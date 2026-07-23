@@ -1,0 +1,10 @@
+// AoC corpus fixture: a character grid (e.g. a forest map).
+// Input:
+//   "..##......."
+//   "#...#...#.."
+//   ".#....#..#."
+// → parses as Grid[Char].
+fn main() -> Int {
+    let map = read grid(char);
+    map.len()
+}

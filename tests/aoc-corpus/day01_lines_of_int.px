@@ -1,0 +1,7 @@
+// AoC corpus fixture: one integer per line (the simplest format).
+// Input: "10\n20\n30\n40\n"  →  parses as Vec[Int] of [10, 20, 30, 40].
+// Usage: praxis run day01_lines_of_int.px --input day01.txt
+fn main() -> Int {
+    let depths = read lines(int);
+    depths.len()
+}

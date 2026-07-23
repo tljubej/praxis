@@ -27,3 +27,6 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-019: Compiler-managed shadow-stack spill](./019-shadow-stack-spill.md)
 - [ADR-020: Method-call dispatch through the built-in catalog](./020-method-dispatch-and-collections.md)
 - [ADR-021: Debug frame metadata and shadowed-symbol registration](./021-debug-frame-metadata.md)
+- [ADR-022: Source-slice `Text` representation in M6](./022-source-slice-text.md)
+- [ADR-023: Input-parser DSL architecture](./023-input-parser-dsl.md)
+- [ADR-024: Provisional structural records ahead of M7](./024-provisional-structural-records.md)
