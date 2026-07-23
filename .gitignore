@@ -1,6 +1,7 @@
 /target
 # Insta pending snapshot updates (review and accept, never commit these).
 *.snap.new
+*.pending-snap
 # Editor / OS / tooling clutter.
 .vscode/
 .idea/
