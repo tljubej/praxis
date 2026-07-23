@@ -1,17 +1,29 @@
-//! The Milestone 0 lexer stub.
+//! The Praxis lexer.
 //!
-//! Scope is intentionally narrow (the full lexer is M1):
-//! - Recognize whitespace, `//` line comments, and nestable `/* */` block
-//!   comments as trivia.
-//! - Recognize identifiers (`[A-Za-z_][A-Za-z0-9_]*` plus Unicode XID continue),
-//!   integer literals, common punctuation, and backtick parser templates.
-//! - Emit a real [`Diagnostic`] for any byte that does not match the above.
+//! Turns source text into a stream of [`Token`]s (each carrying a
+//! [`SyntaxKind`] and a [`Span`]) plus diagnostics. It is lossless — trivia
+//! (whitespace and comments) is kept as real tokens so the parser can fold them
+//! into the rowan tree verbatim (§13.1, ADR-003).
 //!
-//! Every token carries a [`Span`]; the stub does not yet produce a lossless
-//! tree, but the spans are correct so diagnostics point at the right place.
+//! Design notes:
+//! - **Longest match** for operators: `->`, `=>`, `==`, `!=`, `..=`, `+=`, …
+//!   are recognized before their single-character prefixes.
+//! - **Keywords** are split out of the identifier run via
+//!   [`SyntaxKind::from_keyword`]; `out`, `panic`, type names, etc. stay plain
+//!   identifiers (they are builtins, not keywords).
+//! - A bad byte does not abort lexing: it emits a `T003` diagnostic and the
+//!   lexer advances one byte so the rest of the file is still reported (§17.1,
+//!   "multiple diagnostics from one malformed file").
+//!
+//! Diagnostic codes (`T0xx`, [`DiagnosticCategory::Lex`]):
+//! - `T001` — unterminated block comment.
+//! - `T002` — unterminated backtick template.
+//! - `T003` — unexpected byte in source.
+//! - `T004` — unterminated text literal.
+//! - `T005` — invalid escape in text literal.
 
 use praxis_source::{Diagnostic, DiagnosticCategory, DiagnosticCode, FileId, Severity, Span};
-use praxis_syntax::{Token, TokenKind};
+use praxis_syntax::{SyntaxKind, Token};
 
 /// The result of lexing one source file: the token stream and any diagnostics.
 ///
@@ -26,6 +38,9 @@ pub struct LexOutput {
 }
 
 /// Lex `text` belonging to `file`, returning tokens and diagnostics.
+///
+/// This is the stable front-end entry point the CLI and parser both call; its
+/// shape is deliberately unchanged from Milestone 0.
 pub fn lex(file: FileId, text: &str) -> LexOutput {
     let mut lexer = Lexer::new(file, text);
     lexer.run();
@@ -64,30 +79,34 @@ impl<'a> Lexer<'a> {
                 ByteClass::BlockComment => self.eat_block_comment(start),
                 ByteClass::IdentStart => self.eat_ident(start),
                 ByteClass::Digit => self.eat_int(start),
+                ByteClass::Quote => self.eat_text(start),
                 ByteClass::Punct => self.eat_punct(start),
                 ByteClass::Backtick => self.eat_template(start),
                 ByteClass::Unknown => self.diagnose_unknown(start),
             }
         }
         self.tokens
-            .push(Token::new(TokenKind::Eof, Span::at(self.pos as u32)));
+            .push(Token::new(SyntaxKind::EOF, Span::at(self.pos as u32)));
     }
 
     fn classify_byte(&self, b: u8) -> ByteClass {
         match b {
             b' ' | b'\t' | b'\n' | b'\r' => ByteClass::Whitespace,
             // A `/` is a comment only when followed by `/` or `*`; otherwise it
-            // is punctuation (the division operator).
+            // is punctuation (the division operator / part of a comment opener).
             b'/' if self.starts_with(b"//") => ByteClass::LineComment,
             b'/' if self.starts_with(b"/*") => ByteClass::BlockComment,
             b'_' | b'a'..=b'z' | b'A'..=b'Z' => ByteClass::IdentStart,
             b'0'..=b'9' => ByteClass::Digit,
-            // Punctuation we know the language uses (§4.1, §4.5, §4.6, §7).
+            b'"' => ByteClass::Quote,
+            b'`' => ByteClass::Backtick,
+            // Any leading punctuation byte of an operator we recognize. The
+            // precise multi-char split happens in `eat_punct`; the class just
+            // routes the first byte here.
             b'(' | b')' | b'{' | b'}' | b'[' | b']' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/'
-            | b'%' | b'=' | b'!' | b'?' | b':' | b';' | b',' | b'.' | b'|' | b'&' | b'^' | b'~' => {
+            | b'%' | b'=' | b'!' | b'?' | b':' | b';' | b',' | b'.' | b'|' | b'&' | b'#' => {
                 ByteClass::Punct
             }
-            b'`' => ByteClass::Backtick,
             _ => ByteClass::Unknown,
         }
     }
@@ -99,7 +118,7 @@ impl<'a> Lexer<'a> {
         {
             self.pos += 1;
         }
-        self.push(TokenKind::Whitespace, start);
+        self.push(SyntaxKind::Whitespace, start);
     }
 
     fn eat_line_comment(&mut self) {
@@ -108,7 +127,7 @@ impl<'a> Lexer<'a> {
         while self.pos < self.src.len() && !matches!(self.src[self.pos], b'\n' | b'\r') {
             self.pos += 1;
         }
-        self.push(TokenKind::LineComment, start);
+        self.push(SyntaxKind::LineComment, start);
     }
 
     fn eat_block_comment(&mut self, start: usize) {
@@ -135,40 +154,133 @@ impl<'a> Lexer<'a> {
                 "unterminated block comment",
             );
         }
-        self.push(TokenKind::BlockComment, start);
+        self.push(SyntaxKind::BlockComment, start);
     }
 
     fn eat_ident(&mut self, start: usize) {
         // First byte is already known to be ident-start; advance and consume
         // XID-continue-ish bytes. ASCII is exact; non-ASCII is accepted
-        // permissively (a proper XID table lands in M1).
+        // permissively (a proper XID table is a follow-up — see TODO below).
         self.pos += 1;
         while self.pos < self.src.len() && is_ident_continue(self.src[self.pos]) {
             self.pos += 1;
         }
-        self.push(TokenKind::Ident, start);
+        // Look up the keyword table: `let`/`if`/… become their own kinds; the
+        // rest stay identifiers. Builtins (`out`, `panic`, type names) are
+        // intentionally not keywords.
+        let text = &self.src[start..self.pos];
+        // SAFETY: the span came from a valid UTF-8 source slice, so it is UTF-8.
+        let text = std::str::from_utf8(text).expect("ident slice is UTF-8");
+        let kind = SyntaxKind::from_keyword(text).unwrap_or(SyntaxKind::Ident);
+        self.push(kind, start);
     }
 
     fn eat_int(&mut self, start: usize) {
         while self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() {
             self.pos += 1;
         }
-        self.push(TokenKind::IntLit, start);
+        self.push(SyntaxKind::IntLit, start);
+    }
+
+    fn eat_text(&mut self, start: usize) {
+        // Double-quoted text literal with `\` escapes (§4). The body is scanned
+        // here only to find the closing quote; its semantic value is decoded
+        // later. We do validate escapes so a stray trailing backslash is caught.
+        self.pos += 1; // opening `"`
+        while self.pos < self.src.len() {
+            match self.src[self.pos] {
+                b'"' => {
+                    self.pos += 1; // closing quote
+                    self.push(SyntaxKind::TextLit, start);
+                    return;
+                }
+                b'\\' => {
+                    // Need at least one more byte for the escape.
+                    if self.pos + 1 >= self.src.len() {
+                        break;
+                    }
+                    let esc = self.src[self.pos + 1];
+                    if !is_valid_escape(esc) {
+                        let bad_at = self.pos;
+                        self.pos += 2;
+                        self.diagnostic(
+                            Span::new(bad_at as u32, self.pos as u32),
+                            DiagnosticCode::new(DiagnosticCategory::Lex, 5),
+                            "invalid escape in text literal",
+                        );
+                    } else {
+                        self.pos += 2;
+                    }
+                }
+                b'\n' | b'\r' => {
+                    // A raw newline inside a text literal is not allowed; report
+                    // it and let the unterminated path close the token at EOF.
+                    break;
+                }
+                _ => self.pos += 1,
+            }
+        }
+        // Reached EOF (or a newline) without a closing quote.
+        self.diagnostic(
+            Span::new(start as u32, self.pos as u32),
+            DiagnosticCode::new(DiagnosticCategory::Lex, 4),
+            "unterminated text literal",
+        );
+        self.push(SyntaxKind::TextLit, start);
     }
 
     fn eat_punct(&mut self, start: usize) {
-        // Collapse a run of consecutive punct bytes into one token; M1 will
-        // split multi-char operators precisely.
-        self.pos += 1;
-        while self.pos < self.src.len() && is_punct(self.src[self.pos]) {
+        // Longest-match: try the three- and two-char operators first, then fall
+        // back to single-byte punctuation. `match_op` advances `pos` past the
+        // matched bytes and returns the kind.
+        let kind = self
+            .match_op()
+            .unwrap_or_else(|| single_punct(self.src[start]).unwrap_or(SyntaxKind::ERROR));
+        self.push(kind, start);
+    }
+
+    /// Try to match the longest operator beginning at `pos`, advancing `pos`
+    /// past it. Returns the matched kind for multi-char operators, or `None`
+    /// for a bare single-byte punctuation byte (the caller then falls back to
+    /// [`single_punct`]).
+    fn match_op(&mut self) -> Option<SyntaxKind> {
+        // Three-char operators first (only `..=` so far), then two-char. Order
+        // matters: longest first so `..=` is not misread as `..` then `=`.
+        let three = self.src.get(self.pos..self.pos + 3);
+        if let Some([b'.', b'.', b'=']) = three {
+            self.pos += 3;
+            return Some(SyntaxKind::DOT2EQ);
+        }
+        let two = self.src.get(self.pos..self.pos + 2);
+        let matched = match two {
+            Some(b"->") => Some(SyntaxKind::THIN_ARROW),
+            Some(b"=>") => Some(SyntaxKind::FAT_ARROW),
+            Some(b"==") => Some(SyntaxKind::EQ2),
+            Some(b"!=") => Some(SyntaxKind::NEQ),
+            Some(b"<=") => Some(SyntaxKind::LTEQ),
+            Some(b">=") => Some(SyntaxKind::GTEQ),
+            Some(b"..") => Some(SyntaxKind::DOT2),
+            Some(b"||") => Some(SyntaxKind::PIPE2),
+            Some(b"+=") => Some(SyntaxKind::PLUS_EQ),
+            Some(b"-=") => Some(SyntaxKind::MINUS_EQ),
+            Some(b"*=") => Some(SyntaxKind::STAR_EQ),
+            Some(b"/=") => Some(SyntaxKind::SLASH_EQ),
+            Some(b"%=") => Some(SyntaxKind::PERCENT_EQ),
+            _ => None,
+        };
+        if matched.is_some() {
+            self.pos += 2;
+        } else {
+            // Single-byte operator/punct. Advance one byte and signal "no
+            // multi-char match" so the caller resolves the kind itself.
             self.pos += 1;
         }
-        self.push(TokenKind::Punct, start);
+        matched
     }
 
     fn eat_template(&mut self, start: usize) {
         // Consume until the matching closing backtick. The M6 template lexer
-        // will re-scan the contents.
+        // will re-scan the contents; for M1 the whole template is one token.
         self.pos += 1; // opening backtick
         while self.pos < self.src.len() && self.src[self.pos] != b'`' {
             // Honour `\\` so an escaped backtick doesn't terminate the template.
@@ -187,7 +299,7 @@ impl<'a> Lexer<'a> {
                 "unterminated backtick template",
             );
         }
-        self.push(TokenKind::BacktickTemplate, start);
+        self.push(SyntaxKind::BacktickTemplate, start);
     }
 
     fn diagnose_unknown(&mut self, start: usize) {
@@ -203,7 +315,7 @@ impl<'a> Lexer<'a> {
 
     // --- helpers ---
 
-    fn push(&mut self, kind: TokenKind, start: usize) {
+    fn push(&mut self, kind: SyntaxKind, start: usize) {
         self.tokens
             .push(Token::new(kind, Span::new(start as u32, self.pos as u32)));
     }
@@ -222,37 +334,48 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// Whether `b` may continue an identifier (after the first byte).
+// TODO(M1 follow-up): replace the permissive `b >= 0x80` arm with a real Unicode
+// XID-Continue table; for now non-ASCII bytes are accepted so UTF-8 identifiers
+// lex without spurious errors.
 fn is_ident_continue(b: u8) -> bool {
     matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_') || b >= 0x80
 }
 
-fn is_punct(b: u8) -> bool {
-    matches!(
-        b,
-        b'(' | b')'
-            | b'{'
-            | b'}'
-            | b'['
-            | b']'
-            | b'<'
-            | b'>'
-            | b'+'
-            | b'-'
-            | b'*'
-            | b'/'
-            | b'%'
-            | b'='
-            | b'!'
-            | b'?'
-            | b':'
-            | b';'
-            | b','
-            | b'.'
-            | b'|'
-            | b'&'
-            | b'^'
-            | b'~'
-    )
+/// The `SyntaxKind` for a single-byte punctuation/operator byte, or `None` if
+/// the byte is not punctuation at all.
+fn single_punct(b: u8) -> Option<SyntaxKind> {
+    Some(match b {
+        b'(' => SyntaxKind::L_PAREN,
+        b')' => SyntaxKind::R_PAREN,
+        b'{' => SyntaxKind::L_BRACE,
+        b'}' => SyntaxKind::R_BRACE,
+        b'[' => SyntaxKind::L_BRACK,
+        b']' => SyntaxKind::R_BRACK,
+        b',' => SyntaxKind::COMMA,
+        b'.' => SyntaxKind::DOT,
+        b':' => SyntaxKind::COLON,
+        b';' => SyntaxKind::SEMICOLON,
+        b'#' => SyntaxKind::HASH,
+        b'|' => SyntaxKind::PIPE,
+        b'&' => SyntaxKind::AMP,
+        b'+' => SyntaxKind::PLUS,
+        b'-' => SyntaxKind::MINUS,
+        b'*' => SyntaxKind::STAR,
+        b'/' => SyntaxKind::SLASH,
+        b'%' => SyntaxKind::PERCENT,
+        b'=' => SyntaxKind::EQ,
+        b'!' => SyntaxKind::BANG,
+        b'<' => SyntaxKind::LT,
+        b'>' => SyntaxKind::GT,
+        b'?' => SyntaxKind::QUESTION,
+        _ => return None,
+    })
+}
+
+/// Whether `esc` is a recognized escape character inside a text literal.
+fn is_valid_escape(esc: u8) -> bool {
+    matches!(esc, b'"' | b'\\' | b'n' | b'r' | b't' | b'0' | b'`')
 }
 
 #[derive(Clone, Copy)]
@@ -262,6 +385,7 @@ enum ByteClass {
     BlockComment,
     IdentStart,
     Digit,
+    Quote,
     Punct,
     Backtick,
     Unknown,
@@ -272,7 +396,7 @@ mod tests {
     use super::*;
     use praxis_source::SourceMap;
 
-    fn lex_text(text: &str) -> (Vec<TokenKind>, Vec<Diagnostic>) {
+    fn lex_text(text: &str) -> (Vec<SyntaxKind>, Vec<Diagnostic>) {
         let map = SourceMap::new();
         let id = map.intern("test.px", text);
         let out = lex(id, text);
@@ -286,11 +410,12 @@ mod tests {
     fn clean_trivial_input_has_no_diagnostics() {
         let (kinds, diags) = lex_text("let x = 42 // hi\n");
         assert!(diags.is_empty(), "got diagnostics: {diags:?}");
-        assert!(kinds.contains(&TokenKind::Ident));
-        assert!(kinds.contains(&TokenKind::IntLit));
-        assert!(kinds.contains(&TokenKind::Whitespace));
-        assert!(kinds.contains(&TokenKind::LineComment));
-        assert!(kinds.last().unwrap() == &TokenKind::Eof);
+        assert!(kinds.contains(&SyntaxKind::KW_LET)); // keyword split out
+        assert!(kinds.contains(&SyntaxKind::Ident));
+        assert!(kinds.contains(&SyntaxKind::IntLit));
+        assert!(kinds.contains(&SyntaxKind::Whitespace));
+        assert!(kinds.contains(&SyntaxKind::LineComment));
+        assert!(kinds.last().is_some_and(|k| *k == SyntaxKind::EOF));
     }
 
     #[test]
@@ -302,14 +427,14 @@ mod tests {
             DiagnosticCode::new(DiagnosticCategory::Lex, 3)
         );
         // The `@` does not appear as a token, but lexing continues.
-        assert!(!kinds.contains(&TokenKind::Unknown));
+        assert!(!kinds.contains(&SyntaxKind::ERROR));
     }
 
     #[test]
     fn nested_block_comment() {
         let (kinds, diags) = lex_text("/* outer /* inner */ still outer */ x");
         assert!(diags.is_empty());
-        assert!(kinds.contains(&TokenKind::BlockComment));
+        assert!(kinds.contains(&SyntaxKind::BlockComment));
     }
 
     #[test]
@@ -326,7 +451,7 @@ mod tests {
     fn backtick_template_terminated() {
         let (kinds, diags) = lex_text("let p = `{x:int}`");
         assert!(diags.is_empty());
-        assert!(kinds.contains(&TokenKind::BacktickTemplate));
+        assert!(kinds.contains(&SyntaxKind::BacktickTemplate));
     }
 
     #[test]
@@ -352,5 +477,149 @@ mod tests {
           1 | let @ = 1
             |     ^
         "#);
+    }
+
+    // ---- New M1 coverage ----
+
+    #[test]
+    fn keywords_split_from_identifiers() {
+        let (kinds, diags) = lex_text("let var fn if else while for match return");
+        assert!(diags.is_empty());
+        assert!(kinds.contains(&SyntaxKind::KW_LET));
+        assert!(kinds.contains(&SyntaxKind::KW_VAR));
+        assert!(kinds.contains(&SyntaxKind::KW_FN));
+        assert!(kinds.contains(&SyntaxKind::KW_IF));
+        assert!(kinds.contains(&SyntaxKind::KW_ELSE));
+        assert!(kinds.contains(&SyntaxKind::KW_WHILE));
+        assert!(kinds.contains(&SyntaxKind::KW_FOR));
+        assert!(kinds.contains(&SyntaxKind::KW_MATCH));
+        assert!(kinds.contains(&SyntaxKind::KW_RETURN));
+    }
+
+    #[test]
+    fn builtins_are_not_keywords() {
+        // `out` and `panic` are builtin calls, and type names are identifiers.
+        // Filter out trivia so the assertion is about the real tokens only.
+        let (kinds, _) = lex_text("out panic Int Vec");
+        let meaningful: Vec<_> = kinds
+            .into_iter()
+            .filter(|k| !k.is_trivia())
+            .filter(|k| *k != SyntaxKind::EOF)
+            .collect();
+        assert!(
+            meaningful.iter().all(|k| *k == SyntaxKind::Ident),
+            "expected all identifiers, got {meaningful:?}"
+        );
+    }
+
+    #[test]
+    fn multi_char_operators_prefer_longest_match() {
+        let (kinds, _) = lex_text("-> => == != <= >= += -= *= /= %= .. ..=");
+        assert!(kinds.contains(&SyntaxKind::THIN_ARROW));
+        assert!(kinds.contains(&SyntaxKind::FAT_ARROW));
+        assert!(kinds.contains(&SyntaxKind::EQ2));
+        assert!(kinds.contains(&SyntaxKind::NEQ));
+        assert!(kinds.contains(&SyntaxKind::LTEQ));
+        assert!(kinds.contains(&SyntaxKind::GTEQ));
+        assert!(kinds.contains(&SyntaxKind::PLUS_EQ));
+        assert!(kinds.contains(&SyntaxKind::MINUS_EQ));
+        assert!(kinds.contains(&SyntaxKind::STAR_EQ));
+        assert!(kinds.contains(&SyntaxKind::SLASH_EQ));
+        assert!(kinds.contains(&SyntaxKind::PERCENT_EQ));
+        assert!(kinds.contains(&SyntaxKind::DOT2));
+        assert!(kinds.contains(&SyntaxKind::DOT2EQ));
+        // The compound forms must NOT degrade into their single-char parts:
+        // there is no standalone `=`, `<`, `>`, `.`, `+`, `-`, `*`, `/`, `%`
+        // anywhere in the input.
+        assert!(!kinds.contains(&SyntaxKind::EQ));
+        assert!(!kinds.contains(&SyntaxKind::LT));
+        assert!(!kinds.contains(&SyntaxKind::GT));
+        assert!(!kinds.contains(&SyntaxKind::DOT));
+        assert!(!kinds.contains(&SyntaxKind::PLUS));
+        assert!(!kinds.contains(&SyntaxKind::MINUS));
+        assert!(!kinds.contains(&SyntaxKind::STAR));
+        assert!(!kinds.contains(&SyntaxKind::SLASH));
+        assert!(!kinds.contains(&SyntaxKind::PERCENT));
+    }
+
+    #[test]
+    fn single_punct_classifies() {
+        let (kinds, _) = lex_text("( ) { } [ ] , : ; | + - * / % = ! < > ?");
+        for k in [
+            SyntaxKind::L_PAREN,
+            SyntaxKind::R_PAREN,
+            SyntaxKind::L_BRACE,
+            SyntaxKind::R_BRACE,
+            SyntaxKind::L_BRACK,
+            SyntaxKind::R_BRACK,
+            SyntaxKind::COMMA,
+            SyntaxKind::COLON,
+            SyntaxKind::SEMICOLON,
+            SyntaxKind::PIPE,
+            SyntaxKind::PLUS,
+            SyntaxKind::MINUS,
+            SyntaxKind::STAR,
+            SyntaxKind::SLASH,
+            SyntaxKind::PERCENT,
+            SyntaxKind::EQ,
+            SyntaxKind::BANG,
+            SyntaxKind::LT,
+            SyntaxKind::GT,
+            SyntaxKind::QUESTION,
+        ] {
+            assert!(kinds.contains(&k), "missing punct kind {k:?}");
+        }
+    }
+
+    #[test]
+    fn pipe2_is_one_token() {
+        let (kinds, _) = lex_text("||");
+        assert!(kinds.contains(&SyntaxKind::PIPE2));
+    }
+
+    #[test]
+    fn text_literal_terminates() {
+        let (kinds, diags) = lex_text("\"hello\\nworld\"");
+        assert!(diags.is_empty());
+        assert!(kinds.contains(&SyntaxKind::TextLit));
+    }
+
+    #[test]
+    fn unterminated_text_literal_faults() {
+        let (_, diags) = lex_text("\"never closes");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].code(),
+            DiagnosticCode::new(DiagnosticCategory::Lex, 4)
+        );
+    }
+
+    #[test]
+    fn invalid_escape_faults() {
+        let (_, diags) = lex_text("\"bad \\q escape\"");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].code(),
+            DiagnosticCode::new(DiagnosticCategory::Lex, 5)
+        );
+    }
+
+    #[test]
+    fn division_operator_not_a_comment() {
+        // A lone `/` not followed by `/` or `*` is division.
+        let (kinds, _) = lex_text("a / b");
+        assert!(kinds.contains(&SyntaxKind::SLASH));
+        assert!(!kinds.contains(&SyntaxKind::LineComment));
+        assert!(!kinds.contains(&SyntaxKind::BlockComment));
+    }
+
+    #[test]
+    fn eof_span_is_at_end() {
+        let map = SourceMap::new();
+        let id = map.intern("test.px", "ab");
+        let out = lex(id, "ab");
+        let eof = out.tokens.last().expect("eof token present");
+        assert_eq!(eof.kind, SyntaxKind::EOF);
+        assert_eq!(eof.span, Span::new(2, 2));
     }
 }

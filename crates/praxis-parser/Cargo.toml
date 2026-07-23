@@ -12,3 +12,5 @@ praxis-syntax.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+praxis-test-support.workspace = true
+proptest.workspace = true

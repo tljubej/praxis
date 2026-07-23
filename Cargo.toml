@@ -30,6 +30,8 @@ rust-version = "1.80"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 insta = "1"
+proptest = "1"
+rowan = "0.16"
 
 # Internal crates — paths so every consumer resolves to the workspace copy.
 praxis-ast = { path = "crates/praxis-ast" }

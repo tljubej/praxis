@@ -1,0 +1,380 @@
+//! The single vocabulary of Praxis syntax: tokens, trivia, and tree nodes.
+//!
+//! `SyntaxKind` is one enumeration that carries every leaf token the lexer
+//! emits (literals, keywords, operators, trivia) *and* every interior node the
+//! parser produces. This is the rowan idiom (ADR-003): one `#[repr(u16)]` enum
+//! backs a strongly-typed lossless tree, and the [`PraxisLanguage`](crate::PraxisLanguage)
+//! implementation carries it through `rowan`'s generic node types.
+//!
+//! Adding a construct is therefore two edits: a token kind (if it is a new
+//! leaf) or a node kind, plus the parser code that emits it. The kinds are kept
+//! exhaustive here so the lexer and parser never need to invent identifiers at
+//! runtime — illegal kinds are unrepresentable.
+
+// `is_token`/`is_node`/keyword tables are exercised by the unit tests below;
+// the large match arms are exhaustive by construction.
+
+#![allow(dead_code)] // node kinds fill in across Slice 4; keep them all now.
+
+/// Every lexical token, piece of trivia, and tree node in Praxis.
+///
+/// The ordering inside the enum is grouping-only (comments delimit the
+/// sections) and carries no semantic meaning. The discriminants are stable
+/// `u16` values because rowan stores them as raw integers in the green tree.
+///
+/// Naming convention: keywords carry a `KW_` prefix, punctuation a prefix
+/// matching its role (`L_`/`R_` for matching pairs), and tree nodes an `_EXPR`/
+/// `_STMT`/`_ITEM` suffix. The screaming-snake names make lexical kinds visually
+/// distinct from the CamelCase AST wrappers in `praxis-ast`, which is why we
+/// relax the usual camel-case lint for this one enum.
+#[repr(u16)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[allow(non_camel_case_types)]
+pub enum SyntaxKind {
+    // ---- Trivia (kept in the lossless tree, ignored for parsing) ----
+    /// A run of spaces, tabs, and newlines outside a comment.
+    Whitespace,
+    /// A `//` line comment (not including the trailing newline).
+    LineComment,
+    /// A nestable `/* ... */` block comment, including delimiters.
+    BlockComment,
+
+    // ---- Identifiers and literals ----
+    /// An identifier that is *not* a keyword.
+    Ident,
+    /// An integer literal, e.g. `42`.
+    IntLit,
+    /// A double-quoted text literal, e.g. `"hello"`.
+    TextLit,
+    /// A backtick-delimited parser template, e.g. `` `{x:int}` ``. The whole
+    /// template is one token in Milestone 1; its interior is re-scanned by the
+    /// input-parser lexer in Milestone 6 (§7).
+    BacktickTemplate,
+
+    // ---- Keywords (§4). All are lexed; only a subset is parsed in M1. ----
+    KW_LET,      // `let`
+    KW_VAR,      // `var`
+    KW_FN,       // `fn`
+    KW_IF,       // `if`
+    KW_ELSE,     // `else`
+    KW_WHILE,    // `while`
+    KW_FOR,      // `for`
+    KW_LOOP,     // `loop`
+    KW_MATCH,    // `match`
+    KW_RETURN,   // `return`
+    KW_BREAK,    // `break`
+    KW_CONTINUE, // `continue`
+    KW_READ,     // `read`
+    KW_STRUCT,   // `struct`
+    KW_ENUM,     // `enum`
+    KW_TRUE,     // `true`
+    KW_FALSE,    // `false`
+
+    // ---- Punctuation and operators ----
+    /// `(`
+    L_PAREN,
+    /// `)`
+    R_PAREN,
+    /// `{`
+    L_BRACE,
+    /// `}`
+    R_BRACE,
+    /// `[`
+    L_BRACK,
+    /// `]`
+    R_BRACK,
+    /// `,`
+    COMMA,
+    /// `.`
+    DOT,
+    /// `..`
+    DOT2,
+    /// `..=`
+    DOT2EQ,
+    /// `:`
+    COLON,
+    /// `;`
+    SEMICOLON,
+    /// `->`
+    THIN_ARROW,
+    /// `=>`
+    FAT_ARROW,
+    /// `#`
+    HASH,
+    /// `|`
+    PIPE,
+    /// `||`
+    PIPE2,
+    /// `&`
+    AMP,
+    /// `_` — a lone underscore (placeholder/punning site).
+    UNDERSCORE,
+
+    // Arithmetic operators.
+    /// `+`
+    PLUS,
+    /// `-`
+    MINUS,
+    /// `*`
+    STAR,
+    /// `/`
+    SLASH,
+    /// `%`
+    PERCENT,
+
+    // Compound-assignment operators.
+    /// `+=`
+    PLUS_EQ,
+    /// `-=`
+    MINUS_EQ,
+    /// `*=`
+    STAR_EQ,
+    /// `/=`
+    SLASH_EQ,
+    /// `%=`
+    PERCENT_EQ,
+
+    // Comparison operators.
+    /// `==`
+    EQ2,
+    /// `!=`
+    NEQ,
+    /// `<`
+    LT,
+    /// `>`
+    GT,
+    /// `<=`
+    LTEQ,
+    /// `>=`
+    GTEQ,
+
+    /// `=` (assignment / binding).
+    EQ,
+    /// `!` (logical not).
+    BANG,
+    /// `?` (reserved for later use).
+    QUESTION,
+
+    // ---- Sentinel ----
+    /// End of input. Emitted as the final token so the parser can treat EOF
+    /// uniformly.
+    EOF,
+    /// A byte the lexer does not recognize. The lexer also emits a real
+    /// diagnostic (`T003`) for it rather than silently dropping it.
+    ERROR,
+
+    // ---- Tree nodes (produced by the parser; added incrementally in Slice 4) ----
+    /// The root node of a parsed file.
+    SOURCE_FILE,
+    /// A `let name = expr` binding.
+    LET_STMT,
+    /// A `var name = expr` binding.
+    VAR_STMT,
+    /// A bare expression used as a statement.
+    EXPR_STMT,
+    /// A top-level or nested `fn` declaration.
+    FN_ITEM,
+    /// A single `name: Type` parameter.
+    PARAM,
+    /// The `(...)` parameter list.
+    PARAM_LIST,
+    /// A `{ ... }` block expression.
+    BLOCK_EXPR,
+    /// An `if cond { ... } else { ... }` expression.
+    IF_EXPR,
+    /// The `else` arm (block or `else if`).
+    ELSE_BRANCH,
+    /// A `while cond { ... }` expression.
+    WHILE_EXPR,
+    /// A `callee(args)` call expression (covers `out(...)`).
+    CALL_EXPR,
+    /// The `(arg, arg, ...)` argument list of a call.
+    ARG_LIST,
+    /// A path: an identifier or a dotted name.
+    PATH_EXPR,
+    /// A literal value (`IntLit`/`TextLit`/`true`/`false`/backtick template).
+    LITERAL,
+    /// A reference to a name (identifier used as a value).
+    NAME_REF,
+    /// A binary operator expression, e.g. `a + b`.
+    BIN_EXPR,
+    /// A unary operator expression, e.g. `-x`.
+    UNARY_EXPR,
+    /// A parenthesized expression `( expr )`.
+    PAREN_EXPR,
+    /// A parse-error placeholder node wrapping tokens the parser could not
+    /// place. Recovery (§15.2) emits these so the tree stays well-formed.
+    PARSE_ERROR,
+}
+
+impl SyntaxKind {
+    /// Whether this kind is trivia: whitespace or a comment. Trivia is kept in
+    /// the lossless tree (§13.1) but skipped for parsing decisions.
+    #[must_use]
+    pub fn is_trivia(self) -> bool {
+        matches!(
+            self,
+            Self::Whitespace | Self::LineComment | Self::BlockComment
+        )
+    }
+
+    /// Whether this kind is a keyword token.
+    #[must_use]
+    pub fn is_keyword(self) -> bool {
+        matches!(
+            self,
+            Self::KW_LET
+                | Self::KW_VAR
+                | Self::KW_FN
+                | Self::KW_IF
+                | Self::KW_ELSE
+                | Self::KW_WHILE
+                | Self::KW_FOR
+                | Self::KW_LOOP
+                | Self::KW_MATCH
+                | Self::KW_RETURN
+                | Self::KW_BREAK
+                | Self::KW_CONTINUE
+                | Self::KW_READ
+                | Self::KW_STRUCT
+                | Self::KW_ENUM
+                | Self::KW_TRUE
+                | Self::KW_FALSE
+        )
+    }
+
+    /// Whether this kind is a leaf token (emitted by the lexer), as opposed to
+    /// trivia or an interior tree node.
+    #[must_use]
+    pub fn is_token(self) -> bool {
+        !self.is_trivia() && !self.is_node()
+    }
+
+    /// Whether this kind is an interior tree node (produced by the parser).
+    #[must_use]
+    pub fn is_node(self) -> bool {
+        self >= Self::SOURCE_FILE
+    }
+
+    /// Look up the keyword kind for an identifier's text, or `None` if it is a
+    /// plain identifier. Used by the lexer to split keywords out of the ident
+    /// run via a single table.
+    #[must_use]
+    pub fn from_keyword(text: &str) -> Option<SyntaxKind> {
+        Some(match text {
+            "let" => Self::KW_LET,
+            "var" => Self::KW_VAR,
+            "fn" => Self::KW_FN,
+            "if" => Self::KW_IF,
+            "else" => Self::KW_ELSE,
+            "while" => Self::KW_WHILE,
+            "for" => Self::KW_FOR,
+            "loop" => Self::KW_LOOP,
+            "match" => Self::KW_MATCH,
+            "return" => Self::KW_RETURN,
+            "break" => Self::KW_BREAK,
+            "continue" => Self::KW_CONTINUE,
+            "read" => Self::KW_READ,
+            "struct" => Self::KW_STRUCT,
+            "enum" => Self::KW_ENUM,
+            "true" => Self::KW_TRUE,
+            "false" => Self::KW_FALSE,
+            _ => return None,
+        })
+    }
+
+    /// The source spelling of a keyword, or `None` for non-keywords. The
+    /// inverse of [`from_keyword`]; handy for the formatter and diagnostics.
+    #[must_use]
+    pub fn keyword_text(self) -> Option<&'static str> {
+        Some(match self {
+            Self::KW_LET => "let",
+            Self::KW_VAR => "var",
+            Self::KW_FN => "fn",
+            Self::KW_IF => "if",
+            Self::KW_ELSE => "else",
+            Self::KW_WHILE => "while",
+            Self::KW_FOR => "for",
+            Self::KW_LOOP => "loop",
+            Self::KW_MATCH => "match",
+            Self::KW_RETURN => "return",
+            Self::KW_BREAK => "break",
+            Self::KW_CONTINUE => "continue",
+            Self::KW_READ => "read",
+            Self::KW_STRUCT => "struct",
+            Self::KW_ENUM => "enum",
+            Self::KW_TRUE => "true",
+            Self::KW_FALSE => "false",
+            _ => return None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trivia_classification() {
+        assert!(SyntaxKind::Whitespace.is_trivia());
+        assert!(SyntaxKind::LineComment.is_trivia());
+        assert!(SyntaxKind::BlockComment.is_trivia());
+        assert!(!SyntaxKind::Ident.is_trivia());
+        assert!(!SyntaxKind::KW_IF.is_trivia());
+        assert!(!SyntaxKind::PLUS.is_trivia());
+    }
+
+    #[test]
+    fn token_vs_node_partition() {
+        // Tokens and trivia are not nodes; everything from SOURCE_FILE up is.
+        assert!(SyntaxKind::Ident.is_token());
+        assert!(SyntaxKind::IntLit.is_token());
+        assert!(SyntaxKind::KW_LET.is_token());
+        assert!(SyntaxKind::PLUS.is_token());
+        assert!(SyntaxKind::EOF.is_token());
+        assert!(!SyntaxKind::Whitespace.is_token()); // trivia, not a token
+        assert!(!SyntaxKind::LET_STMT.is_token()); // node
+        assert!(SyntaxKind::SOURCE_FILE.is_node());
+        assert!(SyntaxKind::PARSE_ERROR.is_node());
+        assert!(!SyntaxKind::Ident.is_node());
+        assert!(!SyntaxKind::EOF.is_node());
+    }
+
+    #[test]
+    fn keyword_round_trip() {
+        // Every keyword round-trips through from_keyword/keyword_text.
+        let all = [
+            SyntaxKind::KW_LET,
+            SyntaxKind::KW_VAR,
+            SyntaxKind::KW_FN,
+            SyntaxKind::KW_IF,
+            SyntaxKind::KW_ELSE,
+            SyntaxKind::KW_WHILE,
+            SyntaxKind::KW_FOR,
+            SyntaxKind::KW_LOOP,
+            SyntaxKind::KW_MATCH,
+            SyntaxKind::KW_RETURN,
+            SyntaxKind::KW_BREAK,
+            SyntaxKind::KW_CONTINUE,
+            SyntaxKind::KW_READ,
+            SyntaxKind::KW_STRUCT,
+            SyntaxKind::KW_ENUM,
+            SyntaxKind::KW_TRUE,
+            SyntaxKind::KW_FALSE,
+        ];
+        for kw in all {
+            assert!(kw.is_keyword());
+            let text = kw.keyword_text().expect("keyword has text");
+            assert_eq!(SyntaxKind::from_keyword(text), Some(kw), "{text}");
+        }
+    }
+
+    #[test]
+    fn non_keywords_do_not_classify_as_keywords() {
+        assert_eq!(SyntaxKind::from_keyword("out"), None); // builtin, not keyword
+        assert_eq!(SyntaxKind::from_keyword("x"), None);
+        assert_eq!(SyntaxKind::from_keyword("Int"), None); // type name is an ident
+        assert!(!SyntaxKind::Ident.is_keyword());
+        assert!(!SyntaxKind::PLUS.is_keyword());
+    }
+}

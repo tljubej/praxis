@@ -8,4 +8,6 @@ description = "Shared test helpers for the Praxis compiler: insta snapshot harne
 
 [dependencies]
 praxis-source.workspace = true
+praxis-syntax.workspace = true
 insta.workspace = true
+rowan.workspace = true

@@ -9,3 +9,4 @@ description = "Typed syntax wrappers over Praxis syntax nodes."
 [dependencies]
 praxis-source.workspace = true
 praxis-syntax.workspace = true
+rowan.workspace = true
