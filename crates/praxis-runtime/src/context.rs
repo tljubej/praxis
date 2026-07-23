@@ -524,16 +524,17 @@ mod tests {
     #[test]
     fn runtime_collect_keeps_immortals_alive_unrooted() {
         // Immortals are out-of-band; a collection with no roots must not touch
-        // them.
+        // them. Capture each singleton's address before the collection and assert
+        // the same address afterwards (a self-comparison would assert nothing).
         let rt = Runtime::new();
         let unit_before = rt.immortals().unit().as_ptr();
+        let true_before = rt.immortals().true_().as_ptr();
+        let false_before = rt.immortals().false_().as_ptr();
         let roots = RootScope::new();
         rt.collect(&roots);
         assert_eq!(rt.immortals().unit().as_ptr(), unit_before);
-        assert_eq!(
-            rt.immortals().true_().as_ptr(),
-            rt.immortals().true_().as_ptr()
-        );
+        assert_eq!(rt.immortals().true_().as_ptr(), true_before);
+        assert_eq!(rt.immortals().false_().as_ptr(), false_before);
     }
 
     #[test]

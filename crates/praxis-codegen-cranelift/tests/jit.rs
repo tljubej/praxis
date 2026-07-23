@@ -256,6 +256,20 @@ fn text_len_counts_unicode_scalars() {
 }
 
 #[test]
+fn text_get_indexes_by_scalar_not_byte() {
+    // `praxis_text_get` must index by Unicode scalar value, not by byte: in
+    // "héllo" the char at index 1 is é (scalar 233), but é is encoded as two
+    // bytes (0xC3 0xA9), so byte indexing would return 0xC3 (195) instead. This
+    // distinguishes the two implementations and guards a regression toward
+    // byte indexing — load-bearing for M6, where input parsing produces Text
+    // values that get indexed into.
+    let src = "fn main() -> Int {\n  let s = \"héllo\"\n  s.get(1)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 233);
+}
+
+#[test]
 fn text_is_empty_works() {
     // An empty text literal's .is_empty() → Bool → compare as 1.
     let src = "fn main() -> Int {\n  let s = \"\"\n  if s.is_empty() { 1 } else { 0 }\n}\n";

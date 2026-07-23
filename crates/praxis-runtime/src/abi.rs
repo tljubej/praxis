@@ -262,7 +262,8 @@ checked_int_binop!(praxis_int_add, checked_add, FaultKind::IntOverflow);
 checked_int_binop!(praxis_int_sub, checked_sub, FaultKind::IntOverflow);
 checked_int_binop!(praxis_int_mul, checked_mul, FaultKind::IntOverflow);
 
-/// Checked `Int` division (§4.12). Faults on division by zero.
+/// Checked `Int` division (§4.12). Faults on division by zero, and on overflow
+/// (`Int::MIN / -1`, the one signed-division case that overflows §4.12).
 ///
 /// # Safety
 /// `ctx` must be live and wired; both operands must be valid `Int` `GcRef`s.
@@ -274,12 +275,21 @@ pub unsafe extern "C" fn praxis_int_div(ctx: *mut RuntimeContext, lhs: GcRef, rh
         unsafe { set_fault(ctx, FaultKind::DivByZero) };
         return unsafe { unit_sentinel(ctx) };
     }
+    // `i64::MIN / -1` is the sole overflowing signed division: the mathematical
+    // result (+2^63) is not representable, and the raw `/` panics on overflow in
+    // debug builds (violating the no-panic-across-the-ABI rule, §10.4). Treat it
+    // as checked-arithmetic overflow per §4.12.
+    if a == i64::MIN && b == -1 {
+        unsafe { set_fault(ctx, FaultKind::IntOverflow) };
+        return unsafe { unit_sentinel(ctx) };
+    }
     // Division truncates toward zero (Rust's `i64::div_euclid` rounds differently;
     // Praxis follows C/Rust integer division semantics toward zero).
     unsafe { heap(ctx).alloc(scalars::INT, a / b) }
 }
 
-/// Checked `Int` remainder (§4.12). Faults on division by zero.
+/// Checked `Int` remainder (§4.12). Faults on division by zero, and on overflow
+/// (`Int::MIN % -1`, whose result is not representable under the §4.12 rule).
 ///
 /// # Safety
 /// `ctx` must be live and wired; both operands must be valid `Int` `GcRef`s.
@@ -289,6 +299,13 @@ pub unsafe extern "C" fn praxis_int_rem(ctx: *mut RuntimeContext, lhs: GcRef, rh
     let b = unsafe { int_payload(rhs) };
     if b == 0 {
         unsafe { set_fault(ctx, FaultKind::DivByZero) };
+        return unsafe { unit_sentinel(ctx) };
+    }
+    // `i64::MIN % -1`: the remainder is 0 mathematically, but the raw `%` traps
+    // on this exact case in debug builds because the corresponding quotient
+    // overflows. Guard it for the same no-panic reason as `praxis_int_div`.
+    if a == i64::MIN && b == -1 {
+        unsafe { set_fault(ctx, FaultKind::IntOverflow) };
         return unsafe { unit_sentinel(ctx) };
     }
     unsafe { heap(ctx).alloc(scalars::INT, a % b) }
@@ -699,7 +716,116 @@ mod tests {
             let a = praxis_alloc_int(ctx, 10);
             let b = praxis_alloc_int(ctx, 0);
             let _ = praxis_int_rem(ctx, a, b);
+            assert!(rt.has_pending_fault());
             assert_eq!(rt.fault(), FaultKind::DivByZero);
+        }
+        let _ = rt.take_fault();
+        unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    fn subtraction_overflow_sets_fault() {
+        // The add/sub/mul overflow paths are symmetric; only `add` was exercised
+        // before. Sub: `Int::MIN - 1` overflows.
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; operands are valid Ints.
+        unsafe {
+            let a = praxis_alloc_int(ctx, i64::MIN);
+            let b = praxis_alloc_int(ctx, 1);
+            let _ = praxis_int_sub(ctx, a, b);
+            assert!(rt.has_pending_fault());
+            assert_eq!(rt.fault(), FaultKind::IntOverflow);
+        }
+        let _ = rt.take_fault();
+        unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    fn multiplication_overflow_sets_fault() {
+        // `Int::MIN * -1` is the canonical mul overflow (same magnitude as
+        // `Int::MAX + 1`).
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; operands are valid Ints.
+        unsafe {
+            let a = praxis_alloc_int(ctx, i64::MIN);
+            let b = praxis_alloc_int(ctx, -1);
+            let _ = praxis_int_mul(ctx, a, b);
+            assert!(rt.has_pending_fault());
+            assert_eq!(rt.fault(), FaultKind::IntOverflow);
+        }
+        let _ = rt.take_fault();
+        unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    fn division_truncates_toward_zero() {
+        // §4.12 / abi.rs comment: division truncates toward zero, so -7 / 2 == -3
+        // (not -4 as floor division would give). Remainder takes the sign of the
+        // dividend.
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let a = praxis_alloc_int(ctx, -7);
+            let b = praxis_alloc_int(ctx, 2);
+            let q = praxis_int_div(ctx, a, b);
+            assert!(!rt.has_pending_fault());
+            assert_eq!(praxis_int_load(ctx, q), -3);
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    fn remainder_truncates_toward_zero() {
+        // -7 % 2 == -1 (remainder takes the dividend's sign under truncation).
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let a = praxis_alloc_int(ctx, -7);
+            let b = praxis_alloc_int(ctx, 2);
+            let r = praxis_int_rem(ctx, a, b);
+            assert!(!rt.has_pending_fault());
+            assert_eq!(praxis_int_load(ctx, r), -1);
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    fn division_min_div_minus_one_overflows() {
+        // Regression for the §10.4 no-panic-across-ABI contract: `Int::MIN / -1`
+        // is the sole signed-division case that overflows. The raw `/` panics in
+        // debug builds; the wrapper must instead fault `IntOverflow`.
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; operands are valid Ints.
+        unsafe {
+            let a = praxis_alloc_int(ctx, i64::MIN);
+            let b = praxis_alloc_int(ctx, -1);
+            let _ = praxis_int_div(ctx, a, b);
+            assert!(rt.has_pending_fault());
+            assert_eq!(rt.fault(), FaultKind::IntOverflow);
+        }
+        let _ = rt.take_fault();
+        unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    fn remainder_min_div_minus_one_overflows() {
+        // Companion to the division regression: `Int::MIN % -1` traps in debug
+        // builds even though the mathematical remainder is 0, because the
+        // corresponding quotient overflows. The wrapper must fault instead.
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; operands are valid Ints.
+        unsafe {
+            let a = praxis_alloc_int(ctx, i64::MIN);
+            let b = praxis_alloc_int(ctx, -1);
+            let _ = praxis_int_rem(ctx, a, b);
+            assert!(rt.has_pending_fault());
+            assert_eq!(rt.fault(), FaultKind::IntOverflow);
         }
         let _ = rt.take_fault();
         unsafe { drop_ctx(ctx) };
@@ -728,6 +854,7 @@ mod tests {
         unsafe {
             let min = praxis_alloc_int(ctx, i64::MIN);
             let _ = praxis_int_neg(ctx, min);
+            assert!(rt.has_pending_fault());
             assert_eq!(rt.fault(), FaultKind::IntOverflow);
         }
         let _ = rt.take_fault();
@@ -864,5 +991,143 @@ mod tests {
             assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, nine)), 999);
         }
         unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    fn vec_get_negative_index_faults() {
+        // The `idx < 0` guard in `praxis_vec_get` (the documented IndexOutOfBounds
+        // path) was never exercised — only the `idx >= len` path was.
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let v = praxis_vec_new(ctx, crate::scalars::INT as *const _);
+            let a = praxis_alloc_int(ctx, 1);
+            let _ = praxis_vec_push(ctx, v, a); // non-empty vec, so only the sign can fail
+            let neg = praxis_alloc_int(ctx, -1);
+            let _ = praxis_vec_get(ctx, v, neg);
+            assert!(rt.has_pending_fault());
+            assert_eq!(rt.fault(), FaultKind::IndexOutOfBounds);
+        }
+        let _ = rt.take_fault();
+        unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    fn text_get_negative_index_faults() {
+        // Companion to vec_get_negative_index_faults: the `idx < 0` guard in
+        // `praxis_text_get` was likewise untested.
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let s = "ab";
+            let text = praxis_alloc_text(ctx, s.as_ptr(), s.len());
+            let neg = praxis_alloc_int(ctx, -1);
+            let _ = praxis_text_get(ctx, text, neg);
+            assert!(rt.has_pending_fault());
+            assert_eq!(rt.fault(), FaultKind::IndexOutOfBounds);
+        }
+        let _ = rt.take_fault();
+        unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    fn alloc_text_empty_string_round_trips() {
+        // The `len == 0` branch in `praxis_alloc_text` (treats an empty buffer as
+        // the empty slice) was not exercised. An empty Text must format as "".
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; null pointer + zero length is the documented empty path.
+        unsafe {
+            let r = praxis_alloc_text(ctx, std::ptr::null(), 0);
+            assert_eq!(r.as_text(), "");
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    fn vec_new_with_null_descriptor_defaults_to_int() {
+        // A null element descriptor to `praxis_vec_new` falls back to Int (the
+        // documented `Vec()` construction path). The vec must be usable.
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; null descriptor is the handled default case.
+        unsafe {
+            let v = praxis_vec_new(ctx, std::ptr::null());
+            assert_eq!(praxis_bool_load(ctx, praxis_vec_is_empty(ctx, v)), 1);
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    // --- GC pacing (§12.4, ADR-019) ----------------------------------------
+    //
+    // `maybe_collect` is the load-bearing mechanism for the M5 shadow-stack
+    // spill: the alloc wrappers call it so collection happens automatically
+    // inside JIT'd code. The threshold/doubling logic was only tested
+    // indirectly (through the heavy-allocation integration tests).
+
+    #[test]
+    fn maybe_collect_skips_below_threshold() {
+        // A fresh heap with a single small allocation is well under the 64 KiB
+        // threshold, so `maybe_collect` must report no collection ran.
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let _ = praxis_alloc_int(ctx, 1);
+            // Root nothing — nothing live matters; we only ask whether collection
+            // *ran*.
+            let roots = crate::roots::RootScope::new();
+            let ran = rt.heap().maybe_collect(&roots);
+            assert!(
+                !ran,
+                "a single small Int must not trip the 64 KiB threshold"
+            );
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    fn maybe_collect_runs_under_pressure() {
+        // Allocate well past the 64 KiB threshold, then call `maybe_collect`
+        // directly and assert it ran. (Each Int object is ~32 bytes of header +
+        // payload, so ~2500 ints crosses the line.)
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            for i in 0..3000_i64 {
+                let _ = praxis_alloc_int(ctx, i);
+            }
+            let roots = crate::roots::RootScope::new();
+            let ran = rt.heap().maybe_collect(&roots);
+            assert!(ran, "heavy allocation should trip the threshold");
+            // After a collection the pacing counter resets, so an immediate second
+            // call (no new allocations) does not collect again.
+            let ran2 = rt.heap().maybe_collect(&roots);
+            assert!(!ran2, "counter must reset after a collection");
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    // --- null-context safety (defensive guards, §10.4 spirit) --------------
+
+    #[test]
+    fn check_fault_on_null_context_is_zero() {
+        // A null/unwired context must report no fault rather than dereferencing
+        // the null pointer (the guard at `praxis_check_fault`).
+        // SAFETY: passing a null context is the exact case the guard handles.
+        assert_eq!(unsafe { praxis_check_fault(std::ptr::null_mut()) }, 0);
+    }
+
+    #[test]
+    fn push_shadow_frame_on_null_context_returns_null() {
+        // A null context must return a null frame rather than dereferencing it
+        // (the guard at `praxis_push_shadow_frame`).
+        // SAFETY: passing a null context is the exact case the guard handles.
+        let frame =
+            unsafe { crate::shadow_frame::praxis_push_shadow_frame(std::ptr::null_mut(), 0) };
+        assert!(frame.is_null());
     }
 }

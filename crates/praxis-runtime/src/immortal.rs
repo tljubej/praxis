@@ -90,10 +90,20 @@ mod tests {
     fn immortals_are_distinct_and_stable() {
         let heap = Heap::new();
         let im = Immortals::new(&heap);
-        assert_eq!(im.unit().as_ptr(), im.unit().as_ptr());
-        assert_ne!(im.true_().as_ptr(), im.false_().as_ptr());
-        assert_eq!(im.bool_(true).as_ptr(), im.true_().as_ptr());
-        assert_eq!(im.bool_(false).as_ptr(), im.false_().as_ptr());
+        // Each accessor returns the same singleton address on every call (stability)
+        // and the three singletons are mutually distinct.
+        let unit = im.unit().as_ptr();
+        let true_ = im.true_().as_ptr();
+        let false_ = im.false_().as_ptr();
+        assert_eq!(im.unit().as_ptr(), unit);
+        assert_eq!(im.true_().as_ptr(), true_);
+        assert_eq!(im.false_().as_ptr(), false_);
+        assert_ne!(true_, false_);
+        assert_ne!(unit, true_);
+        assert_ne!(unit, false_);
+        // `bool_` dispatches to the cached singletons rather than allocating.
+        assert_eq!(im.bool_(true).as_ptr(), true_);
+        assert_eq!(im.bool_(false).as_ptr(), false_);
 
         // Nothing is in the live set — immortals are out-of-band.
         assert_eq!(heap.stats().live_count, 0);

@@ -254,4 +254,15 @@ mod tests {
         assert_eq!(BytePos(10).saturating_sub(BytePos(3)), 7);
         assert_eq!(BytePos(3).saturating_sub(BytePos(10)), 0); // clamped
     }
+
+    #[test]
+    #[should_panic(expected = "inverted range")]
+    fn inverted_span_is_rejected_in_debug() {
+        // "Make illegal states unrepresentable" (AGENTS.md): `Span::new` stores
+        // `start + len`, so an inverted span cannot be constructed. The
+        // `debug_assert!` catches the bug in test/debug builds (the default test
+        // profile); release builds clamp to an empty span so the invariant still
+        // holds even if a caller bypasses the assertion.
+        let _ = Span::new(25, 10);
+    }
 }

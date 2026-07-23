@@ -6,7 +6,7 @@
 
 #![cfg(test)]
 
-use praxis_stdlib::type_pattern::ScalarType;
+use praxis_stdlib::type_pattern::{CollectionCtor, ScalarType};
 
 use crate::data::{TypeData, VarState};
 use crate::TypeDb;
@@ -305,4 +305,88 @@ fn generalized_var_state_is_marked() {
         db.data(crate::Type(var.0)),
         TypeData::Var(VarState::Generalized)
     ));
+}
+
+// --- collection types (M5 foundation: §4.4, §11.2) -------------------------
+//
+// Collection types drive the entire M5 method-dispatch surface, yet the
+// unification, occurs check, and rendering paths for `TypeData::Collection`
+// were entirely uncovered. These mirror the tuple/function coverage above.
+
+#[test]
+fn unify_vec_same_element_unifies() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let i2 = db.int();
+    let a = db.vec(i);
+    let b = db.vec(i2);
+    db.unify(a, b).expect("Vec[Int] ~ Vec[Int]");
+    assert_eq!(db.render(a), "Vec[Int]");
+}
+
+#[test]
+fn unify_vec_mismatched_element_fails() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let a = db.vec(i);
+    let t = db.text();
+    let b = db.vec(t);
+    let err = db.unify(a, b).unwrap_err();
+    assert!(
+        matches!(err, crate::unify::UnifyError::Mismatch { .. }),
+        "Vec[Int] !~ Vec[Text], got {err:?}"
+    );
+}
+
+#[test]
+fn unify_vec_mismatched_arity_fails() {
+    // `Vec[Int]` (one arg) vs a collection with two args — different arg counts
+    // must mismatch even when the ctor matches.
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let a = db.vec(i);
+    let t = db.text();
+    let b = db.collection(CollectionCtor::Vec, vec![i, t]);
+    let err = db.unify(a, b).unwrap_err();
+    assert!(matches!(err, crate::unify::UnifyError::Mismatch { .. }));
+}
+
+#[test]
+fn unify_vec_with_different_ctor_fails() {
+    // Same args, different collection ctor: `Vec[Int]` vs `Deque[Int]`. These are
+    // distinct nominal collection types (§4.4) and must not unify.
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let a = db.vec(i);
+    let b = db.collection(CollectionCtor::Deque, vec![i]);
+    assert!(db.unify(a, b).is_err());
+}
+
+#[test]
+fn unify_vec_element_var_links() {
+    // `Vec[?T] ~ Vec[Int]` constrains ?T to Int (unification flows into the
+    // element type).
+    let mut db = TypeDb::new();
+    let v = db.fresh_var();
+    let vec_of_var = db.vec(v);
+    let i = db.int();
+    let vec_of_int = db.vec(i);
+    db.unify(vec_of_var, vec_of_int)
+        .expect("Vec[?T] ~ Vec[Int]");
+    assert!(is_int(&db, v));
+}
+
+#[test]
+fn render_collection_types() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let vec_int = db.vec(i);
+    assert_eq!(db.render(vec_int), "Vec[Int]");
+    // Map[K, V] exercises the multi-arg collection rendering.
+    let t = db.text();
+    let m = db.collection(CollectionCtor::Map, vec![t, i]);
+    assert_eq!(db.render(m), "Map[Text, Int]");
+    // Nested: Vec[Map[Text, Int]].
+    let nested = db.vec(m);
+    assert_eq!(db.render(nested), "Vec[Map[Text, Int]]");
 }
