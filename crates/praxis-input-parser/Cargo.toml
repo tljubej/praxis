@@ -9,3 +9,5 @@ description = "Parser-expression lexer, template parser, type synthesis, and par
 [dependencies]
 praxis-source.workspace = true
 praxis-syntax.workspace = true
+praxis-types.workspace = true
+praxis-runtime.workspace = true
