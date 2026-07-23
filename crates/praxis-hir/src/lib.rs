@@ -19,11 +19,16 @@ pub mod catalog;
 pub mod diagnostics;
 pub mod hover;
 pub mod infer;
+pub mod lower;
 pub mod name_table;
 pub mod resolve;
 pub mod scope;
 pub mod symbol;
 
+pub use lower::{
+    lower, AssignOp, BinOp, Lit, TypedBlock, TypedExpr, TypedFn, TypedItem, TypedModule,
+    TypedParam, TypedStmt, UnaryOp,
+};
 pub use name_table::NameTable;
 pub use resolve::{NameRef, NameResolution, ResolvedRef};
 pub use scope::{ScopeId, ScopeTree};
@@ -50,6 +55,10 @@ pub struct Analysis {
     pub refs: std::collections::HashMap<rowan::TextRange, ResolvedRef>,
     /// The inferred type for each name reference's range (filled by inference).
     pub ref_types: std::collections::HashMap<rowan::TextRange, Type>,
+    /// Each *declaration* site, keyed by the name token's source range → the
+    /// [`SymbolId`] it mints. Survives shadowing (each `let`/`var`/`fn`/param
+    /// declaration is keyed by its own range). Consumed by M4 lowering.
+    pub decls: std::collections::HashMap<rowan::TextRange, SymbolId>,
     /// All `N0xx` (name) and `Y0xx` (type) diagnostics, in source order.
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -76,6 +85,7 @@ pub fn analyze(file: FileId, root: &SourceFile) -> Analysis {
         scopes: inference.scopes,
         refs: inference.refs,
         ref_types: inference.ref_types,
+        decls: inference.decls,
         diagnostics: inference.diagnostics,
     }
 }
@@ -92,6 +102,7 @@ pub fn analyze_root(file: FileId, root: &praxis_syntax::SyntaxNode) -> Analysis 
             scopes: ScopeTree::new(),
             refs: std::collections::HashMap::new(),
             ref_types: std::collections::HashMap::new(),
+            decls: std::collections::HashMap::new(),
             // The parser should always produce a SOURCE_FILE root; if not, this
             // is an internal error, surfaced as a single diagnostic.
             diagnostics: vec![praxis_source::Diagnostic::new(

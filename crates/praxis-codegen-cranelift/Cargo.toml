@@ -9,3 +9,16 @@ description = "Cranelift JIT module and ABI lowering for Praxis."
 [dependencies]
 praxis-mir.workspace = true
 praxis-runtime.workspace = true
+cranelift.workspace = true
+cranelift-frontend.workspace = true
+cranelift-jit.workspace = true
+cranelift-module.workspace = true
+thiserror = "2.0.19"
+anyhow.workspace = true
+
+[dev-dependencies]
+praxis-ast.workspace = true
+praxis-hir.workspace = true
+praxis-parser.workspace = true
+praxis-source.workspace = true
+praxis-test-support.workspace = true

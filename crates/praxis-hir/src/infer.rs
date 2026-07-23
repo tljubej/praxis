@@ -39,6 +39,10 @@ pub struct Inference {
     pub scopes: ScopeTree,
     pub refs: HashMap<TextRange, ResolvedRef>,
     pub ref_types: HashMap<TextRange, Type>,
+    /// Declaration-site ranges → SymbolId. Carried from resolution so downstream
+    /// passes (M4 lowering) can map a `let`/`var`/`fn`/param name to its symbol
+    /// via the declaration range (unambiguous under shadowing).
+    pub decls: HashMap<TextRange, SymbolId>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -84,6 +88,7 @@ pub(crate) fn infer_with_tree(
         scopes: inferer.scopes,
         refs: inferer.refs,
         ref_types: inferer.ref_types,
+        decls: inferer.decls,
         diagnostics,
     }
 }

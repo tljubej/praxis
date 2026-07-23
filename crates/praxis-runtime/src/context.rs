@@ -16,12 +16,67 @@ use crate::immortal::{read_bool, Immortals};
 use crate::roots::RootSet;
 use crate::{collections::VecPayload, descriptor::TypeDescriptor};
 
-/// Opaque fault record. Real layout lands in Milestone 4 (§9.2). When
-/// `pending_fault` is non-null, generated code branches to its fault epilogue
-/// at the next safepoint.
+/// What kind of runtime fault occurred (§9.2, §10.4). Set by the runtime
+/// wrapper that detected it; read by the host after the generated code unwinds
+/// to its fault epilogue.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultKind {
+    /// No fault pending. The zero state.
+    None = 0,
+    /// Integer arithmetic overflowed (§4.12).
+    IntOverflow = 1,
+    /// Division or remainder by zero (§4.12).
+    DivByZero = 2,
+}
+
+impl std::fmt::Display for FaultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FaultKind::None => write!(f, "no fault"),
+            FaultKind::IntOverflow => write!(f, "integer overflow"),
+            FaultKind::DivByZero => write!(f, "division by zero"),
+        }
+    }
+}
+
+/// The fault record a [`RuntimeContext`] points at. `pending_fault` is non-null
+/// and points at the owning runtime's slot; a fault is "pending" when
+/// [`Fault::kind`] is not [`FaultKind::None`] (the `pending` bool mirrors that
+/// for a cheap single-byte check in generated code).
 #[repr(C)]
 pub struct Fault {
-    _opaque: (),
+    /// True iff a fault is pending (mirrors `kind != None`).
+    pub pending: bool,
+    /// The kind of fault, when pending.
+    pub kind: FaultKind,
+}
+
+impl Fault {
+    /// A fresh, clear fault record (no fault pending).
+    pub fn clear() -> Self {
+        Fault {
+            pending: false,
+            kind: FaultKind::None,
+        }
+    }
+
+    /// Mark a fault of `kind` as pending.
+    pub fn set(&mut self, kind: FaultKind) {
+        self.pending = true;
+        self.kind = kind;
+    }
+
+    /// True iff a fault is pending.
+    pub fn is_pending(&self) -> bool {
+        self.pending
+    }
+}
+
+impl Default for Fault {
+    fn default() -> Self {
+        Self::clear()
+    }
 }
 
 /// One frame in the crash-debugger's snapshot chain (§9.3). Real layout lands
@@ -65,10 +120,18 @@ impl RuntimeContext {
     }
 
     /// True iff a fault is currently pending on this context. Generated code
-    /// checks this at safepoints after potentially-faulting operations (§9.2).
+    /// checks this at safepoints after potentially-faulting operations (§10.4).
+    ///
+    /// `pending_fault` is non-null once the context is wired to a runtime; a
+    /// fault is pending when the pointed-at [`Fault`] slot says so.
     #[inline]
     pub fn has_pending_fault(&self) -> bool {
-        !self.pending_fault.is_null()
+        if self.pending_fault.is_null() {
+            return false;
+        }
+        // SAFETY: a non-null `pending_fault` points at a live `Fault` owned by
+        // the runtime for as long as the context is in use.
+        unsafe { (*self.pending_fault).is_pending() }
     }
 }
 
@@ -81,6 +144,9 @@ impl RuntimeContext {
 pub struct Runtime {
     heap: Heap,
     immortals: Immortals,
+    /// The fault slot generated code signals through (§10.4). Owned here so its
+    /// address is stable for the lifetime of the runtime.
+    fault: Fault,
 }
 
 impl Runtime {
@@ -89,7 +155,11 @@ impl Runtime {
         let heap = Heap::new();
         // Immortals must be allocated before any collection can run.
         let immortals = Immortals::new(&heap);
-        Runtime { heap, immortals }
+        Runtime {
+            heap,
+            immortals,
+            fault: Fault::clear(),
+        }
     }
 
     /// Borrow the heap.
@@ -116,15 +186,37 @@ impl Runtime {
         self.heap.collect(roots);
     }
 
-    /// A `RuntimeContext` view of this runtime, suitable for (future) generated
-    /// code. `pending_fault`/`debug_top` are null (M4/M10).
+    /// A `RuntimeContext` view of this runtime, suitable for generated code.
+    /// `pending_fault` points at this runtime's fault slot; `debug_top` stays
+    /// null until the debugger lands (M10).
     pub fn context(&mut self) -> RuntimeContext {
         RuntimeContext {
             heap: &mut self.heap as *mut Heap,
-            pending_fault: std::ptr::null_mut(),
+            pending_fault: &mut self.fault as *mut Fault,
             debug_top: std::ptr::null_mut(),
             input_source: self.immortals.unit(),
             current_generation: 0,
+        }
+    }
+
+    /// The current fault state (§10.4). `FaultKind::None` when no fault is set.
+    pub fn fault(&self) -> FaultKind {
+        self.fault.kind
+    }
+
+    /// True iff a fault is pending.
+    pub fn has_pending_fault(&self) -> bool {
+        self.fault.is_pending()
+    }
+
+    /// Clear any pending fault, returning the kind that was pending (if any).
+    pub fn take_fault(&mut self) -> Option<FaultKind> {
+        let kind = self.fault.kind;
+        if self.fault.is_pending() {
+            self.fault = Fault::clear();
+            Some(kind)
+        } else {
+            None
         }
     }
 }
@@ -330,8 +422,9 @@ mod tests {
         let gcref = unsafe { GcRef::from_non_null(nn) };
         let mut ctx = unsafe { RuntimeContext::placeholder(gcref) };
         assert!(!ctx.has_pending_fault());
-        let fault = Fault { _opaque: () };
-        ctx.pending_fault = &fault as *const Fault as *mut Fault;
+        let mut fault = Fault::clear();
+        fault.set(FaultKind::IntOverflow);
+        ctx.pending_fault = &mut fault;
         assert!(ctx.has_pending_fault());
     }
 

@@ -27,7 +27,7 @@ pub mod scalars;
 pub mod text;
 
 pub use abi::{assert_abi_version, RUNTIME_ABI_VERSION};
-pub use context::{DebugFrame, Fault, Runtime, RuntimeContext};
+pub use context::{DebugFrame, Fault, FaultKind, Runtime, RuntimeContext};
 pub use descriptor::{
     DropFn, DynamicHasher, EqualsFn, FormatFn, HashFn, StructHasher, TraceFn, Tracer,
     TypeDescriptor, TypeId,

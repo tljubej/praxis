@@ -10,3 +10,10 @@ description = "Mid-level IR: CFG, liveness, fault edges, and GC safepoint analys
 praxis-source.workspace = true
 praxis-types.workspace = true
 praxis-runtime.workspace = true
+praxis-hir.workspace = true
+praxis-stdlib.workspace = true
+
+[dev-dependencies]
+praxis-ast.workspace = true
+praxis-parser.workspace = true
+praxis-test-support.workspace = true

@@ -6,6 +6,7 @@
 
 mod check;
 mod diagnostic_render;
+mod run;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -57,7 +58,7 @@ fn main() -> Result<()> {
 
     let exit = match cli.command {
         Command::Check { file } => check::run(&file),
-        Command::Run { file } => not_implemented("run", Some(&file), 4),
+        Command::Run { file } => run::run(&file),
         Command::Watch { file } => not_implemented("watch", Some(&file), 0),
         Command::Repl => not_implemented("repl", None, 0),
         Command::Lsp => not_implemented("lsp", None, 11),

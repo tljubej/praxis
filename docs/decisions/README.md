@@ -19,3 +19,8 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-011: Precise non-moving mark-and-sweep over a Bumpalo arena + live-set registry](./011-gc-bumpalo-mark-sweep.md)
 - [ADR-012: Explicit root frames for M3](./012-root-tracking-explicit-frames.md)
 - [ADR-013: Scalar + Vec[T] descriptors in M3; other collection descriptors in M5](./013-m3-descriptors-scalars-and-vec.md)
+- [ADR-014: A typed-HIR tree as the MIR lowering boundary](./014-typed-hir-tree-as-lowering-boundary.md)
+- [ADR-015: MIR shape — non-SSA slots, transient scalars, Cranelift makes SSA](./015-mir-shape-non-ssa-slots.md)
+- [ADR-016: MIR liveness and the per-safepoint root set](./016-mir-liveness-and-roots.md)
+- [ADR-017: Runtime ABI wrappers and the no-panic fault protocol](./017-runtime-abi-wrappers-and-fault-protocol.md)
+- [ADR-018: Monomorphization deferred — M4 is monomorphic](./018-monomorphization-deferred.md)

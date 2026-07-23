@@ -14,9 +14,12 @@ path = "src/main.rs"
 praxis-source.workspace = true
 praxis-syntax.workspace = true
 praxis-parser.workspace = true
+praxis-ast.workspace = true
 praxis-hir.workspace = true
+praxis-mir.workspace = true
 praxis-runtime.workspace = true
 praxis-stdlib.workspace = true
+praxis-codegen-cranelift.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 

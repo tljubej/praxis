@@ -1,0 +1,6 @@
+fn main() -> Int {
+  var s = 0
+  var i = 1
+  while i < 6 { s = s + i; i = i + 1 }
+  s
+}
