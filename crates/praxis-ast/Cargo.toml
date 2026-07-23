@@ -10,3 +10,7 @@ description = "Typed syntax wrappers over Praxis syntax nodes."
 praxis-source.workspace = true
 praxis-syntax.workspace = true
 rowan.workspace = true
+
+[dev-dependencies]
+praxis-parser.workspace = true
+praxis-test-support.workspace = true

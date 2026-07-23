@@ -204,6 +204,13 @@ pub enum SyntaxKind {
     UNARY_EXPR,
     /// A parenthesized expression `( expr )`.
     PAREN_EXPR,
+    /// A tuple expression `( e1, e2, … )` with two or more elements. A
+    /// single parenthesized value is [`PAREN_EXPR`](Self::PAREN_EXPR), not this.
+    TUPLE_EXPR,
+    /// A type written in source. M2 covers scalar names (`Int`, `Text`, …),
+    /// tuple types, and function types; richer type syntax lands with the
+    /// constructs that need it.
+    TYPE_REF,
     /// A parse-error placeholder node wrapping tokens the parser could not
     /// place. Recovery (§15.2) emits these so the tree stays well-formed.
     PARSE_ERROR,

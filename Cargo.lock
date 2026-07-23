@@ -281,8 +281,10 @@ dependencies = [
 name = "praxis-ast"
 version = "0.1.0"
 dependencies = [
+ "praxis-parser",
  "praxis-source",
  "praxis-syntax",
+ "praxis-test-support",
  "rowan",
 ]
 
