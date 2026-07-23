@@ -29,9 +29,10 @@ use crate::scope::{ScopeId, ScopeTree};
 use crate::symbol::{Symbol, SymbolId, SymbolKind};
 
 /// The built-in scalar type names that a type annotation may legitimately name
-/// (§4.3). Reserved-but-unimplemented scalars (`Float`, `UInt`, `Byte`, `Char`)
-/// are deliberately absent: using them yields `N002 unknown type`.
-const KNOWN_TYPE_NAMES: &[&str] = &["Int", "Text", "Bool", "Unit", "Never"];
+/// (§4.3). Reserved-but-unimplemented scalars (`Float`, `UInt`, `Byte`) are
+/// deliberately absent: using them yields `N002 unknown type`. `Char` is wired
+/// end-to-end in M6 (the input parser produces it).
+const KNOWN_TYPE_NAMES: &[&str] = &["Int", "Text", "Bool", "Char", "Unit", "Never"];
 
 /// A name reference resolved at a source range. Inference later attaches the
 /// inferred type to each.

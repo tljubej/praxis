@@ -320,3 +320,31 @@ fn let_vec_mutation_visible_after_gc() {
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 1000); // 500 * 2
 }
+
+// ===========================================================================
+// Milestone 6: Char wired end-to-end (§4.3). The runtime descriptor exists;
+// M6 connects inference → HIR → MIR → codegen → runtime. The input parser
+// produces Char values (`char` atom, `grid(char)`); these tests exercise the
+// runtime allocation path that path will use.
+// ===========================================================================
+
+#[test]
+fn char_type_annotation_is_accepted() {
+    // `Char` must now type-check (M6: reserved → wired). This compiles through
+    // the whole pipeline (resolve → infer → lower → MIR → JIT) without error.
+    let src = "fn main() -> Char {\n  out(0)\n}\n";
+    let (_jit, ids) = compile(src);
+    assert!(ids.contains_key("main"), "Char return type compiles");
+}
+
+#[test]
+fn char_runtime_roundtrip() {
+    // The descriptor + allocator path the input parser will call: alloc_char
+    // stores a u32 scalar; as_char recovers it. Exercises scalars::CHAR.
+    let rt = Runtime::new();
+    let c = rt.alloc_char('€' as u32);
+    assert_eq!(c.as_char(), '€');
+    // A simple ASCII char.
+    let a = rt.alloc_char('A' as u32);
+    assert_eq!(a.as_char(), 'A');
+}

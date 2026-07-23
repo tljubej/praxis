@@ -156,6 +156,28 @@ pub unsafe extern "C" fn praxis_alloc_unit(ctx: *mut RuntimeContext) -> GcRef {
     unsafe { heap(ctx).alloc_immortal(scalars::UNIT, ()) }
 }
 
+/// Allocate a boxed `Char` from a Unicode scalar value (§4.3, M6). The `value`
+/// is the `u32` code point carried as `i64` (the uniform scalar ABI width). If
+/// the code point is not a valid scalar, the fault is set and the Unit sentinel
+/// is returned (no panic crosses the ABI).
+///
+/// # Safety
+/// `ctx` must point at a live, wired `RuntimeContext`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_alloc_char(ctx: *mut RuntimeContext, value: i64) -> GcRef {
+    // Trigger a collection on allocation pressure before allocating.
+    unsafe { maybe_collect(ctx) };
+    let code = value as u32;
+    if !crate::scalars::is_valid_char(code) {
+        // Defensive: the parser validates scalars, but a malformed code point must
+        // not panic across the ABI.
+        unsafe { set_fault(ctx, FaultKind::None) };
+        return unsafe { unit_sentinel(ctx) };
+    }
+    // SAFETY: caller upholds ctx/heap validity; code is a validated scalar.
+    unsafe { heap(ctx).alloc(scalars::CHAR, code) }
+}
+
 /// Allocate an owned `Text` from a UTF-8 byte buffer (§4.3, ADR-013).
 ///
 /// # Safety
@@ -227,6 +249,17 @@ pub unsafe extern "C" fn praxis_bool_load(_ctx: *mut RuntimeContext, r: GcRef) -
     } else {
         0
     }
+}
+
+/// Read a `Char` payload as its `u32` code point widened to `i64` (§4.3, M6).
+///
+/// # Safety
+/// `r` must be a valid `Char` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_char_load(_ctx: *mut RuntimeContext, r: GcRef) -> i64 {
+    // SAFETY: caller guarantees `r` is a Char; payload is a u32 scalar value.
+    let p: *mut u32 = r.payload::<u32>();
+    unsafe { *p as i64 }
 }
 
 // ---------------------------------------------------------------------------

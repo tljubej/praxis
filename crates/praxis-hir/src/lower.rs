@@ -198,12 +198,14 @@ pub enum TypedExpr {
 }
 
 /// A literal value. (M4 lowers Int/Bool/Unit; Text materializes via the runtime
-/// text descriptor. Reserved scalars are rejected before reaching here.)
+/// text descriptor. M6 adds Char for the input parser's `char`/`grid(char)`.)
 #[derive(Clone, Debug)]
 pub enum Lit {
     Int(i64),
     Text(String),
     Bool(bool),
+    /// A Unicode scalar value (the payload of a `Char` object).
+    Char(u32),
 }
 
 /// Binary operators, carrying the §4.12 semantics the backend needs.

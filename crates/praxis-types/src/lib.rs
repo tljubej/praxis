@@ -50,6 +50,14 @@ impl TypeDb {
         self.scalar(Scalar::Bool)
     }
 
+    /// The `Char` type (§4.3) — a single Unicode scalar value. M6 wires it
+    /// end-to-end: the input parser produces `Char` values (`char` atom,
+    /// `grid(char)`), and the runtime descriptor (`scalars::CHAR`) is complete.
+    #[must_use]
+    pub fn char(&mut self) -> Type {
+        self.scalar(Scalar::Char)
+    }
+
     /// The `Never` type — the bottom type for diverging control flow (§4.3).
     #[must_use]
     pub fn never(&mut self) -> Type {

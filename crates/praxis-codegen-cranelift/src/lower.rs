@@ -45,8 +45,10 @@ enum Symbol {
     AllocBool,
     AllocUnit,
     AllocText,
+    AllocChar,
     IntLoad,
     BoolLoad,
+    CharLoad,
     IntAdd,
     IntSub,
     IntMul,
@@ -73,8 +75,10 @@ impl Symbol {
             Symbol::AllocBool => "praxis_alloc_bool",
             Symbol::AllocUnit => "praxis_alloc_unit",
             Symbol::AllocText => "praxis_alloc_text",
+            Symbol::AllocChar => "praxis_alloc_char",
             Symbol::IntLoad => "praxis_int_load",
             Symbol::BoolLoad => "praxis_bool_load",
+            Symbol::CharLoad => "praxis_char_load",
             Symbol::IntAdd => "praxis_int_add",
             Symbol::IntSub => "praxis_int_sub",
             Symbol::IntMul => "praxis_int_mul",
@@ -336,6 +340,12 @@ fn lower_inst<M: Module>(
                     let result = call_alloc_text(builder, ctx_val, ptr, len_val, module, imports)?;
                     builder.def_var(vars[dst.0 as usize], result);
                 }
+                AllocKind::Char { value } => {
+                    let arg = builder.use_var(vars[value.0 as usize]);
+                    let result =
+                        call_symbol1(builder, ctx_val, arg, Symbol::AllocChar, module, imports)?;
+                    builder.def_var(vars[dst.0 as usize], result);
+                }
             }
         }
         Inst::ExtractScalar { dst, src, scalar } => {
@@ -343,7 +353,9 @@ fn lower_inst<M: Module>(
             let sym = match scalar {
                 ScalarKind::Int => Symbol::IntLoad,
                 ScalarKind::Bool => Symbol::BoolLoad,
-                ScalarKind::Byte | ScalarKind::Char => Symbol::IntLoad,
+                ScalarKind::Char => Symbol::CharLoad,
+                // Byte is not yet wired (reserved); read as Int defensively.
+                ScalarKind::Byte => Symbol::IntLoad,
             };
             let result = call_symbol1(builder, ctx_val, src_val, sym, module, imports)?;
             builder.def_var(vars[dst.0 as usize], result);
@@ -356,12 +368,15 @@ fn lower_inst<M: Module>(
         } => {
             // Materialize re-boxes a scalar → it allocates → safepoint.
             spill.emit_spill(builder, live_roots, vars);
-            // A scalar payload re-boxed: Int → praxis_alloc_int, Bool → alloc_bool.
+            // A scalar payload re-boxed: Int → praxis_alloc_int, Bool → alloc_bool,
+            // Char → praxis_alloc_char.
             let src_val = builder.use_var(vars[src.0 as usize]);
             let sym = match scalar {
                 ScalarKind::Int => Symbol::AllocInt,
                 ScalarKind::Bool => Symbol::AllocBool,
-                ScalarKind::Byte | ScalarKind::Char => Symbol::AllocInt,
+                ScalarKind::Char => Symbol::AllocChar,
+                // Byte is not yet wired (reserved); box as Int defensively.
+                ScalarKind::Byte => Symbol::AllocInt,
             };
             let result = call_symbol1(builder, ctx_val, src_val, sym, module, imports)?;
             builder.def_var(vars[dst.0 as usize], result);

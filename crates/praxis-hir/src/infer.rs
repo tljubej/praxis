@@ -776,6 +776,7 @@ impl Inferer {
             "Int" => ScalarType::Int,
             "Text" => ScalarType::Text,
             "Bool" => ScalarType::Bool,
+            "Char" => ScalarType::Char,
             "Never" => ScalarType::Never,
             "Unit" => return Some(self.db.unit()),
             _ => return None,

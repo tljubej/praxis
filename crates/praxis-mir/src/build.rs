@@ -49,6 +49,7 @@ struct Builder<'a> {
     int_ty: Type,
     bool_ty: Type,
     text_ty: Type,
+    char_ty: Type,
     unit_ty: Type,
 }
 
@@ -57,6 +58,7 @@ fn lower_fn(f: &TypedFn, db: &mut TypeDb) -> Function {
     let int_ty = db.int();
     let bool_ty = db.bool();
     let text_ty = db.text();
+    let char_ty = db.char();
     let unit_ty = db.unit();
 
     let mut func = Function {
@@ -80,6 +82,7 @@ fn lower_fn(f: &TypedFn, db: &mut TypeDb) -> Function {
         int_ty,
         bool_ty,
         text_ty,
+        char_ty,
         unit_ty,
     };
 
@@ -395,6 +398,21 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit) -> LocalId {
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Text { value: s.clone() },
+                live_roots: Vec::new(),
+            });
+            dst
+        }
+        Lit::Char(c) => {
+            // Char's payload is a u32 Unicode scalar; ConstInt carries it as i64.
+            let scalar = b.alloc_scalar(ScalarKind::Char);
+            b.push(Inst::ConstInt {
+                dst: scalar,
+                value: *c as i64,
+            });
+            let dst = b.alloc_gc(b.char_ty, None);
+            b.push(Inst::Alloc {
+                dst,
+                alloc: AllocKind::Char { value: scalar },
                 live_roots: Vec::new(),
             });
             dst

@@ -160,7 +160,10 @@ fn defs(inst: &Inst) -> Vec<LocalId> {
 fn uses(inst: &Inst) -> Vec<LocalId> {
     match inst {
         Inst::Alloc {
-            alloc: crate::ir::AllocKind::Int { value } | crate::ir::AllocKind::Bool { value },
+            alloc:
+                crate::ir::AllocKind::Int { value }
+                | crate::ir::AllocKind::Bool { value }
+                | crate::ir::AllocKind::Char { value },
             ..
         } => vec![*value],
         Inst::Alloc {

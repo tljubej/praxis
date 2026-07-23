@@ -65,9 +65,9 @@ pub enum LocalKind {
 pub enum ScalarKind {
     /// `i64` — the payload of an `Int` object.
     Int,
-    /// `u8` — the payload of a `Byte` object (reserved; M4 focuses on Int).
+    /// `u8` — the payload of a `Byte` object (reserved; not yet wired).
     Byte,
-    /// `u32` — the payload of a `Char` object (reserved).
+    /// `u32` — the payload of a `Char` object (M6 wires it end-to-end).
     Char,
     /// `bool` — the payload of a `Bool` object (represented as `i8`/`u8`).
     Bool,
@@ -158,6 +158,9 @@ pub enum AllocKind {
     Unit,
     /// A boxed `Text` from a literal (the string is embedded in the MIR).
     Text { value: String },
+    /// A boxed `Char` initialized from a `u32` Unicode scalar (a `Scalar` local;
+    /// M6 wires it for the input parser's `char`/`grid(char)`).
+    Char { value: LocalId },
 }
 
 /// A call target. M4 resolves user functions by name; the backend mints a symbol.
