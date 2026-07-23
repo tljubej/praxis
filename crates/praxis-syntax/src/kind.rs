@@ -211,6 +211,11 @@ pub enum SyntaxKind {
     /// tuple types, and function types; richer type syntax lands with the
     /// constructs that need it.
     TYPE_REF,
+    /// A tuple type `(T, U, …)`. A parenthesized single type `(T)` is just `T`,
+    /// so this always carries two or more elements.
+    TUPLE_TYPE,
+    /// A function type `(P0, P1, …) -> R`.
+    FN_TYPE,
     /// A parse-error placeholder node wrapping tokens the parser could not
     /// place. Recovery (§15.2) emits these so the tree stays well-formed.
     PARSE_ERROR,
