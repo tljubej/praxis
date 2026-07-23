@@ -12,6 +12,14 @@
 //! symbol table + reference map that inference (Slice 5) consumes. Type
 //! annotations are validated for *known-ness* (`N002`) but not yet checked
 //! against use.
+//!
+//! **Two-pass (M7):** resolution runs in two phases so that top-level type names
+//! (`struct`/`enum`/`fn`) are visible *before* any type annotation is checked.
+//! Pass 1 (`register_top_level`) seeds all top-level names; pass 2
+//! (`resolve_top_stmt`) resolves bodies and annotations. For M7-WS1 this is
+//! preparatory infrastructure — `struct`/`enum` items are not parsed until WS3,
+//! but the closed `KNOWN_TYPE_NAMES` table is replaced with scope-based lookup
+//! so WS3 can register user types the same way.
 
 use std::collections::HashMap;
 
@@ -32,6 +40,11 @@ use crate::symbol::{Symbol, SymbolId, SymbolKind};
 /// (§4.3). Reserved-but-unimplemented scalars (`Float`, `UInt`, `Byte`) are
 /// deliberately absent: using them yields `N002 unknown type`. `Char` is wired
 /// end-to-end in M6 (the input parser produces it).
+///
+/// M7: these are now seeded into the root scope as `Builtin` symbols (see
+/// [`Resolver::seed_type_names`]), so type-annotation validation consults the
+/// scope tree rather than this constant directly. The constant is retained as
+/// the seed source.
 const KNOWN_TYPE_NAMES: &[&str] = &["Int", "Text", "Bool", "Char", "Unit", "Never"];
 
 /// A name reference resolved at a source range. Inference later attaches the
@@ -77,12 +90,20 @@ impl NameResolution {
 }
 
 /// Resolve names in `file`'s parsed tree. Seeds the prelude (the built-in
-/// functions and the type-name set) into the root scope first.
+/// functions and the type-name set) into the root scope first, then runs the
+/// two-pass resolution (M7): pass 1 registers all top-level names so forward
+/// references work; pass 2 resolves bodies and annotations.
 #[must_use]
 pub fn resolve(file: FileId, root: &SourceFile) -> NameResolution {
     let mut r = Resolver::new(file);
-    r.seed_prelude();
     let root_scope = r.out.scopes.root();
+    r.seed_prelude(root_scope);
+    // Pass 1: register all top-level declaration names (fn/let/var, and in WS3+
+    // struct/enum) so they are visible before any annotation is checked.
+    for stmt in root.stmts() {
+        r.register_top_level(root_scope, &stmt);
+    }
+    // Pass 2: resolve bodies and annotations.
     for stmt in root.stmts() {
         r.resolve_top_stmt(root_scope, &stmt);
     }
@@ -166,20 +187,52 @@ impl Resolver {
 
     /// Seed the root scope with the prelude's function names and the built-in
     /// type names (the latter as builtin symbols so type annotations can resolve
-    /// to them).
-    fn seed_prelude(&mut self) {
-        let root = self.out.scopes.root();
+    /// to them). M7: type names are now seeded here so `check_type_annotation`
+    /// can validate them through scope lookup rather than a closed constant.
+    fn seed_prelude(&mut self, root: ScopeId) {
         for entry in praxis_stdlib::PRELUDE {
             let id = self.mint(SymbolKind::Builtin, entry.name, None);
             self.out.scopes.bind(root, entry.name, id);
         }
+        self.seed_type_names(root);
+    }
+
+    /// Seed the built-in scalar type names as `Builtin` symbols. Retained as a
+    /// separate method so WS3/WS4 can add user `struct`/`enum` registrations
+    /// alongside without touching `seed_prelude`.
+    fn seed_type_names(&mut self, root: ScopeId) {
         for ty in KNOWN_TYPE_NAMES {
             let id = self.mint(SymbolKind::Builtin, (*ty).to_string(), None);
             self.out.scopes.bind(root, (*ty).to_string(), id);
         }
     }
 
-    // --- top-level statements ----------------------------------------------
+    // --- pass 1: top-level name registration (M7) --------------------------
+
+    /// Register a top-level declaration's *name* without resolving its body.
+    /// This is pass 1 of the two-pass resolution: it makes `fn` (and, in WS3+,
+    /// `struct`/`enum`) names visible before any type annotation is checked or
+    /// any body is resolved, so forward references and mutual recursion work.
+    ///
+    /// Only `fn` names are registered here: `let`/`var` follow lexical order
+    /// (their shadowing semantics require the initializer to resolve in the
+    /// *preceding* environment, §5.3, so pre-registering would break that).
+    fn register_top_level(&mut self, scope: ScopeId, node: &praxis_syntax::SyntaxNode) {
+        if let Some(fn_) = FnItem::cast(node.clone()) {
+            if let Some(name_tok) = fn_.name() {
+                self.bind(
+                    scope,
+                    SymbolKind::Fn,
+                    name_tok.text().to_string(),
+                    name_tok.text_range(),
+                );
+            }
+        }
+        // WS3/WS4 will add `StructItem::cast` → SymbolKind::Struct and
+        // `EnumItem::cast` → SymbolKind::Enum here.
+    }
+
+    // --- pass 2: top-level statements --------------------------------------
 
     fn resolve_top_stmt(&mut self, scope: ScopeId, node: &praxis_syntax::SyntaxNode) {
         if let Some(let_) = LetStmt::cast(node.clone()) {
@@ -236,19 +289,11 @@ impl Resolver {
     }
 
     fn resolve_fn(&mut self, scope: ScopeId, item: &FnItem) {
-        // A function's name is visible inside its own body only AFTER the
-        // initializer... but functions are special: the name must be visible
-        // inside the body for recursion. Per §4.9/§5.3, recursive groups are
-        // inferred together and the name is in scope for the body. So bind the
-        // name first, then resolve params + body in a child scope.
+        // A function's name was registered in pass 1 (`register_top_level`) so
+        // it is visible for forward references and mutual recursion. Reuse that
+        // symbol rather than re-binding (which would create a duplicate).
         let fn_symbol = if let Some(name_tok) = item.name() {
-            let id = self.bind(
-                scope,
-                SymbolKind::Fn,
-                name_tok.text().to_string(),
-                name_tok.text_range(),
-            );
-            Some(id)
+            self.out.decls.get(&name_tok.text_range()).copied()
         } else {
             None
         };
@@ -448,8 +493,10 @@ impl Resolver {
     // --- type annotations --------------------------------------------------
 
     /// Walk a type annotation and emit `N002` for any name that is not a known
-    /// built-in type. (Structural type nodes — tuples, function types — are
-    /// recursed into; the leaves are the `Ident` names.)
+    /// type. M7: known types are resolved through the scope tree (built-in
+    /// scalars are seeded as `Builtin` symbols; user `struct`/`enum` names will
+    /// be registered in WS3/WS4). Structural type nodes (tuples, function types)
+    /// are recursed into; the leaves are the `Ident` names.
     fn check_type_annotation(&mut self, scope: ScopeId, ty: &praxis_ast::TypeRef) {
         let syntax = ty.syntax();
         for tok in syntax.descendants_with_tokens().filter_map(|e| match e {
@@ -457,16 +504,16 @@ impl Resolver {
             _ => None,
         }) {
             let name = tok.text();
-            if !KNOWN_TYPE_NAMES.contains(&name) {
-                // It might be a user type from a later milestone; for M2 everything
-                // non-builtin is unknown.
+            // A type name is valid if it resolves in scope (built-in or
+            // user-declared). Collection constructors (Vec, Map, …) are also
+            // valid type names — they're handled in inference's resolve_type.
+            if self.lookup(scope, name).is_none() && !is_collection_ctor_name(name) {
                 let span = range_to_span(tok.text_range());
                 self.out
                     .diagnostics
                     .push(unknown_type(self.file_span(span), name));
             }
         }
-        let _ = scope;
     }
 }
 
@@ -476,5 +523,26 @@ fn range_to_span(range: TextRange) -> Span {
     Span::new(
         BytePos::from(u32::from(range.start())),
         BytePos::from(u32::from(range.end())),
+    )
+}
+
+/// Whether `name` is a built-in collection constructor (§4.4: `Vec`, `Map`,
+/// `Set`, …). These are valid type-annotation names that are *not* seeded as
+/// scope symbols (they're handled specially in inference's `resolve_type`),
+/// so `check_type_annotation` must accept them directly.
+fn is_collection_ctor_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Vec"
+            | "Deque"
+            | "Map"
+            | "Set"
+            | "Counter"
+            | "MinHeap"
+            | "MaxHeap"
+            | "BitSet"
+            | "Grid"
+            | "Range"
+            | "Option"
     )
 }

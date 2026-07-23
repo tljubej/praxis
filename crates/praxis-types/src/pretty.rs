@@ -85,6 +85,33 @@ impl TypeDb {
                 }
                 out.push(']');
             }
+            TypeData::Record { def } => {
+                let rdef = &self.record_defs[def.0 as usize];
+                match &rdef.name {
+                    Some(n) => {
+                        let _ = out.write_str(n);
+                    }
+                    None => {
+                        // Anonymous structural record: render as `{ x: T, y: U }`
+                        // (§5.6; display preserves source order). The spaced
+                        // form matches the runtime `record_format` output.
+                        out.write_str("{ ").ok();
+                        for (i, f) in rdef.fields.iter().enumerate() {
+                            if i > 0 {
+                                out.write_str(", ").ok();
+                            }
+                            let _ = out.write_str(&f.name);
+                            out.write_str(": ").ok();
+                            self.write_type(f.ty, out, names);
+                        }
+                        out.write_str(" }").ok();
+                    }
+                }
+            }
+            TypeData::Enum { def } => {
+                let edef = &self.enum_defs[def.0 as usize];
+                let _ = out.write_str(&edef.name);
+            }
             TypeData::Var(state) => match state {
                 VarState::Generalized => {
                     let _ = out.write_str(names.name_for(t.0));

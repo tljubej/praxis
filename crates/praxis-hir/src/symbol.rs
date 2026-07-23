@@ -36,6 +36,12 @@ pub enum SymbolKind {
     Param,
     /// A prelude/builtin symbol (`out`, `panic`, …) seeded into the root scope.
     Builtin,
+    /// A `struct Name { … }` declaration (M7, §4.5). A type-name symbol; its
+    /// scheme carries the record's [`Type`](praxis_types::Type) once registered.
+    Struct,
+    /// An `enum Name { … }` declaration (M7, §4.6). A type-name symbol; its
+    /// scheme carries the enum's [`Type`](praxis_types::Type) once registered.
+    Enum,
 }
 
 /// One resolved declaration.

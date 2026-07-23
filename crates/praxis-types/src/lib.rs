@@ -19,7 +19,9 @@ pub mod pretty;
 pub mod type_id;
 pub mod unify;
 
-pub use data::{TypeData, VarState};
+pub use data::{
+    EnumDef, EnumDefId, EnumVariantDef, RecordDef, RecordDefId, RecordFieldDef, TypeData, VarState,
+};
 pub use db::{Slot, TypeDb};
 pub use generalize::Scheme;
 pub use type_id::{Type, VarId};

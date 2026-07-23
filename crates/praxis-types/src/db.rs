@@ -11,7 +11,7 @@
 
 use praxis_stdlib::type_pattern::ScalarType;
 
-use crate::data::{TypeData, VarState};
+use crate::data::{EnumDef, EnumDefId, RecordDef, RecordDefId, TypeData, VarState};
 use crate::type_id::{Type, VarId};
 
 /// One arena entry. A slot is either a concrete type shape ([`TypeData`]) or — for
@@ -27,6 +27,11 @@ pub struct Slot {
 
 /// The interned type store. Create one at the start of inference and mint/follow
 /// types through it.
+///
+/// M7 adds two side-tables for record/enum definitions (ADR-025): the heavy
+/// field/variant data lives here rather than inline in [`TypeData`] (which would
+/// make `Type` recursive and expensive). A [`TypeData::Record`] /
+/// [`TypeData::Enum`] variant carries only a def-id index into these tables.
 #[derive(Clone, Debug, Default)]
 pub struct TypeDb {
     /// `pub(crate)` so the `unify`/`generalize` modules can mutate slots in place
@@ -35,6 +40,13 @@ pub struct TypeDb {
     /// The current binding level, raised on each `let`/`fn` and lowered on exit.
     /// See ADR-008.
     level: u32,
+    /// Record definitions, indexed by [`RecordDefId`] (M7, ADR-025). Each
+    /// `register_record`/`anon_record` call mints a fresh def; identity for
+    /// anonymous records is established through unification (not construction),
+    /// mirroring how tuples/funcs work.
+    pub(crate) record_defs: Vec<RecordDef>,
+    /// Enum definitions, indexed by [`EnumDefId`] (M7, ADR-025).
+    pub(crate) enum_defs: Vec<EnumDef>,
 }
 
 impl TypeDb {
@@ -187,5 +199,93 @@ impl TypeDb {
     /// Mark variable `v` as generalized (quantified by a [`Scheme`](crate::Scheme)).
     pub(crate) fn generalize_var(&mut self, v: VarId) {
         self.slots[v.0 as usize].data = TypeData::Var(VarState::Generalized);
+    }
+
+    // --- record / enum definitions (M7, ADR-025) ----------------------------
+
+    /// Borrow a record definition by id (read-only).
+    #[must_use]
+    pub fn record_def(&self, def: RecordDefId) -> &RecordDef {
+        &self.record_defs[def.0 as usize]
+    }
+
+    /// Borrow an enum definition by id (read-only).
+    #[must_use]
+    pub fn enum_def(&self, def: EnumDefId) -> &EnumDef {
+        &self.enum_defs[def.0 as usize]
+    }
+
+    /// Register a *nominal* record definition (§4.5) and return its type. Each
+    /// call mints a fresh def — nominal records are distinct by name even with
+    /// identical fields, so there is no deduplication here.
+    #[must_use]
+    pub fn register_record(
+        &mut self,
+        name: impl Into<String>,
+        fields: Vec<(String, Type)>,
+    ) -> Type {
+        let def = RecordDef {
+            name: Some(name.into()),
+            fields: fields
+                .into_iter()
+                .map(|(n, t)| crate::data::RecordFieldDef { name: n, ty: t })
+                .collect(),
+        };
+        let id = RecordDefId(self.record_defs.len() as u32);
+        self.record_defs.push(def);
+        self.intern(TypeData::Record { def: id })
+    }
+
+    /// Register an enum definition (§4.6) and return its type.
+    #[must_use]
+    pub fn register_enum(
+        &mut self,
+        name: impl Into<String>,
+        variants: Vec<(String, Option<Vec<Type>>)>,
+    ) -> Type {
+        let def = EnumDef {
+            name: name.into(),
+            variants: variants
+                .into_iter()
+                .map(|(n, p)| crate::data::EnumVariantDef {
+                    name: n,
+                    payload: p,
+                })
+                .collect(),
+        };
+        let id = EnumDefId(self.enum_defs.len() as u32);
+        self.enum_defs.push(def);
+        self.intern(TypeData::Enum { def: id })
+    }
+
+    /// Create an *anonymous* structural record type (§5.6). Each call mints a
+    /// fresh def — identity is established through unification (two anon records
+    /// with the same field-name set unify and get linked), mirroring how tuples
+    /// and functions work. Field display order follows the order given here.
+    #[must_use]
+    pub fn anon_record(&mut self, fields: Vec<(String, Type)>) -> Type {
+        let def = RecordDef {
+            name: None,
+            fields: fields
+                .into_iter()
+                .map(|(n, t)| crate::data::RecordFieldDef { name: n, ty: t })
+                .collect(),
+        };
+        let id = RecordDefId(self.record_defs.len() as u32);
+        self.record_defs.push(def);
+        self.intern(TypeData::Record { def: id })
+    }
+
+    /// Wrap an existing [`RecordDefId`] into a `Type` (e.g. for use after
+    /// fetching a shared def-id).
+    #[must_use]
+    pub fn record_type(&mut self, def: RecordDefId) -> Type {
+        self.intern(TypeData::Record { def })
+    }
+
+    /// Wrap an existing [`EnumDefId`] into a `Type`.
+    #[must_use]
+    pub fn enum_type(&mut self, def: EnumDefId) -> Type {
+        self.intern(TypeData::Enum { def })
     }
 }

@@ -3,11 +3,38 @@
 //! [`TypeData`] is what sits in each arena slot. It reuses the built-in scalar
 //! and collection *names* from [`praxis_stdlib`](::praxis_stdlib) (rule 20.3: one
 //! vocabulary) and adds the inference-specific shapes on top: tuples, functions,
-//! and type variables.
+//! records, enums, and type variables.
 
 use praxis_stdlib::type_pattern::{CollectionCtor, ScalarType};
 
 use crate::type_id::Type;
+
+/// An opaque index into [`TypeDb::record_defs`](crate::db::TypeDb), identifying
+/// one record definition (nominal or anonymous structural). Two `Record` types
+/// with the same `RecordDefId` are the *same* type.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct RecordDefId(pub u32);
+
+impl RecordDefId {
+    #[inline]
+    #[must_use]
+    pub const fn to_u32(self) -> u32 {
+        self.0
+    }
+}
+
+/// An opaque index into [`TypeDb::enum_defs`](crate::db::TypeDb), identifying one
+/// enum definition. Two `Enum` types with the same `EnumDefId` are the same type.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct EnumDefId(pub u32);
+
+impl EnumDefId {
+    #[inline]
+    #[must_use]
+    pub const fn to_u32(self) -> u32 {
+        self.0
+    }
+}
 
 /// The concrete shape of an interned type.
 ///
@@ -23,6 +50,13 @@ use crate::type_id::Type;
 /// `Vec[T]` and drive method dispatch (ADR-010) against the receiver type. The
 /// full collection set (Map/Set/Counter/Heap/Deque) lands in M8; M5 focuses on
 /// `Vec`.
+///
+/// M7 adds [`Record`](Self::Record) and [`Enum`](Self::Enum) via def-id
+/// indirection (ADR-025): the heavy field/variant data lives in side-tables on
+/// [`TypeDb`](crate::db::TypeDb), keeping `Type` a cheap copyable `u32` handle
+/// and avoiding recursive size/cycles. Both nominal (source-declared) and
+/// anonymous structural records (from parser templates, ADR-024) use the
+/// `Record` variant; anonymous records are keyed by a canonicalized field set.
 #[derive(Clone, Debug)]
 pub enum TypeData {
     /// A built-in scalar: `Int`, `Text`, `Bool`, `Never`, …
@@ -43,6 +77,18 @@ pub enum TypeData {
         ctor: CollectionCtor,
         args: Vec<Type>,
     },
+    /// A record type (§4.5 nominal, §5.6 anonymous structural). `def` is an
+    /// index into [`TypeDb::record_defs`](crate::db::TypeDb) holding the
+    /// [`RecordDef`] (name + ordered fields). Two records are the same type iff
+    /// their def-ids are equal; for anonymous records the def is keyed by a
+    /// canonicalized (source-order-preserving for display, name-set-equal for
+    /// identity per §5.6) field set.
+    Record { def: RecordDefId },
+    /// An enum type (§4.6). `def` is an index into
+    /// [`TypeDb::enum_defs`](crate::db::TypeDb) holding the [`EnumDef`]
+    /// (name + ordered variants). Two enums are the same type iff their def-ids
+    /// are equal.
+    Enum { def: EnumDefId },
     /// A type variable, in one of its lifecycle states (see [`VarState`]).
     Var(VarState),
 }
@@ -70,6 +116,97 @@ pub enum VarState {
     /// Promoted into a [`Scheme`](crate::Scheme)'s quantified set. Never unified
     /// directly — instantiate the scheme to get fresh vars in its place.
     Generalized,
+}
+
+/// One field of a record definition: its source name and its type (§4.5).
+/// Field order in the definition is the canonical construction/display order;
+/// §5.6 notes field order in *source* does not affect anonymous-record *identity*
+/// after canonicalization, but display and construction preserve source order.
+#[derive(Clone, Debug)]
+pub struct RecordFieldDef {
+    pub name: String,
+    pub ty: Type,
+}
+
+/// The full definition of a record type (§4.5 nominal, §5.6 anonymous structural).
+/// Lives in the [`TypeDb::record_defs`](crate::db::TypeDb) side-table, referenced
+/// from [`TypeData::Record`] via a [`RecordDefId`].
+///
+/// `name` is `None` for anonymous structural records (parser-template-generated).
+/// Two anonymous records with the same field names and types (in any order, per
+/// §5.6) share one `RecordDef`; nominal records are distinct by name even with
+/// identical fields.
+#[derive(Clone, Debug)]
+pub struct RecordDef {
+    /// `None` for anonymous structural records; the declared name for nominal.
+    pub name: Option<String>,
+    pub fields: Vec<RecordFieldDef>,
+}
+
+impl RecordDef {
+    /// The number of fields.
+    #[must_use]
+    pub fn arity(&self) -> usize {
+        self.fields.len()
+    }
+
+    /// Look up a field by name, returning its index and type.
+    #[must_use]
+    pub fn field(&self, name: &str) -> Option<(usize, Type)> {
+        self.fields
+            .iter()
+            .position(|f| f.name == name)
+            .map(|i| (i, self.fields[i].ty))
+    }
+
+    /// The field type at `index`, in definition order.
+    #[must_use]
+    pub fn field_at(&self, index: usize) -> Option<Type> {
+        self.fields.get(index).map(|f| f.ty)
+    }
+}
+
+/// One variant of an enum definition (§4.6). A variant carries an optional
+/// payload — a tuple of types for the variant's data. `Empty`/`Wall` are
+/// payload-less; `Number(Int)` has a one-element payload; `Pair(Int, Text)` has
+/// two.
+#[derive(Clone, Debug)]
+pub struct EnumVariantDef {
+    pub name: String,
+    /// `None` for a payload-less variant (`Empty`); `Some(vec)` for a variant
+    /// carrying data. An empty payload vec is equivalent to `None`.
+    pub payload: Option<Vec<Type>>,
+}
+
+impl EnumVariantDef {
+    /// Whether this variant carries a payload.
+    #[must_use]
+    pub fn has_payload(&self) -> bool {
+        self.payload.as_ref().is_some_and(|p| !p.is_empty())
+    }
+}
+
+/// The full definition of an enum type (§4.6). Lives in the
+/// [`TypeDb::enum_defs`](crate::db::TypeDb) side-table, referenced from
+/// [`TypeData::Enum`] via an [`EnumDefId`].
+#[derive(Clone, Debug)]
+pub struct EnumDef {
+    pub name: String,
+    pub variants: Vec<EnumVariantDef>,
+}
+
+impl EnumDef {
+    /// The number of variants.
+    #[must_use]
+    pub fn arity(&self) -> usize {
+        self.variants.len()
+    }
+
+    /// Look up a variant by name, returning its index.
+    #[must_use]
+    pub fn variant(&self, name: &str) -> Option<usize> {
+        self.variants.iter().position(|v| v.name == name)
+    }
 }
 
 impl TypeData {

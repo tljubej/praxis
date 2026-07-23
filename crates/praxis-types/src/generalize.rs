@@ -83,6 +83,27 @@ impl TypeDb {
                 }
                 self.generalize_walk(result, at_level, out);
             }
+            TypeData::Collection { args, .. } => {
+                for a in args {
+                    self.generalize_walk(a, at_level, out);
+                }
+            }
+            TypeData::Record { def } => {
+                let def = self.record_defs[def.0 as usize].clone();
+                for f in def.fields {
+                    self.generalize_walk(f.ty, at_level, out);
+                }
+            }
+            TypeData::Enum { def } => {
+                let def = self.enum_defs[def.0 as usize].clone();
+                for v in def.variants {
+                    if let Some(payload) = v.payload {
+                        for p in payload {
+                            self.generalize_walk(p, at_level, out);
+                        }
+                    }
+                }
+            }
             // Scalars, Unit, Linked, and already-Generalized vars are left alone.
             _ => {}
         }
@@ -128,6 +149,44 @@ impl TypeDb {
                     .collect();
                 let result = self.instantiate_walk(result, quantified, mapping);
                 self.intern(TypeData::Func { params, result })
+            }
+            TypeData::Collection { ctor, args } => {
+                let args: Vec<_> = args
+                    .into_iter()
+                    .map(|a| self.instantiate_walk(a, quantified, mapping))
+                    .collect();
+                self.intern(TypeData::Collection { ctor, args })
+            }
+            TypeData::Record { def } => {
+                // A record def is shared; instantiation clones it with fresh
+                // field types so the polymorphic record gets its own specialized
+                // shape per use site.
+                let rdef = self.record_defs[def.0 as usize].clone();
+                let fields: Vec<_> = rdef
+                    .fields
+                    .into_iter()
+                    .map(|f| (f.name, self.instantiate_walk(f.ty, quantified, mapping)))
+                    .collect();
+                match rdef.name {
+                    Some(name) => self.register_record(name, fields),
+                    None => self.anon_record(fields),
+                }
+            }
+            TypeData::Enum { def } => {
+                let edef = self.enum_defs[def.0 as usize].clone();
+                let variants: Vec<_> = edef
+                    .variants
+                    .into_iter()
+                    .map(|v| {
+                        let payload = v.payload.map(|ps| {
+                            ps.into_iter()
+                                .map(|p| self.instantiate_walk(p, quantified, mapping))
+                                .collect::<Vec<_>>()
+                        });
+                        (v.name, payload)
+                    })
+                    .collect();
+                self.register_enum(edef.name, variants)
             }
             // Anything else (scalar, unit, unbound/linked var) is structural identity.
             other => self.intern(other),

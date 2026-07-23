@@ -8,7 +8,7 @@
 
 use praxis_stdlib::type_pattern::{CollectionCtor, ScalarType};
 
-use crate::data::{TypeData, VarState};
+use crate::data::{RecordDefId, TypeData, VarState};
 use crate::TypeDb;
 
 fn is_int(db: &TypeDb, t: crate::Type) -> bool {
@@ -389,4 +389,262 @@ fn render_collection_types() {
     // Nested: Vec[Map[Text, Int]].
     let nested = db.vec(m);
     assert_eq!(db.render(nested), "Vec[Map[Text, Int]]");
+}
+
+// --- record & enum types (M7, ADR-025) --------------------------------------
+//
+// Records and enums use def-id indirection: the heavy field/variant data lives
+// in side-tables on TypeDb, referenced from TypeData::Record/Enum by a small
+// index. These tests exercise construction, unification, generalization,
+// instantiation, and rendering — the four recursions that had to be extended
+// (unify_concrete, lower_levels, occurs, generalize_walk, instantiate_walk).
+
+#[test]
+fn nominal_record_renders_by_name() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let t = db.text();
+    let point = db.register_record("Point", vec![("x".into(), i), ("y".into(), t)]);
+    assert_eq!(db.render(point), "Point");
+}
+
+#[test]
+fn anonymous_record_renders_structurally() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let t = db.text();
+    let rec = db.anon_record(vec![("x".into(), i), ("y".into(), t)]);
+    assert_eq!(db.render(rec), "{ x: Int, y: Text }");
+}
+
+#[test]
+fn nominal_records_same_name_unify() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let a = db.register_record("Point", vec![("x".into(), i)]);
+    // Same name, same fields → fresh def-id but... nominal records are distinct
+    // by def-id (each register_record call mints a new one). So two separately
+    // registered Points do NOT unify unless they share the def-id.
+    let i2 = db.int();
+    let b = db.register_record("Point", vec![("x".into(), i2)]);
+    // Different def-ids: nominal records don't unify across registrations.
+    assert!(
+        db.unify(a, b).is_err(),
+        "distinct nominal record registrations do not unify"
+    );
+    // But a record unifies with itself.
+    db.unify(a, a).expect("record ~ itself");
+}
+
+#[test]
+fn nominal_record_unifies_with_same_def_id() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let point = db.register_record("Point", vec![("x".into(), i), ("y".into(), i)]);
+    // Re-intern the same def-id — these unify.
+    let def = match db.data(db.follow(point)) {
+        TypeData::Record { def } => *def,
+        _ => unreachable!(),
+    };
+    let point2 = db.record_type(def);
+    db.unify(point, point2).expect("same def-id unifies");
+}
+
+#[test]
+fn anonymous_records_same_fields_unify() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let a = db.anon_record(vec![("x".into(), i), ("y".into(), i)]);
+    let i2 = db.int();
+    let b = db.anon_record(vec![("x".into(), i2), ("y".into(), i2)]);
+    // Same field-name set → shared def-id → unify.
+    db.unify(a, b).expect("anon records with same names unify");
+}
+
+#[test]
+fn anonymous_records_order_independent_identity() {
+    // §5.6: field order in source does not affect identity after
+    // canonicalization. { x: Int, y: Int } and { y: Int, x: Int } unify
+    // (identity is through unification, which matches fields by name).
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let j = db.int();
+    let a = db.anon_record(vec![("x".into(), i), ("y".into(), j)]);
+    let i2 = db.int();
+    let j2 = db.int();
+    let b = db.anon_record(vec![("y".into(), j2), ("x".into(), i2)]);
+    db.unify(a, b).expect("order-independent identity unifies");
+}
+
+#[test]
+fn anonymous_records_different_names_do_not_unify() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let a = db.anon_record(vec![("x".into(), i), ("y".into(), i)]);
+    let b = db.anon_record(vec![("x".into(), i), ("z".into(), i)]);
+    assert!(
+        db.unify(a, b).is_err(),
+        "{{x,y}} and {{x,z}} have different field sets"
+    );
+}
+
+#[test]
+fn record_field_var_unifies() {
+    // A record field containing a type var: { x: ?T } ~ { x: Int } constrains ?T.
+    let mut db = TypeDb::new();
+    let v = db.fresh_var();
+    let a = db.anon_record(vec![("x".into(), v)]);
+    let i = db.int();
+    let b = db.anon_record(vec![("x".into(), i)]);
+    db.unify(a, b).expect("{x:?T} ~ {x:Int}");
+    assert!(is_int(&db, v));
+}
+
+#[test]
+fn enum_same_def_id_unifies() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let tile = db.register_enum(
+        "Tile",
+        vec![("Empty".into(), None), ("Number".into(), Some(vec![i]))],
+    );
+    db.unify(tile, tile).expect("enum ~ itself");
+    let def = match db.data(db.follow(tile)) {
+        TypeData::Enum { def } => *def,
+        _ => unreachable!(),
+    };
+    let tile2 = db.enum_type(def);
+    db.unify(tile, tile2).expect("same def-id unifies");
+}
+
+#[test]
+fn different_enums_do_not_unify() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let a = db.register_enum("A", vec![("X".into(), Some(vec![i]))]);
+    let b = db.register_enum("B", vec![("X".into(), Some(vec![i]))]);
+    assert!(db.unify(a, b).is_err(), "different enum names don't unify");
+}
+
+#[test]
+fn record_def_lookups() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let t = db.text();
+    let _ = db.register_record("Point", vec![("x".into(), i), ("y".into(), t)]);
+    // Fetch the def via the last registered type.
+    let defs = &db.record_defs;
+    let def = &defs[0];
+    assert_eq!(def.name.as_deref(), Some("Point"));
+    assert_eq!(def.arity(), 2);
+    let (idx, ty) = def.field("y").expect("field y exists");
+    assert_eq!(idx, 1);
+    assert!(is_text(&db, ty));
+    assert!(def.field("z").is_none());
+}
+
+#[test]
+fn enum_def_variant_lookup() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let _ = db.register_enum(
+        "Tile",
+        vec![("Empty".into(), None), ("Number".into(), Some(vec![i]))],
+    );
+    let def = &db.enum_defs[0];
+    assert_eq!(def.name, "Tile");
+    assert_eq!(def.arity(), 2);
+    assert_eq!(def.variant("Number"), Some(1));
+    assert_eq!(def.variant("Empty"), Some(0));
+    assert!(def.variant("Missing").is_none());
+    assert!(!def.variants[0].has_payload());
+    assert!(def.variants[1].has_payload());
+}
+
+#[test]
+fn record_generalizes_inner_vars() {
+    // forall T. { x: T } — a polymorphic anonymous record.
+    let mut db = TypeDb::new();
+    let body = db.scoped_return(|db| {
+        let v = db.fresh_var();
+        db.anon_record(vec![("x".into(), v)])
+    });
+    let scheme = db.generalize(body);
+    assert_eq!(scheme.quantified.len(), 1);
+    // The generalized record still renders structurally.
+    assert_eq!(db.render_scheme(&scheme), "forall T. { x: T }");
+}
+
+#[test]
+fn record_instantiates_to_fresh_vars() {
+    let mut db = TypeDb::new();
+    let body = db.scoped_return(|db| {
+        let v = db.fresh_var();
+        db.anon_record(vec![("x".into(), v)])
+    });
+    let scheme = db.generalize(body);
+    let inst1 = db.instantiate(&scheme);
+    let inst2 = db.instantiate(&scheme);
+    // Constrain inst1's x to Int, inst2's x stays free.
+    let i = db.int();
+    let int_rec = db.anon_record(vec![("x".into(), i)]);
+    db.unify(inst1, int_rec).expect("inst1 ~ {x:Int}");
+    // inst2 should still be instantiable to Text.
+    let t = db.text();
+    let text_rec = db.anon_record(vec![("x".into(), t)]);
+    db.unify(inst2, text_rec).expect("inst2 ~ {x:Text}");
+}
+
+#[test]
+fn enum_instantiates_payloads() {
+    // forall T. enum E { Some(T) } — payload type generalizes.
+    let mut db = TypeDb::new();
+    let body = db.scoped_return(|db| {
+        let v = db.fresh_var();
+        db.register_enum("E", vec![("Some".into(), Some(vec![v]))])
+    });
+    let scheme = db.generalize(body);
+    assert!(scheme.is_polymorphic());
+}
+
+#[test]
+fn occurs_check_works_through_record_fields() {
+    // Unifying ?T with { x: ?T } must fail the occurs check (infinite type).
+    let mut db = TypeDb::new();
+    let v = db.fresh_var();
+    let rec = db.anon_record(vec![("x".into(), v)]);
+    let err = db.unify(v, rec).unwrap_err();
+    assert!(
+        matches!(err, crate::unify::UnifyError::Occurs { .. }),
+        "expected occurs failure, got {err:?}"
+    );
+}
+
+#[test]
+fn vec_of_record_renders() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let rec = db.anon_record(vec![("x".into(), i), ("y".into(), i)]);
+    let vec_rec = db.vec(rec);
+    assert_eq!(db.render(vec_rec), "Vec[{ x: Int, y: Int }]");
+}
+
+fn is_text(db: &TypeDb, t: crate::Type) -> bool {
+    matches!(db.data(db.follow(t)), TypeData::Scalar(ScalarType::Text))
+}
+
+#[test]
+fn anon_record_display_preserves_source_order() {
+    // Each anon_record call preserves its own field order for display.
+    // Identity through unification does not retroactively reorder fields.
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let j = db.int();
+    let xy = db.anon_record(vec![("x".into(), i), ("y".into(), j)]);
+    assert_eq!(db.render(xy), "{ x: Int, y: Int }");
+    let k = db.int();
+    let l = db.int();
+    let yx = db.anon_record(vec![("y".into(), l), ("x".into(), k)]);
+    assert_eq!(db.render(yx), "{ y: Int, x: Int }");
+    let _ = RecordDefId(0); // exercise the debug impl / keep the import used
 }

@@ -37,6 +37,10 @@ pub fn type_to_pattern(db: &TypeDb, t: Type) -> Option<TypePattern> {
             })
         }
         TypeData::Var(_) => None, // an unresolved var cannot select a method
+        // Records and enums carry no catalog method entries today (M7); they
+        // cannot select methods. Their field access is lowered directly, not
+        // through the catalog.
+        TypeData::Record { .. } | TypeData::Enum { .. } => None,
     }
 }
 

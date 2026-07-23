@@ -93,6 +93,22 @@ impl TypeDb {
                     self.lower_levels(a, min_level);
                 }
             }
+            TypeData::Record { def } => {
+                let def = self.record_defs[def.0 as usize].clone();
+                for f in def.fields {
+                    self.lower_levels(f.ty, min_level);
+                }
+            }
+            TypeData::Enum { def } => {
+                let def = self.enum_defs[def.0 as usize].clone();
+                for v in def.variants {
+                    if let Some(payload) = v.payload {
+                        for p in payload {
+                            self.lower_levels(p, min_level);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -109,6 +125,18 @@ impl TypeDb {
                 params.into_iter().any(|p| self.occurs(var, p)) || self.occurs(var, result)
             }
             TypeData::Collection { args, .. } => args.into_iter().any(|a| self.occurs(var, a)),
+            TypeData::Record { def } => {
+                let def = self.record_defs[def.0 as usize].clone();
+                def.fields.into_iter().any(|f| self.occurs(var, f.ty))
+            }
+            TypeData::Enum { def } => {
+                let def = self.enum_defs[def.0 as usize].clone();
+                def.variants.into_iter().any(|v| {
+                    v.payload
+                        .map(|ps| ps.into_iter().any(|p| self.occurs(var, p)))
+                        .unwrap_or(false)
+                })
+            }
             _ => false,
         }
     }
@@ -161,6 +189,51 @@ impl TypeDb {
                     args: args_b,
                 },
             ) if c_a == c_b => self.unify_seqs(a, b, args_a, args_b, "collection"),
+            // Records unify iff same def-id, OR both anonymous with matching
+            // field-name sets (in which case we unify field types pairwise by
+            // name). Nominal records with different def-ids never unify even
+            // with identical fields (§4.5: nominal).
+            (TypeData::Record { def: d_a }, TypeData::Record { def: d_b }) => {
+                if d_a == d_b {
+                    return Ok(());
+                }
+                let ra = self.record_defs[d_a.0 as usize].clone();
+                let rb = self.record_defs[d_b.0 as usize].clone();
+                // Both must be anonymous to consider structural unification.
+                if ra.name.is_some() || rb.name.is_some() {
+                    return Err(UnifyError::Mismatch {
+                        expected: a,
+                        found: b,
+                    });
+                }
+                if ra.arity() != rb.arity() {
+                    return Err(UnifyError::Mismatch {
+                        expected: a,
+                        found: b,
+                    });
+                }
+                // Match fields by name, unify pairwise. §5.6: order-independent
+                // identity, so align by name rather than position.
+                for fa in &ra.fields {
+                    let Some((_, ty_b)) = rb.field(&fa.name) else {
+                        return Err(UnifyError::Mismatch {
+                            expected: a,
+                            found: b,
+                        });
+                    };
+                    self.unify(fa.ty, ty_b).map_err(|_| UnifyError::Mismatch {
+                        expected: a,
+                        found: b,
+                    })?;
+                }
+                // Link the two defs so subsequent uses resolve to one. We adopt
+                // the earlier def-id (d_a) as the canonical one by rewriting b's
+                // slot to point at d_a.
+                self.slots_set(b, TypeData::Record { def: d_a });
+                Ok(())
+            }
+            // Enums unify iff same def-id (nominal by name, §4.6).
+            (TypeData::Enum { def: d_a }, TypeData::Enum { def: d_b }) if d_a == d_b => Ok(()),
             _ => Err(UnifyError::Mismatch {
                 expected: a,
                 found: b,

@@ -51,7 +51,7 @@ fn atomic_type(kind: AtomicKind, db: &mut TypeDb) -> Type {
 ///
 /// - A single anonymous capture → the scalar type.
 /// - Multiple anonymous captures → a tuple.
-/// - Any named capture → an anonymous record (provisional in M6).
+/// - Any named capture → an anonymous record (§5.6; formalized in M7).
 fn template_type(parts: &[TemplatePart], db: &mut TypeDb) -> Type {
     let captures: Vec<&TemplatePart> = parts
         .iter()
@@ -68,9 +68,7 @@ fn template_type(parts: &[TemplatePart], db: &mut TypeDb) -> Type {
         .any(|p| matches!(p, TemplatePart::Capture { name: Some(_), .. }));
 
     if any_named {
-        // Named captures → anonymous record. M6 uses a provisional structural
-        // record type; M7 adds the formal nominal/structural record machinery.
-        // For now, synthesize as a tuple of (name, type) pairs via a record type.
+        // Named captures → anonymous structural record (§5.6, M7 ADR-025).
         record_type(&captures, db)
     } else {
         // All anonymous: scalar if one, tuple if many (§7.3).
@@ -89,41 +87,27 @@ fn template_type(parts: &[TemplatePart], db: &mut TypeDb) -> Type {
     }
 }
 
-/// Build an anonymous record type from named captures (M6 provisional).
+/// Build an anonymous record type from named captures (M7).
 ///
-/// The record type is represented as a `Collection { Record, args }` for now —
-/// the M7 nominal-record work will formalize this. Each field is a (name, type)
-/// pair carried structurally; two records with the same field names and types in
-/// the same order are the same type.
+/// Named-capture templates produce anonymous structural records (§5.6). The
+/// record type is a proper `TypeData::Record` variant (M7, ADR-025), with fields
+/// keyed by name. Two records with the same field names (in any order) and
+/// structurally-equal types share one type.
 fn record_type(captures: &[&TemplatePart], db: &mut TypeDb) -> Type {
-    // Collect field types. The field names are part of the record's identity but
-    // the type system in M6 carries them alongside the types as Text literals
-    // (so the runtime schema can be reconstructed). M7 will give records a real
-    // nominal representation.
-    let mut field_types = Vec::with_capacity(captures.len());
-    let mut name_types = Vec::with_capacity(captures.len());
+    // Collect (name, type) pairs in source order. Display preserves this order;
+    // identity is name-set-based (§5.6), handled by db.anon_record's
+    // canonicalization.
+    let mut fields = Vec::with_capacity(captures.len());
     for part in captures {
         match part {
             TemplatePart::Capture { name, parser } => {
                 let name_str = name.clone().unwrap_or_default();
-                name_types.push(db.text());
-                // Stash the name as a Text-typed field for now — purely so the
-                // record's shape is recoverable. This is provisional; M7 replaces it.
-                let _ = name_str; // name carried structurally in the plan, not the type
-                field_types.push(synthesize(parser, db));
+                fields.push((name_str, synthesize(parser, db)));
             }
             _ => unreachable!("filtered to captures"),
         }
     }
-    // Provisional record representation: flatten name-types and field-types into
-    // a single tuple. M7 replaces this with a proper Record TypeData variant.
-    // The interleaving (name, type, name, type, ...) preserves field identity.
-    let mut all = Vec::with_capacity(name_types.len() + field_types.len());
-    for (n, t) in name_types.into_iter().zip(field_types) {
-        all.push(n);
-        all.push(t);
-    }
-    db.tuple(all)
+    db.anon_record(fields)
 }
 
 #[cfg(test)]
@@ -244,5 +228,70 @@ mod tests {
         };
         let t = synthesize(&ast, &mut db);
         assert!(matches!(db.data(t), praxis_types::TypeData::Tuple(_)));
+    }
+
+    #[test]
+    fn template_named_captures_synthesize_anonymous_record() {
+        // `{x:int},{y:int}` → anonymous record { x: Int, y: Int }.
+        let mut db = TypeDb::new();
+        let ast = ParserAst::Template {
+            parts: vec![
+                TemplatePart::Capture {
+                    name: Some("x".into()),
+                    parser: Box::new(atom(AtomicKind::Int)),
+                },
+                TemplatePart::Capture {
+                    name: Some("y".into()),
+                    parser: Box::new(atom(AtomicKind::Int)),
+                },
+            ],
+            span: Span::at(0),
+        };
+        let t = synthesize(&ast, &mut db);
+        let praxis_types::TypeData::Record { def } = db.data(t) else {
+            panic!("expected Record, got {:?}", db.data(t));
+        };
+        let rdef = db.record_def(*def);
+        assert!(rdef.name.is_none(), "anonymous record has no name");
+        assert_eq!(rdef.arity(), 2);
+        let (idx, _) = rdef.field("x").expect("field x");
+        assert_eq!(idx, 0);
+        // Renders as the structural record form.
+        assert_eq!(db.render(t), "{ x: Int, y: Int }");
+    }
+
+    #[test]
+    fn lines_of_named_captures_is_vec_of_record() {
+        // lines(`{x:int},{y:int}`) → Vec[{ x: Int, y: Int }].
+        let mut db = TypeDb::new();
+        let ast = ParserAst::Lines {
+            child: Box::new(ParserAst::Template {
+                parts: vec![
+                    TemplatePart::Capture {
+                        name: Some("x".into()),
+                        parser: Box::new(atom(AtomicKind::Int)),
+                    },
+                    TemplatePart::Capture {
+                        name: Some("y".into()),
+                        parser: Box::new(atom(AtomicKind::Int)),
+                    },
+                ],
+                span: Span::at(0),
+            }),
+            span: Span::at(0),
+        };
+        let t = synthesize(&ast, &mut db);
+        match db.data(t) {
+            praxis_types::TypeData::Collection { ctor, args } => {
+                assert_eq!(*ctor, CollectionCtor::Vec);
+                assert_eq!(args.len(), 1);
+                assert!(matches!(
+                    db.data(args[0]),
+                    praxis_types::TypeData::Record { .. }
+                ));
+            }
+            other => panic!("expected Vec[Record], got {other:?}"),
+        }
+        assert_eq!(db.render(t), "Vec[{ x: Int, y: Int }]");
     }
 }

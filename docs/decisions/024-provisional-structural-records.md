@@ -1,6 +1,6 @@
 # ADR-024: Provisional structural records in M6
 
-**Date:** 2026-07-23 · **Status:** accepted
+**Date:** 2026-07-23 · **Status:** accepted (type-system representation superseded by ADR-025 in M7; runtime `RecordPayload`/`RecordSchema` remain)
 
 ## Context
 
