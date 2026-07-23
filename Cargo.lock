@@ -361,6 +361,7 @@ dependencies = [
  "praxis-syntax",
  "praxis-test-support",
  "proptest",
+ "rowan",
 ]
 
 [[package]]

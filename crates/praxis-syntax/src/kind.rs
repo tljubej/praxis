@@ -172,6 +172,8 @@ pub enum SyntaxKind {
     VAR_STMT,
     /// A bare expression used as a statement.
     EXPR_STMT,
+    /// A reassignment statement: `name = expr` or `name += expr` etc. (§4.2).
+    ASSIGN_STMT,
     /// A top-level or nested `fn` declaration.
     FN_ITEM,
     /// A single `name: Type` parameter.

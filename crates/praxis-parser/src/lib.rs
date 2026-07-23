@@ -1,12 +1,14 @@
 //! Lexer and parser for the Praxis language.
 //!
-//! Per the milestone plan (§19), the full lossless lexer and parser land in
-//! Milestone 1. This crate currently exposes a deliberately small **lexer
-//! stub**: enough to walk a `.px` file, classify the common token kinds, and
-//! emit a real [`Diagnostic`](praxis_source::Diagnostic) for genuinely
-//! unexpected bytes. The stub proves the `tokens + diagnostics` pipeline end to
-//! end and gives the CLI something real to run for Milestone 0.
+//! - [`lex`] turns source text into a lossless token stream (including trivia)
+//!   plus `T0xx` diagnostics.
+//! - [`parse`] runs the lexer and then a recursive-descent + Pratt parser
+//!   (ADR-004) over the M1 grammar, producing a rowan-backed lossless tree
+//!   (ADR-003) plus `P0xx` diagnostics. The tree retains trivia so the
+//!   formatter, LSP, and code actions can use it (§13.1).
 
 pub mod lex;
+pub mod parse;
 
 pub use lex::{lex, LexOutput};
+pub use parse::{parse, ParseOutput};

@@ -21,9 +21,11 @@
 
 pub mod snapshot;
 pub mod source;
+pub mod tree;
 
 pub use snapshot::{render_diagnostics, snapshot_diagnostics};
 pub use source::single_file;
+pub use tree::format_syntax_tree;
 
 // Re-export the snapshot macro so test crates depend only on this crate.
 pub use insta;

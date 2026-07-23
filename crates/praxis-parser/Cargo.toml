@@ -9,6 +9,7 @@ description = "Lexer and parser for the Praxis language (Milestone 0: lexer stub
 [dependencies]
 praxis-source.workspace = true
 praxis-syntax.workspace = true
+rowan.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

@@ -1,0 +1,4 @@
+{"run_id":"1784767618-784702000","line":113,"new":{"module_name":"praxis_test_support__tree__tests","snapshot_name":"prints_nodes_tokens_and_ranges","metadata":{"source":"crates/praxis-test-support/src/tree.rs","assertion_line":113,"expression":"dump"},"snapshot":"SOURCE_FILE@0..8\n  LET_STMT@0..8\n    KW_LET \"let \"@0..4\n    Ident \"x\"@4..5\n    EQ \"=\"@5..6\n    Whitespace \" \"@6..7\n    IntLit \"1\"@7..8"},"old":{"module_name":"praxis_test_support__tree__tests","metadata":{},"snapshot":"SOURCE_FILE@0..7\n  LET_STMT@0..7\n    KW_LET \"let \"@0..4\n    IDENT \"x\"@4..5\n    EQ \"=\"@5..6\n    Whitespace \" \"@6..7\n    IntLit \"1\"@7..7"}}
+{"run_id":"1784767646-986720000","line":113,"new":null,"old":null}
+{"run_id":"1784769052-484082000","line":116,"new":null,"old":null}
+{"run_id":"1784769059-656211000","line":116,"new":null,"old":null}
