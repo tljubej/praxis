@@ -284,6 +284,10 @@ pub enum Expr {
     Call(CallExpr),
     MethodCall(MethodCallExpr),
     Tuple(TupleExpr),
+    /// `read parser_expression` (§7.1, M6).
+    Read(ReadExpr),
+    /// `parse(text, parser_expression)` (§7.1, M6).
+    Parse(ParseExpr),
     /// An unparseable expression the parser wrapped in a `PARSE_ERROR` node.
     Error(SyntaxNode),
 }
@@ -303,6 +307,8 @@ impl Expr {
             K::CALL_EXPR => Expr::Call(CallExpr::from_syntax(n)),
             K::METHOD_CALL_EXPR => Expr::MethodCall(MethodCallExpr::from_syntax(n)),
             K::TUPLE_EXPR => Expr::Tuple(TupleExpr::from_syntax(n)),
+            K::READ_EXPR => Expr::Read(ReadExpr::from_syntax(n)),
+            K::PARSE_EXPR => Expr::Parse(ParseExpr::from_syntax(n)),
             K::PARSE_ERROR => Expr::Error(n),
             _ => return None,
         })
@@ -608,6 +614,109 @@ impl CallExpr {
     pub fn arg_list(&self) -> Option<ArgList> {
         child(&self.syntax)
     }
+}
+
+/// A `read parser_expression` prefix expression (§7.1, M6). Its single child is
+/// the parser expression applied to the whole process-input buffer.
+#[derive(Clone, Debug)]
+pub struct ReadExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for ReadExpr {
+    const KIND: K = K::READ_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl ReadExpr {
+    /// The parser expression body.
+    pub fn parser_expr(&self) -> Option<ParserExpr> {
+        child(&self.syntax)
+    }
+}
+
+/// A `parse(text, parser_expression)` call (§7.1, M6). The first child is the
+/// ordinary expression yielding the `Text`; the second is the parser expression.
+#[derive(Clone, Debug)]
+pub struct ParseExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for ParseExpr {
+    const KIND: K = K::PARSE_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl ParseExpr {
+    /// The `Text` expression to parse.
+    pub fn text_expr(&self) -> Option<Expr> {
+        self.syntax.children().find_map(Expr::cast_from_child)
+    }
+    /// The parser expression to apply.
+    pub fn parser_expr(&self) -> Option<ParserExpr> {
+        child(&self.syntax)
+    }
+}
+
+/// A parser expression (§7 EBNF): an atomic, a template, or a constructor call.
+/// The body of `read` and the second argument of `parse`.
+#[derive(Clone, Debug)]
+pub struct ParserExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for ParserExpr {
+    const KIND: K = K::PARSER_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl ParserExpr {
+    /// Which kind of parser expression this is.
+    pub fn kind(&self) -> ParserExprKind {
+        for child in self.syntax.children() {
+            match child.kind() {
+                K::PARSER_ATOM => return ParserExprKind::Atom,
+                K::PARSER_TEMPLATE => return ParserExprKind::Template,
+                K::PARSER_CALL => return ParserExprKind::Call,
+                _ => {}
+            }
+        }
+        ParserExprKind::Unknown
+    }
+
+    /// The text of the parser-expression node (for atom names, template text,
+    /// constructor names). The HIR reads this to build the `ParserAst`.
+    pub fn text(&self) -> Option<String> {
+        use rowan::NodeOrToken;
+        for child in self.syntax.children_with_tokens() {
+            if let NodeOrToken::Token(t) = child {
+                return Some(t.text().to_string());
+            }
+        }
+        None
+    }
+}
+
+/// The discriminant of a [`ParserExpr`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParserExprKind {
+    /// An atomic parser name (`int`, `char`, …).
+    Atom,
+    /// A backtick template.
+    Template,
+    /// A constructor call (`lines(P)`, …).
+    Call,
+    /// An unrecognized / malformed parser expression.
+    Unknown,
 }
 
 /// A `receiver.method(args)` method-call expression (M5, §16.2). The receiver

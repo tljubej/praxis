@@ -346,6 +346,14 @@ impl Resolver {
                 }
             }
             Expr::Error(_) => {}
+            // M6 WS5: resolve read/parse sub-expressions (parser_expr has no
+            // ordinary names to resolve; parse's text arg does).
+            Expr::Read(_) => {}
+            Expr::Parse(p) => {
+                if let Some(text_expr) = p.text_expr() {
+                    self.resolve_expr(scope, &text_expr);
+                }
+            }
         }
     }
 

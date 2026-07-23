@@ -376,6 +376,8 @@ impl Inferer {
             Expr::While(w) => self.infer_while(scope, w),
             Expr::Call(c) => self.infer_call(scope, c),
             Expr::MethodCall(m) => self.infer_method_call(scope, m),
+            // M6 WS5 fills these in with real read/parse type synthesis.
+            Expr::Read(_) | Expr::Parse(_) => self.db.fresh_var(),
             Expr::Error(_) => self.db.fresh_var(),
         }
     }

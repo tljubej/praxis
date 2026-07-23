@@ -596,6 +596,11 @@ impl<'a> Lowerer<'a> {
             Expr::Call(c) => self.lower_call(c),
             Expr::MethodCall(m) => self.lower_method_call(m),
             Expr::Tuple(t) => self.lower_tuple(t),
+            // M6 WS5 fills these in with real read/parse lowering.
+            Expr::Read(_) | Expr::Parse(_) => TypedExpr::Lit {
+                value: Lit::Int(0),
+                ty: self.unit,
+            },
             Expr::Error(_) => TypedExpr::Lit {
                 value: Lit::Int(0),
                 ty: self.db.fresh_var(),

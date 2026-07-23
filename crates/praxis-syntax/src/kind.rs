@@ -221,6 +221,27 @@ pub enum SyntaxKind {
     /// A parse-error placeholder node wrapping tokens the parser could not
     /// place. Recovery (§15.2) emits these so the tree stays well-formed.
     PARSE_ERROR,
+    // ---- Input-parser expression nodes (M6, §7) ----
+    /// `read parser_expression` — a prefix expression applying a parser to the
+    /// whole process-input buffer (§7.1).
+    READ_EXPR,
+    /// `parse(text, parser_expression)` — apply a parser to an existing `Text`
+    /// value (§7.1).
+    PARSE_EXPR,
+    /// A parser expression (§7 EBNF): an atomic, a template, or a constructor
+    /// call. The body of `read` and the second arg of `parse`.
+    PARSER_EXPR,
+    /// An atomic parser name: `int`, `char`, `word`, etc. (§7.4).
+    PARSER_ATOM,
+    /// A backtick template `` `{x:int},{y:int}` `` inside a parser expression
+    /// (§7.2). Its children are the scanned template parts.
+    PARSER_TEMPLATE,
+    /// A `{name:parser}` or `{parser}` capture inside a template (§7.3).
+    PARSER_CAPTURE,
+    /// A constructor call `lines(P)`, `csv(P)`, `sep(sep, P)`, etc. (§7.5).
+    PARSER_CALL,
+    /// The `(arg, arg, ...)` argument list of a parser constructor call.
+    PARSER_ARG_LIST,
 }
 
 impl SyntaxKind {

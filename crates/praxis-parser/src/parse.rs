@@ -98,6 +98,10 @@ fn infix_binding_power(op: SyntaxKind) -> Option<BindingPower> {
 fn prefix_binding_power(op: SyntaxKind) -> Option<u8> {
     match op {
         SyntaxKind::MINUS | SyntaxKind::BANG => Some(9),
+        // `read` is a prefix expression (§7.1): `read parser_expression`. Its
+        // body is a parser-expression, not an ordinary expression, so it gets
+        // the highest binding power (binds tighter than arithmetic).
+        SyntaxKind::KW_READ => Some(11),
         _ => None,
     }
 }
@@ -201,6 +205,23 @@ impl<'t> Parser<'t> {
     /// Whether the cursor is past the last meaningful token.
     fn at_end(&mut self) -> bool {
         self.peek() == SyntaxKind::EOF
+    }
+
+    /// The source text of the current meaningful token (trivia skipped). Used to
+    /// special-case keywords-that-look-like-idents such as `parse` and parser
+    /// constructor names (`lines`, `csv`, …).
+    fn peek_text(&mut self) -> Option<&str> {
+        let mut idx = self.cursor;
+        while idx < self.tokens.len() {
+            let kind = self.tokens[idx].kind;
+            if kind.is_trivia() {
+                idx += 1;
+                continue;
+            }
+            let span = self.tokens[idx].span;
+            return Some(&self.text[span.start().to_usize()..span.end().to_usize()]);
+        }
+        None
     }
 
     /// `true` if the current meaningful token is `kind`.
@@ -494,10 +515,19 @@ impl<'t> Parser<'t> {
         }
     }
 
-    /// Prefix expression: unary operators, then an atom or a parenthesized
-    /// expression.
+    /// Prefix expression: unary operators, `read`, then an atom or a
+    /// parenthesized expression.
     fn parse_prefix(&mut self) {
         let op = self.peek();
+        // `read parser_expression` (§7.1): a prefix expression whose body is a
+        // parser-expression grammar, not an ordinary expression.
+        if op == SyntaxKind::KW_READ {
+            self.start_node(SyntaxKind::READ_EXPR);
+            self.bump(); // `read`
+            self.parse_parser_expr();
+            self.finish_node();
+            return;
+        }
         if let Some(bp) = prefix_binding_power(op) {
             self.start_node(SyntaxKind::UNARY_EXPR);
             self.bump(); // unary operator
@@ -735,10 +765,28 @@ impl<'t> Parser<'t> {
     /// postfixes. Method calls chain left-associatively: `v.push(1).len()`.
     fn parse_name_or_call(&mut self) {
         let cp = self.checkpoint_lhs();
+        // Peek the identifier text to special-case `parse(text, parser_expr)`
+        // (§7.1) before committing to an ordinary call.
+        let name_text = self.peek_text();
+        let is_parse_call = name_text == Some("parse");
         self.start_node(SyntaxKind::PATH_EXPR);
         self.bump(); // name
         self.finish_node();
         if self.at(SyntaxKind::L_PAREN) {
+            if is_parse_call {
+                // `parse(text, parser_expression)` (§7.1). The first arg is an
+                // ordinary expression (the Text to parse); the second is a
+                // parser-expression.
+                self.start_node_at(cp, SyntaxKind::PARSE_EXPR);
+                self.bump(); // `(`
+                self.parse_expr(); // first arg: the Text
+                if self.eat(SyntaxKind::COMMA) {
+                    self.parse_parser_expr();
+                }
+                self.expect(SyntaxKind::R_PAREN, "`)` to close parse()");
+                self.finish_node(); // PARSE_EXPR
+                return;
+            }
             self.bump(); // `(`
             self.start_node_at(cp, SyntaxKind::CALL_EXPR);
             // Re-open the path as the callee: rowan's checkpoint wraps the
@@ -801,6 +849,107 @@ impl<'t> Parser<'t> {
                                 // position is now just after the finished METHOD_CALL_EXPR node).
             chain_cp = self.checkpoint_lhs();
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Input-parser expression grammar (§7, M6).
+    //
+    // `parser_expr := atom | template | call`
+    // Whitespace and indentation outside backticks are insignificant (§7.1).
+    // -----------------------------------------------------------------------
+
+    /// Parse a parser expression (§7 EBNF). Emits a `PARSER_EXPR` wrapper node
+    /// around exactly one of: an atomic name, a backtick template, or a
+    /// constructor call `name(args)`.
+    fn parse_parser_expr(&mut self) {
+        self.eat_trivia(); // whitespace outside backticks is insignificant (§7.1)
+        let kind = self.peek();
+        match kind {
+            SyntaxKind::BacktickTemplate => self.parse_parser_template(),
+            SyntaxKind::Ident => {
+                // An identifier is either an atomic parser (`int`, `char`, …)
+                // or a constructor call (`lines(P)`, `sep(s, P)`). Decide by the
+                // presence of `(`.
+                if self.nth_kind(1) == SyntaxKind::L_PAREN {
+                    self.parse_parser_call();
+                } else {
+                    self.parse_parser_atom();
+                }
+            }
+            _ => {
+                // Nothing recognizable as a parser expression.
+                let span = self.current_span();
+                self.error(span, "expected a parser expression");
+                self.start_node(SyntaxKind::PARSER_EXPR);
+                self.start_node(SyntaxKind::PARSE_ERROR);
+                if !self.at_end() {
+                    self.bump(); // guaranteed progress
+                }
+                self.finish_node(); // PARSE_ERROR
+                self.finish_node(); // PARSER_EXPR
+            }
+        }
+    }
+
+    /// Parse an atomic parser name: `int`, `char`, `word`, `text`, `rest`,
+    /// `digit` (§7.4). The identifier is wrapped in `PARSER_EXPR > PARSER_ATOM`.
+    fn parse_parser_atom(&mut self) {
+        self.start_node(SyntaxKind::PARSER_EXPR);
+        self.start_node(SyntaxKind::PARSER_ATOM);
+        self.bump(); // the atomic name
+        self.finish_node(); // PARSER_ATOM
+        self.finish_node(); // PARSER_EXPR
+    }
+
+    /// Parse a backtick template as a parser expression (§7.2). The whole
+    /// `BacktickTemplate` token is emitted as a `PARSER_TEMPLATE` child; its
+    /// interior is re-scanned by `praxis-input-parser` later (in HIR). The
+    /// template node is wrapped in `PARSER_EXPR`.
+    fn parse_parser_template(&mut self) {
+        self.start_node(SyntaxKind::PARSER_EXPR);
+        self.start_node(SyntaxKind::PARSER_TEMPLATE);
+        self.bump(); // the BacktickTemplate token (interior re-scanned in HIR)
+        self.finish_node(); // PARSER_TEMPLATE
+        self.finish_node(); // PARSER_EXPR
+    }
+
+    /// Parse a constructor call `name(args)` (§7.5). Emits
+    /// `PARSER_EXPR > PARSER_CALL > PATH_EXPR + PARSER_ARG_LIST`. Each argument
+    /// is itself a parser expression, except `sep` whose first arg is a string
+    /// literal (the separator).
+    fn parse_parser_call(&mut self) {
+        self.start_node(SyntaxKind::PARSER_EXPR);
+        self.start_node(SyntaxKind::PARSER_CALL);
+        // The constructor name as a path.
+        self.start_node(SyntaxKind::PATH_EXPR);
+        self.bump(); // constructor name
+        self.finish_node();
+        // Argument list.
+        self.expect(SyntaxKind::L_PAREN, "`(` to open parser call arguments");
+        self.start_node(SyntaxKind::PARSER_ARG_LIST);
+        if !self.at(SyntaxKind::R_PAREN) {
+            // `sep`'s first argument is a string separator; everything else is a
+            // parser expression. Parse generically: if the first arg is a string
+            // literal, emit it as a literal; otherwise parse a parser expr.
+            loop {
+                self.eat_trivia();
+                if self.at(SyntaxKind::TextLit) {
+                    self.start_node(SyntaxKind::LITERAL);
+                    self.bump();
+                    self.finish_node();
+                } else {
+                    self.parse_parser_expr();
+                }
+                self.eat_trivia();
+                if !self.eat(SyntaxKind::COMMA) {
+                    break;
+                }
+            }
+        }
+        self.expect(SyntaxKind::R_PAREN, "`)` to close parser call arguments");
+        self.finish_node(); // PARSER_ARG_LIST
+        self.finish_node(); // PARSER_CALL
+        self.finish_node(); // PARSER_EXPR
     }
 
     // -----------------------------------------------------------------------
@@ -1147,8 +1296,97 @@ mod tests {
         assert_eq!(fn_type_count, 2);
     }
 
-    /// Collect the `SyntaxKind` of every node and token in the tree (for
-    /// structural asserts that may reference either).
+    // --- M6: input-parser expression syntax (§7) ---
+
+    #[test]
+    fn parses_read_atomic() {
+        let out = parse_text("let v = read int");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::READ_EXPR));
+        assert!(kinds.contains(&SyntaxKind::PARSER_EXPR));
+        assert!(kinds.contains(&SyntaxKind::PARSER_ATOM));
+    }
+
+    #[test]
+    fn parses_read_lines_of_int() {
+        let out = parse_text("let v = read lines(int)");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::READ_EXPR));
+        assert!(kinds.contains(&SyntaxKind::PARSER_CALL));
+        // Nested atom inside the call's arg list.
+        assert!(kinds.contains(&SyntaxKind::PARSER_ATOM));
+        assert!(kinds.contains(&SyntaxKind::PARSER_ARG_LIST));
+    }
+
+    #[test]
+    fn parses_read_nested_constructors() {
+        // sections(lines(csv(int))) — whitespace outside backticks is
+        // insignificant (§7.1 acceptance criterion 5).
+        let out = parse_text("let v = read sections( lines( csv( int ) ) )");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        // Three nested PARSER_CALL nodes (sections, lines, csv).
+        let call_count = kinds
+            .iter()
+            .filter(|k| **k == SyntaxKind::PARSER_CALL)
+            .count();
+        assert_eq!(call_count, 3);
+    }
+
+    #[test]
+    fn parses_read_template() {
+        let out = parse_text("let v = read lines(`{x:int},{y:int}`)");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::READ_EXPR));
+        assert!(kinds.contains(&SyntaxKind::PARSER_CALL));
+        assert!(kinds.contains(&SyntaxKind::PARSER_TEMPLATE));
+        assert!(kinds.contains(&SyntaxKind::BacktickTemplate));
+    }
+
+    #[test]
+    fn parses_read_grid() {
+        let out = parse_text("solve(read grid(char))");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::READ_EXPR));
+        assert!(kinds.contains(&SyntaxKind::PARSER_CALL));
+    }
+
+    #[test]
+    fn parses_read_sep_with_string_literal() {
+        let out = parse_text(r#"let v = read sep(" -> ", word)"#);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::READ_EXPR));
+        assert!(kinds.contains(&SyntaxKind::PARSER_CALL));
+        // The string-literal separator is inside the arg list.
+        assert!(kinds.contains(&SyntaxKind::TextLit));
+    }
+
+    #[test]
+    fn parses_parse_call() {
+        let out = parse_text("let v = parse(sample, lines(int))");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::PARSE_EXPR));
+        assert!(kinds.contains(&SyntaxKind::PARSER_CALL));
+    }
+
+    #[test]
+    fn parser_expression_whitespace_is_insignificant() {
+        // The same parser expression laid out differently must produce the same
+        // tree shape (modulo trivia). §7.1 acceptance criterion 5.
+        let a = construct_names(&parse_text("read lines(int)").tree);
+        let b = construct_names(&parse_text("read\n  lines(\n    int\n  )").tree);
+        // Filter out trivia (whitespace) for the comparison.
+        let filt = |ks: &[SyntaxKind]| -> Vec<SyntaxKind> {
+            ks.iter().filter(|k| !k.is_trivia()).copied().collect()
+        };
+        assert_eq!(filt(&a), filt(&b));
+    }
     fn construct_names(node: &SyntaxNode) -> Vec<SyntaxKind> {
         let mut out = Vec::new();
         collect(node, &mut out);
