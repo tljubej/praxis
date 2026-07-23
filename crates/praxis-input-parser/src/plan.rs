@@ -11,15 +11,14 @@
 //!   (no `Box`, no owned `String` on the hot path). Separators and template
 //!   literals are interned into a parallel `&'static [&'static str]` slice so
 //!   the runtime reads them without dereferencing Rust owned data.
-//! - The plan owns the [`RecordSchema`] for any named-capture templates, so the
-//!   runtime can allocate records with the right field descriptors.
+//! - Record schemas for named-capture templates are built at **runtime** (the
+//!   interpreter knows the field descriptors from the child plans' result
+//!   types); the plan stores only field names as `&'static str`.
 //!
 //! This mirrors how the JIT already leaks function-name strings as `String` in
 //! `CallTarget::User` — acceptable for a JIT process.
 
-use crate::ast::{AtomicKind, Constructor, ParserAst, TemplatePart, WsPolicy};
-use praxis_runtime::descriptor::TypeDescriptor;
-use praxis_runtime::{RecordField, RecordSchema};
+use crate::ast::{AtomicKind, ParserAst, TemplatePart, WsPolicy};
 
 // ===========================================================================
 // The flat plan node arena.
@@ -72,8 +71,6 @@ pub struct ParserPlan {
     /// Interned string literals (separators, template literals), so the runtime
     /// reads `&'static str` without touching Rust owned data.
     pub literals: &'static [&'static str],
-    /// Record schemas for named-capture templates, indexed by template node.
-    pub schemas: &'static [Option<&'static RecordSchema>],
     /// The root node index (entry point).
     pub root: u32,
 }
@@ -84,7 +81,6 @@ impl std::fmt::Debug for ParserPlan {
             .field("nodes", &self.nodes)
             .field("template_parts_len", &self.template_parts.len())
             .field("literals", &self.literals)
-            .field("schemas_len", &self.schemas.len())
             .field("root", &self.root)
             .finish()
     }
@@ -100,7 +96,6 @@ struct PlanBuilder {
     nodes: Vec<PlanNode>,
     template_parts: Vec<TemplatePartNode>,
     literals: Vec<&'static str>,
-    schemas: Vec<Option<&'static RecordSchema>>,
 }
 
 impl PlanBuilder {
@@ -109,7 +104,6 @@ impl PlanBuilder {
             nodes: Vec::new(),
             template_parts: Vec::new(),
             literals: Vec::new(),
-            schemas: Vec::new(),
         }
     }
 
@@ -133,12 +127,10 @@ impl PlanBuilder {
         let nodes = leak(self.nodes);
         let template_parts = leak(self.template_parts);
         let literals = leak(self.literals);
-        let schemas = leak(self.schemas);
         Box::leak(Box::new(ParserPlan {
             nodes,
             template_parts,
             literals,
-            schemas,
             root,
         }))
     }
@@ -149,8 +141,9 @@ fn leak<T>(v: Vec<T>) -> &'static [T] {
     Box::leak(v.into_boxed_slice())
 }
 
-/// Lower a validated `ParserAst` into a `&'static ParserPlan`. The returned
-/// reference lives for the process lifetime (JIT process — acceptable leak).
+/// Lower a validated `ParserAst` into a `&'static ParserPlan`, register it in
+/// the global plan slab, and return its index. The returned reference lives for
+/// the process lifetime (JIT process — acceptable leak).
 ///
 /// # Panics
 /// Only on an internal inconsistency (the AST should have passed validation).
@@ -158,6 +151,36 @@ pub fn lower_to_plan(ast: &ParserAst) -> &'static ParserPlan {
     let mut b = PlanBuilder::new();
     let root = lower_node(&mut b, ast);
     b.finish(root)
+}
+
+// ===========================================================================
+// The global plan slab: maps plan indices (passed as i64 through MIR) to their
+// compiled `&'static ParserPlan`. Lives here (not in HIR) so both HIR (which
+// registers) and the runtime interpreter (which looks up) depend on this crate
+// without creating a dependency cycle.
+// ===========================================================================
+
+/// A wrapper asserting `Send + Sync` — the plan's raw pointers point at
+/// process-static descriptor data, so sharing across the compile/run boundary is
+/// safe.
+struct PlanEntry(&'static ParserPlan);
+unsafe impl Send for PlanEntry {}
+unsafe impl Sync for PlanEntry {}
+
+static PLAN_SLAB: std::sync::Mutex<Vec<PlanEntry>> = std::sync::Mutex::new(Vec::new());
+
+/// Register a plan in the global slab, returning its index.
+pub fn register_plan(plan: &'static ParserPlan) -> u32 {
+    let mut slab = PLAN_SLAB.lock().unwrap();
+    let idx = slab.len() as u32;
+    slab.push(PlanEntry(plan));
+    idx
+}
+
+/// Look up a plan by its index. Returns `None` if out of range (the caller
+/// treats this as a parse fault).
+pub fn get_plan(index: u32) -> Option<&'static ParserPlan> {
+    PLAN_SLAB.lock().ok()?.get(index as usize).map(|e| e.0)
 }
 
 /// Lower one node, returning its index in the plan arena.
@@ -233,11 +256,9 @@ fn lower_template(b: &mut PlanBuilder, parts: &[TemplatePart]) -> u32 {
     let part_indices = lower_template_parts(b, parts, &captures);
 
     if any_named {
-        // Named captures → record. Build the schema.
-        let _schema = build_record_schema(&captures);
-        // The runtime reads the schema from the plan's `schemas` slot keyed by
-        // the template node. For M6 we attach it alongside the parts.
-        b.schemas.push(None); // placeholder; the interpreter builds records inline
+        // Named captures → record. The record schema (field names + descriptors)
+        // is built at runtime by the interpreter, which knows the child result
+        // types. The plan stores field names in the capture parts.
         b.push_node(PlanNode::Template {
             parts: part_indices,
         })
@@ -297,39 +318,6 @@ fn lower_template_parts(
     }
     leak(nodes)
 }
-
-/// Build a static [`RecordSchema`] from named captures. The field descriptors
-/// are resolved at runtime (the runtime knows the element descriptors from the
-/// child plans' result types); here we just record the names.
-fn build_record_schema(captures: &[(usize, &TemplatePart)]) -> &'static RecordSchema {
-    let fields: Vec<RecordField> = captures
-        .iter()
-        .map(|(_, p)| match p {
-            TemplatePart::Capture { name, .. } => RecordField {
-                name: name.as_ref().map(|n| leak_str(n)).unwrap_or(""),
-                // Placeholder descriptor; the runtime fills the real per-field
-                // descriptors when allocating the record from child results.
-                descriptor: std::ptr::null(),
-            },
-            _ => unreachable!(),
-        })
-        .collect();
-    let schema = RecordSchema {
-        fields: leak(fields),
-    };
-    Box::leak(Box::new(schema))
-}
-
-/// Resolve the descriptor for a constructor's result, used by the runtime when
-/// allocating collection results. Exposed so the runtime can map plan nodes to
-/// the right `*const TypeDescriptor`.
-pub fn constructor_of(name: &str) -> Option<Constructor> {
-    Constructor::from_keyword(name)
-}
-
-/// Re-export the TypeDescriptor so downstream crates don't need praxis-runtime
-/// just for this vocabulary type.
-pub type Desc = &'static TypeDescriptor;
 
 #[cfg(test)]
 mod tests {

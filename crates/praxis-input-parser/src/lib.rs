@@ -18,7 +18,7 @@ pub mod synthesize;
 pub mod validate;
 
 pub use ast::{AtomicKind, Constructor, ParserAst, TemplatePart, WsPolicy};
-pub use plan::{lower_to_plan, ParserPlan, PlanNode, TemplatePartNode};
+pub use plan::{get_plan, lower_to_plan, register_plan, ParserPlan, PlanNode, TemplatePartNode};
 pub use scan::{scan_template, ScanError};
 pub use synthesize::synthesize;
 pub use validate::{check_constructor_arity, validate, ValidationError};

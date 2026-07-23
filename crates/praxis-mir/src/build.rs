@@ -359,9 +359,60 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             }
             lower_lit_gc(b, &Lit::Int(0))
         }
-        // M6 WS6 implements the real read/parse runtime-call lowering.
-        TypedExpr::Read { .. } | TypedExpr::Parse { .. } => lower_lit_gc(b, &Lit::Int(0)),
+        // M6: `read`/`parse` lower to a runtime call against the parser plan.
+        TypedExpr::Read { plan_index, .. } => lower_read(b, *plan_index),
+        TypedExpr::Parse {
+            text, plan_index, ..
+        } => lower_parse(b, text, *plan_index),
     }
+}
+
+/// Lower a `read parser_expr`: get the input buffer, then run the plan.
+fn lower_read(b: &mut Builder<'_>, plan_index: u32) -> LocalId {
+    // 1. Get the input buffer from the runtime context.
+    let input = b.alloc_gc(Type(0), None);
+    b.push(Inst::Call {
+        dst: input,
+        callee: CallTarget::Runtime("praxis_get_input".to_string()),
+        args: vec![],
+        live_roots: Vec::new(),
+    });
+    // 2. Run the parser plan against it.
+    run_parser_plan(b, plan_index, input)
+}
+
+/// Lower a `parse(text, parser_expr)`: run the plan against the text argument.
+fn lower_parse(b: &mut Builder<'_>, text: &TypedExpr, plan_index: u32) -> LocalId {
+    let input = lower_expr_gc(b, text);
+    run_parser_plan(b, plan_index, input)
+}
+
+/// Emit the call to `praxis_run_parser(ctx, plan_index, input) -> GcRef`, then
+/// check for a parse fault. The plan_index is boxed as an Int GcRef to match the
+/// uniform ABI; the runtime wrapper reads its payload.
+fn run_parser_plan(b: &mut Builder<'_>, plan_index: u32, input: LocalId) -> LocalId {
+    // Box the plan index as an Int GcRef.
+    let idx_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ConstInt {
+        dst: idx_scalar,
+        value: plan_index as i64,
+    });
+    let idx_gc = b.alloc_gc(b.int_ty, None);
+    b.push(Inst::Alloc {
+        dst: idx_gc,
+        alloc: AllocKind::Int { value: idx_scalar },
+        live_roots: Vec::new(),
+    });
+    // Call praxis_run_parser(ctx, idx, input) -> result.
+    let dst = b.alloc_gc(Type(0), None);
+    b.push(Inst::Call {
+        dst,
+        callee: CallTarget::Runtime("praxis_run_parser".to_string()),
+        args: vec![idx_gc, input],
+        live_roots: Vec::new(),
+    });
+    b.check_fault();
+    dst
 }
 
 /// Lower a literal to a `GcRef` local (allocating the object).

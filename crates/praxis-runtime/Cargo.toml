@@ -9,3 +9,4 @@ description = "GC ABI types, type descriptors, and runtime context for Praxis"
 [dependencies]
 bumpalo.workspace = true
 praxis-source.workspace = true
+praxis-input-parser.workspace = true

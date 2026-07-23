@@ -659,6 +659,54 @@ pub unsafe extern "C" fn praxis_write_stdout(_ctx: *mut RuntimeContext, value: G
     value
 }
 
+// ---------------------------------------------------------------------------
+// Input parser (§7, M6).
+//
+// `read` / `parse` lower to runtime calls that fetch the input buffer and run
+// a compiled parser plan against it. The plan is compiled at HIR time and
+// registered in a global slab; its index is passed as a boxed Int.
+// ---------------------------------------------------------------------------
+
+/// Return the process-input source buffer (§7.10). The CLI sets this from stdin
+/// before executing the entry function; if unset, the immortal Unit is returned.
+///
+/// # Safety
+/// `ctx` must be live and wired.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_get_input(ctx: *mut RuntimeContext) -> GcRef {
+    unsafe { (*ctx).input_source }
+}
+
+/// Run a compiled parser plan against `input`, returning the parsed result as a
+/// `GcRef` (§7.1, M6). `plan_index_gc` is a boxed `Int` whose payload is the
+/// plan's index in the HIR's global slab.
+///
+/// On a parse mismatch, sets `FaultKind::ParseFailed` and returns the Unit
+/// sentinel (§7.11). No Rust panic crosses the ABI.
+///
+/// # Safety
+/// `ctx` must be live and wired; `plan_index_gc` must be a valid `Int`; `input`
+/// must be a valid `Text` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_run_parser(
+    ctx: *mut RuntimeContext,
+    plan_index_gc: GcRef,
+    input: GcRef,
+) -> GcRef {
+    let idx = unsafe { int_payload(plan_index_gc) };
+    // Delegate to the parser interpreter (WS7). It reads the plan from the HIR
+    // slab, runs it against the input bytes, and allocates the result.
+    match crate::parser::run_plan_by_index(ctx, idx as u32, input) {
+        Some(result) => result,
+        None => {
+            // A `None` return means the plan index was out of range or the
+            // interpreter was not linked. Treat as a parse fault.
+            unsafe { set_fault(ctx, FaultKind::ParseFailed) };
+            unsafe { unit_sentinel(ctx) }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

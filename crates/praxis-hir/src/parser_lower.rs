@@ -8,7 +8,9 @@
 
 use praxis_ast::{AstNode, ParserExpr, ParserExprKind};
 use praxis_input_parser::ast::{AtomicKind, Constructor, ParserAst, TemplatePart};
-use praxis_input_parser::{lower_to_plan, scan_template, synthesize, validate, ValidationError};
+use praxis_input_parser::{
+    lower_to_plan, register_plan, scan_template, synthesize, validate, ValidationError,
+};
 use praxis_source::{
     Diagnostic, DiagnosticCategory, DiagnosticCode, FileId, FileSpan, Severity, Span,
 };
@@ -20,34 +22,6 @@ pub struct ParserAnalysis {
     pub plan_index: u32,
     /// The synthesized result type (for inference / hover).
     pub result_type: Type,
-}
-
-/// A global slab of compiled parser plans, indexed by `u32`. Each unique parser
-/// expression in the program gets one entry.
-///
-/// The plan contains raw pointers (`*const TypeDescriptor`) for record schemas,
-/// which are not `Send`/`Sync` by default. They are safe to share across threads
-/// because the descriptors are process-static `const`s and the slab is only
-/// mutated during compilation (single-threaded), then read during JIT execution.
-static PLAN_SLAB: std::sync::Mutex<Vec<PlanWrapper>> = std::sync::Mutex::new(Vec::new());
-
-/// A thin wrapper that asserts `Send + Sync` for the otherwise-non-Sync plan
-/// (its raw pointers point at process-static data).
-struct PlanWrapper(&'static praxis_input_parser::ParserPlan);
-unsafe impl Send for PlanWrapper {}
-unsafe impl Sync for PlanWrapper {}
-
-/// Register a compiled plan, returning its index.
-fn register_plan(plan: &'static praxis_input_parser::ParserPlan) -> u32 {
-    let mut slab = PLAN_SLAB.lock().unwrap();
-    let idx = slab.len() as u32;
-    slab.push(PlanWrapper(plan));
-    idx
-}
-
-/// Look up a plan by index (used by the runtime interpreter via MIR).
-pub fn plan(index: u32) -> &'static praxis_input_parser::ParserPlan {
-    PLAN_SLAB.lock().unwrap()[index as usize].0
 }
 
 /// Analyze a `read`/`parse` body: convert the rowan tree to `ParserAst`,

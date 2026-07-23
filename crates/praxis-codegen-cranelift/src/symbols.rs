@@ -46,6 +46,8 @@ pub fn resolve(name: &str) -> Option<*const u8> {
         "praxis_text_is_empty" => praxis_text_is_empty as *const (),
         "praxis_text_get" => praxis_text_get as *const (),
         "praxis_write_stdout" => praxis_write_stdout as *const (),
+        "praxis_get_input" => praxis_get_input as *const (),
+        "praxis_run_parser" => praxis_run_parser as *const (),
         "praxis_push_debug_frame" => praxis_runtime::debug::praxis_push_debug_frame as *const (),
         "praxis_pop_debug_frame" => praxis_runtime::debug::praxis_pop_debug_frame as *const (),
         _ => return None,
