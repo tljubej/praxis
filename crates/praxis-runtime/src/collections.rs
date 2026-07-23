@@ -122,6 +122,68 @@ pub const VEC: &TypeDescriptor = &TypeDescriptor {
     hash: Some(vec_hash),
 };
 
+// ===========================================================================
+// Grid[T] (M6, §7.5 `grid`, §7.8 type derivation). M6 ships a minimal runtime
+// type — row-major storage with a known width — so the synthesized type is the
+// spec-faithful `Grid[T]`. Grid methods (neighbors, indexing, etc.) are M8.
+// ===========================================================================
+
+/// The `Grid[T]` payload: a row-major sequence of `GcRef`s plus the fixed
+/// column count (width). `items.len() == width * height`. Mirrors `VecPayload`
+/// but carries rectangular shape so M8 methods and indexing are cheap.
+#[repr(C)]
+pub struct GridPayload {
+    /// The descriptor for every cell in `items` (homogeneous, like Vec).
+    pub element_descriptor: *const TypeDescriptor,
+    /// Row-major cells: `items[row * width + col]`.
+    pub items: Vec<GcRef>,
+    /// The number of columns (all rows share this width).
+    pub width: usize,
+}
+
+unsafe fn grid_trace(payload: *mut u8, tracer: &mut dyn Tracer) {
+    // SAFETY: caller guarantees `payload` points at an initialized GridPayload.
+    let p = unsafe { &*(payload as *const GridPayload) };
+    for cell in p.items.iter() {
+        tracer.trace(*cell);
+    }
+}
+
+unsafe fn grid_drop(payload: *mut u8) {
+    // SAFETY: caller guarantees `payload` points at an initialized GridPayload.
+    unsafe { std::ptr::drop_in_place(payload as *mut GridPayload) };
+}
+
+unsafe fn grid_format(payload: *const u8, out: &mut dyn fmt::Write) {
+    // SAFETY: caller guarantees `payload` points at an initialized GridPayload.
+    let p = unsafe { &*(payload as *const GridPayload) };
+    let elem_desc = unsafe { &*p.element_descriptor };
+    let _ = out.write_str("[");
+    for (i, cell) in p.items.iter().enumerate() {
+        if i > 0 {
+            let _ = out.write_str(", ");
+        }
+        let elem_payload = cell.payload::<u8>() as *const u8;
+        (elem_desc.format)(elem_payload, out);
+    }
+    let _ = out.write_str("]");
+}
+
+/// Descriptor for the `Grid[T]` collection (M6, §7.8). Element-wise equality and
+/// hashing are deferred to M8 (grid-as-map-key is an M8 concern); the descriptor
+/// is marked non-equatable / non-hashable for now.
+pub const GRID: &TypeDescriptor = &TypeDescriptor {
+    id: TypeId(7),
+    name: "Grid",
+    size: std::mem::size_of::<GridPayload>(),
+    align: std::mem::align_of::<GridPayload>(),
+    trace: grid_trace,
+    drop_value: grid_drop,
+    format: grid_format,
+    equals: None,
+    hash: None,
+};
+
 #[cfg(test)]
 mod tests {
     // The Vec descriptor is exercised end-to-end through the Heap in heap.rs

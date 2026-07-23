@@ -107,10 +107,12 @@ unsafe fn int_payload(r: GcRef) -> i64 {
 
 /// The Unit sentinel GcRef from the context's input source slot. (Unit is an
 /// immortal; in M4 we reuse the input_source field which the runtime sets to
-/// the immortal Unit.) Returned on fault paths as the "defined dummy" (§10.4).
+/// The Unit GcRef returned on fault paths as the "defined dummy" (§10.4). Reads
+/// the cached immortal `unit_ref` from the context — stable for the program
+/// lifetime regardless of whether `input_source` holds the read-in buffer.
 #[inline]
 unsafe fn unit_sentinel(ctx: *mut RuntimeContext) -> GcRef {
-    unsafe { (*ctx).input_source }
+    unsafe { (*ctx).unit_ref }
 }
 
 // ---------------------------------------------------------------------------
@@ -207,13 +209,16 @@ pub unsafe extern "C" fn praxis_alloc_text(
                 .into_boxed_str()
         }
     };
-    // SAFETY: Box<str> matches TEXT's size/align and is fully initialized.
+    // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
     unsafe {
         heap(ctx).alloc_with(
             crate::text::TEXT,
-            std::mem::size_of::<Box<str>>(),
-            std::mem::align_of::<Box<str>>(),
-            |payload| (payload as *mut Box<str>).write(owned),
+            std::mem::size_of::<crate::text::TextPayload>(),
+            std::mem::align_of::<crate::text::TextPayload>(),
+            |payload| {
+                (payload as *mut crate::text::TextPayload)
+                    .write(crate::text::TextPayload::Owned(owned));
+            },
         )
     }
 }
@@ -566,14 +571,14 @@ pub unsafe extern "C" fn praxis_vec_is_empty(ctx: *mut RuntimeContext, vec: GcRe
 // (no allocation beyond the result object) and never fault.
 // ---------------------------------------------------------------------------
 
-/// Read the `Box<str>` payload of a `Text` `GcRef`.
+/// Read the `Text` payload of a `GcRef` as a `&str`, following slice owners.
 ///
 /// # Safety
-/// `r` must be a valid `Text` `GcRef`.
+/// `r` must be a valid `Text` `GcRef`. Non-moving GC keeps it stable.
 unsafe fn text_str(r: GcRef) -> &'static str {
-    // SAFETY: caller guarantees `r` is Text; non-moving GC keeps it stable.
-    let boxed: &crate::text::OwnedText = unsafe { &*r.payload::<crate::text::OwnedText>() };
-    boxed
+    // SAFETY: caller guarantees `r` is Text; payload is a TextPayload.
+    let payload = r.payload::<crate::text::TextPayload>() as *const crate::text::TextPayload;
+    unsafe { crate::text::text_str(payload) }
 }
 
 /// The number of Unicode scalar values (chars) in `text`, as a boxed `Int`.

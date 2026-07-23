@@ -23,12 +23,15 @@ pub mod descriptor;
 pub mod gc;
 pub mod heap;
 pub mod immortal;
+pub mod parser;
+pub mod records;
 pub mod roots;
 pub mod scalars;
 pub mod shadow_frame;
 pub mod text;
 
 pub use abi::{assert_abi_version, RUNTIME_ABI_VERSION};
+pub use collections::{GridPayload, VecPayload};
 pub use context::{DebugFrame, DebugLocal, Fault, FaultKind, Runtime, RuntimeContext};
 pub use debug::DebugLocalMeta;
 pub use descriptor::{
@@ -38,5 +41,7 @@ pub use descriptor::{
 pub use gc::{GcHeader, GcRef};
 pub use heap::{Heap, HeapStats};
 pub use immortal::Immortals;
+pub use records::{RecordField, RecordPayload, RecordSchema};
 pub use roots::{RootScope, RootSet};
 pub use shadow_frame::{ShadowFrame, MAX_SHADOW_SLOTS};
+pub use text::TextPayload;

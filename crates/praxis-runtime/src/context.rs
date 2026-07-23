@@ -32,6 +32,11 @@ pub enum FaultKind {
     /// A collection index was out of bounds (§9.2). Raised by `Vec.get` /
     /// indexing and similar accessors in M5.
     IndexOutOfBounds = 3,
+    /// An input parse mismatch (§7.11). Raised by the input-parser interpreter
+    /// when the input does not match a parser expression. The fault carries no
+    /// structured spans yet (M6 surfaces it as a plain fault; the crash debugger
+    /// in M10 will render the input/parser spans from the runtime's plan).
+    ParseFailed = 4,
 }
 
 impl std::fmt::Display for FaultKind {
@@ -41,6 +46,7 @@ impl std::fmt::Display for FaultKind {
             FaultKind::IntOverflow => write!(f, "integer overflow"),
             FaultKind::DivByZero => write!(f, "division by zero"),
             FaultKind::IndexOutOfBounds => write!(f, "index out of bounds"),
+            FaultKind::ParseFailed => write!(f, "input parse mismatch"),
         }
     }
 }
@@ -144,6 +150,10 @@ pub struct RuntimeContext {
     /// collector walks this chain via [`RootSet`].
     pub roots: *mut ShadowFrame,
     pub input_source: GcRef,
+    /// The cached immortal `Unit` — the "defined dummy" returned on fault paths
+    /// (§10.4). M6 split this from `input_source` (which now holds the read-in
+    /// buffer when present), so fault sentinels are stable regardless of input.
+    pub unit_ref: GcRef,
     pub current_generation: u64,
 }
 
@@ -162,6 +172,9 @@ impl RuntimeContext {
             debug_top: std::ptr::null_mut(),
             roots: std::ptr::null_mut(),
             input_source,
+            // Placeholder: reuse the input_source ref as the Unit sentinel too,
+            // since this constructor is only for not-yet-wired test scaffolding.
+            unit_ref: input_source,
             current_generation: 0,
         }
     }
@@ -244,6 +257,7 @@ impl Runtime {
             debug_top: std::ptr::null_mut(),
             roots: std::ptr::null_mut(),
             input_source: self.immortals.unit(),
+            unit_ref: self.immortals.unit(),
             current_generation: 0,
         }
     }
@@ -313,13 +327,40 @@ impl Runtime {
     /// Allocate an owned `Text` (§4.3, ADR-013).
     pub fn alloc_text(&self, value: &str) -> GcRef {
         let owned: Box<str> = value.into();
-        // SAFETY: Box<str> matches TEXT's size/align and is fully initialized.
+        // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
         unsafe {
             self.heap.alloc_with(
                 crate::text::TEXT,
-                std::mem::size_of::<Box<str>>(),
-                std::mem::align_of::<Box<str>>(),
-                |payload| (payload as *mut Box<str>).write(owned),
+                std::mem::size_of::<crate::text::TextPayload>(),
+                std::mem::align_of::<crate::text::TextPayload>(),
+                |payload| {
+                    (payload as *mut crate::text::TextPayload)
+                        .write(crate::text::TextPayload::Owned(owned));
+                },
+            )
+        }
+    }
+
+    /// Allocate a source-slice `Text` — a zero-copy view into `owner`'s bytes
+    /// spanning `[start, start+len)` (§7.10, ADR-013). The slice's descriptor
+    /// traces `owner`, keeping the backing alive.
+    ///
+    /// # Panics
+    /// Debug-build assertion that the byte range lands within the owner; the
+    /// parser guarantees this by construction.
+    pub fn alloc_text_slice(&self, owner: GcRef, start: usize, len: usize) -> GcRef {
+        debug_assert!(
+            start.saturating_add(len) <= owner.as_text().len(),
+            "source-slice Text range [{start}, {start}+{len}) exceeds owner length"
+        );
+        let payload = crate::text::TextPayload::Slice { owner, start, len };
+        // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
+        unsafe {
+            self.heap.alloc_with(
+                crate::text::TEXT,
+                std::mem::size_of::<crate::text::TextPayload>(),
+                std::mem::align_of::<crate::text::TextPayload>(),
+                |ptr| (ptr as *mut crate::text::TextPayload).write(payload),
             )
         }
     }
@@ -342,6 +383,68 @@ impl Runtime {
                         element_descriptor,
                         items,
                     });
+                },
+            )
+        }
+    }
+
+    /// Allocate a `Grid[T]` from a flat row-major list of cells, the element
+    /// descriptor, and the column count (§7.5, M6). `items.len()` must be a
+    /// multiple of `width`.
+    pub fn alloc_grid(
+        &self,
+        element_descriptor: &'static TypeDescriptor,
+        items: Vec<GcRef>,
+        width: usize,
+    ) -> GcRef {
+        debug_assert!(
+            width == 0 || items.len() % width == 0,
+            "grid items ({}) not a multiple of width ({})",
+            items.len(),
+            width
+        );
+        // SAFETY: GridPayload matches GRID's size/align and is fully initialized.
+        unsafe {
+            self.heap.alloc_with(
+                crate::collections::GRID,
+                std::mem::size_of::<crate::collections::GridPayload>(),
+                std::mem::align_of::<crate::collections::GridPayload>(),
+                |payload| {
+                    (payload as *mut crate::collections::GridPayload).write(
+                        crate::collections::GridPayload {
+                            element_descriptor,
+                            items,
+                            width,
+                        },
+                    );
+                },
+            )
+        }
+    }
+
+    /// Allocate a provisional structural `Record` from field values and a static
+    /// schema (§7.8, M6). `items.len()` must equal `schema.arity()`.
+    pub fn alloc_record(
+        &self,
+        schema: &'static crate::records::RecordSchema,
+        items: Vec<GcRef>,
+    ) -> GcRef {
+        debug_assert_eq!(
+            items.len(),
+            schema.arity(),
+            "record field count ({}) != schema arity ({})",
+            items.len(),
+            schema.arity()
+        );
+        // SAFETY: RecordPayload matches RECORD's size/align and is fully initialized.
+        unsafe {
+            self.heap.alloc_with(
+                crate::records::RECORD,
+                std::mem::size_of::<crate::records::RecordPayload>(),
+                std::mem::align_of::<crate::records::RecordPayload>(),
+                |payload| {
+                    (payload as *mut crate::records::RecordPayload)
+                        .write(crate::records::RecordPayload { schema, items });
                 },
             )
         }
@@ -386,15 +489,14 @@ impl GcRef {
     /// Read a `Text` payload as a `&str` (§4.3).
     ///
     /// The lifetime is tied to the `GcRef`'s borrow; the text stays valid as long
-    /// as the object is reachable.
+    /// as the object is reachable. Handles both owned and source-slice payloads
+    /// (ADR-013): a slice reads through its owner.
     pub fn as_text(&self) -> &str {
         assert_eq!(self.descriptor().id, crate::text::TEXT.id, "not Text");
-        // SAFETY: descriptor check confirms payload is Box<str>. The returned
+        // SAFETY: descriptor check confirms payload is a TextPayload; the
         // reference is valid while the object lives (non-moving GC, ADR-011).
-        // We materialize a `&str` (not `&Box<str>`) to avoid carrying the box
-        // wrapper; `Box<str>` derefs to `str`.
-        let boxed: *const Box<str> = self.payload::<Box<str>>();
-        unsafe { &*boxed }
+        let payload = self.payload::<crate::text::TextPayload>() as *const crate::text::TextPayload;
+        unsafe { crate::text::text_str(payload) }
     }
 
     /// Read a `Vec[T]` payload as a slice of element refs (§11.2).
