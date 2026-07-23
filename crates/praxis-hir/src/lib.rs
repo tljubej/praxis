@@ -1,22 +1,107 @@
 //! Name resolution and the high-level intermediate representation (§13.3, §14.1).
 //!
-//! Responsibility (per the design): resolve names, remove surface sugar (top
-//! level becomes a generated `main`, method calls become resolved intrinsic or
-//! function calls, `for` becomes explicit iteration, `read`/`parse` parser
-//! expressions become typed parser plans, string interpolation becomes
-//! formatting nodes).
+//! The HIR takes M1's lossless tree and layers two passes on top of it:
 //!
-//! **Milestone 0: skeleton.** Name resolution lands in Milestone 2.
+//! 1. **Name resolution** ([`resolve`]): walk the typed AST, build a lexical
+//!    scope tree, mint a [`SymbolId`] per declaration, resolve every name
+//!    reference, and emit `N0xx` diagnostics. Shadowing is handled here — each
+//!    `let`/`var` declaration gets a distinct id, and an initializer resolves
+//!    names in the *preceding* environment (§4.2/§5.3).
+//! 2. **Type inference** (the `infer` module, Slice 5): consume the resolved
+//!    names and infer a [`Scheme`] for every expression and binding, emitting
+//!    `Y0xx` diagnostics.
+//!
+//! The single entry point is [`analyze`], which runs both passes and returns an
+//! [`Analysis`] carrying the symbol table, scope tree, resolved references,
+//! inferred types, and all diagnostics.
 
-/// Marker documenting that this crate is a deliberate skeleton.
-pub const FILLED_AT_MILESTONE: u32 = 2;
+pub mod diagnostics;
+pub mod infer;
+pub mod name_table;
+pub mod resolve;
+pub mod scope;
+pub mod symbol;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub use name_table::NameTable;
+pub use resolve::{NameRef, NameResolution, ResolvedRef};
+pub use scope::{ScopeId, ScopeTree};
+pub use symbol::{Symbol, SymbolId, SymbolKind};
 
-    #[test]
-    fn skeleton_reports_fill_milestone() {
-        assert_eq!(FILLED_AT_MILESTONE, 2);
+use praxis_ast::{AstNode, SourceFile};
+use praxis_source::{Diagnostic, FileId};
+use praxis_types::{Type, TypeDb};
+
+/// The full result of analyzing one file: resolution + inference + diagnostics.
+///
+/// Built by [`analyze`]; consumed by the CLI (for diagnostics) and the LSP (for
+/// hover/completion, in M11).
+#[derive(Debug)]
+pub struct Analysis {
+    /// The interned type arena, holding every type minted during inference.
+    pub db: TypeDb,
+    /// Every resolved symbol.
+    pub names: NameTable,
+    /// The lexical scope tree.
+    pub scopes: ScopeTree,
+    /// Each name reference, keyed by its source range, with the symbol it
+    /// resolved to and the scope at the reference site.
+    pub refs: std::collections::HashMap<rowan::TextRange, ResolvedRef>,
+    /// The inferred type for each name reference's range (filled by inference).
+    pub ref_types: std::collections::HashMap<rowan::TextRange, Type>,
+    /// All `N0xx` (name) and `Y0xx` (type) diagnostics, in source order.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl Analysis {
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.diagnostics.is_empty()
     }
 }
+
+/// Run name resolution and type inference on `file`'s parsed tree.
+///
+/// `parse` (from `praxis-parser`) must already have run; pass its root here.
+/// Never panics on malformed input — the parser guarantees a well-formed tree,
+/// and unresolved names / type errors surface as diagnostics.
+#[must_use]
+pub fn analyze(file: FileId, root: &SourceFile) -> Analysis {
+    let resolution = resolve::resolve(file, root);
+    let inference = infer::infer(file, resolution);
+    Analysis {
+        db: inference.db,
+        names: inference.names,
+        scopes: inference.scopes,
+        refs: inference.refs,
+        ref_types: inference.ref_types,
+        diagnostics: inference.diagnostics,
+    }
+}
+
+/// Convenience: analyze the root of an already-parsed tree given the raw node.
+/// Casts to [`SourceFile`] internally.
+#[must_use]
+pub fn analyze_root(file: FileId, root: &praxis_syntax::SyntaxNode) -> Analysis {
+    match SourceFile::cast(root.clone()) {
+        Some(sf) => analyze(file, &sf),
+        None => Analysis {
+            db: TypeDb::new(),
+            names: NameTable::default(),
+            scopes: ScopeTree::new(),
+            refs: std::collections::HashMap::new(),
+            ref_types: std::collections::HashMap::new(),
+            // The parser should always produce a SOURCE_FILE root; if not, this
+            // is an internal error, surfaced as a single diagnostic.
+            diagnostics: vec![praxis_source::Diagnostic::new(
+                praxis_source::Severity::Error,
+                praxis_source::DiagnosticCode::new(praxis_source::DiagnosticCategory::Name, 0),
+                "internal: parse tree root is not a SOURCE_FILE",
+                praxis_source::FileSpan::new(file, praxis_source::Span::EMPTY),
+            )],
+        },
+    }
+}
+
+#[cfg(test)]
+#[path = "hir_tests.rs"]
+mod hir_tests;

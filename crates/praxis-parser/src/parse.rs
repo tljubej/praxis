@@ -387,9 +387,11 @@ impl<'t> Parser<'t> {
                     let before = self.meaningful_index();
                     self.start_node(SyntaxKind::PARAM);
                     self.expect(SyntaxKind::Ident, "parameter name");
-                    self.expect(SyntaxKind::COLON, "`:`");
-                    // M2: real parameter type grammar.
-                    self.parse_type();
+                    // The `: Type` annotation is OPTIONAL (§4.9, criterion 1):
+                    // `fn manhattan(a, b) { … }` infers param types from use.
+                    if self.eat(SyntaxKind::COLON) {
+                        self.parse_type();
+                    }
                     self.finish_node();
                     if !self.eat(SyntaxKind::COMMA) {
                         break;
@@ -638,7 +640,7 @@ impl<'t> Parser<'t> {
     /// rejected by name resolution (`N002`), not by the parser.
     fn parse_type(&mut self) {
         let cp = self.checkpoint_lhs();
-        let mut kind = self.parse_atom_type();
+        self.parse_atom_type();
         // Function types bind right-associatively: `A -> B -> C` = `A -> (B -> C)`.
         if self.eat(SyntaxKind::THIN_ARROW) {
             self.parse_type(); // rhs (recurses, so right-assoc)
@@ -646,23 +648,21 @@ impl<'t> Parser<'t> {
                                // emitted exactly one node; reopening at `cp` captures it.
             self.start_node_at(cp, SyntaxKind::FN_TYPE);
             self.finish_node();
-            kind = SyntaxKind::FN_TYPE;
         }
-        // When the atom was a tuple/group emitted directly, no wrapping needed;
-        // when it was a scalar, it is already a TYPE_REF. `kind` is recorded for
-        // future use (e.g. error recovery); the node is already on the builder.
-        let _ = kind;
+        // A scalar atom is already a TYPE_REF; a tuple/group is TUPLE_TYPE; an
+        // arrow-wrapped one is FN_TYPE. The node is on the builder.
     }
 
-    /// Parse one atomic type (no `->`). Returns the kind that was emitted, so the
-    /// caller can decide whether to wrap. Emits exactly one node onto the builder.
-    fn parse_atom_type(&mut self) -> SyntaxKind {
+    /// Parse one atomic type (no `->`). Emits exactly one node onto the builder:
+    /// [`TYPE_REF`] for a scalar or grouped type, [`TUPLE_TYPE`] for two or more
+    /// comma-separated elements.
+    fn parse_atom_type(&mut self) {
         if self.at(SyntaxKind::Ident) {
             self.eat_trivia();
             self.start_node(SyntaxKind::TYPE_REF);
             self.bump_meaningful(); // the scalar name
             self.finish_node();
-            return SyntaxKind::TYPE_REF;
+            return;
         }
         if self.at(SyntaxKind::L_PAREN) {
             // `( T )` (grouped) or `( T, U, … )` (tuple). Same checkpoint trick
@@ -675,7 +675,7 @@ impl<'t> Parser<'t> {
                 self.expect(SyntaxKind::R_PAREN, "`)`");
                 self.start_node_at(cp, SyntaxKind::TYPE_REF);
                 self.finish_node();
-                return SyntaxKind::TYPE_REF;
+                return;
             }
             self.parse_type(); // first element
             let is_tuple = self.at(SyntaxKind::COMMA);
@@ -700,7 +700,7 @@ impl<'t> Parser<'t> {
             }
             self.expect(SyntaxKind::R_PAREN, "`)`");
             self.finish_node();
-            return kind;
+            return;
         }
         // Nothing recognizable: emit a diagnostic + a PARSE_ERROR node, but make
         // progress (OOM rule) by consuming the stray token if any.
@@ -714,7 +714,6 @@ impl<'t> Parser<'t> {
             self.bump();
             self.finish_node();
         }
-        SyntaxKind::PARSE_ERROR
     }
 
     /// An identifier, possibly followed by a call `(args)`.

@@ -323,10 +323,15 @@ dependencies = [
 name = "praxis-hir"
 version = "0.1.0"
 dependencies = [
+ "insta",
  "praxis-ast",
+ "praxis-parser",
  "praxis-source",
+ "praxis-stdlib",
  "praxis-syntax",
+ "praxis-test-support",
  "praxis-types",
+ "rowan",
 ]
 
 [[package]]
