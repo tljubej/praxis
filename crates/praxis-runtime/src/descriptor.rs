@@ -7,7 +7,9 @@
 //! design (§11.4) is that there are no scattered type switches in generated or
 //! runtime code: every operation routes through a descriptor.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 /// An opaque, interned identifier for a type. Equality on `TypeId` *is* type
 /// identity for descriptor-table lookups.
@@ -21,19 +23,64 @@ impl TypeId {
     }
 }
 
-/// The tracer a descriptor's `trace` function receives during GC. Real
-/// implementations live in Milestone 3; for Milestone 0 this is a forward-declared
-/// trait the descriptor signature can reference.
+/// The tracer a descriptor's `trace` function receives during GC. The collector
+/// supplies a concrete implementation whose own `trace` method enqueues child
+/// references onto the mark worklist (ADR-011).
 pub trait Tracer {
-    /// Mark a `GcRef` as reachable and trace it later or now.
+    /// Mark a `GcRef` as reachable and arrange for it to be traced.
     fn trace(&mut self, reference: crate::GcRef);
 }
 
-/// A hashing sink used by structural hash descriptors. Real implementations
-/// (delegating to the value's `hash` function) land in Milestone 3.
+/// A hashing sink used by structural hash descriptors (§5.5). Concrete
+/// implementations feed bytes into a hash state; [`StructHasher`] is the
+/// built-in implementation used by the scalar and collection descriptors.
 pub trait DynamicHasher {
     fn write_bytes(&mut self, bytes: &[u8]);
     fn finish(&self) -> u64;
+}
+
+/// The built-in [`DynamicHasher`] backed by [`DefaultHasher`]. Used by every
+/// descriptor's `hash` callback in M3.
+pub struct StructHasher(DefaultHasher);
+
+impl StructHasher {
+    pub fn new() -> Self {
+        StructHasher(DefaultHasher::new())
+    }
+}
+
+impl Default for StructHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DynamicHasher for StructHasher {
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        // `Hasher::write` consumes the bytes into the hash state.
+        self.0.write(bytes);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0.finish()
+    }
+}
+
+/// Convenience: feed any `Hash` value into a [`DynamicHasher`] byte-wise.
+pub(crate) fn hash_value<H: DynamicHasher + ?Sized, T: Hash + ?Sized>(hasher: &mut H, value: &T) {
+    // Route through a shim Hasher so we don't re-implement Hash for each scalar.
+    struct HasherShim<'a, H: ?Sized>(&'a mut H);
+    impl<H: DynamicHasher + ?Sized> Hasher for HasherShim<'_, H> {
+        #[inline]
+        fn write(&mut self, bytes: &[u8]) {
+            self.0.write_bytes(bytes);
+        }
+        #[inline]
+        fn finish(&self) -> u64 {
+            self.0.finish()
+        }
+    }
+    value.hash(&mut HasherShim(hasher));
 }
 
 /// `trace` callback shape: receive a pointer to the object payload (the bytes

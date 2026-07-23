@@ -28,6 +28,7 @@ rust-version = "1.80"
 [workspace.dependencies]
 # Shared crates reference a single version from here.
 anyhow = "1"
+bumpalo = "3"
 clap = { version = "4", features = ["derive"] }
 insta = "1"
 proptest = "1"
