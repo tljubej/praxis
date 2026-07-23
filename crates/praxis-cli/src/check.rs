@@ -29,12 +29,23 @@ pub fn run(file: &str) -> anyhow::Result<i32> {
     let source = praxis_source::SourceMap::new();
     let id = source.intern(path, text.clone());
 
-    // Milestone 1 front end: lex + parse, producing a lossless tree and any
-    // `T0xx` (lex) / `P0xx` (parse) diagnostics. Name resolution and type
-    // inference are layered in by Milestone 2.
+    // Front end: lex + parse, producing a lossless tree and any `T0xx` (lex) /
+    // `P0xx` (parse) diagnostics. Then name resolution + type inference (M2)
+    // add `N0xx` (name) / `Y0xx` (type) diagnostics on top.
     let parsed = praxis_parser::parse(id, &text);
+    let mut diagnostics = parsed.diagnostics;
 
-    let rendered = diagnostic_render::render_all(&source, &parsed.diagnostics);
+    // Skip semantic analysis if parsing already failed badly enough that the
+    // tree would mislead resolution. We still run analysis when there are parse
+    // errors (recovery keeps the tree usable), but only if the root is intact.
+    let analysis = praxis_hir::analyze_root(id, &parsed.tree);
+    diagnostics.extend(analysis.diagnostics);
+    diagnostics.sort_by_key(|d| {
+        let s = d.primary().span;
+        (s.start(), s.end())
+    });
+
+    let rendered = diagnostic_render::render_all(&source, &diagnostics);
     diagnostic_render::write_to(&mut std::io::stderr(), &rendered)?;
 
     Ok(if rendered.has_errors() { 1 } else { 0 })

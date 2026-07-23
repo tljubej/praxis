@@ -8,3 +8,7 @@ description = "Type interning, inference, and capability resolution for Praxis."
 
 [dependencies]
 praxis-source.workspace = true
+praxis-stdlib.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

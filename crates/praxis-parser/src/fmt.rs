@@ -264,4 +264,33 @@ mod tests {
         let twice = format(&once);
         assert_eq!(once, twice);
     }
+
+    // --- M2: type annotations + tuples --------------------------------------
+
+    #[test]
+    fn format_is_idempotent_on_tuple() {
+        let src = "out((1,2,3))";
+        assert_clean(src);
+        let once = format(src);
+        let twice = format(&once);
+        assert_eq!(once, twice, "\n--once--\n{once}\n--twice--\n{twice}");
+    }
+
+    #[test]
+    fn format_is_idempotent_on_typed_let() {
+        let src = "let p:(Int,Int)=(1,2)";
+        assert_clean(src);
+        let once = format(src);
+        let twice = format(&once);
+        assert_eq!(once, twice, "\n--once--\n{once}\n--twice--\n{twice}");
+    }
+
+    #[test]
+    fn format_is_idempotent_on_higher_order_fn() {
+        let src = "fn apply(f:(Int)->Int,x:Int)->Int{f(x)}";
+        assert_clean(src);
+        let once = format(src);
+        let twice = format(&once);
+        assert_eq!(once, twice, "\n--once--\n{once}\n--twice--\n{twice}");
+    }
 }

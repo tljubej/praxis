@@ -1,0 +1,226 @@
+//! Type-inference tests (Slice 5).
+//!
+//! These cover the §19-M2 acceptance criteria that inference owns: inferring
+//! function parameter and return types from use (criterion 1), and rejecting
+//! cross-type `var` reassignment (criterion 4). They also snapshot inferred
+//! schemes/types (§17.1 "inference snapshots").
+
+#![cfg(test)]
+
+use praxis_parser::parse;
+use praxis_source::{DiagnosticCategory, SourceMap};
+
+use crate::{analyze_root, SymbolKind};
+
+fn analyze(text: &str) -> crate::Analysis {
+    let map = SourceMap::new();
+    let id = map.intern("infer_test.px", text);
+    let parsed = parse(id, text);
+    analyze_root(id, &parsed.tree)
+}
+
+/// The rendered scheme of the user binding named `name` (a Let/Var/Fn/Param),
+/// or `None` if it has no scheme.
+fn scheme_of(text: &str, name: &str) -> Option<String> {
+    let analysis = analyze(text);
+    analysis
+        .names
+        .all()
+        .iter()
+        .filter(|s| s.name == name && s.kind != SymbolKind::Builtin)
+        .find_map(|s| s.scheme.as_ref().map(|sc| analysis.db.render_scheme(sc)))
+}
+
+/// The type of an expression, observed by binding it: `let _probe = <expr>`
+/// and reading `_probe`'s scheme. Returns the rendered type.
+fn expr_type(expr: &str) -> String {
+    let src = format!("let _probe = {expr}");
+    scheme_of(&src, "_probe").unwrap_or_else(|| panic!("no scheme for expr `{expr}`"))
+}
+
+fn has_type_error(text: &str) -> bool {
+    analyze(text)
+        .diagnostics
+        .iter()
+        .any(|d| d.code().category() == DiagnosticCategory::Type)
+}
+
+// --- §19-M2 criterion 1: infer non-recursive fn params and returns ---------
+
+#[test]
+fn infers_int_function_from_arithmetic_body() {
+    // `fn add(a, b) { a + b }` — `+` forces both params and the result to Int.
+    // Concrete (no type vars), so the scheme renders without `forall`.
+    let scheme = scheme_of("fn add(a, b) { a + b }", "add").expect("add has a scheme");
+    insta::assert_snapshot!(scheme, @"(Int, Int) -> Int");
+}
+
+#[test]
+fn infers_unused_param_is_polymorphic() {
+    // `fn greet(name) { "hi" }` — `name` is unused, so it stays a type variable;
+    // only the body (Text) constrains the result.
+    let scheme = scheme_of("fn greet(name) { \"hi\" }", "greet").expect("scheme");
+    insta::assert_snapshot!(scheme, @"forall T. (T) -> Text");
+}
+
+#[test]
+fn infers_annotated_return_from_body() {
+    let src = "fn double(n: Int) -> Int { n + n }";
+    let analysis = analyze(src);
+    assert!(
+        !has_type_error(src),
+        "annotated fn should type-check: {:?}",
+        analysis.diagnostics
+    );
+}
+
+// --- §19-M2 criterion 2: shadowed bindings have distinct types -----------
+
+#[test]
+fn shadowed_let_changes_type() {
+    // `let a = 4` then `let a = "Foo"`: each binding keeps its own type.
+    let src = "let a = 4\nlet a = \"Foo\"";
+    let analysis = analyze(src);
+    let a_schemes: Vec<_> = analysis
+        .names
+        .all()
+        .iter()
+        .filter(|s| s.name == "a" && s.kind == SymbolKind::Let)
+        .filter_map(|s| s.scheme.as_ref())
+        .map(|sc| analysis.db.render_scheme(sc))
+        .collect();
+    assert_eq!(a_schemes, vec!["Int", "Text"]);
+}
+
+// --- §19-M2 criterion 4: reject cross-type var reassignment ---------------
+
+#[test]
+fn cross_type_var_reassignment_is_rejected() {
+    let analysis = analyze("var x = 0\nx = \"hi\"");
+    let type_errs: Vec<_> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.code().category() == DiagnosticCategory::Type)
+        .collect();
+    assert_eq!(
+        type_errs.len(),
+        1,
+        "expected one Y001, got {:?}",
+        analysis.diagnostics
+    );
+    assert!(analysis.diagnostics[0]
+        .message()
+        .contains("expected Int, found Text"));
+}
+
+#[test]
+fn same_type_var_reassignment_is_accepted() {
+    assert!(!has_type_error("var x = 0\nx = 1"));
+}
+
+#[test]
+fn compound_assignment_type_checked() {
+    // `var x = 0; x += "s"` — the RHS must be Int.
+    assert!(has_type_error("var x = 0\nx += \"s\""));
+}
+
+// --- arithmetic & comparison typing ---------------------------------------
+
+#[test]
+fn arithmetic_yields_int() {
+    assert_eq!(expr_type("1 + 2 * 3"), "Int");
+}
+
+#[test]
+fn comparison_yields_bool() {
+    assert_eq!(expr_type("1 == 2"), "Bool");
+}
+
+#[test]
+fn comparison_operand_mismatch_is_rejected() {
+    assert!(has_type_error("out(1 == \"a\")"));
+}
+
+#[test]
+fn unary_minus_is_int() {
+    assert_eq!(expr_type("-5"), "Int");
+}
+
+#[test]
+fn logical_not_is_bool() {
+    assert_eq!(expr_type("!true"), "Bool");
+}
+
+// --- tuples (M2 deliverable) ----------------------------------------------
+
+#[test]
+fn tuple_type_is_inferred() {
+    assert_eq!(expr_type("(1, \"a\")"), "(Int, Text)");
+}
+
+#[test]
+fn nested_tuple_type_is_inferred() {
+    assert_eq!(expr_type("(1, (true, 2))"), "(Int, (Bool, Int))");
+}
+
+// --- if/while typing -------------------------------------------------------
+
+#[test]
+fn if_cond_must_be_bool() {
+    let analysis = analyze("if 1 { out(2) }");
+    assert!(analysis.diagnostics.iter().any(|d| {
+        d.code().category() == DiagnosticCategory::Type && d.message().contains("expected Bool")
+    }));
+}
+
+#[test]
+fn while_cond_must_be_bool() {
+    let analysis = analyze("while 1 { out(2) }");
+    assert!(analysis.diagnostics.iter().any(|d| {
+        d.code().category() == DiagnosticCategory::Type && d.message().contains("expected Bool")
+    }));
+}
+
+#[test]
+fn if_branches_must_match() {
+    // then: Int, else: Text — mismatch.
+    assert!(has_type_error("if true { 1 } else { \"a\" }"));
+}
+
+// --- let-generalization ---------------------------------------------------
+
+#[test]
+fn let_int_binding_is_monotype() {
+    // A concrete let is monomorphic.
+    assert_eq!(scheme_of("let x = 1", "x").unwrap(), "Int");
+}
+
+#[test]
+fn var_binding_is_monotype() {
+    assert_eq!(scheme_of("var x = true", "x").unwrap(), "Bool");
+}
+
+// --- recursive functions (§4.9) -------------------------------------------
+
+#[test]
+fn recursive_fn_with_annotations_type_checks() {
+    let src = "fn fact(n: Int) -> Int { if n <= 1 { 1 } else { n * fact(n - 1) } }";
+    assert!(!has_type_error(src));
+}
+
+// --- a representative whole program (clean) -------------------------------
+
+#[test]
+fn clean_program_has_no_diagnostics() {
+    let src = "fn add(a: Int, b: Int) -> Int { a + b }\nout(add(1, 2))";
+    let analysis = analyze(src);
+    assert!(analysis.is_clean(), "{:?}", analysis.diagnostics);
+}
+
+#[test]
+fn out_accepts_any_type() {
+    // `out` is polymorphic: out(1), out("a"), out(true) all type-check.
+    assert!(!has_type_error("out(1)"));
+    assert!(!has_type_error("out(\"a\")"));
+    assert!(!has_type_error("out(true)"));
+}

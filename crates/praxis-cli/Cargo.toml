@@ -14,6 +14,7 @@ path = "src/main.rs"
 praxis-source.workspace = true
 praxis-syntax.workspace = true
 praxis-parser.workspace = true
+praxis-hir.workspace = true
 praxis-runtime.workspace = true
 praxis-stdlib.workspace = true
 anyhow.workspace = true

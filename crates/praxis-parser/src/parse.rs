@@ -346,15 +346,15 @@ impl<'t> Parser<'t> {
         }
     }
 
-    /// `let`/`var name = expr` — `kind` is the node kind (LET_STMT / VAR_STMT).
+    /// `let`/`var name [: Type] = expr` — `kind` is the node kind (LET_STMT / VAR_STMT).
     fn parse_let_or_var(&mut self, kind: SyntaxKind) -> bool {
         self.start_node(kind);
         self.bump(); // `let`/`var`
         self.expect(SyntaxKind::Ident, "binding name");
-        // Optional type annotation `: Type` (parsed leniently for M1: we accept
-        // a single identifier-like type and stop). Full types land in M2.
+        // Optional type annotation `: Type` (M2: real type grammar — scalar,
+        // tuple, or function type).
         if self.eat(SyntaxKind::COLON) {
-            self.expect(SyntaxKind::Ident, "type name");
+            self.parse_type();
         }
         self.expect(SyntaxKind::EQ, "`=`");
         self.parse_expr();
@@ -374,7 +374,7 @@ impl<'t> Parser<'t> {
         true
     }
 
-    /// `fn name(params) -> Ret { body }` (params and return type optional in M1).
+    /// `fn name(params) -> Ret { body }` (params and return type optional).
     fn parse_fn_item(&mut self) -> bool {
         self.start_node(SyntaxKind::FN_ITEM);
         self.bump(); // `fn`
@@ -387,8 +387,11 @@ impl<'t> Parser<'t> {
                     let before = self.meaningful_index();
                     self.start_node(SyntaxKind::PARAM);
                     self.expect(SyntaxKind::Ident, "parameter name");
-                    self.expect(SyntaxKind::COLON, "`:`");
-                    self.expect(SyntaxKind::Ident, "parameter type");
+                    // The `: Type` annotation is OPTIONAL (§4.9, criterion 1):
+                    // `fn manhattan(a, b) { … }` infers param types from use.
+                    if self.eat(SyntaxKind::COLON) {
+                        self.parse_type();
+                    }
                     self.finish_node();
                     if !self.eat(SyntaxKind::COMMA) {
                         break;
@@ -402,7 +405,7 @@ impl<'t> Parser<'t> {
         }
         // Optional `-> Type` return annotation.
         if self.eat(SyntaxKind::THIN_ARROW) {
-            self.expect(SyntaxKind::Ident, "return type");
+            self.parse_type();
         }
         // Body.
         if self.at(SyntaxKind::L_BRACE) {
@@ -551,10 +554,43 @@ impl<'t> Parser<'t> {
     }
 
     fn parse_paren(&mut self) {
-        self.start_node(SyntaxKind::PAREN_EXPR);
+        // Either `( expr )` (PAREN_EXPR) or `( e1, e2, … )` (TUPLE_EXPR). We do
+        // not know which until we see a comma after the first element, so take a
+        // checkpoint *before* the `(`, emit the shared prefix, then retroactively
+        // open the correct node kind at that checkpoint. Both `(` and `)` end up
+        // inside the single resulting node (no double nesting).
+        let cp = self.checkpoint_lhs();
         self.bump(); // `(`
-        if !self.at(SyntaxKind::R_PAREN) {
-            self.parse_expr();
+        if self.at(SyntaxKind::R_PAREN) {
+            // Empty `()`: a degenerate paren expr; type checking rejects it.
+            self.expect(SyntaxKind::R_PAREN, "`)`");
+            self.start_node_at(cp, SyntaxKind::PAREN_EXPR);
+            self.finish_node();
+            return;
+        }
+        self.parse_expr(); // first element
+        let is_tuple = self.at(SyntaxKind::COMMA);
+        let kind = if is_tuple {
+            SyntaxKind::TUPLE_EXPR
+        } else {
+            SyntaxKind::PAREN_EXPR
+        };
+        self.start_node_at(cp, kind);
+        if is_tuple {
+            // Collect the remaining elements.
+            loop {
+                let before = self.meaningful_index();
+                if !self.eat(SyntaxKind::COMMA) {
+                    break;
+                }
+                if self.at(SyntaxKind::R_PAREN) {
+                    // Trailing comma: `(a, b, )` — stop without another element.
+                    break;
+                }
+                self.parse_expr();
+                // Guarantee termination on any input.
+                self.ensure_progress(before);
+            }
         }
         self.expect(SyntaxKind::R_PAREN, "`)`");
         self.finish_node();
@@ -584,6 +620,100 @@ impl<'t> Parser<'t> {
         self.parse_expr();
         self.parse_block();
         self.finish_node();
+    }
+
+    // --- types (M2) ---------------------------------------------------------
+
+    /// Parse a type annotation. Grammar:
+    ///
+    /// ```text
+    /// type := atom_type ("->" type)?       // function types, right-assoc
+    /// atom_type := Ident                   // scalar: Int, Text, Bool, ...
+    ///            | "(" [type ("," type)*] ")"  // tuple (≥2) or grouped type
+    /// ```
+    ///
+    /// A scalar or grouped type becomes a [`TYPE_REF`](SyntaxKind::TYPE_REF); a
+    /// parenthesized two-or-more-element list becomes a
+    /// [`TUPLE_TYPE`](SyntaxKind::TUPLE_TYPE); anything followed by `->` wraps in
+    /// an [`FN_TYPE`](SyntaxKind::FN_TYPE). Unknown identifiers (e.g. a typo or a
+    /// reserved-but-unused scalar like `Float`) parse as `TYPE_REF` and are
+    /// rejected by name resolution (`N002`), not by the parser.
+    fn parse_type(&mut self) {
+        let cp = self.checkpoint_lhs();
+        self.parse_atom_type();
+        // Function types bind right-associatively: `A -> B -> C` = `A -> (B -> C)`.
+        if self.eat(SyntaxKind::THIN_ARROW) {
+            self.parse_type(); // rhs (recurses, so right-assoc)
+                               // Wrap lhs + arrow + rhs retroactively. `parse_atom_type` already
+                               // emitted exactly one node; reopening at `cp` captures it.
+            self.start_node_at(cp, SyntaxKind::FN_TYPE);
+            self.finish_node();
+        }
+        // A scalar atom is already a TYPE_REF; a tuple/group is TUPLE_TYPE; an
+        // arrow-wrapped one is FN_TYPE. The node is on the builder.
+    }
+
+    /// Parse one atomic type (no `->`). Emits exactly one node onto the builder:
+    /// [`TYPE_REF`] for a scalar or grouped type, [`TUPLE_TYPE`] for two or more
+    /// comma-separated elements.
+    fn parse_atom_type(&mut self) {
+        if self.at(SyntaxKind::Ident) {
+            self.eat_trivia();
+            self.start_node(SyntaxKind::TYPE_REF);
+            self.bump_meaningful(); // the scalar name
+            self.finish_node();
+            return;
+        }
+        if self.at(SyntaxKind::L_PAREN) {
+            // `( T )` (grouped) or `( T, U, … )` (tuple). Same checkpoint trick
+            // as `parse_paren`: emit the shared prefix, then open the right kind.
+            let cp = self.checkpoint_lhs();
+            self.bump(); // `(`
+            if self.at(SyntaxKind::R_PAREN) {
+                // Empty `()` — degenerate; record as TYPE_REF and let type
+                // resolution reject it.
+                self.expect(SyntaxKind::R_PAREN, "`)`");
+                self.start_node_at(cp, SyntaxKind::TYPE_REF);
+                self.finish_node();
+                return;
+            }
+            self.parse_type(); // first element
+            let is_tuple = self.at(SyntaxKind::COMMA);
+            let kind = if is_tuple {
+                SyntaxKind::TUPLE_TYPE
+            } else {
+                SyntaxKind::TYPE_REF
+            };
+            self.start_node_at(cp, kind);
+            if is_tuple {
+                loop {
+                    let before = self.meaningful_index();
+                    if !self.eat(SyntaxKind::COMMA) {
+                        break;
+                    }
+                    if self.at(SyntaxKind::R_PAREN) {
+                        break; // trailing comma
+                    }
+                    self.parse_type();
+                    self.ensure_progress(before);
+                }
+            }
+            self.expect(SyntaxKind::R_PAREN, "`)`");
+            self.finish_node();
+            return;
+        }
+        // Nothing recognizable: emit a diagnostic + a PARSE_ERROR node, but make
+        // progress (OOM rule) by consuming the stray token if any.
+        if self.at_end() {
+            let span = self.current_span();
+            self.error(span, "expected a type");
+        } else {
+            self.start_node(SyntaxKind::PARSE_ERROR);
+            let span = self.current_span();
+            self.error(span, "expected a type");
+            self.bump();
+            self.finish_node();
+        }
     }
 
     /// An identifier, possibly followed by a call `(args)`.
@@ -872,6 +1002,91 @@ mod tests {
     fn whitespace_only_input_is_clean() {
         let out = parse_text("   \n  // just a comment\n  ");
         assert!(out.diagnostics.is_empty());
+    }
+
+    // --- M2: real type annotations + tuples ---------------------------------
+
+    #[test]
+    fn parses_let_with_tuple_type_annotation() {
+        let src = "let p: (Int, Int) = (1, 2)";
+        let out = parse_text(src);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::TUPLE_TYPE));
+        assert!(kinds.contains(&SyntaxKind::TUPLE_EXPR));
+        assert!(kinds.contains(&SyntaxKind::TYPE_REF));
+    }
+
+    #[test]
+    fn parses_fn_with_full_annotations() {
+        // Full parameter + return annotations, including a tuple return type.
+        let src = "fn f(a: Int, b: Int) -> (Int, Int) { (a, b) }";
+        let out = parse_text(src);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::TYPE_REF));
+        assert!(kinds.contains(&SyntaxKind::TUPLE_TYPE));
+    }
+
+    #[test]
+    fn parses_higher_order_function_type() {
+        // `(Int) -> Int` as a parameter type.
+        let src = "fn apply(f: (Int) -> Int, x: Int) -> Int { f(x) }";
+        let out = parse_text(src);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::FN_TYPE));
+    }
+
+    #[test]
+    fn parses_scalar_type_annotation() {
+        let src = "let x: Int = 1";
+        let out = parse_text(src);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::TYPE_REF));
+    }
+
+    #[test]
+    fn tuple_expression_distinguishes_from_paren() {
+        // Single-element paren stays PAREN_EXPR; two-element is TUPLE_EXPR.
+        let single = construct_names(&parse_text("(1)").tree);
+        assert!(single.contains(&SyntaxKind::PAREN_EXPR));
+        assert!(!single.contains(&SyntaxKind::TUPLE_EXPR));
+
+        let pair = construct_names(&parse_text("(1, 2)").tree);
+        assert!(pair.contains(&SyntaxKind::TUPLE_EXPR));
+        assert!(!pair.contains(&SyntaxKind::PAREN_EXPR));
+    }
+
+    #[test]
+    fn tuple_expression_snapshot() {
+        insta::assert_snapshot!(dump("(1, 2)"), @r#"
+        SOURCE_FILE@0..6
+          EXPR_STMT@0..6
+            TUPLE_EXPR@0..6
+              L_PAREN "("@0..1
+              LITERAL@1..2
+                IntLit "1"@1..2
+              COMMA ","@2..3
+              Whitespace " "@3..4
+              LITERAL@4..5
+                IntLit "2"@4..5
+              R_PAREN ")"@5..6
+        "#);
+    }
+
+    #[test]
+    fn function_type_right_associative() {
+        // `A -> B -> C` parses as `A -> (B -> C)`: the outer FN_TYPE's result is
+        // itself an FN_TYPE.
+        let src = "let f: Int -> Text -> Bool = panic";
+        let out = parse_text(src);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        // Two FN_TYPE nodes for the nested arrow.
+        let fn_type_count = kinds.iter().filter(|k| **k == SyntaxKind::FN_TYPE).count();
+        assert_eq!(fn_type_count, 2);
     }
 
     /// Collect the `SyntaxKind` of every node and token in the tree (for

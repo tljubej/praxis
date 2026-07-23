@@ -281,8 +281,10 @@ dependencies = [
 name = "praxis-ast"
 version = "0.1.0"
 dependencies = [
+ "praxis-parser",
  "praxis-source",
  "praxis-syntax",
+ "praxis-test-support",
  "rowan",
 ]
 
@@ -293,6 +295,7 @@ dependencies = [
  "anyhow",
  "clap",
  "insta",
+ "praxis-hir",
  "praxis-parser",
  "praxis-runtime",
  "praxis-source",
@@ -321,10 +324,15 @@ dependencies = [
 name = "praxis-hir"
 version = "0.1.0"
 dependencies = [
+ "insta",
  "praxis-ast",
+ "praxis-parser",
  "praxis-source",
+ "praxis-stdlib",
  "praxis-syntax",
+ "praxis-test-support",
  "praxis-types",
+ "rowan",
 ]
 
 [[package]]
@@ -407,7 +415,9 @@ dependencies = [
 name = "praxis-types"
 version = "0.1.0"
 dependencies = [
+ "insta",
  "praxis-source",
+ "praxis-stdlib",
 ]
 
 [[package]]
