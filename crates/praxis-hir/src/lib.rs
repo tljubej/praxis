@@ -67,7 +67,7 @@ impl Analysis {
 #[must_use]
 pub fn analyze(file: FileId, root: &SourceFile) -> Analysis {
     let resolution = resolve::resolve(file, root);
-    let inference = infer::infer(file, resolution);
+    let inference = infer::infer_with_tree(file, resolution, root);
     Analysis {
         db: inference.db,
         names: inference.names,
@@ -105,3 +105,7 @@ pub fn analyze_root(file: FileId, root: &praxis_syntax::SyntaxNode) -> Analysis 
 #[cfg(test)]
 #[path = "hir_tests.rs"]
 mod hir_tests;
+
+#[cfg(test)]
+#[path = "infer_tests.rs"]
+mod infer_tests;

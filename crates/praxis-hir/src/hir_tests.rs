@@ -26,7 +26,7 @@ fn resolve_src(text: &str) -> crate::Analysis {
 /// Collect every resolved name reference (range → resolved ref) in source order.
 fn refs(src: &str) -> (crate::Analysis, Vec<(TextRange, ResolvedRef)>) {
     let analysis = resolve_src(src);
-    let mut refs: Vec<_> = analysis.refs.iter().map(|(r, v)| (*r, v.clone())).collect();
+    let mut refs: Vec<_> = analysis.refs.iter().map(|(r, v)| (*r, *v)).collect();
     refs.sort_by_key(|(r, _)| (u32::from(r.start()), u32::from(r.end())));
     (analysis, refs)
 }

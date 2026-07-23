@@ -43,7 +43,7 @@ pub struct NameRef {
 
 /// The scope id active when a name reference was resolved. Needed by inference
 /// to know the binding level at which to instantiate the symbol's scheme.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct ResolvedRef {
     pub symbol: SymbolId,
     pub scope: ScopeId,
@@ -57,9 +57,14 @@ pub struct ResolvedRef {
 pub struct NameResolution {
     pub names: NameTable,
     pub scopes: ScopeTree,
-    /// Each name reference, keyed by its source range. A reference that failed
+    /// Each name *reference*, keyed by its source range. A reference that failed
     /// to resolve is simply absent (its diagnostic is in `diagnostics`).
     pub refs: HashMap<TextRange, ResolvedRef>,
+    /// Each *declaration* site, keyed by the name token's source range → the
+    /// [`SymbolId`] it mints. This lets inference attach the inferred scheme to
+    /// the exact symbol even when the same name is shadowed (where a scope lookup
+    /// would resolve to the wrong/latest binding).
+    pub decls: HashMap<TextRange, SymbolId>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -117,9 +122,19 @@ impl Resolver {
         })
     }
 
-    fn bind(&mut self, scope: ScopeId, kind: SymbolKind, name: String, span: Span) -> SymbolId {
+    fn bind(
+        &mut self,
+        scope: ScopeId,
+        kind: SymbolKind,
+        name: String,
+        range: TextRange,
+    ) -> SymbolId {
+        let span = range_to_span(range);
         let id = self.mint(kind, name.clone(), Some(self.file_span(span)));
         self.out.scopes.bind(scope, name, id);
+        // Record the declaration so inference can attach a scheme to exactly
+        // this symbol (not whatever a name lookup would find under shadowing).
+        self.out.decls.insert(range, id);
         id
     }
 
@@ -191,8 +206,12 @@ impl Resolver {
         }
         // Only now does the new binding enter scope.
         if let Some(name_tok) = stmt.name() {
-            let span = range_to_span(name_tok.text_range());
-            self.bind(scope, SymbolKind::Let, name_tok.text().to_string(), span);
+            self.bind(
+                scope,
+                SymbolKind::Let,
+                name_tok.text().to_string(),
+                name_tok.text_range(),
+            );
         } else {
             // Malformed `let` (no name) — the parser already diagnosed it.
         }
@@ -206,8 +225,12 @@ impl Resolver {
             self.resolve_expr(scope, &init);
         }
         if let Some(name_tok) = stmt.name() {
-            let span = range_to_span(name_tok.text_range());
-            self.bind(scope, SymbolKind::Var, name_tok.text().to_string(), span);
+            self.bind(
+                scope,
+                SymbolKind::Var,
+                name_tok.text().to_string(),
+                name_tok.text_range(),
+            );
         }
     }
 
@@ -218,8 +241,12 @@ impl Resolver {
         // inferred together and the name is in scope for the body. So bind the
         // name first, then resolve params + body in a child scope.
         let fn_symbol = if let Some(name_tok) = item.name() {
-            let span = range_to_span(name_tok.text_range());
-            let id = self.bind(scope, SymbolKind::Fn, name_tok.text().to_string(), span);
+            let id = self.bind(
+                scope,
+                SymbolKind::Fn,
+                name_tok.text().to_string(),
+                name_tok.text_range(),
+            );
             Some(id)
         } else {
             None
@@ -255,8 +282,12 @@ impl Resolver {
 
     fn bind_param(&mut self, scope: ScopeId, p: &Param) {
         if let Some(name_tok) = p.name() {
-            let span = range_to_span(name_tok.text_range());
-            self.bind(scope, SymbolKind::Param, name_tok.text().to_string(), span);
+            self.bind(
+                scope,
+                SymbolKind::Param,
+                name_tok.text().to_string(),
+                name_tok.text_range(),
+            );
         }
     }
 
