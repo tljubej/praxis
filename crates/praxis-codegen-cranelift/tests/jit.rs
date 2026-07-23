@@ -418,3 +418,75 @@ fn read_sections_lines_csv_int_nested() {
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2); // two sections
 }
+
+// --- short-circuit || and ! (M7-WS2 carryover) ------------------------------
+
+#[test]
+fn logical_or_returns_true_when_lhs_true() {
+    // true || false → true (→ 1).
+    let src = "fn main() -> Int {\n  let b = true || false\n  if b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn logical_or_returns_rhs_when_lhs_false() {
+    // false || true → true (→ 1).
+    let src = "fn main() -> Int {\n  let b = false || true\n  if b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn logical_or_returns_false_when_both_false() {
+    // false || false → false (→ 0).
+    let src = "fn main() -> Int {\n  let b = false || false\n  if b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+#[test]
+fn logical_or_short_circuits_skipping_rhs_side_effect() {
+    // The acceptance test for short-circuit: when lhs is true, the rhs division
+    // by zero must NOT execute (no fault). If || were eager, this would fault.
+    let src = "fn main() -> Int {\n  let b = true || (1 / 0 == 0)\n  if b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(
+        !rt.has_pending_fault(),
+        "short-circuit must skip the div-by-zero, but fault: {:?}",
+        rt.fault()
+    );
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn logical_or_evaluates_rhs_side_effect_when_lhs_false() {
+    // When lhs is false, the rhs IS evaluated — so a div-by-zero faults.
+    let src = "fn main() -> Int {\n  let b = false || (1 / 0 == 0)\n  if b { 1 } else { 0 }\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(
+        rt.has_pending_fault(),
+        "rhs must be evaluated when lhs is false"
+    );
+}
+
+#[test]
+fn logical_not_flips_bool() {
+    // !true → false (→ 0); !false → true (→ 1).
+    let src = "fn main() -> Int {\n  let a = !true\n  let b = !false\n  if a { 0 } else { if b { 1 } else { 0 } }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn double_not_is_identity() {
+    // !!true → true (→ 1).
+    let src = "fn main() -> Int {\n  let b = !!true\n  if b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}

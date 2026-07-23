@@ -195,6 +195,12 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             lower_lit_gc(b, &Lit::Int(0))
         }),
         TypedExpr::Bin { op, lhs, rhs, .. } => {
+            // Short-circuit ops must not eagerly evaluate `rhs` — it is lowered
+            // only on the path that needs it (inside `lower_logical_or`).
+            if *op == BinOp::LogicalOr {
+                let l = lower_expr_gc(b, lhs);
+                return lower_logical_or(b, l, rhs);
+            }
             let l = lower_expr_gc(b, lhs);
             let r = lower_expr_gc(b, rhs);
             match op {
@@ -216,14 +222,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     });
                     lower_materialize_bool(b, bool_scalar)
                 }
-                BinOp::LogicalOr => {
-                    // Short-circuit lowers to branches; M4 emits a non-short-
-                    // circuiting evaluation as a simplification (operands are
-                    // side-effect-free in the acceptance corpus). The Bool result
-                    // is the left operand's value (placeholder; logical-or is rare
-                    // in the M4 acceptance corpus).
-                    l
-                }
+                // LogicalOr is handled above (before eager rhs lowering).
+                BinOp::LogicalOr => unreachable!(),
             }
         }
         TypedExpr::Unary { op, operand, .. } => {
@@ -236,8 +236,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     lower_materialize(b, result)
                 }
                 UnaryOp::Not => {
-                    // Logical not on Bool: the operand is already a Bool GcRef.
-                    o
+                    // Logical not on Bool: `!x` is `x == false`.
+                    lower_logical_not(b, o)
                 }
             }
         }
@@ -518,6 +518,74 @@ fn lower_materialize_bool(b: &mut Builder<'_>, scalar: LocalId) -> LocalId {
         live_roots: Vec::new(),
     });
     dst
+}
+
+/// Lower short-circuiting logical or: `lhs || rhs`.
+///
+/// `lhs || rhs` is `if lhs { true } else { rhs }`: evaluate `lhs`; if it is
+/// true the result is `true` and `rhs` is *not* evaluated (its side effects and
+/// any GC safepoint are skipped). Otherwise the result is `rhs`. Both operands
+/// are `Bool` `GcRef`s; `lhs_gc` is already lowered, `rhs_expr` is lowered only
+/// on the false path.
+fn lower_logical_or(b: &mut Builder<'_>, lhs_gc: LocalId, rhs_expr: &TypedExpr) -> LocalId {
+    let lhs_bool = b.alloc_scalar(ScalarKind::Bool);
+    b.push(Inst::ExtractScalar {
+        dst: lhs_bool,
+        src: lhs_gc,
+        scalar: ScalarKind::Bool,
+    });
+    let result = b.alloc_gc(b.bool_ty, None);
+    let true_blk = b.func.new_block();
+    let false_blk = b.func.new_block();
+    let join = b.func.new_block();
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+        cond: lhs_bool,
+        then_block: true_blk,
+        else_block: false_blk,
+    };
+    // lhs true → result = true.
+    b.cur = true_blk;
+    let true_val = lower_lit_gc(b, &Lit::Bool(true));
+    b.push(Inst::MoveGc {
+        dst: result,
+        src: true_val,
+    });
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join };
+    // lhs false → evaluate rhs.
+    b.cur = false_blk;
+    let rhs_val = lower_expr_gc(b, rhs_expr);
+    b.push(Inst::MoveGc {
+        dst: result,
+        src: rhs_val,
+    });
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join };
+    b.cur = join;
+    result
+}
+
+/// Lower logical not: `!operand` flips a `Bool`. Implemented as an integer
+/// comparison against 0 (false), yielding the negation.
+fn lower_logical_not(b: &mut Builder<'_>, operand_gc: LocalId) -> LocalId {
+    let operand_bool = b.alloc_scalar(ScalarKind::Bool);
+    b.push(Inst::ExtractScalar {
+        dst: operand_bool,
+        src: operand_gc,
+        scalar: ScalarKind::Bool,
+    });
+    let zero = b.alloc_scalar(ScalarKind::Bool);
+    // Bool is represented as i8: 0 = false, 1 = true. `!x` is `x == 0`.
+    b.push(Inst::ConstInt {
+        dst: zero,
+        value: 0,
+    });
+    let negated = b.alloc_scalar(ScalarKind::Bool);
+    b.push(Inst::IntCmp {
+        op: CmpOp::Eq,
+        dst: negated,
+        lhs: operand_bool,
+        rhs: zero,
+    });
+    lower_materialize_bool(b, negated)
 }
 
 /// Lower an `if` expression, returning the `GcRef` holding its value.
