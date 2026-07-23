@@ -1,0 +1,6 @@
+// A Praxis snippet with multiple parse errors, for the `check` parse-error
+// integration test. Missing `=` in the let, a stray `)`, and a broken second
+// statement — the parser must recover past each and keep reporting.
+let x 1
+)
+let = 2

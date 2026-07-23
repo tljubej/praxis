@@ -62,15 +62,39 @@ fn bad_byte_file_exits_nonzero_with_diagnostic() {
         "missing message: {stderr}"
     );
     assert!(
-        stderr.contains("bad_byte.px:5:"),
+        stderr.contains("bad_byte.px:4:"),
         "missing location: {stderr}"
     );
     assert!(
-        stderr.contains("let first = values[@0]"),
+        stderr.contains("let first = @"),
         "missing source line: {stderr}"
     );
     assert!(stderr.contains("^"), "missing caret: {stderr}");
-    assert!(stderr.contains("1 error(s)"), "missing summary: {stderr}");
+    assert!(stderr.contains("2 error(s)"), "missing summary: {stderr}");
+}
+
+#[test]
+fn parse_error_file_reports_multiple_diagnostics() {
+    // Milestone 1 acceptance: the parser produces multiple diagnostics from
+    // one malformed file and the CLI surfaces them end to end.
+    let output = Command::new(bin_path())
+        .arg("check")
+        .arg(fixture("parse_error.px"))
+        .output()
+        .expect("failed to run praxis");
+    let code = output
+        .status
+        .code()
+        .expect("process was terminated by signal");
+    assert_eq!(code, 1, "file with parse errors should exit 1");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // At least two distinct P0xx parse diagnostics.
+    let p001_count = stderr.matches("error[P001]").count();
+    assert!(
+        p001_count >= 2,
+        "expected >=2 parse diagnostics, got {p001_count}: {stderr}"
+    );
 }
 
 #[test]

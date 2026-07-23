@@ -7,8 +7,10 @@
 //!   (ADR-003) plus `P0xx` diagnostics. The tree retains trivia so the
 //!   formatter, LSP, and code actions can use it (§13.1).
 
+pub mod fmt;
 pub mod lex;
 pub mod parse;
 
+pub use fmt::{format_node, format_source};
 pub use lex::{lex, LexOutput};
 pub use parse::{parse, ParseOutput};

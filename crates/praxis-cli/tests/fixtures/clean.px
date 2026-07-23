@@ -1,6 +1,17 @@
-// A clean, lexically valid Praxis snippet for the `check` happy-path test.
-// (Full parsing and type-checking arrive in later milestones; for Milestone 0
-// `check` only needs the lexer to walk this without complaints.)
-let numbers = read lines(int)
+// A clean, M1-valid Praxis snippet for the `check` happy-path test.
+// Covers let/var bindings, a fn, arithmetic, if, while, and an out call —
+// the full Milestone 1 grammar subset.
+fn manhattan(a: Int, b: Int) -> Int {
+    abs(a - b)
+}
 
-out(numbers.sum())
+let width = 3
+var score = 0
+
+while score < width {
+    score = score + 1
+}
+
+if score == width {
+    out(score)
+}

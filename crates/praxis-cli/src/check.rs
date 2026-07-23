@@ -1,5 +1,5 @@
-//! The `praxis check` command: load a `.px` file, run the front end (lex for
-//! Milestone 0), render any diagnostics, and return the exit code.
+//! The `praxis check` command: load a `.px` file, run the front end (lex +
+//! parse as of Milestone 1), render any diagnostics, and return the exit code.
 //!
 //! Exit codes:
 //! - `0` — no errors.
@@ -29,11 +29,12 @@ pub fn run(file: &str) -> anyhow::Result<i32> {
     let source = praxis_source::SourceMap::new();
     let id = source.intern(path, text.clone());
 
-    // Milestone 0 front end: just the lexer stub. The full pipeline
-    // (parse + resolve + type-check) is layered in by later milestones.
-    let lexed = praxis_parser::lex(id, &text);
+    // Milestone 1 front end: lex + parse, producing a lossless tree and any
+    // `T0xx` (lex) / `P0xx` (parse) diagnostics. Name resolution and type
+    // inference are layered in by Milestone 2.
+    let parsed = praxis_parser::parse(id, &text);
 
-    let rendered = diagnostic_render::render_all(&source, &lexed.diagnostics);
+    let rendered = diagnostic_render::render_all(&source, &parsed.diagnostics);
     diagnostic_render::write_to(&mut std::io::stderr(), &rendered)?;
 
     Ok(if rendered.has_errors() { 1 } else { 0 })
