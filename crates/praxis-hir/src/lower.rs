@@ -871,7 +871,10 @@ impl<'a> Lowerer<'a> {
 
         // Resolve the method against the catalog, keyed by the receiver's
         // inferred type + name + arity (ADR-010 bridge).
-        let hits = crate::catalog::lookup(self.db, self.catalog, expr_ty(&receiver), &name, arity);
+        // Resolve the method against the catalog, keyed by the receiver's
+        // inferred type + name + arity (ADR-010 bridge).
+        let receiver_ty = expr_ty(&receiver);
+        let hits = crate::catalog::lookup(self.db, self.catalog, receiver_ty, &name, arity);
         if let Some(entry) = hits.first() {
             let ty = pattern_to_type(self.db, &entry.result);
             let lowering_symbol = match &entry.lowering {

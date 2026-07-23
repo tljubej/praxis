@@ -267,3 +267,15 @@ fn parse_expression_synthesizes_type() {
     let src = "fn f(sample: Text) { let v = parse(sample, lines(int)); v }";
     assert!(!has_type_error(src));
 }
+
+#[test]
+fn read_in_fn_then_method_call_typechecks() {
+    // Full pipeline: read inside a fn, then call .len() on the result.
+    let src = "fn main() -> Int {\n  let v = read lines(int)\n  v.len()\n}\n";
+    let analysis = analyze(src);
+    assert!(
+        !has_type_error(src),
+        "type errors: {:?}",
+        analysis.diagnostics
+    );
+}

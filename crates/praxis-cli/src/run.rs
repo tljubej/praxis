@@ -22,7 +22,12 @@ use praxis_runtime::{GcRef, Runtime, RuntimeContext};
 use crate::diagnostic_render;
 
 /// Run the `run` command against `file`. Returns the process exit code.
-pub fn run(file: &str) -> anyhow::Result<i32> {
+///
+/// `input_file` optionally overrides the process input (§7.1): when `None`,
+/// stdin is read; when `Some(path)`, the file's contents are used. The input is
+/// read lazily — only if the program contains a `read` expression — but for M6
+/// we always read it upfront (a single read is the common case).
+pub fn run(file: &str, input_file: Option<&str>) -> anyhow::Result<i32> {
     let path = Path::new(file);
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -105,6 +110,27 @@ pub fn run(file: &str) -> anyhow::Result<i32> {
     // Execute. `main` takes no GcRef params beyond the hidden context.
     let mut runtime = Runtime::new();
     let mut ctx = runtime.context();
+
+    // Read the process input (§7.10, M6). The first `read` expression lazily
+    // reads this buffer; we read it once here and install it as `input_source`.
+    // Empty input keeps the default (immortal Unit).
+    let input_text = match input_file {
+        Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
+        None => {
+            // Read stdin if it's not a terminal (piped input); otherwise empty.
+            use std::io::IsTerminal;
+            if std::io::stdin().is_terminal() {
+                String::new()
+            } else {
+                std::io::read_to_string(std::io::stdin()).unwrap_or_default()
+            }
+        }
+    };
+    if !input_text.is_empty() {
+        let input_ref = runtime.alloc_text(&input_text);
+        ctx.input_source = input_ref;
+    }
+
     // SAFETY: `entry` was just finalized for `main_id`; the JIT outlives the
     // call. `main` takes one unused GcRef slot (the uniform calling convention
     // passes the context plus the declared params — zero here — but the entry

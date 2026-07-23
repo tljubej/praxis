@@ -62,8 +62,28 @@ pub fn lookup<'a>(
     catalog
         .entries()
         .iter()
-        .filter(|e| e.receiver == pattern && e.name == name && e.arity() == arity)
+        .filter(|e| e.name == name && e.arity() == arity && pattern_matches(&e.receiver, &pattern))
         .collect()
+}
+
+/// Whether a catalog receiver pattern accepts a concrete runtime pattern.
+///
+/// `Var("T")` in the catalog entry is a type-variable wildcard: it matches any
+/// concrete element (so `Vec[T].len()` matches `Vec[Int].len()`). All other
+/// variants require exact equality.
+fn pattern_matches(catalog_pat: &TypePattern, concrete_pat: &TypePattern) -> bool {
+    match (catalog_pat, concrete_pat) {
+        (TypePattern::Var(_), _) => true,
+        (
+            TypePattern::Collection { ctor: c1, args: a1 },
+            TypePattern::Collection { ctor: c2, args: a2 },
+        ) => {
+            c1 == c2
+                && a1.len() == a2.len()
+                && a1.iter().zip(a2).all(|(x, y)| pattern_matches(x, y))
+        }
+        _ => catalog_pat == concrete_pat,
+    }
 }
 
 fn map_scalar(s: praxis_types::ScalarType) -> PatternScalar {

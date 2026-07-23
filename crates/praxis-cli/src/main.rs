@@ -33,6 +33,9 @@ enum Command {
     Run {
         /// The `.px` source file to run.
         file: String,
+        /// Read the process input from this file instead of stdin (§7.1, M6).
+        #[arg(long)]
+        input: Option<String>,
     },
     /// Run the front end (lex + parse + type-check) without executing.
     Check {
@@ -58,7 +61,7 @@ fn main() -> Result<()> {
 
     let exit = match cli.command {
         Command::Check { file } => check::run(&file),
-        Command::Run { file } => run::run(&file),
+        Command::Run { file, input } => run::run(&file, input.as_deref()),
         Command::Watch { file } => not_implemented("watch", Some(&file), 0),
         Command::Repl => not_implemented("repl", None, 0),
         Command::Lsp => not_implemented("lsp", None, 11),
