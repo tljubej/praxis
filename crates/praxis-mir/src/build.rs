@@ -359,6 +359,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             }
             lower_lit_gc(b, &Lit::Int(0))
         }
+        // M6 WS6 implements the real read/parse runtime-call lowering.
+        TypedExpr::Read { .. } | TypedExpr::Parse { .. } => lower_lit_gc(b, &Lit::Int(0)),
     }
 }
 
@@ -595,7 +597,9 @@ fn expr_static_type(e: &TypedExpr) -> Type {
         | TypedExpr::While { ty, .. }
         | TypedExpr::Call { ty, .. }
         | TypedExpr::MethodCall { ty, .. }
-        | TypedExpr::Tuple { ty, .. } => *ty,
+        | TypedExpr::Tuple { ty, .. }
+        | TypedExpr::Read { ty, .. }
+        | TypedExpr::Parse { ty, .. } => *ty,
         TypedExpr::Block(blk) => blk.ty,
     }
 }

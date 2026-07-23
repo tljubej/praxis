@@ -224,3 +224,46 @@ fn out_accepts_any_type() {
     assert!(!has_type_error("out(\"a\")"));
     assert!(!has_type_error("out(true)"));
 }
+
+// --- M6: input-parser type synthesis (§7.8) --------------------------------
+
+#[test]
+fn read_atomic_synthesizes_scalar_type() {
+    // `read int` → Int; `read char` → Char (acceptance criterion 4: hover).
+    assert_eq!(expr_type("read int"), "Int");
+    assert_eq!(expr_type("read char"), "Char");
+}
+
+#[test]
+fn read_lines_of_int_synthesizes_vec_int() {
+    // `read lines(int)` → Vec[Int] (§7.8 derivation table).
+    assert_eq!(expr_type("read lines(int)"), "Vec[Int]");
+}
+
+#[test]
+fn read_nested_sections_lines_csv_int() {
+    // `read sections(lines(csv(int)))` → Vec[Vec[Vec[Int]]] (§7.6).
+    assert_eq!(
+        expr_type("read sections(lines(csv(int)))"),
+        "Vec[Vec[Vec[Int]]]"
+    );
+}
+
+#[test]
+fn read_grid_of_char_synthesizes_grid_char() {
+    // `read grid(char)` → Grid[Char] (§7.8).
+    assert_eq!(expr_type("read grid(char)"), "Grid[Char]");
+}
+
+#[test]
+fn read_template_synthesizes_tuple() {
+    // `read lines(`{int},{int}`)` → Vec[(Int, Int)] (§7.3, §7.8).
+    assert_eq!(expr_type("read lines(`{int},{int}`)"), "Vec[(Int, Int)]");
+}
+
+#[test]
+fn parse_expression_synthesizes_type() {
+    // `parse(sample, lines(int))` → Vec[Int], where sample is Text.
+    let src = "fn f(sample: Text) { let v = parse(sample, lines(int)); v }";
+    assert!(!has_type_error(src));
+}

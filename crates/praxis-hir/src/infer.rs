@@ -376,9 +376,41 @@ impl Inferer {
             Expr::While(w) => self.infer_while(scope, w),
             Expr::Call(c) => self.infer_call(scope, c),
             Expr::MethodCall(m) => self.infer_method_call(scope, m),
-            // M6 WS5 fills these in with real read/parse type synthesis.
-            Expr::Read(_) | Expr::Parse(_) => self.db.fresh_var(),
+            Expr::Read(r) => self.infer_read(r),
+            Expr::Parse(p) => self.infer_parse(scope, p),
             Expr::Error(_) => self.db.fresh_var(),
+        }
+    }
+
+    /// Synthesize the result type of a `read parser_expression` (§7.1, M6).
+    fn infer_read(&mut self, r: &praxis_ast::ReadExpr) -> Type {
+        match r.parser_expr() {
+            Some(pe) => crate::parser_lower::synthesize_parser_type(
+                &pe,
+                self.file,
+                &mut self.db,
+                &mut self.diagnostics,
+            )
+            .unwrap_or_else(|| self.db.fresh_var()),
+            None => self.db.fresh_var(),
+        }
+    }
+
+    /// Synthesize the result type of a `parse(text, parser_expression)` (§7.1, M6).
+    fn infer_parse(&mut self, scope: ScopeId, p: &praxis_ast::ParseExpr) -> Type {
+        // The text argument is an ordinary expression; resolve it.
+        if let Some(text_expr) = p.text_expr() {
+            self.infer_expr(scope, &text_expr);
+        }
+        match p.parser_expr() {
+            Some(pe) => crate::parser_lower::synthesize_parser_type(
+                &pe,
+                self.file,
+                &mut self.db,
+                &mut self.diagnostics,
+            )
+            .unwrap_or_else(|| self.db.fresh_var()),
+            None => self.db.fresh_var(),
         }
     }
 

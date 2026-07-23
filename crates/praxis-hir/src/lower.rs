@@ -195,6 +195,16 @@ pub enum TypedExpr {
     },
     /// `( a, b, … )` — at least two elements.
     Tuple { elements: Vec<TypedExpr>, ty: Type },
+    /// `read parser_expression` (§7.1, M6). `plan_index` identifies the compiled
+    /// [`ParserPlan`] in the global slab; the runtime interpreter looks it up.
+    Read { plan_index: u32, ty: Type },
+    /// `parse(text, parser_expression)` (§7.1, M6). The `text` arg is lowered as
+    /// an ordinary expression; `plan_index` identifies the parser plan.
+    Parse {
+        text: Box<TypedExpr>,
+        plan_index: u32,
+        ty: Type,
+    },
 }
 
 /// A literal value. (M4 lowers Int/Bool/Unit; Text materializes via the runtime
@@ -596,11 +606,8 @@ impl<'a> Lowerer<'a> {
             Expr::Call(c) => self.lower_call(c),
             Expr::MethodCall(m) => self.lower_method_call(m),
             Expr::Tuple(t) => self.lower_tuple(t),
-            // M6 WS5 fills these in with real read/parse lowering.
-            Expr::Read(_) | Expr::Parse(_) => TypedExpr::Lit {
-                value: Lit::Int(0),
-                ty: self.unit,
-            },
+            Expr::Read(r) => self.lower_read(r),
+            Expr::Parse(p) => self.lower_parse(p),
             Expr::Error(_) => TypedExpr::Lit {
                 value: Lit::Int(0),
                 ty: self.db.fresh_var(),
@@ -906,6 +913,73 @@ impl<'a> Lowerer<'a> {
         TypedExpr::Tuple { elements, ty }
     }
 
+    /// Lower a `read parser_expression` (§7.1, M6). Analyzes the parser expr
+    /// (validate + synthesize type + lower to plan), then produces a `TypedExpr`
+    /// carrying the plan index and synthesized result type.
+    fn lower_read(&mut self, r: &praxis_ast::ReadExpr) -> TypedExpr {
+        let Some(parser_expr) = r.parser_expr() else {
+            return self.error_expr();
+        };
+        match crate::parser_lower::analyze_parser_expr(
+            &parser_expr,
+            self.file,
+            self.db,
+            &mut self.diagnostics,
+        ) {
+            Some(analysis) => TypedExpr::Read {
+                plan_index: analysis.plan_index,
+                ty: analysis.result_type,
+            },
+            None => self.error_expr(),
+        }
+    }
+
+    /// Lower a `parse(text, parser_expression)` call (§7.1, M6).
+    fn lower_parse(&mut self, p: &praxis_ast::ParseExpr) -> TypedExpr {
+        let text_expr = p
+            .text_expr()
+            .map(|e| self.lower_expr(&e))
+            .unwrap_or_else(|| self.error_expr());
+        let ty = match &text_expr {
+            TypedExpr::Lit { ty, .. } => *ty,
+            _ => self.db.fresh_var(),
+        };
+        match p.parser_expr() {
+            Some(parser_expr) => {
+                match crate::parser_lower::analyze_parser_expr(
+                    &parser_expr,
+                    self.file,
+                    self.db,
+                    &mut self.diagnostics,
+                ) {
+                    Some(analysis) => TypedExpr::Parse {
+                        text: Box::new(text_expr),
+                        plan_index: analysis.plan_index,
+                        ty: analysis.result_type,
+                    },
+                    None => TypedExpr::Parse {
+                        text: Box::new(text_expr),
+                        plan_index: 0,
+                        ty,
+                    },
+                }
+            }
+            None => TypedExpr::Parse {
+                text: Box::new(text_expr),
+                plan_index: 0,
+                ty,
+            },
+        }
+    }
+
+    /// A typed expression representing a lowering error (Unit-typed literal).
+    fn error_expr(&self) -> TypedExpr {
+        TypedExpr::Lit {
+            value: Lit::Int(0),
+            ty: self.unit,
+        }
+    }
+
     // --- helpers -----------------------------------------------------------
 
     /// Resolve the symbol *declared* at `range` (a `let`/`var`/`fn`/param name
@@ -956,6 +1030,8 @@ fn expr_ty(e: &TypedExpr) -> Type {
         TypedExpr::Call { ty, .. } => *ty,
         TypedExpr::MethodCall { ty, .. } => *ty,
         TypedExpr::Tuple { ty, .. } => *ty,
+        TypedExpr::Read { ty, .. } => *ty,
+        TypedExpr::Parse { ty, .. } => *ty,
     }
 }
 

@@ -12,6 +12,7 @@ praxis-syntax.workspace = true
 praxis-ast.workspace = true
 praxis-types.workspace = true
 praxis-stdlib.workspace = true
+praxis-input-parser.workspace = true
 rowan.workspace = true
 
 [dev-dependencies]

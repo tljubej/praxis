@@ -21,6 +21,7 @@ pub mod hover;
 pub mod infer;
 pub mod lower;
 pub mod name_table;
+pub mod parser_lower;
 pub mod resolve;
 pub mod scope;
 pub mod symbol;

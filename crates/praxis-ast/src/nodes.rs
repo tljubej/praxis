@@ -695,11 +695,35 @@ impl ParserExpr {
 
     /// The text of the parser-expression node (for atom names, template text,
     /// constructor names). The HIR reads this to build the `ParserAst`.
+    ///
+    /// For an atom (`PARSER_EXPR > PARSER_ATOM > Ident`), this returns the
+    /// identifier's text. For a constructor call, the name lives in the nested
+    /// `PATH_EXPR`; use [`ParserExpr::constructor_name`] for that.
     pub fn text(&self) -> Option<String> {
         use rowan::NodeOrToken;
-        for child in self.syntax.children_with_tokens() {
-            if let NodeOrToken::Token(t) = child {
-                return Some(t.text().to_string());
+        // Descend to the first token in the subtree (handles PARSER_ATOM nesting).
+        for descendant in self.syntax.descendants_with_tokens() {
+            if let NodeOrToken::Token(t) = descendant {
+                if t.kind() == K::Ident {
+                    return Some(t.text().to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// The constructor name for a `PARSER_CALL` parser expression (the text of
+    /// the `PATH_EXPR`'s identifier). `None` for atoms/templates.
+    pub fn constructor_name(&self) -> Option<String> {
+        for child in self.syntax.children() {
+            if child.kind() == K::PATH_EXPR {
+                return Some(child.text().to_string());
+            }
+            // The call wraps a PARSER_CALL which contains the PATH_EXPR.
+            for sub in child.descendants() {
+                if sub.kind() == K::PATH_EXPR {
+                    return Some(sub.text().to_string());
+                }
             }
         }
         None

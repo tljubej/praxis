@@ -626,6 +626,7 @@ version = "0.1.0"
 dependencies = [
  "insta",
  "praxis-ast",
+ "praxis-input-parser",
  "praxis-parser",
  "praxis-source",
  "praxis-stdlib",
