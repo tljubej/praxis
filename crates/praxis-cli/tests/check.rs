@@ -98,6 +98,32 @@ fn parse_error_file_reports_multiple_diagnostics() {
 }
 
 #[test]
+fn type_error_file_reports_y001() {
+    // Milestone 2 acceptance: cross-type `var` reassignment is rejected end to
+    // end through `praxis check`, surfacing a Y001 type diagnostic.
+    let output = Command::new(bin_path())
+        .arg("check")
+        .arg(fixture("type_error.px"))
+        .output()
+        .expect("failed to run praxis");
+    let code = output
+        .status
+        .code()
+        .expect("process was terminated by signal");
+    assert_eq!(code, 1, "file with a type error should exit 1");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error[Y001]"),
+        "missing Y001 code: {stderr}"
+    );
+    assert!(
+        stderr.contains("expected Int, found Text"),
+        "missing type-mismatch message: {stderr}"
+    );
+}
+
+#[test]
 fn missing_file_exits_two() {
     let output = Command::new(bin_path())
         .arg("check")

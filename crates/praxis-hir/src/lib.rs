@@ -15,7 +15,9 @@
 //! [`Analysis`] carrying the symbol table, scope tree, resolved references,
 //! inferred types, and all diagnostics.
 
+pub mod catalog;
 pub mod diagnostics;
+pub mod hover;
 pub mod infer;
 pub mod name_table;
 pub mod resolve;
@@ -105,6 +107,10 @@ pub fn analyze_root(file: FileId, root: &praxis_syntax::SyntaxNode) -> Analysis 
 #[cfg(test)]
 #[path = "hir_tests.rs"]
 mod hir_tests;
+
+#[cfg(test)]
+#[path = "hover_tests.rs"]
+mod hover_tests;
 
 #[cfg(test)]
 #[path = "infer_tests.rs"]

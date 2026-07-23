@@ -295,6 +295,7 @@ dependencies = [
  "anyhow",
  "clap",
  "insta",
+ "praxis-hir",
  "praxis-parser",
  "praxis-runtime",
  "praxis-source",
