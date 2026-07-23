@@ -23,6 +23,19 @@ pub fn type_to_pattern(db: &TypeDb, t: Type) -> Option<TypePattern> {
         TypeData::Tuple(_) => None,    // catalog has no tuple pattern yet
         TypeData::Func { .. } => None, // function-as-receiver not in catalog
         TypeData::Unit => Some(TypePattern::Unit),
+        TypeData::Collection { ctor, args } => {
+            // Bridge each type arg to a pattern (recursing); unresolved element
+            // vars become `TypePattern::Var("T")` so the catalog's `Vec[T]`
+            // entry matches. A concrete `Vec[Int]` maps element-wise.
+            let pat_args: Vec<TypePattern> = args
+                .iter()
+                .map(|a| type_to_pattern(db, *a).unwrap_or(TypePattern::Var("T")))
+                .collect();
+            Some(TypePattern::Collection {
+                ctor: *ctor,
+                args: pat_args,
+            })
+        }
         TypeData::Var(_) => None, // an unresolved var cannot select a method
     }
 }

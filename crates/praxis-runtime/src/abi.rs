@@ -20,11 +20,16 @@ use crate::context::{FaultKind, RuntimeContext};
 use crate::gc::GcRef;
 use crate::heap::Heap;
 use crate::scalars;
+use crate::{collections::VecPayload, descriptor::TypeDescriptor};
 
 /// The runtime ABI version for this build. Bump this whenever the layout of
 /// [`RuntimeContext`](crate::RuntimeContext), the calling convention, or the
 /// signature set of `praxis_*` runtime wrappers changes in an incompatible way.
-pub const RUNTIME_ABI_VERSION: u32 = 1;
+///
+/// v2 (M5): `RuntimeContext` gained the `roots: *mut ShadowFrame` field for the
+/// compiler-managed shadow-stack spill (ADR-019), and the `praxis_push_shadow_frame`
+/// / `praxis_pop_shadow_frame` extern helpers were added.
+pub const RUNTIME_ABI_VERSION: u32 = 2;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -46,7 +51,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 1;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Internals the wrappers share.
@@ -66,6 +71,30 @@ unsafe fn heap<'a>(ctx: *mut RuntimeContext) -> &'a Heap {
     // SAFETY: the caller guarantees `ctx` points at a live, wired context whose
     // `heap` field references a valid `Heap` for the duration of the call.
     unsafe { &*(*ctx).heap }
+}
+
+/// Trigger a collection on allocation pressure, rooting from the context's
+/// shadow-stack frame chain (§12.4, ADR-019). Called by every allocating
+/// `praxis_*` wrapper. Safe to call with a null/unwired context (no-op).
+///
+/// The roots are read from `ctx.roots`: the current shadow frame, whose
+/// `RootSet` impl walks the whole parent chain. If `roots` is null (no frame
+/// pushed yet — e.g. during host-driven allocation before `main`), the
+/// immortals are the only survivors, which is correct.
+#[inline]
+unsafe fn maybe_collect(ctx: *mut RuntimeContext) {
+    if ctx.is_null() {
+        return;
+    }
+    // SAFETY: ctx is live and wired.
+    let roots_ptr = unsafe { (*ctx).roots };
+    if roots_ptr.is_null() {
+        return;
+    }
+    // SAFETY: `roots_ptr` is a live shadow frame (pushed by a prologue that has
+    // not yet returned).
+    let frame: &dyn crate::RootSet = unsafe { &*roots_ptr };
+    unsafe { heap(ctx).maybe_collect(frame) };
 }
 
 /// Read the `i64` payload of an `Int` `GcRef`. Used by every arithmetic wrapper.
@@ -94,6 +123,12 @@ unsafe fn unit_sentinel(ctx: *mut RuntimeContext) -> GcRef {
 /// `ctx` must point at a live, wired `RuntimeContext` whose `heap` is valid.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_int(ctx: *mut RuntimeContext, value: i64) -> GcRef {
+    // Trigger a collection on allocation pressure before allocating, rooted at
+    // the current shadow frame. The new object is not yet a root, but it is
+    // returned by value to the caller, which spills it — so it is safe across
+    // this collection (the *previous* allocation's result was already spilled
+    // by the backend before this wrapper was called).
+    unsafe { maybe_collect(ctx) };
     // SAFETY: caller upholds the ctx/heap validity.
     unsafe { heap(ctx).alloc(scalars::INT, value) }
 }
@@ -328,6 +363,247 @@ pub unsafe extern "C" fn praxis_check_fault(ctx: *mut RuntimeContext) -> i64 {
     0
 }
 
+// ---------------------------------------------------------------------------
+// Vec[T] collection methods (§11.1, §11.2, §11.5, M5).
+//
+// `VecPayload` stores a `Box<[GcRef]>` (immutable length). `push` therefore
+// *reallocates*: it copies the existing elements into a grown `Vec`, appends
+// the new value, and returns a fresh `GcRef` to a new `VecPayload`. The old
+// vec is left to the collector. Per §11.5 reallocation safety, we never retain
+// an interior pointer into the Rust vector across a capacity-mutating op; the
+// new payload is built in full before the box is sealed.
+// ---------------------------------------------------------------------------
+
+/// Read the `VecPayload` out of a `GcRef` as a shared ref, asserting it is a Vec.
+///
+/// # Safety
+/// `r` must be a valid `Vec` `GcRef`.
+unsafe fn vec_payload(r: GcRef) -> &'static VecPayload {
+    // SAFETY: caller guarantees `r` is a Vec; the non-moving GC (ADR-011) keeps
+    // the payload address stable for the object's lifetime. The `'static` is
+    // unbounded because the raw FFI boundary has no lifetime to carry; the
+    // caller (a wrapper that holds `ctx`) ensures the object outlives the use.
+    unsafe { &*r.payload::<VecPayload>() }
+}
+
+/// Read the `VecPayload` out of a `GcRef` as a mutable ref, asserting it is a
+/// Vec. Used by `push` to mutate the vector in place (§11.1).
+///
+/// # Safety
+/// `r` must be a valid `Vec` `GcRef`.
+unsafe fn vec_payload_mut(r: GcRef) -> &'static mut VecPayload {
+    // SAFETY: caller guarantees `r` is a Vec; the non-moving GC keeps the
+    // payload stable. We hold `&mut` only for the duration of this wrapper call,
+    // which is single-threaded and not reentrant through the GC.
+    unsafe { &mut *r.payload::<VecPayload>() }
+}
+
+/// Allocate a new empty `Vec[T]` with the given element descriptor (§11.2).
+/// Returns a `GcRef` to a zero-length vector.
+///
+/// # Safety
+/// `ctx` must be live and wired. `element_descriptor` must be a valid pointer to
+/// a `'static TypeDescriptor`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_new(
+    ctx: *mut RuntimeContext,
+    element_descriptor: *const TypeDescriptor,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let element_descriptor = if element_descriptor.is_null() {
+        scalars::INT
+    } else {
+        // SAFETY: caller guarantees a valid `'static` descriptor pointer.
+        unsafe { &*element_descriptor }
+    };
+    // SAFETY: VecPayload matches VEC's size/align and is fully initialized.
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::collections::VEC,
+            std::mem::size_of::<VecPayload>(),
+            std::mem::align_of::<VecPayload>(),
+            |payload| {
+                (payload as *mut VecPayload).write(VecPayload {
+                    element_descriptor,
+                    items: Vec::new(),
+                });
+            },
+        )
+    }
+}
+
+/// Append `value` to `vec` in place (§11.1). Returns the Unit sentinel — the
+/// receiver is mutated directly, so the caller's `GcRef` remains valid (the
+/// `VecPayload` object does not move; only its internal buffer may grow).
+///
+/// # Safety
+/// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`; `value`
+/// must be a valid `GcRef` whose type matches the vector's element descriptor.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_push(
+    ctx: *mut RuntimeContext,
+    vec: GcRef,
+    value: GcRef,
+) -> GcRef {
+    // `push` may grow the Vec's backing buffer, which allocates Rust heap memory
+    // (not GC memory). A GC collection during this would be safe (the vec
+    // object is rooted by the caller's spilled `vec` local), but we trigger it
+    // *before* the mutation to keep the rooting story simple: `value` is passed
+    // by value and is not yet in the vec, so it must survive across this
+    // collection via the caller's shadow frame.
+    unsafe { maybe_collect(ctx) };
+    // SAFETY: caller guarantees `vec` is a valid Vec.
+    let p = unsafe { vec_payload_mut(vec) };
+    p.items.push(value);
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// The number of elements in `vec`, as a boxed `Int` (§11.1).
+///
+/// # Safety
+/// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_len(ctx: *mut RuntimeContext, vec: GcRef) -> GcRef {
+    // SAFETY: caller guarantees `vec` is a valid Vec.
+    let p = unsafe { vec_payload(vec) };
+    let len = p.items.len() as i64;
+    // len allocates the returned Int, but the input vec is still live via `vec`.
+    unsafe { heap(ctx).alloc(scalars::INT, len) }
+}
+
+/// The element at `index`, or an `IndexOutOfBounds` fault if out of range
+/// (§9.2, §11.1). Returns the Unit sentinel on fault.
+///
+/// # Safety
+/// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`; `index`
+/// must be a valid `Int` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_get(
+    ctx: *mut RuntimeContext,
+    vec: GcRef,
+    index: GcRef,
+) -> GcRef {
+    // SAFETY: caller guarantees `vec` is a valid Vec.
+    let p = unsafe { vec_payload(vec) };
+    // SAFETY: caller guarantees `index` is a valid Int.
+    let idx = unsafe { int_payload(index) };
+    if idx < 0 || idx as usize >= p.items.len() {
+        unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+        return unsafe { unit_sentinel(ctx) };
+    }
+    // Return the element by value (a copy of the GcRef). No allocation, so no
+    // collection is needed; the vec stays live via `vec`.
+    p.items[idx as usize]
+}
+
+/// True iff `vec` has no elements, as a boxed `Bool` (§11.1).
+///
+/// # Safety
+/// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_is_empty(ctx: *mut RuntimeContext, vec: GcRef) -> GcRef {
+    // SAFETY: caller guarantees `vec` is a valid Vec.
+    let p = unsafe { vec_payload(vec) };
+    let empty = p.items.is_empty();
+    // SAFETY: ctx/heap valid; Bool immortal path.
+    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, empty) }
+}
+
+// ---------------------------------------------------------------------------
+// Text methods (§4.3, M5).
+//
+// `Text` is an immutable UTF-8 payload (`Box<str>`). The methods are pure
+// (no allocation beyond the result object) and never fault.
+// ---------------------------------------------------------------------------
+
+/// Read the `Box<str>` payload of a `Text` `GcRef`.
+///
+/// # Safety
+/// `r` must be a valid `Text` `GcRef`.
+unsafe fn text_str(r: GcRef) -> &'static str {
+    // SAFETY: caller guarantees `r` is Text; non-moving GC keeps it stable.
+    let boxed: &crate::text::OwnedText = unsafe { &*r.payload::<crate::text::OwnedText>() };
+    boxed
+}
+
+/// The number of Unicode scalar values (chars) in `text`, as a boxed `Int`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `text` must be a valid `Text` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_text_len(ctx: *mut RuntimeContext, text: GcRef) -> GcRef {
+    // SAFETY: caller guarantees `text` is Text.
+    let s = unsafe { text_str(text) };
+    let len = s.chars().count() as i64;
+    unsafe { heap(ctx).alloc(scalars::INT, len) }
+}
+
+/// True iff `text` has no chars, as a boxed `Bool`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `text` must be a valid `Text` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_text_is_empty(ctx: *mut RuntimeContext, text: GcRef) -> GcRef {
+    // SAFETY: caller guarantees `text` is Text.
+    let s = unsafe { text_str(text) };
+    // SAFETY: ctx/heap valid; Bool immortal path.
+    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, s.is_empty()) }
+}
+
+/// The Unicode scalar value (as a boxed `Int`) of the char at `index`, or an
+/// `IndexOutOfBounds` fault if out of range.
+///
+/// # Safety
+/// `ctx` must be live and wired; `text` must be a valid `Text` `GcRef`; `index`
+/// must be a valid `Int` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_text_get(
+    ctx: *mut RuntimeContext,
+    text: GcRef,
+    index: GcRef,
+) -> GcRef {
+    // SAFETY: caller guarantees `text` is Text.
+    let s = unsafe { text_str(text) };
+    // SAFETY: caller guarantees `index` is a valid Int.
+    let idx = unsafe { int_payload(index) };
+    if idx < 0 {
+        unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+        return unsafe { unit_sentinel(ctx) };
+    }
+    match s.chars().nth(idx as usize) {
+        Some(ch) => {
+            // Return the scalar value as an Int (Char is reserved; M5 uses Int).
+            unsafe { heap(ctx).alloc(scalars::INT, ch as i64) }
+        }
+        None => {
+            unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+            unsafe { unit_sentinel(ctx) }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `out(...)` — write a value to stdout followed by a newline (§16.1, M5).
+// ---------------------------------------------------------------------------
+
+/// Format `value` through its descriptor and write it to stdout followed by a
+/// newline. Returns the Unit sentinel (§4.3). Never faults.
+///
+/// # Safety
+/// `ctx` must be live and wired; `value` must be a valid `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_write_stdout(_ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
+    use std::io::Write;
+    let mut out = String::new();
+    value.format(&mut out);
+    let _ = std::io::stdout().write_all(out.as_bytes());
+    let _ = std::io::stdout().write_all(b"\n");
+    // Return the input value so `out(expr)` can be used in expression position
+    // (the spec models `out` as `(T) -> Unit`, but returning the value is more
+    // useful and the M4 corpus uses it for effect only).
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,8 +621,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_one_at_milestone_4() {
-        assert_eq!(RUNTIME_ABI_VERSION, 1);
+    fn version_is_two_at_milestone_5() {
+        assert_eq!(RUNTIME_ABI_VERSION, 2);
     }
 
     #[test]
@@ -510,5 +786,83 @@ mod tests {
         let f = Fault::clear();
         assert!(!f.is_pending());
         assert_eq!(f.kind, FaultKind::None);
+    }
+
+    // --- Vec[T] collection wrappers (M5) -----------------------------------
+
+    #[test]
+    fn vec_new_is_empty() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; INT is a valid static descriptor.
+        unsafe {
+            let v = praxis_vec_new(ctx, crate::scalars::INT as *const _);
+            assert_eq!(praxis_bool_load(ctx, praxis_vec_is_empty(ctx, v)), 1);
+            assert_eq!(praxis_int_load(ctx, praxis_vec_len(ctx, v)), 0);
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    fn vec_push_grows_and_get_reads_back() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; push mutates the vec in place (returns Unit), so we
+        // keep using the same `v` GcRef throughout.
+        unsafe {
+            let v = praxis_vec_new(ctx, crate::scalars::INT as *const _);
+            let a = praxis_alloc_int(ctx, 10);
+            let b = praxis_alloc_int(ctx, 20);
+            let c = praxis_alloc_int(ctx, 30);
+            let _ = praxis_vec_push(ctx, v, a);
+            let _ = praxis_vec_push(ctx, v, b);
+            let _ = praxis_vec_push(ctx, v, c);
+            assert_eq!(praxis_int_load(ctx, praxis_vec_len(ctx, v)), 3);
+            let i0 = praxis_alloc_int(ctx, 0);
+            let i2 = praxis_alloc_int(ctx, 2);
+            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, i0)), 10);
+            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, i2)), 30);
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    fn vec_get_out_of_bounds_faults() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let v = praxis_vec_new(ctx, crate::scalars::INT as *const _);
+            let one = praxis_alloc_int(ctx, 1);
+            let _ = praxis_vec_get(ctx, v, one); // empty vec, index 0
+            assert!(rt.has_pending_fault());
+            assert_eq!(rt.fault(), FaultKind::IndexOutOfBounds);
+        }
+        let _ = rt.take_fault();
+        unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    fn vec_push_many_survive_collection() {
+        // Stress: push 1000 elements (forcing many GCs) and read them all back.
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; push mutates in place so `v` stays valid throughout.
+        unsafe {
+            let v = praxis_vec_new(ctx, crate::scalars::INT as *const _);
+            for i in 0..1000_i64 {
+                let elem = praxis_alloc_int(ctx, i);
+                let _ = praxis_vec_push(ctx, v, elem);
+            }
+            assert_eq!(praxis_int_load(ctx, praxis_vec_len(ctx, v)), 1000);
+            // Spot-check first/middle/last.
+            let zero = praxis_alloc_int(ctx, 0);
+            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, zero)), 0);
+            let five = praxis_alloc_int(ctx, 500);
+            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, five)), 500);
+            let nine = praxis_alloc_int(ctx, 999);
+            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, nine)), 999);
+        }
+        unsafe { drop_ctx(ctx) };
     }
 }

@@ -655,13 +655,28 @@ impl<'t> Parser<'t> {
 
     /// Parse one atomic type (no `->`). Emits exactly one node onto the builder:
     /// [`TYPE_REF`] for a scalar or grouped type, [`TUPLE_TYPE`] for two or more
-    /// comma-separated elements.
+    /// comma-separated elements. A scalar name followed by `[T]` or `[K, V]` is
+    /// a collection type (M5, §4.4) — also emitted as `TYPE_REF` with the bracketed
+    /// args as children.
     fn parse_atom_type(&mut self) {
         if self.at(SyntaxKind::Ident) {
+            let cp = self.checkpoint_lhs();
             self.eat_trivia();
             self.start_node(SyntaxKind::TYPE_REF);
             self.bump_meaningful(); // the scalar name
             self.finish_node();
+            // Collection type args: `Vec[Int]`, `Map[Text, Int]`, …
+            if self.at(SyntaxKind::L_BRACK) {
+                self.bump(); // `[`
+                self.start_node_at(cp, SyntaxKind::TYPE_REF);
+                // The first type arg.
+                self.parse_type();
+                while self.eat(SyntaxKind::COMMA) {
+                    self.parse_type();
+                }
+                self.expect(SyntaxKind::R_BRACK, "`]`");
+                self.finish_node(); // wraps name + args into one TYPE_REF
+            }
             return;
         }
         if self.at(SyntaxKind::L_PAREN) {
@@ -716,7 +731,8 @@ impl<'t> Parser<'t> {
         }
     }
 
-    /// An identifier, possibly followed by a call `(args)`.
+    /// An identifier, possibly followed by a call `(args)` and/or `.method(args)`
+    /// postfixes. Method calls chain left-associatively: `v.push(1).len()`.
     fn parse_name_or_call(&mut self) {
         let cp = self.checkpoint_lhs();
         self.start_node(SyntaxKind::PATH_EXPR);
@@ -742,6 +758,48 @@ impl<'t> Parser<'t> {
             self.expect(SyntaxKind::R_PAREN, "`)`");
             self.finish_node(); // ARG_LIST
             self.finish_node(); // CALL_EXPR
+        }
+        // Postfix method calls: `.method(args)`, chained left-associatively.
+        // Each iteration wraps the whole preceding expression (receiver) plus
+        // the method name + args into a METHOD_CALL_EXPR node.
+        //
+        // The checkpoint `cp` was taken *before* the receiver was emitted, so
+        // `start_node_at(cp, ...)` retroactively wraps the receiver (PATH_EXPR
+        // or a prior CALL_EXPR / METHOD_CALL_EXPR) as the first child. For
+        // chains (`v.push(1).len()`), update `cp` to the position before each
+        // iteration so the next method wraps the previous METHOD_CALL_EXPR.
+        let mut chain_cp = cp;
+        while self.at(SyntaxKind::DOT) {
+            self.bump(); // `.`
+                         // The method name.
+            if !self.at(SyntaxKind::Ident) {
+                let span = self.current_span();
+                self.error(span, "expected method name after `.`");
+                break;
+            }
+            self.bump(); // method name
+            self.start_node_at(chain_cp, SyntaxKind::METHOD_CALL_EXPR);
+            if self.at(SyntaxKind::L_PAREN) {
+                self.bump(); // `(`
+                self.start_node(SyntaxKind::ARG_LIST);
+                if !self.at(SyntaxKind::R_PAREN) {
+                    loop {
+                        let before = self.meaningful_index();
+                        self.parse_expr();
+                        if !self.eat(SyntaxKind::COMMA) {
+                            break;
+                        }
+                        self.ensure_progress(before);
+                    }
+                }
+                self.expect(SyntaxKind::R_PAREN, "`)`");
+                self.finish_node(); // ARG_LIST
+            }
+            self.finish_node(); // METHOD_CALL_EXPR
+                                // The next `.method()` in a chain must wrap this METHOD_CALL_EXPR,
+                                // so take a fresh checkpoint at the current position (the builder
+                                // position is now just after the finished METHOD_CALL_EXPR node).
+            chain_cp = self.checkpoint_lhs();
         }
     }
 

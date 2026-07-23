@@ -166,6 +166,10 @@ pub enum CallTarget {
     /// A user-defined function, by its MIR-local index-resolved name. The
     /// backend resolves this to the JIT'd function pointer.
     User(String),
+    /// A built-in runtime wrapper, by its `praxis_*` symbol name (M5, §11.1).
+    /// The backend resolves this through the registered symbol table. Method
+    /// calls (`receiver.push(x)`) lower to this variant.
+    Runtime(String),
 }
 
 /// Checked integer binary operators (§4.12). All fault on overflow; `Div`/`Rem`

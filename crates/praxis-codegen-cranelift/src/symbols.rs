@@ -6,6 +6,7 @@
 //! by the exact symbol name the lowering emits.
 
 use praxis_runtime::abi::*;
+use praxis_runtime::shadow_frame::{praxis_pop_shadow_frame, praxis_push_shadow_frame};
 
 /// Look up a `praxis_*` runtime symbol by name, returning its address as a
 /// `*const u8`. Returns `None` for unknown names (Cranelift then reports the
@@ -32,6 +33,19 @@ pub fn resolve(name: &str) -> Option<*const u8> {
         "praxis_int_le" => praxis_int_le as *const (),
         "praxis_int_ge" => praxis_int_ge as *const (),
         "praxis_check_fault" => praxis_check_fault as *const (),
+        "praxis_push_shadow_frame" => praxis_push_shadow_frame as *const (),
+        "praxis_pop_shadow_frame" => praxis_pop_shadow_frame as *const (),
+        "praxis_vec_new" => praxis_vec_new as *const (),
+        "praxis_vec_push" => praxis_vec_push as *const (),
+        "praxis_vec_len" => praxis_vec_len as *const (),
+        "praxis_vec_get" => praxis_vec_get as *const (),
+        "praxis_vec_is_empty" => praxis_vec_is_empty as *const (),
+        "praxis_text_len" => praxis_text_len as *const (),
+        "praxis_text_is_empty" => praxis_text_is_empty as *const (),
+        "praxis_text_get" => praxis_text_get as *const (),
+        "praxis_write_stdout" => praxis_write_stdout as *const (),
+        "praxis_push_debug_frame" => praxis_runtime::debug::praxis_push_debug_frame as *const (),
+        "praxis_pop_debug_frame" => praxis_runtime::debug::praxis_pop_debug_frame as *const (),
         _ => return None,
     };
     Some(ptr as *const u8)

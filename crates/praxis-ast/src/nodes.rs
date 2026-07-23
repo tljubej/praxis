@@ -282,6 +282,7 @@ pub enum Expr {
     If(IfExpr),
     While(WhileExpr),
     Call(CallExpr),
+    MethodCall(MethodCallExpr),
     Tuple(TupleExpr),
     /// An unparseable expression the parser wrapped in a `PARSE_ERROR` node.
     Error(SyntaxNode),
@@ -300,6 +301,7 @@ impl Expr {
             K::IF_EXPR => Expr::If(IfExpr::from_syntax(n)),
             K::WHILE_EXPR => Expr::While(WhileExpr::from_syntax(n)),
             K::CALL_EXPR => Expr::Call(CallExpr::from_syntax(n)),
+            K::METHOD_CALL_EXPR => Expr::MethodCall(MethodCallExpr::from_syntax(n)),
             K::TUPLE_EXPR => Expr::Tuple(TupleExpr::from_syntax(n)),
             K::PARSE_ERROR => Expr::Error(n),
             _ => return None,
@@ -603,6 +605,45 @@ impl CallExpr {
         child(&self.syntax)
     }
     /// The argument list.
+    pub fn arg_list(&self) -> Option<ArgList> {
+        child(&self.syntax)
+    }
+}
+
+/// A `receiver.method(args)` method-call expression (M5, §16.2). The receiver
+/// is the first child expression; the method name is the `Ident` token after
+/// the `DOT`; the argument list follows.
+#[derive(Clone, Debug)]
+pub struct MethodCallExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for MethodCallExpr {
+    const KIND: K = K::METHOD_CALL_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl MethodCallExpr {
+    /// The receiver expression (`vec` in `vec.push(x)`).
+    pub fn receiver(&self) -> Option<Expr> {
+        self.syntax.children().find_map(Expr::cast_from_child)
+    }
+    /// The method name token (the `Ident` appearing after the `DOT`). Returns
+    /// the first `Ident` that is not part of a child node (i.e. not the receiver
+    /// path's name, which lives inside the `PATH_EXPR` child).
+    pub fn method_name(&self) -> Option<SyntaxToken> {
+        // Walk tokens; the method name is the first `Ident` token that is a
+        // *direct* child of this node (the receiver's name lives inside its own
+        // child node, so it is not a direct token child here).
+        self.syntax
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == K::Ident)
+    }
+    /// The argument list, if present.
     pub fn arg_list(&self) -> Option<ArgList> {
         child(&self.syntax)
     }

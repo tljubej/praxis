@@ -74,6 +74,17 @@ impl TypeDb {
                 out.write_str(") -> ").ok();
                 self.write_type(*result, out, names);
             }
+            TypeData::Collection { ctor, args } => {
+                let _ = out.write_str(ctor.name());
+                out.push('[');
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        out.write_str(", ").ok();
+                    }
+                    self.write_type(*a, out, names);
+                }
+                out.push(']');
+            }
             TypeData::Var(state) => match state {
                 VarState::Generalized => {
                     let _ = out.write_str(names.name_for(t.0));

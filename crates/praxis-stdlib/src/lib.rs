@@ -12,10 +12,12 @@
 //! "reject duplicate entries" invariant. The full method set is filled in
 //! alongside the features that exercise each method.
 
+pub mod builtins;
 pub mod catalog;
 pub mod prelude;
 pub mod type_pattern;
 
+pub use builtins::builtin_catalog;
 pub use catalog::{
     MethodCatalog, MethodCatalogError, MethodEntry, MethodLowering, Purity, Stability,
 };

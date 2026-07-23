@@ -67,6 +67,19 @@ impl TypeDb {
     pub fn tuple(&mut self, elements: Vec<Type>) -> Type {
         self.intern(TypeData::Tuple(elements))
     }
+
+    /// A collection type `Ctor[args]`, e.g. `Vec[elem]` (§4.4, §11.2, M5).
+    #[must_use]
+    pub fn collection(&mut self, ctor: CollectionCtor, args: Vec<Type>) -> Type {
+        self.intern(TypeData::Collection { ctor, args })
+    }
+
+    /// The `Vec[T]` collection type (§4.4, §11.2). Convenience for
+    /// [`collection`](Self::collection) with the `Vec` ctor.
+    #[must_use]
+    pub fn vec(&mut self, elem: Type) -> Type {
+        self.collection(CollectionCtor::Vec, vec![elem])
+    }
 }
 
 #[cfg(test)]

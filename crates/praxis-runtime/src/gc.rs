@@ -121,6 +121,20 @@ impl GcRef {
         GcRef(ptr)
     }
 
+    /// Wrap a non-null raw header pointer. Internal convenience for callers
+    /// (e.g. the shadow frame) that hold a `*mut GcHeader` already known to be
+    /// non-null.
+    ///
+    /// # Safety
+    /// `ptr` must be non-null, properly aligned, and point at a valid live
+    /// `GcHeader`.
+    #[inline]
+    pub unsafe fn from_raw(ptr: *mut GcHeader) -> GcRef {
+        // SAFETY: forwarded to the caller's contract.
+        let nn = unsafe { NonNull::new_unchecked(ptr) };
+        GcRef(nn)
+    }
+
     /// The raw pointer this reference carries. Never null.
     #[inline]
     pub fn as_ptr(self) -> *mut GcHeader {

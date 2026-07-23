@@ -18,16 +18,19 @@
 pub mod abi;
 pub mod collections;
 pub mod context;
+pub mod debug;
 pub mod descriptor;
 pub mod gc;
 pub mod heap;
 pub mod immortal;
 pub mod roots;
 pub mod scalars;
+pub mod shadow_frame;
 pub mod text;
 
 pub use abi::{assert_abi_version, RUNTIME_ABI_VERSION};
-pub use context::{DebugFrame, Fault, FaultKind, Runtime, RuntimeContext};
+pub use context::{DebugFrame, DebugLocal, Fault, FaultKind, Runtime, RuntimeContext};
+pub use debug::DebugLocalMeta;
 pub use descriptor::{
     DropFn, DynamicHasher, EqualsFn, FormatFn, HashFn, StructHasher, TraceFn, Tracer,
     TypeDescriptor, TypeId,
@@ -36,3 +39,4 @@ pub use gc::{GcHeader, GcRef};
 pub use heap::{Heap, HeapStats};
 pub use immortal::Immortals;
 pub use roots::{RootScope, RootSet};
+pub use shadow_frame::{ShadowFrame, MAX_SHADOW_SLOTS};

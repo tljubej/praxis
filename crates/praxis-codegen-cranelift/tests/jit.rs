@@ -143,3 +143,166 @@ fn division_by_zero_returns_to_host_without_unwinding() {
     assert!(rt.has_pending_fault(), "div-by-zero should set the fault");
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::DivByZero);
 }
+
+// ===========================================================================
+// Milestone 5: shadow-stack GC spill (ADR-019).
+// ===========================================================================
+
+#[test]
+fn live_locals_survive_collection_during_a_loop() {
+    // The headline M5 spill test: a loop that allocates heavily (well past the
+    // 64 KiB initial collection threshold) while holding two live `Int` locals
+    // (`sum` and `i`) across every allocation safepoint. If the shadow-stack
+    // spill is wrong, a collection reclaims `sum`/`i` and the result corrupts.
+    //
+    // Each iteration allocates ~8 Int objects (the arithmetic + the counter);
+    // 10000 iterations allocates ~80k objects (~1.5 MiB), forcing many GCs.
+    let src = "fn main() -> Int {\n  var sum = 0\n  var i = 0\n  while i < 10000 { sum = sum + i; i = i + 1 }\n  sum\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "no fault expected");
+    // sum(0..10000) = 10000*9999/2 = 49995000
+    assert_eq!(result.as_int(), 49_995_000);
+}
+
+#[test]
+fn recursive_call_keeps_caller_locals_alive_across_collections() {
+    // fact(10) = 3628800. Each recursive call allocates (the materialized
+    // product), and the caller's `n` must survive across the callee's
+    // allocations. fib(20) is a heavier stress (more calls / allocations).
+    let src = "\
+fn fib(n: Int) -> Int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }
+fn main() -> Int { fib(20) }
+";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault());
+    // fib(20) = 6765
+    assert_eq!(result.as_int(), 6765);
+}
+
+// ===========================================================================
+// Milestone 5: Vec[T] method surface (§11, §16.2).
+// ===========================================================================
+
+#[test]
+fn vec_push_and_len_end_to_end() {
+    // The headline M5 vertical slice: construct a Vec, push values, read len.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "no fault expected");
+    assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn vec_get_reads_back_elements() {
+    // Push 10, 20, 30; get index 1 → 20.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.get(1)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 20);
+}
+
+#[test]
+fn vec_get_out_of_bounds_faults() {
+    // Accessing index 0 of an empty vector faults IndexOutOfBounds.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.get(0)\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault(), "OOB should fault");
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
+}
+
+#[test]
+fn vec_push_many_with_collection_during_growth() {
+    // Push 500 elements (forcing many GCs during growth), check length.
+    // This exercises both the method surface and the shadow-stack spill: the
+    // vector `v` must survive across every push's allocation + collection.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  v.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 500);
+}
+
+#[test]
+fn vec_push_many_read_back_correct() {
+    // Push 500 elements and read back the last (index 499 = value 499). This is
+    // a stricter test of the shadow-stack spill: the vec's *contents* must
+    // survive across every collection, not just the vec object itself.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  v.get(499)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 499);
+}
+
+// ===========================================================================
+// Milestone 5: Text methods (§4.3) and `out(...)` (§16.1).
+// ===========================================================================
+
+#[test]
+fn text_len_and_get_end_to_end() {
+    // Text literals allocate; .len() counts chars; .get(0) returns the scalar.
+    let src = "fn main() -> Int {\n  let s = \"hello\"\n  s.get(1)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault());
+    // 'e' = 101
+    assert_eq!(result.as_int(), 101);
+}
+
+#[test]
+fn text_len_counts_unicode_scalars() {
+    // "héllo" has 5 Unicode scalar values (é is one char).
+    let src = "fn main() -> Int {\n  let s = \"héllo\"\n  s.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 5);
+}
+
+#[test]
+fn text_is_empty_works() {
+    // An empty text literal's .is_empty() → Bool → compare as 1.
+    let src = "fn main() -> Int {\n  let s = \"\"\n  if s.is_empty() { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn text_get_out_of_bounds_faults() {
+    let src = "fn main() -> Int {\n  let s = \"ab\"\n  s.get(5)\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
+}
+
+#[test]
+fn out_writes_to_stdout_and_returns_value() {
+    // out(expr) should write the formatted value to stdout. We can't easily
+    // capture stdout in a unit test; instead verify it doesn't fault and the
+    // program completes. The return is the value itself (for chaining).
+    let src = "fn main() -> Int {\n  out(42)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+// ===========================================================================
+// Milestone 5: var reassignment and let object mutation under GC (§4.2).
+// ===========================================================================
+
+#[test]
+fn var_vec_reassign_survives_gc() {
+    // `var v` is reassigned to a fresh Vec after heavy allocation. The GC must
+    // not reclaim the live binding. §4.2: reassignment updates the binding.
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  v = Vec()\n  v.push(999)\n  v.get(0)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 999);
+}
+
+#[test]
+fn let_vec_mutation_visible_after_gc() {
+    // §4.2: "A let binding may still point to a mutable object." Push 1000
+    // elements to a `let v` (mutating the object), survive GCs, read back.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 1000 { v.push(i * 2); i = i + 1 }\n  v.get(500)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 1000); // 500 * 2
+}

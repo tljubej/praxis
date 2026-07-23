@@ -5,7 +5,7 @@
 //! vocabulary) and adds the inference-specific shapes on top: tuples, functions,
 //! and type variables.
 
-use praxis_stdlib::type_pattern::ScalarType;
+use praxis_stdlib::type_pattern::{CollectionCtor, ScalarType};
 
 use crate::type_id::Type;
 
@@ -18,6 +18,11 @@ use crate::type_id::Type;
 /// M2 only *constructs* `Int`, `Text`, `Bool`, `Unit`, and `Never`; the reserved
 /// scalars (`UInt`, `Float`, `Byte`, `Char`) surface as "unknown type" name
 /// diagnostics if a user writes them (ADR-007), per §4.3.
+///
+/// M5 adds [`Collection`](Self::Collection) so the inference engine can represent
+/// `Vec[T]` and drive method dispatch (ADR-010) against the receiver type. The
+/// full collection set (Map/Set/Counter/Heap/Deque) lands in M8; M5 focuses on
+/// `Vec`.
 #[derive(Clone, Debug)]
 pub enum TypeData {
     /// A built-in scalar: `Int`, `Text`, `Bool`, `Never`, …
@@ -30,6 +35,14 @@ pub enum TypeData {
     Tuple(Vec<Type>),
     /// A function `(P0, P1, …) -> R`.
     Func { params: Vec<Type>, result: Type },
+    /// A collection `Ctor[T, …]`, e.g. `Vec[Int]` (§4.4, §11.2). The `ctor`
+    /// names the collection kind (shared with `TypePattern::Collection`); `args`
+    /// are the type arguments (one for `Vec[T]`, two for `Map[K, V]`, …). M5
+    /// constructs `Vec` only; other ctors are reserved.
+    Collection {
+        ctor: CollectionCtor,
+        args: Vec<Type>,
+    },
     /// A type variable, in one of its lifecycle states (see [`VarState`]).
     Var(VarState),
 }

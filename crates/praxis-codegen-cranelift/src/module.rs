@@ -72,6 +72,19 @@ impl Jit {
             "praxis_int_le",
             "praxis_int_ge",
             "praxis_check_fault",
+            "praxis_push_shadow_frame",
+            "praxis_pop_shadow_frame",
+            "praxis_vec_new",
+            "praxis_vec_push",
+            "praxis_vec_len",
+            "praxis_vec_get",
+            "praxis_vec_is_empty",
+            "praxis_text_len",
+            "praxis_text_is_empty",
+            "praxis_text_get",
+            "praxis_write_stdout",
+            "praxis_push_debug_frame",
+            "praxis_pop_debug_frame",
         ];
         for name in sym_names {
             if let Some(ptr) = symbols::resolve(name) {

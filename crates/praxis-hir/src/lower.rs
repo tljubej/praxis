@@ -20,10 +20,12 @@ use std::collections::HashMap;
 
 use praxis_ast::{
     ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, Expr, ExprStmt, FnItem,
-    IfExpr, LetStmt, Literal, Param, ParamList, PathExpr, SourceFile, TupleExpr, UnaryExpr,
-    VarStmt, WhileExpr,
+    IfExpr, LetStmt, Literal, MethodCallExpr, Param, ParamList, PathExpr, SourceFile, TupleExpr,
+    UnaryExpr, VarStmt, WhileExpr,
 };
 use praxis_source::{Diagnostic, DiagnosticCategory, DiagnosticCode, FileSpan, Severity, Span};
+use praxis_stdlib::type_pattern::ScalarType as PatternScalar;
+use praxis_stdlib::TypePattern;
 use praxis_syntax::{SyntaxKind, SyntaxNode};
 use praxis_types::{Type, TypeDb};
 use rowan::TextRange;
@@ -181,6 +183,16 @@ pub enum TypedExpr {
         args: Vec<TypedExpr>,
         ty: Type,
     },
+    /// `receiver.method(args)` (M5, §16.2). `lowering_symbol` is the runtime
+    /// wrapper name the catalog resolved (e.g. `praxis_vec_push`), so the MIR
+    /// builder emits a direct call without re-resolving the catalog.
+    MethodCall {
+        receiver: Box<TypedExpr>,
+        name: String,
+        lowering_symbol: String,
+        args: Vec<TypedExpr>,
+        ty: Type,
+    },
     /// `( a, b, … )` — at least two elements.
     Tuple { elements: Vec<TypedExpr>, ty: Type },
 }
@@ -265,6 +277,7 @@ pub fn lower(
         refs,
         decls,
         diagnostics: Vec::new(),
+        catalog: builtin_catalog(),
         int,
         bool_,
         text,
@@ -296,6 +309,9 @@ struct Lowerer<'a> {
     /// Declaration-site ranges → SymbolId (from resolution; survives shadowing).
     decls: &'a HashMap<TextRange, SymbolId>,
     diagnostics: Vec<Diagnostic>,
+    /// The built-in method catalog (§16.2), used to resolve `receiver.method()`
+    /// calls to their runtime lowering symbol. Immutable; built once.
+    catalog: &'static praxis_stdlib::MethodCatalog,
     /// Cached handles for the common scalar/unit types, so the lowering does not
     /// allocate a fresh slot on every literal/binop (which would need `&mut db`
     /// repeatedly). Populated once at construction.
@@ -303,6 +319,13 @@ struct Lowerer<'a> {
     bool_: Type,
     text: Type,
     unit: Type,
+}
+
+/// The built-in method catalog, constructed once and cached for the process
+/// lifetime (it is immutable data). Used by every `Lowerer`.
+fn builtin_catalog() -> &'static praxis_stdlib::MethodCatalog {
+    static CATALOG: std::sync::OnceLock<praxis_stdlib::MethodCatalog> = std::sync::OnceLock::new();
+    CATALOG.get_or_init(praxis_stdlib::builtin_catalog)
 }
 
 impl<'a> Lowerer<'a> {
@@ -452,6 +475,13 @@ impl<'a> Lowerer<'a> {
                     continue;
                 }
             }
+            // A non-ExprStmt (let/var/assign) after a pending tail demotes the
+            // tail to an effect statement — the tail was not the block's value
+            // after all, since more statements follow. This preserves source
+            // order: `{ v.push(i); i = i + 1 }` must push *before* incrementing.
+            if let Some(prev) = tail.take() {
+                stmts.push(TypedStmt::Expr(prev));
+            }
             if let Some(s) = self.lower_stmt(&child) {
                 stmts.push(s);
             }
@@ -562,6 +592,7 @@ impl<'a> Lowerer<'a> {
             Expr::If(i) => self.lower_if(i),
             Expr::While(w) => self.lower_while(w),
             Expr::Call(c) => self.lower_call(c),
+            Expr::MethodCall(m) => self.lower_method_call(m),
             Expr::Tuple(t) => self.lower_tuple(t),
             Expr::Error(_) => TypedExpr::Lit {
                 value: Lit::Int(0),
@@ -801,6 +832,66 @@ impl<'a> Lowerer<'a> {
         args.args().map(|a| self.lower_expr(&a)).collect()
     }
 
+    /// Lower `receiver.method(args)` (M5, §16.2). Resolves the method against
+    /// the built-in catalog via the [`crate::catalog`] bridge, recording the
+    /// runtime lowering symbol so the MIR builder emits a direct call.
+    fn lower_method_call(&mut self, m: &MethodCallExpr) -> TypedExpr {
+        // Lower the receiver (or fall back to a Unit-typed literal if the tree
+        // is malformed so the rest of the expression still lowers).
+        let receiver = match m.receiver() {
+            Some(r) => self.lower_expr(&r),
+            None => TypedExpr::Lit {
+                value: Lit::Int(0),
+                ty: self.unit,
+            },
+        };
+        let name = m
+            .method_name()
+            .map(|t| t.text().to_string())
+            .unwrap_or_default();
+        let args: Vec<TypedExpr> = m
+            .arg_list()
+            .map(|a| self.lower_args(&a))
+            .unwrap_or_default();
+        let arity = args.len();
+
+        // Resolve the method against the catalog, keyed by the receiver's
+        // inferred type + name + arity (ADR-010 bridge).
+        let hits = crate::catalog::lookup(self.db, self.catalog, expr_ty(&receiver), &name, arity);
+        if let Some(entry) = hits.first() {
+            let ty = pattern_to_type(self.db, &entry.result);
+            let lowering_symbol = match &entry.lowering {
+                praxis_stdlib::MethodLowering::RuntimeSymbol(sym) => sym.to_string(),
+                praxis_stdlib::MethodLowering::Intrinsic(_) => {
+                    // Intrinsics are not yet emitted (M8 pipeline); leave empty
+                    // so MIR skips the call for now.
+                    String::new()
+                }
+            };
+            TypedExpr::MethodCall {
+                receiver: Box::new(receiver),
+                name,
+                lowering_symbol,
+                args,
+                ty,
+            }
+        } else {
+            // Unknown method: emit a Y110 diagnostic and lower to Unit so the
+            // rest of the tree is still well-formed.
+            if let Some(name_tok) = m.method_name() {
+                self.diag(
+                    name_tok.text_range(),
+                    110,
+                    format!("no method `{name}` on this type taking {arity} argument(s)"),
+                );
+            }
+            TypedExpr::Lit {
+                value: Lit::Int(0),
+                ty: self.unit,
+            }
+        }
+    }
+
     fn lower_tuple(&mut self, t: &TupleExpr) -> TypedExpr {
         let elements: Vec<TypedExpr> = t.elements().map(|e| self.lower_expr(&e)).collect();
         let tys: Vec<Type> = elements.iter().map(expr_ty).collect();
@@ -856,8 +947,45 @@ fn expr_ty(e: &TypedExpr) -> Type {
         TypedExpr::If { ty, .. } => *ty,
         TypedExpr::While { ty, .. } => *ty,
         TypedExpr::Call { ty, .. } => *ty,
+        TypedExpr::MethodCall { ty, .. } => *ty,
         TypedExpr::Tuple { ty, .. } => *ty,
     }
+}
+
+/// Convert a catalog [`TypePattern`] (the schema-level result type of a method)
+/// into a real inferred [`Type`]. `Var("T")` becomes a fresh unbound var (the
+/// caller unifies it with the receiver's element type if needed); concrete
+/// scalars/collections map directly. This is the reverse of
+/// [`crate::catalog::type_to_pattern`] for result types.
+///
+/// Public so the inference pass can instantiate param/result patterns before
+/// unification (both passes share the one conversion).
+pub fn pattern_to_type_pub(db: &mut TypeDb, p: &TypePattern) -> Type {
+    pattern_to_type(db, p)
+}
+
+fn pattern_to_type(db: &mut TypeDb, p: &TypePattern) -> Type {
+    match p {
+        TypePattern::Scalar(s) => db.scalar(map_pattern_scalar(*s)),
+        TypePattern::Unit => db.unit(),
+        TypePattern::Var(_) => db.fresh_var(),
+        TypePattern::Collection { ctor, args } => {
+            let arg_tys: Vec<Type> = args.iter().map(|a| pattern_to_type(db, a)).collect();
+            db.collection(*ctor, arg_tys)
+        }
+        TypePattern::Function { params, result } => {
+            let ps: Vec<Type> = params.iter().map(|p| pattern_to_type(db, p)).collect();
+            let r = pattern_to_type(db, result);
+            db.func(ps, r)
+        }
+        TypePattern::Opaque => db.fresh_var(),
+    }
+}
+
+/// Map a stdlib pattern scalar to the inference scalar (they share the enum via
+/// `praxis_types::ScalarType`, so this is identity).
+fn map_pattern_scalar(s: PatternScalar) -> praxis_types::ScalarType {
+    s
 }
 
 /// A `Unit`-typed literal placeholder (for malformed subtrees).

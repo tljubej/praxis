@@ -331,6 +331,19 @@ impl Resolver {
             Expr::If(i) => self.resolve_if(scope, i),
             Expr::While(w) => self.resolve_while(scope, w),
             Expr::Call(c) => self.resolve_call(scope, c),
+            Expr::MethodCall(m) => {
+                // Resolve names in the receiver and the arguments. Method names
+                // themselves are resolved against the catalog during inference,
+                // not name resolution (they are not scope bindings).
+                if let Some(receiver) = m.receiver() {
+                    self.resolve_expr(scope, &receiver);
+                }
+                if let Some(args) = m.arg_list() {
+                    for arg in args.args() {
+                        self.resolve_expr(scope, &arg);
+                    }
+                }
+            }
             Expr::Error(_) => {}
         }
     }

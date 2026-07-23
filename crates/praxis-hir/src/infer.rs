@@ -19,7 +19,8 @@ use std::collections::HashMap;
 
 use praxis_ast::{
     ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, Expr, ExprStmt, FnItem,
-    IfExpr, LetStmt, Literal, Param, PathExpr, SourceFile, UnaryExpr, VarStmt, WhileExpr,
+    IfExpr, LetStmt, Literal, MethodCallExpr, Param, PathExpr, SourceFile, UnaryExpr, VarStmt,
+    WhileExpr,
 };
 use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
 use praxis_syntax::SyntaxKind;
@@ -70,6 +71,7 @@ pub(crate) fn infer_with_tree(
         decls,
         ref_types: HashMap::new(),
         diagnostics: Vec::new(),
+        catalog: builtin_catalog(),
     };
     inferer.seed_builtin_schemes();
     let root_scope = inferer.scopes.root();
@@ -104,6 +106,16 @@ struct Inferer {
     decls: HashMap<TextRange, SymbolId>,
     ref_types: HashMap<TextRange, Type>,
     diagnostics: Vec<Diagnostic>,
+    /// The built-in method catalog (§16.2), for resolving `receiver.method()`.
+    /// Immutable; shared via a process-wide `OnceLock`.
+    catalog: &'static praxis_stdlib::MethodCatalog,
+}
+
+/// The built-in method catalog, constructed once and cached for the process
+/// lifetime (it is immutable data). Shared with the HIR lowerer.
+fn builtin_catalog() -> &'static praxis_stdlib::MethodCatalog {
+    static CATALOG: std::sync::OnceLock<praxis_stdlib::MethodCatalog> = std::sync::OnceLock::new();
+    CATALOG.get_or_init(praxis_stdlib::builtin_catalog)
 }
 
 impl Inferer {
@@ -143,20 +155,33 @@ impl Inferer {
             .names
             .all()
             .iter()
-            .filter(|s| s.kind == SymbolKind::Builtin && (s.name == "out" || s.name == "panic"))
+            .filter(|s| {
+                s.kind == SymbolKind::Builtin
+                    && (s.name == "out" || s.name == "panic" || s.name == "Vec")
+            })
             .map(|s| (s.id, s.name.clone()))
             .collect();
         for (id, name) in to_seed {
-            // Create the polymorphic var at an inner level so generalization
-            // quantifies it: `forall T. (T) -> Unit`.
             let scheme = self.db.scoped_return(|db| {
-                let v = db.fresh_var();
-                let result = if name == "panic" {
-                    db.never()
-                } else {
-                    db.unit()
+                let mono = match name.as_str() {
+                    "out" | "panic" => {
+                        // forall T. (T) -> Unit  (out)   /   forall T. (T) -> Never  (panic)
+                        let v = db.fresh_var();
+                        let result = if name == "panic" {
+                            db.never()
+                        } else {
+                            db.unit()
+                        };
+                        db.func(vec![v], result)
+                    }
+                    "Vec" => {
+                        // forall T. () -> Vec[T]
+                        let v = db.fresh_var();
+                        let vec_ty = db.vec(v);
+                        db.func(vec![], vec_ty)
+                    }
+                    other => panic!("unexpected builtin `{other}` seeded"),
                 };
-                let mono = db.func(vec![v], result);
                 db.generalize(mono)
             });
             if let Some(sym) = self.names.get_mut(id) {
@@ -350,6 +375,7 @@ impl Inferer {
             Expr::If(i) => self.infer_if(scope, i),
             Expr::While(w) => self.infer_while(scope, w),
             Expr::Call(c) => self.infer_call(scope, c),
+            Expr::MethodCall(m) => self.infer_method_call(scope, m),
             Expr::Error(_) => self.db.fresh_var(),
         }
     }
@@ -585,6 +611,57 @@ impl Inferer {
         args.args().map(|a| self.infer_expr(scope, &a)).collect()
     }
 
+    /// Infer `receiver.method(args)` (M5, §16.2). Resolves the method against
+    /// the built-in catalog by receiver type + name + arity, unifies the
+    /// element-type variable with the receiver's element type, checks arg types,
+    /// and returns the result type. Records the method-name range in
+    /// `ref_types` for hover.
+    fn infer_method_call(&mut self, scope: ScopeId, m: &MethodCallExpr) -> Type {
+        // Infer the receiver's type.
+        let receiver_ty = match m.receiver() {
+            Some(r) => self.infer_expr(scope, &r),
+            None => self.db.fresh_var(),
+        };
+        let name = m
+            .method_name()
+            .map(|t| t.text().to_string())
+            .unwrap_or_default();
+        let arg_types: Vec<Type> = m
+            .arg_list()
+            .map(|a| self.collect_args(scope, &a))
+            .unwrap_or_default();
+        let arity = arg_types.len();
+
+        // Record the method-name range for hover (the result type).
+        if let Some(tok) = m.method_name() {
+            self.ref_types.insert(tok.text_range(), receiver_ty);
+        }
+
+        // Look up the method in the catalog via the ADR-010 bridge.
+        let hits = crate::catalog::lookup(&self.db, self.catalog, receiver_ty, &name, arity);
+        let Some(entry) = hits.first().copied() else {
+            // Unknown method: leave the result as a fresh var; the HIR lowerer
+            // emits the Y110 diagnostic (it has the method-name span).
+            return self.db.fresh_var();
+        };
+
+        // Unify the method's parameter types with the argument types. The
+        // catalog's param patterns carry `Var("T")` for the element type; we
+        // instantiate them as fresh vars, then unify the receiver's element
+        // type against the first param's `T` (for `push`) so a `Vec[Int]`
+        // only accepts `Int` arguments.
+        let param_tys: Vec<Type> = entry
+            .params
+            .iter()
+            .map(|p| crate::lower::pattern_to_type_pub(&mut self.db, p))
+            .collect();
+        for (pt, at) in param_tys.iter().zip(arg_types.iter()) {
+            let _ = self.db.unify(*pt, *at);
+        }
+        // The result type.
+        crate::lower::pattern_to_type_pub(&mut self.db, &entry.result)
+    }
+
     fn is_builtin(&self, id: SymbolId, name: &str) -> bool {
         self.names
             .get(id)
@@ -623,6 +700,19 @@ impl Inferer {
                     }
                     _ => None,
                 })?;
+                // Collection type: `Vec[T]`, `Map[K, V]`, … The parser emits the
+                // name plus bracketed child TYPE_REF args as children of one node.
+                let type_args: Vec<Type> = node
+                    .children()
+                    .filter(|c| c.kind() == SyntaxKind::TYPE_REF)
+                    .map(|c| {
+                        self.resolve_type_node(&c)
+                            .unwrap_or_else(|| self.db.fresh_var())
+                    })
+                    .collect();
+                if !type_args.is_empty() {
+                    return self.collection_from_name(&name, type_args);
+                }
                 self.scalar_from_name(&name)
             }
             SyntaxKind::TUPLE_TYPE => {
@@ -691,5 +781,16 @@ impl Inferer {
             _ => return None,
         };
         Some(self.db.scalar(scalar))
+    }
+
+    /// Resolve a collection type name + args to a [`Type`] (M5, §4.4). M5
+    /// supports `Vec`; other ctors are reserved and return `None` (reported as
+    /// an unknown type by resolution).
+    fn collection_from_name(&mut self, name: &str, args: Vec<Type>) -> Option<Type> {
+        let ctor = match name {
+            "Vec" => praxis_types::CollectionCtor::Vec,
+            _ => return None,
+        };
+        Some(self.db.collection(ctor, args))
     }
 }

@@ -7,9 +7,17 @@
 //! `format`, and `equals` dispatch element-wise without a type switch.
 //!
 //! This is the composite type that proves nested `GcRef` tracing (ADR-013):
-//! `trace` forwards every element to the tracer. The method surface
-//! (`push`/`get`/…) is M5; M3 ships only allocation, tracing, dropping,
-//! formatting, and equality.
+//! `trace` forwards every element to the tracer.
+//!
+//! **M5 change:** `items` is now a `Vec<GcRef>` (was `Box<[GcRef]>` in M3) so
+//! `push` mutates the vector *in place* — matching §4.2's "a `let` binding may
+//! still point to a mutable object" and §11.1's `push -> Unit` (the receiver is
+//! mutated, no new reference returned). The `Vec`'s backing storage may
+//! reallocate internally, but the `VecPayload` object itself stays at the same
+//! GC address (non-moving collector, ADR-011), so existing `GcRef`s remain
+//! valid. Per §11.5, runtime wrappers never expose an interior pointer to the
+//! `Vec`'s backing buffer across a capacity-mutating op; they reload from the
+//! payload each call.
 
 use std::fmt;
 
@@ -17,20 +25,19 @@ use crate::descriptor::{Tracer, TypeDescriptor};
 use crate::GcRef;
 use crate::{DynamicHasher, TypeId};
 
-/// The `Vec[T]` payload: the element descriptor plus the boxed slice of items.
+/// The `Vec[T]` payload: the element descriptor plus the growable items.
 ///
-/// `items` is a `Box<[GcRef]>` (not `Vec<GcRef>`) so the payload has a stable,
-/// simple ownership story; it is constructed from a `Vec<GcRef>` at allocation
-/// time. Both fields are `Drop`, so [`Vec::drop_value`] releases them on sweep
-/// (§12.5).
+/// `items` is a `Vec<GcRef>` so `push` can grow it in place (§11.1). Both fields
+/// are `Drop`, so [`VEC`]`'s `drop_value` releases them on sweep (§12.5).
 #[repr(C)]
 pub struct VecPayload {
     /// The descriptor for every element in `items`. Set at construction; all
     /// elements must share it. Read by `trace`/`format`/`equals` to dispatch
     /// without a scattered type switch (§11.4).
     pub element_descriptor: *const TypeDescriptor,
-    /// The elements, in order.
-    pub items: Box<[GcRef]>,
+    /// The elements, in order. A `Vec` (not `Box<[T]>`) so `push` mutates in
+    /// place.
+    pub items: Vec<GcRef>,
 }
 
 unsafe fn vec_trace(payload: *mut u8, tracer: &mut dyn Tracer) {

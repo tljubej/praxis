@@ -36,7 +36,21 @@ pub struct Heap {
     /// Wrapped in a `RefCell` because `collect` mutates it while a `&Heap` is
     /// reborrowed by the tracer callbacks.
     live: RefCell<Vec<NonNull<GcHeader>>>,
+    /// Bytes allocated since the last collection. Used by [`Heap::maybe_collect`]
+    /// to trigger automatic collection on allocation pressure (§12.4, M5). This
+    /// is the mechanism that makes "survives collection" observable from JIT'd
+    /// code: the alloc wrappers call `maybe_collect` with the current roots.
+    bytes_since_collect: RefCell<usize>,
+    /// The threshold at/above which [`Heap::maybe_collect`] runs a collection.
+    /// Doubled after each collection so the heap grows geometrically (amortized
+    /// O(1) allocations per collection), a standard GC pacing heuristic.
+    collect_threshold: RefCell<usize>,
 }
+
+/// The initial collection threshold (bytes). Small enough that the first
+/// collection runs early in a program's life (catching rooting bugs fast in
+/// tests), then grows via the doubling rule.
+pub const INITIAL_COLLECT_THRESHOLD: usize = 1 << 16; // 64 KiB
 
 // SAFETY: the heap owns raw allocations that are only accessed through `GcRef`s
 // the caller keeps rooted. It is `Send` because the collector is
@@ -58,6 +72,8 @@ impl Heap {
         Heap {
             arena: Bump::new(),
             live: RefCell::new(Vec::new()),
+            bytes_since_collect: RefCell::new(0),
+            collect_threshold: RefCell::new(INITIAL_COLLECT_THRESHOLD),
         }
     }
 
@@ -193,6 +209,8 @@ impl Heap {
 
         let nn = NonNull::new(header_ptr).expect("bumpalo never returns null");
         self.live.borrow_mut().push(nn);
+        // Account for the allocation against the collection pacing counter.
+        *self.bytes_since_collect.borrow_mut() += total;
         // SAFETY: `nn` points at the just-allocated, initialized header.
         unsafe { GcRef::from_non_null(nn) }
     }
@@ -205,6 +223,29 @@ impl Heap {
     pub fn collect(&self, roots: &dyn RootSet) {
         self.mark(roots);
         self.sweep();
+        // Reset the pacing counter and grow the threshold geometrically.
+        *self.bytes_since_collect.borrow_mut() = 0;
+        let mut threshold = self.collect_threshold.borrow_mut();
+        *threshold = (*threshold)
+            .saturating_mul(2)
+            .max(INITIAL_COLLECT_THRESHOLD);
+    }
+
+    /// Run a collection if allocation pressure has reached the threshold,
+    /// rooting from `roots`. Called by the `praxis_alloc_*` wrappers (§12.4)
+    /// so collection happens automatically inside JIT'd code — this is what
+    /// makes "nested vectors survive collection" (§19 M5 acceptance) testable
+    /// without the host forcing it.
+    ///
+    /// Returns `true` if a collection ran.
+    pub fn maybe_collect(&self, roots: &dyn RootSet) -> bool {
+        let should = *self.bytes_since_collect.borrow() >= *self.collect_threshold.borrow();
+        if should {
+            self.collect(roots);
+            true
+        } else {
+            false
+        }
     }
 
     /// Mark phase: color every reachable object black.
@@ -369,7 +410,7 @@ mod tests {
                 |payload| {
                     let vp = VecPayload {
                         element_descriptor: INT,
-                        items: elems.clone().into_boxed_slice(),
+                        items: elems.clone(),
                     };
                     (payload as *mut VecPayload).write(vp);
                 },
@@ -414,7 +455,7 @@ mod tests {
                     |payload| {
                         (payload as *mut VecPayload).write(VecPayload {
                             element_descriptor: INT,
-                            items: elems.into_boxed_slice(),
+                            items: elems,
                         });
                     },
                 )
@@ -432,7 +473,7 @@ mod tests {
                     (payload as *mut VecPayload).write(VecPayload {
                         // The element descriptor of a Vec-of-X is VEC itself.
                         element_descriptor: VEC,
-                        items: vec![inner0, inner1].into_boxed_slice(),
+                        items: vec![inner0, inner1],
                     });
                 },
             )

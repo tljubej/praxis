@@ -83,6 +83,22 @@ impl CollectionCtor {
             _ => 1,
         }
     }
+
+    /// The user-facing name of this collection constructor, e.g. `Vec`.
+    pub fn name(self) -> &'static str {
+        match self {
+            CollectionCtor::Vec => "Vec",
+            CollectionCtor::Deque => "Deque",
+            CollectionCtor::Map => "Map",
+            CollectionCtor::Set => "Set",
+            CollectionCtor::Counter => "Counter",
+            CollectionCtor::MinHeap => "MinHeap",
+            CollectionCtor::MaxHeap => "MaxHeap",
+            CollectionCtor::BitSet => "BitSet",
+            CollectionCtor::Grid => "Grid",
+            CollectionCtor::Range => "Range",
+        }
+    }
 }
 
 impl ScalarType {

@@ -14,6 +14,7 @@ use crate::gc::GcRef;
 use crate::heap::Heap;
 use crate::immortal::{read_bool, Immortals};
 use crate::roots::RootSet;
+use crate::shadow_frame::ShadowFrame;
 use crate::{collections::VecPayload, descriptor::TypeDescriptor};
 
 /// What kind of runtime fault occurred (§9.2, §10.4). Set by the runtime
@@ -28,6 +29,9 @@ pub enum FaultKind {
     IntOverflow = 1,
     /// Division or remainder by zero (§4.12).
     DivByZero = 2,
+    /// A collection index was out of bounds (§9.2). Raised by `Vec.get` /
+    /// indexing and similar accessors in M5.
+    IndexOutOfBounds = 3,
 }
 
 impl std::fmt::Display for FaultKind {
@@ -36,6 +40,7 @@ impl std::fmt::Display for FaultKind {
             FaultKind::None => write!(f, "no fault"),
             FaultKind::IntOverflow => write!(f, "integer overflow"),
             FaultKind::DivByZero => write!(f, "division by zero"),
+            FaultKind::IndexOutOfBounds => write!(f, "index out of bounds"),
         }
     }
 }
@@ -79,12 +84,48 @@ impl Default for Fault {
     }
 }
 
-/// One frame in the crash-debugger's snapshot chain (§9.3). Real layout lands
-/// in Milestone 10; for now it is an opaque anchor so the context's shape is
-/// fixed and ABI-stable within the build.
+/// One local variable in a debug frame snapshot (§9.3, M5).
+///
+/// Carries the source name, the compiler-assigned `symbol_id` (which
+/// disambiguates shadowed bindings — two `let a` in the same scope get distinct
+/// ids, §4.2), and the current `GcRef` value. The crash debugger (M10) reads
+/// these to display locals; M5 only *registers* them (the prologue/epilogue
+/// push/pop frames and the spill updates the values).
+#[repr(C)]
+pub struct DebugLocal {
+    /// The source name as written (e.g. `a`). Not owned by the frame; points at
+    /// a `'static` string the compiler embedded.
+    pub source_name: *const u8,
+    /// The name's byte length.
+    pub name_len: u32,
+    /// The compiler-assigned symbol id (disambiguates shadowed bindings, §4.2).
+    pub symbol_id: u32,
+    /// The current value of the local (updated by the spill at safepoints).
+    pub value: GcRef,
+}
+
+/// One frame in the crash-debugger's snapshot chain (§9.3, M5).
+///
+/// M5 gives `DebugFrame` a real layout: a parent pointer (the call chain), the
+/// function name, and a slice of [`DebugLocal`] entries. The prologue helper
+/// ([`crate::debug::push_debug_frame`]) allocates and links a frame; the
+/// epilogue pops it. The shadow-stack spill (ADR-019) keeps the `value` fields
+/// fresh across GC safepoints so a crash snapshot reflects live state.
+///
+/// The crash-debugger REPL that *reads* these frames lands in M10; M5 only
+/// ensures the metadata is correct and registered.
 #[repr(C)]
 pub struct DebugFrame {
-    _opaque: (),
+    /// The caller's frame, or null for the outermost (`main`) frame.
+    pub parent: *mut DebugFrame,
+    /// The function's source name (a `'static` embedded string).
+    pub func_name: *const u8,
+    /// The function name's byte length.
+    pub func_name_len: u32,
+    /// The local-variable entries, as a pointer + count (FFI-safe slice).
+    pub locals: *mut DebugLocal,
+    /// How many locals are in the `locals` array.
+    pub local_count: u32,
 }
 
 /// The hidden first argument to every generated function.
@@ -97,6 +138,11 @@ pub struct RuntimeContext {
     pub heap: *mut Heap,
     pub pending_fault: *mut Fault,
     pub debug_top: *mut DebugFrame,
+    /// The current top of the compiler-managed shadow-stack root chain (§12.3,
+    /// ADR-019). Generated code pushes a frame in the prologue, spills live
+    /// `GcRef`s into it at safepoints, and pops it in the epilogue. The
+    /// collector walks this chain via [`RootSet`].
+    pub roots: *mut ShadowFrame,
     pub input_source: GcRef,
     pub current_generation: u64,
 }
@@ -114,6 +160,7 @@ impl RuntimeContext {
             heap: std::ptr::null_mut(),
             pending_fault: std::ptr::null_mut(),
             debug_top: std::ptr::null_mut(),
+            roots: std::ptr::null_mut(),
             input_source,
             current_generation: 0,
         }
@@ -188,12 +235,14 @@ impl Runtime {
 
     /// A `RuntimeContext` view of this runtime, suitable for generated code.
     /// `pending_fault` points at this runtime's fault slot; `debug_top` stays
-    /// null until the debugger lands (M10).
+    /// null until the debugger lands (M10); `roots` starts null — the first
+    /// generated function's prologue pushes the initial shadow frame.
     pub fn context(&mut self) -> RuntimeContext {
         RuntimeContext {
             heap: &mut self.heap as *mut Heap,
             pending_fault: &mut self.fault as *mut Fault,
             debug_top: std::ptr::null_mut(),
+            roots: std::ptr::null_mut(),
             input_source: self.immortals.unit(),
             current_generation: 0,
         }
@@ -291,7 +340,7 @@ impl Runtime {
                 |payload| {
                     (payload as *mut VecPayload).write(VecPayload {
                         element_descriptor,
-                        items: items.into_boxed_slice(),
+                        items,
                     });
                 },
             )

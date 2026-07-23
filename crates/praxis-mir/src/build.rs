@@ -259,6 +259,48 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             args,
             ..
         } => {
+            // The `Vec()` builtin constructs an empty vector via praxis_vec_new.
+            // For M5 the element type is Int (a real type-arg `Vec[T]()` is a
+            // follow-up); pass a null descriptor and let the wrapper default.
+            if callee_name == "Vec" {
+                let dst = b.alloc_gc(Type(0), None);
+                // Pass 0 (null descriptor) as the single arg; praxis_vec_new
+                // defaults to INT when the descriptor pointer is null.
+                let null_arg = b.alloc_scalar(ScalarKind::Int);
+                b.push(Inst::ConstInt {
+                    dst: null_arg,
+                    value: 0,
+                });
+                let arg_gc = b.alloc_gc(Type(0), None);
+                b.push(Inst::MoveGc {
+                    dst: arg_gc,
+                    src: null_arg,
+                });
+                b.push(Inst::Call {
+                    dst,
+                    callee: CallTarget::Runtime("praxis_vec_new".to_string()),
+                    args: vec![arg_gc],
+                    live_roots: Vec::new(),
+                });
+                b.check_fault();
+                return dst;
+            }
+            // The `out(x)` builtin writes x to stdout via praxis_write_stdout.
+            if callee_name == "out" {
+                let arg_local = args
+                    .first()
+                    .map(|a| lower_expr_gc(b, a))
+                    .unwrap_or_else(|| lower_lit_gc(b, &Lit::Int(0)));
+                let dst = b.alloc_gc(Type(0), None);
+                b.push(Inst::Call {
+                    dst,
+                    callee: CallTarget::Runtime("praxis_write_stdout".to_string()),
+                    args: vec![arg_local],
+                    live_roots: Vec::new(),
+                });
+                // out does not fault; no check_fault needed.
+                return dst;
+            }
             let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
             let dst = b.alloc_gc(Type(0), None);
             b.push(Inst::Call {
@@ -267,6 +309,42 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 args: arg_locals,
                 live_roots: Vec::new(),
             });
+            b.check_fault();
+            dst
+        }
+        TypedExpr::MethodCall {
+            receiver,
+            name: _,
+            lowering_symbol,
+            args,
+            ..
+        } => {
+            // A method call lowers to a runtime-wrapper call. The receiver is
+            // the first argument; the method's explicit args follow. The
+            // catalog resolved `lowering_symbol` (e.g. `praxis_vec_push`); if
+            // empty (an intrinsic not yet emitted), skip the call.
+            if lowering_symbol.is_empty() {
+                // No runtime symbol yet (M8 intrinsic): evaluate the receiver
+                // and args for effect and return a Unit placeholder.
+                let _ = lower_expr_gc(b, receiver);
+                for a in args {
+                    let _ = lower_expr_gc(b, a);
+                }
+                return lower_lit_gc(b, &Lit::Int(0));
+            }
+            let mut arg_locals: Vec<LocalId> = Vec::with_capacity(args.len() + 1);
+            arg_locals.push(lower_expr_gc(b, receiver));
+            for a in args {
+                arg_locals.push(lower_expr_gc(b, a));
+            }
+            let dst = b.alloc_gc(Type(0), None);
+            b.push(Inst::Call {
+                dst,
+                callee: CallTarget::Runtime(lowering_symbol.clone()),
+                args: arg_locals,
+                live_roots: Vec::new(),
+            });
+            // Method calls may fault (e.g. vec.get out of bounds); check after.
             b.check_fault();
             dst
         }
@@ -498,6 +576,7 @@ fn expr_static_type(e: &TypedExpr) -> Type {
         | TypedExpr::If { ty, .. }
         | TypedExpr::While { ty, .. }
         | TypedExpr::Call { ty, .. }
+        | TypedExpr::MethodCall { ty, .. }
         | TypedExpr::Tuple { ty, .. } => *ty,
         TypedExpr::Block(blk) => blk.ty,
     }

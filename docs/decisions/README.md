@@ -24,3 +24,6 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-016: MIR liveness and the per-safepoint root set](./016-mir-liveness-and-roots.md)
 - [ADR-017: Runtime ABI wrappers and the no-panic fault protocol](./017-runtime-abi-wrappers-and-fault-protocol.md)
 - [ADR-018: Monomorphization deferred — M4 is monomorphic](./018-monomorphization-deferred.md)
+- [ADR-019: Compiler-managed shadow-stack spill](./019-shadow-stack-spill.md)
+- [ADR-020: Method-call dispatch through the built-in catalog](./020-method-dispatch-and-collections.md)
+- [ADR-021: Debug frame metadata and shadowed-symbol registration](./021-debug-frame-metadata.md)

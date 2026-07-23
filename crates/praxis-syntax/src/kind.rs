@@ -190,6 +190,8 @@ pub enum SyntaxKind {
     WHILE_EXPR,
     /// A `callee(args)` call expression (covers `out(...)`).
     CALL_EXPR,
+    /// A `receiver.method(args)` method-call expression (M5, §16.2).
+    METHOD_CALL_EXPR,
     /// The `(arg, arg, ...)` argument list of a call.
     ARG_LIST,
     /// A path: an identifier or a dotted name.

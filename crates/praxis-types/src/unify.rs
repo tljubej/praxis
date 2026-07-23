@@ -88,6 +88,11 @@ impl TypeDb {
                 }
                 self.lower_levels(result, min_level);
             }
+            TypeData::Collection { args, .. } => {
+                for a in args {
+                    self.lower_levels(a, min_level);
+                }
+            }
             _ => {}
         }
     }
@@ -103,6 +108,7 @@ impl TypeDb {
             TypeData::Func { params, result } => {
                 params.into_iter().any(|p| self.occurs(var, p)) || self.occurs(var, result)
             }
+            TypeData::Collection { args, .. } => args.into_iter().any(|a| self.occurs(var, a)),
             _ => false,
         }
     }
@@ -145,6 +151,16 @@ impl TypeDb {
                     found: b,
                 })
             }
+            (
+                TypeData::Collection {
+                    ctor: c_a,
+                    args: args_a,
+                },
+                TypeData::Collection {
+                    ctor: c_b,
+                    args: args_b,
+                },
+            ) if c_a == c_b => self.unify_seqs(a, b, args_a, args_b, "collection"),
             _ => Err(UnifyError::Mismatch {
                 expected: a,
                 found: b,
