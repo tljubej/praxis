@@ -1,0 +1,6 @@
+// A Praxis snippet containing a byte the lexer stub does not recognize.
+// The `@` triggers a real `T003` diagnostic, proving the check pipeline reports
+// problems end to end.
+let values = read lines(int)
+let first = values[@0]
+out(first)

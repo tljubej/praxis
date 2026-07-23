@@ -1,0 +1,10 @@
+[package]
+name = "praxis-syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Token and syntax-node definitions for the Praxis language."
+
+[dependencies]
+praxis-source.workspace = true

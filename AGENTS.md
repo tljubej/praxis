@@ -1,0 +1,2 @@
+- Use the Rust maxim "Make illegal states unrepresentable" wherever possible.
+- Test every language feature extensively via unit and integration tests.

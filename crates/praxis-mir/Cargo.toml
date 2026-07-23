@@ -1,0 +1,12 @@
+[package]
+name = "praxis-mir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Mid-level IR: CFG, liveness, fault edges, and GC safepoint analysis."
+
+[dependencies]
+praxis-source.workspace = true
+praxis-types.workspace = true
+praxis-runtime.workspace = true

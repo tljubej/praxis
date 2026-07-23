@@ -1,0 +1,11 @@
+[package]
+name = "praxis-codegen-cranelift"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cranelift JIT module and ABI lowering for Praxis."
+
+[dependencies]
+praxis-mir.workspace = true
+praxis-runtime.workspace = true

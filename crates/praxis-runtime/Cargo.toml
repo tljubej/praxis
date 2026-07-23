@@ -1,0 +1,10 @@
+[package]
+name = "praxis-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GC ABI types, type descriptors, and runtime context for Praxis"
+
+[dependencies]
+praxis-source.workspace = true

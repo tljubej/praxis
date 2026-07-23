@@ -1,0 +1,5 @@
+---
+source: crates/praxis-test-support/src/snapshot.rs
+expression: "\"stable output\\n\""
+---
+stable output

@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/praxis-cli",
+    "crates/praxis-source",
+    "crates/praxis-syntax",
+    "crates/praxis-parser",
+    "crates/praxis-ast",
+    "crates/praxis-types",
+    "crates/praxis-input-parser",
+    "crates/praxis-hir",
+    "crates/praxis-runtime",
+    "crates/praxis-stdlib",
+    "crates/praxis-mir",
+    "crates/praxis-codegen-cranelift",
+    "crates/praxis-debugger",
+    "crates/praxis-lsp",
+    "crates/praxis-test-support",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tljubej/praxis"
+rust-version = "1.80"
+
+[workspace.dependencies]
+# Shared crates reference a single version from here.
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+insta = "1"
+
+# Internal crates — paths so every consumer resolves to the workspace copy.
+praxis-ast = { path = "crates/praxis-ast" }
+praxis-cli = { path = "crates/praxis-cli" }
+praxis-codegen-cranelift = { path = "crates/praxis-codegen-cranelift" }
+praxis-debugger = { path = "crates/praxis-debugger" }
+praxis-hir = { path = "crates/praxis-hir" }
+praxis-input-parser = { path = "crates/praxis-input-parser" }
+praxis-lsp = { path = "crates/praxis-lsp" }
+praxis-mir = { path = "crates/praxis-mir" }
+praxis-parser = { path = "crates/praxis-parser" }
+praxis-runtime = { path = "crates/praxis-runtime" }
+praxis-source = { path = "crates/praxis-source" }
+praxis-stdlib = { path = "crates/praxis-stdlib" }
+praxis-syntax = { path = "crates/praxis-syntax" }
+praxis-test-support = { path = "crates/praxis-test-support" }
+praxis-types = { path = "crates/praxis-types" }
+
+[profile.dev]
+# Faster from-scratch dev builds; link time matters more than codegen here.
+debug = 1
+
+[profile.release]
+debug = 0

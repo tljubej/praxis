@@ -1,0 +1,9 @@
+# Rustfmt policy. Shared by `just fmt`, `just fmt-check`, editors, and CI.
+#
+# Only stable options here — nightly-only knobs (imports_granularity,
+# group_imports) would emit warnings on the stable toolchain and be ignored,
+# which defeats the point of a shared policy.
+edition = "2021"
+max_width = 100
+use_field_init_shorthand = true
+use_try_shorthand = true

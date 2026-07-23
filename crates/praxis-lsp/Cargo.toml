@@ -1,0 +1,11 @@
+[package]
+name = "praxis-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Language Server Protocol implementation for Praxis."
+
+[dependencies]
+praxis-source.workspace = true
+praxis-syntax.workspace = true

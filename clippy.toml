@@ -1,0 +1,3 @@
+# Clippy policy. Shared by `just clippy` and CI (`just ci`).
+# `msrv` keeps MSRV-aware lints honest against the declared `rust-version`.
+msrv = "1.80"

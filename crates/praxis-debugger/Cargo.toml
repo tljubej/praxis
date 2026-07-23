@@ -1,0 +1,11 @@
+[package]
+name = "praxis-debugger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Crash snapshots and the interactive crash REPL for Praxis."
+
+[dependencies]
+praxis-source.workspace = true
+praxis-runtime.workspace = true

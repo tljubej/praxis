@@ -1,0 +1,13 @@
+[package]
+name = "praxis-hir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Name resolution and high-level intermediate representation for Praxis."
+
+[dependencies]
+praxis-source.workspace = true
+praxis-syntax.workspace = true
+praxis-ast.workspace = true
+praxis-types.workspace = true

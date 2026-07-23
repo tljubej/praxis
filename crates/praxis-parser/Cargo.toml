@@ -1,0 +1,14 @@
+[package]
+name = "praxis-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lexer and parser for the Praxis language (Milestone 0: lexer stub)."
+
+[dependencies]
+praxis-source.workspace = true
+praxis-syntax.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "praxis-input-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Parser-expression lexer, template parser, type synthesis, and parser plans."
+
+[dependencies]
+praxis-source.workspace = true
+praxis-syntax.workspace = true

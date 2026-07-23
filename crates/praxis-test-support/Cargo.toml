@@ -1,0 +1,11 @@
+[package]
+name = "praxis-test-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared test helpers for the Praxis compiler: insta snapshot harness and source fixtures."
+
+[dependencies]
+praxis-source.workspace = true
+insta.workspace = true

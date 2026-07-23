@@ -1,0 +1,6 @@
+// A clean, lexically valid Praxis snippet for the `check` happy-path test.
+// (Full parsing and type-checking arrive in later milestones; for Milestone 0
+// `check` only needs the lexer to walk this without complaints.)
+let numbers = read lines(int)
+
+out(numbers.sum())

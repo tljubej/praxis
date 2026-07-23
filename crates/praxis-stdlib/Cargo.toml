@@ -1,0 +1,10 @@
+[package]
+name = "praxis-stdlib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Method catalog schema and the Praxis prelude."
+
+[dependencies]
+praxis-source.workspace = true
