@@ -447,6 +447,38 @@ fn lower_inst<M: Module>(
                     }
                     builder.def_var(vars[dst.0 as usize], tuple_ref);
                 }
+                AllocKind::Closure { fn_name, captures } => {
+                    // M7, §4.10. Take the synthetic function's address (the
+                    // symbol is declared in `Jit::compile`'s first pass since the
+                    // synthetic fn is appended to the function list), then
+                    // allocate the closure via `praxis_alloc_closure(ctx, fn_ptr,
+                    // n)` and fill each capture slot via
+                    // `praxis_closure_set_capture(ctx, closure, idx, value)`.
+                    let fr = user_funcref(fn_name, user_funcs, user_cache, module, builder)?;
+                    let fn_ptr_val = builder.ins().func_addr(GC, fr);
+                    let n_val = builder.ins().iconst(GC, captures.len() as i64);
+                    let closure_ref = call_runtime_by_name(
+                        builder,
+                        ctx_val,
+                        &[fn_ptr_val, n_val],
+                        "praxis_alloc_closure",
+                        module,
+                        imports,
+                    )?;
+                    for (idx, cap_local) in captures.iter().enumerate() {
+                        let cap_val = builder.use_var(vars[cap_local.0 as usize]);
+                        let idx_val = builder.ins().iconst(GC, idx as i64);
+                        call_runtime_by_name(
+                            builder,
+                            ctx_val,
+                            &[closure_ref, idx_val, cap_val],
+                            "praxis_closure_set_capture",
+                            module,
+                            imports,
+                        )?;
+                    }
+                    builder.def_var(vars[dst.0 as usize], closure_ref);
+                }
             }
         }
         Inst::ExtractScalar { dst, src, scalar } => {
@@ -557,6 +589,50 @@ fn lower_inst<M: Module>(
             let mut call_args = vec![ctx_val];
             call_args.extend(arg_vals);
             let call = builder.ins().call(funcref, &call_args);
+            let result = builder.func.dfg.first_result(call);
+            builder.def_var(vars[dst.0 as usize], result);
+        }
+        Inst::CallIndirect {
+            dst,
+            callee,
+            args,
+            live_roots,
+        } => {
+            // M7, §4.10 (Approach B). An indirect call through a closure value.
+            // Spill live Gc roots (safepoint — the call may allocate/GC), read
+            // the closure's `fn_ptr` via `praxis_closure_fn_ptr`, then emit a
+            // Cranelift `call_indirect` with the signature
+            // `fn(ctx, closure, args...) -> i64`. The closure is passed as the
+            // hidden first explicit arg; the synthetic function loads its
+            // captures at entry.
+            spill.emit_spill(builder, live_roots, vars);
+            let callee_val = builder.use_var(vars[callee.0 as usize]);
+            let arg_vals: Vec<Value> = args
+                .iter()
+                .map(|a| builder.use_var(vars[a.0 as usize]))
+                .collect();
+            // fn_ptr = praxis_closure_fn_ptr(closure). (No ctx arg.)
+            let fn_ptr = call_runtime_by_name(
+                builder,
+                ctx_val,
+                &[callee_val],
+                "praxis_closure_fn_ptr",
+                module,
+                imports,
+            )?;
+            // Build the indirect-call signature: fn(ctx, closure, args...) -> i64.
+            let mut sig = Signature::new(CallConv::Fast);
+            sig.params.push(AbiParam::new(GC)); // ctx
+            sig.params.push(AbiParam::new(GC)); // closure (self)
+            for _ in &arg_vals {
+                sig.params.push(AbiParam::new(GC));
+            }
+            sig.returns.push(AbiParam::new(GC));
+            let sig_ref = builder.import_signature(sig);
+            // call_indirect(sig, fn_ptr, [ctx, closure, args...])
+            let mut call_args = vec![ctx_val, callee_val];
+            call_args.extend(arg_vals);
+            let call = builder.ins().call_indirect(sig_ref, fn_ptr, &call_args);
             let result = builder.func.dfg.first_result(call);
             builder.def_var(vars[dst.0 as usize], result);
         }

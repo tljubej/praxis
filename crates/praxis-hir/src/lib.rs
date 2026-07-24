@@ -16,6 +16,7 @@
 //! inferred types, and all diagnostics.
 
 pub mod capability;
+pub mod capture;
 pub mod catalog;
 pub mod diagnostics;
 pub mod exhaustive;

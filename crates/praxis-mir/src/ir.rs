@@ -151,6 +151,18 @@ pub enum Inst {
         args: Vec<LocalId>,
         live_roots: Vec<LocalId>,
     },
+    /// Call a closure value indirectly (M7, §4.10). `callee` is the `Gc` local
+    /// holding the closure `GcRef`. The codegen reads the closure's `fn_ptr`
+    /// via `praxis_closure_fn_ptr`, then emits a Cranelift `call_indirect` with
+    /// the signature `fn(ctx, closure, args...) -> GcRef` (Approach B: the
+    /// closure is passed as a hidden first arg; the synthetic function loads its
+    /// captures at entry). A safepoint + fault check follow.
+    CallIndirect {
+        dst: LocalId,
+        callee: LocalId,
+        args: Vec<LocalId>,
+        live_roots: Vec<LocalId>,
+    },
     /// Test `pending_fault`; if set, jump to `on_fault`. Inserted after any
     /// faultable operation (checked arith, div/rem, calls).
     CheckFault { on_fault: BlockId },
@@ -213,6 +225,15 @@ pub enum AllocKind {
     /// positional order. Unlike records, tuples have no def-id — their shape is
     /// the element-type sequence alone, so the schema is keyed by the `Type`.
     Tuple { ty: Type, elements: Vec<LocalId> },
+    /// A boxed closure value (M7, §4.10). `fn_name` is the synthetic MIR
+    /// function's name (the codegen takes its address via `func_addr`); `captures`
+    /// are the captured-value locals in env-slot order. The codegen allocates via
+    /// `praxis_alloc_closure(ctx, fn_ptr, n)` then fills each slot with
+    /// `praxis_closure_set_capture`.
+    Closure {
+        fn_name: String,
+        captures: Vec<LocalId>,
+    },
 }
 
 /// A call target. M4 resolves user functions by name; the backend mints a symbol.

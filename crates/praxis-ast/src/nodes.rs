@@ -444,6 +444,39 @@ pub enum Expr {
 }
 
 impl Expr {
+    /// The underlying syntax node for this expression, regardless of variant.
+    /// Used by AST walks (e.g. closure capture analysis) that need the node's
+    /// range and subtree.
+    pub fn syntax(&self) -> &SyntaxNode {
+        match self {
+            Expr::Literal(e) => e.syntax(),
+            Expr::Path(e) => e.syntax(),
+            Expr::Bin(e) => e.syntax(),
+            Expr::Unary(e) => e.syntax(),
+            Expr::Paren(e) => e.syntax(),
+            Expr::Block(e) => e.syntax(),
+            Expr::If(e) => e.syntax(),
+            Expr::While(e) => e.syntax(),
+            Expr::Call(e) => e.syntax(),
+            Expr::MethodCall(e) => e.syntax(),
+            Expr::Tuple(e) => e.syntax(),
+            Expr::Read(e) => e.syntax(),
+            Expr::Parse(e) => e.syntax(),
+            Expr::RecordLit(e) => e.syntax(),
+            Expr::FieldGet(e) => e.syntax(),
+            Expr::Match(e) => e.syntax(),
+            Expr::Closure(e) => e.syntax(),
+            Expr::Error(n) => n,
+        }
+    }
+
+    /// Try to cast a syntax node into an `Expr` of any known expression kind.
+    /// Returns `None` for non-expression nodes. Public so passes that walk the
+    /// AST subtree (e.g. closure capture analysis) can descend generically.
+    pub fn cast(n: SyntaxNode) -> Option<Expr> {
+        Self::cast_from_child(n)
+    }
+
     /// Try to cast a child node into an `Expr` of any known expression kind.
     fn cast_from_child(n: SyntaxNode) -> Option<Expr> {
         Some(match n.kind() {

@@ -846,10 +846,19 @@ pub unsafe extern "C" fn praxis_closure_set_capture(
 /// Read the function pointer out of a closure `GcRef` (M7, §4.10). Used by the
 /// indirect-call lowering to obtain the entry point before a native call.
 ///
+/// `ctx` is accepted (and unused) for ABI uniformity with every other `praxis_*`
+/// wrapper — generated code calls all wrappers as `fn(ctx, args...)`, so this
+/// keeps the calling convention consistent. The returned `*const u8` is carried
+/// as an `i64` (pointer-sized) back into the JIT'd code.
+///
 /// # Safety
-/// `closure` must be a valid closure `GcRef`.
+/// `ctx` must be live; `closure` must be a valid closure `GcRef`.
 #[no_mangle]
-pub unsafe extern "C" fn praxis_closure_fn_ptr(closure: GcRef) -> *const u8 {
+pub unsafe extern "C" fn praxis_closure_fn_ptr(
+    ctx: *mut RuntimeContext,
+    closure: GcRef,
+) -> *const u8 {
+    let _ = ctx;
     // SAFETY: caller guarantees closure is a valid closure GcRef.
     let payload = closure.payload::<u8>() as *const crate::closures::ClosurePayload;
     unsafe { (*payload).fn_ptr }

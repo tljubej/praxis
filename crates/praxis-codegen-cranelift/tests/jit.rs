@@ -806,3 +806,65 @@ fn match_variable_bind_whole_scrutinee() {
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 99);
 }
+
+// --- M7-WS7: closures (§4.10) ---------------------------------------------
+//
+// Closures capture outer `let`/`param` values by copying them into the closure's
+// runtime environment; the synthetic function loads them at entry (Approach B).
+// Calling a closure value is an indirect call through its `fn_ptr`.
+
+#[test]
+fn closure_no_captures() {
+    // A closure that references only its own param.
+    let (rt, result) = run_main("fn main() -> Int { let f = |x| x * 2; f(21) }");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn closure_captures_outer_let() {
+    // The headline demo: `let o = 10; let f = |x| x + o; f(5)` → 15.
+    let (rt, result) = run_main("fn main() -> Int { let o = 10; let f = |x| x + o; f(5) }");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 15);
+}
+
+#[test]
+fn closure_captures_multiple() {
+    // Two captures, used together.
+    let (rt, result) =
+        run_main("fn main() -> Int { let a = 3; let b = 4; let f = |x| x + a * b; f(5) }");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 17);
+}
+
+#[test]
+fn closure_captures_param_of_enclosing_fn() {
+    // The captured value is the enclosing fn's param.
+    let (rt, result) = run_main(
+        "fn make(o: Int) -> Int { let f = |x| x + o; f(5) }\nfn main() -> Int { make(10) }",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 15);
+}
+
+#[test]
+fn closure_returned_and_called() {
+    // A fn returns a closure; main calls it. Exercises capture across a fn
+    // boundary (the closure outlives `make`'s frame — the env is GC'd).
+    let (rt, result) = run_main(
+        "fn make(o: Int) -> Int { |x| x + o }\nfn main() -> Int { let f = make(10); f(5) }",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 15);
+}
+
+#[test]
+fn closure_curried() {
+    // A closure returning a closure: |x| |y| x + y. The inner closure captures
+    // the outer's param `x`.
+    let (rt, result) =
+        run_main("fn main() -> Int { let add = |x| |y| x + y; let inc = add(1); inc(41) }");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}

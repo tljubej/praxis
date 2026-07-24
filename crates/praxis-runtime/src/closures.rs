@@ -9,10 +9,19 @@
 //! Per §5.5, function and closure values are **never equatable or hashable** —
 //! they have no structural identity. The `equals`/`hash` callbacks are `None`.
 //!
-//! The closure's synthetic function takes the captured environment values as
-//! trailing parameters (after the explicit params), so calling a closure is a
-//! direct native call through `fn_ptr` with the env spread into the argument
-//! list. This avoids a separate env-struct indirection at the call site.
+//! ## Calling convention (Approach B)
+//!
+//! The closure's synthetic function takes the closure value itself as a hidden
+//! first explicit parameter (after the implicit `ctx`): its MIR signature is
+//! `fn(ctx, closure_self, params...)`. At entry, a prologue loads each captured
+//! value via [`praxis_closure_capture`](crate::abi::praxis_closure_capture) and
+//! binds it to a local. Calling a closure value is an indirect call: the call
+//! site reads `fn_ptr` via
+//! [`praxis_closure_fn_ptr`](crate::abi::praxis_closure_fn_ptr), then emits a
+//! native `call_indirect` passing `[ctx, closure, args...]`. Keeping the
+//! closure value intact at the call site (rather than spreading the env into
+//! trailing params) makes the indirect call uniform per-arity and keeps the
+//! closure self-contained for fault snapshots and future borrow/move semantics.
 
 use std::fmt;
 

@@ -13,7 +13,8 @@
 #![allow(dead_code)] // Consumed by the Cranelift backend (Phase 4).
 
 use praxis_hir::{
-    AssignOp, BinOp, Lit, TypedExpr, TypedFn, TypedItem, TypedModule, TypedStmt, UnaryOp,
+    capture::Capture, AssignOp, BinOp, Lit, TypedBlock, TypedExpr, TypedFn, TypedItem, TypedModule,
+    TypedParam, TypedStmt, UnaryOp,
 };
 use praxis_types::{Type, TypeDb};
 
@@ -22,16 +23,149 @@ use crate::ir::{
     ScalarKind, Terminator,
 };
 
-/// Lower a typed module to a MIR function per source `fn` item.
+/// Lower a typed module to MIR: one [`Function`] per source `fn` item, plus one
+/// synthetic [`Function`] per closure literal (M7, §4.10). The synthetic closure
+/// functions are appended after the source functions; they are referenced by name
+/// from `AllocKind::Closure` at the allocation site.
 #[must_use]
 pub fn lower_module(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
-    module
+    let mut funcs: Vec<Function> = module
         .items
         .iter()
         .map(|item| match item {
             TypedItem::Fn(f) => lower_fn(f, db),
         })
-        .collect()
+        .collect();
+    // Collect every closure literal in the module (across all fn bodies) and
+    // emit one synthetic function per closure, in source order.
+    for item in &module.items {
+        let TypedItem::Fn(tfn) = item;
+        for closure in collect_closures(&tfn.body) {
+            funcs.push(lower_closure_fn(&closure, db));
+        }
+    }
+    funcs
+}
+
+/// A closure literal lifted out of a body for synthetic-function emission.
+/// Carries the pieces of `TypedExpr::Closure` needed by `lower_closure_fn`.
+struct LiftedClosure {
+    fn_name: String,
+    params: Vec<TypedParam>,
+    body: TypedBlock,
+    captures: Vec<Capture>,
+}
+
+/// Walk a typed block collecting every `TypedExpr::Closure` (depth-first, source
+/// order) as a [`LiftedClosure`]. Nested closures are included — each becomes its
+/// own synthetic function.
+fn collect_closures(block: &TypedBlock) -> Vec<LiftedClosure> {
+    let mut out = Vec::new();
+    collect_closures_block(block, &mut out);
+    out
+}
+
+fn collect_closures_block(block: &TypedBlock, out: &mut Vec<LiftedClosure>) {
+    for stmt in &block.stmts {
+        collect_closures_stmt(stmt, out);
+    }
+    collect_closures_expr(&block.tail, out);
+}
+
+fn collect_closures_stmt(stmt: &TypedStmt, out: &mut Vec<LiftedClosure>) {
+    match stmt {
+        TypedStmt::Let { init, .. } | TypedStmt::Var { init, .. } => {
+            collect_closures_expr(init, out)
+        }
+        TypedStmt::Assign { value, .. } => collect_closures_expr(value, out),
+        TypedStmt::Expr(e) => collect_closures_expr(e, out),
+    }
+}
+
+fn collect_closures_expr(e: &TypedExpr, out: &mut Vec<LiftedClosure>) {
+    match e {
+        TypedExpr::Closure {
+            fn_name,
+            params,
+            body,
+            captures,
+            ..
+        } => {
+            // Recurse into the closure's body first so inner closures are emitted
+            // before the outer (deterministic ordering for tests).
+            collect_closures_block(body, out);
+            out.push(LiftedClosure {
+                fn_name: fn_name.clone(),
+                params: params.clone(),
+                body: (**body).clone(),
+                captures: captures.clone(),
+            });
+        }
+        TypedExpr::Lit { .. } | TypedExpr::Path { .. } | TypedExpr::Read { .. } => {}
+        TypedExpr::Bin { lhs, rhs, .. } => {
+            collect_closures_expr(lhs, out);
+            collect_closures_expr(rhs, out);
+        }
+        TypedExpr::Unary { operand, .. } => collect_closures_expr(operand, out),
+        TypedExpr::Paren { inner, .. } => {
+            if let Some(inner) = inner {
+                collect_closures_expr(inner, out);
+            }
+        }
+        TypedExpr::Block(b) => collect_closures_block(b, out),
+        TypedExpr::If {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_closures_expr(cond, out);
+            collect_closures_block(then_block, out);
+            if let Some(eb) = else_block.as_deref() {
+                collect_closures_block(eb, out);
+            }
+        }
+        TypedExpr::While { cond, body, .. } => {
+            collect_closures_expr(cond, out);
+            collect_closures_block(body, out);
+        }
+        TypedExpr::Call { args, .. } => {
+            for a in args {
+                collect_closures_expr(a, out);
+            }
+        }
+        TypedExpr::MethodCall { receiver, args, .. } => {
+            collect_closures_expr(receiver, out);
+            for a in args {
+                collect_closures_expr(a, out);
+            }
+        }
+        TypedExpr::Tuple { elements, .. } => {
+            for el in elements {
+                collect_closures_expr(el, out);
+            }
+        }
+        TypedExpr::Parse { text, .. } => collect_closures_expr(text, out),
+        TypedExpr::RecordLit { fields, .. } => {
+            for (_, init) in fields {
+                collect_closures_expr(init, out);
+            }
+        }
+        TypedExpr::FieldGet { receiver, .. } => collect_closures_expr(receiver, out),
+        TypedExpr::EnumVariant { args, .. } => {
+            for a in args {
+                collect_closures_expr(a, out);
+            }
+        }
+        TypedExpr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_closures_expr(scrutinee, out);
+            for arm in arms {
+                collect_closures_expr(&arm.body, out);
+            }
+        }
+    }
 }
 
 /// The (function-local) symbol id → local id map for the current frame, plus
@@ -100,6 +234,104 @@ fn lower_fn(f: &TypedFn, db: &mut TypeDb) -> Function {
     // Lower the body. The tail expression's value is the function's result.
     let tail = lower_block_body(&mut b, &f.body);
     // Materialize the tail into the return slot and return it.
+    b.func.blocks[b.cur.0 as usize].insts.push(Inst::MoveGc {
+        dst: ret,
+        src: tail,
+    });
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Return { value: ret };
+
+    b.func
+}
+
+/// Lower a closure literal to its synthetic MIR function (M7, §4.10). The
+/// function's MIR params are `[closure_self, user_params...]` (ctx is the
+/// implicit hidden first ABI param, as for every Praxis function). At entry, a
+/// prologue loads each captured value via `praxis_closure_capture(ctx, self, i)`
+/// and binds it to the capture's symbol in `b.locals`; the params are already
+/// bound. Then the body is lowered as usual.
+///
+/// This is Approach B (the closure value is passed as a hidden first arg; the
+/// synthetic function loads its captures at entry). The call site reads `fn_ptr`
+/// and emits a `call_indirect` with the matching signature.
+fn lower_closure_fn(closure: &LiftedClosure, db: &mut TypeDb) -> Function {
+    let int_ty = db.int();
+    let bool_ty = db.bool();
+    let text_ty = db.text();
+    let char_ty = db.char();
+    let unit_ty = db.unit();
+
+    let mut func = Function {
+        name: closure.fn_name.clone(),
+        params: Vec::new(),
+        return_local: LocalId(0),
+        locals: Vec::new(),
+        blocks: Vec::new(),
+        debug_names: Vec::new(),
+    };
+    let entry = func.new_block();
+    let fault = func.new_block();
+    func.blocks[fault.0 as usize].term = Terminator::Fault;
+
+    let mut b = Builder {
+        func,
+        locals: std::collections::HashMap::new(),
+        cur: entry,
+        fault_block: fault,
+        db,
+        int_ty,
+        bool_ty,
+        text_ty,
+        char_ty,
+        unit_ty,
+    };
+
+    // Param 0 (MIR): the closure value itself (`closure_self`). It is the hidden
+    // first explicit arg after the implicit ctx. Bound to a local so the prologue
+    // can pass it to `praxis_closure_capture`.
+    let self_local = b.alloc_gc(Type(0), Some("__closure_self".to_string()));
+    b.func.params.push(self_local);
+
+    // User params: one `Gc` slot each, after `self_local`.
+    for p in &closure.params {
+        let id = b.alloc_gc(p.ty, Some(p.name.clone()));
+        b.locals.insert(p.symbol, id);
+        b.func.params.push(id);
+    }
+
+    // Prologue: load each captured value from the closure's env and bind it to
+    // the capture's symbol. `praxis_closure_capture(ctx, closure, idx) -> GcRef`.
+    // The `idx` arg is a raw integer carried in the uniform i64 ABI (like the
+    // `Vec()` null-descriptor idiom): we ConstInt it into a scalar slot, then
+    // MoveGc-copy that scalar's raw i64 into a Gc-typed slot so it flows through
+    // the call as a plain integer, not a boxed Int pointer.
+    for (idx, cap) in closure.captures.iter().enumerate() {
+        let idx_scalar = b.alloc_scalar(ScalarKind::Int);
+        b.push(Inst::ConstInt {
+            dst: idx_scalar,
+            value: idx as i64,
+        });
+        let idx_gc = b.alloc_gc(int_ty, None);
+        b.push(Inst::MoveGc {
+            dst: idx_gc,
+            src: idx_scalar,
+        });
+        let dst = b.alloc_gc(cap.ty, Some(cap.name.clone()));
+        b.push(Inst::Call {
+            dst,
+            callee: CallTarget::Runtime("praxis_closure_capture".to_string()),
+            args: vec![self_local, idx_gc],
+            live_roots: Vec::new(),
+        });
+        b.check_fault();
+        b.locals.insert(cap.symbol, dst);
+    }
+
+    // The return slot.
+    let ret = b.alloc_gc(closure.body.ty, None);
+    b.func.return_local = ret;
+
+    // Lower the body. Captures and params are bound in `b.locals`.
+    let tail = lower_block_body(&mut b, &closure.body);
     b.func.blocks[b.cur.0 as usize].insts.push(Inst::MoveGc {
         dst: ret,
         src: tail,
@@ -282,7 +514,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             lower_lit_gc(b, &Lit::Int(0)) // while yields Unit
         }
         TypedExpr::Call {
-            callee: _,
+            callee,
             callee_name,
             args,
             ..
@@ -330,6 +562,22 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 return dst;
             }
             let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
+            // Indirect call dispatch (M7, §4.10): if the callee resolves to a
+            // local binding (a `let`/`var`/`param` holding a closure value), the
+            // call is indirect — read the closure's `fn_ptr` and call through it.
+            // Top-level `fn`s are never in `b.locals`, so this distinguishes the
+            // two soundly.
+            if let Some(callee_local) = b.locals.get(callee).copied() {
+                let dst = b.alloc_gc(Type(0), None);
+                b.push(Inst::CallIndirect {
+                    dst,
+                    callee: callee_local,
+                    args: arg_locals,
+                    live_roots: Vec::new(),
+                });
+                b.check_fault();
+                return dst;
+            }
             let dst = b.alloc_gc(Type(0), None);
             b.push(Inst::Call {
                 dst,
@@ -422,6 +670,33 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
         TypedExpr::Match {
             scrutinee, arms, ..
         } => lower_match(b, scrutinee, arms),
+        // M7-WS7: closure literal — allocate the closure value. Each capture's
+        // current value is the captured binding's local; the synthetic function
+        // (emitted separately by `lower_module`) is named by `fn_name`.
+        TypedExpr::Closure {
+            fn_name, captures, ..
+        } => {
+            let cap_locals: Vec<LocalId> = captures
+                .iter()
+                .map(|cap| {
+                    b.locals
+                        .get(&cap.symbol)
+                        .copied()
+                        .unwrap_or_else(|| lower_lit_gc(b, &Lit::Int(0)))
+                })
+                .collect();
+            let dst = b.alloc_gc(Type(0), None);
+            b.push(Inst::Alloc {
+                dst,
+                alloc: AllocKind::Closure {
+                    fn_name: fn_name.clone(),
+                    captures: cap_locals,
+                },
+                live_roots: Vec::new(),
+            });
+            b.check_fault();
+            dst
+        }
     }
 }
 
@@ -796,7 +1071,8 @@ fn expr_static_type(e: &TypedExpr) -> Type {
         | TypedExpr::RecordLit { ty, .. }
         | TypedExpr::FieldGet { ty, .. }
         | TypedExpr::EnumVariant { ty, .. }
-        | TypedExpr::Match { ty, .. } => *ty,
+        | TypedExpr::Match { ty, .. }
+        | TypedExpr::Closure { ty, .. } => *ty,
         TypedExpr::Block(blk) => blk.ty,
     }
 }

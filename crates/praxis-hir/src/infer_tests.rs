@@ -429,3 +429,20 @@ fn closure_with_typed_param_typechecks() {
     let src = "fn main() -> Int {\n  let f = |x: Int| x + 1\n  0\n}\n";
     assert!(!has_type_error(src));
 }
+
+#[test]
+fn closure_immutable_capture_lowers_clean() {
+    // The headline immutable-capture pipeline lowers without diagnostics.
+    let src = "fn main() -> Int {\n  let o = 10\n  let f = |x| x + o\n  f(5)\n}\n";
+    assert!(!has_type_error_with_lower(src));
+}
+
+#[test]
+fn mutable_capture_rejected_y130() {
+    // A `var` capture is rejected with Y130 until WS7b lands `VarCell`.
+    let src = "fn main() -> Int {\n  var c = 0\n  let f = |_| c\n  f(0)\n}\n";
+    assert!(
+        has_type_error_with_lower(src),
+        "mutable capture should be rejected (Y130)"
+    );
+}

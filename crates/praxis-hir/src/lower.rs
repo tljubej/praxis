@@ -54,7 +54,7 @@ pub enum TypedItem {
 }
 
 /// A lowered function.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TypedFn {
     /// The function's symbol id (so the backend can mint a stable name).
     pub symbol: SymbolId,
@@ -71,7 +71,7 @@ pub struct TypedFn {
 }
 
 /// A parameter `name: Type`.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TypedParam {
     pub symbol: SymbolId,
     pub name: String,
@@ -79,7 +79,7 @@ pub struct TypedParam {
 }
 
 /// A `{ stmt; …; tail }` block. `tail` is the block's value (`Unit` if absent).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TypedBlock {
     pub stmts: Vec<TypedStmt>,
     /// The trailing expression, lowered as a statement; `Unit` typed if none.
@@ -89,7 +89,7 @@ pub struct TypedBlock {
 }
 
 /// A statement.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum TypedStmt {
     /// `let name = expr` (immutable binding).
     Let {
@@ -134,7 +134,7 @@ pub enum AssignOp {
 }
 
 /// A typed expression. Every variant carries its inferred `ty`.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum TypedExpr {
     /// An integer / text / bool literal.
     Lit { value: Lit, ty: Type },
@@ -236,6 +236,17 @@ pub enum TypedExpr {
         arms: Vec<TypedMatchArm>,
         ty: Type,
     },
+    /// `|params| body` closure (M7, §4.10). `fn_name` is a synthesized unique
+    /// name for the closure's synthetic MIR function; `fn_type` is the inferred
+    /// `Func` type; `captures` is the ordered capture list (env slot order).
+    Closure {
+        params: Vec<TypedParam>,
+        body: Box<TypedBlock>,
+        captures: Vec<crate::capture::Capture>,
+        fn_type: Type,
+        fn_name: String,
+        ty: Type,
+    },
 }
 
 /// A recursive pattern, the M7-Part-2 replacement for the flat
@@ -243,7 +254,7 @@ pub enum TypedExpr {
 /// wildcard, literal, variable bind, and enum variant with nested sub-patterns
 /// (§4.6). The exhaustiveness checker and the MIR decision-tree lowering both
 /// recurse over this.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum TypedPattern {
     /// `_` — matches anything, binds nothing.
     Wildcard,
@@ -266,7 +277,7 @@ pub enum TypedPattern {
 
 /// One arm of a lowered `match` expression (M7, §4.6). The pattern is recursive
 /// (see [`TypedPattern`]); the MIR lowering emits a decision tree over it.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TypedMatchArm {
     /// The arm's pattern (recursive: may nest sub-patterns in variant payloads).
     pub pattern: TypedPattern,
@@ -340,7 +351,7 @@ pub fn lower(
         scopes,
         refs,
         decls,
-        ref_types: _,
+        ref_types,
         diagnostics: _,
     } = analysis;
     // Cache the scalar/unit handles once (these methods need &mut db).
@@ -355,12 +366,14 @@ pub fn lower(
         scopes,
         refs,
         decls,
+        ref_types,
         diagnostics: Vec::new(),
         catalog: builtin_catalog(),
         int,
         bool_,
         text,
         unit,
+        closure_counter: 0,
     };
     let mut items = Vec::new();
     for node in root.stmts() {
@@ -396,6 +409,9 @@ struct Lowerer<'a> {
     refs: &'a HashMap<TextRange, ResolvedRef>,
     /// Declaration-site ranges → SymbolId (from resolution; survives shadowing).
     decls: &'a HashMap<TextRange, SymbolId>,
+    /// The inferred type for each name reference's range (filled by inference).
+    /// Used to read a captured binding's type off the reference site.
+    ref_types: &'a HashMap<TextRange, Type>,
     diagnostics: Vec<Diagnostic>,
     /// The built-in method catalog (§16.2), used to resolve `receiver.method()`
     /// calls to their runtime lowering symbol. Immutable; built once.
@@ -407,6 +423,10 @@ struct Lowerer<'a> {
     bool_: Type,
     text: Type,
     unit: Type,
+    /// A monotonically increasing counter for synthesizing unique closure MIR
+    /// function names (e.g. `__closure_0`). Each closure literal in the module
+    /// gets a distinct name.
+    closure_counter: u32,
 }
 
 /// The built-in method catalog, constructed once and cached for the process
@@ -699,21 +719,136 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Lower a closure expression (M7-WS7, §4.10). Currently a placeholder: the
-    /// closure's *type* is inferred correctly (a `Func`), but the runtime
-    /// representation (synthetic MIR function + captured environment + indirect
-    /// call dispatch) is not yet lowered. Returns a Unit-typed placeholder.
+    /// Lower a closure expression (M7-WS7, §4.10). Runs capture analysis to find
+    /// the free variables (each becomes one env slot), lowers the params and body,
+    /// and produces a [`TypedExpr::Closure`] carrying a synthesized unique MIR
+    /// function name. The closure's *type* (`fn_type`) is the inferred `Func`.
+    ///
+    /// The capture environment is a runtime concern (§4.10): the type system does
+    /// not model it. Mutable (`var`) captures are reported as `Y130` until WS7b
+    /// lands the `VarCell` cell; for now they are still recorded so lowering has
+    /// the full set, but a `var` capture makes the module non-compiling.
     fn lower_closure(&mut self, c: &praxis_ast::ClosureExpr) -> TypedExpr {
-        // Touch the params/body so any side-effecting lowering runs, but the
-        // result is a placeholder. The closure's type comes from inference.
-        let _ = c.params().count();
-        if let Some(body) = c.body() {
-            let _ = self.lower_expr(&body);
+        // The closure's inferred Func type comes from inference: re-derive it by
+        // reading the body's type and the param types. Inference already pinned
+        // these; we read them off the lowered params/body rather than re-querying
+        // (the lowerer is a pure consumer of the finalized TypeDb).
+        let params: Vec<TypedParam> = c.params().filter_map(|p| self.lower_param(&p)).collect();
+        // The body is an expression. If it is a block, lower it as one; otherwise
+        // wrap the single expression as a block whose tail is that expression.
+        let body = match c.body() {
+            Some(praxis_ast::Expr::Block(b)) => {
+                self.lower_block(&b).unwrap_or_else(|| TypedBlock {
+                    stmts: Vec::new(),
+                    tail: TypedExpr::Lit {
+                        value: Lit::Int(0),
+                        ty: self.unit,
+                    },
+                    ty: self.unit,
+                })
+            }
+            Some(other) => {
+                let tail = self.lower_expr(&other);
+                let ty = expr_ty(&tail);
+                TypedBlock {
+                    stmts: Vec::new(),
+                    tail,
+                    ty,
+                }
+            }
+            None => TypedBlock {
+                stmts: Vec::new(),
+                tail: TypedExpr::Lit {
+                    value: Lit::Int(0),
+                    ty: self.unit,
+                },
+                ty: self.unit,
+            },
+        };
+        let result_ty = body.ty;
+        let param_types: Vec<Type> = params.iter().map(|p| p.ty).collect();
+        let fn_type = self.db.func(param_types, result_ty);
+
+        // Capture analysis: walk the closure body for free variables. The
+        // "inside the closure" boundary is the whole closure node (params + body)
+        // so params and closure-local bindings are recognized as locals.
+        let closure_range = c.syntax().text_range();
+        let body_expr = match c.body() {
+            Some(b) => b,
+            None => {
+                return TypedExpr::Closure {
+                    params,
+                    body: Box::new(body),
+                    captures: Vec::new(),
+                    fn_type,
+                    fn_name: self.fresh_closure_name(),
+                    ty: fn_type,
+                };
+            }
+        };
+        let analysis = crate::capture::analyze(
+            &body_expr,
+            closure_range,
+            self.refs,
+            |sym| self.decls.iter().find(|(_, s)| **s == sym).map(|(r, _)| *r),
+            |sym| self.names.get(sym).map(|s| s.kind),
+        );
+        // Report Y130 for any mutable capture (unsupported in WS7a).
+        for err in &analysis.errors {
+            if err.mutable_unsupported {
+                self.diag(
+                    err.range,
+                    130,
+                    "mutable capture (`var`) is not supported yet (WS7b will add `VarCell`)",
+                );
+            }
         }
-        TypedExpr::Lit {
-            value: Lit::Int(0),
-            ty: self.unit,
+        // Resolve each capture's name and type. The type is read from the
+        // reference site's inferred type (`ref_types`); the name from the symbol.
+        let captures: Vec<crate::capture::Capture> = analysis
+            .captures
+            .iter()
+            .map(|fv| {
+                let name = self
+                    .names
+                    .get(fv.symbol)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                let ty = self
+                    .ref_types
+                    .get(&fv.ref_range)
+                    .copied()
+                    .unwrap_or(self.db.fresh_var());
+                let kind = if matches!(fv.kind, crate::symbol::SymbolKind::Var) {
+                    crate::capture::CaptureKind::ByCell
+                } else {
+                    crate::capture::CaptureKind::ByValue
+                };
+                crate::capture::Capture {
+                    symbol: fv.symbol,
+                    name,
+                    ty,
+                    kind,
+                }
+            })
+            .collect();
+
+        let fn_name = self.fresh_closure_name();
+        TypedExpr::Closure {
+            params,
+            body: Box::new(body),
+            captures,
+            fn_type,
+            fn_name,
+            ty: fn_type,
         }
+    }
+
+    /// Mint a fresh, unique synthetic MIR function name for a closure.
+    fn fresh_closure_name(&mut self) -> String {
+        let n = self.closure_counter;
+        self.closure_counter += 1;
+        format!("__closure_{n}")
     }
 
     fn lower_literal(&mut self, lit: &Literal) -> TypedExpr {
@@ -1425,6 +1560,7 @@ fn expr_ty(e: &TypedExpr) -> Type {
         TypedExpr::FieldGet { ty, .. } => *ty,
         TypedExpr::EnumVariant { ty, .. } => *ty,
         TypedExpr::Match { ty, .. } => *ty,
+        TypedExpr::Closure { ty, .. } => *ty,
     }
 }
 

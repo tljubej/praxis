@@ -150,6 +150,7 @@ fn defs(inst: &Inst) -> Vec<LocalId> {
         Inst::IntCmp { dst, .. } => vec![*dst],
         Inst::StructEq { dst, .. } => vec![*dst],
         Inst::Call { dst, .. } => vec![*dst],
+        Inst::CallIndirect { dst, .. } => vec![*dst],
         Inst::MoveGc { dst, .. } => vec![*dst],
         Inst::ConstInt { dst, .. } => vec![*dst],
         Inst::LoadField { dst, .. } => vec![*dst],
@@ -186,12 +187,21 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
             alloc: crate::ir::AllocKind::Unit | crate::ir::AllocKind::Text { .. },
             ..
         } => vec![],
+        Inst::Alloc {
+            alloc: crate::ir::AllocKind::Closure { captures, .. },
+            ..
+        } => captures.clone(),
         Inst::ExtractScalar { src, .. } => vec![*src],
         Inst::StoreScalar { dst_gc, src, .. } => vec![*dst_gc, *src],
         Inst::Materialize { src, .. } => vec![*src],
         Inst::IntBinOp { lhs, rhs, .. } => vec![*lhs, *rhs],
         Inst::IntCmp { lhs, rhs, .. } => vec![*lhs, *rhs],
         Inst::Call { args, .. } => args.clone(),
+        Inst::CallIndirect { callee, args, .. } => {
+            let mut v = vec![*callee];
+            v.extend(args.iter().copied());
+            v
+        }
         Inst::MoveGc { src, .. } => vec![*src],
         Inst::LoadField { src, .. } => vec![*src],
         Inst::EnumTag { src, .. } => vec![*src],
@@ -228,6 +238,7 @@ fn safepoint_roots_slot(inst: &mut Inst) -> Option<&mut Vec<LocalId>> {
         Inst::Alloc { live_roots, .. }
         | Inst::Materialize { live_roots, .. }
         | Inst::Call { live_roots, .. }
+        | Inst::CallIndirect { live_roots, .. }
         | Inst::StructEq { live_roots, .. } => Some(live_roots),
         _ => None,
     }
