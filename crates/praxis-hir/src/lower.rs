@@ -1232,10 +1232,19 @@ impl<'a> Lowerer<'a> {
         use praxis_ast::PatternKind;
         match pat.kind() {
             PatternKind::Wildcard | PatternKind::Literal => (None, Vec::new()),
-            PatternKind::Name(_) => {
-                // A variable bind: no variant test, but we don't bind it here
-                // (it's the whole scrutinee, already in a local). The MIR builder
-                // treats a None-variant arm as a catch-all.
+            PatternKind::Name(name) => {
+                // A bare identifier in a pattern is ambiguous: it could be a
+                // variable bind (`x`) or a payload-less enum variant (`Empty`).
+                // Disambiguate by checking if the scrutinee is an enum and the
+                // name matches one of its variants.
+                let resolved = self.db.follow(scrutinee_ty);
+                if let praxis_types::TypeData::Enum { def } = self.db.data(resolved) {
+                    let edef = self.db.enum_def(*def);
+                    if let Some(idx) = edef.variant(&name) {
+                        return (Some(idx as u32), Vec::new());
+                    }
+                }
+                // Not a variant: treat as a variable bind (catch-all).
                 (None, Vec::new())
             }
             PatternKind::Variant(vname) => {

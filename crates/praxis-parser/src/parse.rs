@@ -120,6 +120,20 @@ fn is_assignment_op(op: SyntaxKind) -> bool {
     )
 }
 
+/// Whether `kind` can start a match pattern (M7, §4.6). Used to decide whether
+/// to continue parsing arms after a newline (arms are comma-OR-newline separated).
+fn is_pattern_start(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::UNDERSCORE
+            | SyntaxKind::IntLit
+            | SyntaxKind::TextLit
+            | SyntaxKind::KW_TRUE
+            | SyntaxKind::KW_FALSE
+            | SyntaxKind::Ident
+    )
+}
+
 const fn bp(left: u8, right: u8) -> BindingPower {
     BindingPower { left, right }
 }
@@ -752,9 +766,18 @@ impl<'t> Parser<'t> {
                 self.start_node(SyntaxKind::MATCH_ARM);
                 self.parse_pattern();
                 self.expect(SyntaxKind::FAT_ARROW, "`=>` in match arm");
+                // Arm body: suppress record literals so a Name { ... } in the
+                // body isn't confused with the next arm's pattern.
+                let prev = self.no_struct_literal;
+                self.no_struct_literal = true;
                 self.parse_expr();
+                self.no_struct_literal = prev;
                 self.finish_node(); // MATCH_ARM
-                if !self.eat(SyntaxKind::COMMA) {
+                                    // Arms are comma-OR-newline separated (§4.6). Eat an optional
+                                    // comma, then check if more arms follow.
+                self.eat(SyntaxKind::COMMA);
+                // Stop if we hit `}` or something that can't start a pattern.
+                if self.at(SyntaxKind::R_BRACE) || !is_pattern_start(self.peek()) {
                     break;
                 }
                 self.ensure_progress(before);

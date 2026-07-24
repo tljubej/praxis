@@ -561,32 +561,34 @@ fn lower_inst<M: Module>(
         Inst::EnumTag { dst, src } => {
             // Read the tag directly from the EnumPayload at offset 0. The
             // payload starts at gc_ref + size_of(GcHeader). The tag is a u32 at
-            // offset 0 of EnumPayload. No allocation (not a safepoint).
+            // Read the tag directly from the EnumPayload. The payload starts at
+            // gc_ref + size_of(GcHeader). The tag is a u32 at offset 0.
             let enum_ref = builder.use_var(vars[src.0 as usize]);
             let payload_offset = core::mem::size_of::<praxis_runtime::gc::GcHeader>() as i64;
             let tag_ptr = builder.ins().iadd_imm_s(enum_ref, payload_offset);
-            // Load the tag as a full I64 (the u32 tag occupies the low 4 bytes;
-            // the upper 4 are padding/zero). This avoids I32/I64 type issues.
-            let tag = builder.ins().load(GC, MemFlags::trusted(), tag_ptr, 0);
+            // Read just the u32 tag (not a full I64 — the 4 bytes of padding
+            // after the tag are uninitialized bumpalo memory). In Cranelift
+            // 0.134, uload32 returns an I64 with the upper 32 bits zeroed.
+            let tag = builder.ins().uload32(MemFlags::trusted(), tag_ptr, 0);
             builder.def_var(vars[dst.0 as usize], tag);
         }
         Inst::EnumPayloadGet { dst, src, idx } => {
             // Read payload slot `idx` from the EnumPayload. The payload is
             // { tag: u32, items: Vec<GcRef> }. The Vec's data pointer is at
             // offset 8 of EnumPayload (after tag:u32 + 4 padding). Slot `idx`
-            // is at data_ptr + idx * 8. No allocation (not a safepoint).
+            // is at data_ptr + idx * 8. We call praxis_enum_payload (a runtime
+            // ABI wrapper) rather than reading the Vec's internal layout
+            // directly, because Vec's field order is repr(Rust) and not stable.
             let enum_ref = builder.use_var(vars[src.0 as usize]);
-            let payload_offset = core::mem::size_of::<praxis_runtime::gc::GcHeader>() as i64;
-            let payload_ptr = builder.ins().iadd_imm_s(enum_ref, payload_offset);
-            // Vec<GcRef> is at offset 8 (after tag:u32 + pad). Its data pointer
-            // (the first field of Vec) is at payload_ptr + 8.
-            let vec_data_ptr_addr = builder.ins().iadd_imm_s(payload_ptr, 8);
-            let vec_data_ptr = builder
-                .ins()
-                .load(GC, MemFlags::trusted(), vec_data_ptr_addr, 0);
-            let slot_offset = (*idx as i64) * 8;
-            let slot_addr = builder.ins().iadd_imm_s(vec_data_ptr, slot_offset);
-            let slot_val = builder.ins().load(GC, MemFlags::trusted(), slot_addr, 0);
+            let idx_val = builder.ins().iconst(GC, *idx as i64);
+            let slot_val = call_runtime_by_name(
+                builder,
+                ctx_val,
+                &[enum_ref, idx_val],
+                "praxis_enum_payload",
+                module,
+                imports,
+            )?;
             builder.def_var(vars[dst.0 as usize], slot_val);
         }
     }
