@@ -192,6 +192,9 @@ pub enum SyntaxKind {
     FIELD_EXPR,
     /// A `match scrutinee { pattern => expr, … }` expression (M7, §4.6/§4.11).
     MATCH_EXPR,
+    /// A closure expression `|params| expr` (M7, §4.10). Bare `PIPE` claims the
+    /// `|` (lexer max-munch keeps `||` as logical-or `PIPE2`).
+    CLOSURE_EXPR,
     /// One `pattern => expr` arm of a match expression.
     MATCH_ARM,
     /// A pattern (M7, §4.6): wildcard `_`, literal, variable bind, enum variant,

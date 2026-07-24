@@ -687,10 +687,32 @@ impl<'a> Lowerer<'a> {
             Expr::RecordLit(r) => self.lower_record_lit(r),
             Expr::FieldGet(f) => self.lower_field_get(f),
             Expr::Match(m) => self.lower_match(m),
+            // M7-WS7: closure parsing, resolution, and inference are complete;
+            // the runtime lowering (synthetic MIR function, capture environment,
+            // indirect call) is the remaining WS7 work. For now the lowerer
+            // produces a placeholder so type-checking works end-to-end.
+            Expr::Closure(c) => self.lower_closure(c),
             Expr::Error(_) => TypedExpr::Lit {
                 value: Lit::Int(0),
                 ty: self.db.fresh_var(),
             },
+        }
+    }
+
+    /// Lower a closure expression (M7-WS7, §4.10). Currently a placeholder: the
+    /// closure's *type* is inferred correctly (a `Func`), but the runtime
+    /// representation (synthetic MIR function + captured environment + indirect
+    /// call dispatch) is not yet lowered. Returns a Unit-typed placeholder.
+    fn lower_closure(&mut self, c: &praxis_ast::ClosureExpr) -> TypedExpr {
+        // Touch the params/body so any side-effecting lowering runs, but the
+        // result is a placeholder. The closure's type comes from inference.
+        let _ = c.params().count();
+        if let Some(body) = c.body() {
+            let _ = self.lower_expr(&body);
+        }
+        TypedExpr::Lit {
+            value: Lit::Int(0),
+            ty: self.unit,
         }
     }
 

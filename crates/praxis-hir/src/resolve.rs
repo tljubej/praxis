@@ -472,6 +472,23 @@ impl Resolver {
             // M7-WS5: match — resolve the scrutinee and each arm's body. Pattern
             // variable bindings enter a child scope.
             Expr::Match(m) => self.resolve_match(scope, m),
+            // M7-WS7: closure — params bind in a child scope; the body resolves
+            // there (capturing outer-scope names naturally through the scope chain).
+            Expr::Closure(c) => self.resolve_closure(scope, c),
+        }
+    }
+
+    /// Resolve a `|params| expr` closure (M7, §4.10). Params bind in a child
+    /// scope; the body resolves in that scope. Outer names are captured
+    /// automatically through the scope chain (a free var in the body resolves to
+    /// an enclosing binding).
+    fn resolve_closure(&mut self, scope: ScopeId, c: &praxis_ast::ClosureExpr) {
+        let body_scope = self.out.scopes.push_child(scope);
+        for p in c.params() {
+            self.bind_param(body_scope, &p);
+        }
+        if let Some(body) = c.body() {
+            self.resolve_expr(body_scope, &body);
         }
     }
 

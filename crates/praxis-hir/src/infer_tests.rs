@@ -402,3 +402,30 @@ fn arm_after_wildcard_is_unreachable() {
     let src = "enum Tile { Empty, Wall }\nfn main() -> Int {\n  let t = Empty\n  match t {\n    _ => 0\n    Empty => 1\n  }\n}\n";
     assert!(has_type_error_with_lower(src));
 }
+
+// --- M7-WS7: closure type inference (§4.10) ---------------------------------
+// The frontend (parse, resolve, infer) is complete; runtime lowering is in
+// progress. These test the inferred types.
+
+#[test]
+fn closure_infers_identity_type() {
+    // `|x| x` should infer `(Int) -> Int` when applied to an Int.
+    let ty = expr_type("|x| x");
+    // Without a call site, the param is a fresh var; the type is `(a) -> a`.
+    // Just verify it type-checks (no error) and produces a function type.
+    assert!(ty.contains("->"), "closure type was: {ty}");
+}
+
+#[test]
+fn closure_typechecks() {
+    // A closure that captures an outer variable: `let o = 10; let f = |x| x + o`.
+    let src = "fn main() -> Int {\n  let o = 10\n  let f = |x| x + o\n  0\n}\n";
+    assert!(!has_type_error(src));
+}
+
+#[test]
+fn closure_with_typed_param_typechecks() {
+    // `|x: Int| x + 1` with an explicit param type.
+    let src = "fn main() -> Int {\n  let f = |x: Int| x + 1\n  0\n}\n";
+    assert!(!has_type_error(src));
+}

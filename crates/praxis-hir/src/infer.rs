@@ -536,8 +536,26 @@ impl Inferer {
             Expr::RecordLit(r) => self.infer_record_lit(scope, r),
             Expr::FieldGet(f) => self.infer_field_get(scope, f),
             Expr::Match(m) => self.infer_match(scope, m),
+            // M7-WS7: closure — type is `Func`; params bind in a child scope.
+            Expr::Closure(c) => self.infer_closure(scope, c),
             Expr::Error(_) => self.db.fresh_var(),
         }
+    }
+
+    /// Infer the type of a `|params| expr` closure (M7, §4.10). The result is a
+    /// `Func` type `(P0, …) -> R` built from the param and body types. Free
+    /// variables in the body resolve to outer-scope bindings (captures); the
+    /// capture environment is a runtime concern, not a type-system one (§4.10).
+    fn infer_closure(&mut self, scope: ScopeId, c: &praxis_ast::ClosureExpr) -> Type {
+        let body_scope = self.scopes.push_child(scope);
+        let mut param_types = Vec::new();
+        for p in c.params() {
+            param_types.push(self.infer_param(body_scope, &p));
+        }
+        let result_ty = c
+            .body()
+            .map_or(self.db.unit(), |b| self.infer_expr(body_scope, &b));
+        self.db.func(param_types, result_ty)
     }
 
     /// Infer the type of a record literal `Name { field: expr, … }` (M7, §4.5).

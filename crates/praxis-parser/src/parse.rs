@@ -616,6 +616,13 @@ impl<'t> Parser<'t> {
             self.finish_node();
             return;
         }
+        // `|params| expr` closure (M7, §4.10). Bare `PIPE` claims the `|`; the
+        // lexer's max-munch keeps `||` as logical-or (`PIPE2`, handled in the
+        // infix table), so the two never conflict.
+        if op == SyntaxKind::PIPE {
+            self.parse_closure();
+            return;
+        }
         if let Some(bp) = prefix_binding_power(op) {
             self.start_node(SyntaxKind::UNARY_EXPR);
             self.bump(); // unary operator
@@ -624,6 +631,35 @@ impl<'t> Parser<'t> {
             return;
         }
         self.parse_atom();
+    }
+
+    /// `|params| expr` — a closure expression (M7, §4.10). Params are bare names
+    /// optionally annotated `: Type`, separated by commas, between two `|`. The
+    /// body is a single expression (which may be a `{ block }`). Closures capture
+    /// outer variables automatically (§4.10); the capture analysis is in HIR.
+    fn parse_closure(&mut self) {
+        self.start_node(SyntaxKind::CLOSURE_EXPR);
+        self.bump(); // `|`
+                     // Zero or more `name` or `name: Type` params separated by commas.
+        if !self.at(SyntaxKind::PIPE) {
+            loop {
+                let before = self.meaningful_index();
+                self.start_node(SyntaxKind::PARAM);
+                self.expect(SyntaxKind::Ident, "closure parameter name");
+                if self.eat(SyntaxKind::COLON) {
+                    self.parse_type();
+                }
+                self.finish_node();
+                if !self.eat(SyntaxKind::COMMA) {
+                    break;
+                }
+                self.ensure_progress(before);
+            }
+        }
+        self.expect(SyntaxKind::PIPE, "`|` to close closure parameters");
+        // Body: a single expression (which may be a `{ block }`).
+        self.parse_expr();
+        self.finish_node();
     }
 
     /// Smallest expression: literals, names, calls, parenthesized expressions,

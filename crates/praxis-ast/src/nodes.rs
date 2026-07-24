@@ -437,6 +437,8 @@ pub enum Expr {
     FieldGet(FieldExpr),
     /// `match scrutinee { pattern => expr, … }` (M7, §4.6).
     Match(MatchExpr),
+    /// `|params| expr` closure (M7, §4.10).
+    Closure(ClosureExpr),
     /// An unparseable expression the parser wrapped in a `PARSE_ERROR` node.
     Error(SyntaxNode),
 }
@@ -461,6 +463,7 @@ impl Expr {
             K::RECORD_LIT_EXPR => Expr::RecordLit(RecordLitExpr::from_syntax(n)),
             K::FIELD_EXPR => Expr::FieldGet(FieldExpr::from_syntax(n)),
             K::MATCH_EXPR => Expr::Match(MatchExpr::from_syntax(n)),
+            K::CLOSURE_EXPR => Expr::Closure(ClosureExpr::from_syntax(n)),
             K::PARSE_ERROR => Expr::Error(n),
             _ => return None,
         })
@@ -580,6 +583,38 @@ impl MatchArm {
         self.syntax
             .children()
             .filter(|c| c.kind() != K::PATTERN)
+            .find_map(Expr::cast_from_child)
+    }
+}
+
+/// `|params| expr` — a closure expression (M7, §4.10). The params are `PARAM`
+/// children (no `PARAM_LIST` wrapper, since closures use `|…|` not `(…)`). The
+/// body is the trailing expression child. Closures capture outer variables
+/// automatically; the capture analysis lives in HIR.
+#[derive(Clone, Debug)]
+pub struct ClosureExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for ClosureExpr {
+    const KIND: K = K::CLOSURE_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl ClosureExpr {
+    /// The closure's parameters (bare `name` or `name: Type`), in order.
+    pub fn params(&self) -> impl Iterator<Item = Param> + '_ {
+        children::<Param>(&self.syntax)
+    }
+    /// The closure body expression (after the closing `|`).
+    pub fn body(&self) -> Option<Expr> {
+        // The body is the expression child that is not a PARAM.
+        self.syntax
+            .children()
+            .filter(|c| c.kind() != K::PARAM)
             .find_map(Expr::cast_from_child)
     }
 }
