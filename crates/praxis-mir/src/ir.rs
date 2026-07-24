@@ -152,6 +152,17 @@ pub enum Inst {
         src: LocalId,
         field_idx: u32,
     },
+    /// Read the variant tag of an enum `GcRef` into a `Scalar(Int)` local (M7,
+    /// §4.6). The codegen reads the tag directly from the payload without
+    /// allocating. Not a safepoint.
+    EnumTag { dst: LocalId, src: LocalId },
+    /// Read payload slot `idx` of an enum `GcRef` into a `Gc` local (M7, §4.6).
+    /// Not a safepoint (no allocation).
+    EnumPayloadGet {
+        dst: LocalId,
+        src: LocalId,
+        idx: u32,
+    },
 }
 
 /// What to allocate, for [`Inst::Alloc`].

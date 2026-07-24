@@ -583,8 +583,8 @@ pub unsafe extern "C" fn praxis_record_field(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_enum(
     ctx: *mut RuntimeContext,
-    tag: u32,
-    arity: u32,
+    tag: i64,
+    arity: i64,
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
     let unit = unit_sentinel(ctx);
@@ -596,8 +596,10 @@ pub unsafe extern "C" fn praxis_alloc_enum(
             std::mem::size_of::<crate::enums::EnumPayload>(),
             std::mem::align_of::<crate::enums::EnumPayload>(),
             |payload| {
-                (payload as *mut crate::enums::EnumPayload)
-                    .write(crate::enums::EnumPayload { tag, items });
+                (payload as *mut crate::enums::EnumPayload).write(crate::enums::EnumPayload {
+                    tag: tag as u32,
+                    items,
+                });
             },
         )
     }
@@ -612,7 +614,7 @@ pub unsafe extern "C" fn praxis_alloc_enum(
 pub unsafe extern "C" fn praxis_enum_set_payload(
     ctx: *mut RuntimeContext,
     enum_value: GcRef,
-    idx: u32,
+    idx: i64,
     value: GcRef,
 ) -> GcRef {
     let _ = ctx;
@@ -625,18 +627,22 @@ pub unsafe extern "C" fn praxis_enum_set_payload(
     enum_value
 }
 
-/// Read the variant tag (discriminant) of an enum value (M7, §4.6). Returns
-/// the `u32` variant index. Used by `match` lowering to branch on the variant.
+/// Read the variant tag (discriminant) of an enum value (M7, §4.6). Returns the
+/// tag as a boxed `Int` `GcRef` (the uniform ABI convention), so the `match`
+/// lowering can extract the scalar and compare. Used by `match` to branch.
 ///
 /// # Safety
 /// `ctx` must be live; `enum_value` must be a valid enum `GcRef`.
 #[no_mangle]
-pub unsafe extern "C" fn praxis_enum_tag(ctx: *mut RuntimeContext, enum_value: GcRef) -> u32 {
-    let _ = ctx;
+pub unsafe extern "C" fn praxis_enum_tag(ctx: *mut RuntimeContext, enum_value: GcRef) -> GcRef {
     // SAFETY: caller guarantees enum_value is a valid enum GcRef.
+    // Read the tag BEFORE allocating — the alloc below may trigger GC, and
+    // enum_value is not explicitly rooted (it's only in a Cranelift local).
     let payload = enum_value.payload::<u8>() as *const crate::enums::EnumPayload;
-    let ep = unsafe { &*payload };
-    ep.tag
+    let tag = unsafe { (*payload).tag as i64 };
+    // SAFETY: alloc boxes the i64 into a fresh Int object. The tag value is
+    // already in a register, so GC collecting enum_value here is safe.
+    unsafe { heap(ctx).alloc(crate::scalars::INT, tag) }
 }
 
 /// Read payload slot `idx` of an enum value (M7, §4.6). Returns the slot's
@@ -648,7 +654,7 @@ pub unsafe extern "C" fn praxis_enum_tag(ctx: *mut RuntimeContext, enum_value: G
 pub unsafe extern "C" fn praxis_enum_payload(
     ctx: *mut RuntimeContext,
     enum_value: GcRef,
-    idx: u32,
+    idx: i64,
 ) -> GcRef {
     // SAFETY: caller guarantees enum_value is a valid enum GcRef.
     let payload = enum_value.payload::<u8>() as *const crate::enums::EnumPayload;

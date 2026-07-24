@@ -260,7 +260,7 @@ impl SpillCtx<'_> {
             // sign/zero-extended variants; the slot offset is always a small
             // positive immediate so the distinction is immaterial.
             #[allow(deprecated)]
-            let slot_addr = builder.ins().iadd_imm(frame_ptr, off);
+            let slot_addr = builder.ins().iadd_imm_s(frame_ptr, off);
             // Store into the frame slot; these accesses never trap (the frame is
             // always live and the offset is in-bounds by construction).
             let mut flags = MemFlags::trusted();
@@ -480,23 +480,25 @@ fn lower_inst<M: Module>(
             let _ = call_check_fault(builder, ctx_val, module, imports)?;
         }
         Inst::IntCmp { op, dst, lhs, rhs } => {
+            // Compare the scalar operands directly in Cranelift (no boxing). The
+            // operands are i64 scalar values; Cranelift's `icmp` produces an i8
+            // condition which we widen to i64 for uniformity. This avoids the
+            // allocation safepoints that the boxed-comparison path would
+            // introduce (which would require spilling live Gc roots not tracked
+            // by the MIR liveness pass for non-safepoint instructions).
             let l = builder.use_var(vars[lhs.0 as usize]);
             let r = builder.use_var(vars[rhs.0 as usize]);
-            // Re-materialize operands to GcRefs to match the wrapper ABI.
-            let l_gc = call_symbol1(builder, ctx_val, l, Symbol::AllocInt, module, imports)?;
-            let r_gc = call_symbol1(builder, ctx_val, r, Symbol::AllocInt, module, imports)?;
-            let sym = match op {
-                CmpOp::Eq => Symbol::IntEq,
-                CmpOp::Neq => Symbol::IntNe,
-                CmpOp::Lt => Symbol::IntLt,
-                CmpOp::Gt => Symbol::IntGt,
-                CmpOp::Le => Symbol::IntLe,
-                CmpOp::Ge => Symbol::IntGe,
+            let cond = match op {
+                CmpOp::Eq => cranelift::codegen::ir::condcodes::IntCC::Equal,
+                CmpOp::Neq => cranelift::codegen::ir::condcodes::IntCC::NotEqual,
+                CmpOp::Lt => cranelift::codegen::ir::condcodes::IntCC::SignedLessThan,
+                CmpOp::Gt => cranelift::codegen::ir::condcodes::IntCC::SignedGreaterThan,
+                CmpOp::Le => cranelift::codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
+                CmpOp::Ge => cranelift::codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual,
             };
-            let bool_gc = call_symbol2(builder, ctx_val, l_gc, r_gc, sym, module, imports)?;
-            let bool_scalar =
-                call_symbol1(builder, ctx_val, bool_gc, Symbol::BoolLoad, module, imports)?;
-            builder.def_var(vars[dst.0 as usize], bool_scalar);
+            let cmp = builder.ins().icmp(cond, l, r);
+            let widened = builder.ins().uextend(GC, cmp);
+            builder.def_var(vars[dst.0 as usize], widened);
         }
         Inst::Call {
             dst,
@@ -555,6 +557,37 @@ fn lower_inst<M: Module>(
                 imports,
             )?;
             builder.def_var(vars[dst.0 as usize], field);
+        }
+        Inst::EnumTag { dst, src } => {
+            // Read the tag directly from the EnumPayload at offset 0. The
+            // payload starts at gc_ref + size_of(GcHeader). The tag is a u32 at
+            // offset 0 of EnumPayload. No allocation (not a safepoint).
+            let enum_ref = builder.use_var(vars[src.0 as usize]);
+            let payload_offset = core::mem::size_of::<praxis_runtime::gc::GcHeader>() as i64;
+            let tag_ptr = builder.ins().iadd_imm_s(enum_ref, payload_offset);
+            // Load the tag as a full I64 (the u32 tag occupies the low 4 bytes;
+            // the upper 4 are padding/zero). This avoids I32/I64 type issues.
+            let tag = builder.ins().load(GC, MemFlags::trusted(), tag_ptr, 0);
+            builder.def_var(vars[dst.0 as usize], tag);
+        }
+        Inst::EnumPayloadGet { dst, src, idx } => {
+            // Read payload slot `idx` from the EnumPayload. The payload is
+            // { tag: u32, items: Vec<GcRef> }. The Vec's data pointer is at
+            // offset 8 of EnumPayload (after tag:u32 + 4 padding). Slot `idx`
+            // is at data_ptr + idx * 8. No allocation (not a safepoint).
+            let enum_ref = builder.use_var(vars[src.0 as usize]);
+            let payload_offset = core::mem::size_of::<praxis_runtime::gc::GcHeader>() as i64;
+            let payload_ptr = builder.ins().iadd_imm_s(enum_ref, payload_offset);
+            // Vec<GcRef> is at offset 8 (after tag:u32 + pad). Its data pointer
+            // (the first field of Vec) is at payload_ptr + 8.
+            let vec_data_ptr_addr = builder.ins().iadd_imm_s(payload_ptr, 8);
+            let vec_data_ptr = builder
+                .ins()
+                .load(GC, MemFlags::trusted(), vec_data_ptr_addr, 0);
+            let slot_offset = (*idx as i64) * 8;
+            let slot_addr = builder.ins().iadd_imm_s(vec_data_ptr, slot_offset);
+            let slot_val = builder.ins().load(GC, MemFlags::trusted(), slot_addr, 0);
+            builder.def_var(vars[dst.0 as usize], slot_val);
         }
     }
     Ok(())

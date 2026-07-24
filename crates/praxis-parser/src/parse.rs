@@ -636,6 +636,7 @@ impl<'t> Parser<'t> {
             SyntaxKind::L_BRACE => self.parse_block(),
             SyntaxKind::KW_IF => self.parse_if(),
             SyntaxKind::KW_WHILE => self.parse_while(),
+            SyntaxKind::KW_MATCH => self.parse_match(),
             SyntaxKind::Ident => self.parse_name_or_call(),
             _ => {
                 // Nothing recognizable. CRITICAL: we must make forward progress
@@ -732,6 +733,78 @@ impl<'t> Parser<'t> {
         self.no_struct_literal = prev;
         self.parse_block();
         self.finish_node();
+    }
+
+    /// `match scrutinee { pattern => expr, … }` (M7, §4.6/§4.11).
+    fn parse_match(&mut self) {
+        self.start_node(SyntaxKind::MATCH_EXPR);
+        self.bump(); // `match`
+                     // The scrutinee is an expression; suppress record literals so the `{`
+                     // opening the arm list isn't consumed as a record body.
+        let prev = self.no_struct_literal;
+        self.no_struct_literal = true;
+        self.parse_expr();
+        self.no_struct_literal = prev;
+        self.expect(SyntaxKind::L_BRACE, "`{` to begin match arms");
+        if !self.at(SyntaxKind::R_BRACE) {
+            loop {
+                let before = self.meaningful_index();
+                self.start_node(SyntaxKind::MATCH_ARM);
+                self.parse_pattern();
+                self.expect(SyntaxKind::FAT_ARROW, "`=>` in match arm");
+                self.parse_expr();
+                self.finish_node(); // MATCH_ARM
+                if !self.eat(SyntaxKind::COMMA) {
+                    break;
+                }
+                self.ensure_progress(before);
+            }
+        }
+        self.expect(SyntaxKind::R_BRACE, "`}` to end match arms");
+        self.finish_node(); // MATCH_EXPR
+    }
+
+    /// Parse a pattern (M7, §4.6). M7 supports: `_` (wildcard), a literal
+    /// (Int/Text/Bool), a variable bind (`x`), an enum variant (`Empty` or
+    /// `Number(sub_pattern, …)`), and tuple/record patterns.
+    fn parse_pattern(&mut self) {
+        self.start_node(SyntaxKind::PATTERN);
+        match self.peek() {
+            SyntaxKind::UNDERSCORE => {
+                self.bump(); // `_`
+            }
+            SyntaxKind::IntLit
+            | SyntaxKind::TextLit
+            | SyntaxKind::KW_TRUE
+            | SyntaxKind::KW_FALSE => {
+                self.bump(); // literal
+            }
+            SyntaxKind::Ident => {
+                self.bump(); // variant name or variable bind
+                             // Enum variant with payload: `Name(pat, pat, …)`.
+                if self.eat(SyntaxKind::L_PAREN) {
+                    if !self.at(SyntaxKind::R_PAREN) {
+                        loop {
+                            let before = self.meaningful_index();
+                            self.parse_pattern();
+                            if !self.eat(SyntaxKind::COMMA) {
+                                break;
+                            }
+                            self.ensure_progress(before);
+                        }
+                    }
+                    self.expect(SyntaxKind::R_PAREN, "`)` to close variant pattern");
+                }
+            }
+            _ => {
+                let span = self.current_span();
+                self.error(span, "expected a pattern");
+                if !self.at_end() {
+                    self.bump();
+                }
+            }
+        }
+        self.finish_node(); // PATTERN
     }
 
     // --- types (M2) ---------------------------------------------------------

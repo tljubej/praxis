@@ -435,6 +435,8 @@ pub enum Expr {
     RecordLit(RecordLitExpr),
     /// `receiver.field` field access (M7, §4.5).
     FieldGet(FieldExpr),
+    /// `match scrutinee { pattern => expr, … }` (M7, §4.6).
+    Match(MatchExpr),
     /// An unparseable expression the parser wrapped in a `PARSE_ERROR` node.
     Error(SyntaxNode),
 }
@@ -458,6 +460,7 @@ impl Expr {
             K::PARSE_EXPR => Expr::Parse(ParseExpr::from_syntax(n)),
             K::RECORD_LIT_EXPR => Expr::RecordLit(RecordLitExpr::from_syntax(n)),
             K::FIELD_EXPR => Expr::FieldGet(FieldExpr::from_syntax(n)),
+            K::MATCH_EXPR => Expr::Match(MatchExpr::from_syntax(n)),
             K::PARSE_ERROR => Expr::Error(n),
             _ => return None,
         })
@@ -524,6 +527,135 @@ impl FieldExpr {
             })
             .last()
     }
+}
+
+/// `match scrutinee { pattern => expr, … }` (M7, §4.6/§4.11).
+#[derive(Clone, Debug)]
+pub struct MatchExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for MatchExpr {
+    const KIND: K = K::MATCH_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl MatchExpr {
+    /// The scrutinee expression being matched.
+    pub fn scrutinee(&self) -> Option<Expr> {
+        // The scrutinee is the first expression-kind child (before the arms).
+        self.syntax.children().find_map(Expr::cast_from_child)
+    }
+    /// The match arms in source order.
+    pub fn arms(&self) -> impl Iterator<Item = MatchArm> + '_ {
+        self.syntax.children().filter_map(MatchArm::cast)
+    }
+}
+
+/// One `pattern => expr` arm of a match expression (M7, §4.6).
+#[derive(Clone, Debug)]
+pub struct MatchArm {
+    syntax: SyntaxNode,
+}
+impl AstNode for MatchArm {
+    const KIND: K = K::MATCH_ARM;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl MatchArm {
+    /// The arm's pattern.
+    pub fn pattern(&self) -> Option<Pattern> {
+        child(&self.syntax)
+    }
+    /// The arm's body expression (after `=>`).
+    pub fn body(&self) -> Option<Expr> {
+        // The body is the expression child that is not the Pattern.
+        self.syntax
+            .children()
+            .filter(|c| c.kind() != K::PATTERN)
+            .find_map(Expr::cast_from_child)
+    }
+}
+
+/// A pattern (M7, §4.6): `_`, literal, variable bind, or enum variant
+/// (optionally with sub-patterns).
+#[derive(Clone, Debug)]
+pub struct Pattern {
+    syntax: SyntaxNode,
+}
+impl AstNode for Pattern {
+    const KIND: K = K::PATTERN;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl Pattern {
+    /// The kind of this pattern, as a [`PatternKind`].
+    pub fn kind(&self) -> PatternKind {
+        let syntax = &self.syntax;
+        // Check for wildcard.
+        if syntax
+            .children_with_tokens()
+            .any(|e| matches!(e, rowan::NodeOrToken::Token(t) if t.kind() == K::UNDERSCORE))
+        {
+            return PatternKind::Wildcard;
+        }
+        // Check for a literal.
+        if syntax
+            .children_with_tokens()
+            .any(|e| matches!(e, rowan::NodeOrToken::Token(t) if matches!(t.kind(), K::IntLit | K::TextLit | K::KW_TRUE | K::KW_FALSE)))
+        {
+            return PatternKind::Literal;
+        }
+        // Check for an Ident — variant or variable bind.
+        let name_tok = syntax.children_with_tokens().find_map(|e| match e {
+            rowan::NodeOrToken::Token(t) if t.kind() == K::Ident => Some(t),
+            _ => None,
+        });
+        if let Some(tok) = name_tok {
+            // If followed by `(`, it's a variant with sub-patterns.
+            let has_parens = syntax.children().any(|c| c.kind() == K::PATTERN);
+            if has_parens {
+                return PatternKind::Variant(tok.text().to_string());
+            }
+            return PatternKind::Name(tok.text().to_string());
+        }
+        PatternKind::Wildcard
+    }
+    /// Sub-patterns (for a variant pattern `Number(n, _)`).
+    pub fn sub_patterns(&self) -> impl Iterator<Item = Pattern> + '_ {
+        self.syntax.children().filter_map(Pattern::cast)
+    }
+    /// The name token, if this is a variant or variable-bind pattern.
+    pub fn name_token(&self) -> Option<SyntaxToken> {
+        self.syntax.children_with_tokens().find_map(|e| match e {
+            rowan::NodeOrToken::Token(t) if t.kind() == K::Ident => Some(t),
+            _ => None,
+        })
+    }
+}
+
+/// What kind of pattern a [`Pattern`] is (M7, §4.6).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PatternKind {
+    /// `_` — matches anything.
+    Wildcard,
+    /// A literal: `42`, `"hi"`, `true`, `false`.
+    Literal,
+    /// A variable bind: `x` — matches anything and binds the value to `x`.
+    Name(String),
+    /// An enum variant: `Empty` or `Number(…)` — the string is the variant name.
+    Variant(String),
 }
 
 /// A literal: `IntLit`, `TextLit`, `true`/`false`, backtick template.

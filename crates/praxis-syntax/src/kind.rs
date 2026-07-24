@@ -190,6 +190,13 @@ pub enum SyntaxKind {
     RECORD_LIT_EXPR,
     /// A `receiver.field` field-access expression (M7, §4.5).
     FIELD_EXPR,
+    /// A `match scrutinee { pattern => expr, … }` expression (M7, §4.6/§4.11).
+    MATCH_EXPR,
+    /// One `pattern => expr` arm of a match expression.
+    MATCH_ARM,
+    /// A pattern (M7, §4.6): wildcard `_`, literal, variable bind, enum variant,
+    /// or tuple/record destructuring.
+    PATTERN,
     /// A single `name: Type` parameter.
     PARAM,
     /// The `(...)` parameter list.

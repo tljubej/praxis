@@ -469,6 +469,46 @@ impl Resolver {
             // a scope binding; it's resolved against the struct type during
             // inference.
             Expr::FieldGet(f) => self.resolve_field_get(scope, f),
+            // M7-WS5: match — resolve the scrutinee and each arm's body. Pattern
+            // variable bindings enter a child scope.
+            Expr::Match(m) => self.resolve_match(scope, m),
+        }
+    }
+
+    /// Resolve a `match scrutinee { pattern => body, … }` expression (M7, §4.6).
+    fn resolve_match(&mut self, scope: ScopeId, m: &praxis_ast::MatchExpr) {
+        // Resolve the scrutinee.
+        if let Some(scrutinee) = m.scrutinee() {
+            self.resolve_expr(scope, &scrutinee);
+        }
+        // Each arm opens a child scope for its pattern bindings.
+        for arm in m.arms() {
+            let arm_scope = self.out.scopes.push_child(scope);
+            if let Some(pat) = arm.pattern() {
+                self.resolve_pattern_bindings(arm_scope, &pat);
+            }
+            if let Some(body) = arm.body() {
+                self.resolve_expr(arm_scope, &body);
+            }
+        }
+    }
+
+    /// Bind any variable names introduced by a pattern in `scope` (M7, §4.6).
+    /// A `Name(x)` pattern introduces a binding `x`; a `Variant(Sub)` recurses
+    /// into sub-patterns.
+    fn resolve_pattern_bindings(&mut self, scope: ScopeId, pat: &praxis_ast::Pattern) {
+        match pat.kind() {
+            praxis_ast::PatternKind::Wildcard | praxis_ast::PatternKind::Literal => {}
+            praxis_ast::PatternKind::Name(name) => {
+                if let Some(tok) = pat.name_token() {
+                    self.bind(scope, SymbolKind::Let, name, tok.text_range());
+                }
+            }
+            praxis_ast::PatternKind::Variant(_) => {
+                for sub in pat.sub_patterns() {
+                    self.resolve_pattern_bindings(scope, &sub);
+                }
+            }
         }
     }
 

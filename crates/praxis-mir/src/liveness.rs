@@ -152,6 +152,8 @@ fn defs(inst: &Inst) -> Vec<LocalId> {
         Inst::MoveGc { dst, .. } => vec![*dst],
         Inst::ConstInt { dst, .. } => vec![*dst],
         Inst::LoadField { dst, .. } => vec![*dst],
+        Inst::EnumTag { dst, .. } => vec![*dst],
+        Inst::EnumPayloadGet { dst, .. } => vec![*dst],
         Inst::StoreScalar { .. } | Inst::CheckFault { .. } => vec![],
     }
 }
@@ -187,6 +189,8 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
         Inst::Call { args, .. } => args.clone(),
         Inst::MoveGc { src, .. } => vec![*src],
         Inst::LoadField { src, .. } => vec![*src],
+        Inst::EnumTag { src, .. } => vec![*src],
+        Inst::EnumPayloadGet { src, .. } => vec![*src],
         Inst::ConstInt { .. } => vec![],
         Inst::CheckFault { .. } => vec![],
     }

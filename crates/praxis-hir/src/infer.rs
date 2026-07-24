@@ -535,6 +535,7 @@ impl Inferer {
             Expr::Parse(p) => self.infer_parse(scope, p),
             Expr::RecordLit(r) => self.infer_record_lit(scope, r),
             Expr::FieldGet(f) => self.infer_field_get(scope, f),
+            Expr::Match(m) => self.infer_match(scope, m),
             Expr::Error(_) => self.db.fresh_var(),
         }
     }
@@ -614,6 +615,98 @@ impl Inferer {
                     .unwrap_or_else(|| self.db.fresh_var())
             }
             _ => self.db.fresh_var(),
+        }
+    }
+
+    /// Infer the type of a `match scrutinee { pattern => body, … }` expression
+    /// (M7, §4.6). Unifies the scrutinee with each pattern, then unifies all
+    /// arm body types to determine the match's result type.
+    fn infer_match(&mut self, scope: ScopeId, m: &praxis_ast::MatchExpr) -> Type {
+        let scrutinee_ty = m
+            .scrutinee()
+            .map(|s| self.infer_expr(scope, &s))
+            .unwrap_or_else(|| self.db.fresh_var());
+        let arms: Vec<_> = m.arms().collect();
+        let result = self.db.fresh_var();
+        for arm in &arms {
+            let arm_scope = self.scopes.push_child(scope);
+            if let Some(pat) = arm.pattern() {
+                self.infer_pattern(arm_scope, &pat, scrutinee_ty);
+            }
+            if let Some(body) = arm.body() {
+                let body_ty = self.infer_expr(arm_scope, &body);
+                if let Err(e) = self.db.unify(result, body_ty) {
+                    let at = self.file_span(arm.syntax().text_range());
+                    self.diag_unify(at, e);
+                }
+            }
+        }
+        result
+    }
+
+    /// Infer a pattern against an expected type (M7, §4.6). Binds pattern
+    /// variables and unifies variant payloads.
+    #[allow(clippy::only_used_in_recursion)]
+    fn infer_pattern(&mut self, scope: ScopeId, pat: &praxis_ast::Pattern, expected: Type) {
+        use praxis_ast::PatternKind;
+        match pat.kind() {
+            PatternKind::Wildcard => {
+                // Matches anything; no binding, no constraint.
+            }
+            PatternKind::Literal => {
+                // Literal patterns match scalars; infer the literal's type and
+                // unify with the scrutinee. We rely on the token kind.
+                if let Some(tok) = pat.name_token().or_else(|| {
+                    pat.syntax().children_with_tokens().find_map(|e| match e {
+                        rowan::NodeOrToken::Token(t) => Some(t),
+                        _ => None,
+                    })
+                }) {
+                    let lit_ty = match tok.kind() {
+                        SyntaxKind::IntLit => self.db.int(),
+                        SyntaxKind::TextLit => self.db.text(),
+                        SyntaxKind::KW_TRUE | SyntaxKind::KW_FALSE => self.db.bool(),
+                        _ => self.db.fresh_var(),
+                    };
+                    if let Err(e) = self.db.unify(expected, lit_ty) {
+                        self.diag_unify(self.file_span(tok.text_range()), e);
+                    }
+                }
+            }
+            PatternKind::Name(name) => {
+                // A variable bind: matches anything of the scrutinee's type.
+                // Bind the variable to `expected`'s type.
+                if let Some(tok) = pat.name_token() {
+                    let range = tok.text_range();
+                    if let Some(&symbol) = self.decls.get(&range) {
+                        if let Some(sym) = self.names.get_mut(symbol) {
+                            sym.scheme = Some(Scheme::monotype(expected));
+                        }
+                    }
+                }
+                let _ = name;
+            }
+            PatternKind::Variant(vname) => {
+                // An enum variant pattern. Look up the variant to get payload types.
+                if let Some((enum_def_id, variant_idx, payload_types)) =
+                    self.lookup_enum_variant(&vname)
+                {
+                    let enum_ty = self.db.enum_type(enum_def_id);
+                    if let Err(e) = self.db.unify(expected, enum_ty) {
+                        if let Some(tok) = pat.name_token() {
+                            self.diag_unify(self.file_span(tok.text_range()), e);
+                        }
+                    }
+                    // Unify sub-patterns with payload types.
+                    let sub_pats: Vec<_> = pat.sub_patterns().collect();
+                    for (i, sub) in sub_pats.iter().enumerate() {
+                        if let Some(&payload_ty) = payload_types.get(i) {
+                            self.infer_pattern(scope, sub, payload_ty);
+                        }
+                    }
+                    let _ = variant_idx;
+                }
+            }
         }
     }
 

@@ -382,6 +382,10 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             args,
             ..
         } => lower_enum_variant(b, *enum_def_id, *variant_idx, args),
+        // M7-WS5: match expression — lowered to a tag-compare branch chain.
+        TypedExpr::Match {
+            scrutinee, arms, ..
+        } => lower_match(b, scrutinee, arms),
     }
 }
 
@@ -739,7 +743,8 @@ fn expr_static_type(e: &TypedExpr) -> Type {
         | TypedExpr::Parse { ty, .. }
         | TypedExpr::RecordLit { ty, .. }
         | TypedExpr::FieldGet { ty, .. }
-        | TypedExpr::EnumVariant { ty, .. } => *ty,
+        | TypedExpr::EnumVariant { ty, .. }
+        | TypedExpr::Match { ty, .. } => *ty,
         TypedExpr::Block(blk) => blk.ty,
     }
 }
@@ -801,6 +806,96 @@ fn lower_enum_variant(
         live_roots: Vec::new(),
     });
     dst
+}
+
+/// Lower a `match scrutinee { arms }` expression (M7, §4.6) to a tag-compare
+/// branch chain. The scrutinee must be an enum value; the result is the unified
+/// type of all arm bodies.
+///
+/// Strategy: read the scrutinee's tag via `praxis_enum_tag`, then for each arm
+/// with a variant index, compare the tag and branch. Wildcard arms (None) are
+/// the fall-through default. Each arm extracts its payload bindings and lowers
+/// its body.
+fn lower_match(
+    b: &mut Builder<'_>,
+    scrutinee: &TypedExpr,
+    arms: &[praxis_hir::TypedMatchArm],
+) -> LocalId {
+    let scrut_gc = lower_expr_gc(b, scrutinee);
+    let result = b.alloc_gc(Type(0), None);
+
+    // Read the tag directly as a scalar (no allocation, no boxing).
+    let tag_local = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::EnumTag {
+        dst: tag_local,
+        src: scrut_gc,
+    });
+
+    let join = b.func.new_block();
+    // Create a block per arm. We chain them: each variant arm tests its tag and
+    // either branches to its body or falls through to the next test. The last
+    // wildcard arm is the default.
+    for arm in arms {
+        let arm_body_blk = b.func.new_block();
+        let next_test_blk = b.func.new_block();
+        match arm.variant_idx {
+            Some(vidx) => {
+                // Compare tag == vidx.
+                let cmp_dst = b.alloc_scalar(ScalarKind::Bool);
+                let expected = b.alloc_scalar(ScalarKind::Int);
+                b.push(Inst::ConstInt {
+                    dst: expected,
+                    value: vidx as i64,
+                });
+                b.push(Inst::IntCmp {
+                    op: CmpOp::Eq,
+                    dst: cmp_dst,
+                    lhs: tag_local,
+                    rhs: expected,
+                });
+                b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                    cond: cmp_dst,
+                    then_block: arm_body_blk,
+                    else_block: next_test_blk,
+                };
+            }
+            None => {
+                // Wildcard/default arm: unconditional jump to body.
+                b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
+                    target: arm_body_blk,
+                };
+            }
+        }
+        // Arm body: extract payload bindings, lower the body, store result.
+        b.cur = arm_body_blk;
+        for (symbol, slot) in &arm.bindings {
+            let payload_local = b.alloc_gc(Type(0), None);
+            b.push(Inst::EnumPayloadGet {
+                dst: payload_local,
+                src: scrut_gc,
+                idx: *slot,
+            });
+            b.locals.insert(*symbol, payload_local);
+        }
+        let body_val = lower_expr_gc(b, &arm.body);
+        b.push(Inst::MoveGc {
+            dst: result,
+            src: body_val,
+        });
+        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join };
+        // Continue to the next test.
+        b.cur = next_test_blk;
+    }
+    // If no wildcard arm caught everything, the fall-through reaches here.
+    // Push a Unit default so the join block always has a valid result.
+    let unit_val = lower_lit_gc(b, &Lit::Int(0));
+    b.push(Inst::MoveGc {
+        dst: result,
+        src: unit_val,
+    });
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join };
+    b.cur = join;
+    result
 }
 
 #[cfg(test)]

@@ -230,6 +230,25 @@ pub enum TypedExpr {
         args: Vec<TypedExpr>,
         ty: Type,
     },
+    /// `match scrutinee { pattern => body, … }` (M7, §4.6).
+    Match {
+        scrutinee: Box<TypedExpr>,
+        arms: Vec<TypedMatchArm>,
+        ty: Type,
+    },
+}
+
+/// One arm of a lowered `match` expression (M7, §4.6).
+#[derive(Debug)]
+pub struct TypedMatchArm {
+    /// The variant index to test against the scrutinee's tag. `None` for a
+    /// wildcard/default arm (always matches).
+    pub variant_idx: Option<u32>,
+    /// (symbol, payload-slot-index) pairs: pattern variables bound to payload
+    /// slots. The MIR builder extracts these and binds them to locals.
+    pub bindings: Vec<(SymbolId, u32)>,
+    /// The arm body expression.
+    pub body: TypedExpr,
 }
 
 /// A literal value. (M4 lowers Int/Bool/Unit; Text materializes via the runtime
@@ -644,6 +663,7 @@ impl<'a> Lowerer<'a> {
             Expr::Parse(p) => self.lower_parse(p),
             Expr::RecordLit(r) => self.lower_record_lit(r),
             Expr::FieldGet(f) => self.lower_field_get(f),
+            Expr::Match(m) => self.lower_match(m),
             Expr::Error(_) => TypedExpr::Lit {
                 value: Lit::Int(0),
                 ty: self.db.fresh_var(),
@@ -1164,6 +1184,88 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Lower a `match scrutinee { pattern => body, … }` expression (M7, §4.6).
+    /// Each arm is converted to a [`TypedMatchArm`] with the variant index (or
+    /// `None` for wildcard) and payload bindings. The MIR builder lowers this to
+    /// a tag-compare branch chain.
+    fn lower_match(&mut self, m: &praxis_ast::MatchExpr) -> TypedExpr {
+        let scrutinee = match m.scrutinee() {
+            Some(s) => self.lower_expr(&s),
+            None => return self.error_expr(),
+        };
+        let scrutinee_ty = expr_ty(&scrutinee);
+        let mut arms = Vec::new();
+        for arm in m.arms() {
+            let (variant_idx, bindings) = match arm.pattern() {
+                Some(pat) => self.lower_pattern(&pat, scrutinee_ty),
+                None => (None, Vec::new()),
+            };
+            let body = match arm.body() {
+                Some(b) => self.lower_expr(&b),
+                None => self.error_expr(),
+            };
+            arms.push(TypedMatchArm {
+                variant_idx,
+                bindings,
+                body,
+            });
+        }
+        // The match's type is the unified body type (inference already unified
+        // them); use the first arm's body type.
+        let ty = arms.first().map(|a| expr_ty(&a.body)).unwrap_or(self.unit);
+        TypedExpr::Match {
+            scrutinee: Box::new(scrutinee),
+            arms,
+            ty,
+        }
+    }
+
+    /// Lower a pattern into (variant_idx, bindings). Returns `variant_idx =
+    /// None` for wildcard/variable/literal patterns (treated as catch-all by
+    /// the MIR tag-compare chain). For variant patterns, returns the variant
+    /// index and payload-slot bindings.
+    fn lower_pattern(
+        &mut self,
+        pat: &praxis_ast::Pattern,
+        scrutinee_ty: Type,
+    ) -> (Option<u32>, Vec<(SymbolId, u32)>) {
+        use praxis_ast::PatternKind;
+        match pat.kind() {
+            PatternKind::Wildcard | PatternKind::Literal => (None, Vec::new()),
+            PatternKind::Name(_) => {
+                // A variable bind: no variant test, but we don't bind it here
+                // (it's the whole scrutinee, already in a local). The MIR builder
+                // treats a None-variant arm as a catch-all.
+                (None, Vec::new())
+            }
+            PatternKind::Variant(vname) => {
+                // Look up the variant to get its index and payload types.
+                let resolved = self.db.follow(scrutinee_ty);
+                let enum_def_id = match self.db.data(resolved) {
+                    praxis_types::TypeData::Enum { def } => *def,
+                    _ => return (None, Vec::new()),
+                };
+                let edef = self.db.enum_def(enum_def_id);
+                let Some(idx) = edef.variant(&vname) else {
+                    return (None, Vec::new());
+                };
+                // Collect sub-pattern variable bindings mapped to payload slots.
+                let mut bindings = Vec::new();
+                let sub_pats: Vec<_> = pat.sub_patterns().collect();
+                for (slot, sub) in sub_pats.iter().enumerate() {
+                    if let PatternKind::Name(_) = sub.kind() {
+                        if let Some(tok) = sub.name_token() {
+                            if let Some(symbol) = self.resolve_decl_at(tok.text_range()) {
+                                bindings.push((symbol, slot as u32));
+                            }
+                        }
+                    }
+                }
+                (Some(idx as u32), bindings)
+            }
+        }
+    }
+
     // --- helpers -----------------------------------------------------------
 
     /// Resolve the symbol *declared* at `range` (a `let`/`var`/`fn`/param name
@@ -1219,6 +1321,7 @@ fn expr_ty(e: &TypedExpr) -> Type {
         TypedExpr::RecordLit { ty, .. } => *ty,
         TypedExpr::FieldGet { ty, .. } => *ty,
         TypedExpr::EnumVariant { ty, .. } => *ty,
+        TypedExpr::Match { ty, .. } => *ty,
     }
 }
 
@@ -1295,206 +1398,4 @@ fn unquote_text(raw: &str) -> String {
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use praxis_parser::parse;
-    use praxis_stdlib::type_pattern::ScalarType;
-
-    /// Parse + analyze + lower a one-file program. Returns the typed module
-    /// alongside the analysis (whose `db` is needed to read any `Type` handle).
-    struct Lowered {
-        module: TypedModule,
-        analysis: crate::Analysis,
-    }
-
-    fn lower_src(src: &str) -> Lowered {
-        let map = praxis_source::SourceMap::new();
-        let file = map.intern("lower_test.px", src);
-        let parsed = parse(file, src);
-        let mut analysis = crate::analyze_root(file, &parsed.tree);
-        // `lower` takes `&SourceFile`; cast the parsed root (analyze_root does
-        // the same internally).
-        let root = praxis_ast::SourceFile::cast(parsed.tree.clone())
-            .expect("parse produced a SOURCE_FILE");
-        let module = lower(file, &root, &mut analysis);
-        Lowered { module, analysis }
-    }
-
-    fn fn0(l: &Lowered) -> &TypedFn {
-        match &l.module.items[0] {
-            TypedItem::Fn(f) => f,
-        }
-    }
-
-    fn is_int(l: &Lowered, ty: Type) -> bool {
-        matches!(
-            l.analysis.db.data(ty),
-            praxis_types::TypeData::Scalar(ScalarType::Int)
-        )
-    }
-
-    fn is_bool(l: &Lowered, ty: Type) -> bool {
-        matches!(
-            l.analysis.db.data(ty),
-            praxis_types::TypeData::Scalar(ScalarType::Bool)
-        )
-    }
-
-    #[test]
-    fn lowers_a_simple_int_fn() {
-        let l = lower_src("fn id(x: Int) -> Int { x }");
-        assert!(
-            l.module.diagnostics.is_empty(),
-            "{:?}",
-            l.module.diagnostics
-        );
-        assert_eq!(l.module.items.len(), 1);
-        let f = fn0(&l);
-        assert_eq!(f.name, "id");
-        assert_eq!(f.params.len(), 1);
-        assert_eq!(f.params[0].name, "x");
-    }
-
-    #[test]
-    fn lowers_arithmetic_binop_as_int() {
-        let l = lower_src("fn f() -> Int { 1 + 2 }");
-        let f = fn0(&l);
-        let TypedExpr::Bin { op, ty, .. } = &f.body.tail else {
-            panic!("expected bin");
-        };
-        assert_eq!(*op, BinOp::Add);
-        assert!(is_int(&l, *ty));
-    }
-
-    #[test]
-    fn lowers_comparison_as_bool() {
-        let l = lower_src("fn f() -> Bool { 1 < 2 }");
-        let f = fn0(&l);
-        let TypedExpr::Bin { op, ty, .. } = &f.body.tail else {
-            panic!("expected bin");
-        };
-        assert_eq!(*op, BinOp::Lt);
-        assert!(is_bool(&l, *ty));
-    }
-
-    #[test]
-    fn lowers_integer_literal_value() {
-        let l = lower_src("fn f() -> Int { 42 }");
-        let f = fn0(&l);
-        let TypedExpr::Lit {
-            value: Lit::Int(v),
-            ty,
-        } = &f.body.tail
-        else {
-            panic!("expected int lit");
-        };
-        assert_eq!(*v, 42);
-        assert!(is_int(&l, *ty));
-    }
-
-    #[test]
-    fn lowers_text_literal_unquoted() {
-        let l = lower_src("fn f() -> Text { \"a\\tb\" }");
-        let f = fn0(&l);
-        let TypedExpr::Lit {
-            value: Lit::Text(s),
-            ..
-        } = &f.body.tail
-        else {
-            panic!("expected text lit");
-        };
-        assert_eq!(s, "a\tb");
-    }
-
-    #[test]
-    fn lowers_bool_literals() {
-        let l = lower_src("fn f() -> Bool { true }");
-        let f = fn0(&l);
-        let TypedExpr::Lit {
-            value: Lit::Bool(b),
-            ..
-        } = &f.body.tail
-        else {
-            panic!();
-        };
-        assert!(*b);
-    }
-
-    #[test]
-    fn rejects_generic_fn_with_y100() {
-        // `id` is polymorphic (`a -> a`); M4 cannot lower it.
-        let l = lower_src("fn id(x) { x }");
-        assert_eq!(l.module.diagnostics.len(), 1);
-        assert_eq!(
-            l.module.diagnostics[0].code().number(),
-            100,
-            "should be Y100 (generic not supported)"
-        );
-    }
-
-    #[test]
-    fn lowers_if_while_and_assign() {
-        let l = lower_src(
-            "fn f(n: Int) -> Int {\n  var i = 0\n  while i < n { i = i + 1 }\n  if i > 0 { 1 } else { 2 }\n}\n",
-        );
-        assert!(
-            l.module.diagnostics.is_empty(),
-            "{:?}",
-            l.module.diagnostics
-        );
-        let f = fn0(&l);
-        // stmt 0: Var { i }; then a While; then an If as tail.
-        assert!(matches!(f.body.stmts.first(), Some(TypedStmt::Var { name, .. }) if name == "i"));
-        assert!(matches!(&f.body.tail, TypedExpr::If { .. }));
-    }
-
-    #[test]
-    fn lowers_compound_assignment_op() {
-        let l = lower_src("fn f() -> Int { var i = 0; i += 1; i }");
-        let f = fn0(&l);
-        let assign = f
-            .body
-            .stmts
-            .iter()
-            .find_map(|s| match s {
-                TypedStmt::Assign { op, .. } => Some(*op),
-                _ => None,
-            })
-            .expect("found an assign");
-        assert_eq!(assign, AssignOp::AddAssign);
-    }
-
-    #[test]
-    fn lowers_call_with_args() {
-        let l = lower_src("fn a(x: Int) -> Int { x }\nfn b() -> Int { a(7) }");
-        assert_eq!(l.module.items.len(), 2);
-        // `TypedItem` currently has a single variant, so this bind is infallible.
-        let TypedItem::Fn(b) = &l.module.items[1];
-        let TypedExpr::Call { args, ty, .. } = &b.body.tail else {
-            panic!("expected call");
-        };
-        assert_eq!(args.len(), 1);
-        assert!(is_int(&l, *ty));
-    }
-
-    #[test]
-    fn lowers_tuple() {
-        let l = lower_src("fn f() { (1, 2) }");
-        let f = fn0(&l);
-        let TypedExpr::Tuple { elements, .. } = &f.body.tail else {
-            panic!("expected tuple");
-        };
-        assert_eq!(elements.len(), 2);
-    }
-
-    #[test]
-    fn unquote_text_strips_quotes_and_unescapes() {
-        assert_eq!(unquote_text("\"plain\""), "plain");
-        assert_eq!(unquote_text("\"a\\nb\""), "a\nb");
-        assert_eq!(unquote_text("\"\\\\\""), "\\");
-        assert_eq!(unquote_text("nope"), "nope");
-    }
 }

@@ -27,8 +27,8 @@ pub mod scope;
 pub mod symbol;
 
 pub use lower::{
-    lower, AssignOp, BinOp, Lit, TypedBlock, TypedExpr, TypedFn, TypedItem, TypedModule,
-    TypedParam, TypedStmt, UnaryOp,
+    lower, AssignOp, BinOp, Lit, TypedBlock, TypedExpr, TypedFn, TypedItem, TypedMatchArm,
+    TypedModule, TypedParam, TypedStmt, UnaryOp,
 };
 pub use name_table::NameTable;
 pub use resolve::{NameRef, NameResolution, ResolvedRef};
