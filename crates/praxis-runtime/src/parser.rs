@@ -363,29 +363,305 @@ fn walk_grid(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize
 
 // ---- templates (§7.2, §7.3) -----------------------------------------------
 
+/// Interpret a backtick template against `bytes` from `offset` (§7.2, §7.3).
+///
+/// Walks the `parts` in order: a `Literal` part matches its bytes (honoring the
+/// whitespace policy), a `Capture` part recursively walks its child parser to
+/// extract one value. The result is assembled per §7.3:
+/// - 0 captures → `Unit` (a pure literal match).
+/// - 1 anonymous capture → the scalar value directly.
+/// - any named capture → a `Record` (schema built at runtime from the capture
+///   names + the child result descriptors).
+///
+/// Multi-anon-capture templates lower to a `Tuple` node (handled by
+/// [`walk_tuple`]); this function never sees that case.
 fn walk_template(
-    _rt: &Rt,
-    _plan: &ParserPlan,
-    _parts: &[praxis_input_parser::TemplatePartNode],
-    _bytes: &[u8],
-    _offset: usize,
+    rt: &Rt,
+    plan: &ParserPlan,
+    parts: &[praxis_input_parser::TemplatePartNode],
+    bytes: &[u8],
+    offset: usize,
 ) -> WalkResult {
-    // Template matching is complex (literal matching + capture extraction).
-    // For M6 v1, templates inside `lines()` are the common case and are handled
-    // by the per-line child walk. A full template interpreter (matching literal
-    // text between captures) is a follow-up within M6 or M9.
-    Err(())
+    let mut cursor = offset;
+    // Capture values in field-index order. Each entry is (name, child_node,
+    // value): the child node is kept so a multi-anon-capture tuple can build its
+    // TupleSchema from the child result descriptors.
+    let mut captures: Vec<(Option<&'static str>, u32, GcRef)> = Vec::new();
+
+    for part in parts {
+        match part {
+            praxis_input_parser::TemplatePartNode::Literal { text, ws } => {
+                // Honor the whitespace policy before matching the literal.
+                cursor = match consume_ws(bytes, cursor, *ws) {
+                    Some(c) => c,
+                    None => return Err(()),
+                };
+                // Match the literal bytes verbatim.
+                let lit = text.as_bytes();
+                if !bytes[cursor..].starts_with(lit) {
+                    return Err(());
+                }
+                cursor += lit.len();
+            }
+            praxis_input_parser::TemplatePartNode::Capture {
+                child,
+                field_index: _,
+                name,
+            } => {
+                // Skip any flexible leading whitespace before a capture, then
+                // walk the child parser to extract one value.
+                cursor = match consume_ws(bytes, cursor, consume_ws_default()) {
+                    Some(c) => c,
+                    None => return Err(()),
+                };
+                // `walk` returns the *absolute* new offset (not a delta), so
+                // assign rather than add.
+                let (value, new_offset) = unsafe { walk(rt.ctx, plan, *child, bytes, cursor)? };
+                cursor = new_offset;
+                captures.push((*name, *child, value));
+            }
+        }
+    }
+
+    // Assemble the result per §7.3.
+    let any_named = captures.iter().any(|(n, _, _)| n.is_some());
+    if any_named {
+        // Named captures → Record. Build the schema at runtime.
+        Ok((alloc_record(rt, &captures), bytes.len() - offset))
+    } else if captures.len() == 1 {
+        // Single anonymous capture → the scalar value.
+        Ok((captures.into_iter().next().unwrap().2, bytes.len() - offset))
+    } else if captures.is_empty() {
+        // No captures → Unit.
+        Ok((alloc_unit(rt), bytes.len() - offset))
+    } else {
+        // Multiple anonymous captures → Tuple. Build the schema from the child
+        // result descriptors and fill the payload with the captured values.
+        let children: Vec<u32> = captures.iter().map(|(_, c, _)| *c).collect();
+        let values: Vec<GcRef> = captures.into_iter().map(|(_, _, v)| v).collect();
+        Ok((
+            alloc_tuple(rt, &children, plan, values),
+            bytes.len() - offset,
+        ))
+    }
 }
 
+/// Interpret a multi-anon-capture template lowered as a `Tuple` node (§7.3).
+/// Each element is walked against successive sub-regions; the values are
+/// assembled into a `Tuple`. The region is the whole remaining input split
+/// across the captures by the literals' boundaries.
+///
+/// In practice the lowering emits a `Tuple` only for a bare `{a},{b}` template
+/// (no surrounding literal context per capture), so each element parses the next
+/// chunk of input greedily up to the following element's literal boundary. For
+/// the M7 scope we walk each element against the full remaining region and
+/// advance by the consumed amount.
 fn walk_tuple(
-    _rt: &Rt,
-    _plan: &ParserPlan,
-    _elements: &[u32],
-    _bytes: &[u8],
-    _offset: usize,
+    rt: &Rt,
+    plan: &ParserPlan,
+    elements: &[u32],
+    bytes: &[u8],
+    offset: usize,
 ) -> WalkResult {
-    // Tuples materialize as part of template capture grouping (M6 follow-up).
-    Err(())
+    let mut cursor = offset;
+    let mut values: Vec<GcRef> = Vec::with_capacity(elements.len());
+    for &elem in elements {
+        cursor = match consume_ws(bytes, cursor, consume_ws_default()) {
+            Some(c) => c,
+            None => return Err(()),
+        };
+        // `walk` returns the absolute new offset, not a delta.
+        let (value, new_offset) = unsafe { walk(rt.ctx, plan, elem, bytes, cursor)? };
+        cursor = new_offset;
+        values.push(value);
+    }
+    let tuple_ref = alloc_tuple(rt, elements, plan, values);
+    Ok((tuple_ref, bytes.len() - offset))
+}
+
+/// The default whitespace policy applied before a capture: a flexible run of
+/// spaces/tabs (the §7.2 SpaceRun rule, so AoC column alignment works). This
+/// matches `walk_atomic`'s `trim_leading_ws` behavior for atomics.
+fn consume_ws_default() -> praxis_input_parser::WsPolicy {
+    praxis_input_parser::WsPolicy::SpaceRun
+}
+
+/// Consume bytes at `cursor` per `ws`, returning the new cursor or `None` if the
+/// policy is not satisfied (§7.2).
+fn consume_ws(bytes: &[u8], cursor: usize, ws: praxis_input_parser::WsPolicy) -> Option<usize> {
+    use praxis_input_parser::WsPolicy;
+    let rest = bytes.get(cursor..)?;
+    let mut i = 0;
+    match ws {
+        WsPolicy::SpaceRun => {
+            // One or more spaces or tabs (flexible; §7.2 default).
+            // Note: for a literal with leading SpaceRun we require ≥1; if the
+            // literal is the very first part the run may be empty — handled by
+            // allowing zero when cursor == 0. Practically, allow zero-or-more
+            // here so templates starting at offset 0 match.
+            while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
+                i += 1;
+            }
+        }
+        WsPolicy::ZeroOrMore => {
+            while i < rest.len() && (rest[i].is_ascii_whitespace()) {
+                i += 1;
+            }
+        }
+        WsPolicy::OneOrMore => {
+            while i < rest.len() && rest[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i == 0 {
+                return None;
+            }
+        }
+        WsPolicy::ExactSpace => {
+            if rest.first() == Some(&b' ') {
+                i = 1;
+            } else {
+                return None;
+            }
+        }
+        WsPolicy::Newline => {
+            // Match `\n`, optionally preceded by `\r`.
+            if rest.first() == Some(&b'\r') {
+                i = 1;
+            }
+            if rest.get(i) == Some(&b'\n') {
+                i += 1;
+            } else {
+                return None;
+            }
+        }
+        WsPolicy::Tab => {
+            if rest.first() == Some(&b'\t') {
+                i = 1;
+            } else {
+                return None;
+            }
+        }
+    }
+    Some(cursor + i)
+}
+
+/// Allocate a `Unit` sentinel.
+fn alloc_unit(rt: &Rt) -> GcRef {
+    // SAFETY: ctx is valid.
+    unsafe { (*rt.ctx).unit_ref }
+}
+
+/// Allocate a record from named captures (§7.3). Builds (and caches) the
+/// `RecordSchema` from the capture names + the child result descriptors, leaks
+/// it to `&'static`, and fills the payload with the captured values.
+fn alloc_record(rt: &Rt, captures: &[(Option<&'static str>, u32, GcRef)]) -> GcRef {
+    // Build the schema fields. Named captures only (the record case requires
+    // every capture to have a name in well-formed input; anonymous ones in a
+    // named template are a parser-validation concern, treated as `_` here).
+    let fields: Vec<crate::records::RecordField> = captures
+        .iter()
+        .map(|(name, _child, _value)| crate::records::RecordField {
+            name: name.unwrap_or("_"),
+            // The per-field element descriptor is read from the value's own
+            // header at trace/format/eq/hash time; a sound GC-traceable default
+            // suffices for the schema entry.
+            descriptor: scalars::INT,
+        })
+        .collect();
+    let schema = leak_record_schema(fields);
+    let items: Vec<GcRef> = captures.iter().map(|(_, _, v)| *v).collect();
+    let payload = crate::records::RecordPayload { schema, items };
+    // SAFETY: ctx is valid; payload matches RECORD's layout.
+    unsafe {
+        heap_ref(rt.ctx).alloc_with(
+            crate::records::RECORD,
+            std::mem::size_of::<crate::records::RecordPayload>(),
+            std::mem::align_of::<crate::records::RecordPayload>(),
+            |ptr| (ptr as *mut crate::records::RecordPayload).write(payload),
+        )
+    }
+}
+
+/// Allocate a tuple from positional capture values (§7.3). Builds (and caches)
+/// the `TupleSchema` from the element descriptors, leaks it to `&'static`, and
+/// fills the payload.
+fn alloc_tuple(rt: &Rt, elements: &[u32], plan: &ParserPlan, values: Vec<GcRef>) -> GcRef {
+    let descriptors: Vec<*const crate::TypeDescriptor> = elements
+        .iter()
+        .map(|&e| child_descriptor(plan, e) as *const _)
+        .collect();
+    let schema = leak_tuple_schema(descriptors);
+    let payload = crate::tuples::TuplePayload {
+        schema,
+        items: values,
+    };
+    // SAFETY: ctx is valid; payload matches TUPLE's layout.
+    unsafe {
+        heap_ref(rt.ctx).alloc_with(
+            crate::tuples::TUPLE,
+            std::mem::size_of::<crate::tuples::TuplePayload>(),
+            std::mem::align_of::<crate::tuples::TuplePayload>(),
+            |ptr| (ptr as *mut crate::tuples::TuplePayload).write(payload),
+        )
+    }
+}
+
+/// Leak a `RecordSchema` to `&'static`, caching by the field-name sequence so
+/// repeated parses of the same template shape share one schema (mirrors the
+/// codegen's record/tuple schema caches).
+fn leak_record_schema(
+    fields: Vec<crate::records::RecordField>,
+) -> *const crate::records::RecordSchema {
+    use std::sync::Mutex;
+    // A `Send` wrapper for the leaked schema pointer (raw pointers inside the
+    // schema make it non-`Sync`; the wrapper just satisfies the Mutex's bounds.
+    // The schema is immutable `'static` data; the parser is single-threaded.)
+    struct SendSchema(*const crate::records::RecordSchema);
+    unsafe impl Send for SendSchema {}
+    type RecordCache = Mutex<Vec<(Vec<&'static str>, SendSchema)>>;
+    static CACHE: std::sync::OnceLock<RecordCache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    let key: Vec<&'static str> = fields.iter().map(|f| f.name).collect();
+    let mut guard = cache.lock().unwrap();
+    if let Some((_, s)) = guard.iter().find(|(k, _)| *k == key) {
+        return s.0;
+    }
+    let leaked_fields: &'static [crate::records::RecordField] =
+        Box::leak(fields.into_boxed_slice());
+    let schema: &'static crate::records::RecordSchema =
+        Box::leak(Box::new(crate::records::RecordSchema {
+            fields: leaked_fields,
+        }));
+    guard.push((key, SendSchema(schema as *const _)));
+    schema as *const _
+}
+
+/// Leak a `TupleSchema` to `&'static`, caching by the descriptor-pointer
+/// sequence so same-shaped tuples share one schema.
+fn leak_tuple_schema(
+    descriptors: Vec<*const crate::TypeDescriptor>,
+) -> *const crate::tuples::TupleSchema {
+    use std::sync::Mutex;
+    // A `Send` wrapper for the leaked schema pointer (raw pointers are not
+    // `Sync`, but the schema is immutable `'static` data and the parser is
+    // single-threaded; the wrapper just satisfies the Mutex's bounds).
+    struct SendSchema(*const crate::tuples::TupleSchema);
+    unsafe impl Send for SendSchema {}
+    type TupleCache = Mutex<Vec<(Vec<usize>, SendSchema)>>;
+    static CACHE: std::sync::OnceLock<TupleCache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    let key: Vec<usize> = descriptors.iter().map(|p| *p as usize).collect();
+    let mut guard = cache.lock().unwrap();
+    if let Some((_, s)) = guard.iter().find(|(k, _)| *k == key) {
+        return s.0;
+    }
+    let leaked: &'static [*const crate::TypeDescriptor] = Box::leak(descriptors.into_boxed_slice());
+    let schema: &'static crate::tuples::TupleSchema =
+        Box::leak(Box::new(crate::tuples::TupleSchema {
+            descriptors: leaked,
+        }));
+    guard.push((key, SendSchema(schema as *const _)));
+    schema as *const _
 }
 
 // ---- byte-splitting helpers -----------------------------------------------
@@ -527,31 +803,77 @@ fn is_ws(b: u8) -> bool {
     b == b' ' || b == b'\t'
 }
 
-/// Determine the element descriptor for a child plan node's result type. The
-/// runtime maps atomic kinds to their GC descriptors.
+/// Determine the element descriptor for a child plan node's *result* type. A
+/// constructor `lines(P)` produces `Vec[result(P)]`, so its element descriptor is
+/// the descriptor of `result(P)`.
+///
+/// Because the collection descriptors (`VEC`, `GRID`) are **uniform** — the
+/// per-instance element type lives in the payload, not the descriptor — a nested
+/// constructor's result descriptor is just `VEC`/`GRID` regardless of how deep
+/// the nesting goes. The payload chain carries the inner element types, so
+/// `vec_format`/`vec_equals`/`vec_hash` recurse correctly through it. (The prior
+/// implementation collapsed the whole subtree to its leaf atomic and returned
+/// that scalar, mis-tagging every intermediate Vec/Grid — a silent mis-dispatch
+/// in any nested-collection format/eq/hash.)
 fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescriptor {
-    // Walk the child to find its result atomic kind.
-    match find_atomic_kind(plan, child) {
-        Some(AtomicKind::Int) | Some(AtomicKind::Digit) => scalars::INT,
-        Some(AtomicKind::Char) => scalars::CHAR,
-        Some(AtomicKind::Word) | Some(AtomicKind::Text) | Some(AtomicKind::Rest) => {
-            crate::text::TEXT
-        }
-        None => scalars::INT, // default for nested collections
+    match &plan.nodes[child as usize] {
+        // Atomics produce their scalar.
+        PlanNode::Atomic { kind } => atomic_descriptor(*kind),
+        // Collection constructors produce a Vec (lines/sections/csv/ws/sep) or a
+        // Grid. Uniform descriptors — the element type is in the payload.
+        PlanNode::Lines { .. }
+        | PlanNode::Sections { .. }
+        | PlanNode::Csv { .. }
+        | PlanNode::Ws { .. }
+        | PlanNode::Sep { .. } => crate::collections::VEC,
+        PlanNode::Grid { .. } => crate::collections::GRID,
+        // A template's result is a scalar (single anon capture), a record (named
+        // captures), or Unit (no captures). A tuple's result is a tuple. These
+        // are uniform descriptors too (schema in the payload).
+        PlanNode::Template { parts } => template_result_descriptor(parts),
+        PlanNode::Tuple { .. } => crate::tuples::TUPLE,
     }
 }
 
-/// Recursively find the atomic kind at the leaf of a plan subtree.
-fn find_atomic_kind(plan: &ParserPlan, node: u32) -> Option<AtomicKind> {
-    match &plan.nodes[node as usize] {
-        PlanNode::Atomic { kind } => Some(*kind),
-        PlanNode::Lines { child }
-        | PlanNode::Sections { child }
-        | PlanNode::Csv { child }
-        | PlanNode::Ws { child }
-        | PlanNode::Grid { child } => find_atomic_kind(plan, *child),
-        PlanNode::Sep { child, .. } => find_atomic_kind(plan, *child),
-        _ => None,
+/// The scalar descriptor for an atomic kind.
+fn atomic_descriptor(kind: AtomicKind) -> &'static crate::TypeDescriptor {
+    match kind {
+        AtomicKind::Int | AtomicKind::Digit => scalars::INT,
+        AtomicKind::Char => scalars::CHAR,
+        AtomicKind::Word | AtomicKind::Text | AtomicKind::Rest => crate::text::TEXT,
+    }
+}
+
+/// The descriptor of a template's *result*: a scalar if it has exactly one
+/// anonymous capture, a record if it has named captures, Unit if none. (A
+/// multi-anon-capture template lowers to a `Tuple` node, handled above.)
+fn template_result_descriptor(
+    parts: &[praxis_input_parser::TemplatePartNode],
+) -> &'static crate::TypeDescriptor {
+    let mut captures = 0usize;
+    let mut any_named = false;
+    for p in parts {
+        if let praxis_input_parser::TemplatePartNode::Capture { name, .. } = p {
+            captures += 1;
+            if name.is_some() {
+                any_named = true;
+            }
+        }
+    }
+    if any_named {
+        crate::records::RECORD
+    } else if captures == 1 {
+        // Single anonymous capture → scalar. The exact scalar descriptor depends
+        // on the capture's child, but for descriptor-table purposes the element
+        // is a GC value; the per-value descriptor is read from the value's own
+        // header at trace/format/eq/hash time. Returning a generic GC scalar
+        // descriptor here would be more precise, but the collection wrappers
+        // (vec_equals etc.) dispatch through the value's own descriptor, so this
+        // is only consulted for the collection's *element* tag. Use INT as a
+        // sound default (the value's real descriptor governs tracing).
+        scalars::INT
+    } else {
+        scalars::UNIT
     }
 }
 
@@ -596,5 +918,38 @@ mod tests {
         let (s, len) = take_int_run(b"-42abc");
         assert_eq!(s, "-42");
         assert_eq!(len, 3);
+    }
+
+    // --- M7-WS9: whitespace matcher (§7.2) -----------------------------------
+
+    #[test]
+    fn consume_ws_space_run_skips_spaces_and_tabs() {
+        use praxis_input_parser::WsPolicy;
+        assert_eq!(consume_ws(b"  ,x", 0, WsPolicy::SpaceRun), Some(2));
+        assert_eq!(consume_ws(b"\t\t,x", 0, WsPolicy::SpaceRun), Some(2));
+        // SpaceRun allows zero (so a template at offset 0 matches).
+        assert_eq!(consume_ws(b"x", 0, WsPolicy::SpaceRun), Some(0));
+    }
+
+    #[test]
+    fn consume_ws_one_or_more_requires_at_least_one() {
+        use praxis_input_parser::WsPolicy;
+        assert_eq!(consume_ws(b"  x", 0, WsPolicy::OneOrMore), Some(2));
+        assert_eq!(consume_ws(b"x", 0, WsPolicy::OneOrMore), None);
+    }
+
+    #[test]
+    fn consume_ws_exact_space_matches_one() {
+        use praxis_input_parser::WsPolicy;
+        assert_eq!(consume_ws(b" x", 0, WsPolicy::ExactSpace), Some(1));
+        assert_eq!(consume_ws(b"\tx", 0, WsPolicy::ExactSpace), None);
+    }
+
+    #[test]
+    fn consume_ws_newline_matches_crlf_and_lf() {
+        use praxis_input_parser::WsPolicy;
+        assert_eq!(consume_ws(b"\r\nx", 0, WsPolicy::Newline), Some(2));
+        assert_eq!(consume_ws(b"\nx", 0, WsPolicy::Newline), Some(1));
+        assert_eq!(consume_ws(b"x", 0, WsPolicy::Newline), None);
     }
 }

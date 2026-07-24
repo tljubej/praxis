@@ -421,6 +421,61 @@ fn read_sections_lines_csv_int_nested() {
     assert_eq!(result.as_int(), 2); // two sections
 }
 
+// --- M7-WS9: input-parser carryovers (§7.2 templates, nested descriptors) --
+
+#[test]
+fn read_lines_of_named_capture_template_parses_records() {
+    // `read lines(`{x:int},{y:int}`)` → Vec[{x:Int,y:Int}]. Each line matches the
+    // template; named captures become record fields. We read .len() to confirm
+    // three records parsed without faulting.
+    let src = "fn main() -> Int {\n  let v = read lines(`{x:int},{y:int}`)\n  v.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "1,2\n3,4\n5,6\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn read_lines_of_single_anon_capture_parses_scalars() {
+    // `read lines(`{int}`)` → Vec[Int]. A single anonymous capture yields the
+    // scalar value directly. Read the first element to confirm the value flows.
+    let src = "fn main() -> Int {\n  let v = read lines(`{int}`)\n  v.get(1)\n}\n";
+    let (rt, result) = run_main_with_input(src, "10\n20\n30\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 20);
+}
+
+#[test]
+fn read_lines_of_multi_anon_capture_parses_tuples() {
+    // `read lines(`{int},{int}`)` → Vec[(Int, Int)]. Two anonymous captures
+    // assemble into a tuple. We read .len() to confirm parsing succeeded.
+    let src = "fn main() -> Int {\n  let v = read lines(`{int},{int}`)\n  v.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "1,2\n3,4\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn read_standalone_named_capture_template_parses_one_record() {
+    // A standalone template (no `lines`) against the whole buffer. `{x:int},{y:int}`
+    // parses a single record from "7,8".
+    let src = "fn main() -> Int {\n  let r = read `{x:int},{y:int}`\n  0\n}\n";
+    let (rt, result) = run_main_with_input(src, "7,8\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+#[test]
+fn read_nested_collections_descriptor_is_composite() {
+    // `read sections(lines(csv(int)))` now tags the outer Vec's element
+    // descriptor as a Vec (not the leaf Int), so formatting/equality on nested
+    // collections dispatches correctly. Compare two identical nested parses for
+    // structural equality → true (1).
+    let src = "fn main() -> Int {\n  let a = read sections(lines(csv(int)))\n  let b = read sections(lines(csv(int)))\n  if a == b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main_with_input(src, "1,2\n3,4\n\n1,2\n3,4\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
 // --- short-circuit || and ! (M7-WS2 carryover) ------------------------------
 
 #[test]

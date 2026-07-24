@@ -262,24 +262,14 @@ fn lower_template(b: &mut PlanBuilder, parts: &[TemplatePart]) -> u32 {
         b.push_node(PlanNode::Template {
             parts: part_indices,
         })
-    } else if captures.len() == 1 {
-        // Single anonymous capture → scalar. The template node carries the one
-        // capture; the runtime returns its value directly.
+    } else {
+        // Single anonymous capture → scalar; multiple anonymous captures → tuple.
+        // Both lower to a `Template` node (preserving the literal parts between
+        // captures, so the runtime can match the separators). The interpreter
+        // assembles a scalar (1 capture) or a tuple (≥2 captures) from the
+        // captured values.
         b.push_node(PlanNode::Template {
             parts: part_indices,
-        })
-    } else {
-        // Multiple anonymous captures → tuple. Emit a Tuple node whose elements
-        // are the capture child nodes.
-        let elements: Vec<u32> = captures
-            .iter()
-            .map(|(_, p)| match p {
-                TemplatePart::Capture { parser, .. } => lower_node(b, parser),
-                _ => unreachable!(),
-            })
-            .collect();
-        b.push_node(PlanNode::Tuple {
-            elements: leak(elements),
         })
     }
 }
@@ -411,7 +401,13 @@ mod tests {
             span: Span::at(0),
         };
         let plan = lower_to_plan(&ast);
-        // Two anonymous captures → Tuple node at root.
-        assert!(matches!(plan.nodes.last(), Some(PlanNode::Tuple { .. })));
+        // Two anonymous captures → a Template node at root (the literals between
+        // captures are preserved so the runtime can match the separators; the
+        // interpreter assembles a tuple from the captured values). The root is
+        // the last-pushed node.
+        assert!(matches!(
+            plan.nodes[plan.root as usize],
+            PlanNode::Template { .. }
+        ));
     }
 }
