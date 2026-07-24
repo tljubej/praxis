@@ -211,16 +211,41 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 }
                 // Comparison: extract scalars, compare, materialize a Bool.
                 BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                    let li = lower_extract_int(b, l);
-                    let ri = lower_extract_int(b, r);
-                    let bool_scalar = b.alloc_scalar(ScalarKind::Bool);
-                    b.push(Inst::IntCmp {
-                        op: binop_to_cmp(*op),
-                        dst: bool_scalar,
-                        lhs: li,
-                        rhs: ri,
-                    });
-                    lower_materialize_bool(b, bool_scalar)
+                    // Decide scalar vs structural comparison by the operand type
+                    // (§5.5). `==`/`!=` on a composite GC type (record/tuple/
+                    // enum/collection) lower to a structural-equality runtime
+                    // call; everything else (Int/Bool/Char/Text, and all
+                    // ordering ops `<` `>` `<=` `>=` which are Int-only) uses
+                    // the native scalar compare.
+                    let operand_ty = expr_static_type(lhs);
+                    let composite = matches!(
+                        b.db.data(b.db.follow(operand_ty)),
+                        praxis_types::data::TypeData::Record { .. }
+                            | praxis_types::data::TypeData::Tuple(_)
+                            | praxis_types::data::TypeData::Enum { .. }
+                            | praxis_types::data::TypeData::Collection { .. }
+                    );
+                    if composite && matches!(op, BinOp::Eq | BinOp::Neq) {
+                        // Structural equality via praxis_struct_eq(ctx, a, b) -> 0/1.
+                        // `!=` is `!(==)`.
+                        let eq_bool = lower_struct_eq(b, l, r);
+                        if *op == BinOp::Neq {
+                            lower_logical_not(b, eq_bool)
+                        } else {
+                            eq_bool
+                        }
+                    } else {
+                        let li = lower_extract_int(b, l);
+                        let ri = lower_extract_int(b, r);
+                        let bool_scalar = b.alloc_scalar(ScalarKind::Bool);
+                        b.push(Inst::IntCmp {
+                            op: binop_to_cmp(*op),
+                            dst: bool_scalar,
+                            lhs: li,
+                            rhs: ri,
+                        });
+                        lower_materialize_bool(b, bool_scalar)
+                    }
                 }
                 // LogicalOr is handled above (before eager rhs lowering).
                 BinOp::LogicalOr => unreachable!(),
@@ -351,13 +376,24 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             b.check_fault();
             dst
         }
-        TypedExpr::Tuple { elements, .. } => {
-            // Lower each element for effect; tuples materialize in M5. Return a
-            // Unit placeholder (the M4 acceptance corpus is Int-typed).
-            for el in elements {
-                let _ = lower_expr_gc(b, el);
-            }
-            lower_lit_gc(b, &Lit::Int(0))
+        TypedExpr::Tuple { elements, ty } => {
+            // M7 Part 2: tuples now materialize as real objects. Lower each
+            // element to a `Gc` local in positional order, then emit an `Alloc`
+            // with `AllocKind::Tuple`. The codegen builds the `TupleSchema`
+            // from the tuple's static type (the element-type sequence) and
+            // embeds its address as an immediate in the allocation call.
+            let element_locals: Vec<LocalId> =
+                elements.iter().map(|e| lower_expr_gc(b, e)).collect();
+            let dst = b.alloc_gc(Type(0), None);
+            b.push(Inst::Alloc {
+                dst,
+                alloc: AllocKind::Tuple {
+                    ty: *ty,
+                    elements: element_locals,
+                },
+                live_roots: Vec::new(),
+            });
+            dst
         }
         // M6: `read`/`parse` lower to a runtime call against the parser plan.
         TypedExpr::Read { plan_index, .. } => lower_read(b, *plan_index),
@@ -540,6 +576,22 @@ fn lower_materialize_bool(b: &mut Builder<'_>, scalar: LocalId) -> LocalId {
         live_roots: Vec::new(),
     });
     dst
+}
+
+/// Lower a structural-equality comparison `lhs == rhs` of two composite GC
+/// values (records/tuples/enums/collections), returning the materialized `Bool`
+/// `GcRef` (§5.5). Emits an `Inst::StructEq` that lowers to the
+/// `praxis_struct_eq` runtime call (which dispatches through the descriptor).
+/// Both operands are already-lowered `Gc` locals.
+fn lower_struct_eq(b: &mut Builder<'_>, lhs: LocalId, rhs: LocalId) -> LocalId {
+    let bool_scalar = b.alloc_scalar(ScalarKind::Bool);
+    b.push(Inst::StructEq {
+        dst: bool_scalar,
+        lhs,
+        rhs,
+        live_roots: Vec::new(),
+    });
+    lower_materialize_bool(b, bool_scalar)
 }
 
 /// Lower short-circuiting logical or: `lhs || rhs`.

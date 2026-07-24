@@ -416,6 +416,37 @@ fn lower_inst<M: Module>(
                     }
                     builder.def_var(vars[dst.0 as usize], enum_ref);
                 }
+                AllocKind::Tuple { ty, elements } => {
+                    // Build (or fetch a cached) 'static TupleSchema from the
+                    // tuple's static type, leak it, embed its address, and call
+                    // praxis_alloc_tuple(ctx, schema_ptr). Then fill in each
+                    // element via praxis_tuple_set.
+                    let schema_ptr = tuple_schema_for(db, *ty);
+                    let schema_imm = builder.ins().iconst(GC, schema_ptr as i64);
+                    // praxis_alloc_tuple(ctx, schema_ptr) -> GcRef.
+                    let tuple_ref = call_runtime_by_name(
+                        builder,
+                        ctx_val,
+                        &[schema_imm],
+                        "praxis_alloc_tuple",
+                        module,
+                        imports,
+                    )?;
+                    // Fill in each element in positional order.
+                    for (idx, el_local) in elements.iter().enumerate() {
+                        let el_val = builder.use_var(vars[el_local.0 as usize]);
+                        let idx_val = builder.ins().iconst(GC, idx as i64);
+                        call_runtime_by_name(
+                            builder,
+                            ctx_val,
+                            &[tuple_ref, idx_val, el_val],
+                            "praxis_tuple_set",
+                            module,
+                            imports,
+                        )?;
+                    }
+                    builder.def_var(vars[dst.0 as usize], tuple_ref);
+                }
             }
         }
         Inst::ExtractScalar { dst, src, scalar } => {
@@ -527,6 +558,27 @@ fn lower_inst<M: Module>(
             call_args.extend(arg_vals);
             let call = builder.ins().call(funcref, &call_args);
             let result = builder.func.dfg.first_result(call);
+            builder.def_var(vars[dst.0 as usize], result);
+        }
+        Inst::StructEq {
+            dst,
+            lhs,
+            rhs,
+            live_roots,
+        } => {
+            // Structural equality via praxis_struct_eq(ctx, a, b) -> i64 (0/1).
+            // The call may trigger GC → spill live Gc roots first (safepoint).
+            spill.emit_spill(builder, live_roots, vars);
+            let l = builder.use_var(vars[lhs.0 as usize]);
+            let r = builder.use_var(vars[rhs.0 as usize]);
+            let result = call_runtime_by_name(
+                builder,
+                ctx_val,
+                &[l, r],
+                "praxis_struct_eq",
+                module,
+                imports,
+            )?;
             builder.def_var(vars[dst.0 as usize], result);
         }
         Inst::CheckFault { on_fault: _ } => {
@@ -906,6 +958,58 @@ fn record_schema_for(
     raw
 }
 
+/// Build (and cache) a `'static TupleSchema` for the tuple type `ty`, returning
+/// its address as a raw pointer the JIT embeds as an immediate. The schema is
+/// `Box::leak`'d once per distinct tuple shape (mirroring `record_schema_for`).
+///
+/// The cache is keyed by the **resolved element-descriptor sequence**, not by
+/// the static `Type` id: the type arena does not structurally intern tuples
+/// (each `db.tuple(...)` call mints a fresh slot), so two `(Int, Int)` literals
+/// get different `Type` ids but the same shape. Keying on the descriptor
+/// pointers gives true structural de-duplication, so two same-shaped tuples
+/// share one schema and compare structurally equal at runtime.
+fn tuple_schema_for(
+    db: &praxis_types::TypeDb,
+    ty: praxis_types::Type,
+) -> *const praxis_runtime::tuples::TupleSchema {
+    use praxis_runtime::tuples::TupleSchema;
+    use praxis_types::data::TypeData;
+    use std::sync::Mutex;
+    // Resolve the element types. A non-tuple type here is a misuse (the HIR
+    // only lowers `TypedExpr::Tuple` here), but degrade defensively by
+    // treating it as a zero-element tuple rather than panicking in the JIT.
+    let element_types: Vec<praxis_types::Type> = match db.data(db.follow(ty)) {
+        TypeData::Tuple(els) => els.clone(),
+        _ => Vec::new(),
+    };
+    let descriptors: Vec<*const praxis_runtime::descriptor::TypeDescriptor> = element_types
+        .iter()
+        .map(|t| descriptor_for_type(db, *t))
+        .collect();
+    // A process-wide cache keyed by the descriptor sequence (structural shape).
+    // SendPtr wraps the raw pointer so the Mutex can be shared across threads.
+    struct SendPtr(*const TupleSchema);
+    unsafe impl Send for SendPtr {}
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<Vec<usize>, SendPtr>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    // Use the descriptor pointers as addresses for the cache key — structurally
+    // identical tuples resolve to the same descriptor pointers.
+    let key: Vec<usize> = descriptors.iter().map(|p| *p as usize).collect();
+    if let Some(p) = cache.lock().unwrap().get(&key) {
+        return p.0;
+    }
+    let leaked_descriptors: &'static [*const praxis_runtime::descriptor::TypeDescriptor] =
+        Box::leak(descriptors.into_boxed_slice());
+    let schema = Box::leak(Box::new(TupleSchema {
+        descriptors: leaked_descriptors,
+    }));
+    let ptr = SendPtr(schema as *const TupleSchema);
+    let raw = ptr.0;
+    cache.lock().unwrap().insert(key, ptr);
+    raw
+}
+
 /// Best-effort mapping from a static `Type` to its runtime `TypeDescriptor`.
 /// Scalars map to their descriptor; everything else (collections, nested
 /// records) defaults to `INT` — sound for GC tracing because every value is a
@@ -931,6 +1035,11 @@ fn descriptor_for_type(
             }
             _ => praxis_runtime::scalars::INT as *const TypeDescriptor,
         },
+        // Tuples resolve to the TUPLE descriptor (M7 Part 2). Records/enums use
+        // a single top-level descriptor per value (RECORD/ENUM), but their field
+        // descriptors are resolved here; a nested record's field descriptor
+        // defaulting to INT is sound for GC tracing since every value is a GcRef.
+        TypeData::Tuple(_) => praxis_runtime::tuples::TUPLE as *const TypeDescriptor,
         _ => praxis_runtime::scalars::INT as *const TypeDescriptor,
     }
 }

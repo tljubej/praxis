@@ -94,6 +94,10 @@ impl Jit {
             "praxis_enum_set_payload",
             "praxis_enum_tag",
             "praxis_enum_payload",
+            "praxis_alloc_tuple",
+            "praxis_tuple_set",
+            "praxis_tuple_get",
+            "praxis_struct_eq",
             "praxis_push_debug_frame",
             "praxis_pop_debug_frame",
         ];

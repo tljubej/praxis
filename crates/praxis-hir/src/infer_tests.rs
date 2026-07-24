@@ -279,3 +279,45 @@ fn read_in_fn_then_method_call_typechecks() {
         analysis.diagnostics
     );
 }
+
+// --- M7-WS6: structural equality capability (§5.5) --------------------------
+
+#[test]
+fn record_equality_typechecks() {
+    // `==` on two records of the same type typechecks cleanly (no Y004).
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let a = Point { x: 1, y: 2 }\n  let b = Point { x: 1, y: 2 }\n  if a == b { 1 } else { 0 }\n}\n";
+    assert!(!has_type_error(src));
+}
+
+#[test]
+fn tuple_equality_typechecks() {
+    // `==` on two tuples of the same shape typechecks cleanly.
+    let src =
+        "fn main() -> Int {\n  let a = (1, 2)\n  let b = (1, 2)\n  if a == b { 1 } else { 0 }\n}\n";
+    assert!(!has_type_error(src));
+}
+
+#[test]
+fn comparing_functions_is_rejected() {
+    // Functions are never equatable (§5.5); comparing two function values must
+    // emit Y004 (whose wording must not mention trait/capability).
+    let src = "fn f(x: Int) -> Int { x }\nfn g(x: Int) -> Int { x }\nfn main() -> Int {\n  if f == g { 1 } else { 0 }\n}\n";
+    assert!(has_type_error(src));
+}
+
+#[test]
+fn record_with_function_field_not_equatable() {
+    // A record containing a function field is not equatable (§5.5). We bind the
+    // function to a name first (nested fn literals aren't supported as field
+    // values), then construct the record and compare it.
+    let src = "struct Box { f: (Int) -> Int }\nfn id(x: Int) -> Int { x }\nfn main() -> Int {\n  let a = Box { f: id }\n  let b = Box { f: id }\n  if a == b { 1 } else { 0 }\n}\n";
+    assert!(has_type_error(src));
+}
+
+#[test]
+fn int_equality_still_typechecks() {
+    // Regression: `==` on Int (the pre-existing path) must still typecheck.
+    assert!(!has_type_error(
+        "fn main() -> Int {\n  if 3 == 3 { 1 } else { 0 }\n}\n"
+    ));
+}

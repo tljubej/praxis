@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use crate::descriptor::{Tracer, TypeDescriptor, TypeId};
+use crate::descriptor::{DynamicHasher, Tracer, TypeDescriptor, TypeId};
 use crate::GcRef;
 
 /// The runtime payload of an enum value: the variant discriminant plus its
@@ -51,8 +51,55 @@ unsafe fn enum_format(payload: *const u8, out: &mut dyn fmt::Write) {
     let _ = out.write_str(">");
 }
 
-/// Descriptor for the `Enum` value type (M7, §4.6). Non-equatable / non-hashable
-/// in M7; WS6 adds structural equality/hashing.
+unsafe fn enum_equals(a: *const u8, b: *const u8) -> bool {
+    // SAFETY: caller guarantees both pointers point at initialized EnumPayloads.
+    let pa = unsafe { &*(a as *const EnumPayload) };
+    let pb = unsafe { &*(b as *const EnumPayload) };
+    // Two enum values are equal only if they carry the same variant (tag), then
+    // if their payloads are element-wise equal (§5.5). The variant's payload
+    // types are fixed by the tag, so each item's own descriptor is the right one.
+    if pa.tag != pb.tag {
+        return false;
+    }
+    if pa.items.len() != pb.items.len() {
+        return false;
+    }
+    for (x, y) in pa.items.iter().zip(pb.items.iter()) {
+        let eq_x = match x.descriptor().equals {
+            Some(eq) => eq,
+            // If a payload type is not equatable, the enum is not equatable (§5.5).
+            None => return false,
+        };
+        let xe = x.payload::<u8>() as *const u8;
+        let ye = y.payload::<u8>() as *const u8;
+        if !eq_x(xe, ye) {
+            return false;
+        }
+    }
+    true
+}
+
+unsafe fn enum_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
+    // SAFETY: caller guarantees `payload` points at an initialized EnumPayload.
+    let p = unsafe { &*(payload as *const EnumPayload) };
+    // The tag first — two values of different variants must hash distinctly even
+    // before the payload is considered.
+    hasher.write_bytes(&(p.tag as u64).to_le_bytes());
+    for item in p.items.iter() {
+        // If a payload type is not hashable, the enum is not hashable (§5.5).
+        let Some(hash_item) = item.descriptor().hash else {
+            return;
+        };
+        let elem_payload = item.payload::<u8>() as *const u8;
+        hash_item(elem_payload, hasher);
+    }
+}
+
+/// Descriptor for the `Enum` value type (M7, §4.6). Structural equality and
+/// hashing (§5.5): two enum values are equal iff same variant tag and equal
+/// payloads; hashing mixes the tag then each payload. An enum is
+/// equatable/hashable iff every payload type is; functions never are. This lets
+/// enums serve as map/set keys (M8 containers).
 pub const ENUM: &TypeDescriptor = &TypeDescriptor {
     id: TypeId(9),
     name: "Enum",
@@ -61,8 +108,8 @@ pub const ENUM: &TypeDescriptor = &TypeDescriptor {
     trace: enum_trace,
     drop_value: enum_drop,
     format: enum_format,
-    equals: None,
-    hash: None,
+    equals: Some(enum_equals),
+    hash: Some(enum_hash),
 };
 
 #[cfg(test)]
@@ -71,8 +118,8 @@ mod tests {
 
     #[test]
     fn enum_descriptor_reports_capabilities() {
-        assert!(!ENUM.is_equatable());
-        assert!(!ENUM.is_hashable());
+        assert!(ENUM.is_equatable());
+        assert!(ENUM.is_hashable());
         assert_eq!(ENUM.name, "Enum");
         assert_eq!(ENUM.id, TypeId(9));
     }

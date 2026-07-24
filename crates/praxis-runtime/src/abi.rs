@@ -29,7 +29,12 @@ use crate::{collections::VecPayload, descriptor::TypeDescriptor};
 /// v2 (M5): `RuntimeContext` gained the `roots: *mut ShadowFrame` field for the
 /// compiler-managed shadow-stack spill (ADR-019), and the `praxis_push_shadow_frame`
 /// / `praxis_pop_shadow_frame` extern helpers were added.
-pub const RUNTIME_ABI_VERSION: u32 = 3;
+/// v3 (M7 Part 1): record/enum object model — `praxis_alloc_record`,
+/// `praxis_record_set_field`, `praxis_record_field`, `praxis_alloc_enum`,
+/// `praxis_enum_set_payload`, `praxis_enum_tag`, `praxis_enum_payload`.
+/// v4 (M7 Part 2, WS6): tuple object model and structural equality —
+/// `praxis_alloc_tuple`, `praxis_tuple_set`, `praxis_tuple_get`, `praxis_struct_eq`.
+pub const RUNTIME_ABI_VERSION: u32 = 4;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -51,7 +56,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 3;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // Internals the wrappers share.
@@ -665,6 +670,125 @@ pub unsafe extern "C" fn praxis_enum_payload(
         .unwrap_or_else(|| unsafe { unit_sentinel(ctx) })
 }
 
+/// Allocate a tuple (M7, §4.5 structural tuples) with all element slots
+/// initialized to Unit. The `schema_ptr` points at a `'static TupleSchema`
+/// (built and leaked by the codegen from the tuple's element-type sequence).
+/// Elements are filled in positional order via [`praxis_tuple_set`] after
+/// allocation. Returns the tuple `GcRef`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `schema_ptr` must be a valid `'static` pointer.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_alloc_tuple(
+    ctx: *mut RuntimeContext,
+    schema_ptr: *const crate::tuples::TupleSchema,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    if schema_ptr.is_null() {
+        return unit_sentinel(ctx);
+    }
+    // SAFETY: caller guarantees schema_ptr is a valid 'static pointer.
+    let schema = unsafe { &*schema_ptr };
+    let arity = schema.descriptors.len();
+    let unit = unit_sentinel(ctx);
+    // SAFETY: TuplePayload matches TUPLE's size/align and is fully initialized.
+    // Every element slot starts as Unit (a valid GcRef), keeping the GC sound
+    // before the caller fills them in via praxis_tuple_set.
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::tuples::TUPLE,
+            std::mem::size_of::<crate::tuples::TuplePayload>(),
+            std::mem::align_of::<crate::tuples::TuplePayload>(),
+            |payload| {
+                (payload as *mut crate::tuples::TuplePayload).write(crate::tuples::TuplePayload {
+                    schema: schema_ptr,
+                    items: vec![unit; arity],
+                });
+            },
+        )
+    }
+}
+
+/// Set element `idx` of `tuple` to `value` (M7, §4.5). Used by the codegen to
+/// fill in elements after [`praxis_alloc_tuple`]. Returns the tuple (the
+/// receiver is mutated in place).
+///
+/// # Safety
+/// `ctx` must be live; `tuple` must be a valid tuple `GcRef`; `idx` in bounds.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_tuple_set(
+    ctx: *mut RuntimeContext,
+    tuple: GcRef,
+    idx: i64,
+    value: GcRef,
+) -> GcRef {
+    let _ = ctx;
+    // SAFETY: caller guarantees tuple is a valid tuple GcRef.
+    let payload = tuple.payload::<u8>() as *mut crate::tuples::TuplePayload;
+    // SAFETY: the payload is a TuplePayload for any TUPLE-descriptor object.
+    let tp = unsafe { &mut *payload };
+    if let Some(slot) = tp.items.get_mut(idx as usize) {
+        *slot = value;
+    }
+    tuple
+}
+
+/// Read element `idx` out of a tuple `GcRef` (M7, §4.5). Returns the element's
+/// `GcRef` value. Returns Unit if the tuple is malformed or the index is out of
+/// bounds (defensive; the type checker prevents this in well-typed code).
+///
+/// # Safety
+/// `ctx` must be live; `tuple` must be a valid tuple `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_tuple_get(
+    ctx: *mut RuntimeContext,
+    tuple: GcRef,
+    idx: i64,
+) -> GcRef {
+    // SAFETY: caller guarantees tuple is a valid tuple GcRef; the payload is a
+    // TuplePayload for any TUPLE-descriptor object.
+    let payload = tuple.payload::<u8>() as *const crate::tuples::TuplePayload;
+    let tp = unsafe { &*payload };
+    tp.items
+        .get(idx as usize)
+        .copied()
+        .unwrap_or_else(|| unsafe { unit_sentinel(ctx) })
+}
+
+/// Structural equality between two GC values (§5.5, M7). Reads the descriptor
+/// from `a` and dispatches to its `equals` callback, which recurses element/field
+/// wise for composite types (records, tuples, enums, collections). Returns 1 for
+/// equal, 0 for not equal. Returns 0 if `a`'s type is not equatable (functions
+/// are never equatable, §5.5) — the type checker rejects this in well-typed code,
+/// so this is defensive.
+///
+/// # Safety
+/// `ctx` must be live and wired; `a` and `b` must be valid `GcRef`s of the same
+/// type (the caller has already unified their types at compile time).
+#[no_mangle]
+pub unsafe extern "C" fn praxis_struct_eq(ctx: *mut RuntimeContext, a: GcRef, b: GcRef) -> i64 {
+    let _ = ctx;
+    // SAFETY: caller guarantees a is a valid GcRef; the descriptor header is
+    // always present and its `equals` (if Some) is safe to call with a/b.
+    let desc = a.descriptor();
+    match desc.equals {
+        // SAFETY: both a and b are values of desc's type (caller has type-checked
+        // them equal); the equals callback is safe under that invariant.
+        Some(eq) => {
+            let pa = a.payload::<u8>() as *const u8;
+            let pb = b.payload::<u8>() as *const u8;
+            if unsafe { eq(pa, pb) } {
+                1
+            } else {
+                0
+            }
+        }
+        // Not equatable: treat as not-equal. The type checker rejects this in
+        // well-typed code; the defensive default keeps runtime sound.
+        None => 0,
+    }
+}
+
 /// Append `value` to `vec` in place (§11.1). Returns the Unit sentinel — the
 /// receiver is mutated directly, so the caller's `GcRef` remains valid (the
 /// `VecPayload` object does not move; only its internal buffer may grow).
@@ -902,8 +1026,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_two_at_milestone_5() {
-        assert_eq!(RUNTIME_ABI_VERSION, 3);
+    fn version_is_four_at_milestone_7_part2() {
+        assert_eq!(RUNTIME_ABI_VERSION, 4);
     }
 
     #[test]

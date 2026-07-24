@@ -539,6 +539,124 @@ fn record_field_punning() {
     assert_eq!(result.as_int(), 35);
 }
 
+// --- tuples (M7-WS6, §4.5 structural tuples) --------------------------------
+
+#[test]
+fn tuple_construction_does_not_fault() {
+    // M7 Part 2: tuples now materialize as real objects. Constructing one must
+    // not fault (previously this was a Unit stub).
+    let src = "fn main() -> Int {\n  let t = (1, 2, 3)\n  7\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
+}
+
+#[test]
+fn tuple_survives_gc() {
+    // Allocate a tuple, trigger GC by allocating many objects, and confirm the
+    // program completes without faulting (the tuple's GcRef must be rooted
+    // across safepoints).
+    let src = "fn main() -> Int {\n  let t = (100, 200)\n  var i = 0\n  while i < 100 {\n    let junk = i + 1\n    i = i + 1\n  }\n  9\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 9);
+}
+
+#[test]
+fn tuple_of_mixed_types() {
+    // A tuple with heterogeneous element types (Int, Bool) constructs cleanly.
+    let src = "fn main() -> Int {\n  let t = (42, true)\n  5\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 5);
+}
+
+// --- structural equality (M7-WS6, §5.5) -------------------------------------
+
+#[test]
+fn record_equality_true() {
+    // `Point{1,2} == Point{1,2}` → true (1). Bind to `let` first because record
+    // literals are blocked in `if` conditions (`no_struct_literal`).
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let a = Point { x: 1, y: 2 }\n  let b = Point { x: 1, y: 2 }\n  if a == b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn record_equality_false() {
+    // `Point{1,2} == Point{1,3}` → false (0).
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let a = Point { x: 1, y: 2 }\n  let b = Point { x: 1, y: 3 }\n  if a == b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+#[test]
+fn record_inequality() {
+    // `Point{1,2} != Point{1,3}` → true (1).
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let a = Point { x: 1, y: 2 }\n  let b = Point { x: 1, y: 3 }\n  if a != b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn tuple_equality_true() {
+    // `(1, 2) == (1, 2)` → true.
+    let src =
+        "fn main() -> Int {\n  let a = (1, 2)\n  let b = (1, 2)\n  if a == b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn tuple_equality_false() {
+    // `(1, 2) == (1, 3)` → false.
+    let src =
+        "fn main() -> Int {\n  let a = (1, 2)\n  let b = (1, 3)\n  if a == b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+#[test]
+fn enum_equality_same_variant() {
+    // `Empty == Empty` → true; `Wall == Wall` → true.
+    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  if Empty == Empty { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn enum_equality_different_variant() {
+    // `Empty == Wall` → false.
+    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  if Empty == Wall { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+#[test]
+fn enum_equality_with_payload() {
+    // `Number(42) == Number(42)` → true; `Number(42) == Number(7)` → false.
+    let src = "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  let a = Number(42) == Number(42)\n  let b = Number(42) == Number(7)\n  if a { if b { 3 } else { 2 } } else { 1 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn scalar_equality_still_works() {
+    // `==` on Int still uses the native scalar compare path.
+    let src = "fn main() -> Int {\n  if 3 == 3 { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
 // --- enums (M7-WS4, §4.6) ---------------------------------------------------
 
 #[test]

@@ -27,7 +27,7 @@ use praxis_syntax::SyntaxKind;
 use praxis_types::{unify::UnifyError, ScalarType, Scheme, Type, TypeDb};
 use rowan::TextRange;
 
-use crate::diagnostics::{infinite_type, type_mismatch};
+use crate::diagnostics::{infinite_type, not_equatable, type_mismatch};
 use crate::name_table::NameTable;
 use crate::resolve::{NameResolution, ResolvedRef};
 use crate::scope::{ScopeId, ScopeTree};
@@ -821,6 +821,21 @@ impl Inferer {
                     let at = b.syntax().text_range();
                     if let Err(e) = self.db.unify(l, r) {
                         self.diag_unify(self.file_span(at), e);
+                    }
+                    // Equality (`==`/`!=`) on a composite type (record/tuple/
+                    // enum/collection) is structural (§5.5) and requires every
+                    // contained type to be equatable; functions are never
+                    // equatable. Ordering comparisons (`<`, `>`, …) are still
+                    // Int-only (§4.12), so they keep the native IntCmp path;
+                    // only `==`/`!=` admit composite operands. Emit Y004 for a
+                    // type that cannot be compared with `==`.
+                    if matches!(op_kind, Some(SyntaxKind::EQ2 | SyntaxKind::NEQ)) {
+                        let operand_ty = self.db.follow(l);
+                        if !crate::capability::supports_eq(&self.db, operand_ty) {
+                            let rendered = self.db.render(operand_ty);
+                            self.diagnostics
+                                .push(not_equatable(self.file_span(at), &rendered));
+                        }
                     }
                 }
                 self.db.bool()

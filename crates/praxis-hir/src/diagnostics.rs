@@ -63,3 +63,15 @@ pub(crate) fn annotation_conflict(at: FileSpan, annotated: &str, derived: &str) 
         at,
     )
 }
+
+/// `Y004` — `==` / `!=` applied to a type whose values cannot be compared (e.g.
+/// a function value). The wording is concrete (§5.4: never mention trait or
+/// capability names): it says the type "cannot be compared" and names the type.
+pub(crate) fn not_equatable(at: FileSpan, ty: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagnosticCode::new(DiagnosticCategory::Type, 4),
+        format!("values of type `{ty}` cannot be compared with `==`"),
+        at,
+    )
+}

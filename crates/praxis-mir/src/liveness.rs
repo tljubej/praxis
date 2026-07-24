@@ -148,6 +148,7 @@ fn defs(inst: &Inst) -> Vec<LocalId> {
         Inst::Materialize { dst, .. } => vec![*dst],
         Inst::IntBinOp { dst, .. } => vec![*dst],
         Inst::IntCmp { dst, .. } => vec![*dst],
+        Inst::StructEq { dst, .. } => vec![*dst],
         Inst::Call { dst, .. } => vec![*dst],
         Inst::MoveGc { dst, .. } => vec![*dst],
         Inst::ConstInt { dst, .. } => vec![*dst],
@@ -174,6 +175,10 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
             ..
         } => fields.clone(),
         Inst::Alloc {
+            alloc: crate::ir::AllocKind::Tuple { elements, .. },
+            ..
+        } => elements.clone(),
+        Inst::Alloc {
             alloc: crate::ir::AllocKind::Enum { args, .. },
             ..
         } => args.clone(),
@@ -191,6 +196,7 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
         Inst::LoadField { src, .. } => vec![*src],
         Inst::EnumTag { src, .. } => vec![*src],
         Inst::EnumPayloadGet { src, .. } => vec![*src],
+        Inst::StructEq { lhs, rhs, .. } => vec![*lhs, *rhs],
         Inst::ConstInt { .. } => vec![],
         Inst::CheckFault { .. } => vec![],
     }
@@ -221,7 +227,8 @@ fn safepoint_roots_slot(inst: &mut Inst) -> Option<&mut Vec<LocalId>> {
     match inst {
         Inst::Alloc { live_roots, .. }
         | Inst::Materialize { live_roots, .. }
-        | Inst::Call { live_roots, .. } => Some(live_roots),
+        | Inst::Call { live_roots, .. }
+        | Inst::StructEq { live_roots, .. } => Some(live_roots),
         _ => None,
     }
 }

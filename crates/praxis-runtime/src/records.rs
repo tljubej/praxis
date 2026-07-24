@@ -17,7 +17,7 @@
 
 use std::fmt;
 
-use crate::descriptor::{Tracer, TypeDescriptor, TypeId};
+use crate::descriptor::{DynamicHasher, Tracer, TypeDescriptor, TypeId};
 use crate::GcRef;
 
 /// One field of a record shape: its source name plus the descriptor for the
@@ -85,9 +85,58 @@ unsafe fn record_format(payload: *const u8, out: &mut dyn fmt::Write) {
     let _ = out.write_str(" }");
 }
 
-/// Descriptor for the provisional structural `Record` type (M6, §7.8). Marked
-/// non-equatable / non-hashable for M6; M7 adds structural equality + hashing
-/// as part of the full record story (so records can be map/set keys).
+unsafe fn record_equals(a: *const u8, b: *const u8) -> bool {
+    // SAFETY: caller guarantees both pointers point at initialized RecordPayloads
+    // with compatible schemas.
+    let pa = unsafe { &*(a as *const RecordPayload) };
+    let pb = unsafe { &*(b as *const RecordPayload) };
+    // Structural equality is shape + field-wise equality (§5.5). The schemas are
+    // interned by shape, so distinct shapes are distinct pointers; if the
+    // schemas disagree the records are different shapes and never equal.
+    if pa.schema != pb.schema {
+        return false;
+    }
+    if pa.items.len() != pb.items.len() {
+        return false;
+    }
+    let schema = unsafe { &*pa.schema };
+    // Field-wise equality through each field's descriptor (§11.4), short-circuiting
+    // on the first non-equal field. If a field type is not equatable, the record is
+    // not equatable (§5.5).
+    for (i, (x, y)) in pa.items.iter().zip(pb.items.iter()).enumerate() {
+        let Some(eq) = unsafe { &*schema.fields[i].descriptor }.equals else {
+            return false;
+        };
+        let xe = x.payload::<u8>() as *const u8;
+        let ye = y.payload::<u8>() as *const u8;
+        if !eq(xe, ye) {
+            return false;
+        }
+    }
+    true
+}
+
+unsafe fn record_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
+    // SAFETY: caller guarantees `payload` points at an initialized RecordPayload.
+    let p = unsafe { &*(payload as *const RecordPayload) };
+    let schema = unsafe { &*p.schema };
+    // Arity first to distinguish records of different field counts.
+    hasher.write_bytes(&(p.items.len() as u64).to_le_bytes());
+    for (i, item) in p.items.iter().enumerate() {
+        // If the field type is not hashable, the record is not hashable (§5.5).
+        let Some(hash_field) = unsafe { &*schema.fields[i].descriptor }.hash else {
+            return;
+        };
+        let elem_payload = item.payload::<u8>() as *const u8;
+        hash_field(elem_payload, hasher);
+    }
+}
+
+/// Descriptor for the structural `Record` type (§4.5/§7.8). Structural equality
+/// and hashing (§5.5) recurse field-wise through the per-shape schema's field
+/// descriptors. A record is equatable/hashable iff every field is; functions
+/// never are, so a record containing a function field is neither. This lets
+/// records serve as map/set keys (M8 containers).
 pub const RECORD: &TypeDescriptor = &TypeDescriptor {
     id: TypeId(8),
     name: "Record",
@@ -96,14 +145,9 @@ pub const RECORD: &TypeDescriptor = &TypeDescriptor {
     trace: record_trace,
     drop_value: record_drop,
     format: record_format,
-    equals: None,
-    hash: None,
+    equals: Some(record_equals),
+    hash: Some(record_hash),
 };
-
-// Suppress the unused-import warning for DynamicHasher: it is part of the
-// descriptor vocabulary and will be referenced when equality/hash land in M7.
-#[allow(unused_imports)]
-use crate::DynamicHasher as _DynamicHasher;
 
 #[cfg(test)]
 mod tests {
@@ -111,8 +155,8 @@ mod tests {
 
     #[test]
     fn record_descriptor_reports_capabilities() {
-        assert!(!RECORD.is_equatable());
-        assert!(!RECORD.is_hashable());
+        assert!(RECORD.is_equatable());
+        assert!(RECORD.is_hashable());
         assert_eq!(RECORD.name, "Record");
         assert_eq!(RECORD.id, TypeId(8));
     }
@@ -123,5 +167,57 @@ mod tests {
         assert!(!crate::collections::GRID.is_hashable());
         assert_eq!(crate::collections::GRID.name, "Grid");
         assert_eq!(crate::collections::GRID.id, TypeId(7));
+    }
+
+    #[test]
+    fn record_equals_identical_int_fields() {
+        // Build two records with the same schema and equal Int fields; their
+        // structural equals must be true, and unequal fields must be false.
+        let mut rt = crate::Runtime::new();
+        let mut ctx = rt.context();
+        let descriptors: &'static [*const TypeDescriptor] =
+            Box::leak(vec![crate::scalars::INT as *const TypeDescriptor; 2].into_boxed_slice());
+        let schema = Box::leak(Box::new(RecordSchema {
+            fields: Box::leak(
+                vec![
+                    RecordField {
+                        name: "x",
+                        descriptor: descriptors[0],
+                    },
+                    RecordField {
+                        name: "y",
+                        descriptor: descriptors[1],
+                    },
+                ]
+                .into_boxed_slice(),
+            ),
+        }));
+        // Allocate two records and fill with Int 1, 2.
+        let a = unsafe { crate::abi::praxis_alloc_record(&mut ctx, schema) };
+        let b = unsafe { crate::abi::praxis_alloc_record(&mut ctx, schema) };
+        let one = unsafe { crate::abi::praxis_alloc_int(&mut ctx, 1) };
+        let two = unsafe { crate::abi::praxis_alloc_int(&mut ctx, 2) };
+        unsafe {
+            crate::abi::praxis_record_set_field(&mut ctx, a, 0, one);
+            crate::abi::praxis_record_set_field(&mut ctx, a, 1, two);
+            crate::abi::praxis_record_set_field(&mut ctx, b, 0, one);
+            crate::abi::praxis_record_set_field(&mut ctx, b, 1, two);
+        }
+        assert!(unsafe {
+            record_equals(
+                a.payload::<u8>() as *const u8,
+                b.payload::<u8>() as *const u8,
+            )
+        });
+
+        // Now make b's second field differ (3) → not equal.
+        let three = unsafe { crate::abi::praxis_alloc_int(&mut ctx, 3) };
+        unsafe { crate::abi::praxis_record_set_field(&mut ctx, b, 1, three) };
+        assert!(!unsafe {
+            record_equals(
+                a.payload::<u8>() as *const u8,
+                b.payload::<u8>() as *const u8,
+            )
+        });
     }
 }

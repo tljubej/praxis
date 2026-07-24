@@ -30,6 +30,7 @@ pub mod roots;
 pub mod scalars;
 pub mod shadow_frame;
 pub mod text;
+pub mod tuples;
 
 pub use abi::{assert_abi_version, RUNTIME_ABI_VERSION};
 pub use collections::{GridPayload, VecPayload};
@@ -46,3 +47,4 @@ pub use records::{RecordField, RecordPayload, RecordSchema};
 pub use roots::{RootScope, RootSet};
 pub use shadow_frame::{ShadowFrame, MAX_SHADOW_SLOTS};
 pub use text::TextPayload;
+pub use tuples::{TuplePayload, TupleSchema};

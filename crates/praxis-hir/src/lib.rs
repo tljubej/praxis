@@ -15,6 +15,7 @@
 //! [`Analysis`] carrying the symbol table, scope tree, resolved references,
 //! inferred types, and all diagnostics.
 
+pub mod capability;
 pub mod catalog;
 pub mod diagnostics;
 pub mod hover;

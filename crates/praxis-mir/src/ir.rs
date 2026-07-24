@@ -131,6 +131,18 @@ pub enum Inst {
         lhs: LocalId,
         rhs: LocalId,
     },
+    /// Structural equality of two composite GC values (records/tuples/enums/
+    /// collections), yielding a `Bool` scalar (§5.5). Lowers to the
+    /// `praxis_struct_eq` runtime call, which dispatches to the descriptor's
+    /// `equals` callback and recurses element/field wise. A safepoint + fault
+    /// check follow (the call may trigger GC). Both operands are `Gc` locals;
+    /// `live_roots` are the GC locals that must survive the call.
+    StructEq {
+        dst: LocalId,
+        lhs: LocalId,
+        rhs: LocalId,
+        live_roots: Vec<LocalId>,
+    },
     /// Call a function. Arguments and result are `Gc` locals. A safepoint +
     /// fault check follow (calls may allocate and may fault).
     Call {
@@ -195,6 +207,12 @@ pub enum AllocKind {
         variant_idx: u32,
         args: Vec<LocalId>,
     },
+    /// A boxed tuple (M7, §4.5 structural tuples). `ty` is the tuple's static
+    /// type (the codegen resolves it to a `TupleSchema` keyed on the type's
+    /// element-type sequence); `elements` are the element-value locals in
+    /// positional order. Unlike records, tuples have no def-id — their shape is
+    /// the element-type sequence alone, so the schema is keyed by the `Type`.
+    Tuple { ty: Type, elements: Vec<LocalId> },
 }
 
 /// A call target. M4 resolves user functions by name; the backend mints a symbol.
