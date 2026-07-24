@@ -34,7 +34,9 @@ use crate::{collections::VecPayload, descriptor::TypeDescriptor};
 /// `praxis_enum_set_payload`, `praxis_enum_tag`, `praxis_enum_payload`.
 /// v4 (M7 Part 2, WS6): tuple object model and structural equality —
 /// `praxis_alloc_tuple`, `praxis_tuple_set`, `praxis_tuple_get`, `praxis_struct_eq`.
-pub const RUNTIME_ABI_VERSION: u32 = 4;
+/// v5 (M7 Part 2, WS7): closure object model — `praxis_alloc_closure`,
+/// `praxis_closure_set_capture`, `praxis_closure_fn_ptr`, `praxis_closure_capture`.
+pub const RUNTIME_ABI_VERSION: u32 = 5;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -56,7 +58,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 4;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 5;
 
 // ---------------------------------------------------------------------------
 // Internals the wrappers share.
@@ -789,6 +791,90 @@ pub unsafe extern "C" fn praxis_struct_eq(ctx: *mut RuntimeContext, a: GcRef, b:
     }
 }
 
+/// Allocate a closure value (M7, §4.10) with `fn_ptr` as its entry point and
+/// `n_captures` environment slots initialized to Unit. Captures are filled via
+/// [`praxis_closure_set_capture`] after allocation. Returns the closure `GcRef`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `fn_ptr` must be a valid JIT'd function pointer
+/// whose calling convention matches `fn(ctx, params..., env...) -> i64`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_alloc_closure(
+    ctx: *mut RuntimeContext,
+    fn_ptr: *const u8,
+    n_captures: i64,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let unit = unit_sentinel(ctx);
+    let env = vec![unit; n_captures as usize];
+    // SAFETY: ClosurePayload matches CLOSURE's size/align and is fully initialized.
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::closures::CLOSURE,
+            std::mem::size_of::<crate::closures::ClosurePayload>(),
+            std::mem::align_of::<crate::closures::ClosurePayload>(),
+            |payload| {
+                (payload as *mut crate::closures::ClosurePayload)
+                    .write(crate::closures::ClosurePayload { fn_ptr, env });
+            },
+        )
+    }
+}
+
+/// Set capture slot `idx` of `closure` to `value` (M7, §4.10). Returns the
+/// closure (mutated in place).
+///
+/// # Safety
+/// `ctx` must be live; `closure` must be a valid closure `GcRef`; `idx` in bounds.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_closure_set_capture(
+    ctx: *mut RuntimeContext,
+    closure: GcRef,
+    idx: i64,
+    value: GcRef,
+) -> GcRef {
+    let _ = ctx;
+    // SAFETY: caller guarantees closure is a valid closure GcRef.
+    let payload = closure.payload::<u8>() as *mut crate::closures::ClosurePayload;
+    let cp = unsafe { &mut *payload };
+    if let Some(slot) = cp.env.get_mut(idx as usize) {
+        *slot = value;
+    }
+    closure
+}
+
+/// Read the function pointer out of a closure `GcRef` (M7, §4.10). Used by the
+/// indirect-call lowering to obtain the entry point before a native call.
+///
+/// # Safety
+/// `closure` must be a valid closure `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_closure_fn_ptr(closure: GcRef) -> *const u8 {
+    // SAFETY: caller guarantees closure is a valid closure GcRef.
+    let payload = closure.payload::<u8>() as *const crate::closures::ClosurePayload;
+    unsafe { (*payload).fn_ptr }
+}
+
+/// Read capture slot `idx` out of a closure `GcRef` (M7, §4.10). Used by the
+/// closure's synthetic function to load its captured values from the env.
+///
+/// # Safety
+/// `ctx` must be live; `closure` must be a valid closure `GcRef`; `idx` in bounds.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_closure_capture(
+    ctx: *mut RuntimeContext,
+    closure: GcRef,
+    idx: i64,
+) -> GcRef {
+    // SAFETY: caller guarantees closure is a valid closure GcRef.
+    let payload = closure.payload::<u8>() as *const crate::closures::ClosurePayload;
+    let cp = unsafe { &*payload };
+    cp.env
+        .get(idx as usize)
+        .copied()
+        .unwrap_or_else(|| unsafe { unit_sentinel(ctx) })
+}
+
 /// Append `value` to `vec` in place (§11.1). Returns the Unit sentinel — the
 /// receiver is mutated directly, so the caller's `GcRef` remains valid (the
 /// `VecPayload` object does not move; only its internal buffer may grow).
@@ -1026,8 +1112,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_four_at_milestone_7_part2() {
-        assert_eq!(RUNTIME_ABI_VERSION, 4);
+    fn version_is_five_at_milestone_7_part2_ws7() {
+        assert_eq!(RUNTIME_ABI_VERSION, 5);
     }
 
     #[test]

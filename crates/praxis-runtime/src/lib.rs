@@ -16,6 +16,7 @@
 //! See `praxis_technical_design.md` §11, §12, and Appendix B.
 
 pub mod abi;
+pub mod closures;
 pub mod collections;
 pub mod context;
 pub mod debug;
@@ -33,6 +34,7 @@ pub mod text;
 pub mod tuples;
 
 pub use abi::{assert_abi_version, RUNTIME_ABI_VERSION};
+pub use closures::ClosurePayload;
 pub use collections::{GridPayload, VecPayload};
 pub use context::{DebugFrame, DebugLocal, Fault, FaultKind, Runtime, RuntimeContext};
 pub use debug::DebugLocalMeta;

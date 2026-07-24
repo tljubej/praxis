@@ -98,6 +98,10 @@ impl Jit {
             "praxis_tuple_set",
             "praxis_tuple_get",
             "praxis_struct_eq",
+            "praxis_alloc_closure",
+            "praxis_closure_set_capture",
+            "praxis_closure_fn_ptr",
+            "praxis_closure_capture",
             "praxis_push_debug_frame",
             "praxis_pop_debug_frame",
         ];
