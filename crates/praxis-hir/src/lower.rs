@@ -181,6 +181,10 @@ pub enum TypedExpr {
         /// builder (and the JIT) can name the target without a NameTable.
         callee_name: String,
         args: Vec<TypedExpr>,
+        /// The concrete argument types at this call site (WS8, §13.6). The mono
+        /// pass uses these to instantiate a polymorphic callee; the MIR builder
+        /// ignores them (calls are by name). For a closure-value callee, empty.
+        arg_types: Vec<Type>,
         ty: Type,
     },
     /// `receiver.method(args)` (M5, §16.2). `lowering_symbol` is the runtime
@@ -352,6 +356,7 @@ pub fn lower(
         refs,
         decls,
         ref_types,
+        call_sites,
         diagnostics: _,
     } = analysis;
     // Cache the scalar/unit handles once (these methods need &mut db).
@@ -367,6 +372,7 @@ pub fn lower(
         refs,
         decls,
         ref_types,
+        call_sites,
         diagnostics: Vec::new(),
         catalog: builtin_catalog(),
         int,
@@ -412,6 +418,10 @@ struct Lowerer<'a> {
     /// The inferred type for each name reference's range (filled by inference).
     /// Used to read a captured binding's type off the reference site.
     ref_types: &'a HashMap<TextRange, Type>,
+    /// Each call site's monomorphization witness (WS8, §13.6), keyed by the
+    /// callee name token's range. Read in `lower_call` to attach concrete arg
+    /// types to each `TypedExpr::Call`.
+    call_sites: &'a HashMap<TextRange, crate::CallSite>,
     diagnostics: Vec<Diagnostic>,
     /// The built-in method catalog (§16.2), used to resolve `receiver.method()`
     /// calls to their runtime lowering symbol. Immutable; built once.
@@ -466,30 +476,18 @@ impl<'a> Lowerer<'a> {
         // shadowing). Anonymous/builtin decls have no symbol and are skipped.
         let symbol = self.resolve_decl_at(name_range)?;
 
-        // Determine the function's scheme. If it is polymorphic, the M4 backend
-        // cannot lower it (monomorphization is a later milestone, ADR-018).
+        // Determine the function's scheme and instantiate it once to read the
+        // concrete shape (params/result). For a monomorphic function the
+        // instantiation equals the body; for a polymorphic function the mono
+        // pass (WS8, §13.6) clones and specializes this TypedFn per call site.
         let scheme = self.names.get(symbol).and_then(|s| s.scheme.clone());
         let fn_type = match &scheme {
-            Some(s) => {
-                // Instantiate once to read the concrete shape (params/result).
-                // For a monomorphic function the instantiation equals the body.
-                self.db.instantiate(s)
-            }
+            Some(s) => self.db.instantiate(s),
             None => {
                 // No scheme inferred (errored in M2); skip — don't cascade.
                 return None;
             }
         };
-        if scheme.as_ref().is_some_and(|s| s.is_polymorphic()) {
-            self.diag(
-                name_range,
-                100,
-                format!(
-                    "`{name}` is generic; monomorphization is not supported yet (M4 is monomorphic)"
-                ),
-            );
-            return None;
-        }
 
         // Body scope: a child of the current scope. We don't track scopes
         // explicitly during lowering (the analysis already did); instead we
@@ -1103,10 +1101,22 @@ impl<'a> Lowerer<'a> {
         let ty = self
             .call_result_type(callee)
             .unwrap_or_else(|| self.db.fresh_var());
+        // The concrete arg types at this call site (WS8, §13.6). Recorded by
+        // inference in `analysis.call_sites`, keyed by the callee name token's
+        // range. The mono pass reads these off the typed tree to instantiate a
+        // polymorphic callee. Empty if the call site wasn't recorded (e.g. an
+        // unresolved callee) — the mono pass treats an empty vec as
+        // monomorphic.
+        let arg_types = callee_tok
+            .as_ref()
+            .and_then(|t| self.call_sites.get(&t.text_range()))
+            .map(|cs| cs.arg_types.clone())
+            .unwrap_or_default();
         TypedExpr::Call {
             callee,
             callee_name,
             args,
+            arg_types,
             ty,
         }
     }

@@ -6,7 +6,7 @@
 
 use praxis_ast::AstNode;
 use praxis_codegen_cranelift::{Jit, RunnableFunction};
-use praxis_hir::{analyze_root, lower};
+use praxis_hir::{analyze_root, lower, mono::monomorphize};
 use praxis_mir::{annotate, lower_module};
 use praxis_parser::parse;
 use praxis_runtime::{GcRef, Runtime, RuntimeContext};
@@ -31,6 +31,8 @@ fn compile(
         "lowering diagnostics: {:?}",
         module.diagnostics
     );
+    // Monomorphization (WS8): instantiate polymorphic callees per call site.
+    let module = monomorphize(module, &analysis.names, &mut analysis.db);
     let mut funcs = lower_module(&module, &mut analysis.db);
     for f in &mut funcs {
         annotate(f);
@@ -865,6 +867,57 @@ fn closure_curried() {
     // the outer's param `x`.
     let (rt, result) =
         run_main("fn main() -> Int { let add = |x| |y| x + y; let inc = add(1); inc(41) }");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+// --- M7-WS8: monomorphization (§13.6) -------------------------------------
+//
+// Polymorphic user fns are instantiated per concrete call site. The mono pass
+// runs between typed HIR and MIR; the JIT then compiles one clone per
+// (callee, type-args) pair.
+
+#[test]
+fn monomorphization_identity_on_int() {
+    // `fn id(x) { x }` generalizes to `forall a. a -> a`; called with Int, the
+    // mono pass emits an `id__Int` clone and main calls it.
+    let (rt, result) = run_main("fn id(x) { x }\nfn main() -> Int { id(42) }");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn monomorphization_two_clones_of_same_generic_fn() {
+    // `id` called twice on Int shares one clone; the result is the second call.
+    let (rt, result) = run_main("fn id(x) { x }\nfn main() -> Int { id(1) + id(41) }");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn monomorphization_generic_fn_with_two_params() {
+    // `fn first(a, b) { a }` is `forall a b. (a, b) -> a`; instantiated at
+    // (Int, Int).
+    let (rt, result) = run_main("fn first(a, b) { a }\nfn main() -> Int { first(42, 99) }");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn monomorphization_transitive_generic_call() {
+    // A generic fn calling another generic fn: `wrap` calls `id`. Both must be
+    // instantiated transitively.
+    let (rt, result) =
+        run_main("fn id(x) { x }\nfn wrap(y) { id(y) }\nfn main() -> Int { wrap(42) }");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn monomorphization_generic_fn_called_from_closure_body() {
+    // A generic fn called from inside a closure. The mono pass rewrites the
+    // call inside the closure's body too.
+    let (rt, result) = run_main("fn id(x) { x }\nfn main() -> Int { let f = |n| id(n); f(42) }");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
 }

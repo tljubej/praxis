@@ -15,7 +15,7 @@ use std::path::Path;
 
 use praxis_ast::AstNode;
 use praxis_codegen_cranelift::Jit;
-use praxis_hir::{analyze_root, lower};
+use praxis_hir::{analyze_root, lower, mono::monomorphize};
 use praxis_mir::{annotate, lower_module};
 use praxis_runtime::{GcRef, Runtime, RuntimeContext};
 
@@ -78,6 +78,12 @@ pub fn run(file: &str, input_file: Option<&str>) -> anyhow::Result<i32> {
         diagnostic_render::write_to(&mut std::io::stderr(), &rendered)?;
         return Ok(1);
     }
+
+    // Monomorphization (WS8, §13.6): instantiate every polymorphic callee per
+    // call site, between typed HIR and MIR. Produces a module of monomorphic
+    // fns (one clone per generic callee + concrete type args); the MIR builder
+    // then runs unchanged on it.
+    let module = monomorphize(module, &analysis.names, &mut analysis.db);
 
     let mut funcs = lower_module(&module, &mut analysis.db);
     for f in &mut funcs {

@@ -23,6 +23,7 @@ pub mod exhaustive;
 pub mod hover;
 pub mod infer;
 pub mod lower;
+pub mod mono;
 pub mod name_table;
 pub mod parser_lower;
 pub mod resolve;
@@ -60,11 +61,29 @@ pub struct Analysis {
     /// The inferred type for each name reference's range (filled by inference).
     pub ref_types: std::collections::HashMap<rowan::TextRange, Type>,
     /// Each *declaration* site, keyed by the name token's source range → the
-    /// [`SymbolId`] it mints. Survives shadowing (each `let`/`var`/`fn`/param
+    /// [`SymbolId`] it mints. Survives shadowing (each `let`/`var`/fn`/param
     /// declaration is keyed by its own range). Consumed by M4 lowering.
     pub decls: std::collections::HashMap<rowan::TextRange, SymbolId>,
+    /// Each *call site*, keyed by the callee name token's source range. Records
+    /// the callee symbol and the concrete argument types the callee was called
+    /// with (the instantiation witness). Consumed by monomorphization (WS8) to
+    /// instantiate polymorphic callees per call site.
+    pub call_sites: std::collections::HashMap<rowan::TextRange, CallSite>,
     /// All `N0xx` (name) and `Y0xx` (type) diagnostics, in source order.
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// One call site's monomorphization witness (WS8, §13.6): the callee symbol and
+/// the concrete argument types at the call site. After inference, the arg types
+/// pin the callee's quantified type variables to concrete types, so the mono
+/// pass can instantiate the callee's scheme with them.
+#[derive(Clone, Debug)]
+pub struct CallSite {
+    /// The callee's symbol (a `SymbolKind::Fn` for user fns; builtins are also
+    /// recorded so `Vec[T]()` can honor the element type).
+    pub callee: SymbolId,
+    /// The concrete argument types, in call order.
+    pub arg_types: Vec<Type>,
 }
 
 impl Analysis {
@@ -90,6 +109,7 @@ pub fn analyze(file: FileId, root: &SourceFile) -> Analysis {
         refs: inference.refs,
         ref_types: inference.ref_types,
         decls: inference.decls,
+        call_sites: inference.call_sites,
         diagnostics: inference.diagnostics,
     }
 }
@@ -107,6 +127,7 @@ pub fn analyze_root(file: FileId, root: &praxis_syntax::SyntaxNode) -> Analysis 
             refs: std::collections::HashMap::new(),
             ref_types: std::collections::HashMap::new(),
             decls: std::collections::HashMap::new(),
+            call_sites: std::collections::HashMap::new(),
             // The parser should always produce a SOURCE_FILE root; if not, this
             // is an internal error, surfaced as a single diagnostic.
             diagnostics: vec![praxis_source::Diagnostic::new(

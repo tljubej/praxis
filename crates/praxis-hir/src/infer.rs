@@ -44,6 +44,9 @@ pub struct Inference {
     /// passes (M4 lowering) can map a `let`/`var`/`fn`/param name to its symbol
     /// via the declaration range (unambiguous under shadowing).
     pub decls: HashMap<TextRange, SymbolId>,
+    /// Each call site, keyed by the callee name token's range → the callee
+    /// symbol and concrete arg types (the monomorphization witness, WS8 §13.6).
+    pub call_sites: HashMap<TextRange, crate::CallSite>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -70,6 +73,7 @@ pub(crate) fn infer_with_tree(
         refs,
         decls,
         ref_types: HashMap::new(),
+        call_sites: HashMap::new(),
         diagnostics: Vec::new(),
         catalog: builtin_catalog(),
     };
@@ -91,6 +95,7 @@ pub(crate) fn infer_with_tree(
         refs: inferer.refs,
         ref_types: inferer.ref_types,
         decls: inferer.decls,
+        call_sites: inferer.call_sites,
         diagnostics,
     }
 }
@@ -105,6 +110,9 @@ struct Inferer {
     /// to the exact symbol, surviving shadowing.
     decls: HashMap<TextRange, SymbolId>,
     ref_types: HashMap<TextRange, Type>,
+    /// Call sites keyed by the callee name token's range. Populated in
+    /// `infer_call`; consumed by the monomorphization pass (WS8, §13.6).
+    call_sites: HashMap<TextRange, crate::CallSite>,
     diagnostics: Vec<Diagnostic>,
     /// The built-in method catalog (§16.2), for resolving `receiver.method()`.
     /// Immutable; shared via a process-wide `OnceLock`.
@@ -979,11 +987,27 @@ impl Inferer {
                     if let Some(scheme) = scheme {
                         let callee_ty = self.db.instantiate(&scheme);
                         let result = self.db.fresh_var();
+                        // Snapshot the concrete arg types before they are moved
+                        // into the expected Func type — this is the call site's
+                        // monomorphization witness (WS8, §13.6).
+                        let arg_types_snapshot = arg_types.clone();
                         let expected = self.db.func(arg_types, result);
                         if let Err(e) = self.db.unify(callee_ty, expected) {
                             let at = c.syntax().text_range();
                             self.diag_unify(self.file_span(at), e);
                         }
+                        // Record the witness: the callee symbol + the concrete
+                        // arg types. After unification these pin the callee's
+                        // quantified vars, so the mono pass can instantiate the
+                        // scheme with them. (Captured even for monomorphic
+                        // callees — cheap, and keeps the mono pass uniform.)
+                        self.call_sites.insert(
+                            range,
+                            crate::CallSite {
+                                callee: resolved.symbol,
+                                arg_types: arg_types_snapshot,
+                            },
+                        );
                         // For the common builtin `out(x)`, the scheme is
                         // forall T. (T) -> Unit, so the result unifies to Unit.
                         if self.is_builtin(resolved.symbol, "out") {
