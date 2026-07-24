@@ -19,9 +19,9 @@
 use std::collections::HashMap;
 
 use praxis_ast::{
-    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, Expr, ExprStmt,
-    FieldExpr, FnItem, IfExpr, LetStmt, Literal, MethodCallExpr, Param, ParamList, PathExpr,
-    RecordLitExpr, SourceFile, StructItem, TupleExpr, UnaryExpr, VarStmt, WhileExpr,
+    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, EnumItem, Expr,
+    ExprStmt, FieldExpr, FnItem, IfExpr, LetStmt, Literal, MethodCallExpr, Param, ParamList,
+    PathExpr, RecordLitExpr, SourceFile, StructItem, TupleExpr, UnaryExpr, VarStmt, WhileExpr,
 };
 use praxis_source::{Diagnostic, DiagnosticCategory, DiagnosticCode, FileSpan, Severity, Span};
 use praxis_stdlib::type_pattern::ScalarType as PatternScalar;
@@ -221,6 +221,15 @@ pub enum TypedExpr {
         field_idx: u32,
         ty: Type,
     },
+    /// An enum variant construction (M7, §4.6): `Number(5)` or bare `Empty`.
+    /// `enum_def_id` identifies the enum, `variant_idx` the variant, and `args`
+    /// are the payload values (empty for a payload-less variant).
+    EnumVariant {
+        enum_def_id: praxis_types::EnumDefId,
+        variant_idx: u32,
+        args: Vec<TypedExpr>,
+        ty: Type,
+    },
 }
 
 /// A literal value. (M4 lowers Int/Bool/Unit; Text materializes via the runtime
@@ -321,6 +330,10 @@ pub fn lower(
         // Struct declarations (M7, §4.5) are type-only: they register a record
         // type during inference but produce no runtime item. Skip them here.
         if StructItem::cast(node.clone()).is_some() {
+            // No codegen for the declaration itself.
+        }
+        // Enum declarations (M7, §4.6) are likewise type-only.
+        if EnumItem::cast(node.clone()).is_some() {
             // No codegen for the declaration itself.
         }
         // Top-level `let`/`var`/`expr`/`assign` are not lowered yet — M4 only
@@ -694,6 +707,24 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_path(&mut self, p: &PathExpr) -> TypedExpr {
+        // M7-WS4: detect a zero-payload enum variant used as a bare path (`Empty`).
+        if let Some(tok) = p.name() {
+            let name = tok.text().to_string();
+            if let Some((enum_def_id, variant_idx, _)) = self.lookup_enum_variant_by_name(&name) {
+                // Only treat as a variant if the payload is empty (a zero-payload
+                // variant). Payload variants are handled in lower_call.
+                let edef = self.db.enum_def(enum_def_id);
+                if !edef.variants[variant_idx].has_payload() {
+                    let enum_ty = self.db.enum_type(enum_def_id);
+                    return TypedExpr::EnumVariant {
+                        enum_def_id,
+                        variant_idx: variant_idx as u32,
+                        args: Vec::new(),
+                        ty: enum_ty,
+                    };
+                }
+            }
+        }
         let ty = match p.name() {
             Some(tok) => {
                 let range = tok.text_range();
@@ -853,6 +884,21 @@ impl<'a> Lowerer<'a> {
             .arg_list()
             .map(|a| self.lower_args(&a))
             .unwrap_or_default();
+        // M7-WS4: detect enum variant construction. If the callee's scheme is a
+        // Func returning an enum type, this is a payload variant like `Number(5)`.
+        if let Some(name) = callee_tok.as_ref().map(|t| t.text().to_string()) {
+            if let Some((enum_def_id, variant_idx, _payload)) =
+                self.lookup_enum_variant_by_name(&name)
+            {
+                let enum_ty = self.db.enum_type(enum_def_id);
+                return TypedExpr::EnumVariant {
+                    enum_def_id,
+                    variant_idx: variant_idx as u32,
+                    args,
+                    ty: enum_ty,
+                };
+            }
+        }
         // The call's result type comes from the callee's instantiated scheme.
         let ty = self
             .call_result_type(callee)
@@ -863,6 +909,31 @@ impl<'a> Lowerer<'a> {
             args,
             ty,
         }
+    }
+
+    /// Look up an enum variant by constructor name (for lowering). Returns the
+    /// enum def-id, variant index, and payload types.
+    fn lookup_enum_variant_by_name(
+        &self,
+        name: &str,
+    ) -> Option<(praxis_types::EnumDefId, usize, Vec<Type>)> {
+        let root = self.scopes.root();
+        let symbol = self.scopes.lookup(root, name)?;
+        let sym = self.names.get(symbol)?;
+        let scheme = sym.scheme.as_ref()?;
+        let result_ty = match self.db.data(self.db.follow(scheme.body)) {
+            praxis_types::TypeData::Func { result, .. } => *result,
+            praxis_types::TypeData::Enum { .. } => scheme.body,
+            _ => return None,
+        };
+        let def_id = match self.db.data(self.db.follow(result_ty)) {
+            praxis_types::TypeData::Enum { def } => *def,
+            _ => return None,
+        };
+        let edef = self.db.enum_def(def_id);
+        let idx = edef.variant(name)?;
+        let payload = edef.variants[idx].payload.clone().unwrap_or_default();
+        Some((def_id, idx, payload))
     }
 
     fn lower_args(&mut self, args: &ArgList) -> Vec<TypedExpr> {
@@ -1147,6 +1218,7 @@ fn expr_ty(e: &TypedExpr) -> Type {
         TypedExpr::Parse { ty, .. } => *ty,
         TypedExpr::RecordLit { ty, .. } => *ty,
         TypedExpr::FieldGet { ty, .. } => *ty,
+        TypedExpr::EnumVariant { ty, .. } => *ty,
     }
 }
 

@@ -178,6 +178,10 @@ pub enum SyntaxKind {
     FN_ITEM,
     /// A `struct Name { field: Type, … }` declaration (M7, §4.5).
     STRUCT_ITEM,
+    /// An `enum Name { Variant, Variant(Type), … }` declaration (M7, §4.6).
+    ENUM_ITEM,
+    /// One variant of an enum: `Name` or `Name(Type, …)`.
+    ENUM_VARIANT,
     /// The `{ field: Type, … }` body of a struct declaration.
     FIELD_LIST,
     /// A single `name: Type` field of a struct.

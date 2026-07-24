@@ -24,9 +24,9 @@
 use std::collections::HashMap;
 
 use praxis_ast::{
-    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, Expr, ExprStmt,
-    FieldExpr, FnItem, IfExpr, LetStmt, Param, ParamList, RecordLitExpr, SourceFile, StructItem,
-    VarStmt, WhileExpr,
+    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, EnumItem, Expr,
+    ExprStmt, FieldExpr, FnItem, IfExpr, LetStmt, Param, ParamList, RecordLitExpr, SourceFile,
+    StructItem, VarStmt, WhileExpr,
 };
 use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
 use praxis_syntax::SyntaxKind;
@@ -241,6 +241,29 @@ impl Resolver {
                 );
             }
         }
+        // M7-WS4: register enum type names + variant constructor names.
+        if let Some(enum_) = EnumItem::cast(node.clone()) {
+            if let Some(name_tok) = enum_.name() {
+                self.bind(
+                    scope,
+                    SymbolKind::Enum,
+                    name_tok.text().to_string(),
+                    name_tok.text_range(),
+                );
+            }
+            // Each variant is also a constructor name in scope (§4.6):
+            // `Empty`, `Number(5)`, etc. are bare names the user writes.
+            for v in enum_.variants() {
+                if let Some(vname_tok) = v.name() {
+                    self.bind(
+                        scope,
+                        SymbolKind::Fn, // variant constructors behave like fns
+                        vname_tok.text().to_string(),
+                        vname_tok.text_range(),
+                    );
+                }
+            }
+        }
     }
 
     // --- pass 2: top-level statements --------------------------------------
@@ -254,6 +277,8 @@ impl Resolver {
             self.resolve_fn(scope, &fn_);
         } else if let Some(struct_) = StructItem::cast(node.clone()) {
             self.resolve_struct(scope, &struct_);
+        } else if let Some(enum_) = EnumItem::cast(node.clone()) {
+            self.resolve_enum(scope, &enum_);
         } else if let Some(assign) = AssignStmt::cast(node.clone()) {
             self.resolve_assign(scope, &assign);
         } else if let Some(expr) = ExprStmt::cast(node.clone()) {
@@ -269,6 +294,19 @@ impl Resolver {
         if let Some(fields) = item.field_list() {
             for f in fields.fields() {
                 if let Some(ty) = f.ty() {
+                    self.check_type_annotation(scope, &ty);
+                }
+            }
+        }
+    }
+
+    /// Resolve an `enum Name { Variant, Variant(Type), … }` declaration (M7,
+    /// §4.6). The name + variant constructors were registered in pass 1; here we
+    /// validate the variant payload types.
+    fn resolve_enum(&mut self, scope: ScopeId, item: &EnumItem) {
+        for v in item.variants() {
+            if let Some(payload_types) = v.payload_types() {
+                for ty in payload_types {
                     self.check_type_annotation(scope, &ty);
                 }
             }

@@ -198,6 +198,65 @@ impl StructItem {
     }
 }
 
+/// An `enum Name { Variant, Variant(Type), … }` declaration (M7, §4.6).
+#[derive(Clone, Debug)]
+pub struct EnumItem {
+    syntax: SyntaxNode,
+}
+impl AstNode for EnumItem {
+    const KIND: K = K::ENUM_ITEM;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl EnumItem {
+    /// The enum name.
+    pub fn name(&self) -> Option<SyntaxToken> {
+        name_token(&self.syntax)
+    }
+    /// The variants in declaration order.
+    pub fn variants(&self) -> impl Iterator<Item = EnumVariantNode> + '_ {
+        self.syntax.children().filter_map(EnumVariantNode::cast)
+    }
+}
+
+/// One variant of an enum declaration: `Name` or `Name(Type, …)` (M7, §4.6).
+/// Named `EnumVariantNode` to avoid clashing with the type-system
+/// `EnumVariantDef`.
+#[derive(Clone, Debug)]
+pub struct EnumVariantNode {
+    syntax: SyntaxNode,
+}
+impl AstNode for EnumVariantNode {
+    const KIND: K = K::ENUM_VARIANT;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl EnumVariantNode {
+    /// The variant name.
+    pub fn name(&self) -> Option<SyntaxToken> {
+        name_token(&self.syntax)
+    }
+    /// The payload type(s), if the variant carries data. Returns `None` for a
+    /// payload-less variant (`Empty`); `Some(vec)` for `Number(Int)` etc. Each
+    /// payload type is a `TypeRef` child appearing after the name.
+    pub fn payload_types(&self) -> Option<Vec<TypeRef>> {
+        let types: Vec<TypeRef> = self.syntax.children().filter_map(TypeRef::cast).collect();
+        if types.is_empty() {
+            None
+        } else {
+            Some(types)
+        }
+    }
+}
+
 /// The `{ field: Type, … }` body of a struct, or the `{ field: expr, … }` body
 /// of a record literal. Reused for both declaration types and record-literal
 /// expressions (M7).

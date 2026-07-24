@@ -375,6 +375,13 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             field_idx,
             ..
         } => lower_field_get(b, receiver, *field_idx),
+        // M7: enum variant construction.
+        TypedExpr::EnumVariant {
+            enum_def_id,
+            variant_idx,
+            args,
+            ..
+        } => lower_enum_variant(b, *enum_def_id, *variant_idx, args),
     }
 }
 
@@ -731,7 +738,8 @@ fn expr_static_type(e: &TypedExpr) -> Type {
         | TypedExpr::Read { ty, .. }
         | TypedExpr::Parse { ty, .. }
         | TypedExpr::RecordLit { ty, .. }
-        | TypedExpr::FieldGet { ty, .. } => *ty,
+        | TypedExpr::FieldGet { ty, .. }
+        | TypedExpr::EnumVariant { ty, .. } => *ty,
         TypedExpr::Block(blk) => blk.ty,
     }
 }
@@ -769,6 +777,28 @@ fn lower_field_get(b: &mut Builder<'_>, receiver: &TypedExpr, field_idx: u32) ->
         dst,
         src,
         field_idx,
+    });
+    dst
+}
+
+/// Lower an enum variant construction (M7, §4.6). Lowers payload args to `Gc`
+/// locals, then emits an `Alloc` with `AllocKind::Enum`.
+fn lower_enum_variant(
+    b: &mut Builder<'_>,
+    enum_def_id: praxis_types::EnumDefId,
+    variant_idx: u32,
+    args: &[TypedExpr],
+) -> LocalId {
+    let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
+    let dst = b.alloc_gc(Type(0), None);
+    b.push(Inst::Alloc {
+        dst,
+        alloc: AllocKind::Enum {
+            enum_def_id: enum_def_id.to_u32(),
+            variant_idx,
+            args: arg_locals,
+        },
+        live_roots: Vec::new(),
     });
     dst
 }

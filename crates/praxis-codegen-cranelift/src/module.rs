@@ -90,6 +90,10 @@ impl Jit {
             "praxis_alloc_record",
             "praxis_record_set_field",
             "praxis_record_field",
+            "praxis_alloc_enum",
+            "praxis_enum_set_payload",
+            "praxis_enum_tag",
+            "praxis_enum_payload",
             "praxis_push_debug_frame",
             "praxis_pop_debug_frame",
         ];

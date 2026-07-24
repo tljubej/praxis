@@ -368,6 +368,7 @@ impl<'t> Parser<'t> {
             SyntaxKind::KW_VAR => self.parse_let_or_var(SyntaxKind::VAR_STMT),
             SyntaxKind::KW_FN => self.parse_fn_item(),
             SyntaxKind::KW_STRUCT => self.parse_struct_item(),
+            SyntaxKind::KW_ENUM => self.parse_enum_item(),
             // `name = expr` / `name += expr` reassignment (§4.2).
             SyntaxKind::Ident if is_assignment_op(self.nth_kind(1)) => self.parse_assign_stmt(),
             _ => self.parse_expr_stmt(),
@@ -471,6 +472,44 @@ impl<'t> Parser<'t> {
         self.expect(SyntaxKind::R_BRACE, "`}` to end struct fields");
         self.finish_node(); // FIELD_LIST
         self.finish_node(); // STRUCT_ITEM
+        true
+    }
+
+    /// `enum Name { Variant, Variant(Type, …), … }` (M7, §4.6). Each variant is
+    /// an `ENUM_VARIANT` node: a name optionally followed by `( type_list )`.
+    fn parse_enum_item(&mut self) -> bool {
+        self.start_node(SyntaxKind::ENUM_ITEM);
+        self.bump(); // `enum`
+        self.expect(SyntaxKind::Ident, "enum name");
+        self.expect(SyntaxKind::L_BRACE, "`{` to begin enum variants");
+        if !self.at(SyntaxKind::R_BRACE) {
+            loop {
+                let before = self.meaningful_index();
+                self.start_node(SyntaxKind::ENUM_VARIANT);
+                self.expect(SyntaxKind::Ident, "variant name");
+                // Optional payload: `( Type, Type, … )`.
+                if self.eat(SyntaxKind::L_PAREN) {
+                    if !self.at(SyntaxKind::R_PAREN) {
+                        loop {
+                            let pbefore = self.meaningful_index();
+                            self.parse_type();
+                            if !self.eat(SyntaxKind::COMMA) {
+                                break;
+                            }
+                            self.ensure_progress(pbefore);
+                        }
+                    }
+                    self.expect(SyntaxKind::R_PAREN, "`)` to close variant payload");
+                }
+                self.finish_node(); // ENUM_VARIANT
+                if !self.eat(SyntaxKind::COMMA) {
+                    break;
+                }
+                self.ensure_progress(before);
+            }
+        }
+        self.expect(SyntaxKind::R_BRACE, "`}` to end enum variants");
+        self.finish_node(); // ENUM_ITEM
         true
     }
 

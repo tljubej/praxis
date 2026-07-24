@@ -20,6 +20,7 @@ pub mod collections;
 pub mod context;
 pub mod debug;
 pub mod descriptor;
+pub mod enums;
 pub mod gc;
 pub mod heap;
 pub mod immortal;

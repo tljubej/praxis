@@ -177,6 +177,13 @@ pub enum AllocKind {
         record_def_id: u32,
         fields: Vec<LocalId>,
     },
+    /// A boxed enum value (M7, §4.6). `enum_def_id` identifies the enum,
+    /// `variant_idx` is the discriminant, and `args` are the payload values.
+    Enum {
+        enum_def_id: u32,
+        variant_idx: u32,
+        args: Vec<LocalId>,
+    },
 }
 
 /// A call target. M4 resolves user functions by name; the backend mints a symbol.

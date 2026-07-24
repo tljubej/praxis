@@ -538,3 +538,42 @@ fn record_field_punning() {
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 35);
 }
+
+// --- enums (M7-WS4, §4.6) ---------------------------------------------------
+
+#[test]
+fn enum_payload_variant_construction() {
+    // `Number(5)` constructs a payload variant. Verify construction doesn't fault.
+    let src =
+        "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  let t = Number(42)\n  7\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
+}
+
+#[test]
+fn enum_zero_payload_variant_as_value() {
+    // `Empty` is a bare zero-payload variant value.
+    let src = "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  let t = Empty\n  8\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 8);
+}
+
+#[test]
+fn enum_construction_does_not_fault() {
+    // Direct enum construction — verify it allocates without faulting.
+    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  let a = Empty\n  let b = Wall\n  let c = Number(99)\n  42\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn enum_survives_gc() {
+    // Allocate enum values, trigger GC, verify no fault.
+    let src = "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  let t = Number(123)\n  var i = 0\n  while i < 50 {\n    let junk = i + 1\n    i = i + 1\n  }\n  456\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 456);
+}

@@ -18,9 +18,9 @@
 use std::collections::HashMap;
 
 use praxis_ast::{
-    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, Expr, ExprStmt,
-    FieldExpr, FnItem, IfExpr, LetStmt, Literal, MethodCallExpr, Param, PathExpr, RecordLitExpr,
-    SourceFile, StructItem, UnaryExpr, VarStmt, WhileExpr,
+    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, EnumItem, Expr,
+    ExprStmt, FieldExpr, FnItem, IfExpr, LetStmt, Literal, MethodCallExpr, Param, PathExpr,
+    RecordLitExpr, SourceFile, StructItem, UnaryExpr, VarStmt, WhileExpr,
 };
 use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
 use praxis_syntax::SyntaxKind;
@@ -201,6 +201,8 @@ impl Inferer {
             self.infer_fn(scope, &fn_);
         } else if let Some(struct_) = StructItem::cast(node.clone()) {
             self.infer_struct(scope, &struct_);
+        } else if let Some(enum_) = EnumItem::cast(node.clone()) {
+            self.infer_enum(scope, &enum_);
         } else if let Some(assign) = AssignStmt::cast(node.clone()) {
             self.infer_assign(scope, &assign);
         } else if let Some(expr) = ExprStmt::cast(node.clone()) {
@@ -253,6 +255,107 @@ impl Inferer {
         }
         let scheme = sym.scheme.as_ref()?;
         Some(scheme.body)
+    }
+
+    /// Register an enum declaration's type (M7, §4.6). Builds the `EnumDef`,
+    /// stores the resulting `Type` on the enum symbol, and gives each variant
+    /// constructor a function type `(payload…) -> EnumType` (or `() -> EnumType`
+    /// for payload-less variants).
+    fn infer_enum(&mut self, _scope: ScopeId, item: &EnumItem) {
+        let Some(name_tok) = item.name() else {
+            return;
+        };
+        let name = name_tok.text().to_string();
+        let range = name_tok.text_range();
+        let Some(enum_symbol) = self.resolve_decl(range) else {
+            return;
+        };
+        // Resolve each variant's payload types and build the EnumDef.
+        let mut variants = Vec::new();
+        // Collect (variant-name, payload-types, declaration-range) for ctor setup.
+        let mut variant_info: Vec<(String, Vec<Type>, TextRange)> = Vec::new();
+        for v in item.variants() {
+            let vname = v.name().map(|t| t.text().to_string()).unwrap_or_default();
+            let payload_types: Vec<Type> = v
+                .payload_types()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|t| self.resolve_type(&t).unwrap_or_else(|| self.db.fresh_var()))
+                .collect();
+            let payload = if payload_types.is_empty() {
+                None
+            } else {
+                Some(payload_types.clone())
+            };
+            variants.push((vname.clone(), payload));
+            if let Some(vtok) = v.name() {
+                variant_info.push((vname, payload_types, vtok.text_range()));
+            }
+        }
+        let enum_ty = self.db.register_enum(name, variants);
+        if let Some(sym) = self.names.get_mut(enum_symbol) {
+            sym.scheme = Some(Scheme::monotype(enum_ty));
+        }
+        // Give each variant constructor a type.
+        for (vname, payload_types, vrange) in &variant_info {
+            if let Some(vsymbol) = self.resolve_decl(*vrange) {
+                // The constructor type. A zero-payload variant (`Empty`) is a
+                // bare value of the enum type (used as a path, not a call). A
+                // payload variant (`Number(Int)`) is a function `(Int) -> Enum`.
+                let ctor_ty = if payload_types.is_empty() {
+                    enum_ty
+                } else {
+                    self.db.func(payload_types.clone(), enum_ty)
+                };
+                if let Some(sym) = self.names.get_mut(vsymbol) {
+                    sym.scheme = Some(Scheme::monotype(ctor_ty));
+                }
+            }
+            let _ = vname;
+        }
+    }
+
+    /// Look up a registered enum type by name.
+    #[allow(dead_code)] // used by WS5 pattern matching
+    fn lookup_enum_type(&self, name: &str) -> Option<Type> {
+        let root = self.scopes.root();
+        let symbol = self.scopes.lookup(root, name)?;
+        let sym = self.names.get(symbol)?;
+        if sym.kind != SymbolKind::Enum {
+            return None;
+        }
+        let scheme = sym.scheme.as_ref()?;
+        Some(scheme.body)
+    }
+
+    /// Look up an enum variant by constructor name. Returns the variant's enum
+    /// def-id, index, and payload types (empty for payload-less). Works for both
+    /// payload variants (scheme is `Func -> Enum`) and zero-payload variants
+    /// (scheme is the enum type directly).
+    #[allow(dead_code)] // used by WS5 pattern matching
+    fn lookup_enum_variant(
+        &self,
+        name: &str,
+    ) -> Option<(praxis_types::EnumDefId, usize, Vec<Type>)> {
+        let root = self.scopes.root();
+        let symbol = self.scopes.lookup(root, name)?;
+        let sym = self.names.get(symbol)?;
+        let scheme = sym.scheme.as_ref()?;
+        // The scheme body is either a Func returning the enum type (payload
+        // variant) or the enum type itself (zero-payload variant).
+        let result_ty = match self.db.data(self.db.follow(scheme.body)) {
+            praxis_types::TypeData::Func { result, .. } => *result,
+            praxis_types::TypeData::Enum { .. } => scheme.body,
+            _ => return None,
+        };
+        let def_id = match self.db.data(self.db.follow(result_ty)) {
+            praxis_types::TypeData::Enum { def } => *def,
+            _ => return None,
+        };
+        let edef = self.db.enum_def(def_id);
+        let idx = edef.variant(name)?;
+        let payload = edef.variants[idx].payload.clone().unwrap_or_default();
+        Some((def_id, idx, payload))
     }
 
     /// Resolve the symbol declared at `range` (from the resolution `decls` map).

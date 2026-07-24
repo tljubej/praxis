@@ -385,6 +385,37 @@ fn lower_inst<M: Module>(
                     }
                     builder.def_var(vars[dst.0 as usize], record_ref);
                 }
+                AllocKind::Enum {
+                    enum_def_id: _,
+                    variant_idx,
+                    args,
+                } => {
+                    // praxis_alloc_enum(ctx, tag, arity) -> GcRef. Then fill in
+                    // each payload via praxis_enum_set_payload.
+                    let tag_val = builder.ins().iconst(GC, *variant_idx as i64);
+                    let arity_val = builder.ins().iconst(GC, args.len() as i64);
+                    let enum_ref = call_runtime_by_name(
+                        builder,
+                        ctx_val,
+                        &[tag_val, arity_val],
+                        "praxis_alloc_enum",
+                        module,
+                        imports,
+                    )?;
+                    for (idx, arg_local) in args.iter().enumerate() {
+                        let arg_val = builder.use_var(vars[arg_local.0 as usize]);
+                        let idx_val = builder.ins().iconst(GC, idx as i64);
+                        call_runtime_by_name(
+                            builder,
+                            ctx_val,
+                            &[enum_ref, idx_val, arg_val],
+                            "praxis_enum_set_payload",
+                            module,
+                            imports,
+                        )?;
+                    }
+                    builder.def_var(vars[dst.0 as usize], enum_ref);
+                }
             }
         }
         Inst::ExtractScalar { dst, src, scalar } => {

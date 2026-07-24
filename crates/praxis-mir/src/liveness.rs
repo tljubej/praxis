@@ -172,6 +172,10 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
             ..
         } => fields.clone(),
         Inst::Alloc {
+            alloc: crate::ir::AllocKind::Enum { args, .. },
+            ..
+        } => args.clone(),
+        Inst::Alloc {
             alloc: crate::ir::AllocKind::Unit | crate::ir::AllocKind::Text { .. },
             ..
         } => vec![],

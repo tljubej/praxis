@@ -574,6 +574,91 @@ pub unsafe extern "C" fn praxis_record_field(
         .unwrap_or_else(|| unsafe { unit_sentinel(ctx) })
 }
 
+/// Allocate an enum value (M7, §4.6) with variant `tag` and `arity` payload
+/// slots all initialized to Unit. Payload values are filled via
+/// [`praxis_enum_set_payload`] after allocation. Returns the enum `GcRef`.
+///
+/// # Safety
+/// `ctx` must be live and wired.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_alloc_enum(
+    ctx: *mut RuntimeContext,
+    tag: u32,
+    arity: u32,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let unit = unit_sentinel(ctx);
+    let items = vec![unit; arity as usize];
+    // SAFETY: EnumPayload matches ENUM's size/align and is fully initialized.
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::enums::ENUM,
+            std::mem::size_of::<crate::enums::EnumPayload>(),
+            std::mem::align_of::<crate::enums::EnumPayload>(),
+            |payload| {
+                (payload as *mut crate::enums::EnumPayload)
+                    .write(crate::enums::EnumPayload { tag, items });
+            },
+        )
+    }
+}
+
+/// Set payload slot `idx` of `enum_value` to `value` (M7, §4.6). Returns the
+/// enum value (mutated in place).
+///
+/// # Safety
+/// `ctx` must be live; `enum_value` must be a valid enum `GcRef`; `idx` in bounds.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_enum_set_payload(
+    ctx: *mut RuntimeContext,
+    enum_value: GcRef,
+    idx: u32,
+    value: GcRef,
+) -> GcRef {
+    let _ = ctx;
+    // SAFETY: caller guarantees enum_value is a valid enum GcRef.
+    let payload = enum_value.payload::<u8>() as *mut crate::enums::EnumPayload;
+    let ep = unsafe { &mut *payload };
+    if let Some(slot) = ep.items.get_mut(idx as usize) {
+        *slot = value;
+    }
+    enum_value
+}
+
+/// Read the variant tag (discriminant) of an enum value (M7, §4.6). Returns
+/// the `u32` variant index. Used by `match` lowering to branch on the variant.
+///
+/// # Safety
+/// `ctx` must be live; `enum_value` must be a valid enum `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_enum_tag(ctx: *mut RuntimeContext, enum_value: GcRef) -> u32 {
+    let _ = ctx;
+    // SAFETY: caller guarantees enum_value is a valid enum GcRef.
+    let payload = enum_value.payload::<u8>() as *const crate::enums::EnumPayload;
+    let ep = unsafe { &*payload };
+    ep.tag
+}
+
+/// Read payload slot `idx` of an enum value (M7, §4.6). Returns the slot's
+/// `GcRef`. Used by `match` to bind variant payload variables.
+///
+/// # Safety
+/// `ctx` must be live; `enum_value` must be a valid enum `GcRef`; `idx` in bounds.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_enum_payload(
+    ctx: *mut RuntimeContext,
+    enum_value: GcRef,
+    idx: u32,
+) -> GcRef {
+    // SAFETY: caller guarantees enum_value is a valid enum GcRef.
+    let payload = enum_value.payload::<u8>() as *const crate::enums::EnumPayload;
+    let ep = unsafe { &*payload };
+    ep.items
+        .get(idx as usize)
+        .copied()
+        .unwrap_or_else(|| unsafe { unit_sentinel(ctx) })
+}
+
 /// Append `value` to `vec` in place (§11.1). Returns the Unit sentinel — the
 /// receiver is mutated directly, so the caller's `GcRef` remains valid (the
 /// `VecPayload` object does not move; only its internal buffer may grow).
