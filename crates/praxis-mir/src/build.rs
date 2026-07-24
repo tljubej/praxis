@@ -364,6 +364,17 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
         TypedExpr::Parse {
             text, plan_index, ..
         } => lower_parse(b, text, *plan_index),
+        // M7: nominal record literal + field access.
+        TypedExpr::RecordLit {
+            record_def_id,
+            fields,
+            ..
+        } => lower_record_lit(b, *record_def_id, fields),
+        TypedExpr::FieldGet {
+            receiver,
+            field_idx,
+            ..
+        } => lower_field_get(b, receiver, *field_idx),
     }
 }
 
@@ -718,9 +729,48 @@ fn expr_static_type(e: &TypedExpr) -> Type {
         | TypedExpr::MethodCall { ty, .. }
         | TypedExpr::Tuple { ty, .. }
         | TypedExpr::Read { ty, .. }
-        | TypedExpr::Parse { ty, .. } => *ty,
+        | TypedExpr::Parse { ty, .. }
+        | TypedExpr::RecordLit { ty, .. }
+        | TypedExpr::FieldGet { ty, .. } => *ty,
         TypedExpr::Block(blk) => blk.ty,
     }
+}
+
+/// Lower a record literal `Name { field: expr, … }` (M7, §4.5). Lowers each
+/// field initializer to a `Gc` local, then emits an `Alloc` with
+/// `AllocKind::Record`. The codegen builds the `RecordSchema` from the def-id
+/// and embeds its address as an immediate in the allocation call.
+fn lower_record_lit(
+    b: &mut Builder<'_>,
+    record_def_id: praxis_types::RecordDefId,
+    fields: &[(u32, TypedExpr)],
+) -> LocalId {
+    // Lower each field initializer in declaration order (already sorted by the
+    // HIR lowerer).
+    let field_locals: Vec<LocalId> = fields.iter().map(|(_, e)| lower_expr_gc(b, e)).collect();
+    let dst = b.alloc_gc(Type(0), None);
+    b.push(Inst::Alloc {
+        dst,
+        alloc: AllocKind::Record {
+            record_def_id: record_def_id.to_u32(),
+            fields: field_locals,
+        },
+        live_roots: Vec::new(),
+    });
+    dst
+}
+
+/// Lower a field access `receiver.field` (M7, §4.5). Emits a `LoadField`
+/// instruction that reads the field's `GcRef` out of the record payload.
+fn lower_field_get(b: &mut Builder<'_>, receiver: &TypedExpr, field_idx: u32) -> LocalId {
+    let src = lower_expr_gc(b, receiver);
+    let dst = b.alloc_gc(Type(0), None);
+    b.push(Inst::LoadField {
+        dst,
+        src,
+        field_idx,
+    });
+    dst
 }
 
 #[cfg(test)]

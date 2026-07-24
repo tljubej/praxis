@@ -609,6 +609,7 @@ dependencies = [
  "praxis-runtime",
  "praxis-source",
  "praxis-test-support",
+ "praxis-types",
  "thiserror",
 ]
 

@@ -29,7 +29,7 @@ use crate::{collections::VecPayload, descriptor::TypeDescriptor};
 /// v2 (M5): `RuntimeContext` gained the `roots: *mut ShadowFrame` field for the
 /// compiler-managed shadow-stack spill (ADR-019), and the `praxis_push_shadow_frame`
 /// / `praxis_pop_shadow_frame` extern helpers were added.
-pub const RUNTIME_ABI_VERSION: u32 = 2;
+pub const RUNTIME_ABI_VERSION: u32 = 3;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -51,7 +51,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 2;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Internals the wrappers share.
@@ -487,6 +487,93 @@ pub unsafe extern "C" fn praxis_vec_new(
     }
 }
 
+/// Allocate a nominal record (M7, §4.5) with all fields initialized to Unit.
+/// The `schema_ptr` points at a `'static RecordSchema` (built and leaked by the
+/// codegen from the record def). Fields are filled in declaration order via
+/// [`praxis_record_set_field`] after allocation. Returns the record `GcRef`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `schema_ptr` must be a valid `'static` pointer.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_alloc_record(
+    ctx: *mut RuntimeContext,
+    schema_ptr: *const crate::records::RecordSchema,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    if schema_ptr.is_null() {
+        return unit_sentinel(ctx);
+    }
+    // SAFETY: caller guarantees schema_ptr is a valid 'static pointer.
+    let schema = unsafe { &*schema_ptr };
+    let arity = schema.fields.len();
+    let unit = unit_sentinel(ctx);
+    // SAFETY: RecordPayload matches RECORD's size/align and is fully initialized.
+    // Every field slot starts as Unit (a valid GcRef), keeping the GC sound
+    // before the caller fills them in via praxis_record_set_field.
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::records::RECORD,
+            std::mem::size_of::<crate::records::RecordPayload>(),
+            std::mem::align_of::<crate::records::RecordPayload>(),
+            |payload| {
+                (payload as *mut crate::records::RecordPayload).write(
+                    crate::records::RecordPayload {
+                        schema: schema_ptr,
+                        items: vec![unit; arity],
+                    },
+                );
+            },
+        )
+    }
+}
+
+/// Set field `idx` of `record` to `value` (M7, §4.5). Used by the codegen to
+/// fill in fields after [`praxis_alloc_record`]. Returns the record (the
+/// receiver is mutated in place).
+///
+/// # Safety
+/// `ctx` must be live; `record` must be a valid record `GcRef`; `idx` must be
+/// in bounds.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_record_set_field(
+    ctx: *mut RuntimeContext,
+    record: GcRef,
+    idx: u32,
+    value: GcRef,
+) -> GcRef {
+    let _ = ctx;
+    // SAFETY: caller guarantees record is a valid record GcRef.
+    let payload = record.payload::<u8>() as *mut crate::records::RecordPayload;
+    // SAFETY: the payload is a RecordPayload for any RECORD-descriptor object.
+    let rp = unsafe { &mut *payload };
+    if let Some(slot) = rp.items.get_mut(idx as usize) {
+        *slot = value;
+    }
+    record
+}
+
+/// Read field `idx` out of a record `GcRef` (M7, §4.5). Returns the field's
+/// `GcRef` value. Returns Unit if the record is malformed or the index is out
+/// of bounds (defensive; the type checker prevents this in well-typed code).
+///
+/// # Safety
+/// `ctx` must be live; `record` must be a valid record `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_record_field(
+    ctx: *mut RuntimeContext,
+    record: GcRef,
+    idx: u32,
+) -> GcRef {
+    // SAFETY: caller guarantees record is a valid record GcRef; the payload is
+    // a RecordPayload for any RECORD-descriptor object.
+    let payload = record.payload::<u8>() as *const crate::records::RecordPayload;
+    let rp = &*payload;
+    rp.items
+        .get(idx as usize)
+        .copied()
+        .unwrap_or_else(|| unsafe { unit_sentinel(ctx) })
+}
+
 /// Append `value` to `vec` in place (§11.1). Returns the Unit sentinel — the
 /// receiver is mutated directly, so the caller's `GcRef` remains valid (the
 /// `VecPayload` object does not move; only its internal buffer may grow).
@@ -725,7 +812,7 @@ mod tests {
 
     #[test]
     fn version_is_two_at_milestone_5() {
-        assert_eq!(RUNTIME_ABI_VERSION, 2);
+        assert_eq!(RUNTIME_ABI_VERSION, 3);
     }
 
     #[test]

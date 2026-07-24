@@ -104,6 +104,7 @@ pub(crate) fn lower_function<M: Module>(
     fn_ctx: &mut FunctionBuilderContext,
     mir: &MirFunction,
     user_funcs: &HashMap<String, FuncId>,
+    db: &praxis_types::TypeDb,
 ) -> Result<()> {
     // Use the module's own Context (the 0.134 idiom): build into `ctx.func`,
     // then `define_function(id, &mut ctx)`.
@@ -201,6 +202,7 @@ pub(crate) fn lower_function<M: Module>(
                 &mut import_cache,
                 user_funcs,
                 &mut user_func_cache,
+                db,
             )?;
         }
         lower_terminator(
@@ -301,6 +303,7 @@ fn lower_inst<M: Module>(
     imports: &mut HashMap<Symbol, FuncRef>,
     user_funcs: &HashMap<String, FuncId>,
     user_cache: &mut HashMap<String, FuncRef>,
+    db: &praxis_types::TypeDb,
 ) -> Result<()> {
     match inst {
         Inst::ConstInt { dst, value } => {
@@ -345,6 +348,42 @@ fn lower_inst<M: Module>(
                     let result =
                         call_symbol1(builder, ctx_val, arg, Symbol::AllocChar, module, imports)?;
                     builder.def_var(vars[dst.0 as usize], result);
+                }
+                AllocKind::Record {
+                    record_def_id,
+                    fields,
+                } => {
+                    // Build (or fetch a cached) 'static RecordSchema from the
+                    // def-id, leak it, embed its address, and call
+                    // praxis_alloc_record(ctx, schema_ptr). Then fill in each
+                    // field via praxis_record_set_field.
+                    let schema_ptr = record_schema_for(db, *record_def_id);
+                    let schema_imm = builder.ins().iconst(GC, schema_ptr as i64);
+                    // praxis_alloc_record(ctx, schema_ptr) -> GcRef.
+                    let record_ref = call_runtime_by_name(
+                        builder,
+                        ctx_val,
+                        &[schema_imm],
+                        "praxis_alloc_record",
+                        module,
+                        imports,
+                    )?;
+                    // Fill in each field in declaration order. The field locals
+                    // are already spilled into the shadow frame by
+                    // `emit_spill` above; here we pass them as call args.
+                    for (idx, field_local) in fields.iter().enumerate() {
+                        let field_val = builder.use_var(vars[field_local.0 as usize]);
+                        let idx_val = builder.ins().iconst(GC, idx as i64);
+                        call_runtime_by_name(
+                            builder,
+                            ctx_val,
+                            &[record_ref, idx_val, field_val],
+                            "praxis_record_set_field",
+                            module,
+                            imports,
+                        )?;
+                    }
+                    builder.def_var(vars[dst.0 as usize], record_ref);
                 }
             }
         }
@@ -467,6 +506,24 @@ fn lower_inst<M: Module>(
         Inst::MoveGc { dst, src } => {
             let v = builder.use_var(vars[src.0 as usize]);
             builder.def_var(vars[dst.0 as usize], v);
+        }
+        Inst::LoadField {
+            dst,
+            src,
+            field_idx,
+        } => {
+            // praxis_record_field(ctx, record, idx) -> GcRef. Not a safepoint.
+            let record = builder.use_var(vars[src.0 as usize]);
+            let idx_val = builder.ins().iconst(GC, *field_idx as i64);
+            let field = call_runtime_by_name(
+                builder,
+                ctx_val,
+                &[record, idx_val],
+                "praxis_record_field",
+                module,
+                imports,
+            )?;
+            builder.def_var(vars[dst.0 as usize], field);
         }
     }
     Ok(())
@@ -719,6 +776,97 @@ fn runtime_funcref<M: Module>(
     let fr = module.declare_func_in_func(id, builder.func);
     let _ = imports; // runtime symbols are not cached by Symbol (they're name-keyed)
     Ok(fr)
+}
+
+/// Call a runtime wrapper by name with the given Cranelift value args (ctx is
+/// prepended automatically). Returns the call's result value.
+fn call_runtime_by_name<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx_val: cranelift::codegen::ir::Value,
+    args: &[cranelift::codegen::ir::Value],
+    name: &str,
+    module: &mut M,
+    imports: &mut HashMap<Symbol, FuncRef>,
+) -> Result<cranelift::codegen::ir::Value> {
+    let fr = runtime_funcref(name, builder, module, imports, args.len())?;
+    let mut call_args = vec![ctx_val];
+    call_args.extend_from_slice(args);
+    let call = builder.ins().call(fr, &call_args);
+    Ok(builder.func.dfg.first_result(call))
+}
+
+/// Build (and cache) a `'static RecordSchema` for record def `id`, returning
+/// its address as a raw pointer the JIT embeds as an immediate. The schema is
+/// `Box::leak`'d once per def-id (mirroring how text literals are leaked); the
+/// field descriptors are resolved from the runtime's scalar/collection
+/// descriptor table via a best-effort mapping (M7: scalar fields only; nested
+/// records/collections default to the INT descriptor, which is sound for GC
+/// tracing since every value is a GcRef).
+fn record_schema_for(
+    db: &praxis_types::TypeDb,
+    id: u32,
+) -> *const praxis_runtime::records::RecordSchema {
+    use praxis_runtime::records::{RecordField, RecordSchema};
+    use praxis_types::data::RecordDefId;
+    use std::sync::Mutex;
+    // A process-wide cache: def-id → leaked schema pointer. The schema is
+    // immutable and 'static once built, so caching across compiles is sound.
+    // The raw pointer is wrapped (SendPtr) so the Mutex can be shared across
+    // threads (inference/compilation are single-threaded today, but the Mutex
+    // satisfies the OnceLock's Sync requirement).
+    struct SendPtr(*const RecordSchema);
+    unsafe impl Send for SendPtr {}
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<u32, SendPtr>>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(p) = cache.lock().unwrap().get(&id) {
+        return p.0;
+    }
+    let def = db.record_def(RecordDefId(id));
+    let fields: Vec<RecordField> = def
+        .fields
+        .iter()
+        .map(|f| RecordField {
+            name: Box::leak(f.name.clone().into_boxed_str()),
+            descriptor: descriptor_for_type(db, f.ty),
+        })
+        .collect();
+    let leaked_fields: &'static [RecordField] = Box::leak(fields.into_boxed_slice());
+    let schema = Box::leak(Box::new(RecordSchema {
+        fields: leaked_fields,
+    }));
+    let ptr = SendPtr(schema as *const RecordSchema);
+    let raw = ptr.0;
+    cache.lock().unwrap().insert(id, ptr);
+    raw
+}
+
+/// Best-effort mapping from a static `Type` to its runtime `TypeDescriptor`.
+/// Scalars map to their descriptor; everything else (collections, nested
+/// records) defaults to `INT` — sound for GC tracing because every value is a
+/// uniform `GcRef`, and the descriptor's `trace` callback is only called on the
+/// top-level object, not per-field.
+fn descriptor_for_type(
+    db: &praxis_types::TypeDb,
+    ty: praxis_types::Type,
+) -> *const praxis_runtime::descriptor::TypeDescriptor {
+    use praxis_runtime::descriptor::TypeDescriptor;
+    use praxis_types::data::TypeData;
+    match db.data(db.follow(ty)) {
+        TypeData::Scalar(s) => match s {
+            praxis_types::ScalarType::Int | praxis_types::ScalarType::Never => {
+                praxis_runtime::scalars::INT as *const TypeDescriptor
+            }
+            praxis_types::ScalarType::Bool => {
+                praxis_runtime::scalars::BOOL as *const TypeDescriptor
+            }
+            praxis_types::ScalarType::Text => praxis_runtime::text::TEXT as *const TypeDescriptor,
+            praxis_types::ScalarType::Char => {
+                praxis_runtime::scalars::CHAR as *const TypeDescriptor
+            }
+            _ => praxis_runtime::scalars::INT as *const TypeDescriptor,
+        },
+        _ => praxis_runtime::scalars::INT as *const TypeDescriptor,
+    }
 }
 
 // --- signatures ----------------------------------------------------------

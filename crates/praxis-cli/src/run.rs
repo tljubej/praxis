@@ -91,7 +91,7 @@ pub fn run(file: &str, input_file: Option<&str>) -> anyhow::Result<i32> {
             return Ok(1);
         }
     };
-    let ids = match jit.compile(&funcs) {
+    let ids = match jit.compile(&funcs, &analysis.db) {
         Ok(ids) => ids,
         Err(e) => {
             eprintln!("error: JIT compilation failed: {e}");

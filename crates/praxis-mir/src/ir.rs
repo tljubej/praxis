@@ -144,6 +144,14 @@ pub enum Inst {
     CheckFault { on_fault: BlockId },
     /// Copy one `Gc` local into another (a move; no allocation).
     MoveGc { dst: LocalId, src: LocalId },
+    /// Read a field out of a record `GcRef` into a `Gc` local (M7, §4.5).
+    /// `field_idx` is the field's index in the record's `RecordSchema`. Not a
+    /// safepoint (no allocation).
+    LoadField {
+        dst: LocalId,
+        src: LocalId,
+        field_idx: u32,
+    },
 }
 
 /// What to allocate, for [`Inst::Alloc`].
@@ -161,6 +169,14 @@ pub enum AllocKind {
     /// A boxed `Char` initialized from a `u32` Unicode scalar (a `Scalar` local;
     /// M6 wires it for the input parser's `char`/`grid(char)`).
     Char { value: LocalId },
+    /// A boxed nominal record (M7, §4.5). `record_def_id` identifies the struct
+    /// type (index into `TypeDb::record_defs`); `fields` are the field-value
+    /// locals in declaration order. The builder builds a `RecordSchema` from the
+    /// def and leaks it to `&'static`.
+    Record {
+        record_def_id: u32,
+        fields: Vec<LocalId>,
+    },
 }
 
 /// A call target. M4 resolves user functions by name; the backend mints a symbol.

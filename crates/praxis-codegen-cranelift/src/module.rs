@@ -57,8 +57,10 @@ impl Jit {
             "praxis_alloc_bool",
             "praxis_alloc_unit",
             "praxis_alloc_text",
+            "praxis_alloc_char",
             "praxis_int_load",
             "praxis_bool_load",
+            "praxis_char_load",
             "praxis_int_add",
             "praxis_int_sub",
             "praxis_int_mul",
@@ -83,6 +85,11 @@ impl Jit {
             "praxis_text_is_empty",
             "praxis_text_get",
             "praxis_write_stdout",
+            "praxis_get_input",
+            "praxis_run_parser",
+            "praxis_alloc_record",
+            "praxis_record_set_field",
+            "praxis_record_field",
             "praxis_push_debug_frame",
             "praxis_pop_debug_frame",
         ];
@@ -105,7 +112,11 @@ impl Jit {
     ///
     /// # Errors
     /// Returns a [`JitError`] if declaration, lowering, or finalization fails.
-    pub fn compile(&mut self, funcs: &[MirFunction]) -> Result<HashMap<String, FuncId>, JitError> {
+    pub fn compile(
+        &mut self,
+        funcs: &[MirFunction],
+        db: &praxis_types::TypeDb,
+    ) -> Result<HashMap<String, FuncId>, JitError> {
         // First pass: declare every function so they can reference each other
         // (and themselves, for recursion) before any is defined.
         let mut ids = HashMap::new();
@@ -120,7 +131,7 @@ impl Jit {
 
         // Second pass: lower and define each function.
         for f in funcs {
-            lower::lower_function(&mut self.module, &mut self.fn_ctx, f, &ids)
+            lower::lower_function(&mut self.module, &mut self.fn_ctx, f, &ids, db)
                 .map_err(|e| JitError::Cranelift(e.into()))?;
         }
 

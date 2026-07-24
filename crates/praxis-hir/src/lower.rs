@@ -19,9 +19,9 @@
 use std::collections::HashMap;
 
 use praxis_ast::{
-    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, Expr, ExprStmt, FnItem,
-    IfExpr, LetStmt, Literal, MethodCallExpr, Param, ParamList, PathExpr, SourceFile, TupleExpr,
-    UnaryExpr, VarStmt, WhileExpr,
+    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, Expr, ExprStmt,
+    FieldExpr, FnItem, IfExpr, LetStmt, Literal, MethodCallExpr, Param, ParamList, PathExpr,
+    RecordLitExpr, SourceFile, StructItem, TupleExpr, UnaryExpr, VarStmt, WhileExpr,
 };
 use praxis_source::{Diagnostic, DiagnosticCategory, DiagnosticCode, FileSpan, Severity, Span};
 use praxis_stdlib::type_pattern::ScalarType as PatternScalar;
@@ -205,6 +205,22 @@ pub enum TypedExpr {
         plan_index: u32,
         ty: Type,
     },
+    /// `Name { field: expr, … }` record literal (M7, §4.5). `record_def_id`
+    /// identifies the struct type (index into `TypeDb::record_defs`); `fields`
+    /// are the lowered initializers in declaration order, each paired with its
+    /// field index.
+    RecordLit {
+        record_def_id: praxis_types::RecordDefId,
+        fields: Vec<(u32, TypedExpr)>,
+        ty: Type,
+    },
+    /// `receiver.field` field access (M7, §4.5). `field_idx` is the field's
+    /// index in the record's `RecordDef`.
+    FieldGet {
+        receiver: Box<TypedExpr>,
+        field_idx: u32,
+        ty: Type,
+    },
 }
 
 /// A literal value. (M4 lowers Int/Bool/Unit; Text materializes via the runtime
@@ -301,6 +317,11 @@ pub fn lower(
             if let Some(tfn) = l.lower_fn(&fn_item) {
                 items.push(TypedItem::Fn(tfn));
             }
+        }
+        // Struct declarations (M7, §4.5) are type-only: they register a record
+        // type during inference but produce no runtime item. Skip them here.
+        if StructItem::cast(node.clone()).is_some() {
+            // No codegen for the declaration itself.
         }
         // Top-level `let`/`var`/`expr`/`assign` are not lowered yet — M4 only
         // JITs `fn` items (the entry point is a `fn main` or similar). They are
@@ -608,6 +629,8 @@ impl<'a> Lowerer<'a> {
             Expr::Tuple(t) => self.lower_tuple(t),
             Expr::Read(r) => self.lower_read(r),
             Expr::Parse(p) => self.lower_parse(p),
+            Expr::RecordLit(r) => self.lower_record_lit(r),
+            Expr::FieldGet(f) => self.lower_field_get(f),
             Expr::Error(_) => TypedExpr::Lit {
                 value: Lit::Int(0),
                 ty: self.db.fresh_var(),
@@ -983,6 +1006,93 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Lower a `Name { field: expr, … }` record literal (M7, §4.5). Looks up the
+    /// struct type from the symbol table, pairs each initializer with its field
+    /// index, and produces a `TypedExpr::RecordLit`.
+    fn lower_record_lit(&mut self, r: &RecordLitExpr) -> TypedExpr {
+        let struct_ty = r
+            .name()
+            .and_then(|p| p.name())
+            .and_then(|tok| self.resolve_symbol_at(tok.text_range()))
+            .and_then(|sym| self.names.get(sym))
+            .and_then(|s| s.scheme.as_ref().map(|sc| self.db.instantiate(sc)));
+        let Some(struct_ty) = struct_ty else {
+            return self.error_expr();
+        };
+        let record_def_id = match self.db.data(self.db.follow(struct_ty)) {
+            praxis_types::TypeData::Record { def } => *def,
+            _ => return self.error_expr(),
+        };
+        let rdef = self.db.record_def(record_def_id).clone();
+        let mut fields = Vec::new();
+        if let Some(fl) = r.field_list() {
+            for f in fl.fields() {
+                let Some(name_tok) = f.name() else { continue };
+                let fname = name_tok.text().to_string();
+                let Some((idx, _)) = rdef.field(&fname) else {
+                    continue;
+                };
+                let init = match &f.expr() {
+                    Some(e) => self.lower_expr(e),
+                    // Punned field `{ x }` — lower as a path reference to `x`,
+                    // using the variable's actual type (so the record field gets
+                    // the right value).
+                    None => {
+                        let range = name_tok.text_range();
+                        self.resolve_symbol_at(range)
+                            .map(|symbol| TypedExpr::Path {
+                                symbol,
+                                ty: self.symbol_type(symbol),
+                            })
+                            .unwrap_or_else(|| self.error_expr())
+                    }
+                };
+                fields.push((idx as u32, init));
+            }
+        }
+        // Sort fields into declaration order so the runtime allocates them in
+        // the schema's field order.
+        fields.sort_by_key(|(idx, _)| *idx);
+        TypedExpr::RecordLit {
+            record_def_id,
+            fields,
+            ty: struct_ty,
+        }
+    }
+
+    /// Lower a `receiver.field` field access (M7, §4.5). Looks up the field's
+    /// index and type from the receiver's record type.
+    fn lower_field_get(&mut self, f: &FieldExpr) -> TypedExpr {
+        let receiver = match f.receiver() {
+            Some(r) => self.lower_expr(&r),
+            None => return self.error_expr(),
+        };
+        let receiver_ty = expr_ty(&receiver);
+        let resolved = self.db.follow(receiver_ty);
+        let Some((field_idx, field_ty)) = (match self.db.data(resolved) {
+            praxis_types::TypeData::Record { def } => {
+                let rdef = self.db.record_def(*def);
+                f.field_name().and_then(|tok| rdef.field(tok.text()))
+            }
+            _ => None,
+        }) else {
+            // Not a record type, or unknown field — emit a Y1xx diagnostic.
+            if let Some(tok) = f.field_name() {
+                self.diag(
+                    tok.text_range(),
+                    112,
+                    format!("no field `{}` on this type", tok.text()),
+                );
+            }
+            return self.error_expr();
+        };
+        TypedExpr::FieldGet {
+            receiver: Box::new(receiver),
+            field_idx: field_idx as u32,
+            ty: field_ty,
+        }
+    }
+
     // --- helpers -----------------------------------------------------------
 
     /// Resolve the symbol *declared* at `range` (a `let`/`var`/`fn`/param name
@@ -1035,6 +1145,8 @@ fn expr_ty(e: &TypedExpr) -> Type {
         TypedExpr::Tuple { ty, .. } => *ty,
         TypedExpr::Read { ty, .. } => *ty,
         TypedExpr::Parse { ty, .. } => *ty,
+        TypedExpr::RecordLit { ty, .. } => *ty,
+        TypedExpr::FieldGet { ty, .. } => *ty,
     }
 }
 

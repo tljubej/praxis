@@ -173,6 +173,90 @@ impl FnItem {
     }
 }
 
+/// A `struct Name { field: Type, … }` declaration (M7, §4.5).
+#[derive(Clone, Debug)]
+pub struct StructItem {
+    syntax: SyntaxNode,
+}
+impl AstNode for StructItem {
+    const KIND: K = K::STRUCT_ITEM;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl StructItem {
+    /// The struct name.
+    pub fn name(&self) -> Option<SyntaxToken> {
+        name_token(&self.syntax)
+    }
+    /// The `{ field: Type, … }` field list.
+    pub fn field_list(&self) -> Option<FieldList> {
+        child(&self.syntax)
+    }
+}
+
+/// The `{ field: Type, … }` body of a struct, or the `{ field: expr, … }` body
+/// of a record literal. Reused for both declaration types and record-literal
+/// expressions (M7).
+#[derive(Clone, Debug)]
+pub struct FieldList {
+    syntax: SyntaxNode,
+}
+impl AstNode for FieldList {
+    const KIND: K = K::FIELD_LIST;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl FieldList {
+    /// The fields in declaration order.
+    pub fn fields(&self) -> impl Iterator<Item = Field> + '_ {
+        self.syntax.children().filter_map(Field::cast)
+    }
+}
+
+/// A single `name: Type` field (in a struct) or `name: expr` / `name` (pun, in
+/// a record literal). M7, §4.5.
+#[derive(Clone, Debug)]
+pub struct Field {
+    syntax: SyntaxNode,
+}
+impl AstNode for Field {
+    const KIND: K = K::FIELD;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl Field {
+    /// The field name.
+    pub fn name(&self) -> Option<SyntaxToken> {
+        name_token(&self.syntax)
+    }
+    /// The field's type (in a struct declaration), if present.
+    pub fn ty(&self) -> Option<TypeRef> {
+        child(&self.syntax)
+    }
+    /// The field's value expression (in a record literal), if present (`None`
+    /// for a punned field `{ x }`).
+    pub fn expr(&self) -> Option<Expr> {
+        // The expression is the non-TypeRef, non-name child. For a pun there is
+        // none; for `{ x: expr }` it follows the colon.
+        self.syntax
+            .children()
+            .find(|c| TypeRef::cast(c.clone()).is_none())
+            .and_then(Expr::cast_from_child)
+    }
+}
+
 /// The `(...)` parameter list.
 #[derive(Clone, Debug)]
 pub struct ParamList {
@@ -288,6 +372,10 @@ pub enum Expr {
     Read(ReadExpr),
     /// `parse(text, parser_expression)` (§7.1, M6).
     Parse(ParseExpr),
+    /// `Name { field: expr, … }` record literal (M7, §4.5).
+    RecordLit(RecordLitExpr),
+    /// `receiver.field` field access (M7, §4.5).
+    FieldGet(FieldExpr),
     /// An unparseable expression the parser wrapped in a `PARSE_ERROR` node.
     Error(SyntaxNode),
 }
@@ -309,9 +397,73 @@ impl Expr {
             K::TUPLE_EXPR => Expr::Tuple(TupleExpr::from_syntax(n)),
             K::READ_EXPR => Expr::Read(ReadExpr::from_syntax(n)),
             K::PARSE_EXPR => Expr::Parse(ParseExpr::from_syntax(n)),
+            K::RECORD_LIT_EXPR => Expr::RecordLit(RecordLitExpr::from_syntax(n)),
+            K::FIELD_EXPR => Expr::FieldGet(FieldExpr::from_syntax(n)),
             K::PARSE_ERROR => Expr::Error(n),
             _ => return None,
         })
+    }
+}
+
+/// `Name { field: expr, … }` — a record-literal expression (M7, §4.5). The
+/// first child is the `PATH_EXPR` naming the struct type; the `FIELD_LIST` holds
+/// the field initializers (explicit `name: expr` or punned `name`).
+#[derive(Clone, Debug)]
+pub struct RecordLitExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for RecordLitExpr {
+    const KIND: K = K::RECORD_LIT_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl RecordLitExpr {
+    /// The struct name (a path) being constructed.
+    pub fn name(&self) -> Option<PathExpr> {
+        child(&self.syntax)
+    }
+    /// The `{ field: expr, … }` initializer list.
+    pub fn field_list(&self) -> Option<FieldList> {
+        child(&self.syntax)
+    }
+}
+
+/// `receiver.field` — field access (M7, §4.5). The first child is the receiver
+/// expression; the field name is the trailing `Ident` token.
+#[derive(Clone, Debug)]
+pub struct FieldExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for FieldExpr {
+    const KIND: K = K::FIELD_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl FieldExpr {
+    /// The receiver expression (`p` in `p.x`).
+    pub fn receiver(&self) -> Option<Expr> {
+        // The receiver is the first expression-kind child.
+        self.syntax.children().find_map(Expr::cast_from_child)
+    }
+    /// The field name being accessed (the trailing `Ident` after the dot).
+    pub fn field_name(&self) -> Option<SyntaxToken> {
+        // Take the last Ident token child (the field name); the receiver is a
+        // child *node*, so it won't match this token scan.
+        self.syntax
+            .children_with_tokens()
+            .filter_map(|e| match e {
+                rowan::NodeOrToken::Token(t) if t.kind() == K::Ident => Some(t),
+                _ => None,
+            })
+            .last()
     }
 }
 

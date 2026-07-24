@@ -176,6 +176,16 @@ pub enum SyntaxKind {
     ASSIGN_STMT,
     /// A top-level or nested `fn` declaration.
     FN_ITEM,
+    /// A `struct Name { field: Type, … }` declaration (M7, §4.5).
+    STRUCT_ITEM,
+    /// The `{ field: Type, … }` body of a struct declaration.
+    FIELD_LIST,
+    /// A single `name: Type` field of a struct.
+    FIELD,
+    /// A `Name { field: expr, … }` record-literal expression (M7, §4.5).
+    RECORD_LIT_EXPR,
+    /// A `receiver.field` field-access expression (M7, §4.5).
+    FIELD_EXPR,
     /// A single `name: Type` parameter.
     PARAM,
     /// The `(...)` parameter list.

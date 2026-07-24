@@ -36,7 +36,7 @@ fn compile(
         annotate(f);
     }
     let mut jit = Jit::new().expect("JIT construction");
-    let ids = jit.compile(&funcs).expect("JIT compilation");
+    let ids = jit.compile(&funcs, &analysis.db).expect("JIT compilation");
     (jit, ids)
 }
 
@@ -489,4 +489,52 @@ fn double_not_is_identity() {
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
+}
+
+// --- nominal records (M7-WS3, §4.5) -----------------------------------------
+
+#[test]
+fn record_construction_and_field_access() {
+    // `Point { x: 3, y: 4 }` → read back x + y = 7.
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let p = Point { x: 3, y: 4 }\n  p.x + p.y\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
+}
+
+#[test]
+fn record_field_access_independently() {
+    // Read just one field.
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let p = Point { x: 30, y: 4 }\n  p.x\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 30);
+}
+
+#[test]
+fn record_with_text_field() {
+    // A record with a Text field, accessed and used.
+    let src = "struct Entry { key: Int, label: Text }\nfn main() -> Int {\n  let e = Entry { key: 42, label: \"hello\" }\n  e.key\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn record_survives_gc() {
+    // Allocate a record, trigger GC by allocating many objects, then read back.
+    // This verifies the record's GcRef is rooted across safepoints.
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let p = Point { x: 100, y: 200 }\n  var i = 0\n  while i < 100 {\n    let junk = i + 1\n    i = i + 1\n  }\n  p.x + p.y\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 300);
+}
+
+#[test]
+fn record_field_punning() {
+    // Field punning: `Point { x, y }` where x and y are bindings.
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let x = 5\n  let y = 7\n  let p = Point { x, y }\n  p.x * p.y\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 35);
 }

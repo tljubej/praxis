@@ -151,6 +151,7 @@ fn defs(inst: &Inst) -> Vec<LocalId> {
         Inst::Call { dst, .. } => vec![*dst],
         Inst::MoveGc { dst, .. } => vec![*dst],
         Inst::ConstInt { dst, .. } => vec![*dst],
+        Inst::LoadField { dst, .. } => vec![*dst],
         Inst::StoreScalar { .. } | Inst::CheckFault { .. } => vec![],
     }
 }
@@ -167,6 +168,10 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
             ..
         } => vec![*value],
         Inst::Alloc {
+            alloc: crate::ir::AllocKind::Record { fields, .. },
+            ..
+        } => fields.clone(),
+        Inst::Alloc {
             alloc: crate::ir::AllocKind::Unit | crate::ir::AllocKind::Text { .. },
             ..
         } => vec![],
@@ -177,6 +182,7 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
         Inst::IntCmp { lhs, rhs, .. } => vec![*lhs, *rhs],
         Inst::Call { args, .. } => args.clone(),
         Inst::MoveGc { src, .. } => vec![*src],
+        Inst::LoadField { src, .. } => vec![*src],
         Inst::ConstInt { .. } => vec![],
         Inst::CheckFault { .. } => vec![],
     }

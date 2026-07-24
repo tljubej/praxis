@@ -18,9 +18,9 @@
 use std::collections::HashMap;
 
 use praxis_ast::{
-    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, Expr, ExprStmt, FnItem,
-    IfExpr, LetStmt, Literal, MethodCallExpr, Param, PathExpr, SourceFile, UnaryExpr, VarStmt,
-    WhileExpr,
+    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, Expr, ExprStmt,
+    FieldExpr, FnItem, IfExpr, LetStmt, Literal, MethodCallExpr, Param, PathExpr, RecordLitExpr,
+    SourceFile, StructItem, UnaryExpr, VarStmt, WhileExpr,
 };
 use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
 use praxis_syntax::SyntaxKind;
@@ -199,6 +199,8 @@ impl Inferer {
             self.infer_var(scope, &var_);
         } else if let Some(fn_) = FnItem::cast(node.clone()) {
             self.infer_fn(scope, &fn_);
+        } else if let Some(struct_) = StructItem::cast(node.clone()) {
+            self.infer_struct(scope, &struct_);
         } else if let Some(assign) = AssignStmt::cast(node.clone()) {
             self.infer_assign(scope, &assign);
         } else if let Some(expr) = ExprStmt::cast(node.clone()) {
@@ -206,6 +208,56 @@ impl Inferer {
                 self.infer_expr(scope, &e);
             }
         }
+    }
+
+    /// Register a struct declaration's type (M7, §4.5). Resolves each field's
+    /// type annotation, builds a `RecordDef`, and stores the resulting `Type` on
+    /// the struct's symbol (as a monomorphic scheme) so type annotations and
+    /// record literals can look it up.
+    fn infer_struct(&mut self, _scope: ScopeId, item: &StructItem) {
+        let Some(name_tok) = item.name() else {
+            return;
+        };
+        let name = name_tok.text().to_string();
+        let range = name_tok.text_range();
+        let Some(symbol) = self.resolve_decl(range) else {
+            return;
+        };
+        // Resolve each field's type. Unknown types (already reported N002 by the
+        // resolver) become fresh vars.
+        let mut fields = Vec::new();
+        if let Some(fl) = item.field_list() {
+            for f in fl.fields() {
+                let fname = f.name().map(|t| t.text().to_string()).unwrap_or_default();
+                let fty = f
+                    .ty()
+                    .and_then(|t| self.resolve_type(&t))
+                    .unwrap_or_else(|| self.db.fresh_var());
+                fields.push((fname, fty));
+            }
+        }
+        let ty = self.db.register_record(name, fields);
+        if let Some(sym) = self.names.get_mut(symbol) {
+            sym.scheme = Some(Scheme::monotype(ty));
+        }
+    }
+
+    /// Look up a registered struct type by name, returning its `Type` if the
+    /// name resolves to a `SymbolKind::Struct` symbol with an attached scheme.
+    fn lookup_struct_type(&self, name: &str) -> Option<Type> {
+        let root = self.scopes.root();
+        let symbol = self.scopes.lookup(root, name)?;
+        let sym = self.names.get(symbol)?;
+        if sym.kind != SymbolKind::Struct {
+            return None;
+        }
+        let scheme = sym.scheme.as_ref()?;
+        Some(scheme.body)
+    }
+
+    /// Resolve the symbol declared at `range` (from the resolution `decls` map).
+    fn resolve_decl(&self, range: TextRange) -> Option<SymbolId> {
+        self.decls.get(&range).copied()
     }
 
     fn infer_let(&mut self, scope: ScopeId, stmt: &LetStmt) {
@@ -378,7 +430,87 @@ impl Inferer {
             Expr::MethodCall(m) => self.infer_method_call(scope, m),
             Expr::Read(r) => self.infer_read(r),
             Expr::Parse(p) => self.infer_parse(scope, p),
+            Expr::RecordLit(r) => self.infer_record_lit(scope, r),
+            Expr::FieldGet(f) => self.infer_field_get(scope, f),
             Expr::Error(_) => self.db.fresh_var(),
+        }
+    }
+
+    /// Infer the type of a record literal `Name { field: expr, … }` (M7, §4.5).
+    /// Looks up the struct type, unifies each field initializer with the declared
+    /// field type, and returns the struct type.
+    fn infer_record_lit(&mut self, scope: ScopeId, r: &RecordLitExpr) -> Type {
+        let struct_ty = r.name().and_then(|p| p.name()).and_then(|tok| {
+            let name = tok.text().to_string();
+            self.lookup_struct_type(&name)
+        });
+        let Some(struct_ty) = struct_ty else {
+            // Unknown struct: infer each field for diagnostics, return a fresh var.
+            if let Some(fl) = r.field_list() {
+                for f in fl.fields() {
+                    if let Some(e) = f.expr() {
+                        self.infer_expr(scope, &e);
+                    }
+                }
+            }
+            return self.db.fresh_var();
+        };
+        // Get the record def to look up declared field types.
+        let def_id = match self.db.data(self.db.follow(struct_ty)) {
+            praxis_types::TypeData::Record { def } => *def,
+            _ => return struct_ty,
+        };
+        if let Some(fl) = r.field_list() {
+            for f in fl.fields() {
+                let Some(fname_tok) = f.name() else { continue };
+                let fname = fname_tok.text().to_string();
+                let rdef = self.db.record_def(def_id);
+                if let Some((_, declared_ty)) = rdef.field(&fname) {
+                    let init_ty = match &f.expr() {
+                        Some(e) => self.infer_expr(scope, e),
+                        // Punned field `{ x }` — x must be a binding of the field's type.
+                        None => {
+                            // Look up the name as a path reference.
+                            let range = fname_tok.text_range();
+                            self.refs
+                                .get(&range)
+                                .and_then(|rf| {
+                                    self.names.get(rf.symbol).and_then(|s| {
+                                        s.scheme.as_ref().map(|sc| self.db.instantiate(sc))
+                                    })
+                                })
+                                .unwrap_or_else(|| self.db.fresh_var())
+                        }
+                    };
+                    if let Err(e) = self.db.unify(declared_ty, init_ty) {
+                        self.diag_unify(self.file_span(fname_tok.text_range()), e);
+                    }
+                }
+            }
+        }
+        struct_ty
+    }
+
+    /// Infer the type of a field access `receiver.field` (M7, §4.5). Returns the
+    /// field's declared type.
+    fn infer_field_get(&mut self, scope: ScopeId, f: &FieldExpr) -> Type {
+        let receiver_ty = f
+            .receiver()
+            .map(|r| self.infer_expr(scope, &r))
+            .unwrap_or_else(|| self.db.fresh_var());
+        let Some(field_tok) = f.field_name() else {
+            return receiver_ty;
+        };
+        let fname = field_tok.text().to_string();
+        let resolved = self.db.follow(receiver_ty);
+        match self.db.data(resolved) {
+            praxis_types::TypeData::Record { def } => {
+                let rdef = self.db.record_def(*def);
+                rdef.field(&fname)
+                    .map(|(_, t)| t)
+                    .unwrap_or_else(|| self.db.fresh_var())
+            }
+            _ => self.db.fresh_var(),
         }
     }
 
@@ -813,7 +945,11 @@ impl Inferer {
             "Char" => ScalarType::Char,
             "Never" => ScalarType::Never,
             "Unit" => return Some(self.db.unit()),
-            _ => return None,
+            _ => {
+                // M7: user-declared struct types. If `name` is a registered
+                // struct, return its type.
+                return self.lookup_struct_type(name);
+            }
         };
         Some(self.db.scalar(scalar))
     }

@@ -138,6 +138,11 @@ struct Parser<'t> {
     cursor: usize,
     builder: GreenNodeBuilder<'static>,
     diagnostics: Vec<Diagnostic>,
+    /// When true, `Name { … }` is *not* parsed as a record literal. This is set
+    /// while parsing `if`/`while` conditions so the `{ then-block }` is not
+    /// consumed as a record body. Block-expression contexts (`({ … })`) are
+    /// unaffected because the block follows `(`, not a bare name.
+    no_struct_literal: bool,
 }
 
 impl<'t> Parser<'t> {
@@ -149,6 +154,7 @@ impl<'t> Parser<'t> {
             cursor: 0,
             builder: GreenNodeBuilder::new(),
             diagnostics: Vec::new(),
+            no_struct_literal: false,
         }
     }
 
@@ -361,6 +367,7 @@ impl<'t> Parser<'t> {
             SyntaxKind::KW_LET => self.parse_let_or_var(SyntaxKind::LET_STMT),
             SyntaxKind::KW_VAR => self.parse_let_or_var(SyntaxKind::VAR_STMT),
             SyntaxKind::KW_FN => self.parse_fn_item(),
+            SyntaxKind::KW_STRUCT => self.parse_struct_item(),
             // `name = expr` / `name += expr` reassignment (§4.2).
             SyntaxKind::Ident if is_assignment_op(self.nth_kind(1)) => self.parse_assign_stmt(),
             _ => self.parse_expr_stmt(),
@@ -436,6 +443,34 @@ impl<'t> Parser<'t> {
             self.error(span, "expected `{` to begin function body");
         }
         self.finish_node();
+        true
+    }
+
+    /// `struct Name { field: Type, … }` (M7, §4.5). The field list is a
+    /// `FIELD_LIST` of `FIELD` children, each `name: Type`.
+    fn parse_struct_item(&mut self) -> bool {
+        self.start_node(SyntaxKind::STRUCT_ITEM);
+        self.bump(); // `struct`
+        self.expect(SyntaxKind::Ident, "struct name");
+        self.expect(SyntaxKind::L_BRACE, "`{` to begin struct fields");
+        self.start_node(SyntaxKind::FIELD_LIST);
+        if !self.at(SyntaxKind::R_BRACE) {
+            loop {
+                let before = self.meaningful_index();
+                self.start_node(SyntaxKind::FIELD);
+                self.expect(SyntaxKind::Ident, "field name");
+                self.expect(SyntaxKind::COLON, "`:` before field type");
+                self.parse_type();
+                self.finish_node();
+                if !self.eat(SyntaxKind::COMMA) {
+                    break;
+                }
+                self.ensure_progress(before);
+            }
+        }
+        self.expect(SyntaxKind::R_BRACE, "`}` to end struct fields");
+        self.finish_node(); // FIELD_LIST
+        self.finish_node(); // STRUCT_ITEM
         true
     }
 
@@ -630,7 +665,12 @@ impl<'t> Parser<'t> {
         self.start_node(SyntaxKind::IF_EXPR);
         self.bump(); // `if`
                      // The condition is a parenthesized or bare expression; accept either.
+                     // Suppress record-literal parsing so `if x { … }` doesn't read
+                     // the then-block as `x { … }`.
+        let prev = self.no_struct_literal;
+        self.no_struct_literal = true;
         self.parse_expr();
+        self.no_struct_literal = prev;
         self.parse_block(); // then-branch
         if self.eat(SyntaxKind::KW_ELSE) {
             self.start_node(SyntaxKind::ELSE_BRANCH);
@@ -647,7 +687,10 @@ impl<'t> Parser<'t> {
     fn parse_while(&mut self) {
         self.start_node(SyntaxKind::WHILE_EXPR);
         self.bump(); // `while`
+        let prev = self.no_struct_literal;
+        self.no_struct_literal = true;
         self.parse_expr();
+        self.no_struct_literal = prev;
         self.parse_block();
         self.finish_node();
     }
@@ -806,6 +849,33 @@ impl<'t> Parser<'t> {
             self.expect(SyntaxKind::R_PAREN, "`)`");
             self.finish_node(); // ARG_LIST
             self.finish_node(); // CALL_EXPR
+        } else if self.at(SyntaxKind::L_BRACE) && !self.no_struct_literal {
+            // Record literal: `Name { field: expr, … }` or `Name { x, y }` (§4.5
+            // punning). In expression position, a bare name followed by `{` is a
+            // record construction (not a block — blocks only follow `if`/`while`
+            // keywords or appear as `({ … })`).
+            self.start_node_at(cp, SyntaxKind::RECORD_LIT_EXPR);
+            self.bump(); // `{`
+            self.start_node(SyntaxKind::FIELD_LIST);
+            if !self.at(SyntaxKind::R_BRACE) {
+                loop {
+                    let before = self.meaningful_index();
+                    self.start_node(SyntaxKind::FIELD);
+                    self.expect(SyntaxKind::Ident, "field name");
+                    // Field punning (`{ x, y }`) or explicit (`{ x: expr }`).
+                    if self.eat(SyntaxKind::COLON) {
+                        self.parse_expr();
+                    }
+                    self.finish_node();
+                    if !self.eat(SyntaxKind::COMMA) {
+                        break;
+                    }
+                    self.ensure_progress(before);
+                }
+            }
+            self.expect(SyntaxKind::R_BRACE, "`}` to close record literal");
+            self.finish_node(); // FIELD_LIST
+            self.finish_node(); // RECORD_LIT_EXPR
         }
         // Postfix method calls: `.method(args)`, chained left-associatively.
         // Each iteration wraps the whole preceding expression (receiver) plus
@@ -819,15 +889,19 @@ impl<'t> Parser<'t> {
         let mut chain_cp = cp;
         while self.at(SyntaxKind::DOT) {
             self.bump(); // `.`
-                         // The method name.
+                         // The name after `.`.
             if !self.at(SyntaxKind::Ident) {
                 let span = self.current_span();
-                self.error(span, "expected method name after `.`");
+                self.error(span, "expected name after `.`");
                 break;
             }
-            self.bump(); // method name
-            self.start_node_at(chain_cp, SyntaxKind::METHOD_CALL_EXPR);
-            if self.at(SyntaxKind::L_PAREN) {
+            // Disambiguate field access (`p.x`) from method call (`p.x()`):
+            // an IDENT followed by `(` is a method call; otherwise it's a
+            // field access (M7, §4.5).
+            if self.nth_kind(1) == SyntaxKind::L_PAREN {
+                // Method call: `.method(args)`.
+                self.bump(); // method name
+                self.start_node_at(chain_cp, SyntaxKind::METHOD_CALL_EXPR);
                 self.bump(); // `(`
                 self.start_node(SyntaxKind::ARG_LIST);
                 if !self.at(SyntaxKind::R_PAREN) {
@@ -842,11 +916,14 @@ impl<'t> Parser<'t> {
                 }
                 self.expect(SyntaxKind::R_PAREN, "`)`");
                 self.finish_node(); // ARG_LIST
+                self.finish_node(); // METHOD_CALL_EXPR
+            } else {
+                // Field access: `.field` (M7, §4.5).
+                self.start_node_at(chain_cp, SyntaxKind::FIELD_EXPR);
+                self.bump(); // field name
+                self.finish_node(); // FIELD_EXPR
             }
-            self.finish_node(); // METHOD_CALL_EXPR
-                                // The next `.method()` in a chain must wrap this METHOD_CALL_EXPR,
-                                // so take a fresh checkpoint at the current position (the builder
-                                // position is now just after the finished METHOD_CALL_EXPR node).
+            // The next `.method()`/`.field` in a chain must wrap this node.
             chain_cp = self.checkpoint_lhs();
         }
     }

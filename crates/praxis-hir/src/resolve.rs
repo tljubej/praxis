@@ -24,8 +24,9 @@
 use std::collections::HashMap;
 
 use praxis_ast::{
-    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, Expr, ExprStmt, FnItem,
-    IfExpr, LetStmt, Param, ParamList, SourceFile, VarStmt, WhileExpr,
+    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, Expr, ExprStmt,
+    FieldExpr, FnItem, IfExpr, LetStmt, Param, ParamList, RecordLitExpr, SourceFile, StructItem,
+    VarStmt, WhileExpr,
 };
 use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
 use praxis_syntax::SyntaxKind;
@@ -228,8 +229,18 @@ impl Resolver {
                 );
             }
         }
-        // WS3/WS4 will add `StructItem::cast` → SymbolKind::Struct and
-        // `EnumItem::cast` → SymbolKind::Enum here.
+        // M7-WS3: register struct type names so they're visible as type
+        // annotations before any body resolves.
+        if let Some(struct_) = StructItem::cast(node.clone()) {
+            if let Some(name_tok) = struct_.name() {
+                self.bind(
+                    scope,
+                    SymbolKind::Struct,
+                    name_tok.text().to_string(),
+                    name_tok.text_range(),
+                );
+            }
+        }
     }
 
     // --- pass 2: top-level statements --------------------------------------
@@ -241,11 +252,25 @@ impl Resolver {
             self.resolve_var(scope, &var_);
         } else if let Some(fn_) = FnItem::cast(node.clone()) {
             self.resolve_fn(scope, &fn_);
+        } else if let Some(struct_) = StructItem::cast(node.clone()) {
+            self.resolve_struct(scope, &struct_);
         } else if let Some(assign) = AssignStmt::cast(node.clone()) {
             self.resolve_assign(scope, &assign);
         } else if let Some(expr) = ExprStmt::cast(node.clone()) {
             if let Some(e) = expr.expr() {
                 self.resolve_expr(scope, &e);
+            }
+        }
+    }
+
+    /// Resolve a `struct Name { field: Type, … }` declaration (M7, §4.5). The
+    /// name was already registered in pass 1; here we validate the field types.
+    fn resolve_struct(&mut self, scope: ScopeId, item: &StructItem) {
+        if let Some(fields) = item.field_list() {
+            for f in fields.fields() {
+                if let Some(ty) = f.ty() {
+                    self.check_type_annotation(scope, &ty);
+                }
             }
         }
     }
@@ -399,6 +424,46 @@ impl Resolver {
                     self.resolve_expr(scope, &text_expr);
                 }
             }
+            // M7-WS3: record literal — resolve the struct name (a type reference)
+            // and each field initializer.
+            Expr::RecordLit(r) => self.resolve_record_lit(scope, r),
+            // M7-WS3: field access — resolve the receiver. The field name is not
+            // a scope binding; it's resolved against the struct type during
+            // inference.
+            Expr::FieldGet(f) => self.resolve_field_get(scope, f),
+        }
+    }
+
+    /// Resolve names inside a record literal `Name { field: expr, … }`.
+    fn resolve_record_lit(&mut self, scope: ScopeId, r: &RecordLitExpr) {
+        // The struct name is a type reference — look it up so inference knows
+        // which struct. It resolves like any other name.
+        if let Some(name) = r.name() {
+            if let Some(tok) = name.name() {
+                self.resolve_name_ref(scope, &tok);
+            }
+        }
+        if let Some(fields) = r.field_list() {
+            for f in fields.fields() {
+                match f.expr() {
+                    // Explicit field: `{ x: expr }` — resolve the expression.
+                    Some(e) => self.resolve_expr(scope, &e),
+                    // Punned field: `{ x }` — resolve the field name as a
+                    // reference to the binding `x` (like a PathExpr).
+                    None => {
+                        if let Some(name_tok) = f.name() {
+                            self.resolve_name_ref(scope, &name_tok);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolve names inside a field access `receiver.field`.
+    fn resolve_field_get(&mut self, scope: ScopeId, f: &FieldExpr) {
+        if let Some(receiver) = f.receiver() {
+            self.resolve_expr(scope, &receiver);
         }
     }
 
