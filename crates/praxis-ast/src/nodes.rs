@@ -643,6 +643,20 @@ impl Pattern {
             _ => None,
         })
     }
+
+    /// The literal token, if this is a literal pattern (`42`, `"hi"`, `true`,
+    /// `false`). Used by the HIR lowerer to read the value the pattern tests
+    /// against.
+    pub fn literal_token(&self) -> Option<SyntaxToken> {
+        self.syntax.children_with_tokens().find_map(|e| match e {
+            rowan::NodeOrToken::Token(t)
+                if matches!(t.kind(), K::IntLit | K::TextLit | K::KW_TRUE | K::KW_FALSE) =>
+            {
+                Some(t)
+            }
+            _ => None,
+        })
+    }
 }
 
 /// What kind of pattern a [`Pattern`] is (M7, §4.6).

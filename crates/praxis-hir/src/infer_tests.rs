@@ -45,6 +45,28 @@ fn has_type_error(text: &str) -> bool {
         .any(|d| d.code().category() == DiagnosticCategory::Type)
 }
 
+/// Like [`has_type_error`] but also runs lowering, so diagnostics emitted during
+/// lowering (e.g. exhaustiveness Y120/Y121, which need the lowered patterns) are
+/// included. The exhaustiveness checker runs in `lower()`, not `analyze()`.
+fn has_type_error_with_lower(text: &str) -> bool {
+    use praxis_ast::AstNode;
+    use praxis_parser::parse;
+    let map = SourceMap::new();
+    let id = map.intern("lower_test.px", text);
+    let parsed = parse(id, text);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = crate::lower::lower(id, &root, &mut analysis);
+    analysis
+        .diagnostics
+        .iter()
+        .any(|d| d.code().category() == DiagnosticCategory::Type)
+        || module
+            .diagnostics
+            .iter()
+            .any(|d| d.code().category() == DiagnosticCategory::Type)
+}
+
 // --- §19-M2 criterion 1: infer non-recursive fn params and returns ---------
 
 #[test]
@@ -320,4 +342,63 @@ fn int_equality_still_typechecks() {
     assert!(!has_type_error(
         "fn main() -> Int {\n  if 3 == 3 { 1 } else { 0 }\n}\n"
     ));
+}
+
+// --- M7-WSP: exhaustiveness checking (Y120/Y121) ----------------------------
+
+#[test]
+fn non_exhaustive_enum_match_is_rejected() {
+    // Missing the Wall variant → Y120.
+    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  let t = Empty\n  match t {\n    Empty => 1\n    Number(n) => n\n  }\n}\n";
+    assert!(has_type_error_with_lower(src));
+}
+
+#[test]
+fn exhaustive_enum_match_is_ok() {
+    // All three variants covered → no error.
+    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  let t = Empty\n  match t {\n    Empty => 1\n    Wall => 2\n    Number(n) => n\n  }\n}\n";
+    assert!(!has_type_error_with_lower(src));
+}
+
+#[test]
+fn enum_match_with_wildcard_is_ok() {
+    // Wildcard catches remaining variants → exhaustive.
+    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  let t = Empty\n  match t {\n    Empty => 1\n    _ => 0\n  }\n}\n";
+    assert!(!has_type_error_with_lower(src));
+}
+
+#[test]
+fn int_match_without_wildcard_is_rejected() {
+    // Int has infinitely many values; a literal-only match needs `_` → Y120.
+    let src = "fn main() -> Int {\n  let n = 1\n  match n {\n    1 => 10\n    2 => 20\n  }\n}\n";
+    assert!(has_type_error_with_lower(src));
+}
+
+#[test]
+fn int_match_with_wildcard_is_ok() {
+    // Int match with `_` → exhaustive.
+    let src = "fn main() -> Int {\n  let n = 1\n  match n {\n    1 => 10\n    2 => 20\n    _ => 0\n  }\n}\n";
+    assert!(!has_type_error_with_lower(src));
+}
+
+#[test]
+fn bool_match_without_both_cases_is_rejected() {
+    // Bool match missing `false` → Y120.
+    let src = "fn main() -> Int {\n  let b = true\n  match b {\n    true => 1\n  }\n}\n";
+    assert!(has_type_error_with_lower(src));
+}
+
+#[test]
+fn bool_match_both_cases_is_ok() {
+    // Both true and false covered → exhaustive.
+    let src =
+        "fn main() -> Int {\n  let b = true\n  match b {\n    true => 1\n    false => 0\n  }\n}\n";
+    assert!(!has_type_error_with_lower(src));
+}
+
+#[test]
+fn arm_after_wildcard_is_unreachable() {
+    // An arm after `_` is unreachable → Y121 (a type-category diagnostic).
+    let src = "enum Tile { Empty, Wall }\nfn main() -> Int {\n  let t = Empty\n  match t {\n    _ => 0\n    Empty => 1\n  }\n}\n";
+    assert!(has_type_error_with_lower(src));
 }

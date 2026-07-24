@@ -18,6 +18,7 @@
 pub mod capability;
 pub mod catalog;
 pub mod diagnostics;
+pub mod exhaustive;
 pub mod hover;
 pub mod infer;
 pub mod lower;
@@ -29,7 +30,7 @@ pub mod symbol;
 
 pub use lower::{
     lower, AssignOp, BinOp, Lit, TypedBlock, TypedExpr, TypedFn, TypedItem, TypedMatchArm,
-    TypedModule, TypedParam, TypedStmt, UnaryOp,
+    TypedModule, TypedParam, TypedPattern, TypedStmt, UnaryOp,
 };
 pub use name_table::NameTable;
 pub use resolve::{NameRef, NameResolution, ResolvedRef};

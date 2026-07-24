@@ -238,15 +238,38 @@ pub enum TypedExpr {
     },
 }
 
-/// One arm of a lowered `match` expression (M7, §4.6).
+/// A recursive pattern, the M7-Part-2 replacement for the flat
+/// `(variant_idx, bindings)` representation. Models the full pattern grammar:
+/// wildcard, literal, variable bind, and enum variant with nested sub-patterns
+/// (§4.6). The exhaustiveness checker and the MIR decision-tree lowering both
+/// recurse over this.
+#[derive(Debug)]
+pub enum TypedPattern {
+    /// `_` — matches anything, binds nothing.
+    Wildcard,
+    /// A literal `Int`/`Bool`/`Text` value to test against (§4.6). The MIR emits
+    /// an equality compare against the scrutinee for these.
+    Lit { value: Lit, ty: Type },
+    /// `x` — binds the whole scrutinee to `symbol` (always matches).
+    Bind { symbol: SymbolId, ty: Type },
+    /// `Variant` or `Variant(sub, …)` — matches an enum variant by tag, then
+    /// matches each sub-pattern against the corresponding payload slot.
+    /// `enum_def_id`/`variant_idx` identify the variant; `subpatterns` is
+    /// positional (one per payload type, possibly `Wildcard`).
+    EnumVariant {
+        enum_def_id: praxis_types::EnumDefId,
+        variant_idx: u32,
+        subpatterns: Vec<TypedPattern>,
+        ty: Type,
+    },
+}
+
+/// One arm of a lowered `match` expression (M7, §4.6). The pattern is recursive
+/// (see [`TypedPattern`]); the MIR lowering emits a decision tree over it.
 #[derive(Debug)]
 pub struct TypedMatchArm {
-    /// The variant index to test against the scrutinee's tag. `None` for a
-    /// wildcard/default arm (always matches).
-    pub variant_idx: Option<u32>,
-    /// (symbol, payload-slot-index) pairs: pattern variables bound to payload
-    /// slots. The MIR builder extracts these and binds them to locals.
-    pub bindings: Vec<(SymbolId, u32)>,
+    /// The arm's pattern (recursive: may nest sub-patterns in variant payloads).
+    pub pattern: TypedPattern,
     /// The arm body expression.
     pub body: TypedExpr,
 }
@@ -1195,21 +1218,28 @@ impl<'a> Lowerer<'a> {
         };
         let scrutinee_ty = expr_ty(&scrutinee);
         let mut arms = Vec::new();
+        let mut arm_spans = Vec::new();
         for arm in m.arms() {
-            let (variant_idx, bindings) = match arm.pattern() {
+            let pattern = match arm.pattern() {
                 Some(pat) => self.lower_pattern(&pat, scrutinee_ty),
-                None => (None, Vec::new()),
+                None => TypedPattern::Wildcard,
             };
             let body = match arm.body() {
                 Some(b) => self.lower_expr(&b),
                 None => self.error_expr(),
             };
-            arms.push(TypedMatchArm {
-                variant_idx,
-                bindings,
-                body,
-            });
+            arm_spans.push(self.file_span(arm.syntax().text_range()));
+            arms.push(TypedMatchArm { pattern, body });
         }
+        // Check exhaustiveness and unreachable arms (§4.6, the WS5 follow-up).
+        crate::exhaustive::check(
+            self.db,
+            self.file,
+            scrutinee_ty,
+            &arms,
+            &arm_spans,
+            &mut self.diagnostics,
+        );
         // The match's type is the unified body type (inference already unified
         // them); use the first arm's body type.
         let ty = arms.first().map(|a| expr_ty(&a.body)).unwrap_or(self.unit);
@@ -1220,57 +1250,99 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Lower a pattern into (variant_idx, bindings). Returns `variant_idx =
-    /// None` for wildcard/variable/literal patterns (treated as catch-all by
-    /// the MIR tag-compare chain). For variant patterns, returns the variant
-    /// index and payload-slot bindings.
-    fn lower_pattern(
-        &mut self,
-        pat: &praxis_ast::Pattern,
-        scrutinee_ty: Type,
-    ) -> (Option<u32>, Vec<(SymbolId, u32)>) {
+    /// Lower a pattern into a recursive [`TypedPattern`]. This fixes two M7-Part-1
+    /// gaps: nested sub-patterns are now recursed into (previously silently
+    /// dropped), and literal patterns carry their value (previously treated as
+    /// catch-all wildcards, so `match n { 1 => a, 2 => b }` always took the first
+    /// arm).
+    ///
+    /// A bare `Name` is ambiguous (variable bind vs payload-less variant) and is
+    /// disambiguated against the scrutinee's enum type, as in WS5.
+    fn lower_pattern(&mut self, pat: &praxis_ast::Pattern, scrutinee_ty: Type) -> TypedPattern {
         use praxis_ast::PatternKind;
         match pat.kind() {
-            PatternKind::Wildcard | PatternKind::Literal => (None, Vec::new()),
+            PatternKind::Wildcard => TypedPattern::Wildcard,
+            PatternKind::Literal => {
+                // Read the literal value from the pattern's token (the WS5 bug
+                // was that literals were dropped to a catch-all wildcard).
+                let Some(tok) = pat.literal_token() else {
+                    return TypedPattern::Wildcard;
+                };
+                let value = match tok.kind() {
+                    SyntaxKind::IntLit => {
+                        let cleaned: String = tok.text().chars().filter(|c| *c != '_').collect();
+                        Lit::Int(cleaned.parse::<i64>().unwrap_or(i64::MAX))
+                    }
+                    SyntaxKind::TextLit => Lit::Text(unquote_text(tok.text())),
+                    SyntaxKind::KW_TRUE => Lit::Bool(true),
+                    SyntaxKind::KW_FALSE => Lit::Bool(false),
+                    _ => return TypedPattern::Wildcard,
+                };
+                let ty = match &value {
+                    Lit::Int(_) => self.int,
+                    Lit::Bool(_) => self.bool_,
+                    Lit::Text(_) => self.text,
+                    // Char literals don't appear in patterns (no char-literal
+                    // pattern syntax); use the scrutinee type as a fallback.
+                    Lit::Char(_) => scrutinee_ty,
+                };
+                TypedPattern::Lit { value, ty }
+            }
             PatternKind::Name(name) => {
-                // A bare identifier in a pattern is ambiguous: it could be a
-                // variable bind (`x`) or a payload-less enum variant (`Empty`).
-                // Disambiguate by checking if the scrutinee is an enum and the
-                // name matches one of its variants.
+                // Disambiguate payload-less variant from variable bind by checking
+                // the scrutinee's enum type (the WS5 fix).
                 let resolved = self.db.follow(scrutinee_ty);
                 if let praxis_types::TypeData::Enum { def } = self.db.data(resolved) {
                     let edef = self.db.enum_def(*def);
                     if let Some(idx) = edef.variant(&name) {
-                        return (Some(idx as u32), Vec::new());
+                        return TypedPattern::EnumVariant {
+                            enum_def_id: *def,
+                            variant_idx: idx as u32,
+                            subpatterns: Vec::new(),
+                            ty: scrutinee_ty,
+                        };
                     }
                 }
-                // Not a variant: treat as a variable bind (catch-all).
-                (None, Vec::new())
+                // Not a variant: a variable bind. Resolve the declared symbol.
+                if let Some(tok) = pat.name_token() {
+                    if let Some(symbol) = self.resolve_decl_at(tok.text_range()) {
+                        return TypedPattern::Bind {
+                            symbol,
+                            ty: scrutinee_ty,
+                        };
+                    }
+                }
+                // Fallback: treat as wildcard if the symbol is unresolved.
+                TypedPattern::Wildcard
             }
             PatternKind::Variant(vname) => {
-                // Look up the variant to get its index and payload types.
                 let resolved = self.db.follow(scrutinee_ty);
                 let enum_def_id = match self.db.data(resolved) {
                     praxis_types::TypeData::Enum { def } => *def,
-                    _ => return (None, Vec::new()),
+                    _ => return TypedPattern::Wildcard,
                 };
                 let edef = self.db.enum_def(enum_def_id);
                 let Some(idx) = edef.variant(&vname) else {
-                    return (None, Vec::new());
+                    return TypedPattern::Wildcard;
                 };
-                // Collect sub-pattern variable bindings mapped to payload slots.
-                let mut bindings = Vec::new();
+                // Recurse into sub-patterns against payload types — the WS5 bug
+                // was that only flat Name sub-patterns were collected and nested
+                // variant patterns were silently dropped.
+                let variant = &edef.variants[idx];
+                let payload_types: Vec<Type> =
+                    variant.payload.as_ref().map_or(Vec::new(), |ts| ts.clone());
                 let sub_pats: Vec<_> = pat.sub_patterns().collect();
-                for (slot, sub) in sub_pats.iter().enumerate() {
-                    if let PatternKind::Name(_) = sub.kind() {
-                        if let Some(tok) = sub.name_token() {
-                            if let Some(symbol) = self.resolve_decl_at(tok.text_range()) {
-                                bindings.push((symbol, slot as u32));
-                            }
-                        }
-                    }
+                let mut subpatterns = Vec::new();
+                for (i, sub) in sub_pats.iter().enumerate() {
+                    let sub_ty = payload_types.get(i).copied().unwrap_or(scrutinee_ty);
+                    subpatterns.push(self.lower_pattern(sub, sub_ty));
                 }
-                (Some(idx as u32), bindings)
+                TypedPattern::EnumVariant {
+                    enum_def_id,
+                    variant_idx: idx as u32,
+                    subpatterns,
+                    ty: scrutinee_ty,
+                }
             }
         }
     }

@@ -75,3 +75,25 @@ pub(crate) fn not_equatable(at: FileSpan, ty: &str) -> Diagnostic {
         at,
     )
 }
+
+/// `Y120` — a `match` is not exhaustive: some values of the scrutinee type are
+/// not covered by any arm. The missing constructors are named to guide the fix.
+pub(crate) fn non_exhaustive(at: FileSpan, missing: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagnosticCode::new(DiagnosticCategory::Type, 120),
+        format!("non-exhaustive match: missing {missing}"),
+        at,
+    )
+}
+
+/// `Y121` — a `match` arm is unreachable: an earlier arm already matched all
+/// the values this arm could match.
+pub(crate) fn unreachable_arm(at: FileSpan) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagnosticCode::new(DiagnosticCategory::Type, 121),
+        "unreachable match arm",
+        at,
+    )
+}

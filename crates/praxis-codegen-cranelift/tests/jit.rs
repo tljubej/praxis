@@ -729,3 +729,80 @@ fn match_enum_payload_binding() {
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
 }
+
+// --- M7-WSP: pattern-matching completeness (nested + literal patterns) -------
+
+#[test]
+fn match_literal_int() {
+    // Literal Int patterns — the WS5 bug always took the first arm; this now
+    // tests each value. `match n { 1 => 10, 2 => 20, _ => 0 }`.
+    let src = "fn main() -> Int {\n  let n = 2\n  match n {\n    1 => 10\n    2 => 20\n    _ => 0\n  }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 20);
+}
+
+#[test]
+fn match_literal_int_default() {
+    // The wildcard arm must catch unmatched literals.
+    let src = "fn main() -> Int {\n  let n = 99\n  match n {\n    1 => 10\n    2 => 20\n    _ => 0\n  }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+#[test]
+fn match_literal_int_first_arm() {
+    // Matching the first literal arm.
+    let src = "fn main() -> Int {\n  let n = 1\n  match n {\n    1 => 10\n    2 => 20\n    _ => 0\n  }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 10);
+}
+
+#[test]
+fn match_bool() {
+    // Bool patterns: `match b { true => 1, false => 0 }`.
+    let src =
+        "fn main() -> Int {\n  let b = true\n  match b {\n    true => 1\n    false => 0\n  }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn match_nested_variant_pattern() {
+    // Nested pattern: `Wrapped(Some(n))` extracts through two layers of variant.
+    // The WS5 bug silently dropped nested sub-patterns; this now recurses.
+    let src = "enum Inner { None, Some(Int) }\nenum Outer { Wrapped(Inner), Bare }\nfn main() -> Int {\n  let v = Wrapped(Some(7))\n  match v {\n    Wrapped(Some(n)) => n\n    Wrapped(None) => 0\n    Bare => 1\n  }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
+}
+
+#[test]
+fn match_nested_variant_none_branch() {
+    // The same nested match but matching the inner None.
+    let src = "enum Inner { None, Some(Int) }\nenum Outer { Wrapped(Inner), Bare }\nfn main() -> Int {\n  let v = Wrapped(None)\n  match v {\n    Wrapped(Some(n)) => n\n    Wrapped(None) => 0\n    Bare => 1\n  }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+#[test]
+fn match_multi_payload_binding() {
+    // A variant with multiple payload fields, all bound.
+    let src = "enum Shape { Point(Int, Int), Empty }\nfn main() -> Int {\n  let s = Point(3, 4)\n  match s {\n    Point(x, y) => x + y\n    Empty => 0\n  }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
+}
+
+#[test]
+fn match_variable_bind_whole_scrutinee() {
+    // A bare variable bind `x` matches anything and binds the whole value.
+    let src = "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  let t = Number(5)\n  match t {\n    x => 99\n  }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 99);
+}

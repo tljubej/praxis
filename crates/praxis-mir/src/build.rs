@@ -860,14 +860,15 @@ fn lower_enum_variant(
     dst
 }
 
-/// Lower a `match scrutinee { arms }` expression (M7, §4.6) to a tag-compare
-/// branch chain. The scrutinee must be an enum value; the result is the unified
-/// type of all arm bodies.
+/// Lower a `match scrutinee { arms }` expression (M7, §4.6) to a decision tree
+/// of tests. Handles the full recursive pattern grammar (§4.6): wildcard, literal,
+/// variable bind, and enum variant with nested sub-patterns.
 ///
-/// Strategy: read the scrutinee's tag via `praxis_enum_tag`, then for each arm
-/// with a variant index, compare the tag and branch. Wildcard arms (None) are
-/// the fall-through default. Each arm extracts its payload bindings and lowers
-/// its body.
+/// For each arm in order, emit the pattern's tests against the scrutinee local;
+/// on success, bind pattern variables and lower the body; on failure, fall
+/// through to the next arm. The final fall-through (non-exhaustive match) stores
+/// a Unit default — the exhaustiveness checker (Y120) rejects this case at
+/// compile time, so this default is defensive only.
 fn lower_match(
     b: &mut Builder<'_>,
     scrutinee: &TypedExpr,
@@ -875,71 +876,27 @@ fn lower_match(
 ) -> LocalId {
     let scrut_gc = lower_expr_gc(b, scrutinee);
     let result = b.alloc_gc(Type(0), None);
-
-    // Read the tag directly as a scalar (no allocation, no boxing).
-    let tag_local = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::EnumTag {
-        dst: tag_local,
-        src: scrut_gc,
-    });
-
     let join = b.func.new_block();
-    // Create a block per arm. We chain them: each variant arm tests its tag and
-    // either branches to its body or falls through to the next test. The last
-    // wildcard arm is the default.
+
     for arm in arms {
-        let arm_body_blk = b.func.new_block();
-        let next_test_blk = b.func.new_block();
-        match arm.variant_idx {
-            Some(vidx) => {
-                // Compare tag == vidx.
-                let cmp_dst = b.alloc_scalar(ScalarKind::Bool);
-                let expected = b.alloc_scalar(ScalarKind::Int);
-                b.push(Inst::ConstInt {
-                    dst: expected,
-                    value: vidx as i64,
-                });
-                b.push(Inst::IntCmp {
-                    op: CmpOp::Eq,
-                    dst: cmp_dst,
-                    lhs: tag_local,
-                    rhs: expected,
-                });
-                b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                    cond: cmp_dst,
-                    then_block: arm_body_blk,
-                    else_block: next_test_blk,
-                };
-            }
-            None => {
-                // Wildcard/default arm: unconditional jump to body.
-                b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
-                    target: arm_body_blk,
-                };
-            }
-        }
-        // Arm body: extract payload bindings, lower the body, store result.
-        b.cur = arm_body_blk;
-        for (symbol, slot) in &arm.bindings {
-            let payload_local = b.alloc_gc(Type(0), None);
-            b.push(Inst::EnumPayloadGet {
-                dst: payload_local,
-                src: scrut_gc,
-                idx: *slot,
-            });
-            b.locals.insert(*symbol, payload_local);
-        }
+        let on_success = b.func.new_block();
+        let on_fail = b.func.new_block();
+        // Test this arm's pattern against the scrutinee; branch to on_success /
+        // on_fail. Variable bindings are installed on the success path.
+        emit_pattern_test(b, scrut_gc, &arm.pattern, on_success, on_fail);
+        // Success: lower the body, store result, jump to join.
+        b.cur = on_success;
         let body_val = lower_expr_gc(b, &arm.body);
         b.push(Inst::MoveGc {
             dst: result,
             src: body_val,
         });
         b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join };
-        // Continue to the next test.
-        b.cur = next_test_blk;
+        // Continue testing the next arm from the failure block.
+        b.cur = on_fail;
     }
-    // If no wildcard arm caught everything, the fall-through reaches here.
-    // Push a Unit default so the join block always has a valid result.
+    // Defensive fall-through (the exhaustiveness checker rejects non-exhaustive
+    // matches at compile time; this is unreachable in well-typed code).
     let unit_val = lower_lit_gc(b, &Lit::Int(0));
     b.push(Inst::MoveGc {
         dst: result,
@@ -948,6 +905,145 @@ fn lower_match(
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join };
     b.cur = join;
     result
+}
+
+/// Emit the test for one pattern against a scrutinee `Gc` local. On success,
+/// jumps to `on_success` (having installed any variable bindings into
+/// `b.locals`); on failure, jumps to `on_fail`. Both blocks are left unfinished
+/// — the caller fills `on_success` with the arm body and continues from
+/// `on_fail` with the next arm.
+fn emit_pattern_test(
+    b: &mut Builder<'_>,
+    scrut: LocalId,
+    pat: &praxis_hir::TypedPattern,
+    on_success: BlockId,
+    on_fail: BlockId,
+) {
+    use praxis_hir::TypedPattern;
+    match pat {
+        TypedPattern::Wildcard => {
+            // Always matches.
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
+            b.cur = on_fail;
+        }
+        TypedPattern::Bind { symbol, .. } => {
+            // Always matches; bind the scrutinee value to the symbol.
+            b.locals.insert(*symbol, scrut);
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
+            b.cur = on_fail;
+        }
+        TypedPattern::Lit { value, .. } => {
+            // Compare the scrutinee against the literal value. Int/Bool use a
+            // native scalar compare; Text uses structural equality.
+            let lit_gc = lower_lit_gc(b, value);
+            match value {
+                Lit::Int(_) | Lit::Bool(_) => {
+                    let si = lower_extract_int(b, scrut);
+                    let li = lower_extract_int(b, lit_gc);
+                    let cmp = b.alloc_scalar(ScalarKind::Bool);
+                    b.push(Inst::IntCmp {
+                        op: CmpOp::Eq,
+                        dst: cmp,
+                        lhs: si,
+                        rhs: li,
+                    });
+                    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                        cond: cmp,
+                        then_block: on_success,
+                        else_block: on_fail,
+                    };
+                }
+                Lit::Text(_) => {
+                    // Structural equality via praxis_struct_eq.
+                    let eq_bool = lower_struct_eq(b, scrut, lit_gc);
+                    let eq_scalar = b.alloc_scalar(ScalarKind::Bool);
+                    b.push(Inst::ExtractScalar {
+                        dst: eq_scalar,
+                        src: eq_bool,
+                        scalar: ScalarKind::Bool,
+                    });
+                    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                        cond: eq_scalar,
+                        then_block: on_success,
+                        else_block: on_fail,
+                    };
+                }
+                Lit::Char(_) => {
+                    // Char patterns aren't produced by the parser today; treat
+                    // as a match (defensive).
+                    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
+                }
+            }
+            b.cur = on_fail;
+        }
+        TypedPattern::EnumVariant {
+            variant_idx,
+            subpatterns,
+            ..
+        } => {
+            // Read the scrutinee's tag and compare against the variant index.
+            let tag = b.alloc_scalar(ScalarKind::Int);
+            b.push(Inst::EnumTag {
+                dst: tag,
+                src: scrut,
+            });
+            let expected = b.alloc_scalar(ScalarKind::Int);
+            b.push(Inst::ConstInt {
+                dst: expected,
+                value: *variant_idx as i64,
+            });
+            let tag_cmp = b.alloc_scalar(ScalarKind::Bool);
+            b.push(Inst::IntCmp {
+                op: CmpOp::Eq,
+                dst: tag_cmp,
+                lhs: tag,
+                rhs: expected,
+            });
+            // If the tag matches, test sub-patterns; otherwise fail.
+            let sub_ok = b.func.new_block();
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                cond: tag_cmp,
+                then_block: sub_ok,
+                else_block: on_fail,
+            };
+            b.cur = sub_ok;
+            // Test each sub-pattern against its payload slot. Chain them: all
+            // must succeed. Extract each payload slot and recurse.
+            emit_subpattern_tests(b, scrut, subpatterns, 0, on_success, on_fail);
+        }
+    }
+}
+
+/// Recursively test a chain of sub-patterns against consecutive payload slots
+/// of `scrut` (an enum value), starting at `slot_idx`. All must succeed to
+/// reach `on_success`; any failure jumps to `on_fail`.
+fn emit_subpattern_tests(
+    b: &mut Builder<'_>,
+    scrut: LocalId,
+    subpatterns: &[praxis_hir::TypedPattern],
+    slot_idx: u32,
+    on_success: BlockId,
+    on_fail: BlockId,
+) {
+    if let Some(sub) = subpatterns.get(slot_idx as usize) {
+        // Extract this payload slot into a local.
+        let payload = b.alloc_gc(Type(0), None);
+        b.push(Inst::EnumPayloadGet {
+            dst: payload,
+            src: scrut,
+            idx: slot_idx,
+        });
+        // Test `sub` against `payload`. If it matches, continue to the next
+        // sub-pattern; if not, fail.
+        let next = b.func.new_block();
+        emit_pattern_test(b, payload, sub, next, on_fail);
+        b.cur = next;
+        emit_subpattern_tests(b, scrut, subpatterns, slot_idx + 1, on_success, on_fail);
+    } else {
+        // All sub-patterns matched: success.
+        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
+        b.cur = on_fail;
+    }
 }
 
 #[cfg(test)]
