@@ -863,6 +863,60 @@ fn for_loop_over_deque() {
     assert_eq!(result.as_int(), 30);
 }
 
+// --- M8-WS8: pipeline combinators (§6.3) -----------------------------------
+
+#[test]
+fn pipeline_sum_sums_elements() {
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 60);
+}
+
+#[test]
+fn pipeline_count_counts_elements() {
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.count()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn pipeline_map_applies_closure() {
+    // map (|x| x*2) over [1,2,3] → [2,4,6], then sum → 12.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let doubled = v.map(|x| x * 2)\n  doubled.sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 12);
+}
+
+#[test]
+fn pipeline_filter_keeps_matching() {
+    // filter (|x| even) over [1,2,3,4] → [2,4], sum → 6.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  let evens = v.filter(|x| x - x / 2 * 2 == 0)\n  evens.sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 6);
+}
+
+#[test]
+fn pipeline_collect_materializes() {
+    // collect into a Vec, then len.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let copy = v.collect()\n  copy.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn pipeline_map_then_len_chains() {
+    // map then .len() (method chain after a method-with-args, fixed in WS6).
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.map(|x| x * 2).len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}
+
 // ===========================================================================
 // Milestone 5: Text methods (§4.3) and `out(...)` (§16.1).
 // ===========================================================================

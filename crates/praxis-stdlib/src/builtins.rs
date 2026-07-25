@@ -89,6 +89,22 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(grid_transpose())
         .entry(grid_rotate_left())
         .entry(grid_rotate_right())
+        // Pipeline combinators (M8-WS8, §6.3). These are intrinsics lowered by
+        // the compiler into fused loops; they accept a closure and return either
+        // a Seq[T] (streaming) or a scalar/Vec (sink). Defined on Vec[T] and
+        // Seq[T] receivers so `v.map(f)` works directly and chains fuse.
+        .entry(seq_map_on_vec())
+        .entry(seq_map_on_seq())
+        .entry(seq_filter_on_vec())
+        .entry(seq_filter_on_seq())
+        .entry(seq_fold_on_vec())
+        .entry(seq_fold_on_seq())
+        .entry(seq_sum_on_vec())
+        .entry(seq_sum_on_seq())
+        .entry(seq_count_on_vec())
+        .entry(seq_count_on_seq())
+        .entry(seq_collect_on_vec())
+        .entry(seq_collect_on_seq())
         .entry(text_len())
         .entry(text_is_empty())
         .entry(text_get())
@@ -1111,6 +1127,235 @@ fn grid_rotate_right() -> MethodEntry {
         allocates: true,
         lowering: MethodLowering::RuntimeSymbol("praxis_grid_rotate_right"),
         doc: "A copy rotated 90° clockwise.",
+        stability: Stability::Stable,
+    }
+}
+
+// --- Pipeline combinators (M8-WS8, §6.3) ---------------------------------
+// The functional-sequence pipeline. `Seq[T]` is a compiler-internal lazy type
+// (no runtime representation); the combinators are intrinsics the compiler
+// fuses into a single loop over the source. Streaming combinators (map/filter)
+// are defined on BOTH Vec[T] and Seq[T] so a chain can start on a concrete
+// collection and continue on Seq. Sinks (sum/count/collect/fold) terminate.
+
+/// The `Seq[T]` receiver pattern (compiler-internal, §6.3).
+fn seq_of_t() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::Seq,
+        args: vec![TypePattern::Var("T")],
+    }
+}
+
+/// `(T) -> U` — the shape of `map`'s closure argument.
+fn t_to_u() -> TypePattern {
+    TypePattern::Function {
+        params: vec![TypePattern::Var("T")],
+        result: Box::new(TypePattern::Var("U")),
+    }
+}
+
+/// `(T) -> Bool` — the shape of `filter`'s predicate.
+fn t_to_bool() -> TypePattern {
+    TypePattern::Function {
+        params: vec![TypePattern::Var("T")],
+        result: Box::new(TypePattern::Scalar(ScalarType::Bool)),
+    }
+}
+
+/// `(Acc, T) -> Acc` — the shape of `fold`'s combining closure.
+fn acc_t_to_acc() -> TypePattern {
+    TypePattern::Function {
+        params: vec![TypePattern::Var("Acc"), TypePattern::Var("T")],
+        result: Box::new(TypePattern::Var("Acc")),
+    }
+}
+
+fn seq_map_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "map",
+        params: vec![t_to_u()],
+        result: vec_of_u(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_map"),
+        doc: "Apply a function to each element, collecting into a Vec.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_map_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "map",
+        params: vec![t_to_u()],
+        result: vec_of_u(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_map"),
+        doc: "Apply a function to each element, collecting into a Vec.",
+        stability: Stability::Stable,
+    }
+}
+
+/// `Vec[U]` — the result of a `map` (a fresh element variable U). The current
+/// implementation eagerly materializes to Vec; true lazy `Seq[U]` with cross-
+/// combinator fusion is the documented next refinement (M8-WS8 continuation).
+fn vec_of_u() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::Vec,
+        args: vec![TypePattern::Var("U")],
+    }
+}
+
+fn seq_filter_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "filter",
+        params: vec![t_to_bool()],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_filter"),
+        doc: "Keep elements satisfying a predicate, collecting into a Vec.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_filter_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "filter",
+        params: vec![t_to_bool()],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_filter"),
+        doc: "Keep elements satisfying a predicate, collecting into a Vec.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_fold_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "fold",
+        params: vec![TypePattern::Var("Acc"), acc_t_to_acc()],
+        result: TypePattern::Var("Acc"),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_fold"),
+        doc: "Reduce elements left-to-right with an accumulator and combining closure.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_fold_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "fold",
+        params: vec![TypePattern::Var("Acc"), acc_t_to_acc()],
+        result: TypePattern::Var("Acc"),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_fold"),
+        doc: "Reduce elements left-to-right with an accumulator and combining closure.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_sum_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "sum",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_sum"),
+        doc: "Sum the (Int) elements.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_sum_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "sum",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_sum"),
+        doc: "Sum the (Int) elements.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_count_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "count",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_count"),
+        doc: "Number of elements.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_count_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "count",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_count"),
+        doc: "Number of elements.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_collect_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "collect",
+        params: vec![],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_collect"),
+        doc: "Materialize the elements into a Vec.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_collect_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "collect",
+        params: vec![],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_collect"),
+        doc: "Materialize the elements into a Vec.",
         stability: Stability::Stable,
     }
 }

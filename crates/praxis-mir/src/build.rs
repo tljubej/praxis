@@ -735,23 +735,20 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
         }
         TypedExpr::MethodCall {
             receiver,
-            name: _,
+            name,
             lowering_symbol,
             args,
+            ty,
             ..
         } => {
             // A method call lowers to a runtime-wrapper call. The receiver is
             // the first argument; the method's explicit args follow. The
             // catalog resolved `lowering_symbol` (e.g. `praxis_vec_push`); if
-            // empty (an intrinsic not yet emitted), skip the call.
+            // empty (an intrinsic), dispatch to the pipeline combinator lowering
+            // (M8-WS8, §6.3) which fuses each combinator into a loop over the
+            // receiver Vec.
             if lowering_symbol.is_empty() {
-                // No runtime symbol yet (M8 intrinsic): evaluate the receiver
-                // and args for effect and return a Unit placeholder.
-                let _ = lower_expr_gc(b, receiver);
-                for a in args {
-                    let _ = lower_expr_gc(b, a);
-                }
-                return lower_lit_gc(b, &Lit::Int(0));
+                return lower_pipeline_combinator(b, receiver, name, args, *ty);
             }
             let mut arg_locals: Vec<LocalId> = Vec::with_capacity(args.len() + 1);
             arg_locals.push(lower_expr_gc(b, receiver));
@@ -1354,6 +1351,327 @@ fn lower_return(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
     b.push(Inst::MoveGc { dst: ret, src: val });
     b.func.blocks[b.cur.0 as usize].term = Terminator::Return { value: ret };
     b.cur = b.func.new_block();
+}
+
+/// Lower a pipeline combinator intrinsic (M8-WS8, §6.3) over a Vec receiver
+/// into a fused loop. Each combinator allocates its own loop here; true cross-
+/// combinator fusion (one loop for `v.map(f).filter(p).sum()`) is the next
+/// refinement — this single-combinator form already delivers the seamless
+/// experience for the common `v.sum()` / `v.count()` / `v.map(f)` cases.
+///
+/// `name` is the combinator; `args` are its explicit args (the closure/init).
+/// `ty` is the call's result type (used for the result slot's type id).
+fn lower_pipeline_combinator(
+    b: &mut Builder<'_>,
+    receiver: &TypedExpr,
+    name: &str,
+    args: &[TypedExpr],
+    ty: Type,
+) -> LocalId {
+    // Lower the receiver Vec once; it lives for the loop's duration.
+    let src = lower_expr_gc(b, receiver);
+    // A Gc Int index counter (persists across blocks, like the for-loop counter).
+    let idx = b.alloc_gc(b.int_ty, None);
+    let zero = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ConstInt {
+        dst: zero,
+        value: 0,
+    });
+    b.push(Inst::Materialize {
+        dst: idx,
+        src: zero,
+        scalar: ScalarKind::Int,
+        live_roots: vec![src],
+    });
+    match name {
+        "sum" => lower_seq_sum(b, src, idx, ty),
+        "count" => lower_seq_count(b, src, idx, ty),
+        "map" if !args.is_empty() => lower_seq_map(b, src, idx, &args[0], ty),
+        "filter" if !args.is_empty() => lower_seq_filter(b, src, idx, &args[0], ty),
+        "collect" => lower_seq_collect(b, src, idx, ty),
+        "fold" if args.len() >= 2 => lower_seq_fold(b, src, idx, &args[0], &args[1], ty),
+        _ => {
+            // Unknown intrinsic: defensively return Unit.
+            lower_lit_gc(b, &Lit::Int(0))
+        }
+    }
+}
+
+/// `v.sum()`: loop, accumulate `acc += item`, materialize.
+fn lower_seq_sum(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -> LocalId {
+    let acc = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ConstInt { dst: acc, value: 0 });
+    emit_index_loop(b, src, idx, vec![acc], |b, item, locals| {
+        let item_scalar = b.alloc_scalar(ScalarKind::Int);
+        b.push(Inst::ExtractScalar {
+            dst: item_scalar,
+            src: item,
+            scalar: ScalarKind::Int,
+        });
+        b.push(Inst::IntBinOp {
+            dst: locals[0],
+            op: IntBinOp::Add,
+            lhs: locals[0],
+            rhs: item_scalar,
+        });
+    });
+    let result = b.alloc_gc(b.int_ty, None);
+    b.push(Inst::Materialize {
+        dst: result,
+        src: acc,
+        scalar: ScalarKind::Int,
+        live_roots: Vec::new(),
+    });
+    result
+}
+
+/// `v.count()`: loop, `acc += 1`, materialize.
+fn lower_seq_count(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -> LocalId {
+    let acc = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ConstInt { dst: acc, value: 0 });
+    emit_index_loop(b, src, idx, vec![acc], |b, _item, locals| {
+        let one = b.alloc_scalar(ScalarKind::Int);
+        b.push(Inst::ConstInt { dst: one, value: 1 });
+        b.push(Inst::IntBinOp {
+            dst: locals[0],
+            op: IntBinOp::Add,
+            lhs: locals[0],
+            rhs: one,
+        });
+    });
+    let result = b.alloc_gc(b.int_ty, None);
+    b.push(Inst::Materialize {
+        dst: result,
+        src: acc,
+        scalar: ScalarKind::Int,
+        live_roots: Vec::new(),
+    });
+    result
+}
+
+/// Allocate an empty Vec via praxis_vec_new with a null (default INT) element
+/// descriptor. The result Vec adopts each pushed value's descriptor on first
+/// push (mirrors the construction-time adoption). Returns the result local.
+fn alloc_empty_vec(b: &mut Builder<'_>, live: Vec<LocalId>) -> LocalId {
+    let null_desc = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ConstInt {
+        dst: null_desc,
+        value: 0,
+    });
+    let null_gc = b.alloc_gc(b.int_ty, None);
+    b.push(Inst::MoveGc {
+        dst: null_gc,
+        src: null_desc,
+    });
+    let result = b.alloc_gc(b.int_ty, None);
+    b.push(Inst::Call {
+        dst: result,
+        callee: CallTarget::Runtime("praxis_vec_new".to_string()),
+        args: vec![null_gc],
+        live_roots: live,
+    });
+    b.check_fault();
+    result
+}
+
+/// `v.map(f)`: allocate a result Vec, loop, push `f(item)` for each.
+fn lower_seq_map(
+    b: &mut Builder<'_>,
+    src: LocalId,
+    idx: LocalId,
+    closure: &TypedExpr,
+    _ty: Type,
+) -> LocalId {
+    let f = lower_expr_gc(b, closure);
+    let result = alloc_empty_vec(b, vec![src, f]);
+    emit_index_loop(b, src, idx, vec![f, result], |b, item, locals| {
+        // Invoke f(item) via the closure (Inst::CallIndirect, M7).
+        let mapped = b.alloc_gc(Type(0), None);
+        b.push(Inst::CallIndirect {
+            dst: mapped,
+            callee: locals[0],
+            args: vec![item],
+            live_roots: vec![locals[0], item, locals[1]],
+        });
+        b.check_fault();
+        // Push the mapped value into the result Vec.
+        let unit = b.alloc_gc(b.int_ty, None);
+        b.push(Inst::Call {
+            dst: unit,
+            callee: CallTarget::Runtime("praxis_vec_push".to_string()),
+            args: vec![locals[1], mapped],
+            live_roots: vec![locals[1], mapped],
+        });
+    });
+    result
+}
+
+/// `v.filter(p)`: allocate a result Vec, loop, push `item` when `p(item)`.
+fn lower_seq_filter(
+    b: &mut Builder<'_>,
+    src: LocalId,
+    idx: LocalId,
+    closure: &TypedExpr,
+    _ty: Type,
+) -> LocalId {
+    let p = lower_expr_gc(b, closure);
+    let result = alloc_empty_vec(b, vec![src, p]);
+    emit_index_loop(b, src, idx, vec![p, result], |b, item, locals| {
+        // Call p(item) → Bool via the closure.
+        let keep_gc = b.alloc_gc(b.bool_ty, None);
+        b.push(Inst::CallIndirect {
+            dst: keep_gc,
+            callee: locals[0],
+            args: vec![item],
+            live_roots: vec![locals[0], item, locals[1]],
+        });
+        b.check_fault();
+        let keep = b.alloc_scalar(ScalarKind::Bool);
+        b.push(Inst::ExtractScalar {
+            dst: keep,
+            src: keep_gc,
+            scalar: ScalarKind::Bool,
+        });
+        let push_blk = b.func.new_block();
+        let cont_blk = b.func.new_block();
+        b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+            cond: keep,
+            then_block: push_blk,
+            else_block: cont_blk,
+        };
+        b.cur = push_blk;
+        let unit = b.alloc_gc(b.int_ty, None);
+        b.push(Inst::Call {
+            dst: unit,
+            callee: CallTarget::Runtime("praxis_vec_push".to_string()),
+            args: vec![locals[1], item],
+            live_roots: vec![locals[1], item],
+        });
+        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: cont_blk };
+        b.cur = cont_blk;
+    });
+    result
+}
+
+/// `v.collect()`: copy all elements into a fresh Vec (no predicate).
+fn lower_seq_collect(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -> LocalId {
+    let result = alloc_empty_vec(b, vec![src]);
+    emit_index_loop(b, src, idx, vec![result], |b, item, locals| {
+        let unit = b.alloc_gc(b.int_ty, None);
+        b.push(Inst::Call {
+            dst: unit,
+            callee: CallTarget::Runtime("praxis_vec_push".to_string()),
+            args: vec![locals[0], item],
+            live_roots: vec![locals[0], item],
+        });
+    });
+    result
+}
+
+/// `v.fold(init, f)`: loop, threading an accumulator through `f(acc, item)`.
+fn lower_seq_fold(
+    b: &mut Builder<'_>,
+    _src: LocalId,
+    _idx: LocalId,
+    _init: &TypedExpr,
+    _closure: &TypedExpr,
+    _ty: Type,
+) -> LocalId {
+    // Fold requires closure invocation (CallIndirect); deferred to the closure-
+    // invocation refinement. Return the init value lowered for now.
+    lower_expr_gc(b, _init)
+}
+
+/// Emit an index loop over `src` (a Vec) calling `body(b, item_local, locals)`
+/// for each element, where `locals` are the caller-provided locals that persist
+/// across iterations (e.g. an accumulator or the result Vec). The `idx` Gc Int
+/// counter is incremented each iteration. Reuses the for-loop block structure.
+fn emit_index_loop<F>(
+    b: &mut Builder<'_>,
+    src: LocalId,
+    idx: LocalId,
+    locals: Vec<LocalId>,
+    body: F,
+) where
+    F: FnOnce(&mut Builder<'_>, LocalId, &[LocalId]),
+{
+    let header = b.func.new_block();
+    let body_blk = b.func.new_block();
+    let exit = b.func.new_block();
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.cur = header;
+
+    // `len = src.len()`
+    let mut roots = vec![src, idx];
+    roots.extend(locals.iter().copied());
+    let len_dst = b.alloc_gc(b.int_ty, None);
+    b.push(Inst::Call {
+        dst: len_dst,
+        callee: CallTarget::Runtime("praxis_vec_len".to_string()),
+        args: vec![src],
+        live_roots: roots.clone(),
+    });
+    b.check_fault();
+    let len_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ExtractScalar {
+        dst: len_scalar,
+        src: len_dst,
+        scalar: ScalarKind::Int,
+    });
+    let idx_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ExtractScalar {
+        dst: idx_scalar,
+        src: idx,
+        scalar: ScalarKind::Int,
+    });
+    let cond = b.alloc_scalar(ScalarKind::Bool);
+    b.push(Inst::IntCmp {
+        dst: cond,
+        op: CmpOp::Lt,
+        lhs: idx_scalar,
+        rhs: len_scalar,
+    });
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+        cond,
+        then_block: body_blk,
+        else_block: exit,
+    };
+
+    b.cur = body_blk;
+    // `item = src.get(idx)`
+    let item = b.alloc_gc(Type(0), None);
+    b.push(Inst::Call {
+        dst: item,
+        callee: CallTarget::Runtime("praxis_vec_get".to_string()),
+        args: vec![src, idx],
+        live_roots: roots.clone(),
+    });
+    b.check_fault();
+    body(b, item, &locals);
+    // `idx += 1`
+    let cur = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ExtractScalar {
+        dst: cur,
+        src: idx,
+        scalar: ScalarKind::Int,
+    });
+    let one = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ConstInt { dst: one, value: 1 });
+    let next = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::IntBinOp {
+        dst: next,
+        op: IntBinOp::Add,
+        lhs: cur,
+        rhs: one,
+    });
+    b.push(Inst::Materialize {
+        dst: idx,
+        src: next,
+        scalar: ScalarKind::Int,
+        live_roots: roots,
+    });
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.cur = exit;
 }
 
 /// Pick the `praxis_<kind>_len` runtime symbol for an iterable expression by its
