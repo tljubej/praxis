@@ -500,6 +500,21 @@ fn lower_inst<M: Module>(
                             )?;
                             builder.def_var(vars[dst.0 as usize], vec_ref);
                         }
+                        CollectionCtor::Deque => {
+                            // Deque mirrors Vec: a single element descriptor
+                            // passed to praxis_deque_new (M8-WS2, §6.1).
+                            let el_desc = collection_element_descriptor_for(db, args[0]);
+                            let el_imm = builder.ins().iconst(GC, el_desc as i64);
+                            let deque_ref = call_runtime_by_name(
+                                builder,
+                                ctx_val,
+                                &[el_imm],
+                                "praxis_deque_new",
+                                module,
+                                imports,
+                            )?;
+                            builder.def_var(vars[dst.0 as usize], deque_ref);
+                        }
                         CollectionCtor::Grid => {
                             // Grid reuses the Vec-style element descriptor. The
                             // `praxis_grid_new` wrapper lands in WS5; until then,
@@ -1189,7 +1204,8 @@ fn descriptor_for_type(
         TypeData::Collection { ctor, .. } => match ctor {
             CollectionCtor::Vec => praxis_runtime::collections::VEC as *const TypeDescriptor,
             CollectionCtor::Grid => praxis_runtime::collections::GRID as *const TypeDescriptor,
-            // Other collection ctors (Deque/Map/Set/Counter/MinHeap/MaxHeap/BitSet/
+            CollectionCtor::Deque => praxis_runtime::collections::DEQUE as *const TypeDescriptor,
+            // Other collection ctors (Map/Set/Counter/MinHeap/MaxHeap/BitSet/
             // Range/Seq) land in their own workstreams and will add arms here.
             // Until then they fall through to INT — sound for GC tracing only;
             // these types cannot yet be constructed, so the arm is unreachable.

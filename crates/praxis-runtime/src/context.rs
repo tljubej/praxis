@@ -37,6 +37,10 @@ pub enum FaultKind {
     /// structured spans yet (M6 surfaces it as a plain fault; the crash debugger
     /// in M10 will render the input/parser spans from the runtime's plan).
     ParseFailed = 4,
+    /// An operation required a non-empty collection but found an empty one
+    /// (§9.2). Raised by `Deque.pop_front`/`pop_back`, heap `pop`/`peek`, and
+    /// similar accessors on an empty collection.
+    EmptyCollection = 5,
 }
 
 impl std::fmt::Display for FaultKind {
@@ -47,6 +51,7 @@ impl std::fmt::Display for FaultKind {
             FaultKind::DivByZero => write!(f, "division by zero"),
             FaultKind::IndexOutOfBounds => write!(f, "index out of bounds"),
             FaultKind::ParseFailed => write!(f, "input parse mismatch"),
+            FaultKind::EmptyCollection => write!(f, "empty collection"),
         }
     }
 }

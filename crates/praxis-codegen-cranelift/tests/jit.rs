@@ -273,6 +273,98 @@ fn vec_of_vec_inequality_after_construction() {
     assert_eq!(result.as_int(), 0);
 }
 
+// --- M8-WS2: Deque[T] (§6.1) ------------------------------------------------
+
+#[test]
+fn deque_push_back_and_len_end_to_end() {
+    // Construct a Deque, push_back three values, read len → 3.
+    let src = "fn main() -> Int {\n  let d = Deque()\n  d.push_back(1)\n  d.push_back(2)\n  d.push_back(3)\n  d.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn deque_push_front_yields_fifo_order() {
+    // push_front(1), push_front(2), push_front(3) → front-to-back is [3,2,1].
+    // pop_front returns 3 (the last pushed), proving FIFO-from-front semantics.
+    let src = "fn main() -> Int {\n  let d = Deque()\n  d.push_front(1)\n  d.push_front(2)\n  d.push_front(3)\n  d.pop_front()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn deque_push_back_pop_front_is_fifo() {
+    // push_back then pop_front is a classic FIFO queue: 1,2,3 in → 1 out first.
+    let src = "fn main() -> Int {\n  let d = Deque()\n  d.push_back(1)\n  d.push_back(2)\n  d.push_back(3)\n  d.pop_front()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn deque_push_front_pop_back_is_lifo() {
+    // push_front then pop_back is LIFO: 1,2,3 pushed to front → pop_back gives 1.
+    let src = "fn main() -> Int {\n  let d = Deque()\n  d.push_front(1)\n  d.push_front(2)\n  d.push_front(3)\n  d.pop_back()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn deque_get_indexes_from_front() {
+    // push_back 10,20,30 → get(0)=10, get(2)=30 (0-based from the front).
+    let src = "fn main() -> Int {\n  let d = Deque()\n  d.push_back(10)\n  d.push_back(20)\n  d.push_back(30)\n  d.get(2)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 30);
+}
+
+#[test]
+fn deque_pop_front_on_empty_faults() {
+    // Popping an empty deque faults EmptyCollection.
+    let src = "fn main() -> Int {\n  let d = Deque()\n  d.pop_front()\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault(), "empty pop should fault");
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
+}
+
+#[test]
+fn deque_pop_back_on_empty_faults() {
+    let src = "fn main() -> Int {\n  let d = Deque()\n  d.pop_back()\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault(), "empty pop should fault");
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
+}
+
+#[test]
+fn deque_is_empty_true_then_false() {
+    // An empty deque is_empty → 1; after a push it is not → 0.
+    let src = "fn main() -> Int {\n  let d = Deque()\n  if d.is_empty() { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn deque_drained_is_empty() {
+    // Push one, pop one → empty again.
+    let src = "fn main() -> Int {\n  let d = Deque()\n  d.push_back(7)\n  let _ = d.pop_front()\n  if d.is_empty() { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn deque_equality_is_structural() {
+    // Two deques with the same elements in the same order are equal.
+    let src = "fn main() -> Int {\n  let a = Deque()\n  a.push_back(1)\n  a.push_back(2)\n  let b = Deque()\n  b.push_back(1)\n  b.push_back(2)\n  if a == b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
 // ===========================================================================
 // Milestone 5: Text methods (§4.3) and `out(...)` (§16.1).
 // ===========================================================================

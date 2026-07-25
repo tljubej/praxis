@@ -1045,6 +1045,188 @@ pub unsafe extern "C" fn praxis_vec_is_empty(ctx: *mut RuntimeContext, vec: GcRe
 }
 
 // ---------------------------------------------------------------------------
+// Deque[T] methods (M8-WS2, §6.1). Mirrors the Vec surface but adds the
+// front/back distinction: `push_front`/`push_back`/`pop_front`/`pop_back`.
+// `pop_*` fault on an empty deque (§9.1 `EmptyCollection`).
+// ---------------------------------------------------------------------------
+
+use crate::collections::DequePayload;
+
+/// Read the `DequePayload` out of a `GcRef` as a shared ref, asserting Deque.
+///
+/// # Safety
+/// `r` must be a valid `Deque` `GcRef`.
+unsafe fn deque_payload(r: GcRef) -> &'static DequePayload {
+    // SAFETY: caller guarantees `r` is a Deque; non-moving GC keeps it stable.
+    unsafe { &*r.payload::<DequePayload>() }
+}
+
+/// Read the `DequePayload` out of a `GcRef` as a mutable ref, asserting Deque.
+///
+/// # Safety
+/// `r` must be a valid `Deque` `GcRef`.
+unsafe fn deque_payload_mut(r: GcRef) -> &'static mut DequePayload {
+    // SAFETY: caller guarantees `r` is a Deque; non-moving GC keeps it stable.
+    unsafe { &mut *r.payload::<DequePayload>() }
+}
+
+/// Allocate a new empty `Deque[T]` with the given element descriptor (§11.2).
+/// A null descriptor defaults to `INT` (matching `praxis_vec_new`).
+///
+/// # Safety
+/// `ctx` must be live and wired. `element_descriptor` must be a valid pointer to
+/// a `'static TypeDescriptor` (or null).
+#[no_mangle]
+pub unsafe extern "C" fn praxis_deque_new(
+    ctx: *mut RuntimeContext,
+    element_descriptor: *const TypeDescriptor,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let element_descriptor = if element_descriptor.is_null() {
+        scalars::INT
+    } else {
+        // SAFETY: caller guarantees a valid `'static` descriptor pointer.
+        unsafe { &*element_descriptor }
+    };
+    // SAFETY: DequePayload matches DEQUE's size/align and is fully initialized.
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::collections::DEQUE,
+            std::mem::size_of::<DequePayload>(),
+            std::mem::align_of::<DequePayload>(),
+            |payload| {
+                (payload as *mut DequePayload).write(DequePayload {
+                    element_descriptor,
+                    items: std::collections::VecDeque::new(),
+                });
+            },
+        )
+    }
+}
+
+/// Prepend `value` to the front of `deque`; returns Unit (§6.1).
+///
+/// # Safety
+/// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`;
+/// `value` must be a valid `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_deque_push_front(
+    ctx: *mut RuntimeContext,
+    deque: GcRef,
+    value: GcRef,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let p = unsafe { deque_payload_mut(deque) };
+    let pushed_desc = value.descriptor();
+    let cur_is_int = unsafe { (*p.element_descriptor).id } == scalars::INT.id;
+    let pushed_is_int = pushed_desc.id == scalars::INT.id;
+    if cur_is_int && !pushed_is_int {
+        p.element_descriptor = pushed_desc;
+    }
+    p.items.push_front(value);
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// Append `value` to the back of `deque`; returns Unit (§6.1).
+///
+/// # Safety
+/// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`;
+/// `value` must be a valid `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_deque_push_back(
+    ctx: *mut RuntimeContext,
+    deque: GcRef,
+    value: GcRef,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let p = unsafe { deque_payload_mut(deque) };
+    let pushed_desc = value.descriptor();
+    let cur_is_int = unsafe { (*p.element_descriptor).id } == scalars::INT.id;
+    let pushed_is_int = pushed_desc.id == scalars::INT.id;
+    if cur_is_int && !pushed_is_int {
+        p.element_descriptor = pushed_desc;
+    }
+    p.items.push_back(value);
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// Remove and return the front element; faults `EmptyCollection` if empty.
+///
+/// # Safety
+/// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_deque_pop_front(ctx: *mut RuntimeContext, deque: GcRef) -> GcRef {
+    // No allocation in the common case, but `pop_front` on a VecDeque does not
+    // allocate Rust heap, so no collection is needed; `deque` stays live.
+    let p = unsafe { deque_payload_mut(deque) };
+    match p.items.pop_front() {
+        Some(v) => v,
+        None => {
+            unsafe { set_fault(ctx, FaultKind::EmptyCollection) };
+            unsafe { unit_sentinel(ctx) }
+        }
+    }
+}
+
+/// Remove and return the back element; faults `EmptyCollection` if empty.
+///
+/// # Safety
+/// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_deque_pop_back(ctx: *mut RuntimeContext, deque: GcRef) -> GcRef {
+    let p = unsafe { deque_payload_mut(deque) };
+    match p.items.pop_back() {
+        Some(v) => v,
+        None => {
+            unsafe { set_fault(ctx, FaultKind::EmptyCollection) };
+            unsafe { unit_sentinel(ctx) }
+        }
+    }
+}
+
+/// The number of elements in `deque`, as a boxed `Int` (§6.1).
+///
+/// # Safety
+/// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_deque_len(ctx: *mut RuntimeContext, deque: GcRef) -> GcRef {
+    let p = unsafe { deque_payload(deque) };
+    let len = p.items.len() as i64;
+    unsafe { heap(ctx).alloc(scalars::INT, len) }
+}
+
+/// The element at `index` (0-based from the front); faults `IndexOutOfBounds`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`;
+/// `index` must be a valid `Int` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_deque_get(
+    ctx: *mut RuntimeContext,
+    deque: GcRef,
+    index: GcRef,
+) -> GcRef {
+    let p = unsafe { deque_payload(deque) };
+    let idx = unsafe { int_payload(index) };
+    if idx < 0 || idx as usize >= p.items.len() {
+        unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+        return unsafe { unit_sentinel(ctx) };
+    }
+    p.items[idx as usize]
+}
+
+/// True iff `deque` has no elements, as a boxed `Bool` (§6.1).
+///
+/// # Safety
+/// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_deque_is_empty(ctx: *mut RuntimeContext, deque: GcRef) -> GcRef {
+    let p = unsafe { deque_payload(deque) };
+    let empty = p.items.is_empty();
+    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, empty) }
+}
+
+// ---------------------------------------------------------------------------
 // Text methods (§4.3, M5).
 //
 // `Text` is an immutable UTF-8 payload (`Box<str>`). The methods are pure

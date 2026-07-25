@@ -159,13 +159,20 @@ impl Inferer {
     /// references to them infer a fresh var (their dispatch lands in M5).
     fn seed_builtin_schemes(&mut self) {
         // Collect the ids first to avoid borrowing `self.names` while mutating it.
+        // Only builtins whose call form needs a polymorphic scheme are seeded:
+        // `out`/`panic` (forall T. (T) -> ...) and every §6.1 collection
+        // constructor name (forall T. () -> Ctor[T], nullary for BitSet/Range).
+        // Other prelude builtins (dbg/assert/abs/min/...) are handled as free
+        // functions at lower time and are intentionally left scheme-less here.
         let to_seed: Vec<(SymbolId, String)> = self
             .names
             .all()
             .iter()
             .filter(|s| {
                 s.kind == SymbolKind::Builtin
-                    && (s.name == "out" || s.name == "panic" || s.name == "Vec")
+                    && (s.name == "out"
+                        || s.name == "panic"
+                        || Self::collection_ctor_for(&s.name).is_some())
             })
             .map(|s| (s.id, s.name.clone()))
             .collect();
@@ -182,11 +189,27 @@ impl Inferer {
                         };
                         db.func(vec![v], result)
                     }
-                    "Vec" => {
-                        // forall T. () -> Vec[T]
+                    // Collection constructors (§6.1). Each yields an empty
+                    // collection of its ctor type; the element type is a
+                    // quantified variable pinned by usage (push/insert/etc.).
+                    "Vec" | "Deque" | "Set" | "Counter" | "MinHeap" | "MaxHeap" | "Grid" => {
                         let v = db.fresh_var();
-                        let vec_ty = db.vec(v);
-                        db.func(vec![], vec_ty)
+                        let ctor = Self::collection_ctor_for(&name).expect("ctor name");
+                        let coll = db.collection(ctor, vec![v]);
+                        db.func(vec![], coll)
+                    }
+                    "Map" => {
+                        // forall K V. () -> Map[K, V]
+                        let k = db.fresh_var();
+                        let v = db.fresh_var();
+                        let coll = db.collection(praxis_types::CollectionCtor::Map, vec![k, v]);
+                        db.func(vec![], coll)
+                    }
+                    // BitSet and Range are nullary: () -> BitSet / () -> Range.
+                    "BitSet" | "Range" => {
+                        let ctor = Self::collection_ctor_for(&name).expect("ctor name");
+                        let coll = db.collection(ctor, vec![]);
+                        db.func(vec![], coll)
                     }
                     other => panic!("unexpected builtin `{other}` seeded"),
                 };
@@ -1207,16 +1230,13 @@ impl Inferer {
         Some(self.db.scalar(scalar))
     }
 
-    /// Resolve a collection type name + args to a [`Type`] (§4.4, §11.2). M8
-    /// opens the full collection set: every §6.1 ctor resolves to its
-    /// [`CollectionCtor`]. `Seq` is compiler-internal (M8 WS8, §6.3) and is never
-    /// user-named — it is rejected here so `Seq[T]` in source surfaces as an
-    /// unknown type. Construction (`Vec[T]()`) is wired per workstream as each
-    /// collection's runtime payload lands; the *type* resolves for all ctors so
-    /// annotations and signatures can name them ahead of construction support.
-    fn collection_from_name(&mut self, name: &str, args: Vec<Type>) -> Option<Type> {
+    /// Resolve a collection ctor name (e.g. `"Deque"`) to its [`CollectionCtor`].
+    /// Used by builtin scheme seeding so each constructor name is callable as
+    /// `Name()`. Returns `None` for non-collection names (including `Seq`, which
+    /// is compiler-internal and never user-named).
+    fn collection_ctor_for(name: &str) -> Option<praxis_types::CollectionCtor> {
         use praxis_types::CollectionCtor;
-        let ctor = match name {
+        Some(match name {
             "Vec" => CollectionCtor::Vec,
             "Deque" => CollectionCtor::Deque,
             "Map" => CollectionCtor::Map,
@@ -1227,10 +1247,23 @@ impl Inferer {
             "BitSet" => CollectionCtor::BitSet,
             "Grid" => CollectionCtor::Grid,
             "Range" => CollectionCtor::Range,
-            // `Seq` is compiler-internal (§6.3, M8 WS8); never user-named.
-            "Seq" => return None,
             _ => return None,
-        };
+        })
+    }
+
+    /// Resolve a collection type name + args to a [`Type`] (§4.4, §11.2). M8
+    /// opens the full collection set: every §6.1 ctor resolves to its
+    /// [`CollectionCtor`]. `Seq` is compiler-internal (M8 WS8, §6.3) and is never
+    /// user-named — it is rejected here so `Seq[T]` in source surfaces as an
+    /// unknown type. Construction (`Vec[T]()`) is wired per workstream as each
+    /// collection's runtime payload lands; the *type* resolves for all ctors so
+    /// annotations and signatures can name them ahead of construction support.
+    fn collection_from_name(&mut self, name: &str, args: Vec<Type>) -> Option<Type> {
+        // `Seq` is compiler-internal (§6.3, M8 WS8); never user-named.
+        if name == "Seq" {
+            return None;
+        }
+        let ctor = Self::collection_ctor_for(name)?;
         // Arity check: the ctor declares how many type args it takes. A wrong
         // arity is a type error surfaced as a unification failure downstream
         // (the args vec length won't match), so just pass them through here.

@@ -36,7 +36,7 @@ pub mod var_cell;
 
 pub use abi::{assert_abi_version, RUNTIME_ABI_VERSION};
 pub use closures::ClosurePayload;
-pub use collections::{GridPayload, VecPayload};
+pub use collections::{DequePayload, GridPayload, VecPayload};
 pub use context::{DebugFrame, DebugLocal, Fault, FaultKind, Runtime, RuntimeContext};
 pub use debug::DebugLocalMeta;
 pub use descriptor::{

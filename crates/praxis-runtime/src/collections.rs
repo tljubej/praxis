@@ -123,6 +123,101 @@ pub const VEC: &TypeDescriptor = &TypeDescriptor {
 };
 
 // ===========================================================================
+// Deque[T] (M8-WS2, §6.1). A double-ended queue backed by Rust's `VecDeque`.
+// Mirrors `VecPayload` exactly (element descriptor + growable items) so trace/
+// format/equals/hash dispatch identically; only the backing store and the
+// front/back method surface differ.
+// ===========================================================================
+
+use std::collections::VecDeque;
+
+/// The `Deque[T]` payload: the element descriptor plus a growable `VecDeque`.
+/// `VecDeque` (not `Vec`) so `push_front`/`pop_front` are O(1) amortized.
+/// Both fields are `Drop`, so [`DEQUE`]'s `drop_value` releases them on sweep.
+#[repr(C)]
+pub struct DequePayload {
+    /// The descriptor for every element (homogeneous, like `VecPayload`).
+    pub element_descriptor: *const TypeDescriptor,
+    /// The elements. A `VecDeque` so both ends are cheap to mutate.
+    pub items: VecDeque<GcRef>,
+}
+
+unsafe fn deque_trace(payload: *mut u8, tracer: &mut dyn Tracer) {
+    // SAFETY: caller guarantees `payload` points at an initialized DequePayload.
+    let p = unsafe { &*(payload as *const DequePayload) };
+    for item in p.items.iter() {
+        tracer.trace(*item);
+    }
+}
+
+unsafe fn deque_drop(payload: *mut u8) {
+    // SAFETY: caller guarantees `payload` points at an initialized DequePayload.
+    unsafe { std::ptr::drop_in_place(payload as *mut DequePayload) };
+}
+
+unsafe fn deque_format(payload: *const u8, out: &mut dyn fmt::Write) {
+    // SAFETY: caller guarantees `payload` points at an initialized DequePayload.
+    let p = unsafe { &*(payload as *const DequePayload) };
+    let elem_desc = unsafe { &*p.element_descriptor };
+    let _ = out.write_str("[");
+    for (i, item) in p.items.iter().enumerate() {
+        if i > 0 {
+            let _ = out.write_str(", ");
+        }
+        let elem_payload = item.payload::<u8>() as *const u8;
+        (elem_desc.format)(elem_payload, out);
+    }
+    let _ = out.write_str("]");
+}
+
+unsafe fn deque_equals(a: *const u8, b: *const u8) -> bool {
+    // SAFETY: caller guarantees both pointers point at initialized DequePayloads.
+    let pa = unsafe { &*(a as *const DequePayload) };
+    let pb = unsafe { &*(b as *const DequePayload) };
+    if pa.items.len() != pb.items.len() {
+        return false;
+    }
+    let Some(eq) = (unsafe { &*pa.element_descriptor }).equals else {
+        return false;
+    };
+    for (x, y) in pa.items.iter().zip(pb.items.iter()) {
+        let xe = x.payload::<u8>() as *const u8;
+        let ye = y.payload::<u8>() as *const u8;
+        if !eq(xe, ye) {
+            return false;
+        }
+    }
+    true
+}
+
+unsafe fn deque_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
+    // SAFETY: caller guarantees `payload` points at an initialized DequePayload.
+    let p = unsafe { &*(payload as *const DequePayload) };
+    let Some(hash_elem) = (unsafe { &*p.element_descriptor }).hash else {
+        return;
+    };
+    hasher.write_bytes(&(p.items.len() as u64).to_le_bytes());
+    for item in p.items.iter() {
+        let elem_payload = item.payload::<u8>() as *const u8;
+        hash_elem(elem_payload, hasher);
+    }
+}
+
+/// Descriptor for the `Deque[T]` collection (§6.1). The per-instance element
+/// type lives in the payload, so a single descriptor serves all `Deque[T]`.
+pub const DEQUE: &TypeDescriptor = &TypeDescriptor {
+    id: TypeId(13),
+    name: "Deque",
+    size: std::mem::size_of::<DequePayload>(),
+    align: std::mem::align_of::<DequePayload>(),
+    trace: deque_trace,
+    drop_value: deque_drop,
+    format: deque_format,
+    equals: Some(deque_equals),
+    hash: Some(deque_hash),
+};
+
+// ===========================================================================
 // Grid[T] (M6, §7.5 `grid`, §7.8 type derivation). M6 ships a minimal runtime
 // type — row-major storage with a known width — so the synthesized type is the
 // spec-faithful `Grid[T]`. Grid methods (neighbors, indexing, etc.) are M8.
