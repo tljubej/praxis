@@ -35,7 +35,14 @@ use crate::roots::RootSet;
 /// is an ABI-affecting change caught by the ABI version check (§11.6) only in
 /// that the two are rebuilt together. The offset of `slots` within the frame is
 /// stable regardless, because the struct is `#[repr(C)]`.
-pub const MAX_SHADOW_SLOTS: usize = 64;
+/// This is part of the contract between the backend and the runtime; bumping it
+/// is an ABI-affecting change caught by the ABI version check (§11.6) only in
+/// that the two are rebuilt together. The offset of `slots` within the frame is
+/// stable regardless, because the struct is `#[repr(C)]`.
+///
+/// M8 raises this from 64 to 192 to accommodate AoC-style graph programs that
+/// allocate many collections (Deque/Set/Map/Vec) in a single frame.
+pub const MAX_SHADOW_SLOTS: usize = 192;
 
 /// One compiler-managed shadow-stack frame (§12.3).
 ///

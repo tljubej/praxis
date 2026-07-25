@@ -1,0 +1,24 @@
+// AoC corpus fixture: frequency counting (section 19.8 acceptance).
+// Demonstrates the Counter collection (absent keys read as zero, section 6.2)
+// over a Vec[Int] — the most common AoC counting pattern.
+//
+// Input (on stdin): integers, one per line.
+// Output: the highest frequency (the count of the most common value).
+fn main() -> Int {
+    let values = read lines(int)
+    let counts = Counter()
+    var i = 0
+    while i < values.len() {
+        counts.inc(values.get(i))
+        i = i + 1
+    }
+    // The max count (re-scan; for-over-Map is a follow-up).
+    var best = 0
+    var j = 0
+    while j < values.len() {
+        let c = counts.get(values.get(j))
+        if c > best { best = c }
+        j = j + 1
+    }
+    best
+}

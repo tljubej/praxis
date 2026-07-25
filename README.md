@@ -5,11 +5,13 @@ Advent of Code-style puzzle solving. It favors rapid iteration, concise data
 manipulation, practical parsing, and strong diagnostics over systems-programming
 concerns.
 
-> **Status:** Milestone 7 complete — the JIT pipeline parses, type-checks, and
-> executes Praxis programs with nominal records and enums, pattern matching with
-> exhaustiveness checking, closures (immutable and mutable captures), structural
-> equality/hashing, monomorphized polymorphism, and the headline input-parser DSL
-> (`read lines(int)`, `read grid(char)`, `read lines(`{x:int},{y:int}`)`, etc.).
+> **Status:** Milestone 8 complete — the full collection set (`Vec`, `Deque`,
+> `Map`, `Set`, `Counter`, `MinHeap`, `MaxHeap`, `BitSet`, complete `Grid`) is
+> implemented end-to-end, with tuples/records/nested collections working as
+> map/set keys. The §4.11 control-flow surface (`for`/`loop`/`break`/`continue`/
+> `return`) and the §6.3 sequence pipeline (`map`/`filter`/`sum`/`count`/
+> `collect`, with seamless chaining) land here, alongside the `Iterable`/
+> `SupportsOrd` capabilities and a closed method catalog driving completion data.
 > See [`praxis_technical_design.md`](./praxis_technical_design.md) for the full
 > language and the milestone roadmap (§19).
 
