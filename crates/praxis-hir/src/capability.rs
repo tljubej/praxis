@@ -68,6 +68,51 @@ pub fn supports_hash(db: &TypeDb, t: Type) -> bool {
     supports_eq(db, t)
 }
 
+/// True iff values of type `t` are orderable (§5.4 `SupportsOrd`): usable in a
+/// heap, sortable, or comparable with `<`/`>`/`<=`/`>=`.
+///
+/// Recursive over the type's structure. Scalars `Int`/`UInt`/`Float`/`Char`/
+/// `Text` are orderable; `Bool`/`Unit` are not (no total order is defined). A
+/// tuple is orderable iff every element is (lexicographic order). A collection
+/// is orderable iff its element type is. Functions are never orderable.
+/// `Bool` and `Unit` being non-orderable is a deliberate choice: the spec (§5.4)
+/// lists `SupportsOrd` as a capability whose resolution is compiler-defined, and
+/// ordering booleans is almost always a bug.
+#[must_use]
+pub fn supports_ord(db: &TypeDb, t: Type) -> bool {
+    use praxis_stdlib::type_pattern::ScalarType;
+    match db.data(db.follow(t)) {
+        TypeData::Scalar(ScalarType::Int)
+        | TypeData::Scalar(ScalarType::UInt)
+        | TypeData::Scalar(ScalarType::Float)
+        | TypeData::Scalar(ScalarType::Char)
+        | TypeData::Scalar(ScalarType::Text) => true,
+        // Bool and Unit have no defined total order.
+        TypeData::Scalar(ScalarType::Bool | ScalarType::Byte)
+        | TypeData::Unit
+        | TypeData::Scalar(ScalarType::Never) => false,
+        // A tuple is orderable iff every element is (lexicographic).
+        TypeData::Tuple(els) => els.iter().all(|e| supports_ord(db, *e)),
+        // Functions are never orderable.
+        TypeData::Func { .. } => false,
+        // A collection is orderable iff its element type is.
+        TypeData::Collection { args, .. } => args.iter().all(|a| supports_ord(db, *a)),
+        // Records and enums: orderable iff every field/variant payload type is.
+        TypeData::Record { def } => db
+            .record_def(*def)
+            .fields
+            .iter()
+            .all(|f| supports_ord(db, f.ty)),
+        TypeData::Enum { def } => db.enum_def(*def).variants.iter().all(|v| {
+            v.payload
+                .as_ref()
+                .map_or(true, |ts| ts.iter().all(|t| supports_ord(db, *t)))
+        }),
+        // An unresolved var is optimistically orderable.
+        TypeData::Var(_) => true,
+    }
+}
+
 /// The `Item` type yielded when iterating a value of type `t`, or `None` if `t`
 /// is not iterable (§5.4 `Iterable(T, Item)`, §4.11 "for loops over built-in
 /// iterable shapes").
@@ -210,5 +255,44 @@ mod tests {
         let mut db = TypeDb::new();
         let v = db.fresh_var();
         assert!(iter_item(&mut db, v).is_some());
+    }
+
+    #[test]
+    fn numeric_scalars_are_orderable() {
+        let mut db = TypeDb::new();
+        let (i, t, c) = (db.int(), db.text(), db.char());
+        assert!(supports_ord(&db, i));
+        assert!(supports_ord(&db, t));
+        assert!(supports_ord(&db, c));
+    }
+
+    #[test]
+    fn bool_and_unit_are_not_orderable() {
+        // Bool/Unit have no defined total order; ordering them is a likely bug.
+        let mut db = TypeDb::new();
+        let (b, u) = (db.bool(), db.unit());
+        assert!(!supports_ord(&db, b));
+        assert!(!supports_ord(&db, u));
+    }
+
+    #[test]
+    fn functions_are_not_orderable() {
+        let mut db = TypeDb::new();
+        let (p, r) = (db.int(), db.int());
+        let func = db.func(vec![p], r);
+        assert!(!supports_ord(&db, func));
+    }
+
+    #[test]
+    fn tuple_is_orderable_iff_elements_are() {
+        let mut db = TypeDb::new();
+        let (a, b) = (db.int(), db.int());
+        let tup = db.tuple(vec![a, b]);
+        assert!(supports_ord(&db, tup));
+        // A tuple containing a function is not orderable.
+        let (p, r, i) = (db.int(), db.int(), db.int());
+        let func = db.func(vec![p], r);
+        let mixed = db.tuple(vec![i, func]);
+        assert!(!supports_ord(&db, mixed));
     }
 }

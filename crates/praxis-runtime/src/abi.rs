@@ -1655,6 +1655,245 @@ pub unsafe extern "C" fn praxis_counter_is_empty(
 }
 
 // ---------------------------------------------------------------------------
+// MinHeap[T] / MaxHeap[T] (M8-WS4, §6.1, §11.2).
+//
+// `MaxHeap` maps directly to Rust's max-`BinaryHeap`; `MinHeap` wraps entries in
+// `Reverse` so the smallest surfaces first. `pop`/`peek` fault `EmptyCollection`
+// on an empty heap.
+// ---------------------------------------------------------------------------
+
+use crate::heaps::{HeapEntry, MaxHeapPayload, MinHeapPayload};
+use std::collections::BinaryHeap;
+
+unsafe fn max_heap_payload_mut(r: GcRef) -> &'static mut MaxHeapPayload {
+    unsafe { &mut *r.payload::<MaxHeapPayload>() }
+}
+
+unsafe fn max_heap_payload(r: GcRef) -> &'static MaxHeapPayload {
+    unsafe { &*r.payload::<MaxHeapPayload>() }
+}
+
+unsafe fn min_heap_payload_mut(r: GcRef) -> &'static mut MinHeapPayload {
+    unsafe { &mut *r.payload::<MinHeapPayload>() }
+}
+
+unsafe fn min_heap_payload(r: GcRef) -> &'static MinHeapPayload {
+    unsafe { &*r.payload::<MinHeapPayload>() }
+}
+
+/// Allocate an empty `MaxHeap[T]`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
+/// a `'static TypeDescriptor` (or null).
+#[no_mangle]
+pub unsafe extern "C" fn praxis_max_heap_new(
+    ctx: *mut RuntimeContext,
+    element_descriptor: *const TypeDescriptor,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let element_descriptor = if element_descriptor.is_null() {
+        scalars::INT
+    } else {
+        unsafe { &*element_descriptor }
+    };
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::heaps::MAX_HEAP,
+            std::mem::size_of::<MaxHeapPayload>(),
+            std::mem::align_of::<MaxHeapPayload>(),
+            |payload| {
+                (payload as *mut MaxHeapPayload).write(MaxHeapPayload {
+                    element_descriptor,
+                    items: BinaryHeap::new(),
+                });
+            },
+        )
+    }
+}
+
+/// Push `value` onto the max-heap; returns Unit.
+///
+/// # Safety
+/// `ctx` must be live and wired; `heap` and `value` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_max_heap_push(
+    ctx: *mut RuntimeContext,
+    heap_ref: GcRef,
+    value: GcRef,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let p = unsafe { max_heap_payload_mut(heap_ref) };
+    p.items.push(HeapEntry {
+        value,
+        descriptor: value.descriptor(),
+    });
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// Remove and return the largest element; faults `EmptyCollection` if empty.
+///
+/// # Safety
+/// `ctx` must be live and wired; `heap_ref` must be a valid `MaxHeap` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_max_heap_pop(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
+    let p = unsafe { max_heap_payload_mut(heap_ref) };
+    match p.items.pop() {
+        Some(e) => e.value,
+        None => {
+            unsafe { set_fault(ctx, FaultKind::EmptyCollection) };
+            unsafe { unit_sentinel(ctx) }
+        }
+    }
+}
+
+/// The largest element without removing it; faults `EmptyCollection` if empty.
+///
+/// # Safety
+/// `ctx` must be live and wired; `heap_ref` must be a valid `MaxHeap` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_max_heap_peek(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
+    let p = unsafe { max_heap_payload(heap_ref) };
+    match p.items.peek() {
+        Some(e) => e.value,
+        None => {
+            unsafe { set_fault(ctx, FaultKind::EmptyCollection) };
+            unsafe { unit_sentinel(ctx) }
+        }
+    }
+}
+
+/// The number of elements, as a boxed Int.
+///
+/// # Safety
+/// `ctx` must be live and wired; `heap_ref` must be a valid `MaxHeap` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_max_heap_len(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
+    let p = unsafe { max_heap_payload(heap_ref) };
+    unsafe { heap(ctx).alloc(scalars::INT, p.items.len() as i64) }
+}
+
+/// True iff the heap is empty, as a boxed Bool.
+///
+/// # Safety
+/// `ctx` must be live and wired; `heap_ref` must be a valid `MaxHeap` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_max_heap_is_empty(
+    ctx: *mut RuntimeContext,
+    heap_ref: GcRef,
+) -> GcRef {
+    let p = unsafe { max_heap_payload(heap_ref) };
+    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, p.items.is_empty()) }
+}
+
+// --- MinHeap (mirrors MaxHeap with Reverse wrapping) -----------------------
+
+/// Allocate an empty `MinHeap[T]`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
+/// a `'static TypeDescriptor` (or null).
+#[no_mangle]
+pub unsafe extern "C" fn praxis_min_heap_new(
+    ctx: *mut RuntimeContext,
+    element_descriptor: *const TypeDescriptor,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let element_descriptor = if element_descriptor.is_null() {
+        scalars::INT
+    } else {
+        unsafe { &*element_descriptor }
+    };
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::heaps::MIN_HEAP,
+            std::mem::size_of::<MinHeapPayload>(),
+            std::mem::align_of::<MinHeapPayload>(),
+            |payload| {
+                (payload as *mut MinHeapPayload).write(MinHeapPayload {
+                    element_descriptor,
+                    items: BinaryHeap::new(),
+                });
+            },
+        )
+    }
+}
+
+/// Push `value` onto the min-heap; returns Unit.
+///
+/// # Safety
+/// `ctx` must be live and wired; `heap` and `value` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_min_heap_push(
+    ctx: *mut RuntimeContext,
+    heap_ref: GcRef,
+    value: GcRef,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let p = unsafe { min_heap_payload_mut(heap_ref) };
+    p.items.push(std::cmp::Reverse(HeapEntry {
+        value,
+        descriptor: value.descriptor(),
+    }));
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// Remove and return the smallest element; faults `EmptyCollection` if empty.
+///
+/// # Safety
+/// `ctx` must be live and wired; `heap_ref` must be a valid `MinHeap` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_min_heap_pop(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
+    let p = unsafe { min_heap_payload_mut(heap_ref) };
+    match p.items.pop() {
+        Some(e) => e.0.value,
+        None => {
+            unsafe { set_fault(ctx, FaultKind::EmptyCollection) };
+            unsafe { unit_sentinel(ctx) }
+        }
+    }
+}
+
+/// The smallest element without removing it; faults `EmptyCollection` if empty.
+///
+/// # Safety
+/// `ctx` must be live and wired; `heap_ref` must be a valid `MinHeap` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_min_heap_peek(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
+    let p = unsafe { min_heap_payload(heap_ref) };
+    match p.items.peek() {
+        Some(e) => e.0.value,
+        None => {
+            unsafe { set_fault(ctx, FaultKind::EmptyCollection) };
+            unsafe { unit_sentinel(ctx) }
+        }
+    }
+}
+
+/// The number of elements, as a boxed Int.
+///
+/// # Safety
+/// `ctx` must be live and wired; `heap_ref` must be a valid `MinHeap` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_min_heap_len(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
+    let p = unsafe { min_heap_payload(heap_ref) };
+    unsafe { heap(ctx).alloc(scalars::INT, p.items.len() as i64) }
+}
+
+/// True iff the heap is empty, as a boxed Bool.
+///
+/// # Safety
+/// `ctx` must be live and wired; `heap_ref` must be a valid `MinHeap` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_min_heap_is_empty(
+    ctx: *mut RuntimeContext,
+    heap_ref: GcRef,
+) -> GcRef {
+    let p = unsafe { min_heap_payload(heap_ref) };
+    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, p.items.is_empty()) }
+}
+
+// ---------------------------------------------------------------------------
 // Text methods (§4.3, M5).
 //
 // `Text` is an immutable UTF-8 payload (`Box<str>`). The methods are pure

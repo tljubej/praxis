@@ -25,6 +25,7 @@ pub mod dynamic_key;
 pub mod enums;
 pub mod gc;
 pub mod heap;
+pub mod heaps;
 pub mod immortal;
 pub mod maps;
 pub mod parser;

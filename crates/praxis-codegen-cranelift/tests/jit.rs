@@ -510,6 +510,92 @@ fn counter_len_counts_distinct_keys() {
     assert_eq!(result.as_int(), 2);
 }
 
+// --- M8-WS4: MinHeap[T] / MaxHeap[T] (§6.1, §11.2) --------------------------
+
+#[test]
+fn max_heap_pop_returns_largest() {
+    // Push 3, 1, 2; pop yields 3 (the largest first).
+    let src = "fn main() -> Int {\n  let h = MaxHeap()\n  h.push(3)\n  h.push(1)\n  h.push(2)\n  h.pop()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn max_heap_pop_ordering_is_descending() {
+    // Pop all three: 3, 2, 1 (descending).
+    let src = "fn main() -> Int {\n  let h = MaxHeap()\n  h.push(3)\n  h.push(1)\n  h.push(2)\n  let a = h.pop()\n  let b = h.pop()\n  let c = h.pop()\n  a * 100 + b * 10 + c\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 321);
+}
+
+#[test]
+fn max_heap_peek_does_not_remove() {
+    let src = "fn main() -> Int {\n  let h = MaxHeap()\n  h.push(5)\n  h.push(10)\n  let _ = h.peek()\n  h.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn max_heap_peek_returns_largest() {
+    let src = "fn main() -> Int {\n  let h = MaxHeap()\n  h.push(7)\n  h.push(3)\n  h.push(9)\n  h.peek()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 9);
+}
+
+#[test]
+fn max_heap_pop_empty_faults() {
+    let src = "fn main() -> Int {\n  let h = MaxHeap()\n  h.pop()\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault(), "empty pop should fault");
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
+}
+
+#[test]
+fn max_heap_is_empty_true() {
+    let src = "fn main() -> Int {\n  let h = MaxHeap()\n  if h.is_empty() { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn min_heap_pop_returns_smallest() {
+    // Push 3, 1, 2; pop yields 1 (the smallest first).
+    let src = "fn main() -> Int {\n  let h = MinHeap()\n  h.push(3)\n  h.push(1)\n  h.push(2)\n  h.pop()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn min_heap_pop_ordering_is_ascending() {
+    // Pop all three: 1, 2, 3 (ascending).
+    let src = "fn main() -> Int {\n  let h = MinHeap()\n  h.push(3)\n  h.push(1)\n  h.push(2)\n  let a = h.pop()\n  let b = h.pop()\n  let c = h.pop()\n  a * 100 + b * 10 + c\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 123);
+}
+
+#[test]
+fn min_heap_peek_returns_smallest() {
+    let src = "fn main() -> Int {\n  let h = MinHeap()\n  h.push(7)\n  h.push(3)\n  h.push(9)\n  h.peek()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn min_heap_pop_empty_faults() {
+    let src = "fn main() -> Int {\n  let h = MinHeap()\n  h.pop()\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault(), "empty pop should fault");
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
+}
+
 // ===========================================================================
 // Milestone 5: Text methods (§4.3) and `out(...)` (§16.1).
 // ===========================================================================

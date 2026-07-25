@@ -58,6 +58,16 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(counter_inc())
         .entry(counter_len())
         .entry(counter_is_empty())
+        .entry(max_heap_push())
+        .entry(max_heap_pop())
+        .entry(max_heap_peek())
+        .entry(max_heap_len())
+        .entry(max_heap_is_empty())
+        .entry(min_heap_push())
+        .entry(min_heap_pop())
+        .entry(min_heap_peek())
+        .entry(min_heap_len())
+        .entry(min_heap_is_empty())
         .entry(text_len())
         .entry(text_is_empty())
         .entry(text_get())
@@ -540,6 +550,172 @@ fn counter_is_empty() -> MethodEntry {
         allocates: false,
         lowering: MethodLowering::RuntimeSymbol("praxis_counter_is_empty"),
         doc: "True iff the counter has no keys.",
+        stability: Stability::Stable,
+    }
+}
+
+// --- MinHeap[T] / MaxHeap[T] methods (M8-WS4, §6.1) ---------------------
+
+fn min_heap_of_t() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::MinHeap,
+        args: vec![TypePattern::Var("T")],
+    }
+}
+
+fn max_heap_of_t() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::MaxHeap,
+        args: vec![TypePattern::Var("T")],
+    }
+}
+
+fn max_heap_push() -> MethodEntry {
+    MethodEntry {
+        receiver: max_heap_of_t(),
+        name: "push",
+        params: vec![TypePattern::Var("T")],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_max_heap_push"),
+        doc: "Push a value onto the max-heap; returns Unit.",
+        stability: Stability::Stable,
+    }
+}
+
+fn max_heap_pop() -> MethodEntry {
+    MethodEntry {
+        receiver: max_heap_of_t(),
+        name: "pop",
+        params: vec![],
+        result: TypePattern::Var("T"),
+        purity: Purity::Impure,
+        can_fault: true,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_max_heap_pop"),
+        doc: "Remove and return the largest element; faults if empty.",
+        stability: Stability::Stable,
+    }
+}
+
+fn max_heap_peek() -> MethodEntry {
+    MethodEntry {
+        receiver: max_heap_of_t(),
+        name: "peek",
+        params: vec![],
+        result: TypePattern::Var("T"),
+        purity: Purity::Pure,
+        can_fault: true,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_max_heap_peek"),
+        doc: "The largest element without removing it; faults if empty.",
+        stability: Stability::Stable,
+    }
+}
+
+fn max_heap_len() -> MethodEntry {
+    MethodEntry {
+        receiver: max_heap_of_t(),
+        name: "len",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_max_heap_len"),
+        doc: "Number of elements in the max-heap.",
+        stability: Stability::Stable,
+    }
+}
+
+fn max_heap_is_empty() -> MethodEntry {
+    MethodEntry {
+        receiver: max_heap_of_t(),
+        name: "is_empty",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_max_heap_is_empty"),
+        doc: "True iff the max-heap has no elements.",
+        stability: Stability::Stable,
+    }
+}
+
+fn min_heap_push() -> MethodEntry {
+    MethodEntry {
+        receiver: min_heap_of_t(),
+        name: "push",
+        params: vec![TypePattern::Var("T")],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_min_heap_push"),
+        doc: "Push a value onto the min-heap; returns Unit.",
+        stability: Stability::Stable,
+    }
+}
+
+fn min_heap_pop() -> MethodEntry {
+    MethodEntry {
+        receiver: min_heap_of_t(),
+        name: "pop",
+        params: vec![],
+        result: TypePattern::Var("T"),
+        purity: Purity::Impure,
+        can_fault: true,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_min_heap_pop"),
+        doc: "Remove and return the smallest element; faults if empty.",
+        stability: Stability::Stable,
+    }
+}
+
+fn min_heap_peek() -> MethodEntry {
+    MethodEntry {
+        receiver: min_heap_of_t(),
+        name: "peek",
+        params: vec![],
+        result: TypePattern::Var("T"),
+        purity: Purity::Pure,
+        can_fault: true,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_min_heap_peek"),
+        doc: "The smallest element without removing it; faults if empty.",
+        stability: Stability::Stable,
+    }
+}
+
+fn min_heap_len() -> MethodEntry {
+    MethodEntry {
+        receiver: min_heap_of_t(),
+        name: "len",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_min_heap_len"),
+        doc: "Number of elements in the min-heap.",
+        stability: Stability::Stable,
+    }
+}
+
+fn min_heap_is_empty() -> MethodEntry {
+    MethodEntry {
+        receiver: min_heap_of_t(),
+        name: "is_empty",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_min_heap_is_empty"),
+        doc: "True iff the min-heap has no elements.",
         stability: Stability::Stable,
     }
 }

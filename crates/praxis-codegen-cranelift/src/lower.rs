@@ -559,6 +559,26 @@ fn lower_inst<M: Module>(
                             )?;
                             builder.def_var(vars[dst.0 as usize], counter_ref);
                         }
+                        CollectionCtor::MinHeap | CollectionCtor::MaxHeap => {
+                            // Heaps: pass the element descriptor; the runtime
+                            // selects min vs max by the construction symbol.
+                            let el_desc = collection_element_descriptor_for(db, args[0]);
+                            let el_imm = builder.ins().iconst(GC, el_desc as i64);
+                            let sym = if *ctor == CollectionCtor::MinHeap {
+                                "praxis_min_heap_new"
+                            } else {
+                                "praxis_max_heap_new"
+                            };
+                            let heap_ref = call_runtime_by_name(
+                                builder,
+                                ctx_val,
+                                &[el_imm],
+                                sym,
+                                module,
+                                imports,
+                            )?;
+                            builder.def_var(vars[dst.0 as usize], heap_ref);
+                        }
                         CollectionCtor::Grid => {
                             // Grid reuses the Vec-style element descriptor. The
                             // `praxis_grid_new` wrapper lands in WS5; until then,
@@ -1252,6 +1272,8 @@ fn descriptor_for_type(
             CollectionCtor::Map => praxis_runtime::maps::MAP as *const TypeDescriptor,
             CollectionCtor::Set => praxis_runtime::maps::SET as *const TypeDescriptor,
             CollectionCtor::Counter => praxis_runtime::maps::COUNTER as *const TypeDescriptor,
+            CollectionCtor::MinHeap => praxis_runtime::heaps::MIN_HEAP as *const TypeDescriptor,
+            CollectionCtor::MaxHeap => praxis_runtime::heaps::MAX_HEAP as *const TypeDescriptor,
             // Other collection ctors (MinHeap/MaxHeap/BitSet/Range/Seq) land in
             // their own workstreams and will add arms here. Until then they fall
             // through to INT — sound for GC tracing only; these types cannot yet

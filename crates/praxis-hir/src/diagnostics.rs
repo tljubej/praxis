@@ -87,6 +87,18 @@ pub(crate) fn not_iterable(at: FileSpan, ty: &str) -> Diagnostic {
     )
 }
 
+/// `Y006` — a value is used where an orderable type is required (heap element,
+/// sort, comparison) but its type is not orderable (§5.4 `SupportsOrd`). Wording
+/// is concrete and never names the capability (§5.4).
+pub(crate) fn not_orderable(at: FileSpan, ty: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagnosticCode::new(DiagnosticCategory::Type, 6),
+        format!("values of type `{ty}` cannot be ordered"),
+        at,
+    )
+}
+
 /// `Y120` — a `match` is not exhaustive: some values of the scrutinee type are
 /// not covered by any arm. The missing constructors are named to guide the fix.
 pub(crate) fn non_exhaustive(at: FileSpan, missing: &str) -> Diagnostic {
