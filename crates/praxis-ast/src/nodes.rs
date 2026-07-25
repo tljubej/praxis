@@ -424,6 +424,16 @@ pub enum Expr {
     Block(BlockExpr),
     If(IfExpr),
     While(WhileExpr),
+    /// `for name in iter { body }` (M8, §4.11).
+    For(ForExpr),
+    /// `loop { body }` (M8, §4.11).
+    Loop(LoopExpr),
+    /// `break [expr]` (M8, §4.11).
+    Break(BreakExpr),
+    /// `continue` (M8, §4.11).
+    Continue(ContinueExpr),
+    /// `return [expr]` (M8, §4.11).
+    Return(ReturnExpr),
     Call(CallExpr),
     MethodCall(MethodCallExpr),
     Tuple(TupleExpr),
@@ -457,6 +467,11 @@ impl Expr {
             Expr::Block(e) => e.syntax(),
             Expr::If(e) => e.syntax(),
             Expr::While(e) => e.syntax(),
+            Expr::For(e) => e.syntax(),
+            Expr::Loop(e) => e.syntax(),
+            Expr::Break(e) => e.syntax(),
+            Expr::Continue(e) => e.syntax(),
+            Expr::Return(e) => e.syntax(),
             Expr::Call(e) => e.syntax(),
             Expr::MethodCall(e) => e.syntax(),
             Expr::Tuple(e) => e.syntax(),
@@ -488,6 +503,11 @@ impl Expr {
             K::BLOCK_EXPR => Expr::Block(BlockExpr::from_syntax(n)),
             K::IF_EXPR => Expr::If(IfExpr::from_syntax(n)),
             K::WHILE_EXPR => Expr::While(WhileExpr::from_syntax(n)),
+            K::FOR_EXPR => Expr::For(ForExpr::from_syntax(n)),
+            K::LOOP_EXPR => Expr::Loop(LoopExpr::from_syntax(n)),
+            K::BREAK_EXPR => Expr::Break(BreakExpr::from_syntax(n)),
+            K::CONTINUE_EXPR => Expr::Continue(ContinueExpr::from_syntax(n)),
+            K::RETURN_EXPR => Expr::Return(ReturnExpr::from_syntax(n)),
             K::CALL_EXPR => Expr::Call(CallExpr::from_syntax(n)),
             K::METHOD_CALL_EXPR => Expr::MethodCall(MethodCallExpr::from_syntax(n)),
             K::TUPLE_EXPR => Expr::Tuple(TupleExpr::from_syntax(n)),
@@ -1013,6 +1033,114 @@ impl WhileExpr {
     }
     pub fn body(&self) -> Option<BlockExpr> {
         child(&self.syntax)
+    }
+}
+
+/// `for name in iter { body }` (M8, §4.11).
+#[derive(Clone, Debug)]
+pub struct ForExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for ForExpr {
+    const KIND: K = K::FOR_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl ForExpr {
+    /// The binding name token (`for x in …` → `x`).
+    pub fn binding(&self) -> Option<SyntaxToken> {
+        self.syntax.children_with_tokens().find_map(|e| {
+            let t = e.into_token()?;
+            (t.kind() == K::Ident).then_some(t)
+        })
+    }
+    /// The iterator expression (`for x in iter`).
+    pub fn iter(&self) -> Option<Expr> {
+        self.syntax.children().find_map(Expr::cast_from_child)
+    }
+    pub fn body(&self) -> Option<BlockExpr> {
+        child(&self.syntax)
+    }
+}
+
+/// `loop { body }` (M8, §4.11).
+#[derive(Clone, Debug)]
+pub struct LoopExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for LoopExpr {
+    const KIND: K = K::LOOP_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl LoopExpr {
+    pub fn body(&self) -> Option<BlockExpr> {
+        child(&self.syntax)
+    }
+}
+
+/// `break [expr]` (M8, §4.11).
+#[derive(Clone, Debug)]
+pub struct BreakExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for BreakExpr {
+    const KIND: K = K::BREAK_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl BreakExpr {
+    /// The optional break value (`break expr`).
+    pub fn value(&self) -> Option<Expr> {
+        self.syntax.children().find_map(Expr::cast_from_child)
+    }
+}
+
+/// `continue` (M8, §4.11).
+#[derive(Clone, Debug)]
+pub struct ContinueExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for ContinueExpr {
+    const KIND: K = K::CONTINUE_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+
+/// `return [expr]` (M8, §4.11).
+#[derive(Clone, Debug)]
+pub struct ReturnExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for ReturnExpr {
+    const KIND: K = K::RETURN_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl ReturnExpr {
+    /// The optional return value (`return expr`).
+    pub fn value(&self) -> Option<Expr> {
+        self.syntax.children().find_map(Expr::cast_from_child)
     }
 }
 

@@ -24,9 +24,9 @@
 use std::collections::HashMap;
 
 use praxis_ast::{
-    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, EnumItem, Expr,
-    ExprStmt, FieldExpr, FnItem, IfExpr, LetStmt, Param, ParamList, RecordLitExpr, SourceFile,
-    StructItem, VarStmt, WhileExpr,
+    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, BreakExpr, CallExpr, ContinueExpr,
+    ElseBranch, EnumItem, Expr, ExprStmt, FieldExpr, FnItem, ForExpr, IfExpr, LetStmt, LoopExpr,
+    Param, ParamList, RecordLitExpr, ReturnExpr, SourceFile, StructItem, VarStmt, WhileExpr,
 };
 use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
 use praxis_syntax::SyntaxKind;
@@ -439,6 +439,11 @@ impl Resolver {
             Expr::Block(b) => self.resolve_block(scope, b),
             Expr::If(i) => self.resolve_if(scope, i),
             Expr::While(w) => self.resolve_while(scope, w),
+            Expr::For(f) => self.resolve_for(scope, f),
+            Expr::Loop(l) => self.resolve_loop(scope, l),
+            Expr::Break(b) => self.resolve_break(scope, b),
+            Expr::Continue(c) => self.resolve_continue(scope, c),
+            Expr::Return(r) => self.resolve_return(scope, r),
             Expr::Call(c) => self.resolve_call(scope, c),
             Expr::MethodCall(m) => {
                 // Resolve names in the receiver and the arguments. Method names
@@ -616,6 +621,49 @@ impl Resolver {
         }
         if let Some(body) = w.body() {
             self.resolve_block(scope, &body);
+        }
+    }
+
+    /// `for binding in iter { body }` (M8, §4.11). The iterator resolves in the
+    /// current scope; the binding is declared in a child scope that wraps the
+    /// body (so the loop variable is visible only inside the body).
+    fn resolve_for(&mut self, scope: ScopeId, f: &ForExpr) {
+        if let Some(iter) = f.iter() {
+            self.resolve_expr(scope, &iter);
+        }
+        let body_scope = self.out.scopes.push_child(scope);
+        if let Some(name_tok) = f.binding() {
+            self.bind(
+                body_scope,
+                SymbolKind::Let,
+                name_tok.text().to_string(),
+                name_tok.text_range(),
+            );
+        }
+        if let Some(body) = f.body() {
+            self.resolve_block_inner(body_scope, &body);
+        }
+    }
+
+    fn resolve_loop(&mut self, scope: ScopeId, l: &LoopExpr) {
+        if let Some(body) = l.body() {
+            self.resolve_block(scope, &body);
+        }
+    }
+
+    fn resolve_break(&mut self, scope: ScopeId, b: &BreakExpr) {
+        if let Some(v) = b.value() {
+            self.resolve_expr(scope, &v);
+        }
+    }
+
+    fn resolve_continue(&mut self, _scope: ScopeId, _c: &ContinueExpr) {
+        // `continue` has no subexpressions or names.
+    }
+
+    fn resolve_return(&mut self, scope: ScopeId, r: &ReturnExpr) {
+        if let Some(v) = r.value() {
+            self.resolve_expr(scope, &v);
         }
     }
 

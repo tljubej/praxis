@@ -227,6 +227,27 @@ impl<'t> Parser<'t> {
         self.peek() == SyntaxKind::EOF
     }
 
+    /// True iff the current meaningful token can begin an expression. Used by
+    /// `break`/`return` to decide whether a value follows (vs. a bare
+    /// `break`/`return` with no value). A `;`, `}`, EOF, or `else` cannot start
+    /// an expression, so `break }` parses as a value-less break.
+    fn starts_expr(&mut self) -> bool {
+        // Consume trivia so the cursor lands on the meaningful token, then check
+        // whether that token can begin an expression. `eat_trivia` returns ();
+        // we only need its side effect of advancing past trivia.
+        self.eat_trivia();
+        let k = self
+            .tokens
+            .get(self.cursor)
+            .map(|t| t.kind)
+            .unwrap_or(SyntaxKind::EOF);
+        use SyntaxKind::*;
+        !matches!(
+            k,
+            EOF | SEMICOLON | R_BRACE | R_PAREN | COMMA | KW_ELSE | KW_IN
+        )
+    }
+
     /// The source text of the current meaningful token (trivia skipped). Used to
     /// special-case keywords-that-look-like-idents such as `parse` and parser
     /// constructor names (`lines`, `csv`, …).
@@ -686,6 +707,11 @@ impl<'t> Parser<'t> {
             SyntaxKind::L_BRACE => self.parse_block(),
             SyntaxKind::KW_IF => self.parse_if(),
             SyntaxKind::KW_WHILE => self.parse_while(),
+            SyntaxKind::KW_FOR => self.parse_for(),
+            SyntaxKind::KW_LOOP => self.parse_loop(),
+            SyntaxKind::KW_BREAK => self.parse_break(),
+            SyntaxKind::KW_CONTINUE => self.parse_continue(),
+            SyntaxKind::KW_RETURN => self.parse_return(),
             SyntaxKind::KW_MATCH => self.parse_match(),
             SyntaxKind::Ident => self.parse_name_or_call(),
             _ => {
@@ -782,6 +808,59 @@ impl<'t> Parser<'t> {
         self.parse_expr();
         self.no_struct_literal = prev;
         self.parse_block();
+        self.finish_node();
+    }
+
+    /// `for name in iter { body }` (M8, §4.11). The binding name and `in`
+    /// keyword separate the iterator expression from the loop body.
+    fn parse_for(&mut self) {
+        self.start_node(SyntaxKind::FOR_EXPR);
+        self.bump(); // `for`
+        self.expect(SyntaxKind::Ident, "binding name after `for`");
+        self.expect(SyntaxKind::KW_IN, "`in` after the for-loop binding");
+        let prev = self.no_struct_literal;
+        self.no_struct_literal = true;
+        self.parse_expr(); // iterator
+        self.no_struct_literal = prev;
+        self.parse_block();
+        self.finish_node();
+    }
+
+    /// `loop { body }` (M8, §4.11) — an explicit infinite loop, terminated by
+    /// `break` (optionally with a value).
+    fn parse_loop(&mut self) {
+        self.start_node(SyntaxKind::LOOP_EXPR);
+        self.bump(); // `loop`
+        self.parse_block();
+        self.finish_node();
+    }
+
+    /// `break [expr]` (M8, §4.11). The optional value is an expression; absent
+    /// means the loop yields Unit.
+    fn parse_break(&mut self) {
+        self.start_node(SyntaxKind::BREAK_EXPR);
+        self.bump(); // `break`
+                     // A value follows iff the next token starts an expression (not `;`/`}`/EOF).
+        if self.starts_expr() {
+            self.parse_expr();
+        }
+        self.finish_node();
+    }
+
+    /// `continue` (M8, §4.11).
+    fn parse_continue(&mut self) {
+        self.start_node(SyntaxKind::CONTINUE_EXPR);
+        self.bump(); // `continue`
+        self.finish_node();
+    }
+
+    /// `return [expr]` (M8, §4.11).
+    fn parse_return(&mut self) {
+        self.start_node(SyntaxKind::RETURN_EXPR);
+        self.bump(); // `return`
+        if self.starts_expr() {
+            self.parse_expr();
+        }
         self.finish_node();
     }
 
@@ -1054,10 +1133,12 @@ impl<'t> Parser<'t> {
         //
         // The checkpoint `cp` was taken *before* the receiver was emitted, so
         // `start_node_at(cp, ...)` retroactively wraps the receiver (PATH_EXPR
-        // or a prior CALL_EXPR / METHOD_CALL_EXPR) as the first child. For
-        // chains (`v.push(1).len()`), update `cp` to the position before each
-        // iteration so the next method wraps the previous METHOD_CALL_EXPR.
-        let mut chain_cp = cp;
+        // or a prior CALL_EXPR / METHOD_CALL_EXPR) as the first child. The
+        // checkpoint is NOT updated between iterations: each `.method()` in a
+        // chain (`v.push(1).len()`) must wrap the *entire* preceding expression
+        // (the previous METHOD_CALL_EXPR), which starts at the original `cp`.
+        // Updating it to the position after each node (as an earlier version
+        // did) dropped the receiver, breaking `a.b().c()`.
         while self.at(SyntaxKind::DOT) {
             self.bump(); // `.`
                          // The name after `.`.
@@ -1072,7 +1153,7 @@ impl<'t> Parser<'t> {
             if self.nth_kind(1) == SyntaxKind::L_PAREN {
                 // Method call: `.method(args)`.
                 self.bump(); // method name
-                self.start_node_at(chain_cp, SyntaxKind::METHOD_CALL_EXPR);
+                self.start_node_at(cp, SyntaxKind::METHOD_CALL_EXPR);
                 self.bump(); // `(`
                 self.start_node(SyntaxKind::ARG_LIST);
                 if !self.at(SyntaxKind::R_PAREN) {
@@ -1090,12 +1171,10 @@ impl<'t> Parser<'t> {
                 self.finish_node(); // METHOD_CALL_EXPR
             } else {
                 // Field access: `.field` (M7, §4.5).
-                self.start_node_at(chain_cp, SyntaxKind::FIELD_EXPR);
+                self.start_node_at(cp, SyntaxKind::FIELD_EXPR);
                 self.bump(); // field name
                 self.finish_node(); // FIELD_EXPR
             }
-            // The next `.method()`/`.field` in a chain must wrap this node.
-            chain_cp = self.checkpoint_lhs();
         }
     }
 

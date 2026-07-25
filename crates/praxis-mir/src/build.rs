@@ -130,6 +130,22 @@ fn collect_closures_expr(e: &TypedExpr, out: &mut Vec<LiftedClosure>) {
             collect_closures_expr(cond, out);
             collect_closures_block(body, out);
         }
+        TypedExpr::For { iter, body, .. } => {
+            collect_closures_expr(iter, out);
+            collect_closures_block(body, out);
+        }
+        TypedExpr::Loop { body, .. } => collect_closures_block(body, out),
+        TypedExpr::Break { value, .. } => {
+            if let Some(v) = value {
+                collect_closures_expr(v, out);
+            }
+        }
+        TypedExpr::Continue { .. } => {}
+        TypedExpr::Return { value, .. } => {
+            if let Some(v) = value {
+                collect_closures_expr(v, out);
+            }
+        }
         TypedExpr::Call { args, .. } => {
             for a in args {
                 collect_closures_expr(a, out);
@@ -191,6 +207,20 @@ struct Builder<'a> {
     /// site, and reads/writes route through the cell so a closure shares the
     /// mutable storage. Empty when there are no captured `var`s.
     escaping_vars: &'a std::collections::HashSet<praxis_hir::SymbolId>,
+    /// The stack of enclosing loops (M8-WS6, §4.11). `break` jumps to the top's
+    /// `break_target`; `continue` jumps to the `continue_target` (the header for
+    /// `while`/`for`, the body top for `loop`). Empty at the function's top level.
+    loop_stack: Vec<LoopCtx>,
+}
+
+/// One frame of the loop-context stack (M8-WS6). Pushed on entry to a
+/// `while`/`for`/`loop`, popped on exit. `break`/`continue` read the top frame.
+#[derive(Clone, Copy)]
+struct LoopCtx {
+    /// The block `continue` jumps to (the loop header for `while`/`for`).
+    continue_target: BlockId,
+    /// The block `break` jumps to (the loop exit).
+    break_target: BlockId,
 }
 
 fn lower_fn(
@@ -229,6 +259,7 @@ fn lower_fn(
         char_ty,
         unit_ty,
         escaping_vars,
+        loop_stack: Vec::new(),
     };
 
     // Parameters: one `Gc` slot each.
@@ -299,6 +330,7 @@ fn lower_closure_fn(
         char_ty,
         unit_ty,
         escaping_vars,
+        loop_stack: Vec::new(),
     };
 
     // Param 0 (MIR): the closure value itself (`closure_self`). It is the hidden
@@ -609,6 +641,31 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
         TypedExpr::While { cond, body, .. } => {
             lower_while(b, cond, body);
             lower_lit_gc(b, &Lit::Int(0)) // while yields Unit
+        }
+        TypedExpr::For {
+            binding,
+            iter,
+            body,
+            ..
+        } => {
+            lower_for(b, *binding, iter, body);
+            lower_lit_gc(b, &Lit::Int(0)) // for yields Unit
+        }
+        TypedExpr::Loop { body, .. } => {
+            lower_loop(b, body);
+            lower_lit_gc(b, &Lit::Int(0)) // loop yields Unit (break-value is a refinement)
+        }
+        TypedExpr::Break { value, .. } => {
+            lower_break(b, value);
+            lower_lit_gc(b, &Lit::Int(0)) // unreachable in a well-typed program
+        }
+        TypedExpr::Continue { .. } => {
+            lower_continue(b);
+            lower_lit_gc(b, &Lit::Int(0))
+        }
+        TypedExpr::Return { value, .. } => {
+            lower_return(b, value);
+            lower_lit_gc(b, &Lit::Int(0))
         }
         TypedExpr::Call {
             callee,
@@ -1098,11 +1155,237 @@ fn lower_while(b: &mut Builder<'_>, cond: &TypedExpr, body: &praxis_hir::TypedBl
         else_block: exit,
     };
 
+    // Push the loop context so `break`/`continue` inside the body resolve.
+    b.loop_stack.push(LoopCtx {
+        continue_target: header,
+        break_target: exit,
+    });
     b.cur = body_blk;
     let _ = lower_block_body(b, body);
+    b.loop_stack.pop();
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
 
     b.cur = exit;
+}
+
+/// `for binding in iter { body }` (M8-WS6, §4.11). Lowers to an index loop over
+/// the source: a header tests `i < len`, the body binds `iter.get(i)` to the
+/// loop variable, runs, increments `i`, and jumps back. Generalizes across
+/// Vec/Deque via the element-indexed `get` runtime symbol. (Map/Set/Grid
+/// iteration via `for` is a follow-up; the common Vec/Deque case is wired here.)
+fn lower_for(
+    b: &mut Builder<'_>,
+    binding: praxis_hir::SymbolId,
+    iter: &TypedExpr,
+    body: &praxis_hir::TypedBlock,
+) {
+    // Lower the iterator once; it lives in a Gc slot for the loop's duration.
+    let iter_local = lower_expr_gc(b, iter);
+    // The index lives in a Gc Int slot (not a scalar) so it persists across the
+    // loop's block boundaries like other Gc values. Start at 0.
+    let idx_gc = b.alloc_gc(b.int_ty, None);
+    let zero_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ConstInt {
+        dst: zero_scalar,
+        value: 0,
+    });
+    b.push(Inst::Materialize {
+        dst: idx_gc,
+        src: zero_scalar,
+        scalar: ScalarKind::Int,
+        live_roots: vec![iter_local],
+    });
+
+    let header = b.func.new_block();
+    let body_blk = b.func.new_block();
+    let exit = b.func.new_block();
+
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.cur = header;
+
+    // `len = iter.len()`.
+    let len_sym = len_symbol_for(b.db, iter);
+    let len_dst = b.alloc_gc(b.int_ty, None);
+    b.push(Inst::Call {
+        dst: len_dst,
+        callee: CallTarget::Runtime(len_sym.to_string()),
+        args: vec![iter_local],
+        live_roots: vec![iter_local, idx_gc],
+    });
+    b.check_fault();
+    let len_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ExtractScalar {
+        dst: len_scalar,
+        src: len_dst,
+        scalar: ScalarKind::Int,
+    });
+    // Extract the index scalar for the comparison.
+    let idx_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ExtractScalar {
+        dst: idx_scalar,
+        src: idx_gc,
+        scalar: ScalarKind::Int,
+    });
+    // `i < len`
+    let cond = b.alloc_scalar(ScalarKind::Bool);
+    b.push(Inst::IntCmp {
+        dst: cond,
+        op: CmpOp::Lt,
+        lhs: idx_scalar,
+        rhs: len_scalar,
+    });
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+        cond,
+        then_block: body_blk,
+        else_block: exit,
+    };
+
+    b.loop_stack.push(LoopCtx {
+        continue_target: header,
+        break_target: exit,
+    });
+    b.cur = body_blk;
+    // Bind the loop variable: `binding = iter.get(idx_gc)`.
+    let get_sym = get_symbol_for(b.db, iter);
+    let item_gc = b.alloc_gc(Type(0), None);
+    b.push(Inst::Call {
+        dst: item_gc,
+        callee: CallTarget::Runtime(get_sym.to_string()),
+        args: vec![iter_local, idx_gc],
+        live_roots: vec![iter_local, idx_gc],
+    });
+    b.check_fault();
+    // The loop variable's slot: allocate one if the `for` binding has no slot
+    // yet (it is introduced by the loop, not a `let` statement). Reads of the
+    // binding inside the body resolve to this slot via `b.locals`.
+    let slot = b
+        .locals
+        .get(&binding)
+        .copied()
+        .unwrap_or_else(|| b.alloc_gc(Type(0), None));
+    b.locals.insert(binding, slot);
+    b.push(Inst::MoveGc {
+        dst: slot,
+        src: item_gc,
+    });
+    let _ = lower_block_body(b, body);
+    b.loop_stack.pop();
+    // `i = i + 1`: extract, add, re-materialize into the Gc slot.
+    let cur_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ExtractScalar {
+        dst: cur_scalar,
+        src: idx_gc,
+        scalar: ScalarKind::Int,
+    });
+    let one_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ConstInt {
+        dst: one_scalar,
+        value: 1,
+    });
+    let next_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::IntBinOp {
+        dst: next_scalar,
+        op: IntBinOp::Add,
+        lhs: cur_scalar,
+        rhs: one_scalar,
+    });
+    b.push(Inst::Materialize {
+        dst: idx_gc,
+        src: next_scalar,
+        scalar: ScalarKind::Int,
+        live_roots: vec![iter_local, idx_gc],
+    });
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+
+    b.cur = exit;
+}
+
+/// `loop { body }` (M8-WS6, §4.11). An infinite loop; `break` is the only exit.
+fn lower_loop(b: &mut Builder<'_>, body: &praxis_hir::TypedBlock) {
+    let header = b.func.new_block();
+    let exit = b.func.new_block();
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.cur = header;
+    b.loop_stack.push(LoopCtx {
+        continue_target: header,
+        break_target: exit,
+    });
+    let _ = lower_block_body(b, body);
+    b.loop_stack.pop();
+    // Fall through the body → jump back to the header (infinite loop).
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.cur = exit;
+}
+
+/// `break [expr]` (M8-WS6, §4.11). Jump to the enclosing loop's break target.
+/// The optional value is lowered for effect (value-producing loops are a
+/// refinement; for now `break` exits with the loop's Unit value).
+fn lower_break(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
+    if let Some(v) = value {
+        let _ = lower_expr_gc(b, v);
+    }
+    if let Some(ctx) = b.loop_stack.last().copied() {
+        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
+            target: ctx.break_target,
+        };
+        // A fresh unreachable block so subsequent lowering has somewhere to go.
+        b.cur = b.func.new_block();
+    }
+}
+
+/// `continue` (M8-WS6, §4.11). Jump to the enclosing loop's continue target.
+fn lower_continue(b: &mut Builder<'_>) {
+    if let Some(ctx) = b.loop_stack.last().copied() {
+        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
+            target: ctx.continue_target,
+        };
+        b.cur = b.func.new_block();
+    }
+}
+
+/// `return [expr]` (M8-WS6, §4.11). Write the value (or Unit) into the function
+/// return slot, then terminate with `Return`.
+fn lower_return(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
+    let ret = b.func.return_local;
+    let val = match value {
+        Some(v) => lower_expr_gc(b, v),
+        None => lower_lit_gc(b, &Lit::Int(0)),
+    };
+    b.push(Inst::MoveGc { dst: ret, src: val });
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Return { value: ret };
+    b.cur = b.func.new_block();
+}
+
+/// Pick the `praxis_<kind>_len` runtime symbol for an iterable expression by its
+/// static collection ctor. Defaults to `praxis_vec_len` (the common Vec case).
+fn len_symbol_for(db: &TypeDb, iter: &TypedExpr) -> &'static str {
+    use praxis_types::data::TypeData;
+    let ty = expr_static_type(iter);
+    match db.data(db.follow(ty)) {
+        TypeData::Collection { ctor, .. } => match ctor {
+            praxis_types::CollectionCtor::Vec => "praxis_vec_len",
+            praxis_types::CollectionCtor::Deque => "praxis_deque_len",
+            praxis_types::CollectionCtor::Map => "praxis_map_len",
+            praxis_types::CollectionCtor::Set => "praxis_set_len",
+            praxis_types::CollectionCtor::Counter => "praxis_counter_len",
+            _ => "praxis_vec_len",
+        },
+        _ => "praxis_vec_len",
+    }
+}
+
+/// Pick the `praxis_<kind>_get` runtime symbol for element access.
+fn get_symbol_for(db: &TypeDb, iter: &TypedExpr) -> &'static str {
+    use praxis_types::data::TypeData;
+    let ty = expr_static_type(iter);
+    match db.data(db.follow(ty)) {
+        TypeData::Collection { ctor, .. } => match ctor {
+            praxis_types::CollectionCtor::Vec => "praxis_vec_get",
+            praxis_types::CollectionCtor::Deque => "praxis_deque_get",
+            _ => "praxis_vec_get",
+        },
+        _ => "praxis_vec_get",
+    }
 }
 
 // --- helpers --------------------------------------------------------------
@@ -1151,6 +1434,11 @@ fn expr_static_type(e: &TypedExpr) -> Type {
         | TypedExpr::Paren { ty, .. }
         | TypedExpr::If { ty, .. }
         | TypedExpr::While { ty, .. }
+        | TypedExpr::For { ty, .. }
+        | TypedExpr::Loop { ty, .. }
+        | TypedExpr::Break { ty, .. }
+        | TypedExpr::Continue { ty, .. }
+        | TypedExpr::Return { ty, .. }
         | TypedExpr::Call { ty, .. }
         | TypedExpr::MethodCall { ty, .. }
         | TypedExpr::Tuple { ty, .. }

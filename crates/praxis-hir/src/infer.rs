@@ -18,9 +18,10 @@
 use std::collections::HashMap;
 
 use praxis_ast::{
-    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, EnumItem, Expr,
-    ExprStmt, FieldExpr, FnItem, IfExpr, LetStmt, Literal, MethodCallExpr, Param, PathExpr,
-    RecordLitExpr, SourceFile, StructItem, UnaryExpr, VarStmt, WhileExpr,
+    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, BreakExpr, CallExpr, ContinueExpr,
+    ElseBranch, EnumItem, Expr, ExprStmt, FieldExpr, FnItem, ForExpr, IfExpr, LetStmt, Literal,
+    LoopExpr, MethodCallExpr, Param, PathExpr, RecordLitExpr, ReturnExpr, SourceFile, StructItem,
+    UnaryExpr, VarStmt, WhileExpr,
 };
 use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
 use praxis_syntax::SyntaxKind;
@@ -560,6 +561,11 @@ impl Inferer {
             Expr::Block(b) => self.infer_block(scope, b),
             Expr::If(i) => self.infer_if(scope, i),
             Expr::While(w) => self.infer_while(scope, w),
+            Expr::For(f) => self.infer_for(scope, f),
+            Expr::Loop(l) => self.infer_loop(scope, l),
+            Expr::Break(b) => self.infer_break(scope, b),
+            Expr::Continue(c) => self.infer_continue(scope, c),
+            Expr::Return(r) => self.infer_return(scope, r),
             Expr::Call(c) => self.infer_call(scope, c),
             Expr::MethodCall(m) => self.infer_method_call(scope, m),
             Expr::Read(r) => self.infer_read(r),
@@ -990,6 +996,68 @@ impl Inferer {
         }
         // `while` yields Unit.
         self.db.unit()
+    }
+
+    /// `for binding in iter { body }` (M8, §4.11). The iterator must be iterable
+    /// (§5.4); the binding gets the element type. `for` yields Unit.
+    fn infer_for(&mut self, scope: ScopeId, f: &ForExpr) -> Type {
+        let iter_ty = f
+            .iter()
+            .map(|i| self.infer_expr(scope, &i))
+            .unwrap_or_else(|| self.db.fresh_var());
+        // The iterator must be iterable; `iter_item` returns the element type
+        // (None → Y005 not_iterable). Record the element type on the binding's
+        // reference range so the lowerer can read it.
+        let item_ty = crate::capability::iter_item(&mut self.db, iter_ty);
+        if let Some(name_tok) = f.binding() {
+            if let Some(item) = item_ty {
+                self.ref_types.insert(name_tok.text_range(), item);
+                // Attach the element type as the binding's scheme (monomorphic —
+                // a loop variable is never generalized).
+                self.attach_scheme(Some(name_tok.clone()), Scheme::monotype(item));
+            } else {
+                // Not iterable: emit Y005. Render the iterator type for the message.
+                let ty_str = self.db.render(iter_ty);
+                self.diagnostics.push(crate::diagnostics::not_iterable(
+                    self.file_span(f.syntax().text_range()),
+                    &ty_str,
+                ));
+            }
+        }
+        if let Some(body) = f.body() {
+            self.infer_block(scope, &body);
+        }
+        self.db.unit()
+    }
+
+    /// `loop { body }` (M8, §4.11). Yields Unit (a value-producing loop via
+    /// `break expr` refines this; the HIR conservatively reports Unit).
+    fn infer_loop(&mut self, scope: ScopeId, l: &LoopExpr) -> Type {
+        if let Some(body) = l.body() {
+            self.infer_block(scope, &body);
+        }
+        self.db.unit()
+    }
+
+    /// `break [expr]` (M8, §4.11). Diverges; type `Never`.
+    fn infer_break(&mut self, scope: ScopeId, b: &BreakExpr) -> Type {
+        if let Some(v) = b.value() {
+            self.infer_expr(scope, &v);
+        }
+        self.db.never()
+    }
+
+    /// `continue` (M8, §4.11). Diverges; type `Never`.
+    fn infer_continue(&mut self, _scope: ScopeId, _c: &ContinueExpr) -> Type {
+        self.db.never()
+    }
+
+    /// `return [expr]` (M8, §4.11). Diverges; type `Never`.
+    fn infer_return(&mut self, scope: ScopeId, r: &ReturnExpr) -> Type {
+        if let Some(v) = r.value() {
+            self.infer_expr(scope, &v);
+        }
+        self.db.never()
     }
 
     fn infer_call(&mut self, scope: ScopeId, c: &CallExpr) -> Type {

@@ -59,6 +59,7 @@ pub enum SyntaxKind {
     KW_ELSE,     // `else`
     KW_WHILE,    // `while`
     KW_FOR,      // `for`
+    KW_IN,       // `in` (for-loop iterator separator, §4.11)
     KW_LOOP,     // `loop`
     KW_MATCH,    // `match`
     KW_RETURN,   // `return`
@@ -212,6 +213,16 @@ pub enum SyntaxKind {
     ELSE_BRANCH,
     /// A `while cond { ... }` expression.
     WHILE_EXPR,
+    /// A `for pat in iter { ... }` expression (M8, §4.11).
+    FOR_EXPR,
+    /// A `loop { ... }` expression (M8, §4.11).
+    LOOP_EXPR,
+    /// A `break [expr]` expression (M8, §4.11).
+    BREAK_EXPR,
+    /// A `continue` expression (M8, §4.11).
+    CONTINUE_EXPR,
+    /// A `return [expr]` expression (M8, §4.11).
+    RETURN_EXPR,
     /// A `callee(args)` call expression (covers `out(...)`).
     CALL_EXPR,
     /// A `receiver.method(args)` method-call expression (M5, §16.2).
@@ -330,6 +341,7 @@ impl SyntaxKind {
             "else" => Self::KW_ELSE,
             "while" => Self::KW_WHILE,
             "for" => Self::KW_FOR,
+            "in" => Self::KW_IN,
             "loop" => Self::KW_LOOP,
             "match" => Self::KW_MATCH,
             "return" => Self::KW_RETURN,
@@ -356,6 +368,7 @@ impl SyntaxKind {
             Self::KW_ELSE => "else",
             Self::KW_WHILE => "while",
             Self::KW_FOR => "for",
+            Self::KW_IN => "in",
             Self::KW_LOOP => "loop",
             Self::KW_MATCH => "match",
             Self::KW_RETURN => "return",

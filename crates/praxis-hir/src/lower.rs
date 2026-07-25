@@ -19,9 +19,10 @@
 use std::collections::HashMap;
 
 use praxis_ast::{
-    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, CallExpr, ElseBranch, EnumItem, Expr,
-    ExprStmt, FieldExpr, FnItem, IfExpr, LetStmt, Literal, MethodCallExpr, Param, ParamList,
-    PathExpr, RecordLitExpr, SourceFile, StructItem, TupleExpr, UnaryExpr, VarStmt, WhileExpr,
+    ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, BreakExpr, CallExpr, ContinueExpr,
+    ElseBranch, EnumItem, Expr, ExprStmt, FieldExpr, FnItem, ForExpr, IfExpr, LetStmt, Literal,
+    LoopExpr, MethodCallExpr, Param, ParamList, PathExpr, RecordLitExpr, ReturnExpr, SourceFile,
+    StructItem, TupleExpr, UnaryExpr, VarStmt, WhileExpr,
 };
 use praxis_source::{Diagnostic, DiagnosticCategory, DiagnosticCode, FileSpan, Severity, Span};
 use praxis_stdlib::type_pattern::ScalarType as PatternScalar;
@@ -177,6 +178,31 @@ pub enum TypedExpr {
     While {
         cond: Box<TypedExpr>,
         body: Box<TypedBlock>,
+        ty: Type,
+    },
+    /// `for binding in iter { body }` (M8, §4.11). `binding` is the loop
+    /// variable's symbol; `item_ty` is the iterator's element type. Yields Unit.
+    For {
+        binding: SymbolId,
+        iter: Box<TypedExpr>,
+        body: Box<TypedBlock>,
+        item_ty: Type,
+        ty: Type,
+    },
+    /// `loop { body }` (M8, §4.11). An infinite loop terminated by `break`;
+    /// its type is the break-value type (Unit if no break carries a value).
+    Loop { body: Box<TypedBlock>, ty: Type },
+    /// `break [expr]` (M8, §4.11). Diverges from the enclosing loop. `value` is
+    /// the optional break value; `ty` is `Never`.
+    Break {
+        value: Option<Box<TypedExpr>>,
+        ty: Type,
+    },
+    /// `continue` (M8, §4.11). Diverges; `ty` is `Never`.
+    Continue { ty: Type },
+    /// `return [expr]` (M8, §4.11). Diverges from the enclosing function.
+    Return {
+        value: Option<Box<TypedExpr>>,
         ty: Type,
     },
     /// `callee(args)`.
@@ -482,6 +508,22 @@ fn collect_escaping_expr(e: &TypedExpr, out: &mut std::collections::HashSet<Symb
         TypedExpr::While { cond, body, .. } => {
             collect_escaping_expr(cond, out);
             collect_escaping_block(body, out);
+        }
+        TypedExpr::For { iter, body, .. } => {
+            collect_escaping_expr(iter, out);
+            collect_escaping_block(body, out);
+        }
+        TypedExpr::Loop { body, .. } => collect_escaping_block(body, out),
+        TypedExpr::Break { value, .. } => {
+            if let Some(v) = value {
+                collect_escaping_expr(v, out);
+            }
+        }
+        TypedExpr::Continue { .. } => {}
+        TypedExpr::Return { value, .. } => {
+            if let Some(v) = value {
+                collect_escaping_expr(v, out);
+            }
         }
         TypedExpr::Call { args, .. } => {
             for a in args {
@@ -813,6 +855,11 @@ impl<'a> Lowerer<'a> {
                 }),
             Expr::If(i) => self.lower_if(i),
             Expr::While(w) => self.lower_while(w),
+            Expr::For(f) => self.lower_for(f),
+            Expr::Loop(l) => self.lower_loop(l),
+            Expr::Break(b) => self.lower_break(b),
+            Expr::Continue(c) => self.lower_continue(c),
+            Expr::Return(r) => self.lower_return(r),
             Expr::Call(c) => self.lower_call(c),
             Expr::MethodCall(m) => self.lower_method_call(m),
             Expr::Tuple(t) => self.lower_tuple(t),
@@ -1172,6 +1219,93 @@ impl<'a> Lowerer<'a> {
                 })
             }),
             ty: self.unit,
+        }
+    }
+
+    /// `for binding in iter { body }` (M8, §4.11).
+    fn lower_for(&mut self, f: &ForExpr) -> TypedExpr {
+        let iter = f
+            .iter()
+            .map(|i| Box::new(self.lower_expr(&i)))
+            .unwrap_or_else(|| Box::new(unit_lit(self.db)));
+        let body = f
+            .body()
+            .and_then(|b| self.lower_block(&b))
+            .map(Box::new)
+            .unwrap_or_else(|| {
+                Box::new(TypedBlock {
+                    stmts: Vec::new(),
+                    tail: unit_lit(self.db),
+                    ty: self.unit,
+                })
+            });
+        // Resolve the binding symbol from the name token's declaration site
+        // (`decls`, not `refs` — the binding token is a declaration, and the
+        // body's references to it resolve to this same symbol via `refs`).
+        let binding = f
+            .binding()
+            .and_then(|t| self.decls.get(&t.text_range()).copied())
+            .unwrap_or(SymbolId(0));
+        // The item type is read from the iterator's inferred element type; the
+        // inference pass records it on the binding's declaration range. Fall
+        // back to a fresh var if unavailable (malformed tree).
+        let item_ty = f
+            .binding()
+            .and_then(|t| self.ref_types.get(&t.text_range()).copied())
+            .unwrap_or_else(|| self.db.fresh_var());
+        TypedExpr::For {
+            binding,
+            iter,
+            body,
+            item_ty,
+            ty: self.unit,
+        }
+    }
+
+    /// `loop { body }` (M8, §4.11). The type is Unit for now (value-producing
+    /// loops via `break expr` refine this in the MIR; the HIR conservatively
+    /// reports Unit so a `loop` used as a value still type-checks broadly).
+    fn lower_loop(&mut self, l: &LoopExpr) -> TypedExpr {
+        let body = l
+            .body()
+            .and_then(|b| self.lower_block(&b))
+            .map(Box::new)
+            .unwrap_or_else(|| {
+                Box::new(TypedBlock {
+                    stmts: Vec::new(),
+                    tail: unit_lit(self.db),
+                    ty: self.unit,
+                })
+            });
+        TypedExpr::Loop {
+            body,
+            ty: self.unit,
+        }
+    }
+
+    /// `break [expr]` (M8, §4.11). Diverges; the optional value is lowered but
+    /// the expression's type is `Never`.
+    fn lower_break(&mut self, b: &BreakExpr) -> TypedExpr {
+        let value = b.value().map(|v| Box::new(self.lower_expr(&v)));
+        TypedExpr::Break {
+            value,
+            ty: self.db.never(),
+        }
+    }
+
+    /// `continue` (M8, §4.11). Diverges; type `Never`.
+    fn lower_continue(&mut self, _c: &ContinueExpr) -> TypedExpr {
+        TypedExpr::Continue {
+            ty: self.db.never(),
+        }
+    }
+
+    /// `return [expr]` (M8, §4.11). Diverges; type `Never`.
+    fn lower_return(&mut self, r: &ReturnExpr) -> TypedExpr {
+        let value = r.value().map(|v| Box::new(self.lower_expr(&v)));
+        TypedExpr::Return {
+            value,
+            ty: self.db.never(),
         }
     }
 
@@ -1668,6 +1802,11 @@ fn expr_ty(e: &TypedExpr) -> Type {
         TypedExpr::Block(b) => b.ty,
         TypedExpr::If { ty, .. } => *ty,
         TypedExpr::While { ty, .. } => *ty,
+        TypedExpr::For { ty, .. } => *ty,
+        TypedExpr::Loop { ty, .. } => *ty,
+        TypedExpr::Break { ty, .. } => *ty,
+        TypedExpr::Continue { ty, .. } => *ty,
+        TypedExpr::Return { ty, .. } => *ty,
         TypedExpr::Call { ty, .. } => *ty,
         TypedExpr::MethodCall { ty, .. } => *ty,
         TypedExpr::Tuple { ty, .. } => *ty,

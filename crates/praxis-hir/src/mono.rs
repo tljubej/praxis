@@ -249,6 +249,22 @@ fn rewrite_expr(e: &mut TypedExpr, pass: &mut MonoPass<'_>) {
             rewrite_expr(cond, pass);
             rewrite_block(body, pass);
         }
+        TypedExpr::For { iter, body, .. } => {
+            rewrite_expr(iter, pass);
+            rewrite_block(body, pass);
+        }
+        TypedExpr::Loop { body, .. } => rewrite_block(body, pass),
+        TypedExpr::Break { value, .. } => {
+            if let Some(v) = value {
+                rewrite_expr(v, pass);
+            }
+        }
+        TypedExpr::Continue { .. } => {}
+        TypedExpr::Return { value, .. } => {
+            if let Some(v) = value {
+                rewrite_expr(v, pass);
+            }
+        }
         TypedExpr::MethodCall { receiver, args, .. } => {
             rewrite_expr(receiver, pass);
             for a in args {
@@ -347,6 +363,11 @@ fn resolve_expr(db: &TypeDb, e: &mut TypedExpr) {
         | TypedExpr::Paren { ty, .. }
         | TypedExpr::If { ty, .. }
         | TypedExpr::While { ty, .. }
+        | TypedExpr::For { ty, .. }
+        | TypedExpr::Loop { ty, .. }
+        | TypedExpr::Break { ty, .. }
+        | TypedExpr::Continue { ty, .. }
+        | TypedExpr::Return { ty, .. }
         | TypedExpr::Call { ty, .. }
         | TypedExpr::MethodCall { ty, .. }
         | TypedExpr::Tuple { ty, .. }
@@ -403,6 +424,22 @@ fn resolve_expr(db: &TypeDb, e: &mut TypedExpr) {
             resolve_expr(db, cond);
             resolve_block(db, body);
         }
+        TypedExpr::For {
+            iter,
+            body,
+            item_ty,
+            ..
+        } => {
+            resolve_expr(db, iter);
+            *item_ty = resolve_type(db, *item_ty);
+            resolve_block(db, body);
+        }
+        TypedExpr::Loop { body, .. } => resolve_block(db, body),
+        TypedExpr::Break { value: Some(v), .. } => resolve_expr(db, v),
+        TypedExpr::Continue { .. }
+        | TypedExpr::Break { value: None, .. }
+        | TypedExpr::Return { value: None, .. } => {}
+        TypedExpr::Return { value: Some(v), .. } => resolve_expr(db, v),
         TypedExpr::Call {
             args, arg_types, ..
         } => {
