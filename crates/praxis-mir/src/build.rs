@@ -614,29 +614,20 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             callee,
             callee_name,
             args,
+            ty,
             ..
         } => {
-            // The `Vec()` builtin constructs an empty vector via praxis_vec_new.
-            // For M5 the element type is Int (a real type-arg `Vec[T]()` is a
-            // follow-up); pass a null descriptor and let the wrapper default.
-            if callee_name == "Vec" {
-                let dst = b.alloc_gc(Type(0), None);
-                // Pass 0 (null descriptor) as the single arg; praxis_vec_new
-                // defaults to INT when the descriptor pointer is null.
-                let null_arg = b.alloc_scalar(ScalarKind::Int);
-                b.push(Inst::ConstInt {
-                    dst: null_arg,
-                    value: 0,
-                });
-                let arg_gc = b.alloc_gc(Type(0), None);
-                b.push(Inst::MoveGc {
-                    dst: arg_gc,
-                    src: null_arg,
-                });
-                b.push(Inst::Call {
+            // Collection construction: `Vec[T]()`, `Deque[T]()`, etc. (M8 WS1,
+            // §11.1/§11.2). The element type is extracted from the call's result
+            // type (the collection type) and carried through `AllocKind::Collection`
+            // so the codegen resolves the real element descriptor (closing the M7
+            // null-descriptor carryover). `out`/`panic` and other builtins fall
+            // through to the generic call path below.
+            if let Some(alloc) = collection_alloc_kind(b, callee_name, *ty) {
+                let dst = b.alloc_gc(*ty, None);
+                b.push(Inst::Alloc {
                     dst,
-                    callee: CallTarget::Runtime("praxis_vec_new".to_string()),
-                    args: vec![arg_gc],
+                    alloc,
                     live_roots: Vec::new(),
                 });
                 b.check_fault();
@@ -1172,6 +1163,47 @@ fn expr_static_type(e: &TypedExpr) -> Type {
         | TypedExpr::Closure { ty, .. } => *ty,
         TypedExpr::Block(blk) => blk.ty,
     }
+}
+
+/// Build an [`AllocKind::Collection`] for a `Name[T]()` construction call, if
+/// `callee_name` is a known collection constructor. Returns `None` for
+/// non-collection callees (the common case) so the generic call path handles
+/// them. The element/key types are extracted from the call's result type
+/// (`result_ty`), which inference has already pinned to e.g. `Vec[Int]` or
+/// `Map[Text, Int]`.
+///
+/// `Seq` is intentionally rejected — it is compiler-internal and never
+/// constructed from source (§6.3, M8 WS8).
+fn collection_alloc_kind(b: &Builder<'_>, callee_name: &str, result_ty: Type) -> Option<AllocKind> {
+    use praxis_types::data::TypeData;
+    use praxis_types::CollectionCtor;
+    let ctor = match callee_name {
+        "Vec" => CollectionCtor::Vec,
+        "Deque" => CollectionCtor::Deque,
+        "Map" => CollectionCtor::Map,
+        "Set" => CollectionCtor::Set,
+        "Counter" => CollectionCtor::Counter,
+        "MinHeap" => CollectionCtor::MinHeap,
+        "MaxHeap" => CollectionCtor::MaxHeap,
+        "BitSet" => CollectionCtor::BitSet,
+        "Grid" => CollectionCtor::Grid,
+        "Range" => CollectionCtor::Range,
+        // Not a collection constructor; fall through to the generic call path.
+        _ => return None,
+    };
+    // Extract the type arguments from the result type. For a nullary collection
+    // (BitSet/Range) there are none; for Vec/Deque/Set/Heap/Grid/Counter there is
+    // one; for Map there are two. If the result type does not match the ctor's
+    // shape (a malformed call), fall back to an empty arg list — the codegen will
+    // resolve descriptors defensively (defaulting to INT), same as before.
+    let args: Vec<Type> = match b.db.data(b.db.follow(result_ty)) {
+        TypeData::Collection {
+            ctor: c,
+            args: ref a,
+        } if *c == ctor => a.clone(),
+        _ => Vec::new(),
+    };
+    Some(AllocKind::Collection { ctor, args })
 }
 
 /// Lower a record literal `Name { field: expr, … }` (M7, §4.5). Lowers each

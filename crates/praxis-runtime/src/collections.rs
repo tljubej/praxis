@@ -72,7 +72,7 @@ unsafe fn vec_format(payload: *const u8, out: &mut dyn fmt::Write) {
 }
 
 unsafe fn vec_equals(a: *const u8, b: *const u8) -> bool {
-    // SAFETY: caller guarantees both pointers point at initialized `VecPayload`s
+    // SAFETY: caller guarantees both pointers point at initialized VecPayload`s
     // with compatible element descriptors.
     let pa = unsafe { &*(a as *const VecPayload) };
     let pb = unsafe { &*(b as *const VecPayload) };

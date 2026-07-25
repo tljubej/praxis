@@ -191,6 +191,10 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
             alloc: crate::ir::AllocKind::Closure { captures, .. },
             ..
         } => captures.clone(),
+        Inst::Alloc {
+            alloc: crate::ir::AllocKind::Collection { .. },
+            ..
+        } => vec![],
         Inst::ExtractScalar { src, .. } => vec![*src],
         Inst::StoreScalar { dst_gc, src, .. } => vec![*dst_gc, *src],
         Inst::Materialize { src, .. } => vec![*src],

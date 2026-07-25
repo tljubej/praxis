@@ -245,6 +245,34 @@ fn vec_push_many_read_back_correct() {
     assert_eq!(result.as_int(), 499);
 }
 
+// --- M8-WS1: Vec[T]() construction honors the real element descriptor --------
+
+#[test]
+fn vec_of_vec_equality_after_construction() {
+    // Two `Vec()`-constructed vectors holding identical inner vectors must be
+    // structurally equal. This only works once `Vec[T]()` construction passes
+    // the *real* element descriptor (the outer Vec's element descriptor must be
+    // `VEC`, not the null/INT default), so nested equality dispatches through
+    // `vec_equals` on the inner elements. This is the headline M7-carryover
+    // fix for M8-WS1.
+    let src = "fn main() -> Int {\n  let outer_a = Vec()\n  let inner_a = Vec()\n  inner_a.push(1)\n  inner_a.push(2)\n  outer_a.push(inner_a)\n  let outer_b = Vec()\n  let inner_b = Vec()\n  inner_b.push(1)\n  inner_b.push(2)\n  outer_b.push(inner_b)\n  if outer_a == outer_b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn vec_of_vec_inequality_after_construction() {
+    // The complement: two `Vec()`-constructed vectors holding *different* inner
+    // vectors must be structurally unequal. Guards a regression where the
+    // element descriptor defaulted to INT (which would compare only lengths or
+    // mis-dispatch and could spuriously report equal).
+    let src = "fn main() -> Int {\n  let outer_a = Vec()\n  let inner_a = Vec()\n  inner_a.push(1)\n  inner_a.push(2)\n  outer_a.push(inner_a)\n  let outer_b = Vec()\n  let inner_b = Vec()\n  inner_b.push(1)\n  inner_b.push(9)\n  outer_b.push(inner_b)\n  if outer_a == outer_b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
 // ===========================================================================
 // Milestone 5: Text methods (§4.3) and `out(...)` (§16.1).
 // ===========================================================================

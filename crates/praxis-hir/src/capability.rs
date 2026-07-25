@@ -67,3 +67,148 @@ pub fn supports_eq(db: &TypeDb, t: Type) -> bool {
 pub fn supports_hash(db: &TypeDb, t: Type) -> bool {
     supports_eq(db, t)
 }
+
+/// The `Item` type yielded when iterating a value of type `t`, or `None` if `t`
+/// is not iterable (§5.4 `Iterable(T, Item)`, §4.11 "for loops over built-in
+/// iterable shapes").
+///
+/// Recursive over the type's structure. A `Vec[T]`/`Deque[T]`/`Set[T]`/
+/// `MinHeap[T]`/`MaxHeap[T]` yields `T`; a `BitSet` yields `Int`; a `Grid[T]`
+/// yields its cell type `T`; a `Range` yields `Int`. A `Map[K, V]` yields the
+/// `(K, V)` tuple (so a pipeline over a map threads key/value pairs). Functions,
+/// scalars, records, enums, and tuples are not iterable. An unresolved type
+/// variable is optimistically iterable, yielding itself (inference will pin it).
+///
+/// Takes `&mut TypeDb` because the `Map[K, V]` and `Counter[T]` cases mint fresh
+/// tuple types to return as the `Item`.
+#[must_use]
+pub fn iter_item(db: &mut TypeDb, t: Type) -> Option<Type> {
+    use praxis_stdlib::type_pattern::{CollectionCtor, ScalarType};
+    // Inspect the type shape by reading it into owned data first, so the
+    // immutable borrow of `db.data(...)` ends before the mutable `db.tuple`/
+    // `db.scalar` calls below.
+    let shape = match db.data(db.follow(t)) {
+        TypeData::Collection { ctor, args } => Some((*ctor, args.clone())),
+        TypeData::Var(_) => return Some(t),
+        _ => None,
+    }?;
+    let (ctor, args) = shape;
+    Some(match (ctor, &args[..]) {
+        // Sequence-shaped collections yield their single element type.
+        (CollectionCtor::Vec | CollectionCtor::Deque | CollectionCtor::Set, [el]) => *el,
+        // Heaps yield their element type (iteration order is unspecified but
+        // the element type is well-defined).
+        (CollectionCtor::MinHeap | CollectionCtor::MaxHeap, [el]) => *el,
+        // A grid yields its cell type.
+        (CollectionCtor::Grid, [cell]) => *cell,
+        // BitSet and Range are nullary collections of non-negative Ints.
+        (CollectionCtor::BitSet, _) | (CollectionCtor::Range, _) => db.scalar(ScalarType::Int),
+        // A map yields its (key, value) pairs as a tuple.
+        (CollectionCtor::Map, [k, v]) => db.tuple(vec![*k, *v]),
+        // A counter yields its (key, value=Int) pairs.
+        (CollectionCtor::Counter, [k]) => {
+            let int_ty = db.scalar(ScalarType::Int);
+            db.tuple(vec![*k, int_ty])
+        }
+        // `Seq[T]` is the compiler-internal pipeline source (M8 WS8); it
+        // threads its single element type through the pipeline.
+        (CollectionCtor::Seq, [el]) => *el,
+        // An under/over-applied or malformed collection ctor is not iterable.
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use praxis_stdlib::type_pattern::ScalarType;
+    use praxis_types::CollectionCtor;
+
+    /// True iff `t` resolves to the scalar `Int` (test helper only).
+    fn is_int(db: &TypeDb, t: Type) -> bool {
+        matches!(db.data(db.follow(t)), TypeData::Scalar(ScalarType::Int))
+    }
+
+    /// True iff `t` resolves to the scalar `Text` (test helper only).
+    fn is_text(db: &TypeDb, t: Type) -> bool {
+        matches!(db.data(db.follow(t)), TypeData::Scalar(ScalarType::Text))
+    }
+
+    #[test]
+    fn vec_yields_its_element_type() {
+        let mut db = TypeDb::new();
+        let int = db.int();
+        let vec_int = db.collection(CollectionCtor::Vec, vec![int]);
+        let item = iter_item(&mut db, vec_int).expect("Vec[Int] is iterable");
+        assert!(is_int(&db, item));
+    }
+
+    #[test]
+    fn map_yields_key_value_tuple() {
+        let mut db = TypeDb::new();
+        let (text, int) = (db.text(), db.int());
+        let map = db.collection(CollectionCtor::Map, vec![text, int]);
+        let item = iter_item(&mut db, map).expect("Map[Text,Int] is iterable");
+        match db.data(db.follow(item)) {
+            TypeData::Tuple(els) => {
+                assert_eq!(els.len(), 2);
+                assert!(is_text(&db, els[0]));
+                assert!(is_int(&db, els[1]));
+            }
+            other => panic!("expected tuple item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn counter_yields_key_and_int_value() {
+        let mut db = TypeDb::new();
+        let text = db.text();
+        let counter = db.collection(CollectionCtor::Counter, vec![text]);
+        let item = iter_item(&mut db, counter).expect("Counter[Text] is iterable");
+        match db.data(db.follow(item)) {
+            TypeData::Tuple(els) => {
+                assert_eq!(els.len(), 2);
+                assert!(is_text(&db, els[0]));
+                assert!(is_int(&db, els[1]));
+            }
+            other => panic!("expected tuple item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bitset_yields_int() {
+        let mut db = TypeDb::new();
+        let bitset = db.collection(CollectionCtor::BitSet, vec![]);
+        let item = iter_item(&mut db, bitset).expect("BitSet is iterable");
+        assert!(is_int(&db, item));
+    }
+
+    #[test]
+    fn grid_yields_its_cell_type() {
+        let mut db = TypeDb::new();
+        let int = db.int();
+        let grid = db.collection(CollectionCtor::Grid, vec![int]);
+        let item = iter_item(&mut db, grid).expect("Grid[Int] is iterable");
+        assert!(is_int(&db, item));
+    }
+
+    #[test]
+    fn scalars_and_functions_are_not_iterable() {
+        let mut db = TypeDb::new();
+        let (int, unit) = (db.int(), db.unit());
+        assert!(iter_item(&mut db, int).is_none());
+        assert!(iter_item(&mut db, unit).is_none());
+        let (param, result) = (db.int(), db.int());
+        let func = db.func(vec![param], result);
+        assert!(iter_item(&mut db, func).is_none());
+    }
+
+    #[test]
+    fn unresolved_var_is_optimistically_iterable() {
+        // An unbound var is optimistically iterable, yielding itself: a `for`
+        // over a not-yet-pinned source type-checks, and inference pins it later.
+        let mut db = TypeDb::new();
+        let v = db.fresh_var();
+        assert!(iter_item(&mut db, v).is_some());
+    }
+}

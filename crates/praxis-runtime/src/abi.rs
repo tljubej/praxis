@@ -39,7 +39,12 @@ use crate::{collections::VecPayload, descriptor::TypeDescriptor};
 /// v6 (M7 Part 3, WS7b): mutable-capture cells — `praxis_alloc_var_cell`,
 /// `praxis_var_cell_get`, `praxis_var_cell_set`. (`praxis_closure_fn_ptr` also
 /// gained a `ctx` param for ABI uniformity in WS7a, kept within v5's window.)
-pub const RUNTIME_ABI_VERSION: u32 = 6;
+/// v7 (M8 WS1): collection construction now carries the real element descriptor
+/// (closing the M7 `Vec[T]()` null-descriptor carryover). The construction path
+/// is generalized across all M8 collection kinds as they land (Deque/Map/Set/
+/// Counter/Heap/BitSet/complete Grid); each adds its own `praxis_<kind>_*`
+/// wrappers within this version window.
+pub const RUNTIME_ABI_VERSION: u32 = 7;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -61,7 +66,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 6;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 7;
 
 // ---------------------------------------------------------------------------
 // Internals the wrappers share.
@@ -966,6 +971,24 @@ pub unsafe extern "C" fn praxis_vec_push(
     unsafe { maybe_collect(ctx) };
     // SAFETY: caller guarantees `vec` is a valid Vec.
     let p = unsafe { vec_payload_mut(vec) };
+    // M8-WS1: if the element descriptor is still the construction-time default
+    // (`INT`, used when the element type was not yet pinned at construction — the
+    // `forall T. () -> Vec[T]` builtin leaves `T` generalized until first use),
+    // and the pushed value is itself a non-scalar-Int GC object, adopt the pushed
+    // value's descriptor. This is sound because the type checker guarantees every
+    // element shares one type: the first push fixes the descriptor for the whole
+    // vector, making structural equality/hashing of nested collections dispatch
+    // correctly regardless of construction-time inference (§5.5, §11.2). It is a
+    // no-op for the common `Vec[Int]` case (descriptor already matches).
+    let pushed_desc = value.descriptor();
+    // Compare by `TypeId` (canonical type identity, descriptor.rs:14), not by
+    // pointer: `const` descriptors may be duplicated across crate boundaries, so
+    // two `INT` copies can have distinct addresses but the same `TypeId(0)`.
+    let cur_is_int = unsafe { (*p.element_descriptor).id } == scalars::INT.id;
+    let pushed_is_int = pushed_desc.id == scalars::INT.id;
+    if cur_is_int && !pushed_is_int {
+        p.element_descriptor = pushed_desc;
+    }
     p.items.push(value);
     unsafe { unit_sentinel(ctx) }
 }
@@ -1181,8 +1204,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_six_at_milestone_7_part3_ws7b() {
-        assert_eq!(RUNTIME_ABI_VERSION, 6);
+    fn version_is_seven_at_milestone_8_ws1() {
+        assert_eq!(RUNTIME_ABI_VERSION, 7);
     }
 
     #[test]

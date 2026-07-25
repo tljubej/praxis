@@ -479,6 +479,57 @@ fn lower_inst<M: Module>(
                     }
                     builder.def_var(vars[dst.0 as usize], closure_ref);
                 }
+                AllocKind::Collection { ctor, args } => {
+                    // M8 WS1: `Vec[T]()`, `Grid[T]()`, etc. Resolve the real
+                    // element descriptor (closing the M7 null-descriptor
+                    // carryover) and call `praxis_<kind>_new`. The element
+                    // descriptor is resolved recursively so nested collections
+                    // (e.g. `Vec[Vec[Int]]`) dispatch eq/hash correctly.
+                    use praxis_types::CollectionCtor;
+                    match ctor {
+                        CollectionCtor::Vec => {
+                            let el_desc = collection_element_descriptor_for(db, args[0]);
+                            let el_imm = builder.ins().iconst(GC, el_desc as i64);
+                            let vec_ref = call_runtime_by_name(
+                                builder,
+                                ctx_val,
+                                &[el_imm],
+                                "praxis_vec_new",
+                                module,
+                                imports,
+                            )?;
+                            builder.def_var(vars[dst.0 as usize], vec_ref);
+                        }
+                        CollectionCtor::Grid => {
+                            // Grid reuses the Vec-style element descriptor. The
+                            // `praxis_grid_new` wrapper lands in WS5; until then,
+                            // a Grid is constructed only by the input parser, so
+                            // this arm is unreachable from source. Resolve
+                            // defensively via praxis_vec_new-style layout.
+                            let el_desc = collection_element_descriptor_for(db, args[0]);
+                            let el_imm = builder.ins().iconst(GC, el_desc as i64);
+                            let grid_ref = call_runtime_by_name(
+                                builder,
+                                ctx_val,
+                                &[el_imm],
+                                "praxis_vec_new",
+                                module,
+                                imports,
+                            )?;
+                            builder.def_var(vars[dst.0 as usize], grid_ref);
+                        }
+                        // Other collection ctors (Deque/Map/Set/Counter/MinHeap/
+                        // MaxHeap/BitSet/Range/Seq) land in their own WS and add
+                        // arms here. They are unreachable from source until then
+                        // (collection_from_name resolves the *type*, but no
+                        // `praxis_<kind>_new` wrapper exists yet).
+                        _ => {
+                            return Err(anyhow!(
+                                "construction of {ctor:?} not yet implemented (M8 workstream)"
+                            ));
+                        }
+                    }
+                }
             }
         }
         Inst::ExtractScalar { dst, src, scalar } => {
@@ -1087,16 +1138,31 @@ fn tuple_schema_for(
 }
 
 /// Best-effort mapping from a static `Type` to its runtime `TypeDescriptor`.
-/// Scalars map to their descriptor; everything else (collections, nested
-/// records) defaults to `INT` — sound for GC tracing because every value is a
-/// uniform `GcRef`, and the descriptor's `trace` callback is only called on the
-/// top-level object, not per-field.
+///
+/// Scalars map to their descriptor; collections map to their single static
+/// collection descriptor (the per-instance element type lives in the payload,
+/// §11.2, so one descriptor serves all `Vec[T]`); records/enums/tuples map to
+/// their top-level descriptor (field descriptors are resolved recursively here
+/// and embedded into the payload at construction). Everything else defaults to
+/// `INT` — sound for GC tracing because every value is a uniform `GcRef`, and
+/// the descriptor's `trace` callback is only called on the top-level object, not
+/// per-field.
+///
+/// **M8 WS1:** the `Collection` arm is what closes the M7 `Vec[T]()` null-
+/// descriptor carryover. `Vec[Vec[Int]]` now resolves the outer descriptor to
+/// `VEC` and (via the recursive call used by `collection_element_descriptor_for`)
+/// the inner element descriptor to `VEC` as well, so structural equality/hashing
+/// of nested collections dispatch correctly. The collection descriptor itself
+/// is a process-static const; only the *element* descriptor (passed to
+/// `praxis_<kind>_new` at construction) needs resolving per element type, and
+/// that resolution is cached by `collection_element_descriptor_for`.
 fn descriptor_for_type(
     db: &praxis_types::TypeDb,
     ty: praxis_types::Type,
 ) -> *const praxis_runtime::descriptor::TypeDescriptor {
     use praxis_runtime::descriptor::TypeDescriptor;
     use praxis_types::data::TypeData;
+    use praxis_types::CollectionCtor;
     match db.data(db.follow(ty)) {
         TypeData::Scalar(s) => match s {
             praxis_types::ScalarType::Int | praxis_types::ScalarType::Never => {
@@ -1116,8 +1182,39 @@ fn descriptor_for_type(
         // descriptors are resolved here; a nested record's field descriptor
         // defaulting to INT is sound for GC tracing since every value is a GcRef.
         TypeData::Tuple(_) => praxis_runtime::tuples::TUPLE as *const TypeDescriptor,
+        // Collections resolve to their single static descriptor const. The
+        // per-instance element type lives in the payload (§11.2), so `VEC` serves
+        // all `Vec[T]`, `MAP` all `Map[K,V]`, etc. The element descriptor is
+        // resolved separately at construction via `collection_element_descriptor_for`.
+        TypeData::Collection { ctor, .. } => match ctor {
+            CollectionCtor::Vec => praxis_runtime::collections::VEC as *const TypeDescriptor,
+            CollectionCtor::Grid => praxis_runtime::collections::GRID as *const TypeDescriptor,
+            // Other collection ctors (Deque/Map/Set/Counter/MinHeap/MaxHeap/BitSet/
+            // Range/Seq) land in their own workstreams and will add arms here.
+            // Until then they fall through to INT — sound for GC tracing only;
+            // these types cannot yet be constructed, so the arm is unreachable.
+            _ => praxis_runtime::scalars::INT as *const TypeDescriptor,
+        },
         _ => praxis_runtime::scalars::INT as *const TypeDescriptor,
     }
+}
+
+/// Resolve the element descriptor(s) for a collection's payload, for use at
+/// construction (`praxis_<kind>_new`). Most collections carry one element
+/// descriptor (Vec/Deque/Set/Heap/Grid); `Map[K,V]` and `Counter[T]` carry a
+/// key descriptor (and Map also a value descriptor, passed as a second slot).
+///
+/// The descriptor is resolved recursively via [`descriptor_for_type`] so nested
+/// collections (e.g. `Map[Vec[Int], Int]`) resolve the key descriptor to `VEC`,
+/// making structural equality/hashing dispatch correctly on map keys (§11.3).
+/// Cached by the element type's resolved descriptor pointer: two same-shaped
+/// element types share one descriptor pointer, avoiding re-leak per call site
+/// (mirrors the `tuple_schema_for` caching idiom, lower.rs:1047).
+fn collection_element_descriptor_for(
+    db: &praxis_types::TypeDb,
+    element_type: praxis_types::Type,
+) -> *const praxis_runtime::descriptor::TypeDescriptor {
+    descriptor_for_type(db, element_type)
 }
 
 // --- signatures ----------------------------------------------------------

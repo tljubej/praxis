@@ -1207,14 +1207,33 @@ impl Inferer {
         Some(self.db.scalar(scalar))
     }
 
-    /// Resolve a collection type name + args to a [`Type`] (M5, §4.4). M5
-    /// supports `Vec`; other ctors are reserved and return `None` (reported as
-    /// an unknown type by resolution).
+    /// Resolve a collection type name + args to a [`Type`] (§4.4, §11.2). M8
+    /// opens the full collection set: every §6.1 ctor resolves to its
+    /// [`CollectionCtor`]. `Seq` is compiler-internal (M8 WS8, §6.3) and is never
+    /// user-named — it is rejected here so `Seq[T]` in source surfaces as an
+    /// unknown type. Construction (`Vec[T]()`) is wired per workstream as each
+    /// collection's runtime payload lands; the *type* resolves for all ctors so
+    /// annotations and signatures can name them ahead of construction support.
     fn collection_from_name(&mut self, name: &str, args: Vec<Type>) -> Option<Type> {
+        use praxis_types::CollectionCtor;
         let ctor = match name {
-            "Vec" => praxis_types::CollectionCtor::Vec,
+            "Vec" => CollectionCtor::Vec,
+            "Deque" => CollectionCtor::Deque,
+            "Map" => CollectionCtor::Map,
+            "Set" => CollectionCtor::Set,
+            "Counter" => CollectionCtor::Counter,
+            "MinHeap" => CollectionCtor::MinHeap,
+            "MaxHeap" => CollectionCtor::MaxHeap,
+            "BitSet" => CollectionCtor::BitSet,
+            "Grid" => CollectionCtor::Grid,
+            "Range" => CollectionCtor::Range,
+            // `Seq` is compiler-internal (§6.3, M8 WS8); never user-named.
+            "Seq" => return None,
             _ => return None,
         };
+        // Arity check: the ctor declares how many type args it takes. A wrong
+        // arity is a type error surfaced as a unification failure downstream
+        // (the args vec length won't match), so just pass them through here.
         Some(self.db.collection(ctor, args))
     }
 }

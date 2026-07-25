@@ -234,6 +234,19 @@ pub enum AllocKind {
         fn_name: String,
         captures: Vec<LocalId>,
     },
+    /// An empty collection constructed via `Vec[T]()`, `Deque[T]()`, etc. (M8,
+    /// §11.1/§11.2). The codegen resolves the element/key descriptor(s) from
+    /// `ctor` + `args` (the static type args) via [`descriptor_for_type`] and
+    /// calls `praxis_<kind>_new`. Carrying the type args (not a pre-resolved
+    /// pointer) mirrors `AllocKind::Tuple { ty, .. }`: the descriptor is resolved
+    /// in the backend, where the process-static descriptor consts live.
+    /// `args` are the collection's type arguments in order (`Vec`/`Deque`/`Set`/
+    /// `Heap`/`Grid` → one element type; `Map` → `[K, V]`; `Counter` → `[K]`;
+    /// `BitSet`/`Range` → empty).
+    Collection {
+        ctor: praxis_types::CollectionCtor,
+        args: Vec<praxis_types::Type>,
+    },
 }
 
 /// A call target. M4 resolves user functions by name; the backend mints a symbol.

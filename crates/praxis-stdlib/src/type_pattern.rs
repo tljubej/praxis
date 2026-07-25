@@ -57,7 +57,10 @@ pub enum ScalarType {
 }
 
 /// Built-in collection constructors (§6.1). `Range` and `BitSet` take no type
-/// arguments; the others take one (`Vec`, `Set`, ...) or two (`Map`).
+/// arguments; the others take one (`Vec`, `Set`, ...) or two (`Map`). `Seq` is
+/// the compiler-internal pipeline source (M8 WS8, §6.3): it is never user-named
+/// and has no runtime representation, but it threads the element type through
+/// lazy pipelines.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CollectionCtor {
     Vec,
@@ -70,6 +73,8 @@ pub enum CollectionCtor {
     BitSet,
     Grid,
     Range,
+    /// Compiler-internal lazy sequence (M8 WS8, §6.3). Never appears in source.
+    Seq,
 }
 
 impl CollectionCtor {
@@ -84,7 +89,9 @@ impl CollectionCtor {
         }
     }
 
-    /// The user-facing name of this collection constructor, e.g. `Vec`.
+    /// The user-facing name of this collection constructor, e.g. `Vec`. `Seq`
+    /// is internal and has no user-facing name; `name()` returns `"Seq"` only
+    /// for diagnostics/debugging.
     pub fn name(self) -> &'static str {
         match self {
             CollectionCtor::Vec => "Vec",
@@ -97,6 +104,7 @@ impl CollectionCtor {
             CollectionCtor::BitSet => "BitSet",
             CollectionCtor::Grid => "Grid",
             CollectionCtor::Range => "Range",
+            CollectionCtor::Seq => "Seq",
         }
     }
 }

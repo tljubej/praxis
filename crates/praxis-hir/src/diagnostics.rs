@@ -76,6 +76,17 @@ pub(crate) fn not_equatable(at: FileSpan, ty: &str) -> Diagnostic {
     )
 }
 
+/// `Y005` — a value is iterated (`for x in …`) whose type is not iterable (§4.11,
+/// §5.4 `Iterable`). Wording is concrete and never names the capability (§5.4).
+pub(crate) fn not_iterable(at: FileSpan, ty: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagnosticCode::new(DiagnosticCategory::Type, 5),
+        format!("values of type `{ty}` cannot be iterated"),
+        at,
+    )
+}
+
 /// `Y120` — a `match` is not exhaustive: some values of the scrutinee type are
 /// not covered by any arm. The missing constructors are named to guide the fix.
 pub(crate) fn non_exhaustive(at: FileSpan, missing: &str) -> Diagnostic {
