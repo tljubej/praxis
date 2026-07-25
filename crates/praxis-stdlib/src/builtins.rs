@@ -43,6 +43,21 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(deque_len())
         .entry(deque_get())
         .entry(deque_is_empty())
+        .entry(map_insert())
+        .entry(map_get())
+        .entry(map_contains())
+        .entry(map_remove())
+        .entry(map_len())
+        .entry(map_is_empty())
+        .entry(set_insert())
+        .entry(set_remove())
+        .entry(set_contains())
+        .entry(set_len())
+        .entry(set_is_empty())
+        .entry(counter_get())
+        .entry(counter_inc())
+        .entry(counter_len())
+        .entry(counter_is_empty())
         .entry(text_len())
         .entry(text_is_empty())
         .entry(text_get())
@@ -272,6 +287,259 @@ fn deque_is_empty() -> MethodEntry {
         allocates: false,
         lowering: MethodLowering::RuntimeSymbol("praxis_deque_is_empty"),
         doc: "True iff the deque has no elements.",
+        stability: Stability::Stable,
+    }
+}
+
+// --- Map / Set / Counter methods (M8-WS3, §6.1, §11.3) -------------------
+
+/// The `Map[K, V]` receiver pattern: two type args (key, value).
+fn map_of_k_v() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::Map,
+        args: vec![TypePattern::Var("K"), TypePattern::Var("V")],
+    }
+}
+
+/// The `Set[T]` receiver pattern.
+fn set_of_t() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::Set,
+        args: vec![TypePattern::Var("T")],
+    }
+}
+
+/// The `Counter[T]` receiver pattern (key type only; values are Int).
+fn counter_of_t() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::Counter,
+        args: vec![TypePattern::Var("T")],
+    }
+}
+
+fn map_insert() -> MethodEntry {
+    MethodEntry {
+        receiver: map_of_k_v(),
+        name: "insert",
+        params: vec![TypePattern::Var("K"), TypePattern::Var("V")],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_map_insert"),
+        doc: "Set `key` to `value`, replacing any prior value; returns Unit.",
+        stability: Stability::Stable,
+    }
+}
+
+fn map_get() -> MethodEntry {
+    MethodEntry {
+        receiver: map_of_k_v(),
+        name: "get",
+        params: vec![TypePattern::Var("K")],
+        // For now the result is V (Unit if absent); a real Option[V] is a
+        // follow-up once Option lands more broadly.
+        result: TypePattern::Var("V"),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_map_get"),
+        doc: "The value for `key`, or Unit if absent (use `contains` to distinguish).",
+        stability: Stability::Stable,
+    }
+}
+
+fn map_contains() -> MethodEntry {
+    MethodEntry {
+        receiver: map_of_k_v(),
+        name: "contains",
+        params: vec![TypePattern::Var("K")],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_map_contains"),
+        doc: "True iff `key` is present in the map.",
+        stability: Stability::Stable,
+    }
+}
+
+fn map_remove() -> MethodEntry {
+    MethodEntry {
+        receiver: map_of_k_v(),
+        name: "remove",
+        params: vec![TypePattern::Var("K")],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_map_remove"),
+        doc: "Remove `key` if present; returns Unit.",
+        stability: Stability::Stable,
+    }
+}
+
+fn map_len() -> MethodEntry {
+    MethodEntry {
+        receiver: map_of_k_v(),
+        name: "len",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_map_len"),
+        doc: "Number of entries in the map.",
+        stability: Stability::Stable,
+    }
+}
+
+fn map_is_empty() -> MethodEntry {
+    MethodEntry {
+        receiver: map_of_k_v(),
+        name: "is_empty",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_map_is_empty"),
+        doc: "True iff the map has no entries.",
+        stability: Stability::Stable,
+    }
+}
+
+fn set_insert() -> MethodEntry {
+    MethodEntry {
+        receiver: set_of_t(),
+        name: "insert",
+        params: vec![TypePattern::Var("T")],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_set_insert"),
+        doc: "Add `value` to the set; returns Unit.",
+        stability: Stability::Stable,
+    }
+}
+
+fn set_remove() -> MethodEntry {
+    MethodEntry {
+        receiver: set_of_t(),
+        name: "remove",
+        params: vec![TypePattern::Var("T")],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_set_remove"),
+        doc: "Remove `value` if present; returns Unit.",
+        stability: Stability::Stable,
+    }
+}
+
+fn set_contains() -> MethodEntry {
+    MethodEntry {
+        receiver: set_of_t(),
+        name: "contains",
+        params: vec![TypePattern::Var("T")],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_set_contains"),
+        doc: "True iff `value` is in the set.",
+        stability: Stability::Stable,
+    }
+}
+
+fn set_len() -> MethodEntry {
+    MethodEntry {
+        receiver: set_of_t(),
+        name: "len",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_set_len"),
+        doc: "Number of elements in the set.",
+        stability: Stability::Stable,
+    }
+}
+
+fn set_is_empty() -> MethodEntry {
+    MethodEntry {
+        receiver: set_of_t(),
+        name: "is_empty",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_set_is_empty"),
+        doc: "True iff the set has no elements.",
+        stability: Stability::Stable,
+    }
+}
+
+fn counter_get() -> MethodEntry {
+    MethodEntry {
+        receiver: counter_of_t(),
+        name: "get",
+        params: vec![TypePattern::Var("T")],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_counter_get"),
+        doc: "The count for `key`, or zero if absent (never faults).",
+        stability: Stability::Stable,
+    }
+}
+
+fn counter_inc() -> MethodEntry {
+    MethodEntry {
+        receiver: counter_of_t(),
+        name: "inc",
+        params: vec![TypePattern::Var("T")],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_counter_inc"),
+        doc: "Increment the count for `key` by one; returns Unit.",
+        stability: Stability::Stable,
+    }
+}
+
+fn counter_len() -> MethodEntry {
+    MethodEntry {
+        receiver: counter_of_t(),
+        name: "len",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_counter_len"),
+        doc: "Number of distinct keys in the counter.",
+        stability: Stability::Stable,
+    }
+}
+
+fn counter_is_empty() -> MethodEntry {
+    MethodEntry {
+        receiver: counter_of_t(),
+        name: "is_empty",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_counter_is_empty"),
+        doc: "True iff the counter has no keys.",
         stability: Stability::Stable,
     }
 }

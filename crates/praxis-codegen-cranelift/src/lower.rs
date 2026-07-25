@@ -515,6 +515,50 @@ fn lower_inst<M: Module>(
                             )?;
                             builder.def_var(vars[dst.0 as usize], deque_ref);
                         }
+                        CollectionCtor::Map => {
+                            // Map: pass the key descriptor to praxis_map_new.
+                            // The value descriptor is adopted from the first
+                            // inserted value at runtime (§11.3).
+                            let key_desc = collection_element_descriptor_for(db, args[0]);
+                            let key_imm = builder.ins().iconst(GC, key_desc as i64);
+                            let map_ref = call_runtime_by_name(
+                                builder,
+                                ctx_val,
+                                &[key_imm],
+                                "praxis_map_new",
+                                module,
+                                imports,
+                            )?;
+                            builder.def_var(vars[dst.0 as usize], map_ref);
+                        }
+                        CollectionCtor::Set => {
+                            // Set: pass the element descriptor.
+                            let el_desc = collection_element_descriptor_for(db, args[0]);
+                            let el_imm = builder.ins().iconst(GC, el_desc as i64);
+                            let set_ref = call_runtime_by_name(
+                                builder,
+                                ctx_val,
+                                &[el_imm],
+                                "praxis_set_new",
+                                module,
+                                imports,
+                            )?;
+                            builder.def_var(vars[dst.0 as usize], set_ref);
+                        }
+                        CollectionCtor::Counter => {
+                            // Counter: pass the key descriptor.
+                            let key_desc = collection_element_descriptor_for(db, args[0]);
+                            let key_imm = builder.ins().iconst(GC, key_desc as i64);
+                            let counter_ref = call_runtime_by_name(
+                                builder,
+                                ctx_val,
+                                &[key_imm],
+                                "praxis_counter_new",
+                                module,
+                                imports,
+                            )?;
+                            builder.def_var(vars[dst.0 as usize], counter_ref);
+                        }
                         CollectionCtor::Grid => {
                             // Grid reuses the Vec-style element descriptor. The
                             // `praxis_grid_new` wrapper lands in WS5; until then,
@@ -1205,10 +1249,13 @@ fn descriptor_for_type(
             CollectionCtor::Vec => praxis_runtime::collections::VEC as *const TypeDescriptor,
             CollectionCtor::Grid => praxis_runtime::collections::GRID as *const TypeDescriptor,
             CollectionCtor::Deque => praxis_runtime::collections::DEQUE as *const TypeDescriptor,
-            // Other collection ctors (Map/Set/Counter/MinHeap/MaxHeap/BitSet/
-            // Range/Seq) land in their own workstreams and will add arms here.
-            // Until then they fall through to INT — sound for GC tracing only;
-            // these types cannot yet be constructed, so the arm is unreachable.
+            CollectionCtor::Map => praxis_runtime::maps::MAP as *const TypeDescriptor,
+            CollectionCtor::Set => praxis_runtime::maps::SET as *const TypeDescriptor,
+            CollectionCtor::Counter => praxis_runtime::maps::COUNTER as *const TypeDescriptor,
+            // Other collection ctors (MinHeap/MaxHeap/BitSet/Range/Seq) land in
+            // their own workstreams and will add arms here. Until then they fall
+            // through to INT — sound for GC tracing only; these types cannot yet
+            // be constructed, so the arm is unreachable.
             _ => praxis_runtime::scalars::INT as *const TypeDescriptor,
         },
         _ => praxis_runtime::scalars::INT as *const TypeDescriptor,

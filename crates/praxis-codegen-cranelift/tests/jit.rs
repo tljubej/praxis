@@ -365,6 +365,151 @@ fn deque_equality_is_structural() {
     assert_eq!(result.as_int(), 1);
 }
 
+// --- M8-WS3: Map[K,V] / Set[T] / Counter[T] (§6.1, §11.3) -------------------
+// These are the headline §19.7 tests: tuples/records/nested collections as
+// map/set keys, working end-to-end through the DynamicKey descriptor bridge.
+
+#[test]
+fn map_insert_get_len_end_to_end() {
+    // Insert two (Int→Int) entries, get one back, check len.
+    let src =
+        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  m.insert(2, 20)\n  m.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn map_get_returns_inserted_value() {
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(7, 42)\n  m.get(7)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn map_get_absent_returns_unit() {
+    // An absent key returns Unit (a real Option[V] return is a follow-up; for
+    // now `get` is paired with `contains` to distinguish present/absent). The
+    // returned Unit is not an Int, so we only assert no fault occurred.
+    let src = "fn main() -> Int {\n  let m = Map()\n  let _ = m.get(99)\n  0\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+}
+
+#[test]
+fn map_contains_distinguishes_present_and_absent() {
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(5, 1)\n  if m.contains(5) { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn map_remove_drops_entry() {
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  m.insert(2, 20)\n  m.remove(1)\n  m.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn map_insert_overwrites_prior_value() {
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  m.insert(1, 99)\n  m.get(1)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 99);
+}
+
+#[test]
+fn map_with_tuple_keys_end_to_end() {
+    // The headline §19.7 criterion: tuples as map keys. Two structurally-equal
+    // tuples must hit the same entry.
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert((1, 2), 100)\n  m.get((1, 2))\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 100);
+}
+
+#[test]
+fn map_with_distinct_tuple_keys() {
+    // (1,2) and (1,3) are distinct keys.
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert((1, 2), 100)\n  m.insert((1, 3), 200)\n  m.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn map_with_text_keys_end_to_end() {
+    // Text keys: two equal strings hit the same entry.
+    let src =
+        "fn main() -> Int {\n  let m = Map()\n  m.insert(\"hello\", 1)\n  m.get(\"hello\")\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn set_insert_contains_len_end_to_end() {
+    let src = "fn main() -> Int {\n  let s = Set()\n  s.insert(1)\n  s.insert(2)\n  s.insert(1)\n  s.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    // Duplicate insert (1 twice) → 2 distinct elements.
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn set_contains_true_false() {
+    let src = "fn main() -> Int {\n  let s = Set()\n  s.insert(7)\n  if s.contains(7) { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn set_with_tuple_keys() {
+    // Tuples in a set (§19.7).
+    let src = "fn main() -> Int {\n  let s = Set()\n  s.insert((1, 2))\n  s.insert((1, 2))\n  s.insert((3, 4))\n  s.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn counter_absent_reads_zero() {
+    // §6.2: "Counter missing values behave as zero" — the §19.8 acceptance
+    // criterion. An absent key's count is 0.
+    let src = "fn main() -> Int {\n  let c = Counter()\n  c.get(\"absent\")\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+#[test]
+fn counter_inc_increments() {
+    let src = "fn main() -> Int {\n  let c = Counter()\n  c.inc(\"a\")\n  c.inc(\"a\")\n  c.inc(\"a\")\n  c.get(\"a\")\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn counter_distinct_keys_tracked_separately() {
+    let src = "fn main() -> Int {\n  let c = Counter()\n  c.inc(\"a\")\n  c.inc(\"b\")\n  c.inc(\"b\")\n  c.get(\"b\")\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn counter_len_counts_distinct_keys() {
+    let src = "fn main() -> Int {\n  let c = Counter()\n  c.inc(\"a\")\n  c.inc(\"a\")\n  c.inc(\"b\")\n  c.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
 // ===========================================================================
 // Milestone 5: Text methods (§4.3) and `out(...)` (§16.1).
 // ===========================================================================

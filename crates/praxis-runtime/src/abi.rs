@@ -17,6 +17,7 @@
 //! defined sentinel.
 
 use crate::context::{FaultKind, RuntimeContext};
+use crate::dynamic_key::DynamicKey;
 use crate::gc::GcRef;
 use crate::heap::Heap;
 use crate::scalars;
@@ -1224,6 +1225,433 @@ pub unsafe extern "C" fn praxis_deque_is_empty(ctx: *mut RuntimeContext, deque: 
     let p = unsafe { deque_payload(deque) };
     let empty = p.items.is_empty();
     unsafe { heap(ctx).alloc_immortal(scalars::BOOL, empty) }
+}
+
+// ---------------------------------------------------------------------------
+// Map[K, V] / Set[T] / Counter[T] (M8-WS3, §6.1, §11.3).
+//
+// All three reuse Rust hash collections behind opaque GC objects. Keys are
+// wrapped in `DynamicKey`, which delegates Rust `Hash`/`Eq` to the descriptor's
+// structural callbacks — this is what makes tuples/records/enums/nested
+// collections work as keys (§19.7 criterion). Counter's absent keys read as
+// zero (§6.2); `min=`/`max=` update a map entry in place (§6.2).
+// ---------------------------------------------------------------------------
+
+use crate::maps::{CounterPayload, MapPayload, SetPayload};
+
+/// Read a `MapPayload` as a shared ref. See `vec_payload` for the safety model.
+unsafe fn map_payload(r: GcRef) -> &'static MapPayload {
+    unsafe { &*r.payload::<MapPayload>() }
+}
+
+unsafe fn map_payload_mut(r: GcRef) -> &'static mut MapPayload {
+    unsafe { &mut *r.payload::<MapPayload>() }
+}
+
+unsafe fn set_payload(r: GcRef) -> &'static SetPayload {
+    unsafe { &*r.payload::<SetPayload>() }
+}
+
+unsafe fn set_payload_mut(r: GcRef) -> &'static mut SetPayload {
+    unsafe { &mut *r.payload::<SetPayload>() }
+}
+
+unsafe fn counter_payload(r: GcRef) -> &'static CounterPayload {
+    unsafe { &*r.payload::<CounterPayload>() }
+}
+
+unsafe fn counter_payload_mut(r: GcRef) -> &'static mut CounterPayload {
+    unsafe { &mut *r.payload::<CounterPayload>() }
+}
+
+/// Allocate an empty `Map[K, V]`. `key_descriptor` selects the structural
+/// hash/eq for `DynamicKey`; `value_descriptor` is recorded for format/trace.
+/// A null descriptor defaults to INT (matching `praxis_vec_new`).
+///
+/// # Safety
+/// `ctx` must be live and wired. `key_descriptor` must be a valid pointer to a
+/// `'static TypeDescriptor` (or null).
+#[no_mangle]
+pub unsafe extern "C" fn praxis_map_new(
+    ctx: *mut RuntimeContext,
+    key_descriptor: *const TypeDescriptor,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let key_descriptor = if key_descriptor.is_null() {
+        scalars::INT
+    } else {
+        unsafe { &*key_descriptor }
+    };
+    // The value descriptor defaults to INT; the compiler will specialize this
+    // to pass the real value type as a second slot when Map construction
+    // carries both type args (a follow-up generalization). For now INT is
+    // sound: values are uniform GcRefs and format via the descriptor adopted
+    // from the first inserted value.
+    let value_descriptor = scalars::INT;
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::maps::MAP,
+            std::mem::size_of::<MapPayload>(),
+            std::mem::align_of::<MapPayload>(),
+            |payload| {
+                (payload as *mut MapPayload).write(MapPayload {
+                    key_descriptor,
+                    value_descriptor,
+                    entries: std::collections::HashMap::new(),
+                });
+            },
+        )
+    }
+}
+
+/// Insert `(key, value)` into `map`, replacing any prior value; returns Unit.
+///
+/// # Safety
+/// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`; `key` and
+/// `value` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_map_insert(
+    ctx: *mut RuntimeContext,
+    map: GcRef,
+    key: GcRef,
+    value: GcRef,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let p = unsafe { map_payload_mut(map) };
+    // Adopt the value's descriptor if the default is still in place, so nested
+    // values format/trace correctly (mirrors the Vec push-descriptor adoption).
+    let val_desc = value.descriptor();
+    if p.value_descriptor.id == scalars::INT.id && val_desc.id != scalars::INT.id {
+        p.value_descriptor = val_desc;
+    }
+    p.entries.insert(DynamicKey::new(key), value);
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// The value for `key`, or Unit if absent (use `contains` to distinguish). A
+/// real `Option[V]` return is a follow-up; for now absent returns Unit.
+///
+/// # Safety
+/// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`; `key`
+/// must be a valid `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_map_get(ctx: *mut RuntimeContext, map: GcRef, key: GcRef) -> GcRef {
+    let p = unsafe { map_payload(map) };
+    match p.entries.get(&DynamicKey::new(key)) {
+        Some(v) => *v,
+        None => unsafe { unit_sentinel(ctx) },
+    }
+}
+
+/// True iff `key` is present, as a boxed Bool.
+///
+/// # Safety
+/// `ctx` must be live and wired; `map` and `key` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_map_contains(
+    ctx: *mut RuntimeContext,
+    map: GcRef,
+    key: GcRef,
+) -> GcRef {
+    let p = unsafe { map_payload(map) };
+    let present = p.entries.contains_key(&DynamicKey::new(key));
+    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, present) }
+}
+
+/// Remove `key`; returns Unit (the removed value, if any, is dropped).
+///
+/// # Safety
+/// `ctx` must be live and wired; `map` and `key` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_map_remove(
+    ctx: *mut RuntimeContext,
+    map: GcRef,
+    key: GcRef,
+) -> GcRef {
+    let p = unsafe { map_payload_mut(map) };
+    p.entries.remove(&DynamicKey::new(key));
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// The number of entries, as a boxed Int.
+///
+/// # Safety
+/// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_map_len(ctx: *mut RuntimeContext, map: GcRef) -> GcRef {
+    let p = unsafe { map_payload(map) };
+    unsafe { heap(ctx).alloc(scalars::INT, p.entries.len() as i64) }
+}
+
+/// True iff the map is empty, as a boxed Bool.
+///
+/// # Safety
+/// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_map_is_empty(ctx: *mut RuntimeContext, map: GcRef) -> GcRef {
+    let p = unsafe { map_payload(map) };
+    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, p.entries.is_empty()) }
+}
+
+/// `distance[key] min= candidate` (§6.2): keep the smaller value, or insert if
+/// absent (an absent entry accepts the first value). The value must support
+/// ordering (Int); returns Unit.
+///
+/// # Safety
+/// `ctx` must be live and wired; `map`, `key`, `value` must be valid `GcRef`s
+/// and `value` must be an `Int`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_map_update_min(
+    ctx: *mut RuntimeContext,
+    map: GcRef,
+    key: GcRef,
+    value: GcRef,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let p = unsafe { map_payload_mut(map) };
+    let cand = unsafe { int_payload(value) };
+    match p.entries.get_mut(&DynamicKey::new(key)) {
+        Some(existing) => {
+            let cur = unsafe { int_payload(*existing) };
+            if cand < cur {
+                *existing = value;
+            }
+        }
+        None => {
+            p.entries.insert(DynamicKey::new(key), value);
+        }
+    }
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// `best[key] max= score` (§6.2): keep the larger value, or insert if absent.
+///
+/// # Safety
+/// `ctx` must be live and wired; `map`, `key`, `value` must be valid `GcRef`s
+/// and `value` must be an `Int`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_map_update_max(
+    ctx: *mut RuntimeContext,
+    map: GcRef,
+    key: GcRef,
+    value: GcRef,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let p = unsafe { map_payload_mut(map) };
+    let cand = unsafe { int_payload(value) };
+    match p.entries.get_mut(&DynamicKey::new(key)) {
+        Some(existing) => {
+            let cur = unsafe { int_payload(*existing) };
+            if cand > cur {
+                *existing = value;
+            }
+        }
+        None => {
+            p.entries.insert(DynamicKey::new(key), value);
+        }
+    }
+    unsafe { unit_sentinel(ctx) }
+}
+
+// --- Set[T] -----------------------------------------------------------------
+
+/// Allocate an empty `Set[T]`. `element_descriptor` selects hash/eq.
+///
+/// # Safety
+/// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
+/// a `'static TypeDescriptor` (or null).
+#[no_mangle]
+pub unsafe extern "C" fn praxis_set_new(
+    ctx: *mut RuntimeContext,
+    element_descriptor: *const TypeDescriptor,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let element_descriptor = if element_descriptor.is_null() {
+        scalars::INT
+    } else {
+        unsafe { &*element_descriptor }
+    };
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::maps::SET,
+            std::mem::size_of::<SetPayload>(),
+            std::mem::align_of::<SetPayload>(),
+            |payload| {
+                (payload as *mut SetPayload).write(SetPayload {
+                    element_descriptor,
+                    entries: std::collections::HashSet::new(),
+                });
+            },
+        )
+    }
+}
+
+/// Insert `value` into `set`; returns Unit.
+///
+/// # Safety
+/// `ctx` must be live and wired; `set` and `value` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_set_insert(
+    ctx: *mut RuntimeContext,
+    set: GcRef,
+    value: GcRef,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let p = unsafe { set_payload_mut(set) };
+    p.entries.insert(DynamicKey::new(value));
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// Remove `value` from `set`; returns Unit.
+///
+/// # Safety
+/// `ctx` must be live and wired; `set` and `value` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_set_remove(
+    ctx: *mut RuntimeContext,
+    set: GcRef,
+    value: GcRef,
+) -> GcRef {
+    let p = unsafe { set_payload_mut(set) };
+    p.entries.remove(&DynamicKey::new(value));
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// True iff `value` is in the set, as a boxed Bool.
+///
+/// # Safety
+/// `ctx` must be live and wired; `set` and `value` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_set_contains(
+    ctx: *mut RuntimeContext,
+    set: GcRef,
+    value: GcRef,
+) -> GcRef {
+    let p = unsafe { set_payload(set) };
+    let present = p.entries.contains(&DynamicKey::new(value));
+    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, present) }
+}
+
+/// The number of elements, as a boxed Int.
+///
+/// # Safety
+/// `ctx` must be live and wired; `set` must be a valid `Set` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_set_len(ctx: *mut RuntimeContext, set: GcRef) -> GcRef {
+    let p = unsafe { set_payload(set) };
+    unsafe { heap(ctx).alloc(scalars::INT, p.entries.len() as i64) }
+}
+
+/// True iff the set is empty, as a boxed Bool.
+///
+/// # Safety
+/// `ctx` must be live and wired; `set` must be a valid `Set` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_set_is_empty(ctx: *mut RuntimeContext, set: GcRef) -> GcRef {
+    let p = unsafe { set_payload(set) };
+    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, p.entries.is_empty()) }
+}
+
+// --- Counter[T] -------------------------------------------------------------
+
+/// Allocate an empty `Counter[T]`. `key_descriptor` selects hash/eq.
+///
+/// # Safety
+/// `ctx` must be live and wired; `key_descriptor` must be a valid pointer to a
+/// `'static TypeDescriptor` (or null).
+#[no_mangle]
+pub unsafe extern "C" fn praxis_counter_new(
+    ctx: *mut RuntimeContext,
+    key_descriptor: *const TypeDescriptor,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let key_descriptor = if key_descriptor.is_null() {
+        scalars::INT
+    } else {
+        unsafe { &*key_descriptor }
+    };
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::maps::COUNTER,
+            std::mem::size_of::<CounterPayload>(),
+            std::mem::align_of::<CounterPayload>(),
+            |payload| {
+                (payload as *mut CounterPayload).write(CounterPayload {
+                    key_descriptor,
+                    entries: std::collections::HashMap::new(),
+                });
+            },
+        )
+    }
+}
+
+/// The count for `key`, or zero if absent (§6.2: "absent values read as zero").
+/// Never faults. Returns a boxed Int.
+///
+/// # Safety
+/// `ctx` must be live and wired; `counter` and `key` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_counter_get(
+    ctx: *mut RuntimeContext,
+    counter: GcRef,
+    key: GcRef,
+) -> GcRef {
+    let p = unsafe { counter_payload(counter) };
+    let count = match p.entries.get(&DynamicKey::new(key)) {
+        Some(v) => unsafe { int_payload(*v) },
+        None => 0, // §6.2: absent reads as zero.
+    };
+    unsafe { heap(ctx).alloc(scalars::INT, count) }
+}
+
+/// Increment the count for `key` by one (inserting 1 if absent); returns Unit.
+///
+/// # Safety
+/// `ctx` must be live and wired; `counter` and `key` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_counter_inc(
+    ctx: *mut RuntimeContext,
+    counter: GcRef,
+    key: GcRef,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let p = unsafe { counter_payload_mut(counter) };
+    let dk = DynamicKey::new(key);
+    match p.entries.get_mut(&dk) {
+        Some(v) => {
+            let cur = unsafe { int_payload(*v) };
+            // SAFETY: ctx is wired; alloc a fresh Int for the incremented value.
+            *v = unsafe { heap(ctx).alloc(scalars::INT, cur + 1) };
+        }
+        None => {
+            let one = unsafe { heap(ctx).alloc(scalars::INT, 1_i64) };
+            p.entries.insert(dk, one);
+        }
+    }
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// The number of distinct keys, as a boxed Int.
+///
+/// # Safety
+/// `ctx` must be live and wired; `counter` must be a valid `Counter` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_counter_len(ctx: *mut RuntimeContext, counter: GcRef) -> GcRef {
+    let p = unsafe { counter_payload(counter) };
+    unsafe { heap(ctx).alloc(scalars::INT, p.entries.len() as i64) }
+}
+
+/// True iff the counter has no keys, as a boxed Bool.
+///
+/// # Safety
+/// `ctx` must be live and wired; `counter` must be a valid `Counter` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_counter_is_empty(
+    ctx: *mut RuntimeContext,
+    counter: GcRef,
+) -> GcRef {
+    let p = unsafe { counter_payload(counter) };
+    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, p.entries.is_empty()) }
 }
 
 // ---------------------------------------------------------------------------
