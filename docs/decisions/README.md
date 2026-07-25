@@ -32,3 +32,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-024: Provisional structural records ahead of M7](./024-provisional-structural-records.md)
 - [ADR-025: TypeData record/enum via def-id indirection](./025-typedata-record-enum-defid.md)
 - [ADR-026: Structural equality & hashing via descriptors + internal capability check](./026-structural-equality-hashing.md)
+- [ADR-027: Closures — Approach B calling convention, capture analysis, VarCell](./027-closures.md)

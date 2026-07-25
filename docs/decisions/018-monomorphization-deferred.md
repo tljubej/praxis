@@ -1,6 +1,6 @@
 # ADR-018: Monomorphization deferred — M4 is monomorphic
 
-**Date:** 2026-07-23 · **Status:** accepted
+**Date:** 2026-07-23 · **Status:** superseded (monomorphization landed in M7-WS8, 2026-07-25)
 
 ## Context
 
@@ -39,3 +39,25 @@ milestone.
 - When monomorphization lands, it inserts between `lower` (typed HIR) and
   `lower_module` (MIR), instantiating clones of generic functions. The typed-HIR
   tree is shaped to make this straightforward (each `fn` is self-contained).
+
+## Supersession (M7-WS8, 2026-07-25)
+
+Monomorphization landed in M7 Part 3 (WS8) exactly where this ADR predicted:
+between `lower` and `lower_module`, as `praxis-hir/src/mono.rs`. The `Y100` gate
+was removed (no test asserted it). The pass:
+
+- Captures each call site's concrete argument types during inference
+  (`Analysis.call_sites`, keyed by the callee name token's range), since
+  `infer_call` instantiated and unified but previously discarded them.
+- Walks the typed tree; for each `Call` to a polymorphic callee, canonicalizes the
+  arg types (rendered structural strings — not type ids, so two call sites with
+  the same concrete type share one clone even when inference gave them distinct
+  arena slots), clones the callee `TypedFn`, specializes it (instantiate scheme,
+  unify params with arg types to pin the quantified vars, then resolve every
+  `Type` via `db.follow`), mangles the name (e.g. `id__Int`), and rewrites the
+  call site to target it. Reaches a fixpoint for transitive instantiation.
+- Drops the original generic fns (only clones survive); monomorphic fns pass
+  through unchanged.
+
+Generic user code now compiles and runs; this ADR's "deferred" stance is
+superseded.

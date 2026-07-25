@@ -1,0 +1,11 @@
+// AoC corpus fixture: the named-capture template parser (M7-WS9). Each input
+// line matches `{x:int},{y:int}` and parses into a record `{x: Int, y: Int}`;
+// the result is a Vec of those records. This exercises the §7.2/§7.3 template
+// interpreter end-to-end (literal matching between captures + record assembly).
+//
+// Input: "1,2\n3,4\n5,6\n"  →  parses as Vec[{x:Int,y:Int}] of length 3.
+// Usage: praxis run day08_named_capture_template.px --input day08.txt
+fn main() -> Int {
+    let points = read lines(`{x:int},{y:int}`);
+    points.len()
+}

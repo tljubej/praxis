@@ -5,10 +5,12 @@ Advent of Code-style puzzle solving. It favors rapid iteration, concise data
 manipulation, practical parsing, and strong diagnostics over systems-programming
 concerns.
 
-> **Status:** Milestone 6 complete — the JIT pipeline parses, type-checks, and
-> executes Praxis programs including the headline input-parser DSL
-> (`read lines(int)`, `read grid(char)`, etc.). See
-> [`praxis_technical_design.md`](./praxis_technical_design.md) for the full
+> **Status:** Milestone 7 complete — the JIT pipeline parses, type-checks, and
+> executes Praxis programs with nominal records and enums, pattern matching with
+> exhaustiveness checking, closures (immutable and mutable captures), structural
+> equality/hashing, monomorphized polymorphism, and the headline input-parser DSL
+> (`read lines(int)`, `read grid(char)`, `read lines(`{x:int},{y:int}`)`, etc.).
+> See [`praxis_technical_design.md`](./praxis_technical_design.md) for the full
 > language and the milestone roadmap (§19).
 
 ## Command surface

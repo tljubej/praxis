@@ -1,0 +1,18 @@
+// AoC corpus fixture: closures + monomorphization together (M7-WS7a + WS8).
+//
+// `id` is a generic fn (monomorphized to `id__Int` at the call site). `bump`
+// is a closure capturing `offset` (immutable). Together they exercise the M7
+// closure lowering and the monomorphization pass in one small program.
+//
+// Input: none needed (the value is inline). Result: id(bump(32)) = 32 + 10 = 42.
+// Usage: praxis run day07_closure_pipeline.px
+
+// A generic identity — monomorphized to `id__Int` by the WS8 pass.
+fn id(x) { x }
+
+fn main() -> Int {
+    let offset = 10
+    // A closure capturing `offset` (immutable capture, WS7a).
+    let bump = |n| n + offset
+    id(bump(32))
+}
