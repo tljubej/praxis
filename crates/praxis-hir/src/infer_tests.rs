@@ -438,11 +438,12 @@ fn closure_immutable_capture_lowers_clean() {
 }
 
 #[test]
-fn mutable_capture_rejected_y130() {
-    // A `var` capture is rejected with Y130 until WS7b lands `VarCell`.
+fn mutable_capture_now_supported() {
+    // WS7b: a `var` capture is now supported (boxed into a `VarCell`). It lowers
+    // without diagnostics.
     let src = "fn main() -> Int {\n  var c = 0\n  let f = |_| c\n  f(0)\n}\n";
     assert!(
-        has_type_error_with_lower(src),
-        "mutable capture should be rejected (Y130)"
+        !has_type_error_with_lower(src),
+        "mutable capture should be supported (WS7b)"
     );
 }

@@ -926,6 +926,54 @@ fn closure_curried() {
     assert_eq!(result.as_int(), 42);
 }
 
+// --- M7-WS7b: mutable captures via VarCell (§4.10) ------------------------
+//
+// A `var` captured by a closure is boxed into a GC'd VarCell at its binding
+// site. The binding function and every capturing closure share the cell, so a
+// mutation in one frame is visible to the other.
+
+#[test]
+fn closure_reads_mutable_capture() {
+    // The closure reads (but does not write) a captured `var` — the cell holds
+    // the initial value.
+    let (rt, result) = run_main("fn main() -> Int {\n  var c = 10\n  let f = |_| c\n  f(0)\n}\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 10);
+}
+
+#[test]
+fn closure_mutates_mutable_capture_visible_outside() {
+    // The headline mutable-capture scenario: a closure mutates the captured
+    // `var`, and the outer scope reads the updated value after the closure runs.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var counter = 0\n  let inc = |_| { counter = counter + 1 }\n  inc(0)\n  inc(0)\n  counter\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn closure_compound_assign_on_mutable_capture() {
+    // A compound assignment (`+=`) on a captured `var` inside a closure: read
+    // the cell, add, write back.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var total = 100\n  let add = |n| { total += n }\n  add(5)\n  add(10)\n  total\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 115);
+}
+
+#[test]
+fn mutable_capture_survives_returned_closure() {
+    // A closure capturing a `var` is returned from a fn; calling it mutates the
+    // cell (which outlives the fn's frame — it's GC'd).
+    let (rt, result) = run_main(
+        "fn make() {\n  var n = 0\n  |x| { n = n + x; n }\n}\nfn main() -> Int {\n  let bump = make()\n  bump(3)\n  bump(4)\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
+}
+
 // --- M7-WS8: monomorphization (§13.6) -------------------------------------
 //
 // Polymorphic user fns are instantiated per concrete call site. The mono pass

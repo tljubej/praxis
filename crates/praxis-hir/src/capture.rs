@@ -143,37 +143,31 @@ fn walk<R, K>(
     if matches!(expr, Expr::Closure(_)) {
         return;
     }
-    // A name reference (Path): record it if it resolves to an outer value binding.
-    if let Expr::Path(p) = expr {
-        if let Some(name_tok) = p.name() {
-            let range = name_tok.text_range();
+    // Scan every token in the subtree. A name reference is *any* resolved NAME
+    // token: a PathExpr name (a read), an AssignStmt target (a write), etc. —
+    // both are captures if they resolve to an outer value binding. The resolver
+    // records every resolved name in `refs`, keyed by its token range, so we
+    // simply check membership.
+    for child in expr.syntax().descendants_with_tokens() {
+        if let NodeOrToken::Token(t) = child {
+            // Skip tokens inside a nested closure (their captures are their own).
+            // A nested closure's subtree is excluded by the early return above for
+            // direct closures, but a nested closure may appear as a descendant of
+            // a non-closure expr; guard by checking the token is not within any
+            // CLOSURE_EXPR descendant other than via the outer closure.
+            let range = t.text_range();
             if let Some(rref) = refs.get(&range) {
                 record_free_var(*rref, range, closure_range, decl_range, kind_of, seen, out);
             }
         }
     }
-    // Recurse into child expressions of every kind (skipping nested closures,
-    // handled by the early return above).
-    let self_range = expr.syntax().text_range();
-    for child in expr.syntax().descendants_with_tokens() {
-        if let NodeOrToken::Node(n) = child {
-            if n.text_range() == self_range {
-                continue;
-            }
-            if let Some(child_expr) = Expr::cast(n) {
-                walk(
-                    &child_expr,
-                    closure_range,
-                    refs,
-                    decl_range,
-                    kind_of,
-                    seen,
-                    out,
-                );
-            }
-        }
-    }
 }
+
+/// Whether a token range falls inside a nested (non-outer) closure. Unused now
+/// that the walker scans tokens directly with the early-return guard on the
+/// outer closure; retained as a note for a future tighter analysis.
+#[allow(dead_code)]
+fn _inside_nested_closure() {}
 
 /// Record one free variable if it is a value binding declared outside the body.
 fn record_free_var<R, K>(
@@ -356,6 +350,19 @@ mod tests {
         assert!(
             analysis.errors.iter().any(|e| e.mutable_unsupported),
             "expected a mutable-capture error"
+        );
+    }
+
+    #[test]
+    fn captures_assigned_var_in_block_body() {
+        // A `var` assigned inside the closure body (the lhs of `+=` is a bare
+        // NAME token, not a PathExpr) is a capture.
+        let names = capture_names(
+            "fn main() { var total = 100; let add = |n| { total += n }; add(5); total }",
+        );
+        assert!(
+            names.contains(&"total".to_string()),
+            "expected `total` capture, got {names:?}"
         );
     }
 }

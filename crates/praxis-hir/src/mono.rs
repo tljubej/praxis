@@ -88,6 +88,7 @@ pub fn monomorphize(module: TypedModule, names: &NameTable, db: &mut TypeDb) -> 
     TypedModule {
         items,
         diagnostics: module.diagnostics,
+        escaping_vars: module.escaping_vars,
     }
 }
 

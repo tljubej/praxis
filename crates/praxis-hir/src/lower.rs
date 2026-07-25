@@ -44,6 +44,11 @@ pub struct TypedModule {
     /// `Y1xx` diagnostics emitted during lowering (generic-fn rejection,
     /// unsupported construct, …). Empty for a fully lowerable module.
     pub diagnostics: Vec<Diagnostic>,
+    /// The `var` symbols captured by some closure in the module (escape
+    /// analysis, M7-WS7b). The MIR builder boxes these into a `VarCell` at
+    /// their binding site and routes reads/writes through the cell, so a
+    /// mutation in one frame is visible to every closure sharing the cell.
+    pub escaping_vars: std::collections::HashSet<SymbolId>,
 }
 
 /// A top-level item.
@@ -401,9 +406,120 @@ pub fn lower(
         // JITs `fn` items (the entry point is a `fn main` or similar). They are
         // still type-checked by `analyze`; they simply have no runtime lowering.
     }
+    // Escape analysis (M7-WS7b): collect every `var` symbol captured by some
+    // closure in the module. These are boxed into a `VarCell` at their binding
+    // site so the closure shares the cell.
+    let escaping_vars = collect_escaping_vars(&items);
     TypedModule {
         items,
         diagnostics: l.diagnostics,
+        escaping_vars,
+    }
+}
+
+/// Walk the module's fn bodies collecting every `var` symbol that appears as a
+/// `ByCell` capture in any closure. The result is the set of escaping `var`s
+/// the MIR builder must box into a `VarCell`.
+fn collect_escaping_vars(items: &[TypedItem]) -> std::collections::HashSet<SymbolId> {
+    let mut out = std::collections::HashSet::new();
+    for item in items {
+        let TypedItem::Fn(f) = item;
+        collect_escaping_block(&f.body, &mut out);
+    }
+    out
+}
+
+fn collect_escaping_block(block: &TypedBlock, out: &mut std::collections::HashSet<SymbolId>) {
+    for stmt in &block.stmts {
+        collect_escaping_stmt(stmt, out);
+    }
+    collect_escaping_expr(&block.tail, out);
+}
+
+fn collect_escaping_stmt(stmt: &TypedStmt, out: &mut std::collections::HashSet<SymbolId>) {
+    match stmt {
+        TypedStmt::Let { init, .. } | TypedStmt::Var { init, .. } => {
+            collect_escaping_expr(init, out)
+        }
+        TypedStmt::Assign { value, .. } => collect_escaping_expr(value, out),
+        TypedStmt::Expr(e) => collect_escaping_expr(e, out),
+    }
+}
+
+fn collect_escaping_expr(e: &TypedExpr, out: &mut std::collections::HashSet<SymbolId>) {
+    match e {
+        TypedExpr::Closure { captures, body, .. } => {
+            for cap in captures {
+                if matches!(cap.kind, crate::capture::CaptureKind::ByCell) {
+                    out.insert(cap.symbol);
+                }
+            }
+            collect_escaping_block(body, out);
+        }
+        TypedExpr::Bin { lhs, rhs, .. } => {
+            collect_escaping_expr(lhs, out);
+            collect_escaping_expr(rhs, out);
+        }
+        TypedExpr::Unary { operand, .. } => collect_escaping_expr(operand, out),
+        TypedExpr::Paren { inner, .. } => {
+            if let Some(inner) = inner {
+                collect_escaping_expr(inner, out);
+            }
+        }
+        TypedExpr::Block(b) => collect_escaping_block(b, out),
+        TypedExpr::If {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_escaping_expr(cond, out);
+            collect_escaping_block(then_block, out);
+            if let Some(eb) = else_block.as_deref() {
+                collect_escaping_block(eb, out);
+            }
+        }
+        TypedExpr::While { cond, body, .. } => {
+            collect_escaping_expr(cond, out);
+            collect_escaping_block(body, out);
+        }
+        TypedExpr::Call { args, .. } => {
+            for a in args {
+                collect_escaping_expr(a, out);
+            }
+        }
+        TypedExpr::MethodCall { receiver, args, .. } => {
+            collect_escaping_expr(receiver, out);
+            for a in args {
+                collect_escaping_expr(a, out);
+            }
+        }
+        TypedExpr::Tuple { elements, .. } => {
+            for el in elements {
+                collect_escaping_expr(el, out);
+            }
+        }
+        TypedExpr::Parse { text, .. } => collect_escaping_expr(text, out),
+        TypedExpr::RecordLit { fields, .. } => {
+            for (_, init) in fields {
+                collect_escaping_expr(init, out);
+            }
+        }
+        TypedExpr::FieldGet { receiver, .. } => collect_escaping_expr(receiver, out),
+        TypedExpr::EnumVariant { args, .. } => {
+            for a in args {
+                collect_escaping_expr(a, out);
+            }
+        }
+        TypedExpr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_escaping_expr(scrutinee, out);
+            for arm in arms {
+                collect_escaping_expr(&arm.body, out);
+            }
+        }
+        TypedExpr::Lit { .. } | TypedExpr::Path { .. } | TypedExpr::Read { .. } => {}
     }
 }
 
@@ -723,9 +839,10 @@ impl<'a> Lowerer<'a> {
     /// function name. The closure's *type* (`fn_type`) is the inferred `Func`.
     ///
     /// The capture environment is a runtime concern (§4.10): the type system does
-    /// not model it. Mutable (`var`) captures are reported as `Y130` until WS7b
-    /// lands the `VarCell` cell; for now they are still recorded so lowering has
-    /// the full set, but a `var` capture makes the module non-compiling.
+    /// not model it. Immutable (`let`/`param`) captures copy the value into the
+    /// env; mutable (`var`) captures share a `VarCell` (WS7b) — the env holds the
+    /// cell, and the binding site boxes the `var` so writes are visible across
+    /// frames.
     fn lower_closure(&mut self, c: &praxis_ast::ClosureExpr) -> TypedExpr {
         // The closure's inferred Func type comes from inference: re-derive it by
         // reading the body's type and the param types. Inference already pinned
@@ -791,16 +908,6 @@ impl<'a> Lowerer<'a> {
             |sym| self.decls.iter().find(|(_, s)| **s == sym).map(|(r, _)| *r),
             |sym| self.names.get(sym).map(|s| s.kind),
         );
-        // Report Y130 for any mutable capture (unsupported in WS7a).
-        for err in &analysis.errors {
-            if err.mutable_unsupported {
-                self.diag(
-                    err.range,
-                    130,
-                    "mutable capture (`var`) is not supported yet (WS7b will add `VarCell`)",
-                );
-            }
-        }
         // Resolve each capture's name and type. The type is read from the
         // reference site's inferred type (`ref_types`); the name from the symbol.
         let captures: Vec<crate::capture::Capture> = analysis

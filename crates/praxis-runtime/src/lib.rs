@@ -32,6 +32,7 @@ pub mod scalars;
 pub mod shadow_frame;
 pub mod text;
 pub mod tuples;
+pub mod var_cell;
 
 pub use abi::{assert_abi_version, RUNTIME_ABI_VERSION};
 pub use closures::ClosurePayload;

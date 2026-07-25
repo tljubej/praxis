@@ -29,11 +29,12 @@ use crate::ir::{
 /// from `AllocKind::Closure` at the allocation site.
 #[must_use]
 pub fn lower_module(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
+    let escaping = &module.escaping_vars;
     let mut funcs: Vec<Function> = module
         .items
         .iter()
         .map(|item| match item {
-            TypedItem::Fn(f) => lower_fn(f, db),
+            TypedItem::Fn(f) => lower_fn(f, db, escaping),
         })
         .collect();
     // Collect every closure literal in the module (across all fn bodies) and
@@ -41,7 +42,7 @@ pub fn lower_module(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
     for item in &module.items {
         let TypedItem::Fn(tfn) = item;
         for closure in collect_closures(&tfn.body) {
-            funcs.push(lower_closure_fn(&closure, db));
+            funcs.push(lower_closure_fn(&closure, db, escaping));
         }
     }
     funcs
@@ -185,9 +186,18 @@ struct Builder<'a> {
     text_ty: Type,
     char_ty: Type,
     unit_ty: Type,
+    /// The set of `var` symbols captured by some closure in the module (escape
+    /// analysis, M7-WS7b). These are boxed into a `VarCell` at their binding
+    /// site, and reads/writes route through the cell so a closure shares the
+    /// mutable storage. Empty when there are no captured `var`s.
+    escaping_vars: &'a std::collections::HashSet<praxis_hir::SymbolId>,
 }
 
-fn lower_fn(f: &TypedFn, db: &mut TypeDb) -> Function {
+fn lower_fn(
+    f: &TypedFn,
+    db: &mut TypeDb,
+    escaping_vars: &std::collections::HashSet<praxis_hir::SymbolId>,
+) -> Function {
     // Cache scalar handles once.
     let int_ty = db.int();
     let bool_ty = db.bool();
@@ -218,6 +228,7 @@ fn lower_fn(f: &TypedFn, db: &mut TypeDb) -> Function {
         text_ty,
         char_ty,
         unit_ty,
+        escaping_vars,
     };
 
     // Parameters: one `Gc` slot each.
@@ -253,7 +264,11 @@ fn lower_fn(f: &TypedFn, db: &mut TypeDb) -> Function {
 /// This is Approach B (the closure value is passed as a hidden first arg; the
 /// synthetic function loads its captures at entry). The call site reads `fn_ptr`
 /// and emits a `call_indirect` with the matching signature.
-fn lower_closure_fn(closure: &LiftedClosure, db: &mut TypeDb) -> Function {
+fn lower_closure_fn(
+    closure: &LiftedClosure,
+    db: &mut TypeDb,
+    escaping_vars: &std::collections::HashSet<praxis_hir::SymbolId>,
+) -> Function {
     let int_ty = db.int();
     let bool_ty = db.bool();
     let text_ty = db.text();
@@ -283,6 +298,7 @@ fn lower_closure_fn(closure: &LiftedClosure, db: &mut TypeDb) -> Function {
         text_ty,
         char_ty,
         unit_ty,
+        escaping_vars,
     };
 
     // Param 0 (MIR): the closure value itself (`closure_self`). It is the hidden
@@ -376,14 +392,35 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
     match stmt {
         TypedStmt::Let {
             symbol, name, init, ..
-        }
-        | TypedStmt::Var {
-            symbol, name, init, ..
         } => {
             let v = lower_expr_gc(b, init);
             let slot = b.alloc_gc(expr_static_type(init), Some(name.clone()));
             b.push(Inst::MoveGc { dst: slot, src: v });
             b.locals.insert(*symbol, slot);
+        }
+        TypedStmt::Var {
+            symbol, name, init, ..
+        } => {
+            let v = lower_expr_gc(b, init);
+            if b.escaping_vars.contains(symbol) {
+                // A captured `var` is boxed into a `VarCell` at its binding site
+                // (M7-WS7b, §4.10). The local holds the cell; reads/writes route
+                // through `praxis_var_cell_get`/`praxis_var_cell_set` so a
+                // closure sharing the cell sees mutations.
+                let cell = b.alloc_gc(Type(0), Some(format!("__cell_{name}")));
+                b.push(Inst::Call {
+                    dst: cell,
+                    callee: CallTarget::Runtime("praxis_alloc_var_cell".to_string()),
+                    args: vec![v],
+                    live_roots: Vec::new(),
+                });
+                b.check_fault();
+                b.locals.insert(*symbol, cell);
+            } else {
+                let slot = b.alloc_gc(expr_static_type(init), Some(name.clone()));
+                b.push(Inst::MoveGc { dst: slot, src: v });
+                b.locals.insert(*symbol, slot);
+            }
         }
         TypedStmt::Assign {
             symbol,
@@ -396,20 +433,58 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                 Some(id) => id,
                 None => return, // unresolved in HIR; skip (diagnostic already emitted)
             };
+            // For an escaping `var`, the slot holds a `VarCell`; a plain Assign
+            // stores into the cell via `praxis_var_cell_set`. Compound assigns
+            // read the cell first (get), compute, then write back (set).
+            let escaping = b.escaping_vars.contains(symbol);
             if *op == AssignOp::Assign {
                 let v = lower_expr_gc(b, value);
-                b.push(Inst::MoveGc { dst, src: v });
+                if escaping {
+                    b.push(Inst::Call {
+                        dst,
+                        callee: CallTarget::Runtime("praxis_var_cell_set".to_string()),
+                        args: vec![dst, v],
+                        live_roots: Vec::new(),
+                    });
+                    b.check_fault();
+                } else {
+                    b.push(Inst::MoveGc { dst, src: v });
+                }
             } else {
                 // Compound assignment: dst = dst <op> value (Int arithmetic).
-                let cur = b.alloc_gc(Type(0), None);
-                b.push(Inst::MoveGc { dst: cur, src: dst });
+                let cur = if escaping {
+                    // Read the cell's current value.
+                    let cur = b.alloc_gc(Type(0), None);
+                    b.push(Inst::Call {
+                        dst: cur,
+                        callee: CallTarget::Runtime("praxis_var_cell_get".to_string()),
+                        args: vec![dst],
+                        live_roots: Vec::new(),
+                    });
+                    b.check_fault();
+                    cur
+                } else {
+                    let cur = b.alloc_gc(Type(0), None);
+                    b.push(Inst::MoveGc { dst: cur, src: dst });
+                    cur
+                };
                 let rhs = lower_expr_gc(b, value);
                 let result = lower_int_binop(b, op_to_int_binop(*op), cur, rhs);
                 let materialized = lower_materialize(b, result);
-                b.push(Inst::MoveGc {
-                    dst,
-                    src: materialized,
-                });
+                if escaping {
+                    b.push(Inst::Call {
+                        dst,
+                        callee: CallTarget::Runtime("praxis_var_cell_set".to_string()),
+                        args: vec![dst, materialized],
+                        live_roots: Vec::new(),
+                    });
+                    b.check_fault();
+                } else {
+                    b.push(Inst::MoveGc {
+                        dst,
+                        src: materialized,
+                    });
+                }
             }
         }
         TypedStmt::Expr(e) => {
@@ -422,10 +497,32 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
 fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
     match e {
         TypedExpr::Lit { value, .. } => lower_lit_gc(b, value),
-        TypedExpr::Path { symbol, .. } => b.locals.get(symbol).copied().unwrap_or_else(|| {
-            // Unresolved: allocate a Unit placeholder so downstream lowering is sound.
-            lower_lit_gc(b, &Lit::Int(0))
-        }),
+        TypedExpr::Path { symbol, ty, .. } => {
+            match b.locals.get(symbol).copied() {
+                Some(slot) => {
+                    // An escaping `var`'s slot holds a `VarCell`; deref it.
+                    if b.escaping_vars.contains(symbol) {
+                        let value = b.alloc_gc(*ty, None);
+                        b.push(Inst::Call {
+                            dst: value,
+                            callee: CallTarget::Runtime("praxis_var_cell_get".to_string()),
+                            args: vec![slot],
+                            live_roots: Vec::new(),
+                        });
+                        b.check_fault();
+                        value
+                    } else {
+                        slot
+                    }
+                }
+                None => {
+                    // Unresolved: allocate a Unit placeholder so downstream
+                    // lowering is sound.
+                    let _ = ty;
+                    lower_lit_gc(b, &Lit::Int(0))
+                }
+            }
+        }
         TypedExpr::Bin { op, lhs, rhs, .. } => {
             // Short-circuit ops must not eagerly evaluate `rhs` — it is lowered
             // only on the path that needs it (inside `lower_logical_or`).

@@ -36,7 +36,10 @@ use crate::{collections::VecPayload, descriptor::TypeDescriptor};
 /// `praxis_alloc_tuple`, `praxis_tuple_set`, `praxis_tuple_get`, `praxis_struct_eq`.
 /// v5 (M7 Part 2, WS7): closure object model — `praxis_alloc_closure`,
 /// `praxis_closure_set_capture`, `praxis_closure_fn_ptr`, `praxis_closure_capture`.
-pub const RUNTIME_ABI_VERSION: u32 = 5;
+/// v6 (M7 Part 3, WS7b): mutable-capture cells — `praxis_alloc_var_cell`,
+/// `praxis_var_cell_get`, `praxis_var_cell_set`. (`praxis_closure_fn_ptr` also
+/// gained a `ctx` param for ABI uniformity in WS7a, kept within v5's window.)
+pub const RUNTIME_ABI_VERSION: u32 = 6;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -58,7 +61,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 5;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 6;
 
 // ---------------------------------------------------------------------------
 // Internals the wrappers share.
@@ -884,6 +887,63 @@ pub unsafe extern "C" fn praxis_closure_capture(
         .unwrap_or_else(|| unsafe { unit_sentinel(ctx) })
 }
 
+/// Allocate a `VarCell` holding `value` (M7-WS7b, §4.10). The cell is the shared
+/// mutable storage for a captured `var` binding: the binding site and every
+/// closure that captures the `var` refer to the same cell. Returns the cell
+/// `GcRef`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `value` must be a valid `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_alloc_var_cell(ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    // SAFETY: VarCellPayload matches VAR_CELL's size/align and is fully initialized.
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::var_cell::VAR_CELL,
+            std::mem::size_of::<crate::var_cell::VarCellPayload>(),
+            std::mem::align_of::<crate::var_cell::VarCellPayload>(),
+            |payload| {
+                (payload as *mut crate::var_cell::VarCellPayload)
+                    .write(crate::var_cell::VarCellPayload { value });
+            },
+        )
+    }
+}
+
+/// Read the current value out of a `VarCell` (M7-WS7b, §4.10). Used by `Path`
+/// reads of a captured `var` (the local holds the cell; this derefs it).
+///
+/// # Safety
+/// `ctx` must be live; `cell` must be a valid `VarCell` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_var_cell_get(ctx: *mut RuntimeContext, cell: GcRef) -> GcRef {
+    let _ = ctx;
+    // SAFETY: caller guarantees cell is a valid VarCell GcRef.
+    let payload = cell.payload::<u8>() as *const crate::var_cell::VarCellPayload;
+    unsafe { (*payload).value }
+}
+
+/// Store `value` into a `VarCell` (M7-WS7b, §4.10). Used by `Assign` to a
+/// captured `var`. Returns the cell (mutated in place).
+///
+/// # Safety
+/// `ctx` must be live; `cell` must be a valid `VarCell` `GcRef`; `value` valid.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_var_cell_set(
+    ctx: *mut RuntimeContext,
+    cell: GcRef,
+    value: GcRef,
+) -> GcRef {
+    let _ = ctx;
+    // SAFETY: caller guarantees cell is a valid VarCell GcRef.
+    let payload = cell.payload::<u8>() as *mut crate::var_cell::VarCellPayload;
+    unsafe {
+        (*payload).value = value;
+    }
+    cell
+}
+
 /// Append `value` to `vec` in place (§11.1). Returns the Unit sentinel — the
 /// receiver is mutated directly, so the caller's `GcRef` remains valid (the
 /// `VecPayload` object does not move; only its internal buffer may grow).
@@ -1121,8 +1181,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_five_at_milestone_7_part2_ws7() {
-        assert_eq!(RUNTIME_ABI_VERSION, 5);
+    fn version_is_six_at_milestone_7_part3_ws7b() {
+        assert_eq!(RUNTIME_ABI_VERSION, 6);
     }
 
     #[test]

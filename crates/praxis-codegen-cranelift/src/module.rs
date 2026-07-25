@@ -102,6 +102,9 @@ impl Jit {
             "praxis_closure_set_capture",
             "praxis_closure_fn_ptr",
             "praxis_closure_capture",
+            "praxis_alloc_var_cell",
+            "praxis_var_cell_get",
+            "praxis_var_cell_set",
             "praxis_push_debug_frame",
             "praxis_pop_debug_frame",
         ];
