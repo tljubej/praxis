@@ -596,6 +596,197 @@ fn min_heap_pop_empty_faults() {
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
 }
 
+// --- M8-WS5: BitSet (§6.1) --------------------------------------------------
+
+#[test]
+fn bitset_insert_contains_len() {
+    let src = "fn main() -> Int {\n  let b = BitSet()\n  b.insert(0)\n  b.insert(64)\n  b.insert(1000)\n  b.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn bitset_contains_true_false() {
+    let src = "fn main() -> Int {\n  let b = BitSet()\n  b.insert(5)\n  if b.contains(5) { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn bitset_contains_absent_false() {
+    let src = "fn main() -> Int {\n  let b = BitSet()\n  b.insert(5)\n  if b.contains(6) { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+#[test]
+fn bitset_remove_clears_bit() {
+    let src = "fn main() -> Int {\n  let b = BitSet()\n  b.insert(5)\n  b.insert(10)\n  b.remove(5)\n  b.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn bitset_is_empty_true_then_false() {
+    let src = "fn main() -> Int {\n  let b = BitSet()\n  let first = if b.is_empty() { 1 } else { 0 }\n  b.insert(1)\n  let second = if b.is_empty() { 1 } else { 0 }\n  first * 10 + second\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 10);
+}
+
+// --- M8-WS5: Grid[T] methods (§6.4) ----------------------------------------
+
+#[test]
+fn grid_width_height_from_parsed_grid() {
+    // Parse a 2-column × 2-row grid; width=2, height=2.
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
+    let (rt, result) = run_main_with_input(src, "ab\ncd\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 22);
+}
+
+#[test]
+fn grid_get_reads_cell() {
+    // Grid "ab/cd": get(1, 0) returns the Char 'b'. Compare via find_all: the
+    // count of cells equal to the (1,0) cell should be 1. Intermediate `let`
+    // bindings avoid the method-chain-after-args parser limitation.
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let cell = g.get(1, 0)\n  let matches = g.find_all(cell)\n  matches.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "ab\ncd\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn grid_get_out_of_bounds_faults() {
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let _ = g.get(9, 9)\n  0\n}\n";
+    let (rt, _result) = run_main_with_input(src, "ab\n");
+    assert!(rt.has_pending_fault(), "OOB should fault");
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
+}
+
+#[test]
+fn grid_contains_in_and_out() {
+    // (1,1) is in a 2×2 grid; (5,5) is not.
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let a = if g.contains(1, 1) { 1 } else { 0 }\n  let b = if g.contains(5, 5) { 1 } else { 0 }\n  a * 10 + b\n}\n";
+    let (rt, result) = run_main_with_input(src, "ab\ncd\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 10);
+}
+
+#[test]
+fn grid_neighbors4_corner() {
+    // Top-left corner (0,0) of a 2×2 grid has 2 in-bounds neighbors (right, down).
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let ns = g.neighbors4((0, 0))\n  ns.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "ab\ncd\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn grid_neighbors8_center() {
+    // Center (1,1) of a 3×3 grid has all 8 neighbors.
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let ns = g.neighbors8((1, 1))\n  ns.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "abc\ndef\nghi\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 8);
+}
+
+#[test]
+fn grid_positions_count() {
+    // A 2×3 grid has 6 positions. (Intermediate `let` avoids the method-chain
+    // parser limitation for chains after a no-arg method returning a collection.)
+    let src =
+        "fn main() -> Int {\n  let g = read grid(char)\n  let ps = g.positions()\n  ps.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "abc\ndef\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 6);
+}
+
+#[test]
+fn grid_cells_count() {
+    let src =
+        "fn main() -> Int {\n  let g = read grid(char)\n  let cs = g.cells()\n  cs.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "ab\ncd\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4);
+}
+
+#[test]
+fn grid_row() {
+    // Row 1 of "ab/cd" is "cd" (length 2). The row is a Vec[Char]; check its len.
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let r = g.row(1)\n  r.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "ab\ncd\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn grid_column() {
+    // Column 0 of "ab/cd" is "ac" (length 2).
+    let src =
+        "fn main() -> Int {\n  let g = read grid(char)\n  let c = g.column(0)\n  c.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "ab\ncd\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn grid_find_locates_first_match() {
+    // Grid "ab/cd": find a cell, then verify find_all for that cell finds 1.
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let cell = g.get(0, 1)\n  let matches = g.find_all(cell)\n  matches.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "ab\ncd\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn grid_find_all_count() {
+    // Grid with two 'x' cells. Get the 'x' value via get(0,0) then find_all.
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let x = g.get(0, 0)\n  let matches = g.find_all(x)\n  matches.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "x.\n.x\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn grid_transpose_round_trips_dimensions() {
+    // A 3-wide × 2-tall grid transposes to 2-wide × 3-tall.
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let t = g.transpose()\n  t.width() * 10 + t.height()\n}\n";
+    let (rt, result) = run_main_with_input(src, "abc\ndef\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 23);
+}
+
+#[test]
+fn grid_rotate_left_changes_dimensions() {
+    // A 3-wide × 2-tall grid rotated left → 2-wide × 3-tall.
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let r = g.rotate_left()\n  r.width() * 10 + r.height()\n}\n";
+    let (rt, result) = run_main_with_input(src, "abc\ndef\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 23);
+}
+
+#[test]
+fn grid_rotate_right_changes_dimensions() {
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let r = g.rotate_right()\n  r.width() * 10 + r.height()\n}\n";
+    let (rt, result) = run_main_with_input(src, "abc\ndef\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 23);
+}
+
+#[test]
+fn grid_rotate_four_times_is_identity() {
+    // Rotating right 4× returns to the original dimensions (3×2).
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let r1 = g.rotate_right()\n  let r2 = r1.rotate_right()\n  let r3 = r2.rotate_right()\n  let r4 = r3.rotate_right()\n  r4.width() * 10 + r4.height()\n}\n";
+    let (rt, result) = run_main_with_input(src, "abc\ndef\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 32); // back to 3-wide × 2-tall
+}
+
 // ===========================================================================
 // Milestone 5: Text methods (§4.3) and `out(...)` (§16.1).
 // ===========================================================================

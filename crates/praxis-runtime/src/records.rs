@@ -163,8 +163,10 @@ mod tests {
 
     #[test]
     fn grid_descriptor_reports_capabilities() {
-        assert!(!crate::collections::GRID.is_equatable());
-        assert!(!crate::collections::GRID.is_hashable());
+        // M8-WS5: Grid is now equatable and hashable (grid-as-map-key enabled),
+        // closing the M6 "grid-as-key deferred" note.
+        assert!(crate::collections::GRID.is_equatable());
+        assert!(crate::collections::GRID.is_hashable());
         assert_eq!(crate::collections::GRID.name, "Grid");
         assert_eq!(crate::collections::GRID.id, TypeId(7));
     }

@@ -16,6 +16,7 @@
 //! See `praxis_technical_design.md` §11, §12, and Appendix B.
 
 pub mod abi;
+pub mod bitset;
 pub mod closures;
 pub mod collections;
 pub mod context;

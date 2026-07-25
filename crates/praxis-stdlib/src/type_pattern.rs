@@ -34,6 +34,9 @@ pub enum TypePattern {
     },
     /// The unit type, used for methods like `Vec[T].push` that return nothing.
     Unit,
+    /// A tuple `(T, U, ...)`. Used by grid methods that return/accept `(x, y)`
+    /// points (§6.4). Structural identity is the element-type sequence.
+    Tuple(Vec<TypePattern>),
     /// Opaque / unknown during early scaffolding. Catalog entries added before
     /// a full type pattern is worked out can use this placeholder; the type
     /// checker will reject it if it is still present at use time.
@@ -129,6 +132,16 @@ impl fmt::Display for TypePattern {
         match self {
             TypePattern::Scalar(s) => f.write_str(s.name()),
             TypePattern::Unit => f.write_str("Unit"),
+            TypePattern::Tuple(els) => {
+                f.write_str("(")?;
+                for (i, e) in els.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{e}")?;
+                }
+                f.write_str(")")
+            }
             TypePattern::Opaque => f.write_str("_"),
             TypePattern::Var(name) => write!(f, "{name}"),
             TypePattern::Collection { ctor, args } => {

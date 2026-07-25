@@ -1894,6 +1894,594 @@ pub unsafe extern "C" fn praxis_min_heap_is_empty(
 }
 
 // ---------------------------------------------------------------------------
+// BitSet (M8-WS5, §6.1). A compact set of non-negative integers.
+// ---------------------------------------------------------------------------
+
+use crate::bitset::BitSetPayload;
+
+unsafe fn bitset_payload(r: GcRef) -> &'static BitSetPayload {
+    unsafe { &*r.payload::<BitSetPayload>() }
+}
+
+unsafe fn bitset_payload_mut(r: GcRef) -> &'static mut BitSetPayload {
+    unsafe { &mut *r.payload::<BitSetPayload>() }
+}
+
+/// Allocate an empty `BitSet` (§6.1). Nullary — no element descriptor.
+///
+/// # Safety
+/// `ctx` must be live and wired.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_bitset_new(ctx: *mut RuntimeContext) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::bitset::BITSET,
+            std::mem::size_of::<BitSetPayload>(),
+            std::mem::align_of::<BitSetPayload>(),
+            |payload| {
+                (payload as *mut BitSetPayload).write(BitSetPayload { words: Vec::new() });
+            },
+        )
+    }
+}
+
+/// Set bit `value` (must be a non-negative `Int`); returns Unit.
+///
+/// # Safety
+/// `ctx` must be live and wired; `bs` must be a valid `BitSet` `GcRef`; `value`
+/// must be a non-negative `Int` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_bitset_insert(
+    ctx: *mut RuntimeContext,
+    bs: GcRef,
+    value: GcRef,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let p = unsafe { bitset_payload_mut(bs) };
+    let i = unsafe { int_payload(value) };
+    if i >= 0 {
+        p.insert(i as usize);
+    }
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// Clear bit `value`; returns Unit.
+///
+/// # Safety
+/// `ctx` must be live and wired; `bs` and `value` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_bitset_remove(
+    ctx: *mut RuntimeContext,
+    bs: GcRef,
+    value: GcRef,
+) -> GcRef {
+    let p = unsafe { bitset_payload_mut(bs) };
+    let i = unsafe { int_payload(value) };
+    if i >= 0 {
+        p.remove(i as usize);
+    }
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// True iff bit `value` is set, as a boxed Bool.
+///
+/// # Safety
+/// `ctx` must be live and wired; `bs` and `value` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_bitset_contains(
+    ctx: *mut RuntimeContext,
+    bs: GcRef,
+    value: GcRef,
+) -> GcRef {
+    let p = unsafe { bitset_payload(bs) };
+    let i = unsafe { int_payload(value) };
+    let present = i >= 0 && p.contains(i as usize);
+    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, present) }
+}
+
+/// The number of set bits, as a boxed Int.
+///
+/// # Safety
+/// `ctx` must be live and wired; `bs` must be a valid `BitSet` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_bitset_len(ctx: *mut RuntimeContext, bs: GcRef) -> GcRef {
+    let p = unsafe { bitset_payload(bs) };
+    unsafe { heap(ctx).alloc(scalars::INT, p.count() as i64) }
+}
+
+/// True iff the bitset is empty, as a boxed Bool.
+///
+/// # Safety
+/// `ctx` must be live and wired; `bs` must be a valid `BitSet` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_bitset_is_empty(ctx: *mut RuntimeContext, bs: GcRef) -> GcRef {
+    let p = unsafe { bitset_payload(bs) };
+    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, p.count() == 0) }
+}
+
+// ---------------------------------------------------------------------------
+// Grid[T] methods (M8-WS5, §6.4). The payload (GridPayload) already exists from
+// M6 (row-major Vec<GcRef> + width). M8 adds the full method surface.
+// Coordinates are (x, y) with x rightward, y downward (§6.4). Indexing stays
+// behind runtime wrappers (§11.5 realloc safety).
+// ---------------------------------------------------------------------------
+
+use crate::collections::GridPayload;
+
+unsafe fn grid_payload(r: GcRef) -> &'static GridPayload {
+    unsafe { &*r.payload::<GridPayload>() }
+}
+
+unsafe fn grid_payload_mut(r: GcRef) -> &'static mut GridPayload {
+    unsafe { &mut *r.payload::<GridPayload>() }
+}
+
+/// Allocate a `(x, y)` point tuple from two `i64` coordinates. The schema is
+/// the cached `(Int, Int)` point schema; elements are filled via
+/// `praxis_tuple_set`. Returns the point `GcRef`.
+unsafe fn alloc_point(ctx: *mut RuntimeContext, x: i64, y: i64) -> GcRef {
+    let schema = crate::tuples::point_schema();
+    let schema_ptr = schema as *const crate::tuples::TupleSchema;
+    let tup = unsafe { praxis_alloc_tuple(ctx, schema_ptr) };
+    let x_ref = unsafe { heap(ctx).alloc(scalars::INT, x) };
+    unsafe { praxis_tuple_set(ctx, tup, 0, x_ref) };
+    let y_ref = unsafe { heap(ctx).alloc(scalars::INT, y) };
+    unsafe { praxis_tuple_set(ctx, tup, 1, y_ref) };
+    tup
+}
+
+/// The (x, y) coordinates of a flat `idx` in a grid of `width`.
+fn grid_xy(idx: usize, width: usize) -> (i64, i64) {
+    ((idx % width) as i64, (idx / width) as i64)
+}
+
+/// The height (row count) of a grid: `items.len() / width`, or 0 if width is 0
+/// (avoids division by zero on a degenerate empty grid).
+fn grid_height(items_len: usize, width: usize) -> usize {
+    items_len.checked_div(width).unwrap_or(0)
+}
+
+/// Allocate an empty `Grid[T]` with the given element descriptor, width, and
+/// height, all cells initialized to Unit. (The input parser also constructs
+/// grids directly; this wrapper is for source `Grid[T]()` + a follow-up fill.)
+///
+/// # Safety
+/// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
+/// a `'static TypeDescriptor` (or null).
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_new(
+    ctx: *mut RuntimeContext,
+    element_descriptor: *const TypeDescriptor,
+    width: i64,
+    height: i64,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let element_descriptor = if element_descriptor.is_null() {
+        scalars::INT
+    } else {
+        unsafe { &*element_descriptor }
+    };
+    let unit = unsafe { unit_sentinel(ctx) };
+    let cells = vec![unit; (width as usize) * (height as usize)];
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::collections::GRID,
+            std::mem::size_of::<GridPayload>(),
+            std::mem::align_of::<GridPayload>(),
+            |payload| {
+                (payload as *mut GridPayload).write(GridPayload {
+                    element_descriptor,
+                    items: cells,
+                    width: width as usize,
+                });
+            },
+        )
+    }
+}
+
+/// The grid width (number of columns), as a boxed Int.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_width(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
+    let p = unsafe { grid_payload(grid) };
+    unsafe { heap(ctx).alloc(scalars::INT, p.width as i64) }
+}
+
+/// The grid height (number of rows), as a boxed Int.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_height(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
+    let p = unsafe { grid_payload(grid) };
+    // height = items.len() / width.
+    let height = grid_height(p.items.len(), p.width);
+    unsafe { heap(ctx).alloc(scalars::INT, height as i64) }
+}
+
+/// The cell at `(x, y)`; faults `IndexOutOfBounds` if out of range.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`; `x`/`y`
+/// must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_get(
+    ctx: *mut RuntimeContext,
+    grid: GcRef,
+    x: GcRef,
+    y: GcRef,
+) -> GcRef {
+    let p = unsafe { grid_payload(grid) };
+    let (xi, yi) = (unsafe { int_payload(x) }, unsafe { int_payload(y) });
+    let height = grid_height(p.items.len(), p.width);
+    if xi < 0 || yi < 0 || xi as usize >= p.width || yi as usize >= height {
+        unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+        return unsafe { unit_sentinel(ctx) };
+    }
+    p.items[(yi as usize) * p.width + (xi as usize)]
+}
+
+/// Set the cell at `(x, y)`; faults `IndexOutOfBounds` if out of range.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`; `x`/`y`
+/// must be valid `Int` `GcRef`s; `value` must be a valid `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_set(
+    ctx: *mut RuntimeContext,
+    grid: GcRef,
+    x: GcRef,
+    y: GcRef,
+    value: GcRef,
+) -> GcRef {
+    let p = unsafe { grid_payload_mut(grid) };
+    let (xi, yi) = (unsafe { int_payload(x) }, unsafe { int_payload(y) });
+    let height = grid_height(p.items.len(), p.width);
+    if xi < 0 || yi < 0 || xi as usize >= p.width || yi as usize >= height {
+        unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+        return unsafe { unit_sentinel(ctx) };
+    }
+    p.items[(yi as usize) * p.width + (xi as usize)] = value;
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// True iff `(x, y)` is within the grid, as a boxed Bool.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`; `x`/`y`
+/// must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_contains(
+    ctx: *mut RuntimeContext,
+    grid: GcRef,
+    x: GcRef,
+    y: GcRef,
+) -> GcRef {
+    let p = unsafe { grid_payload(grid) };
+    let (xi, yi) = (unsafe { int_payload(x) }, unsafe { int_payload(y) });
+    let height = grid_height(p.items.len(), p.width);
+    let inside = xi >= 0 && yi >= 0 && (xi as usize) < p.width && (yi as usize) < height;
+    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, inside) }
+}
+
+/// The 4 orthogonal neighbors of `point` that lie inside the grid, as a `Vec`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` and `point` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_neighbors4(
+    ctx: *mut RuntimeContext,
+    grid: GcRef,
+    point: GcRef,
+) -> GcRef {
+    let p = unsafe { grid_payload(grid) };
+    // `point` is an `(Int, Int)` tuple; read its two elements.
+    let tp = point.payload::<crate::tuples::TuplePayload>() as *const crate::tuples::TuplePayload;
+    let pt = unsafe { &*tp };
+    let (px, py) = unsafe { (int_payload(pt.items[0]), int_payload(pt.items[1])) };
+    let height = grid_height(p.items.len(), p.width);
+    let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
+    let rp = unsafe { vec_payload_mut(result) };
+    for (dx, dy) in [(0i64, -1), (0, 1), (-1, 0), (1, 0)] {
+        let (nx, ny) = (px + dx, py + dy);
+        if nx >= 0 && ny >= 0 && (nx as usize) < p.width && (ny as usize) < height {
+            let pt_ref = unsafe { alloc_point(ctx, nx, ny) };
+            rp.items.push(pt_ref);
+        }
+    }
+    result
+}
+
+/// The 8 neighbors of `point` that lie inside the grid, as a `Vec`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` and `point` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_neighbors8(
+    ctx: *mut RuntimeContext,
+    grid: GcRef,
+    point: GcRef,
+) -> GcRef {
+    let p = unsafe { grid_payload(grid) };
+    let tp = point.payload::<crate::tuples::TuplePayload>() as *const crate::tuples::TuplePayload;
+    let pt = unsafe { &*tp };
+    let (px, py) = unsafe { (int_payload(pt.items[0]), int_payload(pt.items[1])) };
+    let height = grid_height(p.items.len(), p.width);
+    let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
+    let rp = unsafe { vec_payload_mut(result) };
+    for dy in -1i64..=1 {
+        for dx in -1i64..=1 {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            let (nx, ny) = (px + dx, py + dy);
+            if nx >= 0 && ny >= 0 && (nx as usize) < p.width && (ny as usize) < height {
+                let pt_ref = unsafe { alloc_point(ctx, nx, ny) };
+                rp.items.push(pt_ref);
+            }
+        }
+    }
+    result
+}
+
+/// All `(x, y)` positions in row-major order, as a `Vec`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_positions(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let p = unsafe { grid_payload(grid) };
+    let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
+    let rp = unsafe { vec_payload_mut(result) };
+    for i in 0..p.items.len() {
+        let (x, y) = grid_xy(i, p.width);
+        rp.items.push(unsafe { alloc_point(ctx, x, y) });
+    }
+    result
+}
+
+/// All cells in row-major order, as a `Vec`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_cells(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
+    let p = unsafe { grid_payload(grid) };
+    let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
+    let rp = unsafe { vec_payload_mut(result) };
+    for cell in p.items.iter() {
+        rp.items.push(*cell);
+    }
+    result
+}
+
+/// Row `y` as a `Vec`; faults `IndexOutOfBounds` if out of range.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`; `y`
+/// must be a valid `Int` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_row(ctx: *mut RuntimeContext, grid: GcRef, y: GcRef) -> GcRef {
+    let p = unsafe { grid_payload(grid) };
+    let yi = unsafe { int_payload(y) };
+    let height = grid_height(p.items.len(), p.width);
+    if yi < 0 || yi as usize >= height {
+        unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+        return unsafe { unit_sentinel(ctx) };
+    }
+    let start = (yi as usize) * p.width;
+    let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
+    let rp = unsafe { vec_payload_mut(result) };
+    for x in 0..p.width {
+        rp.items.push(p.items[start + x]);
+    }
+    result
+}
+
+/// Column `x` as a `Vec`; faults `IndexOutOfBounds` if out of range.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`; `x`
+/// must be a valid `Int` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_column(
+    ctx: *mut RuntimeContext,
+    grid: GcRef,
+    x: GcRef,
+) -> GcRef {
+    let p = unsafe { grid_payload(grid) };
+    let xi = unsafe { int_payload(x) };
+    if xi < 0 || xi as usize >= p.width {
+        unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+        return unsafe { unit_sentinel(ctx) };
+    }
+    let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
+    let rp = unsafe { vec_payload_mut(result) };
+    let mut idx = xi as usize;
+    while idx < p.items.len() {
+        rp.items.push(p.items[idx]);
+        idx += p.width;
+    }
+    result
+}
+
+/// The first `(x, y)` position whose cell equals `value`, or Unit if none.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` and `value` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_find(
+    ctx: *mut RuntimeContext,
+    grid: GcRef,
+    value: GcRef,
+) -> GcRef {
+    let p = unsafe { grid_payload(grid) };
+    let val_desc = value.descriptor();
+    let eq = val_desc.equals;
+    for (i, cell) in p.items.iter().enumerate() {
+        let matches = match eq {
+            Some(equals) => {
+                let a = cell.payload::<u8>() as *const u8;
+                let b = value.payload::<u8>() as *const u8;
+                unsafe { equals(a, b) }
+            }
+            None => *cell == value,
+        };
+        if matches {
+            let (x, y) = grid_xy(i, p.width);
+            return unsafe { alloc_point(ctx, x, y) };
+        }
+    }
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// All `(x, y)` positions whose cell equals `value`, as a `Vec`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` and `value` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_find_all(
+    ctx: *mut RuntimeContext,
+    grid: GcRef,
+    value: GcRef,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let p = unsafe { grid_payload(grid) };
+    let val_desc = value.descriptor();
+    let eq = val_desc.equals;
+    let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
+    let rp = unsafe { vec_payload_mut(result) };
+    for (i, cell) in p.items.iter().enumerate() {
+        let matches = match eq {
+            Some(equals) => {
+                let a = cell.payload::<u8>() as *const u8;
+                let b = value.payload::<u8>() as *const u8;
+                unsafe { equals(a, b) }
+            }
+            None => *cell == value,
+        };
+        if matches {
+            let (x, y) = grid_xy(i, p.width);
+            rp.items.push(unsafe { alloc_point(ctx, x, y) });
+        }
+    }
+    result
+}
+
+/// A transposed copy of the grid (rows ↔ columns), as a new `Grid`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_transpose(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let p = unsafe { grid_payload(grid) };
+    let height = grid_height(p.items.len(), p.width);
+    let new_width = height;
+    let new_height = p.width;
+    let mut cells = Vec::with_capacity(p.items.len());
+    for y in 0..new_height {
+        for x in 0..new_width {
+            // new[x,y] = old[y,x]
+            cells.push(p.items[x * p.width + y]);
+        }
+    }
+    let _ = ctx;
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::collections::GRID,
+            std::mem::size_of::<GridPayload>(),
+            std::mem::align_of::<GridPayload>(),
+            |payload| {
+                (payload as *mut GridPayload).write(GridPayload {
+                    element_descriptor: p.element_descriptor,
+                    items: cells,
+                    width: new_width,
+                });
+            },
+        )
+    }
+}
+
+/// A copy of the grid rotated 90° left (counter-clockwise), as a new `Grid`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_rotate_left(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let p = unsafe { grid_payload(grid) };
+    let height = grid_height(p.items.len(), p.width);
+    // Rotate left (90° CCW): result is H×W (width=height, height=width).
+    // result[x, y] = original[y, height-1-x], for x in 0..height, y in 0..width.
+    let new_width = height;
+    let new_height = p.width;
+    let mut cells = Vec::with_capacity(p.items.len());
+    for y in 0..new_height {
+        for x in 0..new_width {
+            let ox = y;
+            let oy = height - 1 - x;
+            cells.push(p.items[oy * p.width + ox]);
+        }
+    }
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::collections::GRID,
+            std::mem::size_of::<GridPayload>(),
+            std::mem::align_of::<GridPayload>(),
+            |payload| {
+                (payload as *mut GridPayload).write(GridPayload {
+                    element_descriptor: p.element_descriptor,
+                    items: cells,
+                    width: new_width,
+                });
+            },
+        )
+    }
+}
+
+/// A copy of the grid rotated 90° right (clockwise), as a new `Grid`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_rotate_right(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let p = unsafe { grid_payload(grid) };
+    let height = grid_height(p.items.len(), p.width);
+    // Rotate right (90° CW): result is H×W (width=height, height=width).
+    // result[x, y] = original[width-1-y, x], for x in 0..height, y in 0..width.
+    let new_width = height;
+    let new_height = p.width;
+    let mut cells = Vec::with_capacity(p.items.len());
+    for y in 0..new_height {
+        for x in 0..new_width {
+            let ox = p.width - 1 - y;
+            let oy = x;
+            cells.push(p.items[oy * p.width + ox]);
+        }
+    }
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::collections::GRID,
+            std::mem::size_of::<GridPayload>(),
+            std::mem::align_of::<GridPayload>(),
+            |payload| {
+                (payload as *mut GridPayload).write(GridPayload {
+                    element_descriptor: p.element_descriptor,
+                    items: cells,
+                    width: new_width,
+                });
+            },
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Text methods (§4.3, M5).
 //
 // `Text` is an immutable UTF-8 payload (`Box<str>`). The methods are pure

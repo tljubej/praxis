@@ -68,6 +68,27 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(min_heap_peek())
         .entry(min_heap_len())
         .entry(min_heap_is_empty())
+        .entry(bitset_insert())
+        .entry(bitset_remove())
+        .entry(bitset_contains())
+        .entry(bitset_len())
+        .entry(bitset_is_empty())
+        .entry(grid_width())
+        .entry(grid_height())
+        .entry(grid_get())
+        .entry(grid_set())
+        .entry(grid_contains())
+        .entry(grid_neighbors4())
+        .entry(grid_neighbors8())
+        .entry(grid_positions())
+        .entry(grid_cells())
+        .entry(grid_row())
+        .entry(grid_column())
+        .entry(grid_find())
+        .entry(grid_find_all())
+        .entry(grid_transpose())
+        .entry(grid_rotate_left())
+        .entry(grid_rotate_right())
         .entry(text_len())
         .entry(text_is_empty())
         .entry(text_get())
@@ -716,6 +737,380 @@ fn min_heap_is_empty() -> MethodEntry {
         allocates: false,
         lowering: MethodLowering::RuntimeSymbol("praxis_min_heap_is_empty"),
         doc: "True iff the min-heap has no elements.",
+        stability: Stability::Stable,
+    }
+}
+
+// --- BitSet methods (M8-WS5, §6.1) --------------------------------------
+
+/// The `BitSet` receiver pattern (nullary — no type args).
+fn bitset_receiver() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::BitSet,
+        args: vec![],
+    }
+}
+
+fn bitset_insert() -> MethodEntry {
+    MethodEntry {
+        receiver: bitset_receiver(),
+        name: "insert",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_bitset_insert"),
+        doc: "Set the bit for a non-negative integer; returns Unit.",
+        stability: Stability::Stable,
+    }
+}
+
+fn bitset_remove() -> MethodEntry {
+    MethodEntry {
+        receiver: bitset_receiver(),
+        name: "remove",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_bitset_remove"),
+        doc: "Clear the bit for an integer; returns Unit.",
+        stability: Stability::Stable,
+    }
+}
+
+fn bitset_contains() -> MethodEntry {
+    MethodEntry {
+        receiver: bitset_receiver(),
+        name: "contains",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_bitset_contains"),
+        doc: "True iff the bit for the integer is set.",
+        stability: Stability::Stable,
+    }
+}
+
+fn bitset_len() -> MethodEntry {
+    MethodEntry {
+        receiver: bitset_receiver(),
+        name: "len",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_bitset_len"),
+        doc: "Number of set bits (popcount).",
+        stability: Stability::Stable,
+    }
+}
+
+fn bitset_is_empty() -> MethodEntry {
+    MethodEntry {
+        receiver: bitset_receiver(),
+        name: "is_empty",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_bitset_is_empty"),
+        doc: "True iff no bits are set.",
+        stability: Stability::Stable,
+    }
+}
+
+// --- Grid[T] methods (M8-WS5, §6.4) -------------------------------------
+
+/// The `Grid[T]` receiver pattern.
+fn grid_of_t() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::Grid,
+        args: vec![TypePattern::Var("T")],
+    }
+}
+
+/// A `(x, y)` point: the `(Int, Int)` tuple shape returned by grid methods.
+fn point_pattern() -> TypePattern {
+    TypePattern::Tuple(vec![
+        TypePattern::Scalar(ScalarType::Int),
+        TypePattern::Scalar(ScalarType::Int),
+    ])
+}
+
+fn grid_width() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "width",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_width"),
+        doc: "The number of columns.",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_height() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "height",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_height"),
+        doc: "The number of rows.",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_get() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "get",
+        params: vec![
+            TypePattern::Scalar(ScalarType::Int),
+            TypePattern::Scalar(ScalarType::Int),
+        ],
+        result: TypePattern::Var("T"),
+        purity: Purity::Pure,
+        can_fault: true,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_get"),
+        doc: "The cell at (x, y); faults if out of range.",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_set() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "set",
+        params: vec![
+            TypePattern::Scalar(ScalarType::Int),
+            TypePattern::Scalar(ScalarType::Int),
+            TypePattern::Var("T"),
+        ],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        can_fault: true,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_set"),
+        doc: "Set the cell at (x, y); faults if out of range.",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_contains() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "contains",
+        params: vec![
+            TypePattern::Scalar(ScalarType::Int),
+            TypePattern::Scalar(ScalarType::Int),
+        ],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_contains"),
+        doc: "True iff (x, y) is within the grid.",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_neighbors4() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "neighbors4",
+        params: vec![point_pattern()],
+        result: TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![point_pattern()],
+        },
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_neighbors4"),
+        doc: "The 4 orthogonal in-bounds neighbors of a point, as a Vec of (x, y).",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_neighbors8() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "neighbors8",
+        params: vec![point_pattern()],
+        result: TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![point_pattern()],
+        },
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_neighbors8"),
+        doc: "The 8 in-bounds neighbors of a point, as a Vec of (x, y).",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_positions() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "positions",
+        params: vec![],
+        result: TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![point_pattern()],
+        },
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_positions"),
+        doc: "All (x, y) positions in row-major order, as a Vec.",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_cells() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "cells",
+        params: vec![],
+        result: TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![TypePattern::Var("T")],
+        },
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_cells"),
+        doc: "All cells in row-major order, as a Vec.",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_row() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "row",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![TypePattern::Var("T")],
+        },
+        purity: Purity::Pure,
+        can_fault: true,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_row"),
+        doc: "Row `y` as a Vec; faults if out of range.",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_column() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "column",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![TypePattern::Var("T")],
+        },
+        purity: Purity::Pure,
+        can_fault: true,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_column"),
+        doc: "Column `x` as a Vec; faults if out of range.",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_find() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "find",
+        params: vec![TypePattern::Var("T")],
+        result: point_pattern(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_find"),
+        doc: "The first (x, y) whose cell equals `value`, or Unit if none.",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_find_all() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "find_all",
+        params: vec![TypePattern::Var("T")],
+        result: TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![point_pattern()],
+        },
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_find_all"),
+        doc: "All (x, y) positions whose cell equals `value`, as a Vec.",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_transpose() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "transpose",
+        params: vec![],
+        result: grid_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_transpose"),
+        doc: "A transposed copy (rows ↔ columns).",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_rotate_left() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "rotate_left",
+        params: vec![],
+        result: grid_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_rotate_left"),
+        doc: "A copy rotated 90° counter-clockwise.",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_rotate_right() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: "rotate_right",
+        params: vec![],
+        result: grid_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_grid_rotate_right"),
+        doc: "A copy rotated 90° clockwise.",
         stability: Stability::Stable,
     }
 }

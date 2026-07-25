@@ -20,7 +20,13 @@ use praxis_types::{data::TypeData, Type, TypeDb};
 pub fn type_to_pattern(db: &TypeDb, t: Type) -> Option<TypePattern> {
     match db.data(db.follow(t)) {
         TypeData::Scalar(s) => Some(TypePattern::Scalar(map_scalar(*s))),
-        TypeData::Tuple(_) => None,    // catalog has no tuple pattern yet
+        // Tuples bridge element-wise (so grid methods' `(Int, Int)` points match
+        // the catalog's `Tuple[Int, Int]` param/result patterns).
+        TypeData::Tuple(els) => Some(TypePattern::Tuple(
+            els.iter()
+                .map(|e| type_to_pattern(db, *e).unwrap_or(TypePattern::Var("T")))
+                .collect(),
+        )),
         TypeData::Func { .. } => None, // function-as-receiver not in catalog
         TypeData::Unit => Some(TypePattern::Unit),
         TypeData::Collection { ctor, args } => {
@@ -85,6 +91,11 @@ fn pattern_matches(catalog_pat: &TypePattern, concrete_pat: &TypePattern) -> boo
             c1 == c2
                 && a1.len() == a2.len()
                 && a1.iter().zip(a2).all(|(x, y)| pattern_matches(x, y))
+        }
+        // Tuples match element-wise (so a catalog `Tuple[Int, Int]` point
+        // pattern matches a concrete `(Int, Int)`).
+        (TypePattern::Tuple(a1), TypePattern::Tuple(a2)) => {
+            a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| pattern_matches(x, y))
         }
         _ => catalog_pat == concrete_pat,
     }

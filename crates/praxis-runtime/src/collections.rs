@@ -264,9 +264,42 @@ unsafe fn grid_format(payload: *const u8, out: &mut dyn fmt::Write) {
     let _ = out.write_str("]");
 }
 
-/// Descriptor for the `Grid[T]` collection (M6, §7.8). Element-wise equality and
-/// hashing are deferred to M8 (grid-as-map-key is an M8 concern); the descriptor
-/// is marked non-equatable / non-hashable for now.
+unsafe fn grid_equals(a: *const u8, b: *const u8) -> bool {
+    // SAFETY: caller guarantees both pointers point at initialized GridPayloads.
+    let pa = unsafe { &*(a as *const GridPayload) };
+    let pb = unsafe { &*(b as *const GridPayload) };
+    if pa.width != pb.width || pa.items.len() != pb.items.len() {
+        return false;
+    }
+    let Some(eq) = (unsafe { &*pa.element_descriptor }).equals else {
+        return false;
+    };
+    for (x, y) in pa.items.iter().zip(pb.items.iter()) {
+        let xe = x.payload::<u8>() as *const u8;
+        let ye = y.payload::<u8>() as *const u8;
+        if !eq(xe, ye) {
+            return false;
+        }
+    }
+    true
+}
+
+unsafe fn grid_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
+    // SAFETY: caller guarantees `payload` points at an initialized GridPayload.
+    let p = unsafe { &*(payload as *const GridPayload) };
+    let Some(hash_elem) = (unsafe { &*p.element_descriptor }).hash else {
+        return;
+    };
+    hasher.write_bytes(&(p.items.len() as u64).to_le_bytes());
+    hasher.write_bytes(&(p.width as u64).to_le_bytes());
+    for cell in p.items.iter() {
+        let elem_payload = cell.payload::<u8>() as *const u8;
+        hash_elem(elem_payload, hasher);
+    }
+}
+
+/// Descriptor for the `Grid[T]` collection (M6, §7.8; M8-WS5 enables equality
+/// and hashing so a Grid can be used as a map key). Element-wise, like Vec.
 pub const GRID: &TypeDescriptor = &TypeDescriptor {
     id: TypeId(7),
     name: "Grid",
@@ -275,8 +308,8 @@ pub const GRID: &TypeDescriptor = &TypeDescriptor {
     trace: grid_trace,
     drop_value: grid_drop,
     format: grid_format,
-    equals: None,
-    hash: None,
+    equals: Some(grid_equals),
+    hash: Some(grid_hash),
 };
 
 #[cfg(test)]

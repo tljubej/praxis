@@ -579,19 +579,34 @@ fn lower_inst<M: Module>(
                             )?;
                             builder.def_var(vars[dst.0 as usize], heap_ref);
                         }
+                        CollectionCtor::BitSet => {
+                            // BitSet is nullary (no element descriptor); elements
+                            // are always Int. praxis_bitset_new takes only ctx.
+                            let bs_ref = call_runtime_by_name(
+                                builder,
+                                ctx_val,
+                                &[],
+                                "praxis_bitset_new",
+                                module,
+                                imports,
+                            )?;
+                            builder.def_var(vars[dst.0 as usize], bs_ref);
+                        }
                         CollectionCtor::Grid => {
-                            // Grid reuses the Vec-style element descriptor. The
-                            // `praxis_grid_new` wrapper lands in WS5; until then,
-                            // a Grid is constructed only by the input parser, so
-                            // this arm is unreachable from source. Resolve
-                            // defensively via praxis_vec_new-style layout.
+                            // Grid construction from source `Grid()`: an empty
+                            // 0×0 grid. (The input parser is the usual grid
+                            // constructor; source construction is for manual
+                            // grids filled via set.) praxis_grid_new takes
+                            // (descriptor, width, height).
                             let el_desc = collection_element_descriptor_for(db, args[0]);
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
+                            let w_imm = builder.ins().iconst(GC, 0);
+                            let h_imm = builder.ins().iconst(GC, 0);
                             let grid_ref = call_runtime_by_name(
                                 builder,
                                 ctx_val,
-                                &[el_imm],
-                                "praxis_vec_new",
+                                &[el_imm, w_imm, h_imm],
+                                "praxis_grid_new",
                                 module,
                                 imports,
                             )?;
@@ -1274,6 +1289,7 @@ fn descriptor_for_type(
             CollectionCtor::Counter => praxis_runtime::maps::COUNTER as *const TypeDescriptor,
             CollectionCtor::MinHeap => praxis_runtime::heaps::MIN_HEAP as *const TypeDescriptor,
             CollectionCtor::MaxHeap => praxis_runtime::heaps::MAX_HEAP as *const TypeDescriptor,
+            CollectionCtor::BitSet => praxis_runtime::bitset::BITSET as *const TypeDescriptor,
             // Other collection ctors (MinHeap/MaxHeap/BitSet/Range/Seq) land in
             // their own workstreams and will add arms here. Until then they fall
             // through to INT — sound for GC tracing only; these types cannot yet

@@ -137,6 +137,33 @@ pub const TUPLE: &TypeDescriptor = &TypeDescriptor {
     hash: Some(tuple_hash),
 };
 
+/// The cached `'static` schema for a `(Int, Int)` point tuple. Used by Grid
+/// methods that return `(x, y)` points (§6.4). Built once and leaked; the two
+/// element descriptors are both `INT`. This avoids the codegen round-trip for
+/// tuple schemas when the runtime allocates points directly.
+pub fn point_schema() -> &'static TupleSchema {
+    use std::sync::OnceLock;
+    // `*const TypeDescriptor` is not `Sync`, so wrap the leaked slice pointer in
+    // a `Send + Sync` newtype (the underlying static descriptors outlive all
+    // threads — mirroring the `SendPtr` idiom used by the codegen's tuple cache).
+    struct SyncPtr(&'static TupleSchema);
+    unsafe impl Send for SyncPtr {}
+    unsafe impl Sync for SyncPtr {}
+    static POINT: OnceLock<SyncPtr> = OnceLock::new();
+    POINT
+        .get_or_init(|| {
+            let descriptors: &'static [*const TypeDescriptor] = Box::leak(
+                vec![
+                    crate::scalars::INT as *const _,
+                    crate::scalars::INT as *const _,
+                ]
+                .into_boxed_slice(),
+            );
+            SyncPtr(Box::leak(Box::new(TupleSchema { descriptors })))
+        })
+        .0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

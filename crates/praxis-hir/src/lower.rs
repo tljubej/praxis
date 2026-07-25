@@ -1707,6 +1707,10 @@ fn pattern_to_type(db: &mut TypeDb, p: &TypePattern) -> Type {
             let r = pattern_to_type(db, result);
             db.func(ps, r)
         }
+        TypePattern::Tuple(els) => {
+            let tys: Vec<Type> = els.iter().map(|e| pattern_to_type(db, e)).collect();
+            db.tuple(tys)
+        }
         TypePattern::Opaque => db.fresh_var(),
     }
 }
