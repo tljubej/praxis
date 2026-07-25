@@ -1142,4 +1142,47 @@ mod tests {
             .expect("vec.get exists");
         assert!(get.can_fault);
     }
+
+    /// M8-WS7 closed-catalog check: every §6.1 collection has at least the
+    /// `len`/`is_empty` pair, plus its type-specific methods. This guards against
+    /// an accidental catalog gap where a collection ships without its methods.
+    #[test]
+    fn catalog_covers_every_collection_kind() {
+        let cat = builtin_catalog();
+        // Each collection must have a `len` and `is_empty` method (or the
+        // type-specific equivalent — heaps have len/is_empty; bitset has them too).
+        for (ctor, name) in [
+            (CollectionCtor::Vec, "Vec"),
+            (CollectionCtor::Deque, "Deque"),
+            (CollectionCtor::Set, "Set"),
+            (CollectionCtor::Counter, "Counter"),
+            (CollectionCtor::MinHeap, "MinHeap"),
+            (CollectionCtor::MaxHeap, "MaxHeap"),
+            (CollectionCtor::BitSet, "BitSet"),
+        ] {
+            let args: Vec<TypePattern> = match ctor.arity() {
+                0 => Vec::new(),
+                n => (0..n).map(|_| TypePattern::Var("T")).collect(),
+            };
+            let pat = TypePattern::Collection { ctor, args };
+            let len = cat.by_receiver_and_name(&pat, "len").count();
+            let is_empty = cat.by_receiver_and_name(&pat, "is_empty").count();
+            assert!(len >= 1, "{name} missing len method");
+            assert!(is_empty >= 1, "{name} missing is_empty method");
+        }
+        // Map has two type args with distinct var names (K, V).
+        let map_pat = TypePattern::Collection {
+            ctor: CollectionCtor::Map,
+            args: vec![TypePattern::Var("K"), TypePattern::Var("V")],
+        };
+        assert!(cat.by_receiver_and_name(&map_pat, "len").count() >= 1);
+        assert!(cat.by_receiver_and_name(&map_pat, "is_empty").count() >= 1);
+        // Grid has width/height (its dimension methods).
+        let grid_pat = TypePattern::Collection {
+            ctor: CollectionCtor::Grid,
+            args: vec![TypePattern::Var("T")],
+        };
+        assert!(cat.by_receiver_and_name(&grid_pat, "width").count() >= 1);
+        assert!(cat.by_receiver_and_name(&grid_pat, "neighbors4").count() >= 1);
+    }
 }

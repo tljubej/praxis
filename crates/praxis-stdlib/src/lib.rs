@@ -14,6 +14,7 @@
 
 pub mod builtins;
 pub mod catalog;
+pub mod completion;
 pub mod prelude;
 pub mod type_pattern;
 
@@ -21,5 +22,6 @@ pub use builtins::builtin_catalog;
 pub use catalog::{
     MethodCatalog, MethodCatalogError, MethodEntry, MethodLowering, Purity, Stability,
 };
+pub use completion::{completion_data, CompletionItem};
 pub use prelude::PRELUDE;
 pub use type_pattern::TypePattern;
