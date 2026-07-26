@@ -595,7 +595,7 @@ Initial operations:
 - `max_by`
 - `collect`
 
-The compiler lowers pipelines into concrete internal adapters, then fuses common chains into loops.
+The compiler lowers pipelines into concrete internal adapters, then fuses common chains into loops. As of M8-WS11, the 22 non-barrier combinators (all of the above except `sorted`/`unique`/`frequencies`/`chunks`/`windows`) fuse into a single loop over the source — `v.map(f).filter(p).sum()` compiles to one loop with zero intermediate Vecs (ADR-029). The five barriers need the whole sequence and require new runtime sort/dedup helpers; they remain deferred.
 
 ### 6.4 Grid
 

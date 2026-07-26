@@ -32,6 +32,7 @@ with completion-data generation.
 | WS8 | Pipeline combinators (`map`/`filter`/`sum`/`count`/`collect`) with closure invocation + seamless chaining | `844bfcd` |
 | WS9 | Graph-algorithm acceptance evidence: BFS/frequency fixtures solved with the new collections (built-in `bfs`/`dijkstra`/etc. wrappers deferred — see §6) | (WS10) |
 | WS10 | Docs, ADR-028, corpus fixtures, README bump, this handover | (this commit) |
+| WS11 | **Cross-combinator pipeline fusion (§6.3).** `v.map(f).filter(p).sum()` → one fused loop, zero intermediate Vecs. Pipeline grows 6 → 23 combinators; `fold` stub closed; ADR-029. See §7 (done) and §9. | (this commit) |
 
 **TypeId allocation:** 13=Deque, 14=Map, 15=Set, 16=Counter, 17=MinHeap,
 18=MaxHeap, 19=BitSet. `Grid` keeps TypeId 7 (now equatable/hashable). `Seq` is
@@ -98,14 +99,22 @@ compile-time only (no TypeId). `DynamicKey` is a Rust-internal wrapper.
 
 ## 6. Known limitations / follow-ups for M9+
 
-- **Pipeline: full lazy `Seq[T]` + cross-combinator fusion.** M8-WS8 ships eager
-  materialization (each combinator allocates a Vec) for `map`/`filter`/`sum`/
-  `count`/`collect`. The remaining 20 combinators (reduce/any/all/find/position/
-  enumerate/zip/take/skip/take_while/flat_map/filter_map/sorted/unique/
-  frequencies/min/max/min_by/max_by/chunks/windows) and true single-loop fusion
-  across a chain are the M8-WS8 continuation (or M9).
-- **`fold` closure invocation.** The skeleton is in place but `fold` returns the
-  init value; full `CallIndirect`-driven fold lands with the fusion work.
+- **Pipeline: cross-combinator fusion is DONE (WS11); barriers + lazy `Seq[T]`
+  remain.** WS11 fuses the 22 non-barrier combinators into a single loop per
+  chain (`v.map(f).filter(p).sum()` → one loop, zero intermediate Vecs; ADR-029).
+  The 5 barriers (`sorted`/`unique`/`frequencies`/`chunks`/`windows`) need new
+  runtime sort/dedup helpers and are deferred — they Y110 until a separate
+  workstream. True first-class lazy `Seq[T]` values flowing through non-pipeline
+  contexts (the handover step-5 coercion) is also deferred; the delivered
+  combinators return `Vec[T]` at the chain's end (eager-at-sink), which already
+  achieves the perf goal.
+- **`enumerate`/`zip` produce tuples but `.0`/`.1` field access is deferred
+  (ADR-026).** These combinators ship (WS11) for forward-compatibility —
+  `enumerate().count()`, `zip(b).count()`, and `.sum()` via closures that
+  destructure in their params work today; full usefulness lands with `.0`/`.1`.
+- **`filter_map` is modeled as "map and keep".** The catalog types it `(T) -> U`
+  with non-Unit `U`; a precise Unit-drop needs a runtime tag check (deferred).
+- **`find`/`position` return -1 on miss** (Praxis has no `Option` yet).
 - **Built-in graph functions (§6.5).** `bfs`/`bfs_distance`/`dfs`/`dijkstra`/
   `a_star`/`flood_fill`/`connected_components`/`topological_sort` are names in
   the prelude but not yet wired as built-in free functions. The §19.8 acceptance
@@ -133,14 +142,20 @@ compile-time only (no TypeId). `DynamicKey` is a Rust-internal wrapper.
 
 ---
 
-## 7. Picking up the fusion work (the top follow-up)
+## 7. Picking up the fusion work — **DONE in WS11** (see §9)
 
-The single highest-value follow-up is **true cross-combinator fusion** for the
-§6.3 pipeline. M8-WS8 ships an *eager* version: each combinator (`map`/`filter`/
-`sum`/`count`/`collect`) lowers to its **own loop** and materializes an
-intermediate `Vec`. So `v.map(f).filter(p).sum()` compiles to **three loops and
-two throwaway Vecs**. The UX is seamless (no `.collect()` needed) but the spec's
-"fuse common chains into loops" (§6.3) is **not yet met**. This section gives a
+> **Status update (WS11):** cross-combinator fusion landed. The notes below are
+> the original architectural brief from the M8 close; §9 records what actually
+> shipped and where it diverged from this brief. TL;DR: the recognizer lives in
+> the MIR builder (not HIR, as this brief suggested), the eager lowerers are
+> retained as a fallback, and 22 of 27 combinators now fuse.
+
+The single highest-value follow-up was **true cross-combinator fusion** for the
+§6.3 pipeline. M8-WS8 shipped an *eager* version: each combinator (`map`/`filter`/
+`sum`/`count`/`collect`) lowered to its **own loop** and materialized an
+intermediate `Vec`. So `v.map(f).filter(p).sum()` compiled to **three loops and
+two throwaway Vecs**. The UX was seamless (no `.collect()` needed) but the spec's
+"fuse common chains into loops" (§6.3) was **not yet met**. This section gave a
 fresh session the architectural context and exact file/function pointers to pick
 it up without re-deriving them.
 
@@ -234,6 +249,84 @@ and shipping eager-and-correct beat fused-and-flaky for a milestone close.
 
 ## 8. Test count
 
-**591 tests** (up from 485 at M7 close): ~166 JIT end-to-end, ~96 HIR, ~89
+**620 tests** (up from 591 at M8-WS10 close, itself up from 485 at M7 close):
+~200 JIT end-to-end (39 new pipeline-fusion tests in WS11), ~96 HIR, ~89
 runtime, ~44 types, ~56 parser, ~140 other. `just ci` clean (fmt-check + clippy
 `-D warnings` + test).
+
+---
+
+## 9. M8-WS11: cross-combinator pipeline fusion (§6.3 — done)
+
+WS11 closes the §6.3 "fuse common chains into loops" clause that §7 (above)
+identified as the top follow-up. `v.map(f).filter(p).sum()` now compiles to
+**one loop over the source, zero intermediate Vecs**. The pipeline grows from
+6 → 23 combinators; only the 5 barriers remain.
+
+### What shipped
+
+- **A chain-recognition pass** (`recognize_pipeline`, `praxis-mir/src/build.rs`)
+  that walks the `MethodCall`-`MethodCall`-…-leaf tree at the MIR dispatch site
+  and builds a `PipelinePlan { source, stages: Vec<Stage>, sink: Sink }`. No HIR
+  or typed-tree changes were needed — the whole chain is already visible as a
+  tree at MIR-lowering time.
+- **A fused single-loop builder** (`lower_pipeline`) that emits one loop
+  threading each element through the stages and into the sink. Stages emit
+  branches inline (returning `(item, still_live)`); the loop pushes its own
+  `LoopCtx` so `filter`-skips jump to a dedicated increment block and
+  short-circuit sinks (`any`/`all`/`find`) jump to exit.
+- **17 new combinators** in the catalog (`praxis-stdlib/src/builtins.rs`), each
+  as a `_on_vec` / `_on_seq` pair: `take`, `skip`, `take_while`, `enumerate`,
+  `zip`, `flat_map`, `filter_map`, `product`, `min`, `max`, `min_by`, `max_by`,
+  `any`, `all`, `find`, `position`, `reduce`. Plus the existing `fold`, whose
+  M8 stub (returned init unchanged) is now closed.
+- **`flat_map`** is special-cased before the stage loop: it invokes its closure,
+  runs the sink in a nested inner loop over the result, then continues the outer
+  loop.
+- **ADR-029** records the design; **§6.3 of the spec** is updated to mark fusion
+  delivered.
+
+### How it diverged from the §7 brief
+
+- The brief proposed hooking `lower_method_call` in **HIR**. WS11 does it in the
+  **MIR builder** instead — simpler, single-crate, no typed-tree changes.
+- The brief's "barrier splitting" (materialize prefix to Vec, resume fusion) is
+  unnecessary for this workstream: barriers aren't registered in the catalog, so
+  the recognizer simply stops the walk at any unrecognized method and treats the
+  inner call as the source. Adding barriers later is purely additive.
+- The eager M8-WS8 lowerers (`lower_pipeline_combinator` + `lower_seq_*`) are
+  **retained verbatim** as the fallback path. Any chain the recognizer declines
+  is bit-for-bit identical to M8 behavior, so a recognizer regression can't
+  break the eager path.
+
+### Bugs found and fixed during WS11
+
+- **Infinite loop**: the fused body block had no fall-through terminator after
+  the sink; the missing `Jump { target: incr_blk }` made the loop spin. Fixed by
+  emitting the jump after the sink body.
+- **`max_by` comparator args inverted**: the comparator is "less-than"
+  (`f(a,b) = a < b`); for max, "item is better" means `acc < item` → `f(acc,
+  item)`, not `f(item, acc)`. (min_by was already correct.)
+- **`flat_map` as outermost call** returned empty: the recognizer required the
+  outermost call to be a sink. Fixed by appending an implicit `Collect` when the
+  outermost call is a streaming stage (mirrors eager `v.map(f)` → Vec).
+
+### Known limitations (carry-forward)
+
+- Barriers (`sorted`/`unique`/`frequencies`/`chunks`/`windows`) — deferred, Y110.
+- `enumerate`/`zip` produce tuples but `.0`/`.1` is deferred (ADR-026).
+- `filter_map` is "map and keep" (no Unit-drop; needs a runtime tag check).
+- `find`/`position` return -1 on miss (no `Option` type yet).
+- First-class lazy `Seq[T]` values with auto-materialization coercion — deferred;
+  the perf goal (no intermediate Vecs) is met without it.
+
+### Entry points (for future work)
+
+| File | Function | Role |
+|---|---|---|
+| `praxis-mir/src/build.rs` | `recognize_pipeline` | walk the chain, build the plan |
+| `praxis-mir/src/build.rs` | `lower_pipeline` | emit the fused single loop |
+| `praxis-mir/src/build.rs` | `run_stage` / `emit_sink_body` / `emit_flat_map_inner` | per-stage / per-sink / flat-map-inner emission |
+| `praxis-mir/src/build.rs` | `lower_pipeline_combinator` + `lower_seq_*` | the retained eager fallback |
+| `praxis-stdlib/src/builtins.rs` | `seq_*_on_vec` / `seq_*_on_seq` | the 23 combinator catalog entries |
+

@@ -34,3 +34,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-026: Structural equality & hashing via descriptors + internal capability check](./026-structural-equality-hashing.md)
 - [ADR-027: Closures — Approach B calling convention, capture analysis, VarCell](./027-closures.md)
 - [ADR-028: Collections, DynamicKey, and the sequence pipeline (M8)](./028-collections-and-sequence-pipelines.md)
+- [ADR-029: Pipeline fusion and the chain-recognition pass (M8-WS11)](./029-pipeline-fusion.md)
