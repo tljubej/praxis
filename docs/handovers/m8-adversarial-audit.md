@@ -1,6 +1,17 @@
 # M8 adversarial test audit — findings & handover
 
 **Date:** 2026-07-26
+
+> **Follow-up (2026-07-26):** all five leftover issues documented below have been
+> addressed in four commits on `main`. §2 (closure-from-collection SIGSEGV),
+> §6.2 (deep-recursion SIGABRT), §6.3 (read-against-non-Text SIGSEGV), and the
+> §6.1 schema-cache residual are **FIXED**. §3 Gap A (fold-into-Vec) is **FIXED**;
+> §3 Gap B is **partially fixed** (closure-param element-type propagation is now
+> implemented; the residual blocker is the orthogonal HM let-generalization of
+> `Vec()` bindings, documented in the test). See the "Status" lines in each
+> section and the new tests referenced there. The JIT crate grew 313 → 321
+> tests; `cargo fmt --check` + `cargo clippy -D warnings` + `cargo test
+> --workspace` all clean.
 **Scope:** An adversary-style audit of the M8-WS11 pipeline fusion, closures,
 GC, runtime collections, arithmetic, and input parser. Two rounds of ~108 new
 adversarial end-to-end JIT tests were added to
@@ -67,12 +78,17 @@ the fixed path. Full suite green (676 → 719 tests; the JIT crate 205 → 263).
 
 ---
 
-## 2. KNOWN LIMITATION (unfixed): invoking a closure retrieved from a collection
+## 2. ~~KNOWN LIMITATION (unfixed)~~ FIXED: invoking a closure retrieved from a collection
 
 **Severity:** memory-safety / miscompile — **can SIGSEGV**.
 **Where:** parser + HIR call lowering.
-**Not fixed** — requires AST/parser/HIR changes. Documented here so a future
-workstream can pick it up.
+**Status:** **FIXED** (commit `7aaa1c8`). A postfix `expr(args)` parse
+production, an AST `callee_expr()` accessor, resolver/HIR/infer handling of the
+expression callee, and an MIR `Inst::CallIndirect` lowering together make
+`fs.get(0)(100)`, `f(1)(2)`, and `(|x| x*3)(14)` work end-to-end. Regression
+tests: `adv_call_closure_retrieved_from_collection`,
+`adv_call_closure_in_parens`, `adv_call_result_of_call`,
+`adv_call_closure_from_collection_under_gc_pressure`.
 
 ### Symptom
 
@@ -119,24 +135,34 @@ CI (it is non-deterministically a SIGSEGV, which would flake); a comment in
 
 ---
 
-## 3. KNOWN LIMITATION (unfixed): type inference gaps blocking pipelines
+## 3. ~~KNOWN LIMITATION (unfixed)~~ FIXED (Gap A) / PARTIAL (Gap B): type inference gaps blocking pipelines
 
-Two inference gaps make idiomatic pipelines reject with `T110` ("no method on
-this type"). Neither is a runtime bug; both are front-end inference
-limitations. Asserted as clean-diagnostics tests so they're tracked:
+Bidirectional (expected-type) inference was added to `infer_method_call`
+(commit `025721e`): the method's full signature (receiver + params + result) is
+instantiated name-aware (one type var per `Var(name)`, so fold's `Acc` is a
+single type across the init arg, closure params, and result), the receiver is
+unified against its pattern to pin the element type, and each argument is
+inferred with its expected param type pushed down — unifying immediately so a
+shared var propagates to later args. A closure arg whose expected type is a
+`Func` gets each param unified with the expected Func param before its body is
+inferred. This is purely additive (unifying with a fresh var is a no-op), so all
+86 existing pipeline tests keep their behavior.
 
-- **`adv_pipeline_fold_into_vec_unsupported_by_inference`** —
-  `v.fold(Vec(), |a, x| { a.push(x); a })` fails: the closure param `a` cannot
-  be inferred as `Vec[Int]` from the `Vec()` init. Blocks fold/reduce into a
-  collection accumulator.
-- **`adv_pipeline_method_on_closure_param_from_collection_rejected`** —
-  `v.map(|inner| inner.len())` over a `Vec[Vec[Int]]` fails: a method call on a
-  closure parameter whose type is a collection's element type is not resolved.
-  Blocks `.len()`-based `min_by`/`max_by` comparators over nested collections
-  and most Text-element pipelines.
-
-Both likely need the inference engine to propagate the collection element type
-into the closure parameter when the closure is a pipeline combinator argument.
+- **Gap A — FIXED.** `adv_pipeline_fold_into_vec_unsupported_by_inference` →
+  renamed `adv_pipeline_fold_into_vec_now_supported`: a positive runtime test.
+  `v.fold(Vec(), |a, x| { a.push(x); a })` now type-checks and runs; the closure
+  param `a` is pinned to the init arg's accumulator type (threaded via the
+  name-shared `Acc`).
+- **Gap B — PARTIALLY FIXED.** The closure-param element-type propagation this
+  section described is now implemented. The idiomatic
+  `let v = Vec(); v.push(...); v.map(|inner| inner.len())` pattern is STILL
+  rejected, but for a DIFFERENT, orthogonal reason: HM let-generalization turns
+  `let v = Vec()` into `forall T. Vec[T]`, so each method call on `v` instantiates
+  a fresh, unbound element type and the push that would pin it doesn't propagate
+  to the map. That is a generalization-policy issue for mutable Vec bindings, not
+  the closure-param gap targeted here.
+  `adv_pipeline_method_on_closure_param_partially_supported` documents the
+  residual (clean diagnostic, not a crash).
 
 ---
 
@@ -209,34 +235,53 @@ capture value's real type). 4 regression tests
 (`adv_parser_record_with_text_field_*`) cover equality, set-key, and
 GC-survival of Text-field parser records.
 
-**Residual note:** `leak_record_schema` caches schemas by field-*name* sequence
-only (parser.rs:628). Two templates with the same field names but different
-capture types (e.g. `{x:int}` vs `{x:word}`) would collide and share the
-first-seen schema's descriptors. Latent (each template has a fixed capture
-type in practice); a follow-up could key the cache on (names, descriptors).
+**Residual note (FIXED):** `leak_record_schema` previously cached schemas by
+field-*name* sequence only, so two templates with the same field names but
+different capture types (e.g. `{x:word}` vs `{x:char}`) would collide and share
+the first-seen schema's descriptors — the same class of segfault the
+`alloc_record` fix above closed. **Fixed** (commit `23130ee`): the cache is now
+keyed on `(names, descriptor-pointers)`, mirroring the sibling
+`leak_tuple_schema`. Regression tests: `adv_parser_record_same_name_diff_type_
+no_schema_collision`, `adv_parser_record_same_name_diff_type_survives_gc`.
 
-### 6.2 BUG (unfixed): deep recursion aborts the host (SIGABRT)
+### 6.2 BUG (fixed): deep recursion aborts the host (SIGABRT)
 
 **Severity:** robustness — kills the process; violates §9.2/§17.4.
-**Status:** documented; `adv_deep_recursion_does_not_crash_host` tests the
-safe depth (10000) and the comment reproduces the crash.
+**Status:** **FIXED** (commit `cd61ad3`). A new `FaultKind::StackOverflow` and a
+`recursion_depth` counter on `RuntimeContext` (bumped in
+`praxis_push_shadow_frame`, decremented in `praxis_pop_shadow_frame`) back a
+prologue guard in every generated function: after the shadow-frame push, read
+`recursion_depth` at its fixed `#[repr(C)]` offset and branch — if it exceeds
+`MAX_RECURSION_DEPTH` (8000), to a stack-overflow fault epilogue (raise the
+fault, pop frame, return the Unit sentinel); else to the body.
 
-Recursion beyond ~15–20k frames overflows the native stack; the process is
-killed with `fatal runtime error: stack overflow, aborting` (SIGABRT) rather
-than faulting gracefully. `count(100000)` reproduces. Fix: a recursion-depth
-guard at generated-function entry that sets a `StackOverflow` fault (a new
-`FaultKind`) before the native stack is exhausted. Not fixed here — needs a
-chosen limit + a `FaultKind` addition + the check emitted at every call prologue.
+The enabling change: `Inst::CheckFault` now actually **branches** to the
+function's fault block when a fault is pending (previously a no-op
+`praxis_check_fault` call — the "full per-check branching is a follow-up" TODO).
+Without it, a `StackOverflow` set deep in recursion would return Unit to the
+parent, which would feed Unit into an arithmetic wrapper and dereference Unit's
+payload as an `i64` (UB → segfault). Branching at every `CheckFault` diverts to
+the fault block before any such operand is touched, so the fault unwinds
+cleanly through every parent frame. This also hardens all other fault kinds.
+Regression tests: `adv_deep_recursion_does_not_crash_host` (count(4000) under
+the limit — succeeds), `adv_deep_recursion_over_limit_faults_cleanly`
+(count(100000) over the limit — pre-fix SIGABRT, now `FaultKind::StackOverflow`,
+host survives).
 
-### 6.3 Host-safety gap (mitigated in tests): `read` with no input buffer
+### 6.3 Host-safety gap (fixed): `read` with no input buffer
 
 The test harness `run_main_with_input` previously skipped installing an input
 buffer for empty input, leaving `ctx.input_source` at its default (the Unit
 singleton). A `read` against Unit reinterprets Unit's payload as a Text
-buffer → SIGSEGV. The harness now always installs a (possibly empty) Text
-buffer. The underlying runtime gap — `read` against a non-Text `input_source`
-segfaults instead of faulting cleanly — remains; a guard in the read lowering
-(input descriptor check) would close it.
+buffer → SIGSEGV. The harness always installs a (possibly empty) Text buffer.
+
+**The underlying runtime gap is FIXED** (commit `23130ee`): `praxis_run_parser`
+(the ABI chokepoint both `read` and `parse(text, expr)` funnel through) now
+guards the input descriptor — if it is not `TEXT`, it raises `ParseFailed` and
+returns the Unit sentinel instead of handing the parser interpreter a non-Text
+payload to reinterpret. The host observes the fault cleanly. Regression test:
+`adv_read_against_non_text_input_faults_cleanly` (+ a `run_main_no_input` helper
+that deliberately leaves `input_source` at the default Unit).
 
 ### 6.4 What held up (round 2)
 
@@ -321,3 +366,10 @@ All in `crates/praxis-codegen-cranelift/tests/jit.rs`, prefixed `adv_`:
 **Totals:** 728 tests pass workspace-wide (up from 620 at M8-WS11 close); the
 JIT crate alone grew 205 → 313. `cargo fmt --check` + `cargo clippy -D warnings`
 + `cargo test --workspace` all clean.
+
+**Follow-up fix totals:** the four leftover-fix commits (§2, §3, §6.1-residual,
+§6.2, §6.3) added 8 new JIT tests (schema-cache collision ×2, read-against-Unit,
+deep-recursion over-limit, closure-from-collection ×4) and converted the two §3
+limitation assertions (one now positive, one now documents the residual). The
+JIT crate grew 313 → 321; `cargo fmt --check` + `cargo clippy -D warnings` +
+`cargo test --workspace` all clean.
