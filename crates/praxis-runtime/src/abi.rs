@@ -2598,18 +2598,34 @@ pub unsafe extern "C" fn praxis_get_input(ctx: *mut RuntimeContext) -> GcRef {
 /// `GcRef` (§7.1, M6). `plan_index_gc` is a boxed `Int` whose payload is the
 /// plan's index in the HIR's global slab.
 ///
-/// On a parse mismatch, sets `FaultKind::ParseFailed` and returns the Unit
-/// sentinel (§7.11). No Rust panic crosses the ABI.
+/// On a parse mismatch (or a non-Text `input`), sets `FaultKind::ParseFailed`
+/// and returns the Unit sentinel (§7.11). No Rust panic crosses the ABI.
+///
+/// The non-Text guard is load-bearing (§6.3 host-safety gap): the parser
+/// interpreter reinterprets `input`'s payload as a `TextPayload`, so a non-Text
+/// `input` (e.g. the default Unit singleton when no input buffer was installed)
+/// would be dereferenced as a Text buffer and segfault. Both `read` (whose
+/// `input` comes from `praxis_get_input`) and `parse(text, expr)` (whose `input`
+/// is an arbitrary expression) funnel through here, so guarding at this ABI
+/// boundary closes the gap regardless of how the input was produced.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `plan_index_gc` must be a valid `Int`; `input`
-/// must be a valid `Text` `GcRef`.
+/// must be a valid `GcRef` (any descriptor — a non-Text descriptor faults cleanly
+/// rather than dereferencing garbage).
 #[no_mangle]
 pub unsafe extern "C" fn praxis_run_parser(
     ctx: *mut RuntimeContext,
     plan_index_gc: GcRef,
     input: GcRef,
 ) -> GcRef {
+    // Guard the parser interpreter against a non-Text input (§6.3). Reaching
+    // `run_plan` with a non-Text payload would reinterpret foreign bytes as a
+    // TextPayload and segfault; fault cleanly instead.
+    if input.descriptor().id != crate::text::TEXT.id {
+        unsafe { set_fault(ctx, FaultKind::ParseFailed) };
+        return unsafe { unit_sentinel(ctx) };
+    }
     let idx = unsafe { int_payload(plan_index_gc) };
     // Delegate to the parser interpreter (WS7). It reads the plan from the HIR
     // slab, runs it against the input bytes, and allocates the result.

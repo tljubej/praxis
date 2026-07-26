@@ -71,6 +71,24 @@ fn run_main_with_input(src: &str, input: &str) -> (Runtime, GcRef) {
     (rt, result)
 }
 
+/// Like [`run_main`], but deliberately leaves `input_source` at its default (the
+/// immortal Unit singleton) instead of installing a Text buffer. A `read`
+/// against the Unit source must fault cleanly (`ParseFailed`) rather than
+/// segfault — the parser interpreter would otherwise reinterpret Unit's payload
+/// as a Text buffer (§6.3 host-safety gap, now guarded in `praxis_get_input`).
+fn run_main_no_input(src: &str) -> (Runtime, GcRef) {
+    let (jit, ids) = compile(src);
+    let main_id = *ids.get("main").expect("no `main` function");
+    let mut rt = Runtime::new();
+    let mut ctx = rt.context();
+    // Intentionally do NOT touch ctx.input_source: it stays at the default Unit.
+    let entry: RunnableFunction = unsafe { std::mem::transmute(jit.entry(main_id)) };
+    let unit = rt.alloc_unit();
+    let result = unsafe { entry(&mut ctx as *mut RuntimeContext, unit) };
+    drop(jit);
+    (rt, result)
+}
+
 #[test]
 fn runs_a_constant_int() {
     // main returns a boxed 42; the host reads the payload.
@@ -1904,6 +1922,88 @@ fn adv_parser_record_with_text_field_survives_gc() {
     let (rt, result) = run_main_with_input(src, "alpha,80\nbeta,443\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
+}
+
+// --- Adversarial: parser-record schema cache (§6.1 residual) ----------------
+//
+// `leak_record_schema` cached record schemas by field-NAME sequence only, so two
+// templates with identical field names but different capture types (e.g.
+// `{x:word}` vs `{x:int}`) collided and shared the first-seen schema's
+// descriptors. record_equals/format/hash dispatch through schema.fields[i]
+// .descriptor, so the second template's fields were compared/formatted through
+// the WRONG callback — the same class of segfault the §6.1 alloc_record fix
+// closed. Fixed: the cache is now keyed on (names, descriptors). Mirrors the
+// sibling leak_tuple_schema, which was already descriptor-keyed.
+
+#[test]
+fn adv_parser_record_same_name_diff_type_no_schema_collision() {
+    // Two record templates with the SAME field name `v` but DIFFERENT capture
+    // types (`word` → Text vs `int` → Int) must not share a schema. Pre-fix,
+    // whichever template was parsed first won the cache and the second's fields
+    // were compared/formatted through the wrong descriptor. We parse each into a
+    // Vec, then compare a record to itself (forces record_equals through the
+    // schema descriptor) and use it as a Set key (forces record_hash). Both must
+    // succeed without faulting — pre-fix the Int-then-Text order segfaulted on
+    // the equality of the Text record (INT.equals reinterpreting a TextPayload).
+    let src = String::from("fn main() -> Int {\n")
+        // First template seen: {v:word} → v is Text. Parse, compare, key it.
+        + "  let ws = read lines(`{v:word}`)\n"
+        + "  let w_ok = if ws.get(0) == ws.get(0) { 1 } else { 0 }\n"
+        + "  let ws_set = Set()\n"
+        + "  ws_set.insert(ws.get(0))\n"
+        // Second template seen: {v:char} → v is Char, SAME field name `v`.
+        // Both parse the single char `a`, but the field descriptor differs
+        // (TEXT vs CHAR). Pre-fix this got the word-template's schema (Text
+        // descriptor), which would miscompare/mishash the Char field.
+        + "  let cs = read lines(`{v:char}`)\n"
+        + "  let c_ok = if cs.get(0) == cs.get(0) { 1 } else { 0 }\n"
+        + "  let cs_set = Set()\n"
+        + "  cs_set.insert(cs.get(0))\n"
+        + "  w_ok + c_ok\n"
+        + "}\n";
+    let (rt, result) = run_main_with_input(&src, "a\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn adv_parser_record_same_name_diff_type_survives_gc() {
+    // Same-name/different-type templates under GC pressure: the leaked schemas
+    // are `'static` (immune to collection), but force a collection between the
+    // two parses to confirm nothing about the cached-schema dispatch is
+    // sensitive to GC ordering. Parses cleanly and counts both records.
+    let src = String::from("fn main() -> Int {\n")
+        + "  let ws = read lines(`{v:word}`)\n"
+        + "  let garbage = Vec()\n"
+        + "  var i = 0\n"
+        + "  while i < 300 { garbage.push(i); i = i + 1 }\n"
+        + "  let cs = read lines(`{v:char}`)\n"
+        + "  ws.len() + cs.len()\n"
+        + "}\n";
+    let (rt, result) = run_main_with_input(&src, "a\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn adv_read_against_non_text_input_faults_cleanly() {
+    // PROBE (§6.3): `read` against a non-Text input_source used to segfault —
+    // run_plan reinterprets input.payload as TextPayload and derefs a garbage
+    // pointer when input_source is the default Unit singleton. Fixed:
+    // praxis_get_input now checks the descriptor and, for a non-Text source,
+    // raises ParseFailed and returns the Unit sentinel instead of handing the
+    // parser garbage. This program reads against the UNSET (Unit) input_source;
+    // pre-fix it killed the host (SIGSEGV). Now it must return with a clean
+    // ParseFailed fault and the host stays alive.
+    let src = "fn main() -> Int {\n  let v = read lines(`{x:word}`)\n  v.len()\n}\n";
+    let (rt, result) = run_main_no_input(src);
+    assert!(
+        rt.has_pending_fault(),
+        "expected ParseFailed fault for non-Text input"
+    );
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::ParseFailed);
+    // The host is alive (we got here) and the result is the Unit sentinel.
+    let _ = result;
 }
 
 // --- Adversarial: parser offset, grid round-trips, tuple non-Int fields -----

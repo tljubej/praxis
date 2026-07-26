@@ -610,9 +610,16 @@ fn alloc_tuple(rt: &Rt, elements: &[u32], plan: &ParserPlan, values: Vec<GcRef>)
     }
 }
 
-/// Leak a `RecordSchema` to `&'static`, caching by the field-name sequence so
-/// repeated parses of the same template shape share one schema (mirrors the
-/// codegen's record/tuple schema caches).
+/// Leak a `RecordSchema` to `&'static`, caching by the (field-name, descriptor)
+/// sequence so repeated parses of the same template shape share one schema
+/// (mirrors the codegen's record/tuple schema caches). The descriptor half is
+/// load-bearing: two templates with the same field *names* but different capture
+/// types (e.g. `{x:int}` vs `{x:word}`) must NOT share a schema — `alloc_record`
+/// records each field's real descriptor, and `record_equals`/`record_format`/
+/// `record_hash` dispatch through the schema's per-field descriptor, so a
+/// name-only cache would hand the second template the first template's
+/// descriptor and recompare/reformat via the wrong callback (the same class of
+/// segfault the §6.1 `alloc_record` fix closed).
 fn leak_record_schema(
     fields: Vec<crate::records::RecordField>,
 ) -> *const crate::records::RecordSchema {
@@ -622,10 +629,16 @@ fn leak_record_schema(
     // The schema is immutable `'static` data; the parser is single-threaded.)
     struct SendSchema(*const crate::records::RecordSchema);
     unsafe impl Send for SendSchema {}
-    type RecordCache = Mutex<Vec<(Vec<&'static str>, SendSchema)>>;
+    type RecordCache = Mutex<Vec<(Vec<(&'static str, usize)>, SendSchema)>>;
     static CACHE: std::sync::OnceLock<RecordCache> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
-    let key: Vec<&'static str> = fields.iter().map(|f| f.name).collect();
+    // Key on (name, descriptor-pointer-as-usize). Same field names with
+    // different descriptors → different key → distinct schema. This mirrors
+    // `leak_tuple_schema`'s descriptor-pointer key below.
+    let key: Vec<(&'static str, usize)> = fields
+        .iter()
+        .map(|f| (f.name, f.descriptor as usize))
+        .collect();
     let mut guard = cache.lock().unwrap();
     if let Some((_, s)) = guard.iter().find(|(k, _)| *k == key) {
         return s.0;
