@@ -37,6 +37,7 @@ pub fn resolve(name: &str) -> Option<*const u8> {
         "praxis_check_fault" => praxis_check_fault as *const (),
         "praxis_push_shadow_frame" => praxis_push_shadow_frame as *const (),
         "praxis_pop_shadow_frame" => praxis_pop_shadow_frame as *const (),
+        "praxis_raise_stack_overflow" => praxis_raise_stack_overflow as *const (),
         "praxis_vec_new" => praxis_vec_new as *const (),
         "praxis_vec_push" => praxis_vec_push as *const (),
         "praxis_vec_len" => praxis_vec_len as *const (),

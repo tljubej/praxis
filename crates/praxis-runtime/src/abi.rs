@@ -117,7 +117,10 @@ unsafe fn maybe_collect(ctx: *mut RuntimeContext) {
 #[inline]
 unsafe fn int_payload(r: GcRef) -> i64 {
     // SAFETY: the compiler only emits these calls with Int-typed operands; the
-    // payload follows the header and is an i64.
+    // payload follows the header and is an `i64`. Faults that would feed a
+    // non-`Int` (e.g. the Unit sentinel) into an arithmetic wrapper are diverted
+    // before reaching here by `Inst::CheckFault` branching to the fault block
+    // (§10.4), so operands on the normal path are always valid `Int`s.
     unsafe { *r.payload::<i64>() }
 }
 
@@ -432,6 +435,19 @@ pub unsafe extern "C" fn praxis_check_fault(ctx: *mut RuntimeContext) -> i64 {
         return fault.is_pending().into();
     }
     0
+}
+
+/// Raise a [`FaultKind::StackOverflow`] fault on `ctx` (§9.2, §17.4). Called by
+/// the generated prologue guard when `recursion_depth` exceeds
+/// [`MAX_RECURSION_DEPTH`], so the host survives deep recursion instead of
+/// overflowing the native stack. The prologue then unwinds to its fault
+/// epilogue (pop frame + return Unit) — same path as any other fault.
+///
+/// # Safety
+/// `ctx` must point at a live, wired `RuntimeContext`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_raise_stack_overflow(ctx: *mut RuntimeContext) {
+    unsafe { set_fault(ctx, FaultKind::StackOverflow) };
 }
 
 // ---------------------------------------------------------------------------

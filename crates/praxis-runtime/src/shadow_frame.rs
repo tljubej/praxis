@@ -136,6 +136,12 @@ impl ShadowFrame {
 /// field, and return its address. Called in every generated function's
 /// prologue.
 ///
+/// Also bumps the context's `recursion_depth` (§9.2, §17.4); the generated
+/// prologue reads it back and branches to the fault epilogue when it exceeds
+/// [`MAX_RECURSION_DEPTH`], so deep recursion faults cleanly instead of
+/// overflowing the native stack. The matching [`praxis_pop_shadow_frame`]
+/// decrements it.
+///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`. `slot_count` must be ≤
 /// [`MAX_SHADOW_SLOTS`]. The returned pointer is valid until the matching
@@ -154,6 +160,10 @@ pub unsafe extern "C" fn praxis_push_shadow_frame(
     unsafe {
         (*raw).parent = (*ctx).roots;
         (*ctx).roots = raw;
+        // Bump the Praxis call depth; the prologue guard faults if it exceeds
+        // MAX_RECURSION_DEPTH. Saturating add so a runaway counter can't wrap.
+        let d = (*ctx).recursion_depth.saturating_add(1);
+        (*ctx).recursion_depth = d;
     }
     raw
 }
@@ -161,6 +171,10 @@ pub unsafe extern "C" fn praxis_push_shadow_frame(
 /// Pop the frame at `ctx.roots` (must be `frame`), restoring the parent as the
 /// current top and freeing `frame`. Called in every generated function's
 /// epilogue (including fault epilogues).
+///
+/// Also decrements the context's `recursion_depth`, balancing the bump in
+/// [`praxis_push_shadow_frame`]. Saturating so the depth never underflows on a
+/// fault path.
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`. `frame` must be the
@@ -180,6 +194,9 @@ pub unsafe extern "C" fn praxis_pop_shadow_frame(
         (*ctx).roots = parent;
         // Reclaim the Box. After this the slots are invalid.
         let _ = Box::from_raw(frame);
+        // Balance the prologue's depth bump (saturating so a fault path can't
+        // underflow).
+        (*ctx).recursion_depth = (*ctx).recursion_depth.saturating_sub(1);
     }
 }
 

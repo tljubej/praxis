@@ -20,7 +20,7 @@ use praxis_mir::{
     AllocKind, CallTarget, CmpOp, Function as MirFunction, Inst, IntBinOp, LocalId, LocalKind,
     ScalarKind, Terminator,
 };
-use praxis_runtime::{ShadowFrame, MAX_SHADOW_SLOTS};
+use praxis_runtime::{RuntimeContext, ShadowFrame, MAX_SHADOW_SLOTS};
 
 /// The uniform Cranelift type for a `GcRef` and every scalar payload: `i64`.
 /// `GcRef` is `#[repr(transparent)]` over a pointer; `Int`/`Bool` payloads are
@@ -32,6 +32,12 @@ const GC: types::Type = types::I64;
 /// Computed from the `#[repr(C)]` layout so it stays correct if the struct
 /// evolves (and the ABI version check catches a drift that matters).
 const SLOTS_OFFSET: i64 = core::mem::offset_of!(ShadowFrame, slots) as i64;
+
+/// The byte offset of `recursion_depth` within a `RuntimeContext`. The prologue
+/// guard reads it (after the shadow-frame push bumps it) to decide whether to
+/// branch to the stack-overflow fault epilogue (§9.2, §17.4). Computed from the
+/// `#[repr(C)]` layout, like `SLOTS_OFFSET`.
+const RECURSION_DEPTH_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, recursion_depth) as i64;
 
 /// The `praxis_*` symbols the lowering references, each mapped to its name.
 /// The `praxis_*` symbols the lowering references. Some (e.g. `IntNeg`) are
@@ -66,6 +72,9 @@ enum Symbol {
     PushShadowFrame,
     /// Epilogue helper: pop + free the shadow-stack frame (ADR-019).
     PopShadowFrame,
+    /// Prologue guard: raise `FaultKind::StackOverflow` when recursion exceeds
+    /// `MAX_RECURSION_DEPTH` (§9.2, §17.4).
+    RaiseStackOverflow,
 }
 
 impl Symbol {
@@ -94,6 +103,7 @@ impl Symbol {
             Symbol::CheckFault => "praxis_check_fault",
             Symbol::PushShadowFrame => "praxis_push_shadow_frame",
             Symbol::PopShadowFrame => "praxis_pop_shadow_frame",
+            Symbol::RaiseStackOverflow => "praxis_raise_stack_overflow",
         }
     }
 }
@@ -184,8 +194,60 @@ pub(crate) fn lower_function<M: Module>(
         slot_of: &gc_slot,
     };
 
+    // Recursion-depth guard (§9.2, §17.4). The shadow-frame push above bumped
+    // `ctx.recursion_depth`; read it back and, if it exceeds MAX_RECURSION_DEPTH,
+    // branch to a stack-overflow fault epilogue instead of executing the body.
+    // Without this, deep recursion (e.g. `count(100000)`) overflows the native
+    // stack and the host aborts (SIGABRT); with it, the call faults cleanly as
+    // `FaultKind::StackOverflow` and unwinds to the host like any other fault.
+    //
+    // Block 0's actual instructions run in `body_entry` (a fresh block), so the
+    // `entry` block ends with this conditional branch.
+    let body_entry = builder.create_block();
+    let over_limit = builder.create_block();
+    {
+        // Load `(*ctx).recursion_depth` (u32) at its fixed `#[repr(C)]` offset.
+        #[allow(deprecated)] // iadd_imm_s vs iadd_imm: offset is a small positive imm.
+        let depth_addr = builder.ins().iadd_imm_s(ctx_val, RECURSION_DEPTH_OFFSET);
+        let mut depth_flags = MemFlags::trusted();
+        depth_flags.set_notrap();
+        let depth = builder.ins().load(types::I32, depth_flags, depth_addr, 0);
+        // Compare against the limit; branch if depth > MAX (signed is fine — the
+        // saturating add in the push helper keeps depth non-negative and bounded).
+        let limit = builder
+            .ins()
+            .iconst(types::I32, praxis_runtime::MAX_RECURSION_DEPTH as i64);
+        let over = builder.ins().icmp(
+            cranelift::codegen::ir::condcodes::IntCC::SignedGreaterThan,
+            depth,
+            limit,
+        );
+        builder.ins().brif(over, over_limit, &[], body_entry, &[]);
+    }
+
+    // The stack-overflow fault epilogue: raise the fault, pop the shadow frame
+    // (which also decrements recursion_depth, balancing the prologue bump), and
+    // return the Unit sentinel. Mirrors `Terminator::Fault` below.
+    {
+        builder.switch_to_block(over_limit);
+        let fr = import(
+            module,
+            &mut builder,
+            &mut import_cache,
+            Symbol::RaiseStackOverflow,
+            &raise_stack_overflow_sig(),
+        )?;
+        builder.ins().call(fr, &[ctx_val]);
+        emit_pop_shadow_frame(&mut builder, ctx_val, &spill, module, &mut import_cache)?;
+        let zero = builder.ins().iconst(GC, 0);
+        builder.ins().return_(&[zero]);
+    }
+
     // Lower each block. Blocks are sealed together after the whole CFG is built
-    // so loop backedges resolve correctly.
+    // so loop backedges resolve correctly. Block 0's body runs in `body_entry`
+    // (the recursion guard's fall-through target), not the param-receiving
+    // `entry` block.
+    builder.switch_to_block(body_entry);
     for (blk_idx, mir_block) in mir.blocks.iter().enumerate() {
         let block = blocks[blk_idx];
         if blk_idx != 0 {
@@ -198,6 +260,7 @@ pub(crate) fn lower_function<M: Module>(
                 ctx_val,
                 &vars,
                 &spill,
+                &blocks,
                 module,
                 &mut import_cache,
                 user_funcs,
@@ -299,6 +362,7 @@ fn lower_inst<M: Module>(
     ctx_val: Value,
     vars: &[Variable],
     spill: &SpillCtx<'_>,
+    blocks: &[Block],
     module: &mut M,
     imports: &mut HashMap<Symbol, FuncRef>,
     user_funcs: &HashMap<String, FuncId>,
@@ -802,12 +866,27 @@ fn lower_inst<M: Module>(
             )?;
             builder.def_var(vars[dst.0 as usize], result);
         }
-        Inst::CheckFault { on_fault: _ } => {
-            // CheckFault is modeled by the faultable ops themselves (they set
-            // pending_fault); a dedicated praxis_check_fault could branch to the
-            // fault block here. For M4's acceptance tests the aggregate result
-            // is read back by the host. (Full per-check branching is a follow-up.)
-            let _ = call_check_fault(builder, ctx_val, module, imports)?;
+        Inst::CheckFault { on_fault } => {
+            // Divert to the fault block when a fault is pending (§10.4). The
+            // faultable op just before this set `pending_fault` (or a callee
+            // did); `praxis_check_fault` returns 1 iff a fault is pending. If so,
+            // branch to the function's fault block — which pops the shadow frame
+            // and returns the Unit sentinel, unwinding cleanly to the host. The
+            // rest of this MIR block's instructions lower into a fresh
+            // fall-through block, so the diversion does not strand them.
+            //
+            // This is load-bearing for faults that must propagate through
+            // subsequent operations (notably StackOverflow: a deeply-recursive
+            // caller receives the Unit sentinel from a child and would otherwise
+            // feed it to an arithmetic wrapper before the host can observe the
+            // fault). Branching here keeps every operand on the fault path valid.
+            let pending = call_check_fault(builder, ctx_val, module, imports)?;
+            let fault_block = blocks[on_fault.0 as usize];
+            let fallthrough = builder.create_block();
+            builder
+                .ins()
+                .brif(pending, fault_block, &[], fallthrough, &[]);
+            builder.switch_to_block(fallthrough);
         }
         Inst::MoveGc { dst, src } => {
             let v = builder.use_var(vars[src.0 as usize]);
@@ -1376,6 +1455,13 @@ fn pop_shadow_frame_sig() -> Signature {
     let mut sig = Signature::new(CallConv::Fast);
     sig.params.push(AbiParam::new(GC)); // ctx
     sig.params.push(AbiParam::new(GC)); // frame
+    sig
+}
+
+/// `fn(ctx: i64) -> void` — raises `FaultKind::StackOverflow`.
+fn raise_stack_overflow_sig() -> Signature {
+    let mut sig = Signature::new(CallConv::Fast);
+    sig.params.push(AbiParam::new(GC)); // ctx
     sig
 }
 

@@ -76,6 +76,7 @@ impl Jit {
             "praxis_check_fault",
             "praxis_push_shadow_frame",
             "praxis_pop_shadow_frame",
+            "praxis_raise_stack_overflow",
             "praxis_vec_new",
             "praxis_vec_push",
             "praxis_vec_len",

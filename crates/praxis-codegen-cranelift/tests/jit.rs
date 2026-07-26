@@ -162,26 +162,43 @@ fn main() -> Int { fib(10) }
 
 #[test]
 fn adv_deep_recursion_does_not_crash_host() {
-    // Deep recursion that stays within the native stack: 10000 frames. Each
-    // Praxis call is a native call that pushes a debug frame + spills a shadow
-    // frame; this confirms a reasonably deep recursion completes correctly.
-    //
-    // KNOWN BUG (see handover, NOT tested here because it aborts the process):
-    // recursion beyond ~15-20k frames overflows the native stack and the
-    // process is killed with SIGABRT ("fatal runtime error: stack overflow")
-    // rather than faulting gracefully. §9.2/§17.4 require the host to survive;
-    // a stack-depth guard (checking a recursion limit at call entry and setting
-    // a StackOverflow fault) is the fix. Reproduce with count(100000).
+    // Deep recursion that stays within the recursion limit (MAX_RECURSION_DEPTH
+    // = 8000): 4000 frames. Each Praxis call is a native call that pushes a
+    // shadow frame; this confirms a reasonably deep recursion completes
+    // correctly, and that the prologue guard does not trip on legitimate
+    // recursion.
     let src = "\
 fn count(n: Int) -> Int { if n == 0 { 0 } else { 1 + count(n - 1) } }
-fn main() -> Int { count(10000) }
+fn main() -> Int { count(4000) }
 ";
     let (rt, result) = run_main(src);
     assert!(
         !rt.has_pending_fault(),
-        "10000-deep recursion should succeed"
+        "4000-deep recursion should succeed"
     );
-    assert_eq!(result.as_int(), 10000);
+    assert_eq!(result.as_int(), 4000);
+}
+
+#[test]
+fn adv_deep_recursion_over_limit_faults_cleanly() {
+    // PROBE (§6.2): recursion beyond MAX_RECURSION_DEPTH used to overflow the
+    // native stack and abort the host with SIGABRT ("fatal runtime error: stack
+    // overflow, aborting") rather than faulting gracefully — §9.2/§17.4 require
+    // the host to survive. Fixed: every generated function's prologue now bumps
+    // `ctx.recursion_depth` (in praxis_push_shadow_frame) and branches to a
+    // stack-overflow fault epilogue when it exceeds MAX_RECURSION_DEPTH (8000),
+    // raising FaultKind::StackOverflow and unwinding to the host. count(100000)
+    // pre-fix killed the process; now it faults cleanly and the host stays alive.
+    let src = "\
+fn count(n: Int) -> Int { if n == 0 { 0 } else { 1 + count(n - 1) } }
+fn main() -> Int { count(100000) }
+";
+    let (rt, _result) = run_main(src);
+    assert!(
+        rt.has_pending_fault(),
+        "recursion past the limit should fault, not return normally"
+    );
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::StackOverflow);
 }
 
 #[test]

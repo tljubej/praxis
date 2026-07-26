@@ -17,6 +17,14 @@ use crate::roots::RootSet;
 use crate::shadow_frame::ShadowFrame;
 use crate::{collections::VecPayload, descriptor::TypeDescriptor};
 
+/// The maximum Praxis call depth before the prologue guard raises
+/// [`FaultKind::StackOverflow`]. Chosen with headroom under the native stack's
+/// abort threshold: high enough that legitimate recursion passes, low enough
+/// that runaway recursion faults cleanly instead of killing the host with
+/// SIGABRT. The guard is emitted in every generated function's prologue (§9.2,
+/// §17.4).
+pub const MAX_RECURSION_DEPTH: u32 = 8000;
+
 /// What kind of runtime fault occurred (§9.2, §10.4). Set by the runtime
 /// wrapper that detected it; read by the host after the generated code unwinds
 /// to its fault epilogue.
@@ -41,6 +49,12 @@ pub enum FaultKind {
     /// (§9.2). Raised by `Deque.pop_front`/`pop_back`, heap `pop`/`peek`, and
     /// similar accessors on an empty collection.
     EmptyCollection = 5,
+    /// Recursion exceeded the depth limit (§9.2, §17.4). Raised by the
+    /// prologue guard in every generated function when `recursion_depth` would
+    /// exceed `MAX_RECURSION_DEPTH`, so the host survives deep recursion
+    /// (`count(100000)` and similar) instead of overflowing the native stack
+    /// and aborting (SIGABRT).
+    StackOverflow = 6,
 }
 
 impl std::fmt::Display for FaultKind {
@@ -52,6 +66,7 @@ impl std::fmt::Display for FaultKind {
             FaultKind::IndexOutOfBounds => write!(f, "index out of bounds"),
             FaultKind::ParseFailed => write!(f, "input parse mismatch"),
             FaultKind::EmptyCollection => write!(f, "empty collection"),
+            FaultKind::StackOverflow => write!(f, "stack overflow (recursion limit)"),
         }
     }
 }
@@ -160,6 +175,14 @@ pub struct RuntimeContext {
     /// buffer when present), so fault sentinels are stable regardless of input.
     pub unit_ref: GcRef,
     pub current_generation: u64,
+    /// The current Praxis call depth — incremented at every generated function's
+    /// prologue and decremented in its epilogue (§9.2, §17.4). A prologue guard
+    /// faults with [`FaultKind::StackOverflow`] when this would exceed
+    /// [`MAX_RECURSION_DEPTH`], so deep recursion faults cleanly instead of
+    /// overflowing the native stack and aborting the host (SIGABRT). Read by
+    /// generated Cranelift code at a fixed offset, like the other `#[repr(C)]`
+    /// fields above.
+    pub recursion_depth: u32,
 }
 
 impl RuntimeContext {
@@ -181,6 +204,7 @@ impl RuntimeContext {
             // since this constructor is only for not-yet-wired test scaffolding.
             unit_ref: input_source,
             current_generation: 0,
+            recursion_depth: 0,
         }
     }
 
@@ -264,6 +288,7 @@ impl Runtime {
             input_source: self.immortals.unit(),
             unit_ref: self.immortals.unit(),
             current_generation: 0,
+            recursion_depth: 0,
         }
     }
 
