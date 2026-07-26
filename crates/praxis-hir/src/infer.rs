@@ -178,44 +178,54 @@ impl Inferer {
             .map(|s| (s.id, s.name.clone()))
             .collect();
         for (id, name) in to_seed {
-            let scheme = self.db.scoped_return(|db| {
-                let mono = match name.as_str() {
-                    "out" | "panic" => {
-                        // forall T. (T) -> Unit  (out)   /   forall T. (T) -> Never  (panic)
-                        let v = db.fresh_var();
-                        let result = if name == "panic" {
-                            db.never()
-                        } else {
-                            db.unit()
-                        };
-                        db.func(vec![v], result)
-                    }
-                    // Collection constructors (§6.1). Each yields an empty
-                    // collection of its ctor type; the element type is a
-                    // quantified variable pinned by usage (push/insert/etc.).
-                    "Vec" | "Deque" | "Set" | "Counter" | "MinHeap" | "MaxHeap" | "Grid" => {
-                        let v = db.fresh_var();
-                        let ctor = Self::collection_ctor_for(&name).expect("ctor name");
-                        let coll = db.collection(ctor, vec![v]);
-                        db.func(vec![], coll)
-                    }
-                    "Map" => {
-                        // forall K V. () -> Map[K, V]
-                        let k = db.fresh_var();
-                        let v = db.fresh_var();
-                        let coll = db.collection(praxis_types::CollectionCtor::Map, vec![k, v]);
-                        db.func(vec![], coll)
-                    }
-                    // BitSet and Range are nullary: () -> BitSet / () -> Range.
-                    "BitSet" | "Range" => {
-                        let ctor = Self::collection_ctor_for(&name).expect("ctor name");
-                        let coll = db.collection(ctor, vec![]);
-                        db.func(vec![], coll)
-                    }
-                    other => panic!("unexpected builtin `{other}` seeded"),
-                };
-                db.generalize(mono)
+            // Build the monomorphic scheme at an inner level, then generalize
+            // OUTSIDE the scope. Generalize quantifies vars whose level is
+            // strictly greater than the current level; the fresh vars are
+            // created at the inner level, so generalizing at the outer level
+            // (after scoped_return restores it) is what quantifies them. (Doing
+            // it inside the scope quantifies nothing — the bug that left `Vec`
+            // monomorphic, so every `Vec()` shared one element type.)
+            let mono = self.db.scoped_return(|db| match name.as_str() {
+                "out" | "panic" => {
+                    // forall T. (T) -> Unit  (out)   /   forall T. (T) -> Never  (panic)
+                    let v = db.fresh_var();
+                    let result = if name == "panic" {
+                        db.never()
+                    } else {
+                        db.unit()
+                    };
+                    db.func(vec![v], result)
+                }
+                // Collection constructors (§6.1). Each yields an empty
+                // collection of its ctor type; the element type is a
+                // quantified variable pinned by usage (push/insert/etc.).
+                "Vec" | "Deque" | "Set" | "Counter" | "MinHeap" | "MaxHeap" | "Grid" => {
+                    let v = db.fresh_var();
+                    let ctor = Self::collection_ctor_for(&name).expect("ctor name");
+                    let coll = db.collection(ctor, vec![v]);
+                    db.func(vec![], coll)
+                }
+                "Map" => {
+                    // forall K V. () -> Map[K, V]
+                    let k = db.fresh_var();
+                    let v = db.fresh_var();
+                    let coll = db.collection(praxis_types::CollectionCtor::Map, vec![k, v]);
+                    db.func(vec![], coll)
+                }
+                // BitSet and Range are nullary: () -> BitSet / () -> Range.
+                "BitSet" | "Range" => {
+                    let ctor = Self::collection_ctor_for(&name).expect("ctor name");
+                    let coll = db.collection(ctor, vec![]);
+                    db.func(vec![], coll)
+                }
+                other => panic!("unexpected builtin `{other}` seeded"),
             });
+            // Generalize at the outer level (after scoped_return restored it) so
+            // the inner-level fresh vars are quantified — yielding e.g.
+            // `forall T. () -> Vec[T]`. Doing this inside the scope quantified
+            // nothing (the bug that left constructors monomorphic, so every
+            // `Vec()` shared one element type).
+            let scheme = self.db.generalize(mono);
             if let Some(sym) = self.names.get_mut(id) {
                 sym.scheme = Some(scheme);
             }
@@ -400,7 +410,8 @@ impl Inferer {
         // the level explicitly (not via db.scoped) because the inference borrows
         // `self` mutably alongside `self.db`.
         let prev = self.db.enter_level();
-        let rhs_ty = stmt.init().map(|e| self.infer_expr(scope, &e));
+        let rhs = stmt.init();
+        let rhs_ty = rhs.as_ref().map(|e| self.infer_expr(scope, e));
         let annot = stmt.ty().and_then(|t| self.resolve_type(&t));
         // Unify annotation with the inferred RHS, if both are present.
         if let (Some(a), Some(r)) = (annot, rhs_ty) {
@@ -411,8 +422,20 @@ impl Inferer {
         }
         let body_ty = annot.or(rhs_ty).unwrap_or_else(|| self.db.fresh_var());
         self.db.exit_level(prev);
-        // Generalize `let` bindings (§5.3).
-        let scheme = self.db.generalize(body_ty);
+        // Generalize `let` bindings (§5.3), but only when the RHS is a syntactic
+        // value — the HM value restriction. An expansive RHS (a call like
+        // `Vec()`, a method call, a block, `read`, …) is left monomorphic so its
+        // type variables are shared across uses rather than instantiated fresh
+        // per reference. Without this, `let v = Vec(); v.push(inner); v.map(...)`
+        // gives `v : forall T. Vec[T]`, and the push's element-type pinning never
+        // reaches the map (Gap B). An explicit type annotation overrides the
+        // restriction (the user has pinned the type by writing it).
+        let expansive = rhs.as_ref().is_some_and(|e| !is_syntactic_value(e));
+        let scheme = if expansive && annot.is_none() {
+            Scheme::monotype(body_ty)
+        } else {
+            self.db.generalize(body_ty)
+        };
         self.attach_scheme(stmt.name(), scheme);
     }
 
@@ -1451,5 +1474,31 @@ impl Inferer {
         // arity is a type error surfaced as a unification failure downstream
         // (the args vec length won't match), so just pass them through here.
         Some(self.db.collection(ctor, args))
+    }
+}
+
+/// Whether an expression is a *syntactic value* for the HM value restriction
+/// (§5.3). `let x = <value>` may generalize `x`'s type; `let x = <expansive>`
+/// (a call, method call, block, `read`, …) is left monomorphic so its type
+/// variables are shared across uses instead of instantiated fresh per reference
+/// — the standard fix for the `let r = ref []` / `let v = Vec()` generalization
+/// gap. Recurses through `Paren` (a transparent wrapper) and `Tuple` of values
+/// (a value iff every element is). An explicit type annotation on the `let`
+/// overrides the restriction, handled by the caller.
+fn is_syntactic_value(e: &Expr) -> bool {
+    match e {
+        // Pure values.
+        Expr::Literal(_) | Expr::Path(_) | Expr::Closure(_) => true,
+        // A paren is transparent: `(v)` is a value iff `v` is.
+        Expr::Paren(p) => p
+            .expr()
+            .map(|inner| is_syntactic_value(&inner))
+            .unwrap_or(false),
+        // A tuple is a value iff every element is (classic ML).
+        Expr::Tuple(t) => t.elements().all(|el| is_syntactic_value(&el)),
+        // Everything else is expansive: calls (`Vec()`), method calls, blocks,
+        // control flow, `read`/`parse`, record literals, field access, matches,
+        // binary/unary ops, and parse errors. Conservative but sound.
+        _ => false,
     }
 }

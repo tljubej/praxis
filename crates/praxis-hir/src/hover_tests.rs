@@ -77,7 +77,9 @@ fn hover_distinguishes_two_shadowed_declarations() {
 fn hover_over_out_shows_polymorphic_scheme() {
     let src = "out(1)";
     let analysis = analyze(src);
-    // The `out` reference's instantiated type at this call is (Int) -> Unit.
+    // `out`'s scheme is the polymorphic `forall T. (T) -> Unit` (the element
+    // type is quantified, not pinned to the call site's Int — so the hover shows
+    // the generalized scheme, matching how `out` is actually typed).
     let out_hover = analysis
         .refs
         .keys()
@@ -86,7 +88,11 @@ fn hover_over_out_shows_polymorphic_scheme() {
             (h.name == "out").then_some(h)
         })
         .expect("out hoverable");
-    assert!(out_hover.scheme.contains("Int"), "got {}", out_hover.scheme);
+    assert!(
+        out_hover.scheme.contains("forall"),
+        "expected the polymorphic scheme, got {}",
+        out_hover.scheme
+    );
     assert!(
         out_hover.scheme.contains("Unit"),
         "got {}",

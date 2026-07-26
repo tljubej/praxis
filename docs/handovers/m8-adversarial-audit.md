@@ -3,15 +3,17 @@
 **Date:** 2026-07-26
 
 > **Follow-up (2026-07-26):** all five leftover issues documented below have been
-> addressed in four commits on `main`. §2 (closure-from-collection SIGSEGV),
-> §6.2 (deep-recursion SIGABRT), §6.3 (read-against-non-Text SIGSEGV), and the
-> §6.1 schema-cache residual are **FIXED**. §3 Gap A (fold-into-Vec) is **FIXED**;
-> §3 Gap B is **partially fixed** (closure-param element-type propagation is now
-> implemented; the residual blocker is the orthogonal HM let-generalization of
-> `Vec()` bindings, documented in the test). See the "Status" lines in each
-> section and the new tests referenced there. The JIT crate grew 313 → 321
-> tests; `cargo fmt --check` + `cargo clippy -D warnings` + `cargo test
-> --workspace` all clean.
+> addressed on `main`. §2 (closure-from-collection SIGSEGV), §6.2 (deep-recursion
+> SIGABRT), §6.3 (read-against-non-Text SIGSEGV), and the §6.1 schema-cache
+> residual are **FIXED**. §3 — **both** gaps are **FIXED**: Gap A (fold-into-Vec)
+> via bidirectional inference, and Gap B (`.method()` on a closure param whose
+> type is a collection's element type) via bidirectional inference **plus** the HM
+> value restriction on `let` bindings **plus** a scheme-seeding fix so collection
+> constructors (`Vec()`, …) and `out`/`panic` get properly polymorphic schemes
+> (`forall T. () -> Vec[T]`) — they were accidentally monomorphic before, so every
+> `Vec()` shared one element type. See the "Status" lines in each section and the
+> new tests referenced there. The JIT crate grew 313 → 322 tests; `cargo fmt
+> --check` + `cargo clippy -D warnings` + `cargo test --workspace` all clean.
 **Scope:** An adversary-style audit of the M8-WS11 pipeline fusion, closures,
 GC, runtime collections, arithmetic, and input parser. Two rounds of ~108 new
 adversarial end-to-end JIT tests were added to
@@ -135,7 +137,7 @@ CI (it is non-deterministically a SIGSEGV, which would flake); a comment in
 
 ---
 
-## 3. ~~KNOWN LIMITATION (unfixed)~~ FIXED (Gap A) / PARTIAL (Gap B): type inference gaps blocking pipelines
+## 3. ~~KNOWN LIMITATION (unfixed)~~ FIXED: type inference gaps blocking pipelines
 
 Bidirectional (expected-type) inference was added to `infer_method_call`
 (commit `025721e`): the method's full signature (receiver + params + result) is
@@ -153,16 +155,27 @@ inferred. This is purely additive (unifying with a fresh var is a no-op), so all
   `v.fold(Vec(), |a, x| { a.push(x); a })` now type-checks and runs; the closure
   param `a` is pinned to the init arg's accumulator type (threaded via the
   name-shared `Acc`).
-- **Gap B — PARTIALLY FIXED.** The closure-param element-type propagation this
-  section described is now implemented. The idiomatic
-  `let v = Vec(); v.push(...); v.map(|inner| inner.len())` pattern is STILL
-  rejected, but for a DIFFERENT, orthogonal reason: HM let-generalization turns
-  `let v = Vec()` into `forall T. Vec[T]`, so each method call on `v` instantiates
-  a fresh, unbound element type and the push that would pin it doesn't propagate
-  to the map. That is a generalization-policy issue for mutable Vec bindings, not
-  the closure-param gap targeted here.
-  `adv_pipeline_method_on_closure_param_partially_supported` documents the
-  residual (clean diagnostic, not a crash).
+- **Gap B — FIXED** (follow-up commit). The closure-param element-type
+  propagation above was necessary but not sufficient: two further root causes
+  were closed.
+  1. **HM value restriction** on `let` bindings: an expansive RHS (a call like
+     `Vec()`, a method call, a block, `read`, …) is left monomorphic instead of
+     generalized, so `let v = Vec()` no longer becomes `forall T. Vec[T]` and the
+     element-type pinning from `v.push(inner)` propagates to the later
+     `v.map(...)`. (Lambdas, literals, paths, and explicit type annotations still
+     generalize.) The standard ML fix for the `let r = ref []` / `let v = Vec()`
+     generalization gap.
+  2. **Scheme-seeding bug:** `seed_builtin_schemes` called `db.generalize`
+     *inside* the `scoped_return` scope, where the level check (`level > at_level`)
+     quantified nothing — so `Vec`/`Map`/`Deque`/… and `out`/`panic` had
+     accidentally-**monomorphic** schemes (every `Vec()` shared one element type).
+     Generalizing at the outer level (after `scoped_return` restores it) yields
+     the intended `forall T. () -> Vec[T]`, so each call instantiates a fresh
+     element type.
+  Regression tests: `adv_pipeline_method_on_closure_param_from_collection_now_
+  supported` (`let v = Vec(); …; v.map(|i| i.len()).sum()` — the idiomatic pattern,
+  now positive); `adv_pipeline_min_by_on_nested_collection_lengths`
+  (`v.min_by(|a, b| a.len() < b.len())` over a `Vec[Vec[Int]]`).
 
 ---
 

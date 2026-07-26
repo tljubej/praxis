@@ -2952,32 +2952,46 @@ fn adv_pipeline_nested_vec_elements_survive_fused_count() {
 }
 
 #[test]
-fn adv_pipeline_method_on_closure_param_partially_supported() {
-    // PARTIALLY FIXED (§3 Gap B): bidirectional inference now propagates the
-    // receiver's element type into a closure combinator's param BEFORE the body
-    // is inferred (the handover's described root cause). A method call on a
-    // closure param whose type is a *concrete, known* element type now resolves.
+fn adv_pipeline_method_on_closure_param_from_collection_now_supported() {
+    // FIXED (§3 Gap B): a method call on a closure parameter whose type is the
+    // element type of a collection now resolves. `v.map(|i| i.len())` over a
+    // Vec[Vec[Int]] failed with T110 pre-fix — two root causes, both closed:
     //
-    // The idiomatic `let v = Vec(); v.push(...); v.map(|i| i.len())` pattern is
-    // STILL rejected, but for a DIFFERENT, orthogonal reason: HM
-    // let-generalization turns `let v = Vec()` into `forall T. Vec[T]`, so each
-    // method call on `v` instantiates a FRESH, unbound element type — the push
-    // that would pin it does not propagate to the map. That is a generalization
-    // policy issue for mutable Vec bindings, not the closure-param propagation
-    // gap this workstream targeted. We assert the front-end still rejects the
-    // `Vec()` idiom (a clean diagnostic, not a crash) until generalization is
-    // revisited.
+    // 1. Bidirectional inference threads the receiver's element type into the
+    //    closure param before the body is inferred, so `.len()` resolves once
+    //    the element type is known.
+    // 2. The HM value restriction: `let v = Vec()` no longer generalizes to
+    //    `forall T. Vec[T]` (an expansive RHS is left monomorphic), so the
+    //    element-type pinning from `v.push(inner)` propagates to the later
+    //    `v.map(...)` instead of each call instantiating a fresh element type.
+    //
+    // The idiomatic build-then-map pattern now type-checks and runs.
+    // inner = [1] → len 1 → sum = 1.
     let src = "fn main() -> Int {\n  let v = Vec()\n  let inner = Vec()\n  inner.push(1)\n  v.push(inner)\n  v.map(|i| i.len()).sum()\n}\n";
-    let map = praxis_source::SourceMap::new();
-    let file = map.intern("nested.px", src);
-    let parsed = praxis_parser::parse(file, src);
-    let mut analysis = praxis_hir::analyze_root(file, &parsed.tree);
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = praxis_hir::lower(file, &root, &mut analysis);
-    assert!(
-        !module.diagnostics.is_empty(),
-        "Vec() idiom still rejected (HM generalization of mutable Vec bindings)"
-    );
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn adv_pipeline_min_by_on_nested_collection_lengths() {
+    // The Gap B fix unblocks the `.len()`-based min_by/max_by comparators over
+    // nested collections: find the inner Vec with the fewest elements. The
+    // comparator closure's params `a`/`b` are the element type Vec[Int], pinned
+    // by bidirectional inference + the value restriction so `a.len()`/`b.len()`
+    // resolve. min_by takes a (T,T)->Bool comparator; "shorter" is
+    // `a.len() < b.len()`. inner lengths [3,1,2] → shortest = b → len 1.
+    let src = String::from("fn main() -> Int {\n")
+        + "  let v = Vec()\n"
+        + "  let a = Vec()\n  a.push(1)\n  a.push(2)\n  a.push(3)\n  v.push(a)\n"
+        + "  let b = Vec()\n  b.push(9)\n  v.push(b)\n"
+        + "  let c = Vec()\n  c.push(4)\n  c.push(5)\n  v.push(c)\n"
+        + "  let shortest = v.min_by(|a, b| a.len() < b.len())\n"
+        + "  shortest.len()\n"
+        + "}\n";
+    let (rt, result) = run_main(&src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
 }
 
 #[test]
