@@ -558,14 +558,18 @@ fn alloc_record(rt: &Rt, captures: &[(Option<&'static str>, u32, GcRef)]) -> GcR
     // Build the schema fields. Named captures only (the record case requires
     // every capture to have a name in well-formed input; anonymous ones in a
     // named template are a parser-validation concern, treated as `_` here).
+    //
+    // Each field's descriptor is taken from the CAPTURED VALUE's own header
+    // (`value.descriptor()`). record_equals/format/hash dispatch through the
+    // schema's per-field descriptor (records.rs), so it must match the value's
+    // real type — hardcoding INT here miscompares/misformats/segsfaults on any
+    // non-Int field (Text, Char, nested record, …) because the INT callback
+    // reinterprets the foreign payload as an i64.
     let fields: Vec<crate::records::RecordField> = captures
         .iter()
-        .map(|(name, _child, _value)| crate::records::RecordField {
+        .map(|(name, _child, value)| crate::records::RecordField {
             name: name.unwrap_or("_"),
-            // The per-field element descriptor is read from the value's own
-            // header at trace/format/eq/hash time; a sound GC-traceable default
-            // suffices for the schema entry.
-            descriptor: scalars::INT,
+            descriptor: value.descriptor(),
         })
         .collect();
     let schema = leak_record_schema(fields);

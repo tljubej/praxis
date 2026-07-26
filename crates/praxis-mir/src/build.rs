@@ -1700,30 +1700,38 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
 
     // Run the stages in order. Each stage either replaces the element and
     // leaves `b.cur` live, or emits a skip/stop and leaves a dead `b.cur`.
-    // `FlatMap` is special: it produces a Vec that must be spliced into the sink
-    // element-by-element, consuming the outer element.
+    // `FlatMap` is special: it produces a Vec whose elements must be spliced
+    // into the *remainder* of the stage chain (all stages after flat_map) and
+    // then the sink, consuming the outer element.
     let mut cur_item = item;
     let mut arg_iter = stage_args.into_iter();
     let mut alive = true;
-    for stage in &stages {
+    for (stage_idx, stage) in stages.iter().enumerate() {
         if !alive {
             break;
         }
         if let Stage::FlatMap(_) = stage {
-            // f(cur_item) -> Vec<U>; run the sink on each inner element, then
-            // jump to incr_blk (the outer element is fully consumed).
+            // f(cur_item) -> Vec<U>; for each inner element, run the remaining
+            // stages (those after flat_map) and then the sink. The outer
+            // element is fully consumed by the flat_map.
             let f = arg_iter.next().unwrap();
             let inner = invoke_closure(b, f, vec![cur_item], &loop_roots);
+            let remaining: Vec<Stage> = stages[stage_idx + 1..].to_vec();
             emit_flat_map_inner(
                 b,
                 inner,
+                &remaining,
+                &mut arg_iter,
                 &sink,
+                idx,
                 acc_scalar,
                 acc_gc,
                 seen_flag,
                 collect_vec,
                 sink_closure_slot,
                 &loop_roots,
+                incr_blk,
+                exit,
             );
             // After splicing, continue to the next outer iteration.
             b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: incr_blk };
@@ -2439,21 +2447,31 @@ fn emit_sink_body(
 }
 
 /// Emit the inner iteration for a `flat_map` stage: for each element of
-/// `inner_vec`, run the sink body. The inner loop has its own index, header,
-/// and exit (which falls through to the outer stage loop's continuation, set by
-/// the caller). A nested `LoopCtx` is pushed so any sink short-circuit
-/// (`any`/`all`/`find`) scopes to this inner loop.
+/// `inner_vec`, run the remaining stages (those after the flat_map in the
+/// chain) and then the sink body. The inner loop has its own index, header,
+/// and exit (which falls through to the outer loop's continuation, set by the
+/// caller). A nested `LoopCtx` is pushed so any stage `continue`/`break` or
+/// sink short-circuit (`any`/`all`/`find`) scopes to this inner loop.
+///
+/// `remaining_args` yields the pre-lowered argument local for each remaining
+/// stage that carries one, in stage order (same contract as the outer loop's
+/// `arg_iter`). It is advanced only for stages with an argument.
 #[allow(clippy::too_many_arguments)]
 fn emit_flat_map_inner(
     b: &mut Builder<'_>,
     inner_vec: LocalId,
+    remaining: &[Stage],
+    remaining_args: &mut std::vec::IntoIter<LocalId>,
     sink: &Sink,
+    outer_idx: LocalId,
     acc_scalar: Option<LocalId>,
     acc_gc: Option<LocalId>,
     seen_flag: Option<LocalId>,
     collect_vec: Option<LocalId>,
     sink_closure_slot: Option<LocalId>,
     loop_roots: &[LocalId],
+    incr_blk: BlockId,
+    exit: BlockId,
 ) {
     let inner_idx = b.alloc_gc(b.int_ty, None);
     let zero = b.alloc_scalar(ScalarKind::Int);
@@ -2472,15 +2490,16 @@ fn emit_flat_map_inner(
 
     let header = b.func.new_block();
     let body_blk = b.func.new_block();
-    let exit = b.func.new_block();
+    let inner_incr = b.func.new_block();
+    let inner_exit = b.func.new_block();
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
     b.cur = header;
-    emit_bounds_check(b, inner_vec, inner_idx, body_blk, exit, &roots);
+    emit_bounds_check(b, inner_vec, inner_idx, body_blk, inner_exit, &roots);
 
     b.cur = body_blk;
     b.loop_stack.push(LoopCtx {
-        continue_target: header,
-        break_target: exit,
+        continue_target: inner_incr,
+        break_target: inner_exit,
     });
     let inner_item = b.alloc_gc(Type(0), None);
     b.push(Inst::Call {
@@ -2490,22 +2509,68 @@ fn emit_flat_map_inner(
         live_roots: roots.clone(),
     });
     b.check_fault();
-    emit_sink_body(
-        b,
-        sink,
-        inner_item,
-        inner_idx,
-        acc_scalar,
-        acc_gc,
-        seen_flag,
-        collect_vec,
-        sink_closure_slot,
-        &roots,
-    );
+
+    // Run the remaining stages on the inner element. Each stage emits its
+    // branches inline; a stage that drops the element (filter) jumps to the
+    // inner increment (continue), and one that stops (take/take_while) jumps to
+    // the inner exit (break). A nested flat_map here is not supported (it would
+    // require recursive emission); the recognizer does not produce nested
+    // flat_maps within one chain because each flat_map consumes its outer
+    // element, so `remaining` contains only non-flat_map stages.
+    let mut cur_item = inner_item;
+    let mut alive = true;
+    for stage in remaining {
+        if !alive {
+            break;
+        }
+        let (new_item, still_live) = run_stage(
+            b,
+            stage,
+            remaining_args,
+            cur_item,
+            inner_idx,
+            &roots,
+            inner_incr,
+            inner_exit,
+        );
+        cur_item = new_item;
+        alive = still_live;
+    }
+
+    // If still live, feed the inner element to the sink. The index reported to
+    // the sink is the inner index (the position within the flat_map's output);
+    // find/position thus report the inner position, matching eager semantics
+    // where flat_map produces a flat sequence.
+    if alive {
+        emit_sink_body(
+            b,
+            sink,
+            cur_item,
+            inner_idx,
+            acc_scalar,
+            acc_gc,
+            seen_flag,
+            collect_vec,
+            sink_closure_slot,
+            &roots,
+        );
+        // Normal sink completion: fall through to the inner increment block
+        // (NOT the header — jumping to the header skips the increment and
+        // spins the loop, the same M8-WS11 bug that the outer loop guards
+        // against).
+        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: inner_incr };
+    }
     b.loop_stack.pop();
+
+    // Inner increment block: `inner_idx += 1`, jump to header.
+    b.cur = inner_incr;
     emit_increment(b, inner_idx, &roots);
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
-    b.cur = exit;
+    b.cur = inner_exit;
+    // The outer_idx, incr_blk, exit, and outer sink machinery are not used
+    // here; they are parameters for signature symmetry with a future nested-
+    // flat_map path. Suppress unused warnings.
+    let _ = (outer_idx, incr_blk, exit);
 }
 
 /// Emit `!bool` as a fresh Bool scalar (Bool is `i8`; `== 0` inverts it).
