@@ -1866,6 +1866,17 @@ pub fn pattern_to_type_pub(db: &mut TypeDb, p: &TypePattern) -> Type {
     pattern_to_type(db, p)
 }
 
+/// Public name-aware variant of [`pattern_to_type`] for the inference pass
+/// (bidirectional method-call inference, M8 §3). Shares one type variable per
+/// `Var(name)` within one instantiation via the supplied `names` map.
+pub fn pattern_to_type_named(
+    db: &mut TypeDb,
+    p: &TypePattern,
+    names: &mut HashMap<String, Type>,
+) -> Type {
+    pattern_to_type_named_impl(db, p, names)
+}
+
 fn pattern_to_type(db: &mut TypeDb, p: &TypePattern) -> Type {
     match p {
         TypePattern::Scalar(s) => db.scalar(map_pattern_scalar(*s)),
@@ -1882,6 +1893,57 @@ fn pattern_to_type(db: &mut TypeDb, p: &TypePattern) -> Type {
         }
         TypePattern::Tuple(els) => {
             let tys: Vec<Type> = els.iter().map(|e| pattern_to_type(db, e)).collect();
+            db.tuple(tys)
+        }
+        TypePattern::Opaque => db.fresh_var(),
+    }
+}
+
+/// Like [`pattern_to_type`], but shares a single type variable for each named
+/// `Var(name)` within one instantiation. This is what the bidirectional method-
+/// call inference needs: a combinator signature like `fold`'s
+/// `(Acc, (Acc, T) -> Acc) -> Acc` names the accumulator `Acc` in three places,
+/// and those must be the *same* type variable so the accumulator type threads
+/// from the init argument through the closure params to the result. The
+/// `names` map carries the per-instantiation sharing; pass a fresh map for each
+/// combinator call site.
+fn pattern_to_type_named_impl(
+    db: &mut TypeDb,
+    p: &TypePattern,
+    names: &mut HashMap<String, Type>,
+) -> Type {
+    match p {
+        TypePattern::Scalar(s) => db.scalar(map_pattern_scalar(*s)),
+        TypePattern::Unit => db.unit(),
+        TypePattern::Var(n) => {
+            if let Some(&t) = names.get(*n) {
+                t
+            } else {
+                let t = db.fresh_var();
+                names.insert(n.to_string(), t);
+                t
+            }
+        }
+        TypePattern::Collection { ctor, args } => {
+            let arg_tys: Vec<Type> = args
+                .iter()
+                .map(|a| pattern_to_type_named_impl(db, a, names))
+                .collect();
+            db.collection(*ctor, arg_tys)
+        }
+        TypePattern::Function { params, result } => {
+            let ps: Vec<Type> = params
+                .iter()
+                .map(|p| pattern_to_type_named_impl(db, p, names))
+                .collect();
+            let r = pattern_to_type_named_impl(db, result, names);
+            db.func(ps, r)
+        }
+        TypePattern::Tuple(els) => {
+            let tys: Vec<Type> = els
+                .iter()
+                .map(|e| pattern_to_type_named_impl(db, e, names))
+                .collect();
             db.tuple(tys)
         }
         TypePattern::Opaque => db.fresh_var(),

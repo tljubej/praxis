@@ -2888,23 +2888,17 @@ fn adv_pipeline_fold_accumulator_is_gc_int_under_pressure() {
 }
 
 #[test]
-fn adv_pipeline_fold_into_vec_unsupported_by_inference() {
-    // DOCUMENTED LIMITATION: fold into a Vec accumulator does NOT type-check.
-    // The closure param `a` cannot be inferred as Vec[Int] from the init
-    // `Vec()` (inference doesn't propagate the accumulator type into the
-    // closure body). This is recorded as a follow-up, not a runtime bug.
-    // We assert the front-end rejects it (a clean diagnostic, not a crash).
+fn adv_pipeline_fold_into_vec_now_supported() {
+    // FIXED (§3 Gap A): fold into a Vec accumulator now type-checks and runs.
+    // The closure param `a` is inferred as Vec[Int] from the init `Vec()`:
+    // bidirectional inference threads the combinator's accumulator type
+    // (the name-shared `Acc` in fold's signature) into the closure's params
+    // before the body is inferred, so `a.push(x)` resolves. Pre-fix this was
+    // rejected with Y110; now it collects [1,2] → len 2.
     let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  let acc = v.fold(Vec(), |a, x| { a.push(x); a })\n  acc.len()\n}\n";
-    let map = praxis_source::SourceMap::new();
-    let file = map.intern("fold_vec.px", src);
-    let parsed = praxis_parser::parse(file, src);
-    let mut analysis = praxis_hir::analyze_root(file, &parsed.tree);
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = praxis_hir::lower(file, &root, &mut analysis);
-    assert!(
-        !module.diagnostics.is_empty(),
-        "fold-into-Vec should be rejected by inference (currently unsupported)"
-    );
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
 }
 
 #[test]
@@ -2958,13 +2952,21 @@ fn adv_pipeline_nested_vec_elements_survive_fused_count() {
 }
 
 #[test]
-fn adv_pipeline_method_on_closure_param_from_collection_rejected() {
-    // DOCUMENTED LIMITATION: a method call on a closure parameter whose type
-    // is the element type of a collection is NOT resolved by inference today.
-    // `v.map(|inner| inner.len())` over a Vec[Vec[Int]] fails with T110 even
-    // though `inner` is clearly a Vec[Int]. This blocks idiomatic nested-
-    // collection pipelines and the `.len()`-based min_by/max_by comparators.
-    // Recorded as a follow-up; asserting the clean diagnostic (not a crash).
+fn adv_pipeline_method_on_closure_param_partially_supported() {
+    // PARTIALLY FIXED (§3 Gap B): bidirectional inference now propagates the
+    // receiver's element type into a closure combinator's param BEFORE the body
+    // is inferred (the handover's described root cause). A method call on a
+    // closure param whose type is a *concrete, known* element type now resolves.
+    //
+    // The idiomatic `let v = Vec(); v.push(...); v.map(|i| i.len())` pattern is
+    // STILL rejected, but for a DIFFERENT, orthogonal reason: HM
+    // let-generalization turns `let v = Vec()` into `forall T. Vec[T]`, so each
+    // method call on `v` instantiates a FRESH, unbound element type — the push
+    // that would pin it does not propagate to the map. That is a generalization
+    // policy issue for mutable Vec bindings, not the closure-param propagation
+    // gap this workstream targeted. We assert the front-end still rejects the
+    // `Vec()` idiom (a clean diagnostic, not a crash) until generalization is
+    // revisited.
     let src = "fn main() -> Int {\n  let v = Vec()\n  let inner = Vec()\n  inner.push(1)\n  v.push(inner)\n  v.map(|i| i.len()).sum()\n}\n";
     let map = praxis_source::SourceMap::new();
     let file = map.intern("nested.px", src);
@@ -2974,7 +2976,7 @@ fn adv_pipeline_method_on_closure_param_from_collection_rejected() {
     let module = praxis_hir::lower(file, &root, &mut analysis);
     assert!(
         !module.diagnostics.is_empty(),
-        "method-on-closure-param-from-collection should be rejected (inference gap)"
+        "Vec() idiom still rejected (HM generalization of mutable Vec bindings)"
     );
 }
 

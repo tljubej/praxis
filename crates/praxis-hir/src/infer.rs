@@ -595,6 +595,65 @@ impl Inferer {
         self.db.func(param_types, result_ty)
     }
 
+    /// Bidirectional closure inference (M8, §3): infer a closure argument with
+    /// an expected `Func` type pushed down from the combinator's signature. Each
+    /// param is unified with the corresponding expected Func param BEFORE the
+    /// body is inferred, so a closure param whose type is the receiver's element
+    /// type (e.g. `|inner| inner.len()` over a `Vec[Vec[Int]]`) is pinned and
+    /// method calls on it resolve; and a fold's accumulator param `a` is pinned
+    /// to the accumulator type threaded from the init argument. The expected
+    /// result type is threaded into the body. Falls back to plain
+    /// [`infer_closure`](Self::infer_closure) when the expected type is not a
+    /// Func (or the arity differs) — unification with a fresh var is a no-op, so
+    /// this is purely additive and cannot change currently-passing inference.
+    fn infer_closure_expected(
+        &mut self,
+        scope: ScopeId,
+        c: &praxis_ast::ClosureExpr,
+        expected: Type,
+    ) -> Type {
+        // Read the expected Func's params/result (after following). If it is not
+        // a Func, or the param count differs, defer to the bottom-up path.
+        let (exp_params, exp_result) = match self.db.data(self.db.follow(expected)) {
+            praxis_types::TypeData::Func { params, result } => (params.clone(), *result),
+            _ => return self.infer_closure(scope, c),
+        };
+        let closure_params: Vec<_> = c.params().collect();
+        if exp_params.len() != closure_params.len() {
+            return self.infer_closure(scope, c);
+        }
+        let body_scope = self.scopes.push_child(scope);
+        let mut param_types = Vec::new();
+        for (p, exp_pt) in closure_params.into_iter().zip(exp_params.iter()) {
+            let pt = self.infer_param(body_scope, &p);
+            // Pin the param to the expected type before the body sees it. This is
+            // the load-bearing step: the body's method calls on this param now
+            // resolve against a concrete type.
+            let _ = self.db.unify(pt, *exp_pt);
+            param_types.push(pt);
+        }
+        // Thread the expected result type into the body. (The body is a single
+        // expression; we infer it directly. A full bidirectional system would
+        // push `exp_result` into block tails too, but Praxis closure bodies here
+        // are single expressions or push from their own tail.)
+        let _ = exp_result;
+        let result_ty = c
+            .body()
+            .map_or(self.db.unit(), |b| self.infer_expr(body_scope, &b));
+        self.db.func(param_types, result_ty)
+    }
+
+    /// Infer an expression with an expected type pushed down from context
+    /// (bidirectional inference, M8 §3). Currently only closures take the hint;
+    /// every other expression ignores `expected` and infers bottom-up (a fresh
+    /// var unifies no-op, so this is safe).
+    fn infer_expr_expected(&mut self, scope: ScopeId, expr: &Expr, expected: Type) -> Type {
+        match expr {
+            Expr::Closure(c) => self.infer_closure_expected(scope, c, expected),
+            _ => self.infer_expr(scope, expr),
+        }
+    }
+
     /// Infer the type of a record literal `Name { field: expr, … }` (M7, §4.5).
     /// Looks up the struct type, unifies each field initializer with the declared
     /// field type, and returns the struct type.
@@ -1154,11 +1213,12 @@ impl Inferer {
             .method_name()
             .map(|t| t.text().to_string())
             .unwrap_or_default();
-        let arg_types: Vec<Type> = m
-            .arg_list()
-            .map(|a| self.collect_args(scope, &a))
-            .unwrap_or_default();
-        let arity = arg_types.len();
+        // Collect the argument expressions (do NOT infer them yet — bidirectional
+        // inference below pushes each arg's expected param type into it before
+        // inferring, so a closure arg whose param type is the element type gets
+        // pinned). Arity is the arg count.
+        let arg_exprs: Vec<Expr> = m.arg_list().map(|a| a.args().collect()).unwrap_or_default();
+        let arity = arg_exprs.len();
 
         // Record the method-name range for hover (the result type).
         if let Some(tok) = m.method_name() {
@@ -1168,26 +1228,63 @@ impl Inferer {
         // Look up the method in the catalog via the ADR-010 bridge.
         let hits = crate::catalog::lookup(&self.db, self.catalog, receiver_ty, &name, arity);
         let Some(entry) = hits.first().copied() else {
-            // Unknown method: leave the result as a fresh var; the HIR lowerer
-            // emits the Y110 diagnostic (it has the method-name span).
+            // Unknown method: infer the args anyway (for nested diagnostics),
+            // then leave the result as a fresh var; the HIR lowerer emits the
+            // Y110 diagnostic (it has the method-name span).
+            for arg in &arg_exprs {
+                self.infer_expr(scope, arg);
+            }
             return self.db.fresh_var();
         };
 
-        // Unify the method's parameter types with the argument types. The
-        // catalog's param patterns carry `Var("T")` for the element type; we
-        // instantiate them as fresh vars, then unify the receiver's element
-        // type against the first param's `T` (for `push`) so a `Vec[Int]`
-        // only accepts `Int` arguments.
+        // Bidirectional inference (M8, §3): instantiate the method's full
+        // signature (params + result) with ONE shared name map, so repeated
+        // `Var(name)` occurrences in the catalog entry are the same type
+        // variable (fold's `Acc` appears in the init param, both closure params,
+        // and the result — they must be one type). The receiver's element type is
+        // also a shared `Var("T")` in most combinators; unify the receiver
+        // against the entry's receiver pattern (instantiated from the same map)
+        // to pin `T` BEFORE inferring the arguments — so an argument closure
+        // whose param is the element type (e.g. `|inner| inner.len()` over
+        // `Vec[Vec[Int]]`) gets pinned and its body's method calls resolve.
+        // Catalog `params` are exactly the user arguments (the receiver is
+        // separate, in `entry.receiver`).
+        let mut names = HashMap::new();
+        let receiver_param =
+            crate::lower::pattern_to_type_named(&mut self.db, &entry.receiver, &mut names);
         let param_tys: Vec<Type> = entry
             .params
             .iter()
-            .map(|p| crate::lower::pattern_to_type_pub(&mut self.db, p))
+            .map(|p| crate::lower::pattern_to_type_named(&mut self.db, p, &mut names))
             .collect();
-        for (pt, at) in param_tys.iter().zip(arg_types.iter()) {
-            let _ = self.db.unify(*pt, *at);
+        let result_ty =
+            crate::lower::pattern_to_type_named(&mut self.db, &entry.result, &mut names);
+        // Unify the receiver against its pattern. This pins the element type `T`.
+        let _ = self.db.unify(receiver_param, receiver_ty);
+        // Infer each argument with its expected param type pushed down, unifying
+        // it against its param IMMEDIATELY so a shared variable (e.g. fold's
+        // `Acc`, which appears in the init arg and the closure's signature)
+        // propagates to subsequent args before they are inferred. For a closure
+        // argument whose expected type is a Func, the closure's params are pinned
+        // to the Func's param types before its body is inferred (closing the §3
+        // gaps).
+        let mut arg_types: Vec<Type> = Vec::with_capacity(arg_exprs.len());
+        for (i, arg) in arg_exprs.iter().enumerate() {
+            let expected = param_tys.get(i).copied();
+            let at = match expected {
+                Some(et) => self.infer_expr_expected(scope, arg, et),
+                None => self.infer_expr(scope, arg),
+            };
+            // Unify now (not deferred) so shared vars pin before the next arg.
+            if let Some(pt) = param_tys.get(i) {
+                if let Err(e) = self.db.unify(*pt, at) {
+                    let at_range = arg.syntax().text_range();
+                    self.diag_unify(self.file_span(at_range), e);
+                }
+            }
+            arg_types.push(at);
         }
-        // The result type.
-        crate::lower::pattern_to_type_pub(&mut self.db, &entry.result)
+        result_ty
     }
 
     fn is_builtin(&self, id: SymbolId, name: &str) -> bool {
