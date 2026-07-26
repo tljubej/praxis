@@ -3416,14 +3416,79 @@ fn adv_pipeline_flat_map_with_filter_then_sum() {
 #[test]
 fn adv_indirect_call_on_local_closure_works() {
     // The SUPPORTED path: a closure bound to a local, then called. This works
-    // (the callee resolves to a local). Contrast with the broken
-    // closures-from-collections case (documented in the handover — invoking a
-    // closure retrieved via `vec.get(i)(x)` miscompiles and can segfault, so it
-    // is NOT tested here to keep CI stable).
+    // (the callee resolves to a local). The closures-from-collections case is
+    // now ALSO supported — see adv_call_closure_retrieved_from_collection and
+    // siblings below.
     let src = "fn main() -> Int {\n  let f = |x| x + 7\n  f(100)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 107);
+}
+
+#[test]
+fn adv_call_closure_retrieved_from_collection() {
+    // PROBE (§2): invoking a closure retrieved from a collection used to
+    // miscompile and SIGSEGV — `fs.get(0)(100)` resolved its callee to no symbol
+    // (SymbolId(u32::MAX), empty callee_name) and fell through to a nonsense
+    // direct call (CallTarget::User("")), which does not read the closure's
+    // fn_ptr. Fixed: a postfix `expr(args)` parse production wraps the preceding
+    // expression as the call's callee; the HIR lowerer stores it as `callee_expr`
+    // and inference unifies it against a Func; the MIR builder lowers it to
+    // Inst::CallIndirect (reads the closure's fn_ptr and calls through it).
+    // Pre-fix this segfaulted; now it returns 101.
+    let src = String::from("fn main() -> Int {\n")
+        + "  let fs = Vec()\n"
+        + "  fs.push(|x| x + 1)\n"
+        + "  fs.get(0)(100)\n"
+        + "}\n";
+    let (rt, result) = run_main(&src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 101);
+}
+
+#[test]
+fn adv_call_closure_in_parens() {
+    // The parenthesized-callee case: `(expr)(args)`. A paren holds a closure
+    // value; calling through it exercises the same postfix-call + indirect path
+    // as the collection case (the callee is an arbitrary expression, not a name).
+    let src = "fn main() -> Int {\n  (|x| x * 3)(14)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn adv_call_result_of_call() {
+    // `f(1)(2)` — calling the result of another call (a curried closure
+    // returned by f). The outer call's callee is the inner CALL_EXPR, the same
+    // arbitrary-expression-callee path.
+    let src = String::from("fn main() -> Int {\n")
+        + "  let mk = |a| |b| a + b\n"
+        + "  mk(40)(2)\n"
+        + "}\n";
+    let (rt, result) = run_main(&src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn adv_call_closure_from_collection_under_gc_pressure() {
+    // The closure-from-collection path under GC pressure: the retrieved closure
+    // (and the Vec holding it) must survive collections triggered by allocations
+    // between the get and the indirect call. Retrieves the second closure and
+    // calls it after allocating garbage.
+    let src = String::from("fn main() -> Int {\n")
+        + "  let fs = Vec()\n"
+        + "  fs.push(|x| x + 1)\n"
+        + "  fs.push(|x| x * 100)\n"
+        + "  let garbage = Vec()\n"
+        + "  var i = 0\n"
+        + "  while i < 300 { garbage.push(i); i = i + 1 }\n"
+        + "  fs.get(1)(7)\n"
+        + "}\n";
+    let (rt, result) = run_main(&src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 700);
 }
 
 #[test]

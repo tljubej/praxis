@@ -146,9 +146,14 @@ fn collect_closures_expr(e: &TypedExpr, out: &mut Vec<LiftedClosure>) {
                 collect_closures_expr(v, out);
             }
         }
-        TypedExpr::Call { args, .. } => {
+        TypedExpr::Call {
+            args, callee_expr, ..
+        } => {
             for a in args {
                 collect_closures_expr(a, out);
+            }
+            if let Some(ce) = callee_expr {
+                collect_closures_expr(ce, out);
             }
         }
         TypedExpr::MethodCall { receiver, args, .. } => {
@@ -671,9 +676,31 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             callee,
             callee_name,
             args,
+            callee_expr,
             ty,
             ..
         } => {
+            // Postfix call on an arbitrary expression (`expr(args)`, M8 §4.10):
+            // the callee is a closure value produced by an expression (e.g.
+            // `fs.get(0)` in `fs.get(0)(100)`). Lower the callee expression to a
+            // GcRef local and emit an indirect call through its `fn_ptr`. This
+            // bypasses the named-call paths below (collection construction,
+            // `out`, named/indirect-via-local) — those only apply when the callee
+            // is a name. Pre-fix this case fell through to `CallTarget::User("")`
+            // (a nonsense direct call that SIGSEGV'd); now it lowers soundly.
+            if let Some(ce) = callee_expr {
+                let callee_local = lower_expr_gc(b, ce);
+                let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
+                let dst = b.alloc_gc(*ty, None);
+                b.push(Inst::CallIndirect {
+                    dst,
+                    callee: callee_local,
+                    args: arg_locals,
+                    live_roots: Vec::new(),
+                });
+                b.check_fault();
+                return dst;
+            }
             // Collection construction: `Vec[T]()`, `Deque[T]()`, etc. (M8 WS1,
             // §11.1/§11.2). The element type is extracted from the call's result
             // type (the collection type) and carried through `AllocKind::Collection`

@@ -203,11 +203,17 @@ fn rewrite_expr(e: &mut TypedExpr, pass: &mut MonoPass<'_>) {
             callee_name,
             arg_types,
             args,
+            callee_expr,
             ..
         } => {
             // Recurse into args first (they may contain polymorphic calls).
             for a in args.iter_mut() {
                 rewrite_expr(a, pass);
+            }
+            // A postfix call's callee expression (a closure value) may itself
+            // contain polymorphic calls in its body — recurse so they rewrite.
+            if let Some(ce) = callee_expr {
+                rewrite_expr(ce, pass);
             }
             // Is this callee a polymorphic user fn? (Closure-value callees have
             // no scheme / are not in originals; their `arg_types` may be empty.)
@@ -441,13 +447,19 @@ fn resolve_expr(db: &TypeDb, e: &mut TypedExpr) {
         | TypedExpr::Return { value: None, .. } => {}
         TypedExpr::Return { value: Some(v), .. } => resolve_expr(db, v),
         TypedExpr::Call {
-            args, arg_types, ..
+            args,
+            arg_types,
+            callee_expr,
+            ..
         } => {
             for a in args {
                 resolve_expr(db, a);
             }
             for at in arg_types {
                 *at = resolve_type(db, *at);
+            }
+            if let Some(ce) = callee_expr {
+                resolve_expr(db, ce);
             }
         }
         TypedExpr::MethodCall { receiver, args, .. } => {

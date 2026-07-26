@@ -625,8 +625,15 @@ impl<'t> Parser<'t> {
     }
 
     /// Prefix expression: unary operators, `read`, then an atom or a
-    /// parenthesized expression.
+    /// parenthesized expression. Followed by any postfix `expr(args)` calls
+    /// (M8, §4.10) — calling a closure retrieved from a collection
+    /// (`fs.get(0)(100)`), the result of another call (`f(1)(2)`), a paren
+    /// (`(|x| x*3)(14)`), etc.
     fn parse_prefix(&mut self) {
+        // Capture the builder position before the primary is emitted, so a
+        // postfix `expr(args)` can wrap the whole primary as the call's callee
+        // via start_node_at (same idiom as the method-call loop).
+        let cp = self.checkpoint_lhs();
         let op = self.peek();
         // `read parser_expression` (§7.1): a prefix expression whose body is a
         // parser-expression grammar, not an ordinary expression.
@@ -635,23 +642,42 @@ impl<'t> Parser<'t> {
             self.bump(); // `read`
             self.parse_parser_expr();
             self.finish_node();
-            return;
-        }
-        // `|params| expr` closure (M7, §4.10). Bare `PIPE` claims the `|`; the
-        // lexer's max-munch keeps `||` as logical-or (`PIPE2`, handled in the
-        // infix table), so the two never conflict.
-        if op == SyntaxKind::PIPE {
+        } else if op == SyntaxKind::PIPE {
+            // `|params| expr` closure (M7, §4.10). Bare `PIPE` claims the `|`;
+            // the lexer's max-munch keeps `||` as logical-or (`PIPE2`, handled
+            // in the infix table), so the two never conflict.
             self.parse_closure();
-            return;
-        }
-        if let Some(bp) = prefix_binding_power(op) {
+        } else if let Some(bp) = prefix_binding_power(op) {
             self.start_node(SyntaxKind::UNARY_EXPR);
             self.bump(); // unary operator
             self.parse_expr_bp(bp);
             self.finish_node();
-            return;
+        } else {
+            self.parse_atom();
         }
-        self.parse_atom();
+        // Postfix calls on an arbitrary expression: `expr(args)`, chained
+        // left-associatively. The primary parsed above is the callee (wrapped
+        // retroactively as the CALL_EXPR's first child). The leading `Ident(args)`
+        // named-call case is handled inside parse_name_or_call (an atom); this
+        // loop covers the callee-not-a-path case and chains like `f(1)(2)`.
+        while self.at(SyntaxKind::L_PAREN) {
+            self.start_node_at(cp, SyntaxKind::CALL_EXPR);
+            self.bump(); // `(`
+            self.start_node(SyntaxKind::ARG_LIST);
+            if !self.at(SyntaxKind::R_PAREN) {
+                loop {
+                    let before = self.meaningful_index();
+                    self.parse_expr();
+                    if !self.eat(SyntaxKind::COMMA) {
+                        break;
+                    }
+                    self.ensure_progress(before);
+                }
+            }
+            self.expect(SyntaxKind::R_PAREN, "`)`");
+            self.finish_node(); // ARG_LIST
+            self.finish_node(); // CALL_EXPR
+        }
     }
 
     /// `|params| expr` — a closure expression (M7, §4.10). Params are bare names

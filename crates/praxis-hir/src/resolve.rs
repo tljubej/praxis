@@ -668,11 +668,18 @@ impl Resolver {
     }
 
     fn resolve_call(&mut self, scope: ScopeId, c: &CallExpr) {
-        // The callee is a name reference.
+        // The callee is a name reference (named call `f(args)`), or — for a
+        // postfix call on an arbitrary expression (`expr(args)`, M8 §4.10) — an
+        // expression callee (e.g. `fs.get(0)` in `fs.get(0)(100)`, or a paren'd
+        // closure `(|x| x)(14)`). Resolve whichever is present; the expression
+        // callee must be resolved so its nested bindings (closure params,
+        // captures) are declared.
         if let Some(callee) = c.callee() {
             if let Some(name_tok) = callee.name() {
                 self.resolve_name_ref(scope, &name_tok);
             }
+        } else if let Some(callee_expr) = c.callee_expr() {
+            self.resolve_expr(scope, &callee_expr);
         }
         if let Some(args) = c.arg_list() {
             self.resolve_args(scope, &args);

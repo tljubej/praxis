@@ -1159,9 +1159,25 @@ impl AstNode for CallExpr {
     }
 }
 impl CallExpr {
-    /// The callee (a `PathExpr` naming the function/builtin).
+    /// The callee (a `PathExpr` naming the function/builtin). Present for a
+    /// named call (`f(args)`); `None` for a postfix call on an arbitrary
+    /// expression (`fs.get(0)(args)`), whose callee is an [`Expr`] — see
+    /// [`callee_expr`](Self::callee_expr).
     pub fn callee(&self) -> Option<PathExpr> {
         child(&self.syntax)
+    }
+    /// The callee as an arbitrary expression, for a postfix call (`expr(args)`).
+    /// `None` for a named call (use [`callee`](Self::callee) instead). This is
+    /// the callee-not-a-path case (M8, §4.10): calling a closure retrieved from
+    /// a collection, the result of another call, etc.
+    pub fn callee_expr(&self) -> Option<Expr> {
+        // Only present when there is no `PathExpr` callee (a named call). The
+        // first `Expr` child is then the postfix callee (a method call, paren,
+        // prior call, …); the `ArgList` is not an `Expr` so it is skipped.
+        if self.callee().is_some() {
+            return None;
+        }
+        self.syntax.children().find_map(Expr::cast_from_child)
     }
     /// The argument list.
     pub fn arg_list(&self) -> Option<ArgList> {

@@ -1066,6 +1066,24 @@ impl Inferer {
             .arg_list()
             .map(|a| self.collect_args(scope, &a))
             .unwrap_or_default();
+        // Postfix call on an arbitrary expression (`expr(args)`, M8 §4.10):
+        // when there is no named callee, the callee is an expression (e.g.
+        // `fs.get(0)`). Infer its type, unify it against `(arg_types) -> result`
+        // (which pins a fresh closure param to a Func and checks the arity), and
+        // return `result`. The lowered callee_expr carries this Func type, so the
+        // HIR lowerer reads its result type for the call's type.
+        if c.callee().is_none() {
+            if let Some(callee_expr) = c.callee_expr() {
+                let callee_ty = self.infer_expr(scope, &callee_expr);
+                let result = self.db.fresh_var();
+                let expected = self.db.func(arg_types, result);
+                if let Err(e) = self.db.unify(callee_ty, expected) {
+                    let at = c.syntax().text_range();
+                    self.diag_unify(self.file_span(at), e);
+                }
+                return result;
+            }
+        }
         // Resolve the callee to a function scheme and instantiate it.
         if let Some(callee) = c.callee() {
             if let Some(name_tok) = callee.name() {

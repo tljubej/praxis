@@ -216,6 +216,13 @@ pub enum TypedExpr {
         /// pass uses these to instantiate a polymorphic callee; the MIR builder
         /// ignores them (calls are by name). For a closure-value callee, empty.
         arg_types: Vec<Type>,
+        /// For a postfix call on an arbitrary expression (`expr(args)`, M8
+        /// §4.10) — e.g. calling a closure retrieved from a collection
+        /// (`fs.get(0)(100)`) or the result of another call (`f(1)(2)`) — the
+        /// lowered callee expression. `None` for an ordinary named call (the
+        /// callee is `callee`/`callee_name`); `Some` for a closure-value callee
+        /// that the MIR builder lowers to `Inst::CallIndirect`.
+        callee_expr: Option<Box<TypedExpr>>,
         ty: Type,
     },
     /// `receiver.method(args)` (M5, §16.2). `lowering_symbol` is the runtime
@@ -1311,6 +1318,15 @@ impl<'a> Lowerer<'a> {
 
     fn lower_call(&mut self, c: &CallExpr) -> TypedExpr {
         let callee_tok = c.callee().and_then(|p| p.name());
+        // Postfix call on an arbitrary expression (`expr(args)`, M8 §4.10):
+        // when there is no named (PathExpr) callee, the callee is an expression
+        // (e.g. `fs.get(0)` in `fs.get(0)(100)`). Lower it; the MIR builder
+        // emits an indirect call through its closure fn_ptr.
+        let callee_expr: Option<Box<TypedExpr>> = if callee_tok.is_none() {
+            c.callee_expr().map(|e| Box::new(self.lower_expr(&e)))
+        } else {
+            None
+        };
         let callee = callee_tok
             .as_ref()
             .and_then(|t| self.resolve_symbol_at(t.text_range()))
@@ -1339,15 +1355,23 @@ impl<'a> Lowerer<'a> {
             }
         }
         // The call's result type comes from the callee's instantiated scheme.
-        let ty = self
-            .call_result_type(callee)
-            .unwrap_or_else(|| self.db.fresh_var());
+        // For a postfix (expression) callee, the result type is the Func type's
+        // result, inferred and recorded on the callee_expr by inference.
+        let ty = if let Some(ce) = callee_expr.as_deref() {
+            // The callee expression's inferred type is a Func (params) -> result;
+            // follow it to read the result. If it is not yet a Func (inference
+            // could not pin it), fall back to a fresh var.
+            func_result_type(self.db, expr_ty(ce)).unwrap_or_else(|| self.db.fresh_var())
+        } else {
+            self.call_result_type(callee)
+                .unwrap_or_else(|| self.db.fresh_var())
+        };
         // The concrete arg types at this call site (WS8, §13.6). Recorded by
         // inference in `analysis.call_sites`, keyed by the callee name token's
         // range. The mono pass reads these off the typed tree to instantiate a
         // polymorphic callee. Empty if the call site wasn't recorded (e.g. an
-        // unresolved callee) — the mono pass treats an empty vec as
-        // monomorphic.
+        // unresolved callee, or a postfix expression callee) — the mono pass
+        // treats an empty vec as monomorphic.
         let arg_types = callee_tok
             .as_ref()
             .and_then(|t| self.call_sites.get(&t.text_range()))
@@ -1358,6 +1382,7 @@ impl<'a> Lowerer<'a> {
             callee_name,
             args,
             arg_types,
+            callee_expr,
             ty,
         }
     }
@@ -1817,6 +1842,15 @@ fn expr_ty(e: &TypedExpr) -> Type {
         TypedExpr::EnumVariant { ty, .. } => *ty,
         TypedExpr::Match { ty, .. } => *ty,
         TypedExpr::Closure { ty, .. } => *ty,
+    }
+}
+
+/// The result type of a function-typed value, if `t` (after following) is a
+/// `Func`. Used to read a postfix call's result type off its callee expression.
+fn func_result_type(db: &TypeDb, t: Type) -> Option<Type> {
+    match db.data(db.follow(t)) {
+        praxis_types::TypeData::Func { result, .. } => Some(*result),
+        _ => None,
     }
 }
 
