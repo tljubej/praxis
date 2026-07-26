@@ -133,7 +133,106 @@ compile-time only (no TypeId). `DynamicKey` is a Rust-internal wrapper.
 
 ---
 
-## 7. Test count
+## 7. Picking up the fusion work (the top follow-up)
+
+The single highest-value follow-up is **true cross-combinator fusion** for the
+§6.3 pipeline. M8-WS8 ships an *eager* version: each combinator (`map`/`filter`/
+`sum`/`count`/`collect`) lowers to its **own loop** and materializes an
+intermediate `Vec`. So `v.map(f).filter(p).sum()` compiles to **three loops and
+two throwaway Vecs**. The UX is seamless (no `.collect()` needed) but the spec's
+"fuse common chains into loops" (§6.3) is **not yet met**. This section gives a
+fresh session the architectural context and exact file/function pointers to pick
+it up without re-deriving them.
+
+### The architectural gap
+
+Method calls lower **bottom-up and independently**. The MIR `lower_expr_gc` arm
+for `TypedExpr::MethodCall` (`crates/praxis-mir/src/build.rs`, around line 736)
+handles each combinator in isolation: when `.sum()`'s lowerer runs, its
+`receiver` field is an opaque `TypedExpr::MethodCall` (the filter call) — it has
+no idea that receiver is part of a chain it could fold into. So each combinator
+emits its own loop.
+
+### What "eager" vs "fused" means concretely
+
+- **Shipped (eager):** `v.map(f).filter(p).sum()` → loop over `v` calling `f`
+  into `vec1`; loop over `vec1` calling `p` into `vec2`; loop over `vec2`
+  accumulating. Three loops, two intermediate Vecs.
+- **Fused (the goal):** one loop over `v` → `x = f(item)` → `if p(x) { acc += x }`.
+  One loop, zero intermediate Vecs. Identical UX either way.
+
+### What needs to change
+
+1. **A pipeline-recognition pass.** Before lowering, walk the `MethodCall`
+   chain and recognize that `((((v).map(f)).filter(p)).sum())` is a chain. Build
+   a *plan*: `[source=v, map(f), filter(p), sink=sum]`. This traversal does not
+   exist today. The chain is a left-leaning `MethodCall` tree whose `receiver`
+   is the previous `MethodCall` (or a `Vec`/`Seq` leaf). Hook point:
+   `crates/praxis-hir/src/lower.rs::lower_method_call` (around line 1290),
+   which currently lowers each call in isolation.
+
+2. **Combinator classification.** Each of the 27 §6.3 combinators is one of:
+   - **Streaming** (fuse into the body): `map`, `filter`, `filter_map`,
+     `flat_map`, `take`, `skip`, `take_while`, `enumerate`, `zip`. Each is
+     either a `CallIndirect` (map/filter — **already working in M8**) or a
+     conditional / int counter.
+   - **Barrier** (materialize input to Vec, then resume): `sorted`, `unique`,
+     `frequencies`, `chunks`, `windows`. They need the whole sequence.
+   - **Aggregating sink** (terminate, scalar result): `sum`, `product`, `count`,
+     `fold`, `reduce`, `any`, `all`, `find`, `position`, `min`, `max`,
+     `min_by`, `max_by`. These fuse the whole run into the accumulator.
+   - **`collect`** — explicit sink → Vec.
+
+3. **A fused single-loop body builder.** The core: `lower_pipeline` takes the
+   recognized plan and emits *one* loop over the source, threading each element
+   through the reversed streaming chain. `filter` inserts a `Branch` that skips
+   the rest of the body for that element; `map` is a `CallIndirect` whose result
+   becomes the next stage's input; the terminal sink accumulates. **Reuse the
+   existing `emit_index_loop` helper** (`crates/praxis-mir/src/build.rs`,
+   ~line 1590) — pass it a stage-list instead of a single closure. **The
+   closure-invocation plumbing already works** (map/filter call closures via
+   `Inst::CallIndirect` end-to-end in M8), so fusion sits on top of working
+   pieces — that was the main risk and it's resolved.
+
+4. **Barrier splitting.** When the fuser hits a barrier mid-chain, it splits:
+   materialize the prefix to a Vec (run the streaming stages so far into a
+   collect), then restart fusion from that Vec.
+
+5. **Seamless auto-materialization (only needed once lazy `Seq[T]` lands).** A
+   `Seq[T]`-producing expression used in a value position (assign/return/arg/
+   non-`Seq`-method receiver) must implicitly collect to `Vec[T]`. Today the
+   catalog combinator results are already `Vec[T]` (eager), so this coercion is
+   not exercised; with lazy `Seq[T]` it becomes a HIR-lowering coercion (append
+   a `collect` when a `Seq` flows into a non-`Seq`/non-sink context).
+
+### Exact entry points
+
+| File | Function (approx. line) | Role |
+|---|---|---|
+| `crates/praxis-mir/src/build.rs` | `lower_pipeline_combinator` (~1380) | current eager dispatch — replace with chain-aware dispatch |
+| `crates/praxis-mir/src/build.rs` | `emit_index_loop` (~1590) | the loop scaffold to reuse (pass a stage-list) |
+| `crates/praxis-mir/src/build.rs` | `lower_seq_map`/`lower_seq_filter`/`lower_seq_sum`/`lower_seq_count`/`lower_seq_collect` | per-combinator lowerers to fold into the fuser |
+| `crates/praxis-stdlib/src/builtins.rs` | the 12 combinator catalog entries (`Intrinsic` lowering) | add the remaining 20 combinators here too |
+| `crates/praxis-hir/src/lower.rs` | `lower_method_call` (~1290) | where the chain-recognition pass hooks |
+
+### Rough effort estimate
+
+One focused workstream: ~150 lines recognition pass + ~250 lines fused-loop
+builder + ~50 lines barrier splitting + per-combinator equivalence tests (fused
+vs. eager produce the same result). The closure plumbing being done removes the
+main risk.
+
+### Why it was deferred (so a fresh session doesn't re-litigate)
+
+Not infeasible — deferred because (a) the eager version delivers the seamless UX
+the user asked for ("no `.collect()`, it just works"), (b) §19.8 doesn't gate on
+performance, and (c) the fused body builder is the one piece of M8 most likely
+to harbor subtle GC-rooting bugs (each stage introduces live GcRefs mid-loop),
+and shipping eager-and-correct beat fused-and-flaky for a milestone close.
+
+---
+
+## 8. Test count
 
 **591 tests** (up from 485 at M7 close): ~166 JIT end-to-end, ~96 HIR, ~89
 runtime, ~44 types, ~56 parser, ~140 other. `just ci` clean (fmt-check + clippy
