@@ -917,6 +917,377 @@ fn pipeline_map_then_len_chains() {
     assert_eq!(result.as_int(), 3);
 }
 
+// --- M8-WS11: cross-combinator fusion (§6.3) -------------------------------
+// These exercise the single-fused-loop path: every multi-stage chain must
+// produce the same value as the eager equivalent, with zero intermediate Vecs.
+
+#[test]
+fn pipeline_map_filter_sum_fuses() {
+    // [1,2,3,4].map(*2)=[2,4,6,8].filter(even)=[2,4,6,8].sum()=20. (All doubled
+    // values are even, so filter keeps all four.) One fused loop.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.map(|x| x * 2).filter(|x| x - x / 2 * 2 == 0).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 20);
+}
+
+#[test]
+fn pipeline_filter_map_sum_fuses() {
+    // [1,2,3,4,5].filter(odd)=[1,3,5].map(*10)=[10,30,50].sum()=90.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter(|x| x - x / 2 * 2 == 1).map(|x| x * 10).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 90);
+}
+
+#[test]
+fn pipeline_map_map_sum_fuses() {
+    // [1,2,3].map(+1)=[2,3,4].map(*10)=[20,30,40].sum()=90.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.map(|x| x + 1).map(|x| x * 10).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 90);
+}
+
+#[test]
+fn pipeline_filter_filter_sum_fuses() {
+    // [1..6].filter(>2)=[3,4,5].filter(<5)=[3,4].sum()=7.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter(|x| x > 2).filter(|x| x < 5).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
+}
+
+#[test]
+fn pipeline_three_stage_map_filter_map_sum() {
+    // [1..6].map(+1)=[2..6].filter(even)=[2,4,6].map(*3)=[6,12,18].sum()=36.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.map(|x| x + 1).filter(|x| x - x / 2 * 2 == 0).map(|x| x * 3).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 36);
+}
+
+#[test]
+fn pipeline_chain_with_capturing_closure() {
+    // Capturing closure in a fused chain (untested combination pre-WS11).
+    // let k = 10; [1..5].map(+k)=[11..14].filter(>13)=[14].sum()=14.
+    let src = "fn main() -> Int {\n  let k = 10\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.map(|x| x + k).filter(|x| x > 13).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 14);
+}
+
+#[test]
+fn pipeline_map_filter_count_fuses() {
+    // [1..6].map(*2).filter(>5)=[6,8,10].count()=3.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.map(|x| x * 2).filter(|x| x > 5).count()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn pipeline_map_filter_collect_len() {
+    // Fused chain ending in collect → len. [1..5].map(*2).filter(>4)=[6,8].len()=2.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  let out = v.map(|x| x * 2).filter(|x| x > 4)\n  out.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn pipeline_fused_chain_survives_gc_stress() {
+    // 300 elements through a fused map+filter+sum. Verifies every fused stage
+    // roots its live GcRefs across the collections the loop triggers (the
+    // GC-rooting risk flagged in the M8 handover §7).
+    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  v.map(|x| x * 2).filter(|x| x > 100).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    // The loop pushes i = 0..299 (300 elements). Sum of 2*i for i in 51..=299
+    // (since 2*i > 100 ⟺ i > 50): 2 * (sum(1..=299) - sum(1..=50))
+    // = 2 * (44850 - 1275) = 2 * 43575 = 87150.
+    assert_eq!(result.as_int(), 87150);
+}
+
+#[test]
+fn pipeline_fold_threads_accumulator() {
+    // Closes the M8 fold stub. [1..4].fold(100, |a,x| a - x) = 100-1-2-3 = 94.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.fold(100, |a, x| a - x)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 94);
+}
+
+#[test]
+fn pipeline_fold_in_fused_chain() {
+    // [1..4].map(*2)=[2,4,6].fold(0,|a,x|a+x)=12.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.map(|x| x * 2).fold(0, |a, x| a + x)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 12);
+}
+
+#[test]
+fn pipeline_product_multiplies() {
+    // [2,3,4].product() = 24.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.product()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 24);
+}
+
+#[test]
+fn pipeline_reduce_seeds_from_first() {
+    // [3,1,2].reduce(|a,x| if a<x then a else x) — but Praxis closures can't
+    // branch by returning different values without an if-expression. Use a
+    // simpler reducer: |a,x| a*10 + x → 3*10+1=31, 31*10+2=312.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(3)\n  v.push(1)\n  v.push(2)\n  v.reduce(|a, x| a * 10 + x)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 312);
+}
+
+#[test]
+fn pipeline_min_finds_smallest() {
+    // [5,2,8,1,9].min() = 1.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(5)\n  v.push(2)\n  v.push(8)\n  v.push(1)\n  v.push(9)\n  v.min()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn pipeline_max_finds_largest() {
+    // [5,2,8,1,9].max() = 9.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(5)\n  v.push(2)\n  v.push(8)\n  v.push(1)\n  v.push(9)\n  v.max()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 9);
+}
+
+#[test]
+fn pipeline_min_after_map_fuses() {
+    // [1,5,2].map(*2)=[2,10,4].min()=2.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(5)\n  v.push(2)\n  v.map(|x| x * 2).min()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn pipeline_max_in_fused_chain() {
+    // [1..5].filter(>2)=[3,4,5].max()=5.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter(|x| x > 2).max()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 5);
+}
+
+#[test]
+fn pipeline_any_true_when_one_matches() {
+    // [1,2,3].any(|x| x == 2) = true → packed as 1.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let b = v.any(|x| x == 2)\n  if b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn pipeline_any_false_when_none_match() {
+    // [1,2,3].any(|x| x == 9) = false → packed as 0.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let b = v.any(|x| x == 9)\n  if b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+#[test]
+fn pipeline_all_true_when_all_match() {
+    // [2,4,6].all(even) = true → 1.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(2)\n  v.push(4)\n  v.push(6)\n  let b = v.all(|x| x - x / 2 * 2 == 0)\n  if b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn pipeline_all_false_short_circuits() {
+    // [2,4,5,6].all(even) = false (short-circuits at 5) → 0.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(2)\n  v.push(4)\n  v.push(5)\n  v.push(6)\n  let b = v.all(|x| x - x / 2 * 2 == 0)\n  if b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+#[test]
+fn pipeline_find_returns_index_on_hit() {
+    // [10,20,30].find(|x| x == 20) = 1.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.find(|x| x == 20)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn pipeline_find_returns_neg1_on_miss() {
+    // [10,20,30].find(|x| x == 99) = -1.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.find(|x| x == 99)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), -1);
+}
+
+#[test]
+fn pipeline_position_is_alias_of_find() {
+    // [10,20,30].position(|x| x == 30) = 2.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.position(|x| x == 30)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn pipeline_take_limits_elements() {
+    // [1..5].take(3).sum() = 1+2+3 = 6.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.take(3).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 6);
+}
+
+#[test]
+fn pipeline_take_more_than_length() {
+    // [1,2,3].take(10).sum() = 6 (take is bounded by length).
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.take(10).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 6);
+}
+
+#[test]
+fn pipeline_skip_drops_prefix() {
+    // [1..5].skip(2).sum() = 3+4+5 = 12.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.skip(2).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 12);
+}
+
+#[test]
+fn pipeline_take_then_map_then_sum() {
+    // [1..5].take(3).map(*10)=[10,20,30].sum()=60.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.take(3).map(|x| x * 10).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 60);
+}
+
+#[test]
+fn pipeline_take_while_stops_at_predicate() {
+    // [1,2,3,4,1].take_while(<4) = [1,2,3] (stops at first 4, does NOT resume
+    // at the trailing 1). sum() = 6.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(1)\n  v.take_while(|x| x < 4).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 6);
+}
+
+#[test]
+fn pipeline_take_while_then_count() {
+    // [2,4,6,1,8].take_while(even) = [2,4,6].count() = 3.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(2)\n  v.push(4)\n  v.push(6)\n  v.push(1)\n  v.push(8)\n  v.take_while(|x| x - x / 2 * 2 == 0).count()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn pipeline_enumerate_count() {
+    // enumerate produces (i, item) pairs but we only count them → 3.
+    // (Tuple field access .0/.1 is deferred per ADR-026, so we only count here.)
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.enumerate().count()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn pipeline_zip_count_pairs_to_shorter() {
+    // [1,2,3].zip([10,20]) = 2 pairs (shorter length). count() = 2.
+    let src = "fn main() -> Int {\n  let a = Vec()\n  a.push(1)\n  a.push(2)\n  a.push(3)\n  let b = Vec()\n  b.push(10)\n  b.push(20)\n  a.zip(b).count()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn pipeline_flat_map_collect_len() {
+    // [1,2,3].flat_map(|x| Vec-of-two) → 6 elements. Each closure returns a
+    // 2-element Vec via push. We then collect and read len.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let out = v.flat_map(|x| {\n    let r = Vec()\n    r.push(x)\n    r.push(x)\n    r\n  })\n  out.len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 6);
+}
+
+#[test]
+fn pipeline_flat_map_sum() {
+    // [1,2,3].flat_map(|x| Vec(x, x*10)) = [1,10,2,20,3,30].sum() = 66.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.flat_map(|x| {\n    let r = Vec()\n    r.push(x)\n    r.push(x * 10)\n    r\n  }).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 66);
+}
+
+#[test]
+fn pipeline_filter_map_keeps_results() {
+    // filter_map is modeled as map-keep (no Unit to filter). [1,2,3].filter_map(*2)
+    // = [2,4,6].sum() = 12.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.filter_map(|x| x * 2).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 12);
+}
+
+#[test]
+fn pipeline_min_by_with_comparator() {
+    // min_by picks the element for which the comparator (a < b) holds vs. the
+    // running best. [|10, 5, 8|].min_by(|a, b| a < b) = 5.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(5)\n  v.push(8)\n  v.min_by(|a, b| a < b)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 5);
+}
+
+#[test]
+fn pipeline_max_by_with_comparator() {
+    // max_by picks the element for which the comparator says candidate < best
+    // (i.e. best is "less than" candidate → candidate is larger).
+    // [|3, 7, 2|].max_by(|a, b| a < b) = 7.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(3)\n  v.push(7)\n  v.push(2)\n  v.max_by(|a, b| a < b)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
+}
+
+#[test]
+fn pipeline_empty_vec_sum_is_zero() {
+    // An empty source: the fused loop body never runs; sum accumulator stays 0.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+#[test]
+fn pipeline_empty_vec_find_is_neg1() {
+    // Empty source → find returns the -1 miss sentinel.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.find(|x| x == 0)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), -1);
+}
+
 // ===========================================================================
 // Milestone 5: Text methods (§4.3) and `out(...)` (§16.1).
 // ===========================================================================

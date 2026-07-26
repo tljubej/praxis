@@ -105,6 +105,44 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(seq_count_on_seq())
         .entry(seq_collect_on_vec())
         .entry(seq_collect_on_seq())
+        // M8-WS11: the remaining non-barrier combinators. Each is an intrinsic
+        // fused by the MIR pipeline recognizer. Barriers (sorted/unique/
+        // frequencies/chunks/windows) are intentionally absent — they need new
+        // runtime helpers (separate workstream).
+        .entry(seq_take_on_vec())
+        .entry(seq_take_on_seq())
+        .entry(seq_skip_on_vec())
+        .entry(seq_skip_on_seq())
+        .entry(seq_take_while_on_vec())
+        .entry(seq_take_while_on_seq())
+        .entry(seq_enumerate_on_vec())
+        .entry(seq_enumerate_on_seq())
+        .entry(seq_zip_on_vec())
+        .entry(seq_zip_on_seq())
+        .entry(seq_flat_map_on_vec())
+        .entry(seq_flat_map_on_seq())
+        .entry(seq_filter_map_on_vec())
+        .entry(seq_filter_map_on_seq())
+        .entry(seq_product_on_vec())
+        .entry(seq_product_on_seq())
+        .entry(seq_min_on_vec())
+        .entry(seq_min_on_seq())
+        .entry(seq_max_on_vec())
+        .entry(seq_max_on_seq())
+        .entry(seq_min_by_on_vec())
+        .entry(seq_min_by_on_seq())
+        .entry(seq_max_by_on_vec())
+        .entry(seq_max_by_on_seq())
+        .entry(seq_any_on_vec())
+        .entry(seq_any_on_seq())
+        .entry(seq_all_on_vec())
+        .entry(seq_all_on_seq())
+        .entry(seq_find_on_vec())
+        .entry(seq_find_on_seq())
+        .entry(seq_position_on_vec())
+        .entry(seq_position_on_seq())
+        .entry(seq_reduce_on_vec())
+        .entry(seq_reduce_on_seq())
         .entry(text_len())
         .entry(text_is_empty())
         .entry(text_get())
@@ -1356,6 +1394,544 @@ fn seq_collect_on_seq() -> MethodEntry {
         allocates: true,
         lowering: MethodLowering::Intrinsic("seq_collect"),
         doc: "Materialize the elements into a Vec.",
+        stability: Stability::Stable,
+    }
+}
+
+// --- M8-WS11: the remaining non-barrier combinators (§6.3) ----------------
+// Each is an intrinsic lowered by the MIR fuser (`recognize_pipeline` +
+// `lower_pipeline`) into a single fused loop. Defined on both `Vec[T]` and
+// `Seq[T]` so chains can start on a concrete collection and continue on Seq.
+// The 5 barriers (sorted/unique/frequencies/chunks/windows) need new runtime
+// helpers and are intentionally NOT registered here — they Y110 until that
+// separate workstream lands.
+
+/// `(T, T) -> Bool` — the shape of `min_by`/`max_by`'s comparator ("less-than").
+fn t_t_to_bool() -> TypePattern {
+    TypePattern::Function {
+        params: vec![TypePattern::Var("T"), TypePattern::Var("T")],
+        result: Box::new(TypePattern::Scalar(ScalarType::Bool)),
+    }
+}
+
+/// `(T) -> Vec<U>` — the shape of `flat_map`'s closure.
+fn t_to_vec_u() -> TypePattern {
+    TypePattern::Function {
+        params: vec![TypePattern::Var("T")],
+        result: Box::new(vec_of_u()),
+    }
+}
+
+// Streaming stages ---------------------------------------------------------
+
+fn seq_take_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "take",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_take"),
+        doc: "Keep at most the first n elements.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_take_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "take",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_take"),
+        doc: "Keep at most the first n elements.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_skip_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "skip",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_skip"),
+        doc: "Drop the first n elements.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_skip_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "skip",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_skip"),
+        doc: "Drop the first n elements.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_take_while_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "take_while",
+        params: vec![t_to_bool()],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_take_while"),
+        doc: "Keep elements until the predicate is false.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_take_while_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "take_while",
+        params: vec![t_to_bool()],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_take_while"),
+        doc: "Keep elements until the predicate is false.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_enumerate_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "enumerate",
+        params: vec![],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_enumerate"),
+        doc: "Pair each element with its index.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_enumerate_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "enumerate",
+        params: vec![],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_enumerate"),
+        doc: "Pair each element with its index.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_zip_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "zip",
+        params: vec![vec_of_t()],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_zip"),
+        doc: "Pair elements with another sequence, stopping at the shorter length.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_zip_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "zip",
+        params: vec![vec_of_t()],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_zip"),
+        doc: "Pair elements with another sequence, stopping at the shorter length.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_flat_map_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "flat_map",
+        params: vec![t_to_vec_u()],
+        result: vec_of_u(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_flat_map"),
+        doc: "Map each element to a Vec and concatenate the results.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_flat_map_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "flat_map",
+        params: vec![t_to_vec_u()],
+        result: vec_of_u(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_flat_map"),
+        doc: "Map each element to a Vec and concatenate the results.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_filter_map_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "filter_map",
+        params: vec![t_to_u()],
+        result: vec_of_u(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_filter_map"),
+        doc: "Map and drop Unit results (modeled as map-keep for non-Unit results).",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_filter_map_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "filter_map",
+        params: vec![t_to_u()],
+        result: vec_of_u(),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::Intrinsic("seq_filter_map"),
+        doc: "Map and drop Unit results (modeled as map-keep for non-Unit results).",
+        stability: Stability::Stable,
+    }
+}
+
+// Aggregating sinks (scalar result) ---------------------------------------
+
+fn seq_product_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "product",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_product"),
+        doc: "Multiply the (Int) elements.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_product_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "product",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_product"),
+        doc: "Multiply the (Int) elements.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_min_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "min",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_min"),
+        doc: "Smallest (Int) element; the first element seeds the accumulator.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_min_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "min",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_min"),
+        doc: "Smallest (Int) element; the first element seeds the accumulator.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_max_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "max",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_max"),
+        doc: "Largest (Int) element; the first element seeds the accumulator.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_max_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "max",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_max"),
+        doc: "Largest (Int) element; the first element seeds the accumulator.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_min_by_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "min_by",
+        params: vec![t_t_to_bool()],
+        result: TypePattern::Var("T"),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_min_by"),
+        doc: "Smallest element per a (T,T)->Bool \"less-than\" comparator.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_min_by_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "min_by",
+        params: vec![t_t_to_bool()],
+        result: TypePattern::Var("T"),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_min_by"),
+        doc: "Smallest element per a (T,T)->Bool \"less-than\" comparator.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_max_by_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "max_by",
+        params: vec![t_t_to_bool()],
+        result: TypePattern::Var("T"),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_max_by"),
+        doc: "Largest element per a (T,T)->Bool \"less-than\" comparator.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_max_by_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "max_by",
+        params: vec![t_t_to_bool()],
+        result: TypePattern::Var("T"),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_max_by"),
+        doc: "Largest element per a (T,T)->Bool \"less-than\" comparator.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_any_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "any",
+        params: vec![t_to_bool()],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_any"),
+        doc: "True if any element satisfies the predicate (short-circuits).",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_any_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "any",
+        params: vec![t_to_bool()],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_any"),
+        doc: "True if any element satisfies the predicate (short-circuits).",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_all_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "all",
+        params: vec![t_to_bool()],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_all"),
+        doc: "True if all elements satisfy the predicate (short-circuits).",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_all_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "all",
+        params: vec![t_to_bool()],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_all"),
+        doc: "True if all elements satisfy the predicate (short-circuits).",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_find_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "find",
+        params: vec![t_to_bool()],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_find"),
+        doc: "Index of the first matching element, or -1 on miss.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_find_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "find",
+        params: vec![t_to_bool()],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_find"),
+        doc: "Index of the first matching element, or -1 on miss.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_position_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "position",
+        params: vec![t_to_bool()],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_position"),
+        doc: "Index of the first matching element, or -1 on miss (alias of find).",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_position_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "position",
+        params: vec![t_to_bool()],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_position"),
+        doc: "Index of the first matching element, or -1 on miss (alias of find).",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_reduce_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "reduce",
+        params: vec![acc_t_to_acc()],
+        result: TypePattern::Var("T"),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_reduce"),
+        doc: "Reduce left-to-right, seeded with the first element.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_reduce_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "reduce",
+        params: vec![acc_t_to_acc()],
+        result: TypePattern::Var("T"),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: false,
+        lowering: MethodLowering::Intrinsic("seq_reduce"),
+        doc: "Reduce left-to-right, seeded with the first element.",
         stability: Stability::Stable,
     }
 }

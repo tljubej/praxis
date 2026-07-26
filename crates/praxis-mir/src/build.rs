@@ -744,10 +744,23 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // A method call lowers to a runtime-wrapper call. The receiver is
             // the first argument; the method's explicit args follow. The
             // catalog resolved `lowering_symbol` (e.g. `praxis_vec_push`); if
-            // empty (an intrinsic), dispatch to the pipeline combinator lowering
-            // (M8-WS8, §6.3) which fuses each combinator into a loop over the
-            // receiver Vec.
+            // empty (an intrinsic), dispatch to the pipeline lowering. M8-WS11
+            // first tries to recognize a *chain* and fuse it into one loop; if
+            // that declines, fall back to the per-combinator eager lowerer
+            // (M8-WS8) which handles single combinators and is the safe default.
             if lowering_symbol.is_empty() {
+                // Reconstruct the MethodCall node so the recognizer can walk
+                // the receiver chain.
+                let call = TypedExpr::MethodCall {
+                    receiver: receiver.clone(),
+                    name: name.clone(),
+                    lowering_symbol: lowering_symbol.clone(),
+                    args: args.clone(),
+                    ty: *ty,
+                };
+                if let Some(plan) = recognize_pipeline(&call) {
+                    return lower_pipeline(b, plan);
+                }
                 return lower_pipeline_combinator(b, receiver, name, args, *ty);
             }
             let mut arg_locals: Vec<LocalId> = Vec::with_capacity(args.len() + 1);
@@ -1351,6 +1364,1230 @@ fn lower_return(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
     b.push(Inst::MoveGc { dst: ret, src: val });
     b.func.blocks[b.cur.0 as usize].term = Terminator::Return { value: ret };
     b.cur = b.func.new_block();
+}
+
+// ===========================================================================
+// M8-WS11: cross-combinator pipeline fusion (§6.3).
+//
+// The whole pipeline chain is already visible as a tree at MIR-lowering time:
+// each combinator's `receiver` is itself a `TypedExpr::MethodCall` (or a
+// collection leaf). `recognize_pipeline` walks that tree to build a
+// `PipelinePlan` of streaming `Stage`s terminated by a `Sink`; `lower_pipeline`
+// emits *one* fused loop over the source threading each element through the
+// stages and into the sink. `v.map(f).filter(p).sum()` → one loop, zero
+// intermediate Vecs.
+//
+// Design note — inline emission. Each stage emits its branches directly into the
+// current block rather than returning a control-flow enum. A stage returns
+// `(item_after_stage, still_live)`: `still_live == false` means the stage
+// already emitted a jump to the loop's continue/break target (e.g. `filter`
+// dropped the element, `take_while` stopped the loop), so the caller must not
+// lower anything more into the now-dead `b.cur` block. This keeps conditional
+// behavior real (a Rust `bool` can't branch for us), and mirrors how the rest
+// of the builder (if/while/match) emits straight-line MIR.
+//
+// The old per-combinator eager lowerers (`lower_pipeline_combinator` +
+// `lower_seq_*`) are kept verbatim below as a fallback for any chain the
+// recognizer declines, so a regression here can never break the eager path.
+// ===========================================================================
+
+/// A streaming pipeline stage (transform the element, possibly skip or stop).
+#[derive(Clone)]
+enum Stage {
+    /// `(T) -> U` — replace the element with the closure's result.
+    Map(Box<TypedExpr>),
+    /// `(T) -> Bool` — drop the element if the predicate is false.
+    Filter(Box<TypedExpr>),
+    /// `(T) -> U` — map, then drop the result if it is Unit.
+    FilterMap(Box<TypedExpr>),
+    /// `(T) -> Vec<U>` — splice the closure's Vec into the sink element by
+    /// element, then continue the outer loop.
+    FlatMap(Box<TypedExpr>),
+    /// Keep at most `n` leading elements, then stop.
+    Take(i64),
+    /// Drop the first `n` elements.
+    Skip(i64),
+    /// Stop at the first element that fails the predicate.
+    TakeWhile(Box<TypedExpr>),
+    /// Replace the element with `(index, element)` tuples.
+    Enumerate,
+    /// Pair each element with the corresponding element of `other`, stopping at
+    /// the shorter length.
+    Zip(Box<TypedExpr>),
+}
+
+impl Stage {
+    /// Whether this stage carries a closure (or second source) that must be
+    /// lowered once, outside the loop.
+    fn has_arg(&self) -> bool {
+        matches!(
+            self,
+            Stage::Map(_)
+                | Stage::Filter(_)
+                | Stage::FilterMap(_)
+                | Stage::FlatMap(_)
+                | Stage::TakeWhile(_)
+                | Stage::Zip(_)
+        )
+    }
+}
+
+/// A terminal pipeline sink — produces the chain's final value.
+#[derive(Clone)]
+enum Sink {
+    Sum,
+    Product,
+    Count,
+    Min,
+    Max,
+    MinBy(Box<TypedExpr>),
+    MaxBy(Box<TypedExpr>),
+    Any(Box<TypedExpr>),
+    All(Box<TypedExpr>),
+    /// Index of the first element satisfying the predicate, or -1 on miss.
+    Find(Box<TypedExpr>),
+    /// Same semantics as `Find` (named alias per §6.3).
+    Position(Box<TypedExpr>),
+    Fold {
+        init: Box<TypedExpr>,
+        f: Box<TypedExpr>,
+    },
+    Reduce(Box<TypedExpr>),
+    Collect,
+}
+
+/// A recognized pipeline: a source collection, zero or more streaming stages,
+/// and a terminal sink. The whole chain lowers to a single fused loop.
+struct PipelinePlan {
+    source: Box<TypedExpr>,
+    /// The element type flowing out of the source (before any stage). Used only
+    /// as a slot-allocation hint; `Type(0)` (opaque) is the universal form.
+    source_item_ty: Type,
+    stages: Vec<Stage>,
+    sink: Sink,
+    /// The chain's overall result type (carried on the outermost `MethodCall`).
+    result_ty: Type,
+}
+
+/// Classify a single `MethodCall` node as a streaming stage. `None` means "not a
+/// recognized streaming op" — the recognizer treats the receiver eagerly.
+fn classify_stage(name: &str, args: &[TypedExpr]) -> Option<Stage> {
+    Some(match (name, args) {
+        ("map", [f]) => Stage::Map(Box::new(f.clone())),
+        ("filter", [p]) => Stage::Filter(Box::new(p.clone())),
+        ("filter_map", [f]) => Stage::FilterMap(Box::new(f.clone())),
+        ("flat_map", [f]) => Stage::FlatMap(Box::new(f.clone())),
+        ("take_while", [p]) => Stage::TakeWhile(Box::new(p.clone())),
+        ("enumerate", []) => Stage::Enumerate,
+        ("zip", [other]) => Stage::Zip(Box::new(other.clone())),
+        (
+            "take",
+            [TypedExpr::Lit {
+                value: Lit::Int(n), ..
+            }],
+        ) => Stage::Take(*n),
+        (
+            "skip",
+            [TypedExpr::Lit {
+                value: Lit::Int(n), ..
+            }],
+        ) => Stage::Skip(*n),
+        _ => return None,
+    })
+}
+
+/// Classify a single `MethodCall` node as a terminal sink, or `None` if it's a
+/// streaming stage / unrecognized method.
+fn classify_sink(name: &str, args: &[TypedExpr]) -> Option<Sink> {
+    Some(match (name, args) {
+        ("sum", []) => Sink::Sum,
+        ("product", []) => Sink::Product,
+        ("count", []) => Sink::Count,
+        ("min", []) => Sink::Min,
+        ("max", []) => Sink::Max,
+        ("min_by", [f]) => Sink::MinBy(Box::new(f.clone())),
+        ("max_by", [f]) => Sink::MaxBy(Box::new(f.clone())),
+        ("any", [p]) => Sink::Any(Box::new(p.clone())),
+        ("all", [p]) => Sink::All(Box::new(p.clone())),
+        ("find", [p]) => Sink::Find(Box::new(p.clone())),
+        ("position", [p]) => Sink::Position(Box::new(p.clone())),
+        ("fold", [init, f]) => Sink::Fold {
+            init: Box::new(init.clone()),
+            f: Box::new(f.clone()),
+        },
+        ("reduce", [f]) => Sink::Reduce(Box::new(f.clone())),
+        ("collect", []) => Sink::Collect,
+        _ => return None,
+    })
+}
+
+/// Recognize a pipeline chain rooted at `expr`. Returns `Some(plan)` if `expr`
+/// is a `MethodCall` whose outermost call is a recognized sink, a recognized
+/// streaming stage (in which case an implicit `Collect` is appended so the chain
+/// yields a Vec — mirroring the eager `v.map(f)` behavior), or `collect`; and
+/// whose receiver chain is a sequence of recognized streaming stages. Any
+/// non-pipeline `MethodCall` receiver (e.g. `.len()`, `.push(x)`) terminates the
+/// walk — that inner call lowers eagerly via the existing path, and *its* result
+/// becomes this chain's source (recursively fusing if it too is a pipeline).
+fn recognize_pipeline(expr: &TypedExpr) -> Option<PipelinePlan> {
+    let TypedExpr::MethodCall {
+        receiver,
+        name,
+        args,
+        ty: result_ty,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    // The outermost call is either a terminal sink, or a streaming stage that
+    // needs an implicit collect to produce a Vec (e.g. `let out = v.map(f)`).
+    let (outermost_stage, sink) = match classify_sink(name, args) {
+        Some(s) => (None, s),
+        None => {
+            let stage = classify_stage(name, args)?;
+            (Some(stage), Sink::Collect)
+        }
+    };
+    // Walk the receiver chain collecting stages, outermost-first. `cur` is the
+    // node under inspection; once it stops being a streaming `MethodCall` it is
+    // the source leaf (whatever it is — `lower_expr_gc` will lower it).
+    let mut stages: Vec<Stage> = Vec::new();
+    if let Some(stage) = outermost_stage {
+        stages.push(stage);
+    }
+    let mut cur: &TypedExpr = receiver;
+    while let TypedExpr::MethodCall {
+        receiver: inner_recv,
+        name: inner_name,
+        args: inner_args,
+        ..
+    } = cur
+    {
+        match classify_stage(inner_name, inner_args) {
+            Some(stage) => {
+                stages.push(stage);
+                cur = inner_recv;
+            }
+            None => break, // Not a streaming stage — `cur` is our source.
+        }
+    }
+    // Stages were collected outermost-first; reverse so the source-side stage
+    // runs first inside the loop body.
+    stages.reverse();
+    Some(PipelinePlan {
+        source: Box::new(cur.clone()),
+        // The item type is only a slot-allocation hint; every existing lowerer
+        // uses the opaque `Type(0)` form, so we match that for consistency.
+        source_item_ty: Type(0),
+        stages,
+        sink,
+        result_ty: *result_ty,
+    })
+}
+
+/// Lower a recognized pipeline as a single fused loop (M8-WS11, §6.3). Emits the
+/// loop scaffold directly (header / body / increment / exit) rather than reusing
+/// `emit_index_loop`, so streaming stages can `continue` (jump to the increment)
+/// and short-circuit sinks/stages can `break` (jump to exit) cleanly.
+fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
+    let PipelinePlan {
+        source,
+        source_item_ty,
+        stages,
+        sink,
+        result_ty,
+    } = plan;
+
+    // Lower the source Vec once; it lives for the loop's duration.
+    let src = lower_expr_gc(b, &source);
+    // A Gc Int index counter (persists across blocks, like the for-loop counter).
+    let idx = b.alloc_gc(b.int_ty, None);
+    let zero = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ConstInt {
+        dst: zero,
+        value: 0,
+    });
+    b.push(Inst::Materialize {
+        dst: idx,
+        src: zero,
+        scalar: ScalarKind::Int,
+        live_roots: vec![src],
+    });
+
+    // Lower every stage/sink closure or second-source once, outside the loop.
+    // `stage_args[i]` is the lowered Gc local for `stages[i]`'s argument (only
+    // when `stages[i].has_arg()`); they're pulled in order via `arg_iter`.
+    let mut stage_args: Vec<LocalId> = Vec::new();
+    let mut loop_roots: Vec<LocalId> = vec![src, idx];
+    for stage in &stages {
+        if stage.has_arg() {
+            let arg_expr: &TypedExpr = match stage {
+                Stage::Map(f)
+                | Stage::Filter(f)
+                | Stage::FilterMap(f)
+                | Stage::FlatMap(f)
+                | Stage::TakeWhile(f) => f,
+                Stage::Zip(other) => other,
+                _ => unreachable!(),
+            };
+            let local = lower_expr_gc(b, arg_expr);
+            loop_roots.push(local);
+            stage_args.push(local);
+        }
+    }
+    // Sink closure/init, lowered once.
+    let (sink_init_slot, sink_closure_slot) = match &sink {
+        Sink::Fold { init, f } => {
+            let init_l = lower_expr_gc(b, init);
+            loop_roots.push(init_l);
+            let f_l = lower_expr_gc(b, f);
+            loop_roots.push(f_l);
+            (Some(init_l), Some(f_l))
+        }
+        Sink::MinBy(f)
+        | Sink::MaxBy(f)
+        | Sink::Reduce(f)
+        | Sink::Any(f)
+        | Sink::All(f)
+        | Sink::Find(f)
+        | Sink::Position(f) => {
+            let f_l = lower_expr_gc(b, f);
+            loop_roots.push(f_l);
+            (None, Some(f_l))
+        }
+        _ => (None, None),
+    };
+
+    // Allocate the sink's accumulators up front.
+    let (acc_scalar, acc_gc, seen_flag) = sink_alloc(b, &sink, sink_init_slot, &mut loop_roots);
+
+    // The Collect sink needs a result Vec pushed into per element.
+    let collect_vec = match &sink {
+        Sink::Collect => {
+            let v = alloc_empty_vec(b, loop_roots.clone());
+            loop_roots.push(v);
+            Some(v)
+        }
+        _ => None,
+    };
+
+    // ---- The loop scaffold: header / body / increment / exit ---------------
+    let header = b.func.new_block();
+    let body_blk = b.func.new_block();
+    let incr_blk = b.func.new_block();
+    let exit = b.func.new_block();
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.cur = header;
+
+    // Header: `if idx < src.len() { body } else { exit }`.
+    emit_bounds_check(b, src, idx, body_blk, exit, &loop_roots);
+
+    // Body: load the element, thread it through the stages, run the sink.
+    b.cur = body_blk;
+    b.loop_stack.push(LoopCtx {
+        continue_target: incr_blk, // filter-skip / flat-map-tail → increment
+        break_target: exit,        // take / take_while / any / all / find → exit
+    });
+    let item = b.alloc_gc(source_item_ty, None);
+    b.push(Inst::Call {
+        dst: item,
+        callee: CallTarget::Runtime("praxis_vec_get".to_string()),
+        args: vec![src, idx],
+        live_roots: loop_roots.clone(),
+    });
+    b.check_fault();
+
+    // Run the stages in order. Each stage either replaces the element and
+    // leaves `b.cur` live, or emits a skip/stop and leaves a dead `b.cur`.
+    // `FlatMap` is special: it produces a Vec that must be spliced into the sink
+    // element-by-element, consuming the outer element.
+    let mut cur_item = item;
+    let mut arg_iter = stage_args.into_iter();
+    let mut alive = true;
+    for stage in &stages {
+        if !alive {
+            break;
+        }
+        if let Stage::FlatMap(_) = stage {
+            // f(cur_item) -> Vec<U>; run the sink on each inner element, then
+            // jump to incr_blk (the outer element is fully consumed).
+            let f = arg_iter.next().unwrap();
+            let inner = invoke_closure(b, f, vec![cur_item], &loop_roots);
+            emit_flat_map_inner(
+                b,
+                inner,
+                &sink,
+                acc_scalar,
+                acc_gc,
+                seen_flag,
+                collect_vec,
+                sink_closure_slot,
+                &loop_roots,
+            );
+            // After splicing, continue to the next outer iteration.
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: incr_blk };
+            b.cur = b.func.new_block(); // dead — nothing else lowers for this element
+            alive = false;
+            continue;
+        }
+        let (new_item, still_live) = run_stage(
+            b,
+            stage,
+            &mut arg_iter,
+            cur_item,
+            idx,
+            &loop_roots,
+            incr_blk,
+            exit,
+        );
+        cur_item = new_item;
+        alive = still_live;
+    }
+
+    // If we're still on a live block, feed the element to the sink.
+    if alive {
+        emit_sink_body(
+            b,
+            &sink,
+            cur_item,
+            idx,
+            acc_scalar,
+            acc_gc,
+            seen_flag,
+            collect_vec,
+            sink_closure_slot,
+            &loop_roots,
+        );
+        // Normal sink completion: fall through to the increment block. (Sinks
+        // that short-circuit — any/all/find — emit their own break and leave
+        // `b.cur` dead, in which case this jump goes into a dead block, harm.)
+        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: incr_blk };
+    }
+    b.loop_stack.pop();
+
+    // Increment block: `idx += 1`, jump to header.
+    b.cur = incr_blk;
+    emit_increment(b, idx, &loop_roots);
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+
+    // Exit: materialize the sink's result out of its accumulator(s).
+    b.cur = exit;
+    sink_finish(b, &sink, acc_scalar, acc_gc, collect_vec, result_ty)
+}
+
+/// Run one streaming stage in-place. Emits branches directly into `b.cur` and
+/// returns `(item_after_stage, still_live)`. `still_live == false` means the
+/// stage emitted a jump to `incr_blk` (skip) or `exit` (stop) and left `b.cur`
+/// on a dead block — the caller must not lower anything more.
+///
+/// `arg_iter` yields this stage's pre-lowered argument local (closure or second
+/// source) in stage order, advancing only for stages with an argument.
+#[allow(clippy::too_many_arguments)]
+fn run_stage(
+    b: &mut Builder<'_>,
+    stage: &Stage,
+    arg_iter: &mut std::vec::IntoIter<LocalId>,
+    item: LocalId,
+    idx: LocalId,
+    loop_roots: &[LocalId],
+    incr_blk: BlockId,
+    exit: BlockId,
+) -> (LocalId, bool) {
+    match stage {
+        Stage::Map(_) => {
+            let f = arg_iter.next().unwrap();
+            (invoke_closure(b, f, vec![item], loop_roots), true)
+        }
+        Stage::Filter(_) => {
+            let p = arg_iter.next().unwrap();
+            let keep = call_predicate(b, p, item, loop_roots);
+            // On false → jump to incr_blk (skip this element); on true → fall
+            // through to a fresh continuation block.
+            let keep_blk = b.func.new_block();
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                cond: keep,
+                then_block: keep_blk,
+                else_block: incr_blk,
+            };
+            b.cur = keep_blk;
+            (item, true)
+        }
+        Stage::FilterMap(_) => {
+            let f = arg_iter.next().unwrap();
+            let mapped = invoke_closure(b, f, vec![item], loop_roots);
+            // filter_map is modeled as "keep everything": in the catalog it is
+            // typed `(T)->U` with non-Unit U, so there's no Unit to filter on.
+            // (A precise Unit-drop needs a runtime tag check — see ADR-029.)
+            (mapped, true)
+        }
+        Stage::FlatMap(_) => {
+            // Handled inline in `lower_pipeline` before this function is called
+            // (flat_map consumes the outer element by splicing an inner Vec
+            // into the sink). This arm is unreachable; consume the arg to keep
+            // `arg_iter` aligned for any (impossible) subsequent stage.
+            let _ = arg_iter.next();
+            let _ = (incr_blk, exit);
+            unreachable!("flat_map is handled inline in lower_pipeline")
+        }
+        Stage::TakeWhile(_) => {
+            let p = arg_iter.next().unwrap();
+            let keep = call_predicate(b, p, item, loop_roots);
+            let keep_blk = b.func.new_block();
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                cond: keep,
+                then_block: keep_blk,
+                else_block: exit, // predicate false → stop the loop
+            };
+            b.cur = keep_blk;
+            (item, true)
+        }
+        Stage::Take(n) => {
+            // If idx >= n → stop (jump to exit); else fall through.
+            let stop = idx_cmp_const(b, idx, *n, CmpOp::Ge, loop_roots);
+            let keep_blk = b.func.new_block();
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                cond: stop,
+                then_block: exit,
+                else_block: keep_blk,
+            };
+            b.cur = keep_blk;
+            (item, true)
+        }
+        Stage::Skip(n) => {
+            // If idx < n → skip (jump to incr_blk); else fall through.
+            let skip = idx_cmp_const(b, idx, *n, CmpOp::Lt, loop_roots);
+            let keep_blk = b.func.new_block();
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                cond: skip,
+                then_block: incr_blk,
+                else_block: keep_blk,
+            };
+            b.cur = keep_blk;
+            (item, true)
+        }
+        Stage::Enumerate => {
+            // Replace item with (idx, item). idx is already a Gc Int slot; copy
+            // it so the tuple owns a stable value.
+            let idx_copy = b.alloc_gc(b.int_ty, None);
+            b.push(Inst::MoveGc {
+                dst: idx_copy,
+                src: idx,
+            });
+            let tup = b.alloc_gc(Type(0), None);
+            b.push(Inst::Alloc {
+                dst: tup,
+                alloc: AllocKind::Tuple {
+                    // The tuple's precise type isn't known here; codegen derives
+                    // the schema from runtime element tags (consistent with the
+                    // opaque Type(0) used by the existing Tuple lowerer when the
+                    // schema is reconstructed downstream).
+                    ty: Type(0),
+                    elements: vec![idx_copy, item],
+                },
+                live_roots: Vec::new(),
+            });
+            (tup, true)
+        }
+        Stage::Zip(_) => {
+            let other = arg_iter.next().unwrap();
+            // Stop if idx >= other.len(); else pair (item, other.get(idx)).
+            let stop = idx_ge_len(b, other, idx, loop_roots);
+            let pair_blk = b.func.new_block();
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                cond: stop,
+                then_block: exit,
+                else_block: pair_blk,
+            };
+            b.cur = pair_blk;
+            let other_item = b.alloc_gc(Type(0), None);
+            b.push(Inst::Call {
+                dst: other_item,
+                callee: CallTarget::Runtime("praxis_vec_get".to_string()),
+                args: vec![other, idx],
+                live_roots: loop_roots.to_vec(),
+            });
+            b.check_fault();
+            let tup = b.alloc_gc(Type(0), None);
+            b.push(Inst::Alloc {
+                dst: tup,
+                alloc: AllocKind::Tuple {
+                    ty: Type(0),
+                    elements: vec![item, other_item],
+                },
+                live_roots: Vec::new(),
+            });
+            (tup, true)
+        }
+    }
+}
+
+/// Emit `idx <op> n` as a Bool scalar and return it. Used by Take/Skip.
+fn idx_cmp_const(
+    b: &mut Builder<'_>,
+    idx: LocalId,
+    n: i64,
+    op: CmpOp,
+    _loop_roots: &[LocalId],
+) -> LocalId {
+    let idx_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ExtractScalar {
+        dst: idx_scalar,
+        src: idx,
+        scalar: ScalarKind::Int,
+    });
+    let n_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ConstInt {
+        dst: n_scalar,
+        value: n,
+    });
+    let dst = b.alloc_scalar(ScalarKind::Bool);
+    b.push(Inst::IntCmp {
+        dst,
+        op,
+        lhs: idx_scalar,
+        rhs: n_scalar,
+    });
+    dst
+}
+
+/// Emit `idx >= other.len()` as a Bool scalar (used by Zip's stop condition).
+fn idx_ge_len(
+    b: &mut Builder<'_>,
+    other: LocalId,
+    idx: LocalId,
+    loop_roots: &[LocalId],
+) -> LocalId {
+    let len_dst = b.alloc_gc(b.int_ty, None);
+    b.push(Inst::Call {
+        dst: len_dst,
+        callee: CallTarget::Runtime("praxis_vec_len".to_string()),
+        args: vec![other],
+        live_roots: loop_roots.to_vec(),
+    });
+    b.check_fault();
+    let len_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ExtractScalar {
+        dst: len_scalar,
+        src: len_dst,
+        scalar: ScalarKind::Int,
+    });
+    let idx_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ExtractScalar {
+        dst: idx_scalar,
+        src: idx,
+        scalar: ScalarKind::Int,
+    });
+    let dst = b.alloc_scalar(ScalarKind::Bool);
+    b.push(Inst::IntCmp {
+        dst,
+        op: CmpOp::Ge,
+        lhs: idx_scalar,
+        rhs: len_scalar,
+    });
+    dst
+}
+
+/// Emit the header's bounds check: `if idx < src.len() { then } else { els }`.
+fn emit_bounds_check(
+    b: &mut Builder<'_>,
+    src: LocalId,
+    idx: LocalId,
+    then_blk: BlockId,
+    els_blk: BlockId,
+    loop_roots: &[LocalId],
+) {
+    let len_dst = b.alloc_gc(b.int_ty, None);
+    b.push(Inst::Call {
+        dst: len_dst,
+        callee: CallTarget::Runtime("praxis_vec_len".to_string()),
+        args: vec![src],
+        live_roots: loop_roots.to_vec(),
+    });
+    b.check_fault();
+    let len_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ExtractScalar {
+        dst: len_scalar,
+        src: len_dst,
+        scalar: ScalarKind::Int,
+    });
+    let idx_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ExtractScalar {
+        dst: idx_scalar,
+        src: idx,
+        scalar: ScalarKind::Int,
+    });
+    let cond = b.alloc_scalar(ScalarKind::Bool);
+    b.push(Inst::IntCmp {
+        dst: cond,
+        op: CmpOp::Lt,
+        lhs: idx_scalar,
+        rhs: len_scalar,
+    });
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+        cond,
+        then_block: then_blk,
+        else_block: els_blk,
+    };
+}
+
+/// Invoke a closure `f(args)` via `CallIndirect` and return the result slot.
+fn invoke_closure(
+    b: &mut Builder<'_>,
+    f: LocalId,
+    args: Vec<LocalId>,
+    loop_roots: &[LocalId],
+) -> LocalId {
+    let mut roots = vec![f];
+    roots.extend(args.iter().copied());
+    roots.extend(loop_roots.iter().copied());
+    let dst = b.alloc_gc(Type(0), None);
+    b.push(Inst::CallIndirect {
+        dst,
+        callee: f,
+        args,
+        live_roots: roots,
+    });
+    b.check_fault();
+    dst
+}
+
+/// Call a `(T)->Bool` predicate closure and extract the Bool scalar.
+fn call_predicate(
+    b: &mut Builder<'_>,
+    p: LocalId,
+    item: LocalId,
+    loop_roots: &[LocalId],
+) -> LocalId {
+    let keep_gc = invoke_closure(b, p, vec![item], loop_roots);
+    let keep = b.alloc_scalar(ScalarKind::Bool);
+    b.push(Inst::ExtractScalar {
+        dst: keep,
+        src: keep_gc,
+        scalar: ScalarKind::Bool,
+    });
+    keep
+}
+
+/// Allocate the sink's accumulators up front. Returns
+/// `(acc_scalar, acc_gc, seen_flag)`:
+/// - `acc_scalar` — the running Int/Bool scalar.
+/// - `acc_gc` — a Gc slot for fold/reduce/min_by/max_by.
+/// - `seen_flag` — a Bool "first element seen" flag for min/max/reduce.
+fn sink_alloc(
+    b: &mut Builder<'_>,
+    sink: &Sink,
+    sink_init_slot: Option<LocalId>,
+    loop_roots: &mut Vec<LocalId>,
+) -> (Option<LocalId>, Option<LocalId>, Option<LocalId>) {
+    match sink {
+        Sink::Sum | Sink::Product | Sink::Count | Sink::Find(_) | Sink::Position(_) => {
+            let acc = b.alloc_scalar(ScalarKind::Int);
+            let init = match sink {
+                Sink::Product => 1,
+                Sink::Find(_) | Sink::Position(_) => -1, // miss sentinel
+                _ => 0,
+            };
+            b.push(Inst::ConstInt {
+                dst: acc,
+                value: init,
+            });
+            (Some(acc), None, None)
+        }
+        Sink::Min | Sink::Max => {
+            let acc = b.alloc_scalar(ScalarKind::Int);
+            b.push(Inst::ConstInt { dst: acc, value: 0 });
+            let seen = b.alloc_scalar(ScalarKind::Bool);
+            b.push(Inst::ConstInt {
+                dst: seen,
+                value: 0,
+            }); // false
+            (Some(acc), None, Some(seen))
+        }
+        Sink::Any(_) | Sink::All(_) => {
+            let acc = b.alloc_scalar(ScalarKind::Bool);
+            // any → false; all → true.
+            let init = matches!(sink, Sink::All(_)) as i64;
+            b.push(Inst::ConstInt {
+                dst: acc,
+                value: init,
+            });
+            (Some(acc), None, None)
+        }
+        Sink::MinBy(_) | Sink::MaxBy(_) => {
+            // Hold the running best element in a Gc slot; the seen-flag gates
+            // the first comparison.
+            let acc = b.alloc_gc(Type(0), None);
+            if let Some(init) = sink_init_slot {
+                b.push(Inst::MoveGc {
+                    dst: acc,
+                    src: init,
+                });
+            }
+            loop_roots.push(acc);
+            let seen = b.alloc_scalar(ScalarKind::Bool);
+            b.push(Inst::ConstInt {
+                dst: seen,
+                value: 0,
+            });
+            (None, Some(acc), Some(seen))
+        }
+        Sink::Fold { .. } => {
+            // acc = init (a Gc slot carrying a closure-produced value across
+            // iterations). This closes the M8 `fold` stub.
+            let acc = b.alloc_gc(Type(0), None);
+            if let Some(init) = sink_init_slot {
+                b.push(Inst::MoveGc {
+                    dst: acc,
+                    src: init,
+                });
+            }
+            loop_roots.push(acc);
+            (None, Some(acc), None)
+        }
+        Sink::Reduce(_) => {
+            // Seed from the first element; allocate an opaque Gc slot now.
+            let acc = b.alloc_gc(Type(0), None);
+            loop_roots.push(acc);
+            let seen = b.alloc_scalar(ScalarKind::Bool);
+            b.push(Inst::ConstInt {
+                dst: seen,
+                value: 0,
+            });
+            (None, Some(acc), Some(seen))
+        }
+        Sink::Collect => (None, None, None),
+    }
+}
+
+/// Emit `idx += 1` (extract, add, re-materialize into the Gc slot).
+fn emit_increment(b: &mut Builder<'_>, idx: LocalId, loop_roots: &[LocalId]) {
+    let cur = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ExtractScalar {
+        dst: cur,
+        src: idx,
+        scalar: ScalarKind::Int,
+    });
+    let one = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ConstInt { dst: one, value: 1 });
+    let next = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::IntBinOp {
+        dst: next,
+        op: IntBinOp::Add,
+        lhs: cur,
+        rhs: one,
+    });
+    b.push(Inst::Materialize {
+        dst: idx,
+        src: next,
+        scalar: ScalarKind::Int,
+        live_roots: loop_roots.to_vec(),
+    });
+}
+
+/// Copy one scalar into another. There is no scalar-move Inst, so the idiom is
+/// `dst = src + 0` (the existing lowerers use the same trick).
+fn move_scalar(b: &mut Builder<'_>, dst: LocalId, src: LocalId) {
+    let zero = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ConstInt {
+        dst: zero,
+        value: 0,
+    });
+    b.push(Inst::IntBinOp {
+        dst,
+        op: IntBinOp::Add,
+        lhs: src,
+        rhs: zero,
+    });
+}
+
+/// Emit the sink's per-element update into the current (live) body block.
+#[allow(clippy::too_many_arguments)]
+fn emit_sink_body(
+    b: &mut Builder<'_>,
+    sink: &Sink,
+    item: LocalId,
+    idx: LocalId,
+    acc_scalar: Option<LocalId>,
+    acc_gc: Option<LocalId>,
+    seen_flag: Option<LocalId>,
+    collect_vec: Option<LocalId>,
+    sink_closure_slot: Option<LocalId>,
+    loop_roots: &[LocalId],
+) {
+    match sink {
+        Sink::Sum | Sink::Product => {
+            let acc = acc_scalar.unwrap();
+            let item_scalar = b.alloc_scalar(ScalarKind::Int);
+            b.push(Inst::ExtractScalar {
+                dst: item_scalar,
+                src: item,
+                scalar: ScalarKind::Int,
+            });
+            b.push(Inst::IntBinOp {
+                dst: acc,
+                op: if matches!(sink, Sink::Sum) {
+                    IntBinOp::Add
+                } else {
+                    IntBinOp::Mul
+                },
+                lhs: acc,
+                rhs: item_scalar,
+            });
+        }
+        Sink::Count => {
+            let acc = acc_scalar.unwrap();
+            let one = b.alloc_scalar(ScalarKind::Int);
+            b.push(Inst::ConstInt { dst: one, value: 1 });
+            b.push(Inst::IntBinOp {
+                dst: acc,
+                op: IntBinOp::Add,
+                lhs: acc,
+                rhs: one,
+            });
+        }
+        Sink::Min | Sink::Max => {
+            let acc = acc_scalar.unwrap();
+            let seen = seen_flag.unwrap();
+            let item_scalar = b.alloc_scalar(ScalarKind::Int);
+            b.push(Inst::ExtractScalar {
+                dst: item_scalar,
+                src: item,
+                scalar: ScalarKind::Int,
+            });
+            // If !seen { acc = item; seen = true } else { if cmp { acc = item } }.
+            let cmp_blk = b.func.new_block();
+            let set_blk = b.func.new_block();
+            let cont_blk = b.func.new_block();
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                cond: seen,
+                then_block: cmp_blk,
+                else_block: set_blk,
+            };
+            // First element: seed.
+            b.cur = set_blk;
+            b.push(Inst::ConstInt {
+                dst: seen,
+                value: 1,
+            });
+            move_scalar(b, acc, item_scalar);
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: cont_blk };
+            // Subsequent: compare and maybe update.
+            b.cur = cmp_blk;
+            let cond = b.alloc_scalar(ScalarKind::Bool);
+            b.push(Inst::IntCmp {
+                dst: cond,
+                op: if matches!(sink, Sink::Min) {
+                    CmpOp::Lt
+                } else {
+                    CmpOp::Gt
+                },
+                lhs: item_scalar,
+                rhs: acc,
+            });
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                cond,
+                then_block: set_blk, // reuse: acc = item (seen already true)
+                else_block: cont_blk,
+            };
+            b.cur = cont_blk;
+        }
+        Sink::MinBy(_) | Sink::MaxBy(_) => {
+            let acc = acc_gc.unwrap();
+            let seen = seen_flag.unwrap();
+            let f = sink_closure_slot.unwrap();
+            let cmp_blk = b.func.new_block();
+            let set_blk = b.func.new_block();
+            let cont_blk = b.func.new_block();
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                cond: seen,
+                then_block: cmp_blk,
+                else_block: set_blk,
+            };
+            b.cur = set_blk;
+            b.push(Inst::ConstInt {
+                dst: seen,
+                value: 1,
+            });
+            b.push(Inst::MoveGc {
+                dst: acc,
+                src: item,
+            });
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: cont_blk };
+            b.cur = cmp_blk;
+            // The comparator is "less-than": f(a, b) = a < b. For min, item is
+            // better when item < acc → f(item, acc). For max, item is better
+            // when item > acc ⟺ acc < item → f(acc, item).
+            let better_gc = if matches!(sink, Sink::MinBy(_)) {
+                invoke_closure(b, f, vec![item, acc], loop_roots)
+            } else {
+                invoke_closure(b, f, vec![acc, item], loop_roots)
+            };
+            let better = b.alloc_scalar(ScalarKind::Bool);
+            b.push(Inst::ExtractScalar {
+                dst: better,
+                src: better_gc,
+                scalar: ScalarKind::Bool,
+            });
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                cond: better,
+                then_block: set_blk,
+                else_block: cont_blk,
+            };
+            b.cur = cont_blk;
+        }
+        Sink::Any(_) | Sink::All(_) => {
+            let acc = acc_scalar.unwrap();
+            let pred = sink_closure_slot.unwrap();
+            let keep = call_predicate(b, pred, item, loop_roots);
+            // any trips (short-circuits) on true; all trips on false.
+            let trip_cond = if matches!(sink, Sink::Any(_)) {
+                keep
+            } else {
+                invert_bool(b, keep)
+            };
+            let trip_blk = b.func.new_block();
+            let cont_blk = b.func.new_block();
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                cond: trip_cond,
+                then_block: trip_blk,
+                else_block: cont_blk,
+            };
+            // trip: set acc, break out of the loop.
+            b.cur = trip_blk;
+            let val = if matches!(sink, Sink::Any(_)) { 1 } else { 0 };
+            b.push(Inst::ConstInt {
+                dst: acc,
+                value: val,
+            });
+            break_loop(b);
+            b.cur = cont_blk;
+        }
+        Sink::Find(_) | Sink::Position(_) => {
+            let acc = acc_scalar.unwrap();
+            let pred = sink_closure_slot.unwrap();
+            let keep = call_predicate(b, pred, item, loop_roots);
+            let found_blk = b.func.new_block();
+            let cont_blk = b.func.new_block();
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                cond: keep,
+                then_block: found_blk,
+                else_block: cont_blk,
+            };
+            b.cur = found_blk;
+            let idx_scalar = b.alloc_scalar(ScalarKind::Int);
+            b.push(Inst::ExtractScalar {
+                dst: idx_scalar,
+                src: idx,
+                scalar: ScalarKind::Int,
+            });
+            move_scalar(b, acc, idx_scalar);
+            break_loop(b);
+            b.cur = cont_blk;
+        }
+        Sink::Fold { .. } => {
+            let acc = acc_gc.unwrap();
+            let f = sink_closure_slot.unwrap();
+            let new_acc = invoke_closure(b, f, vec![acc, item], loop_roots);
+            b.push(Inst::MoveGc {
+                dst: acc,
+                src: new_acc,
+            });
+        }
+        Sink::Reduce(_) => {
+            let acc = acc_gc.unwrap();
+            let seen = seen_flag.unwrap();
+            let f = sink_closure_slot.unwrap();
+            // If !seen { acc = item; seen = true; continue } else { acc = f(acc, item) }.
+            let fold_blk = b.func.new_block();
+            let seed_blk = b.func.new_block();
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                cond: seen,
+                then_block: fold_blk,
+                else_block: seed_blk,
+            };
+            b.cur = seed_blk;
+            b.push(Inst::ConstInt {
+                dst: seen,
+                value: 1,
+            });
+            b.push(Inst::MoveGc {
+                dst: acc,
+                src: item,
+            });
+            continue_loop(b);
+            b.cur = fold_blk;
+            let new_acc = invoke_closure(b, f, vec![acc, item], loop_roots);
+            b.push(Inst::MoveGc {
+                dst: acc,
+                src: new_acc,
+            });
+        }
+        Sink::Collect => {
+            let result = collect_vec.unwrap();
+            let unit = b.alloc_gc(b.int_ty, None);
+            let mut roots = vec![result, item];
+            roots.extend(loop_roots.iter().copied());
+            b.push(Inst::Call {
+                dst: unit,
+                callee: CallTarget::Runtime("praxis_vec_push".to_string()),
+                args: vec![result, item],
+                live_roots: roots,
+            });
+        }
+    }
+}
+
+/// Emit the inner iteration for a `flat_map` stage: for each element of
+/// `inner_vec`, run the sink body. The inner loop has its own index, header,
+/// and exit (which falls through to the outer stage loop's continuation, set by
+/// the caller). A nested `LoopCtx` is pushed so any sink short-circuit
+/// (`any`/`all`/`find`) scopes to this inner loop.
+#[allow(clippy::too_many_arguments)]
+fn emit_flat_map_inner(
+    b: &mut Builder<'_>,
+    inner_vec: LocalId,
+    sink: &Sink,
+    acc_scalar: Option<LocalId>,
+    acc_gc: Option<LocalId>,
+    seen_flag: Option<LocalId>,
+    collect_vec: Option<LocalId>,
+    sink_closure_slot: Option<LocalId>,
+    loop_roots: &[LocalId],
+) {
+    let inner_idx = b.alloc_gc(b.int_ty, None);
+    let zero = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ConstInt {
+        dst: zero,
+        value: 0,
+    });
+    b.push(Inst::Materialize {
+        dst: inner_idx,
+        src: zero,
+        scalar: ScalarKind::Int,
+        live_roots: loop_roots.to_vec(),
+    });
+    let mut roots = vec![inner_vec, inner_idx];
+    roots.extend(loop_roots.iter().copied());
+
+    let header = b.func.new_block();
+    let body_blk = b.func.new_block();
+    let exit = b.func.new_block();
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.cur = header;
+    emit_bounds_check(b, inner_vec, inner_idx, body_blk, exit, &roots);
+
+    b.cur = body_blk;
+    b.loop_stack.push(LoopCtx {
+        continue_target: header,
+        break_target: exit,
+    });
+    let inner_item = b.alloc_gc(Type(0), None);
+    b.push(Inst::Call {
+        dst: inner_item,
+        callee: CallTarget::Runtime("praxis_vec_get".to_string()),
+        args: vec![inner_vec, inner_idx],
+        live_roots: roots.clone(),
+    });
+    b.check_fault();
+    emit_sink_body(
+        b,
+        sink,
+        inner_item,
+        inner_idx,
+        acc_scalar,
+        acc_gc,
+        seen_flag,
+        collect_vec,
+        sink_closure_slot,
+        &roots,
+    );
+    b.loop_stack.pop();
+    emit_increment(b, inner_idx, &roots);
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.cur = exit;
+}
+
+/// Emit `!bool` as a fresh Bool scalar (Bool is `i8`; `== 0` inverts it).
+fn invert_bool(b: &mut Builder<'_>, x: LocalId) -> LocalId {
+    let zero = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ConstInt {
+        dst: zero,
+        value: 0,
+    });
+    let not_x = b.alloc_scalar(ScalarKind::Bool);
+    b.push(Inst::IntCmp {
+        dst: not_x,
+        op: CmpOp::Eq,
+        lhs: x,
+        rhs: zero,
+    });
+    not_x
+}
+
+/// Jump to the enclosing loop's break target and leave `b.cur` on a fresh dead
+/// block so subsequent lowering has somewhere to append.
+fn break_loop(b: &mut Builder<'_>) {
+    if let Some(ctx) = b.loop_stack.last().copied() {
+        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
+            target: ctx.break_target,
+        };
+        b.cur = b.func.new_block();
+    }
+}
+
+/// Jump to the enclosing loop's continue target and leave `b.cur` on a fresh
+/// dead block.
+fn continue_loop(b: &mut Builder<'_>) {
+    if let Some(ctx) = b.loop_stack.last().copied() {
+        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
+            target: ctx.continue_target,
+        };
+        b.cur = b.func.new_block();
+    }
+}
+
+/// Materialize the sink's final result out of its accumulator(s).
+fn sink_finish(
+    b: &mut Builder<'_>,
+    sink: &Sink,
+    acc_scalar: Option<LocalId>,
+    acc_gc: Option<LocalId>,
+    collect_vec: Option<LocalId>,
+    _result_ty: Type,
+) -> LocalId {
+    match sink {
+        Sink::Collect => collect_vec.unwrap(),
+        Sink::Fold { .. } | Sink::Reduce(_) | Sink::MinBy(_) | Sink::MaxBy(_) => acc_gc.unwrap(),
+        Sink::Any(_) | Sink::All(_) => {
+            let acc = acc_scalar.unwrap();
+            let dst = b.alloc_gc(b.bool_ty, None);
+            b.push(Inst::Materialize {
+                dst,
+                src: acc,
+                scalar: ScalarKind::Bool,
+                live_roots: Vec::new(),
+            });
+            dst
+        }
+        Sink::Sum
+        | Sink::Product
+        | Sink::Count
+        | Sink::Min
+        | Sink::Max
+        | Sink::Find(_)
+        | Sink::Position(_) => {
+            let acc = acc_scalar.unwrap();
+            let dst = b.alloc_gc(b.int_ty, None);
+            b.push(Inst::Materialize {
+                dst,
+                src: acc,
+                scalar: ScalarKind::Int,
+                live_roots: Vec::new(),
+            });
+            dst
+        }
+    }
 }
 
 /// Lower a pipeline combinator intrinsic (M8-WS8, §6.3) over a Vec receiver
