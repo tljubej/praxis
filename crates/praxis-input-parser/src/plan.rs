@@ -34,6 +34,13 @@ pub enum PlanNode {
     Lines { child: u32 },
     /// `sections(P)` (homogeneous).
     Sections { child: u32 },
+    /// Named heterogeneous `sections(name: P, ..., tail: repeated(P))` (M9).
+    /// `fields` are `(name, child_index)` pairs; `repeated_tail` is the named
+    /// tail field's `(name, child_index)`, if present.
+    SectionsNamed {
+        fields: &'static [(&'static str, u32)],
+        repeated_tail: Option<(&'static str, u32)>,
+    },
     /// `csv(P)`.
     Csv { child: u32 },
     /// `ws(P)`.
@@ -194,6 +201,31 @@ fn lower_node(b: &mut PlanBuilder, ast: &ParserAst) -> u32 {
         ParserAst::Sections { child, .. } => {
             let c = lower_node(b, child);
             b.push_node(PlanNode::Sections { child: c })
+        }
+        ParserAst::SectionsNamed {
+            fields,
+            repeated_tail,
+            ..
+        } => {
+            // Lower each field's child, recording (name, child_index).
+            let field_entries: Vec<(&'static str, u32)> = fields
+                .iter()
+                .map(|(name, p)| {
+                    let n = leak_str(name);
+                    let c = lower_node(b, p);
+                    (n, c)
+                })
+                .collect();
+            let tail_entry = repeated_tail.as_ref().map(|(name, p)| {
+                let n = leak_str(name);
+                let c = lower_node(b, p);
+                (n, c)
+            });
+            let field_slice = leak(field_entries);
+            b.push_node(PlanNode::SectionsNamed {
+                fields: field_slice,
+                repeated_tail: tail_entry,
+            })
         }
         ParserAst::Csv { child, .. } => {
             let c = lower_node(b, child);

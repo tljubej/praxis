@@ -209,15 +209,15 @@ enum CallArg {
     /// A string literal (the separator for `sep`).
     String(String),
     /// A named argument `name: parser_expr` (M9, §7.5). `name` is the field/
-    /// keyword; `parser` is the nested parser expression. The `repeated(...)`
-    /// tail marker of `sections` arrives as `Named { name: "repeated", .. }`
-    /// whose parser is the repeated child.
+    /// keyword; `parser` is the nested parser expression.
     ///
     /// Consumed by the M9 constructors that take named/keyword args
-    /// (`sections`, `block`, `chars`, `grid`, `optional`); until those land
-    /// (WS2+) the variant is collected but not yet dispatched on.
-    #[allow(dead_code)]
+    /// (`sections`, `block`, `chars`, `grid`, `optional`).
     Named { name: String, parser: ParserAst },
+    /// The `repeated(...)` tail marker of named `sections`
+    /// (`boards: repeated(matrix(int))`): `name` is the field, `parser`
+    /// consumes every remaining section into a `Vec[result(P)]`.
+    RepeatedTail { name: String, parser: ParserAst },
 }
 
 /// Convert a constructor call rowan node into a `ParserAst`.
@@ -235,8 +235,23 @@ fn convert_constructor_call(
     let (ctor_name, args) = extract_call_args(&parser_call, file, diagnostics);
     let ctor = Constructor::from_keyword(&ctor_name)?;
 
-    if let Some(err) = praxis_input_parser::check_constructor_arity(ctor, args.len(), span) {
-        diagnostics.push(validation_error_to_diagnostic(&err, file));
+    // Arity check on positional args only, skipped for the heterogeneous
+    // `sections` path (which legitimately has 0 positional args — all its args
+    // are named). Named-arg shape is validated by `validate` on the resulting
+    // `SectionsNamed` AST.
+    let has_named_args = args
+        .iter()
+        .any(|a| matches!(a, CallArg::Named { .. } | CallArg::RepeatedTail { .. }));
+    if !(ctor == Constructor::Sections && has_named_args) {
+        let positional_arity = args
+            .iter()
+            .filter(|a| !matches!(a, CallArg::Named { .. } | CallArg::RepeatedTail { .. }))
+            .count();
+        if let Some(err) =
+            praxis_input_parser::check_constructor_arity(ctor, positional_arity, span)
+        {
+            diagnostics.push(validation_error_to_diagnostic(&err, file));
+        }
     }
 
     match ctor {
@@ -245,6 +260,14 @@ fn convert_constructor_call(
         | Constructor::Csv
         | Constructor::Ws
         | Constructor::Grid => {
+            // `sections` with named args is the heterogeneous form (M9, §7.5):
+            // build a `SectionsNamed`. A named arg whose value is a `repeated(P)`
+            // call is the tail and consumes all remaining sections.
+            if ctor == Constructor::Sections
+                && args.iter().any(|a| matches!(a, CallArg::Named { .. }))
+            {
+                return Some(build_sections_named(args, span));
+            }
             if let Some(CallArg::Parser(child)) = args.into_iter().next() {
                 Some(match ctor {
                     Constructor::Lines => ParserAst::Lines {
@@ -321,7 +344,21 @@ fn extract_call_args(
                             // A named argument `name: parser_expr` (M9, §7.5).
                             if let Some(na) = ParserNamedArg::cast(arg.clone()) {
                                 if let (Some(name), Some(value)) = (na.name(), na.value()) {
-                                    if let Some(parser) =
+                                    // `name: repeated(P)` is the named-sections
+                                    // tail marker: consume all remaining sections.
+                                    // Detect it by the value's constructor name.
+                                    let is_repeated =
+                                        value.constructor_name().as_deref() == Some("repeated");
+                                    if is_repeated {
+                                        // Unwrap the single child of `repeated(P)`.
+                                        if let Some(inner) = unwrap_repeated_child(&value) {
+                                            if let Some(parser) =
+                                                convert_parser_expr(&inner, file, diagnostics)
+                                            {
+                                                args.push(CallArg::RepeatedTail { name, parser });
+                                            }
+                                        }
+                                    } else if let Some(parser) =
                                         convert_parser_expr(&value, file, diagnostics)
                                     {
                                         args.push(CallArg::Named { name, parser });
@@ -347,6 +384,57 @@ fn extract_call_args(
     }
 
     (name, args)
+}
+
+/// Extract the single child parser expression from a `repeated(P)` call node.
+/// Returns the inner `ParserExpr` (the `P`), or `None` if the node is not a
+/// well-formed `repeated(...)` call with exactly one parser-expr child.
+fn unwrap_repeated_child(call: &ParserExpr) -> Option<ParserExpr> {
+    let parser_call = call
+        .syntax()
+        .children()
+        .find(|c| c.kind() == praxis_syntax::SyntaxKind::PARSER_CALL)?;
+    let arg_list = parser_call
+        .children()
+        .find(|c| c.kind() == praxis_syntax::SyntaxKind::PARSER_ARG_LIST)?;
+    // The single child parser expression.
+    arg_list.children().find_map(|c| {
+        if matches!(
+            c.kind(),
+            praxis_syntax::SyntaxKind::PARSER_EXPR | praxis_syntax::SyntaxKind::PARSER_TEMPLATE
+        ) {
+            ParserExpr::cast(c)
+        } else {
+            None
+        }
+    })
+}
+
+/// Build a `ParserAst::SectionsNamed` from the args of a heterogeneous
+/// `sections(name: P, ..., tail: repeated(P))` call (M9, §7.5). Named args
+/// become fields in source order; a `RepeatedTail` arg (if any) must be last
+/// and becomes the `repeated_tail`. Positional args are not permitted in the
+/// heterogeneous form — if any appear, they are dropped with a diagnostic
+/// (validation surfaces the structural error).
+fn build_sections_named(args: Vec<CallArg>, span: Span) -> ParserAst {
+    let mut fields: Vec<(String, ParserAst)> = Vec::new();
+    let mut repeated_tail: Option<(String, Box<ParserAst>)> = None;
+    for arg in args {
+        match arg {
+            CallArg::Named { name, parser } => fields.push((name, parser)),
+            CallArg::RepeatedTail { name, parser } => {
+                repeated_tail = Some((name, Box::new(parser)));
+            }
+            // A positional arg in a heterogeneous sections call is a structural
+            // error; drop it (validation will have flagged the shape).
+            _ => {}
+        }
+    }
+    ParserAst::SectionsNamed {
+        fields,
+        repeated_tail,
+        span,
+    }
 }
 
 // ---- diagnostic helpers ----------------------------------------------------

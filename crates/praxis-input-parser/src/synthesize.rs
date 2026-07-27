@@ -35,6 +35,23 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Type {
             let elem = synthesize(child, db);
             db.collection(CollectionCtor::Grid, vec![elem])
         }
+        ParserAst::SectionsNamed {
+            fields,
+            repeated_tail,
+            ..
+        } => {
+            // Anonymous record: one field per named section, plus a final
+            // `Vec[result(P)]` field for the `repeated` tail (if any).
+            let mut rec_fields: Vec<(String, Type)> = fields
+                .iter()
+                .map(|(name, p)| (name.clone(), synthesize(p, db)))
+                .collect();
+            if let Some((name, tail)) = repeated_tail {
+                let elem = synthesize(tail, db);
+                rec_fields.push((name.clone(), db.vec(elem)));
+            }
+            db.anon_record(rec_fields)
+        }
     }
 }
 

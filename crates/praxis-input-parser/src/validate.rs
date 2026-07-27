@@ -45,6 +45,37 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
         ParserAst::Sep { child, .. } => {
             validate_node(child, errs);
         }
+        ParserAst::SectionsNamed {
+            fields,
+            repeated_tail,
+            span,
+        } => {
+            // At least one named field is required (§7.5: a named sections call
+            // with zero fields is malformed).
+            if fields.is_empty() {
+                errs.push(ValidationError {
+                    span: *span,
+                    code: "I025",
+                    message: "named `sections` requires at least one field".to_string(),
+                });
+            }
+            // Field names must be unique (reuse the duplicate-name concern).
+            let mut seen = Vec::new();
+            for (name, child) in fields {
+                if seen.contains(name) {
+                    errs.push(ValidationError {
+                        span: *span,
+                        code: "I024",
+                        message: format!("duplicate section field `{name}`"),
+                    });
+                }
+                seen.push(name.clone());
+                validate_node(child, errs);
+            }
+            if let Some((_name, tail)) = repeated_tail {
+                validate_node(tail, errs);
+            }
+        }
     }
 }
 

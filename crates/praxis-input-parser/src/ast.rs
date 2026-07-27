@@ -101,6 +101,21 @@ pub enum ParserAst {
     Lines { child: Box<ParserAst>, span: Span },
     /// `sections(P)` → `Vec[result(P)]` (homogeneous; named sections are M9).
     Sections { child: Box<ParserAst>, span: Span },
+    /// Named heterogeneous `sections(name: P, ..., tail: repeated(P))` (M9,
+    /// §7.5). Each named field parses one fixed section in order; the optional
+    /// `repeated_tail` is a named field (`boards: repeated(matrix(int))`) whose
+    /// parser consumes all remaining sections as a `Vec[result(P)]`. Result is
+    /// an anonymous record `{ field1: result(P1), …, tail_name: Vec[…] }`.
+    SectionsNamed {
+        /// `(field_name, parser)` pairs in source order. Each parses exactly
+        /// one section.
+        fields: Vec<(String, ParserAst)>,
+        /// The named `repeated(...)` tail, if present. The name (e.g.
+        /// `"boards"`) becomes the record field; the parser consumes every
+        /// remaining section into a `Vec[result(P)]`.
+        repeated_tail: Option<(String, Box<ParserAst>)>,
+        span: Span,
+    },
     /// `csv(P)` → `Vec[result(P)]`.
     Csv { child: Box<ParserAst>, span: Span },
     /// `ws(P)` → `Vec[result(P)]` (whitespace-separated).
@@ -123,6 +138,7 @@ impl ParserAst {
             | ParserAst::Template { span, .. }
             | ParserAst::Lines { span, .. }
             | ParserAst::Sections { span, .. }
+            | ParserAst::SectionsNamed { span, .. }
             | ParserAst::Csv { span, .. }
             | ParserAst::Ws { span, .. }
             | ParserAst::Sep { span, .. }

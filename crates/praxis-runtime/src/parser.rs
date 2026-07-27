@@ -136,6 +136,10 @@ unsafe fn walk(
         PlanNode::Atomic { kind } => walk_atomic(&rt, *kind, bytes, offset),
         PlanNode::Lines { child } => walk_lines(&rt, plan, *child, bytes, offset),
         PlanNode::Sections { child } => walk_sections(&rt, plan, *child, bytes, offset),
+        PlanNode::SectionsNamed {
+            fields,
+            repeated_tail,
+        } => walk_sections_named(&rt, plan, fields, *repeated_tail, bytes, offset),
         PlanNode::Csv { child } => walk_csv(&rt, plan, *child, bytes, offset),
         PlanNode::Ws { child } => walk_ws(&rt, plan, *child, bytes, offset),
         PlanNode::Sep {
@@ -248,6 +252,64 @@ fn walk_sections(
     }
     let elem_desc = child_descriptor(plan, child);
     Ok((rt.alloc_vec(elem_desc, items), bytes.len() - offset))
+}
+
+/// Walk named heterogeneous `sections(name: P, ..., tail: repeated(P))` (M9,
+/// §7.5). The region is split on blank lines into sections; the first `N`
+/// sections (where N = number of named fields, or fewer if a `repeated` tail is
+/// present — it takes all the rest) are parsed by the named fields in order;
+/// any remaining sections are parsed by the `repeated` tail into a `Vec`. The
+/// result is an anonymous record assembled via [`alloc_record`].
+fn walk_sections_named(
+    rt: &Rt,
+    plan: &ParserPlan,
+    fields: &'static [(&'static str, u32)],
+    repeated_tail: Option<(&'static str, u32)>,
+    bytes: &[u8],
+    offset: usize,
+) -> WalkResult {
+    let region = &bytes[offset..];
+    let sections: Vec<ByteRange> = split_sections(region).collect();
+    // Too few sections is a parse fault.
+    let min_needed = fields.len();
+    if sections.len() < min_needed {
+        return Err(());
+    }
+    // Build the record captures: each named field parses its section, in order.
+    // The repeated tail (if any) parses every remaining section into a Vec.
+    //
+    // Each section is parsed against a *bounded* byte view (just that section's
+    // bytes), so a child like `lines(int)` consumes only the section's lines
+    // rather than running to the end of input. The owner reference for any
+    // source-slice Texts remains the original input owner (`rt_owner`), which
+    // the child walks recover via `rt_owner(rt)` — but here we pass absolute
+    // offsets into the full `bytes`, so source-slice Texts stay correct.
+    let mut captures: Vec<(Option<&'static str>, u32, GcRef)> = Vec::new();
+    for (i, (name, child)) in fields.iter().enumerate() {
+        let sec = &sections[i];
+        let sec_offset = offset + sec.start;
+        let sec_bytes = &bytes[sec_offset..sec_offset + sec.len];
+        let (value, _consumed) = unsafe { walk(rt.ctx, plan, *child, sec_bytes, 0)? };
+        captures.push((Some(name), *child, value));
+    }
+    if let Some((tail_name, tail_child)) = repeated_tail {
+        // The tail consumes every remaining section, parsed per-section by its
+        // child into a Vec.
+        let mut tail_items = Vec::new();
+        for sec in &sections[fields.len()..] {
+            let sec_offset = offset + sec.start;
+            let sec_bytes = &bytes[sec_offset..sec_offset + sec.len];
+            let (value, _consumed) = unsafe { walk(rt.ctx, plan, tail_child, sec_bytes, 0)? };
+            tail_items.push(value);
+        }
+        let elem_desc = child_descriptor(plan, tail_child);
+        let tail_vec = rt.alloc_vec(elem_desc, tail_items);
+        // The tail field's "child" node for descriptor purposes is the tail
+        // child; its value is the assembled Vec.
+        captures.push((Some(tail_name), tail_child, tail_vec));
+    }
+    let record = alloc_record(rt, &captures);
+    Ok((record, bytes.len() - offset))
 }
 
 fn walk_csv(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
@@ -844,6 +906,9 @@ fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescri
         | PlanNode::Ws { .. }
         | PlanNode::Sep { .. } => crate::collections::VEC,
         PlanNode::Grid { .. } => crate::collections::GRID,
+        // Named sections produce an anonymous record (uniform descriptor; the
+        // schema is in the payload, built at runtime by `walk_sections_named`).
+        PlanNode::SectionsNamed { .. } => crate::records::RECORD,
         // A template's result is a scalar (single anon capture), a record (named
         // captures), or Unit (no captures). A tuple's result is a tuple. These
         // are uniform descriptors too (schema in the payload).

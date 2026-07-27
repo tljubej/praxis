@@ -3629,3 +3629,59 @@ fn m9_option_returned_none_from_function() {
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 99);
 }
+
+// --- M9 WS2: named heterogeneous sections + repeated tail (§7.5) ------------
+
+#[test]
+fn m9_named_sections_two_fields() {
+    // sections(rules: ..., updates: ...) → record { rules, updates }.
+    // rules = Vec[Int] of 2 values; updates = Vec[Int] of 3 values.
+    // Access `.a` and `.b` field on the record.
+    let src = "fn main() -> Int {\n  let data = read sections(a: lines(int), b: lines(int))\n  data.a.len() + data.b.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "1\n2\n\n3\n4\n5");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 5); // 2 + 3
+}
+
+#[test]
+fn m9_named_sections_field_values() {
+    // The first section's first value is 7.
+    let src = "fn main() -> Int {\n  let data = read sections(a: lines(int), b: lines(int))\n  data.a.get(0)\n}\n";
+    let (rt, result) = run_main_with_input(src, "7\n8\n\n9\n10");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
+}
+
+#[test]
+fn m9_named_sections_with_repeated_tail() {
+    // sections(single: lines(int), rest: repeated(lines(int))) — one fixed
+    // section then all remaining sections folded into a Vec[Vec[Int]].
+    let src = "fn main() -> Int {\n  let data = read sections(single: lines(int), rest: repeated(lines(int)))\n  data.single.len() + data.rest.len()\n}\n";
+    // 1 section of 1 line (single), then 3 sections (rest has 3 elements).
+    let (rt, result) = run_main_with_input(src, "100\n\n1\n\n2\n\n3");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4); // 1 + 3
+}
+
+#[test]
+fn m9_named_sections_template_fields() {
+    // Named sections with template parsers → record of records. Access the
+    // inner record's fields directly through indexing.
+    let src = "fn main() -> Int {\n  let data = read sections(p: lines(`{x:int},{y:int}`))\n  let first = data.p.get(0)\n  first.x + first.y\n}\n";
+    let (rt, result) = run_main_with_input(src, "3,4");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
+}
+
+#[test]
+fn m9_named_sections_too_few_sections_faults() {
+    // Fewer sections than named fields → ParseFailed fault.
+    let src =
+        "fn main() -> Int {\n  let data = read sections(a: lines(int), b: lines(int))\n  42\n}\n";
+    let (rt, _result) = run_main_with_input(src, "1\n2\n3"); // one section, two fields wanted
+    assert!(
+        rt.has_pending_fault(),
+        "expected ParseFailed on too-few sections, got: {:?}",
+        rt.fault()
+    );
+}
