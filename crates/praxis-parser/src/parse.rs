@@ -1312,6 +1312,11 @@ impl<'t> Parser<'t> {
                 if !self.eat(SyntaxKind::COMMA) {
                     break;
                 }
+                // Allow a trailing comma: if the next token is `)`, stop.
+                self.eat_trivia();
+                if self.at(SyntaxKind::R_PAREN) {
+                    break;
+                }
             }
         }
         self.expect(SyntaxKind::R_PAREN, "`)` to close parser call arguments");

@@ -1,0 +1,18 @@
+// M9 acceptance fixture (§19.9 / C.8): almanac-style repeated mapping sections.
+// Named sections + repeated block: a header section, then repeated labeled
+// blocks each carrying a name and a body of integer lines.
+// Input:
+//   "header\n\nmap seed\n50\n52\n\nmap water\n1\n2\n"
+// → parses as { head: Vec[Text], maps: Vec[{ name: Text, ranges: Vec[Int] }] }
+//   via sections(head: lines(word), maps: repeated(block(...))).
+// Acceptance: "Parse almanac-style repeated mapping sections."
+fn main() -> Int {
+    let almanac = read sections(
+        head: lines(word),
+        maps: repeated(block(
+            `map {name:word}`,
+            ranges: lines(int),
+        )),
+    );
+    almanac.head.len() + almanac.maps.len()
+}

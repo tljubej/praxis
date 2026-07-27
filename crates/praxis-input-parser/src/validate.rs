@@ -87,9 +87,14 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
                     crate::ast::BlockItem::Positional(p) => {
                         // Collect the field names this positional contributes.
                         let contributed = block_positional_field_names(p);
-                        if contributed.is_empty() {
-                            // A scalar positional (e.g. a bare `int`) has no
-                            // field name — reject it.
+                        // §7.5: a positional parser returning a *scalar* must be
+                        // explicitly named (unclear field name). A template —
+                        // even one with no captures (a pure literal match) — is
+                        // fine: a no-capture template contributes no fields but
+                        // legitimately consumes input; a named-capture template
+                        // flattens its fields.
+                        let is_template = matches!(p, ParserAst::Template { .. });
+                        if contributed.is_empty() && !is_template {
                             errs.push(ValidationError {
                                 span: *span,
                                 code: "I026",

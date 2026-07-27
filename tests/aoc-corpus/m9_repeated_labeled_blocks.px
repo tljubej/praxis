@@ -1,0 +1,16 @@
+// M9 acceptance fixture (§19.9 / §7.7): repeated labeled blocks.
+// sections(block(...)) where each block has a labeled header template and a
+// body of integer lines — the AoC-2022-day-11 "Monkey" shape.
+// Input:
+//   "Monkey 0:\n10\n20\n\nMonkey 1:\n30\n40\n"
+// → parses as Vec[{ id: Int, items: Vec[Int] }].
+// Acceptance: "Parse repeated labeled blocks."
+fn main() -> Int {
+    let monkeys = read sections(block(
+        `Monkey {id:int}:`,
+        items: lines(int),
+    ));
+    let m0 = monkeys.get(0);
+    let m1 = monkeys.get(1);
+    m0.id + m0.items.len() + m1.id + m1.items.len()
+}

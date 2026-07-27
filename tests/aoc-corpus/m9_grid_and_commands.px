@@ -1,0 +1,14 @@
+// M9 acceptance fixture (§19.9 / C.7): grid plus folded command stream.
+// Named sections: a character grid, then a stream of movement characters.
+// Input:
+//   "..#.\n#...\n\n^v<>\n"
+// → parses as { map: Grid[Char], moves: Vec[Char] }.
+// Acceptance: "Parse grid plus folded command stream."
+fn main() -> Int {
+    let data = read sections(
+        map: grid(char),
+        moves: chars(one_of("^v<>"), skip: whitespace),
+    );
+    // map is 2x2... actually 2 rows x 4 cols; moves has 4 chars.
+    data.map.height() + data.moves.len()
+}

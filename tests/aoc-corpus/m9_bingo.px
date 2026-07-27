@@ -1,0 +1,14 @@
+// M9 acceptance fixture (§19.9 / C.6): bingo-style input.
+// Named heterogeneous sections with a `repeated(matrix(int))` tail.
+// Input:
+//   "7,4,9,5\n\n22 13 17 11  0\n 8  2 23  4 24\n\n 3 15 21  0  1\n 9 14  2  6  8\n"
+// → parses as { draws: Vec[Int], boards: Vec[Grid[Int]] }.
+// Acceptance: "Parse bingo-style input."
+fn main() -> Int {
+    let bingo = read sections(
+        draws: csv(int),
+        boards: repeated(matrix(int)),
+    );
+    // draws has 4 numbers; 2 boards.
+    bingo.draws.len() + bingo.boards.len()
+}
