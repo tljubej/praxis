@@ -343,3 +343,33 @@ fn m10b_ws4_type_reports_inferred_method_type() {
     let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "type xs.len()\nquit\n");
     assert!(out.contains("Int"), "type xs.len() should be Int: {out}");
 }
+
+// ===========================================================================
+// M10b WS5 — `heap EXPR` recursive inspection (§9.4).
+//
+// `heap EXPR` evaluates the expression (reusing the WS4 evaluator + purity
+// gate) and renders the result prefixed with its type, so the structure and
+// type are visible at a glance.
+// ===========================================================================
+
+#[test]
+fn m10b_ws5_heap_shows_value_with_type() {
+    // `heap xs` → `Vec[Int]: [11, 22]`. The type prefix distinguishes `heap`
+    // from `p` (which prints just `[11, 22]`).
+    let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "heap xs\nquit\n");
+    assert!(
+        out.contains("Vec[Int]") && out.contains("[11, 22]"),
+        "heap xs should show type + value: {out}"
+    );
+}
+
+#[test]
+fn m10b_ws5_heap_literal() {
+    // `heap 1 + 2` → `Int: 3`.
+    let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "heap 1 + 2\nquit\n");
+    assert!(
+        out.contains("Int"),
+        "heap 1 + 2 should show Int type: {out}"
+    );
+    assert!(out.contains("3"), "heap 1 + 2 should show value 3: {out}");
+}

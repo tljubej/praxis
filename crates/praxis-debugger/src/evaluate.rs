@@ -41,13 +41,14 @@ use crate::purity::assert_read_only;
 /// The synthesized function's name (a reserved, unlikely-to-collide identifier).
 const P_EXPR_FN: &str = "__p_expr";
 
-/// Which evaluation the REPL requested: print the value (`p`) or its type
-/// (`type`). Both share the synthesis + pipeline; `type` stops before the
-/// purity gate and JIT.
+/// Which evaluation the REPL requested: print the value (`p`), its type
+/// (`type`), or recursively inspect it (`heap`). All three share the synthesis
+/// + pipeline; `type` stops before the purity gate and JIT.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Print,
     Type,
+    Heap,
 }
 
 /// One named, typed, valued local extracted from a snapshot frame, ready to
@@ -108,6 +109,34 @@ pub fn type_of(db: &mut TypeDb, frame: &SnapshotFrame, expr_text: &str) -> EvalR
         Ok((_typed_fn, expr_ty, fresh_db)) => Ok(fresh_db.render(expr_ty)),
         Err(e) => Err(e),
     }
+}
+
+/// Recursively inspect a value (§9.4 `heap EXPR`, M10b-WS5). Evaluates `EXPR`
+/// (reusing the `p EXPR` path, including the purity gate) and renders the
+/// result with its type prefix and the descriptor's recursive `format`
+/// (which already walks record fields, collection elements, tuple members).
+/// The type prefix is what distinguishes `heap` from `p`: `heap xs` shows
+/// `Vec[Int]: [11, 22]`, making the structure + type visible at a glance.
+pub fn heap(
+    db: &mut TypeDb,
+    runtime: &mut Runtime,
+    snapshot: &CrashSnapshot,
+    frame: &SnapshotFrame,
+    expr_text: &str,
+) -> EvalResult {
+    let bindings = collect_bindings(frame, db);
+    let source = synthesize(db, &bindings, expr_text);
+    let (typed_fn, expr_ty, fresh_db) = build_pipeline(&source)?;
+    assert_read_only(&typed_fn.body.tail)?;
+    let result = exec(runtime, snapshot, &bindings, &source)?;
+    let type_str = fresh_db.render(expr_ty);
+    let mut value_str = String::new();
+    result.format(&mut value_str);
+    Ok(if value_str.is_empty() {
+        format!("{type_str}: <unreadable>")
+    } else {
+        format!("{type_str}: {value_str}")
+    })
 }
 
 /// Extract the named, real-valued locals from `frame`, pairing each with a

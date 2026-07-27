@@ -118,6 +118,9 @@ impl Repl {
                 crate::evaluate::evaluate(db, &mut session.runtime, &self.snapshot, frame, expr)
             }
             crate::evaluate::Mode::Type => crate::evaluate::type_of(db, frame, expr),
+            crate::evaluate::Mode::Heap => {
+                crate::evaluate::heap(db, &mut session.runtime, &self.snapshot, frame, expr)
+            }
         }
     }
 
@@ -279,8 +282,19 @@ impl Repl {
                 let result = self.evaluate_expr(rest, crate::evaluate::Mode::Type);
                 let _ = crate::evaluate::write_eval_result(out, &result);
             }
-            // Still-deferred M10b commands (WS5–WS6).
-            "heap" | "restart" | "reload" => {
+            // M10b-WS5: `heap EXPR` recursively inspects a value (§9.4). Like
+            // `p EXPR` but prefixes the result with its type, so the structure
+            // and type are visible at a glance.
+            "heap" => {
+                if rest.is_empty() {
+                    let _ = writeln!(out, "usage: heap EXPR");
+                    return Control::Continue;
+                }
+                let result = self.evaluate_expr(rest, crate::evaluate::Mode::Heap);
+                let _ = crate::evaluate::write_eval_result(out, &result);
+            }
+            // Still-deferred M10b commands (WS6).
+            "restart" | "reload" => {
                 let _ = writeln!(
                     out,
                     "note: `{cmd}` is implemented later in Milestone 10 Part 2 (not yet wired)."
@@ -321,6 +335,7 @@ Crash debugger commands (§9.4):
   locals          show the selected frame's locals
   p EXPR          evaluate a read-only expression
   type EXPR       show the inferred expression type
+  heap EXPR       inspect a value with its type
   source [N]      show the selected (or Nth) frame's source
   input           show the input near the active parser cursor
   parser          show the active input parser near the fault
@@ -328,7 +343,7 @@ Crash debugger commands (§9.4):
   quit            exit the debugger
 
 Not yet wired (later in Milestone 10 Part 2):
-  heap EXPR, restart, reload";
+  restart, reload";
 
 #[cfg(test)]
 mod tests {
