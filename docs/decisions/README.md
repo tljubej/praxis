@@ -35,3 +35,7 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-027: Closures — Approach B calling convention, capture analysis, VarCell](./027-closures.md)
 - [ADR-028: Collections, DynamicKey, and the sequence pipeline (M8)](./028-collections-and-sequence-pipelines.md)
 - [ADR-029: Pipeline fusion and the chain-recognition pass (M8-WS11)](./029-pipeline-fusion.md)
+- [ADR-030: `matrix(P)` is `Grid[T]` (closes §21.1)](./030-matrix-is-grid.md)
+- [ADR-031: Fixed-width diagram helper deferred](./031-fixed-width-deferred.md)
+- [ADR-032: Debugger expressions allocate on the main GC heap (closes §21.8)](./032-debugger-expr-main-heap.md)
+- [ADR-033: Crash snapshots root through `DebugLocal.value` copies (M10-WS3)](./033-crash-snapshot-rooting.md)

@@ -5,15 +5,16 @@ Advent of Code-style puzzle solving. It favors rapid iteration, concise data
 manipulation, practical parsing, and strong diagnostics over systems-programming
 concerns.
 
-> **Status:** Milestone 9 complete — the input-parser DSL (§7) now covers the
-> harder AoC input shapes: named heterogeneous `sections` with `repeated`
-> tails, `block` (with field flattening), `choice` generated enums, `optional`
-> (→ `Option[T]`), `scan`, `matrix`, `chars`/`one_of`, and ragged grids. A
-> polymorphic `Option[T]` prelude enum (with the same-named-enum unification
-> fix that makes it sound) lands here. All five §19.9 acceptance fixtures
-> (bingo, almanac, repeated labeled blocks, grid+commands, noisy scan) parse
-> end-to-end. See [`praxis_technical_design.md`](./praxis_technical_design.md)
-> for the full language and the milestone roadmap (§19).
+> **Status:** Milestone 10 Part 1 complete — the crash debugger substrate
+> (§9): §7.11 rich parse diagnostics, debug-frame codegen wiring (ADR-021),
+> crash snapshots with GC rooting (the §19.10 "GC retains snapshot-reachable
+> objects" criterion), the §9.6 noninteractive fallback, and the interactive
+> crash REPL (`bt`/`frame`/`up`/`down`/`locals`/`help`/`quit`). A fault now
+> renders a numbered backtrace + locals; `--debug=auto|always|never` controls
+> REPL entry. Part 2 adds the read-only `p EXPR`/`type EXPR` evaluator and
+> `restart`/`reload`. See
+> [`praxis_technical_design.md`](./praxis_technical_design.md) for the full
+> language and the milestone roadmap (§19).
 
 ## Command surface
 
