@@ -20,7 +20,7 @@ use praxis_mir::{
     AllocKind, CallTarget, CmpOp, Function as MirFunction, Inst, IntBinOp, LocalId, LocalKind,
     ScalarKind, Terminator,
 };
-use praxis_runtime::{RuntimeContext, ShadowFrame, MAX_SHADOW_SLOTS};
+use praxis_runtime::{DebugLocalMeta, RuntimeContext, ShadowFrame, MAX_SHADOW_SLOTS};
 
 /// The uniform Cranelift type for a `GcRef` and every scalar payload: `i64`.
 /// `GcRef` is `#[repr(transparent)]` over a pointer; `Int`/`Bool` payloads are
@@ -72,6 +72,10 @@ enum Symbol {
     PushShadowFrame,
     /// Epilogue helper: pop + free the shadow-stack frame (ADR-019).
     PopShadowFrame,
+    /// Prologue helper: allocate + push a debug frame (§9.3, ADR-021, M10-WS2).
+    PushDebugFrame,
+    /// Epilogue helper: pop + free the debug frame (§9.3, ADR-021, M10-WS2).
+    PopDebugFrame,
     /// Prologue guard: raise `FaultKind::StackOverflow` when recursion exceeds
     /// `MAX_RECURSION_DEPTH` (§9.2, §17.4).
     RaiseStackOverflow,
@@ -103,6 +107,8 @@ impl Symbol {
             Symbol::CheckFault => "praxis_check_fault",
             Symbol::PushShadowFrame => "praxis_push_shadow_frame",
             Symbol::PopShadowFrame => "praxis_pop_shadow_frame",
+            Symbol::PushDebugFrame => "praxis_push_debug_frame",
+            Symbol::PopDebugFrame => "praxis_pop_debug_frame",
             Symbol::RaiseStackOverflow => "praxis_raise_stack_overflow",
         }
     }
@@ -187,10 +193,45 @@ pub(crate) fn lower_function<M: Module>(
     };
     builder.def_var(frame_var, frame_ptr);
 
+    // Prologue (cont.): push a debug frame and keep its pointer in a Variable
+    // (§9.3, ADR-021, M10-WS2). This frame is what the crash debugger reads for
+    // `bt`/`locals`; the spill below keeps each `DebugLocal.value` fresh across
+    // safepoints, parallel to the shadow-frame slots. The frame carries one
+    // `DebugLocalMeta` per Gc local — in the same order as `gc_slot`, so a
+    // local's shadow slot index doubles as its debug-local index.
+    let debug_frame_var = builder.declare_var(GC);
+    let debug_frame_ptr = {
+        // Build the &'static [DebugLocalMeta] for this function's Gc locals.
+        // Each entry carries the source name (embedded as &'static str), a
+        // per-local symbol id placeholder, and the static type descriptor
+        // resolved from the MIR local's Type.
+        let metas = build_debug_local_metas(mir, db);
+        let meta_ptr_val = builder.ins().iconst(GC, metas.as_ptr() as i64);
+        // Embed the function name as a &'static str (ptr + len) for the frame.
+        let name_static = leak_static_str(&mir.name);
+        let name_ptr_val = builder.ins().iconst(GC, name_static.as_ptr() as i64);
+        let name_len_val = builder.ins().iconst(GC, name_static.len() as i64);
+        let fr = import(
+            module,
+            &mut builder,
+            &mut HashMap::new(),
+            Symbol::PushDebugFrame,
+            &push_debug_frame_sig(),
+        )?;
+        let count_val = builder.ins().iconst(GC, gc_count as i64);
+        let call = builder.ins().call(
+            fr,
+            &[ctx_val, name_ptr_val, name_len_val, count_val, meta_ptr_val],
+        );
+        builder.func.dfg.first_result(call)
+    };
+    builder.def_var(debug_frame_var, debug_frame_ptr);
+
     let mut import_cache: HashMap<Symbol, FuncRef> = HashMap::new();
     let mut user_func_cache: HashMap<String, FuncRef> = HashMap::new();
     let spill = SpillCtx {
         frame_var,
+        debug_frame_var,
         slot_of: &gc_slot,
     };
 
@@ -239,6 +280,7 @@ pub(crate) fn lower_function<M: Module>(
         )?;
         builder.ins().call(fr, &[ctx_val]);
         emit_pop_shadow_frame(&mut builder, ctx_val, &spill, module, &mut import_cache)?;
+        emit_pop_debug_frame(&mut builder, ctx_val, &spill, module, &mut import_cache)?;
         let zero = builder.ins().iconst(GC, 0);
         builder.ins().return_(&[zero]);
     }
@@ -296,28 +338,44 @@ pub(crate) fn lower_function<M: Module>(
 }
 
 /// The spill context handed to every instruction/terminator lowering: the
-/// Variable holding the current frame pointer, and the Gc-local → slot-index
-/// map. At safepoints the backend stores each live root's value into its slot
-/// (ADR-019).
+/// Variables holding the current shadow-frame and debug-frame pointers, and the
+/// Gc-local → slot-index map. At safepoints the backend stores each live root's
+/// value into its shadow-stack slot (ADR-019) **and** its debug-local `value`
+/// field (§9.3, M10-WS2), so a crash snapshot reflects live state.
 struct SpillCtx<'a> {
     frame_var: Variable,
+    /// The debug frame pointer Variable (M10-WS2). The spill mirrors each root
+    /// write into the corresponding `DebugLocal.value` so the crash debugger
+    /// sees fresh values without a separate mechanism.
+    debug_frame_var: Variable,
     slot_of: &'a HashMap<LocalId, u32>,
 }
 
+/// The byte offset of `locals` within a `DebugFrame`, and of `value` within a
+/// `DebugLocal`. The spill writes a live root into debug frame slot `i` at
+/// `frame.locals[i].value`. Computed from the `#[repr(C)]` layouts so they stay
+/// correct if the structs evolve.
+const DEBUG_LOCALS_OFFSET: i64 = core::mem::offset_of!(praxis_runtime::DebugFrame, locals) as i64;
+const DEBUG_VALUE_OFFSET: i64 = core::mem::offset_of!(praxis_runtime::DebugLocal, value) as i64;
+const DEBUG_LOCAL_SIZE: i64 = core::mem::size_of::<praxis_runtime::DebugLocal>() as i64;
+
 impl SpillCtx<'_> {
-    /// Emit stores for every live root in `roots` into the shadow frame, just
-    /// before a safepoint. Each root's current Cranelift value is written to
-    /// `frame_ptr + SLOTS_OFFSET + slot_index*8` (§12.3).
+    /// Emit stores for every live root in `roots` into the shadow frame and the
+    /// debug frame, just before a safepoint. Each root's current Cranelift value
+    /// is written to `frame_ptr + SLOTS_OFFSET + slot_index*8` (§12.3) and to
+    /// `debug_frame.locals[slot_index].value` (§9.3, M10-WS2).
     fn emit_spill(&self, builder: &mut FunctionBuilder, roots: &[LocalId], vars: &[Variable]) {
         if roots.is_empty() {
             return;
         }
         let frame_ptr = builder.use_var(self.frame_var);
+        let debug_frame_ptr = builder.use_var(self.debug_frame_var);
         for &local in roots {
             let Some(&slot) = self.slot_of.get(&local) else {
                 continue; // a Scalar local slipped into live_roots; it has no slot.
             };
             let val = builder.use_var(vars[local.0 as usize]);
+            // --- shadow-stack slot (ADR-019) ---
             let off = SLOTS_OFFSET + (slot as i64) * 8;
             // `iadd_imm` is deprecated in Cranelift 0.134 in favor of the
             // sign/zero-extended variants; the slot offset is always a small
@@ -329,6 +387,24 @@ impl SpillCtx<'_> {
             let mut flags = MemFlags::trusted();
             flags.set_notrap();
             builder.ins().store(flags, val, slot_addr, 0);
+
+            // --- debug-local value (§9.3, M10-WS2) ---
+            // debug_frame.locals is a *mut DebugLocal; slot i's DebugLocal is at
+            // *(debug_frame.locals) + i*size, and `value` is at +DEBUG_VALUE_OFFSET
+            // within it. Load the locals base pointer, then compute the address.
+            let locals_base_flags = MemFlags::trusted();
+            let locals_base = builder.ins().load(
+                GC,
+                locals_base_flags,
+                debug_frame_ptr,
+                DEBUG_LOCALS_OFFSET as i32,
+            );
+            let local_off = (slot as i64) * DEBUG_LOCAL_SIZE + DEBUG_VALUE_OFFSET;
+            #[allow(deprecated)]
+            let value_addr = builder.ins().iadd_imm_s(locals_base, local_off);
+            let mut vflags = MemFlags::trusted();
+            vflags.set_notrap();
+            builder.ins().store(vflags, val, value_addr, 0);
         }
     }
 }
@@ -976,14 +1052,18 @@ fn lower_terminator<M: Module>(
             builder.ins().jump(blocks[target.0 as usize], &[]);
         }
         Terminator::Return { value } => {
-            // Epilogue: pop the shadow frame before returning (ADR-019).
+            // Epilogue: pop the shadow frame and debug frame before returning
+            // (ADR-019, §9.3/M10-WS2).
             emit_pop_shadow_frame(builder, ctx_val, spill, module, imports)?;
+            emit_pop_debug_frame(builder, ctx_val, spill, module, imports)?;
             let v = builder.use_var(vars[value.0 as usize]);
             builder.ins().return_(&[v]);
         }
         Terminator::Fault => {
-            // Epilogue (fault path): pop the shadow frame before unwinding.
+            // Epilogue (fault path): pop the shadow frame and debug frame before
+            // unwinding.
             emit_pop_shadow_frame(builder, ctx_val, spill, module, imports)?;
+            emit_pop_debug_frame(builder, ctx_val, spill, module, imports)?;
             // Unwind to the host: return the Unit sentinel (the caller checks
             // pending_fault). The fault block has no value of its own.
             let zero = builder.ins().iconst(GC, 0);
@@ -1009,6 +1089,27 @@ fn emit_pop_shadow_frame<M: Module>(
         &pop_shadow_frame_sig(),
     )?;
     let frame_ptr = builder.use_var(spill.frame_var);
+    builder.ins().call(fr, &[ctx_val, frame_ptr]);
+    Ok(())
+}
+
+/// Emit the `praxis_pop_debug_frame(ctx, frame)` epilogue call (§9.3, M10-WS2).
+/// Mirrors [`emit_pop_shadow_frame`] for the debug-frame chain.
+fn emit_pop_debug_frame<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx_val: Value,
+    spill: &SpillCtx<'_>,
+    module: &mut M,
+    imports: &mut HashMap<Symbol, FuncRef>,
+) -> Result<()> {
+    let fr = import(
+        module,
+        builder,
+        imports,
+        Symbol::PopDebugFrame,
+        &pop_debug_frame_sig(),
+    )?;
+    let frame_ptr = builder.use_var(spill.debug_frame_var);
     builder.ins().call(fr, &[ctx_val, frame_ptr]);
     Ok(())
 }
@@ -1310,6 +1411,52 @@ fn tuple_schema_for(
     raw
 }
 
+/// Build the `&'static [DebugLocalMeta]` for a function's `Gc` locals, in the
+/// same order as the `gc_slot` map iterates them (so a local's shadow-slot
+/// index doubles as its debug-local index). Each entry carries the source name
+/// (embedded as `&'static str`), a per-local symbol-id placeholder, and the
+/// static type descriptor resolved from the MIR local's `Type` (§9.3, M10-WS2).
+///
+/// The symbol id is a best-effort placeholder: MIR locals do not yet carry the
+/// HIR `SymbolId`, so we use the local's position. This is sufficient for the
+/// crash debugger to *display* locals (the source name disambiguates in the
+/// common case); full shadow-disambiguation by real symbol id is an M10b
+/// refinement once MIR threads the id.
+fn build_debug_local_metas(
+    mir: &MirFunction,
+    db: &praxis_types::TypeDb,
+) -> &'static [DebugLocalMeta] {
+    let mut metas: Vec<DebugLocalMeta> = Vec::new();
+    let mut symbol_id = 0u32;
+    for local in &mir.locals {
+        if local.kind != LocalKind::Gc {
+            continue;
+        }
+        // The source name; anonymous temps get "<tmp>".
+        let name: &'static str = mir
+            .debug_name(local.id)
+            .map(|n| Box::leak(n.to_string().into_boxed_str()) as &'static str)
+            .unwrap_or("<tmp>");
+        metas.push(DebugLocalMeta {
+            source_name: name.as_ptr(),
+            name_len: name.len() as u32,
+            symbol_id,
+            descriptor: descriptor_for_type(db, local.ty),
+        });
+        symbol_id += 1;
+    }
+    Box::leak(metas.into_boxed_slice())
+}
+
+/// Leak a `&str` into `&'static str` for embedding in a runtime call (the
+/// runtime reads it by raw pointer). Used by the prologue to pass the function
+/// name to `praxis_push_debug_frame` (M10-WS2). The caller turns the result
+/// into `(ptr, len)` iconsts through its own builder. Lighter than
+/// [`embed_text`]: no GC `Text` allocation, just a process-static string.
+fn leak_static_str(s: &str) -> &'static str {
+    Box::leak(s.to_string().into_boxed_str())
+}
+
 /// Best-effort mapping from a static `Type` to its runtime `TypeDescriptor`.
 ///
 /// Scalars map to their descriptor; collections map to their single static
@@ -1452,6 +1599,27 @@ fn push_shadow_frame_sig() -> Signature {
 
 /// `fn(ctx: i64, frame: i64) -> void`.
 fn pop_shadow_frame_sig() -> Signature {
+    let mut sig = Signature::new(CallConv::Fast);
+    sig.params.push(AbiParam::new(GC)); // ctx
+    sig.params.push(AbiParam::new(GC)); // frame
+    sig
+}
+
+/// `fn(ctx: i64, func_name: i64, func_name_len: i64, local_count: i64,
+/// local_metas: i64) -> i64` — returns `*mut DebugFrame` (§9.3, M10-WS2).
+fn push_debug_frame_sig() -> Signature {
+    let mut sig = Signature::new(CallConv::Fast);
+    sig.params.push(AbiParam::new(GC)); // ctx
+    sig.params.push(AbiParam::new(GC)); // func_name ptr
+    sig.params.push(AbiParam::new(GC)); // func_name_len
+    sig.params.push(AbiParam::new(GC)); // local_count
+    sig.params.push(AbiParam::new(GC)); // local_metas ptr
+    sig.returns.push(AbiParam::new(GC)); // *mut DebugFrame
+    sig
+}
+
+/// `fn(ctx: i64, frame: i64) -> void` — pops the debug frame (§9.3, M10-WS2).
+fn pop_debug_frame_sig() -> Signature {
     let mut sig = Signature::new(CallConv::Fast);
     sig.params.push(AbiParam::new(GC)); // ctx
     sig.params.push(AbiParam::new(GC)); // frame

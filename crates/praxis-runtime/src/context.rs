@@ -115,9 +115,9 @@ impl Default for Fault {
 ///
 /// Carries the source name, the compiler-assigned `symbol_id` (which
 /// disambiguates shadowed bindings — two `let a` in the same scope get distinct
-/// ids, §4.2), and the current `GcRef` value. The crash debugger (M10) reads
-/// these to display locals; M5 only *registers* them (the prologue/epilogue
-/// push/pop frames and the spill updates the values).
+/// ids, §4.2), the local's type descriptor, and the current `GcRef` value. The
+/// crash debugger (M10) reads these to display locals; M5 only *registers* them
+/// (the prologue/epilogue push/pop frames and the spill updates the values).
 #[repr(C)]
 pub struct DebugLocal {
     /// The source name as written (e.g. `a`). Not owned by the frame; points at
@@ -127,20 +127,29 @@ pub struct DebugLocal {
     pub name_len: u32,
     /// The compiler-assigned symbol id (disambiguates shadowed bindings, §4.2).
     pub symbol_id: u32,
+    /// The local's static type descriptor (§9.3 "local type descriptors"), so
+    /// the debugger can render a local without re-deriving its type. Embedded
+    /// by the backend at push time from the MIR local's `Type`. Null only on
+    /// frames constructed before M10-WS2 (the M5 unit tests).
+    pub descriptor: *const crate::TypeDescriptor,
     /// The current value of the local (updated by the spill at safepoints).
     pub value: GcRef,
 }
 
-/// One frame in the crash-debugger's snapshot chain (§9.3, M5).
+/// One frame in the crash-debugger's snapshot chain (§9.3, M5/M10).
 ///
-/// M5 gives `DebugFrame` a real layout: a parent pointer (the call chain), the
-/// function name, and a slice of [`DebugLocal`] entries. The prologue helper
-/// ([`crate::debug::push_debug_frame`]) allocates and links a frame; the
-/// epilogue pops it. The shadow-stack spill (ADR-019) keeps the `value` fields
-/// fresh across GC safepoints so a crash snapshot reflects live state.
+/// M5 gave `DebugFrame` a real layout (parent, func name, locals). M10-WS2
+/// completes the §9.3 field set: per-local type descriptors (on
+/// [`DebugLocal`]), the function's source span, and the active input-parser
+/// path. The prologue helper ([`crate::debug::praxis_push_debug_frame`])
+/// allocates and links a frame; the epilogue pops it. The shadow-stack spill
+/// (ADR-019) keeps the `value` fields fresh across GC safepoints so a crash
+/// snapshot reflects live state.
 ///
-/// The crash-debugger REPL that *reads* these frames lands in M10; M5 only
-/// ensures the metadata is correct and registered.
+/// `source_span` and `parser_path` are **reserved** in M10a: the backend
+/// zeroes them at push time (the MIR does not yet carry per-function spans or
+/// the active-parser path). M10b fills them so the `source`/`input`/`parser`
+/// REPL commands can render them.
 #[repr(C)]
 pub struct DebugFrame {
     /// The caller's frame, or null for the outermost (`main`) frame.
@@ -153,6 +162,16 @@ pub struct DebugFrame {
     pub locals: *mut DebugLocal,
     /// How many locals are in the `locals` array.
     pub local_count: u32,
+    /// The function's source span `[start, end)` as byte offsets into the
+    /// program source (§9.3 "current source span"). `(0, 0)` until M10b threads
+    /// the span from the AST through HIR/MIR into the backend.
+    pub source_span: (u32, u32),
+    /// The active input-parser path at the fault (§9.3), as a `'static`
+    /// embedded string. Null/zero-length until M10b populates it from the
+    /// parser plan; the `parser` REPL command renders it.
+    pub parser_path: *const u8,
+    /// The byte length of `parser_path`.
+    pub parser_path_len: u32,
 }
 
 /// The hidden first argument to every generated function.

@@ -16,13 +16,17 @@ use std::ptr::NonNull;
 use crate::context::{DebugFrame, DebugLocal, RuntimeContext};
 use crate::gc::GcRef;
 
-/// One local's metadata at frame construction: the source name (ptr + len) and
-/// the compiler-assigned symbol id. Flattened for FFI.
+/// One local's metadata at frame construction: the source name (ptr + len),
+/// the compiler-assigned symbol id, and the local's static type descriptor.
+/// Flattened for FFI.
 #[repr(C)]
 pub struct DebugLocalMeta {
     pub source_name: *const u8,
     pub name_len: u32,
     pub symbol_id: u32,
+    /// The local's static type descriptor (§9.3). The backend embeds the
+    /// `'static TypeDescriptor` resolved from the MIR local's `Type`.
+    pub descriptor: *const crate::TypeDescriptor,
 }
 
 /// Allocate a debug frame for `func_name` with `local_count` local slots, chain
@@ -61,6 +65,7 @@ pub unsafe extern "C" fn praxis_push_debug_frame(
                 source_name: m.source_name,
                 name_len: m.name_len,
                 symbol_id: m.symbol_id,
+                descriptor: m.descriptor,
                 value: GcRef::null_sentinel_ref(),
             })
             .collect()
@@ -74,6 +79,11 @@ pub unsafe extern "C" fn praxis_push_debug_frame(
         func_name_len,
         locals: locals_ptr,
         local_count,
+        // Reserved for M10b: source span and active-parser path are zeroed/null
+        // until the backend threads them from the AST/plan.
+        source_span: (0, 0),
+        parser_path: std::ptr::null(),
+        parser_path_len: 0,
     });
     let raw = Box::into_raw(frame);
     // SAFETY: ctx is live; chain onto debug_top.
@@ -228,11 +238,13 @@ mod tests {
                 source_name: name_a.as_ptr(),
                 name_len: 1,
                 symbol_id: 10,
+                descriptor: crate::scalars::INT,
             },
             DebugLocalMeta {
                 source_name: name_a.as_ptr(),
                 name_len: 1,
                 symbol_id: 20,
+                descriptor: crate::scalars::INT,
             },
         ];
         // SAFETY: ctx wired; metas is valid.
@@ -244,6 +256,11 @@ mod tests {
             assert_eq!(locals[0].name(), "a");
             assert_eq!(locals[1].name(), "a");
             assert_ne!(locals[0].symbol_id, locals[1].symbol_id);
+            // M10-WS2: the descriptor is carried through to the frame.
+            assert_eq!(
+                locals[0].descriptor as *const _,
+                crate::scalars::INT as *const _
+            );
             praxis_pop_debug_frame(ctx, frame);
         }
         unsafe { drop_ctx(ctx) };

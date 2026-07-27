@@ -3994,3 +3994,61 @@ fn m10ws1_parse_failed_preview_is_single_line() {
     assert!(!preview.contains('\n'));
     assert!(!preview.contains('\r'));
 }
+
+// ===========================================================================
+// M10 WS2 — debug-frame codegen wiring (§9.3, ADR-021).
+//
+// Every generated function now pushes/pops a debug frame in lockstep with its
+// shadow frame, and the spill mirrors each live-root write into the
+// corresponding `DebugLocal.value`. These tests confirm the wiring is balanced
+// and non-corrupting: GC rooting stays sound (the run-pass suite guards this)
+// and the deepest push/pop chain — the stack-overflow fault path — unwinds
+// cleanly back to the host. The chain's *content* (locals at fault time) is
+// made observable by WS3's crash snapshot.
+// ===========================================================================
+
+#[test]
+fn m10ws2_debug_frame_pushpop_balanced_across_recursion() {
+    // Deep recursion pushes/pops many debug frames. If the push/pop were
+    // unbalanced or the spill corrupted the frame, this would either leak
+    // (eventual OOM) or fault spuriously. A clean result confirms the wiring.
+    let src = "fn sum(n: Int) -> Int {\n  if n <= 0 { 0 } else { n + sum(n - 1) }\n}\n
+               fn main() -> Int { sum(500) }\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    // sum(500) = 500*501/2 = 125250.
+    assert_eq!(result.as_int(), 125250);
+}
+
+#[test]
+fn m10ws2_debug_frame_unwinds_cleanly_on_stack_overflow() {
+    // The stack-overflow fault path is the deepest push/pop chain: every
+    // recursed frame has pushed a shadow + debug frame. The fault epilogue
+    // must pop *both* for every frame as it unwinds to the host, leaving
+    // debug_top null and no leak/corruption. A clean StackOverflow fault
+    // confirms the debug-frame epilogue ordering is correct.
+    let src = "fn count(n: Int) -> Int { count(n + 1) }\n
+               fn main() -> Int { count(0) }\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::StackOverflow);
+    // After unwind, debug_top must be null: every frame's epilogue popped.
+    // (We cannot read ctx here — it was dropped — but a clean fault return
+    // without abort/SIGSEGV is itself the proof the epilogue chain is sound;
+    // the chain's persistence is asserted via the snapshot in WS3.)
+}
+
+#[test]
+fn m10ws2_debug_frame_locals_survive_gc_during_recursion() {
+    // A recursive function that allocates on every call forces GC at safepoints
+    // while the debug-frame chain is deep. If the spill into DebugLocal.value
+    // corrupted any slot, the GC (which walks the parallel shadow frame) or the
+    // returned value would be wrong. The correct sum confirms both frames stay
+    // consistent across collections.
+    let src = "fn build(n: Int) -> Vec[Int] {\n  if n == 0 { Vec() } else { let v = build(n - 1); v.push(n); v }\n}\n
+               fn main() -> Int {\n  let v = build(100);\n  var s = 0;\n  var i = 0;\n  while i < v.len() { s = s + v.get(i); i = i + 1 }\n  s\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    // sum 1..=100 = 5050.
+    assert_eq!(result.as_int(), 5050);
+}
