@@ -3770,3 +3770,42 @@ fn m9_choice_equality() {
 // type. Scalar payloads work fully (above). This is a pre-existing inference
 // interaction surfaced by choice, tracked as an M9 follow-up; it does not block
 // the §19.9 acceptance fixtures, which use scalar-payload choices (C.9 scan).
+
+// --- M9 WS5: optional + Option[T] integration (§7.5) -----------------------
+
+#[test]
+fn m9_optional_present_returns_some() {
+    // optional(int) on "42" → Some(42).
+    let src = "fn main() -> Int {\n  let v = read optional(int)\n  match v {\n    Some(n) => n\n    None => 0\n  }\n}\n";
+    let (rt, result) = run_main_with_input(src, "42");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn m9_optional_absent_returns_none() {
+    // optional(int) on "hello" → None (int parse fails). No fault raised.
+    let src = "fn main() -> Int {\n  let v = read optional(int)\n  match v {\n    Some(n) => n\n    None => 7\n  }\n}\n";
+    let (rt, result) = run_main_with_input(src, "hello");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
+}
+
+#[test]
+fn m9_optional_some_none_equality() {
+    // Some(5) == Some(5) is true; Some(5) == None is false; None == None is true.
+    let src = "fn main() -> Int {\n  let a = read optional(int)\n  let b = read optional(int)\n  let same = a == b\n  if same { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main_with_input(src, "5");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn m9_optional_present_and_absent_differ() {
+    // Each read re-parses the whole input (§7.10). a = optional(int) on "5" →
+    // Some(5); b = optional(word) on "5" → Some("5"). Both Some; result is a's n.
+    let src = "fn main() -> Int {\n  let a = read optional(int)\n  let b = read optional(word)\n  match a {\n    Some(n) => match b {\n      Some(w) => n\n      None => 99\n    }\n    None => 0\n  }\n}\n";
+    let (rt, result) = run_main_with_input(src, "5");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 5);
+}

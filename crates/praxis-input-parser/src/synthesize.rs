@@ -93,6 +93,16 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Type {
                 .collect();
             db.anon_enum(variants)
         }
+        ParserAst::Optional { child, .. } => {
+            // `Option[result(P)]` (§7.5/§7.8): a nominal Option enum (Some(T),
+            // None) carrying the child's result type. Registered fresh per site;
+            // unifies with other Option[T] values via the M9 same-named-enum arm.
+            let elem = synthesize(child, db);
+            db.register_enum(
+                "Option",
+                vec![("Some".into(), Some(vec![elem])), ("None".into(), None)],
+            )
+        }
     }
 }
 

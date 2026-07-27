@@ -158,6 +158,7 @@ unsafe fn walk(
         } => walk_sections_named(&rt, plan, fields, *repeated_tail, bytes, offset),
         PlanNode::Block { items } => walk_block(&rt, plan, items, bytes, offset),
         PlanNode::Choice { cases } => walk_choice(&rt, plan, cases, bytes, offset),
+        PlanNode::Optional { child } => walk_optional(&rt, plan, *child, bytes, offset),
         PlanNode::Csv { child } => walk_csv(&rt, plan, *child, bytes, offset),
         PlanNode::Ws { child } => walk_ws(&rt, plan, *child, bytes, offset),
         PlanNode::Sep {
@@ -462,6 +463,30 @@ fn walk_choice(
         }
     }
     Err(())
+}
+
+/// Walk `optional(P)` (M9, §7.5): parse `P`; on success return `Some(value)`
+/// (Option tag 0) advancing the cursor, on failure return `None` (tag 1) and
+/// consume NO input (the cursor stays at `offset`). No fault is raised on a
+/// miss — this is parser-level optionality, not exception recovery.
+fn walk_optional(
+    rt: &Rt,
+    plan: &ParserPlan,
+    child: u32,
+    bytes: &[u8],
+    offset: usize,
+) -> WalkResult {
+    match unsafe { walk(rt.ctx, plan, child, bytes, offset) } {
+        Ok((value, new_offset)) => {
+            let some_ref = rt.alloc_enum(0, vec![value]);
+            Ok((some_ref, new_offset))
+        }
+        Err(()) => {
+            // Consume nothing; return None (tag 1, no payload).
+            let none_ref = rt.alloc_enum(1, Vec::new());
+            Ok((none_ref, offset))
+        }
+    }
 }
 
 fn walk_csv(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
@@ -1064,7 +1089,7 @@ fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescri
         // A block produces a flattened anonymous record (uniform descriptor).
         PlanNode::Block { .. } => crate::records::RECORD,
         // choice/optional produce an enum (uniform descriptor; tag + payload).
-        PlanNode::Choice { .. } => crate::enums::ENUM,
+        PlanNode::Choice { .. } | PlanNode::Optional { .. } => crate::enums::ENUM,
         // A template's result is a scalar (single anon capture), a record (named
         // captures), or Unit (no captures). A tuple's result is a tuple. These
         // are uniform descriptors too (schema in the payload).

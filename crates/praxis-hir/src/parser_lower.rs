@@ -243,6 +243,15 @@ fn convert_constructor_call(
     if ctor_name == "choice" {
         return Some(build_choice(args, span));
     }
+    if ctor_name == "optional" {
+        if let Some(CallArg::Parser(child)) = args.into_iter().next() {
+            return Some(ParserAst::Optional {
+                child: Box::new(child),
+                span,
+            });
+        }
+        return None;
+    }
 
     let ctor = Constructor::from_keyword(&ctor_name)?;
 

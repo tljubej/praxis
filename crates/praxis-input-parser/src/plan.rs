@@ -51,6 +51,9 @@ pub enum PlanNode {
     Choice {
         cases: &'static [(&'static str, u32)],
     },
+    /// `optional(P)` (M9, §7.5). Parse `P`; on success return Some(value)
+    /// (Option tag 0), on failure consume nothing and return None (tag 1).
+    Optional { child: u32 },
     /// `csv(P)`.
     Csv { child: u32 },
     /// `ws(P)`.
@@ -298,6 +301,10 @@ fn lower_node(b: &mut PlanBuilder, ast: &ParserAst) -> u32 {
                 .collect();
             let cases_slice = leak(case_entries);
             b.push_node(PlanNode::Choice { cases: cases_slice })
+        }
+        ParserAst::Optional { child, .. } => {
+            let c = lower_node(b, child);
+            b.push_node(PlanNode::Optional { child: c })
         }
         ParserAst::Template { parts, .. } => lower_template(b, parts),
     }

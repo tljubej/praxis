@@ -146,6 +146,7 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
                 validate_node(parser, errs);
             }
         }
+        ParserAst::Optional { child, .. } => validate_node(child, errs),
     }
 }
 

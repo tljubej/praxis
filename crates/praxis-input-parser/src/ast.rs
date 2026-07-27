@@ -142,6 +142,10 @@ pub enum ParserAst {
         cases: Vec<(String, ParserAst)>,
         span: Span,
     },
+    /// `optional(P)` (M9, §7.5): parse `P` if it matches, else consume nothing
+    /// and return `None`. Result is `Option[result(P)]`. Failure consumes no
+    /// input (parser-level optionality, not exception recovery).
+    Optional { child: Box<ParserAst>, span: Span },
 }
 
 /// One item in a `block(...)` (M9, §7.5).
@@ -170,7 +174,8 @@ impl ParserAst {
             | ParserAst::Sep { span, .. }
             | ParserAst::Grid { span, .. }
             | ParserAst::Block { span, .. }
-            | ParserAst::Choice { span, .. } => *span,
+            | ParserAst::Choice { span, .. }
+            | ParserAst::Optional { span, .. } => *span,
         }
     }
 }
