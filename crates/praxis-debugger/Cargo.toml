@@ -10,6 +10,7 @@ description = "Crash snapshots and the interactive crash REPL for Praxis."
 praxis-source.workspace = true
 praxis-runtime.workspace = true
 praxis-types.workspace = true
+praxis-stdlib.workspace = true
 praxis-ast.workspace = true
 praxis-parser.workspace = true
 praxis-hir.workspace = true

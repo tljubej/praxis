@@ -232,12 +232,16 @@ pub enum TypedExpr {
     },
     /// `receiver.method(args)` (M5, §16.2). `lowering_symbol` is the runtime
     /// wrapper name the catalog resolved (e.g. `praxis_vec_push`), so the MIR
-    /// builder emits a direct call without re-resolving the catalog.
+    /// builder emits a direct call without re-resolving the catalog. `purity`
+    /// (M10b-WS4) is the catalog's purity tag, so the crash debugger's read-only
+    /// `p EXPR` evaluator can reject impure calls (§9.5, §19.10 "no command can
+    /// mutate").
     MethodCall {
         receiver: Box<TypedExpr>,
         name: String,
         lowering_symbol: String,
         args: Vec<TypedExpr>,
+        purity: praxis_stdlib::Purity,
         ty: Type,
     },
     /// `( a, b, … )` — at least two elements.
@@ -1472,6 +1476,7 @@ impl<'a> Lowerer<'a> {
                 name,
                 lowering_symbol,
                 args,
+                purity: entry.purity,
                 ty,
             }
         } else {
@@ -1828,8 +1833,10 @@ impl<'a> Lowerer<'a> {
     }
 }
 
-/// The type carried by a typed expression.
-fn expr_ty(e: &TypedExpr) -> Type {
+/// The type carried by a typed expression. Public so the crash debugger (M10b)
+/// and the LSP can read an expression's inferred type without re-matching the
+/// whole enum.
+pub fn expr_ty(e: &TypedExpr) -> Type {
     match e {
         TypedExpr::Lit { ty, .. } => *ty,
         TypedExpr::Path { ty, .. } => *ty,

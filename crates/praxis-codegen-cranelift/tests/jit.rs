@@ -38,7 +38,9 @@ fn compile(
         annotate(f);
     }
     let mut jit = Jit::new().expect("JIT construction");
-    let ids = jit.compile(&funcs, &analysis.db).expect("JIT compilation");
+    let ids = jit
+        .compile(&funcs, &mut analysis.db)
+        .expect("JIT compilation");
     (jit, ids)
 }
 

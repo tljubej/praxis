@@ -12,6 +12,8 @@
 //! `input`/`parser`/`heap` context commands, and `restart`/`reload`. The
 //! [`session`] module owns the live compile/run state those commands reach.
 
+pub mod evaluate;
+pub mod purity;
 pub mod render;
 pub mod repl;
 pub mod session;

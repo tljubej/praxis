@@ -94,6 +94,33 @@ impl Repl {
         self.selected
     }
 
+    /// Run `p EXPR` / `type EXPR` against the selected frame (§9.5, M10b-WS4).
+    /// Splits the snapshot/frame borrow (immutable) from the session borrow
+    /// (mutable: the runtime hosts the call) so both coexist. Degrades to a
+    /// "session not attached" error for navigation-only REPLs.
+    fn evaluate_expr(
+        &mut self,
+        expr: &str,
+        mode: crate::evaluate::Mode,
+    ) -> crate::evaluate::EvalResult {
+        let Some(session) = self.session.as_mut() else {
+            return Err("no live session — cannot evaluate expressions".to_string());
+        };
+        // Borrow the snapshot + selected frame immutably, the session mutably.
+        // The snapshot is `self.snapshot`, separate from `session`.
+        let frame = match self.snapshot.frames.get(self.selected) {
+            Some(f) => f,
+            None => return Err("no frame selected".to_string()),
+        };
+        let db = &mut session.analysis.db;
+        match mode {
+            crate::evaluate::Mode::Print => {
+                crate::evaluate::evaluate(db, &mut session.runtime, &self.snapshot, frame, expr)
+            }
+            crate::evaluate::Mode::Type => crate::evaluate::type_of(db, frame, expr),
+        }
+    }
+
     /// Run the read-eval-print loop, reading commands from `input` and writing
     /// output + the prompt to `output`. Returns when the user types `quit` or
     /// EOF is reached. Each command's output is also returned for testing via
@@ -232,8 +259,28 @@ impl Repl {
                     .unwrap_or("");
                 let _ = render_parser_context(out, detail, source_text);
             }
-            // Still-deferred M10b commands (WS4–WS6).
-            "p" | "type" | "heap" | "restart" | "reload" => {
+            // M10b-WS4: the read-only `p EXPR` / `type EXPR` JIT evaluator
+            // (§9.5). Synthesizes `fn __p_expr(<typed params>) { EXPR }`,
+            // type-checks against the selected frame's locals, purity-gates,
+            // JITs a fresh function, and calls it with the snapshot locals.
+            "p" => {
+                if rest.is_empty() {
+                    let _ = writeln!(out, "usage: p EXPR");
+                    return Control::Continue;
+                }
+                let result = self.evaluate_expr(rest, crate::evaluate::Mode::Print);
+                let _ = crate::evaluate::write_eval_result(out, &result);
+            }
+            "type" => {
+                if rest.is_empty() {
+                    let _ = writeln!(out, "usage: type EXPR");
+                    return Control::Continue;
+                }
+                let result = self.evaluate_expr(rest, crate::evaluate::Mode::Type);
+                let _ = crate::evaluate::write_eval_result(out, &result);
+            }
+            // Still-deferred M10b commands (WS5–WS6).
+            "heap" | "restart" | "reload" => {
                 let _ = writeln!(
                     out,
                     "note: `{cmd}` is implemented later in Milestone 10 Part 2 (not yet wired)."
@@ -272,6 +319,8 @@ Crash debugger commands (§9.4):
   up              move the selection toward the caller
   down            move the selection toward the callee
   locals          show the selected frame's locals
+  p EXPR          evaluate a read-only expression
+  type EXPR       show the inferred expression type
   source [N]      show the selected (or Nth) frame's source
   input           show the input near the active parser cursor
   parser          show the active input parser near the fault
@@ -279,7 +328,7 @@ Crash debugger commands (§9.4):
   quit            exit the debugger
 
 Not yet wired (later in Milestone 10 Part 2):
-  p EXPR, type EXPR, heap EXPR, restart, reload";
+  heap EXPR, restart, reload";
 
 #[cfg(test)]
 mod tests {

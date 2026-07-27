@@ -182,6 +182,37 @@ impl TypeDb {
         }
     }
 
+    /// Recursively resolve `t`, following links at *every* level — including
+    /// the element/param/result args of `Collection`/`Tuple`/`Func` types, which
+    /// [`follow`](Self::follow) leaves untouched (it only resolves the top-level
+    /// representative). Allocates new slots for any resolved composite so the
+    /// returned `Type` is fully concrete to its leaves (or genuinely `Unbound`).
+    ///
+    /// Used by the crash debugger (M10b-WS4) to capture a local's exact static
+    /// type — e.g. turning `Vec[?T]` (an element var that a later `push(11)`
+    /// linked to `Int`) into `Vec[Int]` so `p EXPR` can type-check against it.
+    #[must_use]
+    pub fn deep_resolve(&mut self, t: Type) -> Type {
+        let t = self.follow(t);
+        match &self.slots[t.0 as usize].data.clone() {
+            TypeData::Collection { ctor, args } => {
+                let args: Vec<Type> = args.iter().map(|a| self.deep_resolve(*a)).collect();
+                self.intern(TypeData::Collection { ctor: *ctor, args })
+            }
+            TypeData::Tuple(els) => {
+                let els: Vec<Type> = els.iter().map(|a| self.deep_resolve(*a)).collect();
+                self.intern(TypeData::Tuple(els))
+            }
+            TypeData::Func { params, result } => {
+                let params: Vec<Type> = params.iter().map(|a| self.deep_resolve(*a)).collect();
+                let result = self.deep_resolve(*result);
+                self.intern(TypeData::Func { params, result })
+            }
+            // Leaves (Scalar/Unit/Record/Enum/Var) need no recursion.
+            _ => t,
+        }
+    }
+
     /// Borrow the data of `t`'s representative **without** pruning links. Callers
     /// that may hold the borrow across a mutation must use [`prune`](Self::prune)
     /// first and then index the returned handle.

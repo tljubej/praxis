@@ -133,7 +133,7 @@ impl Jit {
     pub fn compile(
         &mut self,
         funcs: &[MirFunction],
-        db: &praxis_types::TypeDb,
+        db: &mut praxis_types::TypeDb,
     ) -> Result<HashMap<String, FuncId>, JitError> {
         // First pass: declare every function so they can reference each other
         // (and themselves, for recursion) before any is defined.

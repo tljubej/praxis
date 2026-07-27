@@ -771,8 +771,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             name,
             lowering_symbol,
             args,
+            purity,
             ty,
-            ..
         } => {
             // A method call lowers to a runtime-wrapper call. The receiver is
             // the first argument; the method's explicit args follow. The
@@ -789,6 +789,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     name: name.clone(),
                     lowering_symbol: lowering_symbol.clone(),
                     args: args.clone(),
+                    purity: *purity,
                     ty: *ty,
                 };
                 if let Some(plan) = recognize_pipeline(&call) {

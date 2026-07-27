@@ -285,3 +285,61 @@ fn m10b_ws3_source_help_lists_command() {
     assert!(out.contains("input"), "help lists `input`: {out}");
     assert!(out.contains("parser"), "help lists `parser`: {out}");
 }
+
+// ===========================================================================
+// M10b WS4 — `p EXPR` / `type EXPR` read-only JIT evaluator (§9.5).
+//
+// The fixture `debug_backtrace.px` has `xs = [11, 22]` in the faulting `main`
+// frame. `p EXPR` synthesizes `fn __p_expr(xs: Vec[Int]) { EXPR }`, type-checks
+// against the snapshot local, purity-gates, JITs, and calls with the snapshot's
+// `xs` GcRef. `type EXPR` reports the inferred type without JIT.
+// ===========================================================================
+
+#[test]
+fn m10b_ws4_p_literal_arithmetic() {
+    // `p 1 + 2` → 3. No locals needed; a pure literal expression.
+    let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "p 1 + 2\nquit\n");
+    assert!(out.contains("3"), "p 1 + 2 should print 3: {out}");
+}
+
+#[test]
+fn m10b_ws4_p_evaluates_pure_method_on_snapshot_local() {
+    // `p xs.len()` → the Vec's length, 2. A pure method call on a snapshot local.
+    let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "p xs.len()\nquit\n");
+    assert!(out.contains("2"), "p xs.len() should print 2: {out}");
+}
+
+#[test]
+fn m10b_ws4_p_index_into_snapshot_vec() {
+    // `p xs.get(0)` → 11. Indexes the snapshot Vec via a pure method. This is
+    // the case that needs the full static `Vec[Int]` type (WS1) to type-check.
+    let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "p xs.get(0)\nquit\n");
+    assert!(out.contains("11"), "p xs.get(0) should print 11: {out}");
+}
+
+#[test]
+fn m10b_ws4_p_rejects_mutation() {
+    // `p xs.push(99)` is impure → the purity gate rejects it.
+    let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "p xs.push(99)\nquit\n");
+    assert!(
+        out.contains("error") && out.contains("impure"),
+        "p xs.push(99) should be rejected as impure: {out}"
+    );
+}
+
+#[test]
+fn m10b_ws4_type_reports_collection_type() {
+    // `type xs` → Vec[Int]. Proves the full static type (WS1) renders.
+    let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "type xs\nquit\n");
+    assert!(
+        out.contains("Vec[Int]"),
+        "type xs should be Vec[Int]: {out}"
+    );
+}
+
+#[test]
+fn m10b_ws4_type_reports_inferred_method_type() {
+    // `type xs.len()` → Int.
+    let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "type xs.len()\nquit\n");
+    assert!(out.contains("Int"), "type xs.len() should be Int: {out}");
+}

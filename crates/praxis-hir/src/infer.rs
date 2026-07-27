@@ -1368,25 +1368,44 @@ impl Inferer {
                 if has_struct_child {
                     return node.children().find_map(|c| self.resolve_type_node(&c));
                 }
+                // Collection type: `Vec[T]`, `Map[K, V]`, … The parser emits the
+                // ctor name as its own nested TYPE_REF child (the `start_node` +
+                // `finish_node` for the name, before the `start_node_at(cp)` wrap
+                // reopens to cover the bracketed args), with the bracket args as
+                // further TYPE_REF siblings. So the *first* TYPE_REF child is the
+                // ctor name; the rest are the type arguments.
+                let type_ref_children: Vec<_> = node
+                    .children()
+                    .filter(|c| c.kind() == SyntaxKind::TYPE_REF)
+                    .collect();
+                if type_ref_children.len() >= 2 {
+                    // The ctor name is the first TYPE_REF child's Ident token;
+                    // the remaining TYPE_REF children are the type args.
+                    let name =
+                        type_ref_children[0]
+                            .children_with_tokens()
+                            .find_map(|e| match e {
+                                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::Ident => {
+                                    Some(t.text().to_string())
+                                }
+                                _ => None,
+                            })?;
+                    let type_args: Vec<Type> = type_ref_children[1..]
+                        .iter()
+                        .map(|c| {
+                            self.resolve_type_node(c)
+                                .unwrap_or_else(|| self.db.fresh_var())
+                        })
+                        .collect();
+                    return self.collection_from_name(&name, type_args);
+                }
+                // Scalar: the name is a direct Ident token of this node.
                 let name = node.children_with_tokens().find_map(|e| match e {
                     rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::Ident => {
                         Some(t.text().to_string())
                     }
                     _ => None,
                 })?;
-                // Collection type: `Vec[T]`, `Map[K, V]`, … The parser emits the
-                // name plus bracketed child TYPE_REF args as children of one node.
-                let type_args: Vec<Type> = node
-                    .children()
-                    .filter(|c| c.kind() == SyntaxKind::TYPE_REF)
-                    .map(|c| {
-                        self.resolve_type_node(&c)
-                            .unwrap_or_else(|| self.db.fresh_var())
-                    })
-                    .collect();
-                if !type_args.is_empty() {
-                    return self.collection_from_name(&name, type_args);
-                }
                 self.scalar_from_name(&name)
             }
             SyntaxKind::TUPLE_TYPE => {

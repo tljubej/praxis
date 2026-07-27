@@ -127,7 +127,7 @@ pub(crate) fn lower_function<M: Module>(
     fn_ctx: &mut FunctionBuilderContext,
     mir: &MirFunction,
     user_funcs: &HashMap<String, FuncId>,
-    db: &praxis_types::TypeDb,
+    db: &mut praxis_types::TypeDb,
 ) -> Result<()> {
     // Use the module's own Context (the 0.134 idiom): build into `ctx.func`,
     // then `define_function(id, &mut ctx)`.
@@ -1476,7 +1476,7 @@ fn tuple_schema_for(
 /// refinement once MIR threads the id.
 fn build_debug_local_metas(
     mir: &MirFunction,
-    db: &praxis_types::TypeDb,
+    db: &mut praxis_types::TypeDb,
 ) -> &'static [DebugLocalMeta] {
     let mut metas: Vec<DebugLocalMeta> = Vec::new();
     let mut symbol_id = 0u32;
@@ -1489,6 +1489,12 @@ fn build_debug_local_metas(
             .debug_name(local.id)
             .map(|n| Box::leak(n.to_string().into_boxed_str()) as &'static str)
             .unwrap_or("<tmp>");
+        // Deep-resolve the local's type before capturing its id, so the id
+        // points at a fully-concrete type (e.g. Vec[Int], not Vec[?T]). The
+        // element/param vars of a composite are left untouched by `follow`
+        // (top-level only); `deep_resolve` recurses and interns a resolved
+        // copy. Idempotent on already-resolved types. (M10b-WS4)
+        let resolved_ty = db.deep_resolve(local.ty);
         metas.push(DebugLocalMeta {
             source_name: name.as_ptr(),
             name_len: name.len() as u32,
@@ -1497,7 +1503,7 @@ fn build_debug_local_metas(
             // The full static `Type` id (M10-WS1b): `Type(u32)`. Lets the
             // debugger reconstruct the exact local type (incl. collection
             // element types / record shapes) the runtime `descriptor` loses.
-            type_id: local.ty.0,
+            type_id: resolved_ty.0,
         });
         symbol_id += 1;
     }
