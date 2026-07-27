@@ -420,6 +420,17 @@ impl Runtime {
     pub fn take_crash_snapshot(&mut self) -> Option<CrashSnapshot> {
         self.crash_snapshot.take()
     }
+
+    /// Reset the fault, crash-snapshot, and parse-detail slots so the next
+    /// `main` call starts from a clean slate (§9.7 `restart`/`reload`). The
+    /// heap is *not* collected — old allocations (and the snapshot the host
+    /// may still hold as a root set) survive until an explicit `collect`.
+    /// Call this before re-executing `main`.
+    pub fn clear_for_rerun(&mut self) {
+        self.fault = Fault::clear();
+        self.crash_snapshot.clear();
+        self.parse_detail.clear();
+    }
 }
 
 impl Default for Runtime {

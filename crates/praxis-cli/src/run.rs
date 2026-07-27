@@ -17,7 +17,7 @@ use praxis_ast::AstNode;
 use praxis_codegen_cranelift::Jit;
 use praxis_hir::{analyze_root, lower, mono::monomorphize};
 use praxis_mir::{annotate, lower_module};
-use praxis_runtime::{GcRef, Runtime, RuntimeContext};
+use praxis_runtime::{Runtime, RuntimeContext};
 
 use crate::debug_mode::DebugMode;
 use crate::diagnostic_render;
@@ -142,7 +142,7 @@ pub fn run(file: &str, input_file: Option<&str>, debug: DebugMode) -> anyhow::Re
     // call. `main` takes one unused GcRef slot (the uniform calling convention
     // passes the context plus the declared params — zero here — but the entry
     // pointer type carries one placeholder slot).
-    let entry: unsafe extern "C" fn(*mut RuntimeContext, GcRef) -> GcRef =
+    let entry: praxis_debugger::session::MainEntry =
         unsafe { std::mem::transmute(jit.entry(main_id)) };
     let unit = runtime.alloc_unit();
     let result = unsafe { entry(&mut ctx as *mut RuntimeContext, unit) };
@@ -165,7 +165,25 @@ pub fn run(file: &str, input_file: Option<&str>, debug: DebugMode) -> anyhow::Re
                     Some(&snapshot),
                     Some(runtime.parse_detail()),
                 )?;
-                let mut repl = praxis_debugger::repl::Repl::new(snapshot);
+                // M10b: hand the live compile/run state to the REPL as a
+                // `DebugSession`, so `p EXPR`/`source`/`restart`/`reload` can
+                // reach the Jit/Runtime/TypeDb/source/input. The snapshot was
+                // taken out of `runtime` above, so the two are decoupled.
+                // SAFETY: `main_entry` was just transmuted from a finalized
+                // JIT entry for `main_id`; the `jit` outlives the REPL (it
+                // moves into the session and is dropped with it).
+                let session = praxis_debugger::session::DebugSession {
+                    jit,
+                    main_entry: entry,
+                    func_ids: ids,
+                    runtime,
+                    analysis,
+                    source_text: text.clone(),
+                    source_path: path.to_path_buf(),
+                    input_text: input_text.clone(),
+                    input_path: input_file.map(Path::new).map(std::path::Path::to_path_buf),
+                };
+                let mut repl = praxis_debugger::repl::Repl::new_session(snapshot, session);
                 let stdin = std::io::stdin();
                 let mut stdin = stdin.lock();
                 let stderr = std::io::stderr();
@@ -178,6 +196,7 @@ pub fn run(file: &str, input_file: Option<&str>, debug: DebugMode) -> anyhow::Re
                     None,
                     Some(runtime.parse_detail()),
                 )?;
+                drop(jit);
             }
         } else {
             praxis_debugger::render::render_noninteractive(
@@ -186,9 +205,8 @@ pub fn run(file: &str, input_file: Option<&str>, debug: DebugMode) -> anyhow::Re
                 runtime.crash_snapshot(),
                 Some(runtime.parse_detail()),
             )?;
+            drop(jit);
         }
-        // Keep the JIT alive through the print/REPL; drop after.
-        drop(jit);
         return Ok(1);
     }
 

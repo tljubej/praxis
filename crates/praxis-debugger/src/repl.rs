@@ -23,25 +23,72 @@ use std::io::{BufRead, Write};
 use praxis_runtime::CrashSnapshot;
 
 use crate::render::{render_backtrace, render_frame_locals};
+use crate::session::DebugSession;
 
 /// The prompt shown when the REPL is waiting for a command (§9.4).
 pub const PROMPT: &str = "Praxis crash> ";
 
 /// The interactive crash REPL. Owns the snapshot (taken from the runtime by the
-/// host), the selected frame index, and the I/O handles.
+/// host), the selected frame index, and — when driven from a real fault — the
+/// full [`DebugSession`] (live `Jit`/`Runtime`/`TypeDb`/source/input) the
+/// `p EXPR`/`source`/`restart`/`reload` commands reach into.
+///
+/// The session is `Option`al so pure-navigation unit tests can build a
+/// synthetic snapshot directly (`Repl::new`) without standing up a whole
+/// compile/run pipeline. The CLI path uses [`Repl::new_session`].
 pub struct Repl {
     snapshot: CrashSnapshot,
     selected: usize,
+    session: Option<DebugSession>,
 }
 
 impl Repl {
-    /// Construct a REPL over `snapshot` (the host transfers ownership).
+    /// Construct a navigation-only REPL over `snapshot` (no live session).
+    /// Used by unit tests and by the (rare) case where a fault fired before
+    /// any debug frame, leaving the host with just a snapshot to render.
+    /// Commands that need the session (`p`, `source`, `restart`, …) print a
+    /// "not available" note.
     #[must_use]
     pub fn new(snapshot: CrashSnapshot) -> Self {
         Repl {
             snapshot,
             selected: 0,
+            session: None,
         }
+    }
+
+    /// Construct a REPL over `snapshot` backed by the live `session`. The
+    /// session's `Jit`/`Runtime`/`TypeDb`/source/input are now owned by the
+    /// REPL and dropped when it is. This is the CLI's fault-handoff path.
+    #[must_use]
+    pub fn new_session(snapshot: CrashSnapshot, session: DebugSession) -> Self {
+        Repl {
+            snapshot,
+            selected: 0,
+            session: Some(session),
+        }
+    }
+
+    /// Borrow the live session, if any. M10b commands use this to reach the
+    /// `Jit`/`Runtime`/`TypeDb`; returns `None` for navigation-only REPLs.
+    pub fn session(&self) -> Option<&DebugSession> {
+        self.session.as_ref()
+    }
+
+    /// Mutably borrow the live session, if any. `restart`/`reload` mutate it.
+    pub fn session_mut(&mut self) -> Option<&mut DebugSession> {
+        self.session.as_mut()
+    }
+
+    /// Borrow the crash snapshot. M10b rendering commands (`source`,
+    /// `render_frame_locals`) read frame spans/locals from it.
+    pub fn snapshot(&self) -> &CrashSnapshot {
+        &self.snapshot
+    }
+
+    /// The currently selected frame index (0 = innermost = faulting function).
+    pub fn selected(&self) -> usize {
+        self.selected
     }
 
     /// Run the read-eval-print loop, reading commands from `input` and writing
@@ -213,6 +260,20 @@ mod tests {
         s.fault_kind = FaultKind::IndexOutOfBounds;
         s.frames = vec![frame0, frame1];
         s
+    }
+
+    #[test]
+    fn navigation_only_repl_has_no_session() {
+        // `Repl::new` (the unit-test / degraded path) carries no live session:
+        // `session()` is None, and the snapshot/selected accessors still work.
+        // M10b commands that need the session will degrade gracefully off this.
+        let repl = Repl::new(two_frame_snapshot());
+        assert!(
+            repl.session().is_none(),
+            "navigation-only REPL has no session"
+        );
+        assert_eq!(repl.selected(), 0);
+        assert_eq!(repl.snapshot().len(), 2);
     }
 
     #[test]

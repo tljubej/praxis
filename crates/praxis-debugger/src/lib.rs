@@ -6,12 +6,15 @@
 //! crash REPL with `bt`, `frame`, `locals`, `p EXPR`, `type EXPR`, `source`,
 //! `input`, `parser`, `heap`, `restart`, `reload`, `quit`, `help`.
 //!
-//! **M10a:** snapshot rendering + the noninteractive fallback (§9.6). The
-//! interactive REPL navigation/locals lands in WS5; `p EXPR`/`type EXPR` and
-//! the context commands land in M10b.
+//! **M10a:** snapshot rendering + the noninteractive fallback (§9.6) + the
+//! interactive REPL navigation/locals (`bt`/`frame`/`up`/`down`/`locals`).
+//! **M10b:** the read-only `p EXPR`/`type EXPR` evaluator, the `source`/
+//! `input`/`parser`/`heap` context commands, and `restart`/`reload`. The
+//! [`session`] module owns the live compile/run state those commands reach.
 
 pub mod render;
 pub mod repl;
+pub mod session;
 
 /// Marker documenting that this crate was a skeleton through Milestone 9 and
 /// fills at Milestone 10.
