@@ -247,6 +247,7 @@ fn lower_fn(
         locals: Vec::new(),
         blocks: Vec::new(),
         debug_names: Vec::new(),
+        span: f.span,
     };
     let entry = func.new_block();
     let fault = func.new_block();
@@ -318,6 +319,11 @@ fn lower_closure_fn(
         locals: Vec::new(),
         blocks: Vec::new(),
         debug_names: Vec::new(),
+        // Closures are lifted to synthetic functions; the `__p_expr` debugger
+        // function is also span-less. The `source` command degrades to "no
+        // span recorded" for these, which is acceptable (the faulting frame is
+        // almost always a real source function).
+        span: (0, 0),
     };
     let entry = func.new_block();
     let fault = func.new_block();

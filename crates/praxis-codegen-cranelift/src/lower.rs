@@ -76,6 +76,8 @@ enum Symbol {
     PushDebugFrame,
     /// Epilogue helper: pop + free the debug frame (§9.3, ADR-021, M10-WS2).
     PopDebugFrame,
+    /// Prologue helper: set the just-pushed frame's source span (§9.3, M10-WS1).
+    SetFrameSourceSpan,
     /// Fault-epilogue helper: snapshot the debug-frame chain before unwind
     /// (§9.3, M10-WS3). Idempotent — only the first (innermost) call captures.
     SnapshotDebugChain,
@@ -112,6 +114,7 @@ impl Symbol {
             Symbol::PopShadowFrame => "praxis_pop_shadow_frame",
             Symbol::PushDebugFrame => "praxis_push_debug_frame",
             Symbol::PopDebugFrame => "praxis_pop_debug_frame",
+            Symbol::SetFrameSourceSpan => "praxis_set_frame_source_span",
             Symbol::SnapshotDebugChain => "praxis_snapshot_debug_chain",
             Symbol::RaiseStackOverflow => "praxis_raise_stack_overflow",
         }
@@ -230,6 +233,25 @@ pub(crate) fn lower_function<M: Module>(
         builder.func.dfg.first_result(call)
     };
     builder.def_var(debug_frame_var, debug_frame_ptr);
+
+    // Prologue (cont.): record this function's source span on the just-pushed
+    // debug frame (§9.3 "current source span", M10-WS1). Threaded AST → HIR
+    // `TypedFn` → MIR `Function.span` → here. The crash debugger's `source`
+    // command renders the faulting function's extent from this. A `(0, 0)`
+    // span (synthetic/closure functions) is a no-op: the setter still writes
+    // it, and the debugger treats `(0, 0)` as "no span recorded".
+    {
+        let fr = import(
+            module,
+            &mut builder,
+            &mut HashMap::new(),
+            Symbol::SetFrameSourceSpan,
+            &set_frame_source_span_sig(),
+        )?;
+        let start = builder.ins().iconst(GC, mir.span.0 as i64);
+        let end = builder.ins().iconst(GC, mir.span.1 as i64);
+        builder.ins().call(fr, &[ctx_val, start, end]);
+    }
 
     let mut import_cache: HashMap<Symbol, FuncRef> = HashMap::new();
     let mut user_func_cache: HashMap<String, FuncRef> = HashMap::new();
@@ -1472,6 +1494,10 @@ fn build_debug_local_metas(
             name_len: name.len() as u32,
             symbol_id,
             descriptor: descriptor_for_type(db, local.ty),
+            // The full static `Type` id (M10-WS1b): `Type(u32)`. Lets the
+            // debugger reconstruct the exact local type (incl. collection
+            // element types / record shapes) the runtime `descriptor` loses.
+            type_id: local.ty.0,
         });
         symbol_id += 1;
     }
@@ -1653,6 +1679,16 @@ fn pop_debug_frame_sig() -> Signature {
     let mut sig = Signature::new(CallConv::Fast);
     sig.params.push(AbiParam::new(GC)); // ctx
     sig.params.push(AbiParam::new(GC)); // frame
+    sig
+}
+
+/// `fn(ctx: i64, start: i64, end: i64) -> void` — sets the just-pushed frame's
+/// source span (§9.3, M10-WS1).
+fn set_frame_source_span_sig() -> Signature {
+    let mut sig = Signature::new(CallConv::Fast);
+    sig.params.push(AbiParam::new(GC)); // ctx
+    sig.params.push(AbiParam::new(GC)); // start
+    sig.params.push(AbiParam::new(GC)); // end
     sig
 }
 

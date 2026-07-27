@@ -17,8 +17,8 @@ use crate::context::{DebugFrame, DebugLocal, RuntimeContext};
 use crate::gc::GcRef;
 
 /// One local's metadata at frame construction: the source name (ptr + len),
-/// the compiler-assigned symbol id, and the local's static type descriptor.
-/// Flattened for FFI.
+/// the compiler-assigned symbol id, the local's static type descriptor, and the
+/// full static `Type` id. Flattened for FFI.
 #[repr(C)]
 pub struct DebugLocalMeta {
     pub source_name: *const u8,
@@ -27,6 +27,10 @@ pub struct DebugLocalMeta {
     /// The local's static type descriptor (§9.3). The backend embeds the
     /// `'static TypeDescriptor` resolved from the MIR local's `Type`.
     pub descriptor: *const crate::TypeDescriptor,
+    /// The full static `Type` id (`praxis_types::Type(u32)` handle, M10-WS1b).
+    /// Lets the debugger reconstruct the exact local type (incl. collection
+    /// element types / record shapes) the runtime `descriptor` alone loses.
+    pub type_id: u32,
 }
 
 /// Allocate a debug frame for `func_name` with `local_count` local slots, chain
@@ -67,6 +71,7 @@ pub unsafe extern "C" fn praxis_push_debug_frame(
                 symbol_id: m.symbol_id,
                 descriptor: m.descriptor,
                 value: GcRef::null_sentinel_ref(),
+                type_id: m.type_id,
             })
             .collect()
     };
@@ -92,6 +97,34 @@ pub unsafe extern "C" fn praxis_push_debug_frame(
         (*ctx).debug_top = raw;
     }
     raw
+}
+
+/// Set the source span `[start, end)` (byte offsets into program source) on the
+/// frame at `ctx.debug_top` (§9.3 "current source span"). The backend calls
+/// this in the prologue, right after [`praxis_push_debug_frame`], so each
+/// generated function records its source extent for the `source` REPL command.
+/// `M10b-WS1`: spans flow AST → HIR `TypedFn` → MIR `Function` → backend here.
+///
+/// # Safety
+/// `ctx` must point at a live, wired `RuntimeContext` whose `debug_top` is a
+/// valid frame (the frame just pushed by the caller).
+#[no_mangle]
+pub unsafe extern "C" fn praxis_set_frame_source_span(
+    ctx: *mut RuntimeContext,
+    start: u32,
+    end: u32,
+) {
+    if ctx.is_null() {
+        return;
+    }
+    let top = unsafe { (*ctx).debug_top };
+    if top.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees debug_top is the frame just pushed.
+    unsafe {
+        (*top).source_span = (start, end);
+    }
 }
 
 /// Pop the frame at `ctx.debug_top` (must be `frame`), restoring the parent,
@@ -239,12 +272,14 @@ mod tests {
                 name_len: 1,
                 symbol_id: 10,
                 descriptor: crate::scalars::INT,
+                type_id: 1,
             },
             DebugLocalMeta {
                 source_name: name_a.as_ptr(),
                 name_len: 1,
                 symbol_id: 20,
                 descriptor: crate::scalars::INT,
+                type_id: 1,
             },
         ];
         // SAFETY: ctx wired; metas is valid.
@@ -261,8 +296,46 @@ mod tests {
                 locals[0].descriptor as *const _,
                 crate::scalars::INT as *const _
             );
+            // M10-WS1b: the full static Type id is carried through.
+            assert_eq!(locals[0].type_id, 1);
+            assert_eq!(locals[1].type_id, 1);
             praxis_pop_debug_frame(ctx, frame);
         }
         unsafe { drop_ctx(ctx) };
+    }
+
+    /// M10-WS1: `praxis_set_frame_source_span` records the span on the
+    /// just-pushed frame, so the `source` REPL command can render it.
+    #[test]
+    fn set_frame_source_span_records_on_top() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx is wired; name is valid for the program's lifetime.
+        unsafe {
+            let frame = praxis_push_debug_frame(ctx, b"f".as_ptr(), 1, 0, std::ptr::null());
+            // Freshly pushed frames default to (0, 0).
+            assert_eq!((*frame).source_span, (0, 0));
+            praxis_set_frame_source_span(ctx, 40, 90);
+            assert_eq!((*frame).source_span, (40, 90));
+            // A second push+set records a *different* span on the new top, not
+            // the old frame — the setter always targets `debug_top`.
+            let outer = praxis_push_debug_frame(ctx, b"g".as_ptr(), 1, 0, std::ptr::null());
+            praxis_set_frame_source_span(ctx, 7, 9);
+            assert_eq!((*outer).source_span, (7, 9));
+            // The inner frame keeps its span.
+            assert_eq!((*frame).source_span, (40, 90));
+            praxis_pop_debug_frame(ctx, outer);
+            praxis_pop_debug_frame(ctx, frame);
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// M10-WS1: the setter is null-safe (no crash on a null ctx / no top).
+    #[test]
+    fn set_frame_source_span_is_null_safe() {
+        // SAFETY: the contract is null-safety; we exercise it directly.
+        unsafe {
+            praxis_set_frame_source_span(std::ptr::null_mut(), 1, 2);
+        }
     }
 }

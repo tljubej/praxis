@@ -200,12 +200,14 @@ mod tests {
             func_name: boom.as_ptr(),
             func_name_len: boom.len() as u32,
             locals: Vec::new(),
+            source_span: (0, 0),
         };
         let frame1 = SnapshotFrame {
             parent: usize::MAX,
             func_name: main.as_ptr(),
             func_name_len: main.len() as u32,
             locals: Vec::new(),
+            source_span: (0, 0),
         };
         let mut s = CrashSnapshot::new();
         s.fault_kind = FaultKind::IndexOutOfBounds;

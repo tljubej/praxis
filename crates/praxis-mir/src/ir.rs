@@ -34,6 +34,12 @@ pub struct Function {
     /// Source-name metadata per local, for fault snapshots (§19 M4 acceptance:
     /// "named locals are available as `GcRef` values in fault snapshots").
     pub debug_names: Vec<Option<String>>,
+    /// The function's source span `[start, end)` as byte offsets into the
+    /// program source (§9.3, M10-WS1). Threaded AST → HIR → MIR → backend so
+    /// the crash debugger's `source` command can render the faulting function.
+    /// `(0, 0)` for synthetic functions with no source (closures get the
+    /// literal's span; the `__p_expr` debugger function is span-less).
+    pub span: (u32, u32),
 }
 
 /// A local slot.
@@ -354,6 +360,7 @@ mod tests {
             locals: Vec::new(),
             blocks: Vec::new(),
             debug_names: Vec::new(),
+            span: (0, 0),
         };
         let a = f.new_local(LocalKind::Gc, Type(0), Some("x".into()));
         let b = f.new_local(LocalKind::Scalar(ScalarKind::Int), Type(0), None);

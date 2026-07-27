@@ -275,6 +275,7 @@ mod tests {
             locals: Vec::new(),
             blocks: Vec::new(),
             debug_names: Vec::new(),
+            span: (0, 0),
         };
         let ret = gc_local(&mut f, "ret");
         f.return_local = ret;
@@ -338,6 +339,7 @@ mod tests {
             locals: Vec::new(),
             blocks: Vec::new(),
             debug_names: Vec::new(),
+            span: (0, 0),
         };
         let _blk: Block = Block {
             id: crate::ir::BlockId(0),

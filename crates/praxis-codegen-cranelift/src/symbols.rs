@@ -132,6 +132,9 @@ pub fn resolve(name: &str) -> Option<*const u8> {
         "praxis_var_cell_set" => praxis_var_cell_set as *const (),
         "praxis_push_debug_frame" => praxis_runtime::debug::praxis_push_debug_frame as *const (),
         "praxis_pop_debug_frame" => praxis_runtime::debug::praxis_pop_debug_frame as *const (),
+        "praxis_set_frame_source_span" => {
+            praxis_runtime::debug::praxis_set_frame_source_span as *const ()
+        }
         "praxis_snapshot_debug_chain" => {
             praxis_runtime::crash_snapshot::praxis_snapshot_debug_chain as *const ()
         }

@@ -158,6 +158,7 @@ mod tests {
             func_name: name.as_ptr(),
             func_name_len: name.len() as u32,
             locals: Vec::new(),
+            source_span: (0, 0),
         };
         let mut s = CrashSnapshot::new();
         s.fault_kind = FaultKind::IndexOutOfBounds;

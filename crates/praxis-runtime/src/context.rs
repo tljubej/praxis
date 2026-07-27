@@ -136,6 +136,14 @@ pub struct DebugLocal {
     pub descriptor: *const crate::TypeDescriptor,
     /// The current value of the local (updated by the spill at safepoints).
     pub value: GcRef,
+    /// The full static `Type` id (`praxis_types::Type(u32)` handle, M10-WS1b),
+    /// so the crash debugger can reconstruct the local's *exact* type —
+    /// including collection element types (`Vec[Int]`, `Map[Text, Int]`) and
+    /// record field shapes — which the runtime `descriptor` alone loses. The
+    /// debugger pairs this id with the live `TypeDb` to type-check `p EXPR`
+    /// against the selected frame (§9.5). `0` until the backend threads it
+    /// (M10b); sound as a fallback since the debugger treats `0` as "unknown".
+    pub type_id: u32,
 }
 
 /// One frame in the crash-debugger's snapshot chain (§9.3, M5/M10).

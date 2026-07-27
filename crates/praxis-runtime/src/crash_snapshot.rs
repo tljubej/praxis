@@ -40,6 +40,10 @@ pub struct SnapshotFrame {
     pub func_name_len: u32,
     /// The copied locals. `value` fields are the GC roots.
     pub locals: Vec<DebugLocal>,
+    /// The function's source span `[start, end)` byte offsets (§9.3). Copied
+    /// from the live frame; `(0, 0)` means "unknown" (M10b-WS1 fills it from
+    /// the AST; the `source` REPL command renders it).
+    pub source_span: (u32, u32),
 }
 
 /// A crash snapshot: the deep-copied frame chain + the fault kind that triggered
@@ -222,6 +226,7 @@ unsafe fn copy_chain(top: *mut DebugFrame) -> Vec<SnapshotFrame> {
             parent: usize::MAX,
             func_name: frame.func_name,
             func_name_len: frame.func_name_len,
+            source_span: frame.source_span,
             locals,
         });
         cur = frame.parent;

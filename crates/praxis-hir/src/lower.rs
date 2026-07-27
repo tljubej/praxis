@@ -74,6 +74,11 @@ pub struct TypedFn {
     pub body: TypedBlock,
     /// The whole function's type `(P0, …) -> R`.
     pub fn_type: Type,
+    /// The function's source span `[start, end)` as byte offsets (§9.3,
+    /// M10-WS1). Threaded through to MIR `Function` so the crash debugger's
+    /// `source` command can render the faulting function's extent. `(0, 0)`
+    /// only when the AST node has no usable span.
+    pub span: (u32, u32),
 }
 
 /// A parameter `name: Type`.
@@ -682,6 +687,13 @@ impl<'a> Lowerer<'a> {
             return_type,
             body,
             fn_type,
+            // The whole `fn ... { ... }` declaration's byte span (§9.3, M10-WS1).
+            // Threaded to MIR `Function` → backend → debug frame so the `source`
+            // REPL command can render the faulting function's extent.
+            span: {
+                let r = item.syntax().text_range();
+                (u32::from(r.start()), u32::from(r.end()))
+            },
         })
     }
 

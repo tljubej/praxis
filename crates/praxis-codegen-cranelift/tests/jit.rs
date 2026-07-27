@@ -4132,3 +4132,74 @@ fn m10ws3_snapshot_retains_reachable_objects_across_gc() {
     assert_eq!(v[0].as_int(), 11);
     assert_eq!(v[1].as_int(), 22);
 }
+
+// ===========================================================================
+// M10 WS1 (Part 2) — full static `Type` id + source span threaded into the
+// debug frame (§9.3). WS1 of Part 2 carries the per-local `type_id` (so the
+// `p EXPR` evaluator can reconstruct `Vec[Int]` / record shapes the runtime
+// `descriptor` loses) and the per-function source span (so the `source`
+// command can render the faulting function). These assert both survive into
+// the crash snapshot.
+// ===========================================================================
+
+#[test]
+fn m10b_ws1_snapshot_frame_carries_source_span() {
+    // `main` has a real source span; the snapshot's frame for `main` must carry
+    // a non-empty `[start, end)` byte range, not the `(0, 0)` default. A
+    // deliberately-placed OOB get faults inside `main`, so frame 0 is `main`.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.get(9)\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault());
+    let snap = rt.crash_snapshot().expect("snapshot captured");
+    let main_frame = &snap.frames[0];
+    assert_eq!(unsafe { snap.frame_name(0) }, "main");
+    // The span covers some prefix of `src`; it must be non-empty and point
+    // inside the source (end <= src.len()).
+    let (start, end) = main_frame.source_span;
+    assert!(
+        start < end && (end as usize) <= src.len(),
+        "main's source_span should be a real in-source range, got ({start}, {end}) for src len {}",
+        src.len()
+    );
+    // The span must cover the `fn main` declaration.
+    let span_text = &src[start as usize..end as usize];
+    assert!(
+        span_text.starts_with("fn main"),
+        "source_span should cover `fn main`, got: {span_text:?}"
+    );
+}
+
+#[test]
+fn m10b_ws1_snapshot_locals_carry_distinct_type_ids() {
+    // Two locals of distinct static types — `Int` (`n`) and `Vec[Int]` (`xs`) —
+    // must carry distinct `type_id`s in the snapshot. This proves the full
+    // static `Type` (not just the runtime descriptor, which collapses all
+    // collections to `VEC`) is threaded through, so the M10b `p EXPR` evaluator
+    // can reconstruct `Vec[Int]` element types for type-checking.
+    let src = "fn main() -> Int {\n  let n = 42\n  let xs = Vec()\n  xs.push(n)\n  xs.get(9)\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault());
+    let snap = rt.crash_snapshot().expect("snapshot captured");
+    let frame = &snap.frames[0];
+    // Locate the two named locals by source name (skip synthetic <tmp> locals).
+    let n = frame
+        .locals
+        .iter()
+        .find(|l| l.name() == "n")
+        .expect("`n` local present");
+    let xs = frame
+        .locals
+        .iter()
+        .find(|l| l.name() == "xs")
+        .expect("`xs` local present");
+    // Non-zero (the default placeholder for unknown types is 0).
+    assert_ne!(n.type_id, 0, "`n` should carry a real Int type id");
+    assert_ne!(xs.type_id, 0, "`xs` should carry a real Vec type id");
+    // Distinct — the whole point of threading the full Type id: the runtime
+    // descriptors INT and VEC differ, but this also guards against any future
+    // collapse where two different Types share an id.
+    assert_ne!(
+        n.type_id, xs.type_id,
+        "Int and Vec locals must have distinct type ids"
+    );
+}
