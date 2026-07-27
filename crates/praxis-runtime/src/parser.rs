@@ -159,6 +159,7 @@ unsafe fn walk(
         PlanNode::Block { items } => walk_block(&rt, plan, items, bytes, offset),
         PlanNode::Choice { cases } => walk_choice(&rt, plan, cases, bytes, offset),
         PlanNode::Optional { child } => walk_optional(&rt, plan, *child, bytes, offset),
+        PlanNode::Scan { child } => walk_scan(&rt, plan, *child, bytes, offset),
         PlanNode::Csv { child } => walk_csv(&rt, plan, *child, bytes, offset),
         PlanNode::Ws { child } => walk_ws(&rt, plan, *child, bytes, offset),
         PlanNode::Sep {
@@ -487,6 +488,34 @@ fn walk_optional(
             Ok((none_ref, offset))
         }
     }
+}
+
+/// Walk `scan(P)` (M9, §7.5): slide a cursor across the region; at each
+/// position try `P`. On success, push the value and advance past the match
+/// (so overlapping matches aren't found); on failure, advance one byte. All
+/// unmatched text is ignored. Returns `Vec[result(P)]` in source order.
+fn walk_scan(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
+    let mut items = Vec::new();
+    let mut cursor = offset;
+    while cursor < bytes.len() {
+        match unsafe { walk(rt.ctx, plan, child, bytes, cursor) } {
+            Ok((value, new_offset)) => {
+                // A match must advance the cursor (otherwise we'd loop forever
+                // on a zero-width match). If it didn't, advance one byte.
+                items.push(value);
+                if new_offset > cursor {
+                    cursor = new_offset;
+                } else {
+                    cursor += 1;
+                }
+            }
+            Err(()) => {
+                cursor += 1;
+            }
+        }
+    }
+    let elem_desc = child_descriptor(plan, child);
+    Ok((rt.alloc_vec(elem_desc, items), bytes.len() - offset))
 }
 
 fn walk_csv(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
@@ -1081,7 +1110,8 @@ fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescri
         | PlanNode::Sections { .. }
         | PlanNode::Csv { .. }
         | PlanNode::Ws { .. }
-        | PlanNode::Sep { .. } => crate::collections::VEC,
+        | PlanNode::Sep { .. }
+        | PlanNode::Scan { .. } => crate::collections::VEC,
         PlanNode::Grid { .. } => crate::collections::GRID,
         // Named sections produce an anonymous record (uniform descriptor; the
         // schema is in the payload, built at runtime by `walk_sections_named`).

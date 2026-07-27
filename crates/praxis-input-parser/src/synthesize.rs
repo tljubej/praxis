@@ -103,6 +103,11 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Type {
                 vec![("Some".into(), Some(vec![elem])), ("None".into(), None)],
             )
         }
+        ParserAst::Scan { child, .. } => {
+            // `scan(P)` → `Vec[result(P)]` (§7.5): matches in source order.
+            let elem = synthesize(child, db);
+            db.vec(elem)
+        }
     }
 }
 

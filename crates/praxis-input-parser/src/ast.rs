@@ -146,6 +146,10 @@ pub enum ParserAst {
     /// and return `None`. Result is `Option[result(P)]`. Failure consumes no
     /// input (parser-level optionality, not exception recovery).
     Optional { child: Box<ParserAst>, span: Span },
+    /// `scan(P)` (M9, §7.5): find repeated `P` matches inside otherwise
+    /// irrelevant text (e.g. corrupted AoC input). Returns matches in source
+    /// order as `Vec[result(P)]`, ignoring unmatched text.
+    Scan { child: Box<ParserAst>, span: Span },
 }
 
 /// One item in a `block(...)` (M9, §7.5).
@@ -175,7 +179,8 @@ impl ParserAst {
             | ParserAst::Grid { span, .. }
             | ParserAst::Block { span, .. }
             | ParserAst::Choice { span, .. }
-            | ParserAst::Optional { span, .. } => *span,
+            | ParserAst::Optional { span, .. }
+            | ParserAst::Scan { span, .. } => *span,
         }
     }
 }

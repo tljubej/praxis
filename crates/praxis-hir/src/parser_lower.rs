@@ -252,6 +252,15 @@ fn convert_constructor_call(
         }
         return None;
     }
+    if ctor_name == "scan" {
+        if let Some(CallArg::Parser(child)) = args.into_iter().next() {
+            return Some(ParserAst::Scan {
+                child: Box::new(child),
+                span,
+            });
+        }
+        return None;
+    }
 
     let ctor = Constructor::from_keyword(&ctor_name)?;
 
