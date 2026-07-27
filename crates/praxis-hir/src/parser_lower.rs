@@ -240,6 +240,9 @@ fn convert_constructor_call(
     if ctor_name == "block" {
         return Some(build_block(args, span));
     }
+    if ctor_name == "choice" {
+        return Some(build_choice(args, span));
+    }
 
     let ctor = Constructor::from_keyword(&ctor_name)?;
 
@@ -464,6 +467,19 @@ fn build_block(args: Vec<CallArg>, span: Span) -> ParserAst {
         }
     }
     ParserAst::Block { items, span }
+}
+
+/// Build a `ParserAst::Choice` from the args of a `choice(Name: P, ...)` call
+/// (M9, §7.5). Each case is a named arg `(Name, P)`; positional / string args
+/// are not valid in a choice and are dropped (validation surfaces the error).
+fn build_choice(args: Vec<CallArg>, span: Span) -> ParserAst {
+    let mut cases: Vec<(String, ParserAst)> = Vec::new();
+    for arg in args {
+        if let CallArg::Named { name, parser } = arg {
+            cases.push((name, parser));
+        }
+    }
+    ParserAst::Choice { cases, span }
 }
 
 // ---- diagnostic helpers ----------------------------------------------------

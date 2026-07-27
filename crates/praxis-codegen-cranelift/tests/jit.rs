@@ -3721,3 +3721,52 @@ fn m9_block_two_template_fields_flatten() {
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 6);
 }
+
+// --- M9 WS4: choice generated enums (§7.5) ----------------------------------
+
+#[test]
+fn m9_choice_first_alternative_matches() {
+    // choice(A: `{a:int}`, B: `{b:int}`) on "42" → first case wins (.A).
+    // Scalar payload recovered directly.
+    let src = "fn main() -> Int {\n  let v = read choice(A: int, B: int)\n  match v {\n    A(n) => n\n    B(n) => n\n  }\n}\n";
+    let (rt, result) = run_main_with_input(src, "42");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn m9_choice_second_alternative_via_backtrack() {
+    // choice(A: int, B: word) on "hello" — A fails (not an int), B wins via
+    // backtracking. Scalar payloads to avoid the anon-record-as-payload field
+    // access inference gap (a pre-existing limitation, not choice-specific).
+    let src = "fn main() -> Int {\n  let v = read choice(A: int, B: word)\n  match v {\n    A(n) => n\n    B(w) => 99\n  }\n}\n";
+    let (rt, result) = run_main_with_input(src, "hello");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 99);
+}
+
+#[test]
+fn m9_choice_distinct_payloads() {
+    // Two cases with different scalar payload types; the matched case's payload
+    // is recovered.
+    let src = "fn main() -> Int {\n  let v = read choice(Num: int, Txt: word)\n  match v {\n    Num(n) => n\n    Txt(w) => 7\n  }\n}\n";
+    let (rt, result) = run_main_with_input(src, "123");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 123);
+}
+
+#[test]
+fn m9_choice_equality() {
+    // Two choice results of the same shape compare equal when same variant+payload.
+    let src = "fn main() -> Int {\n  let a = read choice(N: int)\n  let b = read choice(N: int)\n  if a == b { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main_with_input(src, "5");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+// NOTE: choice with a *record-payload* case (e.g. choice(A: `{a:int}`) then
+// `match v { A(r) => r.a }`) is a known gap: anonymous-record field access on
+// a match-bound variant payload doesn't resolve through the anon-enum payload
+// type. Scalar payloads work fully (above). This is a pre-existing inference
+// interaction surfaced by choice, tracked as an M9 follow-up; it does not block
+// the §19.9 acceptance fixtures, which use scalar-payload choices (C.9 scan).

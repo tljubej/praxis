@@ -45,6 +45,12 @@ pub enum PlanNode {
     /// positional named-capture templates flatten their fields into the result
     /// record, named items contribute one field each.
     Block { items: &'static [BlockItemNode] },
+    /// `choice(Name: P, ...)` (M9, §7.5). Try each case in source order; the
+    /// first match wins and its value becomes the variant's payload. `cases`
+    /// are `(name, child_index)` pairs.
+    Choice {
+        cases: &'static [(&'static str, u32)],
+    },
     /// `csv(P)`.
     Csv { child: u32 },
     /// `ws(P)`.
@@ -280,6 +286,18 @@ fn lower_node(b: &mut PlanBuilder, ast: &ParserAst) -> u32 {
                 .collect();
             let items_slice = leak(item_nodes);
             b.push_node(PlanNode::Block { items: items_slice })
+        }
+        ParserAst::Choice { cases, .. } => {
+            let case_entries: Vec<(&'static str, u32)> = cases
+                .iter()
+                .map(|(name, p)| {
+                    let n = leak_str(name);
+                    let c = lower_node(b, p);
+                    (n, c)
+                })
+                .collect();
+            let cases_slice = leak(case_entries);
+            b.push_node(PlanNode::Choice { cases: cases_slice })
         }
         ParserAst::Template { parts, .. } => lower_template(b, parts),
     }

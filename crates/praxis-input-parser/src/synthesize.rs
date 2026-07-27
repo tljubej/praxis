@@ -79,6 +79,20 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Type {
             }
             db.anon_record(rec_fields)
         }
+        ParserAst::Choice { cases, .. } => {
+            // Anonymous enum (§7.5): one variant per case, each carrying the
+            // case's result type as a single-element payload (so the parsed
+            // value is recoverable via match). Identity is name+signature-based
+            // via the M9 unify arm + anon_enum's synthetic name.
+            let variants: Vec<(String, Option<Vec<Type>>)> = cases
+                .iter()
+                .map(|(name, p)| {
+                    let payload_ty = synthesize(p, db);
+                    (name.clone(), Some(vec![payload_ty]))
+                })
+                .collect();
+            db.anon_enum(variants)
+        }
     }
 }
 

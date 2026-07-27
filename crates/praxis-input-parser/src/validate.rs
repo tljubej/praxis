@@ -124,6 +124,28 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
                 }
             }
         }
+        ParserAst::Choice { cases, span } => {
+            // §7.5: at least one case; unique case names; recurse.
+            if cases.is_empty() {
+                errs.push(ValidationError {
+                    span: *span,
+                    code: "I025",
+                    message: "`choice` requires at least one case".to_string(),
+                });
+            }
+            let mut seen = Vec::new();
+            for (name, parser) in cases {
+                if seen.contains(name) {
+                    errs.push(ValidationError {
+                        span: *span,
+                        code: "I027",
+                        message: format!("duplicate choice case `{name}`"),
+                    });
+                }
+                seen.push(name.clone());
+                validate_node(parser, errs);
+            }
+        }
     }
 }
 

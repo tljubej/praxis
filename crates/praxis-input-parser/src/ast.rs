@@ -134,6 +134,14 @@ pub enum ParserAst {
     /// named (else rejected). A named item contributes one field. Result is a
     /// flattened anonymous record.
     Block { items: Vec<BlockItem>, span: Span },
+    /// `choice(Name: P, Name: P, ...)` (M9, §7.5): parse one of several
+    /// alternatives, generating an anonymous enum. Each case's parser produces
+    /// the payload (a record for a named-capture template, a scalar otherwise).
+    /// The first alternative that matches wins (source order).
+    Choice {
+        cases: Vec<(String, ParserAst)>,
+        span: Span,
+    },
 }
 
 /// One item in a `block(...)` (M9, §7.5).
@@ -161,7 +169,8 @@ impl ParserAst {
             | ParserAst::Ws { span, .. }
             | ParserAst::Sep { span, .. }
             | ParserAst::Grid { span, .. }
-            | ParserAst::Block { span, .. } => *span,
+            | ParserAst::Block { span, .. }
+            | ParserAst::Choice { span, .. } => *span,
         }
     }
 }

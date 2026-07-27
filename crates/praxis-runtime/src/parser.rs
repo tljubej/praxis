@@ -117,6 +117,22 @@ impl Rt {
             )
         }
     }
+
+    /// Allocate an enum value (M9): `tag` selects the variant; `items` are the
+    /// payload values. Matches the `EnumPayload` layout that codegen-produced
+    /// `match` code expects (§4.6, M7). Used by `choice`/`optional`.
+    fn alloc_enum(&self, tag: u32, items: Vec<GcRef>) -> GcRef {
+        let payload = crate::enums::EnumPayload { tag, items };
+        // SAFETY: ctx is valid; payload matches ENUM's layout.
+        unsafe {
+            heap_ref(self.ctx).alloc_with(
+                crate::enums::ENUM,
+                std::mem::size_of::<crate::enums::EnumPayload>(),
+                std::mem::align_of::<crate::enums::EnumPayload>(),
+                |ptr| (ptr as *mut crate::enums::EnumPayload).write(payload),
+            )
+        }
+    }
 }
 
 /// Walk a plan node against `bytes` starting at `offset`, producing a value.
@@ -141,6 +157,7 @@ unsafe fn walk(
             repeated_tail,
         } => walk_sections_named(&rt, plan, fields, *repeated_tail, bytes, offset),
         PlanNode::Block { items } => walk_block(&rt, plan, items, bytes, offset),
+        PlanNode::Choice { cases } => walk_choice(&rt, plan, cases, bytes, offset),
         PlanNode::Csv { child } => walk_csv(&rt, plan, *child, bytes, offset),
         PlanNode::Ws { child } => walk_ws(&rt, plan, *child, bytes, offset),
         PlanNode::Sep {
@@ -411,6 +428,40 @@ fn flatten_record_into(
             captures.push((Some(field.name), u32::MAX, *value));
         }
     }
+}
+
+/// Walk `choice(Name: P, ...)` (M9, §7.5): try each case in source order from
+/// the current offset. The first case whose parser succeeds wins; its value
+/// becomes the variant's payload and the cursor advances to where that parser
+/// stopped. If a case fails, the cursor is restored (backtracking) and the next
+/// case is tried. If no case matches, this is a parse fault.
+///
+/// Backtracking note: a failed case may have allocated GC objects (since `walk`
+/// allocates eagerly); those are unreferenced and collected later. Only the
+/// cursor is restored — there is no allocator rollback, which is fine because
+/// failed allocations are simply garbage.
+fn walk_choice(
+    rt: &Rt,
+    plan: &ParserPlan,
+    cases: &'static [(&'static str, u32)],
+    bytes: &[u8],
+    offset: usize,
+) -> WalkResult {
+    for (tag, (_name, child)) in cases.iter().enumerate() {
+        match unsafe { walk(rt.ctx, plan, *child, bytes, offset) } {
+            Ok((value, new_offset)) => {
+                // First match wins. Tag with this case's index; the value is
+                // the single payload slot.
+                let enum_ref = rt.alloc_enum(tag as u32, vec![value]);
+                return Ok((enum_ref, new_offset));
+            }
+            Err(()) => {
+                // Backtrack: try the next case from the same offset.
+                continue;
+            }
+        }
+    }
+    Err(())
 }
 
 fn walk_csv(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
@@ -1012,6 +1063,8 @@ fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescri
         PlanNode::SectionsNamed { .. } => crate::records::RECORD,
         // A block produces a flattened anonymous record (uniform descriptor).
         PlanNode::Block { .. } => crate::records::RECORD,
+        // choice/optional produce an enum (uniform descriptor; tag + payload).
+        PlanNode::Choice { .. } => crate::enums::ENUM,
         // A template's result is a scalar (single anon capture), a record (named
         // captures), or Unit (no captures). A tuple's result is a tuple. These
         // are uniform descriptors too (schema in the payload).
