@@ -8,6 +8,7 @@
 //! looks up plans by index and walks their `#[repr(C)]` node arena.
 
 use crate::context::RuntimeContext;
+use crate::parse_detail::ParseFail;
 use crate::scalars;
 use crate::text::{text_bytes, TextPayload};
 use crate::GcRef;
@@ -31,15 +32,26 @@ pub unsafe fn run_plan_by_index(
 
 /// Run a parser plan against an input buffer.
 ///
+/// Clears the runtime's [`ParseDetail`] slot at the start so a stale failure
+/// from a prior parse does not leak in; on a mismatch, the deepest failure is
+/// recorded there (§7.11, M10-WS1) before the `ParseFailed` fault is raised.
+///
 /// # Safety
 /// `ctx` must be live and wired; `input` must be a valid `Text` GcRef.
 unsafe fn run_plan(ctx: *mut RuntimeContext, plan: &ParserPlan, input: GcRef) -> GcRef {
     let payload = input.payload::<TextPayload>();
     let bytes = unsafe { text_bytes(payload) };
+    // Clear any stale detail from a prior parse, then run.
+    unsafe { clear_parse_detail(ctx) };
     let result = unsafe { walk(ctx, plan, plan.root, bytes, 0) };
     match result {
         Ok((value, _consumed)) => value,
-        Err(_) => unsafe { fault_sentinel(ctx) },
+        Err(fail) => {
+            // Record the deepest failure into the runtime's detail slot, then
+            // raise the fault. The host reads the detail after `ParseFailed`.
+            unsafe { record_fail(ctx, fail, bytes) };
+            unsafe { fault_sentinel(ctx) }
+        }
     }
 }
 
@@ -55,9 +67,38 @@ unsafe fn set_parse_fault(ctx: *mut RuntimeContext) {
     fault.set(crate::FaultKind::ParseFailed);
 }
 
+/// Clear the runtime's [`ParseDetail`] slot at the start of a parse.
+///
+/// # Safety
+/// `ctx` must be live and wired with a non-null `parse_detail`.
+unsafe fn clear_parse_detail(ctx: *mut RuntimeContext) {
+    if (*ctx).parse_detail.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees parse_detail points at a live ParseDetail.
+    unsafe { (*(*ctx).parse_detail).clear() };
+}
+
+/// Record a [`ParseFail`] into the runtime's [`ParseDetail`] slot, keeping the
+/// deepest (most specific) failure (§7.11).
+///
+/// # Safety
+/// `ctx` must be live and wired; `input` is the buffer the failure was against
+/// (used for the actual-preview).
+unsafe fn record_fail(ctx: *mut RuntimeContext, fail: ParseFail, input: &[u8]) {
+    if (*ctx).parse_detail.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees parse_detail points at a live ParseDetail.
+    unsafe { (*(*ctx).parse_detail).consider(fail, input) };
+}
+
 /// The outcome of walking a node: a value + the number of bytes consumed, or an
-/// error (parse mismatch).
-type WalkResult = Result<(GcRef, usize), ()>;
+/// error carrying the §7.11 structured detail. The deepest (highest-offset)
+/// failure wins at the [`run_plan`] boundary; inner failures propagate up with
+/// their already-specific detail, so an outer constructor only overrides when
+/// it has *more* specific information (it generally does not).
+type WalkResult = Result<(GcRef, usize), ParseFail>;
 
 /// The runtime, extracted from the context for allocation calls.
 struct Rt {
@@ -197,18 +238,20 @@ fn walk_atomic(rt: &Rt, kind: AtomicKind, bytes: &[u8], offset: usize) -> WalkRe
             let s = trim_leading_ws(rest);
             let (digits, len) = take_int_run(s);
             if digits.is_empty() {
-                return Err(());
+                return Err(ParseFail::at(offset + (rest.len() - s.len()), 0, "int"));
             }
-            let value: i64 = digits.parse().map_err(|_| ())?;
+            let value: i64 = digits
+                .parse()
+                .map_err(|_| ParseFail::at(offset + (rest.len() - s.len()), len, "int"))?;
             Ok((rt.alloc_int(value), offset + (rest.len() - s.len()) + len))
         }
         AtomicKind::Digit => {
             let s = trim_leading_ws(rest);
             let Some(&b) = s.first() else {
-                return Err(());
+                return Err(ParseFail::at(offset + (rest.len() - s.len()), 0, "digit"));
             };
             if !b.is_ascii_digit() {
-                return Err(());
+                return Err(ParseFail::at(offset + (rest.len() - s.len()), 1, "digit"));
             }
             let value = (b - b'0') as i64;
             let consumed = rest.len() - s.len() + 1;
@@ -218,8 +261,12 @@ fn walk_atomic(rt: &Rt, kind: AtomicKind, bytes: &[u8], offset: usize) -> WalkRe
             // One Unicode scalar value. Decode the first char of the (trimmed)
             // remaining input.
             let s = trim_leading_ws(rest);
-            let s_str = std::str::from_utf8(s).map_err(|_| ())?;
-            let ch = s_str.chars().next().ok_or(())?;
+            let s_str =
+                std::str::from_utf8(s).map_err(|_| ParseFail::at(offset, rest.len(), "char"))?;
+            let ch = s_str
+                .chars()
+                .next()
+                .ok_or_else(|| ParseFail::at(offset + (rest.len() - s.len()), 0, "char"))?;
             let consumed = rest.len() - s.len() + ch.len_utf8();
             Ok((rt.alloc_char(ch as u32), offset + consumed))
         }
@@ -227,7 +274,7 @@ fn walk_atomic(rt: &Rt, kind: AtomicKind, bytes: &[u8], offset: usize) -> WalkRe
             let s = trim_leading_ws(rest);
             let (word, len) = take_word_run(s);
             if word.is_empty() {
-                return Err(());
+                return Err(ParseFail::at(offset + (rest.len() - s.len()), 0, "word"));
             }
             let leading = rest.len() - s.len();
             Ok((
@@ -309,7 +356,7 @@ fn walk_sections_named(
     // Too few sections is a parse fault.
     let min_needed = fields.len();
     if sections.len() < min_needed {
-        return Err(());
+        return Err(ParseFail::at(offset, region.len(), "section header"));
     }
     // Build the record captures: each named field parses its section, in order.
     // The repeated tail (if any) parses every remaining section into a Vec.
@@ -469,13 +516,17 @@ fn walk_choice(
                 let enum_ref = rt.alloc_enum(tag as u32, vec![value]);
                 return Ok((enum_ref, new_offset));
             }
-            Err(()) => {
-                // Backtrack: try the next case from the same offset.
+            Err(_inner) => {
+                // Backtrack: try the next case from the same offset. We discard
+                // the inner failure here; if no case matches, the choice's own
+                // failure below is the user-visible one. (Recording the deepest
+                // inner failure across cases is a documented hardening
+                // follow-up.)
                 continue;
             }
         }
     }
-    Err(())
+    Err(ParseFail::at(offset, 0, "any choice case"))
 }
 
 /// Walk `optional(P)` (M9, §7.5): parse `P`; on success return `Some(value)`
@@ -494,8 +545,10 @@ fn walk_optional(
             let some_ref = rt.alloc_enum(0, vec![value]);
             Ok((some_ref, new_offset))
         }
-        Err(()) => {
-            // Consume nothing; return None (tag 1, no payload).
+        Err(_) => {
+            // Consume nothing; return None (tag 1, no payload). The inner
+            // failure is intentionally swallowed — `optional` is parser-level
+            // optionality, not exception recovery.
             let none_ref = rt.alloc_enum(1, Vec::new());
             Ok((none_ref, offset))
         }
@@ -521,7 +574,7 @@ fn walk_scan(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize
                     cursor += 1;
                 }
             }
-            Err(()) => {
+            Err(_) => {
                 cursor += 1;
             }
         }
@@ -534,10 +587,17 @@ fn walk_scan(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize
 fn walk_one_of(rt: &Rt, chars: &str, bytes: &[u8], offset: usize) -> WalkResult {
     let rest = &bytes[offset..];
     let s = trim_leading_ws(rest);
-    let s_str = std::str::from_utf8(s).map_err(|_| ())?;
-    let ch = s_str.chars().next().ok_or(())?;
+    let s_str = std::str::from_utf8(s).map_err(|_| ParseFail::at(offset, rest.len(), "char"))?;
+    let ch = s_str
+        .chars()
+        .next()
+        .ok_or_else(|| ParseFail::at(offset + (rest.len() - s.len()), 0, "char"))?;
     if !chars.contains(ch) {
-        return Err(());
+        return Err(ParseFail::at(
+            offset + (rest.len() - s.len()),
+            ch.len_utf8(),
+            format!("one of \"{chars}\""),
+        ));
     }
     let consumed = rest.len() - s.len() + ch.len_utf8();
     Ok((rt.alloc_char(ch as u32), offset + consumed))
@@ -569,7 +629,7 @@ fn walk_characters(
                 }
                 items.push(value);
             }
-            Err(()) => break,
+            Err(_) => break,
         }
     }
     Ok((rt.alloc_vec(scalars::CHAR, items), bytes.len() - offset))
@@ -612,7 +672,11 @@ fn walk_matrix(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usi
     for line in &lines {
         let tokens: Vec<&str> = line.split_whitespace().collect();
         if tokens.len() != width {
-            return Err(());
+            return Err(ParseFail::at(
+                offset,
+                region.len(),
+                "rectangular matrix row",
+            ));
         }
         for token in tokens {
             let token_bytes = token.as_bytes();
@@ -766,7 +830,7 @@ fn walk_grid(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize
         let line_bytes = &region[line.start..line.start + line.len];
         if line_bytes.len() != width {
             // Grid rows must be uniform (§7.5). Ragged grids are M9.
-            return Err(());
+            return Err(ParseFail::at(offset, region.len(), "uniform grid row"));
         }
         for (i, _) in line_bytes.iter().enumerate() {
             let cell_offset = offset + line.start + i;
@@ -824,13 +888,19 @@ fn walk_template(
             praxis_input_parser::TemplatePartNode::Literal { text, ws } => {
                 // Honor the whitespace policy before matching the literal.
                 cursor = match consume_ws(bytes, cursor, *ws) {
+                    None => {
+                        return Err(ParseFail::at(cursor, 0, "whitespace"));
+                    }
                     Some(c) => c,
-                    None => return Err(()),
                 };
                 // Match the literal bytes verbatim.
                 let lit = text.as_bytes();
                 if !bytes[cursor..].starts_with(lit) {
-                    return Err(());
+                    return Err(ParseFail::at(
+                        cursor,
+                        lit.len(),
+                        format!("literal {:?}", text),
+                    ));
                 }
                 cursor += lit.len();
             }
@@ -842,8 +912,10 @@ fn walk_template(
                 // Skip any flexible leading whitespace before a capture, then
                 // walk the child parser to extract one value.
                 cursor = match consume_ws(bytes, cursor, consume_ws_default()) {
+                    None => {
+                        return Err(ParseFail::at(cursor, 0, "whitespace"));
+                    }
                     Some(c) => c,
-                    None => return Err(()),
                 };
                 // `walk` returns the *absolute* new offset (not a delta), so
                 // assign rather than add.
@@ -898,8 +970,10 @@ fn walk_tuple(
     let mut values: Vec<GcRef> = Vec::with_capacity(elements.len());
     for &elem in elements {
         cursor = match consume_ws(bytes, cursor, consume_ws_default()) {
+            None => {
+                return Err(ParseFail::at(cursor, 0, "whitespace"));
+            }
             Some(c) => c,
-            None => return Err(()),
         };
         // `walk` returns the absolute new offset, not a delta.
         let (value, new_offset) = unsafe { walk(rt.ctx, plan, elem, bytes, cursor)? };

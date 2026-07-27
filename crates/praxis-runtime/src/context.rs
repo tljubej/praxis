@@ -13,6 +13,7 @@
 use crate::gc::GcRef;
 use crate::heap::Heap;
 use crate::immortal::{read_bool, Immortals};
+use crate::parse_detail::ParseDetail;
 use crate::roots::RootSet;
 use crate::shadow_frame::ShadowFrame;
 use crate::{collections::VecPayload, descriptor::TypeDescriptor};
@@ -183,6 +184,13 @@ pub struct RuntimeContext {
     /// generated Cranelift code at a fixed offset, like the other `#[repr(C)]`
     /// fields above.
     pub recursion_depth: u32,
+    /// Host-managed pointer to the runtime's [`crate::ParseDetail`] slot
+    /// (§7.11, M10-WS1). The parser interpreter writes the richest parse
+    /// mismatch into it on `ParseFailed`; the host (CLI / crash debugger) reads
+    /// it after the fault. Generated code never touches this field — it is
+    /// appended at the end of `RuntimeContext` so the offsets of all
+    /// generated-code-read fields above are unchanged (§11.6 ABI stability).
+    pub parse_detail: *mut crate::ParseDetail,
 }
 
 impl RuntimeContext {
@@ -205,6 +213,7 @@ impl RuntimeContext {
             unit_ref: input_source,
             current_generation: 0,
             recursion_depth: 0,
+            parse_detail: std::ptr::null_mut(),
         }
     }
 
@@ -236,6 +245,11 @@ pub struct Runtime {
     /// The fault slot generated code signals through (§10.4). Owned here so its
     /// address is stable for the lifetime of the runtime.
     fault: Fault,
+    /// The rich parse-failure detail slot (§7.11, M10-WS1). Owned here so its
+    /// address is stable; `Runtime::context` installs it on every context. The
+    /// parser interpreter writes the deepest mismatch into it; the host reads it
+    /// after a `FaultKind::ParseFailed`.
+    parse_detail: ParseDetail,
 }
 
 impl Runtime {
@@ -248,6 +262,7 @@ impl Runtime {
             heap,
             immortals,
             fault: Fault::clear(),
+            parse_detail: ParseDetail::new(),
         }
     }
 
@@ -279,6 +294,8 @@ impl Runtime {
     /// `pending_fault` points at this runtime's fault slot; `debug_top` stays
     /// null until the debugger lands (M10); `roots` starts null — the first
     /// generated function's prologue pushes the initial shadow frame.
+    /// `parse_detail` points at this runtime's [`ParseDetail`] slot so the
+    /// parser interpreter can record the richest `ParseFailed` detail.
     pub fn context(&mut self) -> RuntimeContext {
         RuntimeContext {
             heap: &mut self.heap as *mut Heap,
@@ -289,6 +306,7 @@ impl Runtime {
             unit_ref: self.immortals.unit(),
             current_generation: 0,
             recursion_depth: 0,
+            parse_detail: &mut self.parse_detail as *mut ParseDetail,
         }
     }
 
@@ -311,6 +329,21 @@ impl Runtime {
         } else {
             None
         }
+    }
+
+    /// Borrow the rich parse-failure detail slot (§7.11, M10-WS1). The host
+    /// reads this after a `FaultKind::ParseFailed` to render the input/parser
+    /// span, the expected description, and the actual preview. Returns `None`
+    /// when no detail was recorded (e.g. a non-parser `ParseFailed` path).
+    #[must_use]
+    pub fn parse_detail(&self) -> &ParseDetail {
+        &self.parse_detail
+    }
+
+    /// Mutably borrow the parse-detail slot (so the host can clear it before a
+    /// rerun, or the debugger can read the partial root value).
+    pub fn parse_detail_mut(&mut self) -> &mut ParseDetail {
+        &mut self.parse_detail
     }
 }
 

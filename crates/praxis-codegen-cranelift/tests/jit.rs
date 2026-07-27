@@ -3911,3 +3911,86 @@ fn m9_matrix_uniformity_faults_on_ragged() {
 // (which then faults on ragged input). The grammar fix (accepting a wider
 // token set for `fill:` values) is a small follow-up; the runtime is ready.
 // Regular `grid(P)` and `matrix(P)` (the acceptance-critical forms) work fully.
+
+// ===========================================================================
+// M10 WS1 — §7.11 rich parse diagnostics (the on-ramp).
+//
+// A `ParseFailed` fault now records structured detail (input span, expected
+// description, actual preview) into the runtime's `ParseDetail` slot. These
+// tests assert the detail is populated after a parse fault — the foundation the
+// noninteractive fallback (WS4) and the crash REPL's `input`/`parser` commands
+// (M10b) render.
+// ===========================================================================
+
+#[test]
+fn m10ws1_parse_failed_records_expected_and_preview() {
+    // `read lines(int)` against non-integer input faults. The detail should
+    // carry a non-empty `expected` and a non-empty `actual_preview`.
+    let src = "fn main() -> Int {\n  let xs = read lines(int)\n  0\n}\n";
+    let (rt, _result) = run_main_with_input(src, "not a number");
+    assert!(
+        rt.has_pending_fault(),
+        "expected ParseFailed, got: {:?}",
+        rt.fault()
+    );
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::ParseFailed);
+    let detail = rt.parse_detail();
+    let fail = detail
+        .fail
+        .as_ref()
+        .expect("ParseDetail should record the failure");
+    assert_eq!(fail.expected, "int", "expected field should be populated");
+    // The input span is within the buffer.
+    assert!(fail.input_span.0 <= "not a number".len());
+    // The actual preview is populated and contains the offending text.
+    assert!(
+        !detail.actual_preview.is_empty(),
+        "actual_preview should be populated"
+    );
+}
+
+#[test]
+fn m10ws1_parse_failed_records_literal_expectation() {
+    // A template literal mismatch reports `literal "..."` as the expectation,
+    // not just a generic atomic kind. We use `read` with a template that
+    // expects a `:` between two ints; input with the wrong separator faults at
+    // the literal.
+    let src = "fn main() -> Int {\n  let r = read `{a:int}:{b:int}`\n  0\n}\n";
+    let (rt, _result) = run_main_with_input(src, "3;4");
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::ParseFailed);
+    let detail = rt.parse_detail();
+    let fail = detail.fail.as_ref().expect("detail recorded");
+    assert!(
+        fail.expected.starts_with("literal"),
+        "expected a literal expectation, got: {}",
+        fail.expected
+    );
+}
+
+#[test]
+fn m10ws1_no_detail_when_parse_succeeds() {
+    // A successful parse must NOT leave stale detail behind (the slot is
+    // cleared at the start of each `run_plan`).
+    let src = "fn main() -> Int {\n  let xs = read lines(int)\n  xs.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "1\n2\n3\n");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 3);
+    assert!(
+        !rt.parse_detail().is_set(),
+        "detail must be cleared on success"
+    );
+}
+
+#[test]
+fn m10ws1_parse_failed_preview_is_single_line() {
+    // The actual preview must not contain raw newlines (rendered as ⏎) so the
+    // noninteractive fallback prints a clean one-line glance.
+    let src = "fn main() -> Int {\n  let xs = read lines(int)\n  0\n}\n";
+    let input = "line one\nline two\nstill not an int";
+    let (rt, _result) = run_main_with_input(src, input);
+    assert!(rt.has_pending_fault());
+    let preview = &rt.parse_detail().actual_preview;
+    assert!(!preview.contains('\n'));
+    assert!(!preview.contains('\r'));
+}
