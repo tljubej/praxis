@@ -108,6 +108,7 @@ impl Jit {
             "praxis_var_cell_set",
             "praxis_push_debug_frame",
             "praxis_pop_debug_frame",
+            "praxis_snapshot_debug_chain",
         ];
         for name in sym_names {
             if let Some(ptr) = symbols::resolve(name) {

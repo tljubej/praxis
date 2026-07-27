@@ -76,6 +76,9 @@ enum Symbol {
     PushDebugFrame,
     /// Epilogue helper: pop + free the debug frame (§9.3, ADR-021, M10-WS2).
     PopDebugFrame,
+    /// Fault-epilogue helper: snapshot the debug-frame chain before unwind
+    /// (§9.3, M10-WS3). Idempotent — only the first (innermost) call captures.
+    SnapshotDebugChain,
     /// Prologue guard: raise `FaultKind::StackOverflow` when recursion exceeds
     /// `MAX_RECURSION_DEPTH` (§9.2, §17.4).
     RaiseStackOverflow,
@@ -109,6 +112,7 @@ impl Symbol {
             Symbol::PopShadowFrame => "praxis_pop_shadow_frame",
             Symbol::PushDebugFrame => "praxis_push_debug_frame",
             Symbol::PopDebugFrame => "praxis_pop_debug_frame",
+            Symbol::SnapshotDebugChain => "praxis_snapshot_debug_chain",
             Symbol::RaiseStackOverflow => "praxis_raise_stack_overflow",
         }
     }
@@ -279,6 +283,8 @@ pub(crate) fn lower_function<M: Module>(
             &raise_stack_overflow_sig(),
         )?;
         builder.ins().call(fr, &[ctx_val]);
+        // Snapshot the (deep) debug-frame chain before unwinding (M10-WS3).
+        emit_snapshot_debug_chain(&mut builder, ctx_val, module, &mut import_cache)?;
         emit_pop_shadow_frame(&mut builder, ctx_val, &spill, module, &mut import_cache)?;
         emit_pop_debug_frame(&mut builder, ctx_val, &spill, module, &mut import_cache)?;
         let zero = builder.ins().iconst(GC, 0);
@@ -1060,8 +1066,12 @@ fn lower_terminator<M: Module>(
             builder.ins().return_(&[v]);
         }
         Terminator::Fault => {
-            // Epilogue (fault path): pop the shadow frame and debug frame before
-            // unwinding.
+            // Epilogue (fault path): snapshot the debug-frame chain BEFORE
+            // popping, so the host can inspect the intact chain after unwind
+            // (§9.3, M10-WS3). Idempotent: only the innermost frame's epilogue
+            // (which runs first) captures; outer frames unwinding later skip.
+            emit_snapshot_debug_chain(builder, ctx_val, module, imports)?;
+            // Then pop the shadow frame and debug frame before unwinding.
             emit_pop_shadow_frame(builder, ctx_val, spill, module, imports)?;
             emit_pop_debug_frame(builder, ctx_val, spill, module, imports)?;
             // Unwind to the host: return the Unit sentinel (the caller checks
@@ -1111,6 +1121,26 @@ fn emit_pop_debug_frame<M: Module>(
     )?;
     let frame_ptr = builder.use_var(spill.debug_frame_var);
     builder.ins().call(fr, &[ctx_val, frame_ptr]);
+    Ok(())
+}
+
+/// Emit the `praxis_snapshot_debug_chain(ctx)` fault-epilogue call (§9.3,
+/// M10-WS3). Must run BEFORE the debug-frame pop, while the chain is intact.
+/// Idempotent at runtime: only the first (innermost) call captures.
+fn emit_snapshot_debug_chain<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx_val: Value,
+    module: &mut M,
+    imports: &mut HashMap<Symbol, FuncRef>,
+) -> Result<()> {
+    let fr = import(
+        module,
+        builder,
+        imports,
+        Symbol::SnapshotDebugChain,
+        &snapshot_debug_chain_sig(),
+    )?;
+    builder.ins().call(fr, &[ctx_val]);
     Ok(())
 }
 
@@ -1623,6 +1653,14 @@ fn pop_debug_frame_sig() -> Signature {
     let mut sig = Signature::new(CallConv::Fast);
     sig.params.push(AbiParam::new(GC)); // ctx
     sig.params.push(AbiParam::new(GC)); // frame
+    sig
+}
+
+/// `fn(ctx: i64) -> void` — snapshots the debug-frame chain before unwind
+/// (§9.3, M10-WS3). Idempotent.
+fn snapshot_debug_chain_sig() -> Signature {
+    let mut sig = Signature::new(CallConv::Fast);
+    sig.params.push(AbiParam::new(GC)); // ctx
     sig
 }
 

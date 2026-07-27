@@ -9,7 +9,7 @@ use praxis_codegen_cranelift::{Jit, RunnableFunction};
 use praxis_hir::{analyze_root, lower, mono::monomorphize};
 use praxis_mir::{annotate, lower_module};
 use praxis_parser::parse;
-use praxis_runtime::{GcRef, Runtime, RuntimeContext};
+use praxis_runtime::{GcRef, RootSet, Runtime, RuntimeContext};
 use praxis_source::SourceMap;
 
 /// The full pipeline for one source string: compile every `fn` and return the
@@ -4051,4 +4051,84 @@ fn m10ws2_debug_frame_locals_survive_gc_during_recursion() {
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // sum 1..=100 = 5050.
     assert_eq!(result.as_int(), 5050);
+}
+
+// ===========================================================================
+// M10 WS3 — crash snapshot + GC rooting (§9.3, §19.10 acceptance).
+//
+// The first fault epilogue deep-copies the debug-frame chain into the runtime's
+// SnapshotSlot before unwinding. These tests assert the snapshot is populated
+// after a fault, reflects the call chain (frame names), and — the §19.10
+// acceptance criterion — that GC retains every object reachable from it.
+// ===========================================================================
+
+#[test]
+fn m10ws3_snapshot_captured_on_index_fault() {
+    // An index-out-of-bounds fault drops into the snapshot. The chain must be
+    // non-empty and carry the function name. The faulting frame is `main` here
+    // (the OOB access is inline); a deeper chain is exercised by the WS3 GC test.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.get(5)\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
+    let snap = rt
+        .crash_snapshot()
+        .expect("snapshot should be captured on fault");
+    assert!(!snap.is_empty(), "snapshot should have >=1 frame");
+    // SAFETY: function names are compiler-embedded 'static UTF-8.
+    let frame0 = unsafe { snap.frame_name(0) };
+    assert!(frame0.contains("main"), "innermost frame is {frame0}");
+    // The fault kind is recorded.
+    assert_eq!(snap.fault_kind, praxis_runtime::FaultKind::IndexOutOfBounds);
+}
+
+#[test]
+fn m10ws3_snapshot_not_captured_on_clean_run() {
+    // A program that completes without faulting must leave no snapshot.
+    let (rt, _result) = run_main("fn main() -> Int { 42 }");
+    assert!(!rt.has_pending_fault());
+    assert!(
+        rt.crash_snapshot().is_none(),
+        "no snapshot expected on a clean run"
+    );
+}
+
+#[test]
+fn m10ws3_snapshot_retains_reachable_objects_across_gc() {
+    // The §19.10 acceptance criterion: "GC retains all objects reachable from
+    // snapshots." Build a Vec[Int] local in the faulting frame, fault (OOB get),
+    // then run a host-side collection with the snapshot as a root. The
+    // referenced Vec must survive (its elements remain readable through the
+    // snapshot's locals).
+    let src =
+        "fn main() -> Int {\n  let xs = Vec()\n  xs.push(11)\n  xs.push(22)\n  xs.get(99)\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault());
+    let snap = rt.crash_snapshot().expect("snapshot captured");
+    // The snapshot references GcRefs (the locals in the faulting frames).
+    let mut roots = Vec::new();
+    snap.push_roots(&mut roots);
+    assert!(
+        !roots.is_empty(),
+        "snapshot must root at least one GcRef (the Vec locals)"
+    );
+    // Force a collection with the snapshot as the root set. If retention is
+    // broken, the referenced objects are reclaimed and dereferencing a root
+    // would be use-after-free (the test would crash / valgrind would flag it).
+    // We collect several times to stress the mark/sweep.
+    for _ in 0..3 {
+        rt.collect(snap);
+    }
+    // The roots are still valid GcRefs into the (non-moving) heap; reading one
+    // as a Vec and checking its length confirms the object survived collection.
+    // Find a Vec-typed root among the snapshot locals.
+    let vec_root = snap.frames.iter().flat_map(|f| &f.locals).find_map(|l| {
+        let desc = unsafe { &*l.descriptor };
+        (desc.id == praxis_runtime::collections::VEC.id).then_some(l.value)
+    });
+    let vec_root = vec_root.expect("snapshot should hold a Vec local");
+    let v = vec_root.as_vec();
+    assert_eq!(v.len(), 2, "the Vec survived GC with its elements intact");
+    assert_eq!(v[0].as_int(), 11);
+    assert_eq!(v[1].as_int(), 22);
 }

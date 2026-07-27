@@ -10,6 +10,7 @@
 //! M3 fills in the real [`Heap`] and [`crate::Immortals`]; the fault and
 //! debug-frame pointers remain null (M4/M10).
 
+use crate::crash_snapshot::{CrashSnapshot, SnapshotSlot};
 use crate::gc::GcRef;
 use crate::heap::Heap;
 use crate::immortal::{read_bool, Immortals};
@@ -119,6 +120,7 @@ impl Default for Fault {
 /// crash debugger (M10) reads these to display locals; M5 only *registers* them
 /// (the prologue/epilogue push/pop frames and the spill updates the values).
 #[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct DebugLocal {
     /// The source name as written (e.g. `a`). Not owned by the frame; points at
     /// a `'static` string the compiler embedded.
@@ -210,6 +212,13 @@ pub struct RuntimeContext {
     /// appended at the end of `RuntimeContext` so the offsets of all
     /// generated-code-read fields above are unchanged (§11.6 ABI stability).
     pub parse_detail: *mut crate::ParseDetail,
+    /// Host-managed pointer to the runtime's [`crate::SnapshotSlot`] (§9.3,
+    /// M10-WS3). The first fault epilogue deep-copies the debug-frame chain
+    /// into it before unwinding; the host reads the snapshot after the fault.
+    /// Like `parse_detail`, generated code only passes it to
+    /// `praxis_snapshot_debug_chain` — it is appended at the end of
+    /// `RuntimeContext` for ABI stability.
+    pub crash_snapshot: *mut crate::SnapshotSlot,
 }
 
 impl RuntimeContext {
@@ -233,6 +242,7 @@ impl RuntimeContext {
             current_generation: 0,
             recursion_depth: 0,
             parse_detail: std::ptr::null_mut(),
+            crash_snapshot: std::ptr::null_mut(),
         }
     }
 
@@ -252,6 +262,22 @@ impl RuntimeContext {
     }
 }
 
+/// Read the current fault kind from a context's `pending_fault` slot (§9.2).
+/// Returns [`FaultKind::None`] if no fault is pending or the slot is null. Used
+/// by [`crate::crash_snapshot::praxis_snapshot_debug_chain`] to record which
+/// fault kind triggered the snapshot.
+///
+/// # Safety
+/// `ctx` must be live and wired (a null `pending_fault` yields `None`).
+pub unsafe fn current_fault_kind(ctx: *mut RuntimeContext) -> FaultKind {
+    if ctx.is_null() || unsafe { (*ctx).pending_fault.is_null() } {
+        return FaultKind::None;
+    }
+    // SAFETY: caller guarantees the context is live; a non-null pending_fault
+    // points at a live Fault owned by the runtime.
+    unsafe { (*(*ctx).pending_fault).kind }
+}
+
 /// The owner of the heap and the immortal singletons.
 ///
 /// This is the M3 entry point for runtime code: construct a `Runtime`, allocate
@@ -269,6 +295,11 @@ pub struct Runtime {
     /// parser interpreter writes the deepest mismatch into it; the host reads it
     /// after a `FaultKind::ParseFailed`.
     parse_detail: ParseDetail,
+    /// The crash-snapshot slot (§9.3, M10-WS3). Owned here so its address is
+    /// stable; the first fault epilogue deep-copies the debug-frame chain into
+    /// it before unwinding. The host reads it (and roots it for GC) after a
+    /// fault.
+    crash_snapshot: SnapshotSlot,
 }
 
 impl Runtime {
@@ -282,6 +313,7 @@ impl Runtime {
             immortals,
             fault: Fault::clear(),
             parse_detail: ParseDetail::new(),
+            crash_snapshot: SnapshotSlot::new(),
         }
     }
 
@@ -326,6 +358,7 @@ impl Runtime {
             current_generation: 0,
             recursion_depth: 0,
             parse_detail: &mut self.parse_detail as *mut ParseDetail,
+            crash_snapshot: &mut self.crash_snapshot as *mut SnapshotSlot,
         }
     }
 
@@ -363,6 +396,21 @@ impl Runtime {
     /// rerun, or the debugger can read the partial root value).
     pub fn parse_detail_mut(&mut self) -> &mut ParseDetail {
         &mut self.parse_detail
+    }
+
+    /// Borrow the crash-snapshot slot (§9.3, M10-WS3). `None` when no fault
+    /// snapshotted this run (the program completed cleanly, or faulted before
+    /// any debug frame was pushed). The host reads this after a fault for the
+    /// noninteractive render / crash REPL.
+    #[must_use]
+    pub fn crash_snapshot(&self) -> Option<&CrashSnapshot> {
+        self.crash_snapshot.get()
+    }
+
+    /// Take the crash snapshot out of the runtime (the host owns it after).
+    /// Returns `None` when no snapshot was taken.
+    pub fn take_crash_snapshot(&mut self) -> Option<CrashSnapshot> {
+        self.crash_snapshot.take()
     }
 }
 

@@ -20,6 +20,7 @@ pub mod bitset;
 pub mod closures;
 pub mod collections;
 pub mod context;
+pub mod crash_snapshot;
 pub mod debug;
 pub mod descriptor;
 pub mod dynamic_key;
@@ -43,8 +44,10 @@ pub use abi::{assert_abi_version, RUNTIME_ABI_VERSION};
 pub use closures::ClosurePayload;
 pub use collections::{DequePayload, GridPayload, VecPayload};
 pub use context::{
-    DebugFrame, DebugLocal, Fault, FaultKind, Runtime, RuntimeContext, MAX_RECURSION_DEPTH,
+    current_fault_kind, DebugFrame, DebugLocal, Fault, FaultKind, Runtime, RuntimeContext,
+    MAX_RECURSION_DEPTH,
 };
+pub use crash_snapshot::{CrashSnapshot, SnapshotFrame, SnapshotSlot};
 pub use debug::DebugLocalMeta;
 pub use descriptor::{
     DropFn, DynamicHasher, EqualsFn, FormatFn, HashFn, StructHasher, TraceFn, Tracer,
