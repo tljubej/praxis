@@ -128,6 +128,24 @@ pub enum ParserAst {
     },
     /// `grid(P)` → `Grid[result(P)]`.
     Grid { child: Box<ParserAst>, span: Span },
+    /// `block(item, ...)` (M9, §7.5): apply sequential parsers within one
+    /// region. A positional item that is a named-capture template *flattens*
+    /// its captures into the block's record; a positional scalar must be
+    /// named (else rejected). A named item contributes one field. Result is a
+    /// flattened anonymous record.
+    Block { items: Vec<BlockItem>, span: Span },
+}
+
+/// One item in a `block(...)` (M9, §7.5).
+#[derive(Clone, Debug)]
+pub enum BlockItem {
+    /// A positional parser. If it is a named-capture template, its captures
+    /// flatten into the enclosing block record; otherwise (a scalar) it must
+    /// be the sole contributor or validation rejects it for an unclear field
+    /// name (§7.5).
+    Positional(ParserAst),
+    /// A named item `name: parser` contributing one field.
+    Named { name: String, parser: ParserAst },
 }
 
 impl ParserAst {
@@ -142,7 +160,8 @@ impl ParserAst {
             | ParserAst::Csv { span, .. }
             | ParserAst::Ws { span, .. }
             | ParserAst::Sep { span, .. }
-            | ParserAst::Grid { span, .. } => *span,
+            | ParserAst::Grid { span, .. }
+            | ParserAst::Block { span, .. } => *span,
         }
     }
 }

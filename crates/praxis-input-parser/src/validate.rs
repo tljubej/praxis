@@ -59,7 +59,7 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
                     message: "named `sections` requires at least one field".to_string(),
                 });
             }
-            // Field names must be unique (reuse the duplicate-name concern).
+            // Field names must be unique.
             let mut seen = Vec::new();
             for (name, child) in fields {
                 if seen.contains(name) {
@@ -76,6 +76,71 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
                 validate_node(tail, errs);
             }
         }
+        ParserAst::Block { items, span } => {
+            // §7.5: a positional parser returning a scalar must be explicitly
+            // named to avoid an unclear field name. A positional template with
+            // named captures flattens its captures into the block record. All
+            // flattened field names must be unique.
+            let mut seen: Vec<String> = Vec::new();
+            for item in items {
+                match item {
+                    crate::ast::BlockItem::Positional(p) => {
+                        // Collect the field names this positional contributes.
+                        let contributed = block_positional_field_names(p);
+                        if contributed.is_empty() {
+                            // A scalar positional (e.g. a bare `int`) has no
+                            // field name — reject it.
+                            errs.push(ValidationError {
+                                span: *span,
+                                code: "I026",
+                                message:
+                                    "a positional `block` item returning a scalar must be named"
+                                        .to_string(),
+                            });
+                        }
+                        for n in &contributed {
+                            if seen.contains(n) {
+                                errs.push(ValidationError {
+                                    span: *span,
+                                    code: "I024",
+                                    message: format!("duplicate block field `{n}`"),
+                                });
+                            }
+                            seen.push(n.clone());
+                        }
+                        validate_node(p, errs);
+                    }
+                    crate::ast::BlockItem::Named { name, parser } => {
+                        if seen.contains(name) {
+                            errs.push(ValidationError {
+                                span: *span,
+                                code: "I024",
+                                message: format!("duplicate block field `{name}`"),
+                            });
+                        }
+                        seen.push(name.clone());
+                        validate_node(parser, errs);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The field names a positional `block` item contributes via flattening (§7.5).
+/// A named-capture template contributes its capture names; anything else (a
+/// scalar atomic, a constructor) contributes nothing — which means a bare
+/// scalar positional must be explicitly named (validation rejects it).
+fn block_positional_field_names(p: &ParserAst) -> Vec<String> {
+    match p {
+        ParserAst::Template { parts, .. } => parts
+            .iter()
+            .filter_map(|part| match part {
+                TemplatePart::Capture { name: Some(n), .. } => Some(n.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 

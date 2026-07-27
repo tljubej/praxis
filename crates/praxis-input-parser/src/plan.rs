@@ -41,6 +41,10 @@ pub enum PlanNode {
         fields: &'static [(&'static str, u32)],
         repeated_tail: Option<(&'static str, u32)>,
     },
+    /// `block(item, ...)` (M9, §7.5). Sequential parsers within one region;
+    /// positional named-capture templates flatten their fields into the result
+    /// record, named items contribute one field each.
+    Block { items: &'static [BlockItemNode] },
     /// `csv(P)`.
     Csv { child: u32 },
     /// `ws(P)`.
@@ -67,6 +71,17 @@ pub enum TemplatePartNode {
         field_index: Option<u16>,
         name: Option<&'static str>,
     },
+}
+
+/// One item of a `block(...)` (M9, §7.5), in plan form.
+#[derive(Debug)]
+pub enum BlockItemNode {
+    /// A positional parser. A named-capture template's fields flatten into the
+    /// block record (the runtime reads the record's fields from the produced
+    /// value); any other positional must have been named (validation rejects).
+    Positional { child: u32 },
+    /// A named item contributing one field.
+    Named { name: &'static str, child: u32 },
 }
 
 /// A compiled parser plan: the node arena plus auxiliary interned data.
@@ -249,6 +264,22 @@ fn lower_node(b: &mut PlanBuilder, ast: &ParserAst) -> u32 {
         ParserAst::Grid { child, .. } => {
             let c = lower_node(b, child);
             b.push_node(PlanNode::Grid { child: c })
+        }
+        ParserAst::Block { items, .. } => {
+            let item_nodes: Vec<BlockItemNode> = items
+                .iter()
+                .map(|item| match item {
+                    crate::ast::BlockItem::Positional(p) => BlockItemNode::Positional {
+                        child: lower_node(b, p),
+                    },
+                    crate::ast::BlockItem::Named { name, parser } => BlockItemNode::Named {
+                        name: leak_str(name),
+                        child: lower_node(b, parser),
+                    },
+                })
+                .collect();
+            let items_slice = leak(item_nodes);
+            b.push_node(PlanNode::Block { items: items_slice })
         }
         ParserAst::Template { parts, .. } => lower_template(b, parts),
     }

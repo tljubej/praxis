@@ -140,6 +140,7 @@ unsafe fn walk(
             fields,
             repeated_tail,
         } => walk_sections_named(&rt, plan, fields, *repeated_tail, bytes, offset),
+        PlanNode::Block { items } => walk_block(&rt, plan, items, bytes, offset),
         PlanNode::Csv { child } => walk_csv(&rt, plan, *child, bytes, offset),
         PlanNode::Ws { child } => walk_ws(&rt, plan, *child, bytes, offset),
         PlanNode::Sep {
@@ -246,8 +247,12 @@ fn walk_sections(
     let region = &bytes[offset..];
     let mut items = Vec::new();
     for section in split_sections(region) {
+        // Parse each section against a bounded byte view (just that section's
+        // bytes), so a child like `block(...)` or `lines(...)` consumes only the
+        // section's content rather than running to the end of input.
         let sec_offset = offset + section.start;
-        let (value, _consumed) = unsafe { walk(rt.ctx, plan, child, bytes, sec_offset)? };
+        let sec_bytes = &bytes[sec_offset..sec_offset + section.len];
+        let (value, _consumed) = unsafe { walk(rt.ctx, plan, child, sec_bytes, 0)? };
         items.push(value);
     }
     let elem_desc = child_descriptor(plan, child);
@@ -310,6 +315,102 @@ fn walk_sections_named(
     }
     let record = alloc_record(rt, &captures);
     Ok((record, bytes.len() - offset))
+}
+
+/// Walk `block(item, ...)` (M9, §7.5): apply sequential parsers within one
+/// region, advancing the cursor after each. A positional named-capture template
+/// *flattens* its fields into the block record; a named item contributes one
+/// field. The result is a flattened anonymous record assembled via
+/// [`alloc_record`].
+///
+/// Cursor model: each item is walked against the remaining region from the
+/// current cursor; the item's returned absolute offset becomes the next
+/// cursor. `walk_template` returns the real position where matching stopped, so
+/// a chain of line-anchored templates advances line by line.
+fn walk_block(
+    rt: &Rt,
+    plan: &ParserPlan,
+    items: &'static [praxis_input_parser::BlockItemNode],
+    bytes: &[u8],
+    offset: usize,
+) -> WalkResult {
+    let mut cursor = offset;
+    // Captures collected as (name, child_node_for_descriptor, value). For a
+    // flattened positional record, we expand its fields into separate entries.
+    let mut captures: Vec<(Option<&'static str>, u32, GcRef)> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        // Before every item after the first, skip the line boundary: any run of
+        // horizontal whitespace plus one newline (§7.5 block items are
+        // line-anchored). The first item starts at the region head.
+        if i > 0 {
+            cursor = skip_line_boundary(bytes, cursor);
+        }
+        match item {
+            praxis_input_parser::BlockItemNode::Positional { child } => {
+                let (value, new_offset) = unsafe { walk(rt.ctx, plan, *child, bytes, cursor)? };
+                cursor = new_offset;
+                // If the positional produced a record (named-capture template),
+                // flatten its fields into the block record. We detect a record
+                // by pointer-equality of its descriptor against RECORD.
+                if std::ptr::eq(value.descriptor(), crate::records::RECORD) {
+                    flatten_record_into(rt, value, &mut captures);
+                }
+                // A non-record positional (scalar) was rejected by validation
+                // (I026); if we reach one here it contributes no field.
+            }
+            praxis_input_parser::BlockItemNode::Named { name, child } => {
+                let (value, new_offset) = unsafe { walk(rt.ctx, plan, *child, bytes, cursor)? };
+                cursor = new_offset;
+                captures.push((Some(name), *child, value));
+            }
+        }
+    }
+    let record = alloc_record(rt, &captures);
+    Ok((record, cursor))
+}
+
+/// Skip the line boundary between sequential `block` items (§7.5): any run of
+/// horizontal whitespace, then an optional single line ending (`\n` or `\r\n`).
+/// Returns the new cursor. If no line ending is present (e.g. the items are on
+/// one line separated by spaces), only the horizontal whitespace is consumed.
+fn skip_line_boundary(bytes: &[u8], mut cursor: usize) -> usize {
+    // Horizontal whitespace (spaces/tabs).
+    while cursor < bytes.len() && (bytes[cursor] == b' ' || bytes[cursor] == b'\t') {
+        cursor += 1;
+    }
+    // One optional line ending.
+    if cursor < bytes.len() && bytes[cursor] == b'\r' {
+        cursor += 1;
+    }
+    if cursor < bytes.len() && bytes[cursor] == b'\n' {
+        cursor += 1;
+    }
+    cursor
+}
+
+/// Flatten a positional record's fields into the block captures (§7.5
+/// flattening). Reads the value's `RecordPayload` schema + items and pushes one
+/// `(name, child_for_descriptor, value)` entry per field. The per-field
+/// descriptor is read from the value's own header at record-format/eq/hash time,
+/// so the `child` placeholder here is only a fallback tag.
+fn flatten_record_into(
+    _rt: &Rt,
+    record_ref: GcRef,
+    captures: &mut Vec<(Option<&'static str>, u32, GcRef)>,
+) {
+    let payload = record_ref.payload::<u8>() as *const crate::records::RecordPayload;
+    // SAFETY: record_ref is a valid RECORD GcRef (descriptor checked by caller).
+    let (schema, items) = unsafe {
+        let p = &*payload;
+        (p.schema, &p.items)
+    };
+    // SAFETY: schema is a valid leaked RecordSchema pointer.
+    let schema = unsafe { &*schema };
+    for (i, field) in schema.fields.iter().enumerate() {
+        if let Some(value) = items.get(i) {
+            captures.push((Some(field.name), u32::MAX, *value));
+        }
+    }
 }
 
 fn walk_csv(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
@@ -485,26 +586,26 @@ fn walk_template(
         }
     }
 
-    // Assemble the result per §7.3.
+    // Assemble the result per §7.3. Return the *real* cursor position (the
+    // absolute offset where matching stopped) so a `block(...)` parent can
+    // advance item-by-item (§7.5). Nothing in the M6/M7 tree consumed this
+    // value, so changing from `bytes.len() - offset` to the true cursor is safe.
     let any_named = captures.iter().any(|(n, _, _)| n.is_some());
     if any_named {
         // Named captures → Record. Build the schema at runtime.
-        Ok((alloc_record(rt, &captures), bytes.len() - offset))
+        Ok((alloc_record(rt, &captures), cursor))
     } else if captures.len() == 1 {
         // Single anonymous capture → the scalar value.
-        Ok((captures.into_iter().next().unwrap().2, bytes.len() - offset))
+        Ok((captures.into_iter().next().unwrap().2, cursor))
     } else if captures.is_empty() {
         // No captures → Unit.
-        Ok((alloc_unit(rt), bytes.len() - offset))
+        Ok((alloc_unit(rt), cursor))
     } else {
         // Multiple anonymous captures → Tuple. Build the schema from the child
         // result descriptors and fill the payload with the captured values.
         let children: Vec<u32> = captures.iter().map(|(_, c, _)| *c).collect();
         let values: Vec<GcRef> = captures.into_iter().map(|(_, _, v)| v).collect();
-        Ok((
-            alloc_tuple(rt, &children, plan, values),
-            bytes.len() - offset,
-        ))
+        Ok((alloc_tuple(rt, &children, plan, values), cursor))
     }
 }
 
@@ -909,6 +1010,8 @@ fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescri
         // Named sections produce an anonymous record (uniform descriptor; the
         // schema is in the payload, built at runtime by `walk_sections_named`).
         PlanNode::SectionsNamed { .. } => crate::records::RECORD,
+        // A block produces a flattened anonymous record (uniform descriptor).
+        PlanNode::Block { .. } => crate::records::RECORD,
         // A template's result is a scalar (single anon capture), a record (named
         // captures), or Unit (no captures). A tuple's result is a tuple. These
         // are uniform descriptors too (schema in the payload).

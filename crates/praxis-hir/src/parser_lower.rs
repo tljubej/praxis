@@ -233,6 +233,14 @@ fn convert_constructor_call(
         .children()
         .find(|c| c.kind() == praxis_syntax::SyntaxKind::PARSER_CALL)?;
     let (ctor_name, args) = extract_call_args(&parser_call, file, diagnostics);
+
+    // M9 constructors (§7.5) are dispatched by name before the M6
+    // `Constructor::from_keyword` table — they have richer arg shapes (positional
+    // + named) that the M6 table doesn't model.
+    if ctor_name == "block" {
+        return Some(build_block(args, span));
+    }
+
     let ctor = Constructor::from_keyword(&ctor_name)?;
 
     // Arity check on positional args only, skipped for the heterogeneous
@@ -435,6 +443,27 @@ fn build_sections_named(args: Vec<CallArg>, span: Span) -> ParserAst {
         repeated_tail,
         span,
     }
+}
+
+/// Build a `ParserAst::Block` from the args of a `block(item, ...)` call (M9,
+/// §7.5). Positional parsers become `BlockItem::Positional` (a named-capture
+/// template's fields flatten into the record; a scalar must be named or
+/// validation rejects it); named args become `BlockItem::Named`.
+fn build_block(args: Vec<CallArg>, span: Span) -> ParserAst {
+    use praxis_input_parser::ast::BlockItem;
+    let mut items = Vec::new();
+    for arg in args {
+        match arg {
+            CallArg::Parser(p) => items.push(BlockItem::Positional(p)),
+            CallArg::Named { name, parser } => {
+                items.push(BlockItem::Named { name, parser });
+            }
+            // String / RepeatedTail args are not valid in a block; drop them
+            // (validation surfaces the structural error).
+            _ => {}
+        }
+    }
+    ParserAst::Block { items, span }
 }
 
 // ---- diagnostic helpers ----------------------------------------------------

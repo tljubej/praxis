@@ -52,6 +52,33 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Type {
             }
             db.anon_record(rec_fields)
         }
+        ParserAst::Block { items, .. } => {
+            // Flattened anonymous record (§7.5): positional named-capture
+            // templates contribute their capture fields; named items contribute
+            // one field each.
+            let mut rec_fields: Vec<(String, Type)> = Vec::new();
+            for item in items {
+                match item {
+                    crate::ast::BlockItem::Positional(p) => {
+                        if let ParserAst::Template { parts, .. } = p {
+                            for part in parts {
+                                if let TemplatePart::Capture {
+                                    name: Some(n),
+                                    parser,
+                                } = part
+                                {
+                                    rec_fields.push((n.clone(), synthesize(parser, db)));
+                                }
+                            }
+                        }
+                    }
+                    crate::ast::BlockItem::Named { name, parser } => {
+                        rec_fields.push((name.clone(), synthesize(parser, db)));
+                    }
+                }
+            }
+            db.anon_record(rec_fields)
+        }
     }
 }
 

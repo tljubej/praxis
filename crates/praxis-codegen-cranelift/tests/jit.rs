@@ -3685,3 +3685,39 @@ fn m9_named_sections_too_few_sections_faults() {
         rt.fault()
     );
 }
+
+// --- M9 WS3: block (§7.5, §7.7) ---------------------------------------------
+
+#[test]
+fn m9_block_template_plus_named_field() {
+    // sections(block(`Monkey {id:int}:`, items: lines(int))) — each section is
+    // a block: a positional header template (flattening `id`) + a named `items`
+    // field consuming the remaining lines.
+    let src = "fn main() -> Int {\n  let monkeys = read sections(block(`Monkey {id:int}:`, items: lines(int)))\n  let m0 = monkeys.get(0)\n  m0.id + m0.items.len()\n}\n";
+    let input = "Monkey 1:\n10\n20\n\nMonkey 2:\n30\n40";
+    let (rt, result) = run_main_with_input(src, input);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    // m0.id = 1, m0.items has 2 entries (10, 20) → 1 + 2 = 3
+    assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn m9_block_second_section() {
+    // The second monkey's id and item count.
+    let src = "fn main() -> Int {\n  let monkeys = read sections(block(`Monkey {id:int}:`, items: lines(int)))\n  let m1 = monkeys.get(1)\n  m1.id + m1.items.len()\n}\n";
+    let input = "Monkey 1:\n10\n20\n\nMonkey 2:\n30\n40";
+    let (rt, result) = run_main_with_input(src, input);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    // m1.id = 2, m1.items has 2 entries (30, 40) → 2 + 2 = 4
+    assert_eq!(result.as_int(), 4);
+}
+
+#[test]
+fn m9_block_two_template_fields_flatten() {
+    // A block with two positional templates whose named captures both flatten
+    // into the record: `{x:int},{y:int}` then `\n{z:int}`.
+    let src = "fn main() -> Int {\n  let b = read block(`{x:int},{y:int}\\n{z:int}`)\n  b.x + b.y + b.z\n}\n";
+    let (rt, result) = run_main_with_input(src, "1,2\n3");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 6);
+}
