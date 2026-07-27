@@ -254,3 +254,34 @@ fn m10ws5_repl_help_lists_commands() {
         assert!(out.contains(cmd), "help lists `{cmd}`: {out}");
     }
 }
+
+// ===========================================================================
+// M10b WS3 — `source` / `input` / `parser` context commands (§9.4).
+//
+// `source` renders the selected frame's source extent (threaded in WS1) from
+// the session's source text. `input`/`parser` render the §7.11 ParseDetail.
+// ===========================================================================
+
+#[test]
+fn m10b_ws3_source_renders_faulting_function_text() {
+    // `source` on the faulting `main` frame prints the function's source lines
+    // (the whole `fn main … { … }` extent, threaded in WS1) with a caret.
+    let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "source\nquit\n");
+    assert!(
+        out.contains("main:"),
+        "source shows the frame header: {out}"
+    );
+    assert!(
+        out.contains("xs.get(99)"),
+        "source shows the faulting line: {out}"
+    );
+    assert!(out.contains('^'), "source shows a caret: {out}");
+}
+
+#[test]
+fn m10b_ws3_source_help_lists_command() {
+    let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "help\nquit\n");
+    assert!(out.contains("source"), "help lists `source`: {out}");
+    assert!(out.contains("input"), "help lists `input`: {out}");
+    assert!(out.contains("parser"), "help lists `parser`: {out}");
+}

@@ -137,6 +137,138 @@ fn format_value(value: praxis_runtime::GcRef) -> String {
     }
 }
 
+/// Render the selected frame's source extent (§9.4 `source`, M10b-WS3).
+///
+/// Prints the lines of `source_text` the frame's `source_span` covers, each
+/// prefixed with its 1-based line number, then a caret line pointing at the
+/// span's start column. `(0, 0)` spans (synthetic/span-less frames) print a
+/// "no span recorded" note instead. The frame's function name is shown as a
+/// header. A span outside `source_text` degrades to the note.
+pub fn render_source_span<W: Write>(
+    out: &mut W,
+    source_text: &str,
+    frame_name: &str,
+    span: (u32, u32),
+) -> std::io::Result<()> {
+    writeln!(out, "{frame_name}:")?;
+    let (start, end) = (span.0 as usize, span.1 as usize);
+    if start == 0 && end == 0 {
+        writeln!(out, "  (no source span recorded for this frame)")?;
+        return Ok(());
+    }
+    if start >= source_text.len() || end > source_text.len() || start > end {
+        writeln!(
+            out,
+            "  (source span {start}..{end} is outside the program source)"
+        )?;
+        return Ok(());
+    }
+    // Map the byte span to line(s). Find the line containing `start` (1-based).
+    let mut line_starts: Vec<usize> = vec![0];
+    for (i, b) in source_text.bytes().enumerate() {
+        if b == b'\n' {
+            line_starts.push(i + 1);
+        }
+    }
+    // The line index (0-based) of `start` = number of newlines before it.
+    let start_line = source_text[..start].bytes().filter(|&b| b == b'\n').count();
+    let end_line = source_text[..end].bytes().filter(|&b| b == b'\n').count();
+    for (li, &ls) in line_starts
+        .iter()
+        .enumerate()
+        .skip(start_line)
+        .take(end_line - start_line + 1)
+    {
+        let le = line_starts
+            .get(li + 1)
+            .copied()
+            .unwrap_or(source_text.len())
+            .saturating_sub(1); // exclude the trailing newline
+        let line_text = &source_text[ls..le];
+        writeln!(out, "  {:>4} | {}", li + 1, line_text)?;
+    }
+    // Caret: spaces to the start column (relative to its line), then carets to
+    // the end column (or at least one). Only meaningful on a single line.
+    let line_start = line_starts[start_line];
+    let caret_col = start - line_start;
+    let caret_len = (end - start).max(1);
+    let padding = " ".repeat(7 + caret_col); // 4-digit num + " | " + col
+    writeln!(out, "{padding}{}", "^".repeat(caret_len))?;
+    Ok(())
+}
+
+/// Render the input near the active parser cursor (§9.4 `input`, M10b-WS3).
+///
+/// For a `ParseFailed` fault, prints the input bytes around the recorded
+/// mismatch offset with a caret under the span. For other fault kinds, prints
+/// a "no input context (not a parse failure)" note. The detail's
+/// `actual_preview` (already a bounded UTF-8-lossy slice set by the runtime)
+/// is shown directly; the input span anchors the caret.
+pub fn render_input_context<W: Write>(
+    out: &mut W,
+    detail: Option<&ParseDetail>,
+    input_text: &str,
+) -> std::io::Result<()> {
+    let Some(detail) = detail else {
+        writeln!(out, "(no input context available — session not attached)")?;
+        return Ok(());
+    };
+    let Some(fail) = &detail.fail else {
+        writeln!(out, "(no input context — not a parse failure)")?;
+        return Ok(());
+    };
+    let (start, end) = fail.input_span;
+    writeln!(out, "input at offset {start}..{end}:")?;
+    // The runtime already built a bounded preview; show it (single line).
+    if !detail.actual_preview.is_empty() {
+        writeln!(out, "  {}", detail.actual_preview)?;
+    } else if !input_text.is_empty() {
+        // Fall back to the session's input buffer slice if the preview is empty.
+        let lo = start.min(input_text.len());
+        let hi = end.min(input_text.len()).max(lo);
+        writeln!(out, "  {}", &input_text[lo..hi])?;
+    } else {
+        writeln!(out, "  (empty input)")?;
+    }
+    Ok(())
+}
+
+/// Render the active input-parser context (§9.4 `parser`, M10b-WS3).
+///
+/// For a `ParseFailed` fault, prints what the parser expected, the parser
+/// expression's source span (if threaded), and the actual preview. For other
+/// fault kinds, prints a "no parser context" note.
+pub fn render_parser_context<W: Write>(
+    out: &mut W,
+    detail: Option<&ParseDetail>,
+    source_text: &str,
+) -> std::io::Result<()> {
+    let Some(detail) = detail else {
+        writeln!(out, "(no parser context available — session not attached)")?;
+        return Ok(());
+    };
+    let Some(fail) = &detail.fail else {
+        writeln!(out, "(no parser context — not a parse failure)")?;
+        return Ok(());
+    };
+    writeln!(out, "expected: {}", fail.expected)?;
+    if let Some((pstart, pend)) = fail.parser_span {
+        let (ps, pe) = (pstart as usize, pend as usize);
+        if ps < source_text.len() && pe <= source_text.len() && ps <= pe {
+            writeln!(out, "parser expression (source {pstart}..{pend}):")?;
+            writeln!(out, "  {}", &source_text[ps..pe])?;
+        } else {
+            writeln!(
+                out,
+                "parser expression span: {pstart}..{pend} (outside source)"
+            )?;
+        }
+    } else {
+        writeln!(out, "parser expression: <unknown parser>")?;
+    }
+    Ok(())
+}
+
 /// True iff `r` is a real GC reference (not the null sentinel used for
 /// not-yet-written debug-local slots). Mirrors the check in crash_snapshot.
 fn is_real_ref(r: praxis_runtime::GcRef) -> bool {
@@ -216,5 +348,90 @@ mod tests {
         render_frame_locals(&mut out, &snap, 0, 12).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("no locals"), "{text}");
+    }
+
+    // ---- M10b-WS3: source/input/parser context rendering ----
+
+    #[test]
+    fn source_span_renders_lines_with_caret() {
+        // A two-line source; the span covers "b + c" on line 2.
+        let src = "fn f() {\n  a = b + c\n}\n";
+        // "b + c" starts after "fn f() {\n  a = " = 13 bytes, length 5.
+        let span = (13, 18);
+        let mut out = Vec::new();
+        render_source_span(&mut out, src, "f", span).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("f:"), "header: {text}");
+        assert!(text.contains("a = b + c"), "the source line: {text}");
+        assert!(text.contains('^'), "caret: {text}");
+        // The caret column: "  a = " is 6 chars after the line-number gutter.
+        assert!(
+            text.contains("       ^^^"),
+            "caret at the right column: {text:?}"
+        );
+    }
+
+    #[test]
+    fn source_span_zero_span_shows_no_span_note() {
+        let mut out = Vec::new();
+        render_source_span(&mut out, "fn f() {}", "f", (0, 0)).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("no source span recorded"), "{text}");
+    }
+
+    #[test]
+    fn source_span_out_of_range_shows_note() {
+        let mut out = Vec::new();
+        render_source_span(&mut out, "abc", "f", (10, 20)).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("outside the program source"), "{text}");
+    }
+
+    #[test]
+    fn input_context_renders_parse_detail() {
+        let mut detail = ParseDetail::new();
+        use praxis_runtime::ParseFail;
+        detail.consider(ParseFail::at(2, 1, "digit"), b"x9");
+        detail.actual_preview = "x9".to_string();
+        let mut out = Vec::new();
+        render_input_context(&mut out, Some(&detail), "x9").unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("offset 2..3"), "span shown: {text}");
+        assert!(text.contains("x9"), "preview shown: {text}");
+    }
+
+    #[test]
+    fn input_context_no_detail_for_non_parse_fault() {
+        let mut out = Vec::new();
+        render_input_context(&mut out, None, "").unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("no input context available"), "{text}");
+    }
+
+    #[test]
+    fn parser_context_renders_expected_and_expression() {
+        let mut detail = ParseDetail::new();
+        use praxis_runtime::ParseFail;
+        // The parser expression span covers `int` in the source "read int".
+        detail.consider(
+            ParseFail::at(0, 0, "int").with_parser_span(Some((5, 8))),
+            b"",
+        );
+        let mut out = Vec::new();
+        render_parser_context(&mut out, Some(&detail), "read int").unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("expected: int"), "expected shown: {text}");
+        assert!(text.contains("int"), "parser expression shown: {text}");
+    }
+
+    #[test]
+    fn parser_context_unknown_when_no_parser_span() {
+        let mut detail = ParseDetail::new();
+        use praxis_runtime::ParseFail;
+        detail.consider(ParseFail::here(0, "int"), b"");
+        let mut out = Vec::new();
+        render_parser_context(&mut out, Some(&detail), "").unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("<unknown parser>"), "{text}");
     }
 }

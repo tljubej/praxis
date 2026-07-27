@@ -22,7 +22,10 @@ use std::io::{BufRead, Write};
 
 use praxis_runtime::CrashSnapshot;
 
-use crate::render::{render_backtrace, render_frame_locals};
+use crate::render::{
+    render_backtrace, render_frame_locals, render_input_context, render_parser_context,
+    render_source_span,
+};
 use crate::session::DebugSession;
 
 /// The prompt shown when the REPL is waiting for a command (§9.4).
@@ -186,11 +189,54 @@ impl Repl {
                 let _ = writeln!(out, "{}", HELP_TEXT);
             }
             "quit" | "exit" | "q" => return Control::Quit,
-            // M10b commands: acknowledged but not yet implemented.
-            "p" | "type" | "source" | "input" | "parser" | "heap" | "restart" | "reload" => {
+            // M10b-WS3 context commands. `source` reads the selected frame's
+            // source_span (threaded in WS1) against the session's source text.
+            // `input`/`parser` read the runtime's §7.11 ParseDetail.
+            "source" => {
+                let frame_idx = match rest.parse::<usize>() {
+                    Ok(n) if n < self.snapshot.len() => n,
+                    _ => self.selected,
+                };
+                // SAFETY: names are compiler-embedded 'static UTF-8.
+                let name = unsafe { self.snapshot.frame_name(frame_idx) };
+                let span = self
+                    .snapshot
+                    .frames
+                    .get(frame_idx)
+                    .map(|f| f.source_span)
+                    .unwrap_or((0, 0));
+                match self.session.as_ref() {
+                    Some(s) => {
+                        let _ = render_source_span(out, &s.source_text, name, span);
+                    }
+                    None => {
+                        let _ = writeln!(out, "(no source available — session not attached)");
+                    }
+                }
+            }
+            "input" => {
+                let detail = self.session.as_ref().map(|s| s.runtime.parse_detail());
+                let input_text = self
+                    .session
+                    .as_ref()
+                    .map(|s| s.input_text.as_str())
+                    .unwrap_or("");
+                let _ = render_input_context(out, detail, input_text);
+            }
+            "parser" => {
+                let detail = self.session.as_ref().map(|s| s.runtime.parse_detail());
+                let source_text = self
+                    .session
+                    .as_ref()
+                    .map(|s| s.source_text.as_str())
+                    .unwrap_or("");
+                let _ = render_parser_context(out, detail, source_text);
+            }
+            // Still-deferred M10b commands (WS4–WS6).
+            "p" | "type" | "heap" | "restart" | "reload" => {
                 let _ = writeln!(
                     out,
-                    "note: `{cmd}` is implemented in Milestone 10 Part 2 (not yet wired)."
+                    "note: `{cmd}` is implemented later in Milestone 10 Part 2 (not yet wired)."
                 );
             }
             "" => {}
@@ -218,7 +264,7 @@ fn split_cmd(line: &str) -> (&str, &str) {
     }
 }
 
-/// The `help` text (§9.4 command list, M10a subset marked).
+/// The `help` text (§9.4 command list).
 const HELP_TEXT: &str = "\
 Crash debugger commands (§9.4):
   bt              show the numbered backtrace
@@ -226,11 +272,14 @@ Crash debugger commands (§9.4):
   up              move the selection toward the caller
   down            move the selection toward the callee
   locals          show the selected frame's locals
+  source [N]      show the selected (or Nth) frame's source
+  input           show the input near the active parser cursor
+  parser          show the active input parser near the fault
   help            show this message
   quit            exit the debugger
 
-Not yet wired (Milestone 10 Part 2):
-  p EXPR, type EXPR, source, input, parser, heap, restart, reload";
+Not yet wired (later in Milestone 10 Part 2):
+  p EXPR, type EXPR, heap EXPR, restart, reload";
 
 #[cfg(test)]
 mod tests {
