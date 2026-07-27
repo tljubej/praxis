@@ -149,23 +149,45 @@ pub fn run(file: &str, input_file: Option<&str>, debug: DebugMode) -> anyhow::Re
 
     if runtime.has_pending_fault() {
         let kind = runtime.fault();
-        // Decide whether to enter the interactive crash REPL (§9.6). The REPL
-        // itself lands in WS5; until then `always`/TTY `auto` fall back to the
-        // noninteractive render with a note. `never` and non-TTY `auto` always
-        // print the noninteractive diagnostic.
+        // Decide whether to enter the interactive crash REPL (§9.4, §9.6).
+        // `always` or TTY `auto` enters the REPL; `never` or non-TTY `auto`
+        // prints the noninteractive diagnostic and exits nonzero.
         if debug.wants_repl() {
-            // M10a: the interactive REPL is not wired into the CLI yet (WS5).
-            // Fall back to the noninteractive render; WS5 replaces this branch
-            // with the actual REPL hand-off.
-            eprintln!("note: interactive crash REPL is not yet wired; showing the noninteractive diagnostic.");
+            // Take the snapshot out of the runtime; the REPL owns it for its
+            // lifetime. A missing snapshot (host-side fault before any debug
+            // frame) degrades to the noninteractive render.
+            if let Some(snapshot) = runtime.take_crash_snapshot() {
+                // Show the fault line + §7.11 detail before the prompt, so the
+                // user sees what happened (§9.4's banner).
+                praxis_debugger::render::render_noninteractive(
+                    &mut std::io::stderr(),
+                    kind,
+                    Some(&snapshot),
+                    Some(runtime.parse_detail()),
+                )?;
+                let mut repl = praxis_debugger::repl::Repl::new(snapshot);
+                let stdin = std::io::stdin();
+                let mut stdin = stdin.lock();
+                let stderr = std::io::stderr();
+                let mut stderr = stderr.lock();
+                repl.run(&mut stdin, &mut stderr);
+            } else {
+                praxis_debugger::render::render_noninteractive(
+                    &mut std::io::stderr(),
+                    kind,
+                    None,
+                    Some(runtime.parse_detail()),
+                )?;
+            }
+        } else {
+            praxis_debugger::render::render_noninteractive(
+                &mut std::io::stderr(),
+                kind,
+                runtime.crash_snapshot(),
+                Some(runtime.parse_detail()),
+            )?;
         }
-        praxis_debugger::render::render_noninteractive(
-            &mut std::io::stderr(),
-            kind,
-            runtime.crash_snapshot(),
-            Some(runtime.parse_detail()),
-        )?;
-        // Keep the JIT alive through the print; drop after.
+        // Keep the JIT alive through the print/REPL; drop after.
         drop(jit);
         return Ok(1);
     }

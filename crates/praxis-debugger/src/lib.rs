@@ -11,6 +11,7 @@
 //! the context commands land in M10b.
 
 pub mod render;
+pub mod repl;
 
 /// Marker documenting that this crate was a skeleton through Milestone 9 and
 /// fills at Milestone 10.

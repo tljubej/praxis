@@ -160,12 +160,12 @@ fn m10ws4_noninteractive_renders_backtrace_and_locals() {
 }
 
 #[test]
-fn m10ws4_debug_never_exits_one_without_repl_note() {
-    // `--debug=never` must not print the "REPL not wired" note — it declines
-    // the REPL outright.
+fn m10ws4_debug_never_exits_one_without_repl() {
+    // `--debug=never` must not enter the REPL — it prints the noninteractive
+    // diagnostic and exits. No "Praxis crash>" prompt on stderr.
     let (code, _stdout, stderr) = run_fixture_debug("overflow.px", "never");
     assert_eq!(code, 1);
-    assert!(!stderr.contains("interactive crash REPL"));
+    assert!(!stderr.contains("Praxis crash>"));
     assert!(stderr.contains("integer overflow"));
 }
 
@@ -179,4 +179,78 @@ fn m10ws4_default_auto_non_tty_is_noninteractive() {
         stderr.contains("Backtrace:"),
         "auto/non-TTY still renders backtrace"
     );
+}
+
+// ===========================================================================
+// M10 WS5 — interactive crash REPL (§9.4).
+//
+// `--debug=always` enters the REPL after a fault. Program input comes from
+// `--input` (freeing stdin for REPL commands). These tests pipe a command
+// script and assert the REPL's output (backtrace, frame navigation, locals).
+// ===========================================================================
+
+/// Run a fixture with `--debug=always`, piping `repl_cmds` to stdin and using
+/// `--input` (empty) so stdin is free for the REPL. Returns (exit, combined).
+fn run_repl_with_cmds(name: &str, repl_cmds: &str) -> (i32, String) {
+    use std::process::Stdio;
+    let mut child = Command::new(bin_path())
+        .args(["run", "--debug=always", "--input", "/dev/null"])
+        .arg(fixture(name))
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn praxis");
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().expect("stdin");
+        stdin
+            .write_all(repl_cmds.as_bytes())
+            .expect("write repl cmds");
+    }
+    let output = child.wait_with_output().expect("wait");
+    let code = output.status.code().unwrap_or(-1);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (code, combined)
+}
+
+#[test]
+fn m10ws5_repl_bt_and_locals_and_quit() {
+    // Pipe `bt`, `locals`, `quit` into the REPL. The output must contain the
+    // backtrace frame, the named local, and exit cleanly (code 1).
+    let (code, out) = run_repl_with_cmds("debug_backtrace.px", "bt\nlocals\nquit\n");
+    assert_eq!(code, 1, "faulted run exits 1 after REPL quits");
+    assert!(out.contains("Praxis crash>"), "REPL prompt shown: {out}");
+    assert!(out.contains("#0"), "bt ran: {out}");
+    assert!(out.contains("main"), "frame name shown: {out}");
+    // The named local `xs = [11, 22]` renders in `locals`.
+    assert!(out.contains("xs = [11, 22]"), "locals ran: {out}");
+}
+
+#[test]
+fn m10ws5_repl_frame_navigation() {
+    // `frame 0` selects the (only) frame; `up` at the outermost reports the
+    // boundary. The selection is reflected in subsequent output.
+    let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "frame 0\nup\nquit\n");
+    assert!(out.contains("frame 0:"), "frame select ran: {out}");
+    assert!(out.contains("outermost"), "up-at-top boundary: {out}");
+}
+
+#[test]
+fn m10ws5_repl_eof_exits() {
+    // EOF (no `quit`) must exit the REPL cleanly, not hang.
+    let (code, _out) = run_repl_with_cmds("debug_backtrace.px", "");
+    assert_eq!(code, 1, "EOF exits the REPL with the fault exit code");
+}
+
+#[test]
+fn m10ws5_repl_help_lists_commands() {
+    let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "help\nquit\n");
+    for cmd in ["bt", "frame", "up", "down", "locals", "quit"] {
+        assert!(out.contains(cmd), "help lists `{cmd}`: {out}");
+    }
 }
