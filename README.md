@@ -5,15 +5,15 @@ Advent of Code-style puzzle solving. It favors rapid iteration, concise data
 manipulation, practical parsing, and strong diagnostics over systems-programming
 concerns.
 
-> **Status:** Milestone 8 complete — the full collection set (`Vec`, `Deque`,
-> `Map`, `Set`, `Counter`, `MinHeap`, `MaxHeap`, `BitSet`, complete `Grid`) is
-> implemented end-to-end, with tuples/records/nested collections working as
-> map/set keys. The §4.11 control-flow surface (`for`/`loop`/`break`/`continue`/
-> `return`) and the §6.3 sequence pipeline (`map`/`filter`/`sum`/`count`/
-> `collect`, with seamless chaining) land here, alongside the `Iterable`/
-> `SupportsOrd` capabilities and a closed method catalog driving completion data.
-> See [`praxis_technical_design.md`](./praxis_technical_design.md) for the full
-> language and the milestone roadmap (§19).
+> **Status:** Milestone 9 complete — the input-parser DSL (§7) now covers the
+> harder AoC input shapes: named heterogeneous `sections` with `repeated`
+> tails, `block` (with field flattening), `choice` generated enums, `optional`
+> (→ `Option[T]`), `scan`, `matrix`, `chars`/`one_of`, and ragged grids. A
+> polymorphic `Option[T]` prelude enum (with the same-named-enum unification
+> fix that makes it sound) lands here. All five §19.9 acceptance fixtures
+> (bingo, almanac, repeated labeled blocks, grid+commands, noisy scan) parse
+> end-to-end. See [`praxis_technical_design.md`](./praxis_technical_design.md)
+> for the full language and the milestone roadmap (§19).
 
 ## Command surface
 

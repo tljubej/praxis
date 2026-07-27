@@ -715,6 +715,19 @@ fn counter_distinct_keys_tracked_separately() {
 }
 
 #[test]
+fn counter_vec_sourced_text_keys_accumulate() {
+    // M9 regression: the M8 handover listed "vec-sourced Text keys don't
+    // accumulate correctly" as a known bug; the M8 adversarial audit §6.4 said
+    // it was NOT reproduced. This test pins the working behavior: Text keys
+    // sourced from a Vec (distinct allocations) accumulate correctly in a
+    // Counter via structural Text hashing.
+    let src = "fn main() -> Int {\n  let words = Vec()\n  words.push(\"apple\")\n  words.push(\"apple\")\n  words.push(\"banana\")\n  let counts = Counter()\n  var i = 0\n  while i < words.len() {\n    counts.inc(words.get(i))\n    i = i + 1\n  }\n  counts.get(\"apple\")\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
 fn counter_len_counts_distinct_keys() {
     let src = "fn main() -> Int {\n  let c = Counter()\n  c.inc(\"a\")\n  c.inc(\"a\")\n  c.inc(\"b\")\n  c.len()\n}\n";
     let (rt, result) = run_main(src);
