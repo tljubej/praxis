@@ -150,6 +150,53 @@ pub enum ParserAst {
     /// irrelevant text (e.g. corrupted AoC input). Returns matches in source
     /// order as `Vec[result(P)]`, ignoring unmatched text.
     Scan { child: Box<ParserAst>, span: Span },
+    /// `one_of("LR")` (M9, §7.5): match one character from a literal character
+    /// set. Result is `Char`.
+    OneOf { chars: String, span: Span },
+    /// `chars(P, skip:)` (M9, §7.5): apply a char-parser repeatedly. Result is
+    /// `Vec[Char]`. The `skip` policy trims between matches (`none`/`whitespace`/
+    /// `newlines`).
+    Characters {
+        child: Box<ParserAst>,
+        skip: SkipPolicy,
+        span: Span,
+    },
+    /// `matrix(P)` (M9, §7.5, ADR-030): parse lines of whitespace-separated
+    /// tokens into a rectangular `Grid[result(P)]`. Same result type as `grid`
+    /// but tokenizes on whitespace rather than per-character.
+    Matrix { child: Box<ParserAst>, span: Span },
+    /// Ragged `grid(P, ragged, fill:)` (M9, §7.5): permit uneven rows and pad
+    /// to the maximum width with `fill`. The plain `grid(P)` keeps its own arm.
+    GridRagged {
+        child: Box<ParserAst>,
+        /// The fill character/value, as the literal text from source (parsed by
+        /// the cell parser at runtime).
+        fill: String,
+        span: Span,
+    },
+}
+
+/// How `chars(P, skip:)` trims between matches (§7.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkipPolicy {
+    /// No trimming between matches.
+    None,
+    /// Skip horizontal whitespace (spaces/tabs) between matches.
+    Whitespace,
+    /// Skip any whitespace including newlines between matches.
+    Newlines,
+}
+
+impl SkipPolicy {
+    /// Parse a `skip:` keyword value, or `None` if unknown.
+    pub fn from_keyword(name: &str) -> Option<Self> {
+        Some(match name {
+            "none" => SkipPolicy::None,
+            "whitespace" => SkipPolicy::Whitespace,
+            "newlines" => SkipPolicy::Newlines,
+            _ => return None,
+        })
+    }
 }
 
 /// One item in a `block(...)` (M9, §7.5).
@@ -180,7 +227,11 @@ impl ParserAst {
             | ParserAst::Block { span, .. }
             | ParserAst::Choice { span, .. }
             | ParserAst::Optional { span, .. }
-            | ParserAst::Scan { span, .. } => *span,
+            | ParserAst::Scan { span, .. }
+            | ParserAst::OneOf { span, .. }
+            | ParserAst::Characters { span, .. }
+            | ParserAst::Matrix { span, .. }
+            | ParserAst::GridRagged { span, .. } => *span,
         }
     }
 }

@@ -108,6 +108,20 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Type {
             let elem = synthesize(child, db);
             db.vec(elem)
         }
+        ParserAst::OneOf { .. } => {
+            // `one_of("LR")` → Char (§7.5).
+            db.char()
+        }
+        ParserAst::Characters { .. } => {
+            // `chars(P, skip:)` → Vec[Char] (§7.5).
+            let ch = db.char();
+            db.vec(ch)
+        }
+        ParserAst::Matrix { child, .. } | ParserAst::GridRagged { child, .. } => {
+            // `matrix(P)` / ragged `grid(P)` → Grid[result(P)] (§7.5, ADR-030).
+            let elem = synthesize(child, db);
+            db.collection(CollectionCtor::Grid, vec![elem])
+        }
     }
 }
 

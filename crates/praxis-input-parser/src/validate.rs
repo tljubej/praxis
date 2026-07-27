@@ -148,6 +148,10 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
         }
         ParserAst::Optional { child, .. } => validate_node(child, errs),
         ParserAst::Scan { child, .. } => validate_node(child, errs),
+        ParserAst::Characters { child, .. } => validate_node(child, errs),
+        ParserAst::Matrix { child, .. } => validate_node(child, errs),
+        ParserAst::GridRagged { child, .. } => validate_node(child, errs),
+        ParserAst::OneOf { .. } => {}
     }
 }
 

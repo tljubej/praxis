@@ -160,6 +160,18 @@ unsafe fn walk(
         PlanNode::Choice { cases } => walk_choice(&rt, plan, cases, bytes, offset),
         PlanNode::Optional { child } => walk_optional(&rt, plan, *child, bytes, offset),
         PlanNode::Scan { child } => walk_scan(&rt, plan, *child, bytes, offset),
+        PlanNode::OneOf { chars_index } => {
+            let chars = plan.literals[*chars_index as usize];
+            walk_one_of(&rt, chars, bytes, offset)
+        }
+        PlanNode::Characters { child, skip } => {
+            walk_characters(&rt, plan, *child, *skip, bytes, offset)
+        }
+        PlanNode::Matrix { child } => walk_matrix(&rt, plan, *child, bytes, offset),
+        PlanNode::GridRagged { child, fill_index } => {
+            let fill = plan.literals[*fill_index as usize];
+            walk_grid_ragged(&rt, plan, *child, fill, bytes, offset)
+        }
         PlanNode::Csv { child } => walk_csv(&rt, plan, *child, bytes, offset),
         PlanNode::Ws { child } => walk_ws(&rt, plan, *child, bytes, offset),
         PlanNode::Sep {
@@ -516,6 +528,157 @@ fn walk_scan(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize
     }
     let elem_desc = child_descriptor(plan, child);
     Ok((rt.alloc_vec(elem_desc, items), bytes.len() - offset))
+}
+
+/// Walk `one_of("LR")` (M9, §7.5): match one character from a literal set.
+fn walk_one_of(rt: &Rt, chars: &str, bytes: &[u8], offset: usize) -> WalkResult {
+    let rest = &bytes[offset..];
+    let s = trim_leading_ws(rest);
+    let s_str = std::str::from_utf8(s).map_err(|_| ())?;
+    let ch = s_str.chars().next().ok_or(())?;
+    if !chars.contains(ch) {
+        return Err(());
+    }
+    let consumed = rest.len() - s.len() + ch.len_utf8();
+    Ok((rt.alloc_char(ch as u32), offset + consumed))
+}
+
+/// Walk `chars(P, skip:)` (M9, §7.5): apply a char-parser repeatedly, trimming
+/// between matches per the skip policy. Result is `Vec[Char]`.
+fn walk_characters(
+    rt: &Rt,
+    plan: &ParserPlan,
+    child: u32,
+    skip: praxis_input_parser::SkipPolicy,
+    bytes: &[u8],
+    offset: usize,
+) -> WalkResult {
+    let mut items = Vec::new();
+    let mut cursor = offset;
+    loop {
+        cursor = skip_chars(bytes, cursor, skip);
+        if cursor >= bytes.len() {
+            break;
+        }
+        match unsafe { walk(rt.ctx, plan, child, bytes, cursor) } {
+            Ok((value, new_offset)) => {
+                if new_offset <= cursor {
+                    cursor += 1;
+                } else {
+                    cursor = new_offset;
+                }
+                items.push(value);
+            }
+            Err(()) => break,
+        }
+    }
+    Ok((rt.alloc_vec(scalars::CHAR, items), bytes.len() - offset))
+}
+
+/// Skip bytes at `cursor` per the `chars` skip policy (§7.5).
+fn skip_chars(bytes: &[u8], mut cursor: usize, skip: praxis_input_parser::SkipPolicy) -> usize {
+    use praxis_input_parser::SkipPolicy;
+    match skip {
+        SkipPolicy::None => {}
+        SkipPolicy::Whitespace => {
+            while cursor < bytes.len() && (bytes[cursor] == b' ' || bytes[cursor] == b'\t') {
+                cursor += 1;
+            }
+        }
+        SkipPolicy::Newlines => {
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+        }
+    }
+    cursor
+}
+
+/// Walk `matrix(P)` (M9, §7.5, ADR-030): parse lines of whitespace-separated
+/// tokens into a rectangular `Grid[result(P)]`. Each row must have the same
+/// token count.
+fn walk_matrix(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
+    let region = &bytes[offset..];
+    let region_str = std::str::from_utf8(region).unwrap_or("");
+    let lines: Vec<&str> = region_str
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let width = lines
+        .first()
+        .map(|l| l.split_whitespace().count())
+        .unwrap_or(0);
+    let mut items = Vec::with_capacity(lines.len() * width);
+    for line in &lines {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() != width {
+            return Err(());
+        }
+        for token in tokens {
+            let token_bytes = token.as_bytes();
+            let (value, _) = unsafe { walk(rt.ctx, plan, child, token_bytes, 0)? };
+            items.push(value);
+        }
+    }
+    let elem_desc = child_descriptor(plan, child);
+    alloc_grid(rt, elem_desc, items, width, bytes.len() - offset)
+}
+
+/// Walk ragged `grid(P, ragged, fill:)` (M9, §7.5): permit uneven rows and pad
+/// to the maximum width with the `fill` value (parsed by the cell parser).
+fn walk_grid_ragged(
+    rt: &Rt,
+    plan: &ParserPlan,
+    child: u32,
+    fill: &str,
+    bytes: &[u8],
+    offset: usize,
+) -> WalkResult {
+    let region = &bytes[offset..];
+    let lines: Vec<_> = split_lines(region).collect();
+    let width = lines.iter().map(|l| l.len).max().unwrap_or(0);
+    let mut items = Vec::with_capacity(lines.len() * width);
+    let fill_bytes = fill.as_bytes();
+    let (fill_value, _) = unsafe { walk(rt.ctx, plan, child, fill_bytes, 0)? };
+    for line in &lines {
+        let line_bytes = &region[line.start..line.start + line.len];
+        for (i, _) in line_bytes.iter().enumerate() {
+            let cell_offset = offset + line.start + i;
+            let (value, _) = unsafe { walk(rt.ctx, plan, child, bytes, cell_offset)? };
+            items.push(value);
+        }
+        for _ in line_bytes.len()..width {
+            items.push(fill_value);
+        }
+    }
+    let elem_desc = child_descriptor(plan, child);
+    alloc_grid(rt, elem_desc, items, width, bytes.len() - offset)
+}
+
+/// Allocate a `Grid` from element refs + width (shared by grid/matrix/ragged).
+/// `consumed` is the byte count the grid consumed (caller-supplied).
+fn alloc_grid(
+    rt: &Rt,
+    elem_desc: &'static crate::TypeDescriptor,
+    items: Vec<GcRef>,
+    width: usize,
+    consumed: usize,
+) -> WalkResult {
+    let payload = crate::collections::GridPayload {
+        element_descriptor: elem_desc,
+        items,
+        width,
+    };
+    // SAFETY: ctx is valid.
+    let grid_ref = unsafe {
+        heap_ref(rt.ctx).alloc_with(
+            crate::collections::GRID,
+            std::mem::size_of::<crate::collections::GridPayload>(),
+            std::mem::align_of::<crate::collections::GridPayload>(),
+            |ptr| (ptr as *mut crate::collections::GridPayload).write(payload),
+        )
+    };
+    Ok((grid_ref, consumed))
 }
 
 fn walk_csv(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
@@ -1120,6 +1283,11 @@ fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescri
         PlanNode::Block { .. } => crate::records::RECORD,
         // choice/optional produce an enum (uniform descriptor; tag + payload).
         PlanNode::Choice { .. } | PlanNode::Optional { .. } => crate::enums::ENUM,
+        // one_of produces a Char; chars produces a Vec[Char].
+        PlanNode::OneOf { .. } => scalars::CHAR,
+        PlanNode::Characters { .. } => crate::collections::VEC,
+        // matrix / ragged grid produce a Grid.
+        PlanNode::Matrix { .. } | PlanNode::GridRagged { .. } => crate::collections::GRID,
         // A template's result is a scalar (single anon capture), a record (named
         // captures), or Unit (no captures). A tuple's result is a tuple. These
         // are uniform descriptors too (schema in the payload).

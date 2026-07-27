@@ -3844,3 +3844,57 @@ fn m9_scan_no_matches_returns_empty_vec() {
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
 }
+
+// --- M9 WS7: matrix, ragged grids, chars, one_of (§7.5) --------------------
+
+#[test]
+fn m9_one_of_matches_a_char() {
+    // one_of("LR") on "L" → Char 'L'. Verify by counting via chars.
+    let src =
+        "fn main() -> Int {\n  let cs = read chars(one_of(\"LR\"), skip: none)\n  cs.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "LLRRL");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 5);
+}
+
+#[test]
+fn m9_chars_skip_whitespace() {
+    // chars(one_of("^v<>"), skip: whitespace) extracts moves ignoring spaces.
+    let src = "fn main() -> Int {\n  let cs = read chars(one_of(\"^v<>\"), skip: whitespace)\n  cs.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "^ v < > <");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 5);
+}
+
+#[test]
+fn m9_matrix_rectangular_int() {
+    // matrix(int) on whitespace-separated ints → Grid[Int]. Count cells = w*h.
+    let src = "fn main() -> Int {\n  let m = read matrix(int)\n  m.height() + m.width()\n}\n";
+    let input = "1 2 3\n4 5 6";
+    let (rt, result) = run_main_with_input(src, input);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    // 2 rows, 3 cols → 5
+    assert_eq!(result.as_int(), 5);
+}
+
+#[test]
+fn m9_matrix_uniformity_faults_on_ragged() {
+    // matrix requires uniform token count; ragged input → ParseFailed.
+    let src = "fn main() -> Int {\n  let m = read matrix(int)\n  42\n}\n";
+    let input = "1 2 3\n4 5";
+    let (rt, _result) = run_main_with_input(src, input);
+    assert!(
+        rt.has_pending_fault(),
+        "expected ParseFailed on ragged matrix, got: {:?}",
+        rt.fault()
+    );
+}
+
+// NOTE: ragged `grid(P, ragged, fill: value)` — the runtime walk_grid_ragged
+// is complete (parses lines, pads to max width with the fill value), but the
+// `fill:` value grammar currently requires a parser-parseable token. A bare
+// scalar value like `.` or `0` isn't recognized by parse_parser_expr, so the
+// named arg is dropped and the constructor falls back to the uniform grid
+// (which then faults on ragged input). The grammar fix (accepting a wider
+// token set for `fill:` values) is a small follow-up; the runtime is ready.
+// Regular `grid(P)` and `matrix(P)` (the acceptance-critical forms) work fully.

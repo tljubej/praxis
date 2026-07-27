@@ -18,7 +18,7 @@
 //! This mirrors how the JIT already leaks function-name strings as `String` in
 //! `CallTarget::User` — acceptable for a JIT process.
 
-use crate::ast::{AtomicKind, ParserAst, TemplatePart, WsPolicy};
+use crate::ast::{AtomicKind, ParserAst, SkipPolicy, TemplatePart, WsPolicy};
 
 // ===========================================================================
 // The flat plan node arena.
@@ -57,6 +57,14 @@ pub enum PlanNode {
     /// `scan(P)` (M9, §7.5). Slide a cursor; at each position try `P`; collect
     /// matches in source order, ignoring unmatched text.
     Scan { child: u32 },
+    /// `one_of("LR")` (M9, §7.5). `chars_index` is into `ParserPlan::literals`.
+    OneOf { chars_index: u32 },
+    /// `chars(P, skip:)` (M9, §7.5). Apply a char-parser repeatedly.
+    Characters { child: u32, skip: SkipPolicy },
+    /// `matrix(P)` (M9, §7.5, ADR-030). Whitespace-tokenized rectangular Grid.
+    Matrix { child: u32 },
+    /// Ragged `grid(P, ragged, fill:)` (M9, §7.5). `fill_index` into literals.
+    GridRagged { child: u32, fill_index: u32 },
     /// `csv(P)`.
     Csv { child: u32 },
     /// `ws(P)`.
@@ -312,6 +320,31 @@ fn lower_node(b: &mut PlanBuilder, ast: &ParserAst) -> u32 {
         ParserAst::Scan { child, .. } => {
             let c = lower_node(b, child);
             b.push_node(PlanNode::Scan { child: c })
+        }
+        ParserAst::OneOf { chars, .. } => {
+            let chars_static = leak_str(chars);
+            let idx = b.intern_literal(chars_static);
+            b.push_node(PlanNode::OneOf { chars_index: idx })
+        }
+        ParserAst::Characters { child, skip, .. } => {
+            let c = lower_node(b, child);
+            b.push_node(PlanNode::Characters {
+                child: c,
+                skip: *skip,
+            })
+        }
+        ParserAst::Matrix { child, .. } => {
+            let c = lower_node(b, child);
+            b.push_node(PlanNode::Matrix { child: c })
+        }
+        ParserAst::GridRagged { child, fill, .. } => {
+            let c = lower_node(b, child);
+            let fill_static = leak_str(fill);
+            let fill_idx = b.intern_literal(fill_static);
+            b.push_node(PlanNode::GridRagged {
+                child: c,
+                fill_index: fill_idx,
+            })
         }
         ParserAst::Template { parts, .. } => lower_template(b, parts),
     }
