@@ -1268,8 +1268,13 @@ impl<'t> Parser<'t> {
 
     /// Parse a constructor call `name(args)` (§7.5). Emits
     /// `PARSER_EXPR > PARSER_CALL > PATH_EXPR + PARSER_ARG_LIST`. Each argument
-    /// is itself a parser expression, except `sep` whose first arg is a string
-    /// literal (the separator).
+    /// is one of:
+    /// - a positional parser expression (`lines(int)` → child `int`);
+    /// - a string literal (the separator for `sep`);
+    /// - a named argument `name: parser_expr` (M9, §7.5), emitted as a
+    ///   `PARSER_NAMED_ARG` node — used by heterogeneous `sections`
+    ///   (`rules: lines(...)`), `chars`/`grid` keyword args (`skip: whitespace`,
+    ///   `fill: value`), and the `repeated(...)` tail marker of `sections`.
     fn parse_parser_call(&mut self) {
         self.start_node(SyntaxKind::PARSER_EXPR);
         self.start_node(SyntaxKind::PARSER_CALL);
@@ -1281,15 +1286,25 @@ impl<'t> Parser<'t> {
         self.expect(SyntaxKind::L_PAREN, "`(` to open parser call arguments");
         self.start_node(SyntaxKind::PARSER_ARG_LIST);
         if !self.at(SyntaxKind::R_PAREN) {
-            // `sep`'s first argument is a string separator; everything else is a
-            // parser expression. Parse generically: if the first arg is a string
-            // literal, emit it as a literal; otherwise parse a parser expr.
             loop {
                 self.eat_trivia();
                 if self.at(SyntaxKind::TextLit) {
+                    // A string-literal separator for `sep`.
                     self.start_node(SyntaxKind::LITERAL);
                     self.bump();
                     self.finish_node();
+                } else if self.at(SyntaxKind::Ident) && self.nth_kind(1) == SyntaxKind::COLON {
+                    // A named argument `name: parser_expr` (M9). The name is a
+                    // bare ident followed by `:`. This does not conflict with a
+                    // constructor call (`lines(...)`) because that has `(` at
+                    // position 1, not `:`.
+                    self.start_node(SyntaxKind::PARSER_NAMED_ARG);
+                    self.bump(); // the name ident
+                    self.eat_trivia();
+                    self.expect(SyntaxKind::COLON, "`:` after a named argument");
+                    self.eat_trivia();
+                    self.parse_parser_expr();
+                    self.finish_node(); // PARSER_NAMED_ARG
                 } else {
                     self.parse_parser_expr();
                 }
@@ -1717,6 +1732,56 @@ mod tests {
         assert!(kinds.contains(&SyntaxKind::PARSER_CALL));
         // The string-literal separator is inside the arg list.
         assert!(kinds.contains(&SyntaxKind::TextLit));
+    }
+
+    // --- M9: named arguments in parser constructor calls (§7.5) ---------------
+
+    #[test]
+    fn parses_named_args_in_sections() {
+        // heterogeneous `sections(rules: ..., updates: ...)` — two named args.
+        let out = parse_text("let v = read sections(rules: lines(int), updates: lines(int))");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::PARSER_NAMED_ARG));
+        // Two named args + one positional arg-less... actually two named args.
+        let named_count = kinds
+            .iter()
+            .filter(|k| **k == SyntaxKind::PARSER_NAMED_ARG)
+            .count();
+        assert_eq!(named_count, 2);
+    }
+
+    #[test]
+    fn parses_repeated_tail_in_sections() {
+        // The `repeated(...)` tail marker of named sections.
+        let out =
+            parse_text("let v = read sections(draws: csv(int), boards: repeated(matrix(int)))");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::PARSER_NAMED_ARG));
+    }
+
+    #[test]
+    fn parses_keyword_arg_in_chars() {
+        // `chars(one_of(...), skip: whitespace)` — a positional arg followed by
+        // a named keyword arg.
+        let out = parse_text("let v = read chars(one_of(\"LR\"), skip: whitespace)");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::PARSER_NAMED_ARG));
+    }
+
+    #[test]
+    fn named_arg_does_not_shadow_constructor_call() {
+        // A constructor call argument (`lines(int)`) has `(` at position 1, so
+        // it is NOT mistaken for a named arg. Only `ident:` is.
+        let out = parse_text("let v = read sections(lines(int))");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(
+            !kinds.contains(&SyntaxKind::PARSER_NAMED_ARG),
+            "positional constructor-call arg must not parse as a named arg"
+        );
     }
 
     #[test]

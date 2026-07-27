@@ -42,6 +42,12 @@ pub const PRELUDE: &[PreludeEntry] = &[
     ),
     PreludeEntry::new("Grid", "2D grid with rectangular indexing."),
     PreludeEntry::new("BitSet", "Compact set of non-negative integers."),
+    // Optionality (M9). Option[T] is a polymorphic enum: Some(T) carries a
+    // value, None marks absence. Returned by the `optional(P)` parser and by
+    // `find`/`position` on a miss.
+    PreludeEntry::new("Option", "Optional value: Some(T) or None."),
+    PreludeEntry::new("Some", "Wrap a value in an Option."),
+    PreludeEntry::new("None", "The absent Option value."),
     // Graph algorithms
     PreludeEntry::new("bfs", "Breadth-first traversal."),
     PreludeEntry::new("bfs_distance", "Breadth-first shortest distance."),

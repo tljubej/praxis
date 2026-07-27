@@ -1312,6 +1312,40 @@ pub enum ParserExprKind {
     Unknown,
 }
 
+/// A named argument inside a parser constructor call (M9, §7.5):
+/// `name: parser_expr`. The name is the leading `Ident` token; the value is the
+/// nested [`ParserExpr`]. Used by heterogeneous `sections`
+/// (`rules: lines(...)`), `chars`/`grid` keyword args (`skip: whitespace`,
+/// `fill: value`), and as the `repeated(...)` tail marker of `sections`.
+#[derive(Clone, Debug)]
+pub struct ParserNamedArg {
+    syntax: SyntaxNode,
+}
+impl AstNode for ParserNamedArg {
+    const KIND: K = K::PARSER_NAMED_ARG;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl ParserNamedArg {
+    /// The argument name (the leading `Ident`).
+    pub fn name(&self) -> Option<String> {
+        use rowan::NodeOrToken;
+        self.syntax.children_with_tokens().find_map(|e| match e {
+            NodeOrToken::Token(t) if t.kind() == K::Ident => Some(t.text().to_string()),
+            _ => None,
+        })
+    }
+
+    /// The argument's parser-expression value.
+    pub fn value(&self) -> Option<ParserExpr> {
+        self.syntax.children().find_map(ParserExpr::cast)
+    }
+}
+
 /// A `receiver.method(args)` method-call expression (M5, §16.2). The receiver
 /// is the first child expression; the method name is the `Ident` token after
 /// the `DOT`; the argument list follows.

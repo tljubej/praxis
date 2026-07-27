@@ -6,7 +6,7 @@
 //! tree and builds a `praxis_input_parser::ParserAst`, which is then validated,
 //! type-synthesized, and lowered to a `ParserPlan`.
 
-use praxis_ast::{AstNode, ParserExpr, ParserExprKind};
+use praxis_ast::{AstNode, ParserExpr, ParserExprKind, ParserNamedArg};
 use praxis_input_parser::ast::{AtomicKind, Constructor, ParserAst, TemplatePart};
 use praxis_input_parser::{
     lower_to_plan, register_plan, scan_template, synthesize, validate, ValidationError,
@@ -200,11 +200,24 @@ fn find_template_text(parser_expr: &ParserExpr) -> Option<String> {
     None
 }
 
-/// One argument to a constructor: either a nested parser expression or a string
-/// literal (the separator for `sep`).
+/// One argument to a constructor call. Most constructors take positional
+/// parsers (`lines(int)`); `sep` takes a string separator; and the M9
+/// constructors take named arguments (`rules: lines(...)`, `skip: whitespace`).
 enum CallArg {
+    /// A positional parser expression.
     Parser(ParserAst),
+    /// A string literal (the separator for `sep`).
     String(String),
+    /// A named argument `name: parser_expr` (M9, §7.5). `name` is the field/
+    /// keyword; `parser` is the nested parser expression. The `repeated(...)`
+    /// tail marker of `sections` arrives as `Named { name: "repeated", .. }`
+    /// whose parser is the repeated child.
+    ///
+    /// Consumed by the M9 constructors that take named/keyword args
+    /// (`sections`, `block`, `chars`, `grid`, `optional`); until those land
+    /// (WS2+) the variant is collected but not yet dispatched on.
+    #[allow(dead_code)]
+    Named { name: String, parser: ParserAst },
 }
 
 /// Convert a constructor call rowan node into a `ParserAst`.
@@ -301,6 +314,18 @@ fn extract_call_args(
                                 if let Some(converted) = convert_parser_expr(&pe, file, diagnostics)
                                 {
                                     args.push(CallArg::Parser(converted));
+                                }
+                            }
+                        }
+                        praxis_syntax::SyntaxKind::PARSER_NAMED_ARG => {
+                            // A named argument `name: parser_expr` (M9, §7.5).
+                            if let Some(na) = ParserNamedArg::cast(arg.clone()) {
+                                if let (Some(name), Some(value)) = (na.name(), na.value()) {
+                                    if let Some(parser) =
+                                        convert_parser_expr(&value, file, diagnostics)
+                                    {
+                                        args.push(CallArg::Named { name, parser });
+                                    }
                                 }
                             }
                         }

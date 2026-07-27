@@ -173,6 +173,8 @@ impl Inferer {
                 s.kind == SymbolKind::Builtin
                     && (s.name == "out"
                         || s.name == "panic"
+                        || s.name == "Some"
+                        || s.name == "None"
                         || Self::collection_ctor_for(&s.name).is_some())
             })
             .map(|s| (s.id, s.name.clone()))
@@ -217,6 +219,30 @@ impl Inferer {
                     let ctor = Self::collection_ctor_for(&name).expect("ctor name");
                     let coll = db.collection(ctor, vec![]);
                     db.func(vec![], coll)
+                }
+                // Optionality (M9). `Some : forall T. (T) -> Option[T]` and
+                // `None : forall T. Option[T]`. `None` is a zero-payload variant,
+                // so its scheme is the enum type directly (mirroring how
+                // user-declared zero-payload variants get a monotype scheme in
+                // `infer_enum`, not a `() -> ...` function). The Option def is
+                // registered fresh inside the inner scope; instantiation
+                // re-registers a fresh def per use, and same-named enums unify
+                // structurally (unify.rs M9 arm) so independently-stamped
+                // Option[T] copies merge into one type.
+                "Some" => {
+                    let t = db.fresh_var();
+                    let opt = db.register_enum(
+                        "Option",
+                        vec![("Some".into(), Some(vec![t])), ("None".into(), None)],
+                    );
+                    db.func(vec![t], opt)
+                }
+                "None" => {
+                    let t = db.fresh_var();
+                    db.register_enum(
+                        "Option",
+                        vec![("Some".into(), Some(vec![t])), ("None".into(), None)],
+                    )
                 }
                 other => panic!("unexpected builtin `{other}` seeded"),
             });
@@ -1468,6 +1494,21 @@ impl Inferer {
         // `Seq` is compiler-internal (§6.3, M8 WS8); never user-named.
         if name == "Seq" {
             return None;
+        }
+        // `Option[T]` (M9): a type-arg application of the prelude `Option`
+        // resolves to a fresh Option def carrying the element type. Registered
+        // here (not via `register_enum` in the prelude) so each annotation site
+        // gets its own def, which then unifies with any other Option[T] by name
+        // (unify.rs M9 arm) and with `Some`/`None`-constructed values.
+        if name == "Option" {
+            let elem = args
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| self.db.fresh_var());
+            return Some(self.db.register_enum(
+                "Option",
+                vec![("Some".into(), Some(vec![elem])), ("None".into(), None)],
+            ));
         }
         let ctor = Self::collection_ctor_for(name)?;
         // Arity check: the ctor declares how many type args it takes. A wrong

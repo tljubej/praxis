@@ -648,3 +648,100 @@ fn anon_record_display_preserves_source_order() {
     assert_eq!(db.render(yx), "{ y: Int, x: Int }");
     let _ = RecordDefId(0); // exercise the debug impl / keep the import used
 }
+
+// ---- M9: enum unification for polymorphic / anonymous enums ----------------
+
+/// Two nominal enums with the same name and variant signature unify and link to
+/// one canonical def-id. This is the soundness fix that lets a polymorphic
+/// `forall T. Option[T]` scheme work: each instantiation mints a fresh def, but
+/// they unify by name+shape.
+#[test]
+fn same_named_enums_unify_structurally() {
+    let mut db = TypeDb::new();
+    let int = db.int();
+    // Two independently-stamped `Option` defs (simulating two instantiation
+    // sites of a polymorphic Option scheme).
+    let opt_a = db.register_enum(
+        "Option",
+        vec![("Some".into(), Some(vec![int])), ("None".into(), None)],
+    );
+    let opt_b = db.register_enum(
+        "Option",
+        vec![("Some".into(), Some(vec![int])), ("None".into(), None)],
+    );
+    db.unify(opt_a, opt_b).expect("Option[Int] ~ Option[Int]");
+}
+
+/// Unifying fixes the element type across the two sites: `Option[?T]` unified
+/// with `Option[Int]` pins `?T = Int` in both.
+#[test]
+fn same_named_enums_unify_payloads_pairwise() {
+    let mut db = TypeDb::new();
+    let t = db.fresh_var();
+    let int = db.int();
+    // Option[?T]
+    let opt_var = db.register_enum(
+        "Option",
+        vec![("Some".into(), Some(vec![t])), ("None".into(), None)],
+    );
+    // Option[Int]
+    let opt_int = db.register_enum(
+        "Option",
+        vec![("Some".into(), Some(vec![int])), ("None".into(), None)],
+    );
+    db.unify(opt_var, opt_int)
+        .expect("Option[?T] ~ Option[Int]");
+    assert!(is_int(&db, t), "Some's payload ?T should be pinned to Int");
+}
+
+/// Different names never unify, even with identical variant signatures —
+/// `Color::Red` must never equal `Signal::Red`.
+#[test]
+fn differently_named_enums_do_not_unify() {
+    let mut db = TypeDb::new();
+    let color = db.register_enum("Color", vec![("Red".into(), None), ("Green".into(), None)]);
+    let signal = db.register_enum("Signal", vec![("Red".into(), None), ("Green".into(), None)]);
+    let err = db.unify(color, signal).unwrap_err();
+    assert!(matches!(err, crate::unify::UnifyError::Mismatch { .. }));
+}
+
+/// Same name but different variant signatures do not unify.
+#[test]
+fn same_name_different_variants_do_not_unify() {
+    let mut db = TypeDb::new();
+    let a = db.register_enum("E", vec![("A".into(), None), ("B".into(), None)]);
+    let b = db.register_enum("E", vec![("A".into(), None), ("C".into(), None)]);
+    let err = db.unify(a, b).unwrap_err();
+    assert!(matches!(err, crate::unify::UnifyError::Mismatch { .. }));
+}
+
+/// Anonymous enums (the synthetic name "") unify by variant-name signature, so
+/// two independently-stamped `choice` results of the same shape unify.
+#[test]
+fn anonymous_enums_unify_by_variant_signature() {
+    let mut db = TypeDb::new();
+    let i0 = db.int();
+    let i1 = db.int();
+    let i2 = db.int();
+    let i3 = db.int();
+    let choice_a = db.anon_enum(vec![
+        ("Multiply".into(), Some(vec![i0, i1])),
+        ("Enable".into(), None),
+    ]);
+    let choice_b = db.anon_enum(vec![
+        ("Multiply".into(), Some(vec![i2, i3])),
+        ("Enable".into(), None),
+    ]);
+    db.unify(choice_a, choice_b)
+        .expect("anon enums same shape unify");
+}
+
+/// `anon_enum` minted separately from a `choice` of different variant names must
+/// NOT unify.
+#[test]
+fn anonymous_enums_different_shape_do_not_unify() {
+    let mut db = TypeDb::new();
+    let a = db.anon_enum(vec![("Foo".into(), None)]);
+    let b = db.anon_enum(vec![("Bar".into(), None)]);
+    assert!(db.unify(a, b).is_err());
+}

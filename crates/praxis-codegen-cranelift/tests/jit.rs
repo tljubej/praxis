@@ -3549,3 +3549,83 @@ fn adv_let_shadowing_changes_type() {
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 5);
 }
+
+// --- M9: Option[T] prelude enum --------------------------------------------
+// Option is a polymorphic prelude enum (forall T. Option[T]) with variants
+// Some(T) and None. These tests exercise construction, matching, equality, and
+// cross-site unification (the M9 structural-same-named-enum unify fix).
+
+#[test]
+fn m9_option_some_construction_and_match() {
+    // `Some(42)` constructs; matching `.Some(n)` extracts the payload.
+    let src = "fn main() -> Int {\n  let v = Some(42)\n  match v {\n    Some(n) => n\n    None => 0\n  }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn m9_option_none_construction_and_match() {
+    // `None` constructs a payload-less variant.
+    let src = "fn main() -> Int {\n  let v = None\n  match v {\n    Some(n) => n\n    None => 7\n  }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
+}
+
+#[test]
+fn m9_option_some_none_equality() {
+    // `Some(1) == Some(1)` is true; `Some(1) == None` is false; `None == None` is true.
+    let src = "fn main() -> Int {\n  let a = Some(1) == Some(1)\n  let b = Some(1) == None\n  let c = None == None\n  if a { if b { 3 } else { if c { 2 } else { 4 } } } else { 1 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+fn m9_option_unifies_across_construction_sites() {
+    // Two independently-constructed Some values unify through match + equality,
+    // exercising the same-named-enum structural unification.
+    let src = "fn main() -> Int {\n  let a = Some(10)\n  let b = Some(20)\n  if a == Some(10) { if b == Some(20) { 1 } else { 2 } } else { 3 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn m9_option_text_payload() {
+    // Option is polymorphic: Some(Text) works, not just Some(Int).
+    let src = "fn main() -> Int {\n  let v = Some(\"hi\")\n  match v {\n    Some(s) => if s == \"hi\" { 1 } else { 0 }\n    None => 9\n  }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+fn m9_option_type_annotation() {
+    // An explicit `Option[Int]` annotation unifies with Some(5).
+    let src = "fn main() -> Int {\n  let v: Option[Int] = Some(5)\n  match v {\n    Some(n) => n\n    None => 0\n  }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 5);
+}
+
+#[test]
+fn m9_option_returned_from_function() {
+    // A function returning Option[Int] (None path) — polymorphic enum as a
+    // return type, flowing through a fresh def at the annotation vs. the
+    // Some-construction site.
+    let src = "fn maybe(x: Int) -> Option[Int] {\n  if x > 0 { Some(x) } else { None }\n}\nfn main() -> Int {\n  match maybe(5) {\n    Some(n) => n\n    None => 0\n  }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 5);
+}
+
+#[test]
+fn m9_option_returned_none_from_function() {
+    // The None path of the function above.
+    let src = "fn maybe(x: Int) -> Option[Int] {\n  if x > 0 { Some(x) } else { None }\n}\nfn main() -> Int {\n  match maybe(-1) {\n    Some(n) => n\n    None => 99\n  }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 99);
+}

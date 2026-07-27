@@ -232,8 +232,76 @@ impl TypeDb {
                 self.slots_set(b, TypeData::Record { def: d_a });
                 Ok(())
             }
-            // Enums unify iff same def-id (nominal by name, §4.6).
-            (TypeData::Enum { def: d_a }, TypeData::Enum { def: d_b }) if d_a == d_b => Ok(()),
+            // Enums unify iff same def-id, OR (M9) the two defs share the same
+            // name and the same variant-name signature — in which case their
+            // payloads unify pairwise by variant position and the later def-id
+            // is rewritten to point at the canonical (earlier) one.
+            //
+            // Why the second clause: a polymorphic enum scheme such as the
+            // prelude `forall T. Option[T]` is *instantiate*d into a fresh
+            // `EnumDef` per use site (generalize.rs), so `Some(5)` and an
+            // `Option[Int]` annotation carry different def-ids despite being
+            // structurally the same named enum. Pure identity-only comparison
+            // would reject them. Two user-declared enums can never share a name
+            // in one scope (the resolver binds the name once), so this relaxed
+            // arm can only fire for compiler-stamped copies of a polymorphic
+            // enum — it never collapses two genuinely-distinct nominal types.
+            // Anonymous enums from `choice(...)` share the synthetic name "" and
+            // a variant-name signature, so two independently-stamped copies of
+            // the same `choice` also unify here. This mirrors the anonymous
+            // record arm above (structural identity by field-name set + link).
+            (TypeData::Enum { def: d_a }, TypeData::Enum { def: d_b }) => {
+                if d_a == d_b {
+                    return Ok(());
+                }
+                let ea = self.enum_defs[d_a.0 as usize].clone();
+                let eb = self.enum_defs[d_b.0 as usize].clone();
+                // Same name + same variant-name signature is the precondition.
+                let same_shape = ea.name == eb.name
+                    && ea.variants.len() == eb.variants.len()
+                    && ea
+                        .variants
+                        .iter()
+                        .zip(&eb.variants)
+                        .all(|(va, vb)| va.name == vb.name);
+                if !same_shape {
+                    return Err(UnifyError::Mismatch {
+                        expected: a,
+                        found: b,
+                    });
+                }
+                // Unify each variant's payload pairwise (zip by declaration
+                // order, which the name check above already aligned).
+                for (va, vb) in ea.variants.iter().zip(&eb.variants) {
+                    match (&va.payload, &vb.payload) {
+                        (None, None) => {}
+                        (Some(ps_a), Some(ps_b)) => {
+                            if ps_a.len() != ps_b.len() {
+                                return Err(UnifyError::Mismatch {
+                                    expected: a,
+                                    found: b,
+                                });
+                            }
+                            for (pa, pb) in ps_a.iter().zip(ps_b) {
+                                self.unify(*pa, *pb).map_err(|_| UnifyError::Mismatch {
+                                    expected: a,
+                                    found: b,
+                                })?;
+                            }
+                        }
+                        _ => {
+                            return Err(UnifyError::Mismatch {
+                                expected: a,
+                                found: b,
+                            });
+                        }
+                    }
+                }
+                // Adopt the earlier def-id (d_a) as canonical: rewrite b's slot
+                // to point at d_a so subsequent uses resolve to one def.
+                self.slots_set(b, TypeData::Enum { def: d_a });
+                Ok(())
+            }
             _ => Err(UnifyError::Mismatch {
                 expected: a,
                 found: b,

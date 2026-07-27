@@ -277,6 +277,11 @@ pub enum SyntaxKind {
     PARSER_CALL,
     /// The `(arg, arg, ...)` argument list of a parser constructor call.
     PARSER_ARG_LIST,
+    /// A named argument inside a parser constructor call (M9, §7.5):
+    /// `name: parser_expr`, e.g. `rules: lines(int)` in heterogeneous
+    /// `sections`, or `skip: whitespace` in `chars`. Holds the name ident, the
+    /// `:`, and the parser-expr value.
+    PARSER_NAMED_ARG,
 }
 
 impl SyntaxKind {

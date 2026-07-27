@@ -276,6 +276,30 @@ impl TypeDb {
         self.intern(TypeData::Record { def: id })
     }
 
+    /// Create an *anonymous* enum type (M9). Mirrors [`anon_record`](Self::anon_record):
+    /// each call mints a fresh def whose identity is established through unification
+    /// (two anonymous enums with the same synthetic name `""` and the same
+    /// variant-name signature unify and get linked, per `unify.rs`). Used by
+    /// `choice(...)` (§7.5) and as the fallback representation for `optional` when
+    /// it cannot share the nominal `Option` def. Variant display order follows the
+    /// order given here.
+    #[must_use]
+    pub fn anon_enum(&mut self, variants: Vec<(String, Option<Vec<Type>>)>) -> Type {
+        let def = EnumDef {
+            name: String::new(),
+            variants: variants
+                .into_iter()
+                .map(|(n, p)| crate::data::EnumVariantDef {
+                    name: n,
+                    payload: p,
+                })
+                .collect(),
+        };
+        let id = EnumDefId(self.enum_defs.len() as u32);
+        self.enum_defs.push(def);
+        self.intern(TypeData::Enum { def: id })
+    }
+
     /// Wrap an existing [`RecordDefId`] into a `Type` (e.g. for use after
     /// fetching a shared def-id).
     #[must_use]

@@ -26,7 +26,7 @@ impl Language for PraxisLanguage {
         // discriminant. The only producer of raw kinds is `kind_to_raw` below
         // (plus rowan's own storage, which round-trips our values). Unknown
         // values cannot occur from Praxis-owned input.
-        debug_assert!(raw.0 <= SyntaxKind::PARSER_ARG_LIST as u16);
+        debug_assert!(raw.0 <= SyntaxKind::PARSER_NAMED_ARG as u16);
         // The cast is sound because of `repr(u16)` and the provenance of `raw`.
         unsafe { std::mem::transmute(raw.0) }
     }
