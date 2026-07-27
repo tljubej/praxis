@@ -5,16 +5,16 @@ Advent of Code-style puzzle solving. It favors rapid iteration, concise data
 manipulation, practical parsing, and strong diagnostics over systems-programming
 concerns.
 
-> **Status:** Milestone 10 Part 1 complete — the crash debugger substrate
-> (§9): §7.11 rich parse diagnostics, debug-frame codegen wiring (ADR-021),
-> crash snapshots with GC rooting (the §19.10 "GC retains snapshot-reachable
-> objects" criterion), the §9.6 noninteractive fallback, and the interactive
-> crash REPL (`bt`/`frame`/`up`/`down`/`locals`/`help`/`quit`). A fault now
-> renders a numbered backtrace + locals; `--debug=auto|always|never` controls
-> REPL entry. Part 2 adds the read-only `p EXPR`/`type EXPR` evaluator and
-> `restart`/`reload`. See
-> [`praxis_technical_design.md`](./praxis_technical_design.md) for the full
-> language and the milestone roadmap (§19).
+> **Status:** Milestone 10 complete — the crash debugger (§9). A fault renders
+> a numbered backtrace + locals and (when attached to a terminal, or with
+> `--debug=always`) drops into an interactive crash REPL with all fifteen §9.4
+> commands: `bt`/`frame`/`up`/`down`/`locals` for navigation, `p EXPR`/`type
+> EXPR`/`heap EXPR` for read-only evaluation through the JIT, `source`/`input`/
+> `parser` for context, and `restart`/`reload` to rerun. The §9.6 noninteractive
+> fallback covers piped/non-TTY runs. All five §19.10 acceptance criteria pass.
+> See [`praxis_technical_design.md`](./praxis_technical_design.md) for the full
+> language and the milestone roadmap (§19); the next milestone (M11) is the
+> LSP / IDE integration.
 
 ## Command surface
 

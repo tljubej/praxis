@@ -39,3 +39,6 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-031: Fixed-width diagram helper deferred](./031-fixed-width-deferred.md)
 - [ADR-032: Debugger expressions allocate on the main GC heap (closes §21.8)](./032-debugger-expr-main-heap.md)
 - [ADR-033: Crash snapshots root through `DebugLocal.value` copies (M10-WS3)](./033-crash-snapshot-rooting.md)
+- [ADR-034: Read-only purity gate for debugger expressions (M10b-WS4)](./034-read-only-purity-gate.md)
+- [ADR-035: Full static `Type` id + source span threaded into the debug frame (M10b-WS1)](./035-static-type-id-and-source-span-threading.md)
+- [ADR-036: `p EXPR` evaluates a synthesized `__p_expr` function (M10b-WS4)](./036-synthetic-p-expr-function.md)
