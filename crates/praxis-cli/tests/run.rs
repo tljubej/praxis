@@ -95,6 +95,42 @@ fn run_pass_recursive_fibonacci() {
     assert_passes("fibonacci.px", "55");
 }
 
+// ===========================================================================
+// `out(...)` and `Unit`-returning `main` (§16.1, §4.3).
+//
+// `out` is `(T) -> Unit`: it writes its argument once and returns `Unit`. A
+// `Unit`-returning `main` has no answer value, so the host prints nothing for
+// it (no trailing result line) — the program's output is whatever `out` wrote.
+// These guard against a former double-print bug where `out` returned its
+// argument and the host re-printed `main`'s result.
+// ===========================================================================
+
+#[test]
+fn unit_main_out_prints_argument_once() {
+    // `out("kurac")` must write "kurac" exactly once; no second line from the
+    // host printing `main`'s (Unit) result.
+    assert_passes("unit_main_out.px", "kurac");
+}
+
+#[test]
+fn unit_main_empty_prints_nothing() {
+    // A `Unit`-returning `main` with no `out` produces empty stdout — not a
+    // spurious "0" or "Unit" result line.
+    let (code, stdout, stderr) = run_fixture("unit_main_empty.px");
+    assert_eq!(code, 0, "should exit 0\nstdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        stdout, "",
+        "empty Unit main should print nothing, got {stdout:?}"
+    );
+}
+
+#[test]
+fn no_return_type_main_defaults_to_unit() {
+    // `fn main()` with no declared return type defaults to `Unit`, so `out`
+    // writes once and nothing else is printed.
+    assert_passes("no_return_type_main.px", "hi");
+}
+
 #[test]
 fn run_fault_overflow() {
     // §19 acceptance: overflow returns to the host without Rust unwinding.

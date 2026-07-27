@@ -562,7 +562,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     // Unresolved: allocate a Unit placeholder so downstream
                     // lowering is sound.
                     let _ = ty;
-                    lower_lit_gc(b, &Lit::Int(0))
+                    lower_lit_gc(b, &Lit::Unit)
                 }
             }
         }
@@ -640,7 +640,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
         }
         TypedExpr::Paren { inner, .. } => match inner {
             Some(e) => lower_expr_gc(b, e),
-            None => lower_lit_gc(b, &Lit::Int(0)),
+            None => lower_lit_gc(b, &Lit::Unit),
         },
         TypedExpr::Block(blk) => lower_block_body(b, blk),
         TypedExpr::If {
@@ -651,7 +651,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
         } => lower_if(b, cond, then_block, else_block.as_deref()),
         TypedExpr::While { cond, body, .. } => {
             lower_while(b, cond, body);
-            lower_lit_gc(b, &Lit::Int(0)) // while yields Unit
+            lower_lit_gc(b, &Lit::Unit) // while yields Unit
         }
         TypedExpr::For {
             binding,
@@ -660,23 +660,23 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             ..
         } => {
             lower_for(b, *binding, iter, body);
-            lower_lit_gc(b, &Lit::Int(0)) // for yields Unit
+            lower_lit_gc(b, &Lit::Unit) // for yields Unit
         }
         TypedExpr::Loop { body, .. } => {
             lower_loop(b, body);
-            lower_lit_gc(b, &Lit::Int(0)) // loop yields Unit (break-value is a refinement)
+            lower_lit_gc(b, &Lit::Unit) // loop yields Unit (break-value is a refinement)
         }
         TypedExpr::Break { value, .. } => {
             lower_break(b, value);
-            lower_lit_gc(b, &Lit::Int(0)) // unreachable in a well-typed program
+            lower_lit_gc(b, &Lit::Unit) // unreachable in a well-typed program
         }
         TypedExpr::Continue { .. } => {
             lower_continue(b);
-            lower_lit_gc(b, &Lit::Int(0))
+            lower_lit_gc(b, &Lit::Unit)
         }
         TypedExpr::Return { value, .. } => {
             lower_return(b, value);
-            lower_lit_gc(b, &Lit::Int(0))
+            lower_lit_gc(b, &Lit::Unit)
         }
         TypedExpr::Call {
             callee,
@@ -728,7 +728,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 let arg_local = args
                     .first()
                     .map(|a| lower_expr_gc(b, a))
-                    .unwrap_or_else(|| lower_lit_gc(b, &Lit::Int(0)));
+                    .unwrap_or_else(|| lower_lit_gc(b, &Lit::Unit));
                 let dst = b.alloc_gc(Type(0), None);
                 b.push(Inst::Call {
                     dst,
@@ -871,7 +871,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     b.locals
                         .get(&cap.symbol)
                         .copied()
-                        .unwrap_or_else(|| lower_lit_gc(b, &Lit::Int(0)))
+                        .unwrap_or_else(|| lower_lit_gc(b, &Lit::Unit))
                 })
                 .collect();
             let dst = b.alloc_gc(Type(0), None);
@@ -988,6 +988,16 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit) -> LocalId {
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Char { value: scalar },
+                live_roots: Vec::new(),
+            });
+            dst
+        }
+        Lit::Unit => {
+            // The Unit value (§4.3): allocate the immortal Unit singleton.
+            let dst = b.alloc_gc(b.unit_ty, None);
+            b.push(Inst::Alloc {
+                dst,
+                alloc: AllocKind::Unit,
                 live_roots: Vec::new(),
             });
             dst
@@ -1165,7 +1175,7 @@ fn lower_if(
     b.cur = else_blk;
     let else_val = match else_block {
         Some(blk) => lower_block_body(b, blk),
-        None => lower_lit_gc(b, &Lit::Int(0)), // no else → Unit
+        None => lower_lit_gc(b, &Lit::Unit), // no else → Unit
     };
     b.push(Inst::MoveGc {
         dst: result,
@@ -1393,7 +1403,7 @@ fn lower_return(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
     let ret = b.func.return_local;
     let val = match value {
         Some(v) => lower_expr_gc(b, v),
-        None => lower_lit_gc(b, &Lit::Int(0)),
+        None => lower_lit_gc(b, &Lit::Unit),
     };
     b.push(Inst::MoveGc { dst: ret, src: val });
     b.func.blocks[b.cur.0 as usize].term = Terminator::Return { value: ret };
@@ -2728,7 +2738,7 @@ fn lower_pipeline_combinator(
         "fold" if args.len() >= 2 => lower_seq_fold(b, src, idx, &args[0], &args[1], ty),
         _ => {
             // Unknown intrinsic: defensively return Unit.
-            lower_lit_gc(b, &Lit::Int(0))
+            lower_lit_gc(b, &Lit::Unit)
         }
     }
 }
@@ -3244,7 +3254,7 @@ fn lower_match(
     }
     // Defensive fall-through (the exhaustiveness checker rejects non-exhaustive
     // matches at compile time; this is unreachable in well-typed code).
-    let unit_val = lower_lit_gc(b, &Lit::Int(0));
+    let unit_val = lower_lit_gc(b, &Lit::Unit);
     b.push(Inst::MoveGc {
         dst: result,
         src: unit_val,
@@ -3318,6 +3328,12 @@ fn emit_pattern_test(
                 Lit::Char(_) => {
                     // Char patterns aren't produced by the parser today; treat
                     // as a match (defensive).
+                    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
+                }
+                Lit::Unit => {
+                    // Unit patterns aren't produced by the parser today; treat
+                    // as a match (defensive). Unit is a singleton, so any Unit
+                    // scrutinee equals the (sole) Unit literal.
                     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
                 }
             }
@@ -3492,5 +3508,42 @@ mod tests {
             .iter()
             .any(|b| b.insts.iter().any(|i| matches!(i, Inst::Call { .. })));
         assert!(has_call, "should emit a Call instruction");
+    }
+
+    #[test]
+    fn lowers_unit_literal_to_alloc_unit() {
+        // A `Unit`-returning `main` with an empty body synthesizes a `Lit::Unit`
+        // tail. That tail must lower to an `Alloc { AllocKind::Unit }` whose
+        // destination slot carries the Unit type — not an `Int(0)` masquerading
+        // as Unit. This is the MIR-side guard for the type-lie fix: a
+        // `Unit`-typed expression holds a genuine Unit value.
+        let (funcs, analysis) = lower_src_to_mir("fn main() -> Unit { let x = 1 }");
+        let f = &funcs[0];
+
+        // Find an Alloc-Unit instruction and inspect its destination slot.
+        let alloc_unit = f.blocks.iter().find_map(|b| {
+            b.insts.iter().find_map(|i| match i {
+                Inst::Alloc {
+                    dst,
+                    alloc: AllocKind::Unit,
+                    ..
+                } => Some(*dst),
+                _ => None,
+            })
+        });
+        let dst = alloc_unit.expect("a Unit-returning body should emit an AllocKind::Unit");
+
+        // The destination slot must be a Gc local typed Unit (not Int(0):Unit).
+        // `TypeData` isn't `PartialEq`, so compare via `matches!` on the
+        // resolved representative (canonical pattern used elsewhere in the crate).
+        let slot = &f.locals[dst.0 as usize];
+        assert_eq!(slot.kind, LocalKind::Gc, "Unit value lives in a Gc slot");
+        assert!(
+            matches!(
+                analysis.db.data(analysis.db.follow(slot.ty)),
+                praxis_types::TypeData::Unit
+            ),
+            "the Unit value's slot must carry the Unit type"
+        );
     }
 }

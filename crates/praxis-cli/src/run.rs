@@ -15,9 +15,10 @@ use std::path::Path;
 
 use praxis_ast::AstNode;
 use praxis_codegen_cranelift::Jit;
-use praxis_hir::{analyze_root, lower, mono::monomorphize};
+use praxis_hir::{analyze_root, lower, mono::monomorphize, TypedItem};
 use praxis_mir::{annotate, lower_module};
 use praxis_runtime::{Runtime, RuntimeContext};
+use praxis_types::TypeData;
 
 use crate::debug_mode::DebugMode;
 use crate::diagnostic_render;
@@ -84,6 +85,19 @@ pub fn run(
         diagnostic_render::write_to(&mut std::io::stderr(), &rendered)?;
         return Ok(1);
     }
+
+    // Capture `main`'s declared return type before the module is consumed by
+    // monomorphization. A `Unit`-returning `main` has no answer value to print
+    // (its observable output comes from `out(...)` calls), so the host prints
+    // `main`'s result only when it is non-`Unit`.
+    let main_return_type = module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            TypedItem::Fn(f) if f.name == "main" => Some(f.return_type),
+            _ => None,
+        })
+        .unwrap_or_else(|| analysis.db.unit());
 
     // Monomorphization (WS8, §13.6): instantiate every polymorphic callee per
     // call site, between typed HIR and MIR. Produces a module of monomorphic
@@ -218,10 +232,19 @@ pub fn run(
         return Ok(1);
     }
 
-    // Print the result value through its descriptor (§11.4).
-    let mut out = String::new();
-    result.format(&mut out);
-    println!("{out}");
+    // Print the result value through its descriptor (§11.4) — but only when
+    // `main` returns a non-`Unit` type. A `Unit`-returning `main` has no answer
+    // value (its output is whatever `out(...)` wrote), so printing a result
+    // line would only echo spurious noise like the last `out` argument.
+    let main_returns_unit = matches!(
+        analysis.db.data(analysis.db.follow(main_return_type)),
+        TypeData::Unit
+    );
+    if !main_returns_unit {
+        let mut out = String::new();
+        result.format(&mut out);
+        println!("{out}");
+    }
     drop(jit);
     Ok(0)
 }

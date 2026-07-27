@@ -2575,21 +2575,22 @@ pub unsafe extern "C" fn praxis_text_get(
 // ---------------------------------------------------------------------------
 
 /// Format `value` through its descriptor and write it to stdout followed by a
-/// newline. Returns the Unit sentinel (§4.3). Never faults.
+/// newline. Returns the Unit sentinel (§4.3), matching `out`'s `(T) -> Unit`
+/// type. Never faults.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `value` must be a valid `GcRef`.
 #[no_mangle]
-pub unsafe extern "C" fn praxis_write_stdout(_ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
+pub unsafe extern "C" fn praxis_write_stdout(ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
     use std::io::Write;
     let mut out = String::new();
     value.format(&mut out);
     let _ = std::io::stdout().write_all(out.as_bytes());
     let _ = std::io::stdout().write_all(b"\n");
-    // Return the input value so `out(expr)` can be used in expression position
-    // (the spec models `out` as `(T) -> Unit`, but returning the value is more
-    // useful and the M4 corpus uses it for effect only).
-    value
+    // `out` is `(T) -> Unit`: return the Unit sentinel so a Unit-typed value
+    // flows out, not the printed argument (which would otherwise leak as the
+    // function's result and be printed a second time by the host).
+    unsafe { unit_sentinel(ctx) }
 }
 
 // ---------------------------------------------------------------------------

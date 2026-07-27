@@ -345,6 +345,14 @@ pub enum Lit {
     Bool(bool),
     /// A Unicode scalar value (the payload of a `Char` object).
     Char(u32),
+    /// The `Unit` value — the sole inhabitant of the `Unit` type (§4.3). This is
+    /// never produced by the parser (there is no `Unit` literal syntax); it is
+    /// synthesized wherever an expression of type `Unit` is needed (empty block
+    /// tails, `while`/`for`/`loop` results, bare `return`, a missing `else`
+    /// branch, and malformed-subtree fallbacks). Lowered to an `AllocKind::Unit`
+    /// allocation so a `Unit`-typed expression holds a genuine Unit value, not
+    /// an `Int(0)` masquerading as one.
+    Unit,
 }
 
 /// Binary operators, carrying the §4.12 semantics the backend needs.
@@ -678,7 +686,7 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_else(|| TypedBlock {
                 stmts: Vec::new(),
                 tail: TypedExpr::Lit {
-                    value: Lit::Int(0),
+                    value: Lit::Unit,
                     ty: self.unit,
                 },
                 ty: self.unit,
@@ -774,7 +782,7 @@ impl<'a> Lowerer<'a> {
             }
         }
         let tail = tail.unwrap_or(TypedExpr::Lit {
-            value: Lit::Int(0),
+            value: Lit::Unit,
             ty: self.unit,
         });
         let ty = expr_ty(&tail);
@@ -873,7 +881,7 @@ impl<'a> Lowerer<'a> {
                 .lower_block(b)
                 .map(|b| TypedExpr::Block(Box::new(b)))
                 .unwrap_or_else(|| TypedExpr::Lit {
-                    value: Lit::Int(0),
+                    value: Lit::Unit,
                     ty: self.unit,
                 }),
             Expr::If(i) => self.lower_if(i),
@@ -926,7 +934,7 @@ impl<'a> Lowerer<'a> {
                 self.lower_block(&b).unwrap_or_else(|| TypedBlock {
                     stmts: Vec::new(),
                     tail: TypedExpr::Lit {
-                        value: Lit::Int(0),
+                        value: Lit::Unit,
                         ty: self.unit,
                     },
                     ty: self.unit,
@@ -944,7 +952,7 @@ impl<'a> Lowerer<'a> {
             None => TypedBlock {
                 stmts: Vec::new(),
                 tail: TypedExpr::Lit {
-                    value: Lit::Int(0),
+                    value: Lit::Unit,
                     ty: self.unit,
                 },
                 ty: self.unit,
@@ -1441,7 +1449,7 @@ impl<'a> Lowerer<'a> {
         let receiver = match m.receiver() {
             Some(r) => self.lower_expr(&r),
             None => TypedExpr::Lit {
-                value: Lit::Int(0),
+                value: Lit::Unit,
                 ty: self.unit,
             },
         };
@@ -1490,7 +1498,7 @@ impl<'a> Lowerer<'a> {
                 );
             }
             TypedExpr::Lit {
-                value: Lit::Int(0),
+                value: Lit::Unit,
                 ty: self.unit,
             }
         }
@@ -1565,7 +1573,7 @@ impl<'a> Lowerer<'a> {
     /// A typed expression representing a lowering error (Unit-typed literal).
     fn error_expr(&self) -> TypedExpr {
         TypedExpr::Lit {
-            value: Lit::Int(0),
+            value: Lit::Unit,
             ty: self.unit,
         }
     }
@@ -1735,6 +1743,9 @@ impl<'a> Lowerer<'a> {
                     // Char literals don't appear in patterns (no char-literal
                     // pattern syntax); use the scrutinee type as a fallback.
                     Lit::Char(_) => scrutinee_ty,
+                    // `Unit` literals are synthesized internally; the parser
+                    // produces no Unit pattern, so this arm is defensive.
+                    Lit::Unit => self.unit,
                 };
                 TypedPattern::Lit { value, ty }
             }
@@ -1978,7 +1989,7 @@ fn map_pattern_scalar(s: PatternScalar) -> praxis_types::ScalarType {
 /// A `Unit`-typed literal placeholder (for malformed subtrees).
 fn unit_lit(db: &mut TypeDb) -> TypedExpr {
     TypedExpr::Lit {
-        value: Lit::Int(0),
+        value: Lit::Unit,
         ty: db.unit(),
     }
 }

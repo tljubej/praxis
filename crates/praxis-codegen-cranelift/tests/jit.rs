@@ -1729,14 +1729,19 @@ fn text_get_out_of_bounds_faults() {
 }
 
 #[test]
-fn out_writes_to_stdout_and_returns_value() {
-    // out(expr) should write the formatted value to stdout. We can't easily
-    // capture stdout in a unit test; instead verify it doesn't fault and the
-    // program completes. The return is the value itself (for chaining).
-    let src = "fn main() -> Int {\n  out(42)\n}\n";
+fn out_writes_to_stdout_and_returns_unit() {
+    // out(expr) writes the formatted value to stdout and returns Unit — its
+    // type is `(T) -> Unit` (§16.1). We can't easily capture stdout in a unit
+    // test; instead verify it doesn't fault, the program completes, and the
+    // returned GcRef is the Unit singleton (not the printed argument).
+    let src = "fn main() -> Unit {\n  out(42)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
-    assert_eq!(result.as_int(), 42);
+    assert_eq!(
+        result.descriptor().id,
+        praxis_runtime::scalars::UNIT.id,
+        "out(...) must return Unit, not the printed argument"
+    );
 }
 
 // ===========================================================================

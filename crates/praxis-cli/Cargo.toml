@@ -16,6 +16,7 @@ praxis-syntax.workspace = true
 praxis-parser.workspace = true
 praxis-ast.workspace = true
 praxis-hir.workspace = true
+praxis-types.workspace = true
 praxis-mir.workspace = true
 praxis-runtime.workspace = true
 praxis-debugger.workspace = true

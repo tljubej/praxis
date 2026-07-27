@@ -592,6 +592,7 @@ dependencies = [
  "praxis-stdlib",
  "praxis-syntax",
  "praxis-test-support",
+ "praxis-types",
 ]
 
 [[package]]
