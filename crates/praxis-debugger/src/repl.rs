@@ -124,6 +124,56 @@ impl Repl {
         }
     }
 
+    /// Run `restart` or `reload` (§9.7), then update the REPL state: take the
+    /// new snapshot (replacing `self.snapshot`), reset the frame cursor, and
+    /// print the result or the new fault. A clean run prints the result and
+    /// stays in the REPL. A failed `reload` (compile error) leaves the session
+    /// intact and prints the error.
+    fn do_restart_or_reload<O: Write>(&mut self, out: &mut O, reload: bool) {
+        let Some(session) = self.session.as_mut() else {
+            let _ = writeln!(out, "error: no live session — cannot restart/reload");
+            return;
+        };
+        // Run the re-execution, capturing the result GcRef (or an error for
+        // a failed reload recompile).
+        let result = if reload {
+            session.reload()
+        } else {
+            Ok(session.restart())
+        };
+        match result {
+            Ok(value) => {
+                if session.runtime.has_pending_fault() {
+                    let kind = session.runtime.fault();
+                    // Take the new snapshot; the REPL owns it for inspection.
+                    if let Some(snap) = session.runtime.take_crash_snapshot() {
+                        self.snapshot = snap;
+                        self.selected = 0;
+                        let _ = writeln!(
+                            out,
+                            "program faulted: {kind}\n{} frame(s); frame 0 selected.",
+                            self.snapshot.len()
+                        );
+                    } else {
+                        let _ = writeln!(out, "program faulted: {kind} (no snapshot captured)");
+                    }
+                } else {
+                    // Clean run: print the result, stay in the REPL.
+                    let mut s = String::new();
+                    value.format(&mut s);
+                    let _ = writeln!(out, "program completed: {s}");
+                }
+            }
+            Err(msg) => {
+                let _ = writeln!(out, "error: {msg}");
+                let _ = writeln!(
+                    out,
+                    "(session unchanged — the old snapshot is still active)"
+                );
+            }
+        }
+    }
+
     /// Run the read-eval-print loop, reading commands from `input` and writing
     /// output + the prompt to `output`. Returns when the user types `quit` or
     /// EOF is reached. Each command's output is also returned for testing via
@@ -293,12 +343,15 @@ impl Repl {
                 let result = self.evaluate_expr(rest, crate::evaluate::Mode::Heap);
                 let _ = crate::evaluate::write_eval_result(out, &result);
             }
-            // Still-deferred M10b commands (WS6).
-            "restart" | "reload" => {
-                let _ = writeln!(
-                    out,
-                    "note: `{cmd}` is implemented later in Milestone 10 Part 2 (not yet wired)."
-                );
+            // M10b-WS6: `restart` reruns the same code+input; `reload`
+            // recompiles the source then reruns (§9.7). Both take the new
+            // snapshot (if it faulted) and reset the frame cursor; a clean run
+            // prints the result and stays in the REPL.
+            "restart" => {
+                self.do_restart_or_reload(out, /* reload */ false);
+            }
+            "reload" => {
+                self.do_restart_or_reload(out, /* reload */ true);
             }
             "" => {}
             other => {
@@ -339,11 +392,10 @@ Crash debugger commands (§9.4):
   source [N]      show the selected (or Nth) frame's source
   input           show the input near the active parser cursor
   parser          show the active input parser near the fault
+  restart         rerun the program with the same input
+  reload          recompile source and rerun with the same input
   help            show this message
-  quit            exit the debugger
-
-Not yet wired (later in Milestone 10 Part 2):
-  restart, reload";
+  quit            exit the debugger";
 
 #[cfg(test)]
 mod tests {

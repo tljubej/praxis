@@ -373,3 +373,170 @@ fn m10b_ws5_heap_literal() {
     );
     assert!(out.contains("3"), "heap 1 + 2 should show value 3: {out}");
 }
+
+// ===========================================================================
+// M10b WS6 — `restart` / `reload` (§9.7).
+//
+// `restart` reruns the same compiled code+input (re-faulting deterministically).
+// `reload` re-reads the source from disk, recompiles, and reruns — discarding
+// old JIT/snapshots only after the new compile succeeds. A failed recompile
+// leaves the session intact with the old snapshot (the §9.7 guarantee).
+// ===========================================================================
+
+#[test]
+fn m10b_ws6_restart_refaults_deterministically() {
+    // `restart` re-runs the same faulting program. The re-run must fault again
+    // (same kind) and produce a fresh snapshot the REPL can inspect.
+    let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "restart\nbt\nquit\n");
+    assert!(
+        out.contains("program faulted"),
+        "restart should re-fault: {out}"
+    );
+    // The re-run's snapshot is inspectable: `bt` after restart lists frames.
+    // (The output has two `#0 main` lines — one from the original banner, one
+    // from the post-restart `bt`.)
+    assert!(
+        out.matches("#0").count() >= 2,
+        "bt after restart runs against the new snapshot: {out}"
+    );
+}
+
+#[test]
+fn m10b_ws6_reload_after_edit_changes_result() {
+    // Write a faulting fixture to a temp file, then `reload` after rewriting it
+    // to a clean program. The reload re-reads the source, recompiles, and the
+    // re-run completes (no fault).
+    use std::io::{Read, Write};
+    let dir = std::env::temp_dir();
+    let src_path = dir.join("m10b_ws6_reload.px");
+    {
+        let mut f = std::fs::File::create(&src_path).unwrap();
+        f.write_all(b"fn main() -> Int { 1 / 0 }").unwrap();
+    }
+    // Start the REPL against the faulting version.
+    use std::process::Stdio;
+    let mut child = Command::new(bin_path())
+        .args(["run", "--debug=always", "--input", "/dev/null"])
+        .arg(&src_path)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().expect("stdin");
+    // Wait for the child to fault and print the REPL prompt before rewriting
+    // the source (otherwise the child reads the edited file at startup). Poll
+    // stderr until the prompt appears.
+    let stderr = child.stderr.as_mut().expect("stderr");
+    let mut seen = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let mut buf = [0u8; 256];
+        match stderr.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                seen.extend_from_slice(&buf[..n]);
+                if String::from_utf8_lossy(&seen).contains("Praxis crash>") {
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&seen).contains("Praxis crash>"),
+        "REPL should start before reload: {}",
+        String::from_utf8_lossy(&seen)
+    );
+    // Now safe to rewrite: the child has read the original faulting source.
+    {
+        let mut f = std::fs::File::create(&src_path).unwrap();
+        f.write_all(b"fn main() -> Int { 42 }").unwrap();
+    }
+    stdin.write_all(b"reload\nquit\n").unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait");
+    let combined = format!(
+        "{}{}{}",
+        String::from_utf8_lossy(&seen),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_file(&src_path);
+    assert!(
+        combined.contains("program completed"),
+        "reload after edit should run cleanly: {combined}"
+    );
+    assert!(
+        combined.contains("42"),
+        "reload should reflect the edited source: {combined}"
+    );
+}
+
+#[test]
+fn m10b_ws6_reload_on_malformed_source_keeps_session() {
+    // §9.7: a failed recompilation leaves the crash REPL active with the old
+    // snapshot. Write a valid faulting fixture, start the REPL, then `reload`
+    // after rewriting it to malformed source. The reload must error and the old
+    // snapshot stays inspectable.
+    use std::io::{Read, Write};
+    let dir = std::env::temp_dir();
+    let src_path = dir.join("m10b_ws6_reload_bad.px");
+    {
+        let mut f = std::fs::File::create(&src_path).unwrap();
+        f.write_all(b"fn main() -> Int { 1 / 0 }").unwrap();
+    }
+    use std::process::Stdio;
+    let mut child = Command::new(bin_path())
+        .args(["run", "--debug=always", "--input", "/dev/null"])
+        .arg(&src_path)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stderr = child.stderr.as_mut().expect("stderr");
+    let mut seen = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let mut buf = [0u8; 256];
+        match stderr.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                seen.extend_from_slice(&buf[..n]);
+                if String::from_utf8_lossy(&seen).contains("Praxis crash>") {
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&seen).contains("Praxis crash>"),
+        "REPL should start: {}",
+        String::from_utf8_lossy(&seen)
+    );
+    // Rewrite to malformed source (unbalanced).
+    {
+        let mut f = std::fs::File::create(&src_path).unwrap();
+        f.write_all(b"fn main() -> Int {").unwrap();
+    }
+    stdin.write_all(b"reload\nbt\nquit\n").unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait");
+    let combined = format!(
+        "{}{}{}",
+        String::from_utf8_lossy(&seen),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_file(&src_path);
+    assert!(
+        combined.contains("error") && combined.contains("unchanged"),
+        "reload on malformed source should error and keep the session: {combined}"
+    );
+    // The old snapshot is still inspectable: `bt` runs.
+    assert!(
+        combined.contains("#0"),
+        "bt runs against the old snapshot after a failed reload: {combined}"
+    );
+}

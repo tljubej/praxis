@@ -91,4 +91,68 @@ impl DebugSession {
         // SAFETY: caller guarantees main_entry is a finalized entry in self.jit.
         unsafe { (self.main_entry)(&mut ctx as *mut RuntimeContext, unit) }
     }
+
+    /// `restart` (§9.7): rerun the *same* compiled code with the same input.
+    /// Returns the result `GcRef` (or the Unit sentinel on fault). The caller
+    /// takes the new snapshot and resets the frame cursor. No recompilation.
+    pub fn restart(&mut self) -> praxis_runtime::GcRef {
+        // SAFETY: main_entry is a finalized entry in self.jit (set at session
+        // construction or the last successful reload).
+        unsafe { self.rerun_main() }
+    }
+
+    /// `reload` (§9.7): re-read the source from `source_path`, recompile, and
+    /// on success swap in the new `Jit`/analysis/`main_entry` then rerun with
+    /// the same input. On failure (diagnostics or compile error), leaves the
+    /// current session intact and returns `Err(diagnostics)`. Per §9.7, old
+    /// JIT code and snapshots are discarded only after the new compilation
+    /// succeeds.
+    pub fn reload(&mut self) -> Result<praxis_runtime::GcRef, String> {
+        use praxis_ast::AstNode;
+        // 1. Re-read the source from disk (retains input bytes per §9.7).
+        let text = std::fs::read_to_string(&self.source_path)
+            .map_err(|e| format!("failed to re-read source: {e}"))?;
+        // 2. Recompile: parse → analyze → lower → mono → MIR → JIT.
+        let map = praxis_source::SourceMap::new();
+        let path_str = self.source_path.to_string_lossy();
+        let file = map.intern(&*path_str, &text);
+        let parsed = praxis_parser::parse(file, &text);
+        if let Some(d) = parsed.diagnostics.first() {
+            return Err(format!("parse error: {}", d.message()));
+        }
+        let mut analysis = praxis_hir::analyze_root(file, &parsed.tree);
+        if let Some(d) = analysis.diagnostics.first() {
+            return Err(format!("type error: {}", d.message()));
+        }
+        let root = praxis_ast::SourceFile::cast(parsed.tree.clone())
+            .ok_or_else(|| "internal: parse tree root is not a SOURCE_FILE".to_string())?;
+        let module = praxis_hir::lower(file, &root, &mut analysis);
+        if let Some(d) = module.diagnostics.first() {
+            return Err(format!("lowering error: {}", d.message()));
+        }
+        let module = praxis_hir::mono::monomorphize(module, &analysis.names, &mut analysis.db);
+        let mut funcs = praxis_mir::lower_module(&module, &mut analysis.db);
+        for f in &mut funcs {
+            praxis_mir::annotate(f);
+        }
+        let mut new_jit =
+            praxis_codegen_cranelift::Jit::new().map_err(|e| format!("JIT init failed: {e}"))?;
+        let ids = new_jit
+            .compile(&funcs, &mut analysis.db)
+            .map_err(|e| format!("JIT compile failed: {e}"))?;
+        let main_id = *ids
+            .get("main")
+            .ok_or_else(|| "no `main` function in reloaded source".to_string())?;
+        // SAFETY: main_id is a finalized entry in new_jit.
+        let new_entry: MainEntry = unsafe { std::mem::transmute(new_jit.entry(main_id)) };
+        // 3. Compilation succeeded — swap in the new state (§9.7: discard old
+        // JIT + snapshots only after success). The old self.jit drops here.
+        self.jit = new_jit;
+        self.main_entry = new_entry;
+        self.func_ids = ids;
+        self.analysis = analysis;
+        self.source_text = text;
+        // 4. Rerun with the same input.
+        Ok(self.restart())
+    }
 }
