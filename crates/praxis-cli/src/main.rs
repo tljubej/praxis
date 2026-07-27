@@ -5,12 +5,14 @@
 //! report which milestone will implement them.
 
 mod check;
+mod color_mode;
 mod debug_mode;
 mod diagnostic_render;
 mod run;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+pub use color_mode::ColorMode;
 pub use debug_mode::DebugMode;
 
 /// The Praxis command-line interface.
@@ -25,6 +27,11 @@ pub use debug_mode::DebugMode;
                   Advent of Code-style puzzle solving. See praxis_technical_design.md."
 )]
 struct Cli {
+    /// When to color diagnostic output: `auto` (default) colors iff stderr is a
+    /// terminal; `always` forces color; `never` emits plain text.
+    #[arg(long, default_value = "auto", global = true)]
+    color: ColorMode,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -68,8 +75,8 @@ fn main() -> Result<()> {
     praxis_runtime::assert_abi_version();
 
     let exit = match cli.command {
-        Command::Check { file } => check::run(&file),
-        Command::Run { file, input, debug } => run::run(&file, input.as_deref(), debug),
+        Command::Check { file } => check::run(&file, cli.color),
+        Command::Run { file, input, debug } => run::run(&file, input.as_deref(), debug, cli.color),
         Command::Watch { file } => not_implemented("watch", Some(&file), 0),
         Command::Repl => not_implemented("repl", None, 0),
         Command::Lsp => not_implemented("lsp", None, 11),

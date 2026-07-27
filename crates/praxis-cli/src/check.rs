@@ -12,10 +12,11 @@
 
 use std::path::Path;
 
+use crate::color_mode::ColorMode;
 use crate::diagnostic_render;
 
 /// Run the `check` command against `file`. Returns the process exit code.
-pub fn run(file: &str) -> anyhow::Result<i32> {
+pub fn run(file: &str, color: ColorMode) -> anyhow::Result<i32> {
     let path = Path::new(file);
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -45,7 +46,7 @@ pub fn run(file: &str) -> anyhow::Result<i32> {
         (s.start(), s.end())
     });
 
-    let rendered = diagnostic_render::render_all(&source, &diagnostics);
+    let rendered = diagnostic_render::render_all(&source, &diagnostics, color.palette());
     diagnostic_render::write_to(&mut std::io::stderr(), &rendered)?;
 
     Ok(if rendered.has_errors() { 1 } else { 0 })

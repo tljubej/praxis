@@ -7,6 +7,7 @@
 
 use std::io::Write;
 
+use praxis_source::style::Palette;
 use praxis_source::{Diagnostic, Renderer, Severity, SourceMap};
 
 /// Outcome of rendering a batch of diagnostics: the rendered text plus the
@@ -25,9 +26,14 @@ impl RenderedDiagnostics {
     }
 }
 
-/// Render all `diags` (in order) to one string and tally severities.
-pub fn render_all(source: &SourceMap, diags: &[Diagnostic]) -> RenderedDiagnostics {
-    let renderer = Renderer::new(source);
+/// Render all `diags` (in order) to one string and tally severities. `palette`
+/// controls ANSI styling — pass [`Palette::plain()`] for snapshot-stable output.
+pub fn render_all(
+    source: &SourceMap,
+    diags: &[Diagnostic],
+    palette: Palette,
+) -> RenderedDiagnostics {
+    let renderer = Renderer::new_styled(source, palette);
     let mut out = String::new();
     let mut errors = 0;
     let mut warnings = 0;
@@ -89,7 +95,7 @@ mod tests {
             "careful",
             FileSpan::new(id, Span::new(3, 4)),
         );
-        let r = render_all(&map, &[e, w]);
+        let r = render_all(&map, &[e, w], praxis_source::style::Palette::plain());
         assert_eq!(r.errors, 1);
         assert_eq!(r.warnings, 1);
         assert!(r.has_errors());
@@ -98,7 +104,7 @@ mod tests {
     #[test]
     fn empty_batch_renders_nothing() {
         let (map, _id) = single_file("f.px", "abc");
-        let r = render_all(&map, &[]);
+        let r = render_all(&map, &[], praxis_source::style::Palette::plain());
         assert!(r.text.is_empty());
         assert!(!r.has_errors());
     }

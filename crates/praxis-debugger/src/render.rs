@@ -34,9 +34,12 @@ pub fn render_noninteractive<W: Write>(
     kind: FaultKind,
     snapshot: Option<&CrashSnapshot>,
     parse_detail: Option<&ParseDetail>,
+    palette: praxis_source::style::Palette,
 ) -> std::io::Result<()> {
-    // 1. The fault line.
-    writeln!(out, "error: program faulted: {kind}")?;
+    use praxis_source::style::{Severity as StyleSeverity, Style};
+    // 1. The fault line — a runtime error, colored like a compiler error.
+    let label = palette.paint(Style::Severity(StyleSeverity::Error), "error:");
+    writeln!(out, "{label} program faulted: {kind}")?;
 
     // ParseFailed appends the §7.11 detail (input span, expected, actual preview).
     if kind == FaultKind::ParseFailed {
@@ -140,10 +143,15 @@ fn format_value(value: praxis_runtime::GcRef) -> String {
 /// Render the selected frame's source extent (§9.4 `source`, M10b-WS3).
 ///
 /// Prints the lines of `source_text` the frame's `source_span` covers, each
-/// prefixed with its 1-based line number, then a caret line pointing at the
-/// span's start column. `(0, 0)` spans (synthetic/span-less frames) print a
+/// prefixed with its 1-based line number, then a clamped caret underline
+/// pointing at the span. `(0, 0)` spans (synthetic/span-less frames) print a
 /// "no span recorded" note instead. The frame's function name is shown as a
 /// header. A span outside `source_text` degrades to the note.
+///
+/// The caret logic is shared with the compiler via
+/// [`praxis_source::snippet::render_span_snippet`], so a multi-line span is
+/// underlined on each line and never overruns the visible line (the earlier
+/// implementation drew `end − start` carets all on one line).
 pub fn render_source_span<W: Write>(
     out: &mut W,
     source_text: &str,
@@ -163,37 +171,35 @@ pub fn render_source_span<W: Write>(
         )?;
         return Ok(());
     }
-    // Map the byte span to line(s). Find the line containing `start` (1-based).
-    let mut line_starts: Vec<usize> = vec![0];
-    for (i, b) in source_text.bytes().enumerate() {
-        if b == b'\n' {
-            line_starts.push(i + 1);
-        }
-    }
-    // The line index (0-based) of `start` = number of newlines before it.
-    let start_line = source_text[..start].bytes().filter(|&b| b == b'\n').count();
-    let end_line = source_text[..end].bytes().filter(|&b| b == b'\n').count();
-    for (li, &ls) in line_starts
-        .iter()
-        .enumerate()
-        .skip(start_line)
-        .take(end_line - start_line + 1)
-    {
-        let le = line_starts
-            .get(li + 1)
-            .copied()
-            .unwrap_or(source_text.len())
-            .saturating_sub(1); // exclude the trailing newline
-        let line_text = &source_text[ls..le];
-        writeln!(out, "  {:>4} | {}", li + 1, line_text)?;
-    }
-    // Caret: spaces to the start column (relative to its line), then carets to
-    // the end column (or at least one). Only meaningful on a single line.
-    let line_start = line_starts[start_line];
-    let caret_col = start - line_start;
-    let caret_len = (end - start).max(1);
-    let padding = " ".repeat(7 + caret_col); // 4-digit num + " | " + col
-    writeln!(out, "{padding}{}", "^".repeat(caret_len))?;
+    // Build a transient source map so the shared snippet helper (clamped carets,
+    // multi-line handling) can render this span identically to compiler output.
+    let map = praxis_source::SourceMap::new();
+    let id = map.intern("<debug>", source_text);
+    let Some(file) = map.get(id) else {
+        writeln!(out, "  (could not resolve source for this frame)")?;
+        return Ok(());
+    };
+    let file_span = praxis_source::FileSpan::new(
+        id,
+        praxis_source::Span::new(
+            praxis_source::BytePos::from(start as u32),
+            praxis_source::BytePos::from(end as u32),
+        ),
+    );
+    let mut buf = String::new();
+    // No line limit: the `source` command exists to show the whole function the
+    // faulting frame spans, including the faulting line itself — collapsing it
+    // to an ellipsis would hide exactly the line the user needs to see.
+    praxis_source::snippet::render_span_snippet_with_limits(
+        &file,
+        file_span,
+        praxis_source::snippet::CaretLabel::Plain,
+        &mut buf,
+        u32::MAX as usize,
+    );
+    // The shared helper emits a leading newline + indented lines; trim the
+    // leading newline so the frame-name header sits directly above the snippet.
+    out.write_all(buf.trim_start_matches('\n').as_bytes())?;
     Ok(())
 }
 
@@ -312,7 +318,14 @@ mod tests {
     fn noninteractive_renders_fault_and_backtrace() {
         let snap = snap_with_frame("boom");
         let mut out = Vec::new();
-        render_noninteractive(&mut out, snap.fault_kind, Some(&snap), None).unwrap();
+        render_noninteractive(
+            &mut out,
+            snap.fault_kind,
+            Some(&snap),
+            None,
+            praxis_source::style::Palette::plain(),
+        )
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("program faulted"), "fault line: {text}");
         assert!(text.contains("Backtrace"), "backtrace header: {text}");
@@ -322,7 +335,14 @@ mod tests {
     #[test]
     fn noninteractive_without_snapshot_still_shows_fault() {
         let mut out = Vec::new();
-        render_noninteractive(&mut out, FaultKind::DivByZero, None, None).unwrap();
+        render_noninteractive(
+            &mut out,
+            FaultKind::DivByZero,
+            None,
+            None,
+            praxis_source::style::Palette::plain(),
+        )
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("program faulted: division by zero"));
         // No snapshot → no Backtrace section.
@@ -335,7 +355,14 @@ mod tests {
         use praxis_runtime::ParseFail;
         detail.consider(ParseFail::at(5, 0, "int"), b"abc");
         let mut out = Vec::new();
-        render_noninteractive(&mut out, FaultKind::ParseFailed, None, Some(&detail)).unwrap();
+        render_noninteractive(
+            &mut out,
+            FaultKind::ParseFailed,
+            None,
+            Some(&detail),
+            praxis_source::style::Palette::plain(),
+        )
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("expected int"), "expected shown: {text}");
         assert!(text.contains("at input offset 5"), "offset shown: {text}");
@@ -363,11 +390,33 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("f:"), "header: {text}");
         assert!(text.contains("a = b + c"), "the source line: {text}");
-        assert!(text.contains('^'), "caret: {text}");
-        // The caret column: "  a = " is 6 chars after the line-number gutter.
+        // The caret must cover all 5 bytes of "b + c" and line up under the `|`
+        // gutter — the shared snippet helper clamps it to the visible line.
         assert!(
-            text.contains("       ^^^"),
-            "caret at the right column: {text:?}"
+            text.contains("    |     ^^^^^"),
+            "caret at the right column covering the span: {text:?}"
+        );
+    }
+
+    #[test]
+    fn source_span_multiline_does_not_overflow() {
+        // A span covering the whole `fn` (3 lines): each line is underlined to
+        // its end and the caret never runs past the visible line. The earlier
+        // implementation drew `end - start` carets all on line 1.
+        let src = "fn f() {\n  a = b + c\n}\n";
+        let span = (0, src.len() as u32);
+        let mut out = Vec::new();
+        render_source_span(&mut out, src, "f", span).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        // Line 1's caret runs to the line end then stops (8 carets + ellipsis),
+        // never reaching the width of the whole 3-line span.
+        assert!(
+            text.contains("    | ^^^^^^^^..."),
+            "line 1 caret clamped to its line: {text:?}"
+        );
+        assert!(
+            !text.contains("^^^^^^^^^^^^^^"),
+            "no runaway caret spanning multiple lines: {text:?}"
         );
     }
 

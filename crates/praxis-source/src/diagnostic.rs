@@ -21,8 +21,8 @@
 use std::fmt::Write;
 
 use crate::file::SourceMap;
-use crate::line_map::LineCol;
-use crate::span::{BytePos, FileSpan};
+use crate::span::FileSpan;
+use crate::style;
 
 /// How serious a diagnostic is. Non-exhaustive so future severities (e.g. an
 /// "advice" level for inlay context) don't break match exhaustiveness downstream.
@@ -134,11 +134,17 @@ pub struct DiagnosticNote {
     pub message: String,
 }
 
-/// A machine-applicable fix: replace `span` with `replacement`, labelled `label`.
+/// A fix or piece of advice attached to a diagnostic.
+///
+/// When `replacement` is `Some`, it is a machine-applicable fix: replace `span`
+/// with the given text (a "fix-it"). When `None`, the suggestion is advisory —
+/// a `help:` line that explains how to resolve the problem without offering an
+/// automatic rewrite (§8.2: "a concrete suggestion when available").
 #[derive(Clone, Debug)]
 pub struct Suggestion {
     pub span: FileSpan,
-    pub replacement: String,
+    /// `None` for advisory hints with no automatic replacement.
+    pub replacement: Option<String>,
     pub label: String,
 }
 
@@ -236,7 +242,7 @@ impl DiagnosticBuilder {
         self
     }
 
-    /// Attach a machine-applicable suggestion.
+    /// Attach a machine-applicable suggestion: replace `span` with `replacement`.
     pub fn suggestion(
         mut self,
         span: FileSpan,
@@ -245,7 +251,19 @@ impl DiagnosticBuilder {
     ) -> Self {
         self.diag.suggestions.push(Suggestion {
             span,
-            replacement: replacement.into(),
+            replacement: Some(replacement.into()),
+            label: label.into(),
+        });
+        self
+    }
+
+    /// Attach an advisory `help:` line (no automatic replacement). Use when the
+    /// fix is not mechanical (e.g. "remove this expression" or "change the
+    /// return type") — §8.2 names these as explanations rather than fix-its.
+    pub fn help(mut self, span: FileSpan, label: impl Into<String>) -> Self {
+        self.diag.suggestions.push(Suggestion {
+            span,
+            replacement: None,
             label: label.into(),
         });
         self
@@ -265,95 +283,124 @@ impl DiagnosticBuilder {
 /// Renders diagnostics in the §8.2 layout.
 ///
 /// The renderer borrows a [`SourceMap`] for source snippets and line/column
-/// conversion; it has no state of its own and is cheap to construct per render.
+/// conversion; it holds a [`style::Palette`] that decides whether the output is
+/// plain (the default, for snapshot-stable tests) or ANSI-styled. It is cheap to
+/// construct per render.
 pub struct Renderer<'a> {
     source: &'a SourceMap,
+    palette: style::Palette,
 }
 
 impl<'a> Renderer<'a> {
+    /// A plain-text renderer (no ANSI). The default for snapshot tests, which
+    /// must stay byte-stable regardless of terminal state.
     pub fn new(source: &'a SourceMap) -> Renderer<'a> {
-        Renderer { source }
+        Renderer {
+            source,
+            palette: style::Palette::plain(),
+        }
+    }
+
+    /// A renderer that styles its output when `palette` is [`style::Palette::styled`].
+    pub fn new_styled(source: &'a SourceMap, palette: style::Palette) -> Renderer<'a> {
+        Renderer { source, palette }
+    }
+
+    /// The diagnostic's severity in the [`style`] module's terms.
+    fn style_severity(sev: Severity) -> style::Severity {
+        match sev {
+            Severity::Error => style::Severity::Error,
+            Severity::Warning => style::Severity::Warning,
+            Severity::Note => style::Severity::Note,
+            Severity::Hint => style::Severity::Help,
+        }
     }
 
     /// Render one diagnostic into `out`.
     pub fn render(&self, diag: &Diagnostic, out: &mut String) {
         self.render_header(diag, out);
+        // §8.2 puts a blank line between the header and the location snippet.
         out.push('\n');
 
-        // Primary location + source snippet. The header already carries the
-        // diagnostic message, so the caret line shows just the caret (matching
-        // how note spans render).
-        self.render_location_and_snippet(diag.primary, "", out);
+        // Primary location + source snippet, with the diagnostic message as the
+        // caret-line label (§8.2: `^^^^ this value is Text`).
+        self.render_location_and_snippet(
+            diag.primary,
+            Some(diag.message.as_str()),
+            diag.severity,
+            out,
+        );
 
-        // Related notes.
+        // Related notes: each carries its own message + span snippet, set off by
+        // a blank line so a multi-span diagnostic reads as distinct blocks.
         for note in &diag.notes {
             out.push('\n');
-            out.push_str(note.message.as_str());
-            out.push('\n');
-            self.render_location_and_snippet(note.span, "", out);
+            let label = self
+                .palette
+                .paint(style::Style::Severity(style::Severity::Note), "note:");
+            let _ = writeln!(out, "{label} {}", note.message);
+            self.render_location_and_snippet(note.span, None, Severity::Note, out);
         }
 
-        // Suggestions as hint lines.
+        // Suggestions as rustc-style `help:` lines. A machine-applicable fix
+        // shows its replacement on the next indented line; an advisory hint
+        // shows only the explanation.
         for sugg in &diag.suggestions {
             out.push('\n');
-            let _ = writeln!(
-                out,
-                "hint: {} (suggestion: {})",
-                sugg.label, sugg.replacement
-            );
+            let label = self
+                .palette
+                .paint(style::Style::Severity(style::Severity::Help), "help:");
+            let _ = writeln!(out, "{label} {}", sugg.label);
+            if let Some(repl) = &sugg.replacement {
+                let _ = writeln!(out, "      {repl}");
+            }
         }
     }
 
-    /// Render `error[code]: message`.
+    /// Render `error[code]: message` (no trailing newline; the caller frames it).
     fn render_header(&self, diag: &Diagnostic, out: &mut String) {
-        out.push_str(diag.severity.label());
-        let _ = write!(out, "[{}]: {}", diag.code, diag.message);
+        let sev = Self::style_severity(diag.severity);
+        let label = self
+            .palette
+            .paint(style::Style::Severity(sev), diag.severity.label());
+        let code = self
+            .palette
+            .paint(style::Style::Code, &format!("[{}]", diag.code));
+        let _ = write!(out, "{label}{code}: {}", diag.message);
     }
 
-    /// Render the `path:line:col` header followed by the source line with a
-    /// caret underline pointing at `span`. If `message` is non-empty it is
-    /// written on the caret line as a trailing note.
-    fn render_location_and_snippet(&self, span: FileSpan, message: &str, out: &mut String) {
+    /// Render the `path:line:col` header followed by the source line(s) the
+    /// span touches, with a clamped caret underline. `label` (when `Some`)
+    /// trails the carets on the first underlined line. The caret is colored in
+    /// the diagnostic's severity color when the palette is styled. Delegates the
+    /// actual line/caret drawing to the shared
+    /// [`snippet::render_span_snippet_styled`] so the compiler and crash debugger
+    /// render spans identically.
+    fn render_location_and_snippet(
+        &self,
+        span: FileSpan,
+        label: Option<&str>,
+        sev: Severity,
+        out: &mut String,
+    ) {
         let Some(file) = self.source.get(span.file) else {
             // Synthetic / unknown file: fall back to a location-only line.
             let _ = writeln!(out, "  <unknown file> [{:?}]", span);
             return;
         };
-        let line_map = file.line_map();
-        let text = file.text();
-        let start = span.span.start();
-        let end = span.span.end();
-        let LineCol { line, col } = line_map.offset_to_linecol(start);
-
-        out.push('\n');
-        let _ = writeln!(out, "  {}:{}:{}", file.path().display(), line, col);
-
-        // Source line + gutter. The line text runs to the line's real end, not
-        // just the span end, so the reader sees the surrounding context.
-        let (line_start, line_end) = line_map
-            .line_range(line)
-            .unwrap_or((BytePos::ZERO, BytePos::ZERO));
-        let line_bytes = text.as_bytes();
-        let s = line_start.to_usize();
-        let e = (line_end.to_u32() as usize).min(line_bytes.len());
-        let line_text = std::str::from_utf8(&line_bytes[s..e])
-            .unwrap_or("<invalid utf-8>")
-            .trim_end_matches(['\n', '\r']);
-        let _ = writeln!(out, "  {line} | {line_text}");
-
-        // Caret line: `   | ^^^^ ` aligned under the start, with the message.
-        let gutter_width = line.to_string().len();
-        let pad: String = " ".repeat(gutter_width);
-        let carets = "^".repeat((end.to_u32().saturating_sub(start.to_u32()) as usize).max(1));
-        let _ = write!(out, "  {pad} | ");
-        for _ in 0..col {
-            out.push(' ');
-        }
-        let _ = write!(out, "{carets}");
-        if !message.is_empty() {
-            let _ = write!(out, " {message}");
-        }
-        out.push('\n');
+        let caret_label = match label {
+            Some(s) if !s.is_empty() => crate::snippet::CaretLabel::Labelled(s),
+            _ => crate::snippet::CaretLabel::Plain,
+        };
+        crate::snippet::render_span_snippet_styled(
+            &file,
+            span,
+            caret_label,
+            out,
+            crate::snippet::MAX_SNIPPET_LINES,
+            &self.palette,
+            Some(Self::style_severity(sev)),
+        );
     }
 }
 
@@ -424,7 +471,7 @@ mod tests {
         .finish();
         assert_eq!(d.notes().len(), 1);
         assert_eq!(d.suggestions().len(), 1);
-        assert_eq!(d.suggestions()[0].replacement, "value");
+        assert_eq!(d.suggestions()[0].replacement.as_deref(), Some("value"));
     }
 
     #[test]
@@ -445,15 +492,16 @@ mod tests {
         )
         .finish();
         let rendered = render_one(&map, &d);
-        insta::assert_snapshot!(rendered, @r#"
-        error[Y012]: expected Int, found Text
+        insta::assert_snapshot!(rendered, @r"
+error[Y012]: expected Int, found Text
 
-          day03.px:1:9
-          1 | total += line
-            |          ^^^^
+  day03.px:1:9
+  1 | total += line
+    |          ^^^^ expected Int, found Text
 
-        hint: parse it with the input parser (suggestion: line.int())
-        "#);
+help: parse it with the input parser
+      line.int()
+");
     }
 
     #[test]
@@ -471,18 +519,63 @@ mod tests {
         .note(span(id, 23, 24), "the name `a` is defined here")
         .finish();
         let rendered = render_one(&map, &d);
-        insta::assert_snapshot!(rendered, @r#"
-        error[N001]: undefined name `value`
+        insta::assert_snapshot!(rendered, @r"
+error[N001]: undefined name `value`
 
-          f.px:1:8
-          1 | let a = value
-            |         ^^^^^
+  f.px:1:8
+  1 | let a = value
+    |         ^^^^^ undefined name `value`
 
-        the name `a` is defined here
+note: the name `a` is defined here
 
-          f.px:2:9
-          2 | let b = a + 1
-            |          ^
-        "#);
+  f.px:2:9
+  2 | let b = a + 1
+    |          ^
+");
+    }
+
+    #[test]
+    fn styled_renderer_emits_ansi() {
+        // The styled renderer wraps the severity label, code, carets, location,
+        // and help label in ANSI escapes. The plain path (default) emits none.
+        let map = SourceMap::new();
+        let id = map.intern("f.px", "x = 1\n");
+        let d = Diagnostic::build(
+            Severity::Error,
+            DiagnosticCode::new(DiagnosticCategory::Type, 1),
+            "expected Int, found Text",
+            span(id, 0, 1),
+        )
+        .help(span(id, 0, 1), "call .int()")
+        .finish();
+
+        let mut plain = String::new();
+        Renderer::new(&map).render(&d, &mut plain);
+        assert!(
+            !plain.contains("\x1b["),
+            "plain output has no ANSI: {plain:?}"
+        );
+
+        let mut styled = String::new();
+        Renderer::new_styled(&map, style::Palette::styled()).render(&d, &mut styled);
+        // Header: bold-red `error` + bold `[Y001]`.
+        assert!(
+            styled.contains("\x1b[1;31merror\x1b[0m"),
+            "styled error label: {styled:?}"
+        );
+        assert!(
+            styled.contains("\x1b[1m[Y001]\x1b[0m"),
+            "styled code: {styled:?}"
+        );
+        // Caret in the error color (red, not bold).
+        assert!(
+            styled.contains("\x1b[31m^\x1b[0m"),
+            "styled caret: {styled:?}"
+        );
+        // help label in cyan.
+        assert!(
+            styled.contains("\x1b[1;36mhelp:\x1b[0m"),
+            "styled help label: {styled:?}"
+        );
     }
 }

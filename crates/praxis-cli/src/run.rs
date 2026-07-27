@@ -28,7 +28,12 @@ use crate::diagnostic_render;
 /// stdin is read; when `Some(path)`, the file's contents are used. The input is
 /// read lazily — only if the program contains a `read` expression — but for M6
 /// we always read it upfront (a single read is the common case).
-pub fn run(file: &str, input_file: Option<&str>, debug: DebugMode) -> anyhow::Result<i32> {
+pub fn run(
+    file: &str,
+    input_file: Option<&str>,
+    debug: DebugMode,
+    color: crate::color_mode::ColorMode,
+) -> anyhow::Result<i32> {
     let path = Path::new(file);
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -53,7 +58,7 @@ pub fn run(file: &str, input_file: Option<&str>, debug: DebugMode) -> anyhow::Re
 
     // Honesty gate: never JIT malformed input. If any language errors exist
     // (parse / type / lowering), report them and stop.
-    let rendered = diagnostic_render::render_all(&source, &diagnostics);
+    let rendered = diagnostic_render::render_all(&source, &diagnostics, color.palette());
     if rendered.has_errors() {
         diagnostic_render::write_to(&mut std::io::stderr(), &rendered)?;
         return Ok(1);
@@ -75,7 +80,7 @@ pub fn run(file: &str, input_file: Option<&str>, debug: DebugMode) -> anyhow::Re
             let s = d.primary().span;
             (s.start(), s.end())
         });
-        let rendered = diagnostic_render::render_all(&source, &all);
+        let rendered = diagnostic_render::render_all(&source, &all, color.palette());
         diagnostic_render::write_to(&mut std::io::stderr(), &rendered)?;
         return Ok(1);
     }
@@ -164,6 +169,7 @@ pub fn run(file: &str, input_file: Option<&str>, debug: DebugMode) -> anyhow::Re
                     kind,
                     Some(&snapshot),
                     Some(runtime.parse_detail()),
+                    color.palette(),
                 )?;
                 // M10b: hand the live compile/run state to the REPL as a
                 // `DebugSession`, so `p EXPR`/`source`/`restart`/`reload` can
@@ -195,6 +201,7 @@ pub fn run(file: &str, input_file: Option<&str>, debug: DebugMode) -> anyhow::Re
                     kind,
                     None,
                     Some(runtime.parse_detail()),
+                    color.palette(),
                 )?;
                 drop(jit);
             }
@@ -204,6 +211,7 @@ pub fn run(file: &str, input_file: Option<&str>, debug: DebugMode) -> anyhow::Re
                 kind,
                 runtime.crash_snapshot(),
                 Some(runtime.parse_detail()),
+                color.palette(),
             )?;
             drop(jit);
         }

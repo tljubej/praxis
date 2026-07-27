@@ -43,6 +43,25 @@ pub(crate) fn type_mismatch(at: FileSpan, expected: &str, found: &str) -> Diagno
     )
 }
 
+/// `Y001` with an advisory `help:` hint attached (§8.2: "a concrete suggestion
+/// when available"). Use when the fix is explanatory rather than mechanical
+/// (e.g. "this value is `Unit`; make the last expression produce a value").
+pub(crate) fn type_mismatch_with_help(
+    at: FileSpan,
+    expected: &str,
+    found: &str,
+    help_label: &str,
+) -> Diagnostic {
+    Diagnostic::build(
+        Severity::Error,
+        DiagnosticCode::new(DiagnosticCategory::Type, 1),
+        format!("expected {expected}, found {found}"),
+        at,
+    )
+    .help(at, help_label)
+    .finish()
+}
+
 /// `Y002` — an occurs-check failure (infinite type), e.g. unifying `a` with
 /// `(a) -> a`.
 pub(crate) fn infinite_type(at: FileSpan) -> Diagnostic {

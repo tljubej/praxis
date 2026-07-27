@@ -28,7 +28,7 @@ use praxis_syntax::SyntaxKind;
 use praxis_types::{unify::UnifyError, ScalarType, Scheme, Type, TypeDb};
 use rowan::TextRange;
 
-use crate::diagnostics::{infinite_type, not_equatable, type_mismatch};
+use crate::diagnostics::{infinite_type, not_equatable, type_mismatch, type_mismatch_with_help};
 use crate::name_table::NameTable;
 use crate::resolve::{NameResolution, ResolvedRef};
 use crate::scope::{ScopeId, ScopeTree};
@@ -149,6 +149,58 @@ impl Inferer {
             UnifyError::Occurs { .. } => {
                 self.diagnostics.push(infinite_type(at));
             }
+        }
+    }
+
+    /// Like [`diag_unify`](Self::diag_unify), but attaches a `help:` hint for the
+    /// common, recognizable mismatch shapes (§8.2: "a concrete suggestion when
+    /// available"). The hint is chosen from the expected/found type pair and is
+    /// guarded so it never fires speculatively — unknown shapes fall through to
+    /// the plain mismatch.
+    ///
+    /// `context` describes where the mismatch occurred (e.g. "a function
+    /// returning `Int`") so the hint reads naturally.
+    fn diag_unify_hinted(&mut self, at: FileSpan, err: UnifyError, context: &str) {
+        match err {
+            UnifyError::Mismatch { expected, found } => {
+                let e = self.db.render(expected);
+                let f = self.db.render(found);
+                let label = self.hint_for(expected, found, context);
+                match label {
+                    Some(label) => {
+                        self.diagnostics
+                            .push(type_mismatch_with_help(at, &e, &f, &label));
+                    }
+                    None => self.diagnostics.push(type_mismatch(at, &e, &f)),
+                }
+            }
+            UnifyError::Occurs { .. } => {
+                self.diagnostics.push(infinite_type(at));
+            }
+        }
+    }
+
+    /// Pick a `help:` label for a type mismatch, or `None` when no concrete
+    /// suggestion applies. Currently recognizes:
+    /// - found `Unit` where a value was expected (forgot to return one), and
+    /// - found `Text` where a numeric type was expected (suggest `.int()`).
+    fn hint_for(&self, expected: Type, found: Type, context: &str) -> Option<String> {
+        let found_data = self.db.data(self.db.follow(found));
+        let expected_data = self.db.data(self.db.follow(expected));
+        use praxis_types::TypeData;
+        match (expected_data, found_data) {
+            (_, TypeData::Unit) => {
+                // The expected type's rendered name (e.g. "Int") for the hint.
+                let exp = self.db.render(expected);
+                Some(format!(
+                    "this value is `Unit`; {context} expected `{exp}` — make the last expression produce a value, or change the declared type to `Unit`"
+                ))
+            }
+            (
+                TypeData::Scalar(praxis_types::ScalarType::Int),
+                TypeData::Scalar(praxis_types::ScalarType::Text),
+            ) => Some("this is `Text`; call `.int()` on it (or use `read lines(int)`)".into()),
+            _ => None,
         }
     }
 
@@ -439,11 +491,16 @@ impl Inferer {
         let rhs = stmt.init();
         let rhs_ty = rhs.as_ref().map(|e| self.infer_expr(scope, e));
         let annot = stmt.ty().and_then(|t| self.resolve_type(&t));
-        // Unify annotation with the inferred RHS, if both are present.
+        // Unify annotation with the inferred RHS, if both are present. Point the
+        // mismatch at the RHS initializer (the value with the wrong type),
+        // falling back to the whole statement.
         if let (Some(a), Some(r)) = (annot, rhs_ty) {
-            let at = stmt.syntax().text_range();
+            let at = rhs
+                .as_ref()
+                .map(|e| e.syntax().text_range())
+                .unwrap_or_else(|| stmt.syntax().text_range());
             if let Err(e) = self.db.unify(a, r) {
-                self.diag_unify(self.file_span(at), e);
+                self.diag_unify_hinted(self.file_span(at), e, "the binding's type annotation");
             }
         }
         let body_ty = annot.or(rhs_ty).unwrap_or_else(|| self.db.fresh_var());
@@ -471,9 +528,13 @@ impl Inferer {
         let rhs_ty = stmt.init().map(|e| self.infer_expr(scope, &e));
         let annot = stmt.ty().and_then(|t| self.resolve_type(&t));
         if let (Some(a), Some(r)) = (annot, rhs_ty) {
-            let at = stmt.syntax().text_range();
+            // Point at the RHS initializer, not the whole `var` statement.
+            let at = stmt
+                .init()
+                .map(|e| e.syntax().text_range())
+                .unwrap_or_else(|| stmt.syntax().text_range());
             if let Err(e) = self.db.unify(a, r) {
-                self.diag_unify(self.file_span(at), e);
+                self.diag_unify_hinted(self.file_span(at), e, "the binding's type annotation");
             }
         }
         let body_ty = annot.or(rhs_ty).unwrap_or_else(|| self.db.fresh_var());
@@ -513,13 +574,22 @@ impl Inferer {
         }
         // The declared return type, if any; else a fresh var inferred from body.
         let ret_annot = item.return_type().and_then(|t| self.resolve_type(&t));
-        let body_ty = item.body().map(|b| self.infer_block(body_scope, &b));
-        // Unify declared return with the body's type (if both present).
+        let (body_ty, tail_range) = match item.body() {
+            Some(b) => {
+                let (ty, range) = self.infer_block_with_tail(body_scope, &b);
+                (Some(ty), range)
+            }
+            None => (None, None),
+        };
+        // Unify declared return with the body's type (if both present). Point the
+        // mismatch at the offending tail expression (e.g. the trailing
+        // `out(...)`) rather than the whole `fn`, falling back to the block's
+        // range, then the whole item, so precision never regresses.
         let result_ty = match (ret_annot, body_ty) {
             (Some(a), Some(b)) => {
                 if let Err(e) = self.db.unify(a, b) {
-                    let at = item.syntax().text_range();
-                    self.diag_unify(self.file_span(at), e);
+                    let at = tail_range.unwrap_or_else(|| item.syntax().text_range());
+                    self.diag_unify_hinted(self.file_span(at), e, "the function body");
                 }
                 a
             }
@@ -947,6 +1017,11 @@ impl Inferer {
 
     fn infer_bin(&mut self, scope: ScopeId, b: &BinExpr) -> Type {
         let (lhs, rhs) = b.operands();
+        // Keep each operand's node so a type mismatch can point at the specific
+        // bad operand rather than the whole binary expression (the earlier
+        // behavior underlined `a + b` even when only `a` was at fault).
+        let lhs_range = lhs.as_ref().map(|e| e.syntax().text_range());
+        let rhs_range = rhs.as_ref().map(|e| e.syntax().text_range());
         let lt = lhs.map(|e| self.infer_expr(scope, &e));
         let rt = rhs.map(|e| self.infer_expr(scope, &e));
         let op_kind = b.op().map(|t| t.kind());
@@ -961,12 +1036,14 @@ impl Inferer {
             ) => {
                 let int = self.db.int();
                 if let (Some(l), Some(r)) = (lt, rt) {
-                    let at = b.syntax().text_range();
+                    let whole = b.syntax().text_range();
+                    let lhs_at = lhs_range.unwrap_or(whole);
+                    let rhs_at = rhs_range.unwrap_or(whole);
                     if let Err(e) = self.db.unify(l, int) {
-                        self.diag_unify(self.file_span(at), e);
+                        self.diag_unify(self.file_span(lhs_at), e);
                     }
                     if let Err(e) = self.db.unify(r, int) {
-                        self.diag_unify(self.file_span(at), e);
+                        self.diag_unify(self.file_span(rhs_at), e);
                     }
                 }
                 int
@@ -981,7 +1058,10 @@ impl Inferer {
                 | SyntaxKind::GTEQ,
             ) => {
                 if let (Some(l), Some(r)) = (lt, rt) {
-                    let at = b.syntax().text_range();
+                    // Point at the RHS operand for a comparison mismatch: the LHS
+                    // establishes the expected type, the RHS is what failed to
+                    // match it. Falls back to the whole expression.
+                    let at = rhs_range.unwrap_or_else(|| b.syntax().text_range());
                     if let Err(e) = self.db.unify(l, r) {
                         self.diag_unify(self.file_span(at), e);
                     }
@@ -1007,12 +1087,14 @@ impl Inferer {
             Some(SyntaxKind::PIPE2) => {
                 let bool = self.db.bool();
                 if let (Some(l), Some(r)) = (lt, rt) {
-                    let at = b.syntax().text_range();
+                    let whole = b.syntax().text_range();
+                    let lhs_at = lhs_range.unwrap_or(whole);
+                    let rhs_at = rhs_range.unwrap_or(whole);
                     if let Err(e) = self.db.unify(l, bool) {
-                        self.diag_unify(self.file_span(at), e);
+                        self.diag_unify(self.file_span(lhs_at), e);
                     }
                     if let Err(e) = self.db.unify(r, bool) {
-                        self.diag_unify(self.file_span(at), e);
+                        self.diag_unify(self.file_span(rhs_at), e);
                     }
                 }
                 bool
@@ -1022,14 +1104,19 @@ impl Inferer {
     }
 
     fn infer_unary(&mut self, scope: ScopeId, u: &UnaryExpr) -> Type {
-        let operand = u.operand().map(|e| self.infer_expr(scope, &e));
+        let operand_node = u.operand();
+        let operand = operand_node.as_ref().map(|e| self.infer_expr(scope, e));
         let result = match u.op().map(|t| t.kind()) {
             Some(SyntaxKind::MINUS) => self.db.int(),
             Some(SyntaxKind::BANG) => self.db.bool(),
             _ => self.db.fresh_var(),
         };
         if let Some(o) = operand {
-            let at = u.syntax().text_range();
+            // Point at the operand, not the whole unary expression.
+            let at = operand_node
+                .as_ref()
+                .map(|e| e.syntax().text_range())
+                .unwrap_or_else(|| u.syntax().text_range());
             if let Err(e) = self.db.unify(o, result) {
                 self.diag_unify(self.file_span(at), e);
             }
@@ -1038,27 +1125,57 @@ impl Inferer {
     }
 
     fn infer_block(&mut self, scope: ScopeId, block: &BlockExpr) -> Type {
+        self.infer_block_inner(scope, block).0
+    }
+
+    /// Like [`infer_block`](Self::infer_block), but also returns the source
+    /// range of the expression that produced the block's value (its trailing
+    /// expression), or the block's own range when there is no trailing
+    /// expression (the block's value is then `Unit`). Used by `infer_fn` so a
+    /// return-type mismatch can point at the offending tail expression rather
+    /// than the whole `fn`.
+    fn infer_block_with_tail(
+        &mut self,
+        scope: ScopeId,
+        block: &BlockExpr,
+    ) -> (Type, Option<TextRange>) {
+        self.infer_block_inner(scope, block)
+    }
+
+    /// Shared body: infer every statement, returning the block's value type and
+    /// the range that produced it (the trailing expression, or the block itself
+    /// when the value is the implicit trailing `Unit`).
+    fn infer_block_inner(
+        &mut self,
+        scope: ScopeId,
+        block: &BlockExpr,
+    ) -> (Type, Option<TextRange>) {
         let inner = self.scopes.push_child(scope);
         let mut last = self.db.unit();
+        let mut tail_range: Option<TextRange> = None;
         for child in block.stmts() {
             // A trailing expression statement is the block's value.
             if let Some(expr_stmt) = ExprStmt::cast(child.clone()) {
                 if let Some(e) = expr_stmt.expr() {
                     last = self.infer_expr(inner, &e);
+                    tail_range = Some(e.syntax().text_range());
                     continue;
                 }
             }
             self.infer_top_stmt(inner, &child);
         }
-        last
+        // No trailing expression: the value is Unit; point at the whole block so
+        // the reader still sees where the implicit Unit comes from.
+        let tail_range = tail_range.or_else(|| Some(block.syntax().text_range()));
+        (last, tail_range)
     }
 
     fn infer_if(&mut self, scope: ScopeId, i: &IfExpr) -> Type {
         if let Some(cond) = i.cond() {
             let ct = self.infer_expr(scope, &cond);
             let bool = self.db.bool();
-            let at = i.syntax().text_range();
-            // Condition must be Bool: report "expected Bool, found <ct>".
+            // Condition must be Bool: point at the condition, not the whole `if`.
+            let at = cond.syntax().text_range();
             if let Err(e) = self.db.unify(bool, ct) {
                 self.diag_unify(self.file_span(at), e);
             }
@@ -1068,7 +1185,13 @@ impl Inferer {
         match (then_ty, else_ty) {
             (Some(t), Some(e)) => {
                 if let Err(err) = self.db.unify(t, e) {
-                    let at = i.syntax().text_range();
+                    // Branches disagree: point at the `else` branch (the one that
+                    // diverges from the `then` branch's established type).
+                    let at = i
+                        .else_branch()
+                        .and_then(|eb| eb.body())
+                        .map(|body| body.syntax().text_range())
+                        .unwrap_or_else(|| i.syntax().text_range());
                     self.diag_unify(self.file_span(at), err);
                 }
                 t
@@ -1093,8 +1216,8 @@ impl Inferer {
         if let Some(cond) = w.cond() {
             let ct = self.infer_expr(scope, &cond);
             let bool = self.db.bool();
-            let at = w.syntax().text_range();
-            // Condition must be Bool.
+            // Condition must be Bool: point at the condition, not the whole `while`.
+            let at = cond.syntax().text_range();
             if let Err(e) = self.db.unify(bool, ct) {
                 self.diag_unify(self.file_span(at), e);
             }

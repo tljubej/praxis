@@ -470,13 +470,13 @@ mod tests {
         let id = map.intern("day.px", "let @ = 1");
         let out = lex(id, "let @ = 1");
         let rendered = praxis_source::render_one(&map, &out.diagnostics[0]);
-        insta::assert_snapshot!(rendered, @r#"
-        error[T003]: unexpected byte in source
+        insta::assert_snapshot!(rendered, @r"
+error[T003]: unexpected byte in source
 
-          day.px:1:4
-          1 | let @ = 1
-            |     ^
-        "#);
+  day.px:1:4
+  1 | let @ = 1
+    |     ^ unexpected byte in source
+");
     }
 
     // ---- New M1 coverage ----

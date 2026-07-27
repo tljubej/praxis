@@ -447,3 +447,108 @@ fn mutable_capture_now_supported() {
         "mutable capture should be supported (WS7b)"
     );
 }
+
+// ===========================================================================
+// Diagnostic span precision.
+//
+// A type mismatch must point at the offending sub-expression, not the enclosing
+// statement/function (the earlier behavior underlined the whole `fn` for a
+// return-type error). These tests pin the primary span's byte range to the
+// exact expression at fault, so a regression that re-coarsens the span fails
+// loudly. (AGENTS.md: "test every language feature extensively".)
+// ===========================================================================
+
+/// The primary span `[start, end)` of the first Y001 type-mismatch in `src`, or
+/// `None` if there is none. The offsets are absolute byte offsets into `src`.
+fn first_mismatch_span(src: &str) -> Option<(u32, u32)> {
+    let analysis = analyze(src);
+    let d = analysis
+        .diagnostics
+        .iter()
+        .find(|d| d.code().category() == DiagnosticCategory::Type)?;
+    let span = d.primary().span;
+    Some((span.start().to_u32(), span.end().to_u32()))
+}
+
+/// Find the byte span of the first occurrence of `needle` in `src`.
+fn span_of(src: &str, needle: &str) -> (u32, u32) {
+    let start = src.find(needle).unwrap_or_else(|| {
+        panic!("needle `{needle}` not found in src:\n{src}");
+    }) as u32;
+    (start, start + needle.len() as u32)
+}
+
+#[test]
+fn return_type_mismatch_points_at_tail_expression() {
+    // The user's original example: `out("kurac")` returns `Unit` but `main` is
+    // declared `-> Int`. The error must underline `out("kurac")`, not the whole
+    // `fn main() -> Int { … }`.
+    let src = "fn main() -> Int {\n    let depths = read lines(int)\n    out(\"kurac\")\n}\n";
+    let expected = span_of(src, "out(\"kurac\")");
+    let actual = first_mismatch_span(src).expect("expected a Y001 mismatch");
+    assert_eq!(
+        actual, expected,
+        "return-type mismatch should point at the tail expression, got {actual:?} (expected {expected:?})",
+    );
+}
+
+#[test]
+fn let_annotation_mismatch_points_at_initializer() {
+    // `let x: Int = "hello"` — the error underlines `"hello"`, not the whole let.
+    let src = "fn main() -> Int {\n    let x: Int = \"hello\"\n    0\n}\n";
+    let expected = span_of(src, "\"hello\"");
+    let actual = first_mismatch_span(src).expect("expected a Y001 mismatch");
+    assert_eq!(
+        actual, expected,
+        "let-annotation mismatch should point at the initializer, got {actual:?}",
+    );
+}
+
+#[test]
+fn arithmetic_operand_mismatch_points_at_bad_operand() {
+    // `s + 1` where `s` is `Text`: the error underlines the operand `s` in
+    // `s + 1`, not the whole binary expression. `s` appears twice (in `let s`
+    // and in `s + 1`); the mismatch is at the second use.
+    let src = "fn main() -> Int {\n    let s = \"hi\"\n    s + 1\n}\n";
+    let use_start = src.find("s + 1").unwrap() as u32;
+    let expected = (use_start, use_start + 1);
+    let actual = first_mismatch_span(src).expect("expected a Y001 mismatch");
+    assert_eq!(
+        actual, expected,
+        "arithmetic mismatch should point at the bad operand `s`, got {actual:?}",
+    );
+}
+
+#[test]
+fn if_condition_mismatch_points_at_condition() {
+    // `if 5 { … }` — the error underlines `5`, not the whole `if`.
+    let src = "fn main() -> Int {\n    if 5 { 1 } else { 0 }\n}\n";
+    let expected = span_of(src, "5");
+    let actual = first_mismatch_span(src).expect("expected a Y001 mismatch");
+    assert_eq!(
+        actual, expected,
+        "if-condition mismatch should point at the condition, got {actual:?}",
+    );
+}
+
+#[test]
+fn mismatch_carries_a_help_hint_when_found_is_unit() {
+    // The Unit→Int return mismatch should attach a `help:` suggestion (§8.2).
+    let src = "fn main() -> Int {\n    out(\"x\")\n}\n";
+    let analysis = analyze(src);
+    let d = analysis
+        .diagnostics
+        .iter()
+        .find(|d| d.code().category() == DiagnosticCategory::Type)
+        .expect("expected a type error");
+    assert!(
+        !d.suggestions().is_empty(),
+        "Unit mismatch should carry a help hint: {:?}",
+        d.suggestions()
+    );
+    assert!(
+        d.suggestions()[0].label.contains("Unit"),
+        "the hint should explain the Unit value: {:?}",
+        d.suggestions()[0].label
+    );
+}

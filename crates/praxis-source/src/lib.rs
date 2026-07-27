@@ -12,7 +12,9 @@
 pub mod diagnostic;
 pub mod file;
 pub mod line_map;
+pub mod snippet;
 pub mod span;
+pub mod style;
 
 pub use diagnostic::{
     render_one, Diagnostic, DiagnosticCategory, DiagnosticCode, DiagnosticNote, Renderer, Severity,
