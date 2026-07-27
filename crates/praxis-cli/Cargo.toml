@@ -18,6 +18,7 @@ praxis-ast.workspace = true
 praxis-hir.workspace = true
 praxis-mir.workspace = true
 praxis-runtime.workspace = true
+praxis-debugger.workspace = true
 praxis-stdlib.workspace = true
 praxis-codegen-cranelift.workspace = true
 anyhow.workspace = true

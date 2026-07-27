@@ -117,3 +117,66 @@ fn run_fault_does_not_abort() {
         "process was killed by a signal (abort/panic leaked across the ABI)"
     );
 }
+
+// ===========================================================================
+// M10 WS4 — §9.6 noninteractive crash diagnostic.
+//
+// A runtime fault now renders the fault line + a numbered backtrace + the
+// top frame's locals (via praxis-debugger), instead of a bare one-liner. These
+// tests assert the §9.6 output is present on stderr and the exit code is 1.
+// The `--debug=never` flag forces the noninteractive path regardless of TTY.
+// ===========================================================================
+
+/// Run a fixture with explicit `--debug` mode, returning (exit, stdout, stderr).
+fn run_fixture_debug(name: &str, debug: &str) -> (i32, String, String) {
+    let output = Command::new(bin_path())
+        .args(["run", "--debug", debug])
+        .arg(fixture(name))
+        .output()
+        .expect("failed to run praxis");
+    let code = output.status.code().unwrap_or(-1);
+    (
+        code,
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn m10ws4_noninteractive_renders_backtrace_and_locals() {
+    // The §9.6 output: fault line, a numbered Backtrace section, and the top
+    // frame's locals — including the named `xs` Vec with its elements.
+    let (code, _stdout, stderr) = run_fixture_debug("debug_backtrace.px", "never");
+    assert_eq!(code, 1, "fault exits 1");
+    assert!(stderr.contains("program faulted: index out of bounds"));
+    assert!(stderr.contains("Backtrace:"), "backtrace header present");
+    assert!(stderr.contains("#0"), "backtrace numbers frames");
+    assert!(stderr.contains("main"), "frame name shown");
+    // The named local `xs` with its Vec value renders.
+    assert!(
+        stderr.contains("xs = [11, 22]"),
+        "named local renders with value: {stderr}"
+    );
+}
+
+#[test]
+fn m10ws4_debug_never_exits_one_without_repl_note() {
+    // `--debug=never` must not print the "REPL not wired" note — it declines
+    // the REPL outright.
+    let (code, _stdout, stderr) = run_fixture_debug("overflow.px", "never");
+    assert_eq!(code, 1);
+    assert!(!stderr.contains("interactive crash REPL"));
+    assert!(stderr.contains("integer overflow"));
+}
+
+#[test]
+fn m10ws4_default_auto_non_tty_is_noninteractive() {
+    // In a test (no TTY), the default `auto` mode behaves like `never`: it
+    // prints the noninteractive diagnostic and exits 1.
+    let (code, _stdout, stderr) = run_fixture("overflow.px");
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("Backtrace:"),
+        "auto/non-TTY still renders backtrace"
+    );
+}

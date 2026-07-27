@@ -19,6 +19,7 @@ use praxis_hir::{analyze_root, lower, mono::monomorphize};
 use praxis_mir::{annotate, lower_module};
 use praxis_runtime::{GcRef, Runtime, RuntimeContext};
 
+use crate::debug_mode::DebugMode;
 use crate::diagnostic_render;
 
 /// Run the `run` command against `file`. Returns the process exit code.
@@ -27,7 +28,7 @@ use crate::diagnostic_render;
 /// stdin is read; when `Some(path)`, the file's contents are used. The input is
 /// read lazily — only if the program contains a `read` expression — but for M6
 /// we always read it upfront (a single read is the common case).
-pub fn run(file: &str, input_file: Option<&str>) -> anyhow::Result<i32> {
+pub fn run(file: &str, input_file: Option<&str>, debug: DebugMode) -> anyhow::Result<i32> {
     let path = Path::new(file);
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -148,7 +149,22 @@ pub fn run(file: &str, input_file: Option<&str>) -> anyhow::Result<i32> {
 
     if runtime.has_pending_fault() {
         let kind = runtime.fault();
-        eprintln!("error: program faulted: {kind}");
+        // Decide whether to enter the interactive crash REPL (§9.6). The REPL
+        // itself lands in WS5; until then `always`/TTY `auto` fall back to the
+        // noninteractive render with a note. `never` and non-TTY `auto` always
+        // print the noninteractive diagnostic.
+        if debug.wants_repl() {
+            // M10a: the interactive REPL is not wired into the CLI yet (WS5).
+            // Fall back to the noninteractive render; WS5 replaces this branch
+            // with the actual REPL hand-off.
+            eprintln!("note: interactive crash REPL is not yet wired; showing the noninteractive diagnostic.");
+        }
+        praxis_debugger::render::render_noninteractive(
+            &mut std::io::stderr(),
+            kind,
+            runtime.crash_snapshot(),
+            Some(runtime.parse_detail()),
+        )?;
         // Keep the JIT alive through the print; drop after.
         drop(jit);
         return Ok(1);

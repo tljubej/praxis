@@ -5,11 +5,13 @@
 //! report which milestone will implement them.
 
 mod check;
+mod debug_mode;
 mod diagnostic_render;
 mod run;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+pub use debug_mode::DebugMode;
 
 /// The Praxis command-line interface.
 ///
@@ -36,6 +38,12 @@ enum Command {
         /// Read the process input from this file instead of stdin (§7.1, M6).
         #[arg(long)]
         input: Option<String>,
+        /// When to drop into the crash debugger on a runtime fault (§9.6, M10):
+        /// `auto` (default) enters the REPL iff stdin & stdout are a terminal;
+        /// `always` forces the REPL; `never` always prints the noninteractive
+        /// diagnostic and exits nonzero.
+        #[arg(long, default_value = "auto")]
+        debug: DebugMode,
     },
     /// Run the front end (lex + parse + type-check) without executing.
     Check {
@@ -61,7 +69,7 @@ fn main() -> Result<()> {
 
     let exit = match cli.command {
         Command::Check { file } => check::run(&file),
-        Command::Run { file, input } => run::run(&file, input.as_deref()),
+        Command::Run { file, input, debug } => run::run(&file, input.as_deref(), debug),
         Command::Watch { file } => not_implemented("watch", Some(&file), 0),
         Command::Repl => not_implemented("repl", None, 0),
         Command::Lsp => not_implemented("lsp", None, 11),

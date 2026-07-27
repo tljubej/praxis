@@ -6,9 +6,14 @@
 //! crash REPL with `bt`, `frame`, `locals`, `p EXPR`, `type EXPR`, `source`,
 //! `input`, `parser`, `heap`, `restart`, `reload`, `quit`, `help`.
 //!
-//! **Milestone 0: skeleton.** The REPL lands in Milestone 10.
+//! **M10a:** snapshot rendering + the noninteractive fallback (§9.6). The
+//! interactive REPL navigation/locals lands in WS5; `p EXPR`/`type EXPR` and
+//! the context commands land in M10b.
 
-/// Marker documenting that this crate is a deliberate skeleton.
+pub mod render;
+
+/// Marker documenting that this crate was a skeleton through Milestone 9 and
+/// fills at Milestone 10.
 pub const FILLED_AT_MILESTONE: u32 = 10;
 
 #[cfg(test)]
