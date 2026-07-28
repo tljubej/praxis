@@ -17,28 +17,68 @@ Update this file at the end of every stage.
 | S4 — Object layout and heap provenance | **done** | `dfe42b6` |
 | S5 — Root-set completeness, native RAII roots | **done** | `7911337` |
 | S6 — Allocation pacing, effect metadata, heap lifecycle | **done** | `7182d56`, `ce08ae3`, `b384df9`, `968af35`, `3b5bfb7` |
-| S7 — Descriptor totality, typed collections, fault representation | **part done** — RT-06, RT-17, RT-18 closed; P0-11, RT-09, RT-07, RT-10, RT-11 remain | `d014067`, `c00aab7` |
+| S7 — Descriptor totality, typed collections, fault representation | **done** | `d014067`, `c00aab7`, `6da6037`, `eda8c69` |
 | S8 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
-S10. It fell out of S1.
+S10. It fell out of S1. **DBG-02** is closed in part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1026 passed, 0 failed, 123 ignored**. `just ci` is green.
+Now: **1055 passed, 0 failed, 110 ignored**. `just ci` is green.
 
-Twenty-six of the audit's ignored regressions are un-ignored and passing. The
-five added this session (S6's remaining exit criteria, then two of S7's):
+Thirty-eight of the audit's ignored regressions are un-ignored and passing.
+The thirteen added by S7's second half:
 
-| Test | File |
-|---|---|
-| `checked_int_add_is_an_automatic_gc_safepoint` | `praxis-runtime/src/abi.rs` |
-| `repeated_collection_reuses_dead_object_storage` | `praxis-runtime/src/heap.rs` |
-| `dropping_heap_finalizes_live_owned_payloads` | `praxis-runtime/src/heap.rs` |
-| `alloc_char_rejects_values_that_only_become_valid_after_truncation` | `praxis-runtime/src/abi.rs` |
-| `setting_none_cannot_create_a_pending_fault` | `praxis-runtime/src/context.rs` |
+| Test | File | Finding |
+|---|---|---|
+| `dynamic_keys_with_different_descriptors_are_never_equal` | `praxis-runtime/src/dynamic_key.rs` | RT-09 |
+| `vec_push_rejects_a_value_with_the_wrong_descriptor` | `praxis-runtime/src/abi.rs` | P0-11 |
+| `grid_cell_vectors_preserve_the_grid_element_descriptor` | `praxis-runtime/src/abi.rs` | P0-11 |
+| `grid_position_vectors_use_the_point_tuple_descriptor` | `praxis-runtime/src/abi.rs` | P0-11 |
+| `constructed_grid_cells_satisfy_the_declared_element_descriptor` | `praxis-runtime/src/abi.rs` | P0-11 |
+| `grid_positions_vec_uses_the_point_tuple_descriptor` | `adversarial_audit.rs` | P0-11 |
+| `grid_text_row_preserves_the_grid_cell_descriptor` | `adversarial_audit.rs` | P0-11 |
+| `tuple_schema_uses_the_enum_descriptor_for_enum_elements` | `adversarial_audit.rs` | P0-11 |
+| `tuple_schema_uses_the_unit_descriptor_for_unit_elements` | `adversarial_audit.rs` | P0-11 |
+| `nested_record_inequality_dispatches_to_the_record_descriptor` | `adversarial_audit.rs` | P0-11 |
+| `regression_runtime_vec_descriptor_recovers_its_real_element_type` | `praxis-debugger/src/evaluate.rs` | DBG-02 |
+| `empty_vectors_with_different_element_types_are_not_equal` | `praxis-runtime/src/collections.rs` | RT-10 |
+| `tuple_equality_uses_shape_not_schema_allocation_identity` | `praxis-runtime/src/tuples.rs` | RT-11 |
 
-Two tests were **rewritten**, not merely un-ignored, because this session
-inverted their premise:
+`tuple_schema_uses_the_unit_descriptor_for_unit_elements` needed its **program**
+rewritten, not its assertion: `let unit = { let ignored = 1 }\n  (unit, 7)`
+parses as a *call* of `(unit, 7)`, which is FE-04 (S12). Any test whose source
+puts a parenthesized expression at the start of the line after a `let` hits
+this — bind the tuple to a name and return the name.
+
+**One exit-criterion test could not be un-ignored.**
+`empty_vec_float_has_the_float_element_descriptor_before_any_push` is blocked on
+**TY-08 (S13)**, not on P0-11: `let values: Vec[Float] = Vec()` never applies
+its annotation to the initializer, so the element type is still a variable at
+the construction site and the descriptor is legitimately null. Its `#[ignore]`
+reason now says so, and it no longer *aborts the test process* on a null deref —
+it reads the descriptor as an `Option`.
+
+The eight new gates for the findings that had none:
+
+| Test | File | Pins |
+|---|---|---|
+| `a_mismatched_key_never_dispatches_the_equality_callback` | `dynamic_key.rs` | RT-09 — the callback must not run at all |
+| `keys_of_different_types_are_unequal_in_a_real_hash_set` | `dynamic_key.rs` | RT-09 through a real `HashSet` |
+| `a_bit_outside_the_representable_range_has_no_index` | `bitset.rs` | RT-07 — the resize is unwritable |
+| `a_negative_or_absurd_grid_extent_faults_instead_of_allocating` | `abi.rs` | RT-07 extents |
+| `an_in_range_grid_extent_still_builds_its_cells` | `abi.rs` | RT-07's other side |
+| `a_bitset_member_outside_the_representable_range_faults` | `abi.rs` | RT-07 members |
+| `bitset_queries_outside_the_range_are_absent_rather_than_faults` | `abi.rs` | RT-07 — queries stay total |
+| `neighbors_of_an_extreme_point_are_empty_rather_than_a_panic` | `abi.rs` | RT-07 neighbour overflow |
+| `a_known_element_type_with_no_descriptor_fails_the_compile` | `lower.rs` | P0-11's D9 answer |
+
+Plus the seven crate tests in `praxis-repr/src/tests.rs`, of which
+`every_builtin_value_round_trips` is F11's stated contract: a live sample of all
+twenty-one built-ins, round-tripped by descriptor **pointer**.
+
+Two tests were **rewritten**, not merely un-ignored, because S6 inverted their
+premise:
 
 - `reset_restores_collection_pacing` grew the threshold by calling
   `collect_with`, and an explicit collection no longer grows it (RT-04). It now
@@ -49,7 +89,8 @@ inverted their premise:
   a `RaisedFault`). It now pins the property where it still lives —
   `RaisedFault::new` rejecting `None`, every other kind round-tripping.
 
-Thirteen findings-without-gates got one, all checked against the unfixed code:
+Earlier, thirteen findings-without-gates got one, all checked against the
+unfixed code:
 
 | Test | Pins |
 |---|---|
@@ -135,16 +176,86 @@ MIR-05 supplies one in S21, so they are `MirType::Opaque` and the backend keeps
 its degenerate empty-schema path. `MirType::expect_known`/`MirTypeError` are
 also not written: their only consumer is F17's verifier (S9).
 
-No other foundation has been started. **F11** (the `praxis-repr` crate, the
-total `Type ⇄ TypeDescriptor` bridge) is next on the critical path: P0-11 in S7
-is what it exists for.
+**F11 — the `praxis-repr` bridge: landed whole.** New crate, deps
+`praxis-types` + `praxis-runtime` + `praxis-stdlib`, no cycle.
+`descriptor_for_type` is exhaustive and fallible; `type_for_value` is its
+inverse and reads payloads; `element_descriptors_for` is what a collection
+constructor asks; `type_for_descriptor` is the value-less case. The payload
+reads live in `praxis_runtime::repr::instance_repr`, a total match over
+`BuiltinTypeId`, so the bridge never does a raw payload read itself. See
+ADR-042. **Not done:** `descriptor_supports(d, cap)` — the capability-agreement
+half, whose consumer is F10 (S17).
+
+No other foundation has been started.
 
 ## 3. Things that changed under you
 
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session
+### From this session (S7's second half)
+
+**There is a new crate, `praxis-repr`, and it is where descriptor questions go.**
+`praxis_repr::descriptor_for_type(db, ty) -> Result<&'static TypeDescriptor,
+NoRuntimeRepr>`. `lower.rs`'s own `descriptor_for_type` is now a three-line
+wrapper that turns the error into an `anyhow` diagnostic; the twenty-line match
+with three `_ => INT` arms is gone. **Do not add a local descriptor match
+anywhere** — add an arm to the bridge, where the round-trip test sees it.
+
+**A descriptor request can fail, and there are two kinds of failure.**
+`NoReprCause::NoSuchObject` (`Never`, `UInt`, `Range`, `Seq`, a non-built-in
+descriptor) is always a compile error. `NoReprCause::Unresolved` (a type
+variable) is tolerated *only* where null is representable — a collection's
+element descriptor — because `let xs = Vec()` generalizes at the `let` and S15
+is what fixes it. Ask `e.is_unresolved()`, do not match on the reason string.
+
+**A null element descriptor now means "unknown", and survives.**
+`praxis_vec_new`/`praxis_deque_new` keep a null argument null instead of
+rewriting it to `INT`. Read it through `VecPayload::element()` /
+`DequePayload::element()` / `GridPayload::element()`, which return
+`Option<&'static TypeDescriptor>` — **a bare deref of `element_descriptor` is
+now a null deref**, and in a test that aborts the whole process rather than
+failing one case. Three payloads are affected; Map/Set/Counter/heaps still hold
+a non-null `&'static` and still default null to `INT` (a remaining
+inconsistency, noted in ADR-042).
+
+**`push` adopts or rejects; it never retags.** `praxis_vec_push` and both
+`praxis_deque_push_*` call `adopt_or_reject`, which sets the descriptor if there
+is none, accepts if it matches by pointer, and raises `FaultKind::TypeMismatch`
+otherwise **without storing the value**. `praxis_grid_set` does the same.
+
+**`FaultKind` gained `InvalidSize` and `TypeMismatch`** — a `match` over it is
+two arms longer again (four since S6). Neither needed an ABI bump: generated
+code never switches on a fault kind and the `#[repr(C)]` enum's width is
+unchanged. **`RUNTIME_ABI_VERSION` is still 11.**
+
+**Grid results carry real descriptors.** `cells`/`row`/`column` are tagged with
+the grid's cell descriptor; `positions`/`neighbors4`/`neighbors8`/`find_all`
+with `tuples::TUPLE`. `praxis_grid_new` fills cells with the *zero value of the
+cell type* (`default_cell`, an exhaustive match over `BuiltinTypeId`) and raises
+`TypeMismatch` for a composite cell type it cannot invent a value for.
+
+**Collection equality compares element descriptors, and tuple equality compares
+shape.** `same_element` (pointer identity, two nulls agree) leads
+`vec_equals`/`deque_equals`/`grid_equals`. `TupleSchema::same_shape` replaces
+the schema-*address* comparison, and `tuple_hash` now mixes each slot's
+descriptor id so `Eq` and `Hash` still agree.
+
+**`DynamicKey`'s fields are private.** Use `k.value()` and `k.descriptor()`.
+Equality short-circuits on descriptor pointer identity before touching a
+callback.
+
+**`GridExtent` and `BitIndex` are the only routes from an `Int` to a size.**
+`BitSetPayload::{insert, contains, remove}` take a `BitIndex`, not a `usize`.
+Both cap (`MAX_CELLS = 2^28`, `BitIndex::MAX = 2^32 - 1`) rather than merely
+checking overflow. See ADR-041.
+
+**The debugger reads types out of values, not out of descriptors.**
+`descriptor_to_type`/`descriptor_id_to_type` are deleted;
+`collect_bindings` calls `praxis_repr::type_for_value`. `p xs.get(0)` on a
+`Vec[Text]` now types as `Text`.
+
+### From S6 and the first half of S7
 
 **`Heap::alloc` and `alloc_with` take a `Safepoint` as their first argument.**
 The only producer is `Heap::pace(&RuntimeRoots)`, which performs the
@@ -202,7 +313,8 @@ needed no bump at all: `Heap` gained a field and `TypeDescriptor` gained a
 field, but generated code holds the `Heap` pointer without dereferencing it and
 passes descriptors by pointer without reading their fields — the only thing it
 reads out of the runtime's own types is `GcHeader::payload_offset_for`, which is
-unchanged. **S7's one bump (H17) is therefore spent.**
+unchanged. **S7's one bump (H17) is spent, and S7 is closed — S8 starts with a
+fresh one.**
 
 **`Fault` is one field wide, and `Fault::set` takes a `RaisedFault`.** The
 `pending: bool` is gone — `is_pending()` is `kind != None`, so the two cannot
@@ -405,40 +517,47 @@ re-deriving it.
 
 ## 4. Where to start
 
-**Finish S7.** Five findings remain, and the first needs a decision.
+**S8 — the generation arena** (DBG-05, DBG-06, IP-12, MIR-12, MIR-13). S7 is
+closed; every finding it owned is fixed and gated.
 
-- **P0-11** (descriptor totality) is the stage, and it is **blocked on D9**:
-  what does the JIT do when `descriptor_for_type` returns `Err` — fail the
-  compile with a diagnostic, or fall back and reintroduce the bug? The plan's
-  own S7 text annotates the first as "(correct)". `descriptor_for_type`
-  (`praxis-codegen-cranelift/src/lower.rs`) still takes a `praxis_types::Type`
-  and keeps its `_ => INT` fallback on the `Known` path; that fallback *is* the
-  finding. P0-11 is mostly **F11**, the new `praxis-repr` crate holding the
-  total, bidirectional `Type ⇄ TypeDescriptor` bridge — read §3.1's F11 before
-  starting.
-- **P0-11 must precede RT-10 and RT-11.** Tightening collection and tuple
-  equality first would surface the mislabelled `INT` descriptors as a cascade
-  of new failures instead of the intended assertions.
-- **P0-11 inverts currently-passing tests.** The Vec-adopts-first-push
-  descriptor assertions near
-  `praxis-codegen-cranelift/tests/adversarial_audit.rs:284` assert the
-  behaviour it removes — budget to rewrite them, not just unignore (plan §8.2,
-  H18).
-- **RT-09** (`DynamicKey::eq` omits descriptor identity, so it can run a
-  callback against the wrong payload layout and disagree with `Hash`). Gated by
-  `dynamic_keys_with_different_descriptors_are_never_equal`
-  (`praxis-runtime/src/dynamic_key.rs`). Independent of F11 — this one is
-  reachable today.
-- **RT-07** (negative or overflowing `Grid`/`BitSet` extents, and neighbour
-  arithmetic that overflows, cast toward huge `usize` values and panic or OOM
-  across `extern "C"`). No gating test; the plan wants one asserting they
-  *fault* rather than panic or allocate absurdly. Also independent of F11.
-- **S7's ABI bump is spent** (11, for RT-17's `Fault` repack). If RT-13-style
-  signature work turns out to be needed here rather than in S18, it shares that
-  bump — do not add a second (H17).
+- **H15 is the whole difficulty and it is now unavoidable.** `Heap::drop` runs
+  finalizers, and record and tuple payloads hold `*const RecordSchema` /
+  `*const TupleSchema`. Those are safe today only because they are `Box::leak`ed
+  and never freed — which is precisely what S8 removes. The arena must be
+  dropped **after** heap teardown, and `DebugSession` declares `jit` *before*
+  `runtime`, so today's drop order is the wrong way round.
+- **The `Box::leak` sites S8 must reach** are, in `lower.rs`: `record_schema_for`
+  (a `OnceLock<Mutex<HashMap<u32, _>>>` keyed by a *bare* def id — that is
+  DBG-06's finding and `record_schema_cache_is_scoped_by_type_database_not_bare_def_id`
+  is its gate), `tuple_schema_for` (same shape, keyed by the descriptor
+  sequence), `embed_text`, `leak_static_str`, the field-name leaks inside
+  `record_schema_for`, and `build_debug_local_metas`. The
+  `praxis-repr` work did not add or remove any of them.
+- **S8 starts with a fresh ABI bump budget** (H17). `RUNTIME_ABI_VERSION` is 11.
+- Can run in parallel with S9 and S10.
 
-Re-read §6 of the plan first. The hazards that still bind: **H3**, **H9**,
-**H10**, **H15**, **H17**. **H1, H2, H4, H6, H7, H8 and H16 are discharged.**
+**Two S7-adjacent items were deliberately left**, and both belong to their own
+stage rather than to S8:
+
+- **`chars(int)`** still advertises `Vec[Char]` while storing `Int` objects, and
+  a **single anonymous `{word}` template** still tags its Text values with `INT`.
+  Both are P0-11's *runtime* tail, both are gated
+  (`chars_result_descriptor_matches_the_values_it_contains`,
+  `anonymous_word_template_vec_uses_the_text_element_descriptor`, both in
+  `adversarial_audit.rs`), and both live in code S19/S20 rewrite wholesale. They
+  are now *visible* rather than silently right-looking: the element descriptor is
+  a real claim about the values, and `push` enforces it.
+- **Map/Set/Counter/heap payloads** still hold a non-null `&'static` element
+  descriptor and still rewrite a null argument to `INT`. With the forward map
+  fixed this only bites when inference leaves the element type unresolved (the
+  S15 gap), but it is the one place where "unknown" is still spelled `Int`.
+
+Re-read §6 of the plan first. The hazards that still bind: **H3**, **H15**,
+**H17**, and **H10** in its long form (the MIR verifier's "no `Opaque` in a
+descriptor-producing position" rule stays off until S15). **H1, H2, H4, H6, H7,
+H8, H9 and H16 are discharged** — H9's declared cycle is resolved as it
+predicted: P0-02 landed the representation in S3 and P0-11 made the `Known` path
+exhaustive in S7.
 
 **H15 became live in S6.** `Heap::drop` now runs finalizers, and record and
 tuple payloads hold `*const RecordSchema` / `*const TupleSchema`. It is safe
@@ -453,12 +572,26 @@ first and heap teardown would dereference freed schemas.
 **D14 is answered** — see ADR-040. The `Safepoint` token shipped with a named,
 `pub(crate)` `Heap::alloc_unpaced` back door for the host helpers and the
 parser interpreter (the plan's option 2), rather than landing IPR-14 out of
-stage order (option 1) or deferring the token (option 3). **D9 now blocks S7
-outright**, alongside D1, D3 and D5, none of which have been answered.
+stage order (option 1) or deferring the token (option 3).
+
+**D9 is answered** — see ADR-042. The JIT **fails the compile with a
+diagnostic** naming the type and the site, which is the option the plan's own S7
+text annotates "(correct)". Two carve-outs where absence is already
+representable and already rendered: debug metadata emits a null descriptor plus
+`NO_STATIC_TYPE` (what `MirType::Opaque` locals already do), and a collection's
+element descriptor may be null. A third distinction fell out of the work and is
+part of the answer: an *unresolved type variable* is not the same failure as a
+type that can have no object, and only the first is tolerated — see
+`NoReprCause` and hazard H10.
+
+**D12 (panic-across-FFI) remains open** and RT-06/RT-07 landed without it. What
+shipped is narrower than a policy: the two wrappers the audit named now fault
+instead of aborting. Other wrappers still reach Rust panics on malformed input.
+
+**D1, D3 and D5 still block their stages**; none has been answered.
 
 | | Decision | Blocks |
 |---|---|---|
-| D9 | What the JIT does when `descriptor_for_type` returns `Err` — diagnose, or fall back and reintroduce the bug | S7 |
 | D3 | NaN ordering, and whether Text/tuples/records/collections are orderable at all. **This is what `TypeDescriptor::compare` is waiting for** | S10, blocking P0-12 |
 | D7 | After `_` lexes as `UNDERSCORE`, is it still legal in `let _ = f()`, `fn g(_)`, `\|_\| 0`? | S12 |
 | D8 | Exactly where a newline terminates an expression | S12 |
@@ -476,8 +609,32 @@ outright**, alongside D1, D3 and D5, none of which have been answered.
 
 Things the plan states that are no longer or were not quite true.
 
-- **DBG-01 is closed** (`3836b74`), not open in S10. **DBG-02** — collection
-  element types defaulting to `Int` — is untouched and still needs F11.
+- **DBG-01 is closed** (`3836b74`), not open in S10. **DBG-02 is closed for
+  values**: the debugger reads a value's real type out of its payload through
+  F11's `type_for_value`, and its gate
+  `regression_runtime_vec_descriptor_recovers_its_real_element_type` is
+  un-ignored. What remains of DBG-02 in S10 is the *value-less* half — a record
+  or enum object does not record which nominal type it is (F12), and a closure
+  records no signature. Both report why rather than guessing.
+- **S7's exit criteria list one test that S7 cannot pass.**
+  `empty_vec_float_has_the_float_element_descriptor_before_any_push` needs the
+  `let values: Vec[Float] = Vec()` annotation to reach the initializer, which is
+  TY-08 in **S13**. P0-11 makes the descriptor honestly *null* instead of
+  wrongly `Int`; it cannot make it `Float`.
+- **P0-11's "expect passing tests to flip" was half right.**
+  `vec_float_push_adopts_float_descriptor_and_preserves_signed_zero_semantics`
+  (adversarial_audit.rs, the test H18 names) **still passes unchanged**, because
+  its `let a = Vec()` genuinely has no static element type and adopt-on-first-push
+  is the honest answer there. What P0-11 removed was *retagging* a vector that
+  had been told its type. The test that actually needed rewriting was
+  `tuple_schema_uses_the_unit_descriptor_for_unit_elements`, and for an unrelated
+  reason (FE-04, see §1).
+- **A test that derefs a payload pointer can abort the whole test binary.**
+  `empty_vec_float_…` did, once the descriptor became legitimately null: a null
+  deref in Rust is a non-unwinding panic, so one bad assumption took out
+  thirty-six other tests in the same process with SIGABRT and no failure list.
+  Plan §8.1's "do not batch the ignored suite" is about this class; the cheap
+  defence is to read through the `Option` accessor.
 - **§8.4 is stale for P0-05 and P0-14.** Both now have standing gates in the
   ordinary suite. A Miri job is still worth adding.
 - **F1's `compare` is declared but unpopulated.** S10 does not need to touch 21
@@ -561,3 +718,15 @@ Things the plan states that are no longer or were not quite true.
   faulting instruction is followed by a CheckFault" — MIR-10, S9 — would flag
   it, and the right answer is probably to mark the increment non-faulting
   rather than to add a check.
+- **`MethodEntry.can_fault` is dead metadata.** Nothing reads it — every method
+  call emits an unconditional `check_fault` in `build.rs`. That is why RT-07's
+  and P0-11's new faults are observed by generated code without touching a
+  lowering, and it is also why the field's `false` values (`bitset_insert`,
+  `vec_push`) were never wrong in a way anyone noticed. F17's verifier (S9) is
+  where "faulting instruction ⇒ CheckFault" becomes a real rule; either wire
+  `can_fault` to the manifest's `Effect` there or delete it.
+- **Adding a `FaultKind` variant needs no ABI bump.** Generated code never
+  switches on the kind — it calls `praxis_check_fault`, which answers a bool —
+  and the `#[repr(C)]` enum's width does not change. Four variants have been
+  added across S7 (`InvalidChar`, `InvalidText`, `InvalidSize`, `TypeMismatch`)
+  under one bump, which was spent on the `Fault` *repack*, not on the kinds.
