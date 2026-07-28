@@ -108,7 +108,7 @@ pub static ENUM: TypeDescriptor = TypeDescriptor::builtin::<EnumPayload>(
     enum_format,
     Some(enum_equals),
     Some(enum_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 )
 .with_owned_bytes(enum_owned_bytes);

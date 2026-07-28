@@ -227,9 +227,13 @@ pub type OwnedBytesFn = unsafe fn(payload: *const u8) -> usize;
 /// `compare` callback shape: total ordering between two values of the same
 /// descriptor. `None` on the descriptor means the type is not orderable.
 ///
-/// Populating this is deferred to the ordering ADR (which types are orderable,
-/// and where NaN sorts); every descriptor declares `None` until then, so the
-/// field records the *shape* of the answer without pre-empting it.
+/// This is the ordering a **container** imposes — a heap's `Ord`, a sort, a
+/// deterministic rendering — and it is total, including over `Float` NaN
+/// (which sorts last and equals itself). The source-level `<` on a `Float`
+/// keeps IEEE semantics and is a different operation; see ADR-045.
+///
+/// Populated on `Int`, `Byte`, `Char`, `Float` and `Text`; `None` on everything
+/// else, including every composite (ADR-045 decision 1).
 ///
 /// # Safety
 /// Both pointers must point at values of the descriptor's type.

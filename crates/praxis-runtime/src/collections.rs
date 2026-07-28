@@ -160,7 +160,7 @@ pub static VEC: TypeDescriptor = TypeDescriptor::builtin::<VecPayload>(
     vec_format,
     Some(vec_equals),
     Some(vec_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 )
 .with_owned_bytes(vec_owned_bytes);
@@ -290,7 +290,7 @@ pub static DEQUE: TypeDescriptor = TypeDescriptor::builtin::<DequePayload>(
     deque_format,
     Some(deque_equals),
     Some(deque_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 )
 .with_owned_bytes(deque_owned_bytes);
@@ -492,7 +492,7 @@ pub static GRID: TypeDescriptor = TypeDescriptor::builtin::<GridPayload>(
     grid_format,
     Some(grid_equals),
     Some(grid_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 )
 .with_owned_bytes(grid_owned_bytes);

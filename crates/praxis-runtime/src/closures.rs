@@ -73,7 +73,7 @@ pub static CLOSURE: TypeDescriptor = TypeDescriptor::builtin::<ClosurePayload>(
     closure_format,
     None,
     None,
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 )
 .with_owned_bytes(closure_owned_bytes);

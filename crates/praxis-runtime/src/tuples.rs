@@ -161,7 +161,7 @@ pub static TUPLE: TypeDescriptor = TypeDescriptor::builtin::<TuplePayload>(
     tuple_format,
     Some(tuple_equals),
     Some(tuple_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 )
 .with_owned_bytes(tuple_owned_bytes);

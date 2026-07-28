@@ -195,7 +195,7 @@ pub static MAP: TypeDescriptor = TypeDescriptor::builtin::<MapPayload>(
     map_format,
     Some(map_equals),
     Some(map_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 )
 .with_owned_bytes(map_owned_bytes);
@@ -286,7 +286,7 @@ pub static SET: TypeDescriptor = TypeDescriptor::builtin::<SetPayload>(
     set_format,
     Some(set_equals),
     Some(set_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 )
 .with_owned_bytes(set_owned_bytes);
@@ -402,7 +402,7 @@ pub static COUNTER: TypeDescriptor = TypeDescriptor::builtin::<CounterPayload>(
     counter_format,
     Some(counter_equals),
     Some(counter_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 )
 .with_owned_bytes(counter_owned_bytes);

@@ -145,7 +145,7 @@ pub static RECORD: TypeDescriptor = TypeDescriptor::builtin::<RecordPayload>(
     record_format,
     Some(record_equals),
     Some(record_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 )
 .with_owned_bytes(record_owned_bytes);

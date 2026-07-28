@@ -60,7 +60,7 @@ pub static VAR_CELL: TypeDescriptor = TypeDescriptor::builtin::<VarCellPayload>(
     var_cell_format,
     None,
     None,
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 );
 

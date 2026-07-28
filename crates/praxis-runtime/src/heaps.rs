@@ -6,9 +6,9 @@
 //! (`BinaryHeap<Reverse<HeapEntry>>`) so the smallest element surfaces first.
 //!
 //! The element type must be orderable (§5.4 `SupportsOrd`); the capability
-//! check rejects non-orderable types at compile time. Ordering compares the
-//! element's `i64` payload (sound for the numeric case, the heap's primary use);
-//! a general structural `ord` descriptor callback is a follow-up.
+//! check rejects non-orderable types at compile time. Ordering goes through the
+//! element descriptor's `compare` callback (ADR-045), so a `MinHeap[Float]`
+//! orders numerically and a `MinHeap[Text]` lexicographically.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -53,26 +53,15 @@ unsafe fn write_in_pop_order<T: Ord, F: Fn(&T) -> GcRef>(
     let _ = out.write_str("]");
 }
 
-/// A max-heap entry: the element `GcRef` plus its descriptor. `Ord` compares
-/// the element payloads as `i64` (the numeric case). `MaxHeap` uses this
+/// A max-heap entry: the element `GcRef` plus its descriptor. `Ord` dispatches
+/// to the descriptor's `compare` callback (ADR-045). `MaxHeap` uses this
 /// directly; `MinHeap` wraps it in `Reverse`.
 #[derive(Clone, Copy)]
 pub struct HeapEntry {
     /// The element value.
     pub value: GcRef,
-    /// The element's descriptor (for trace/equals/hash/format).
+    /// The element's descriptor (for trace/equals/hash/format/compare).
     pub descriptor: &'static TypeDescriptor,
-}
-
-impl HeapEntry {
-    /// The `i64` payload of the element, for numeric ordering.
-    fn int_key(&self) -> i64 {
-        // SAFETY: heap elements are orderable; the primary supported case is
-        // numeric (Int/UInt). For non-numeric orderable types this reads the
-        // leading bytes as i64 — a documented limitation until a structural
-        // `ord` descriptor callback lands.
-        unsafe { *self.value.payload::<i64>() }
-    }
 }
 
 impl PartialEq for HeapEntry {
@@ -101,14 +90,40 @@ impl PartialOrd for HeapEntry {
 }
 
 impl Ord for HeapEntry {
+    /// The element type's own order, through its descriptor (ADR-045).
+    ///
+    /// Two answers are `Equal` for a reason rather than by accident: entries
+    /// whose descriptors differ (which a homogeneous heap never has, so this is
+    /// the miscompile case) and an element type with no ordering at all. There
+    /// is no fault channel inside `Ord`, and a heap whose comparisons are all
+    /// `Equal` is a consistent total order — the heap degrades to a bag instead
+    /// of corrupting its sift invariants. What it must never do is what it used
+    /// to: read every payload as an `i64`, which put `-2.0` after `-1.0` and
+    /// read four bytes past a `Char`.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.int_key().cmp(&other.int_key())
+        if !std::ptr::eq(self.descriptor, other.descriptor) {
+            return std::cmp::Ordering::Equal;
+        }
+        match self.descriptor.compare {
+            // SAFETY: both values carry this descriptor (checked above), so
+            // both payloads are values of its type.
+            Some(compare) => unsafe {
+                compare(
+                    self.value.payload::<u8>() as *const u8,
+                    other.value.payload::<u8>() as *const u8,
+                )
+            },
+            None => std::cmp::Ordering::Equal,
+        }
     }
 }
 
 impl std::fmt::Debug for HeapEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "HeapEntry({})", self.int_key())
+        let mut rendered = String::new();
+        // SAFETY: the entry's value is a live object of its descriptor's type.
+        unsafe { (self.descriptor.format)(self.value.payload::<u8>() as *const u8, &mut rendered) };
+        write!(f, "HeapEntry({rendered})")
     }
 }
 
@@ -150,7 +165,7 @@ pub static MAX_HEAP: TypeDescriptor = TypeDescriptor::builtin::<MaxHeapPayload>(
     max_heap_format,
     None,
     None,
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 )
 .with_owned_bytes(max_heap_owned_bytes);
@@ -205,7 +220,7 @@ pub static MIN_HEAP: TypeDescriptor = TypeDescriptor::builtin::<MinHeapPayload>(
     min_heap_format,
     None,
     None,
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 )
 .with_owned_bytes(min_heap_owned_bytes);
@@ -237,7 +252,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: HeapEntry orders every payload as an i64"]
     fn float_heap_entries_use_numeric_order() {
         let rt = crate::Runtime::new();
         let minus_two = HeapEntry {
@@ -253,6 +267,88 @@ mod tests {
             minus_two.cmp(&minus_one),
             std::cmp::Ordering::Less,
             "orderable Float values must use IEEE numeric ordering, not signed bit-pattern order"
+        );
+    }
+
+    /// P0-12. A `Char` payload is four bytes; the old `int_key` read eight from
+    /// a four-byte-aligned address, so the ordering depended on whatever
+    /// followed the object.
+    #[test]
+    fn char_heap_entries_order_by_unicode_scalar_value() {
+        let rt = crate::Runtime::new();
+        let a = HeapEntry {
+            value: rt.alloc_char('a' as u32),
+            descriptor: &crate::scalars::CHAR,
+        };
+        let beta = HeapEntry {
+            value: rt.alloc_char('β' as u32),
+            descriptor: &crate::scalars::CHAR,
+        };
+        assert_eq!(a.cmp(&beta), std::cmp::Ordering::Less);
+        assert_eq!(beta.cmp(&a), std::cmp::Ordering::Greater);
+    }
+
+    /// ADR-045 decision 3: an entry never dispatches a `compare` callback at a
+    /// value of another type. A homogeneous heap cannot reach this; a
+    /// miscompiled one gets `Equal` rather than a `Text` payload read as an
+    /// `Int`.
+    #[test]
+    fn entries_of_different_types_do_not_dispatch_a_callback() {
+        let rt = crate::Runtime::new();
+        let int = HeapEntry {
+            value: rt.alloc_int(1),
+            descriptor: &crate::scalars::INT,
+        };
+        let text = HeapEntry {
+            value: rt.alloc_text("zzz"),
+            descriptor: &crate::text::TEXT,
+        };
+        assert_eq!(int.cmp(&text), std::cmp::Ordering::Equal);
+        assert_eq!(text.cmp(&int), std::cmp::Ordering::Equal);
+    }
+
+    /// An element type with no ordering leaves the heap a bag: every comparison
+    /// is `Equal`, which is still a consistent total order, so `BinaryHeap`
+    /// keeps its invariants.
+    #[test]
+    fn an_unorderable_element_type_compares_equal_rather_than_reading_bytes() {
+        let rt = crate::Runtime::new();
+        assert!(
+            !crate::scalars::BOOL.is_orderable(),
+            "Bool has no ordering (ADR-045)"
+        );
+        let t = HeapEntry {
+            value: rt.alloc_bool(true),
+            descriptor: &crate::scalars::BOOL,
+        };
+        let f = HeapEntry {
+            value: rt.alloc_bool(false),
+            descriptor: &crate::scalars::BOOL,
+        };
+        assert_eq!(t.cmp(&f), std::cmp::Ordering::Equal);
+    }
+
+    /// A `MinHeap[Text]` pops lexicographically. The end-to-end proof that the
+    /// heap's order is the descriptor's order and not the payload's address:
+    /// these three texts are allocated in an order that does not match their
+    /// lexicographic one.
+    #[test]
+    fn a_text_heap_pops_in_lexicographic_order() {
+        let rt = crate::Runtime::new();
+        let mut items = BinaryHeap::new();
+        for s in ["pear", "apple", "quince", "banana"] {
+            items.push(Reverse(HeapEntry {
+                value: rt.alloc_text(s),
+                descriptor: &crate::text::TEXT,
+            }));
+        }
+        let payload = MinHeapPayload {
+            element_descriptor: &crate::text::TEXT,
+            items,
+        };
+        assert_eq!(
+            rendered(min_heap_format, &payload),
+            "[apple, banana, pear, quince]"
         );
     }
 
@@ -290,17 +386,11 @@ mod tests {
 
         let ascending = build([1, 5, 3, 9, 2]);
         let descending = build([2, 9, 3, 5, 1]);
+        let backing =
+            |p: &MaxHeapPayload| p.items.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>();
         assert_ne!(
-            ascending
-                .items
-                .iter()
-                .map(|e| e.int_key())
-                .collect::<Vec<_>>(),
-            descending
-                .items
-                .iter()
-                .map(|e| e.int_key())
-                .collect::<Vec<_>>(),
+            backing(&ascending),
+            backing(&descending),
             "the two backing arrays must actually differ, or this proves nothing"
         );
 

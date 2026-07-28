@@ -167,7 +167,7 @@ pub static BITSET: TypeDescriptor = TypeDescriptor::builtin::<BitSetPayload>(
     bitset_format,
     Some(bitset_equals),
     Some(bitset_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 )
 .with_owned_bytes(bitset_owned_bytes);

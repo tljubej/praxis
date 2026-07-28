@@ -10,6 +10,7 @@
 //! exercising nested references. Composite tracing is covered by `Vec[T]`
 //! (ADR-013).
 
+use std::cmp::Ordering;
 use std::fmt;
 
 use crate::descriptor::{hash_value, BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
@@ -61,7 +62,7 @@ pub static UNIT: TypeDescriptor = TypeDescriptor::builtin::<UnitPayload>(
     unit_format,
     Some(unit_equals),
     Some(unit_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 );
 
@@ -93,7 +94,7 @@ pub static BOOL: TypeDescriptor = TypeDescriptor::builtin::<BoolPayload>(
     bool_format,
     Some(bool_equals),
     Some(bool_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 );
 
@@ -115,6 +116,10 @@ unsafe fn int_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     let v = unsafe { *(payload as *const IntPayload) };
     hash_value(hasher, &v);
 }
+unsafe fn int_compare(a: *const u8, b: *const u8) -> Ordering {
+    // SAFETY: caller guarantees both pointers point at `IntPayload`s.
+    unsafe { (*(a as *const IntPayload)).cmp(&*(b as *const IntPayload)) }
+}
 
 /// Descriptor for the `Int` scalar (§4.3).
 pub static INT: TypeDescriptor = TypeDescriptor::builtin::<IntPayload>(
@@ -125,8 +130,8 @@ pub static INT: TypeDescriptor = TypeDescriptor::builtin::<IntPayload>(
     int_format,
     Some(int_equals),
     Some(int_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
-    None,
+    // Signed numeric order (ADR-045).
+    Some(int_compare),
 );
 
 // ---- Byte ------------------------------------------------------------------
@@ -147,6 +152,10 @@ unsafe fn byte_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     let v = unsafe { *(payload as *const BytePayload) };
     hash_value(hasher, &v);
 }
+unsafe fn byte_compare(a: *const u8, b: *const u8) -> Ordering {
+    // SAFETY: caller guarantees both pointers point at `BytePayload`s.
+    unsafe { (*(a as *const BytePayload)).cmp(&*(b as *const BytePayload)) }
+}
 
 /// Descriptor for the `Byte` scalar (§4.3).
 pub static BYTE: TypeDescriptor = TypeDescriptor::builtin::<BytePayload>(
@@ -157,8 +166,8 @@ pub static BYTE: TypeDescriptor = TypeDescriptor::builtin::<BytePayload>(
     byte_format,
     Some(byte_equals),
     Some(byte_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
-    None,
+    // Unsigned numeric order (ADR-045).
+    Some(byte_compare),
 );
 
 // ---- Char ------------------------------------------------------------------
@@ -188,6 +197,13 @@ unsafe fn char_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     let v = unsafe { *(payload as *const CharPayload) };
     hash_value(hasher, &v);
 }
+unsafe fn char_compare(a: *const u8, b: *const u8) -> Ordering {
+    // SAFETY: caller guarantees both pointers point at `CharPayload`s. The
+    // payload is the Unicode scalar value, so `u32` order *is* code-point
+    // order — and it is four bytes, which is why reading it as an `i64` was
+    // both wrong and out of bounds (P0-12).
+    unsafe { (*(a as *const CharPayload)).cmp(&*(b as *const CharPayload)) }
+}
 
 /// Descriptor for the `Char` scalar (§4.3).
 pub static CHAR: TypeDescriptor = TypeDescriptor::builtin::<CharPayload>(
@@ -198,8 +214,8 @@ pub static CHAR: TypeDescriptor = TypeDescriptor::builtin::<CharPayload>(
     char_format,
     Some(char_equals),
     Some(char_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
-    None,
+    // Unicode scalar value order (ADR-045).
+    Some(char_compare),
 );
 
 // ---- Float ------------------------------------------------------------------
@@ -237,6 +253,34 @@ unsafe fn float_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     hash_value(hasher, &bits);
 }
 
+/// The **container** ordering of two `Float`s (ADR-045 decision 2): numeric for
+/// everything `partial_cmp` can answer — which makes `-0.0` equal to `+0.0`,
+/// agreeing with [`float_equals`] — and NaN last, equal to itself.
+///
+/// Not the source-level `<`: that is `Inst::FloatCmp`, stays IEEE-754, and
+/// answers `false` whenever either operand is NaN (§4.12). This callback exists
+/// because a `BinaryHeap` needs a *total* `Ord` or it corrupts its own sift
+/// invariants, and `f64::total_cmp` was rejected for splitting the two zeros.
+///
+/// # Safety
+/// Both pointers must point at `FloatPayload`s.
+unsafe fn float_compare(a: *const u8, b: *const u8) -> Ordering {
+    // SAFETY: caller guarantees both pointers point at `FloatPayload`s.
+    let (x, y) = unsafe { (*(a as *const FloatPayload), *(b as *const FloatPayload)) };
+    match x.partial_cmp(&y) {
+        Some(o) => o,
+        // Unordered: at least one is NaN. NaN sorts after every number and
+        // ties with another NaN.
+        None => match (x.is_nan(), y.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            // Unreachable: `partial_cmp` on two non-NaN f64s always answers.
+            (false, false) => Ordering::Equal,
+        },
+    }
+}
+
 /// Descriptor for the `Float` scalar (§4.3).
 pub static FLOAT: TypeDescriptor = TypeDescriptor::builtin::<FloatPayload>(
     BuiltinTypeId::Float,
@@ -246,8 +290,8 @@ pub static FLOAT: TypeDescriptor = TypeDescriptor::builtin::<FloatPayload>(
     float_format,
     Some(float_equals),
     Some(float_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
-    None,
+    // Numeric order with NaN last (ADR-045).
+    Some(float_compare),
 );
 
 // ---- validation helper -----------------------------------------------------
@@ -384,6 +428,92 @@ mod tests {
         unsafe { (FLOAT.hash.unwrap())(ptr::addr_of!(pos_zero) as *const u8, &mut hp) };
         unsafe { (FLOAT.hash.unwrap())(ptr::addr_of!(neg_zero) as *const u8, &mut hn) };
         assert_eq!(hp.finish(), hn.finish());
+    }
+
+    /// ADR-045 decision 2. The container order is total, so it has to answer
+    /// for NaN — and it has to agree with `equals` everywhere else, which is
+    /// why `f64::total_cmp` (which splits the two zeros) was not used.
+    #[test]
+    fn float_compare_is_numeric_with_nan_last() {
+        use std::ptr;
+        let cmp = FLOAT.compare.expect("Float is orderable");
+        let at = |v: &FloatPayload| ptr::addr_of!(*v) as *const u8;
+
+        let minus_two: FloatPayload = -2.0;
+        let minus_one: FloatPayload = -1.0;
+        let one: FloatPayload = 1.0;
+        // Numeric, not the signed bit pattern: -2.0 has the *larger* magnitude
+        // and so the larger unsigned payload.
+        assert_eq!(
+            unsafe { cmp(at(&minus_two), at(&minus_one)) },
+            Ordering::Less
+        );
+        assert_eq!(unsafe { cmp(at(&one), at(&minus_one)) }, Ordering::Greater);
+
+        // The two zeros are one value, as they are for `equals`.
+        let pos_zero: FloatPayload = 0.0;
+        let neg_zero: FloatPayload = -0.0;
+        assert_eq!(
+            unsafe { cmp(at(&pos_zero), at(&neg_zero)) },
+            Ordering::Equal
+        );
+
+        // NaN sorts after every number, including infinity, and ties with NaN.
+        let nan: FloatPayload = f64::NAN;
+        let inf: FloatPayload = f64::INFINITY;
+        assert_eq!(unsafe { cmp(at(&nan), at(&inf)) }, Ordering::Greater);
+        assert_eq!(unsafe { cmp(at(&inf), at(&nan)) }, Ordering::Less);
+        assert_eq!(unsafe { cmp(at(&nan), at(&nan)) }, Ordering::Equal);
+    }
+
+    /// The `compare` callback reads the payload it was declared for — the whole
+    /// of P0-12's scalar half. A `Char` payload is four bytes; the old ordering
+    /// read eight.
+    #[test]
+    fn scalar_compare_reads_its_own_payload_width() {
+        use std::ptr;
+        let int_cmp = INT.compare.expect("Int is orderable");
+        let a: IntPayload = -5;
+        let b: IntPayload = 3;
+        assert_eq!(
+            unsafe { int_cmp(ptr::addr_of!(a) as *const u8, ptr::addr_of!(b) as *const u8,) },
+            Ordering::Less
+        );
+
+        let char_cmp = CHAR.compare.expect("Char is orderable");
+        let lower_a: CharPayload = 'a' as u32;
+        let beta: CharPayload = 'β' as u32;
+        assert_eq!(
+            unsafe {
+                char_cmp(
+                    ptr::addr_of!(lower_a) as *const u8,
+                    ptr::addr_of!(beta) as *const u8,
+                )
+            },
+            Ordering::Less,
+            "'a' (U+0061) precedes 'β' (U+03B2) by scalar value"
+        );
+
+        let byte_cmp = BYTE.compare.expect("Byte is orderable");
+        let low: BytePayload = 1;
+        let high: BytePayload = 200;
+        assert_eq!(
+            unsafe { byte_cmp(ptr::addr_of!(low), ptr::addr_of!(high)) },
+            Ordering::Less,
+            "Byte is unsigned: 200 is not negative"
+        );
+    }
+
+    /// ADR-045 decision 1: `Bool` and `Unit` have no ordering, and the absence
+    /// is what `is_orderable` reports.
+    #[test]
+    fn bool_and_unit_declare_no_ordering() {
+        assert!(!BOOL.is_orderable());
+        assert!(!UNIT.is_orderable());
+        assert!(INT.is_orderable());
+        assert!(CHAR.is_orderable());
+        assert!(FLOAT.is_orderable());
+        assert!(BYTE.is_orderable());
     }
 
     #[test]

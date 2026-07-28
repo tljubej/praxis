@@ -177,6 +177,21 @@ unsafe fn text_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     hasher.write_bytes(bytes);
 }
 
+/// Lexicographic order over the text's bytes (ADR-045). UTF-8 byte order *is*
+/// code-point order, so this needs no decoding — and it is the whole content of
+/// P0-12's Text half: the old lowering compared the first eight bytes of the
+/// `TextPayload` enum, which is a `Box<str>` pointer for an owned text and a
+/// `GcRef` for a slice. Two texts were ordered by where they happened to live.
+///
+/// # Safety
+/// Both pointers must point at `TextPayload`s.
+unsafe fn text_compare(a: *const u8, b: *const u8) -> std::cmp::Ordering {
+    // SAFETY: caller guarantees both pointers point at TextPayloads.
+    let a = unsafe { text_bytes(a as *const TextPayload) };
+    let b = unsafe { text_bytes(b as *const TextPayload) };
+    a.cmp(b)
+}
+
 /// Descriptor for the `Text` scalar (§4.3). Handles both owned and source-slice
 /// payloads (ADR-013, M6). A single descriptor serves all `Text` values.
 pub static TEXT: TypeDescriptor = TypeDescriptor::builtin::<TextPayload>(
@@ -187,8 +202,8 @@ pub static TEXT: TypeDescriptor = TypeDescriptor::builtin::<TextPayload>(
     text_format,
     Some(text_equals),
     Some(text_hash),
-    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
-    None,
+    // Lexicographic by UTF-8 bytes (ADR-045).
+    Some(text_compare),
 )
 .with_owned_bytes(text_owned_bytes);
 
@@ -230,6 +245,48 @@ mod tests {
         assert!(!unsafe {
             (TEXT.equals.unwrap())(ptr::addr_of!(a) as *const u8, ptr::addr_of!(c) as *const u8)
         });
+    }
+
+    /// ADR-045: `Text` orders by its bytes, and the ordering is the same
+    /// whether the text is owned or a zero-copy slice of another. Comparing
+    /// the payload's first eight bytes — a `Box<str>` pointer here, a `GcRef`
+    /// there — ordered texts by *address* (P0-12).
+    #[test]
+    fn text_compares_lexicographically_whatever_its_representation() {
+        let cmp = TEXT.compare.expect("Text is orderable");
+        let apple = TextPayload::Owned("apple".into());
+        let banana = TextPayload::Owned("banana".into());
+        let apple_again = TextPayload::Owned("apple".into());
+        let at = |p: &TextPayload| ptr::addr_of!(*p) as *const u8;
+
+        assert_eq!(
+            unsafe { cmp(at(&apple), at(&banana)) },
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            unsafe { cmp(at(&banana), at(&apple)) },
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            unsafe { cmp(at(&apple), at(&apple_again)) },
+            std::cmp::Ordering::Equal,
+            "two separately allocated `apple`s are one value"
+        );
+
+        // A prefix precedes what extends it.
+        let app = TextPayload::Owned("app".into());
+        assert_eq!(
+            unsafe { cmp(at(&app), at(&apple)) },
+            std::cmp::Ordering::Less
+        );
+
+        // UTF-8 byte order is code-point order: "é" (U+00E9) follows "z".
+        let z = TextPayload::Owned("z".into());
+        let e_acute = TextPayload::Owned("é".into());
+        assert_eq!(
+            unsafe { cmp(at(&z), at(&e_acute)) },
+            std::cmp::Ordering::Less
+        );
     }
 
     #[test]
