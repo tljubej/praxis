@@ -17,30 +17,39 @@ Update this file at the end of every stage.
 | S4 — Object layout and heap provenance | **done** | `dfe42b6` |
 | S5 — Root-set completeness, native RAII roots | **done** | `7911337` |
 | S6 — Allocation pacing, effect metadata, heap lifecycle | **done** | `7182d56`, `ce08ae3`, `b384df9`, `968af35`, `3b5bfb7` |
-| S7 … S21 | not started | |
+| S7 — Descriptor totality, typed collections, fault representation | **part done** — RT-06, RT-17, RT-18 closed; P0-11, RT-09, RT-07, RT-10, RT-11 remain | `d014067`, `c00aab7` |
+| S8 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10. It fell out of S1.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1021 passed, 0 failed, 125 ignored**. `just ci` is green.
+Now: **1026 passed, 0 failed, 123 ignored**. `just ci` is green.
 
-Twenty-four of the audit's ignored regressions are un-ignored and passing. The
-three added this session (S6's remaining exit criteria):
+Twenty-six of the audit's ignored regressions are un-ignored and passing. The
+five added this session (S6's remaining exit criteria, then two of S7's):
 
 | Test | File |
 |---|---|
 | `checked_int_add_is_an_automatic_gc_safepoint` | `praxis-runtime/src/abi.rs` |
 | `repeated_collection_reuses_dead_object_storage` | `praxis-runtime/src/heap.rs` |
 | `dropping_heap_finalizes_live_owned_payloads` | `praxis-runtime/src/heap.rs` |
+| `alloc_char_rejects_values_that_only_become_valid_after_truncation` | `praxis-runtime/src/abi.rs` |
+| `setting_none_cannot_create_a_pending_fault` | `praxis-runtime/src/context.rs` |
 
-One passing test was **rewritten** because this session inverted its premise:
-`reset_restores_collection_pacing` grew the threshold by calling
-`collect_with`, and an explicit collection no longer grows it (RT-04) — it now
-drives a real paced collection through the new test-only
-`Heap::maybe_collect_with`.
+Two tests were **rewritten**, not merely un-ignored, because this session
+inverted their premise:
 
-Ten findings-without-gates got one, all checked against the unfixed code:
+- `reset_restores_collection_pacing` grew the threshold by calling
+  `collect_with`, and an explicit collection no longer grows it (RT-04). It now
+  drives a real paced collection through the new test-only
+  `Heap::maybe_collect_with`.
+- `setting_none_cannot_create_a_pending_fault` was built on
+  `fault.set(FaultKind::None)`, which no longer compiles (RT-17 made `set` take
+  a `RaisedFault`). It now pins the property where it still lives —
+  `RaisedFault::new` rejecting `None`, every other kind round-tripping.
+
+Thirteen findings-without-gates got one, all checked against the unfixed code:
 
 | Test | Pins |
 |---|---|
@@ -54,6 +63,9 @@ Ten findings-without-gates got one, all checked against the unfixed code:
 | `an_explicit_collection_does_not_grow_the_pacing_threshold` | RT-04 half two |
 | `pacing_charges_the_bytes_a_payload_owns` | RT-04 half one |
 | `a_source_slice_text_is_charged_nothing_beyond_its_block` | RT-04, the double-count it must not do |
+| `alloc_char_rejects_a_negative_code_point` | RT-18, the other end of the range |
+| `alloc_text_reports_invalid_utf8_as_its_own_fault_kind` | RT-17's second `None` caller |
+| `an_out_of_range_or_non_boundary_slice_is_unconstructible` | RT-06 (in `text.rs`) |
 
 (Earlier nine, from S3/S5: `closure_capture_indices_never_flow_through_gc_locals`,
 `call_result_locals_retain_their_inferred_static_types`,
@@ -185,11 +197,33 @@ calling `collect_with` is now wrong; `reset_restores_collection_pacing` was
 rewritten for exactly this, and `#[cfg(test)] Heap::maybe_collect_with` is how
 an in-crate test drives the paced path.
 
-**`RUNTIME_ABI_VERSION` stays 10.** `Heap` gained a field and `TypeDescriptor`
-gained a field, but generated code holds the `Heap` pointer without
-dereferencing it and passes descriptors by pointer without reading their
-fields — the only thing it reads out of the runtime's own types is
-`GcHeader::payload_offset_for`, which is unchanged.
+**`RUNTIME_ABI_VERSION` is 11**, bumped by RT-17's `Fault` repack. S6's half
+needed no bump at all: `Heap` gained a field and `TypeDescriptor` gained a
+field, but generated code holds the `Heap` pointer without dereferencing it and
+passes descriptors by pointer without reading their fields — the only thing it
+reads out of the runtime's own types is `GcHeader::payload_offset_for`, which is
+unchanged. **S7's one bump (H17) is therefore spent.**
+
+**`Fault` is one field wide, and `Fault::set` takes a `RaisedFault`.** The
+`pending: bool` is gone — `is_pending()` is `kind != None`, so the two cannot
+disagree. `RaisedFault` is a `FaultKind` proven not to be `None`, with an
+associated constant per raisable kind (`RaisedFault::INT_OVERFLOW`, …);
+`RaisedFault::new` is the only fallible route in. `Fault.kind` is private; use
+`kind()`. **`FaultKind` gained `InvalidChar` and `InvalidText`** — a `match` over
+it is two arms longer.
+
+**`praxis_alloc_char` range-checks before narrowing.** `value as u32` truncated,
+so `0x1_0000_0041` silently became `'A'` and a negative wrapped into range. Both
+now raise `FaultKind::InvalidChar`.
+
+**A source-slice `Text` is a validated `SourceSlice`.** `TextPayload::Slice`
+holds one, its fields are private, and `SourceSlice::new` is the only
+constructor — it rejects a range past the owner, an overflowing length, and ends
+that split a multi-byte scalar. `Runtime::alloc_text_slice` and the parser's now
+return `Option<GcRef>` and are `unsafe` (they read the owner's payload to
+validate). `text_bytes` has no clamp and `text_str` no `unwrap_or("")`: both
+were how a bad range became a *different, plausible* `Text` rather than a
+failure.
 
 ### From S5 and the first half of S6
 
@@ -371,39 +405,44 @@ re-deriving it.
 
 ## 4. Where to start
 
-**S6 is closed.** Start **S7** (8 findings, weight 23): descriptor totality
-(P0-11), typed collection construction, fault representation.
+**Finish S7.** Five findings remain, and the first needs a decision.
 
-Read the plan's S7 section and §3's **F11** first — S7 is mostly F11, the new
-`praxis-repr` crate holding the total, bidirectional `Type ⇄ TypeDescriptor`
-bridge. Three things the plan's own text flags:
-
-- **P0-11 answers D9, and D9 is unanswered.** What does the JIT do when
-  `descriptor_for_type` returns `Err` — fail the compile with a diagnostic
-  (correct) or fall back (reintroduces the bug)? Nothing else in S7 moves
-  until that is decided. `descriptor_for_type` still has its `_ => INT`
-  fallback on the `Known` path, which is H9's agreed resolution and exactly
-  what P0-11 removes.
-- **P0-11 must precede RT-10 and RT-11.** Tightening collection equality to
-  compare element descriptors first would surface the mislabelled `INT`
-  descriptors as a cascade of new failures instead of the intended assertions.
+- **P0-11** (descriptor totality) is the stage, and it is **blocked on D9**:
+  what does the JIT do when `descriptor_for_type` returns `Err` — fail the
+  compile with a diagnostic, or fall back and reintroduce the bug? The plan's
+  own S7 text annotates the first as "(correct)". `descriptor_for_type`
+  (`praxis-codegen-cranelift/src/lower.rs`) still takes a `praxis_types::Type`
+  and keeps its `_ => INT` fallback on the `Known` path; that fallback *is* the
+  finding. P0-11 is mostly **F11**, the new `praxis-repr` crate holding the
+  total, bidirectional `Type ⇄ TypeDescriptor` bridge — read §3.1's F11 before
+  starting.
+- **P0-11 must precede RT-10 and RT-11.** Tightening collection and tuple
+  equality first would surface the mislabelled `INT` descriptors as a cascade
+  of new failures instead of the intended assertions.
 - **P0-11 inverts currently-passing tests.** The Vec-adopts-first-push
   descriptor assertions near
   `praxis-codegen-cranelift/tests/adversarial_audit.rs:284` assert the
   behaviour it removes — budget to rewrite them, not just unignore (plan §8.2,
   H18).
-
-RT-17 must precede RT-18, which needs a real `FaultKind` to raise. S7 changes
-no `#[repr(C)]` type generated code reads unless RT-13-style signature work
-comes with it, so its ABI bump (H17) is probably not needed — check before
-spending it.
+- **RT-09** (`DynamicKey::eq` omits descriptor identity, so it can run a
+  callback against the wrong payload layout and disagree with `Hash`). Gated by
+  `dynamic_keys_with_different_descriptors_are_never_equal`
+  (`praxis-runtime/src/dynamic_key.rs`). Independent of F11 — this one is
+  reachable today.
+- **RT-07** (negative or overflowing `Grid`/`BitSet` extents, and neighbour
+  arithmetic that overflows, cast toward huge `usize` values and panic or OOM
+  across `extern "C"`). No gating test; the plan wants one asserting they
+  *fault* rather than panic or allocate absurdly. Also independent of F11.
+- **S7's ABI bump is spent** (11, for RT-17's `Fault` repack). If RT-13-style
+  signature work turns out to be needed here rather than in S18, it shares that
+  bump — do not add a second (H17).
 
 Re-read §6 of the plan first. The hazards that still bind: **H3**, **H9**,
 **H10**, **H15**, **H17**. **H1, H2, H4, H6, H7, H8 and H16 are discharged.**
 
-**H15 became live this stage.** `Heap::drop` now runs finalizers, and record
-and tuple payloads hold `*const RecordSchema` / `*const TupleSchema`. It is
-safe today only because those schemas are `Box::leak`ed and never freed. S8's
+**H15 became live in S6.** `Heap::drop` now runs finalizers, and record and
+tuple payloads hold `*const RecordSchema` / `*const TupleSchema`. It is safe
+today only because those schemas are `Box::leak`ed and never freed. S8's
 generation-arena reclamation must not change that without also fixing drop
 order: `DebugSession` declares `jit` *before* `runtime`, so the arena would go
 first and heap teardown would dereference freed schemas.
@@ -494,6 +533,19 @@ Things the plan states that are no longer or were not quite true.
   the other twenty-four — every comparison, `contains`, `is_empty` — are the
   ones a program calls in a loop. A stage that reads a finding's one-line
   summary as its extent will under-fix it.
+- **RT-17's gating test could not survive its own fix.**
+  `setting_none_cannot_create_a_pending_fault` asserts a *runtime* property —
+  `set(None)` leaves the fault not-pending — and the fix made the call
+  unspellable, so the assertion has no code to run against. §8.2's list of
+  bug-pinning tests does not include it, but it belongs there in spirit: when a
+  fix promotes a runtime check to a compile-time one, expect the gate to need
+  rewriting rather than un-ignoring.
+- **RT-06 needed a newtype, not a validating constructor.** Enum *variant*
+  fields cannot be private in Rust, so a `TextPayload::slice(...) -> Option<Self>`
+  associated function leaves `TextPayload::Slice { .. }` just as spellable as
+  before. The validated `SourceSlice` struct is what actually closes it — worth
+  remembering wherever the plan says "make X unconstructible" about a variant
+  (F14's `TextSlice`, IP-10's `NonEmptySeparator`).
 - **P0-08c's exit criterion is partly obsolete.** "an assert that the effect
   table covers every symbol registered in symbols.rs" — `symbols.rs` no longer
   has a list (F4 deleted it; `resolve` is `from_name` + `address`), and
