@@ -58,7 +58,7 @@ fn bad_byte_file_exits_nonzero_with_diagnostic() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("error[T003]"), "missing code: {stderr}");
     assert!(
-        stderr.contains("unexpected byte"),
+        stderr.contains("unexpected character"),
         "missing message: {stderr}"
     );
     assert!(

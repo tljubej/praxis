@@ -9,3 +9,4 @@ description = "Token and syntax-node definitions for the Praxis language."
 [dependencies]
 praxis-source.workspace = true
 rowan.workspace = true
+unicode-ident.workspace = true

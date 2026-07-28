@@ -11,14 +11,18 @@
 //! - **Keywords** are split out of the identifier run via
 //!   [`SyntaxKind::from_keyword`]; `out`, `panic`, type names, etc. stay plain
 //!   identifiers (they are builtins, not keywords).
-//! - A bad byte does not abort lexing: it emits a `T003` diagnostic and the
-//!   lexer advances one byte so the rest of the file is still reported (§17.1,
-//!   "multiple diagnostics from one malformed file").
+//! - **Identifiers** are Unicode (§4.1): classification is per *scalar*, using
+//!   the workspace-wide [`praxis_syntax::ident`] predicates, so a leading
+//!   Unicode letter starts a name and a UTF-8 continuation byte cannot extend
+//!   one.
+//! - A bad scalar does not abort lexing: it emits a `T003` diagnostic and the
+//!   lexer advances one whole scalar so the rest of the file is still reported
+//!   (§17.1, "multiple diagnostics from one malformed file").
 //!
 //! Diagnostic codes (`T0xx`, [`DiagnosticCategory::Lex`]):
 //! - `T001` — unterminated block comment.
 //! - `T002` — unterminated backtick template.
-//! - `T003` — unexpected byte in source.
+//! - `T003` — unexpected character in source.
 //! - `T004` — unterminated text literal.
 //! - `T005` — invalid escape in text literal.
 
@@ -52,7 +56,10 @@ pub fn lex(file: FileId, text: &str) -> LexOutput {
 
 struct Lexer<'a> {
     file: FileId,
-    src: &'a [u8],
+    /// The source as text. Byte indexing goes through [`Lexer::bytes`]; keeping
+    /// the `&str` is what lets `eat_ident` decode scalars and slice the
+    /// identifier run without a `from_utf8` round-trip.
+    src: &'a str,
     /// Current byte offset into `src`.
     pos: usize,
     tokens: Vec<Token>,
@@ -63,7 +70,7 @@ impl<'a> Lexer<'a> {
     fn new(file: FileId, text: &'a str) -> Lexer<'a> {
         Lexer {
             file,
-            src: text.as_bytes(),
+            src: text,
             pos: 0,
             tokens: Vec::new(),
             diagnostics: Vec::new(),
@@ -73,48 +80,70 @@ impl<'a> Lexer<'a> {
     fn run(&mut self) {
         while self.pos < self.src.len() {
             let start = self.pos;
-            match self.classify_byte(self.src[start]) {
-                ByteClass::Whitespace => self.eat_whitespace(),
-                ByteClass::LineComment => self.eat_line_comment(),
-                ByteClass::BlockComment => self.eat_block_comment(start),
-                ByteClass::IdentStart => self.eat_ident(start),
-                ByteClass::Digit => self.eat_number(start),
-                ByteClass::Quote => self.eat_text(start),
-                ByteClass::Punct => self.eat_punct(start),
-                ByteClass::Backtick => self.eat_template(start),
-                ByteClass::Unknown => self.diagnose_unknown(start),
+            let (class, len) = self.classify(start);
+            match class {
+                CharClass::Whitespace => self.eat_whitespace(),
+                CharClass::LineComment => self.eat_line_comment(),
+                CharClass::BlockComment => self.eat_block_comment(start),
+                CharClass::IdentStart => self.eat_ident(start, len),
+                CharClass::Digit => self.eat_number(start),
+                CharClass::Quote => self.eat_text(start),
+                CharClass::Punct => self.eat_punct(start),
+                CharClass::Backtick => self.eat_template(start),
+                CharClass::Unknown => self.diagnose_unknown(start, len),
             }
         }
         self.tokens
             .push(Token::new(SyntaxKind::EOF, Span::at(self.pos as u32)));
     }
 
-    fn classify_byte(&self, b: u8) -> ByteClass {
-        match b {
-            b' ' | b'\t' | b'\n' | b'\r' => ByteClass::Whitespace,
-            // A `/` is a comment only when followed by `/` or `*`; otherwise it
-            // is punctuation (the division operator / part of a comment opener).
-            b'/' if self.starts_with(b"//") => ByteClass::LineComment,
-            b'/' if self.starts_with(b"/*") => ByteClass::BlockComment,
-            b'_' | b'a'..=b'z' | b'A'..=b'Z' => ByteClass::IdentStart,
-            b'0'..=b'9' => ByteClass::Digit,
-            b'"' => ByteClass::Quote,
-            b'`' => ByteClass::Backtick,
-            // Any leading punctuation byte of an operator we recognize. The
-            // precise multi-char split happens in `eat_punct`; the class just
-            // routes the first byte here.
-            b'(' | b')' | b'{' | b'}' | b'[' | b']' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/'
-            | b'%' | b'=' | b'!' | b'?' | b':' | b';' | b',' | b'.' | b'|' | b'&' | b'#' => {
-                ByteClass::Punct
-            }
-            _ => ByteClass::Unknown,
+    /// The scalar beginning at `at` and its UTF-8 length. `at` is always a char
+    /// boundary: every lexer advance moves by whole scalars.
+    fn scalar_at(&self, at: usize) -> Option<(char, usize)> {
+        self.src[at..].chars().next().map(|c| (c, c.len_utf8()))
+    }
+
+    /// Classify the scalar at `at`, returning its class and byte length.
+    ///
+    /// ASCII takes a byte-level fast path; a non-ASCII scalar is decoded and
+    /// asked the one identifier question (§4.1). Returning the length is what
+    /// keeps `Unknown` from advancing into the middle of a scalar.
+    fn classify(&self, at: usize) -> (CharClass, usize) {
+        let b = self.bytes()[at];
+        if b.is_ascii() {
+            let class = match b {
+                b' ' | b'\t' | b'\n' | b'\r' => CharClass::Whitespace,
+                // A `/` is a comment only when followed by `/` or `*`; otherwise it
+                // is punctuation (the division operator / part of a comment opener).
+                b'/' if self.starts_with(b"//") => CharClass::LineComment,
+                b'/' if self.starts_with(b"/*") => CharClass::BlockComment,
+                b'_' | b'a'..=b'z' | b'A'..=b'Z' => CharClass::IdentStart,
+                b'0'..=b'9' => CharClass::Digit,
+                b'"' => CharClass::Quote,
+                b'`' => CharClass::Backtick,
+                // Any leading punctuation byte of an operator we recognize. The
+                // precise multi-char split happens in `eat_punct`; the class just
+                // routes the first byte here.
+                b'(' | b')' | b'{' | b'}' | b'[' | b']' | b'<' | b'>' | b'+' | b'-' | b'*'
+                | b'/' | b'%' | b'=' | b'!' | b'?' | b':' | b';' | b',' | b'.' | b'|' | b'&'
+                | b'#' => CharClass::Punct,
+                _ => CharClass::Unknown,
+            };
+            return (class, 1);
         }
+        let (c, len) = self.scalar_at(at).expect("pos is a char boundary");
+        let class = if praxis_syntax::ident::is_ident_start(c) {
+            CharClass::IdentStart
+        } else {
+            CharClass::Unknown
+        };
+        (class, len)
     }
 
     fn eat_whitespace(&mut self) {
         let start = self.pos;
         while self.pos < self.src.len()
-            && matches!(self.src[self.pos], b' ' | b'\t' | b'\n' | b'\r')
+            && matches!(self.bytes()[self.pos], b' ' | b'\t' | b'\n' | b'\r')
         {
             self.pos += 1;
         }
@@ -124,7 +153,7 @@ impl<'a> Lexer<'a> {
     fn eat_line_comment(&mut self) {
         let start = self.pos;
         self.pos += 2; // skip leading `//`
-        while self.pos < self.src.len() && !matches!(self.src[self.pos], b'\n' | b'\r') {
+        while self.pos < self.src.len() && !matches!(self.bytes()[self.pos], b'\n' | b'\r') {
             self.pos += 1;
         }
         self.push(SyntaxKind::LineComment, start);
@@ -157,20 +186,21 @@ impl<'a> Lexer<'a> {
         self.push(SyntaxKind::BlockComment, start);
     }
 
-    fn eat_ident(&mut self, start: usize) {
-        // First byte is already known to be ident-start; advance and consume
-        // XID-continue-ish bytes. ASCII is exact; non-ASCII is accepted
-        // permissively (a proper XID table is a follow-up — see TODO below).
-        self.pos += 1;
-        while self.pos < self.src.len() && is_ident_continue(self.src[self.pos]) {
-            self.pos += 1;
+    fn eat_ident(&mut self, start: usize, first_len: usize) {
+        // The first scalar is already known to be ident-start; advance past it
+        // and consume XID-Continue scalars (§4.1). Advancing by scalar, not by
+        // byte, is what keeps a continuation byte from extending the run.
+        self.pos += first_len;
+        while let Some((c, len)) = self.scalar_at(self.pos) {
+            if !praxis_syntax::ident::is_ident_continue(c) {
+                break;
+            }
+            self.pos += len;
         }
         // Look up the keyword table: `let`/`if`/… become their own kinds; the
         // rest stay identifiers. Builtins (`out`, `panic`, type names) are
         // intentionally not keywords.
         let text = &self.src[start..self.pos];
-        // SAFETY: the span came from a valid UTF-8 source slice, so it is UTF-8.
-        let text = std::str::from_utf8(text).expect("ident slice is UTF-8");
         let kind = SyntaxKind::from_keyword(text).unwrap_or(SyntaxKind::Ident);
         self.push(kind, start);
     }
@@ -191,7 +221,7 @@ impl<'a> Lexer<'a> {
     /// supported (a deliberate simplification); users write `0.5`.
     fn eat_number(&mut self, start: usize) {
         // Integer part: one or more digits (the first is already known present).
-        while self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() {
+        while self.pos < self.src.len() && self.bytes()[self.pos].is_ascii_digit() {
             self.pos += 1;
         }
         let mut is_float = false;
@@ -202,22 +232,22 @@ impl<'a> Lexer<'a> {
             is_float = true;
             // Consume the `.`.
             self.pos += 1;
-            while self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() {
+            while self.pos < self.src.len() && self.bytes()[self.pos].is_ascii_digit() {
                 self.pos += 1;
             }
         }
         // Exponent part: `e` or `E`, optional `+`/`-`, then one or more digits.
-        if matches!(self.src.get(self.pos), Some(b'e') | Some(b'E')) {
+        if matches!(self.bytes().get(self.pos), Some(b'e') | Some(b'E')) {
             // Only treat as an exponent if a digit (or signed digit) follows;
             // otherwise `1e` is `IntLit(1)` + `Ident(e)` (a name). `+`/`-` then
             // a digit also counts.
             if self.peek_exponent_has_digits() {
                 is_float = true;
                 self.pos += 1; // the `e`/`E`
-                if matches!(self.src.get(self.pos), Some(b'+') | Some(b'-')) {
+                if matches!(self.bytes().get(self.pos), Some(b'+') | Some(b'-')) {
                     self.pos += 1;
                 }
-                while self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() {
+                while self.pos < self.src.len() && self.bytes()[self.pos].is_ascii_digit() {
                     self.pos += 1;
                 }
             }
@@ -233,21 +263,21 @@ impl<'a> Lexer<'a> {
     /// True iff the current position is a `.` immediately followed by an ASCII
     /// digit. Used to decide whether the `.` starts a float fraction.
     fn peek_is_dot_then_digit(&self) -> bool {
-        matches!(self.src.get(self.pos), Some(b'.'))
-            && matches!(self.src.get(self.pos + 1), Some(d) if d.is_ascii_digit())
+        matches!(self.bytes().get(self.pos), Some(b'.'))
+            && matches!(self.bytes().get(self.pos + 1), Some(d) if d.is_ascii_digit())
     }
 
     /// True iff the current position is an `e`/`E` that begins a valid exponent:
     /// `e`/`E` then (optionally `+`/`-`) then at least one digit.
     fn peek_exponent_has_digits(&self) -> bool {
-        if !matches!(self.src.get(self.pos), Some(b'e') | Some(b'E')) {
+        if !matches!(self.bytes().get(self.pos), Some(b'e') | Some(b'E')) {
             return false;
         }
         let mut i = self.pos + 1;
-        if matches!(self.src.get(i), Some(b'+') | Some(b'-')) {
+        if matches!(self.bytes().get(i), Some(b'+') | Some(b'-')) {
             i += 1;
         }
-        matches!(self.src.get(i), Some(d) if d.is_ascii_digit())
+        matches!(self.bytes().get(i), Some(d) if d.is_ascii_digit())
     }
 
     fn eat_text(&mut self, start: usize) {
@@ -256,7 +286,7 @@ impl<'a> Lexer<'a> {
         // later. We do validate escapes so a stray trailing backslash is caught.
         self.pos += 1; // opening `"`
         while self.pos < self.src.len() {
-            match self.src[self.pos] {
+            match self.bytes()[self.pos] {
                 b'"' => {
                     self.pos += 1; // closing quote
                     self.push(SyntaxKind::TextLit, start);
@@ -267,7 +297,7 @@ impl<'a> Lexer<'a> {
                     if self.pos + 1 >= self.src.len() {
                         break;
                     }
-                    let esc = self.src[self.pos + 1];
+                    let esc = self.bytes()[self.pos + 1];
                     if !is_valid_escape(esc) {
                         let bad_at = self.pos;
                         self.pos += 2;
@@ -303,7 +333,7 @@ impl<'a> Lexer<'a> {
         // matched bytes and returns the kind.
         let kind = self
             .match_op()
-            .unwrap_or_else(|| single_punct(self.src[start]).unwrap_or(SyntaxKind::ERROR));
+            .unwrap_or_else(|| single_punct(self.bytes()[start]).unwrap_or(SyntaxKind::ERROR));
         self.push(kind, start);
     }
 
@@ -314,12 +344,12 @@ impl<'a> Lexer<'a> {
     fn match_op(&mut self) -> Option<SyntaxKind> {
         // Three-char operators first (only `..=` so far), then two-char. Order
         // matters: longest first so `..=` is not misread as `..` then `=`.
-        let three = self.src.get(self.pos..self.pos + 3);
+        let three = self.bytes().get(self.pos..self.pos + 3);
         if let Some([b'.', b'.', b'=']) = three {
             self.pos += 3;
             return Some(SyntaxKind::DOT2EQ);
         }
-        let two = self.src.get(self.pos..self.pos + 2);
+        let two = self.bytes().get(self.pos..self.pos + 2);
         let matched = match two {
             Some(b"->") => Some(SyntaxKind::THIN_ARROW),
             Some(b"=>") => Some(SyntaxKind::FAT_ARROW),
@@ -350,9 +380,9 @@ impl<'a> Lexer<'a> {
         // Consume until the matching closing backtick. The M6 template lexer
         // will re-scan the contents; for M1 the whole template is one token.
         self.pos += 1; // opening backtick
-        while self.pos < self.src.len() && self.src[self.pos] != b'`' {
+        while self.pos < self.src.len() && self.bytes()[self.pos] != b'`' {
             // Honour `\\` so an escaped backtick doesn't terminate the template.
-            if self.src[self.pos] == b'\\' && self.pos + 1 < self.src.len() {
+            if self.bytes()[self.pos] == b'\\' && self.pos + 1 < self.src.len() {
                 self.pos += 2;
             } else {
                 self.pos += 1;
@@ -370,14 +400,19 @@ impl<'a> Lexer<'a> {
         self.push(SyntaxKind::BacktickTemplate, start);
     }
 
-    fn diagnose_unknown(&mut self, start: usize) {
-        // Advance one byte so we make progress.
-        self.pos += 1;
+    fn diagnose_unknown(&mut self, start: usize, len: usize) {
+        // Advance one whole scalar so we make progress without splitting a
+        // multi-byte character into several "unexpected character" diagnostics.
+        self.pos += len;
+        // Emit an ERROR token covering it. The tree is lossless (ADR-003): a
+        // character the lexer cannot classify is still source text, and
+        // dropping it silently means the tree no longer reproduces the file.
+        self.push(SyntaxKind::ERROR, start);
         let span = Span::new(start as u32, self.pos as u32);
         self.diagnostic(
             span,
             DiagnosticCode::new(DiagnosticCategory::Lex, 3),
-            "unexpected byte in source",
+            "unexpected character in source",
         );
     }
 
@@ -397,17 +432,14 @@ impl<'a> Lexer<'a> {
         ));
     }
 
-    fn starts_with(&self, needle: &[u8]) -> bool {
-        self.src[self.pos..].starts_with(needle)
+    #[inline]
+    fn bytes(&self) -> &'a [u8] {
+        self.src.as_bytes()
     }
-}
 
-/// Whether `b` may continue an identifier (after the first byte).
-// TODO(M1 follow-up): replace the permissive `b >= 0x80` arm with a real Unicode
-// XID-Continue table; for now non-ASCII bytes are accepted so UTF-8 identifiers
-// lex without spurious errors.
-fn is_ident_continue(b: u8) -> bool {
-    matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_') || b >= 0x80
+    fn starts_with(&self, needle: &[u8]) -> bool {
+        self.bytes()[self.pos..].starts_with(needle)
+    }
 }
 
 /// The `SyntaxKind` for a single-byte punctuation/operator byte, or `None` if
@@ -447,7 +479,7 @@ fn is_valid_escape(esc: u8) -> bool {
 }
 
 #[derive(Clone, Copy)]
-enum ByteClass {
+enum CharClass {
     Whitespace,
     LineComment,
     BlockComment,
@@ -494,8 +526,33 @@ mod tests {
             diags[0].code(),
             DiagnosticCode::new(DiagnosticCategory::Lex, 3)
         );
-        // The `@` does not appear as a token, but lexing continues.
-        assert!(!kinds.contains(&SyntaxKind::ERROR));
+        // The `@` becomes an ERROR token and lexing continues. It must not be
+        // dropped: the tree is lossless (ADR-003), so every byte of the source
+        // has to be reachable through some token — this test previously
+        // asserted the opposite, contradicting both ADR-003 and the doc on
+        // `SyntaxKind::ERROR`.
+        assert!(kinds.contains(&SyntaxKind::ERROR));
+        assert!(kinds.contains(&SyntaxKind::KW_LET));
+        assert!(kinds.contains(&SyntaxKind::IntLit));
+    }
+
+    /// Every byte of the input is covered by exactly one token, in order —
+    /// including bytes the lexer cannot classify.
+    #[test]
+    fn tokens_tile_the_source_even_across_unknown_characters() {
+        let src = "let x = 1 @ \u{2192} 2";
+        let out = lex(FileId::SYNTHETIC, src);
+        let mut at = 0usize;
+        for token in &out.tokens {
+            assert_eq!(
+                token.span.start().to_usize(),
+                at,
+                "gap before {:?}",
+                token.kind
+            );
+            at = token.span.end().to_usize();
+        }
+        assert_eq!(at, src.len(), "tokens do not cover the source");
     }
 
     #[test]
@@ -539,11 +596,11 @@ mod tests {
         let out = lex(id, "let @ = 1");
         let rendered = praxis_source::render_one(&map, &out.diagnostics[0]);
         insta::assert_snapshot!(rendered, @r"
-error[T003]: unexpected byte in source
+error[T003]: unexpected character in source
 
   day.px:1:4
   1 | let @ = 1
-    |     ^ unexpected byte in source
+    |     ^ unexpected character in source
 ");
     }
 
@@ -598,8 +655,25 @@ error[T003]: unexpected byte in source
         );
     }
 
+    /// The old rule accepted every byte `>= 0x80` as an identifier
+    /// continuation, so a non-identifier scalar silently extended the name
+    /// instead of ending it.
     #[test]
-    #[ignore = "known bug: the byte classifier rejects a non-ASCII identifier start"]
+    fn a_non_identifier_scalar_ends_an_identifier_run() {
+        let (kinds, diags) = lex_text("ab\u{2192}cd");
+        let meaningful: Vec<_> = kinds
+            .into_iter()
+            .filter(|kind| !kind.is_trivia() && *kind != SyntaxKind::EOF)
+            .collect();
+        assert_eq!(
+            meaningful,
+            vec![SyntaxKind::Ident, SyntaxKind::ERROR, SyntaxKind::Ident],
+            "`\u{2192}` is not an identifier character, so it splits the run"
+        );
+        assert_eq!(diags.len(), 1, "the arrow itself is one bad character");
+    }
+
+    #[test]
     fn regression_unicode_identifier_may_start_with_a_unicode_scalar() {
         let (kinds, diags) = lex_text("let λ = 1");
         assert!(diags.is_empty(), "Unicode identifier faulted: {diags:?}");

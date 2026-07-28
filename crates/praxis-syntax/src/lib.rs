@@ -15,6 +15,7 @@
 //!
 //! [`SyntaxNode`]: language::SyntaxNode
 
+pub mod ident;
 pub mod kind;
 pub mod language;
 pub mod span_bridge;

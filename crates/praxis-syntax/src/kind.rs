@@ -301,28 +301,33 @@ impl SyntaxKind {
     }
 
     /// Whether this kind is a keyword token.
+    ///
+    /// Derived from [`SyntaxKind::keyword_text`] rather than maintained as a
+    /// second list: the previous hand-written list omitted `KW_IN`, and the
+    /// test that was supposed to catch that copied the same incomplete list.
     #[must_use]
     pub fn is_keyword(self) -> bool {
-        matches!(
-            self,
-            Self::KW_LET
-                | Self::KW_VAR
-                | Self::KW_FN
-                | Self::KW_IF
-                | Self::KW_ELSE
-                | Self::KW_WHILE
-                | Self::KW_FOR
-                | Self::KW_LOOP
-                | Self::KW_MATCH
-                | Self::KW_RETURN
-                | Self::KW_BREAK
-                | Self::KW_CONTINUE
-                | Self::KW_READ
-                | Self::KW_STRUCT
-                | Self::KW_ENUM
-                | Self::KW_TRUE
-                | Self::KW_FALSE
-        )
+        self.keyword_text().is_some()
+    }
+
+    /// The largest discriminant. Sound because the enum declares no explicit
+    /// discriminants, so its values are consecutive from zero — which
+    /// [`SyntaxKind::from_raw_u16`] relies on and
+    /// `every_raw_value_in_range_round_trips` checks.
+    const LAST: u16 = SyntaxKind::PARSER_NAMED_ARG as u16;
+
+    /// Total conversion from a raw `u16`. Out-of-range values become
+    /// [`SyntaxKind::ERROR`] — the safe rowan `Language` boundary must never
+    /// construct an invalid enum discriminant, whatever the input.
+    #[must_use]
+    pub const fn from_raw_u16(raw: u16) -> SyntaxKind {
+        if raw > Self::LAST {
+            return SyntaxKind::ERROR;
+        }
+        // SAFETY: `SyntaxKind` is `#[repr(u16)]` with no explicit
+        // discriminants, so 0..=LAST are exactly its valid values, and `raw` is
+        // checked to be in that range.
+        unsafe { std::mem::transmute::<u16, SyntaxKind>(raw) }
     }
 
     /// Whether this kind is a leaf token (emitted by the lexer), as opposed to
@@ -454,7 +459,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: KW_IN is lexed as a keyword but is_keyword() omits it"]
     fn regression_in_is_classified_consistently_with_the_keyword_table() {
         let kind = SyntaxKind::from_keyword("in").expect("`in` is a keyword");
         assert_eq!(kind, SyntaxKind::KW_IN);

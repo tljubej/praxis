@@ -68,14 +68,86 @@ impl FmtContext {
     }
 }
 
+/// One thing a statement-list arm has to emit: a child node, or a comment that
+/// sits between children. Comments are the only trivia the formatter keeps —
+/// whitespace is re-derived, but a comment is source the programmer wrote and
+/// deleting it is data loss, not normalization.
+enum Item {
+    Stmt(SyntaxNode),
+    /// A comment plus whether it began its own source line. A comment that
+    /// trailed a statement stays on that statement's line.
+    Comment(SyntaxToken, bool),
+}
+
+/// The child nodes of `node` interleaved with its comment tokens, in source
+/// order. `node.children()` skips tokens entirely, which is how every comment
+/// at statement granularity used to be dropped.
+fn items_of(node: &SyntaxNode) -> Vec<Item> {
+    node.children_with_tokens()
+        .filter_map(|element| match element {
+            rowan::NodeOrToken::Node(child) => Some(Item::Stmt(child)),
+            rowan::NodeOrToken::Token(token) if is_comment(token.kind()) => {
+                let own_line = starts_new_line(&token);
+                Some(Item::Comment(token, own_line))
+            }
+            rowan::NodeOrToken::Token(_) => None,
+        })
+        .collect()
+}
+
+fn is_comment(kind: SyntaxKind) -> bool {
+    matches!(kind, SyntaxKind::LineComment | SyntaxKind::BlockComment)
+}
+
+/// Whether `token` began a source line: the trivia immediately before it
+/// contained a newline, or nothing precedes it. This is what distinguishes a
+/// trailing `// note` from a standalone comment line, and re-emitting each in
+/// its original position is what makes formatting idempotent.
+fn starts_new_line(token: &SyntaxToken) -> bool {
+    let mut prev = token.prev_sibling_or_token();
+    loop {
+        match prev {
+            None => return true,
+            Some(rowan::NodeOrToken::Node(_)) => return false,
+            Some(rowan::NodeOrToken::Token(t)) => {
+                if t.kind() != SyntaxKind::Whitespace {
+                    return false;
+                }
+                if t.text().contains('\n') {
+                    return true;
+                }
+                prev = t.prev_sibling_or_token();
+            }
+        }
+    }
+}
+
 fn fmt_node(node: &SyntaxNode, ctx: &mut FmtContext, out: &mut String) {
     match node.kind() {
         SyntaxKind::SOURCE_FILE => {
             // Statements separated by single newlines; no surrounding indent.
-            for child in node.children() {
-                ctx.write_indent(out);
-                fmt_node(&child, ctx, out);
-                out.push('\n');
+            for item in items_of(node) {
+                match item {
+                    Item::Stmt(child) => {
+                        ctx.write_indent(out);
+                        fmt_node(&child, ctx, out);
+                        out.push('\n');
+                    }
+                    Item::Comment(token, own_line) => {
+                        if own_line {
+                            ctx.write_indent(out);
+                        } else {
+                            // Trailing comment: rejoin the line the previous
+                            // statement just ended.
+                            if out.ends_with('\n') {
+                                out.pop();
+                            }
+                            out.push(' ');
+                        }
+                        out.push_str(token.text().trim_end());
+                        out.push('\n');
+                    }
+                }
             }
         }
         SyntaxKind::BLOCK_EXPR => {
@@ -83,17 +155,30 @@ fn fmt_node(node: &SyntaxNode, ctx: &mut FmtContext, out: &mut String) {
             // Emit the opening brace.
             out.push('{');
             ctx.push_indent();
-            let stmts: Vec<_> = node.children().collect();
-            if stmts.is_empty() {
+            let items = items_of(node);
+            if items.is_empty() {
                 // Empty block: `{ }` inline.
                 ctx.pop_indent();
                 out.push('}');
                 return;
             }
-            for child in &stmts {
-                out.push('\n');
-                ctx.write_indent(out);
-                fmt_node(child, ctx, out);
+            for item in &items {
+                match item {
+                    Item::Stmt(child) => {
+                        out.push('\n');
+                        ctx.write_indent(out);
+                        fmt_node(child, ctx, out);
+                    }
+                    Item::Comment(token, own_line) => {
+                        if *own_line {
+                            out.push('\n');
+                            ctx.write_indent(out);
+                        } else {
+                            out.push(' ');
+                        }
+                        out.push_str(token.text().trim_end());
+                    }
+                }
             }
             ctx.pop_indent();
             out.push('\n');
@@ -137,10 +222,18 @@ fn fmt_token_stream(node: &SyntaxNode, ctx: &mut FmtContext, out: &mut String) {
         })
         .collect();
     let mut prev: Option<SyntaxKind> = None;
+    // Set after a line comment: everything after `//` belongs to that comment,
+    // so the next token must start a fresh line or the statement is destroyed.
+    let mut break_line = false;
     for token in tokens {
         let kind = token.kind();
-        if kind.is_trivia() || kind == SyntaxKind::EOF {
+        if kind == SyntaxKind::EOF || (kind.is_trivia() && !is_comment(kind)) {
             continue;
+        }
+        if break_line {
+            out.push('\n');
+            ctx.write_indent(out);
+            prev = None;
         }
         // Insert a single space between two tokens when either needs separation.
         if let Some(prev_kind) = prev {
@@ -150,15 +243,15 @@ fn fmt_token_stream(node: &SyntaxNode, ctx: &mut FmtContext, out: &mut String) {
         }
         // Recurse: a nested block inside an expression statement is emitted by
         // walking into it via fmt_node for proper layout.
-        out.push_str(token.text());
+        out.push_str(token.text().trim_end());
         prev = Some(kind);
+        break_line = kind == SyntaxKind::LineComment;
     }
     // After collecting tokens, re-walk to render nested blocks with layout.
     // (The token-stream approach above flattens blocks; for M1 idempotency we
     // additionally emit nested blocks through fmt_node. To keep it simple and
     // idempotent, the block layout is applied at the BLOCK_EXPR match arm, and
     // expressions only ever contain inline tokens.)
-    let _ = ctx; // indentation handled at statement granularity
 }
 
 /// Whether a space should separate `prev` from `next`. Conservative: insert a
@@ -166,6 +259,10 @@ fn fmt_token_stream(node: &SyntaxNode, ctx: &mut FmtContext, out: &mut String) {
 /// `,`, unary `-`, etc.).
 fn needs_space(prev: SyntaxKind, next: SyntaxKind) -> bool {
     use SyntaxKind::*;
+    // A comment is never run together with the code around it.
+    if is_comment(prev) || is_comment(next) {
+        return true;
+    }
     // No space right after an opening bracket or before a closing one.
     if matches!(prev, L_PAREN | L_BRACE | L_BRACK) {
         return false;
@@ -266,7 +363,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: the formatter drops all trivia, including comments"]
     fn regression_formatting_does_not_delete_comments() {
         let src = "let answer = 42 // the units matter";
         let once = format(src);
@@ -274,6 +370,38 @@ mod tests {
             once.contains("// the units matter"),
             "formatting deleted a source comment: {once:?}"
         );
+    }
+
+    /// A trailing comment stays on the line it trailed and a standalone
+    /// comment keeps its own line — otherwise a second pass would move it and
+    /// idempotency would fail.
+    #[test]
+    fn comments_keep_their_line_and_survive_reformatting() {
+        let src = "// leading\nlet x=1 // trailing\nlet y=2";
+        let once = format(src);
+        insta::assert_snapshot!(once, @r"
+        // leading
+        let x = 1 // trailing
+        let y = 2
+        ");
+        assert_eq!(format(&once), once, "formatting comments is not idempotent");
+    }
+
+    #[test]
+    fn comments_inside_a_block_are_kept_and_indented() {
+        let src = "fn f() {\n// inside\nlet y=2 // tail\n}";
+        let once = format(src);
+        assert!(once.contains("// inside"), "{once:?}");
+        assert!(once.contains("// tail"), "{once:?}");
+        assert_eq!(format(&once), once, "not idempotent:\n{once}");
+    }
+
+    #[test]
+    fn a_block_comment_survives_inside_an_expression() {
+        let src = "let x = /* why */ 1";
+        let once = format(src);
+        assert!(once.contains("/* why */"), "{once:?}");
+        assert_eq!(format(&once), once, "not idempotent:\n{once}");
     }
 
     // --- M2: type annotations + tuples --------------------------------------

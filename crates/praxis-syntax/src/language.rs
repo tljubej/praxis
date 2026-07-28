@@ -22,13 +22,10 @@ impl Language for PraxisLanguage {
 
     #[inline]
     fn kind_from_raw(raw: RawSyntaxKind) -> Self::Kind {
-        // SAFETY: `SyntaxKind` is `#[repr(u16)]`, so every `u16` is a valid
-        // discriminant. The only producer of raw kinds is `kind_to_raw` below
-        // (plus rowan's own storage, which round-trips our values). Unknown
-        // values cannot occur from Praxis-owned input.
-        debug_assert!(raw.0 <= SyntaxKind::PARSER_NAMED_ARG as u16);
-        // The cast is sound because of `repr(u16)` and the provenance of `raw`.
-        unsafe { std::mem::transmute(raw.0) }
+        // This is a *safe* function, so it may be called with any `u16`
+        // whatever the provenance of the value. `from_raw_u16` is total: out of
+        // range yields `ERROR` rather than an invalid discriminant.
+        SyntaxKind::from_raw_u16(raw.0)
     }
 
     #[inline]
@@ -67,6 +64,21 @@ mod tests {
         }
     }
 
+    /// Every raw value the boundary accepts must map to the kind with that
+    /// discriminant. This is what makes the range check in `from_raw_u16`
+    /// sufficient: it proves the discriminants really are consecutive.
+    #[test]
+    fn every_raw_value_in_range_round_trips() {
+        for raw in 0..=SyntaxKind::PARSER_NAMED_ARG as u16 {
+            let kind = PraxisLanguage::kind_from_raw(RawSyntaxKind(raw));
+            assert_eq!(
+                PraxisLanguage::kind_to_raw(kind).0,
+                raw,
+                "raw {raw} did not round-trip"
+            );
+        }
+    }
+
     #[test]
     fn repr_is_u16() {
         // rowan stores a u16; the repr contract must hold for all time.
@@ -76,7 +88,9 @@ mod tests {
         );
     }
 
-    #[cfg(miri)]
+    /// The safe `Language` boundary is reachable with any `u16`, so it must be
+    /// total. This runs in the ordinary suite, not only under Miri: a checked
+    /// conversion is observable without needing UB detection.
     #[test]
     fn out_of_range_raw_kind_maps_to_a_safe_error_kind() {
         assert_eq!(

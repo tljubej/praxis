@@ -655,77 +655,75 @@ impl<'t> Parser<'t> {
         } else {
             self.parse_atom();
         }
-        // Postfix calls on an arbitrary expression: `expr(args)`, chained
-        // left-associatively. The primary parsed above is the callee (wrapped
-        // retroactively as the CALL_EXPR's first child). The leading `Ident(args)`
-        // named-call case is handled inside parse_name_or_call (an atom); this
-        // loop covers the callee-not-a-path case and chains like `f(1)(2)`.
-        while self.at(SyntaxKind::L_PAREN) {
-            self.start_node_at(cp, SyntaxKind::CALL_EXPR);
-            self.bump(); // `(`
-            self.start_node(SyntaxKind::ARG_LIST);
-            if !self.at(SyntaxKind::R_PAREN) {
-                loop {
-                    let before = self.meaningful_index();
-                    self.parse_expr();
-                    if !self.eat(SyntaxKind::COMMA) {
-                        break;
-                    }
-                    self.ensure_progress(before);
-                }
-            }
-            self.expect(SyntaxKind::R_PAREN, "`)`");
-            self.finish_node(); // ARG_LIST
-            self.finish_node(); // CALL_EXPR
-        }
-        // Postfix method calls / field access on an arbitrary expression:
-        // `expr.method(args)` or `expr.field`. This mirrors the loop in
-        // `parse_name_or_call` but applies to non-name primaries (literals,
-        // parenthesized expressions, call results), so `16.0.sqrt()` and
-        // `(0.0/0.0).is_nan()` parse without needing a `let` binding.
-        self.parse_method_or_field_postfix(cp);
+        self.parse_postfix(cp);
     }
 
-    /// Postfix `.method(args)` / `.field` chain on the expression preceding the
-    /// current position. `cp` is the checkpoint taken *before* that expression
-    /// was emitted, so `start_node_at(cp, …)` retroactively wraps it as the
-    /// METHOD_CALL_EXPR / FIELD_EXPR receiver. Not updated between iterations:
-    // each `.b().c()` must wrap the entire preceding expression (the previous
-    // METHOD_CALL_EXPR), which starts at the original `cp`.
-    fn parse_method_or_field_postfix(&mut self, cp: rowan::Checkpoint) {
-        while self.at(SyntaxKind::DOT) {
-            self.bump(); // `.`
-            if !self.at(SyntaxKind::Ident) {
-                let span = self.current_span();
-                self.error(span, "expected name after `.`");
-                break;
-            }
-            // Disambiguate field access (`p.x`) from method call (`p.x()`):
-            // an IDENT followed by `(` is a method call; otherwise field access.
-            if self.nth_kind(1) == SyntaxKind::L_PAREN {
-                self.bump(); // method name
-                self.start_node_at(cp, SyntaxKind::METHOD_CALL_EXPR);
-                self.bump(); // `(`
-                self.start_node(SyntaxKind::ARG_LIST);
-                if !self.at(SyntaxKind::R_PAREN) {
-                    loop {
-                        let before = self.meaningful_index();
-                        self.parse_expr();
-                        if !self.eat(SyntaxKind::COMMA) {
-                            break;
-                        }
-                        self.ensure_progress(before);
+    /// The postfix chain on the expression preceding the current position:
+    /// `expr(args)`, `expr.method(args)` and `expr.field`, in **any order and
+    /// any number of times**, left-associatively.
+    ///
+    /// One loop over all three forms rather than a call loop followed by a
+    /// field/method loop: two sequential loops cannot express `(fs).get(0)(100)`
+    /// (a call on the result of a method call), because control never returns
+    /// from the second loop to the first.
+    ///
+    /// `cp` is the checkpoint taken *before* the primary was emitted, so
+    /// `start_node_at(cp, …)` retroactively wraps it as the new node's first
+    /// child. It is NOT updated between iterations: each link in `a.b().c()`
+    /// must wrap the entire preceding expression, which starts at the original
+    /// `cp`.
+    fn parse_postfix(&mut self, cp: rowan::Checkpoint) {
+        loop {
+            match self.peek() {
+                SyntaxKind::L_PAREN => {
+                    self.start_node_at(cp, SyntaxKind::CALL_EXPR);
+                    self.bump(); // `(`
+                    self.parse_arg_list();
+                    self.finish_node(); // CALL_EXPR
+                }
+                SyntaxKind::DOT => {
+                    self.bump(); // `.`
+                    if !self.at(SyntaxKind::Ident) {
+                        let span = self.current_span();
+                        self.error(span, "expected name after `.`");
+                        break;
+                    }
+                    // Disambiguate field access (`p.x`) from method call
+                    // (`p.x()`): an IDENT followed by `(` is a method call.
+                    if self.nth_kind(1) == SyntaxKind::L_PAREN {
+                        self.bump(); // method name
+                        self.start_node_at(cp, SyntaxKind::METHOD_CALL_EXPR);
+                        self.bump(); // `(`
+                        self.parse_arg_list();
+                        self.finish_node(); // METHOD_CALL_EXPR
+                    } else {
+                        self.start_node_at(cp, SyntaxKind::FIELD_EXPR);
+                        self.bump(); // field name
+                        self.finish_node(); // FIELD_EXPR
                     }
                 }
-                self.expect(SyntaxKind::R_PAREN, "`)`");
-                self.finish_node(); // ARG_LIST
-                self.finish_node(); // METHOD_CALL_EXPR
-            } else {
-                self.start_node_at(cp, SyntaxKind::FIELD_EXPR);
-                self.bump(); // field name
-                self.finish_node(); // FIELD_EXPR
+                _ => break,
             }
         }
+    }
+
+    /// The `arg, arg, …)` of a call, with the opening `(` already consumed.
+    /// Emits the `ARG_LIST` node and consumes the closing `)`.
+    fn parse_arg_list(&mut self) {
+        self.start_node(SyntaxKind::ARG_LIST);
+        if !self.at(SyntaxKind::R_PAREN) {
+            loop {
+                let before = self.meaningful_index();
+                self.parse_expr();
+                if !self.eat(SyntaxKind::COMMA) {
+                    break;
+                }
+                // Guarantee termination on any input.
+                self.ensure_progress(before);
+            }
+        }
+        self.expect(SyntaxKind::R_PAREN, "`)`");
+        self.finish_node(); // ARG_LIST
     }
 
     /// `|params| expr` — a closure expression (M7, §4.10). Params are bare names
@@ -1161,20 +1159,7 @@ impl<'t> Parser<'t> {
             self.start_node_at(cp, SyntaxKind::CALL_EXPR);
             // Re-open the path as the callee: rowan's checkpoint wraps the
             // already-emitted PATH_EXPR, so the call's first child is the path.
-            self.start_node(SyntaxKind::ARG_LIST);
-            if !self.at(SyntaxKind::R_PAREN) {
-                loop {
-                    let before = self.meaningful_index();
-                    self.parse_expr();
-                    if !self.eat(SyntaxKind::COMMA) {
-                        break;
-                    }
-                    // Guarantee termination on any input.
-                    self.ensure_progress(before);
-                }
-            }
-            self.expect(SyntaxKind::R_PAREN, "`)`");
-            self.finish_node(); // ARG_LIST
+            self.parse_arg_list();
             self.finish_node(); // CALL_EXPR
         } else if self.at(SyntaxKind::L_BRACE) && !self.no_struct_literal {
             // Record literal: `Name { field: expr, … }` or `Name { x, y }` (§4.5
@@ -1204,19 +1189,9 @@ impl<'t> Parser<'t> {
             self.finish_node(); // FIELD_LIST
             self.finish_node(); // RECORD_LIT_EXPR
         }
-        // Postfix method calls: `.method(args)`, chained left-associatively.
-        // Each iteration wraps the whole preceding expression (receiver) plus
-        // the method name + args into a METHOD_CALL_EXPR node.
-        //
-        // The checkpoint `cp` was taken *before* the receiver was emitted, so
-        // `start_node_at(cp, ...)` retroactively wraps the receiver (PATH_EXPR
-        // or a prior CALL_EXPR / METHOD_CALL_EXPR) as the first child. The
-        // checkpoint is NOT updated between iterations: each `.method()` in a
-        // chain (`v.push(1).len()`) must wrap the *entire* preceding expression
-        // (the previous METHOD_CALL_EXPR), which starts at the original `cp`.
-        // Updating it to the position after each node (as an earlier version
-        // did) dropped the receiver, breaking `a.b().c()`.
-        self.parse_method_or_field_postfix(cp);
+        // The rest of the postfix chain — `.method(args)`, `.field` and further
+        // `(args)` calls in any order.
+        self.parse_postfix(cp);
     }
 
     // -----------------------------------------------------------------------
@@ -1550,7 +1525,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: postfix parsing does not return from method/field access to call parsing"]
     fn regression_postfix_forms_may_be_interleaved() {
         let out = parse_text("(fs).get(0)(100)");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
