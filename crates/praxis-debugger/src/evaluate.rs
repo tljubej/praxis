@@ -415,9 +415,7 @@ fn descriptor_id_to_type(id: praxis_runtime::TypeId, db: &mut TypeDb) -> Option<
         B::Unit => Some(db.unit()),
         B::Bool => Some(db.bool()),
         B::Int => Some(db.int()),
-        // `Byte` has no distinct static type in the surface language; it reads
-        // back as `Int`, which is what every Byte-producing expression infers.
-        B::Byte => Some(db.int()),
+        B::Byte => Some(db.scalar(praxis_types::ScalarType::Byte)),
         B::Char => Some(db.char()),
         B::Float => Some(db.float()),
         B::Text => Some(db.text()),
@@ -504,7 +502,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: debugger scalar TypeId mapping is stale and Float collides with Text"]
     fn regression_runtime_scalar_descriptors_recover_their_actual_types() {
         let runtime = Runtime::new();
         let values = [
