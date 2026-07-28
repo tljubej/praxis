@@ -203,6 +203,8 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::PushShadowFrame => {
             crate::shadow_frame::praxis_push_shadow_frame as *const ()
         }
+        RuntimeSymbol::RaiseDivByZeroIf => praxis_raise_div_by_zero_if as *const (),
+        RuntimeSymbol::RaiseIntOverflowIf => praxis_raise_int_overflow_if as *const (),
         RuntimeSymbol::RaiseStackOverflow => praxis_raise_stack_overflow as *const (),
         RuntimeSymbol::RecordField => praxis_record_field as *const (),
         RuntimeSymbol::RecordSetField => praxis_record_set_field as *const (),
@@ -883,6 +885,37 @@ pub unsafe extern "C" fn praxis_check_fault(ctx: *mut RuntimeContext) -> i64 {
 #[no_mangle]
 pub unsafe extern "C" fn praxis_raise_stack_overflow(ctx: *mut RuntimeContext) {
     unsafe { set_fault(ctx, FaultKind::StackOverflow) };
+}
+
+/// Raise a [`FaultKind::IntOverflow`] fault on `ctx` iff `condition` is
+/// non-zero (§4.12).
+///
+/// Generated code lowers `Int` arithmetic natively — `iadd`/`isub`/`imul` on
+/// the raw scalar channel — and computes the overflow predicate inline. This is
+/// how it reports one: the caller passes the predicate, and the wrapper decides
+/// nothing else. It allocates nothing, so an arithmetic site is not a
+/// safepoint, and taking the condition rather than branching around the call
+/// keeps arithmetic to a single basic block.
+///
+/// # Safety
+/// `ctx` must point at a live, wired `RuntimeContext`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_raise_int_overflow_if(ctx: *mut RuntimeContext, condition: i64) {
+    if condition != 0 {
+        unsafe { set_fault(ctx, FaultKind::IntOverflow) };
+    }
+}
+
+/// Raise a [`FaultKind::DivByZero`] fault on `ctx` iff `condition` is non-zero
+/// (§4.12). The division counterpart of [`praxis_raise_int_overflow_if`].
+///
+/// # Safety
+/// `ctx` must point at a live, wired `RuntimeContext`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_raise_div_by_zero_if(ctx: *mut RuntimeContext, condition: i64) {
+    if condition != 0 {
+        unsafe { set_fault(ctx, FaultKind::DivByZero) };
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
+use cranelift::codegen::ir::condcodes::IntCC;
 use cranelift::codegen::ir::FuncRef;
 use cranelift::codegen::ir::MemFlagsData as MemFlags;
 use cranelift::codegen::isa::CallConv;
@@ -39,6 +40,11 @@ const SLOTS_OFFSET: i64 = core::mem::offset_of!(ShadowFrame, slots) as i64;
 /// branch to the stack-overflow fault epilogue (§9.2, §17.4). Computed from the
 /// `#[repr(C)]` layout, like `SLOTS_OFFSET`.
 const RECURSION_DEPTH_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, recursion_depth) as i64;
+
+/// The byte offset of `unit_ref` within a `RuntimeContext`. A fault epilogue
+/// loads the immortal Unit from here and returns it, because the ABI says a
+/// Praxis function returns a valid `GcRef` — including when it unwinds.
+const UNIT_REF_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, unit_ref) as i64;
 
 /// Lower one MIR function into a Cranelift function and define it in `module`.
 pub(crate) fn lower_function<M: Module>(
@@ -198,11 +204,7 @@ pub(crate) fn lower_function<M: Module>(
         let limit = builder
             .ins()
             .iconst(types::I32, praxis_runtime::MAX_RECURSION_DEPTH as i64);
-        let over = builder.ins().icmp(
-            cranelift::codegen::ir::condcodes::IntCC::SignedGreaterThan,
-            depth,
-            limit,
-        );
+        let over = builder.ins().icmp(IntCC::SignedGreaterThan, depth, limit);
         builder.ins().brif(over, over_limit, &[], body_entry, &[]);
     }
 
@@ -223,8 +225,8 @@ pub(crate) fn lower_function<M: Module>(
         emit_snapshot_debug_chain(&mut builder, ctx_val, module, &mut import_cache)?;
         emit_pop_shadow_frame(&mut builder, ctx_val, &spill, module, &mut import_cache)?;
         emit_pop_debug_frame(&mut builder, ctx_val, &spill, module, &mut import_cache)?;
-        let zero = builder.ins().iconst(GC, 0);
-        builder.ins().return_(&[zero]);
+        let unit = load_unit_sentinel(&mut builder, ctx_val);
+        builder.ins().return_(&[unit]);
     }
 
     // Lower each block. Blocks are sealed together after the whole CFG is built
@@ -798,47 +800,122 @@ fn lower_inst<M: Module>(
             // for the future mutable-Int optimization.
         }
         Inst::IntBinOp { op, dst, lhs, rhs } => {
+            // Native scalar arithmetic (§4.12). The operands are already raw
+            // i64s in the scalar channel, so the operation is one Cranelift
+            // instruction plus an inline overflow predicate.
+            //
+            // This replaces boxing both operands with `praxis_alloc_int`,
+            // calling the wrapper, and `praxis_int_load`ing the result: two
+            // allocations and three calls per arithmetic op. That shape also
+            // carried a live memory bug — on fault the wrapper returns the Unit
+            // sentinel, and the `int_load` ran *before* the fault check, reading
+            // eight bytes past a size-0 Unit payload.
+            //
+            // Overflow is reported by calling a non-allocating raise wrapper
+            // with the predicate rather than by branching around it: arithmetic
+            // stays one basic block, and the `CheckFault` that MIR emits next
+            // is what diverts to the fault epilogue.
             let l = builder.use_var(vars[lhs.0 as usize]);
             let r = builder.use_var(vars[rhs.0 as usize]);
-            let sym = match op {
-                IntBinOp::Add => RuntimeSymbol::IntAdd,
-                IntBinOp::Sub => RuntimeSymbol::IntSub,
-                IntBinOp::Mul => RuntimeSymbol::IntMul,
-                IntBinOp::Div => RuntimeSymbol::IntDiv,
-                IntBinOp::Rem => RuntimeSymbol::IntRem,
+            let result = match op {
+                IntBinOp::Add => {
+                    let sum = builder.ins().iadd(l, r);
+                    // Signed overflow iff the operands agree in sign and the
+                    // result disagrees with them: ((l ^ sum) & (r ^ sum)) < 0.
+                    let a = builder.ins().bxor(l, sum);
+                    let b = builder.ins().bxor(r, sum);
+                    let both = builder.ins().band(a, b);
+                    raise_if_negative(
+                        builder,
+                        ctx_val,
+                        both,
+                        RuntimeSymbol::RaiseIntOverflowIf,
+                        module,
+                        imports,
+                    )?;
+                    sum
+                }
+                IntBinOp::Sub => {
+                    let diff = builder.ins().isub(l, r);
+                    // Signed overflow iff the operands differ in sign and the
+                    // result differs from the left: ((l ^ r) & (l ^ diff)) < 0.
+                    let a = builder.ins().bxor(l, r);
+                    let b = builder.ins().bxor(l, diff);
+                    let both = builder.ins().band(a, b);
+                    raise_if_negative(
+                        builder,
+                        ctx_val,
+                        both,
+                        RuntimeSymbol::RaiseIntOverflowIf,
+                        module,
+                        imports,
+                    )?;
+                    diff
+                }
+                IntBinOp::Mul => {
+                    let product = builder.ins().imul(l, r);
+                    // The full 128-bit product fits in 64 bits iff its high half
+                    // is the sign extension of the low half.
+                    let high = builder.ins().smulhi(l, r);
+                    let sign = builder.ins().sshr_imm_u(product, 63);
+                    let differs = builder.ins().icmp(IntCC::NotEqual, high, sign);
+                    let flag = builder.ins().uextend(GC, differs);
+                    raise_if_nonzero(
+                        builder,
+                        ctx_val,
+                        flag,
+                        RuntimeSymbol::RaiseIntOverflowIf,
+                        module,
+                        imports,
+                    )?;
+                    product
+                }
+                IntBinOp::Div | IntBinOp::Rem => {
+                    // `sdiv`/`srem` trap on a zero divisor and on the one
+                    // overflowing signed division, `i64::MIN / -1`. Neither may
+                    // reach the instruction: a trap is a process abort, not a
+                    // Praxis fault. Substituting a divisor of 1 in those cases
+                    // keeps the instruction total; the value it produces is
+                    // dead, because the `CheckFault` after this diverts.
+                    let zero = builder.ins().iconst(GC, 0);
+                    let by_zero = builder.ins().icmp(IntCC::Equal, r, zero);
+                    let min = builder.ins().iconst(GC, i64::MIN);
+                    let neg_one = builder.ins().iconst(GC, -1);
+                    let l_is_min = builder.ins().icmp(IntCC::Equal, l, min);
+                    let r_is_neg_one = builder.ins().icmp(IntCC::Equal, r, neg_one);
+                    let overflows = builder.ins().band(l_is_min, r_is_neg_one);
+
+                    let one = builder.ins().iconst(GC, 1);
+                    let unsafe_divisor = builder.ins().bor(by_zero, overflows);
+                    let divisor = builder.ins().select(unsafe_divisor, one, r);
+                    let value = if matches!(op, IntBinOp::Div) {
+                        builder.ins().sdiv(l, divisor)
+                    } else {
+                        builder.ins().srem(l, divisor)
+                    };
+
+                    let by_zero_flag = builder.ins().uextend(GC, by_zero);
+                    raise_if_nonzero(
+                        builder,
+                        ctx_val,
+                        by_zero_flag,
+                        RuntimeSymbol::RaiseDivByZeroIf,
+                        module,
+                        imports,
+                    )?;
+                    let overflow_flag = builder.ins().uextend(GC, overflows);
+                    raise_if_nonzero(
+                        builder,
+                        ctx_val,
+                        overflow_flag,
+                        RuntimeSymbol::RaiseIntOverflowIf,
+                        module,
+                        imports,
+                    )?;
+                    value
+                }
             };
-            // praxis_int_* take (ctx, lhs_gc, rhs_gc) — but the operands here are
-            // already scalar i64s extracted previously. The wrappers expect GcRef
-            // operands. To bridge, re-alloc each scalar first.
-            // (The builder emits Extract then BinOp; here we re-materialize to
-            //  match the wrapper's GcRef ABI. A future pass can fold the extract.)
-            let l_gc = call_symbol(
-                builder,
-                ctx_val,
-                &[l],
-                RuntimeSymbol::AllocInt,
-                module,
-                imports,
-            )?;
-            let r_gc = call_symbol(
-                builder,
-                ctx_val,
-                &[r],
-                RuntimeSymbol::AllocInt,
-                module,
-                imports,
-            )?;
-            let result = call_symbol(builder, ctx_val, &[l_gc, r_gc], sym, module, imports)?;
-            // The result is a GcRef; load it back to a scalar for the dst slot.
-            let scalar = call_symbol(
-                builder,
-                ctx_val,
-                &[result],
-                RuntimeSymbol::IntLoad,
-                module,
-                imports,
-            )?;
-            builder.def_var(vars[dst.0 as usize], scalar);
+            builder.def_var(vars[dst.0 as usize], result);
             // Fault check after faultable arith.
             let _ = call_symbol(
                 builder,
@@ -1153,9 +1230,13 @@ fn lower_terminator<M: Module>(
             emit_pop_shadow_frame(builder, ctx_val, spill, module, imports)?;
             emit_pop_debug_frame(builder, ctx_val, spill, module, imports)?;
             // Unwind to the host: return the Unit sentinel (the caller checks
-            // pending_fault). The fault block has no value of its own.
-            let zero = builder.ins().iconst(GC, 0);
-            builder.ins().return_(&[zero]);
+            // pending_fault). The fault block has no value of its own — but it
+            // still returns a `GcRef`, so it must return a *valid* one. It used
+            // to return `iconst 0`, a null reference across an ABI whose return
+            // type is non-null: every caller that inspected the result before
+            // checking the fault dereferenced null.
+            let unit = load_unit_sentinel(builder, ctx_val);
+            builder.ins().return_(&[unit]);
         }
     }
     Ok(())
@@ -1278,6 +1359,48 @@ fn import<M: Module>(
     let fr = module.declare_func_in_func(id, builder.func);
     imports.insert(sym, fr);
     Ok(fr)
+}
+
+/// Load the immortal Unit singleton out of the context (`ctx.unit_ref`).
+///
+/// This is the value every fault path returns. The runtime wrappers already do
+/// the same thing (`unit_sentinel`), so a faulted call and a faulted function
+/// now hand back the same object rather than one of them handing back null.
+fn load_unit_sentinel(builder: &mut FunctionBuilder, ctx: Value) -> Value {
+    builder
+        .ins()
+        .load(GC, MemFlags::trusted(), ctx, UNIT_REF_OFFSET as i32)
+}
+
+/// Report a fault when `predicate` is negative — the sign-bit form the
+/// add/sub overflow tests produce.
+fn raise_if_negative<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx: Value,
+    predicate: Value,
+    sym: RuntimeSymbol,
+    module: &mut M,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
+) -> Result<()> {
+    let flag = builder.ins().ushr_imm_u(predicate, 63);
+    raise_if_nonzero(builder, ctx, flag, sym, module, imports)
+}
+
+/// Report a fault when `flag` is non-zero.
+///
+/// The call is unconditional and the wrapper decides: an arithmetic site stays
+/// one basic block, and the wrapper allocates nothing, so the site is not a GC
+/// safepoint and needs no root spill.
+fn raise_if_nonzero<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx: Value,
+    flag: Value,
+    sym: RuntimeSymbol,
+    module: &mut M,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
+) -> Result<()> {
+    call_symbol(builder, ctx, &[flag], sym, module, imports)?;
+    Ok(())
 }
 
 /// Emit a call to `sym`, narrowing each argument to the width its manifest row

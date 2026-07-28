@@ -124,7 +124,6 @@ fn tuple_element_descriptor_ids(value: GcRef) -> Vec<praxis_runtime::descriptor:
 }
 
 #[test]
-#[ignore = "known bug: generated fault epilogues return raw zero instead of Unit"]
 fn fault_epilogue_returns_the_valid_unit_sentinel() {
     // The no-panic fault protocol promises a defined dummy value. Because
     // GcRef is NonNull, integer zero is not a valid dummy; the generated fault
@@ -637,4 +636,127 @@ fn char_ordering_uses_unicode_scalar_values_without_out_of_bounds_reads() {
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert!(result.as_bool());
+}
+
+/// P0-08: `Int` arithmetic lowers natively.
+///
+/// The old shape boxed both operands with `praxis_alloc_int`, called the
+/// wrapper, and `praxis_int_load`ed the result. That `int_load` ran *before*
+/// the fault check, so on overflow it read eight bytes past the size-0 Unit
+/// payload the wrapper returned. Asserting on the emitted symbols is what keeps
+/// the pair from coming back.
+#[test]
+fn int_arithmetic_emits_no_boxing_wrappers() {
+    let src = "fn main() -> Int { 2 + 3 * 4 - 1 }";
+    let names = runtime_symbols_emitted_for(src);
+    for boxed in [
+        "praxis_alloc_int",
+        "praxis_int_load",
+        "praxis_int_add",
+        "praxis_int_sub",
+        "praxis_int_mul",
+    ] {
+        assert!(
+            !names.contains(boxed),
+            "arithmetic still routes through `{boxed}`: {names:?}"
+        );
+    }
+    let (runtime, result) = run_main(src);
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 13);
+}
+
+/// Native lowering must fault exactly where the wrappers did (§4.12).
+#[test]
+fn native_arithmetic_faults_match_the_runtime_wrappers() {
+    for (src, kind) in [
+        (
+            "fn main() -> Int { 9223372036854775807 + 1 }",
+            praxis_runtime::FaultKind::IntOverflow,
+        ),
+        (
+            "fn main() -> Int { 0 - 9223372036854775807 - 2 }",
+            praxis_runtime::FaultKind::IntOverflow,
+        ),
+        (
+            "fn main() -> Int { 4294967296 * 4294967296 }",
+            praxis_runtime::FaultKind::IntOverflow,
+        ),
+        (
+            "fn main() -> Int { 1 / 0 }",
+            praxis_runtime::FaultKind::DivByZero,
+        ),
+        (
+            "fn main() -> Int { 1 % 0 }",
+            praxis_runtime::FaultKind::DivByZero,
+        ),
+    ] {
+        let (runtime, _) = run_main(src);
+        assert_eq!(runtime.fault(), kind, "{src}");
+    }
+}
+
+/// `i64::MIN / -1` and `i64::MIN % -1` are the one overflowing signed division.
+/// Cranelift's `sdiv`/`srem` *trap* on them — a process abort, not a Praxis
+/// fault — so the lowering must keep those operands away from the instruction
+/// and report `IntOverflow`, matching `praxis_int_div` / `praxis_int_rem`.
+#[test]
+fn int_min_divided_by_minus_one_overflows_rather_than_trapping() {
+    let (runtime, _) = run_main("fn main() -> Int { (0 - 9223372036854775807 - 1) / (0 - 1) }");
+    assert_eq!(runtime.fault(), praxis_runtime::FaultKind::IntOverflow);
+
+    let (runtime, _) = run_main("fn main() -> Int { (0 - 9223372036854775807 - 1) % (0 - 1) }");
+    assert_eq!(runtime.fault(), praxis_runtime::FaultKind::IntOverflow);
+}
+
+/// Arithmetic that cannot overflow must not fault, including the boundary
+/// values the overflow predicates are written around.
+#[test]
+fn arithmetic_at_the_boundary_does_not_fault_spuriously() {
+    for (src, want) in [
+        ("fn main() -> Int { 9223372036854775807 - 1 }", i64::MAX - 1),
+        ("fn main() -> Int { 0 - 9223372036854775807 }", -i64::MAX),
+        ("fn main() -> Int { 0 - 7 / 2 }", -3),
+        ("fn main() -> Int { 0 - 7 % 2 }", -1),
+        (
+            "fn main() -> Int { 4294967296 * 2147483647 }",
+            4294967296i64 * 2147483647,
+        ),
+    ] {
+        let (runtime, result) = run_main(src);
+        assert!(
+            !runtime.has_pending_fault(),
+            "{src} faulted: {:?}",
+            runtime.fault()
+        );
+        assert_eq!(result.as_int(), want, "{src}");
+    }
+}
+
+/// The runtime symbol names the MIR for `src` emits, for asserting that a
+/// lowering does *not* reach for a wrapper.
+fn runtime_symbols_emitted_for(src: &str) -> std::collections::BTreeSet<&'static str> {
+    let map = SourceMap::new();
+    let file = map.intern("adversarial_audit.px", src);
+    let parsed = parse(file, src);
+    let mut analysis = analyze_root(file, &parsed.tree);
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).expect("source root");
+    let module = lower(file, &root, &mut analysis);
+    let module = monomorphize(module, &analysis.names, &mut analysis.db);
+    let mut funcs = lower_module(&module, &mut analysis.db);
+    for func in &mut funcs {
+        annotate(func);
+    }
+    funcs
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.insts.iter())
+        .filter_map(|inst| match inst {
+            praxis_mir::Inst::Call {
+                callee: praxis_mir::CallTarget::Runtime(sym),
+                ..
+            } => Some(sym.name()),
+            _ => None,
+        })
+        .collect()
 }

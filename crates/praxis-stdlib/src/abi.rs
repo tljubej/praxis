@@ -293,6 +293,8 @@ runtime_symbols! {
     PopShadowFrame = "praxis_pop_shadow_frame": (Ctx, Ptr) -> Void, Pure;
     PushDebugFrame = "praxis_push_debug_frame": (Ctx, Ptr, RawU32, RawU32, Ptr) -> Ptr, Pure;
     PushShadowFrame = "praxis_push_shadow_frame": (Ctx, RawU32) -> Ptr, Pure;
+    RaiseDivByZeroIf = "praxis_raise_div_by_zero_if": (Ctx, RawI64) -> Void, Faults;
+    RaiseIntOverflowIf = "praxis_raise_int_overflow_if": (Ctx, RawI64) -> Void, Faults;
     RaiseStackOverflow = "praxis_raise_stack_overflow": (Ctx) -> Void, Faults;
     RecordField = "praxis_record_field": (Ctx, Gc, RawU32) -> Gc, Pure;
     RecordSetField = "praxis_record_set_field": (Ctx, Gc, RawU32, Gc) -> Gc, Pure;
