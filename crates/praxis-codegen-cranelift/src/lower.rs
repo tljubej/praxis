@@ -1175,6 +1175,24 @@ fn lower_inst<M: Module>(
             )?;
             builder.def_var(vars[dst.0 as usize], result);
         }
+        Inst::ValueCmp { dst, lhs, rhs } => {
+            // Ordering through the descriptor's compare callback:
+            // praxis_value_cmp(ctx, a, b) -> -1/0/1 (ADR-045). The wrapper is
+            // `Effect::Faults` — it allocates nothing — so this is not a
+            // safepoint and there is nothing to spill; the `CheckFault` the
+            // builder emits next observes a type mismatch.
+            let l = builder.use_var(vars[lhs.0 as usize]);
+            let r = builder.use_var(vars[rhs.0 as usize]);
+            let result = call_symbol(
+                builder,
+                ctx_val,
+                &[l, r],
+                RuntimeSymbol::ValueCmp,
+                module,
+                imports,
+            )?;
+            builder.def_var(vars[dst.0 as usize], result);
+        }
         Inst::CheckFault { on_fault, debug } => {
             // Divert to the fault block when a fault is pending (§10.4). The
             // faultable op just before this set `pending_fault` (or a callee

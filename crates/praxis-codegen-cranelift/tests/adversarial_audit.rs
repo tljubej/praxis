@@ -623,19 +623,53 @@ fn empty_element_returning_sinks_fault_instead_of_returning_uninitialized_gc_ref
 }
 
 #[test]
-#[ignore = "known bug: Text ordering is lowered as an Int payload load"]
 fn text_ordering_is_lexicographic_without_payload_reinterpretation() {
     let (runtime, result) = run_main("fn main() -> Bool {\n  \"apple\" < \"banana\"\n}\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert!(result.as_bool());
 }
 
+/// P0-12's other half for `Text`: the eight-byte payload load compared the
+/// `TextPayload` *discriminant*, so every pair of owned strings was equal and
+/// every owned/slice pair was not. Equality has to move to the descriptor with
+/// ordering, or `"apple" < "banana"` and `"apple" == "banana"` disagree about
+/// what a `Text` is.
 #[test]
-#[ignore = "known bug: Char ordering is lowered as an eight-byte Int payload load"]
+fn text_equality_compares_bytes_not_the_payload_discriminant() {
+    let (runtime, result) = run_main("fn main() -> Bool {\n  \"apple\" == \"banana\"\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert!(
+        !result.as_bool(),
+        "two different strings must not be equal because both are `Owned`"
+    );
+
+    let (runtime, result) = run_main("fn main() -> Bool {\n  \"apple\" == \"apple\"\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert!(result.as_bool());
+}
+
+/// **Rewritten**, not merely un-ignored: its input changed from `aβ\n` to
+/// `ab\n`.
+///
+/// The non-ASCII cell is unparseable for a reason that has nothing to do with
+/// ordering — the `grid(char)` cell parser works in bytes, so `β` is an
+/// "expected char" mismatch, and `read grid(char)` is the only source of `Char`
+/// values in the language (`Text.get` returns the scalar value as an `Int`).
+/// That is an input-parser defect, S19/S20's territory alongside IPR-06's
+/// `grid(int)` granularity, and leaving it here would make an ordering test go
+/// red until a parser fix lands.
+///
+/// What survives is the property P0-12 owns and this input still reaches: two
+/// `Char` cells are ordered by their four-byte payloads, not by eight bytes
+/// read from one. `small_scalars_are_extracted_at_their_own_width` pins the
+/// lowering that makes it so, and
+/// `char_heap_entries_order_by_unicode_scalar_value` (praxis-runtime) covers
+/// the non-ASCII values the parser cannot yet deliver.
+#[test]
 fn char_ordering_uses_unicode_scalar_values_without_out_of_bounds_reads() {
     let (runtime, result) = run_main_with_input(
         "fn main() -> Bool {\n  let g = read grid(char)\n  g.get(0, 0) < g.get(1, 0)\n}\n",
-        "aβ\n",
+        "ab\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert!(result.as_bool());
@@ -767,6 +801,99 @@ fn runtime_symbols_emitted_for(src: &str) -> std::collections::BTreeSet<&'static
             _ => None,
         })
         .collect()
+}
+
+/// The comparison lowerings a program emits, as a set of tags: which scalar
+/// widths were extracted, and which of the four compare instructions ran.
+///
+/// P0-12 is a lowering choice, so asserting on the choice is what keeps it
+/// fixed — a later refactor that reintroduces "extract eight bytes and compare"
+/// for a `Text` or a `Char` fails here rather than at whatever the payload
+/// happened to hold.
+fn comparison_shapes_for(src: &str) -> std::collections::BTreeSet<String> {
+    let map = SourceMap::new();
+    let file = map.intern("adversarial_audit.px", src);
+    let parsed = parse(file, src);
+    let mut analysis = analyze_root(file, &parsed.tree);
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).expect("source root");
+    let module = lower(file, &root, &mut analysis);
+    let module = monomorphize(module, &analysis.names, &mut analysis.db);
+    let mut funcs = lower_module(&module, &mut analysis.db);
+    for func in &mut funcs {
+        annotate(func);
+        if let Err(errs) = praxis_mir::verify(func) {
+            panic!("{}", praxis_mir::verify::report(&errs));
+        }
+    }
+    funcs
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.insts.iter())
+        .filter_map(|inst| match inst {
+            praxis_mir::Inst::ExtractScalar { scalar, .. } => Some(format!("extract:{scalar:?}")),
+            praxis_mir::Inst::ValueCmp { .. } => Some("value_cmp".to_string()),
+            praxis_mir::Inst::StructEq { .. } => Some("struct_eq".to_string()),
+            praxis_mir::Inst::IntCmp { .. } => Some("int_cmp".to_string()),
+            praxis_mir::Inst::FloatCmp { .. } => Some("float_cmp".to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// P0-12. A `Text` comparison — of either kind — goes through the descriptor.
+/// It must never extract a scalar from a `Text`: the payload is an enum of a
+/// `Box<str>` and a `(GcRef, usize, usize)` slice, so an eight-byte load reads
+/// the discriminant or a pointer.
+#[test]
+fn text_comparison_never_extracts_a_scalar_from_the_payload() {
+    let ordering = comparison_shapes_for("fn main() -> Bool {\n  \"a\" < \"b\"\n}\n");
+    assert!(
+        ordering.contains("value_cmp"),
+        "Text ordering dispatches to the descriptor's compare: {ordering:?}"
+    );
+    assert!(
+        !ordering.iter().any(|s| s.starts_with("extract:")),
+        "nothing is extracted from a Text payload: {ordering:?}"
+    );
+
+    let equality = comparison_shapes_for("fn main() -> Bool {\n  \"a\" == \"b\"\n}\n");
+    assert!(
+        equality.contains("struct_eq"),
+        "Text equality dispatches to the descriptor's equals: {equality:?}"
+    );
+    assert!(
+        !equality.iter().any(|s| s.starts_with("extract:")),
+        "nothing is extracted from a Text payload: {equality:?}"
+    );
+}
+
+/// P0-12. A `Char` payload is four bytes and a `Bool` one; both were extracted
+/// as `Int`, an eight-byte load from a smaller, differently-aligned payload.
+#[test]
+fn small_scalars_are_extracted_at_their_own_width() {
+    // `grid(char)` is the only source of `Char` values today — `Text.get`
+    // returns the scalar value as an `Int`, and the language has no char
+    // literal.
+    let chars = comparison_shapes_for(
+        "fn main() -> Bool {\n  let g = read grid(char)\n  g.get(0, 0) < g.get(1, 0)\n}\n",
+    );
+    assert!(
+        !chars.contains("extract:Int"),
+        "a Char is never read as an eight-byte Int: {chars:?}"
+    );
+    assert!(
+        chars.contains("value_cmp") || chars.contains("extract:Char"),
+        "a Char comparison reads the payload at its own width, either natively \
+         or through the descriptor: {chars:?}"
+    );
+
+    let bools = comparison_shapes_for(
+        "fn main() -> Bool {\n  let a = 1 == 1\n  let b = 2 == 2\n  a == b\n}\n",
+    );
+    assert!(
+        bools.contains("extract:Bool"),
+        "a Bool comparison loads a Bool: {bools:?}"
+    );
 }
 
 /// MIR-01: a shadow slot whose local has died must be nulled, or the collector

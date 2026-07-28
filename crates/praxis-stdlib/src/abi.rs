@@ -314,6 +314,7 @@ runtime_symbols! {
     TextLen = "praxis_text_len": (Ctx, Gc) -> Gc, Allocates;
     TupleGet = "praxis_tuple_get": (Ctx, Gc, RawI64) -> Gc, Pure;
     TupleSet = "praxis_tuple_set": (Ctx, Gc, RawI64, Gc) -> Gc, Pure;
+    ValueCmp = "praxis_value_cmp": (Ctx, Gc, Gc) -> RawI64, Faults;
     VarCellGet = "praxis_var_cell_get": (Ctx, Gc) -> Gc, Pure;
     VarCellSet = "praxis_var_cell_set": (Ctx, Gc, Gc) -> Gc, Pure;
     VecGet = "praxis_vec_get": (Ctx, Gc, Gc) -> Gc, Faults;

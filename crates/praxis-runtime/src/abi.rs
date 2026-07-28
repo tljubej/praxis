@@ -253,6 +253,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::TextLen => praxis_text_len as *const (),
         RuntimeSymbol::TupleGet => praxis_tuple_get as *const (),
         RuntimeSymbol::TupleSet => praxis_tuple_set as *const (),
+        RuntimeSymbol::ValueCmp => praxis_value_cmp as *const (),
         RuntimeSymbol::VarCellGet => praxis_var_cell_get as *const (),
         RuntimeSymbol::VarCellSet => praxis_var_cell_set as *const (),
         RuntimeSymbol::VecGet => praxis_vec_get as *const (),
@@ -1403,6 +1404,13 @@ pub unsafe extern "C" fn praxis_struct_eq(ctx: *mut RuntimeContext, a: GcRef, b:
     // SAFETY: caller guarantees a is a valid GcRef; the descriptor header is
     // always present and its `equals` (if Some) is safe to call with a/b.
     let desc = a.descriptor();
+    // Both operands must be the same runtime type before any callback runs
+    // (ADR-045 decision 3). Well-typed code has unified them, so this is the
+    // miscompile case — and a callback dispatched on a foreign layout is how a
+    // type confusion becomes a wild read rather than a wrong answer.
+    if !std::ptr::eq(desc, b.descriptor()) {
+        return 0;
+    }
     match desc.equals {
         // SAFETY: both a and b are values of desc's type (caller has type-checked
         // them equal); the equals callback is safe under that invariant.
@@ -1418,6 +1426,50 @@ pub unsafe extern "C" fn praxis_struct_eq(ctx: *mut RuntimeContext, a: GcRef, b:
         // Not equatable: treat as not-equal. The type checker rejects this in
         // well-typed code; the defensive default keeps runtime sound.
         None => 0,
+    }
+}
+
+/// Order two GC values through their descriptor's `compare` callback (ADR-045).
+/// Returns `-1`, `0` or `1` — the caller turns that into the `<`/`<=`/`>`/`>=`
+/// it wanted by comparing against zero.
+///
+/// This is the ordering counterpart of [`praxis_struct_eq`], and it exists for
+/// the same reason: a `Text` is a pointer-and-length structure, so ordering one
+/// by loading its first eight payload bytes compared *addresses* (P0-12).
+///
+/// Raises `FaultKind::TypeMismatch` and answers `0` when the two operands are
+/// not the same runtime type, or when the type has no ordering. The type
+/// checker rejects both in well-typed code (`Y006`), so reaching either is a
+/// compiler bug — reported as a fault rather than a callback dispatched on a
+/// foreign layout.
+///
+/// # Safety
+/// `ctx` must be live and wired; `a` and `b` must be valid `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_value_cmp(ctx: *mut RuntimeContext, a: GcRef, b: GcRef) -> i64 {
+    // SAFETY: caller guarantees both are valid GcRefs; every object carries a
+    // descriptor in its header.
+    let desc = a.descriptor();
+    if !std::ptr::eq(desc, b.descriptor()) {
+        unsafe { set_fault(ctx, RaisedFault::TYPE_MISMATCH) };
+        return 0;
+    }
+    let Some(compare) = desc.compare else {
+        unsafe { set_fault(ctx, RaisedFault::TYPE_MISMATCH) };
+        return 0;
+    };
+    // SAFETY: both values carry `desc` (checked above), so both payloads are
+    // values of its type.
+    let ordering = unsafe {
+        compare(
+            a.payload::<u8>() as *const u8,
+            b.payload::<u8>() as *const u8,
+        )
+    };
+    match ordering {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
     }
 }
 

@@ -710,57 +710,77 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 }
                 // Comparison: extract scalars, compare, materialize a Bool.
                 BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                    // Decide scalar vs structural comparison by the operand type
-                    // (§5.5). `==`/`!=` on a composite GC type (record/tuple/
-                    // enum/collection) lower to a structural-equality runtime
-                    // call; everything else (Int/Bool/Char/Text, and all
-                    // ordering ops `<` `>` `<=` `>=` which are Int-only) uses
-                    // the native scalar compare.
-                    let operand_ty = expr_static_type(lhs);
-                    let composite = matches!(
-                        b.db.data(b.db.follow(operand_ty)),
-                        praxis_types::data::TypeData::Record { .. }
-                            | praxis_types::data::TypeData::Tuple(_)
-                            | praxis_types::data::TypeData::Enum { .. }
-                            | praxis_types::data::TypeData::Collection { .. }
-                    );
-                    if composite && matches!(op, BinOp::Eq | BinOp::Neq) {
-                        // Structural equality via praxis_struct_eq(ctx, a, b) -> 0/1.
-                        // `!=` is `!(==)`.
-                        let eq_bool = lower_struct_eq(b, l, r);
-                        if *op == BinOp::Neq {
-                            lower_logical_not(b, eq_bool)
-                        } else {
-                            eq_bool
+                    // How the operands are compared follows their type, and the
+                    // choice is the whole of P0-12's compiler half. `==`/`!=`
+                    // on a composite GC value (record/tuple/enum/collection) is
+                    // a structural-equality runtime call; a `Text` of either
+                    // form goes through the descriptor (its payload is a
+                    // pointer-and-length structure, not a number); every other
+                    // scalar is compared natively *at its own width* — a `Char`
+                    // payload is four bytes and a `Bool` one, so the old
+                    // uniform `Int` extraction read past both.
+                    let operand_ty = b.db.follow(expr_static_type(lhs));
+                    let compare_as = compare_kind(b, operand_ty);
+                    let is_equality = matches!(op, BinOp::Eq | BinOp::Neq);
+                    match compare_as {
+                        CompareVia::Descriptor if is_equality => {
+                            // Structural equality via praxis_struct_eq(ctx, a, b) -> 0/1,
+                            // which dispatches to the descriptor's `equals`.
+                            // `!=` is `!(==)`.
+                            let eq_bool = lower_struct_eq(b, l, r);
+                            if *op == BinOp::Neq {
+                                lower_logical_not(b, eq_bool)
+                            } else {
+                                eq_bool
+                            }
                         }
-                    } else {
-                        let operand_ty = expr_static_type(lhs);
-                        let is_float = matches!(
-                            b.db.data(b.db.follow(operand_ty)),
-                            praxis_types::data::TypeData::Scalar(praxis_types::ScalarType::Float)
-                        );
-                        let bool_scalar = b.alloc_scalar(ScalarKind::Bool);
-                        if is_float {
+                        // Ordering through the descriptor's `compare`, as
+                        // `praxis_value_cmp(a, b) <op> 0`. `Text` is the type
+                        // this exists for; a composite reaching here is a
+                        // compiler bug (the type checker rejects it with
+                        // `Y006`) and faults rather than reinterpreting a
+                        // payload.
+                        CompareVia::Descriptor => {
+                            let ord = lower_value_cmp(b, l, r);
+                            let zero = b.alloc_scalar(ScalarKind::Int);
+                            b.push(Inst::ConstInt {
+                                dst: zero,
+                                value: 0,
+                            });
+                            let bool_scalar = b.alloc_scalar(ScalarKind::Bool);
+                            b.push(Inst::IntCmp {
+                                op: binop_to_cmp(*op),
+                                dst: bool_scalar,
+                                lhs: ord,
+                                rhs: zero,
+                            });
+                            lower_materialize_bool(b, bool_scalar, espan)
+                        }
+                        CompareVia::Float => {
                             // IEEE-754 comparison via FloatCmp (NaN-aware).
                             let lf = lower_extract_float(b, l);
                             let rf = lower_extract_float(b, r);
+                            let bool_scalar = b.alloc_scalar(ScalarKind::Bool);
                             b.push(Inst::FloatCmp {
                                 op: binop_to_cmp(*op),
                                 dst: bool_scalar,
                                 lhs: lf,
                                 rhs: rf,
                             });
-                        } else {
-                            let li = lower_extract_int(b, l);
-                            let ri = lower_extract_int(b, r);
+                            lower_materialize_bool(b, bool_scalar, espan)
+                        }
+                        CompareVia::Scalar(kind) => {
+                            let li = lower_extract_scalar(b, l, kind);
+                            let ri = lower_extract_scalar(b, r, kind);
+                            let bool_scalar = b.alloc_scalar(ScalarKind::Bool);
                             b.push(Inst::IntCmp {
                                 op: binop_to_cmp(*op),
                                 dst: bool_scalar,
                                 lhs: li,
                                 rhs: ri,
                             });
+                            lower_materialize_bool(b, bool_scalar, espan)
                         }
-                        lower_materialize_bool(b, bool_scalar, espan)
                     }
                 }
                 // LogicalOr is handled above (before eager rhs lowering).
@@ -1236,15 +1256,58 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
     }
 }
 
-/// Extract an `Int` payload into a scalar local.
-fn lower_extract_int(b: &mut Builder<'_>, src: LocalId) -> LocalId {
-    let dst = b.alloc_scalar(ScalarKind::Int);
+/// How a comparison of two values of a given type is carried out (ADR-045).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CompareVia {
+    /// Natively, on the scalar channel, reading the payload at this width.
+    Scalar(ScalarKind),
+    /// Natively, as IEEE-754 floats (NaN unordered, §4.12).
+    Float,
+    /// Through the value's descriptor — `praxis_struct_eq` for `==`/`!=`,
+    /// `praxis_value_cmp` for an ordering. The answer for every type whose
+    /// payload is not a machine number: composites, `Text`, and anything whose
+    /// static type is still unresolved.
+    Descriptor,
+}
+
+/// Which comparison lowering `ty`'s values take.
+///
+/// The unresolved and unexpected cases answer `Descriptor` rather than
+/// `Scalar(Int)` deliberately: an eight-byte payload load was the fallback for
+/// everything that was not a `Float`, and it is exactly how `Text` came to be
+/// compared by its `TextPayload` discriminant — under which *every* pair of
+/// owned strings was equal (P0-12). Dispatching through the descriptor is wrong
+/// for no type: at worst it faults.
+fn compare_kind(b: &Builder<'_>, ty: praxis_types::Type) -> CompareVia {
+    use praxis_types::data::TypeData;
+    use praxis_types::ScalarType;
+    match b.db.data(ty) {
+        TypeData::Scalar(ScalarType::Float) => CompareVia::Float,
+        TypeData::Scalar(ScalarType::Bool) => CompareVia::Scalar(ScalarKind::Bool),
+        TypeData::Scalar(ScalarType::Char) => CompareVia::Scalar(ScalarKind::Char),
+        TypeData::Scalar(ScalarType::Int | ScalarType::UInt) => CompareVia::Scalar(ScalarKind::Int),
+        // `Byte` has no `praxis_byte_load`; the scalar channel would read it as
+        // an `Int`, eight bytes from a one-byte payload. The descriptor reads
+        // it at its own width.
+        TypeData::Scalar(ScalarType::Byte) => CompareVia::Descriptor,
+        _ => CompareVia::Descriptor,
+    }
+}
+
+/// Extract a payload into a scalar local at the width `kind` names.
+fn lower_extract_scalar(b: &mut Builder<'_>, src: LocalId, kind: ScalarKind) -> LocalId {
+    let dst = b.alloc_scalar(kind);
     b.push(Inst::ExtractScalar {
         dst,
         src,
-        scalar: ScalarKind::Int,
+        scalar: kind,
     });
     dst
+}
+
+/// Extract an `Int` payload into a scalar local.
+fn lower_extract_int(b: &mut Builder<'_>, src: LocalId) -> LocalId {
+    lower_extract_scalar(b, src, ScalarKind::Int)
 }
 
 /// Extract a `Float` payload into a scalar local (carried as f64 bits, §4.12).
@@ -1357,6 +1420,19 @@ fn lower_struct_eq(b: &mut Builder<'_>, lhs: LocalId, rhs: LocalId) -> LocalId {
         debug: DebugSlots::unannotated(),
     });
     lower_materialize_bool(b, bool_scalar, None)
+}
+
+/// Lower an ordering of two GC values through their descriptor (ADR-045),
+/// returning the `Scalar(Int)` local holding `-1`/`0`/`1`.
+///
+/// `praxis_value_cmp` faults when the operands' runtime types disagree or the
+/// type has no ordering, so a fault check follows. It allocates nothing, so the
+/// call is not a safepoint and the instruction carries no root set.
+fn lower_value_cmp(b: &mut Builder<'_>, lhs: LocalId, rhs: LocalId) -> LocalId {
+    let dst = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ValueCmp { dst, lhs, rhs });
+    b.check_fault();
+    dst
 }
 
 /// Lower short-circuiting logical or: `lhs || rhs`.

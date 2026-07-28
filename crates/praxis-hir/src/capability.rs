@@ -68,46 +68,45 @@ pub fn supports_hash(db: &TypeDb, t: Type) -> bool {
     supports_eq(db, t)
 }
 
-/// True iff values of type `t` are orderable (§5.4 `SupportsOrd`): usable in a
-/// heap, sortable, or comparable with `<`/`>`/`<=`/`>=`.
+/// True iff values of type `t` are orderable (§5.4 `SupportsOrd`, ADR-045):
+/// usable in a heap, sortable, or comparable with `<`/`>`/`<=`/`>=`.
 ///
-/// Recursive over the type's structure. Scalars `Int`/`UInt`/`Float`/`Char`/
-/// `Text` are orderable; `Bool`/`Unit` are not (no total order is defined). A
-/// tuple is orderable iff every element is (lexicographic order). A collection
-/// is orderable iff its element type is. Functions are never orderable.
-/// `Bool` and `Unit` being non-orderable is a deliberate choice: the spec (§5.4)
-/// lists `SupportsOrd` as a capability whose resolution is compiler-defined, and
-/// ordering booleans is almost always a bug.
+/// The orderable types are the scalars whose descriptors declare a `compare`
+/// callback: `Int`/`UInt`/`Byte`/`Float`/`Char`/`Text`. **Nothing else is** —
+/// not tuples, not collections, not records or enums, not functions.
+///
+/// This used to answer *yes* for a tuple of orderable elements, and for a
+/// collection or record of them, on the reasonable ground that a lexicographic
+/// product is conventional. But no such ordering was ever lowered: MIR had one
+/// integer compare, so `(1, 2) < (1, 3)` compiled into a comparison of two
+/// payload words that happen to be schema pointers (P0-12). ADR-045 chose
+/// rejection over a semantics nobody had picked; a composite ordering is a
+/// language decision plus a recursive `praxis_value_cmp`, and both belong to
+/// whichever milestone wants sorting by key.
+///
+/// `Bool` and `Unit` stay non-orderable for the older reason: the spec (§5.4)
+/// leaves `SupportsOrd` compiler-defined, and ordering booleans is almost
+/// always a mistyped `&&`.
 #[must_use]
 pub fn supports_ord(db: &TypeDb, t: Type) -> bool {
     use praxis_stdlib::type_pattern::ScalarType;
     match db.data(db.follow(t)) {
-        TypeData::Scalar(ScalarType::Int)
-        | TypeData::Scalar(ScalarType::UInt)
-        | TypeData::Scalar(ScalarType::Float)
-        | TypeData::Scalar(ScalarType::Char)
-        | TypeData::Scalar(ScalarType::Text) => true,
+        TypeData::Scalar(
+            ScalarType::Int
+            | ScalarType::UInt
+            | ScalarType::Byte
+            | ScalarType::Float
+            | ScalarType::Char
+            | ScalarType::Text,
+        ) => true,
         // Bool and Unit have no defined total order.
-        TypeData::Scalar(ScalarType::Bool | ScalarType::Byte)
-        | TypeData::Unit
-        | TypeData::Scalar(ScalarType::Never) => false,
-        // A tuple is orderable iff every element is (lexicographic).
-        TypeData::Tuple(els) => els.iter().all(|e| supports_ord(db, *e)),
-        // Functions are never orderable.
-        TypeData::Func { .. } => false,
-        // A collection is orderable iff its element type is.
-        TypeData::Collection { args, .. } => args.iter().all(|a| supports_ord(db, *a)),
-        // Records and enums: orderable iff every field/variant payload type is.
-        TypeData::Record { def } => db
-            .record_def(*def)
-            .fields
-            .iter()
-            .all(|f| supports_ord(db, f.ty)),
-        TypeData::Enum { def } => db.enum_def(*def).variants.iter().all(|v| {
-            v.payload
-                .as_ref()
-                .map_or(true, |ts| ts.iter().all(|t| supports_ord(db, *t)))
-        }),
+        TypeData::Scalar(ScalarType::Bool | ScalarType::Never) | TypeData::Unit => false,
+        // Composites have no ordering lowering (ADR-045 decision 1).
+        TypeData::Tuple(_)
+        | TypeData::Func { .. }
+        | TypeData::Collection { .. }
+        | TypeData::Record { .. }
+        | TypeData::Enum { .. } => false,
         // An unresolved var is optimistically orderable.
         TypeData::Var(_) => true,
     }
@@ -283,16 +282,30 @@ mod tests {
         assert!(!supports_ord(&db, func));
     }
 
+    /// **Inverted** by ADR-045, and this is the assertion that used to say the
+    /// opposite: `tuple_is_orderable_iff_elements_are`, which was true of the
+    /// capability check and of nothing else in the compiler. A tuple of
+    /// orderable elements has no ordering *lowering*, so admitting it meant
+    /// `(1, 2) < (1, 3)` compiled into a comparison of two schema pointers
+    /// (P0-12). Composite ordering returns as a language decision plus a
+    /// recursive runtime compare, not as an optimistic `all`.
     #[test]
-    fn tuple_is_orderable_iff_elements_are() {
+    fn composites_are_not_orderable_even_when_their_elements_are() {
         let mut db = TypeDb::new();
         let (a, b) = (db.int(), db.int());
         let tup = db.tuple(vec![a, b]);
-        assert!(supports_ord(&db, tup));
-        // A tuple containing a function is not orderable.
-        let (p, r, i) = (db.int(), db.int(), db.int());
-        let func = db.func(vec![p], r);
-        let mixed = db.tuple(vec![i, func]);
-        assert!(!supports_ord(&db, mixed));
+        assert!(!supports_ord(&db, tup));
+
+        let el = db.int();
+        let vec_of_int = db.collection(praxis_types::CollectionCtor::Vec, vec![el]);
+        assert!(!supports_ord(&db, vec_of_int));
+
+        let (fx, fy) = (db.int(), db.int());
+        let rec = db.register_record("P", vec![("x".into(), fx), ("y".into(), fy)]);
+        assert!(!supports_ord(&db, rec));
+
+        // Equality is unchanged: it *does* recurse, and it has a lowering.
+        assert!(supports_eq(&db, tup));
+        assert!(supports_eq(&db, rec));
     }
 }

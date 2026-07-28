@@ -877,7 +877,6 @@ fn integer_literal_overflow_is_diagnosed() {
 }
 
 #[test]
-#[ignore = "known bug: ordering operators do not check orderability"]
 fn ordering_rejects_bool_operands() {
     let src = "fn bad() -> Bool { true < false }";
     assert!(
@@ -887,7 +886,6 @@ fn ordering_rejects_bool_operands() {
 }
 
 #[test]
-#[ignore = "known bug: ordering operators do not check function orderability"]
 fn ordering_rejects_function_operands() {
     let src = "fn id(x: Int) -> Int { x }\nfn bad() -> Bool { id < id }";
     assert!(
@@ -897,7 +895,6 @@ fn ordering_rejects_function_operands() {
 }
 
 #[test]
-#[ignore = "known bug: ordering operators do not check composite orderability"]
 fn ordering_rejects_composites_without_a_matching_runtime_lowering() {
     let src = "fn bad() -> Bool { (1, 2) < (1, 3) }";
     assert!(
@@ -1030,20 +1027,27 @@ fn heap_element_must_be_orderable() {
     );
 }
 
+/// **Inverted** by ADR-045, and rewritten rather than un-ignored. This asserted
+/// that a `MinHeap[Text]` must be a *type error*, because `SupportsOrd` admitted
+/// `Text` while `HeapEntry::cmp` read every payload as an `i64` — so accepting
+/// the program produced pointer ordering. The runtime half now exists
+/// (`TEXT.compare`, dispatched by `HeapEntry::cmp`), so the two agree and the
+/// program is legitimately accepted.
+///
+/// What it pins now is that agreement: a type the capability admits into a heap
+/// is one the runtime can actually order. `a_text_heap_pops_in_lexicographic_order`
+/// (praxis-runtime `heaps.rs`) is the other half — that the order is the right
+/// one.
 #[test]
-#[ignore = "known bug: heap typing admits Text but runtime compares its payload as i64"]
-fn heap_element_requires_a_runtime_compatible_ordering() {
-    // Text is marked SupportsOrd, but HeapEntry::cmp does not dispatch through a
-    // descriptor comparison callback. Until that exists, accepting Text here
-    // produces pointer/layout ordering rather than lexicographic ordering.
+fn heap_element_orderability_agrees_with_the_runtime() {
     let src = "fn main() -> Unit {\n\
                  let heap = MinHeap()\n\
                  heap.push(\"z\")\n\
                  heap.push(\"a\")\n\
                }";
     assert!(
-        has_type_error_with_lower(src),
-        "heap element types need an ordering implemented by the runtime"
+        !has_type_error_with_lower(src),
+        "Text is orderable in both halves now: the capability and the descriptor"
     );
 }
 

@@ -264,6 +264,24 @@ pub enum Inst {
         roots: RootSlots,
         debug: DebugSlots,
     },
+    /// Order two GC values through their descriptor's `compare` callback,
+    /// yielding `-1`/`0`/`1` in a `Scalar(Int)` local (ADR-045). Lowers to the
+    /// `praxis_value_cmp` runtime call; the ordering the source asked for is an
+    /// [`IntCmp`](Self::IntCmp) of that result against zero.
+    ///
+    /// Used where the operand type has no ordering the scalar channel can
+    /// express — `Text` today, whose payload is a pointer-and-length structure
+    /// that an `i64` load turned into an address comparison (P0-12).
+    ///
+    /// **Not a GC safepoint**: `praxis_value_cmp` is `Effect::Faults`, so it
+    /// allocates nothing and carries no [`RootSlots`]. It *can* fault (a
+    /// mismatch between the operands' runtime types), so a
+    /// [`CheckFault`](Self::CheckFault) follows.
+    ValueCmp {
+        dst: LocalId,
+        lhs: LocalId,
+        rhs: LocalId,
+    },
     /// Call a function. Arguments and result are `Gc` locals. A safepoint +
     /// fault check follow (calls may allocate and may fault).
     Call {
