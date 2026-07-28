@@ -13,7 +13,7 @@ Update this file at the end of every stage.
 |---|---|---|
 | S1 — Runtime identity registry | **done** | `055e894` |
 | S2 — Independent hardening | **done** | `5629736`, `70ea4be` |
-| S3 — ABI manifest, MIR representation, fault values | **part done** — P0-13, P0-04, P0-08 closed; P0-02 and P0-03 remain | `8a30db1`, `7075017`, `91b64c1` |
+| S3 — ABI manifest, MIR representation, fault values | **done** | `8a30db1`, `7075017`, `91b64c1`, `1f7eca7` |
 | S4 — Object layout and heap provenance | **done** | `dfe42b6` |
 | S5 — Root-set completeness, native RAII roots | not started | |
 | S6 … S21 | not started | |
@@ -22,18 +22,21 @@ Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10. It fell out of S1.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **992 passed, 0 failed, 137 ignored**. `just ci` is green.
+Now: **999 passed, 0 failed, 134 ignored**. `just ci` is green.
 
-Twelve of the audit's ignored regressions are un-ignored and passing. The three
-added this session:
+Fifteen of the audit's ignored regressions are un-ignored and passing. The three
+added this session (S3's remaining exit criteria):
 
 | Test | File |
 |---|---|
-| `overaligned_payload_accessor_matches_initialized_address` | `praxis-runtime/src/heap.rs` |
-| `foreign_heap_root_cannot_delay_reclamation` | `praxis-runtime/src/heap.rs` |
-| `fault_epilogue_returns_the_valid_unit_sentinel` | `praxis-codegen-cranelift/tests/adversarial_audit.rs` |
+| `closure_capture_indices_never_flow_through_gc_locals` | `praxis-mir/src/build.rs` |
+| `call_result_locals_retain_their_inferred_static_types` | `praxis-mir/src/build.rs` |
+| `pipeline_runtime_call_destinations_retain_vec_and_unit_types` | `praxis-mir/src/build.rs` |
 
-(Earlier nine: `builtin_type_ids_are_globally_unique`,
+(Earlier three: `overaligned_payload_accessor_matches_initialized_address`,
+`foreign_heap_root_cannot_delay_reclamation`,
+`fault_epilogue_returns_the_valid_unit_sentinel`. Earlier nine:
+`builtin_type_ids_are_globally_unique`,
 `regression_unicode_identifier_may_start_with_a_unicode_scalar`,
 `regression_in_is_classified_consistently_with_the_keyword_table`,
 `regression_postfix_forms_may_be_interleaved`,
@@ -71,6 +74,16 @@ for what this means for a stage that adds a symbol (it is now two lines).
 
 **F6 — GcHeader repack: landed whole.** See ADR-039 and §3.
 
+**F16 — MirType and raw-word elimination: landed, minus `TupleShape`.**
+`MirType::{Known, Opaque}` is `Local.ty`, `AllocKind::Tuple.ty` and
+`AllocKind::Collection.args`; `Inst::LoadCapture` carries the capture index as
+an immediate; `alloc_empty_vec` is an ordinary `AllocKind::Collection`. **Not
+done:** `TupleShape` (the validated `Box<[Type]>` that makes arity < 2
+unrepresentable) — the fused `enumerate`/`zip` tuples have no real type until
+MIR-05 supplies one in S21, so they are `MirType::Opaque` and the backend keeps
+its degenerate empty-schema path. `MirType::expect_known`/`MirTypeError` are
+also not written: their only consumer is F17's verifier (S9).
+
 No other foundation has been started. F7 (the composite root set) is next on the
 critical path and is what S5 is mostly made of.
 
@@ -80,6 +93,41 @@ Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
 ### From this session
+
+**A MIR local's `ty` is a `MirType`, not a `Type`.** `MirType::known() ->
+Option<Type>` is the only reader, so every consumer decides what to do with the
+absence. `Function::new_local`, `Builder::alloc_gc`/`alloc_temp`,
+`AllocKind::Tuple.ty` and `AllocKind::Collection.args` all take it. A site that
+has no type says `MirType::Opaque`; there is no longer any way to write
+`Type(0)` and mean "unknown".
+
+**Most call and allocation destinations now carry their real type.** The
+`TypedExpr` being lowered already had one at far more sites than the plan
+assumed — call/method-call/indirect-call results, tuple/record/enum
+allocations, match results, field reads, `for` items and bindings, the parser
+input and result, the closure-self param, and the pipeline result Vec and push
+Units. What is still `Opaque`: pipeline accumulators, fused-loop items, the
+fused `enumerate`/`zip` tuples, the `VarCell` slot, and every `Scalar` slot.
+
+**`Opaque` resolves to nothing in the backend, not to something wrong.**
+`collection_element_descriptor_for(db, args, i)` returns null (which every
+`praxis_*_new` wrapper already reads as "unknown element type"), `tuple_schema_for`
+returns the empty schema, and `build_debug_local_metas` emits a null descriptor
+plus `praxis_runtime::debug::NO_STATIC_TYPE` (`u32::MAX`) — the debugger's
+`type_str` already omits both. `descriptor_for_type` still takes a
+`praxis_types::Type` and keeps its `_ => INT` fallback on the `Known` path (H9);
+P0-11 in S7 makes that exhaustive.
+
+**Closure captures load by immediate.** `Inst::LoadCapture { dst, closure,
+index: u32 }` replaces `ConstInt` + `MoveGc` + `Call(ClosureCapture)`, and there
+is no `check_fault` after it (the wrapper is `Effect::Pure`). Adding an
+instruction touches four exhaustive matches: `ir.rs`, `liveness.rs` defs and
+uses, and `lower_inst`. It is deliberately **not** in `safepoint_roots_slot`.
+
+**`MoveGc` is `Gc` → `Gc`.** Documented, and true at every site — but not yet
+*enforced*: the check is F17's verifier (S9). The gate today is
+`closure_capture_indices_never_flow_through_gc_locals`, which now lowers a
+closure program and a pipeline program.
 
 **`GcHeader` is 24 bytes and its fields are private.** `descriptor`, `size`,
 `payload_offset`, `mark`, `_pad`, `heap_id`. Use the accessors; construct with
@@ -187,30 +235,7 @@ re-deriving it.
 
 ## 4. Where to start
 
-**Finish S3: P0-02 and P0-03 are what remain.** Both need F16 (`MirType` +
-raw-word elimination, XL, tier 2). They land the *representation only*:
-
-- Replace `Type(0)` with `MirType::{Known, Opaque}`. Roughly 35 of the ~40
-  sites have no correct type available until HIR-01 carries inferred per-use
-  types (S15), so mark those `Opaque` **explicitly** — that is the point of the
-  representation, not a shortcut.
-- The MIR verifier's "no `Opaque` in a descriptor-producing position" rule
-  stays **off** until S15 (H10). Turning it on here refuses to compile
-  currently-working programs.
-- H9: `descriptor_for_type` takes `praxis_types::Type`, not `MirType`, so P0-02
-  lands first with `Opaque => emit no descriptor` while the `Known` path keeps
-  its `_ => INT` fallback. P0-11 (S7) makes the `Known` path exhaustive.
-- P0-03 is the same foundation's other half: get raw non-pointer words
-  (`LoadCapture` indices, `TupleShape`) out of GC-rootable slots.
-
-Exit criteria still open for S3:
-`closure_capture_indices_never_flow_through_gc_locals`,
-`call_result_locals_retain_their_inferred_static_types`,
-`pipeline_runtime_call_destinations_retain_vec_and_unit_types` (all in
-`praxis-mir/src/build.rs`). The two tuple-allocation tests in the same file are
-**not** S3 criteria — they need MIR-05's real tuple type in S21.
-
-Then **S5** (weight 36, hard barrier before S6): F7's composite `RuntimeRoots`,
+**S5** (weight 36, hard barrier before S6): F7's composite `RuntimeRoots`,
 P0-06 + P0-07 in one commit (H1 — deleting the null-`roots` early return before
 the native arm exists converts a growth bug into use-after-free), DBG-04, and
 the ABI bump to 9.
