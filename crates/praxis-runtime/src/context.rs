@@ -239,8 +239,18 @@ pub struct DebugLocal {
     /// by the backend at push time from the MIR local's `Type`. Null only on
     /// frames constructed before M10-WS2 (the M5 unit tests).
     pub descriptor: *const crate::TypeDescriptor,
-    /// The current value of the local (updated by the spill at safepoints).
-    pub value: GcRef,
+    /// The current value of the local, or `None` for a slot no value has been
+    /// written into yet (updated by the debug spill at safepoints).
+    ///
+    /// `GcRef` is `#[repr(transparent)]` over a `NonNull`, so `None` is the
+    /// all-zero niche and this field is still one machine word: generated code
+    /// writes a raw pointer and gets `Some`, and the zeroed slot a fresh frame
+    /// starts with *is* `None`. The predecessor was a `GcRef` holding
+    /// `NonNull::dangling()`, compared by pointer identity to decide whether a
+    /// slot held anything — which is to say, an invalid `GcRef` constructed in
+    /// Rust (UB) and a sentinel a real allocation could in principle collide
+    /// with (F18).
+    pub value: Option<GcRef>,
     /// The full static `Type` id (`praxis_types::Type(u32)` handle, M10-WS1b),
     /// so the crash debugger can reconstruct the local's *exact* type —
     /// including collection element types (`Vec[Int]`, `Map[Text, Int]`) and

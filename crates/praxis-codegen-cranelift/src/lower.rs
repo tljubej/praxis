@@ -18,8 +18,8 @@ use cranelift::prelude::*;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
 use praxis_mir::{
-    AllocKind, CallTarget, CmpOp, FloatBinOp, Function as MirFunction, Inst, IntBinOp, LocalId,
-    LocalKind, MirType, ScalarKind, Terminator,
+    AllocKind, CallTarget, CmpOp, DebugSlots, FloatBinOp, Function as MirFunction, Inst, IntBinOp,
+    LocalId, LocalKind, MirType, RootSlots, ScalarKind, Terminator,
 };
 use praxis_runtime::{DebugLocalMeta, RuntimeContext, ShadowFrame, MAX_SHADOW_SLOTS};
 use praxis_stdlib::abi::{AbiKind, AbiRet, RuntimeSymbol};
@@ -288,14 +288,18 @@ pub(crate) fn lower_function<M: Module>(
 
 /// The spill context handed to every instruction/terminator lowering: the
 /// Variables holding the current shadow-frame and debug-frame pointers, and the
-/// Gc-local → slot-index map. At safepoints the backend stores each live root's
-/// value into its shadow-stack slot (ADR-019) **and** its debug-local `value`
-/// field (§9.3, M10-WS2), so a crash snapshot reflects live state.
+/// Gc-local → slot-index map.
+///
+/// **Two spills, not one** (MIR-16). There used to be a single `emit_spill`
+/// writing one root list into both frames, which is why the two frames could
+/// not disagree — and why making the GC root set exact would have silently
+/// emptied the debugger's view. [`SpillCtx::spill_roots`] serves the collector
+/// and takes the exact [`RootSlots`]; [`SpillCtx::spill_debug`] serves the
+/// crash debugger and takes the over-approximate [`DebugSlots`].
 struct SpillCtx<'a> {
     frame_var: Variable,
-    /// The debug frame pointer Variable (M10-WS2). The spill mirrors each root
-    /// write into the corresponding `DebugLocal.value` so the crash debugger
-    /// sees fresh values without a separate mechanism.
+    /// The debug frame pointer Variable (M10-WS2). Written only by
+    /// [`SpillCtx::spill_debug`].
     debug_frame_var: Variable,
     slot_of: &'a HashMap<LocalId, u32>,
 }
@@ -309,52 +313,104 @@ const DEBUG_VALUE_OFFSET: i64 = core::mem::offset_of!(praxis_runtime::DebugLocal
 const DEBUG_LOCAL_SIZE: i64 = core::mem::size_of::<praxis_runtime::DebugLocal>() as i64;
 
 impl SpillCtx<'_> {
-    /// Emit stores for every live root in `roots` into the shadow frame and the
-    /// debug frame, just before a safepoint. Each root's current Cranelift value
-    /// is written to `frame_ptr + SLOTS_OFFSET + slot_index*8` (§12.3) and to
-    /// `debug_frame.locals[slot_index].value` (§9.3, M10-WS2).
-    fn emit_spill(&self, builder: &mut FunctionBuilder, roots: &[LocalId], vars: &[Variable]) {
-        if roots.is_empty() {
+    /// The GC spill, emitted just before a safepoint (§12.3, ADR-019): write
+    /// each live root's current value into `frame_ptr + SLOTS_OFFSET +
+    /// slot_index*8`, and write **null** into every slot the liveness pass
+    /// marked dead.
+    ///
+    /// The null stores are MIR-01. A slot written at one safepoint and not live
+    /// at the next used to keep its old value forever: the collector reads the
+    /// whole frame, so a dead slot kept its object reachable for the rest of the
+    /// call — and, once RT-01 made swept storage reusable, a slot could name a
+    /// live object of an entirely different type.
+    fn spill_roots(&self, builder: &mut FunctionBuilder, roots: &RootSlots, vars: &[Variable]) {
+        if roots.live().is_empty() && roots.dead().is_empty() {
             return;
         }
         let frame_ptr = builder.use_var(self.frame_var);
-        let debug_frame_ptr = builder.use_var(self.debug_frame_var);
-        for &local in roots {
+        let mut flags = MemFlags::trusted();
+        flags.set_notrap();
+        for &local in roots.live() {
             let Some(&slot) = self.slot_of.get(&local) else {
-                continue; // a Scalar local slipped into live_roots; it has no slot.
+                continue; // a Scalar local in the root set; it has no slot.
             };
             let val = builder.use_var(vars[local.0 as usize]);
-            // --- shadow-stack slot (ADR-019) ---
-            let off = SLOTS_OFFSET + (slot as i64) * 8;
             // `iadd_imm` is deprecated in Cranelift 0.134 in favor of the
             // sign/zero-extended variants; the slot offset is always a small
             // positive immediate so the distinction is immaterial.
             #[allow(deprecated)]
-            let slot_addr = builder.ins().iadd_imm_s(frame_ptr, off);
+            let slot_addr = builder
+                .ins()
+                .iadd_imm_s(frame_ptr, SLOTS_OFFSET + (slot as i64) * 8);
             // Store into the frame slot; these accesses never trap (the frame is
             // always live and the offset is in-bounds by construction).
-            let mut flags = MemFlags::trusted();
-            flags.set_notrap();
             builder.ins().store(flags, val, slot_addr, 0);
+        }
+        if roots.dead().is_empty() {
+            return;
+        }
+        let null = builder.ins().iconst(GC, 0);
+        for &local in roots.dead() {
+            let Some(&slot) = self.slot_of.get(&local) else {
+                continue;
+            };
+            #[allow(deprecated)]
+            let slot_addr = builder
+                .ins()
+                .iadd_imm_s(frame_ptr, SLOTS_OFFSET + (slot as i64) * 8);
+            builder.ins().store(flags, null, slot_addr, 0);
+        }
+    }
 
-            // --- debug-local value (§9.3, M10-WS2) ---
-            // debug_frame.locals is a *mut DebugLocal; slot i's DebugLocal is at
-            // *(debug_frame.locals) + i*size, and `value` is at +DEBUG_VALUE_OFFSET
-            // within it. Load the locals base pointer, then compute the address.
-            let locals_base_flags = MemFlags::trusted();
-            let locals_base = builder.ins().load(
-                GC,
-                locals_base_flags,
-                debug_frame_ptr,
-                DEBUG_LOCALS_OFFSET as i32,
-            );
+    /// The debugger spill (§9.3, M10-WS2): write each visible local's current
+    /// value into `debug_frame.locals[slot_index].value`.
+    ///
+    /// Separate from [`SpillCtx::spill_roots`] and driven by a separate,
+    /// deliberately over-approximate set. Nothing here is cleared: the slot's
+    /// `Option<GcRef>` starts `None` and a value that has been produced stays
+    /// renderable, which is what `locals` in the crash REPL is for.
+    fn spill_debug(&self, builder: &mut FunctionBuilder, debug: &DebugSlots, vars: &[Variable]) {
+        if debug.visible().is_empty() {
+            return;
+        }
+        let debug_frame_ptr = builder.use_var(self.debug_frame_var);
+        // debug_frame.locals is a *mut DebugLocal; slot i's DebugLocal is at
+        // *(debug_frame.locals) + i*size, and `value` is at +DEBUG_VALUE_OFFSET
+        // within it. Load the locals base pointer once, then index it.
+        let locals_base = builder.ins().load(
+            GC,
+            MemFlags::trusted(),
+            debug_frame_ptr,
+            DEBUG_LOCALS_OFFSET as i32,
+        );
+        let mut flags = MemFlags::trusted();
+        flags.set_notrap();
+        for &local in debug.visible() {
+            let Some(&slot) = self.slot_of.get(&local) else {
+                continue;
+            };
+            let val = builder.use_var(vars[local.0 as usize]);
             let local_off = (slot as i64) * DEBUG_LOCAL_SIZE + DEBUG_VALUE_OFFSET;
             #[allow(deprecated)]
             let value_addr = builder.ins().iadd_imm_s(locals_base, local_off);
-            let mut vflags = MemFlags::trusted();
-            vflags.set_notrap();
-            builder.ins().store(vflags, val, value_addr, 0);
+            // A non-null `GcRef` written into an `Option<GcRef>` slot *is*
+            // `Some(v)`: the niche makes the two the same word (F18). The
+            // all-zero word the frame starts with is `None`.
+            builder.ins().store(flags, val, value_addr, 0);
         }
+    }
+
+    /// The pair emitted at a GC safepoint: the collector's exact root set and
+    /// the debugger's over-approximate view of the same point.
+    fn spill_safepoint(
+        &self,
+        builder: &mut FunctionBuilder,
+        roots: &RootSlots,
+        debug: &DebugSlots,
+        vars: &[Variable],
+    ) {
+        self.spill_roots(builder, roots, vars);
+        self.spill_debug(builder, debug, vars);
     }
 }
 
@@ -411,12 +467,13 @@ fn lower_inst<M: Module>(
         Inst::Alloc {
             dst,
             alloc,
-            live_roots,
+            roots,
+            debug,
         } => {
             // Spill live Gc roots into the shadow frame *before* the allocating
             // call: the wrapper may trigger a collection (§12.4), and the
             // collector walks the frame (ADR-019).
-            spill.emit_spill(builder, live_roots, vars);
+            spill.spill_safepoint(builder, roots, debug, vars);
             match alloc {
                 AllocKind::Int { value } => {
                     let arg = builder.use_var(vars[value.0 as usize]);
@@ -782,10 +839,11 @@ fn lower_inst<M: Module>(
             dst,
             src,
             scalar,
-            live_roots,
+            roots,
+            debug,
         } => {
             // Materialize re-boxes a scalar → it allocates → safepoint.
-            spill.emit_spill(builder, live_roots, vars);
+            spill.spill_safepoint(builder, roots, debug, vars);
             // A scalar payload re-boxed: Int → praxis_alloc_int, Bool → alloc_bool,
             // Char → praxis_alloc_char.
             let src_val = builder.use_var(vars[src.0 as usize]);
@@ -996,11 +1054,12 @@ fn lower_inst<M: Module>(
             dst,
             callee,
             args,
-            live_roots,
+            roots,
+            debug,
         } => {
             // A call may allocate (and M4 user functions allocate freely) →
             // safepoint. Spill the live Gc roots before the call.
-            spill.emit_spill(builder, live_roots, vars);
+            spill.spill_safepoint(builder, roots, debug, vars);
             let arg_vals: Vec<Value> = args
                 .iter()
                 .map(|a| builder.use_var(vars[a.0 as usize]))
@@ -1027,7 +1086,8 @@ fn lower_inst<M: Module>(
             dst,
             callee,
             args,
-            live_roots,
+            roots,
+            debug,
         } => {
             // M7, §4.10 (Approach B). An indirect call through a closure value.
             // Spill live Gc roots (safepoint — the call may allocate/GC), read
@@ -1036,7 +1096,7 @@ fn lower_inst<M: Module>(
             // `fn(ctx, closure, args...) -> i64`. The closure is passed as the
             // hidden first explicit arg; the synthetic function loads its
             // captures at entry.
-            spill.emit_spill(builder, live_roots, vars);
+            spill.spill_safepoint(builder, roots, debug, vars);
             let callee_val = builder.use_var(vars[callee.0 as usize]);
             let arg_vals: Vec<Value> = args
                 .iter()
@@ -1071,11 +1131,12 @@ fn lower_inst<M: Module>(
             dst,
             lhs,
             rhs,
-            live_roots,
+            roots,
+            debug,
         } => {
             // Structural equality via praxis_struct_eq(ctx, a, b) -> i64 (0/1).
             // The call may trigger GC → spill live Gc roots first (safepoint).
-            spill.emit_spill(builder, live_roots, vars);
+            spill.spill_safepoint(builder, roots, debug, vars);
             let l = builder.use_var(vars[lhs.0 as usize]);
             let r = builder.use_var(vars[rhs.0 as usize]);
             let result = call_symbol(
@@ -1088,10 +1149,7 @@ fn lower_inst<M: Module>(
             )?;
             builder.def_var(vars[dst.0 as usize], result);
         }
-        Inst::CheckFault {
-            on_fault,
-            live_roots,
-        } => {
+        Inst::CheckFault { on_fault, debug } => {
             // Divert to the fault block when a fault is pending (§10.4). The
             // faultable op just before this set `pending_fault` (or a callee
             // did); `praxis_check_fault` returns 1 iff a fault is pending. If so,
@@ -1112,7 +1170,7 @@ fn lower_inst<M: Module>(
             // computed since the last GC safepoint (e.g. the `0` divisor in
             // `x / 0`). The faulting op's own result is genuinely never
             // produced (the fault happens during it), so it stays `<uninit>`.
-            spill.emit_spill(builder, live_roots, vars);
+            spill.spill_debug(builder, debug, vars);
             let pending = call_symbol(
                 builder,
                 ctx_val,

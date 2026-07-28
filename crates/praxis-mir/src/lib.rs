@@ -10,10 +10,12 @@
 //! the GC-liveness pass (§12.3) that computes the minimal root set per
 //! safepoint lives in [`liveness`]; the HIR→MIR lowering lives in [`build`].
 
+pub mod annot;
 pub mod build;
 pub mod ir;
 pub mod liveness;
 
+pub use annot::{DebugSlots, RootSlots};
 pub use build::lower_module;
 pub use ir::{
     AllocKind, Block, BlockId, CallTarget, CmpOp, FloatBinOp, Function, Inst, IntBinOp, Local,

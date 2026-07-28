@@ -7,8 +7,12 @@
 //! never across a safepoint.
 //!
 //! The emitted MIR is **not** run through liveness here; callers invoke
-//! [`crate::annotate`] to populate `live_roots`. Keeping the two phases separate
-//! makes the builder easier to test in isolation.
+//! [`crate::annotate`] to populate each safepoint's [`RootSlots`]/[`DebugSlots`].
+//! Keeping the two phases separate makes the builder easier to test in
+//! isolation — and the sets are *sealed*, so a builder site can only write
+//! `unannotated()`. It used to write 61 hand-maintained root lists that the
+//! pass then silently overwrote; several disagreed with it, and none of them
+//! could be wrong in a way anything noticed.
 
 #![allow(dead_code)] // Consumed by the Cranelift backend (Phase 4).
 
@@ -19,6 +23,7 @@ use praxis_hir::{
 use praxis_stdlib::abi::RuntimeSymbol;
 use praxis_types::{Type, TypeDb};
 
+use crate::annot::{DebugSlots, RootSlots};
 use crate::ir::{
     AllocKind, BlockId, CallTarget, CmpOp, FloatBinOp, Function, Inst, IntBinOp, LocalDebugKind,
     LocalId, LocalKind, MirType, ScalarKind, Terminator,
@@ -485,12 +490,13 @@ impl<'a> Builder<'a> {
 
     /// Emit a fault check after a faultable instruction.
     fn check_fault(&mut self) {
-        // `live_roots` is filled by the liveness pass (it is a debugger
-        // safepoint: the backend spills these into the debug frame so a
-        // snapshot on the fault path sees current values).
+        // `debug` is filled by the liveness pass. `CheckFault` carries *only*
+        // that set: it is a debugger safepoint (the backend spills these into
+        // the debug frame so a snapshot on the fault path sees current values)
+        // and not a GC one — it allocates nothing, so it roots nothing.
         self.push(Inst::CheckFault {
             on_fault: self.fault_block,
-            live_roots: Vec::new(),
+            debug: DebugSlots::unannotated(),
         });
     }
 }
@@ -546,7 +552,8 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                     dst: cell,
                     callee: CallTarget::Runtime(RuntimeSymbol::AllocVarCell),
                     args: vec![v],
-                    live_roots: Vec::new(),
+                    roots: RootSlots::unannotated(),
+                    debug: DebugSlots::unannotated(),
                 });
                 b.check_fault();
                 b.locals.insert(*symbol, cell);
@@ -584,7 +591,8 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                         dst,
                         callee: CallTarget::Runtime(RuntimeSymbol::VarCellSet),
                         args: vec![dst, v],
-                        live_roots: Vec::new(),
+                        roots: RootSlots::unannotated(),
+                        debug: DebugSlots::unannotated(),
                     });
                     b.check_fault();
                 } else {
@@ -599,7 +607,8 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                         dst: cur,
                         callee: CallTarget::Runtime(RuntimeSymbol::VarCellGet),
                         args: vec![dst],
-                        live_roots: Vec::new(),
+                        roots: RootSlots::unannotated(),
+                        debug: DebugSlots::unannotated(),
                     });
                     b.check_fault();
                     cur
@@ -616,7 +625,8 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                         dst,
                         callee: CallTarget::Runtime(RuntimeSymbol::VarCellSet),
                         args: vec![dst, materialized],
-                        live_roots: Vec::new(),
+                        roots: RootSlots::unannotated(),
+                        debug: DebugSlots::unannotated(),
                     });
                     b.check_fault();
                 } else {
@@ -650,7 +660,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                             dst: value,
                             callee: CallTarget::Runtime(RuntimeSymbol::VarCellGet),
                             args: vec![slot],
-                            live_roots: Vec::new(),
+                            roots: RootSlots::unannotated(),
+                            debug: DebugSlots::unannotated(),
                         });
                         b.check_fault();
                         value
@@ -847,7 +858,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     dst,
                     callee: callee_local,
                     args: arg_locals,
-                    live_roots: Vec::new(),
+                    roots: RootSlots::unannotated(),
+                    debug: DebugSlots::unannotated(),
                 });
                 b.check_fault();
                 return dst;
@@ -863,7 +875,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 b.push(Inst::Alloc {
                     dst,
                     alloc,
-                    live_roots: Vec::new(),
+                    roots: RootSlots::unannotated(),
+                    debug: DebugSlots::unannotated(),
                 });
                 b.check_fault();
                 return dst;
@@ -880,7 +893,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     dst,
                     callee: CallTarget::Runtime(RuntimeSymbol::WriteStdout),
                     args: vec![arg_local],
-                    live_roots: Vec::new(),
+                    roots: RootSlots::unannotated(),
+                    debug: DebugSlots::unannotated(),
                 });
                 // out does not fault; no check_fault needed.
                 return dst;
@@ -898,7 +912,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     dst,
                     callee: CallTarget::Runtime(sym),
                     args: vec![],
-                    live_roots: Vec::new(),
+                    roots: RootSlots::unannotated(),
+                    debug: DebugSlots::unannotated(),
                 });
                 return dst;
             }
@@ -914,7 +929,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     dst,
                     callee: callee_local,
                     args: arg_locals,
-                    live_roots: Vec::new(),
+                    roots: RootSlots::unannotated(),
+                    debug: DebugSlots::unannotated(),
                 });
                 b.check_fault();
                 return dst;
@@ -930,7 +946,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 dst,
                 callee: CallTarget::User(callee_name.clone()),
                 args: arg_locals,
-                live_roots: Vec::new(),
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
             b.check_fault();
             dst
@@ -986,7 +1003,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 dst,
                 callee: CallTarget::Runtime(symbol),
                 args: arg_locals,
-                live_roots: Vec::new(),
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
             // Method calls may fault (e.g. vec.get out of bounds); check after.
             b.check_fault();
@@ -1012,7 +1030,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     ty: MirType::Known(*ty),
                     elements: element_locals,
                 },
-                live_roots: Vec::new(),
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
             dst
         }
@@ -1064,7 +1083,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     fn_name: fn_name.clone(),
                     captures: cap_locals,
                 },
-                live_roots: Vec::new(),
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
             b.check_fault();
             dst
@@ -1080,7 +1100,8 @@ fn lower_read(b: &mut Builder<'_>, plan: praxis_hir::PlanId) -> LocalId {
         dst: input,
         callee: CallTarget::Runtime(RuntimeSymbol::GetInput),
         args: vec![],
-        live_roots: Vec::new(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     // 2. Run the parser plan against it.
     run_parser_plan(b, plan, input)
@@ -1107,7 +1128,8 @@ fn run_parser_plan(b: &mut Builder<'_>, plan: praxis_hir::PlanId, input: LocalId
     b.push(Inst::Alloc {
         dst: idx_gc,
         alloc: AllocKind::Int { value: idx_scalar },
-        live_roots: Vec::new(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     // Call praxis_run_parser(ctx, idx, input) -> result.
     let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
@@ -1115,7 +1137,8 @@ fn run_parser_plan(b: &mut Builder<'_>, plan: praxis_hir::PlanId, input: LocalId
         dst,
         callee: CallTarget::Runtime(RuntimeSymbol::RunParser),
         args: vec![idx_gc, input],
-        live_roots: Vec::new(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     b.check_fault();
     dst
@@ -1136,7 +1159,8 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Int { value: scalar },
-                live_roots: Vec::new(),
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
             dst
         }
@@ -1150,7 +1174,8 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Bool { value: scalar },
-                live_roots: Vec::new(),
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
             dst
         }
@@ -1159,7 +1184,8 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Text { value: s.clone() },
-                live_roots: Vec::new(),
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
             dst
         }
@@ -1174,7 +1200,8 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Char { value: scalar },
-                live_roots: Vec::new(),
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
             dst
         }
@@ -1190,7 +1217,8 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Float { value: scalar },
-                live_roots: Vec::new(),
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
             dst
         }
@@ -1200,7 +1228,8 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Unit,
-                live_roots: Vec::new(),
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
             dst
         }
@@ -1249,7 +1278,8 @@ fn lower_materialize(b: &mut Builder<'_>, scalar: LocalId, span: Option<(u32, u3
         dst,
         src: scalar,
         scalar: ScalarKind::Int,
-        live_roots: Vec::new(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     dst
 }
@@ -1266,7 +1296,8 @@ fn lower_materialize_bool(
         dst,
         src: scalar,
         scalar: ScalarKind::Bool,
-        live_roots: Vec::new(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     dst
 }
@@ -1299,7 +1330,8 @@ fn lower_materialize_float(
         dst,
         src: scalar,
         scalar: ScalarKind::Float,
-        live_roots: Vec::new(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     dst
 }
@@ -1315,7 +1347,8 @@ fn lower_struct_eq(b: &mut Builder<'_>, lhs: LocalId, rhs: LocalId) -> LocalId {
         dst: bool_scalar,
         lhs,
         rhs,
-        live_roots: Vec::new(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     lower_materialize_bool(b, bool_scalar, None)
 }
@@ -1504,7 +1537,8 @@ fn lower_for(
         dst: idx_gc,
         src: zero_scalar,
         scalar: ScalarKind::Int,
-        live_roots: vec![iter_local],
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
 
     let header = b.func.new_block();
@@ -1525,7 +1559,8 @@ fn lower_for(
         dst: len_dst,
         callee: CallTarget::Runtime(len_sym),
         args: vec![iter_local],
-        live_roots: vec![iter_local, idx_gc],
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     b.check_fault();
     let len_scalar = b.alloc_scalar(ScalarKind::Int);
@@ -1567,7 +1602,8 @@ fn lower_for(
         dst: item_gc,
         callee: CallTarget::Runtime(get_sym),
         args: vec![iter_local, idx_gc],
-        live_roots: vec![iter_local, idx_gc],
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     b.check_fault();
     // The loop variable's slot: allocate one if the `for` binding has no slot
@@ -1612,7 +1648,8 @@ fn lower_for(
         dst: idx_gc,
         src: next_scalar,
         scalar: ScalarKind::Int,
-        live_roots: vec![iter_local, idx_gc],
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
 
@@ -1922,14 +1959,14 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
         dst: idx,
         src: zero,
         scalar: ScalarKind::Int,
-        live_roots: vec![src],
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
 
     // Lower every stage/sink closure or second-source once, outside the loop.
     // `stage_args[i]` is the lowered Gc local for `stages[i]`'s argument (only
     // when `stages[i].has_arg()`); they're pulled in order via `arg_iter`.
     let mut stage_args: Vec<LocalId> = Vec::new();
-    let mut loop_roots: Vec<LocalId> = vec![src, idx];
     for stage in &stages {
         if stage.has_arg() {
             let arg_expr: &TypedExpr = match stage {
@@ -1942,7 +1979,6 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
                 _ => unreachable!(),
             };
             let local = lower_expr_gc(b, arg_expr);
-            loop_roots.push(local);
             stage_args.push(local);
         }
     }
@@ -1950,9 +1986,7 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     let (sink_init_slot, sink_closure_slot) = match &sink {
         Sink::Fold { init, f } => {
             let init_l = lower_expr_gc(b, init);
-            loop_roots.push(init_l);
             let f_l = lower_expr_gc(b, f);
-            loop_roots.push(f_l);
             (Some(init_l), Some(f_l))
         }
         Sink::MinBy(f)
@@ -1963,20 +1997,18 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
         | Sink::Find(f)
         | Sink::Position(f) => {
             let f_l = lower_expr_gc(b, f);
-            loop_roots.push(f_l);
             (None, Some(f_l))
         }
         _ => (None, None),
     };
 
     // Allocate the sink's accumulators up front.
-    let (acc_scalar, acc_gc, seen_flag) = sink_alloc(b, &sink, sink_init_slot, &mut loop_roots);
+    let (acc_scalar, acc_gc, seen_flag) = sink_alloc(b, &sink, sink_init_slot);
 
     // The Collect sink needs a result Vec pushed into per element.
     let collect_vec = match &sink {
         Sink::Collect => {
-            let v = alloc_empty_vec(b, loop_roots.clone(), MirType::Known(result_ty));
-            loop_roots.push(v);
+            let v = alloc_empty_vec(b, MirType::Known(result_ty));
             Some(v)
         }
         _ => None,
@@ -1991,7 +2023,7 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     b.cur = header;
 
     // Header: `if idx < src.len() { body } else { exit }`.
-    emit_bounds_check(b, src, idx, body_blk, exit, &loop_roots);
+    emit_bounds_check(b, src, idx, body_blk, exit);
 
     // Body: load the element, thread it through the stages, run the sink.
     b.cur = body_blk;
@@ -2004,7 +2036,8 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
         dst: item,
         callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
         args: vec![src, idx],
-        live_roots: loop_roots.clone(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     b.check_fault();
 
@@ -2025,7 +2058,7 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
             // stages (those after flat_map) and then the sink. The outer
             // element is fully consumed by the flat_map.
             let f = arg_iter.next().unwrap();
-            let inner = invoke_closure(b, f, vec![cur_item], &loop_roots);
+            let inner = invoke_closure(b, f, vec![cur_item]);
             let remaining: Vec<Stage> = stages[stage_idx + 1..].to_vec();
             emit_flat_map_inner(
                 b,
@@ -2039,7 +2072,6 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
                 seen_flag,
                 collect_vec,
                 sink_closure_slot,
-                &loop_roots,
                 incr_blk,
                 exit,
             );
@@ -2049,16 +2081,8 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
             alive = false;
             continue;
         }
-        let (new_item, still_live) = run_stage(
-            b,
-            stage,
-            &mut arg_iter,
-            cur_item,
-            idx,
-            &loop_roots,
-            incr_blk,
-            exit,
-        );
+        let (new_item, still_live) =
+            run_stage(b, stage, &mut arg_iter, cur_item, idx, incr_blk, exit);
         cur_item = new_item;
         alive = still_live;
     }
@@ -2075,7 +2099,6 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
             seen_flag,
             collect_vec,
             sink_closure_slot,
-            &loop_roots,
         );
         // Normal sink completion: fall through to the increment block. (Sinks
         // that short-circuit — any/all/find — emit their own break and leave
@@ -2086,7 +2109,7 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
 
     // Increment block: `idx += 1`, jump to header.
     b.cur = incr_blk;
-    emit_increment(b, idx, &loop_roots);
+    emit_increment(b, idx);
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
 
     // Exit: materialize the sink's result out of its accumulator(s).
@@ -2108,18 +2131,17 @@ fn run_stage(
     arg_iter: &mut std::vec::IntoIter<LocalId>,
     item: LocalId,
     idx: LocalId,
-    loop_roots: &[LocalId],
     incr_blk: BlockId,
     exit: BlockId,
 ) -> (LocalId, bool) {
     match stage {
         Stage::Map(_) => {
             let f = arg_iter.next().unwrap();
-            (invoke_closure(b, f, vec![item], loop_roots), true)
+            (invoke_closure(b, f, vec![item]), true)
         }
         Stage::Filter(_) => {
             let p = arg_iter.next().unwrap();
-            let keep = call_predicate(b, p, item, loop_roots);
+            let keep = call_predicate(b, p, item);
             // On false → jump to incr_blk (skip this element); on true → fall
             // through to a fresh continuation block.
             let keep_blk = b.func.new_block();
@@ -2133,7 +2155,7 @@ fn run_stage(
         }
         Stage::FilterMap(_) => {
             let f = arg_iter.next().unwrap();
-            let mapped = invoke_closure(b, f, vec![item], loop_roots);
+            let mapped = invoke_closure(b, f, vec![item]);
             // filter_map is modeled as "keep everything": in the catalog it is
             // typed `(T)->U` with non-Unit U, so there's no Unit to filter on.
             // (A precise Unit-drop needs a runtime tag check — see ADR-029.)
@@ -2150,7 +2172,7 @@ fn run_stage(
         }
         Stage::TakeWhile(_) => {
             let p = arg_iter.next().unwrap();
-            let keep = call_predicate(b, p, item, loop_roots);
+            let keep = call_predicate(b, p, item);
             let keep_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: keep,
@@ -2162,7 +2184,7 @@ fn run_stage(
         }
         Stage::Take(n) => {
             // If idx >= n → stop (jump to exit); else fall through.
-            let stop = idx_cmp_const(b, idx, *n, CmpOp::Ge, loop_roots);
+            let stop = idx_cmp_const(b, idx, *n, CmpOp::Ge);
             let keep_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: stop,
@@ -2174,7 +2196,7 @@ fn run_stage(
         }
         Stage::Skip(n) => {
             // If idx < n → skip (jump to incr_blk); else fall through.
-            let skip = idx_cmp_const(b, idx, *n, CmpOp::Lt, loop_roots);
+            let skip = idx_cmp_const(b, idx, *n, CmpOp::Lt);
             let keep_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: skip,
@@ -2203,14 +2225,15 @@ fn run_stage(
                     ty: MirType::Opaque,
                     elements: vec![idx_copy, item],
                 },
-                live_roots: Vec::new(),
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
             (tup, true)
         }
         Stage::Zip(_) => {
             let other = arg_iter.next().unwrap();
             // Stop if idx >= other.len(); else pair (item, other.get(idx)).
-            let stop = idx_ge_len(b, other, idx, loop_roots);
+            let stop = idx_ge_len(b, other, idx);
             let pair_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: stop,
@@ -2223,7 +2246,8 @@ fn run_stage(
                 dst: other_item,
                 callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
                 args: vec![other, idx],
-                live_roots: loop_roots.to_vec(),
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
             b.check_fault();
             let tup = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
@@ -2234,7 +2258,8 @@ fn run_stage(
                     ty: MirType::Opaque,
                     elements: vec![item, other_item],
                 },
-                live_roots: Vec::new(),
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
             (tup, true)
         }
@@ -2242,13 +2267,7 @@ fn run_stage(
 }
 
 /// Emit `idx <op> n` as a Bool scalar and return it. Used by Take/Skip.
-fn idx_cmp_const(
-    b: &mut Builder<'_>,
-    idx: LocalId,
-    n: i64,
-    op: CmpOp,
-    _loop_roots: &[LocalId],
-) -> LocalId {
+fn idx_cmp_const(b: &mut Builder<'_>, idx: LocalId, n: i64, op: CmpOp) -> LocalId {
     let idx_scalar = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ExtractScalar {
         dst: idx_scalar,
@@ -2271,18 +2290,14 @@ fn idx_cmp_const(
 }
 
 /// Emit `idx >= other.len()` as a Bool scalar (used by Zip's stop condition).
-fn idx_ge_len(
-    b: &mut Builder<'_>,
-    other: LocalId,
-    idx: LocalId,
-    loop_roots: &[LocalId],
-) -> LocalId {
+fn idx_ge_len(b: &mut Builder<'_>, other: LocalId, idx: LocalId) -> LocalId {
     let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: len_dst,
         callee: CallTarget::Runtime(RuntimeSymbol::VecLen),
         args: vec![other],
-        live_roots: loop_roots.to_vec(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     b.check_fault();
     let len_scalar = b.alloc_scalar(ScalarKind::Int);
@@ -2314,14 +2329,14 @@ fn emit_bounds_check(
     idx: LocalId,
     then_blk: BlockId,
     els_blk: BlockId,
-    loop_roots: &[LocalId],
 ) {
     let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: len_dst,
         callee: CallTarget::Runtime(RuntimeSymbol::VecLen),
         args: vec![src],
-        live_roots: loop_roots.to_vec(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     b.check_fault();
     let len_scalar = b.alloc_scalar(ScalarKind::Int);
@@ -2351,34 +2366,22 @@ fn emit_bounds_check(
 }
 
 /// Invoke a closure `f(args)` via `CallIndirect` and return the result slot.
-fn invoke_closure(
-    b: &mut Builder<'_>,
-    f: LocalId,
-    args: Vec<LocalId>,
-    loop_roots: &[LocalId],
-) -> LocalId {
-    let mut roots = vec![f];
-    roots.extend(args.iter().copied());
-    roots.extend(loop_roots.iter().copied());
+fn invoke_closure(b: &mut Builder<'_>, f: LocalId, args: Vec<LocalId>) -> LocalId {
     let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::CallIndirect {
         dst,
         callee: f,
         args,
-        live_roots: roots,
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     b.check_fault();
     dst
 }
 
 /// Call a `(T)->Bool` predicate closure and extract the Bool scalar.
-fn call_predicate(
-    b: &mut Builder<'_>,
-    p: LocalId,
-    item: LocalId,
-    loop_roots: &[LocalId],
-) -> LocalId {
-    let keep_gc = invoke_closure(b, p, vec![item], loop_roots);
+fn call_predicate(b: &mut Builder<'_>, p: LocalId, item: LocalId) -> LocalId {
+    let keep_gc = invoke_closure(b, p, vec![item]);
     let keep = b.alloc_scalar(ScalarKind::Bool);
     b.push(Inst::ExtractScalar {
         dst: keep,
@@ -2397,7 +2400,6 @@ fn sink_alloc(
     b: &mut Builder<'_>,
     sink: &Sink,
     sink_init_slot: Option<LocalId>,
-    loop_roots: &mut Vec<LocalId>,
 ) -> (Option<LocalId>, Option<LocalId>, Option<LocalId>) {
     match sink {
         Sink::Sum | Sink::Product | Sink::Count | Sink::Find(_) | Sink::Position(_) => {
@@ -2443,7 +2445,6 @@ fn sink_alloc(
                     src: init,
                 });
             }
-            loop_roots.push(acc);
             let seen = b.alloc_scalar(ScalarKind::Bool);
             b.push(Inst::ConstInt {
                 dst: seen,
@@ -2461,13 +2462,11 @@ fn sink_alloc(
                     src: init,
                 });
             }
-            loop_roots.push(acc);
             (None, Some(acc), None)
         }
         Sink::Reduce(_) => {
             // Seed from the first element; allocate an opaque Gc slot now.
             let acc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
-            loop_roots.push(acc);
             let seen = b.alloc_scalar(ScalarKind::Bool);
             b.push(Inst::ConstInt {
                 dst: seen,
@@ -2480,7 +2479,7 @@ fn sink_alloc(
 }
 
 /// Emit `idx += 1` (extract, add, re-materialize into the Gc slot).
-fn emit_increment(b: &mut Builder<'_>, idx: LocalId, loop_roots: &[LocalId]) {
+fn emit_increment(b: &mut Builder<'_>, idx: LocalId) {
     let cur = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ExtractScalar {
         dst: cur,
@@ -2500,7 +2499,8 @@ fn emit_increment(b: &mut Builder<'_>, idx: LocalId, loop_roots: &[LocalId]) {
         dst: idx,
         src: next,
         scalar: ScalarKind::Int,
-        live_roots: loop_roots.to_vec(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
 }
 
@@ -2532,7 +2532,6 @@ fn emit_sink_body(
     seen_flag: Option<LocalId>,
     collect_vec: Option<LocalId>,
     sink_closure_slot: Option<LocalId>,
-    loop_roots: &[LocalId],
 ) {
     match sink {
         Sink::Sum | Sink::Product => {
@@ -2638,9 +2637,9 @@ fn emit_sink_body(
             // better when item < acc → f(item, acc). For max, item is better
             // when item > acc ⟺ acc < item → f(acc, item).
             let better_gc = if matches!(sink, Sink::MinBy(_)) {
-                invoke_closure(b, f, vec![item, acc], loop_roots)
+                invoke_closure(b, f, vec![item, acc])
             } else {
-                invoke_closure(b, f, vec![acc, item], loop_roots)
+                invoke_closure(b, f, vec![acc, item])
             };
             let better = b.alloc_scalar(ScalarKind::Bool);
             b.push(Inst::ExtractScalar {
@@ -2658,7 +2657,7 @@ fn emit_sink_body(
         Sink::Any(_) | Sink::All(_) => {
             let acc = acc_scalar.unwrap();
             let pred = sink_closure_slot.unwrap();
-            let keep = call_predicate(b, pred, item, loop_roots);
+            let keep = call_predicate(b, pred, item);
             // any trips (short-circuits) on true; all trips on false.
             let trip_cond = if matches!(sink, Sink::Any(_)) {
                 keep
@@ -2685,7 +2684,7 @@ fn emit_sink_body(
         Sink::Find(_) | Sink::Position(_) => {
             let acc = acc_scalar.unwrap();
             let pred = sink_closure_slot.unwrap();
-            let keep = call_predicate(b, pred, item, loop_roots);
+            let keep = call_predicate(b, pred, item);
             let found_blk = b.func.new_block();
             let cont_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
@@ -2707,7 +2706,7 @@ fn emit_sink_body(
         Sink::Fold { .. } => {
             let acc = acc_gc.unwrap();
             let f = sink_closure_slot.unwrap();
-            let new_acc = invoke_closure(b, f, vec![acc, item], loop_roots);
+            let new_acc = invoke_closure(b, f, vec![acc, item]);
             b.push(Inst::MoveGc {
                 dst: acc,
                 src: new_acc,
@@ -2736,7 +2735,7 @@ fn emit_sink_body(
             });
             continue_loop(b);
             b.cur = fold_blk;
-            let new_acc = invoke_closure(b, f, vec![acc, item], loop_roots);
+            let new_acc = invoke_closure(b, f, vec![acc, item]);
             b.push(Inst::MoveGc {
                 dst: acc,
                 src: new_acc,
@@ -2745,13 +2744,12 @@ fn emit_sink_body(
         Sink::Collect => {
             let result = collect_vec.unwrap();
             let unit = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
-            let mut roots = vec![result, item];
-            roots.extend(loop_roots.iter().copied());
             b.push(Inst::Call {
                 dst: unit,
                 callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
                 args: vec![result, item],
-                live_roots: roots,
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
         }
     }
@@ -2780,7 +2778,6 @@ fn emit_flat_map_inner(
     seen_flag: Option<LocalId>,
     collect_vec: Option<LocalId>,
     sink_closure_slot: Option<LocalId>,
-    loop_roots: &[LocalId],
     incr_blk: BlockId,
     exit: BlockId,
 ) {
@@ -2794,10 +2791,9 @@ fn emit_flat_map_inner(
         dst: inner_idx,
         src: zero,
         scalar: ScalarKind::Int,
-        live_roots: loop_roots.to_vec(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
-    let mut roots = vec![inner_vec, inner_idx];
-    roots.extend(loop_roots.iter().copied());
 
     let header = b.func.new_block();
     let body_blk = b.func.new_block();
@@ -2805,7 +2801,7 @@ fn emit_flat_map_inner(
     let inner_exit = b.func.new_block();
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
     b.cur = header;
-    emit_bounds_check(b, inner_vec, inner_idx, body_blk, inner_exit, &roots);
+    emit_bounds_check(b, inner_vec, inner_idx, body_blk, inner_exit);
 
     b.cur = body_blk;
     b.loop_stack.push(LoopCtx {
@@ -2817,7 +2813,8 @@ fn emit_flat_map_inner(
         dst: inner_item,
         callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
         args: vec![inner_vec, inner_idx],
-        live_roots: roots.clone(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     b.check_fault();
 
@@ -2840,7 +2837,6 @@ fn emit_flat_map_inner(
             remaining_args,
             cur_item,
             inner_idx,
-            &roots,
             inner_incr,
             inner_exit,
         );
@@ -2863,7 +2859,6 @@ fn emit_flat_map_inner(
             seen_flag,
             collect_vec,
             sink_closure_slot,
-            &roots,
         );
         // Normal sink completion: fall through to the inner increment block
         // (NOT the header — jumping to the header skips the increment and
@@ -2875,7 +2870,7 @@ fn emit_flat_map_inner(
 
     // Inner increment block: `inner_idx += 1`, jump to header.
     b.cur = inner_incr;
-    emit_increment(b, inner_idx, &roots);
+    emit_increment(b, inner_idx);
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
     b.cur = inner_exit;
     // The outer_idx, incr_blk, exit, and outer sink machinery are not used
@@ -2942,7 +2937,8 @@ fn sink_finish(
                 dst,
                 src: acc,
                 scalar: ScalarKind::Bool,
-                live_roots: Vec::new(),
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
             dst
         }
@@ -2959,7 +2955,8 @@ fn sink_finish(
                 dst,
                 src: acc,
                 scalar: ScalarKind::Int,
-                live_roots: Vec::new(),
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
             });
             dst
         }
@@ -2994,7 +2991,8 @@ fn lower_pipeline_combinator(
         dst: idx,
         src: zero,
         scalar: ScalarKind::Int,
-        live_roots: vec![src],
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     match name {
         "sum" => lower_seq_sum(b, src, idx, ty),
@@ -3033,7 +3031,8 @@ fn lower_seq_sum(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -> 
         dst: result,
         src: acc,
         scalar: ScalarKind::Int,
-        live_roots: Vec::new(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     result
 }
@@ -3057,7 +3056,8 @@ fn lower_seq_count(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -
         dst: result,
         src: acc,
         scalar: ScalarKind::Int,
-        live_roots: Vec::new(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     result
 }
@@ -3073,7 +3073,7 @@ fn lower_seq_count(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -
 /// carry its item type until MIR-05), which the backend turns into the same
 /// null descriptor the wrapper already expects: the result Vec adopts each
 /// pushed value's descriptor on first push.
-fn alloc_empty_vec(b: &mut Builder<'_>, live: Vec<LocalId>, result_ty: MirType) -> LocalId {
+fn alloc_empty_vec(b: &mut Builder<'_>, result_ty: MirType) -> LocalId {
     let result = b.alloc_gc(result_ty, None, LocalDebugKind::Temp, None);
     b.push(Inst::Alloc {
         dst: result,
@@ -3081,7 +3081,8 @@ fn alloc_empty_vec(b: &mut Builder<'_>, live: Vec<LocalId>, result_ty: MirType) 
             ctor: praxis_types::CollectionCtor::Vec,
             args: vec![MirType::Opaque],
         },
-        live_roots: live,
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     b.check_fault();
     result
@@ -3096,7 +3097,7 @@ fn lower_seq_map(
     ty: Type,
 ) -> LocalId {
     let f = lower_expr_gc(b, closure);
-    let result = alloc_empty_vec(b, vec![src, f], MirType::Known(ty));
+    let result = alloc_empty_vec(b, MirType::Known(ty));
     emit_index_loop(b, src, idx, vec![f, result], |b, item, locals| {
         // Invoke f(item) via the closure (Inst::CallIndirect, M7).
         let mapped = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
@@ -3104,7 +3105,8 @@ fn lower_seq_map(
             dst: mapped,
             callee: locals[0],
             args: vec![item],
-            live_roots: vec![locals[0], item, locals[1]],
+            roots: RootSlots::unannotated(),
+            debug: DebugSlots::unannotated(),
         });
         b.check_fault();
         // Push the mapped value into the result Vec.
@@ -3113,7 +3115,8 @@ fn lower_seq_map(
             dst: unit,
             callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
             args: vec![locals[1], mapped],
-            live_roots: vec![locals[1], mapped],
+            roots: RootSlots::unannotated(),
+            debug: DebugSlots::unannotated(),
         });
     });
     result
@@ -3128,7 +3131,7 @@ fn lower_seq_filter(
     ty: Type,
 ) -> LocalId {
     let p = lower_expr_gc(b, closure);
-    let result = alloc_empty_vec(b, vec![src, p], MirType::Known(ty));
+    let result = alloc_empty_vec(b, MirType::Known(ty));
     emit_index_loop(b, src, idx, vec![p, result], |b, item, locals| {
         // Call p(item) → Bool via the closure.
         let keep_gc = b.alloc_gc(MirType::Known(b.bool_ty), None, LocalDebugKind::Temp, None);
@@ -3136,7 +3139,8 @@ fn lower_seq_filter(
             dst: keep_gc,
             callee: locals[0],
             args: vec![item],
-            live_roots: vec![locals[0], item, locals[1]],
+            roots: RootSlots::unannotated(),
+            debug: DebugSlots::unannotated(),
         });
         b.check_fault();
         let keep = b.alloc_scalar(ScalarKind::Bool);
@@ -3158,7 +3162,8 @@ fn lower_seq_filter(
             dst: unit,
             callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
             args: vec![locals[1], item],
-            live_roots: vec![locals[1], item],
+            roots: RootSlots::unannotated(),
+            debug: DebugSlots::unannotated(),
         });
         b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: cont_blk };
         b.cur = cont_blk;
@@ -3168,14 +3173,15 @@ fn lower_seq_filter(
 
 /// `v.collect()`: copy all elements into a fresh Vec (no predicate).
 fn lower_seq_collect(b: &mut Builder<'_>, src: LocalId, idx: LocalId, ty: Type) -> LocalId {
-    let result = alloc_empty_vec(b, vec![src], MirType::Known(ty));
+    let result = alloc_empty_vec(b, MirType::Known(ty));
     emit_index_loop(b, src, idx, vec![result], |b, item, locals| {
         let unit = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
         b.push(Inst::Call {
             dst: unit,
             callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
             args: vec![locals[0], item],
-            live_roots: vec![locals[0], item],
+            roots: RootSlots::unannotated(),
+            debug: DebugSlots::unannotated(),
         });
     });
     result
@@ -3222,7 +3228,8 @@ fn emit_index_loop<F>(
         dst: len_dst,
         callee: CallTarget::Runtime(RuntimeSymbol::VecLen),
         args: vec![src],
-        live_roots: roots.clone(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     b.check_fault();
     let len_scalar = b.alloc_scalar(ScalarKind::Int);
@@ -3257,7 +3264,8 @@ fn emit_index_loop<F>(
         dst: item,
         callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
         args: vec![src, idx],
-        live_roots: roots.clone(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     b.check_fault();
     body(b, item, &locals);
@@ -3281,7 +3289,8 @@ fn emit_index_loop<F>(
         dst: idx,
         src: next,
         scalar: ScalarKind::Int,
-        live_roots: roots,
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
     b.cur = exit;
@@ -3457,7 +3466,8 @@ fn lower_record_lit(
             record_def_id: record_def_id.to_u32(),
             fields: field_locals,
         },
-        live_roots: Vec::new(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     dst
 }
@@ -3492,7 +3502,8 @@ fn lower_enum_variant(
             variant_idx,
             args: arg_locals,
         },
-        live_roots: Vec::new(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
     });
     dst
 }

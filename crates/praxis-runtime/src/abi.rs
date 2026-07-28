@@ -68,7 +68,15 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// and reachable from the context, so the shape change is declared rather than
 /// assumed. `FaultKind` also gained `InvalidChar` and `InvalidText`, the two
 /// kinds that previously had to be raised as `None` (RT-17).
-pub const RUNTIME_ABI_VERSION: u32 = 11;
+/// v12 (repair S9): `DebugLocal.value` is an `Option<GcRef>`, and generated
+/// code's meaning for the word changed with it. The struct's *layout* is
+/// unchanged — the `NonNull` niche keeps it one machine word — but "no value
+/// yet" moved from `NonNull::dangling()` (a sentinel the runtime wrote and the
+/// hosts compared against by pointer identity) to the all-zero `None`, and
+/// generated code now writes zero into a shadow slot whose local has died
+/// (MIR-01). A runtime of the previous version would read either of those zeros
+/// as a real reference (F18, MIR-16).
+pub const RUNTIME_ABI_VERSION: u32 = 12;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -90,7 +98,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 11;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 12;
 
 // ---------------------------------------------------------------------------
 // The runtime symbol table (F4).
@@ -3394,7 +3402,7 @@ mod tests {
 
     #[test]
     fn version_is_eleven_after_the_fault_repack() {
-        assert_eq!(RUNTIME_ABI_VERSION, 11);
+        assert_eq!(RUNTIME_ABI_VERSION, 12);
     }
 
     #[test]
@@ -4513,7 +4521,7 @@ mod tests {
         unsafe {
             let debug_frame =
                 crate::debug::praxis_push_debug_frame(ctx, b"main".as_ptr(), 4, 1, &meta);
-            (*(*debug_frame).locals).value = captured;
+            (*(*debug_frame).locals).value = Some(captured);
             crate::crash_snapshot::praxis_snapshot_debug_chain(ctx);
             crate::debug::praxis_pop_debug_frame(ctx, debug_frame);
             assert!(rt.crash_snapshot().is_some());

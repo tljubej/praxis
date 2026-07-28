@@ -168,7 +168,7 @@ pub fn render_frame_locals<W: Write>(
     for local in &frame.locals {
         if local.is_user() {
             users.push(local);
-        } else if is_real_ref(local.value) || local.span().is_some() {
+        } else if local.value.is_some() || local.span().is_some() {
             temps.push(local);
         }
     }
@@ -210,10 +210,11 @@ fn render_local_line<W: Write>(
     ctx: &RenderCtx<'_>,
 ) -> std::io::Result<()> {
     let ty_str = type_str(local, ctx);
-    let value_display = if is_real_ref(local.value) {
-        format_value(local.value)
-    } else {
-        "<uninit>".to_string()
+    let value_display = match local.value {
+        Some(v) => format_value(v),
+        // The absence is the type's, not a sentinel pointer's (F18): a slot
+        // nothing was ever spilled into reads back as `None`.
+        None => "<uninit>".to_string(),
     };
     if local.is_user() {
         let name = local.name();
@@ -435,14 +436,6 @@ pub fn render_parser_context<W: Write>(
     Ok(())
 }
 
-/// True iff `r` is a real GC reference (not the null sentinel used for
-/// not-yet-written debug-local slots). Mirrors the check in crash_snapshot.
-fn is_real_ref(r: praxis_runtime::GcRef) -> bool {
-    use std::ptr::NonNull;
-    let dangling = NonNull::<praxis_runtime::GcHeader>::dangling();
-    !std::ptr::eq(r.as_ptr(), dangling.as_ptr())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,11 +473,11 @@ mod tests {
         s
     }
 
-    /// A `DebugLocal` slot, modeling an uninitialized value (the null sentinel
-    /// the runtime uses for not-yet-written slots). `kind` selects user vs temp;
-    /// `span` is the optional provenance span; `type_id` pairs with a TypeDb.
-    /// `descriptor` is non-null so the type path is exercised (a null descriptor
-    /// marks a pre-type-threading frame and suppresses type rendering).
+    /// A `DebugLocal` slot no value was ever spilled into — `value: None`.
+    /// `kind` selects user vs temp; `span` is the optional provenance span;
+    /// `type_id` pairs with a TypeDb. `descriptor` is non-null so the type path
+    /// is exercised (a null descriptor marks a pre-type-threading frame and
+    /// suppresses type rendering).
     fn local(
         name: &'static str,
         symbol_id: u32,
@@ -494,12 +487,6 @@ mod tests {
     ) -> DebugLocal {
         use std::ptr::NonNull;
         let (span_start, span_end) = span.unwrap_or((0, 0));
-        // The null sentinel: a dangling NonNull, never dereferenced. Mirrors
-        // `GcRef::null_sentinel_ref` in the runtime (kept crate-private there).
-        // SAFETY: a dangling NonNull is non-null and aligned; never deref'd.
-        let value = unsafe {
-            praxis_runtime::GcRef::from_non_null(NonNull::<praxis_runtime::GcHeader>::dangling())
-        };
         // A non-null descriptor placeholder (never dereferenced by the renderer;
         // it only checks for null to decide whether a type_id is meaningful).
         let descriptor: *const praxis_runtime::TypeDescriptor = NonNull::dangling().as_ptr();
@@ -508,7 +495,7 @@ mod tests {
             name_len: name.len() as u32,
             symbol_id,
             descriptor,
-            value,
+            value: None,
             type_id,
             kind,
             span_start,

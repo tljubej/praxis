@@ -18,6 +18,8 @@
 use praxis_stdlib::abi::RuntimeSymbol;
 use praxis_types::Type;
 
+use crate::annot::{DebugSlots, RootSlots};
+
 /// A whole lowered function: its locals, basic blocks, and debug metadata.
 #[derive(Debug)]
 pub struct Function {
@@ -179,9 +181,14 @@ pub enum Inst {
     Alloc {
         dst: LocalId,
         alloc: AllocKind,
-        /// The set of `Gc` locals live across this safepoint — filled by the
-        /// liveness pass. The backend spills exactly these into the shadow stack.
-        live_roots: Vec<LocalId>,
+        /// The GC root set at this safepoint — filled by the liveness pass. The
+        /// backend spills exactly [`RootSlots::live`] into the shadow stack and
+        /// nulls exactly [`RootSlots::dead`]. Separate from the debugger's view
+        /// of the same point (MIR-16); see [`crate::annot`].
+        roots: RootSlots,
+        /// What the crash debugger must see here. Over-approximate on purpose,
+        /// and never shrunk by making `roots` exact.
+        debug: DebugSlots,
     },
     /// Read a scalar payload out of a `Gc` local into a `Scalar` local.
     ExtractScalar {
@@ -202,7 +209,8 @@ pub enum Inst {
         dst: LocalId,
         src: LocalId,
         scalar: ScalarKind,
-        live_roots: Vec<LocalId>,
+        roots: RootSlots,
+        debug: DebugSlots,
     },
     /// A checked binary arithmetic op on `Int` scalars. On overflow the runtime
     /// sets `pending_fault`; the following [`Inst::CheckFault`] diverts.
@@ -244,12 +252,13 @@ pub enum Inst {
     /// `praxis_struct_eq` runtime call, which dispatches to the descriptor's
     /// `equals` callback and recurses element/field wise. A safepoint + fault
     /// check follow (the call may trigger GC). Both operands are `Gc` locals;
-    /// `live_roots` are the GC locals that must survive the call.
+    /// `roots` are the GC locals that must survive the call.
     StructEq {
         dst: LocalId,
         lhs: LocalId,
         rhs: LocalId,
-        live_roots: Vec<LocalId>,
+        roots: RootSlots,
+        debug: DebugSlots,
     },
     /// Call a function. Arguments and result are `Gc` locals. A safepoint +
     /// fault check follow (calls may allocate and may fault).
@@ -257,7 +266,8 @@ pub enum Inst {
         dst: LocalId,
         callee: CallTarget,
         args: Vec<LocalId>,
-        live_roots: Vec<LocalId>,
+        roots: RootSlots,
+        debug: DebugSlots,
     },
     /// Call a closure value indirectly (M7, §4.10). `callee` is the `Gc` local
     /// holding the closure `GcRef`. The codegen reads the closure's `fn_ptr`
@@ -269,19 +279,20 @@ pub enum Inst {
         dst: LocalId,
         callee: LocalId,
         args: Vec<LocalId>,
-        live_roots: Vec<LocalId>,
+        roots: RootSlots,
+        debug: DebugSlots,
     },
     /// Test `pending_fault`; if set, jump to `on_fault`. Inserted after any
     /// faultable operation (checked arith, div/rem, calls).
     ///
-    /// `live_roots` are the GC locals live across this point — the backend
-    /// spills them into the debug frame *before* the fault test, so a snapshot
-    /// taken on the fault path (e.g. a div-by-zero) sees their current values
-    /// rather than stale `<uninit>` slots. This makes `CheckFault` a debugger
-    /// safepoint even though it is not a GC safepoint (it allocates nothing).
+    /// **Not a GC safepoint** — it allocates nothing, so it carries no
+    /// [`RootSlots`] at all. It *is* a debugger safepoint: the backend spills
+    /// `debug` into the debug frame before the fault test, so a snapshot taken
+    /// on the fault path (e.g. a div-by-zero) sees the operands' current values
+    /// rather than stale `<uninit>` slots.
     CheckFault {
         on_fault: BlockId,
-        live_roots: Vec<LocalId>,
+        debug: DebugSlots,
     },
     /// Copy one `Gc` local into another (a move; no allocation). **`Gc` → `Gc`
     /// only**: a raw scalar word may not enter a rootable slot this way (P0-03).

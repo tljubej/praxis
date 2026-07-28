@@ -759,3 +759,44 @@ fn runtime_symbols_emitted_for(src: &str) -> std::collections::BTreeSet<&'static
         })
         .collect()
 }
+
+/// MIR-01: a shadow slot whose local has died must be nulled, or the collector
+/// keeps reading it and the object never becomes garbage.
+///
+/// The two programs differ only in whether `xs` is read again after the loop
+/// that fills it. `xs` and its three thousand elements are reachable from the
+/// frame in exactly one of them — so if the slot is never cleared, both keep
+/// them, and the heaps come out the same size. Comparing the two rather than
+/// asserting an absolute count keeps the test honest about collection timing:
+/// whatever residue the arithmetic loop leaves, both programs leave the same.
+#[test]
+fn a_dead_local_stops_being_reachable_from_its_frame() {
+    const FILL_AND_LOOP: &str = "\
+fn main() -> Int {
+  let xs = Vec()
+  var i = 0
+  while i < 3000 {
+    xs.push(i)
+    i = i + 1
+  }
+  var sum = 0
+  var j = 0
+  while j < 20000 {
+    sum = sum + j
+    j = j + 1
+  }
+  sum";
+
+    // `xs` is dead the moment the filling loop ends.
+    let (dead, _) = run_main(&format!("{FILL_AND_LOOP}\n}}\n"));
+    // Identical, except the tail reads `xs` — so it is live throughout.
+    let (kept, _) = run_main(&format!("{FILL_AND_LOOP} + xs.len()\n}}\n"));
+
+    let dead_live = dead.heap().stats().live_count;
+    let kept_live = kept.heap().stats().live_count;
+    assert!(
+        dead_live + 2_500 < kept_live,
+        "dropping `xs` freed almost nothing, so its slot is still rooting it: \
+         dead = {dead_live}, kept alive = {kept_live}"
+    );
+}

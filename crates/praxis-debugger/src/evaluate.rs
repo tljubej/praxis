@@ -165,14 +165,14 @@ fn collect_bindings(frame: &SnapshotFrame, db: &mut TypeDb) -> Vec<LocalBinding>
     frame
         .locals
         .iter()
-        .filter(|l| is_real_ref(l.value))
         .filter(|l| l.is_user() && !l.name().is_empty())
-        .map(|l| LocalBinding {
+        .filter_map(|l| l.value.map(|value| (l, value)))
+        .map(|(l, value)| LocalBinding {
             name: sanitize_name(&l.name()),
-            // SAFETY: `is_real_ref` filtered the sentinel, and a snapshot
-            // local's `GcRef` is rooted by the snapshot itself (ADR-033).
-            ty: unsafe { praxis_repr::type_for_value(l.value, db) }.unwrap_or(Type(l.type_id)),
-            value: l.value,
+            // SAFETY: a `Some` value was spilled by generated code, and a
+            // snapshot local's `GcRef` is rooted by the snapshot (ADR-033).
+            ty: unsafe { praxis_repr::type_for_value(value, db) }.unwrap_or(Type(l.type_id)),
+            value,
         })
         .collect()
 }
@@ -395,14 +395,6 @@ fn sanitize_name(name: &str) -> String {
     }
 }
 
-/// True iff `r` is a real GC reference (not the null sentinel). Mirrors the
-/// check in crash_snapshot / render.
-fn is_real_ref(r: GcRef) -> bool {
-    use std::ptr::NonNull;
-    let dangling = NonNull::<praxis_runtime::GcHeader>::dangling();
-    !std::ptr::eq(r.as_ptr(), dangling.as_ptr())
-}
-
 /// Render an `EvalResult` to the REPL output stream (value, or `error: …`).
 pub fn write_eval_result<W: Write>(out: &mut W, result: &EvalResult) -> std::io::Result<()> {
     match result {
@@ -514,6 +506,7 @@ mod tests {
         assert_eq!(
             snapshot.frames[0].locals[0]
                 .value
+                .expect("the named local has a value")
                 .as_vec()
                 .iter()
                 .map(|v| v.as_int())
@@ -524,6 +517,7 @@ mod tests {
         assert_eq!(
             snapshot.frames[0].locals[1]
                 .value
+                .expect("the temp has a value")
                 .as_vec()
                 .iter()
                 .map(|v| v.as_int())
@@ -609,7 +603,7 @@ mod tests {
             name_len: name.len() as u32,
             symbol_id: 0,
             descriptor: &praxis_runtime::collections::VEC as *const _,
-            value,
+            value: Some(value),
             type_id: ty.0,
             kind,
             span_start: 0,

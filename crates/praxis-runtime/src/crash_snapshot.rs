@@ -22,8 +22,6 @@
 //! outer frames unwinding after the innermost already snapshotted) are no-ops.
 //! The slot is cleared at the start of each program run.
 
-use std::ptr::NonNull;
-
 use crate::context::{DebugFrame, DebugLocal};
 use crate::gc::GcRef;
 use crate::roots::RootSet;
@@ -105,14 +103,11 @@ impl CrashSnapshot {
 
 impl RootSet for CrashSnapshot {
     fn push_roots(&self, out: &mut Vec<GcRef>) {
-        // Walk every copied local's value; null sentinels are skipped (they are
-        // the dangling NonNull used for not-yet-written slots, never real refs).
+        // Walk every copied local's value. A slot no value was ever spilled
+        // into is `None` and roots nothing — an absence the type carries, not a
+        // sentinel pointer to be compared against (F18).
         for frame in &self.frames {
-            for local in &frame.locals {
-                if is_real_ref(local.value) {
-                    out.push(local.value);
-                }
-            }
+            out.extend(frame.locals.iter().filter_map(|l| l.value));
         }
     }
 }
@@ -239,15 +234,6 @@ unsafe fn copy_chain(top: *mut DebugFrame) -> Vec<SnapshotFrame> {
     out
 }
 
-/// True iff `r` is a real GC reference (not the null sentinel used for
-/// not-yet-written debug-local slots). The sentinel is `NonNull::dangling()`
-/// (alignment of `GcHeader`); any real allocation has a distinct address. We
-/// compare against the dangling marker the spill/debug-frame helpers use.
-fn is_real_ref(r: GcRef) -> bool {
-    let dangling = NonNull::<crate::gc::GcHeader>::dangling();
-    !std::ptr::eq(r.as_ptr(), dangling.as_ptr())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,7 +273,7 @@ mod tests {
                     name_len: 0,
                     symbol_id: 0,
                     descriptor: &INT as *const _,
-                    value,
+                    value: Some(value),
                     type_id: 0,
                     kind: LOCAL_KIND_USER,
                     span_start: 0,
@@ -326,7 +312,7 @@ mod tests {
                         name_len: 0,
                         symbol_id: 0,
                         descriptor: &INT as *const _,
-                        value,
+                        value: Some(value),
                         type_id: 0,
                         kind: LOCAL_KIND_USER,
                         span_start: 0,

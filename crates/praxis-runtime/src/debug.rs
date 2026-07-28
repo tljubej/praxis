@@ -11,8 +11,6 @@
 //! spill (ADR-019) updates each local's `value` field at safepoints so a
 //! snapshot reflects live state.
 
-use std::ptr::NonNull;
-
 use crate::context::{DebugFrame, DebugLocal, RuntimeContext};
 use crate::gc::GcRef;
 
@@ -70,7 +68,7 @@ pub struct DebugLocalMeta {
 ///
 /// `local_metas` is an array of [`DebugLocalMeta`] — one per local — so the
 /// frame is populated with source names and symbol ids at construction. The
-/// `value` fields start as the null sentinel and are updated by the spill.
+/// `value` fields start as `None` and are updated by the debug spill.
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`. `func_name` must point
@@ -101,7 +99,7 @@ pub unsafe extern "C" fn praxis_push_debug_frame(
                 name_len: m.name_len,
                 symbol_id: m.symbol_id,
                 descriptor: m.descriptor,
-                value: GcRef::null_sentinel_ref(),
+                value: None,
                 type_id: m.type_id,
                 kind: m.kind,
                 span_start: m.span_start,
@@ -262,20 +260,14 @@ impl DebugLocal {
     }
 }
 
-impl GcRef {
-    /// A null-valued GcRef used as the initial value for debug-local slots that
-    /// haven't been written yet. This is the same pointer value the shadow frame
-    /// uses for null slots (ADR-019), but expressed as a GcRef for the debug
-    /// frame's `value` field. It is never dereferenced.
-    fn null_sentinel_ref() -> GcRef {
-        // Reuse the heap's null header pattern: a dangling NonNull that is never
-        // dereferenced. We use the alignment-marker trick: NonNull::dangling()
-        // gives a non-null pointer that is never a real allocation.
-        let nn = NonNull::dangling();
-        // SAFETY: dangling NonNull is non-null and aligned; never dereferenced.
-        unsafe { GcRef::from_non_null(nn) }
-    }
-}
+/// `DebugLocal.value` must stay one machine word: generated code stores a raw
+/// `GcRef` into it at a fixed `#[repr(C)]` offset, and reads the zeroed slot a
+/// fresh frame starts with as "no value yet". `Option<GcRef>` is niche-optimized
+/// to exactly that (F18); this is the compile-time proof.
+const _: () = {
+    assert!(std::mem::size_of::<Option<GcRef>>() == std::mem::size_of::<GcRef>());
+    assert!(std::mem::size_of::<Option<GcRef>>() == std::mem::size_of::<usize>());
+};
 
 #[cfg(test)]
 mod tests {
