@@ -21,7 +21,7 @@ use praxis_types::{Type, TypeDb};
 
 use crate::ir::{
     AllocKind, BlockId, CallTarget, CmpOp, FloatBinOp, Function, Inst, IntBinOp, LocalDebugKind,
-    LocalId, LocalKind, ScalarKind, Terminator,
+    LocalId, LocalKind, MirType, ScalarKind, Terminator,
 };
 
 /// Lower a typed module to MIR: one [`Function`] per source `fn` item, plus one
@@ -56,6 +56,9 @@ struct LiftedClosure {
     params: Vec<TypedParam>,
     body: TypedBlock,
     captures: Vec<Capture>,
+    /// The closure literal's own type — the type of the hidden `closure_self`
+    /// parameter the synthetic function receives.
+    self_ty: Type,
 }
 
 /// Walk a typed block collecting every `TypedExpr::Closure` (depth-first, source
@@ -91,6 +94,7 @@ fn collect_closures_expr(e: &TypedExpr, out: &mut Vec<LiftedClosure>) {
             params,
             body,
             captures,
+            ty,
             ..
         } => {
             // Recurse into the closure's body first so inner closures are emitted
@@ -101,6 +105,7 @@ fn collect_closures_expr(e: &TypedExpr, out: &mut Vec<LiftedClosure>) {
                 params: params.clone(),
                 body: (**body).clone(),
                 captures: captures.clone(),
+                self_ty: *ty,
             });
         }
         TypedExpr::Lit { .. } | TypedExpr::Path { .. } | TypedExpr::Read { .. } => {}
@@ -278,7 +283,7 @@ fn lower_fn(
     // param has no single materializing expression; its span is the fn's span).
     for p in &f.params {
         let id = b.alloc_gc(
-            p.ty,
+            MirType::Known(p.ty),
             Some(p.name.clone()),
             LocalDebugKind::User,
             Some(f.span),
@@ -288,7 +293,12 @@ fn lower_fn(
     }
 
     // The return slot. A compiler temp; span-less.
-    let ret = b.alloc_gc(f.return_type, None, LocalDebugKind::Temp, None);
+    let ret = b.alloc_gc(
+        MirType::Known(f.return_type),
+        None,
+        LocalDebugKind::Temp,
+        None,
+    );
     b.func.return_local = ret;
 
     // Lower the body. The tail expression's value is the function's result.
@@ -366,7 +376,7 @@ fn lower_closure_fn(
     // user-written binding, so it is classified as a temp (it would otherwise
     // surface as a confusing `__closure_self: T` user local in the debugger).
     let self_local = b.alloc_gc(
-        Type(0),
+        MirType::Known(closure.self_ty),
         Some("__closure_self".to_string()),
         LocalDebugKind::Temp,
         None,
@@ -375,41 +385,46 @@ fn lower_closure_fn(
 
     // User params: one `Gc` slot each, after `self_local`.
     for p in &closure.params {
-        let id = b.alloc_gc(p.ty, Some(p.name.clone()), LocalDebugKind::User, None);
+        let id = b.alloc_gc(
+            MirType::Known(p.ty),
+            Some(p.name.clone()),
+            LocalDebugKind::User,
+            None,
+        );
         b.locals.insert(p.symbol, id);
         b.func.params.push(id);
     }
 
     // Prologue: load each captured value from the closure's env and bind it to
-    // the capture's symbol. `praxis_closure_capture(ctx, closure, idx) -> GcRef`.
-    // The `idx` arg is a raw integer carried in the uniform i64 ABI (like the
-    // `Vec()` null-descriptor idiom): we ConstInt it into a scalar slot, then
-    // MoveGc-copy that scalar's raw i64 into a Gc-typed slot so it flows through
-    // the call as a plain integer, not a boxed Int pointer.
+    // the capture's symbol. The capture index is an ABI immediate on
+    // `Inst::LoadCapture`, not a value: boxing it as `ConstInt` + `MoveGc` into
+    // a `Gc` slot (as this did before P0-03) put a small integer in a slot the
+    // liveness pass may spill into the shadow stack, and the collector would
+    // then dereference `0x1` as a `GcRef`.
     for (idx, cap) in closure.captures.iter().enumerate() {
-        let idx_scalar = b.alloc_scalar(ScalarKind::Int);
-        b.push(Inst::ConstInt {
-            dst: idx_scalar,
-            value: idx as i64,
-        });
-        let idx_gc = b.alloc_gc(int_ty, None, LocalDebugKind::Temp, None);
-        b.push(Inst::MoveGc {
-            dst: idx_gc,
-            src: idx_scalar,
-        });
-        let dst = b.alloc_gc(cap.ty, Some(cap.name.clone()), LocalDebugKind::User, None);
-        b.push(Inst::Call {
+        let dst = b.alloc_gc(
+            MirType::Known(cap.ty),
+            Some(cap.name.clone()),
+            LocalDebugKind::User,
+            None,
+        );
+        b.push(Inst::LoadCapture {
             dst,
-            callee: CallTarget::Runtime(RuntimeSymbol::ClosureCapture),
-            args: vec![self_local, idx_gc],
-            live_roots: Vec::new(),
+            closure: self_local,
+            index: idx as u32,
         });
-        b.check_fault();
+        // No fault check: `praxis_closure_capture` is `Effect::Pure` — it reads
+        // one env slot and can neither allocate nor set a fault.
         b.locals.insert(cap.symbol, dst);
     }
 
     // The return slot.
-    let ret = b.alloc_gc(closure.body.ty, None, LocalDebugKind::Temp, None);
+    let ret = b.alloc_gc(
+        MirType::Known(closure.body.ty),
+        None,
+        LocalDebugKind::Temp,
+        None,
+    );
     b.func.return_local = ret;
 
     // Lower the body. Captures and params are bound in `b.locals`.
@@ -430,7 +445,7 @@ impl<'a> Builder<'a> {
     /// `@ "expr"` provenance).
     fn alloc_gc(
         &mut self,
-        ty: Type,
+        ty: MirType,
         debug_name: Option<String>,
         debug_kind: LocalDebugKind,
         debug_span: Option<(u32, u32)>,
@@ -441,7 +456,7 @@ impl<'a> Builder<'a> {
 
     /// Allocate a `Gc` local for a compiler temporary materializing `expr`'s
     /// span. Convenience for the many lowering sites that hold a `&TypedExpr`.
-    fn alloc_temp(&mut self, ty: Type, expr: &TypedExpr) -> LocalId {
+    fn alloc_temp(&mut self, ty: MirType, expr: &TypedExpr) -> LocalId {
         self.alloc_gc(
             ty,
             None,
@@ -451,13 +466,13 @@ impl<'a> Builder<'a> {
     }
 
     fn alloc_scalar(&mut self, sk: ScalarKind) -> LocalId {
-        // Scalar slots carry a placeholder Type; their ScalarKind is authoritative.
-        // Scalar locals are never displayed by the debugger (the backend only emits
-        // `Gc` locals' metadata), so they get the default temp classification and
-        // no span.
+        // A scalar slot has no language type: its `ScalarKind` is authoritative
+        // and the backend never emits debugger metadata for it. `Opaque` says
+        // that, where the old placeholder `Type(0)` claimed to be whatever type
+        // the arena interned first.
         self.func.new_local(
             LocalKind::Scalar(sk),
-            Type(0),
+            MirType::Opaque,
             None,
             LocalDebugKind::Temp,
             None,
@@ -500,7 +515,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
         } => {
             let v = lower_expr_gc(b, init);
             let slot = b.alloc_gc(
-                expr_static_type(init),
+                MirType::Known(expr_static_type(init)),
                 Some(name.clone()),
                 LocalDebugKind::User,
                 Some(*span),
@@ -522,7 +537,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                 // through `praxis_var_cell_get`/`praxis_var_cell_set` so a
                 // closure sharing the cell sees mutations.
                 let cell = b.alloc_gc(
-                    Type(0),
+                    MirType::Opaque,
                     Some(format!("__cell_{name}")),
                     LocalDebugKind::User,
                     Some(*span),
@@ -537,7 +552,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                 b.locals.insert(*symbol, cell);
             } else {
                 let slot = b.alloc_gc(
-                    expr_static_type(init),
+                    MirType::Known(expr_static_type(init)),
                     Some(name.clone()),
                     LocalDebugKind::User,
                     Some(*span),
@@ -579,7 +594,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                 // Compound assignment: dst = dst <op> value (Int arithmetic).
                 let cur = if escaping {
                     // Read the cell's current value.
-                    let cur = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, Some(*span));
+                    let cur = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, Some(*span));
                     b.push(Inst::Call {
                         dst: cur,
                         callee: CallTarget::Runtime(RuntimeSymbol::VarCellGet),
@@ -589,7 +604,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                     b.check_fault();
                     cur
                 } else {
-                    let cur = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, Some(*span));
+                    let cur = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, Some(*span));
                     b.push(Inst::MoveGc { dst: cur, src: dst });
                     cur
                 };
@@ -630,7 +645,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 Some(slot) => {
                     // An escaping `var`'s slot holds a `VarCell`; deref it.
                     if b.escaping_vars.contains(symbol) {
-                        let value = b.alloc_temp(*ty, e);
+                        let value = b.alloc_temp(MirType::Known(*ty), e);
                         b.push(Inst::Call {
                             dst: value,
                             callee: CallTarget::Runtime(RuntimeSymbol::VarCellGet),
@@ -827,7 +842,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             if let Some(ce) = callee_expr {
                 let callee_local = lower_expr_gc(b, ce);
                 let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
-                let dst = b.alloc_gc(*ty, None, LocalDebugKind::Temp, None);
+                let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, None);
                 b.push(Inst::CallIndirect {
                     dst,
                     callee: callee_local,
@@ -844,7 +859,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // null-descriptor carryover). `out`/`panic` and other builtins fall
             // through to the generic call path below.
             if let Some(alloc) = collection_alloc_kind(b, callee_name, *ty) {
-                let dst = b.alloc_gc(*ty, None, LocalDebugKind::Temp, None);
+                let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, None);
                 b.push(Inst::Alloc {
                     dst,
                     alloc,
@@ -860,7 +875,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     .map(|a| lower_expr_gc(b, a))
                     .unwrap_or_else(|| lower_lit_gc(b, &Lit::Unit, espan));
                 // The call's result temp materializes `e` (the whole call expr).
-                let dst = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, espan);
+                let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, espan);
                 b.push(Inst::Call {
                     dst,
                     callee: CallTarget::Runtime(RuntimeSymbol::WriteStdout),
@@ -878,7 +893,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 } else {
                     RuntimeSymbol::FloatE
                 };
-                let dst = b.alloc_gc(*ty, None, LocalDebugKind::Temp, None);
+                let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, None);
                 b.push(Inst::Call {
                     dst,
                     callee: CallTarget::Runtime(sym),
@@ -894,7 +909,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // Top-level `fn`s are never in `b.locals`, so this distinguishes the
             // two soundly.
             if let Some(callee_local) = b.locals.get(callee).copied() {
-                let dst = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+                let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
                 b.push(Inst::CallIndirect {
                     dst,
                     callee: callee_local,
@@ -906,7 +921,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             }
             // The call's result temp materializes `e` (the whole call expr).
             let dst = b.alloc_gc(
-                Type(0),
+                MirType::Known(*ty),
                 None,
                 LocalDebugKind::Temp,
                 Some(praxis_hir::expr_span(e)),
@@ -962,7 +977,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // expression) — thread its span so the debugger can show
             // `@ "xs.get(99)"`.
             let dst = b.alloc_gc(
-                Type(0),
+                MirType::Known(*ty),
                 None,
                 LocalDebugKind::Temp,
                 Some(praxis_hir::expr_span(e)),
@@ -986,7 +1001,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             let element_locals: Vec<LocalId> =
                 elements.iter().map(|el| lower_expr_gc(b, el)).collect();
             let dst = b.alloc_gc(
-                Type(0),
+                MirType::Known(*ty),
                 None,
                 LocalDebugKind::Temp,
                 Some(praxis_hir::expr_span(e)),
@@ -994,7 +1009,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Tuple {
-                    ty: *ty,
+                    ty: MirType::Known(*ty),
                     elements: element_locals,
                 },
                 live_roots: Vec::new(),
@@ -1044,7 +1059,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 })
                 .collect();
             // The closure value temp materializes `e` (the whole closure expr).
-            let dst = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, espan);
+            let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, espan);
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Closure {
@@ -1062,7 +1077,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
 /// Lower a `read parser_expr`: get the input buffer, then run the plan.
 fn lower_read(b: &mut Builder<'_>, plan_index: u32) -> LocalId {
     // 1. Get the input buffer from the runtime context.
-    let input = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+    let input = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: input,
         callee: CallTarget::Runtime(RuntimeSymbol::GetInput),
@@ -1089,14 +1104,14 @@ fn run_parser_plan(b: &mut Builder<'_>, plan_index: u32, input: LocalId) -> Loca
         dst: idx_scalar,
         value: plan_index as i64,
     });
-    let idx_gc = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+    let idx_gc = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     b.push(Inst::Alloc {
         dst: idx_gc,
         alloc: AllocKind::Int { value: idx_scalar },
         live_roots: Vec::new(),
     });
     // Call praxis_run_parser(ctx, idx, input) -> result.
-    let dst = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+    let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst,
         callee: CallTarget::Runtime(RuntimeSymbol::RunParser),
@@ -1118,7 +1133,7 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
                 dst: scalar,
                 value: *n,
             });
-            let dst = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, span);
+            let dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, span);
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Int { value: scalar },
@@ -1132,7 +1147,7 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
                 dst: scalar,
                 value: if *v { 1 } else { 0 },
             });
-            let dst = b.alloc_gc(b.bool_ty, None, LocalDebugKind::Temp, span);
+            let dst = b.alloc_gc(MirType::Known(b.bool_ty), None, LocalDebugKind::Temp, span);
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Bool { value: scalar },
@@ -1141,7 +1156,7 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
             dst
         }
         Lit::Text(s) => {
-            let dst = b.alloc_gc(b.text_ty, None, LocalDebugKind::Temp, span);
+            let dst = b.alloc_gc(MirType::Known(b.text_ty), None, LocalDebugKind::Temp, span);
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Text { value: s.clone() },
@@ -1156,7 +1171,7 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
                 dst: scalar,
                 value: *c as i64,
             });
-            let dst = b.alloc_gc(b.char_ty, None, LocalDebugKind::Temp, span);
+            let dst = b.alloc_gc(MirType::Known(b.char_ty), None, LocalDebugKind::Temp, span);
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Char { value: scalar },
@@ -1172,7 +1187,7 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
                 dst: scalar,
                 bits: f.to_bits() as i64,
             });
-            let dst = b.alloc_gc(b.float_ty, None, LocalDebugKind::Temp, span);
+            let dst = b.alloc_gc(MirType::Known(b.float_ty), None, LocalDebugKind::Temp, span);
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Float { value: scalar },
@@ -1182,7 +1197,7 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
         }
         Lit::Unit => {
             // The Unit value (§4.3): allocate the immortal Unit singleton.
-            let dst = b.alloc_gc(b.unit_ty, None, LocalDebugKind::Temp, span);
+            let dst = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, span);
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Unit,
@@ -1230,7 +1245,7 @@ fn lower_int_binop(b: &mut Builder<'_>, op: IntBinOp, lhs_gc: LocalId, rhs_gc: L
 /// Materialize an `Int` scalar into a fresh `GcRef`. `span` is the
 /// materializing expression's span for debugger provenance.
 fn lower_materialize(b: &mut Builder<'_>, scalar: LocalId, span: Option<(u32, u32)>) -> LocalId {
-    let dst = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, span);
+    let dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, span);
     b.push(Inst::Materialize {
         dst,
         src: scalar,
@@ -1247,7 +1262,7 @@ fn lower_materialize_bool(
     scalar: LocalId,
     span: Option<(u32, u32)>,
 ) -> LocalId {
-    let dst = b.alloc_gc(b.bool_ty, None, LocalDebugKind::Temp, span);
+    let dst = b.alloc_gc(MirType::Known(b.bool_ty), None, LocalDebugKind::Temp, span);
     b.push(Inst::Materialize {
         dst,
         src: scalar,
@@ -1280,7 +1295,7 @@ fn lower_materialize_float(
     scalar: LocalId,
     span: Option<(u32, u32)>,
 ) -> LocalId {
-    let dst = b.alloc_gc(b.float_ty, None, LocalDebugKind::Temp, span);
+    let dst = b.alloc_gc(MirType::Known(b.float_ty), None, LocalDebugKind::Temp, span);
     b.push(Inst::Materialize {
         dst,
         src: scalar,
@@ -1320,7 +1335,7 @@ fn lower_logical_or(b: &mut Builder<'_>, lhs_gc: LocalId, rhs_expr: &TypedExpr) 
         src: lhs_gc,
         scalar: ScalarKind::Bool,
     });
-    let result = b.alloc_gc(b.bool_ty, None, LocalDebugKind::Temp, None);
+    let result = b.alloc_gc(MirType::Known(b.bool_ty), None, LocalDebugKind::Temp, None);
     let true_blk = b.func.new_block();
     let false_blk = b.func.new_block();
     let join = b.func.new_block();
@@ -1389,7 +1404,12 @@ fn lower_if(
         scalar: ScalarKind::Bool,
     });
 
-    let result = b.alloc_gc(then_block.ty, None, LocalDebugKind::Temp, None);
+    let result = b.alloc_gc(
+        MirType::Known(then_block.ty),
+        None,
+        LocalDebugKind::Temp,
+        None,
+    );
     let then_blk = b.func.new_block();
     let else_blk = b.func.new_block();
     let join = b.func.new_block();
@@ -1475,7 +1495,7 @@ fn lower_for(
     let iter_local = lower_expr_gc(b, iter);
     // The index lives in a Gc Int slot (not a scalar) so it persists across the
     // loop's block boundaries like other Gc values. Start at 0.
-    let idx_gc = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+    let idx_gc = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     let zero_scalar = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ConstInt {
         dst: zero_scalar,
@@ -1501,7 +1521,7 @@ fn lower_for(
 
     // `len = iter.len()`.
     let len_sym = len_symbol_for(b.db, iter);
-    let len_dst = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+    let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: len_dst,
         callee: CallTarget::Runtime(len_sym),
@@ -1543,7 +1563,7 @@ fn lower_for(
     b.cur = body_blk;
     // Bind the loop variable: `binding = iter.get(idx_gc)`.
     let get_sym = get_symbol_for(b.db, iter);
-    let item_gc = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+    let item_gc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: item_gc,
         callee: CallTarget::Runtime(get_sym),
@@ -1558,7 +1578,7 @@ fn lower_for(
         .locals
         .get(&binding)
         .copied()
-        .unwrap_or_else(|| b.alloc_gc(Type(0), None, LocalDebugKind::User, None));
+        .unwrap_or_else(|| b.alloc_gc(MirType::Opaque, None, LocalDebugKind::User, None));
     b.locals.insert(binding, slot);
     b.push(Inst::MoveGc {
         dst: slot,
@@ -1751,8 +1771,9 @@ enum Sink {
 struct PipelinePlan {
     source: Box<TypedExpr>,
     /// The element type flowing out of the source (before any stage). Used only
-    /// as a slot-allocation hint; `Type(0)` (opaque) is the universal form.
-    source_item_ty: Type,
+    /// as a slot-allocation hint, and unknown until MIR-05 carries per-stage
+    /// item types, so it is [`MirType::Opaque`] for every recognized chain.
+    source_item_ty: MirType,
     stages: Vec<Stage>,
     sink: Sink,
     /// The chain's overall result type (carried on the outermost `MethodCall`).
@@ -1867,9 +1888,9 @@ fn recognize_pipeline(expr: &TypedExpr) -> Option<PipelinePlan> {
     stages.reverse();
     Some(PipelinePlan {
         source: Box::new(cur.clone()),
-        // The item type is only a slot-allocation hint; every existing lowerer
-        // uses the opaque `Type(0)` form, so we match that for consistency.
-        source_item_ty: Type(0),
+        // The item type is only a slot-allocation hint, and a fused chain has
+        // no per-stage item type until MIR-05 supplies one.
+        source_item_ty: MirType::Opaque,
         stages,
         sink,
         result_ty: *result_ty,
@@ -1892,7 +1913,7 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     // Lower the source Vec once; it lives for the loop's duration.
     let src = lower_expr_gc(b, &source);
     // A Gc Int index counter (persists across blocks, like the for-loop counter).
-    let idx = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+    let idx = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     let zero = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ConstInt {
         dst: zero,
@@ -1955,7 +1976,7 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     // The Collect sink needs a result Vec pushed into per element.
     let collect_vec = match &sink {
         Sink::Collect => {
-            let v = alloc_empty_vec(b, loop_roots.clone());
+            let v = alloc_empty_vec(b, loop_roots.clone(), MirType::Known(result_ty));
             loop_roots.push(v);
             Some(v)
         }
@@ -2167,20 +2188,20 @@ fn run_stage(
         Stage::Enumerate => {
             // Replace item with (idx, item). idx is already a Gc Int slot; copy
             // it so the tuple owns a stable value.
-            let idx_copy = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+            let idx_copy = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
             b.push(Inst::MoveGc {
                 dst: idx_copy,
                 src: idx,
             });
-            let tup = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+            let tup = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
             b.push(Inst::Alloc {
                 dst: tup,
                 alloc: AllocKind::Tuple {
-                    // The tuple's precise type isn't known here; codegen derives
-                    // the schema from runtime element tags (consistent with the
-                    // opaque Type(0) used by the existing Tuple lowerer when the
-                    // schema is reconstructed downstream).
-                    ty: Type(0),
+                    // A fused `enumerate` has no tuple type until MIR-05 carries
+                    // per-stage item types (S21); saying so explicitly is what
+                    // keeps the backend from building a schema out of whichever
+                    // type the arena happened to intern first.
+                    ty: MirType::Opaque,
                     elements: vec![idx_copy, item],
                 },
                 live_roots: Vec::new(),
@@ -2198,7 +2219,7 @@ fn run_stage(
                 else_block: pair_blk,
             };
             b.cur = pair_blk;
-            let other_item = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+            let other_item = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
             b.push(Inst::Call {
                 dst: other_item,
                 callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
@@ -2206,11 +2227,12 @@ fn run_stage(
                 live_roots: loop_roots.to_vec(),
             });
             b.check_fault();
-            let tup = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+            let tup = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
             b.push(Inst::Alloc {
                 dst: tup,
                 alloc: AllocKind::Tuple {
-                    ty: Type(0),
+                    // As for `enumerate` above: no tuple type here until MIR-05.
+                    ty: MirType::Opaque,
                     elements: vec![item, other_item],
                 },
                 live_roots: Vec::new(),
@@ -2256,7 +2278,7 @@ fn idx_ge_len(
     idx: LocalId,
     loop_roots: &[LocalId],
 ) -> LocalId {
-    let len_dst = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+    let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: len_dst,
         callee: CallTarget::Runtime(RuntimeSymbol::VecLen),
@@ -2295,7 +2317,7 @@ fn emit_bounds_check(
     els_blk: BlockId,
     loop_roots: &[LocalId],
 ) {
-    let len_dst = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+    let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: len_dst,
         callee: CallTarget::Runtime(RuntimeSymbol::VecLen),
@@ -2339,7 +2361,7 @@ fn invoke_closure(
     let mut roots = vec![f];
     roots.extend(args.iter().copied());
     roots.extend(loop_roots.iter().copied());
-    let dst = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+    let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::CallIndirect {
         dst,
         callee: f,
@@ -2415,7 +2437,7 @@ fn sink_alloc(
         Sink::MinBy(_) | Sink::MaxBy(_) => {
             // Hold the running best element in a Gc slot; the seen-flag gates
             // the first comparison.
-            let acc = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+            let acc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
             if let Some(init) = sink_init_slot {
                 b.push(Inst::MoveGc {
                     dst: acc,
@@ -2433,7 +2455,7 @@ fn sink_alloc(
         Sink::Fold { .. } => {
             // acc = init (a Gc slot carrying a closure-produced value across
             // iterations). This closes the M8 `fold` stub.
-            let acc = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+            let acc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
             if let Some(init) = sink_init_slot {
                 b.push(Inst::MoveGc {
                     dst: acc,
@@ -2445,7 +2467,7 @@ fn sink_alloc(
         }
         Sink::Reduce(_) => {
             // Seed from the first element; allocate an opaque Gc slot now.
-            let acc = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+            let acc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
             loop_roots.push(acc);
             let seen = b.alloc_scalar(ScalarKind::Bool);
             b.push(Inst::ConstInt {
@@ -2723,7 +2745,7 @@ fn emit_sink_body(
         }
         Sink::Collect => {
             let result = collect_vec.unwrap();
-            let unit = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+            let unit = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
             let mut roots = vec![result, item];
             roots.extend(loop_roots.iter().copied());
             b.push(Inst::Call {
@@ -2763,7 +2785,7 @@ fn emit_flat_map_inner(
     incr_blk: BlockId,
     exit: BlockId,
 ) {
-    let inner_idx = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+    let inner_idx = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     let zero = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ConstInt {
         dst: zero,
@@ -2791,7 +2813,7 @@ fn emit_flat_map_inner(
         continue_target: inner_incr,
         break_target: inner_exit,
     });
-    let inner_item = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+    let inner_item = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: inner_item,
         callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
@@ -2916,7 +2938,7 @@ fn sink_finish(
         Sink::Fold { .. } | Sink::Reduce(_) | Sink::MinBy(_) | Sink::MaxBy(_) => acc_gc.unwrap(),
         Sink::Any(_) | Sink::All(_) => {
             let acc = acc_scalar.unwrap();
-            let dst = b.alloc_gc(b.bool_ty, None, LocalDebugKind::Temp, None);
+            let dst = b.alloc_gc(MirType::Known(b.bool_ty), None, LocalDebugKind::Temp, None);
             b.push(Inst::Materialize {
                 dst,
                 src: acc,
@@ -2933,7 +2955,7 @@ fn sink_finish(
         | Sink::Find(_)
         | Sink::Position(_) => {
             let acc = acc_scalar.unwrap();
-            let dst = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+            let dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
             b.push(Inst::Materialize {
                 dst,
                 src: acc,
@@ -2963,7 +2985,7 @@ fn lower_pipeline_combinator(
     // Lower the receiver Vec once; it lives for the loop's duration.
     let src = lower_expr_gc(b, receiver);
     // A Gc Int index counter (persists across blocks, like the for-loop counter).
-    let idx = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+    let idx = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     let zero = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ConstInt {
         dst: zero,
@@ -3007,7 +3029,7 @@ fn lower_seq_sum(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -> 
             rhs: item_scalar,
         });
     });
-    let result = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+    let result = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     b.push(Inst::Materialize {
         dst: result,
         src: acc,
@@ -3031,7 +3053,7 @@ fn lower_seq_count(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -
             rhs: one,
         });
     });
-    let result = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+    let result = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     b.push(Inst::Materialize {
         dst: result,
         src: acc,
@@ -3041,25 +3063,25 @@ fn lower_seq_count(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -
     result
 }
 
-/// Allocate an empty Vec via praxis_vec_new with a null (default INT) element
-/// descriptor. The result Vec adopts each pushed value's descriptor on first
-/// push (mirrors the construction-time adoption). Returns the result local.
-fn alloc_empty_vec(b: &mut Builder<'_>, live: Vec<LocalId>) -> LocalId {
-    let null_desc = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ConstInt {
-        dst: null_desc,
-        value: 0,
-    });
-    let null_gc = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
-    b.push(Inst::MoveGc {
-        dst: null_gc,
-        src: null_desc,
-    });
-    let result = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
-    b.push(Inst::Call {
+/// Allocate the empty Vec a pipeline collects into. `result_ty` is the
+/// pipeline's own result type when the lowering has one.
+///
+/// This is an `AllocKind::Collection`, like every other collection
+/// construction. Before P0-03 it hand-rolled a `praxis_vec_new` call whose
+/// element-descriptor argument was the integer `0` moved into a `Gc` slot — the
+/// second and last site where a raw non-pointer word inhabited a rootable slot.
+/// The element type stays [`MirType::Opaque`] here (a fused pipeline does not
+/// carry its item type until MIR-05), which the backend turns into the same
+/// null descriptor the wrapper already expects: the result Vec adopts each
+/// pushed value's descriptor on first push.
+fn alloc_empty_vec(b: &mut Builder<'_>, live: Vec<LocalId>, result_ty: MirType) -> LocalId {
+    let result = b.alloc_gc(result_ty, None, LocalDebugKind::Temp, None);
+    b.push(Inst::Alloc {
         dst: result,
-        callee: CallTarget::Runtime(RuntimeSymbol::VecNew),
-        args: vec![null_gc],
+        alloc: AllocKind::Collection {
+            ctor: praxis_types::CollectionCtor::Vec,
+            args: vec![MirType::Opaque],
+        },
         live_roots: live,
     });
     b.check_fault();
@@ -3072,13 +3094,13 @@ fn lower_seq_map(
     src: LocalId,
     idx: LocalId,
     closure: &TypedExpr,
-    _ty: Type,
+    ty: Type,
 ) -> LocalId {
     let f = lower_expr_gc(b, closure);
-    let result = alloc_empty_vec(b, vec![src, f]);
+    let result = alloc_empty_vec(b, vec![src, f], MirType::Known(ty));
     emit_index_loop(b, src, idx, vec![f, result], |b, item, locals| {
         // Invoke f(item) via the closure (Inst::CallIndirect, M7).
-        let mapped = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+        let mapped = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
         b.push(Inst::CallIndirect {
             dst: mapped,
             callee: locals[0],
@@ -3087,7 +3109,7 @@ fn lower_seq_map(
         });
         b.check_fault();
         // Push the mapped value into the result Vec.
-        let unit = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+        let unit = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
         b.push(Inst::Call {
             dst: unit,
             callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
@@ -3104,13 +3126,13 @@ fn lower_seq_filter(
     src: LocalId,
     idx: LocalId,
     closure: &TypedExpr,
-    _ty: Type,
+    ty: Type,
 ) -> LocalId {
     let p = lower_expr_gc(b, closure);
-    let result = alloc_empty_vec(b, vec![src, p]);
+    let result = alloc_empty_vec(b, vec![src, p], MirType::Known(ty));
     emit_index_loop(b, src, idx, vec![p, result], |b, item, locals| {
         // Call p(item) → Bool via the closure.
-        let keep_gc = b.alloc_gc(b.bool_ty, None, LocalDebugKind::Temp, None);
+        let keep_gc = b.alloc_gc(MirType::Known(b.bool_ty), None, LocalDebugKind::Temp, None);
         b.push(Inst::CallIndirect {
             dst: keep_gc,
             callee: locals[0],
@@ -3132,7 +3154,7 @@ fn lower_seq_filter(
             else_block: cont_blk,
         };
         b.cur = push_blk;
-        let unit = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+        let unit = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
         b.push(Inst::Call {
             dst: unit,
             callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
@@ -3146,10 +3168,10 @@ fn lower_seq_filter(
 }
 
 /// `v.collect()`: copy all elements into a fresh Vec (no predicate).
-fn lower_seq_collect(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -> LocalId {
-    let result = alloc_empty_vec(b, vec![src]);
+fn lower_seq_collect(b: &mut Builder<'_>, src: LocalId, idx: LocalId, ty: Type) -> LocalId {
+    let result = alloc_empty_vec(b, vec![src], MirType::Known(ty));
     emit_index_loop(b, src, idx, vec![result], |b, item, locals| {
-        let unit = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+        let unit = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
         b.push(Inst::Call {
             dst: unit,
             callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
@@ -3196,7 +3218,7 @@ fn emit_index_loop<F>(
     // `len = src.len()`
     let mut roots = vec![src, idx];
     roots.extend(locals.iter().copied());
-    let len_dst = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
+    let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: len_dst,
         callee: CallTarget::Runtime(RuntimeSymbol::VecLen),
@@ -3231,7 +3253,7 @@ fn emit_index_loop<F>(
 
     b.cur = body_blk;
     // `item = src.get(idx)`
-    let item = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+    let item = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: item,
         callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
@@ -3404,13 +3426,14 @@ fn collection_alloc_kind(b: &Builder<'_>, callee_name: &str, result_ty: Type) ->
     // Extract the type arguments from the result type. For a nullary collection
     // (BitSet/Range) there are none; for Vec/Deque/Set/Heap/Grid/Counter there is
     // one; for Map there are two. If the result type does not match the ctor's
-    // shape (a malformed call), fall back to an empty arg list — the codegen will
-    // resolve descriptors defensively (defaulting to INT), same as before.
-    let args: Vec<Type> = match b.db.data(b.db.follow(result_ty)) {
+    // shape (a malformed call), fall back to an empty arg list — the codegen
+    // reads a missing argument as an unknown element type and passes a null
+    // descriptor, same as before.
+    let args: Vec<MirType> = match b.db.data(b.db.follow(result_ty)) {
         TypeData::Collection {
             ctor: c,
             args: ref a,
-        } if *c == ctor => a.clone(),
+        } if *c == ctor => a.iter().copied().map(MirType::Known).collect(),
         _ => Vec::new(),
     };
     Some(AllocKind::Collection { ctor, args })
@@ -3428,7 +3451,7 @@ fn lower_record_lit(
     // Lower each field initializer in declaration order (already sorted by the
     // HIR lowerer).
     let field_locals: Vec<LocalId> = fields.iter().map(|(_, e)| lower_expr_gc(b, e)).collect();
-    let dst = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+    let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::Alloc {
         dst,
         alloc: AllocKind::Record {
@@ -3444,7 +3467,7 @@ fn lower_record_lit(
 /// instruction that reads the field's `GcRef` out of the record payload.
 fn lower_field_get(b: &mut Builder<'_>, receiver: &TypedExpr, field_idx: u32) -> LocalId {
     let src = lower_expr_gc(b, receiver);
-    let dst = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+    let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::LoadField {
         dst,
         src,
@@ -3462,7 +3485,7 @@ fn lower_enum_variant(
     args: &[TypedExpr],
 ) -> LocalId {
     let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
-    let dst = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+    let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::Alloc {
         dst,
         alloc: AllocKind::Enum {
@@ -3490,7 +3513,7 @@ fn lower_match(
     arms: &[praxis_hir::TypedMatchArm],
 ) -> LocalId {
     let scrut_gc = lower_expr_gc(b, scrutinee);
-    let result = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+    let result = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     let join = b.func.new_block();
 
     for arm in arms {
@@ -3666,7 +3689,7 @@ fn emit_subpattern_tests(
 ) {
     if let Some(sub) = subpatterns.get(slot_idx as usize) {
         // Extract this payload slot into a local.
-        let payload = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
+        let payload = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
         b.push(Inst::EnumPayloadGet {
             dst: payload,
             src: scrut,
@@ -3829,9 +3852,10 @@ mod tests {
         // resolved representative (canonical pattern used elsewhere in the crate).
         let slot = &f.locals[dst.0 as usize];
         assert_eq!(slot.kind, LocalKind::Gc, "Unit value lives in a Gc slot");
+        let slot_ty = slot.ty.known().expect("the Unit slot has a static type");
         assert!(
             matches!(
-                analysis.db.data(analysis.db.follow(slot.ty)),
+                analysis.db.data(analysis.db.follow(slot_ty)),
                 praxis_types::TypeData::Unit
             ),
             "the Unit value's slot must carry the Unit type"
@@ -3839,39 +3863,86 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: closure capture indices are moved through rootable Gc locals"]
     fn closure_capture_indices_never_flow_through_gc_locals() {
         // Runtime ABI indices are raw integers, not GcRefs. Moving a scalar
         // capture index into a `LocalKind::Gc` slot makes an illegal state
         // representable: liveness can then spill e.g. integer `1` as if it
         // were a heap pointer, and a later collection will dereference 0x1.
+        //
+        // Both raw-word sites are covered: the closure prologue's capture
+        // index, and the pipeline's `praxis_vec_new` null element descriptor
+        // (the integer `0` moved into a `Gc` slot to ride the argument list).
+        for src in [
+            "fn main() -> Int {\n  let a = 10\n  let b = 20\n  let f = |x| x + a + b\n  f(12)\n}\n",
+            "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.map(|x| x * 2).sum()\n}\n",
+        ] {
+            let (funcs, _analysis) = lower_src_to_mir(src);
+
+            let bad_moves: Vec<(&str, LocalId, LocalId)> = funcs
+                .iter()
+                .flat_map(|f| {
+                    f.blocks.iter().flat_map(move |block| {
+                        block.insts.iter().filter_map(move |inst| match inst {
+                            Inst::MoveGc { dst, src }
+                                if f.locals[dst.0 as usize].kind == LocalKind::Gc
+                                    && matches!(
+                                        f.locals[src.0 as usize].kind,
+                                        LocalKind::Scalar(_)
+                                    ) =>
+                            {
+                                Some((f.name.as_str(), *dst, *src))
+                            }
+                            _ => None,
+                        })
+                    })
+                })
+                .collect();
+
+            assert!(
+                bad_moves.is_empty(),
+                "raw scalar values must never inhabit GC-rootable locals in {src:?}: {bad_moves:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_closure_prologue_reads_its_captures_by_immediate_index() {
+        // The capture index is an instruction immediate, like `LoadField`'s
+        // field index — not a value that has to be built in a local first. This
+        // is what makes P0-03's illegal state unconstructible rather than
+        // merely absent: there is no longer a slot for the index to live in.
         let (funcs, _analysis) = lower_src_to_mir(
             "fn main() -> Int {\n  let a = 10\n  let b = 20\n  let f = |x| x + a + b\n  f(12)\n}\n",
         );
-
-        let bad_moves: Vec<(&str, LocalId, LocalId)> = funcs
+        let closure_fn = funcs
             .iter()
-            .flat_map(|f| {
-                f.blocks.iter().flat_map(move |block| {
-                    block.insts.iter().filter_map(move |inst| match inst {
-                        Inst::MoveGc { dst, src }
-                            if f.locals[dst.0 as usize].kind == LocalKind::Gc
-                                && matches!(
-                                    f.locals[src.0 as usize].kind,
-                                    LocalKind::Scalar(_)
-                                ) =>
-                        {
-                            Some((f.name.as_str(), *dst, *src))
-                        }
-                        _ => None,
-                    })
-                })
+            .find(|f| f.name != "main")
+            .expect("the closure literal lifts to a synthetic function");
+
+        let indices: Vec<u32> = closure_fn
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .filter_map(|inst| match inst {
+                Inst::LoadCapture { index, .. } => Some(*index),
+                _ => None,
             })
             .collect();
+        assert_eq!(indices, vec![0, 1], "one LoadCapture per capture, in order");
 
         assert!(
-            bad_moves.is_empty(),
-            "raw scalar values must never inhabit GC-rootable locals: {bad_moves:?}"
+            !closure_fn
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|inst| matches!(
+                    inst,
+                    Inst::Call {
+                        callee: CallTarget::Runtime(RuntimeSymbol::ClosureCapture),
+                        ..
+                    }
+                )),
+            "the capture load is not a generic call with a boxed index argument"
         );
     }
 
@@ -3935,7 +4006,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: call results use Type(0) as an untyped sentinel"]
     fn call_result_locals_retain_their_inferred_static_types() {
         let (funcs, analysis) = lower_src_to_mir(
             "fn id(n: Int) -> Int { n }\nfn main() -> Int {\n  let v = Vec()\n  let n = v.len()\n  id(n)\n}\n",
@@ -3952,57 +4022,82 @@ mod tests {
             .collect();
         assert!(!call_results.is_empty(), "expected len and id calls");
         for (dst, callee) in call_results {
+            let local_ty = main.locals[dst.0 as usize].ty;
+            let known = local_ty
+                .known()
+                .unwrap_or_else(|| panic!("the {callee:?} result slot {dst:?} is Opaque"));
             assert!(
                 matches!(
-                    analysis
-                        .db
-                        .data(analysis.db.follow(main.locals[dst.0 as usize].ty)),
+                    analysis.db.data(analysis.db.follow(known)),
                     praxis_types::TypeData::Scalar(praxis_types::ScalarType::Int)
                 ),
-                "the {callee:?} result is statically Int but local {dst:?} carries {:?}",
-                main.locals[dst.0 as usize].ty
+                "the {callee:?} result is statically Int but local {dst:?} carries {local_ty:?}"
             );
         }
     }
 
     #[test]
-    #[ignore = "known bug: fused pipeline Vec/Unit result slots are typed as Int"]
     fn pipeline_runtime_call_destinations_retain_vec_and_unit_types() {
+        // The eager pipeline lowerers used to type every slot they minted `Int`:
+        // the result Vec, and the Unit each `praxis_vec_push` returns. Both are
+        // statically known, and a slot that lies about its type feeds the wrong
+        // descriptor into debug metadata and schema construction.
+        //
+        // The Vec half moved from a hand-rolled `praxis_vec_new` call to an
+        // `AllocKind::Collection` when P0-03 removed the null-descriptor
+        // integer from its `Gc` argument slot, so the assertion covers the
+        // allocation form rather than the call form.
         let (funcs, analysis) =
             lower_src_to_mir("fn main() {\n  let v = Vec()\n  v.push(1)\n  v.map(|x| x)\n}\n");
         let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
 
+        let mut saw_vec = false;
+        let mut saw_push = false;
         for inst in main.blocks.iter().flat_map(|block| &block.insts) {
-            let Inst::Call {
-                dst,
-                callee: CallTarget::Runtime(name),
-                ..
-            } = inst
-            else {
-                continue;
+            let (dst, what) = match inst {
+                Inst::Alloc {
+                    dst,
+                    alloc:
+                        AllocKind::Collection {
+                            ctor: praxis_types::CollectionCtor::Vec,
+                            ..
+                        },
+                    ..
+                } => (*dst, "a Vec allocation"),
+                Inst::Call {
+                    dst,
+                    callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
+                    ..
+                } => (*dst, "praxis_vec_push"),
+                _ => continue,
             };
             let local_ty = main.locals[dst.0 as usize].ty;
-            match name.name() {
-                "praxis_vec_new" => assert!(
+            let known = local_ty
+                .known()
+                .unwrap_or_else(|| panic!("{what} must define a typed local, got {local_ty:?}"));
+            let data = analysis.db.data(analysis.db.follow(known));
+            if what == "praxis_vec_push" {
+                saw_push = true;
+                assert!(
+                    matches!(data, praxis_types::TypeData::Unit),
+                    "praxis_vec_push must define a Unit-typed local, got {local_ty:?}"
+                );
+            } else {
+                saw_vec = true;
+                assert!(
                     matches!(
-                        analysis.db.data(analysis.db.follow(local_ty)),
+                        data,
                         praxis_types::TypeData::Collection {
                             ctor: praxis_types::CollectionCtor::Vec,
                             ..
                         }
                     ),
-                    "praxis_vec_new must define a Vec-typed local, got {local_ty:?}"
-                ),
-                "praxis_vec_push" => assert!(
-                    matches!(
-                        analysis.db.data(analysis.db.follow(local_ty)),
-                        praxis_types::TypeData::Unit
-                    ),
-                    "praxis_vec_push must define a Unit-typed local, got {local_ty:?}"
-                ),
-                _ => {}
+                    "a Vec allocation must define a Vec-typed local, got {local_ty:?}"
+                );
             }
         }
+        assert!(saw_vec, "the pipeline allocates its result Vec");
+        assert!(saw_push, "the pipeline pushes into its result Vec");
     }
 
     #[test]
@@ -4052,12 +4147,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: enumerate emits an opaque Type(0) tuple schema"]
+    #[ignore = "known bug: enumerate emits an opaque tuple type (MIR-05, S21)"]
     fn enumerate_tuple_allocation_carries_a_real_two_element_type() {
-        // Codegen builds TupleSchema from AllocKind::Tuple.ty. Supplying the
-        // opaque Type(0) does not make codegen infer a schema from runtime
-        // values; it creates a zero-field tuple and all tuple_set calls become
-        // no-ops. Assert the MIR/codegen boundary carries the actual shape.
+        // Codegen builds TupleSchema from AllocKind::Tuple.ty. `MirType::Opaque`
+        // does not make codegen infer a schema from runtime values; it creates a
+        // zero-field tuple and all tuple_set calls become no-ops. Assert the
+        // MIR/codegen boundary carries the actual shape.
         let (funcs, analysis) =
             lower_src_to_mir("fn main() {\n  let v = Vec()\n  v.push(10)\n  v.enumerate()\n}\n");
         let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
@@ -4074,9 +4169,12 @@ mod tests {
             })
             .expect("enumerate should allocate an (index, item) tuple");
 
+        let known = tuple_ty
+            .known()
+            .expect("enumerate's tuple allocation must carry a real type");
         assert!(
             matches!(
-                analysis.db.data(analysis.db.follow(tuple_ty)),
+                analysis.db.data(analysis.db.follow(known)),
                 praxis_types::TypeData::Tuple(elements) if elements.len() == 2
             ),
             "enumerate must carry a two-element tuple type into codegen, got {tuple_ty:?}"
@@ -4084,7 +4182,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: zip emits an opaque Type(0) tuple schema"]
+    #[ignore = "known bug: zip emits an opaque tuple type (MIR-05, S21)"]
     fn zip_tuple_allocation_carries_a_real_two_element_type() {
         let (funcs, analysis) = lower_src_to_mir(
             "fn main() {\n  let lhs = Vec()\n  lhs.push(10)\n  let rhs = Vec()\n  rhs.push(20)\n  lhs.zip(rhs)\n}\n",
@@ -4103,9 +4201,12 @@ mod tests {
             })
             .expect("zip should allocate an (left, right) tuple");
 
+        let known = tuple_ty
+            .known()
+            .expect("zip's tuple allocation must carry a real type");
         assert!(
             matches!(
-                analysis.db.data(analysis.db.follow(tuple_ty)),
+                analysis.db.data(analysis.db.follow(known)),
                 praxis_types::TypeData::Tuple(elements) if elements.len() == 2
             ),
             "zip must carry a two-element tuple type into codegen, got {tuple_ty:?}"

@@ -25,6 +25,17 @@ use crate::gc::GcRef;
 pub const LOCAL_KIND_USER: u8 = 0;
 pub const LOCAL_KIND_TEMP: u8 = 1;
 
+/// [`DebugLocalMeta::type_id`] when the MIR local has no static type
+/// (`MirType::Opaque`) — a pipeline accumulator, a fused-loop item.
+///
+/// A `Type` is an index into the compiler's arena, so every small integer is a
+/// valid handle and there is no in-band "none": the old lowering wrote `0`,
+/// which the debugger faithfully rendered as whatever type the arena interned
+/// first. `u32::MAX` is outside any arena the debugger will ever pair this with
+/// (`type_str` already omits an out-of-range id), and the metadata's null
+/// descriptor says the same thing in the other field.
+pub const NO_STATIC_TYPE: u32 = u32::MAX;
+
 /// One local's metadata at frame construction: the source name (ptr + len),
 /// the compiler-assigned symbol id, the local's static type descriptor, the
 /// full static `Type` id, the user-vs-temp classification, and the source span.

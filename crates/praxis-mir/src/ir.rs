@@ -69,6 +69,50 @@ pub enum LocalDebugKind {
     Temp,
 }
 
+/// The static language type of a MIR slot — or the explicit statement that
+/// lowering does not have one (P0-02).
+///
+/// `praxis_types::Type` is an index into the [`TypeDb`](praxis_types::TypeDb)
+/// arena, so *every* integer is a valid handle: the old `Type(0)` "unknown"
+/// sentinel silently denoted whichever type happened to be interned first, and
+/// fed that type into descriptor resolution, schema construction and debug
+/// metadata. Making the absence its own variant means "no type here" can no
+/// longer be mistaken for a type, and a consumer that needs a real one has to
+/// say so.
+///
+/// `Opaque` is not a shortcut — it is the honest answer at the sites where the
+/// lowering genuinely has no type (pipeline accumulators, fused-loop items),
+/// which stays true until HIR-01 carries inferred per-use types into lowering.
+/// The MIR verifier's "no `Opaque` in a descriptor-producing position" rule
+/// lands with that work, not here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MirType {
+    /// A real, inference-produced type handle.
+    Known(Type),
+    /// Lowering has no static type for this slot.
+    Opaque,
+}
+
+impl MirType {
+    /// The type handle, or `None` when the slot is opaque. The only way to read
+    /// a `Type` out of a `MirType`, so a consumer must handle the absence.
+    #[inline]
+    #[must_use]
+    pub fn known(self) -> Option<Type> {
+        match self {
+            MirType::Known(t) => Some(t),
+            MirType::Opaque => None,
+        }
+    }
+
+    /// Whether lowering left this slot without a static type.
+    #[inline]
+    #[must_use]
+    pub fn is_opaque(self) -> bool {
+        matches!(self, MirType::Opaque)
+    }
+}
+
 /// A local slot.
 #[derive(Debug)]
 pub struct Local {
@@ -76,9 +120,10 @@ pub struct Local {
     /// What the slot holds. Governs how the backend lays it out and whether the
     /// GC must see it at a safepoint.
     pub kind: LocalKind,
-    /// The static language type (best-effort; `Scalar` payloads may carry a more
-    /// precise `ScalarKind` than the `Type` admits).
-    pub ty: Type,
+    /// The static language type, when lowering knows one. `Scalar` slots are
+    /// always [`MirType::Opaque`]: their [`ScalarKind`] is authoritative and the
+    /// backend never shows them to the debugger.
+    pub ty: MirType,
 }
 
 /// What a [`Local`] holds.
@@ -238,8 +283,26 @@ pub enum Inst {
         on_fault: BlockId,
         live_roots: Vec<LocalId>,
     },
-    /// Copy one `Gc` local into another (a move; no allocation).
+    /// Copy one `Gc` local into another (a move; no allocation). **`Gc` → `Gc`
+    /// only**: a raw scalar word may not enter a rootable slot this way (P0-03).
+    /// [`Materialize`](Self::Materialize) is the one legal `Scalar` → `Gc`
+    /// transition.
     MoveGc { dst: LocalId, src: LocalId },
+    /// Read capture slot `index` out of a closure's environment into a `Gc`
+    /// local (M7, §4.10). Emitted once per capture in a synthetic closure
+    /// function's prologue.
+    ///
+    /// `index` is an **immediate**, following the [`LoadField`](Self::LoadField)
+    /// precedent, because it is a raw ABI word and not a value: the previous
+    /// lowering boxed it as `ConstInt` + `MoveGc` into a `Gc` local so it could
+    /// ride the call's argument list, which put the integer `1` in a slot the
+    /// collector may dereference (P0-03). Not a safepoint —
+    /// `praxis_closure_capture` is `Effect::Pure`, so no fault check follows.
+    LoadCapture {
+        dst: LocalId,
+        closure: LocalId,
+        index: u32,
+    },
     /// Read a field out of a record `GcRef` into a `Gc` local (M7, §4.5).
     /// `field_idx` is the field's index in the record's `RecordSchema`. Not a
     /// safepoint (no allocation).
@@ -300,7 +363,12 @@ pub enum AllocKind {
     /// element-type sequence); `elements` are the element-value locals in
     /// positional order. Unlike records, tuples have no def-id — their shape is
     /// the element-type sequence alone, so the schema is keyed by the `Type`.
-    Tuple { ty: Type, elements: Vec<LocalId> },
+    ///
+    /// [`MirType::Opaque`] means the lowering has no tuple type (the fused
+    /// `enumerate`/`zip` pipelines, whose item types arrive with MIR-05); the
+    /// backend then emits the degenerate zero-element schema rather than the
+    /// schema of whatever type slot 0 happened to hold.
+    Tuple { ty: MirType, elements: Vec<LocalId> },
     /// A boxed closure value (M7, §4.10). `fn_name` is the synthetic MIR
     /// function's name (the codegen takes its address via `func_addr`); `captures`
     /// are the captured-value locals in env-slot order. The codegen allocates via
@@ -318,10 +386,13 @@ pub enum AllocKind {
     /// in the backend, where the process-static descriptor consts live.
     /// `args` are the collection's type arguments in order (`Vec`/`Deque`/`Set`/
     /// `Heap`/`Grid` → one element type; `Map` → `[K, V]`; `Counter` → `[K]`;
-    /// `BitSet`/`Range` → empty).
+    /// `BitSet`/`Range` → empty). An [`MirType::Opaque`] argument means the
+    /// element type is unknown here (a pipeline's result Vec), and the backend
+    /// passes a null descriptor — which is exactly what the wrapper's own
+    /// "unknown element" contract expects.
     Collection {
         ctor: praxis_types::CollectionCtor,
-        args: Vec<praxis_types::Type>,
+        args: Vec<MirType>,
     },
 }
 
@@ -409,7 +480,7 @@ impl Function {
     pub fn new_local(
         &mut self,
         kind: LocalKind,
-        ty: Type,
+        ty: MirType,
         debug_name: Option<String>,
         debug_kind: LocalDebugKind,
         debug_span: Option<(u32, u32)>,
@@ -475,14 +546,14 @@ mod tests {
         };
         let a = f.new_local(
             LocalKind::Gc,
-            Type(0),
+            MirType::Opaque,
             Some("x".into()),
             LocalDebugKind::User,
             Some((1, 5)),
         );
         let b = f.new_local(
             LocalKind::Scalar(ScalarKind::Int),
-            Type(0),
+            MirType::Opaque,
             None,
             LocalDebugKind::Temp,
             None,

@@ -157,6 +157,7 @@ fn defs(inst: &Inst) -> Vec<LocalId> {
         Inst::ConstInt { dst, .. } => vec![*dst],
         Inst::ConstFloat { dst, .. } => vec![*dst],
         Inst::LoadField { dst, .. } => vec![*dst],
+        Inst::LoadCapture { dst, .. } => vec![*dst],
         Inst::EnumTag { dst, .. } => vec![*dst],
         Inst::EnumPayloadGet { dst, .. } => vec![*dst],
         Inst::StoreScalar { .. } | Inst::CheckFault { .. } => vec![],
@@ -214,6 +215,7 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
         }
         Inst::MoveGc { src, .. } => vec![*src],
         Inst::LoadField { src, .. } => vec![*src],
+        Inst::LoadCapture { closure, .. } => vec![*closure],
         Inst::EnumTag { src, .. } => vec![*src],
         Inst::EnumPayloadGet { src, .. } => vec![*src],
         Inst::StructEq { lhs, rhs, .. } => vec![*lhs, *rhs],
@@ -268,12 +270,12 @@ mod tests {
     use crate::ir::{
         Block, Function, Inst, IntBinOp, LocalDebugKind, LocalId, LocalKind, ScalarKind, Terminator,
     };
-    use praxis_types::{Type, TypeDb};
+    use praxis_types::TypeDb;
 
     fn gc_local(func: &mut Function, name: &str) -> LocalId {
         func.new_local(
             LocalKind::Gc,
-            Type(0),
+            crate::ir::MirType::Opaque,
             Some(name.into()),
             LocalDebugKind::User,
             None,
@@ -282,7 +284,7 @@ mod tests {
     fn int_local(func: &mut Function) -> LocalId {
         func.new_local(
             LocalKind::Scalar(ScalarKind::Int),
-            Type(0),
+            crate::ir::MirType::Opaque,
             None,
             LocalDebugKind::Temp,
             None,

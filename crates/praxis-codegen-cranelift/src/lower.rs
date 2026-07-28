@@ -19,7 +19,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
 use praxis_mir::{
     AllocKind, CallTarget, CmpOp, FloatBinOp, Function as MirFunction, Inst, IntBinOp, LocalId,
-    LocalKind, ScalarKind, Terminator,
+    LocalKind, MirType, ScalarKind, Terminator,
 };
 use praxis_runtime::{DebugLocalMeta, RuntimeContext, ShadowFrame, MAX_SHADOW_SLOTS};
 use praxis_stdlib::abi::{AbiKind, AbiRet, RuntimeSymbol};
@@ -626,7 +626,7 @@ fn lower_inst<M: Module>(
                     use praxis_types::CollectionCtor;
                     match ctor {
                         CollectionCtor::Vec => {
-                            let el_desc = collection_element_descriptor_for(db, args[0]);
+                            let el_desc = collection_element_descriptor_for(db, args, 0);
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
                             let vec_ref = call_symbol(
                                 builder,
@@ -641,7 +641,7 @@ fn lower_inst<M: Module>(
                         CollectionCtor::Deque => {
                             // Deque mirrors Vec: a single element descriptor
                             // passed to praxis_deque_new (M8-WS2, §6.1).
-                            let el_desc = collection_element_descriptor_for(db, args[0]);
+                            let el_desc = collection_element_descriptor_for(db, args, 0);
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
                             let deque_ref = call_symbol(
                                 builder,
@@ -657,7 +657,7 @@ fn lower_inst<M: Module>(
                             // Map: pass the key descriptor to praxis_map_new.
                             // The value descriptor is adopted from the first
                             // inserted value at runtime (§11.3).
-                            let key_desc = collection_element_descriptor_for(db, args[0]);
+                            let key_desc = collection_element_descriptor_for(db, args, 0);
                             let key_imm = builder.ins().iconst(GC, key_desc as i64);
                             let map_ref = call_symbol(
                                 builder,
@@ -671,7 +671,7 @@ fn lower_inst<M: Module>(
                         }
                         CollectionCtor::Set => {
                             // Set: pass the element descriptor.
-                            let el_desc = collection_element_descriptor_for(db, args[0]);
+                            let el_desc = collection_element_descriptor_for(db, args, 0);
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
                             let set_ref = call_symbol(
                                 builder,
@@ -685,7 +685,7 @@ fn lower_inst<M: Module>(
                         }
                         CollectionCtor::Counter => {
                             // Counter: pass the key descriptor.
-                            let key_desc = collection_element_descriptor_for(db, args[0]);
+                            let key_desc = collection_element_descriptor_for(db, args, 0);
                             let key_imm = builder.ins().iconst(GC, key_desc as i64);
                             let counter_ref = call_symbol(
                                 builder,
@@ -700,7 +700,7 @@ fn lower_inst<M: Module>(
                         CollectionCtor::MinHeap | CollectionCtor::MaxHeap => {
                             // Heaps: pass the element descriptor; the runtime
                             // selects min vs max by the construction symbol.
-                            let el_desc = collection_element_descriptor_for(db, args[0]);
+                            let el_desc = collection_element_descriptor_for(db, args, 0);
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
                             let sym = if *ctor == CollectionCtor::MinHeap {
                                 RuntimeSymbol::MinHeapNew
@@ -730,7 +730,7 @@ fn lower_inst<M: Module>(
                             // constructor; source construction is for manual
                             // grids filled via set.) praxis_grid_new takes
                             // (descriptor, width, height).
-                            let el_desc = collection_element_descriptor_for(db, args[0]);
+                            let el_desc = collection_element_descriptor_for(db, args, 0);
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
                             let w_imm = builder.ins().iconst(GC, 0);
                             let h_imm = builder.ins().iconst(GC, 0);
@@ -1125,6 +1125,27 @@ fn lower_inst<M: Module>(
         Inst::MoveGc { dst, src } => {
             let v = builder.use_var(vars[src.0 as usize]);
             builder.def_var(vars[dst.0 as usize], v);
+        }
+        Inst::LoadCapture {
+            dst,
+            closure,
+            index,
+        } => {
+            // praxis_closure_capture(ctx, closure, index) -> GcRef. The index is
+            // an immediate here, not a value read out of a local: it is a raw
+            // ABI word, and the manifest declares the parameter `RawI64`. Not a
+            // safepoint (the wrapper is `Effect::Pure`), so no spill.
+            let closure_val = builder.use_var(vars[closure.0 as usize]);
+            let idx_val = builder.ins().iconst(GC, *index as i64);
+            let capture = call_symbol(
+                builder,
+                ctx_val,
+                &[closure_val, idx_val],
+                RuntimeSymbol::ClosureCapture,
+                module,
+                imports,
+            )?;
+            builder.def_var(vars[dst.0 as usize], capture);
         }
         Inst::LoadField {
             dst,
@@ -1526,16 +1547,18 @@ fn record_schema_for(
 /// share one schema and compare structurally equal at runtime.
 fn tuple_schema_for(
     db: &praxis_types::TypeDb,
-    ty: praxis_types::Type,
+    ty: MirType,
 ) -> *const praxis_runtime::tuples::TupleSchema {
     use praxis_runtime::tuples::TupleSchema;
     use praxis_types::data::TypeData;
     use std::sync::Mutex;
-    // Resolve the element types. A non-tuple type here is a misuse (the HIR
-    // only lowers `TypedExpr::Tuple` here), but degrade defensively by
-    // treating it as a zero-element tuple rather than panicking in the JIT.
-    let element_types: Vec<praxis_types::Type> = match db.data(db.follow(ty)) {
-        TypeData::Tuple(els) => els.clone(),
+    // Resolve the element types. `Opaque` means the lowering had no tuple type
+    // (the fused `enumerate`/`zip` pipelines, until MIR-05); a non-tuple type is
+    // a misuse (the HIR only lowers `TypedExpr::Tuple` here). Both degrade to a
+    // zero-element schema rather than panicking in the JIT — but only the second
+    // is a surprise now, because the first says so in the MIR.
+    let element_types: Vec<praxis_types::Type> = match ty.known().map(|t| db.data(db.follow(t))) {
+        Some(TypeData::Tuple(els)) => els.clone(),
         _ => Vec::new(),
     };
     let descriptors: Vec<*const praxis_runtime::descriptor::TypeDescriptor> = element_types
@@ -1603,7 +1626,12 @@ fn build_debug_local_metas(
         // element/param vars of a composite are left untouched by `follow`
         // (top-level only); `deep_resolve` recurses and interns a resolved
         // copy. Idempotent on already-resolved types. (M10b-WS4)
-        let resolved_ty = db.deep_resolve(local.ty);
+        // `Opaque` locals (a pipeline accumulator, a scalar's slot) have no
+        // static type to thread: emit a null descriptor and `NO_STATIC_TYPE`
+        // rather than the descriptor and id of whichever type the arena
+        // interned first, which is what the old `Type(0)` placeholder produced.
+        // The debugger renders these without a type column (P0-02).
+        let resolved_ty = local.ty.known().map(|t| db.deep_resolve(t));
         // Thread the user-vs-temp classification and source span from the MIR.
         let kind = match mir.debug_kind(local.id) {
             LocalDebugKind::User => praxis_runtime::LOCAL_KIND_USER,
@@ -1614,11 +1642,13 @@ fn build_debug_local_metas(
             source_name: name.as_ptr(),
             name_len: name.len() as u32,
             symbol_id,
-            descriptor: descriptor_for_type(db, local.ty),
+            descriptor: resolved_ty
+                .map(|t| descriptor_for_type(db, t))
+                .unwrap_or(std::ptr::null()),
             // The full static `Type` id (M10-WS1b): `Type(u32)`. Lets the
             // debugger reconstruct the exact local type (incl. collection
             // element types / record shapes) the runtime `descriptor` loses.
-            type_id: resolved_ty.0,
+            type_id: resolved_ty.map_or(praxis_runtime::debug::NO_STATIC_TYPE, |t| t.0),
             kind,
             span_start,
             span_end,
@@ -1719,9 +1749,18 @@ fn descriptor_for_type(
 /// (mirrors the `tuple_schema_for` caching idiom, lower.rs:1047).
 fn collection_element_descriptor_for(
     db: &praxis_types::TypeDb,
-    element_type: praxis_types::Type,
+    args: &[MirType],
+    index: usize,
 ) -> *const praxis_runtime::descriptor::TypeDescriptor {
-    descriptor_for_type(db, element_type)
+    match args.get(index).copied() {
+        Some(MirType::Known(element_type)) => descriptor_for_type(db, element_type),
+        // No static element type here — a fused pipeline's result Vec, or a
+        // construction whose result type did not match its ctor. The wrappers
+        // all read a null descriptor as "unknown element type" and adopt the
+        // first inserted value's descriptor, which is the honest answer; the
+        // old code indexed `args[0]` and would have panicked in the JIT.
+        Some(MirType::Opaque) | None => std::ptr::null(),
+    }
 }
 
 /// Embed a string literal as a leaked `&'static str` and produce (ptr, len)
@@ -1833,5 +1872,87 @@ mod tests {
             let want_result = !matches!(sym.sig().ret, AbiRet::Void);
             assert_eq!(sig.returns.len(), usize::from(want_result), "{sym}");
         }
+    }
+
+    /// P0-02: an `Opaque` MIR local produces *no* static type in the debug
+    /// metadata. The old `Type(0)` placeholder was a valid arena index, so the
+    /// crash debugger rendered every untyped temp as whichever type the program
+    /// happened to intern first — usually `Int`.
+    #[test]
+    fn an_opaque_local_carries_neither_a_descriptor_nor_a_type_id() {
+        use praxis_mir::{ir::LocalDebugKind, Function as MirFn};
+        let mut db = praxis_types::TypeDb::new();
+        let int = db.int();
+        let mut f = MirFn {
+            name: "f".into(),
+            params: Vec::new(),
+            return_local: LocalId(0),
+            locals: Vec::new(),
+            blocks: Vec::new(),
+            debug_names: Vec::new(),
+            debug_kinds: Vec::new(),
+            debug_spans: Vec::new(),
+            span: (0, 0),
+        };
+        f.new_local(
+            LocalKind::Gc,
+            MirType::Known(int),
+            Some("n".into()),
+            LocalDebugKind::User,
+            None,
+        );
+        f.new_local(
+            LocalKind::Gc,
+            MirType::Opaque,
+            None,
+            LocalDebugKind::Temp,
+            None,
+        );
+
+        let metas = build_debug_local_metas(&f, &mut db);
+        assert_eq!(metas.len(), 2);
+        assert!(
+            !metas[0].descriptor.is_null(),
+            "a Known local keeps its descriptor"
+        );
+        assert_eq!(metas[0].type_id, int.0, "a Known local keeps its type id");
+        assert!(
+            metas[1].descriptor.is_null(),
+            "an Opaque local has no descriptor to thread"
+        );
+        assert_eq!(
+            metas[1].type_id,
+            praxis_runtime::debug::NO_STATIC_TYPE,
+            "an Opaque local must not name a type it does not have"
+        );
+    }
+
+    /// H9's resolution in the backend: `Opaque` emits no descriptor. The
+    /// wrappers read a null element descriptor as "unknown element type" and
+    /// adopt the first inserted value's, which is what a fused pipeline's
+    /// result Vec needs; a missing argument (a construction whose result type
+    /// did not match its ctor) takes the same path instead of panicking.
+    #[test]
+    fn an_opaque_element_type_resolves_to_no_descriptor() {
+        let mut db = praxis_types::TypeDb::new();
+        let int = db.int();
+        assert!(collection_element_descriptor_for(&db, &[MirType::Opaque], 0).is_null());
+        assert!(collection_element_descriptor_for(&db, &[], 0).is_null());
+        assert!(core::ptr::eq(
+            collection_element_descriptor_for(&db, &[MirType::Known(int)], 0),
+            &praxis_runtime::scalars::INT
+        ));
+    }
+
+    /// A tuple allocation with no static type degrades to the empty schema —
+    /// the same shape the `Type(0)` placeholder produced by accident, now
+    /// reached deliberately from an explicitly typeless MIR node (MIR-05 in S21
+    /// supplies the real fused-pipeline tuple types).
+    #[test]
+    fn an_opaque_tuple_type_yields_an_empty_schema() {
+        let db = praxis_types::TypeDb::new();
+        let schema = tuple_schema_for(&db, MirType::Opaque);
+        // SAFETY: `tuple_schema_for` returns a leaked `'static` schema.
+        assert_eq!(unsafe { &*schema }.arity(), 0);
     }
 }
