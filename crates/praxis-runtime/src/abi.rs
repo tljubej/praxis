@@ -151,7 +151,7 @@ pub unsafe extern "C" fn praxis_alloc_int(ctx: *mut RuntimeContext, value: i64) 
     // by the backend before this wrapper was called).
     unsafe { maybe_collect(ctx) };
     // SAFETY: caller upholds the ctx/heap validity.
-    unsafe { heap(ctx).alloc(scalars::INT, value) }
+    unsafe { heap(ctx).alloc(&scalars::INT, value) }
 }
 
 /// Allocate a boxed `Bool` from a 0/1 value (§4.3). Returns the immortal
@@ -164,7 +164,7 @@ pub unsafe extern "C" fn praxis_alloc_bool(ctx: *mut RuntimeContext, value: i64)
     // Bool is an immortal: allocate it through the heap's immortal path so it is
     // never reclaimed. `value != 0` is true; `0` is false.
     // SAFETY: caller upholds ctx validity.
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, value != 0) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, value != 0) }
 }
 
 /// Allocate the `Unit` singleton (§4.3).
@@ -174,7 +174,7 @@ pub unsafe extern "C" fn praxis_alloc_bool(ctx: *mut RuntimeContext, value: i64)
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_unit(ctx: *mut RuntimeContext) -> GcRef {
     // SAFETY: Unit is an immortal; allocate through the immortal path.
-    unsafe { heap(ctx).alloc_immortal(scalars::UNIT, ()) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::UNIT, ()) }
 }
 
 /// Allocate a boxed `Char` from a Unicode scalar value (§4.3, M6). The `value`
@@ -196,7 +196,7 @@ pub unsafe extern "C" fn praxis_alloc_char(ctx: *mut RuntimeContext, value: i64)
         return unsafe { unit_sentinel(ctx) };
     }
     // SAFETY: caller upholds ctx/heap validity; code is a validated scalar.
-    unsafe { heap(ctx).alloc(scalars::CHAR, code) }
+    unsafe { heap(ctx).alloc(&scalars::CHAR, code) }
 }
 
 /// Allocate an owned `Text` from a UTF-8 byte buffer (§4.3, ADR-013).
@@ -231,7 +231,7 @@ pub unsafe extern "C" fn praxis_alloc_text(
     // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
     unsafe {
         heap(ctx).alloc_with(
-            crate::text::TEXT,
+            &crate::text::TEXT,
             std::mem::size_of::<crate::text::TextPayload>(),
             std::mem::align_of::<crate::text::TextPayload>(),
             |payload| {
@@ -298,7 +298,7 @@ pub unsafe extern "C" fn praxis_alloc_float(ctx: *mut RuntimeContext, value: i64
     unsafe { maybe_collect(ctx) };
     let f = f64::from_bits(value as u64);
     // SAFETY: caller upholds ctx/heap validity; all f64 values are valid Floats.
-    unsafe { heap(ctx).alloc(scalars::FLOAT, f) }
+    unsafe { heap(ctx).alloc(&scalars::FLOAT, f) }
 }
 
 /// Read a `Float` payload as its IEEE-754 bit pattern widened to `i64`
@@ -341,7 +341,7 @@ pub unsafe extern "C" fn praxis_int_to_float(ctx: *mut RuntimeContext, r: GcRef)
     let i = unsafe { int_payload(r) };
     unsafe { maybe_collect(ctx) };
     // SAFETY: ctx/heap valid; every widened int is a valid Float payload.
-    unsafe { heap(ctx).alloc(scalars::FLOAT, i as f64) }
+    unsafe { heap(ctx).alloc(&scalars::FLOAT, i as f64) }
 }
 
 /// Narrow a `Float` to an `Int` by truncating toward zero (§4.12). Faults
@@ -367,7 +367,7 @@ pub unsafe extern "C" fn praxis_float_to_int(ctx: *mut RuntimeContext, r: GcRef)
     // fractional part (which is discarded).
     unsafe { maybe_collect(ctx) };
     // SAFETY: ctx/heap valid; the value is in i64 range.
-    unsafe { heap(ctx).alloc(scalars::INT, f as i64) }
+    unsafe { heap(ctx).alloc(&scalars::INT, f as i64) }
 }
 
 /// Re-box a `Float` after a pure transform (no fault possible). Used by
@@ -375,7 +375,7 @@ pub unsafe extern "C" fn praxis_float_to_int(ctx: *mut RuntimeContext, r: GcRef)
 unsafe fn rebox_float(ctx: *mut RuntimeContext, out: f64) -> GcRef {
     unsafe { maybe_collect(ctx) };
     // SAFETY: ctx/heap valid; every f64 is a valid Float payload.
-    unsafe { heap(ctx).alloc(scalars::FLOAT, out) }
+    unsafe { heap(ctx).alloc(&scalars::FLOAT, out) }
 }
 
 /// `Float.abs()` — absolute value (§4.12).
@@ -448,7 +448,7 @@ pub unsafe extern "C" fn praxis_float_sign(ctx: *mut RuntimeContext, r: GcRef) -
 pub unsafe extern "C" fn praxis_float_is_nan(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     let result = unsafe { float_payload(r) }.is_nan();
     // SAFETY: ctx valid; Bool immortal path.
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, result) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, result) }
 }
 
 /// `Float.is_infinite()` — true iff ±infinity (§4.12).
@@ -459,7 +459,7 @@ pub unsafe extern "C" fn praxis_float_is_nan(ctx: *mut RuntimeContext, r: GcRef)
 pub unsafe extern "C" fn praxis_float_is_infinite(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     let result = unsafe { float_payload(r) }.is_infinite();
     // SAFETY: ctx valid; Bool immortal path.
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, result) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, result) }
 }
 
 /// `Float.min(other)` — the smaller of two floats (§4.12). Per IEEE-754 /
@@ -507,7 +507,7 @@ pub unsafe extern "C" fn praxis_float_to_text(ctx: *mut RuntimeContext, r: GcRef
     // SAFETY: `s` is valid UTF-8 for the duration of the call; ctx/heap valid.
     unsafe {
         heap(ctx).alloc_with(
-            crate::text::TEXT,
+            &crate::text::TEXT,
             std::mem::size_of::<crate::text::TextPayload>(),
             std::mem::align_of::<crate::text::TextPayload>(),
             |payload| {
@@ -527,7 +527,7 @@ pub unsafe extern "C" fn praxis_float_to_text(ctx: *mut RuntimeContext, r: GcRef
 pub unsafe extern "C" fn praxis_float_pi(ctx: *mut RuntimeContext) -> GcRef {
     unsafe { maybe_collect(ctx) };
     // SAFETY: ctx/heap valid.
-    unsafe { heap(ctx).alloc(scalars::FLOAT, core::f64::consts::PI) }
+    unsafe { heap(ctx).alloc(&scalars::FLOAT, core::f64::consts::PI) }
 }
 
 /// `e()` — Euler's number as a `Float` (§4.12 prelude free function).
@@ -538,7 +538,7 @@ pub unsafe extern "C" fn praxis_float_pi(ctx: *mut RuntimeContext) -> GcRef {
 pub unsafe extern "C" fn praxis_float_e(ctx: *mut RuntimeContext) -> GcRef {
     unsafe { maybe_collect(ctx) };
     // SAFETY: ctx/heap valid.
-    unsafe { heap(ctx).alloc(scalars::FLOAT, core::f64::consts::E) }
+    unsafe { heap(ctx).alloc(&scalars::FLOAT, core::f64::consts::E) }
 }
 
 // ---------------------------------------------------------------------------
@@ -560,7 +560,7 @@ macro_rules! checked_int_binop {
             let a = unsafe { int_payload(lhs) };
             let b = unsafe { int_payload(rhs) };
             match a.$op(b) {
-                Some(result) => unsafe { heap(ctx).alloc(scalars::INT, result) },
+                Some(result) => unsafe { heap(ctx).alloc(&scalars::INT, result) },
                 None => {
                     unsafe { set_fault(ctx, $fault) };
                     unsafe { unit_sentinel(ctx) }
@@ -597,7 +597,7 @@ pub unsafe extern "C" fn praxis_int_div(ctx: *mut RuntimeContext, lhs: GcRef, rh
     }
     // Division truncates toward zero (Rust's `i64::div_euclid` rounds differently;
     // Praxis follows C/Rust integer division semantics toward zero).
-    unsafe { heap(ctx).alloc(scalars::INT, a / b) }
+    unsafe { heap(ctx).alloc(&scalars::INT, a / b) }
 }
 
 /// Checked `Int` remainder (§4.12). Faults on division by zero, and on overflow
@@ -620,7 +620,7 @@ pub unsafe extern "C" fn praxis_int_rem(ctx: *mut RuntimeContext, lhs: GcRef, rh
         unsafe { set_fault(ctx, FaultKind::IntOverflow) };
         return unsafe { unit_sentinel(ctx) };
     }
-    unsafe { heap(ctx).alloc(scalars::INT, a % b) }
+    unsafe { heap(ctx).alloc(&scalars::INT, a % b) }
 }
 
 /// Negate an `Int` (§4.12). Faults on overflow (`Int::MIN`).
@@ -631,7 +631,7 @@ pub unsafe extern "C" fn praxis_int_rem(ctx: *mut RuntimeContext, lhs: GcRef, rh
 pub unsafe extern "C" fn praxis_int_neg(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     let a = unsafe { int_payload(r) };
     match a.checked_neg() {
-        Some(result) => unsafe { heap(ctx).alloc(scalars::INT, result) },
+        Some(result) => unsafe { heap(ctx).alloc(&scalars::INT, result) },
         None => {
             unsafe { set_fault(ctx, FaultKind::IntOverflow) };
             unsafe { unit_sentinel(ctx) }
@@ -659,7 +659,7 @@ macro_rules! int_cmp {
             let b = unsafe { int_payload(rhs) };
             let result = a $op b;
             // SAFETY: ctx/heap valid; Bool immortal path.
-            unsafe { heap(ctx).alloc_immortal(scalars::BOOL, result) }
+            unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, result) }
         }
     };
 }
@@ -753,7 +753,7 @@ pub unsafe extern "C" fn praxis_vec_new(
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
     let element_descriptor = if element_descriptor.is_null() {
-        scalars::INT
+        &scalars::INT
     } else {
         // SAFETY: caller guarantees a valid `'static` descriptor pointer.
         unsafe { &*element_descriptor }
@@ -761,7 +761,7 @@ pub unsafe extern "C" fn praxis_vec_new(
     // SAFETY: VecPayload matches VEC's size/align and is fully initialized.
     unsafe {
         heap(ctx).alloc_with(
-            crate::collections::VEC,
+            &crate::collections::VEC,
             std::mem::size_of::<VecPayload>(),
             std::mem::align_of::<VecPayload>(),
             |payload| {
@@ -799,7 +799,7 @@ pub unsafe extern "C" fn praxis_alloc_record(
     // before the caller fills them in via praxis_record_set_field.
     unsafe {
         heap(ctx).alloc_with(
-            crate::records::RECORD,
+            &crate::records::RECORD,
             std::mem::size_of::<crate::records::RecordPayload>(),
             std::mem::align_of::<crate::records::RecordPayload>(),
             |payload| {
@@ -879,7 +879,7 @@ pub unsafe extern "C" fn praxis_alloc_enum(
     // SAFETY: EnumPayload matches ENUM's size/align and is fully initialized.
     unsafe {
         heap(ctx).alloc_with(
-            crate::enums::ENUM,
+            &crate::enums::ENUM,
             std::mem::size_of::<crate::enums::EnumPayload>(),
             std::mem::align_of::<crate::enums::EnumPayload>(),
             |payload| {
@@ -929,7 +929,7 @@ pub unsafe extern "C" fn praxis_enum_tag(ctx: *mut RuntimeContext, enum_value: G
     let tag = unsafe { (*payload).tag as i64 };
     // SAFETY: alloc boxes the i64 into a fresh Int object. The tag value is
     // already in a register, so GC collecting enum_value here is safe.
-    unsafe { heap(ctx).alloc(crate::scalars::INT, tag) }
+    unsafe { heap(ctx).alloc(&crate::scalars::INT, tag) }
 }
 
 /// Read payload slot `idx` of an enum value (M7, §4.6). Returns the slot's
@@ -978,7 +978,7 @@ pub unsafe extern "C" fn praxis_alloc_tuple(
     // before the caller fills them in via praxis_tuple_set.
     unsafe {
         heap(ctx).alloc_with(
-            crate::tuples::TUPLE,
+            &crate::tuples::TUPLE,
             std::mem::size_of::<crate::tuples::TuplePayload>(),
             std::mem::align_of::<crate::tuples::TuplePayload>(),
             |payload| {
@@ -1090,7 +1090,7 @@ pub unsafe extern "C" fn praxis_alloc_closure(
     // SAFETY: ClosurePayload matches CLOSURE's size/align and is fully initialized.
     unsafe {
         heap(ctx).alloc_with(
-            crate::closures::CLOSURE,
+            &crate::closures::CLOSURE,
             std::mem::size_of::<crate::closures::ClosurePayload>(),
             std::mem::align_of::<crate::closures::ClosurePayload>(),
             |payload| {
@@ -1177,7 +1177,7 @@ pub unsafe extern "C" fn praxis_alloc_var_cell(ctx: *mut RuntimeContext, value: 
     // SAFETY: VarCellPayload matches VAR_CELL's size/align and is fully initialized.
     unsafe {
         heap(ctx).alloc_with(
-            crate::var_cell::VAR_CELL,
+            &crate::var_cell::VAR_CELL,
             std::mem::size_of::<crate::var_cell::VarCellPayload>(),
             std::mem::align_of::<crate::var_cell::VarCellPayload>(),
             |payload| {
@@ -1253,11 +1253,11 @@ pub unsafe extern "C" fn praxis_vec_push(
     // correctly regardless of construction-time inference (§5.5, §11.2). It is a
     // no-op for the common `Vec[Int]` case (descriptor already matches).
     let pushed_desc = value.descriptor();
-    // Compare by `TypeId` (canonical type identity, descriptor.rs:14), not by
-    // pointer: `const` descriptors may be duplicated across crate boundaries, so
-    // two `INT` copies can have distinct addresses but the same `TypeId(0)`.
-    let cur_is_int = unsafe { (*p.element_descriptor).id } == scalars::INT.id;
-    let pushed_is_int = pushed_desc.id == scalars::INT.id;
+    // Built-in descriptors are `static`, so their address is their identity and
+    // `ptr::eq` would work equally well here; `TypeId` equality is used because
+    // it reads as the type question being asked.
+    let cur_is_int = unsafe { (*p.element_descriptor).id() } == scalars::INT.id();
+    let pushed_is_int = pushed_desc.id() == scalars::INT.id();
     if cur_is_int && !pushed_is_int {
         p.element_descriptor = pushed_desc;
     }
@@ -1275,7 +1275,7 @@ pub unsafe extern "C" fn praxis_vec_len(ctx: *mut RuntimeContext, vec: GcRef) ->
     let p = unsafe { vec_payload(vec) };
     let len = p.items.len() as i64;
     // len allocates the returned Int, but the input vec is still live via `vec`.
-    unsafe { heap(ctx).alloc(scalars::INT, len) }
+    unsafe { heap(ctx).alloc(&scalars::INT, len) }
 }
 
 /// The element at `index`, or an `IndexOutOfBounds` fault if out of range
@@ -1313,7 +1313,7 @@ pub unsafe extern "C" fn praxis_vec_is_empty(ctx: *mut RuntimeContext, vec: GcRe
     let p = unsafe { vec_payload(vec) };
     let empty = p.items.is_empty();
     // SAFETY: ctx/heap valid; Bool immortal path.
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, empty) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, empty) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1355,7 +1355,7 @@ pub unsafe extern "C" fn praxis_deque_new(
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
     let element_descriptor = if element_descriptor.is_null() {
-        scalars::INT
+        &scalars::INT
     } else {
         // SAFETY: caller guarantees a valid `'static` descriptor pointer.
         unsafe { &*element_descriptor }
@@ -1363,7 +1363,7 @@ pub unsafe extern "C" fn praxis_deque_new(
     // SAFETY: DequePayload matches DEQUE's size/align and is fully initialized.
     unsafe {
         heap(ctx).alloc_with(
-            crate::collections::DEQUE,
+            &crate::collections::DEQUE,
             std::mem::size_of::<DequePayload>(),
             std::mem::align_of::<DequePayload>(),
             |payload| {
@@ -1390,8 +1390,8 @@ pub unsafe extern "C" fn praxis_deque_push_front(
     unsafe { maybe_collect(ctx) };
     let p = unsafe { deque_payload_mut(deque) };
     let pushed_desc = value.descriptor();
-    let cur_is_int = unsafe { (*p.element_descriptor).id } == scalars::INT.id;
-    let pushed_is_int = pushed_desc.id == scalars::INT.id;
+    let cur_is_int = unsafe { (*p.element_descriptor).id() } == scalars::INT.id();
+    let pushed_is_int = pushed_desc.id() == scalars::INT.id();
     if cur_is_int && !pushed_is_int {
         p.element_descriptor = pushed_desc;
     }
@@ -1413,8 +1413,8 @@ pub unsafe extern "C" fn praxis_deque_push_back(
     unsafe { maybe_collect(ctx) };
     let p = unsafe { deque_payload_mut(deque) };
     let pushed_desc = value.descriptor();
-    let cur_is_int = unsafe { (*p.element_descriptor).id } == scalars::INT.id;
-    let pushed_is_int = pushed_desc.id == scalars::INT.id;
+    let cur_is_int = unsafe { (*p.element_descriptor).id() } == scalars::INT.id();
+    let pushed_is_int = pushed_desc.id() == scalars::INT.id();
     if cur_is_int && !pushed_is_int {
         p.element_descriptor = pushed_desc;
     }
@@ -1464,7 +1464,7 @@ pub unsafe extern "C" fn praxis_deque_pop_back(ctx: *mut RuntimeContext, deque: 
 pub unsafe extern "C" fn praxis_deque_len(ctx: *mut RuntimeContext, deque: GcRef) -> GcRef {
     let p = unsafe { deque_payload(deque) };
     let len = p.items.len() as i64;
-    unsafe { heap(ctx).alloc(scalars::INT, len) }
+    unsafe { heap(ctx).alloc(&scalars::INT, len) }
 }
 
 /// The element at `index` (0-based from the front); faults `IndexOutOfBounds`.
@@ -1495,7 +1495,7 @@ pub unsafe extern "C" fn praxis_deque_get(
 pub unsafe extern "C" fn praxis_deque_is_empty(ctx: *mut RuntimeContext, deque: GcRef) -> GcRef {
     let p = unsafe { deque_payload(deque) };
     let empty = p.items.is_empty();
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, empty) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, empty) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1549,7 +1549,7 @@ pub unsafe extern "C" fn praxis_map_new(
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
     let key_descriptor = if key_descriptor.is_null() {
-        scalars::INT
+        &scalars::INT
     } else {
         unsafe { &*key_descriptor }
     };
@@ -1558,10 +1558,10 @@ pub unsafe extern "C" fn praxis_map_new(
     // carries both type args (a follow-up generalization). For now INT is
     // sound: values are uniform GcRefs and format via the descriptor adopted
     // from the first inserted value.
-    let value_descriptor = scalars::INT;
+    let value_descriptor = &scalars::INT;
     unsafe {
         heap(ctx).alloc_with(
-            crate::maps::MAP,
+            &crate::maps::MAP,
             std::mem::size_of::<MapPayload>(),
             std::mem::align_of::<MapPayload>(),
             |payload| {
@@ -1592,7 +1592,7 @@ pub unsafe extern "C" fn praxis_map_insert(
     // Adopt the value's descriptor if the default is still in place, so nested
     // values format/trace correctly (mirrors the Vec push-descriptor adoption).
     let val_desc = value.descriptor();
-    if p.value_descriptor.id == scalars::INT.id && val_desc.id != scalars::INT.id {
+    if p.value_descriptor.id() == scalars::INT.id() && val_desc.id() != scalars::INT.id() {
         p.value_descriptor = val_desc;
     }
     p.entries.insert(DynamicKey::new(key), value);
@@ -1626,7 +1626,7 @@ pub unsafe extern "C" fn praxis_map_contains(
 ) -> GcRef {
     let p = unsafe { map_payload(map) };
     let present = p.entries.contains_key(&DynamicKey::new(key));
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, present) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, present) }
 }
 
 /// Remove `key`; returns Unit (the removed value, if any, is dropped).
@@ -1651,7 +1651,7 @@ pub unsafe extern "C" fn praxis_map_remove(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_map_len(ctx: *mut RuntimeContext, map: GcRef) -> GcRef {
     let p = unsafe { map_payload(map) };
-    unsafe { heap(ctx).alloc(scalars::INT, p.entries.len() as i64) }
+    unsafe { heap(ctx).alloc(&scalars::INT, p.entries.len() as i64) }
 }
 
 /// True iff the map is empty, as a boxed Bool.
@@ -1661,7 +1661,7 @@ pub unsafe extern "C" fn praxis_map_len(ctx: *mut RuntimeContext, map: GcRef) ->
 #[no_mangle]
 pub unsafe extern "C" fn praxis_map_is_empty(ctx: *mut RuntimeContext, map: GcRef) -> GcRef {
     let p = unsafe { map_payload(map) };
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, p.entries.is_empty()) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, p.entries.is_empty()) }
 }
 
 /// `distance[key] min= candidate` (§6.2): keep the smaller value, or insert if
@@ -1738,13 +1738,13 @@ pub unsafe extern "C" fn praxis_set_new(
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
     let element_descriptor = if element_descriptor.is_null() {
-        scalars::INT
+        &scalars::INT
     } else {
         unsafe { &*element_descriptor }
     };
     unsafe {
         heap(ctx).alloc_with(
-            crate::maps::SET,
+            &crate::maps::SET,
             std::mem::size_of::<SetPayload>(),
             std::mem::align_of::<SetPayload>(),
             |payload| {
@@ -1800,7 +1800,7 @@ pub unsafe extern "C" fn praxis_set_contains(
 ) -> GcRef {
     let p = unsafe { set_payload(set) };
     let present = p.entries.contains(&DynamicKey::new(value));
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, present) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, present) }
 }
 
 /// The number of elements, as a boxed Int.
@@ -1810,7 +1810,7 @@ pub unsafe extern "C" fn praxis_set_contains(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_set_len(ctx: *mut RuntimeContext, set: GcRef) -> GcRef {
     let p = unsafe { set_payload(set) };
-    unsafe { heap(ctx).alloc(scalars::INT, p.entries.len() as i64) }
+    unsafe { heap(ctx).alloc(&scalars::INT, p.entries.len() as i64) }
 }
 
 /// True iff the set is empty, as a boxed Bool.
@@ -1820,7 +1820,7 @@ pub unsafe extern "C" fn praxis_set_len(ctx: *mut RuntimeContext, set: GcRef) ->
 #[no_mangle]
 pub unsafe extern "C" fn praxis_set_is_empty(ctx: *mut RuntimeContext, set: GcRef) -> GcRef {
     let p = unsafe { set_payload(set) };
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, p.entries.is_empty()) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, p.entries.is_empty()) }
 }
 
 // --- Counter[T] -------------------------------------------------------------
@@ -1837,13 +1837,13 @@ pub unsafe extern "C" fn praxis_counter_new(
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
     let key_descriptor = if key_descriptor.is_null() {
-        scalars::INT
+        &scalars::INT
     } else {
         unsafe { &*key_descriptor }
     };
     unsafe {
         heap(ctx).alloc_with(
-            crate::maps::COUNTER,
+            &crate::maps::COUNTER,
             std::mem::size_of::<CounterPayload>(),
             std::mem::align_of::<CounterPayload>(),
             |payload| {
@@ -1872,7 +1872,7 @@ pub unsafe extern "C" fn praxis_counter_get(
         Some(v) => unsafe { int_payload(*v) },
         None => 0, // §6.2: absent reads as zero.
     };
-    unsafe { heap(ctx).alloc(scalars::INT, count) }
+    unsafe { heap(ctx).alloc(&scalars::INT, count) }
 }
 
 /// Increment the count for `key` by one (inserting 1 if absent); returns Unit.
@@ -1892,10 +1892,10 @@ pub unsafe extern "C" fn praxis_counter_inc(
         Some(v) => {
             let cur = unsafe { int_payload(*v) };
             // SAFETY: ctx is wired; alloc a fresh Int for the incremented value.
-            *v = unsafe { heap(ctx).alloc(scalars::INT, cur + 1) };
+            *v = unsafe { heap(ctx).alloc(&scalars::INT, cur + 1) };
         }
         None => {
-            let one = unsafe { heap(ctx).alloc(scalars::INT, 1_i64) };
+            let one = unsafe { heap(ctx).alloc(&scalars::INT, 1_i64) };
             p.entries.insert(dk, one);
         }
     }
@@ -1909,7 +1909,7 @@ pub unsafe extern "C" fn praxis_counter_inc(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_counter_len(ctx: *mut RuntimeContext, counter: GcRef) -> GcRef {
     let p = unsafe { counter_payload(counter) };
-    unsafe { heap(ctx).alloc(scalars::INT, p.entries.len() as i64) }
+    unsafe { heap(ctx).alloc(&scalars::INT, p.entries.len() as i64) }
 }
 
 /// True iff the counter has no keys, as a boxed Bool.
@@ -1922,7 +1922,7 @@ pub unsafe extern "C" fn praxis_counter_is_empty(
     counter: GcRef,
 ) -> GcRef {
     let p = unsafe { counter_payload(counter) };
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, p.entries.is_empty()) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, p.entries.is_empty()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1964,13 +1964,13 @@ pub unsafe extern "C" fn praxis_max_heap_new(
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
     let element_descriptor = if element_descriptor.is_null() {
-        scalars::INT
+        &scalars::INT
     } else {
         unsafe { &*element_descriptor }
     };
     unsafe {
         heap(ctx).alloc_with(
-            crate::heaps::MAX_HEAP,
+            &crate::heaps::MAX_HEAP,
             std::mem::size_of::<MaxHeapPayload>(),
             std::mem::align_of::<MaxHeapPayload>(),
             |payload| {
@@ -2041,7 +2041,7 @@ pub unsafe extern "C" fn praxis_max_heap_peek(ctx: *mut RuntimeContext, heap_ref
 #[no_mangle]
 pub unsafe extern "C" fn praxis_max_heap_len(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     let p = unsafe { max_heap_payload(heap_ref) };
-    unsafe { heap(ctx).alloc(scalars::INT, p.items.len() as i64) }
+    unsafe { heap(ctx).alloc(&scalars::INT, p.items.len() as i64) }
 }
 
 /// True iff the heap is empty, as a boxed Bool.
@@ -2054,7 +2054,7 @@ pub unsafe extern "C" fn praxis_max_heap_is_empty(
     heap_ref: GcRef,
 ) -> GcRef {
     let p = unsafe { max_heap_payload(heap_ref) };
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, p.items.is_empty()) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, p.items.is_empty()) }
 }
 
 // --- MinHeap (mirrors MaxHeap with Reverse wrapping) -----------------------
@@ -2071,13 +2071,13 @@ pub unsafe extern "C" fn praxis_min_heap_new(
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
     let element_descriptor = if element_descriptor.is_null() {
-        scalars::INT
+        &scalars::INT
     } else {
         unsafe { &*element_descriptor }
     };
     unsafe {
         heap(ctx).alloc_with(
-            crate::heaps::MIN_HEAP,
+            &crate::heaps::MIN_HEAP,
             std::mem::size_of::<MinHeapPayload>(),
             std::mem::align_of::<MinHeapPayload>(),
             |payload| {
@@ -2148,7 +2148,7 @@ pub unsafe extern "C" fn praxis_min_heap_peek(ctx: *mut RuntimeContext, heap_ref
 #[no_mangle]
 pub unsafe extern "C" fn praxis_min_heap_len(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     let p = unsafe { min_heap_payload(heap_ref) };
-    unsafe { heap(ctx).alloc(scalars::INT, p.items.len() as i64) }
+    unsafe { heap(ctx).alloc(&scalars::INT, p.items.len() as i64) }
 }
 
 /// True iff the heap is empty, as a boxed Bool.
@@ -2161,7 +2161,7 @@ pub unsafe extern "C" fn praxis_min_heap_is_empty(
     heap_ref: GcRef,
 ) -> GcRef {
     let p = unsafe { min_heap_payload(heap_ref) };
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, p.items.is_empty()) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, p.items.is_empty()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -2187,7 +2187,7 @@ pub unsafe extern "C" fn praxis_bitset_new(ctx: *mut RuntimeContext) -> GcRef {
     unsafe { maybe_collect(ctx) };
     unsafe {
         heap(ctx).alloc_with(
-            crate::bitset::BITSET,
+            &crate::bitset::BITSET,
             std::mem::size_of::<BitSetPayload>(),
             std::mem::align_of::<BitSetPayload>(),
             |payload| {
@@ -2248,7 +2248,7 @@ pub unsafe extern "C" fn praxis_bitset_contains(
     let p = unsafe { bitset_payload(bs) };
     let i = unsafe { int_payload(value) };
     let present = i >= 0 && p.contains(i as usize);
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, present) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, present) }
 }
 
 /// The number of set bits, as a boxed Int.
@@ -2258,7 +2258,7 @@ pub unsafe extern "C" fn praxis_bitset_contains(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_bitset_len(ctx: *mut RuntimeContext, bs: GcRef) -> GcRef {
     let p = unsafe { bitset_payload(bs) };
-    unsafe { heap(ctx).alloc(scalars::INT, p.count() as i64) }
+    unsafe { heap(ctx).alloc(&scalars::INT, p.count() as i64) }
 }
 
 /// True iff the bitset is empty, as a boxed Bool.
@@ -2268,7 +2268,7 @@ pub unsafe extern "C" fn praxis_bitset_len(ctx: *mut RuntimeContext, bs: GcRef) 
 #[no_mangle]
 pub unsafe extern "C" fn praxis_bitset_is_empty(ctx: *mut RuntimeContext, bs: GcRef) -> GcRef {
     let p = unsafe { bitset_payload(bs) };
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, p.count() == 0) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, p.count() == 0) }
 }
 
 // ---------------------------------------------------------------------------
@@ -2295,9 +2295,9 @@ unsafe fn alloc_point(ctx: *mut RuntimeContext, x: i64, y: i64) -> GcRef {
     let schema = crate::tuples::point_schema();
     let schema_ptr = schema as *const crate::tuples::TupleSchema;
     let tup = unsafe { praxis_alloc_tuple(ctx, schema_ptr) };
-    let x_ref = unsafe { heap(ctx).alloc(scalars::INT, x) };
+    let x_ref = unsafe { heap(ctx).alloc(&scalars::INT, x) };
     unsafe { praxis_tuple_set(ctx, tup, 0, x_ref) };
-    let y_ref = unsafe { heap(ctx).alloc(scalars::INT, y) };
+    let y_ref = unsafe { heap(ctx).alloc(&scalars::INT, y) };
     unsafe { praxis_tuple_set(ctx, tup, 1, y_ref) };
     tup
 }
@@ -2329,7 +2329,7 @@ pub unsafe extern "C" fn praxis_grid_new(
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
     let element_descriptor = if element_descriptor.is_null() {
-        scalars::INT
+        &scalars::INT
     } else {
         unsafe { &*element_descriptor }
     };
@@ -2337,7 +2337,7 @@ pub unsafe extern "C" fn praxis_grid_new(
     let cells = vec![unit; (width as usize) * (height as usize)];
     unsafe {
         heap(ctx).alloc_with(
-            crate::collections::GRID,
+            &crate::collections::GRID,
             std::mem::size_of::<GridPayload>(),
             std::mem::align_of::<GridPayload>(),
             |payload| {
@@ -2358,7 +2358,7 @@ pub unsafe extern "C" fn praxis_grid_new(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_grid_width(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
     let p = unsafe { grid_payload(grid) };
-    unsafe { heap(ctx).alloc(scalars::INT, p.width as i64) }
+    unsafe { heap(ctx).alloc(&scalars::INT, p.width as i64) }
 }
 
 /// The grid height (number of rows), as a boxed Int.
@@ -2370,7 +2370,7 @@ pub unsafe extern "C" fn praxis_grid_height(ctx: *mut RuntimeContext, grid: GcRe
     let p = unsafe { grid_payload(grid) };
     // height = items.len() / width.
     let height = grid_height(p.items.len(), p.width);
-    unsafe { heap(ctx).alloc(scalars::INT, height as i64) }
+    unsafe { heap(ctx).alloc(&scalars::INT, height as i64) }
 }
 
 /// The cell at `(x, y)`; faults `IndexOutOfBounds` if out of range.
@@ -2435,7 +2435,7 @@ pub unsafe extern "C" fn praxis_grid_contains(
     let (xi, yi) = (unsafe { int_payload(x) }, unsafe { int_payload(y) });
     let height = grid_height(p.items.len(), p.width);
     let inside = xi >= 0 && yi >= 0 && (xi as usize) < p.width && (yi as usize) < height;
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, inside) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, inside) }
 }
 
 /// The 4 orthogonal neighbors of `point` that lie inside the grid, as a `Vec`.
@@ -2664,7 +2664,7 @@ pub unsafe extern "C" fn praxis_grid_transpose(ctx: *mut RuntimeContext, grid: G
     let _ = ctx;
     unsafe {
         heap(ctx).alloc_with(
-            crate::collections::GRID,
+            &crate::collections::GRID,
             std::mem::size_of::<GridPayload>(),
             std::mem::align_of::<GridPayload>(),
             |payload| {
@@ -2701,7 +2701,7 @@ pub unsafe extern "C" fn praxis_grid_rotate_left(ctx: *mut RuntimeContext, grid:
     }
     unsafe {
         heap(ctx).alloc_with(
-            crate::collections::GRID,
+            &crate::collections::GRID,
             std::mem::size_of::<GridPayload>(),
             std::mem::align_of::<GridPayload>(),
             |payload| {
@@ -2738,7 +2738,7 @@ pub unsafe extern "C" fn praxis_grid_rotate_right(ctx: *mut RuntimeContext, grid
     }
     unsafe {
         heap(ctx).alloc_with(
-            crate::collections::GRID,
+            &crate::collections::GRID,
             std::mem::size_of::<GridPayload>(),
             std::mem::align_of::<GridPayload>(),
             |payload| {
@@ -2778,7 +2778,7 @@ pub unsafe extern "C" fn praxis_text_len(ctx: *mut RuntimeContext, text: GcRef) 
     // SAFETY: caller guarantees `text` is Text.
     let s = unsafe { text_str(text) };
     let len = s.chars().count() as i64;
-    unsafe { heap(ctx).alloc(scalars::INT, len) }
+    unsafe { heap(ctx).alloc(&scalars::INT, len) }
 }
 
 /// True iff `text` has no chars, as a boxed `Bool`.
@@ -2790,7 +2790,7 @@ pub unsafe extern "C" fn praxis_text_is_empty(ctx: *mut RuntimeContext, text: Gc
     // SAFETY: caller guarantees `text` is Text.
     let s = unsafe { text_str(text) };
     // SAFETY: ctx/heap valid; Bool immortal path.
-    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, s.is_empty()) }
+    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, s.is_empty()) }
 }
 
 /// The Unicode scalar value (as a boxed `Int`) of the char at `index`, or an
@@ -2816,7 +2816,7 @@ pub unsafe extern "C" fn praxis_text_get(
     match s.chars().nth(idx as usize) {
         Some(ch) => {
             // Return the scalar value as an Int (Char is reserved; M5 uses Int).
-            unsafe { heap(ctx).alloc(scalars::INT, ch as i64) }
+            unsafe { heap(ctx).alloc(&scalars::INT, ch as i64) }
         }
         None => {
             unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
@@ -2894,7 +2894,7 @@ pub unsafe extern "C" fn praxis_run_parser(
     // Guard the parser interpreter against a non-Text input (§6.3). Reaching
     // `run_plan` with a non-Text payload would reinterpret foreign bytes as a
     // TextPayload and segfault; fault cleanly instead.
-    if input.descriptor().id != crate::text::TEXT.id {
+    if input.descriptor().id() != crate::text::TEXT.id() {
         unsafe { set_fault(ctx, FaultKind::ParseFailed) };
         return unsafe { unit_sentinel(ctx) };
     }
@@ -3270,7 +3270,7 @@ mod tests {
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx wired; INT is a valid static descriptor.
         unsafe {
-            let v = praxis_vec_new(ctx, crate::scalars::INT as *const _);
+            let v = praxis_vec_new(ctx, &crate::scalars::INT as *const _);
             assert_eq!(praxis_bool_load(ctx, praxis_vec_is_empty(ctx, v)), 1);
             assert_eq!(praxis_int_load(ctx, praxis_vec_len(ctx, v)), 0);
         }
@@ -3284,7 +3284,7 @@ mod tests {
         // SAFETY: ctx wired; push mutates the vec in place (returns Unit), so we
         // keep using the same `v` GcRef throughout.
         unsafe {
-            let v = praxis_vec_new(ctx, crate::scalars::INT as *const _);
+            let v = praxis_vec_new(ctx, &crate::scalars::INT as *const _);
             let a = praxis_alloc_int(ctx, 10);
             let b = praxis_alloc_int(ctx, 20);
             let c = praxis_alloc_int(ctx, 30);
@@ -3306,7 +3306,7 @@ mod tests {
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx wired.
         unsafe {
-            let v = praxis_vec_new(ctx, crate::scalars::INT as *const _);
+            let v = praxis_vec_new(ctx, &crate::scalars::INT as *const _);
             let one = praxis_alloc_int(ctx, 1);
             let _ = praxis_vec_get(ctx, v, one); // empty vec, index 0
             assert!(rt.has_pending_fault());
@@ -3326,7 +3326,7 @@ mod tests {
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx wired; push mutates in place so `v` stays valid throughout.
         unsafe {
-            let v = praxis_vec_new(ctx, crate::scalars::INT as *const _);
+            let v = praxis_vec_new(ctx, &crate::scalars::INT as *const _);
             let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 2);
             (*frame).slots[0] = v.as_ptr();
             let mut observed_reclamation = false;
@@ -3370,7 +3370,7 @@ mod tests {
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx wired.
         unsafe {
-            let v = praxis_vec_new(ctx, crate::scalars::INT as *const _);
+            let v = praxis_vec_new(ctx, &crate::scalars::INT as *const _);
             let a = praxis_alloc_int(ctx, 1);
             let _ = praxis_vec_push(ctx, v, a); // non-empty vec, so only the sign can fail
             let neg = praxis_alloc_int(ctx, -1);
@@ -3436,7 +3436,7 @@ mod tests {
         let ctx = wired_ctx(&mut rt);
         let length_after;
         unsafe {
-            let ints = praxis_vec_new(ctx, crate::scalars::INT as *const _);
+            let ints = praxis_vec_new(ctx, &crate::scalars::INT as *const _);
             let float = praxis_alloc_float(ctx, 1.5_f64.to_bits() as i64);
             let _ = praxis_vec_push(ctx, ints, float);
             length_after = ints.as_vec().len();
@@ -3471,7 +3471,7 @@ mod tests {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         let cell = rt.alloc_text("x");
-        let grid = rt.alloc_grid(crate::text::TEXT, vec![cell], 1);
+        let grid = rt.alloc_grid(&crate::text::TEXT, vec![cell], 1);
         let descriptors;
         unsafe {
             let zero = praxis_alloc_int(ctx, 0);
@@ -3479,15 +3479,15 @@ mod tests {
             let row = praxis_grid_row(ctx, grid, zero);
             let column = praxis_grid_column(ctx, grid, zero);
             descriptors = [
-                (*vec_payload(cells).element_descriptor).id,
-                (*vec_payload(row).element_descriptor).id,
-                (*vec_payload(column).element_descriptor).id,
+                (*vec_payload(cells).element_descriptor).id(),
+                (*vec_payload(row).element_descriptor).id(),
+                (*vec_payload(column).element_descriptor).id(),
             ];
         }
         unsafe { drop_ctx(ctx) };
 
         assert!(
-            descriptors.iter().all(|id| *id == crate::text::TEXT.id),
+            descriptors.iter().all(|id| *id == crate::text::TEXT.id()),
             "cells(), row(), and column() must return Vec values tagged with the Grid cell type"
         );
     }
@@ -3499,14 +3499,14 @@ mod tests {
         let ctx = wired_ctx(&mut rt);
         let cell_descriptor;
         unsafe {
-            let grid = praxis_grid_new(ctx, crate::scalars::INT as *const _, 1, 1);
-            cell_descriptor = grid_payload(grid).items[0].descriptor().id;
+            let grid = praxis_grid_new(ctx, &crate::scalars::INT as *const _, 1, 1);
+            cell_descriptor = grid_payload(grid).items[0].descriptor().id();
         }
         unsafe { drop_ctx(ctx) };
 
         assert_eq!(
             cell_descriptor,
-            crate::scalars::INT.id,
+            crate::scalars::INT.id(),
             "a live Grid[Int] must never contain a Unit placeholder observable through get/format/hash"
         );
     }
@@ -3517,7 +3517,7 @@ mod tests {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         let cell = rt.alloc_int(1);
-        let grid = rt.alloc_grid(crate::scalars::INT, vec![cell], 1);
+        let grid = rt.alloc_grid(&crate::scalars::INT, vec![cell], 1);
         let descriptors;
         unsafe {
             let point = alloc_point(ctx, 0, 0);
@@ -3526,16 +3526,18 @@ mod tests {
             let neighbors8 = praxis_grid_neighbors8(ctx, grid, point);
             let matches = praxis_grid_find_all(ctx, grid, cell);
             descriptors = [
-                (*vec_payload(positions).element_descriptor).id,
-                (*vec_payload(neighbors4).element_descriptor).id,
-                (*vec_payload(neighbors8).element_descriptor).id,
-                (*vec_payload(matches).element_descriptor).id,
+                (*vec_payload(positions).element_descriptor).id(),
+                (*vec_payload(neighbors4).element_descriptor).id(),
+                (*vec_payload(neighbors8).element_descriptor).id(),
+                (*vec_payload(matches).element_descriptor).id(),
             ];
         }
         unsafe { drop_ctx(ctx) };
 
         assert!(
-            descriptors.iter().all(|id| *id == crate::tuples::TUPLE.id),
+            descriptors
+                .iter()
+                .all(|id| *id == crate::tuples::TUPLE.id()),
             "position-producing Grid methods must return Vec[Tuple[Int, Int]] at runtime"
         );
     }
@@ -3547,15 +3549,15 @@ mod tests {
         let ctx = wired_ctx(&mut rt);
         let missing;
         unsafe {
-            let map = praxis_map_new(ctx, crate::scalars::INT as *const _);
+            let map = praxis_map_new(ctx, &crate::scalars::INT as *const _);
             let key = praxis_alloc_int(ctx, 1);
             missing = praxis_map_get(ctx, map, key);
         }
         unsafe { drop_ctx(ctx) };
 
         assert_ne!(
-            missing.descriptor().id,
-            crate::scalars::UNIT.id,
+            missing.descriptor().id(),
+            crate::scalars::UNIT.id(),
             "Map.get is statically value-typed; absence needs Option or a checked fault, not Unit"
         );
     }
@@ -3569,14 +3571,14 @@ mod tests {
         unsafe {
             let cell = praxis_alloc_int(ctx, 1);
             let sought = praxis_alloc_int(ctx, 2);
-            let grid = rt.alloc_grid(crate::scalars::INT, vec![cell], 1);
+            let grid = rt.alloc_grid(&crate::scalars::INT, vec![cell], 1);
             missing = praxis_grid_find(ctx, grid, sought);
         }
         unsafe { drop_ctx(ctx) };
 
         assert_ne!(
-            missing.descriptor().id,
-            crate::scalars::UNIT.id,
+            missing.descriptor().id(),
+            crate::scalars::UNIT.id(),
             "Grid.find is statically point-typed; absence needs Option or a checked fault, not Unit"
         );
     }
@@ -3720,7 +3722,7 @@ mod tests {
             source_name: local_name.as_ptr(),
             name_len: local_name.len() as u32,
             symbol_id: 1,
-            descriptor: crate::scalars::INT as *const _,
+            descriptor: &crate::scalars::INT as *const _,
             type_id: 0,
             kind: crate::debug::LOCAL_KIND_USER,
             span_start: 0,
@@ -3760,7 +3762,7 @@ mod tests {
 
             // Model Grid.positions/find_all/neighbors: they hold a result Vec
             // only in a Rust local while repeatedly calling alloc_point.
-            let _intermediate = praxis_vec_new(ctx, crate::tuples::TUPLE as *const _);
+            let _intermediate = praxis_vec_new(ctx, &crate::tuples::TUPLE as *const _);
             // Direct allocations raise pacing pressure without collecting.
             for i in 0..3000_i64 {
                 let _ = rt.alloc_int(i);

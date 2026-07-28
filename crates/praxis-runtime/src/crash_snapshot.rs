@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn explicit_collection_preserves_values_held_by_a_crash_snapshot() {
         let runtime = Runtime::new();
-        let value = runtime.heap().alloc(INT, 42_i64);
+        let value = runtime.heap().alloc(&INT, 42_i64);
         let snapshot = CrashSnapshot {
             frames: vec![SnapshotFrame {
                 parent: usize::MAX,
@@ -286,7 +286,7 @@ mod tests {
                     source_name: std::ptr::null(),
                     name_len: 0,
                     symbol_id: 0,
-                    descriptor: INT as *const _,
+                    descriptor: &INT as *const _,
                     value,
                     type_id: 0,
                     kind: LOCAL_KIND_USER,

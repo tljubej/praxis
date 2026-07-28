@@ -115,13 +115,13 @@ impl Rt {
     /// Allocate a boxed `Int`.
     fn alloc_int(&self, value: i64) -> GcRef {
         // SAFETY: ctx is valid (caller upholds).
-        unsafe { heap_ref(self.ctx).alloc(scalars::INT, value) }
+        unsafe { heap_ref(self.ctx).alloc(&scalars::INT, value) }
     }
 
     /// Allocate a boxed `Char` from a Unicode scalar.
     fn alloc_char(&self, value: u32) -> GcRef {
         // SAFETY: ctx is valid.
-        unsafe { heap_ref(self.ctx).alloc(scalars::CHAR, value) }
+        unsafe { heap_ref(self.ctx).alloc(&scalars::CHAR, value) }
     }
 
     /// Allocate a source-slice `Text` pointing into `owner`.
@@ -130,7 +130,7 @@ impl Rt {
         // SAFETY: ctx is valid; payload matches TEXT's layout.
         unsafe {
             heap_ref(self.ctx).alloc_with(
-                crate::text::TEXT,
+                &crate::text::TEXT,
                 std::mem::size_of::<TextPayload>(),
                 std::mem::align_of::<TextPayload>(),
                 |ptr| (ptr as *mut TextPayload).write(payload),
@@ -151,7 +151,7 @@ impl Rt {
         // SAFETY: ctx is valid.
         unsafe {
             heap_ref(self.ctx).alloc_with(
-                crate::collections::VEC,
+                &crate::collections::VEC,
                 std::mem::size_of::<crate::collections::VecPayload>(),
                 std::mem::align_of::<crate::collections::VecPayload>(),
                 |ptr| (ptr as *mut crate::collections::VecPayload).write(payload),
@@ -167,7 +167,7 @@ impl Rt {
         // SAFETY: ctx is valid; payload matches ENUM's layout.
         unsafe {
             heap_ref(self.ctx).alloc_with(
-                crate::enums::ENUM,
+                &crate::enums::ENUM,
                 std::mem::size_of::<crate::enums::EnumPayload>(),
                 std::mem::align_of::<crate::enums::EnumPayload>(),
                 |ptr| (ptr as *mut crate::enums::EnumPayload).write(payload),
@@ -430,7 +430,7 @@ fn walk_block(
                 // If the positional produced a record (named-capture template),
                 // flatten its fields into the block record. We detect a record
                 // by pointer-equality of its descriptor against RECORD.
-                if std::ptr::eq(value.descriptor(), crate::records::RECORD) {
+                if std::ptr::eq(value.descriptor(), &crate::records::RECORD) {
                     flatten_record_into(rt, value, &mut captures);
                 }
                 // A non-record positional (scalar) was rejected by validation
@@ -632,7 +632,7 @@ fn walk_characters(
             Err(_) => break,
         }
     }
-    Ok((rt.alloc_vec(scalars::CHAR, items), bytes.len() - offset))
+    Ok((rt.alloc_vec(&scalars::CHAR, items), bytes.len() - offset))
 }
 
 /// Skip bytes at `cursor` per the `chars` skip policy (§7.5).
@@ -736,7 +736,7 @@ fn alloc_grid(
     // SAFETY: ctx is valid.
     let grid_ref = unsafe {
         heap_ref(rt.ctx).alloc_with(
-            crate::collections::GRID,
+            &crate::collections::GRID,
             std::mem::size_of::<crate::collections::GridPayload>(),
             std::mem::align_of::<crate::collections::GridPayload>(),
             |ptr| (ptr as *mut crate::collections::GridPayload).write(payload),
@@ -847,7 +847,7 @@ fn walk_grid(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize
     // SAFETY: ctx is valid.
     let grid_ref = unsafe {
         heap_ref(rt.ctx).alloc_with(
-            crate::collections::GRID,
+            &crate::collections::GRID,
             std::mem::size_of::<crate::collections::GridPayload>(),
             std::mem::align_of::<crate::collections::GridPayload>(),
             |ptr| (ptr as *mut crate::collections::GridPayload).write(payload),
@@ -1083,7 +1083,7 @@ fn alloc_record(rt: &Rt, captures: &[(Option<&'static str>, u32, GcRef)]) -> GcR
     // SAFETY: ctx is valid; payload matches RECORD's layout.
     unsafe {
         heap_ref(rt.ctx).alloc_with(
-            crate::records::RECORD,
+            &crate::records::RECORD,
             std::mem::size_of::<crate::records::RecordPayload>(),
             std::mem::align_of::<crate::records::RecordPayload>(),
             |ptr| (ptr as *mut crate::records::RecordPayload).write(payload),
@@ -1107,7 +1107,7 @@ fn alloc_tuple(rt: &Rt, elements: &[u32], plan: &ParserPlan, values: Vec<GcRef>)
     // SAFETY: ctx is valid; payload matches TUPLE's layout.
     unsafe {
         heap_ref(rt.ctx).alloc_with(
-            crate::tuples::TUPLE,
+            &crate::tuples::TUPLE,
             std::mem::size_of::<crate::tuples::TuplePayload>(),
             std::mem::align_of::<crate::tuples::TuplePayload>(),
             |ptr| (ptr as *mut crate::tuples::TuplePayload).write(payload),
@@ -1348,34 +1348,34 @@ fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescri
         | PlanNode::Csv { .. }
         | PlanNode::Ws { .. }
         | PlanNode::Sep { .. }
-        | PlanNode::Scan { .. } => crate::collections::VEC,
-        PlanNode::Grid { .. } => crate::collections::GRID,
+        | PlanNode::Scan { .. } => &crate::collections::VEC,
+        PlanNode::Grid { .. } => &crate::collections::GRID,
         // Named sections produce an anonymous record (uniform descriptor; the
         // schema is in the payload, built at runtime by `walk_sections_named`).
-        PlanNode::SectionsNamed { .. } => crate::records::RECORD,
+        PlanNode::SectionsNamed { .. } => &crate::records::RECORD,
         // A block produces a flattened anonymous record (uniform descriptor).
-        PlanNode::Block { .. } => crate::records::RECORD,
+        PlanNode::Block { .. } => &crate::records::RECORD,
         // choice/optional produce an enum (uniform descriptor; tag + payload).
-        PlanNode::Choice { .. } | PlanNode::Optional { .. } => crate::enums::ENUM,
+        PlanNode::Choice { .. } | PlanNode::Optional { .. } => &crate::enums::ENUM,
         // one_of produces a Char; chars produces a Vec[Char].
-        PlanNode::OneOf { .. } => scalars::CHAR,
-        PlanNode::Characters { .. } => crate::collections::VEC,
+        PlanNode::OneOf { .. } => &scalars::CHAR,
+        PlanNode::Characters { .. } => &crate::collections::VEC,
         // matrix / ragged grid produce a Grid.
-        PlanNode::Matrix { .. } | PlanNode::GridRagged { .. } => crate::collections::GRID,
+        PlanNode::Matrix { .. } | PlanNode::GridRagged { .. } => &crate::collections::GRID,
         // A template's result is a scalar (single anon capture), a record (named
         // captures), or Unit (no captures). A tuple's result is a tuple. These
         // are uniform descriptors too (schema in the payload).
         PlanNode::Template { parts } => template_result_descriptor(parts),
-        PlanNode::Tuple { .. } => crate::tuples::TUPLE,
+        PlanNode::Tuple { .. } => &crate::tuples::TUPLE,
     }
 }
 
 /// The scalar descriptor for an atomic kind.
 fn atomic_descriptor(kind: AtomicKind) -> &'static crate::TypeDescriptor {
     match kind {
-        AtomicKind::Int | AtomicKind::Digit => scalars::INT,
-        AtomicKind::Char => scalars::CHAR,
-        AtomicKind::Word | AtomicKind::Text | AtomicKind::Rest => crate::text::TEXT,
+        AtomicKind::Int | AtomicKind::Digit => &scalars::INT,
+        AtomicKind::Char => &scalars::CHAR,
+        AtomicKind::Word | AtomicKind::Text | AtomicKind::Rest => &crate::text::TEXT,
     }
 }
 
@@ -1396,7 +1396,7 @@ fn template_result_descriptor(
         }
     }
     if any_named {
-        crate::records::RECORD
+        &crate::records::RECORD
     } else if captures == 1 {
         // Single anonymous capture → scalar. The exact scalar descriptor depends
         // on the capture's child, but for descriptor-table purposes the element
@@ -1406,9 +1406,9 @@ fn template_result_descriptor(
         // (vec_equals etc.) dispatch through the value's own descriptor, so this
         // is only consulted for the collection's *element* tag. Use INT as a
         // sound default (the value's real descriptor governs tracing).
-        scalars::INT
+        &scalars::INT
     } else {
-        scalars::UNIT
+        &scalars::UNIT
     }
 }
 
@@ -1599,8 +1599,8 @@ mod tests {
         };
 
         assert_eq!(
-            child_descriptor(&plan, plan.root).id,
-            crate::text::TEXT.id,
+            child_descriptor(&plan, plan.root).id(),
+            crate::text::TEXT.id(),
             "lines(`{{word}}`) must carry Text as its Vec element descriptor"
         );
     }

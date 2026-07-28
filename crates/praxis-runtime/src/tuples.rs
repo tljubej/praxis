@@ -19,7 +19,7 @@
 
 use std::fmt;
 
-use crate::descriptor::{DynamicHasher, Tracer, TypeDescriptor, TypeId};
+use crate::descriptor::{BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
 use crate::GcRef;
 
 /// The static shape of a tuple: an ordered list of element descriptors (positional,
@@ -125,17 +125,17 @@ unsafe fn tuple_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 /// hashing (§5.5) recurse element-wise through the per-shape schema's element
 /// descriptors. A tuple is equatable/hashable iff every element is; functions
 /// never are, so a tuple containing a function is neither.
-pub const TUPLE: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(10),
-    name: "Tuple",
-    size: std::mem::size_of::<TuplePayload>(),
-    align: std::mem::align_of::<TuplePayload>(),
-    trace: tuple_trace,
-    drop_value: tuple_drop,
-    format: tuple_format,
-    equals: Some(tuple_equals),
-    hash: Some(tuple_hash),
-};
+pub static TUPLE: TypeDescriptor = TypeDescriptor::builtin::<TuplePayload>(
+    BuiltinTypeId::Tuple,
+    "Tuple",
+    tuple_trace,
+    tuple_drop,
+    tuple_format,
+    Some(tuple_equals),
+    Some(tuple_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 /// The cached `'static` schema for a `(Int, Int)` point tuple. Used by Grid
 /// methods that return `(x, y)` points (§6.4). Built once and leaked; the two
@@ -154,8 +154,8 @@ pub fn point_schema() -> &'static TupleSchema {
         .get_or_init(|| {
             let descriptors: &'static [*const TypeDescriptor] = Box::leak(
                 vec![
-                    crate::scalars::INT as *const _,
-                    crate::scalars::INT as *const _,
+                    &crate::scalars::INT as *const _,
+                    &crate::scalars::INT as *const _,
                 ]
                 .into_boxed_slice(),
             );
@@ -174,7 +174,7 @@ mod tests {
         assert!(TUPLE.is_equatable());
         assert!(TUPLE.is_hashable());
         assert_eq!(TUPLE.name, "Tuple");
-        assert_eq!(TUPLE.id, TypeId(10));
+        assert_eq!(TUPLE.as_builtin(), Some(BuiltinTypeId::Tuple));
     }
 
     #[test]
@@ -185,7 +185,7 @@ mod tests {
         let mut ctx = rt.context();
         // Build a 2-element schema of INT descriptors.
         let descriptors: &'static [*const TypeDescriptor] =
-            Box::leak(vec![crate::scalars::INT as *const TypeDescriptor; 2].into_boxed_slice());
+            Box::leak(vec![&crate::scalars::INT as *const TypeDescriptor; 2].into_boxed_slice());
         let schema = Box::leak(Box::new(TupleSchema { descriptors }));
         let tref = unsafe { praxis_alloc_tuple(&mut ctx, schema) };
         // The schema pointer must be embedded in the payload.
@@ -204,8 +204,8 @@ mod tests {
         let independently_interned_schema = Box::leak(Box::new(TupleSchema {
             descriptors: Box::leak(
                 vec![
-                    crate::scalars::INT as *const TypeDescriptor,
-                    crate::scalars::INT as *const TypeDescriptor,
+                    &crate::scalars::INT as *const TypeDescriptor,
+                    &crate::scalars::INT as *const TypeDescriptor,
                 ]
                 .into_boxed_slice(),
             ),

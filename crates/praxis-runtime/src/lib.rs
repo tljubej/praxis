@@ -50,8 +50,8 @@ pub use context::{
 pub use crash_snapshot::{CrashSnapshot, SnapshotFrame, SnapshotSlot};
 pub use debug::{DebugLocalMeta, LOCAL_KIND_TEMP, LOCAL_KIND_USER};
 pub use descriptor::{
-    DropFn, DynamicHasher, EqualsFn, FormatFn, HashFn, StructHasher, TraceFn, Tracer,
-    TypeDescriptor, TypeId,
+    BuiltinTypeId, CompareFn, DropFn, DynamicHasher, EqualsFn, FormatFn, HashFn, StructHasher,
+    TraceFn, Tracer, TypeDescriptor, TypeId, BUILTINS,
 };
 pub use gc::{GcHeader, GcRef};
 pub use heap::{Heap, HeapStats};

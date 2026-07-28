@@ -461,7 +461,7 @@ impl Default for Runtime {
 impl Runtime {
     /// Allocate an `Int` (§4.3).
     pub fn alloc_int(&self, value: i64) -> GcRef {
-        self.heap.alloc(crate::scalars::INT, value)
+        self.heap.alloc(&crate::scalars::INT, value)
     }
 
     /// Allocate a `Bool` as the corresponding immortal singleton (§4.3). Booleans
@@ -472,7 +472,7 @@ impl Runtime {
 
     /// Allocate a `Byte` (§4.3).
     pub fn alloc_byte(&self, value: u8) -> GcRef {
-        self.heap.alloc(crate::scalars::BYTE, value)
+        self.heap.alloc(&crate::scalars::BYTE, value)
     }
 
     /// Allocate a `Char` (§4.3). Panics if `value` is not a valid scalar value.
@@ -481,13 +481,13 @@ impl Runtime {
             crate::scalars::is_valid_char(value),
             "{value:#x} is not a valid Unicode scalar"
         );
-        self.heap.alloc(crate::scalars::CHAR, value)
+        self.heap.alloc(&crate::scalars::CHAR, value)
     }
 
     /// Allocate a `Float` (§4.3, §4.12). All finite values, ±infinity, and NaN
     /// are valid payloads — `Float` arithmetic never faults (IEEE-754).
     pub fn alloc_float(&self, value: f64) -> GcRef {
-        self.heap.alloc(crate::scalars::FLOAT, value)
+        self.heap.alloc(&crate::scalars::FLOAT, value)
     }
 
     /// The immortal `Unit` (§4.3).
@@ -501,7 +501,7 @@ impl Runtime {
         // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
         unsafe {
             self.heap.alloc_with(
-                crate::text::TEXT,
+                &crate::text::TEXT,
                 std::mem::size_of::<crate::text::TextPayload>(),
                 std::mem::align_of::<crate::text::TextPayload>(),
                 |payload| {
@@ -528,7 +528,7 @@ impl Runtime {
         // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
         unsafe {
             self.heap.alloc_with(
-                crate::text::TEXT,
+                &crate::text::TEXT,
                 std::mem::size_of::<crate::text::TextPayload>(),
                 std::mem::align_of::<crate::text::TextPayload>(),
                 |ptr| (ptr as *mut crate::text::TextPayload).write(payload),
@@ -546,7 +546,7 @@ impl Runtime {
         // SAFETY: VecPayload matches VEC's size/align and is fully initialized.
         unsafe {
             self.heap.alloc_with(
-                crate::collections::VEC,
+                &crate::collections::VEC,
                 std::mem::size_of::<VecPayload>(),
                 std::mem::align_of::<VecPayload>(),
                 |payload| {
@@ -577,7 +577,7 @@ impl Runtime {
         // SAFETY: GridPayload matches GRID's size/align and is fully initialized.
         unsafe {
             self.heap.alloc_with(
-                crate::collections::GRID,
+                &crate::collections::GRID,
                 std::mem::size_of::<crate::collections::GridPayload>(),
                 std::mem::align_of::<crate::collections::GridPayload>(),
                 |payload| {
@@ -610,7 +610,7 @@ impl Runtime {
         // SAFETY: RecordPayload matches RECORD's size/align and is fully initialized.
         unsafe {
             self.heap.alloc_with(
-                crate::records::RECORD,
+                &crate::records::RECORD,
                 std::mem::size_of::<crate::records::RecordPayload>(),
                 std::mem::align_of::<crate::records::RecordPayload>(),
                 |payload| {
@@ -629,7 +629,11 @@ impl GcRef {
     ///
     /// Panics if this reference's descriptor is not `Int`.
     pub fn as_int(&self) -> i64 {
-        assert_eq!(self.descriptor().id, crate::scalars::INT.id, "not an Int");
+        assert_eq!(
+            self.descriptor().id(),
+            crate::scalars::INT.id(),
+            "not an Int"
+        );
         // SAFETY: descriptor check confirms payload is i64.
         unsafe { *self.payload::<i64>() }
     }
@@ -638,21 +642,33 @@ impl GcRef {
     ///
     /// Panics if this reference's descriptor is not `Bool`.
     pub fn as_bool(&self) -> bool {
-        assert_eq!(self.descriptor().id, crate::scalars::BOOL.id, "not a Bool");
+        assert_eq!(
+            self.descriptor().id(),
+            crate::scalars::BOOL.id(),
+            "not a Bool"
+        );
         // SAFETY: descriptor check confirms payload is BoolPayload.
         unsafe { read_bool(*self) }
     }
 
     /// Read a `Byte` payload (§4.3).
     pub fn as_byte(&self) -> u8 {
-        assert_eq!(self.descriptor().id, crate::scalars::BYTE.id, "not a Byte");
+        assert_eq!(
+            self.descriptor().id(),
+            crate::scalars::BYTE.id(),
+            "not a Byte"
+        );
         // SAFETY: descriptor check confirms payload is u8.
         unsafe { *self.payload::<u8>() }
     }
 
     /// Read a `Char` payload as a Rust `char` (§4.3).
     pub fn as_char(&self) -> char {
-        assert_eq!(self.descriptor().id, crate::scalars::CHAR.id, "not a Char");
+        assert_eq!(
+            self.descriptor().id(),
+            crate::scalars::CHAR.id(),
+            "not a Char"
+        );
         let raw = unsafe { *self.payload::<u32>() };
         char::from_u32(raw).expect("Char payload was not a valid scalar; memory corrupted")
     }
@@ -660,8 +676,8 @@ impl GcRef {
     /// Read a `Float` payload as an `f64` (§4.3).
     pub fn as_float(&self) -> f64 {
         assert_eq!(
-            self.descriptor().id,
-            crate::scalars::FLOAT.id,
+            self.descriptor().id(),
+            crate::scalars::FLOAT.id(),
             "not a Float"
         );
         // SAFETY: descriptor check confirms payload is FloatPayload (f64).
@@ -674,7 +690,7 @@ impl GcRef {
     /// as the object is reachable. Handles both owned and source-slice payloads
     /// (ADR-013): a slice reads through its owner.
     pub fn as_text(&self) -> &str {
-        assert_eq!(self.descriptor().id, crate::text::TEXT.id, "not Text");
+        assert_eq!(self.descriptor().id(), crate::text::TEXT.id(), "not Text");
         // SAFETY: descriptor check confirms payload is a TextPayload; the
         // reference is valid while the object lives (non-moving GC, ADR-011).
         let payload = self.payload::<crate::text::TextPayload>() as *const crate::text::TextPayload;
@@ -684,8 +700,8 @@ impl GcRef {
     /// Read a `Vec[T]` payload as a slice of element refs (§11.2).
     pub fn as_vec(&self) -> &[GcRef] {
         assert_eq!(
-            self.descriptor().id,
-            crate::collections::VEC.id,
+            self.descriptor().id(),
+            crate::collections::VEC.id(),
             "not a Vec"
         );
         // SAFETY: descriptor check confirms payload is VecPayload.
@@ -706,7 +722,7 @@ impl GcRef {
     pub fn equals(&self, other: &GcRef) -> bool {
         let a = self.descriptor();
         let b = other.descriptor();
-        if a.id != b.id {
+        if a.id() != b.id() {
             return false;
         }
         let Some(eq) = a.equals else {
@@ -809,7 +825,7 @@ mod tests {
         let rt = Runtime::new();
         let e0 = rt.alloc_int(1);
         let e1 = rt.alloc_int(2);
-        let v = rt.alloc_vec(crate::scalars::INT, vec![e0, e1]);
+        let v = rt.alloc_vec(&crate::scalars::INT, vec![e0, e1]);
         assert_eq!(v.descriptor().name, "Vec");
         assert_eq!(v.as_vec().len(), 2);
 

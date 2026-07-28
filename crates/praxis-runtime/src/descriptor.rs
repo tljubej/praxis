@@ -11,15 +11,101 @@ use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+/// The closed set of built-in runtime types (§11.4).
+///
+/// This enum *is* the type-id registry: a descriptor's [`TypeId`] is derived
+/// from its variant, so two built-ins can no longer be labelled with the same
+/// id (which is how `Float` and `Text` both became `TypeId(5)`). Uniqueness
+/// reduces to enum-discriminant uniqueness, which rustc already enforces.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[repr(u32)]
+pub enum BuiltinTypeId {
+    Unit = 0,
+    Bool,
+    Int,
+    Byte,
+    Char,
+    Float,
+    Text,
+    Vec,
+    Deque,
+    Grid,
+    Map,
+    Set,
+    Counter,
+    MinHeap,
+    MaxHeap,
+    BitSet,
+    Tuple,
+    Record,
+    Enum,
+    Closure,
+    VarCell,
+}
+
+impl BuiltinTypeId {
+    /// Number of built-in types. Kept honest by [`BUILTINS`]'s array length and
+    /// by `builtins_are_indexed_by_their_id`.
+    pub const COUNT: usize = 21;
+
+    /// Total inverse of the discriminant. A `match` rather than a `transmute`,
+    /// so an out-of-range word yields `None` instead of an invalid enum value.
+    pub const fn from_u32(v: u32) -> Option<BuiltinTypeId> {
+        use BuiltinTypeId::*;
+        Some(match v {
+            0 => Unit,
+            1 => Bool,
+            2 => Int,
+            3 => Byte,
+            4 => Char,
+            5 => Float,
+            6 => Text,
+            7 => Vec,
+            8 => Deque,
+            9 => Grid,
+            10 => Map,
+            11 => Set,
+            12 => Counter,
+            13 => MinHeap,
+            14 => MaxHeap,
+            15 => BitSet,
+            16 => Tuple,
+            17 => Record,
+            18 => Enum,
+            19 => Closure,
+            20 => VarCell,
+            _ => return None,
+        })
+    }
+
+    /// This built-in's descriptor. The inverse of
+    /// [`TypeDescriptor::as_builtin`].
+    pub fn descriptor(self) -> &'static TypeDescriptor {
+        BUILTINS[self as usize]
+    }
+}
+
 /// An opaque, interned identifier for a type. Equality on `TypeId` *is* type
 /// identity for descriptor-table lookups.
+///
+/// The inner word is **private**: the only producers are
+/// [`TypeDescriptor::builtin`] (which derives it from a [`BuiltinTypeId`]) and
+/// the test-only escape hatch, so a hand-written integer literal can no longer
+/// impersonate a built-in.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct TypeId(pub u32);
+pub struct TypeId(u32);
 
 impl TypeId {
     #[inline]
     pub const fn to_u32(self) -> u32 {
         self.0
+    }
+
+    /// The built-in this id names, or `None` for a non-built-in (today: only
+    /// the test descriptors, which live at the top of the `u32` range).
+    #[inline]
+    pub const fn as_builtin(self) -> Option<BuiltinTypeId> {
+        BuiltinTypeId::from_u32(self.0)
     }
 }
 
@@ -121,26 +207,125 @@ pub type EqualsFn = unsafe fn(a: *const u8, b: *const u8) -> bool;
 /// `payload` must point at a value of the descriptor's type.
 pub type HashFn = unsafe fn(payload: *const u8, hasher: &mut dyn DynamicHasher);
 
+/// `compare` callback shape: total ordering between two values of the same
+/// descriptor. `None` on the descriptor means the type is not orderable.
+///
+/// Populating this is deferred to the ordering ADR (which types are orderable,
+/// and where NaN sorts); every descriptor declares `None` until then, so the
+/// field records the *shape* of the answer without pre-empting it.
+///
+/// # Safety
+/// Both pointers must point at values of the descriptor's type.
+pub type CompareFn = unsafe fn(a: *const u8, b: *const u8) -> std::cmp::Ordering;
+
 /// Centralized table of operations on a value's payload (§11.4).
 ///
 /// Exact Rust types may evolve, but all payload-aware operations must live here
-/// rather than in scattered type switches. For Milestone 0 this is a fully
-/// defined, constructible data type; the entries themselves are populated in
-/// later milestones.
+/// rather than in scattered type switches.
+///
+/// `id`, `size` and `align` are private and *derived*: a built-in descriptor is
+/// constructible only through [`TypeDescriptor::builtin`], which takes the
+/// [`BuiltinTypeId`] the id comes from and the payload type the layout comes
+/// from. "A descriptor whose id names a different type" and "a descriptor whose
+/// size disagrees with its payload" are therefore unrepresentable.
 #[derive(Clone, Copy)]
 pub struct TypeDescriptor {
-    pub id: TypeId,
+    id: TypeId,
     pub name: &'static str,
-    pub size: usize,
-    pub align: usize,
+    size: usize,
+    align: usize,
     pub trace: TraceFn,
     pub drop_value: DropFn,
     pub format: FormatFn,
     pub equals: Option<EqualsFn>,
     pub hash: Option<HashFn>,
+    pub compare: Option<CompareFn>,
 }
 
 impl TypeDescriptor {
+    /// The only constructor for a built-in descriptor. `id` is derived from
+    /// `builtin`; `size`/`align` are derived from the payload type `P`.
+    ///
+    /// Built-in descriptors must be declared as `static`, never `const`: a
+    /// `const` reference is a promoted rvalue with no guaranteed unique
+    /// address, and descriptor *pointer* identity is what the runtime compares.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn builtin<P>(
+        builtin: BuiltinTypeId,
+        name: &'static str,
+        trace: TraceFn,
+        drop_value: DropFn,
+        format: FormatFn,
+        equals: Option<EqualsFn>,
+        hash: Option<HashFn>,
+        compare: Option<CompareFn>,
+    ) -> TypeDescriptor {
+        TypeDescriptor {
+            id: TypeId(builtin as u32),
+            name,
+            size: std::mem::size_of::<P>(),
+            align: std::mem::align_of::<P>(),
+            trace,
+            drop_value,
+            format,
+            equals,
+            hash,
+            compare,
+        }
+    }
+
+    /// Test-only descriptor whose id is outside the built-in range by
+    /// construction, so a fixture can never collide with a real type.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn for_test<P>(
+        n: u32,
+        name: &'static str,
+        trace: TraceFn,
+        drop_value: DropFn,
+        format: FormatFn,
+        equals: Option<EqualsFn>,
+        hash: Option<HashFn>,
+        compare: Option<CompareFn>,
+    ) -> TypeDescriptor {
+        TypeDescriptor {
+            id: TypeId(u32::MAX - n),
+            name,
+            size: std::mem::size_of::<P>(),
+            align: std::mem::align_of::<P>(),
+            trace,
+            drop_value,
+            format,
+            equals,
+            hash,
+            compare,
+        }
+    }
+
+    /// This descriptor's type identity.
+    #[inline]
+    pub const fn id(&self) -> TypeId {
+        self.id
+    }
+
+    /// Which built-in this descriptor is, if any.
+    #[inline]
+    pub const fn as_builtin(&self) -> Option<BuiltinTypeId> {
+        self.id.as_builtin()
+    }
+
+    /// Size in bytes of this type's payload.
+    #[inline]
+    pub const fn size(&self) -> usize {
+        self.size
+    }
+
+    /// Alignment in bytes of this type's payload.
+    #[inline]
+    pub const fn align(&self) -> usize {
+        self.align
+    }
+
     /// True iff values of this type participate in structural equality (§5.5).
     #[inline]
     pub fn is_equatable(&self) -> bool {
@@ -152,6 +337,12 @@ impl TypeDescriptor {
     #[inline]
     pub fn is_hashable(&self) -> bool {
         self.hash.is_some()
+    }
+
+    /// True iff values of this type have a defined ordering (§5.5).
+    #[inline]
+    pub fn is_orderable(&self) -> bool {
+        self.compare.is_some()
     }
 }
 
@@ -167,6 +358,35 @@ impl fmt::Debug for TypeDescriptor {
             .finish()
     }
 }
+
+/// Every built-in descriptor, indexed by its [`BuiltinTypeId`] discriminant.
+///
+/// This is the registry `BuiltinTypeId::descriptor` reads and the array
+/// `builtins_are_indexed_by_their_id` walks; adding a variant without adding an
+/// entry here is a compile error on the array length.
+pub static BUILTINS: [&TypeDescriptor; BuiltinTypeId::COUNT] = [
+    &crate::scalars::UNIT,
+    &crate::scalars::BOOL,
+    &crate::scalars::INT,
+    &crate::scalars::BYTE,
+    &crate::scalars::CHAR,
+    &crate::scalars::FLOAT,
+    &crate::text::TEXT,
+    &crate::collections::VEC,
+    &crate::collections::DEQUE,
+    &crate::collections::GRID,
+    &crate::maps::MAP,
+    &crate::maps::SET,
+    &crate::maps::COUNTER,
+    &crate::heaps::MIN_HEAP,
+    &crate::heaps::MAX_HEAP,
+    &crate::bitset::BITSET,
+    &crate::tuples::TUPLE,
+    &crate::records::RECORD,
+    &crate::enums::ENUM,
+    &crate::closures::CLOSURE,
+    &crate::var_cell::VAR_CELL,
+];
 
 #[cfg(test)]
 mod tests {
@@ -186,70 +406,100 @@ mod tests {
 
     #[test]
     fn descriptor_constructs_and_reports_capabilities() {
-        let equatable_only = TypeDescriptor {
-            id: TypeId(1),
-            name: "EquatableOnly",
-            size: 8,
-            align: 8,
-            trace: dummy_trace,
-            drop_value: dummy_drop,
-            format: dummy_format,
-            equals: Some(dummy_eq),
-            hash: None,
-        };
-        assert!(equatable_only.is_equatable());
-        assert!(!equatable_only.is_hashable());
+        static EQUATABLE_ONLY: TypeDescriptor = TypeDescriptor::for_test::<i64>(
+            0,
+            "EquatableOnly",
+            dummy_trace,
+            dummy_drop,
+            dummy_format,
+            Some(dummy_eq),
+            None,
+            None,
+        );
+        assert!(EQUATABLE_ONLY.is_equatable());
+        assert!(!EQUATABLE_ONLY.is_hashable());
+        assert!(!EQUATABLE_ONLY.is_orderable());
 
-        let hashable = TypeDescriptor {
-            id: TypeId(2),
-            name: "Key",
-            size: 16,
-            align: 8,
-            trace: dummy_trace,
-            drop_value: dummy_drop,
-            format: dummy_format,
-            equals: Some(dummy_eq),
-            hash: Some(dummy_hash),
-        };
-        assert!(hashable.is_equatable());
-        assert!(hashable.is_hashable());
+        static HASHABLE: TypeDescriptor = TypeDescriptor::for_test::<[u64; 2]>(
+            1,
+            "Key",
+            dummy_trace,
+            dummy_drop,
+            dummy_format,
+            Some(dummy_eq),
+            Some(dummy_hash),
+            None,
+        );
+        assert!(HASHABLE.is_equatable());
+        assert!(HASHABLE.is_hashable());
+        assert_eq!(HASHABLE.size(), 16);
+        assert_eq!(HASHABLE.align(), 8);
+    }
+
+    /// A test descriptor's id is outside the built-in range by construction, so
+    /// a fixture can never be mistaken for a real type.
+    #[test]
+    fn test_descriptor_ids_are_not_builtins() {
+        static PROBE: TypeDescriptor = TypeDescriptor::for_test::<u8>(
+            0,
+            "Probe",
+            dummy_trace,
+            dummy_drop,
+            dummy_format,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(PROBE.as_builtin(), None);
     }
 
     #[test]
-    #[ignore = "known bug: Float and Text both use TypeId(5)"]
     fn builtin_type_ids_are_globally_unique() {
-        let descriptors = [
-            crate::scalars::UNIT,
-            crate::scalars::BOOL,
-            crate::scalars::INT,
-            crate::scalars::BYTE,
-            crate::scalars::CHAR,
-            crate::scalars::FLOAT,
-            crate::text::TEXT,
-            crate::collections::VEC,
-            crate::collections::GRID,
-            crate::records::RECORD,
-            crate::enums::ENUM,
-            crate::tuples::TUPLE,
-            crate::closures::CLOSURE,
-            crate::var_cell::VAR_CELL,
-            crate::collections::DEQUE,
-            crate::maps::MAP,
-            crate::maps::SET,
-            crate::maps::COUNTER,
-            crate::heaps::MAX_HEAP,
-            crate::heaps::MIN_HEAP,
-            crate::bitset::BITSET,
-        ];
         let mut by_id = std::collections::BTreeMap::new();
 
-        for descriptor in descriptors {
-            if let Some(previous) = by_id.insert(descriptor.id, descriptor.name) {
+        for descriptor in BUILTINS {
+            if let Some(previous) = by_id.insert(descriptor.id(), descriptor.name) {
                 panic!(
                     "built-in descriptors {previous} and {} share {:?}; descriptor IDs are runtime type identity",
-                    descriptor.name, descriptor.id
+                    descriptor.name, descriptor.id()
                 );
             }
         }
+        assert_eq!(by_id.len(), BuiltinTypeId::COUNT);
+    }
+
+    /// The registry is a lookup table: `BUILTINS[b as usize]` must be the
+    /// descriptor whose id *is* `b`. Without this, `BuiltinTypeId::descriptor`
+    /// would silently return a neighbour.
+    #[test]
+    fn builtins_are_indexed_by_their_id() {
+        for (index, descriptor) in BUILTINS.iter().enumerate() {
+            assert_eq!(
+                descriptor.id().to_u32(),
+                index as u32,
+                "BUILTINS[{index}] is {} whose id is {:?}",
+                descriptor.name,
+                descriptor.id()
+            );
+            let builtin = BuiltinTypeId::from_u32(index as u32).expect("index is in range");
+            assert!(std::ptr::eq(builtin.descriptor(), *descriptor));
+        }
+        assert!(BuiltinTypeId::from_u32(BuiltinTypeId::COUNT as u32).is_none());
+    }
+
+    /// Built-in descriptors are `static`, so their address is their identity.
+    /// Two reads of the same descriptor must produce the same pointer — this is
+    /// what lets the runtime compare descriptors by pointer rather than by id.
+    #[test]
+    fn builtin_descriptors_have_a_stable_address() {
+        assert!(std::ptr::eq(&crate::scalars::INT, &crate::scalars::INT));
+        assert!(std::ptr::eq(
+            BuiltinTypeId::Int.descriptor(),
+            &crate::scalars::INT
+        ));
+        assert!(!std::ptr::eq(
+            &crate::scalars::FLOAT,
+            &crate::text::TEXT as &TypeDescriptor
+        ));
     }
 }

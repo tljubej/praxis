@@ -17,7 +17,7 @@
 
 use std::fmt;
 
-use crate::descriptor::{DynamicHasher, Tracer, TypeDescriptor, TypeId};
+use crate::descriptor::{BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
 use crate::GcRef;
 
 /// One field of a record shape: its source name plus the descriptor for the
@@ -137,17 +137,17 @@ unsafe fn record_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 /// descriptors. A record is equatable/hashable iff every field is; functions
 /// never are, so a record containing a function field is neither. This lets
 /// records serve as map/set keys (M8 containers).
-pub const RECORD: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(8),
-    name: "Record",
-    size: std::mem::size_of::<RecordPayload>(),
-    align: std::mem::align_of::<RecordPayload>(),
-    trace: record_trace,
-    drop_value: record_drop,
-    format: record_format,
-    equals: Some(record_equals),
-    hash: Some(record_hash),
-};
+pub static RECORD: TypeDescriptor = TypeDescriptor::builtin::<RecordPayload>(
+    BuiltinTypeId::Record,
+    "Record",
+    record_trace,
+    record_drop,
+    record_format,
+    Some(record_equals),
+    Some(record_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 #[cfg(test)]
 mod tests {
@@ -158,7 +158,7 @@ mod tests {
         assert!(RECORD.is_equatable());
         assert!(RECORD.is_hashable());
         assert_eq!(RECORD.name, "Record");
-        assert_eq!(RECORD.id, TypeId(8));
+        assert_eq!(RECORD.as_builtin(), Some(BuiltinTypeId::Record));
     }
 
     #[test]
@@ -168,7 +168,10 @@ mod tests {
         assert!(crate::collections::GRID.is_equatable());
         assert!(crate::collections::GRID.is_hashable());
         assert_eq!(crate::collections::GRID.name, "Grid");
-        assert_eq!(crate::collections::GRID.id, TypeId(7));
+        assert_eq!(
+            crate::collections::GRID.as_builtin(),
+            Some(BuiltinTypeId::Grid)
+        );
     }
 
     #[test]
@@ -178,7 +181,7 @@ mod tests {
         let mut rt = crate::Runtime::new();
         let mut ctx = rt.context();
         let descriptors: &'static [*const TypeDescriptor] =
-            Box::leak(vec![crate::scalars::INT as *const TypeDescriptor; 2].into_boxed_slice());
+            Box::leak(vec![&crate::scalars::INT as *const TypeDescriptor; 2].into_boxed_slice());
         let schema = Box::leak(Box::new(RecordSchema {
             fields: Box::leak(
                 vec![

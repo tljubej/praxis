@@ -14,9 +14,8 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fmt;
 
-use crate::descriptor::{Tracer, TypeDescriptor};
+use crate::descriptor::{BuiltinTypeId, Tracer, TypeDescriptor};
 use crate::GcRef;
-use crate::TypeId;
 
 /// A max-heap entry: the element `GcRef` plus its descriptor. `Ord` compares
 /// the element payloads as `i64` (the numeric case). `MaxHeap` uses this
@@ -114,18 +113,18 @@ unsafe fn max_heap_format(payload: *const u8, out: &mut dyn fmt::Write) {
 }
 
 /// Descriptor for `MaxHeap[T]` (§11.2, TypeId 17).
-pub const MAX_HEAP: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(17),
-    name: "MaxHeap",
-    size: std::mem::size_of::<MaxHeapPayload>(),
-    align: std::mem::align_of::<MaxHeapPayload>(),
-    trace: max_heap_trace,
-    drop_value: max_heap_drop,
-    format: max_heap_format,
-    // Heaps are not equatable/hashable (contents + order define identity).
-    equals: None,
-    hash: None,
-};
+// Heaps are not equatable/hashable (contents + order define identity).
+pub static MAX_HEAP: TypeDescriptor = TypeDescriptor::builtin::<MaxHeapPayload>(
+    BuiltinTypeId::MaxHeap,
+    "MaxHeap",
+    max_heap_trace,
+    max_heap_drop,
+    max_heap_format,
+    None,
+    None,
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 // --- MinHeap payload -------------------------------------------------------
 
@@ -164,17 +163,17 @@ unsafe fn min_heap_format(payload: *const u8, out: &mut dyn fmt::Write) {
 }
 
 /// Descriptor for `MinHeap[T]` (§11.2, TypeId 18).
-pub const MIN_HEAP: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(18),
-    name: "MinHeap",
-    size: std::mem::size_of::<MinHeapPayload>(),
-    align: std::mem::align_of::<MinHeapPayload>(),
-    trace: min_heap_trace,
-    drop_value: min_heap_drop,
-    format: min_heap_format,
-    equals: None,
-    hash: None,
-};
+pub static MIN_HEAP: TypeDescriptor = TypeDescriptor::builtin::<MinHeapPayload>(
+    BuiltinTypeId::MinHeap,
+    "MinHeap",
+    min_heap_trace,
+    min_heap_drop,
+    min_heap_format,
+    None,
+    None,
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 #[cfg(test)]
 mod tests {
@@ -196,11 +195,11 @@ mod tests {
         let rt = crate::Runtime::new();
         let minus_two = HeapEntry {
             value: rt.alloc_float(-2.0),
-            descriptor: crate::scalars::FLOAT,
+            descriptor: &crate::scalars::FLOAT,
         };
         let minus_one = HeapEntry {
             value: rt.alloc_float(-1.0),
-            descriptor: crate::scalars::FLOAT,
+            descriptor: &crate::scalars::FLOAT,
         };
 
         assert_eq!(

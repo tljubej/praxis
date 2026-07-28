@@ -21,9 +21,9 @@
 
 use std::fmt;
 
-use crate::descriptor::{Tracer, TypeDescriptor};
+use crate::descriptor::{BuiltinTypeId, Tracer, TypeDescriptor};
+use crate::DynamicHasher;
 use crate::GcRef;
-use crate::{DynamicHasher, TypeId};
 
 /// The `Vec[T]` payload: the element descriptor plus the growable items.
 ///
@@ -110,17 +110,17 @@ unsafe fn vec_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 
 /// Descriptor for the `Vec[T]` collection (§11.2). The per-instance element
 /// type lives in the payload, so a single descriptor serves all `Vec[T]`.
-pub const VEC: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(6),
-    name: "Vec",
-    size: std::mem::size_of::<VecPayload>(),
-    align: std::mem::align_of::<VecPayload>(),
-    trace: vec_trace,
-    drop_value: vec_drop,
-    format: vec_format,
-    equals: Some(vec_equals),
-    hash: Some(vec_hash),
-};
+pub static VEC: TypeDescriptor = TypeDescriptor::builtin::<VecPayload>(
+    BuiltinTypeId::Vec,
+    "Vec",
+    vec_trace,
+    vec_drop,
+    vec_format,
+    Some(vec_equals),
+    Some(vec_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 // ===========================================================================
 // Deque[T] (M8-WS2, §6.1). A double-ended queue backed by Rust's `VecDeque`.
@@ -205,17 +205,17 @@ unsafe fn deque_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 
 /// Descriptor for the `Deque[T]` collection (§6.1). The per-instance element
 /// type lives in the payload, so a single descriptor serves all `Deque[T]`.
-pub const DEQUE: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(13),
-    name: "Deque",
-    size: std::mem::size_of::<DequePayload>(),
-    align: std::mem::align_of::<DequePayload>(),
-    trace: deque_trace,
-    drop_value: deque_drop,
-    format: deque_format,
-    equals: Some(deque_equals),
-    hash: Some(deque_hash),
-};
+pub static DEQUE: TypeDescriptor = TypeDescriptor::builtin::<DequePayload>(
+    BuiltinTypeId::Deque,
+    "Deque",
+    deque_trace,
+    deque_drop,
+    deque_format,
+    Some(deque_equals),
+    Some(deque_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 // ===========================================================================
 // Grid[T] (M6, §7.5 `grid`, §7.8 type derivation). M6 ships a minimal runtime
@@ -300,17 +300,17 @@ unsafe fn grid_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 
 /// Descriptor for the `Grid[T]` collection (M6, §7.8; M8-WS5 enables equality
 /// and hashing so a Grid can be used as a map key). Element-wise, like Vec.
-pub const GRID: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(7),
-    name: "Grid",
-    size: std::mem::size_of::<GridPayload>(),
-    align: std::mem::align_of::<GridPayload>(),
-    trace: grid_trace,
-    drop_value: grid_drop,
-    format: grid_format,
-    equals: Some(grid_equals),
-    hash: Some(grid_hash),
-};
+pub static GRID: TypeDescriptor = TypeDescriptor::builtin::<GridPayload>(
+    BuiltinTypeId::Grid,
+    "Grid",
+    grid_trace,
+    grid_drop,
+    grid_format,
+    Some(grid_equals),
+    Some(grid_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 #[cfg(test)]
 mod tests {
@@ -330,8 +330,8 @@ mod tests {
     #[ignore = "known bug: Vec equality omits the per-instance element descriptor"]
     fn empty_vectors_with_different_element_types_are_not_equal() {
         let rt = crate::Runtime::new();
-        let ints = rt.alloc_vec(crate::scalars::INT, Vec::new());
-        let floats = rt.alloc_vec(crate::scalars::FLOAT, Vec::new());
+        let ints = rt.alloc_vec(&crate::scalars::INT, Vec::new());
+        let floats = rt.alloc_vec(&crate::scalars::FLOAT, Vec::new());
 
         assert!(
             !ints.equals(&floats),

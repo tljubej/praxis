@@ -389,47 +389,57 @@ fn sanitize_name(name: &str) -> String {
 /// for descriptors we don't map (the caller falls back to the static
 /// `type_id`).
 fn descriptor_to_type(value: GcRef, db: &mut TypeDb) -> Option<Type> {
-    descriptor_id_to_type(value.descriptor().id, db)
+    descriptor_id_to_type(value.descriptor().id(), db)
 }
 
 /// Map a top-level descriptor id to its static `Type` (collections default
 /// their element type to `Int`).
+///
+/// The match is over [`BuiltinTypeId`] and has no catch-all arm, so a new
+/// built-in type is a compile error here rather than a silent `None`. Reading
+/// the *real* element type out of the payload is the bidirectional-bridge work;
+/// this function only recovers the top-level shape.
 fn descriptor_id_to_type(id: praxis_runtime::TypeId, db: &mut TypeDb) -> Option<Type> {
-    use praxis_runtime::TypeId;
-    match id {
-        // Scalars.
-        TypeId(0) | TypeId(1) | TypeId(4) => Some(db.int()), // INT / BYTE → Int
-        TypeId(2) => Some(db.bool()),
-        TypeId(3) => Some(db.char()),
-        TypeId(5) => Some(db.text()),
+    use praxis_runtime::descriptor::BuiltinTypeId as B;
+
+    let unary = |db: &mut TypeDb, ctor| {
+        let elem = db.int();
+        Some(db.intern(TypeData::Collection {
+            ctor,
+            args: vec![elem],
+        }))
+    };
+
+    match id.as_builtin()? {
+        // Scalars recover exactly.
+        B::Unit => Some(db.unit()),
+        B::Bool => Some(db.bool()),
+        B::Int => Some(db.int()),
+        // `Byte` has no distinct static type in the surface language; it reads
+        // back as `Int`, which is what every Byte-producing expression infers.
+        B::Byte => Some(db.int()),
+        B::Char => Some(db.char()),
+        B::Float => Some(db.float()),
+        B::Text => Some(db.text()),
         // Single-element collections (element defaults to Int).
-        TypeId(6) | TypeId(13) | TypeId(7) | TypeId(15) | TypeId(16) | TypeId(17) | TypeId(18) => {
-            let ctor = match id {
-                TypeId(6) => CollectionCtor::Vec,
-                TypeId(7) => CollectionCtor::Grid,
-                TypeId(13) => CollectionCtor::Deque,
-                TypeId(15) => CollectionCtor::Set,
-                TypeId(16) => CollectionCtor::Counter,
-                TypeId(17) => CollectionCtor::MinHeap,
-                _ => CollectionCtor::MaxHeap,
-            };
-            let elem = db.int();
-            Some(db.intern(TypeData::Collection {
-                ctor,
-                args: vec![elem],
-            }))
-        }
-        // Map(14): default to Map[Int, Int].
-        TypeId(14) => {
+        B::Vec => unary(db, CollectionCtor::Vec),
+        B::Deque => unary(db, CollectionCtor::Deque),
+        B::Grid => unary(db, CollectionCtor::Grid),
+        B::Set => unary(db, CollectionCtor::Set),
+        B::Counter => unary(db, CollectionCtor::Counter),
+        B::MinHeap => unary(db, CollectionCtor::MinHeap),
+        B::MaxHeap => unary(db, CollectionCtor::MaxHeap),
+        // Map defaults to Map[Int, Int].
+        B::Map => {
             let k = db.int();
             Some(db.intern(TypeData::Collection {
                 ctor: CollectionCtor::Map,
                 args: vec![k, k],
             }))
         }
-        // Tuples(10), records(8), enums(9), closures(11), var-cell(12),
-        // bitset(19): fall back to the static type_id (the caller handles it).
-        _ => None,
+        // Uniform descriptors whose real type lives in the payload schema, and
+        // the internal ones: fall back to the static type_id (caller handles it).
+        B::BitSet | B::Tuple | B::Record | B::Enum | B::Closure | B::VarCell => None,
     }
 }
 
@@ -486,7 +496,7 @@ mod tests {
     fn regression_runtime_vec_descriptor_recovers_its_real_element_type() {
         let runtime = Runtime::new();
         let text = runtime.alloc_text("hello");
-        let value = runtime.alloc_vec(praxis_runtime::text::TEXT, vec![text]);
+        let value = runtime.alloc_vec(&praxis_runtime::text::TEXT, vec![text]);
         let mut db = TypeDb::new();
 
         let ty = descriptor_to_type(value, &mut db).expect("Vec has a runtime type");
@@ -515,7 +525,7 @@ mod tests {
                 db.render(ty),
                 expected,
                 "descriptor {:?} was recovered as the wrong debugger type",
-                value.descriptor().id
+                value.descriptor().id()
             );
         }
     }

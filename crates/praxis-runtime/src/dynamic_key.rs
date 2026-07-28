@@ -113,7 +113,7 @@ impl Hash for DynamicKey {
             None => {
                 // Defensive: hash the descriptor id only. Should not happen for
                 // a well-typed program (capability check rejects non-hashable keys).
-                self.descriptor.id.hash(state);
+                self.descriptor.id().hash(state);
             }
         }
     }
@@ -139,7 +139,7 @@ mod tests {
     use super::*;
     use crate::abi::praxis_alloc_int;
     use crate::context::{Runtime, RuntimeContext};
-    use crate::descriptor::{TypeDescriptor, TypeId};
+    use crate::descriptor::TypeDescriptor;
     use crate::{Heap, Tracer};
 
     unsafe fn test_trace(_: *mut u8, _: &mut dyn Tracer) {}
@@ -152,28 +152,26 @@ mod tests {
         unsafe { *(a as *const i64) == *(b as *const i64) }
     }
 
-    const LOGICAL_A: &TypeDescriptor = &TypeDescriptor {
-        id: TypeId(u32::MAX - 10),
-        name: "LogicalA",
-        size: std::mem::size_of::<i64>(),
-        align: std::mem::align_of::<i64>(),
-        trace: test_trace,
-        drop_value: test_drop,
-        format: test_format,
-        equals: Some(test_equals),
-        hash: None,
-    };
-    const LOGICAL_B: &TypeDescriptor = &TypeDescriptor {
-        id: TypeId(u32::MAX - 11),
-        name: "LogicalB",
-        size: std::mem::size_of::<i64>(),
-        align: std::mem::align_of::<i64>(),
-        trace: test_trace,
-        drop_value: test_drop,
-        format: test_format,
-        equals: Some(test_equals),
-        hash: None,
-    };
+    static LOGICAL_A: TypeDescriptor = TypeDescriptor::for_test::<i64>(
+        10,
+        "LogicalA",
+        test_trace,
+        test_drop,
+        test_format,
+        Some(test_equals),
+        None,
+        None,
+    );
+    static LOGICAL_B: TypeDescriptor = TypeDescriptor::for_test::<i64>(
+        11,
+        "LogicalB",
+        test_trace,
+        test_drop,
+        test_format,
+        Some(test_equals),
+        None,
+        None,
+    );
 
     /// Wire a fresh runtime and return its context pointer (test helper).
     fn wired_ctx(rt: &mut Runtime) -> *mut RuntimeContext {
@@ -228,8 +226,8 @@ mod tests {
     #[ignore = "known bug: DynamicKey::eq does not compare descriptor identity"]
     fn dynamic_keys_with_different_descriptors_are_never_equal() {
         let heap = Heap::new();
-        let a = heap.alloc(LOGICAL_A, 7_i64);
-        let b = heap.alloc(LOGICAL_B, 7_i64);
+        let a = heap.alloc(&LOGICAL_A, 7_i64);
+        let b = heap.alloc(&LOGICAL_B, 7_i64);
 
         assert_ne!(
             DynamicKey::new(a),
@@ -244,7 +242,7 @@ mod tests {
         use std::collections::HashSet;
 
         let rt = Runtime::new();
-        let key = rt.alloc_vec(crate::scalars::INT, Vec::new());
+        let key = rt.alloc_vec(&crate::scalars::INT, Vec::new());
         let wrapped = DynamicKey::new(key);
         let mut set = HashSet::new();
         assert!(set.insert(wrapped));

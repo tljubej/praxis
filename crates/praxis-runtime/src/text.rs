@@ -21,7 +21,7 @@ use std::fmt;
 
 #[cfg(test)]
 use crate::descriptor::hash_value;
-use crate::descriptor::{DynamicHasher, Tracer, TypeDescriptor, TypeId};
+use crate::descriptor::{BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
 use crate::GcRef;
 
 /// The `Text` payload: either an owned UTF-8 string or a zero-copy slice into
@@ -128,17 +128,17 @@ unsafe fn text_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 
 /// Descriptor for the `Text` scalar (§4.3). Handles both owned and source-slice
 /// payloads (ADR-013, M6). A single descriptor serves all `Text` values.
-pub const TEXT: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(5),
-    name: "Text",
-    size: std::mem::size_of::<TextPayload>(),
-    align: std::mem::align_of::<TextPayload>(),
-    trace: text_trace,
-    drop_value: text_drop,
-    format: text_format,
-    equals: Some(text_equals),
-    hash: Some(text_hash),
-};
+pub static TEXT: TypeDescriptor = TypeDescriptor::builtin::<TextPayload>(
+    BuiltinTypeId::Text,
+    "Text",
+    text_trace,
+    text_drop,
+    text_format,
+    Some(text_equals),
+    Some(text_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 #[cfg(test)]
 mod tests {

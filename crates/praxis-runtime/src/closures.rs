@@ -25,7 +25,7 @@
 
 use std::fmt;
 
-use crate::descriptor::{Tracer, TypeDescriptor, TypeId};
+use crate::descriptor::{BuiltinTypeId, Tracer, TypeDescriptor};
 use crate::GcRef;
 
 /// The runtime payload of a closure value: the function pointer plus the
@@ -65,17 +65,17 @@ unsafe fn closure_format(payload: *const u8, out: &mut dyn fmt::Write) {
 
 /// Descriptor for the `Closure` value type (M7, §4.10). Closures are never
 /// equatable or hashable (§5.5: function values have no structural identity).
-pub const CLOSURE: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(11),
-    name: "Closure",
-    size: std::mem::size_of::<ClosurePayload>(),
-    align: std::mem::align_of::<ClosurePayload>(),
-    trace: closure_trace,
-    drop_value: closure_drop,
-    format: closure_format,
-    equals: None,
-    hash: None,
-};
+pub static CLOSURE: TypeDescriptor = TypeDescriptor::builtin::<ClosurePayload>(
+    BuiltinTypeId::Closure,
+    "Closure",
+    closure_trace,
+    closure_drop,
+    closure_format,
+    None,
+    None,
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 #[cfg(test)]
 mod tests {
@@ -87,6 +87,6 @@ mod tests {
         assert!(!CLOSURE.is_equatable());
         assert!(!CLOSURE.is_hashable());
         assert_eq!(CLOSURE.name, "Closure");
-        assert_eq!(CLOSURE.id, TypeId(11));
+        assert_eq!(CLOSURE.as_builtin(), Some(BuiltinTypeId::Closure));
     }
 }

@@ -10,8 +10,7 @@
 
 use std::fmt;
 
-use crate::descriptor::{DynamicHasher, Tracer, TypeDescriptor};
-use crate::TypeId;
+use crate::descriptor::{BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
 
 /// The `BitSet` payload: a growable vector of 64-bit words. Bit `i` is in word
 /// `i / 64` at position `i % 64`. Both fields are `Drop`.
@@ -123,17 +122,17 @@ unsafe fn bitset_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 
 /// Descriptor for `BitSet` (§6.1, TypeId 19). Equatable and hashable (structural
 /// over the set of bits), so a BitSet can be a value in another collection.
-pub const BITSET: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(19),
-    name: "BitSet",
-    size: std::mem::size_of::<BitSetPayload>(),
-    align: std::mem::align_of::<BitSetPayload>(),
-    trace: bitset_trace,
-    drop_value: bitset_drop,
-    format: bitset_format,
-    equals: Some(bitset_equals),
-    hash: Some(bitset_hash),
-};
+pub static BITSET: TypeDescriptor = TypeDescriptor::builtin::<BitSetPayload>(
+    BuiltinTypeId::BitSet,
+    "BitSet",
+    bitset_trace,
+    bitset_drop,
+    bitset_format,
+    Some(bitset_equals),
+    Some(bitset_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 #[cfg(test)]
 mod tests {

@@ -94,7 +94,7 @@ impl Heap {
     ) -> GcRef {
         assert_eq!(
             std::mem::size_of::<T>(),
-            descriptor.size,
+            descriptor.size(),
             "payload size mismatch for descriptor {}",
             descriptor.name
         );
@@ -124,7 +124,7 @@ impl Heap {
     pub fn alloc<T: Copy>(&self, descriptor: &'static TypeDescriptor, value: T) -> GcRef {
         assert_eq!(
             std::mem::size_of::<T>(),
-            descriptor.size,
+            descriptor.size(),
             "payload size mismatch for descriptor {}",
             descriptor.name
         );
@@ -150,12 +150,14 @@ impl Heap {
         init: impl FnOnce(*mut u8),
     ) -> GcRef {
         assert_eq!(
-            size, descriptor.size,
+            size,
+            descriptor.size(),
             "payload size mismatch for descriptor {}",
             descriptor.name
         );
         assert_eq!(
-            align, descriptor.align,
+            align,
+            descriptor.align(),
             "payload align mismatch for descriptor {}",
             descriptor.name
         );
@@ -176,8 +178,8 @@ impl Heap {
     ) -> GcRef {
         let header_size = std::mem::size_of::<GcHeader>();
         let header_align = std::mem::align_of::<GcHeader>();
-        let payload_size = descriptor.size;
-        let payload_align = descriptor.align;
+        let payload_size = descriptor.size();
+        let payload_align = descriptor.align();
 
         // The allocation must satisfy both header and payload alignment; the
         // payload starts exactly `header_size` bytes in, padded so the payload
@@ -201,7 +203,7 @@ impl Heap {
             GcHeader {
                 descriptor: descriptor as *const TypeDescriptor,
                 mark: std::cell::Cell::new(WHITE),
-                size: descriptor.size as u32,
+                size: descriptor.size() as u32,
             },
         );
         // Initialize the payload.
@@ -340,7 +342,7 @@ fn round_up(n: usize, align: usize) -> usize {
 mod tests {
     use super::*;
     use crate::collections::{VecPayload, VEC};
-    use crate::descriptor::{TypeDescriptor, TypeId};
+    use crate::descriptor::TypeDescriptor;
     use crate::roots::RootScope;
     use crate::scalars::{INT, UNIT};
     use crate::{GcRef, Tracer};
@@ -365,38 +367,36 @@ mod tests {
     }
     unsafe fn probe_format(_: *const u8, _: &mut dyn std::fmt::Write) {}
 
-    const DROP_PROBE: &TypeDescriptor = &TypeDescriptor {
-        id: TypeId(u32::MAX - 1),
-        name: "DropProbe",
-        size: std::mem::size_of::<DropProbe>(),
-        align: std::mem::align_of::<DropProbe>(),
-        trace: probe_trace,
-        drop_value: probe_drop,
-        format: probe_format,
-        equals: None,
-        hash: None,
-    };
+    static DROP_PROBE: TypeDescriptor = TypeDescriptor::for_test::<DropProbe>(
+        1,
+        "DropProbe",
+        probe_trace,
+        probe_drop,
+        probe_format,
+        None,
+        None,
+        None,
+    );
 
     #[repr(C, align(64))]
     struct Overaligned(u8);
 
     unsafe fn overaligned_drop(_: *mut u8) {}
-    const OVERALIGNED: &TypeDescriptor = &TypeDescriptor {
-        id: TypeId(u32::MAX),
-        name: "Overaligned",
-        size: std::mem::size_of::<Overaligned>(),
-        align: std::mem::align_of::<Overaligned>(),
-        trace: probe_trace,
-        drop_value: overaligned_drop,
-        format: probe_format,
-        equals: None,
-        hash: None,
-    };
+    static OVERALIGNED: TypeDescriptor = TypeDescriptor::for_test::<Overaligned>(
+        0,
+        "Overaligned",
+        probe_trace,
+        overaligned_drop,
+        probe_format,
+        None,
+        None,
+        None,
+    );
 
     #[test]
     fn alloc_int_round_trips_payload() {
         let heap = Heap::new();
-        let r = heap.alloc(INT, 42_i64);
+        let r = heap.alloc(&INT, 42_i64);
         assert_eq!(r.descriptor().name, "Int");
         // SAFETY: `r` was allocated with INT, payload is i64.
         let v = unsafe { *r.payload::<i64>() };
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn collect_reclaims_unrooted_allocation() {
         let heap = Heap::new();
-        let _ = heap.alloc(INT, 1_i64);
+        let _ = heap.alloc(&INT, 1_i64);
         assert_eq!(heap.stats().live_count, 1);
 
         let roots = RootScope::new(); // nothing rooted
@@ -423,7 +423,7 @@ mod tests {
     fn collect_preserves_rooted_allocation() {
         let heap = Heap::new();
         let mut scope = RootScope::new();
-        let r = heap.alloc(INT, 7_i64);
+        let r = heap.alloc(&INT, 7_i64);
         scope.root(r);
         assert_eq!(heap.stats().live_count, 1);
 
@@ -446,19 +446,19 @@ mod tests {
         // Build [10, 20, 30] as Int GcRefs.
         let elems: Vec<GcRef> = [10_i64, 20, 30]
             .iter()
-            .map(|&v| heap.alloc(INT, v))
+            .map(|&v| heap.alloc(&INT, v))
             .collect();
 
         // Wrap in a Vec[T] payload. Element type is recorded in the payload
         // (ADR-013).
         let vec_ref = unsafe {
             heap.alloc_with(
-                VEC,
+                &VEC,
                 std::mem::size_of::<VecPayload>(),
                 std::mem::align_of::<VecPayload>(),
                 |payload| {
                     let vp = VecPayload {
-                        element_descriptor: INT,
+                        element_descriptor: &INT,
                         items: elems.clone(),
                     };
                     (payload as *mut VecPayload).write(vp);
@@ -469,7 +469,7 @@ mod tests {
 
         // Allocate garbage that should be reclaimed.
         for i in 0..5_i64 {
-            let _ = heap.alloc(INT, 1000 + i);
+            let _ = heap.alloc(&INT, 1000 + i);
         }
         assert_eq!(heap.stats().live_count, 9); // vec + 3 ints + 5 garbage
 
@@ -495,15 +495,15 @@ mod tests {
         let mut scope = RootScope::new();
 
         let inner_alloc = |ints: &[i64]| -> GcRef {
-            let elems: Vec<GcRef> = ints.iter().map(|&v| heap.alloc(INT, v)).collect();
+            let elems: Vec<GcRef> = ints.iter().map(|&v| heap.alloc(&INT, v)).collect();
             unsafe {
                 heap.alloc_with(
-                    VEC,
+                    &VEC,
                     std::mem::size_of::<VecPayload>(),
                     std::mem::align_of::<VecPayload>(),
                     |payload| {
                         (payload as *mut VecPayload).write(VecPayload {
-                            element_descriptor: INT,
+                            element_descriptor: &INT,
                             items: elems,
                         });
                     },
@@ -515,13 +515,13 @@ mod tests {
         let inner1 = inner_alloc(&[3]);
         let outer = unsafe {
             heap.alloc_with(
-                VEC,
+                &VEC,
                 std::mem::size_of::<VecPayload>(),
                 std::mem::align_of::<VecPayload>(),
                 |payload| {
                     (payload as *mut VecPayload).write(VecPayload {
                         // The element descriptor of a Vec-of-X is VEC itself.
-                        element_descriptor: VEC,
+                        element_descriptor: &VEC,
                         items: vec![inner0, inner1],
                     });
                 },
@@ -530,7 +530,7 @@ mod tests {
         scope.root(outer);
 
         // Garbage.
-        let _ = heap.alloc(UNIT, ());
+        let _ = heap.alloc(&UNIT, ());
 
         heap.collect(&scope);
 
@@ -548,7 +548,7 @@ mod tests {
         let heap = Heap::new();
         unsafe {
             heap.alloc_with(
-                DROP_PROBE,
+                &DROP_PROBE,
                 std::mem::size_of::<DropProbe>(),
                 std::mem::align_of::<DropProbe>(),
                 |payload| (payload as *mut DropProbe).write(DropProbe(Arc::clone(&drops))),
@@ -575,7 +575,7 @@ mod tests {
             let heap = Heap::new();
             unsafe {
                 heap.alloc_with(
-                    DROP_PROBE,
+                    &DROP_PROBE,
                     std::mem::size_of::<DropProbe>(),
                     std::mem::align_of::<DropProbe>(),
                     |payload| (payload as *mut DropProbe).write(DropProbe(Arc::clone(&drops))),
@@ -598,7 +598,7 @@ mod tests {
         let heap = Heap::new();
         let value = unsafe {
             heap.alloc_with(
-                OVERALIGNED,
+                &OVERALIGNED,
                 std::mem::size_of::<Overaligned>(),
                 std::mem::align_of::<Overaligned>(),
                 |payload| {
@@ -620,7 +620,7 @@ mod tests {
     fn foreign_heap_root_cannot_delay_reclamation() {
         let first = Heap::new();
         let second = Heap::new();
-        let value = first.alloc(INT, 1_i64);
+        let value = first.alloc(&INT, 1_i64);
         let mut foreign_roots = RootScope::new();
         foreign_roots.root(value);
 
@@ -639,7 +639,7 @@ mod tests {
     fn reset_restores_collection_pacing() {
         let mut heap = Heap::new();
         heap.collect(&RootScope::new());
-        let _ = heap.alloc(INT, 1_i64);
+        let _ = heap.alloc(&INT, 1_i64);
         assert_ne!(*heap.bytes_since_collect.borrow(), 0);
         assert_ne!(*heap.collect_threshold.borrow(), INITIAL_COLLECT_THRESHOLD);
 
@@ -656,14 +656,14 @@ mod tests {
         const OBJECTS_PER_CYCLE: usize = 4_096;
 
         for i in 0..OBJECTS_PER_CYCLE {
-            let _ = heap.alloc(INT, i as i64);
+            let _ = heap.alloc(&INT, i as i64);
         }
         heap.collect(&RootScope::new());
         let first_cycle_bytes = heap.arena.allocated_bytes();
 
         for cycle in 1..=8 {
             for i in 0..OBJECTS_PER_CYCLE {
-                let _ = heap.alloc(INT, (cycle * OBJECTS_PER_CYCLE + i) as i64);
+                let _ = heap.alloc(&INT, (cycle * OBJECTS_PER_CYCLE + i) as i64);
             }
             heap.collect(&RootScope::new());
         }

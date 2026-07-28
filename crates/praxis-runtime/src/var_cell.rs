@@ -15,11 +15,11 @@
 //! Per §5.5, `VarCell`s are never equatable or hashable — they are an internal
 //! implementation detail, not a first-class value the program can name.
 //!
-//! `TypeId(12)` follows the `CLOSURE` descriptor (TypeId 11).
+//! Its `TypeId` is derived from `BuiltinTypeId::VarCell`.
 
 use std::fmt;
 
-use crate::descriptor::{Tracer, TypeDescriptor, TypeId};
+use crate::descriptor::{BuiltinTypeId, Tracer, TypeDescriptor};
 use crate::GcRef;
 
 /// The runtime payload of a `VarCell`: a single `GcRef` slot. `#[repr(C)]` so
@@ -52,17 +52,17 @@ unsafe fn var_cell_format(payload: *const u8, out: &mut dyn fmt::Write) {
 
 /// Descriptor for the `VarCell` internal value type (M7-WS7b, §4.10). Never
 /// equatable or hashable (it is not a first-class value).
-pub const VAR_CELL: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(12),
-    name: "VarCell",
-    size: std::mem::size_of::<VarCellPayload>(),
-    align: std::mem::align_of::<VarCellPayload>(),
-    trace: var_cell_trace,
-    drop_value: var_cell_drop,
-    format: var_cell_format,
-    equals: None,
-    hash: None,
-};
+pub static VAR_CELL: TypeDescriptor = TypeDescriptor::builtin::<VarCellPayload>(
+    BuiltinTypeId::VarCell,
+    "VarCell",
+    var_cell_trace,
+    var_cell_drop,
+    var_cell_format,
+    None,
+    None,
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 #[cfg(test)]
 mod tests {
@@ -74,6 +74,6 @@ mod tests {
         assert!(!VAR_CELL.is_equatable());
         assert!(!VAR_CELL.is_hashable());
         assert_eq!(VAR_CELL.name, "VarCell");
-        assert_eq!(VAR_CELL.id, TypeId(12));
+        assert_eq!(VAR_CELL.as_builtin(), Some(BuiltinTypeId::VarCell));
     }
 }

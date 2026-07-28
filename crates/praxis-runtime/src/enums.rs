@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use crate::descriptor::{DynamicHasher, Tracer, TypeDescriptor, TypeId};
+use crate::descriptor::{BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
 use crate::GcRef;
 
 /// The runtime payload of an enum value: the variant discriminant plus its
@@ -100,17 +100,17 @@ unsafe fn enum_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 /// payloads; hashing mixes the tag then each payload. An enum is
 /// equatable/hashable iff every payload type is; functions never are. This lets
 /// enums serve as map/set keys (M8 containers).
-pub const ENUM: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(9),
-    name: "Enum",
-    size: std::mem::size_of::<EnumPayload>(),
-    align: std::mem::align_of::<EnumPayload>(),
-    trace: enum_trace,
-    drop_value: enum_drop,
-    format: enum_format,
-    equals: Some(enum_equals),
-    hash: Some(enum_hash),
-};
+pub static ENUM: TypeDescriptor = TypeDescriptor::builtin::<EnumPayload>(
+    BuiltinTypeId::Enum,
+    "Enum",
+    enum_trace,
+    enum_drop,
+    enum_format,
+    Some(enum_equals),
+    Some(enum_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 #[cfg(test)]
 mod tests {
@@ -121,7 +121,7 @@ mod tests {
         assert!(ENUM.is_equatable());
         assert!(ENUM.is_hashable());
         assert_eq!(ENUM.name, "Enum");
-        assert_eq!(ENUM.id, TypeId(9));
+        assert_eq!(ENUM.as_builtin(), Some(BuiltinTypeId::Enum));
     }
 }
 

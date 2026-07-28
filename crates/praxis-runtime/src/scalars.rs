@@ -1,7 +1,7 @@
 //! Built-in scalar type descriptors (§4.3, §11.4).
 //!
-//! Each scalar type has a `const` [`TypeDescriptor`] exposed as a static
-//! reference (`UNIT`, `BOOL`, `INT`, `BYTE`, `CHAR`). Every payload-aware
+//! Each scalar type has one `static` [`TypeDescriptor`] (`UNIT`, `BOOL`, `INT`,
+//! `BYTE`, `CHAR`, `FLOAT`), so its address is its identity. Every payload-aware
 //! operation routes through these descriptors; there are no type switches
 //! elsewhere (§11.4).
 //!
@@ -12,7 +12,7 @@
 
 use std::fmt;
 
-use crate::descriptor::{hash_value, DynamicHasher, Tracer, TypeDescriptor, TypeId};
+use crate::descriptor::{hash_value, BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
 
 // ---- payload types ---------------------------------------------------------
 //
@@ -53,17 +53,17 @@ unsafe fn unit_hash(_: *const u8, hasher: &mut dyn DynamicHasher) {
 }
 
 /// Descriptor for the `Unit` scalar (§4.3).
-pub const UNIT: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(0),
-    name: "Unit",
-    size: std::mem::size_of::<UnitPayload>(),
-    align: std::mem::align_of::<UnitPayload>(),
-    trace: unit_trace,
-    drop_value: unit_drop,
-    format: unit_format,
-    equals: Some(unit_equals),
-    hash: Some(unit_hash),
-};
+pub static UNIT: TypeDescriptor = TypeDescriptor::builtin::<UnitPayload>(
+    BuiltinTypeId::Unit,
+    "Unit",
+    unit_trace,
+    unit_drop,
+    unit_format,
+    Some(unit_equals),
+    Some(unit_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 // ---- Bool ------------------------------------------------------------------
 
@@ -85,17 +85,17 @@ unsafe fn bool_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 }
 
 /// Descriptor for the `Bool` scalar (§4.3).
-pub const BOOL: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(1),
-    name: "Bool",
-    size: std::mem::size_of::<BoolPayload>(),
-    align: std::mem::align_of::<BoolPayload>(),
-    trace: bool_trace,
-    drop_value: bool_drop,
-    format: bool_format,
-    equals: Some(bool_equals),
-    hash: Some(bool_hash),
-};
+pub static BOOL: TypeDescriptor = TypeDescriptor::builtin::<BoolPayload>(
+    BuiltinTypeId::Bool,
+    "Bool",
+    bool_trace,
+    bool_drop,
+    bool_format,
+    Some(bool_equals),
+    Some(bool_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 // ---- Int -------------------------------------------------------------------
 
@@ -117,17 +117,17 @@ unsafe fn int_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 }
 
 /// Descriptor for the `Int` scalar (§4.3).
-pub const INT: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(2),
-    name: "Int",
-    size: std::mem::size_of::<IntPayload>(),
-    align: std::mem::align_of::<IntPayload>(),
-    trace: int_trace,
-    drop_value: int_drop,
-    format: int_format,
-    equals: Some(int_equals),
-    hash: Some(int_hash),
-};
+pub static INT: TypeDescriptor = TypeDescriptor::builtin::<IntPayload>(
+    BuiltinTypeId::Int,
+    "Int",
+    int_trace,
+    int_drop,
+    int_format,
+    Some(int_equals),
+    Some(int_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 // ---- Byte ------------------------------------------------------------------
 
@@ -149,17 +149,17 @@ unsafe fn byte_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 }
 
 /// Descriptor for the `Byte` scalar (§4.3).
-pub const BYTE: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(3),
-    name: "Byte",
-    size: std::mem::size_of::<BytePayload>(),
-    align: std::mem::align_of::<BytePayload>(),
-    trace: byte_trace,
-    drop_value: byte_drop,
-    format: byte_format,
-    equals: Some(byte_equals),
-    hash: Some(byte_hash),
-};
+pub static BYTE: TypeDescriptor = TypeDescriptor::builtin::<BytePayload>(
+    BuiltinTypeId::Byte,
+    "Byte",
+    byte_trace,
+    byte_drop,
+    byte_format,
+    Some(byte_equals),
+    Some(byte_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 // ---- Char ------------------------------------------------------------------
 
@@ -190,17 +190,17 @@ unsafe fn char_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 }
 
 /// Descriptor for the `Char` scalar (§4.3).
-pub const CHAR: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(4),
-    name: "Char",
-    size: std::mem::size_of::<CharPayload>(),
-    align: std::mem::align_of::<CharPayload>(),
-    trace: char_trace,
-    drop_value: char_drop,
-    format: char_format,
-    equals: Some(char_equals),
-    hash: Some(char_hash),
-};
+pub static CHAR: TypeDescriptor = TypeDescriptor::builtin::<CharPayload>(
+    BuiltinTypeId::Char,
+    "Char",
+    char_trace,
+    char_drop,
+    char_format,
+    Some(char_equals),
+    Some(char_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 // ---- Float ------------------------------------------------------------------
 
@@ -238,17 +238,17 @@ unsafe fn float_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 }
 
 /// Descriptor for the `Float` scalar (§4.3).
-pub const FLOAT: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(5),
-    name: "Float",
-    size: std::mem::size_of::<FloatPayload>(),
-    align: std::mem::align_of::<FloatPayload>(),
-    trace: float_trace,
-    drop_value: float_drop,
-    format: float_format,
-    equals: Some(float_equals),
-    hash: Some(float_hash),
-};
+pub static FLOAT: TypeDescriptor = TypeDescriptor::builtin::<FloatPayload>(
+    BuiltinTypeId::Float,
+    "Float",
+    float_trace,
+    float_drop,
+    float_format,
+    Some(float_equals),
+    Some(float_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 // ---- validation helper -----------------------------------------------------
 

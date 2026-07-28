@@ -1846,8 +1846,8 @@ fn out_writes_to_stdout_and_returns_unit() {
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
     assert_eq!(
-        result.descriptor().id,
-        praxis_runtime::scalars::UNIT.id,
+        result.descriptor().id(),
+        praxis_runtime::scalars::UNIT.id(),
         "out(...) must return Unit, not the printed argument"
     );
 }
@@ -4239,7 +4239,7 @@ fn m10ws3_snapshot_retains_reachable_objects_across_gc() {
     // Find a Vec-typed root among the snapshot locals.
     let vec_root = snap.frames.iter().flat_map(|f| &f.locals).find_map(|l| {
         let desc = unsafe { &*l.descriptor };
-        (desc.id == praxis_runtime::collections::VEC.id).then_some(l.value)
+        (desc.id() == praxis_runtime::collections::VEC.id()).then_some(l.value)
     });
     let vec_root = vec_root.expect("snapshot should hold a Vec local");
     let v = vec_root.as_vec();

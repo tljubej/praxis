@@ -18,10 +18,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use crate::descriptor::{Tracer, TypeDescriptor};
+use crate::descriptor::{BuiltinTypeId, Tracer, TypeDescriptor};
 use crate::dynamic_key::DynamicKey;
+use crate::DynamicHasher;
 use crate::GcRef;
-use crate::{DynamicHasher, TypeId};
 
 // ===========================================================================
 // Map[K, V]
@@ -136,17 +136,17 @@ unsafe fn map_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 
 /// Descriptor for `Map[K, V]` (§11.3). Per-instance key/value types live in the
 /// payload, so a single descriptor serves all `Map[K, V]`.
-pub const MAP: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(14),
-    name: "Map",
-    size: std::mem::size_of::<MapPayload>(),
-    align: std::mem::align_of::<MapPayload>(),
-    trace: map_trace,
-    drop_value: map_drop,
-    format: map_format,
-    equals: Some(map_equals),
-    hash: Some(map_hash),
-};
+pub static MAP: TypeDescriptor = TypeDescriptor::builtin::<MapPayload>(
+    BuiltinTypeId::Map,
+    "Map",
+    map_trace,
+    map_drop,
+    map_format,
+    Some(map_equals),
+    Some(map_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 // ===========================================================================
 // Set[T]
@@ -216,17 +216,17 @@ unsafe fn set_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 }
 
 /// Descriptor for `Set[T]` (§11.3).
-pub const SET: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(15),
-    name: "Set",
-    size: std::mem::size_of::<SetPayload>(),
-    align: std::mem::align_of::<SetPayload>(),
-    trace: set_trace,
-    drop_value: set_drop,
-    format: set_format,
-    equals: Some(set_equals),
-    hash: Some(set_hash),
-};
+pub static SET: TypeDescriptor = TypeDescriptor::builtin::<SetPayload>(
+    BuiltinTypeId::Set,
+    "Set",
+    set_trace,
+    set_drop,
+    set_format,
+    Some(set_equals),
+    Some(set_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 // ===========================================================================
 // Counter[T]
@@ -320,17 +320,17 @@ unsafe fn counter_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 }
 
 /// Descriptor for `Counter[T]` (§6.2).
-pub const COUNTER: &TypeDescriptor = &TypeDescriptor {
-    id: TypeId(16),
-    name: "Counter",
-    size: std::mem::size_of::<CounterPayload>(),
-    align: std::mem::align_of::<CounterPayload>(),
-    trace: counter_trace,
-    drop_value: counter_drop,
-    format: counter_format,
-    equals: Some(counter_equals),
-    hash: Some(counter_hash),
-};
+pub static COUNTER: TypeDescriptor = TypeDescriptor::builtin::<CounterPayload>(
+    BuiltinTypeId::Counter,
+    "Counter",
+    counter_trace,
+    counter_drop,
+    counter_format,
+    Some(counter_equals),
+    Some(counter_hash),
+    // Ordering: see the ordering ADR; no built-in declares `compare` yet.
+    None,
+);
 
 #[cfg(test)]
 mod tests {

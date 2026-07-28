@@ -95,8 +95,8 @@ fn run_main_raw_with_input(src: &str, input: &str) -> (Runtime, usize, usize) {
 
 fn tuple_items(value: GcRef) -> Vec<GcRef> {
     assert_eq!(
-        value.descriptor().id,
-        praxis_runtime::tuples::TUPLE.id,
+        value.descriptor().id(),
+        praxis_runtime::tuples::TUPLE.id(),
         "pipeline element should be a Tuple"
     );
     let payload = value.payload::<TuplePayload>();
@@ -107,8 +107,8 @@ fn tuple_items(value: GcRef) -> Vec<GcRef> {
 
 fn tuple_element_descriptor_ids(value: GcRef) -> Vec<praxis_runtime::descriptor::TypeId> {
     assert_eq!(
-        value.descriptor().id,
-        praxis_runtime::tuples::TUPLE.id,
+        value.descriptor().id(),
+        praxis_runtime::tuples::TUPLE.id(),
         "value should be a Tuple"
     );
     let payload = value.payload::<TuplePayload>();
@@ -119,7 +119,7 @@ fn tuple_element_descriptor_ids(value: GcRef) -> Vec<praxis_runtime::descriptor:
         .descriptors
         .iter()
         // SAFETY: schema entries are pointers to process-static descriptors.
-        .map(|descriptor| unsafe { &**descriptor }.id)
+        .map(|descriptor| unsafe { &**descriptor }.id())
         .collect()
 }
 
@@ -305,8 +305,8 @@ fn empty_vec_float_has_the_float_element_descriptor_before_any_push() {
     // initialized even when its items buffer is empty.
     let descriptor = unsafe { &*(*payload).element_descriptor };
     assert_eq!(
-        descriptor.id,
-        praxis_runtime::scalars::FLOAT.id,
+        descriptor.id(),
+        praxis_runtime::scalars::FLOAT.id(),
         "an empty Vec[Float] has no first push that can repair a wrong descriptor"
     );
 }
@@ -439,8 +439,8 @@ fn anonymous_word_template_vec_uses_the_text_element_descriptor() {
     // SAFETY: result is a Vec according to both its static and runtime type.
     let descriptor = unsafe { &*(*payload).element_descriptor };
     assert_eq!(
-        descriptor.id,
-        praxis_runtime::text::TEXT.id,
+        descriptor.id(),
+        praxis_runtime::text::TEXT.id(),
         "a Vec of word captures must dispatch through TEXT"
     );
 }
@@ -464,8 +464,8 @@ fn chars_result_descriptor_matches_the_values_it_contains() {
     // SAFETY: result is a runtime Vec.
     let payload = unsafe { &*payload };
     assert_eq!(payload.items.len(), 1);
-    let declared = unsafe { &*payload.element_descriptor }.id;
-    let actual = payload.items[0].descriptor().id;
+    let declared = unsafe { &*payload.element_descriptor }.id();
+    let actual = payload.items[0].descriptor().id();
     assert_eq!(
         declared, actual,
         "collection descriptors and stored object headers must agree"
@@ -498,8 +498,8 @@ fn tuple_schema_uses_the_unit_descriptor_for_unit_elements() {
     assert_eq!(
         tuple_element_descriptor_ids(result),
         vec![
-            praxis_runtime::scalars::UNIT.id,
-            praxis_runtime::scalars::INT.id
+            praxis_runtime::scalars::UNIT.id(),
+            praxis_runtime::scalars::INT.id()
         ],
         "format/equals/hash must never read Unit's zero-sized payload as an Int"
     );
@@ -513,8 +513,8 @@ fn tuple_schema_uses_the_enum_descriptor_for_enum_elements() {
     assert_eq!(
         tuple_element_descriptor_ids(result),
         vec![
-            praxis_runtime::enums::ENUM.id,
-            praxis_runtime::scalars::INT.id
+            praxis_runtime::enums::ENUM.id(),
+            praxis_runtime::scalars::INT.id()
         ],
         "enum payloads require ENUM format/equality/hash dispatch"
     );
@@ -533,8 +533,8 @@ fn grid_positions_vec_uses_the_point_tuple_descriptor() {
     // inspecting the descriptor does not reinterpret any tuple payload.
     let descriptor = unsafe { &*(*payload).element_descriptor };
     assert_eq!(
-        descriptor.id,
-        praxis_runtime::tuples::TUPLE.id,
+        descriptor.id(),
+        praxis_runtime::tuples::TUPLE.id(),
         "positions/neighbors/find_all must return Vec[(Int, Int)]"
     );
 }
@@ -552,8 +552,8 @@ fn grid_text_row_preserves_the_grid_cell_descriptor() {
     // through the currently incorrect Int descriptor.
     let descriptor = unsafe { &*(*payload).element_descriptor };
     assert_eq!(
-        descriptor.id,
-        praxis_runtime::text::TEXT.id,
+        descriptor.id(),
+        praxis_runtime::text::TEXT.id(),
         "row/cells/column must preserve Grid[T]'s T descriptor"
     );
 }
@@ -567,8 +567,8 @@ fn absent_grid_find_has_no_unit_under_a_tuple_type() {
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(
-        result.descriptor().id,
-        praxis_runtime::tuples::TUPLE.id,
+        result.descriptor().id(),
+        praxis_runtime::tuples::TUPLE.id(),
         "a value statically typed (Int, Int) cannot be the Unit sentinel"
     );
 }
@@ -580,8 +580,8 @@ fn absent_map_get_has_no_unit_under_the_value_type() {
         run_main("fn main() {\n  let m = Map()\n  m.insert(1, 10)\n  m.get(2)\n}\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(
-        result.descriptor().id,
-        praxis_runtime::scalars::INT.id,
+        result.descriptor().id(),
+        praxis_runtime::scalars::INT.id(),
         "a value statically typed Int cannot be the Unit sentinel"
     );
 }

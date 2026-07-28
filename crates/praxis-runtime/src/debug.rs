@@ -309,7 +309,7 @@ mod tests {
                 source_name: name_a.as_ptr(),
                 name_len: 1,
                 symbol_id: 10,
-                descriptor: crate::scalars::INT,
+                descriptor: &crate::scalars::INT,
                 type_id: 1,
                 kind: LOCAL_KIND_USER,
                 span_start: 5,
@@ -319,7 +319,7 @@ mod tests {
                 source_name: name_a.as_ptr(),
                 name_len: 1,
                 symbol_id: 20,
-                descriptor: crate::scalars::INT,
+                descriptor: &crate::scalars::INT,
                 type_id: 1,
                 kind: LOCAL_KIND_USER,
                 span_start: 20,
@@ -336,10 +336,7 @@ mod tests {
             assert_eq!(locals[1].name(), "a");
             assert_ne!(locals[0].symbol_id, locals[1].symbol_id);
             // M10-WS2: the descriptor is carried through to the frame.
-            assert_eq!(
-                locals[0].descriptor as *const _,
-                crate::scalars::INT as *const _
-            );
+            assert!(std::ptr::eq(locals[0].descriptor, &crate::scalars::INT));
             // M10-WS1b: the full static Type id is carried through.
             assert_eq!(locals[0].type_id, 1);
             assert_eq!(locals[1].type_id, 1);

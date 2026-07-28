@@ -1637,43 +1637,43 @@ fn descriptor_for_type(
     match db.data(db.follow(ty)) {
         TypeData::Scalar(s) => match s {
             praxis_types::ScalarType::Int | praxis_types::ScalarType::Never => {
-                praxis_runtime::scalars::INT as *const TypeDescriptor
+                &praxis_runtime::scalars::INT as *const TypeDescriptor
             }
             praxis_types::ScalarType::Bool => {
-                praxis_runtime::scalars::BOOL as *const TypeDescriptor
+                &praxis_runtime::scalars::BOOL as *const TypeDescriptor
             }
-            praxis_types::ScalarType::Text => praxis_runtime::text::TEXT as *const TypeDescriptor,
+            praxis_types::ScalarType::Text => &praxis_runtime::text::TEXT as *const TypeDescriptor,
             praxis_types::ScalarType::Char => {
-                praxis_runtime::scalars::CHAR as *const TypeDescriptor
+                &praxis_runtime::scalars::CHAR as *const TypeDescriptor
             }
-            _ => praxis_runtime::scalars::INT as *const TypeDescriptor,
+            _ => &praxis_runtime::scalars::INT as *const TypeDescriptor,
         },
         // Tuples resolve to the TUPLE descriptor (M7 Part 2). Records/enums use
         // a single top-level descriptor per value (RECORD/ENUM), but their field
         // descriptors are resolved here; a nested record's field descriptor
         // defaulting to INT is sound for GC tracing since every value is a GcRef.
-        TypeData::Tuple(_) => praxis_runtime::tuples::TUPLE as *const TypeDescriptor,
+        TypeData::Tuple(_) => &praxis_runtime::tuples::TUPLE as *const TypeDescriptor,
         // Collections resolve to their single static descriptor const. The
         // per-instance element type lives in the payload (§11.2), so `VEC` serves
         // all `Vec[T]`, `MAP` all `Map[K,V]`, etc. The element descriptor is
         // resolved separately at construction via `collection_element_descriptor_for`.
         TypeData::Collection { ctor, .. } => match ctor {
-            CollectionCtor::Vec => praxis_runtime::collections::VEC as *const TypeDescriptor,
-            CollectionCtor::Grid => praxis_runtime::collections::GRID as *const TypeDescriptor,
-            CollectionCtor::Deque => praxis_runtime::collections::DEQUE as *const TypeDescriptor,
-            CollectionCtor::Map => praxis_runtime::maps::MAP as *const TypeDescriptor,
-            CollectionCtor::Set => praxis_runtime::maps::SET as *const TypeDescriptor,
-            CollectionCtor::Counter => praxis_runtime::maps::COUNTER as *const TypeDescriptor,
-            CollectionCtor::MinHeap => praxis_runtime::heaps::MIN_HEAP as *const TypeDescriptor,
-            CollectionCtor::MaxHeap => praxis_runtime::heaps::MAX_HEAP as *const TypeDescriptor,
-            CollectionCtor::BitSet => praxis_runtime::bitset::BITSET as *const TypeDescriptor,
+            CollectionCtor::Vec => &praxis_runtime::collections::VEC as *const TypeDescriptor,
+            CollectionCtor::Grid => &praxis_runtime::collections::GRID as *const TypeDescriptor,
+            CollectionCtor::Deque => &praxis_runtime::collections::DEQUE as *const TypeDescriptor,
+            CollectionCtor::Map => &praxis_runtime::maps::MAP as *const TypeDescriptor,
+            CollectionCtor::Set => &praxis_runtime::maps::SET as *const TypeDescriptor,
+            CollectionCtor::Counter => &praxis_runtime::maps::COUNTER as *const TypeDescriptor,
+            CollectionCtor::MinHeap => &praxis_runtime::heaps::MIN_HEAP as *const TypeDescriptor,
+            CollectionCtor::MaxHeap => &praxis_runtime::heaps::MAX_HEAP as *const TypeDescriptor,
+            CollectionCtor::BitSet => &praxis_runtime::bitset::BITSET as *const TypeDescriptor,
             // Other collection ctors (MinHeap/MaxHeap/BitSet/Range/Seq) land in
             // their own workstreams and will add arms here. Until then they fall
             // through to INT — sound for GC tracing only; these types cannot yet
             // be constructed, so the arm is unreachable.
-            _ => praxis_runtime::scalars::INT as *const TypeDescriptor,
+            _ => &praxis_runtime::scalars::INT as *const TypeDescriptor,
         },
-        _ => praxis_runtime::scalars::INT as *const TypeDescriptor,
+        _ => &praxis_runtime::scalars::INT as *const TypeDescriptor,
     }
 }
 

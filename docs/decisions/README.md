@@ -42,3 +42,5 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-034: Read-only purity gate for debugger expressions (M10b-WS4)](./034-read-only-purity-gate.md)
 - [ADR-035: Full static `Type` id + source span threaded into the debug frame (M10b-WS1)](./035-static-type-id-and-source-span-threading.md)
 - [ADR-036: `p EXPR` evaluates a synthesized `__p_expr` function (M10b-WS4)](./036-synthetic-p-expr-function.md)
+- [ADR-037: Float scalar implementation](./037-float-implementation.md)
+- [ADR-038: Built-in type identity is derived; descriptors are `static`](./038-derived-builtin-type-identity.md)

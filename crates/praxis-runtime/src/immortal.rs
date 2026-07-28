@@ -28,9 +28,9 @@ impl Immortals {
         // Bypass `Heap::alloc`'s live-set registration: immortals are managed
         // out-of-band. We use the same low-level layout so the descriptors and
         // accessors still work on them.
-        let unit = heap.alloc_immortal(UNIT, ());
-        let true_ = heap.alloc_immortal(BOOL, 1_u8);
-        let false_ = heap.alloc_immortal(BOOL, 0_u8);
+        let unit = heap.alloc_immortal(&UNIT, ());
+        let true_ = heap.alloc_immortal(&BOOL, 1_u8);
+        let false_ = heap.alloc_immortal(&BOOL, 0_u8);
         // Immortals start black so a mark phase that happens to visit them (e.g.
         // via a root that aliases them) does not transiently un-protect them.
         unit.header().set_mark_color(crate::gc::BLACK);
