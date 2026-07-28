@@ -26,7 +26,7 @@ use praxis_types::{Type, TypeDb};
 use crate::annot::{DebugSlots, RootSlots};
 use crate::ir::{
     AllocKind, BlockId, CallTarget, CmpOp, FloatBinOp, Function, Inst, IntBinOp, LocalDebugKind,
-    LocalId, LocalKind, MirType, ScalarKind, Terminator,
+    LocalId, LocalKind, MirType, Overflow, ScalarKind, Terminator,
 };
 
 /// Lower a typed module to MIR: one [`Function`] per source `fn` item, plus one
@@ -1265,7 +1265,13 @@ fn lower_int_binop(b: &mut Builder<'_>, op: IntBinOp, lhs_gc: LocalId, rhs_gc: L
     let lhs = lower_extract_int(b, lhs_gc);
     let rhs = lower_extract_int(b, rhs_gc);
     let dst = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::IntBinOp { op, dst, lhs, rhs });
+    b.push(Inst::IntBinOp {
+        op,
+        dst,
+        lhs,
+        rhs,
+        overflow: Overflow::Checked,
+    });
     b.check_fault();
     dst
 }
@@ -1638,11 +1644,13 @@ fn lower_for(
         value: 1,
     });
     let next_scalar = b.alloc_scalar(ScalarKind::Int);
+    // `for`'s index bump: `idx` is bounded above by the collection's length.
     b.push(Inst::IntBinOp {
         dst: next_scalar,
         op: IntBinOp::Add,
         lhs: cur_scalar,
         rhs: one_scalar,
+        overflow: Overflow::Bounded,
     });
     b.push(Inst::Materialize {
         dst: idx_gc,
@@ -2551,11 +2559,13 @@ fn emit_increment(b: &mut Builder<'_>, idx: LocalId) {
     let one = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ConstInt { dst: one, value: 1 });
     let next = b.alloc_scalar(ScalarKind::Int);
+    // A loop index bump, bounded by the source collection's length.
     b.push(Inst::IntBinOp {
         dst: next,
         op: IntBinOp::Add,
         lhs: cur,
         rhs: one,
+        overflow: Overflow::Bounded,
     });
     b.push(Inst::Materialize {
         dst: idx,
@@ -2574,11 +2584,13 @@ fn move_scalar(b: &mut Builder<'_>, dst: LocalId, src: LocalId) {
         dst: zero,
         value: 0,
     });
+    // `dst = src + 0` — a scalar copy, which cannot overflow.
     b.push(Inst::IntBinOp {
         dst,
         op: IntBinOp::Add,
         lhs: src,
         rhs: zero,
+        overflow: Overflow::Bounded,
     });
 }
 
@@ -2613,17 +2625,20 @@ fn emit_sink_body(
                 },
                 lhs: acc,
                 rhs: item_scalar,
+                overflow: Overflow::Checked,
             });
         }
         Sink::Count => {
             let acc = acc_scalar.unwrap();
             let one = b.alloc_scalar(ScalarKind::Int);
             b.push(Inst::ConstInt { dst: one, value: 1 });
+            // `count += 1`, bounded by the source collection's length.
             b.push(Inst::IntBinOp {
                 dst: acc,
                 op: IntBinOp::Add,
                 lhs: acc,
                 rhs: one,
+                overflow: Overflow::Bounded,
             });
         }
         Sink::Min | Sink::Max => {
@@ -3103,6 +3118,7 @@ fn lower_seq_sum(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -> 
             op: IntBinOp::Add,
             lhs: locals[0],
             rhs: item_scalar,
+            overflow: Overflow::Checked,
         });
     });
     let result = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
@@ -3123,11 +3139,13 @@ fn lower_seq_count(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -
     emit_index_loop(b, src, idx, vec![acc], |b, _item, locals| {
         let one = b.alloc_scalar(ScalarKind::Int);
         b.push(Inst::ConstInt { dst: one, value: 1 });
+        // `count += 1`, bounded by the source collection's length.
         b.push(Inst::IntBinOp {
             dst: locals[0],
             op: IntBinOp::Add,
             lhs: locals[0],
             rhs: one,
+            overflow: Overflow::Bounded,
         });
     });
     let result = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
@@ -3358,11 +3376,13 @@ fn emit_index_loop<F>(
     let one = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ConstInt { dst: one, value: 1 });
     let next = b.alloc_scalar(ScalarKind::Int);
+    // A loop index bump, bounded by the source collection's length.
     b.push(Inst::IntBinOp {
         dst: next,
         op: IntBinOp::Add,
         lhs: cur,
         rhs: one,
+        overflow: Overflow::Bounded,
     });
     b.push(Inst::Materialize {
         dst: idx,

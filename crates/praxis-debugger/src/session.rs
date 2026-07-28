@@ -172,6 +172,8 @@ impl DebugSession {
         let mut funcs = praxis_mir::lower_module(&module, &mut analysis.db);
         for f in &mut funcs {
             praxis_mir::annotate(f);
+            praxis_mir::verify(f)
+                .map_err(|errs| format!("internal: {}", praxis_mir::verify::report(&errs)))?;
         }
         let mut new_jit =
             praxis_codegen_cranelift::Jit::new().map_err(|e| format!("JIT init failed: {e}"))?;

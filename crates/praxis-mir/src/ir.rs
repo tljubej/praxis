@@ -212,13 +212,17 @@ pub enum Inst {
         roots: RootSlots,
         debug: DebugSlots,
     },
-    /// A checked binary arithmetic op on `Int` scalars. On overflow the runtime
-    /// sets `pending_fault`; the following [`Inst::CheckFault`] diverts.
+    /// A binary arithmetic op on `Int` scalars. When `overflow` is
+    /// [`Overflow::Checked`] the runtime sets `pending_fault` on overflow and
+    /// the following [`Inst::CheckFault`] diverts; when it is
+    /// [`Overflow::Bounded`] the site cannot overflow and the backend emits
+    /// the bare arithmetic.
     IntBinOp {
         op: IntBinOp,
         dst: LocalId,
         lhs: LocalId,
         rhs: LocalId,
+        overflow: Overflow,
     },
     /// A comparison yielding a `Bool` scalar (`i8`).
     IntCmp {
@@ -420,8 +424,33 @@ pub enum CallTarget {
     Runtime(RuntimeSymbol),
 }
 
-/// Checked integer binary operators (§4.12). All fault on overflow; `Div`/`Rem`
-/// additionally fault on division-by-zero.
+/// Whether an [`Inst::IntBinOp`] site can overflow, and therefore whether the
+/// backend emits an overflow test at all.
+///
+/// Source-level arithmetic is always [`Overflow::Checked`]. The distinction
+/// exists for the arithmetic the *compiler* writes: a `for` loop's index bump
+/// and a `count()` accumulator are bounded above by a collection's length, so
+/// reaching `i64::MAX` is not a state the program can be in. Emitting the
+/// overflow predicate and the raise call for those was two wasted instructions
+/// and a call per iteration — and it left the fault protocol looking violated,
+/// since none of them is followed by a [`Inst::CheckFault`] (the verifier's
+/// "a faulting instruction is observed" rule, MIR-10).
+///
+/// [`Overflow::Bounded`] is a claim about the *site*, not about the operator.
+/// It is only legal on `Add`/`Sub`/`Mul`: `Div`/`Rem` also trap on a zero
+/// divisor, which no bound rules out, and the verifier rejects a `Bounded`
+/// division.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overflow {
+    /// Report overflow (and division by zero) as a runtime fault.
+    Checked,
+    /// The operands are bounded such that this site cannot overflow. Emitted
+    /// bare.
+    Bounded,
+}
+
+/// Integer binary operators (§4.12). Under [`Overflow::Checked`] all fault on
+/// overflow and `Div`/`Rem` additionally fault on division-by-zero.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntBinOp {
     Add,

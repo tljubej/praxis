@@ -36,6 +36,9 @@ fn compile(
     let mut funcs = lower_module(&module, &mut analysis.db);
     for f in &mut funcs {
         annotate(f);
+        if let Err(errs) = praxis_mir::verify(f) {
+            panic!("{}", praxis_mir::verify::report(&errs));
+        }
     }
     let mut jit = Jit::new().expect("JIT construction");
     let ids = jit

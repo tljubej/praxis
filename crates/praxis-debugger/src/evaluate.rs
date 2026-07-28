@@ -257,6 +257,8 @@ fn exec(
     let mut funcs = lower_module(&module, &mut analysis.db);
     for f in &mut funcs {
         annotate(f);
+        praxis_mir::verify(f)
+            .map_err(|errs| format!("internal: {}", praxis_mir::verify::report(&errs)))?;
     }
     let mut jit =
         Jit::in_generation(Rc::clone(generation)).map_err(|e| format!("JIT init failed: {e}"))?;

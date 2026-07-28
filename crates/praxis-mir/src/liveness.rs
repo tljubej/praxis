@@ -422,6 +422,7 @@ mod tests {
             dst: i0,
             lhs: i0,
             rhs: i0,
+            overflow: crate::ir::Overflow::Checked,
         }); // dummy to define i0
         f.blocks[blk.0 as usize].insts.push(Inst::Alloc {
             dst: a,
@@ -434,6 +435,7 @@ mod tests {
             dst: i1,
             lhs: i0,
             rhs: i0,
+            overflow: crate::ir::Overflow::Checked,
         });
         // At this alloc (b), `a` is live; `b` is the def so excluded.
         f.blocks[blk.0 as usize].insts.push(Inst::Alloc {

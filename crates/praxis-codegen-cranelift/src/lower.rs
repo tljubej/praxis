@@ -19,7 +19,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
 use praxis_mir::{
     AllocKind, CallTarget, CmpOp, DebugSlots, FloatBinOp, Function as MirFunction, Inst, IntBinOp,
-    LocalId, LocalKind, MirType, RootSlots, ScalarKind, Terminator,
+    LocalId, LocalKind, MirType, Overflow, RootSlots, ScalarKind, Terminator,
 };
 use praxis_runtime::{DebugLocalMeta, RuntimeContext, ShadowFrame, MAX_SHADOW_SLOTS};
 use praxis_stdlib::abi::{AbiKind, AbiRet, RuntimeSymbol};
@@ -863,7 +863,13 @@ fn lower_inst<M: Module>(
             // M4 scalars are immutable objects; StoreScalar is a no-op placeholder
             // for the future mutable-Int optimization.
         }
-        Inst::IntBinOp { op, dst, lhs, rhs } => {
+        Inst::IntBinOp {
+            op,
+            dst,
+            lhs,
+            rhs,
+            overflow,
+        } => {
             // Native scalar arithmetic (§4.12). The operands are already raw
             // i64s in the scalar channel, so the operation is one Cranelift
             // instruction plus an inline overflow predicate.
@@ -879,8 +885,28 @@ fn lower_inst<M: Module>(
             // with the predicate rather than by branching around it: arithmetic
             // stays one basic block, and the `CheckFault` that MIR emits next
             // is what diverts to the fault epilogue.
+            //
+            // `Overflow::Bounded` sites — a `for` index bump, a `count`
+            // accumulator — skip the test entirely: their operands are bounded
+            // by a collection's length, so the predicate is provably false and
+            // computing it cost two instructions and a call per iteration.
             let l = builder.use_var(vars[lhs.0 as usize]);
             let r = builder.use_var(vars[rhs.0 as usize]);
+            if matches!(overflow, Overflow::Bounded) {
+                let bare = match op {
+                    IntBinOp::Add => builder.ins().iadd(l, r),
+                    IntBinOp::Sub => builder.ins().isub(l, r),
+                    IntBinOp::Mul => builder.ins().imul(l, r),
+                    // Unreachable: `verify` rejects a bounded division, because
+                    // no bound on the operands rules out a zero divisor, and
+                    // `sdiv`/`srem` *trap* on one.
+                    IntBinOp::Div | IntBinOp::Rem => {
+                        anyhow::bail!("`{op:?}` cannot be lowered as a bounded operation")
+                    }
+                };
+                builder.def_var(vars[dst.0 as usize], bare);
+                return Ok(());
+            }
             let result = match op {
                 IntBinOp::Add => {
                     let sum = builder.ins().iadd(l, r);

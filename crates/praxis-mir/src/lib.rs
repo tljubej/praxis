@@ -8,20 +8,25 @@
 //!
 //! Milestone 4 fills this crate (ADR-015). The data structures live in [`ir`];
 //! the GC-liveness pass (§12.3) that computes the minimal root set per
-//! safepoint lives in [`liveness`]; the HIR→MIR lowering lives in [`build`].
+//! safepoint lives in [`liveness`]; the HIR→MIR lowering lives in [`build`];
+//! and [`verify`] is what keeps the rooting invariant fixed once a stage has
+//! fixed it — every host runs it after `annotate` and refuses to compile MIR
+//! that fails.
 
 pub mod annot;
 pub mod build;
 pub mod ir;
 pub mod liveness;
+pub mod verify;
 
 pub use annot::{DebugSlots, RootSlots};
 pub use build::lower_module;
 pub use ir::{
     AllocKind, Block, BlockId, CallTarget, CmpOp, FloatBinOp, Function, Inst, IntBinOp, Local,
-    LocalId, LocalKind, MirType, ScalarKind, Terminator,
+    LocalId, LocalKind, MirType, Overflow, ScalarKind, Terminator,
 };
 pub use liveness::annotate;
+pub use verify::{verify, VerifyError};
 
 /// Marker documenting the milestone that filled this crate.
 pub const FILLED_AT_MILESTONE: u32 = 4;

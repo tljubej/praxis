@@ -131,7 +131,6 @@ mod tests {
                 params: vec![TypePattern::Var("T")],
                 result: TypePattern::Unit,
                 purity: Purity::Impure,
-                can_fault: false,
                 lowering: MethodLowering::RuntimeSymbol(praxis_stdlib::abi::RuntimeSymbol::VecPush),
                 doc: "Append a value.",
                 stability: Stability::Stable,

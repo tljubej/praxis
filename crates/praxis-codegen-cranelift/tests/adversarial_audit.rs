@@ -47,6 +47,11 @@ fn compile(
     let mut funcs = lower_module(&module, &mut analysis.db);
     for func in &mut funcs {
         annotate(func);
+        // Every host verifies after annotating; the tests are a host too, and
+        // are the only one that runs the whole corpus (MIR-10).
+        if let Err(errs) = praxis_mir::verify(func) {
+            panic!("{}", praxis_mir::verify::report(&errs));
+        }
     }
     let mut jit = Jit::new().expect("JIT construction");
     let ids = jit
@@ -744,6 +749,11 @@ fn runtime_symbols_emitted_for(src: &str) -> std::collections::BTreeSet<&'static
     let mut funcs = lower_module(&module, &mut analysis.db);
     for func in &mut funcs {
         annotate(func);
+        // Every host verifies after annotating; the tests are a host too, and
+        // are the only one that runs the whole corpus (MIR-10).
+        if let Err(errs) = praxis_mir::verify(func) {
+            panic!("{}", praxis_mir::verify::report(&errs));
+        }
     }
     funcs
         .iter()

@@ -58,9 +58,6 @@ pub struct MethodEntry {
     pub result: TypePattern,
     /// Whether the method is pure.
     pub purity: Purity,
-    /// Whether the method may raise a runtime fault (§9.1), e.g. an
-    /// out-of-bounds index.
-    pub can_fault: bool,
     /// How the method lowers.
     pub lowering: MethodLowering,
     /// One-line documentation, surfaced in hover.
@@ -85,6 +82,22 @@ impl MethodEntry {
     pub fn allocates(&self) -> bool {
         match self.lowering {
             MethodLowering::RuntimeSymbol(sym) => sym.allocates(),
+            MethodLowering::Intrinsic(_) => false,
+        }
+    }
+
+    /// Whether calling this method may raise a runtime fault (§9.1), and so
+    /// whether its call site needs a fault check after it.
+    ///
+    /// Derived, for the same reason as [`MethodEntry::allocates`]: the field
+    /// this replaces was dead metadata — nothing read it, because `build.rs`
+    /// emits an unconditional check after every method call — and it had drifted.
+    /// `bitset_insert` declared `can_fault: false` while
+    /// `praxis_bitset_insert` raises `InvalidSize` for a member outside
+    /// `BitIndex`'s range. Nobody noticed, because nobody asked.
+    pub fn can_fault(&self) -> bool {
+        match self.lowering {
+            MethodLowering::RuntimeSymbol(sym) => sym.faults(),
             MethodLowering::Intrinsic(_) => false,
         }
     }
@@ -213,7 +226,6 @@ mod tests {
             params: vec![TypePattern::Var("T")],
             result: TypePattern::Unit,
             purity: Purity::Impure,
-            can_fault: false,
             lowering: MethodLowering::RuntimeSymbol(crate::abi::RuntimeSymbol::VecPush),
             doc: "Append a value to the end of the vector.",
             stability: Stability::Stable,
@@ -227,7 +239,6 @@ mod tests {
             params: vec![],
             result: TypePattern::Scalar(ScalarType::Int),
             purity: Purity::Pure,
-            can_fault: false,
             lowering: MethodLowering::RuntimeSymbol(crate::abi::RuntimeSymbol::VecLen),
             doc: "Number of elements in the vector.",
             stability: Stability::Stable,
@@ -298,7 +309,10 @@ mod tests {
         // exactly what deriving the answer from the wrapper removes.
         assert!(e.allocates());
         assert!(vec_len().allocates());
-        assert!(!e.can_fault);
+        assert!(
+            !e.can_fault(),
+            "praxis_vec_push is Allocates, not AllocatesAndFaults"
+        );
         assert_eq!(e.purity, Purity::Impure);
     }
 }

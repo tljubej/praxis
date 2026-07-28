@@ -16,7 +16,7 @@ use std::path::Path;
 use praxis_ast::AstNode;
 use praxis_codegen_cranelift::Jit;
 use praxis_hir::{analyze_root, lower, mono::monomorphize, TypedItem};
-use praxis_mir::{annotate, lower_module};
+use praxis_mir::{annotate, lower_module, verify};
 use praxis_runtime::{Runtime, RuntimeContext};
 use praxis_types::TypeData;
 
@@ -108,6 +108,12 @@ pub fn run(
     let mut funcs = lower_module(&module, &mut analysis.db);
     for f in &mut funcs {
         annotate(f);
+        // MIR-10. A failure here is a compiler bug, never a program error, so
+        // it is reported as one and no code is generated from it.
+        if let Err(errs) = verify(f) {
+            eprintln!("internal error: {}", praxis_mir::verify::report(&errs));
+            return Ok(1);
+        }
     }
 
     let mut jit = match Jit::new() {
