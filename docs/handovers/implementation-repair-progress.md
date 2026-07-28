@@ -20,13 +20,14 @@ Update this file at the end of every stage.
 | S7 — Descriptor totality, typed collections, fault representation | **done** | `d014067`, `c00aab7`, `6da6037`, `eda8c69` |
 | S8 — Generation arena for JIT and plan metadata | **done** | `1311132`, `b60da0a` |
 | S9 — MIR root exactness, debug/root split, verifier | **done** | `ad9bbdf`, `d9521f9`, `e15a444` |
-| S10 … S21 | not started | |
+| S10 — Semantic comparison, nominal schema identity | **RT-16 only** | `29ff4f6` |
+| S11 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10. It fell out of S1. **DBG-02** is closed in part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1091 passed, 0 failed, 106 ignored**. `just ci` is green.
+Now: **1096 passed, 0 failed, 106 ignored**. `just ci` is green.
 
 Forty-two of the audit's ignored regressions are un-ignored and passing.
 The three added by S9:
@@ -60,6 +61,16 @@ S9's fifteen new gates:
 `adv_pipeline_empty_source_reduce` (`jit.rs`) was **rewritten**, not
 un-ignored: it asserted only that the host survived, because there was no
 contract to assert. There is one now.
+
+RT-16's five gates (S10's only landed finding; it had none, per plan §8.3):
+
+| Test | File | Pins |
+|---|---|---|
+| `map_formatting_does_not_follow_hash_table_order` | `maps.rs` | RT-16 — the same map renders one way |
+| `set_formatting_does_not_follow_hash_table_order` | `maps.rs` | RT-16 |
+| `counter_formatting_does_not_follow_hash_table_order` | `maps.rs` | RT-16 |
+| `heap_formatting_does_not_depend_on_insertion_order` | `heaps.rs` | RT-16 — and asserts the two backing arrays really differ |
+| `a_min_heap_renders_smallest_first` | `heaps.rs` | pop order through `Reverse` |
 
 The one added by S8:
 
@@ -285,7 +296,15 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S9)
+### From this session (S9, plus S10's RT-16)
+
+**`Map`/`Set`/`Counter` formatting is sorted, and heaps render in pop order.**
+`maps::write_sorted` is the single place the hash collections' order is
+decided; it sorts *rendered entries*, which is lexicographic, not numeric
+(`10` before `9`), because `TypeDescriptor::compare` is still `None`
+everywhere. Any test or snapshot that depended on hash-table order was already
+nondeterministic; any that now expects numeric key order will need D3 first.
+
 
 **A safepoint carries two sets, and they are different types.**
 `Inst::{Alloc, Materialize, Call, CallIndirect, StructEq}` have
@@ -729,9 +748,11 @@ re-deriving it.
 
 ## 4. Where to start
 
-**S10 — Semantic comparison, nominal schema identity, debugger type recovery**
-(P0-12, DBG-01, DBG-02, RT-12, RT-16). S9 is closed; every finding it owned is
-fixed and gated.
+**S10, continued** (P0-12, RT-12; DBG-01 and DBG-02 need nothing more here,
+**RT-16 is done**). S9 is closed; every finding it owned is fixed and gated.
+
+RT-16 was taken first because it is the one S10 finding that needs nothing from
+D3. What remains does.
 
 - **D3 blocks P0-12 and nothing else in the stage can substitute for it.**
   `TypeDescriptor::compare` exists on all 21 descriptors and is `None`
@@ -751,11 +772,18 @@ fixed and gated.
   (S7's `type_for_value`). What remains of DBG-02 is the *value-less* half: a
   record or enum object records no nominal type (F12) and a closure records no
   signature. See §6.
-- **S10 starts with a fresh ABI bump budget** (H17). `RUNTIME_ABI_VERSION` is
-  12. Adding `compare` to `TypeDescriptor` needs **no** bump on its own —
-  generated code passes descriptors by pointer without reading their fields
-  (the same reasoning that made S6's second half and S8 free). Check what
-  generated code actually reads before spending it.
+- **S10's ABI bump budget is unspent** (H17). `RUNTIME_ABI_VERSION` is 12, and
+  RT-16 changed no `#[repr(C)]` type. Adding `compare` to `TypeDescriptor`
+  needs **no** bump on its own either — generated code passes descriptors by
+  pointer without reading their fields (the same reasoning that made S6's
+  second half and S8 free). Check what generated code actually reads before
+  spending it.
+- **RT-16 sorts by the *rendered* entry, and that is D3's debt.** `Map`/`Set`/
+  `Counter` formatting renders each entry, sorts the strings, and joins, because
+  a rendered string is the only total order available while
+  `TypeDescriptor::compare` is `None`. So `{10: a, 9: b}` prints `10` first.
+  `maps::write_sorted` is the one place that changes when D3 lands. Heaps did
+  not need it — they carry an ordering by construction and render in pop order.
 
 **What S9 deliberately left:**
 
