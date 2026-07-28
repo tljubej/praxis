@@ -140,15 +140,32 @@ pub fn run(
     // Read the process input (§7.10, M6). The first `read` expression lazily
     // reads this buffer; we read it once here and install it as `input_source`.
     // Empty input keeps the default (immortal Unit).
+    // An I/O failure is reported, never laundered into empty input: a program
+    // that reads a missing `--input` file would otherwise "succeed" against
+    // input the user never supplied, and a truncated stdin read would silently
+    // produce a wrong answer. Same exit code (2, usage/I-O) as an unreadable
+    // source file.
     let input_text = match input_file {
-        Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(err) => {
+                eprintln!("error: failed to read input file `{path}`: {err}");
+                return Ok(2);
+            }
+        },
         None => {
             // Read stdin if it's not a terminal (piped input); otherwise empty.
             use std::io::IsTerminal;
             if std::io::stdin().is_terminal() {
                 String::new()
             } else {
-                std::io::read_to_string(std::io::stdin()).unwrap_or_default()
+                match std::io::read_to_string(std::io::stdin()) {
+                    Ok(t) => t,
+                    Err(err) => {
+                        eprintln!("error: failed to read input from stdin: {err}");
+                        return Ok(2);
+                    }
+                }
             }
         }
     };

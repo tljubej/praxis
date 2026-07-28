@@ -64,7 +64,6 @@ fn assert_faults(name: &str, fault_msg: &str) {
 }
 
 #[test]
-#[ignore = "known bug: --input read errors are silently converted to empty input"]
 fn missing_explicit_input_file_is_a_usage_error() {
     let missing = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/run/definitely-missing-input.txt");

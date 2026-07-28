@@ -6,7 +6,7 @@
 //! must remain stable for the lifetime of a compilation session.
 
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::line_map::LineMap;
 use crate::span::FileSpan;
@@ -86,7 +86,11 @@ impl SourceFile {
 /// LSP, for example, reads source from a background query thread).
 #[derive(Default)]
 pub struct SourceMap {
-    files: RwLock<Vec<SourceFile>>,
+    /// Each file is behind an `Arc`, so its address does not depend on the
+    /// `Vec`'s capacity. That is what lets [`SourceMap::get`] hand out a view
+    /// that outlives the read guard without extending a borrow into storage a
+    /// later `intern` may reallocate.
+    files: RwLock<Vec<Arc<SourceFile>>>,
 }
 
 impl SourceMap {
@@ -112,12 +116,12 @@ impl SourceMap {
         let id = u32::try_from(files.len()).expect("more than 2^32 source files");
         assert!(id != FileId::SYNTHETIC.to_u32(), "file id space exhausted");
 
-        files.push(SourceFile {
+        files.push(Arc::new(SourceFile {
             id: FileId(id),
             path,
             text,
             line_map,
-        });
+        }));
         FileId(id)
     }
 
@@ -132,35 +136,36 @@ impl SourceMap {
     }
 
     /// Fetch a file by id. Returns `None` for unknown or synthetic ids.
-    pub fn get(&self, id: FileId) -> Option<FileView<'_>> {
+    ///
+    /// The returned view shares ownership of the file, so it stays valid across
+    /// later `intern` calls (which reallocate the `Vec`) and across threads.
+    /// The previous implementation released the read guard and then extended
+    /// the borrow into the `Vec`'s storage, which a reallocating `intern`
+    /// invalidated.
+    pub fn get(&self, id: FileId) -> Option<FileView> {
         if id == FileId::SYNTHETIC {
             return None;
         }
         let files = self.files.read().unwrap();
-        let file = files.get(id.to_u32() as usize)?;
-        // SAFETY: we extend the lifetime of the borrow to `&self`. This is sound
-        // because the map is append-only: a file, once pushed, is never moved
-        // or mutated, so the slice and its contents stay at a stable address
-        // for as long as the map exists. The RwLock read guard is dropped here;
-        // mutation (intern) only appends and never reorders existing entries.
-        let file = unsafe { &*(file as *const SourceFile) };
+        let file = Arc::clone(files.get(id.to_u32() as usize)?);
         Some(FileView { file })
     }
 }
 
-/// A borrowed view of an interned source file.
+/// A shared view of an interned source file.
 ///
-/// Because the [`SourceMap`] is append-only, a `FileView` is cheap and the
-/// underlying file is stable for the lifetime of the map. The guard is hidden
-/// so the view is `Send`-friendly where the map is shared.
-pub struct FileView<'a> {
-    file: &'a SourceFile,
+/// It holds a reference count rather than a borrow, so it is independent of the
+/// map's internal storage and of the lock: interning more files, or dropping
+/// the map itself, cannot invalidate a live view.
+#[derive(Clone)]
+pub struct FileView {
+    file: Arc<SourceFile>,
 }
 
-impl<'a> std::ops::Deref for FileView<'a> {
+impl std::ops::Deref for FileView {
     type Target = SourceFile;
     fn deref(&self) -> &SourceFile {
-        self.file
+        &self.file
     }
 }
 
@@ -221,7 +226,9 @@ mod tests {
         assert_eq!(map.len(), 0);
     }
 
-    #[cfg(miri)]
+    /// A live view must survive a reallocating `intern`. This was UB rather
+    /// than a wrong answer, so it needs Miri to *fail*; it is in the ordinary
+    /// suite because the fix (shared ownership) is observable without it.
     #[test]
     fn regression_file_view_remains_valid_when_more_files_are_interned() {
         let map = SourceMap::new();

@@ -47,80 +47,51 @@ impl Jit {
     /// Create a fresh JIT with the `praxis_*` symbols registered.
     ///
     /// # Errors
-    /// Returns [`JitError::UnsupportedTarget`] if the host CPU isn't supported.
+    /// Returns [`JitError::UnsupportedTarget`] if the host CPU isn't supported,
+    /// or if its pointer width or endianness is not the one the lowering
+    /// assumes (see [`Jit::check_target`]).
     pub fn new() -> Result<Self, JitError> {
         let mut builder = JITBuilder::new(cranelift_module::default_libcall_names())
             .map_err(|e| JitError::UnsupportedTarget(format!("{e:?}")))?;
-        // Register every `praxis_*` symbol the lowered code may call.
-        let sym_names: &[&str] = &[
-            "praxis_alloc_int",
-            "praxis_alloc_bool",
-            "praxis_alloc_unit",
-            "praxis_alloc_text",
-            "praxis_alloc_char",
-            "praxis_int_load",
-            "praxis_bool_load",
-            "praxis_char_load",
-            "praxis_int_add",
-            "praxis_int_sub",
-            "praxis_int_mul",
-            "praxis_int_div",
-            "praxis_int_rem",
-            "praxis_int_neg",
-            "praxis_int_eq",
-            "praxis_int_ne",
-            "praxis_int_lt",
-            "praxis_int_gt",
-            "praxis_int_le",
-            "praxis_int_ge",
-            "praxis_check_fault",
-            "praxis_push_shadow_frame",
-            "praxis_pop_shadow_frame",
-            "praxis_raise_stack_overflow",
-            "praxis_vec_new",
-            "praxis_vec_push",
-            "praxis_vec_len",
-            "praxis_vec_get",
-            "praxis_vec_is_empty",
-            "praxis_text_len",
-            "praxis_text_is_empty",
-            "praxis_text_get",
-            "praxis_write_stdout",
-            "praxis_get_input",
-            "praxis_run_parser",
-            "praxis_alloc_record",
-            "praxis_record_set_field",
-            "praxis_record_field",
-            "praxis_alloc_enum",
-            "praxis_enum_set_payload",
-            "praxis_enum_tag",
-            "praxis_enum_payload",
-            "praxis_alloc_tuple",
-            "praxis_tuple_set",
-            "praxis_tuple_get",
-            "praxis_struct_eq",
-            "praxis_alloc_closure",
-            "praxis_closure_set_capture",
-            "praxis_closure_fn_ptr",
-            "praxis_closure_capture",
-            "praxis_alloc_var_cell",
-            "praxis_var_cell_get",
-            "praxis_var_cell_set",
-            "praxis_push_debug_frame",
-            "praxis_pop_debug_frame",
-            "praxis_set_frame_source_span",
-            "praxis_snapshot_debug_chain",
-        ];
-        for name in sym_names {
-            if let Some(ptr) = symbols::resolve(name) {
-                builder.symbol((*name).to_string(), ptr);
-            }
-        }
+        // Resolve `praxis_*` imports through `symbols::resolve` — the one
+        // table. The previous code kept a second, hand-maintained list of 57
+        // names here; it had already drifted from the ~130 the resolver knows,
+        // and the omissions were invisible because the JIT falls back to
+        // `dlsym`, which finds the statically linked runtime anyway.
+        builder.symbol_lookup_fn(Box::new(symbols::resolve));
         let module = JITModule::new(builder);
+        Self::check_target(module.isa().pointer_type(), module.isa().endianness())?;
         Ok(Jit {
             module,
             fn_ctx: FunctionBuilderContext::new(),
         })
+    }
+
+    /// Reject a target the lowering does not actually support.
+    ///
+    /// The backend carries every value — `GcRef`s and all scalar payloads — as
+    /// `I64` (`const GC`, ADR-037), reads `#[repr(C)]` runtime structs at
+    /// offsets computed on the host, and bit-casts floats with an explicitly
+    /// little-endian `MemFlags`. Each of those is a *host* assumption written
+    /// as a constant rather than derived from the ISA, so a target with a
+    /// different pointer width or endianness would miscompile silently. Fail
+    /// loudly at construction instead.
+    pub(crate) fn check_target(
+        pointer: cranelift::codegen::ir::Type,
+        endianness: cranelift::codegen::ir::Endianness,
+    ) -> Result<(), JitError> {
+        if pointer != cranelift::prelude::types::I64 {
+            return Err(JitError::UnsupportedTarget(format!(
+                "pointer type is {pointer}, but the lowering carries every value as i64"
+            )));
+        }
+        if endianness != cranelift::codegen::ir::Endianness::Little {
+            return Err(JitError::UnsupportedTarget(
+                "big-endian targets are unsupported: float bit-casts use little-endian MemFlags"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Compile a set of MIR functions, returning a map from function name to
@@ -183,5 +154,53 @@ impl Jit {
         sig.returns
             .push(AbiParam::new(cranelift::prelude::types::I64));
         sig
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cranelift::codegen::ir::{types, Endianness};
+
+    /// The host is the only target the lowering is written for, and it must
+    /// pass its own check.
+    #[test]
+    fn the_host_target_is_accepted() {
+        Jit::new().expect("the host target must be accepted");
+        Jit::check_target(types::I64, Endianness::Little).expect("i64 little-endian is the target");
+    }
+
+    /// A 32-bit pointer target must be rejected: the lowering carries every
+    /// value, `GcRef`s included, as `i64`.
+    #[test]
+    fn a_non_i64_pointer_target_is_rejected() {
+        let err = Jit::check_target(types::I32, Endianness::Little)
+            .expect_err("a 32-bit pointer target must be rejected");
+        assert!(
+            matches!(err, JitError::UnsupportedTarget(ref m) if m.contains("i64")),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A big-endian target must be rejected: the float bit-cast pins
+    /// little-endian `MemFlags` (ADR-037), and the `#[repr(C)]` runtime structs
+    /// are read at host-computed offsets.
+    #[test]
+    fn a_big_endian_target_is_rejected() {
+        let err = Jit::check_target(types::I64, Endianness::Big)
+            .expect_err("a big-endian target must be rejected");
+        assert!(
+            matches!(err, JitError::UnsupportedTarget(ref m) if m.contains("endian")),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Every runtime symbol the JIT may import must be in the one symbol table.
+    /// Registration used to be a second, hand-maintained list that had already
+    /// drifted; `dlsym` hid the drift by finding the statically linked runtime.
+    #[test]
+    fn an_unknown_runtime_symbol_is_not_resolvable() {
+        assert!(symbols::resolve("praxis_alloc_int").is_some());
+        assert!(symbols::resolve("praxis_not_a_real_runtime_symbol").is_none());
     }
 }

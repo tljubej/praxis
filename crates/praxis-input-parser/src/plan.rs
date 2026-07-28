@@ -1,4 +1,4 @@
-//! Parser plans: the flat, `#[repr(C)]` runtime representation of a parser AST.
+//! Parser plans: the flat runtime representation of a parser AST.
 //!
 //! After validation and type synthesis, a [`ParserAst`] is lowered into a
 //! [`ParserPlan`] — a flat arena of [`PlanNode`]s that the runtime interpreter
@@ -7,16 +7,25 @@
 //! index as an `i64` immediate (no pointer-as-immediate needed).
 //!
 //! Design constraints:
-//! - `#[repr(C)]` and self-contained: nodes reference children by **index**
-//!   (no `Box`, no owned `String` on the hot path). Separators and template
+//! - **Flat and self-contained**: nodes reference children by **index** (no
+//!   `Box`, no owned `String` on the hot path). Separators and template
 //!   literals are interned into a parallel `&'static [&'static str]` slice so
 //!   the runtime reads them without dereferencing Rust owned data.
 //! - Record schemas for named-capture templates are built at **runtime** (the
 //!   interpreter knows the field descriptors from the child plans' result
 //!   types); the plan stores only field names as `&'static str`.
 //!
-//! This mirrors how the JIT already leaks function-name strings as `String` in
-//! `CallTarget::User` — acceptable for a JIT process.
+//! **Not `#[repr(C)]`.** These are ordinary Rust enums and slices with the
+//! default representation, and nothing here crosses an FFI boundary: the plan
+//! is consumed by `praxis-runtime`, which is Rust and links against this crate,
+//! and only the plan *index* is passed as a JIT immediate. Earlier revisions of
+//! this doc claimed a C layout the types never had; if a plan ever does need to
+//! be read by generated code, that is a real representation change (explicit
+//! `#[repr(C)]`, no enums with payloads, no `&str` fat pointers) and not
+//! something to assume from this comment.
+//!
+//! Leaking mirrors how the JIT already leaks function-name strings as `String`
+//! in `CallTarget::User` — acceptable for a JIT process.
 
 use crate::ast::{AtomicKind, ParserAst, SkipPolicy, TemplatePart, WsPolicy};
 

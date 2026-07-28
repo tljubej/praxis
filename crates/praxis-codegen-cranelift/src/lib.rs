@@ -15,6 +15,6 @@
 
 mod lower;
 mod module;
-mod symbols;
+pub mod symbols;
 
 pub use module::{Jit, JitError, RunnableFunction};

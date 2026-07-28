@@ -44,6 +44,79 @@ fn compile(
     (jit, ids)
 }
 
+/// Every `praxis_*` symbol the MIR builder emits must be in the runtime symbol
+/// table. Registration used to be a second hand-maintained list in `module.rs`,
+/// and `dlsym` found the statically linked runtime for anything it omitted — so
+/// the drift was invisible. This walks the MIR of a feature-broad program and
+/// checks each callee by name.
+#[test]
+fn every_runtime_symbol_mir_emits_is_registered() {
+    let src = concat!(
+        "struct P { x: Int, y: Int }\n",
+        "enum E { A, B(Int) }\n",
+        "fn main() -> Int {\n",
+        "  let v = Vec()\n  v.push(1)\n  v.push(2)\n",
+        "  let m = Map()\n  m.insert(\"k\", 1)\n",
+        "  let s = Set()\n  s.insert(3)\n",
+        "  let d = Deque()\n  d.push_back(4)\n",
+        "  let c = Counter()\n  c.inc(5)\n",
+        "  let t = (1, 2)\n",
+        "  let p = P { x: 1, y: 2 }\n",
+        "  let e = B(7)\n",
+        "  let f = |z| z + 1\n",
+        "  var acc = 0\n",
+        "  for x in v { acc = acc + f(x) }\n",
+        "  let txt = \"hi\"\n",
+        "  out(txt.len())\n",
+        "  let fl = 1.5\n  out(fl.sqrt())\n",
+        "  acc + p.x + m.len() + s.len() + d.len() + c.len()\n",
+        "}\n"
+    );
+    let map = SourceMap::new();
+    let file = map.intern("symbols.px", src);
+    let parsed = parse(file, src);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut analysis = analyze_root(file, &parsed.tree);
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = lower(file, &root, &mut analysis);
+    assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+    let module = monomorphize(module, &analysis.names, &mut analysis.db);
+    let funcs = lower_module(&module, &mut analysis.db);
+
+    let mut seen = std::collections::BTreeSet::new();
+    for f in &funcs {
+        for block in &f.blocks {
+            for inst in &block.insts {
+                if let praxis_mir::Inst::Call {
+                    callee: praxis_mir::CallTarget::Runtime(name),
+                    ..
+                } = inst
+                {
+                    seen.insert(name.clone());
+                    assert!(
+                        praxis_codegen_cranelift::symbols::resolve(name).is_some(),
+                        "MIR emits `{name}`, which the runtime symbol table does not know"
+                    );
+                }
+            }
+        }
+    }
+    // A floor, not a target. `CallTarget::Runtime` covers the method-call
+    // families; the allocation, record, enum, closure and debug-frame symbols
+    // are emitted by codegen from `Inst::Alloc` and friends rather than named
+    // in MIR, so compiling the same program below is what checks those.
+    assert!(
+        seen.len() >= 14,
+        "expected a broad symbol sample, saw {}: {seen:?}",
+        seen.len()
+    );
+
+    // Every symbol codegen emits — named in MIR or not — must resolve;
+    // `runtime_funcref` now rejects an unregistered name instead of letting
+    // `dlsym` find it.
+    let _ = compile(src);
+}
+
 /// Compile and call a zero-arg `fn main() -> Int { ... }`, returning the result
 /// `GcRef` and the runtime (so the caller can read the fault / payload).
 fn run_main(src: &str) -> (Runtime, GcRef) {
@@ -1330,6 +1403,16 @@ fn continue_skips_rest_of_body() {
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 25);
+}
+
+/// `continue` inside a `for` must advance the index. Targeting the loop header
+/// skipped the increment, so this program never terminated.
+#[test]
+fn continue_in_a_for_loop_still_advances_the_index() {
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var seen = 0\n  for x in v { if x == 2 { continue } seen = seen + x }\n  seen\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4, "1 + 3, with 2 skipped");
 }
 
 #[test]

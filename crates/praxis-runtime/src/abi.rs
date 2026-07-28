@@ -431,13 +431,25 @@ pub unsafe extern "C" fn praxis_float_round(ctx: *mut RuntimeContext, r: GcRef) 
 
 /// `Float.sign()` — sign as -1.0 / 0.0 / 1.0 (§4.12). NaN yields NaN.
 ///
+/// Not `f64::signum`: that returns `1.0` for `+0.0` and `-1.0` for `-0.0`,
+/// because it reports the IEEE *sign bit*, not the sign of the value. Zero has
+/// no sign in the sense `sign()` documents, so both zeros yield `0.0`.
+///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_float_sign(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
-    // `signum` matches the desired semantics: -1.0 / 0.0 / 1.0, NaN for NaN.
     let f = unsafe { float_payload(r) };
-    unsafe { rebox_float(ctx, f.signum()) }
+    let sign = if f.is_nan() || f == 0.0 {
+        // `f == 0.0` is true for both `+0.0` and `-0.0`; NaN falls through as
+        // itself, which is what §4.12 specifies.
+        f
+    } else if f > 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    unsafe { rebox_float(ctx, sign) }
 }
 
 /// `Float.is_nan()` — true iff NaN (§4.12).
@@ -3006,7 +3018,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: Float.sign delegates zero to signum, which returns 1.0"]
     fn float_sign_of_zero_is_zero() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
@@ -3018,6 +3029,36 @@ mod tests {
         unsafe { drop_ctx(ctx) };
 
         assert_eq!(signed, 0.0);
+    }
+
+    /// `-0.0` is still zero: `signum` reports the sign *bit* and would answer
+    /// `-1.0` here.
+    #[test]
+    fn float_sign_of_negative_zero_is_zero() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let signed = unsafe {
+            let zero = praxis_alloc_float(ctx, (-0.0_f64).to_bits() as i64);
+            let result = praxis_float_sign(ctx, zero);
+            f64::from_bits(praxis_float_load(ctx, result) as u64)
+        };
+        unsafe { drop_ctx(ctx) };
+
+        assert_eq!(signed, 0.0);
+    }
+
+    #[test]
+    fn float_sign_of_nan_is_nan() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let signed = unsafe {
+            let nan = praxis_alloc_float(ctx, f64::NAN.to_bits() as i64);
+            let result = praxis_float_sign(ctx, nan);
+            f64::from_bits(praxis_float_load(ctx, result) as u64)
+        };
+        unsafe { drop_ctx(ctx) };
+
+        assert!(signed.is_nan());
     }
 
     #[test]

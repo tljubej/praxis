@@ -1489,6 +1489,10 @@ fn lower_for(
 
     let header = b.func.new_block();
     let body_blk = b.func.new_block();
+    // The index increment gets its own block, and it — not the header — is
+    // `continue`'s target. Jumping to the header from `continue` would skip the
+    // increment and loop forever.
+    let incr = b.func.new_block();
     let exit = b.func.new_block();
 
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
@@ -1532,7 +1536,7 @@ fn lower_for(
     };
 
     b.loop_stack.push(LoopCtx {
-        continue_target: header,
+        continue_target: incr,
         break_target: exit,
     });
     b.cur = body_blk;
@@ -1561,6 +1565,10 @@ fn lower_for(
     });
     let _ = lower_block_body(b, body);
     b.loop_stack.pop();
+    // Falling off the end of the body reaches the increment the same way
+    // `continue` does.
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: incr };
+    b.cur = incr;
     // `i = i + 1`: extract, add, re-materialize into the Gc slot.
     let cur_scalar = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ExtractScalar {
@@ -3997,7 +4005,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: continue in a for loop jumps past the index increment"]
     fn for_continue_targets_the_increment_block_not_the_header() {
         let (funcs, _analysis) = lower_src_to_mir(
             "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  for x in v { continue }\n  0\n}\n",

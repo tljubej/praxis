@@ -1403,6 +1403,17 @@ fn runtime_funcref<M: Module>(
         sig.params.push(AbiParam::new(GC));
     }
     sig.returns.push(AbiParam::new(GC));
+    // The import must be one the runtime symbol table knows. Without this the
+    // JIT falls back to `dlsym`, which finds any `#[no_mangle]` symbol of the
+    // statically linked runtime — so a symbol the compiler never registered
+    // "works" locally and the registration list is free to rot. Fail at
+    // compile time instead.
+    if crate::symbols::resolve(name).is_none() {
+        return Err(anyhow!(
+            "runtime symbol `{name}` is not in the runtime symbol table \
+             (crates/praxis-codegen-cranelift/src/symbols.rs)"
+        ));
+    }
     // Declare the import. `declare_function` with `Linkage::Import` resolves
     // through the JIT's registered symbol table at finalize time.
     let id = match module.declare_function(name, Linkage::Import, &sig) {
