@@ -74,6 +74,40 @@ fn run_pass_arithmetic() {
     assert_passes("arithmetic.px", "7");
 }
 
+// ---- Float (§4.12) ----
+
+#[test]
+fn run_pass_float_literal() {
+    assert_passes("float_literal.px", "2.5");
+}
+
+#[test]
+fn run_pass_float_arith() {
+    // 1.5 + 2.5 * 2.0 = 6.5.
+    assert_passes("float_arith.px", "6.5");
+}
+
+#[test]
+fn run_pass_float_methods() {
+    // sqrt(16) + 5.to_float() = 4 + 5 = 9.
+    assert_passes("float_methods.px", "9");
+}
+
+#[test]
+fn run_pass_float_div_by_zero() {
+    // 1.0 / 0.0 = inf (IEEE-754); Float division never faults (§4.12).
+    assert_passes("float_div_by_zero.px", "inf");
+}
+
+#[test]
+fn run_fault_float_to_int_nan() {
+    // NaN → to_int faults with FloatToInt (§4.12), exit 1, no abort.
+    assert_faults(
+        "float_to_int_nan.px",
+        "float-to-int conversion out of range",
+    );
+}
+
 #[test]
 fn run_pass_branch() {
     assert_passes("branch.px", "100");

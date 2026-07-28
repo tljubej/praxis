@@ -17,8 +17,8 @@ use cranelift::prelude::*;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
 use praxis_mir::{
-    AllocKind, CallTarget, CmpOp, Function as MirFunction, Inst, IntBinOp, LocalId, LocalKind,
-    ScalarKind, Terminator,
+    AllocKind, CallTarget, CmpOp, FloatBinOp, Function as MirFunction, Inst, IntBinOp, LocalId,
+    LocalKind, ScalarKind, Terminator,
 };
 use praxis_runtime::{DebugLocalMeta, RuntimeContext, ShadowFrame, MAX_SHADOW_SLOTS};
 
@@ -52,9 +52,11 @@ enum Symbol {
     AllocUnit,
     AllocText,
     AllocChar,
+    AllocFloat,
     IntLoad,
     BoolLoad,
     CharLoad,
+    FloatLoad,
     IntAdd,
     IntSub,
     IntMul,
@@ -94,9 +96,11 @@ impl Symbol {
             Symbol::AllocUnit => "praxis_alloc_unit",
             Symbol::AllocText => "praxis_alloc_text",
             Symbol::AllocChar => "praxis_alloc_char",
+            Symbol::AllocFloat => "praxis_alloc_float",
             Symbol::IntLoad => "praxis_int_load",
             Symbol::BoolLoad => "praxis_bool_load",
             Symbol::CharLoad => "praxis_char_load",
+            Symbol::FloatLoad => "praxis_float_load",
             Symbol::IntAdd => "praxis_int_add",
             Symbol::IntSub => "praxis_int_sub",
             Symbol::IntMul => "praxis_int_mul",
@@ -478,6 +482,14 @@ fn lower_inst<M: Module>(
             let v = builder.ins().iconst(GC, *value);
             builder.def_var(vars[dst.0 as usize], v);
         }
+        Inst::ConstFloat { dst, bits } => {
+            // A float constant is carried through the uniform i64 scalar channel
+            // as its IEEE-754 bit pattern. The bits are an exact i64, so we emit
+            // them directly with `iconst` — no f64 materialization needed here.
+            // (The bit-cast to/from f64 happens at arithmetic/comparison points.)
+            let v = builder.ins().iconst(GC, *bits);
+            builder.def_var(vars[dst.0 as usize], v);
+        }
         Inst::Alloc {
             dst,
             alloc,
@@ -515,6 +527,14 @@ fn lower_inst<M: Module>(
                     let arg = builder.use_var(vars[value.0 as usize]);
                     let result =
                         call_symbol1(builder, ctx_val, arg, Symbol::AllocChar, module, imports)?;
+                    builder.def_var(vars[dst.0 as usize], result);
+                }
+                AllocKind::Float { value } => {
+                    // The scalar local holds the f64 bit pattern as i64; the
+                    // runtime wrapper `praxis_alloc_float` reassembles the f64.
+                    let arg = builder.use_var(vars[value.0 as usize]);
+                    let result =
+                        call_symbol1(builder, ctx_val, arg, Symbol::AllocFloat, module, imports)?;
                     builder.def_var(vars[dst.0 as usize], result);
                 }
                 AllocKind::Record {
@@ -800,6 +820,8 @@ fn lower_inst<M: Module>(
                 ScalarKind::Int => Symbol::IntLoad,
                 ScalarKind::Bool => Symbol::BoolLoad,
                 ScalarKind::Char => Symbol::CharLoad,
+                // Float's payload is read as its f64 bit pattern (i64 channel).
+                ScalarKind::Float => Symbol::FloatLoad,
                 // Byte is not yet wired (reserved); read as Int defensively.
                 ScalarKind::Byte => Symbol::IntLoad,
             };
@@ -821,6 +843,8 @@ fn lower_inst<M: Module>(
                 ScalarKind::Int => Symbol::AllocInt,
                 ScalarKind::Bool => Symbol::AllocBool,
                 ScalarKind::Char => Symbol::AllocChar,
+                // Float's bit pattern is boxed by praxis_alloc_float.
+                ScalarKind::Float => Symbol::AllocFloat,
                 // Byte is not yet wired (reserved); box as Int defensively.
                 ScalarKind::Byte => Symbol::AllocInt,
             };
@@ -873,6 +897,45 @@ fn lower_inst<M: Module>(
                 CmpOp::Ge => cranelift::codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual,
             };
             let cmp = builder.ins().icmp(cond, l, r);
+            let widened = builder.ins().uextend(GC, cmp);
+            builder.def_var(vars[dst.0 as usize], widened);
+        }
+        Inst::FloatBinOp { op, dst, lhs, rhs } => {
+            // Float operands are carried as i64 bit patterns; bit-cast to f64,
+            // apply the native Cranelift float op, then bit-cast the result back
+            // to i64 for uniform storage. No fault check — IEEE-754 arithmetic
+            // never faults (overflow → ±inf, div-by-zero → ±inf/NaN) (§4.12).
+            let l_i = builder.use_var(vars[lhs.0 as usize]);
+            let r_i = builder.use_var(vars[rhs.0 as usize]);
+            let l = i64_to_f64(builder, l_i);
+            let r = i64_to_f64(builder, r_i);
+            let result_f = match op {
+                FloatBinOp::Add => builder.ins().fadd(l, r),
+                FloatBinOp::Sub => builder.ins().fsub(l, r),
+                FloatBinOp::Mul => builder.ins().fmul(l, r),
+                FloatBinOp::Div => builder.ins().fdiv(l, r),
+            };
+            let result = f64_to_i64(builder, result_f);
+            builder.def_var(vars[dst.0 as usize], result);
+        }
+        Inst::FloatCmp { op, dst, lhs, rhs } => {
+            // IEEE-754 comparison: bit-cast operands to f64, then `fcmp` with a
+            // `FloatCC`. This gives NaN semantics for free (NaN compares unordered
+            // to everything, so `NaN == NaN` and `NaN < x` are both false). The
+            // i8 result is widened to i64 for uniformity, mirroring `IntCmp`.
+            let l_i = builder.use_var(vars[lhs.0 as usize]);
+            let r_i = builder.use_var(vars[rhs.0 as usize]);
+            let l = i64_to_f64(builder, l_i);
+            let r = i64_to_f64(builder, r_i);
+            let cond = match op {
+                CmpOp::Eq => cranelift::codegen::ir::condcodes::FloatCC::Equal,
+                CmpOp::Neq => cranelift::codegen::ir::condcodes::FloatCC::NotEqual,
+                CmpOp::Lt => cranelift::codegen::ir::condcodes::FloatCC::LessThan,
+                CmpOp::Gt => cranelift::codegen::ir::condcodes::FloatCC::GreaterThan,
+                CmpOp::Le => cranelift::codegen::ir::condcodes::FloatCC::LessThanOrEqual,
+                CmpOp::Ge => cranelift::codegen::ir::condcodes::FloatCC::GreaterThanOrEqual,
+            };
+            let cmp = builder.ins().fcmp(cond, l, r);
             let widened = builder.ins().uextend(GC, cmp);
             builder.def_var(vars[dst.0 as usize], widened);
         }
@@ -1730,4 +1793,23 @@ fn embed_text<M: Module>(
         builder.ins().iconst(GC, ptr_val),
         builder.ins().iconst(GC, len_val),
     ))
+}
+
+/// Memory flags for an in-register bit-cast between the uniform i64 scalar
+/// channel and f64. Cranelift's `bitcast` instruction only accepts flags that
+/// are *exactly* `new()` or `new()` plus a byte-order (big/little) flag — any
+/// extra bits (notrap, aligned, …) are rejected by the verifier. Little-endian
+/// matches every supported Praxis host.
+fn bitcast_flags() -> MemFlags {
+    MemFlags::new().with_endianness(cranelift::codegen::ir::Endianness::Little)
+}
+
+/// Reinterpret an `i64` scalar (an f64 bit pattern) as an `f64` value (§4.12).
+fn i64_to_f64(builder: &mut FunctionBuilder, v: Value) -> Value {
+    builder.ins().bitcast(types::F64, bitcast_flags(), v)
+}
+
+/// Reinterpret an `f64` value as its `i64` bit pattern (§4.12).
+fn f64_to_i64(builder: &mut FunctionBuilder, v: Value) -> Value {
+    builder.ins().bitcast(GC, bitcast_flags(), v)
 }

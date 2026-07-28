@@ -44,6 +44,11 @@ pub enum SyntaxKind {
     Ident,
     /// An integer literal, e.g. `42`.
     IntLit,
+    /// A floating-point literal, e.g. `3.14`, `1e10`, `.5`, `2.` (§4.12).
+    /// A bare `.` is `DOT`; a float literal needs a digit on at least one side
+    /// of the dot, or an exponent. A `.` immediately followed by another `.` is
+    /// a range (`..` / `..=`), never part of a float.
+    FloatLit,
     /// A double-quoted text literal, e.g. `"hello"`.
     TextLit,
     /// A backtick-delimited parser template, e.g. `` `{x:int}` ``. The whole

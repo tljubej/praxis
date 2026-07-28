@@ -413,6 +413,37 @@ a.checked_add(b) // returns Option[Int]
 
 Division by zero always faults.
 
+#### Float behavior
+
+`Float` is IEEE-754 binary64 (§4.3). Float literals (`3.14`, `1e10`) and Int
+literals (`42`) are typed strictly by their syntax: a Float operand makes the
+operation Float, an Int operand makes it Int. There is **no implicit widening**;
+mixing the two is a type error. Cross-type conversion is explicit:
+
+```praxis
+let f: Float = 5.to_float()    // Int -> Float (always exact)
+let n: Int   = 3.9.to_int()    // Float -> Int, truncates toward zero
+```
+
+Float arithmetic **never faults** — per IEEE-754, `1.0 / 0.0` is `inf`,
+`-1.0 / 0.0` is `-inf`, and `0.0 / 0.0` is `NaN`. Comparison uses IEEE-754
+ordering, so `NaN` compares unequal to everything (including itself): `NaN ==
+NaN` is `false`, `NaN < x` is `false`.
+
+The sole faulting Float operation is the narrowing `Float.to_int()`: it faults
+(`FloatToInt`) on `NaN`, `±infinity`, or a finite value outside the signed
+64-bit range — these have no exact `Int` representation. (Integer division by
+zero faults; float division by zero does not.)
+
+`out()` and `to_text()` format finite values in the shortest round-trippable
+form, and the special values as `inf`, `-inf`, `NaN`. The stdlib Float methods
+are `abs`, `sqrt`, `floor`, `ceil`, `round`, `sign`, `to_int`, `to_text`,
+`is_nan`, `is_infinite`, `min(other)`, `max(other)`; `pi()` and `e()` are
+prelude free functions. `%` (remainder) is not defined for floats.
+
+See ADR-037 for the implementation: floats ride the uniform `i64` scalar channel
+as their bit pattern, bit-casting to `f64` at arithmetic/comparison points.
+
 ---
 
 ## 5. Type system

@@ -147,12 +147,15 @@ fn defs(inst: &Inst) -> Vec<LocalId> {
         Inst::ExtractScalar { dst, .. } => vec![*dst],
         Inst::Materialize { dst, .. } => vec![*dst],
         Inst::IntBinOp { dst, .. } => vec![*dst],
+        Inst::FloatBinOp { dst, .. } => vec![*dst],
         Inst::IntCmp { dst, .. } => vec![*dst],
+        Inst::FloatCmp { dst, .. } => vec![*dst],
         Inst::StructEq { dst, .. } => vec![*dst],
         Inst::Call { dst, .. } => vec![*dst],
         Inst::CallIndirect { dst, .. } => vec![*dst],
         Inst::MoveGc { dst, .. } => vec![*dst],
         Inst::ConstInt { dst, .. } => vec![*dst],
+        Inst::ConstFloat { dst, .. } => vec![*dst],
         Inst::LoadField { dst, .. } => vec![*dst],
         Inst::EnumTag { dst, .. } => vec![*dst],
         Inst::EnumPayloadGet { dst, .. } => vec![*dst],
@@ -168,7 +171,8 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
             alloc:
                 crate::ir::AllocKind::Int { value }
                 | crate::ir::AllocKind::Bool { value }
-                | crate::ir::AllocKind::Char { value },
+                | crate::ir::AllocKind::Char { value }
+                | crate::ir::AllocKind::Float { value },
             ..
         } => vec![*value],
         Inst::Alloc {
@@ -199,7 +203,9 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
         Inst::StoreScalar { dst_gc, src, .. } => vec![*dst_gc, *src],
         Inst::Materialize { src, .. } => vec![*src],
         Inst::IntBinOp { lhs, rhs, .. } => vec![*lhs, *rhs],
+        Inst::FloatBinOp { lhs, rhs, .. } => vec![*lhs, *rhs],
         Inst::IntCmp { lhs, rhs, .. } => vec![*lhs, *rhs],
+        Inst::FloatCmp { lhs, rhs, .. } => vec![*lhs, *rhs],
         Inst::Call { args, .. } => args.clone(),
         Inst::CallIndirect { callee, args, .. } => {
             let mut v = vec![*callee];
@@ -212,6 +218,7 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
         Inst::EnumPayloadGet { src, .. } => vec![*src],
         Inst::StructEq { lhs, rhs, .. } => vec![*lhs, *rhs],
         Inst::ConstInt { .. } => vec![],
+        Inst::ConstFloat { .. } => vec![],
         Inst::CheckFault { .. } => vec![],
     }
 }

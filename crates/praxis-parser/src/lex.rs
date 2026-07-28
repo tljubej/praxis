@@ -78,7 +78,7 @@ impl<'a> Lexer<'a> {
                 ByteClass::LineComment => self.eat_line_comment(),
                 ByteClass::BlockComment => self.eat_block_comment(start),
                 ByteClass::IdentStart => self.eat_ident(start),
-                ByteClass::Digit => self.eat_int(start),
+                ByteClass::Digit => self.eat_number(start),
                 ByteClass::Quote => self.eat_text(start),
                 ByteClass::Punct => self.eat_punct(start),
                 ByteClass::Backtick => self.eat_template(start),
@@ -175,11 +175,79 @@ impl<'a> Lexer<'a> {
         self.push(kind, start);
     }
 
-    fn eat_int(&mut self, start: usize) {
+    /// Lex a numeric literal starting at `start` (the first digit). Recognizes
+    /// both integers (`42`) and floats (`3.14`, `2.`, `1e10`, `1.5e-3`).
+    ///
+    /// A `.` is consumed as part of the literal only when it begins a fraction
+    /// — i.e. the byte after the integer part is `.` AND the byte after that is
+    /// a digit. This excludes range syntax: `1..5` and `1..=5` lex as `IntLit`
+    /// `1` followed by `DOT2` / `DOT2EQ`, never as a malformed float. A trailing
+    /// dot with no following digit (`2.`) is a valid float iff the integer part
+    /// is nonempty — handled by the `2..` case below still being a range (the
+    /// second `.` breaks the fraction).
+    ///
+    /// A leading-dot float (`.5`) is not reachable here because the dispatch
+    /// routes on the first byte: `.` is `Punct`. Leading-dot floats are not
+    /// supported (a deliberate simplification); users write `0.5`.
+    fn eat_number(&mut self, start: usize) {
+        // Integer part: one or more digits (the first is already known present).
         while self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() {
             self.pos += 1;
         }
-        self.push(SyntaxKind::IntLit, start);
+        let mut is_float = false;
+        // Fractional part: `.` followed by a digit. The "followed by a digit"
+        // check is what disambiguates `1.5` (float) from `1..5` (range: the
+        // next byte is another `.`) and `1.method()` (the next byte is a letter).
+        if self.peek_is_dot_then_digit() {
+            is_float = true;
+            // Consume the `.`.
+            self.pos += 1;
+            while self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() {
+                self.pos += 1;
+            }
+        }
+        // Exponent part: `e` or `E`, optional `+`/`-`, then one or more digits.
+        if matches!(self.src.get(self.pos), Some(b'e') | Some(b'E')) {
+            // Only treat as an exponent if a digit (or signed digit) follows;
+            // otherwise `1e` is `IntLit(1)` + `Ident(e)` (a name). `+`/`-` then
+            // a digit also counts.
+            if self.peek_exponent_has_digits() {
+                is_float = true;
+                self.pos += 1; // the `e`/`E`
+                if matches!(self.src.get(self.pos), Some(b'+') | Some(b'-')) {
+                    self.pos += 1;
+                }
+                while self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() {
+                    self.pos += 1;
+                }
+            }
+        }
+        let kind = if is_float {
+            SyntaxKind::FloatLit
+        } else {
+            SyntaxKind::IntLit
+        };
+        self.push(kind, start);
+    }
+
+    /// True iff the current position is a `.` immediately followed by an ASCII
+    /// digit. Used to decide whether the `.` starts a float fraction.
+    fn peek_is_dot_then_digit(&self) -> bool {
+        matches!(self.src.get(self.pos), Some(b'.'))
+            && matches!(self.src.get(self.pos + 1), Some(d) if d.is_ascii_digit())
+    }
+
+    /// True iff the current position is an `e`/`E` that begins a valid exponent:
+    /// `e`/`E` then (optionally `+`/`-`) then at least one digit.
+    fn peek_exponent_has_digits(&self) -> bool {
+        if !matches!(self.src.get(self.pos), Some(b'e') | Some(b'E')) {
+            return false;
+        }
+        let mut i = self.pos + 1;
+        if matches!(self.src.get(i), Some(b'+') | Some(b'-')) {
+            i += 1;
+        }
+        matches!(self.src.get(i), Some(d) if d.is_ascii_digit())
     }
 
     fn eat_text(&mut self, start: usize) {
@@ -621,5 +689,124 @@ error[T003]: unexpected byte in source
         let eof = out.tokens.last().expect("eof token present");
         assert_eq!(eof.kind, SyntaxKind::EOF);
         assert_eq!(eof.span, Span::new(2, 2));
+    }
+
+    // ---- Float literal lexing (§4.12) ----
+
+    /// Lex a single numeric token (no trivia) and assert its kind + text span.
+    fn lex_one_number(text: &str) -> (SyntaxKind, String) {
+        let map = SourceMap::new();
+        let id = map.intern("test.px", text);
+        let out = lex(id, text);
+        let tok = out
+            .tokens
+            .iter()
+            .find(|t| matches!(t.kind, SyntaxKind::IntLit | SyntaxKind::FloatLit))
+            .expect("a numeric token");
+        let span = tok.span.start().0 as usize..tok.span.end().0 as usize;
+        (tok.kind, text[span].to_string())
+    }
+
+    #[test]
+    fn float_with_fraction() {
+        let (kind, text) = lex_one_number("3.14");
+        assert_eq!(kind, SyntaxKind::FloatLit);
+        assert_eq!(text, "3.14");
+    }
+
+    #[test]
+    fn float_trailing_dot() {
+        // `2.` — a digit, a dot, then EOF. Not a range (no second dot).
+        let (kind, text) = lex_one_number("2.");
+        assert_eq!(kind, SyntaxKind::IntLit);
+        assert_eq!(text, "2");
+        // `2.` alone (dot then EOF) does NOT consume the dot as a fraction
+        // because there's no digit after it. The dot becomes a separate DOT
+        // token — so the number is just `2` (an Int). A trailing-dot float
+        // requires `2.0`.
+        let map = SourceMap::new();
+        let id = map.intern("test.px", "2.");
+        let out = lex(id, "2.");
+        assert!(out.tokens.iter().any(|t| t.kind == SyntaxKind::DOT));
+    }
+
+    #[test]
+    fn float_with_exponent() {
+        let (kind, text) = lex_one_number("1e10");
+        assert_eq!(kind, SyntaxKind::FloatLit);
+        assert_eq!(text, "1e10");
+    }
+
+    #[test]
+    fn float_with_fraction_and_signed_exponent() {
+        let (kind, text) = lex_one_number("1.5e-3");
+        assert_eq!(kind, SyntaxKind::FloatLit);
+        assert_eq!(text, "1.5e-3");
+    }
+
+    #[test]
+    fn float_with_uppercase_exponent_and_plus() {
+        let (kind, text) = lex_one_number("2.0E+5");
+        assert_eq!(kind, SyntaxKind::FloatLit);
+        assert_eq!(text, "2.0E+5");
+    }
+
+    #[test]
+    fn range_not_lexed_as_float() {
+        // `1..5` must lex as IntLit(1), DOT2, IntLit(5) — never a float.
+        let (kinds, diags) = lex_text("1..5");
+        assert!(diags.is_empty(), "got diagnostics: {diags:?}");
+        assert!(kinds.contains(&SyntaxKind::IntLit));
+        assert!(kinds.contains(&SyntaxKind::DOT2));
+        assert!(!kinds.contains(&SyntaxKind::FloatLit));
+    }
+
+    #[test]
+    fn inclusive_range_not_lexed_as_float() {
+        // `1..=5` must lex as IntLit(1), DOT2EQ, IntLit(5).
+        let (kinds, diags) = lex_text("1..=5");
+        assert!(diags.is_empty(), "got diagnostics: {diags:?}");
+        assert!(kinds.contains(&SyntaxKind::IntLit));
+        assert!(kinds.contains(&SyntaxKind::DOT2EQ));
+        assert!(!kinds.contains(&SyntaxKind::FloatLit));
+    }
+
+    #[test]
+    fn float_then_range_boundary() {
+        // `1.5..2.5` — the first float ends at the second dot; then DOT2.
+        let (kinds, diags) = lex_text("1.5..2.5");
+        assert!(diags.is_empty(), "got diagnostics: {diags:?}");
+        assert_eq!(
+            kinds.iter().filter(|k| **k == SyntaxKind::FloatLit).count(),
+            2,
+            "expected two FloatLit tokens"
+        );
+        assert!(kinds.contains(&SyntaxKind::DOT2));
+    }
+
+    #[test]
+    fn bare_integer_stays_int() {
+        let (kind, text) = lex_one_number("42");
+        assert_eq!(kind, SyntaxKind::IntLit);
+        assert_eq!(text, "42");
+    }
+
+    #[test]
+    fn trailing_e_without_digits_stays_int() {
+        // `1e` — exponent with no digits is `IntLit(1)` then `Ident(e)`.
+        let (kinds, _diags) = lex_text("1e");
+        assert!(kinds.contains(&SyntaxKind::IntLit));
+        assert!(kinds.contains(&SyntaxKind::Ident));
+        assert!(!kinds.contains(&SyntaxKind::FloatLit));
+    }
+
+    #[test]
+    fn dot_method_call_not_lexed_as_float() {
+        // `1.method()` — dot followed by a letter is a DOT + Ident, not a float.
+        let (kinds, _diags) = lex_text("1.method()");
+        assert!(kinds.contains(&SyntaxKind::IntLit));
+        assert!(kinds.contains(&SyntaxKind::DOT));
+        assert!(kinds.contains(&SyntaxKind::Ident));
+        assert!(!kinds.contains(&SyntaxKind::FloatLit));
     }
 }

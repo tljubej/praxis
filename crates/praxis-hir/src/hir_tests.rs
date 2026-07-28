@@ -189,14 +189,27 @@ fn known_type_annotations_resolve_cleanly() {
 
 #[test]
 fn unknown_type_annotation_emits_n002() {
-    // `Float` is reserved but not constructible in M2 (§4.3) → N002.
-    let src = "let x: Float = 1";
+    // `Byte` is reserved but not yet constructible (§4.3) → N002. (`Float` was
+    // reserved too but is now wired end-to-end, so it no longer triggers this.)
+    let src = "let x: Byte = 1";
     let analysis = resolve_src(src);
     assert!(analysis
         .diagnostics
         .iter()
         .any(|d| d.code().category() == DiagnosticCategory::Name
-            && d.message().contains("unknown type `Float`")));
+            && d.message().contains("unknown type `Byte`")));
+}
+
+#[test]
+fn float_type_annotation_resolves() {
+    // `Float` is wired end-to-end (§4.12); the annotation resolves cleanly.
+    let src = "let x: Float = 2.5";
+    let analysis = resolve_src(src);
+    assert!(
+        analysis.is_clean(),
+        "expected no diagnostics: {:?}",
+        analysis.diagnostics
+    );
 }
 
 #[test]

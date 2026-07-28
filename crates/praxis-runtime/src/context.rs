@@ -57,6 +57,11 @@ pub enum FaultKind {
     /// (`count(100000)` and similar) instead of overflowing the native stack
     /// and aborting (SIGABRT).
     StackOverflow = 6,
+    /// A `Float` value could not be converted to `Int`: NaN, ±infinity, or a
+    /// finite value outside the signed 64-bit range (§4.12). `Float` arithmetic
+    /// itself never faults (per IEEE-754 it produces inf/nan); only the
+    /// narrowing `to_int` conversion does.
+    FloatToInt = 7,
 }
 
 impl std::fmt::Display for FaultKind {
@@ -69,6 +74,7 @@ impl std::fmt::Display for FaultKind {
             FaultKind::ParseFailed => write!(f, "input parse mismatch"),
             FaultKind::EmptyCollection => write!(f, "empty collection"),
             FaultKind::StackOverflow => write!(f, "stack overflow (recursion limit)"),
+            FaultKind::FloatToInt => write!(f, "float-to-int conversion out of range"),
         }
     }
 }
@@ -468,6 +474,12 @@ impl Runtime {
         self.heap.alloc(crate::scalars::CHAR, value)
     }
 
+    /// Allocate a `Float` (§4.3, §4.12). All finite values, ±infinity, and NaN
+    /// are valid payloads — `Float` arithmetic never faults (IEEE-754).
+    pub fn alloc_float(&self, value: f64) -> GcRef {
+        self.heap.alloc(crate::scalars::FLOAT, value)
+    }
+
     /// The immortal `Unit` (§4.3).
     pub fn alloc_unit(&self) -> GcRef {
         self.immortals.unit()
@@ -633,6 +645,17 @@ impl GcRef {
         assert_eq!(self.descriptor().id, crate::scalars::CHAR.id, "not a Char");
         let raw = unsafe { *self.payload::<u32>() };
         char::from_u32(raw).expect("Char payload was not a valid scalar; memory corrupted")
+    }
+
+    /// Read a `Float` payload as an `f64` (§4.3).
+    pub fn as_float(&self) -> f64 {
+        assert_eq!(
+            self.descriptor().id,
+            crate::scalars::FLOAT.id,
+            "not a Float"
+        );
+        // SAFETY: descriptor check confirms payload is FloatPayload (f64).
+        unsafe { *self.payload::<f64>() }
     }
 
     /// Read a `Text` payload as a `&str` (§4.3).

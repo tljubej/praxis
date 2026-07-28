@@ -19,8 +19,8 @@ use praxis_hir::{
 use praxis_types::{Type, TypeDb};
 
 use crate::ir::{
-    AllocKind, BlockId, CallTarget, CmpOp, Function, Inst, IntBinOp, LocalId, LocalKind,
-    ScalarKind, Terminator,
+    AllocKind, BlockId, CallTarget, CmpOp, FloatBinOp, Function, Inst, IntBinOp, LocalId,
+    LocalKind, ScalarKind, Terminator,
 };
 
 /// Lower a typed module to MIR: one [`Function`] per source `fn` item, plus one
@@ -203,6 +203,7 @@ struct Builder<'a> {
     db: &'a TypeDb,
     /// Cached scalar type handles (these `TypeDb` constructors need `&mut`).
     int_ty: Type,
+    float_ty: Type,
     bool_ty: Type,
     text_ty: Type,
     char_ty: Type,
@@ -235,6 +236,7 @@ fn lower_fn(
 ) -> Function {
     // Cache scalar handles once.
     let int_ty = db.int();
+    let float_ty = db.float();
     let bool_ty = db.bool();
     let text_ty = db.text();
     let char_ty = db.char();
@@ -260,6 +262,7 @@ fn lower_fn(
         fault_block: fault,
         db,
         int_ty,
+        float_ty,
         bool_ty,
         text_ty,
         char_ty,
@@ -307,6 +310,7 @@ fn lower_closure_fn(
     escaping_vars: &std::collections::HashSet<praxis_hir::SymbolId>,
 ) -> Function {
     let int_ty = db.int();
+    let float_ty = db.float();
     let bool_ty = db.bool();
     let text_ty = db.text();
     let char_ty = db.char();
@@ -336,6 +340,7 @@ fn lower_closure_fn(
         fault_block: fault,
         db,
         int_ty,
+        float_ty,
         bool_ty,
         text_ty,
         char_ty,
@@ -576,10 +581,26 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             let l = lower_expr_gc(b, lhs);
             let r = lower_expr_gc(b, rhs);
             match op {
-                // Arithmetic: extract scalars, do a checked op, materialize.
+                // Arithmetic: extract scalars, do the op, materialize. Int ops
+                // are checked (fault on overflow/div-by-zero); Float ops are
+                // unchecked (IEEE-754 inf/nan), so no fault check follows.
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
-                    let result = lower_int_binop(b, binop_to_int(*op), l, r);
-                    lower_materialize(b, result)
+                    let operand_ty = expr_static_type(lhs);
+                    let is_float = matches!(
+                        b.db.data(b.db.follow(operand_ty)),
+                        praxis_types::data::TypeData::Scalar(praxis_types::ScalarType::Float)
+                    );
+                    if is_float {
+                        // `%` is a type error for floats in inference; if it
+                        // reaches here (e.g. from a malformed subtree), treat as
+                        // Add defensively. binop_to_float maps Add/Sub/Mul/Div.
+                        let fop = binop_to_float(*op);
+                        let result = lower_float_binop(b, fop, l, r);
+                        lower_materialize_float(b, result)
+                    } else {
+                        let result = lower_int_binop(b, binop_to_int(*op), l, r);
+                        lower_materialize(b, result)
+                    }
                 }
                 // Comparison: extract scalars, compare, materialize a Bool.
                 BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
@@ -607,15 +628,32 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                             eq_bool
                         }
                     } else {
-                        let li = lower_extract_int(b, l);
-                        let ri = lower_extract_int(b, r);
+                        let operand_ty = expr_static_type(lhs);
+                        let is_float = matches!(
+                            b.db.data(b.db.follow(operand_ty)),
+                            praxis_types::data::TypeData::Scalar(praxis_types::ScalarType::Float)
+                        );
                         let bool_scalar = b.alloc_scalar(ScalarKind::Bool);
-                        b.push(Inst::IntCmp {
-                            op: binop_to_cmp(*op),
-                            dst: bool_scalar,
-                            lhs: li,
-                            rhs: ri,
-                        });
+                        if is_float {
+                            // IEEE-754 comparison via FloatCmp (NaN-aware).
+                            let lf = lower_extract_float(b, l);
+                            let rf = lower_extract_float(b, r);
+                            b.push(Inst::FloatCmp {
+                                op: binop_to_cmp(*op),
+                                dst: bool_scalar,
+                                lhs: lf,
+                                rhs: rf,
+                            });
+                        } else {
+                            let li = lower_extract_int(b, l);
+                            let ri = lower_extract_int(b, r);
+                            b.push(Inst::IntCmp {
+                                op: binop_to_cmp(*op),
+                                dst: bool_scalar,
+                                lhs: li,
+                                rhs: ri,
+                            });
+                        }
                         lower_materialize_bool(b, bool_scalar)
                     }
                 }
@@ -627,10 +665,22 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             let o = lower_expr_gc(b, operand);
             match op {
                 UnaryOp::Neg => {
-                    // 0 - operand, as checked Int subtraction.
-                    let zero = lower_lit_gc(b, &Lit::Int(0));
-                    let result = lower_int_binop(b, IntBinOp::Sub, zero, o);
-                    lower_materialize(b, result)
+                    // `0 - operand`. For a Float operand, this is `0.0 - x` as
+                    // unchecked float subtraction (no fault); for Int it is the
+                    // checked subtraction that faults on `Int::MIN` overflow.
+                    let is_float = matches!(
+                        b.db.data(b.db.follow(expr_static_type(operand))),
+                        praxis_types::data::TypeData::Scalar(praxis_types::ScalarType::Float)
+                    );
+                    if is_float {
+                        let zero = lower_lit_gc(b, &Lit::Float(0.0));
+                        let result = lower_float_binop(b, FloatBinOp::Sub, zero, o);
+                        lower_materialize_float(b, result)
+                    } else {
+                        let zero = lower_lit_gc(b, &Lit::Int(0));
+                        let result = lower_int_binop(b, IntBinOp::Sub, zero, o);
+                        lower_materialize(b, result)
+                    }
                 }
                 UnaryOp::Not => {
                     // Logical not on Bool: `!x` is `x == false`.
@@ -737,6 +787,23 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     live_roots: Vec::new(),
                 });
                 // out does not fault; no check_fault needed.
+                return dst;
+            }
+            // Float constants `pi()`/`e()` (§4.12): direct runtime calls that
+            // allocate a Float. No arguments; no fault.
+            if callee_name == "pi" || callee_name == "e" {
+                let sym = if callee_name == "pi" {
+                    "praxis_float_pi"
+                } else {
+                    "praxis_float_e"
+                };
+                let dst = b.alloc_gc(*ty, None);
+                b.push(Inst::Call {
+                    dst,
+                    callee: CallTarget::Runtime(sym.to_string()),
+                    args: vec![],
+                    live_roots: Vec::new(),
+                });
                 return dst;
             }
             let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
@@ -992,6 +1059,22 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit) -> LocalId {
             });
             dst
         }
+        Lit::Float(f) => {
+            // Float's payload is an f64; ConstFloat carries it as f64::to_bits()
+            // (an i64) so it rides the uniform scalar channel (§4.12).
+            let scalar = b.alloc_scalar(ScalarKind::Float);
+            b.push(Inst::ConstFloat {
+                dst: scalar,
+                bits: f.to_bits() as i64,
+            });
+            let dst = b.alloc_gc(b.float_ty, None);
+            b.push(Inst::Alloc {
+                dst,
+                alloc: AllocKind::Float { value: scalar },
+                live_roots: Vec::new(),
+            });
+            dst
+        }
         Lit::Unit => {
             // The Unit value (§4.3): allocate the immortal Unit singleton.
             let dst = b.alloc_gc(b.unit_ty, None);
@@ -1012,6 +1095,17 @@ fn lower_extract_int(b: &mut Builder<'_>, src: LocalId) -> LocalId {
         dst,
         src,
         scalar: ScalarKind::Int,
+    });
+    dst
+}
+
+/// Extract a `Float` payload into a scalar local (carried as f64 bits, §4.12).
+fn lower_extract_float(b: &mut Builder<'_>, src: LocalId) -> LocalId {
+    let dst = b.alloc_scalar(ScalarKind::Float);
+    b.push(Inst::ExtractScalar {
+        dst,
+        src,
+        scalar: ScalarKind::Float,
     });
     dst
 }
@@ -1047,6 +1141,34 @@ fn lower_materialize_bool(b: &mut Builder<'_>, scalar: LocalId) -> LocalId {
         dst,
         src: scalar,
         scalar: ScalarKind::Bool,
+        live_roots: Vec::new(),
+    });
+    dst
+}
+
+/// Lower an unchecked Float binary op on two `GcRef` operands, returning the
+/// scalar (bit-pattern) result. No fault check — IEEE-754 arithmetic produces
+/// inf/NaN rather than faulting (§4.12).
+fn lower_float_binop(
+    b: &mut Builder<'_>,
+    op: FloatBinOp,
+    lhs_gc: LocalId,
+    rhs_gc: LocalId,
+) -> LocalId {
+    let lhs = lower_extract_float(b, lhs_gc);
+    let rhs = lower_extract_float(b, rhs_gc);
+    let dst = b.alloc_scalar(ScalarKind::Float);
+    b.push(Inst::FloatBinOp { op, dst, lhs, rhs });
+    dst
+}
+
+/// Materialize a `Float` scalar (bit-pattern) into a fresh `GcRef`.
+fn lower_materialize_float(b: &mut Builder<'_>, scalar: LocalId) -> LocalId {
+    let dst = b.alloc_gc(b.float_ty, None);
+    b.push(Inst::Materialize {
+        dst,
+        src: scalar,
+        scalar: ScalarKind::Float,
         live_roots: Vec::new(),
     });
     dst
@@ -3076,6 +3198,18 @@ fn binop_to_int(op: BinOp) -> IntBinOp {
     }
 }
 
+/// Map a source `BinOp` to its Float equivalent (§4.12). `%` has no float form
+/// (it is a type error in inference); the defensive fallback is `Add`.
+fn binop_to_float(op: BinOp) -> FloatBinOp {
+    match op {
+        BinOp::Add => FloatBinOp::Add,
+        BinOp::Sub => FloatBinOp::Sub,
+        BinOp::Mul => FloatBinOp::Mul,
+        BinOp::Div => FloatBinOp::Div,
+        _ => FloatBinOp::Add,
+    }
+}
+
 fn binop_to_cmp(op: BinOp) -> CmpOp {
     match op {
         BinOp::Eq => CmpOp::Eq,
@@ -3329,6 +3463,24 @@ fn emit_pattern_test(
                     // Char patterns aren't produced by the parser today; treat
                     // as a match (defensive).
                     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
+                }
+                Lit::Float(_) => {
+                    // Compare two Float scalars for equality with IEEE-754
+                    // semantics (NaN never matches, matching `==` on values).
+                    let sf = lower_extract_float(b, scrut);
+                    let lf = lower_extract_float(b, lit_gc);
+                    let cmp = b.alloc_scalar(ScalarKind::Bool);
+                    b.push(Inst::FloatCmp {
+                        op: CmpOp::Eq,
+                        dst: cmp,
+                        lhs: sf,
+                        rhs: lf,
+                    });
+                    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                        cond: cmp,
+                        then_block: on_success,
+                        else_block: on_fail,
+                    };
                 }
                 Lit::Unit => {
                     // Unit patterns aren't produced by the parser today; treat

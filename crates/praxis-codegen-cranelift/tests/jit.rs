@@ -121,6 +121,114 @@ fn runs_subtraction_and_division() {
     assert_eq!(result.as_int(), 3);
 }
 
+// ---- Float (§4.12) ----
+
+#[test]
+fn runs_float_literal() {
+    let (rt, result) = run_main("fn main() -> Float { 2.5 }");
+    assert!(!rt.has_pending_fault());
+    assert!((result.as_float() - 2.5).abs() < 1e-12);
+}
+
+#[test]
+fn runs_float_arithmetic_precedence() {
+    // 1.5 + 2.5 * 2.0 = 6.5.
+    let (rt, result) = run_main("fn main() -> Float { 1.5 + 2.5 * 2.0 }");
+    assert!(!rt.has_pending_fault());
+    assert!((result.as_float() - 6.5).abs() < 1e-12);
+}
+
+#[test]
+fn runs_float_chained_multiplication_of_variables() {
+    // `(a * b) * c` where all are float variables — the lowering must read the
+    // operands' resolved TypeData (not compare Type indices) to keep this Float.
+    let src = "fn main() -> Float { let a = 1.5; let b = 2.0; let c = 3.0; a * b * c }";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault());
+    assert!((result.as_float() - 9.0).abs() < 1e-12);
+}
+
+#[test]
+fn runs_float_unary_negation() {
+    let (rt, result) = run_main("fn main() -> Float { -3.5 }");
+    assert!(!rt.has_pending_fault());
+    assert!((result.as_float() - (-3.5)).abs() < 1e-12);
+}
+
+#[test]
+fn runs_float_comparison() {
+    let (rt, result) = run_main("fn main() -> Bool { 1.5 < 2.5 }");
+    assert!(!rt.has_pending_fault());
+    assert!(result.as_bool());
+}
+
+#[test]
+fn float_div_by_zero_is_infinity_not_fault() {
+    // 1.0 / 0.0 = +inf (IEEE-754); Float arithmetic never faults (§4.12).
+    let (rt, result) = run_main("fn main() -> Float { 1.0 / 0.0 }");
+    assert!(!rt.has_pending_fault());
+    assert!(result.as_float().is_infinite() && result.as_float().is_sign_positive());
+}
+
+#[test]
+fn float_zero_div_zero_is_nan_not_fault() {
+    let (rt, result) = run_main("fn main() -> Float { 0.0 / 0.0 }");
+    assert!(!rt.has_pending_fault());
+    assert!(result.as_float().is_nan());
+}
+
+#[test]
+fn float_nan_is_not_equal_to_itself() {
+    // IEEE-754: NaN != NaN. The comparison uses FloatCC, giving this for free.
+    let (rt, result) = run_main("fn main() -> Bool { let x = 0.0/0.0; x == x }");
+    assert!(!rt.has_pending_fault());
+    assert!(!result.as_bool());
+}
+
+#[test]
+fn float_method_sqrt() {
+    let (rt, result) = run_main("fn main() -> Float { 16.0.sqrt() }");
+    assert!(!rt.has_pending_fault());
+    assert!((result.as_float() - 4.0).abs() < 1e-12);
+}
+
+#[test]
+fn float_method_floor_and_ceil() {
+    // floor(2.9) = 2, ceil(2.1) = 3 → 5.
+    let (rt, r) = run_main("fn main() -> Float { 2.9.floor() + 2.1.ceil() }");
+    assert!(!rt.has_pending_fault());
+    assert!((r.as_float() - 5.0).abs() < 1e-12);
+}
+
+#[test]
+fn float_to_int_truncates() {
+    let (rt, result) = run_main("fn main() -> Int { 3.9.to_int() }");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn int_to_float_widens() {
+    let (rt, result) = run_main("fn main() -> Float { 5.to_float() }");
+    assert!(!rt.has_pending_fault());
+    assert!((result.as_float() - 5.0).abs() < 1e-12);
+}
+
+#[test]
+fn float_to_int_on_nan_faults() {
+    // NaN → to_int faults with FloatToInt (§4.12).
+    let (rt, _result) = run_main("fn main() -> Int { (0.0 / 0.0).to_int() }");
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::FloatToInt);
+}
+
+#[test]
+fn float_pi_and_e_constants() {
+    let (rt, r) = run_main("fn main() -> Float { pi() + e() }");
+    assert!(!rt.has_pending_fault());
+    assert!((r.as_float() - (core::f64::consts::PI + core::f64::consts::E)).abs() < 1e-12);
+}
+
 #[test]
 fn runs_if_branch() {
     let src = "fn main() -> Int { if 1 < 2 { 100 } else { 200 } }";

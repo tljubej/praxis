@@ -701,7 +701,7 @@ impl Pattern {
         // Check for a literal.
         if syntax
             .children_with_tokens()
-            .any(|e| matches!(e, rowan::NodeOrToken::Token(t) if matches!(t.kind(), K::IntLit | K::TextLit | K::KW_TRUE | K::KW_FALSE)))
+            .any(|e| matches!(e, rowan::NodeOrToken::Token(t) if matches!(t.kind(), K::IntLit | K::FloatLit | K::TextLit | K::KW_TRUE | K::KW_FALSE)))
         {
             return PatternKind::Literal;
         }
@@ -738,7 +738,10 @@ impl Pattern {
     pub fn literal_token(&self) -> Option<SyntaxToken> {
         self.syntax.children_with_tokens().find_map(|e| match e {
             rowan::NodeOrToken::Token(t)
-                if matches!(t.kind(), K::IntLit | K::TextLit | K::KW_TRUE | K::KW_FALSE) =>
+                if matches!(
+                    t.kind(),
+                    K::IntLit | K::FloatLit | K::TextLit | K::KW_TRUE | K::KW_FALSE
+                ) =>
             {
                 Some(t)
             }
@@ -787,7 +790,12 @@ impl Literal {
             .find(|t| {
                 matches!(
                     t.kind(),
-                    K::IntLit | K::TextLit | K::BacktickTemplate | K::KW_TRUE | K::KW_FALSE
+                    K::IntLit
+                        | K::FloatLit
+                        | K::TextLit
+                        | K::BacktickTemplate
+                        | K::KW_TRUE
+                        | K::KW_FALSE
                 )
             })
     }

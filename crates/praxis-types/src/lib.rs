@@ -60,6 +60,13 @@ impl TypeDb {
         self.scalar(Scalar::Char)
     }
 
+    /// The `Float` type (§4.3) — IEEE 754 binary64. Float literals (`3.14`)
+    /// infer to this type, and `Int.to_float()` widens to it (§4.12).
+    #[must_use]
+    pub fn float(&mut self) -> Type {
+        self.scalar(Scalar::Float)
+    }
+
     /// The `Never` type — the bottom type for diverging control flow (§4.3).
     #[must_use]
     pub fn never(&mut self) -> Type {

@@ -286,6 +286,261 @@ pub unsafe extern "C" fn praxis_char_load(_ctx: *mut RuntimeContext, r: GcRef) -
     unsafe { *p as i64 }
 }
 
+/// Allocate a boxed `Float` from an `i64` carrying the IEEE-754 binary64 bit
+/// pattern (§4.3, §4.12). The uniform scalar ABI carries every payload as
+/// `i64`; a float is transported as `f64::to_bits()` and reassembled here.
+///
+/// # Safety
+/// `ctx` must point at a live, wired `RuntimeContext`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_alloc_float(ctx: *mut RuntimeContext, value: i64) -> GcRef {
+    // Trigger a collection on allocation pressure before allocating.
+    unsafe { maybe_collect(ctx) };
+    let f = f64::from_bits(value as u64);
+    // SAFETY: caller upholds ctx/heap validity; all f64 values are valid Floats.
+    unsafe { heap(ctx).alloc(scalars::FLOAT, f) }
+}
+
+/// Read a `Float` payload as its IEEE-754 bit pattern widened to `i64`
+/// (§10.3 transient scalar). Generated code keeps floats in the uniform `i64`
+/// scalar channel; the bit pattern is reassembled into an `f64` only at the
+/// point of an arithmetic/comparison instruction.
+///
+/// # Safety
+/// `r` must be a valid `Float` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_float_load(_ctx: *mut RuntimeContext, r: GcRef) -> i64 {
+    // SAFETY: caller guarantees `r` is a Float; payload is an f64.
+    let p: *mut f64 = r.payload::<f64>();
+    unsafe { (*p).to_bits() as i64 }
+}
+
+// ---------------------------------------------------------------------------
+// Float conversion & methods (§4.12). Float arithmetic never faults (IEEE-754
+// produces inf/nan); only the narrowing `to_int` conversion does.
+// ---------------------------------------------------------------------------
+
+/// Read a `Float` payload as an `f64` (private helper).
+///
+/// # Safety
+/// `r` must be a valid `Float` `GcRef`.
+unsafe fn float_payload(r: GcRef) -> f64 {
+    // SAFETY: caller guarantees `r` is a Float; payload is an f64.
+    unsafe { *r.payload::<f64>() }
+}
+
+/// Widen an `Int` to a `Float` (§4.12). Never faults — every `i64` is exactly
+/// representable as an `f64`? No: integers above 2^53 lose precision, but the
+/// conversion is still total and well-defined (rounds to nearest). This is the
+/// explicit widening method `Int.to_float()`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Int` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_to_float(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    let i = unsafe { int_payload(r) };
+    unsafe { maybe_collect(ctx) };
+    // SAFETY: ctx/heap valid; every widened int is a valid Float payload.
+    unsafe { heap(ctx).alloc(scalars::FLOAT, i as f64) }
+}
+
+/// Narrow a `Float` to an `Int` by truncating toward zero (§4.12). Faults
+/// (`FloatToInt`) on NaN, ±infinity, or a finite value outside the signed
+/// 64-bit range — these have no exact `Int` representation. On fault, sets
+/// `pending_fault` and returns the Unit sentinel (no panic crosses the ABI).
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_float_to_int(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    let f = unsafe { float_payload(r) };
+    // NaN, infinities, and out-of-range finite values are not exactly
+    // representable as i64. Rust's `as i64` saturates (inf→i64::MAX,
+    // -inf→i64::MIN, nan→0), which would silently produce a plausible-but-wrong
+    // value; per §4.12 these cases fault instead.
+    if f.is_nan() || f.is_infinite() || f < i64::MIN as f64 || f >= i64::MAX as f64 {
+        unsafe { set_fault(ctx, FaultKind::FloatToInt) };
+        return unsafe { unit_sentinel(ctx) };
+    }
+    // The range check above bounds f to (-2^63, 2^63); truncation toward zero is
+    // then exact for every representable integer and inexact-but-safe for the
+    // fractional part (which is discarded).
+    unsafe { maybe_collect(ctx) };
+    // SAFETY: ctx/heap valid; the value is in i64 range.
+    unsafe { heap(ctx).alloc(scalars::INT, f as i64) }
+}
+
+/// Re-box a `Float` after a pure transform (no fault possible). Used by
+/// `abs`/`sqrt`/`floor`/`ceil`/`round`/`sign`.
+unsafe fn rebox_float(ctx: *mut RuntimeContext, out: f64) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    // SAFETY: ctx/heap valid; every f64 is a valid Float payload.
+    unsafe { heap(ctx).alloc(scalars::FLOAT, out) }
+}
+
+/// `Float.abs()` — absolute value (§4.12).
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_float_abs(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    let f = unsafe { float_payload(r) };
+    unsafe { rebox_float(ctx, f.abs()) }
+}
+
+/// `Float.sqrt()` — square root (§4.12). Negative inputs yield NaN (IEEE-754);
+/// this never faults.
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_float_sqrt(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    let f = unsafe { float_payload(r) };
+    unsafe { rebox_float(ctx, f.sqrt()) }
+}
+
+/// `Float.floor()` — round toward negative infinity (§4.12).
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_float_floor(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    let f = unsafe { float_payload(r) };
+    unsafe { rebox_float(ctx, f.floor()) }
+}
+
+/// `Float.ceil()` — round toward positive infinity (§4.12).
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_float_ceil(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    let f = unsafe { float_payload(r) };
+    unsafe { rebox_float(ctx, f.ceil()) }
+}
+
+/// `Float.round()` — round half away from zero (§4.12, matches Rust's `f64::round`).
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_float_round(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    let f = unsafe { float_payload(r) };
+    unsafe { rebox_float(ctx, f.round()) }
+}
+
+/// `Float.sign()` — sign as -1.0 / 0.0 / 1.0 (§4.12). NaN yields NaN.
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_float_sign(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    // `signum` matches the desired semantics: -1.0 / 0.0 / 1.0, NaN for NaN.
+    let f = unsafe { float_payload(r) };
+    unsafe { rebox_float(ctx, f.signum()) }
+}
+
+/// `Float.is_nan()` — true iff NaN (§4.12).
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_float_is_nan(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    let result = unsafe { float_payload(r) }.is_nan();
+    // SAFETY: ctx valid; Bool immortal path.
+    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, result) }
+}
+
+/// `Float.is_infinite()` — true iff ±infinity (§4.12).
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_float_is_infinite(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    let result = unsafe { float_payload(r) }.is_infinite();
+    // SAFETY: ctx valid; Bool immortal path.
+    unsafe { heap(ctx).alloc_immortal(scalars::BOOL, result) }
+}
+
+/// `Float.min(other)` — the smaller of two floats (§4.12). Per IEEE-754 /
+/// Rust's `f64::min`: if either operand is NaN, returns the other (NaN only
+/// propagates when both are NaN). `-0.0` is less than `+0.0`.
+///
+/// # Safety
+/// `ctx` must be live and wired; both operands must be valid `Float` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_float_min(
+    ctx: *mut RuntimeContext,
+    lhs: GcRef,
+    rhs: GcRef,
+) -> GcRef {
+    let a = unsafe { float_payload(lhs) };
+    let b = unsafe { float_payload(rhs) };
+    unsafe { rebox_float(ctx, a.min(b)) }
+}
+
+/// `Float.max(other)` — the larger of two floats (§4.12). See `praxis_float_min`
+/// for NaN handling.
+///
+/// # Safety
+/// `ctx` must be live and wired; both operands must be valid `Float` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_float_max(
+    ctx: *mut RuntimeContext,
+    lhs: GcRef,
+    rhs: GcRef,
+) -> GcRef {
+    let a = unsafe { float_payload(lhs) };
+    let b = unsafe { float_payload(rhs) };
+    unsafe { rebox_float(ctx, a.max(b)) }
+}
+
+/// `Float.to_text()` — format as a `Text` using Rust's shortest round-trip
+/// form (§4.12). `inf`/`-inf`/`NaN` render as those literals.
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_float_to_text(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    let f = unsafe { float_payload(r) };
+    let s = format!("{f}");
+    // SAFETY: `s` is valid UTF-8 for the duration of the call; ctx/heap valid.
+    unsafe {
+        heap(ctx).alloc_with(
+            crate::text::TEXT,
+            std::mem::size_of::<crate::text::TextPayload>(),
+            std::mem::align_of::<crate::text::TextPayload>(),
+            |payload| {
+                let owned: Box<str> = s.clone().into_boxed_str();
+                (payload as *mut crate::text::TextPayload)
+                    .write(crate::text::TextPayload::Owned(owned));
+            },
+        )
+    }
+}
+
+/// `pi()` — the constant π as a `Float` (§4.12 prelude free function).
+///
+/// # Safety
+/// `ctx` must be live and wired.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_float_pi(ctx: *mut RuntimeContext) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    // SAFETY: ctx/heap valid.
+    unsafe { heap(ctx).alloc(scalars::FLOAT, core::f64::consts::PI) }
+}
+
+/// `e()` — Euler's number as a `Float` (§4.12 prelude free function).
+///
+/// # Safety
+/// `ctx` must be live and wired.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_float_e(ctx: *mut RuntimeContext) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    // SAFETY: ctx/heap valid.
+    unsafe { heap(ctx).alloc(scalars::FLOAT, core::f64::consts::E) }
+}
+
 // ---------------------------------------------------------------------------
 // Checked arithmetic (§4.12). All fault rather than panic (§10.4).
 // ---------------------------------------------------------------------------

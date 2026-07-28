@@ -16,8 +16,8 @@ pub mod liveness;
 
 pub use build::lower_module;
 pub use ir::{
-    AllocKind, Block, BlockId, CallTarget, CmpOp, Function, Inst, IntBinOp, Local, LocalId,
-    LocalKind, ScalarKind, Terminator,
+    AllocKind, Block, BlockId, CallTarget, CmpOp, FloatBinOp, Function, Inst, IntBinOp, Local,
+    LocalId, LocalKind, ScalarKind, Terminator,
 };
 pub use liveness::annotate;
 

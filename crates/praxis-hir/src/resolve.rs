@@ -38,15 +38,15 @@ use crate::scope::{ScopeId, ScopeTree};
 use crate::symbol::{Symbol, SymbolId, SymbolKind};
 
 /// The built-in scalar type names that a type annotation may legitimately name
-/// (§4.3). Reserved-but-unimplemented scalars (`Float`, `UInt`, `Byte`) are
-/// deliberately absent: using them yields `N002 unknown type`. `Char` is wired
-/// end-to-end in M6 (the input parser produces it).
+/// (§4.3). Reserved-but-unimplemented scalars (`UInt`, `Byte`) are deliberately
+/// absent: using them yields `N002 unknown type`. `Char` is wired end-to-end in
+/// M6 (the input parser produces it); `Float` is wired end-to-end (§4.12).
 ///
 /// M7: these are now seeded into the root scope as `Builtin` symbols (see
 /// [`Resolver::seed_type_names`]), so type-annotation validation consults the
 /// scope tree rather than this constant directly. The constant is retained as
 /// the seed source.
-const KNOWN_TYPE_NAMES: &[&str] = &["Int", "Text", "Bool", "Char", "Unit", "Never"];
+const KNOWN_TYPE_NAMES: &[&str] = &["Int", "Text", "Bool", "Char", "Float", "Unit", "Never"];
 
 /// A name reference resolved at a source range. Inference later attaches the
 /// inferred type to each.

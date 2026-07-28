@@ -146,6 +146,23 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(text_len())
         .entry(text_is_empty())
         .entry(text_get())
+        // Float methods (§4.12). Pure unary math, predicates, conversions, and
+        // binary min/max — all lower to `praxis_float_*` runtime wrappers.
+        .entry(float_abs())
+        .entry(float_sqrt())
+        .entry(float_floor())
+        .entry(float_ceil())
+        .entry(float_round())
+        .entry(float_sign())
+        .entry(float_to_int())
+        .entry(float_to_text())
+        .entry(float_is_nan())
+        .entry(float_is_infinite())
+        .entry(float_min())
+        .entry(float_max())
+        // The explicit Int→Float widening method (§4.12). The first Int-receiver
+        // method; establishes the pattern for scalar-receiver methods.
+        .entry(int_to_float())
         .finish()
         .expect("built-in catalog must be duplicate-free")
 }
@@ -197,6 +214,212 @@ fn text_get() -> MethodEntry {
         allocates: false,
         lowering: MethodLowering::RuntimeSymbol("praxis_text_get"),
         doc: "The scalar value of the char at `index`; faults if out of range.",
+        stability: Stability::Stable,
+    }
+}
+
+// ---- Float methods (§4.12) --------------------------------------------------
+//
+// All Float method entries share a Float receiver pattern. The pure unary math
+// methods (`abs`/`sqrt`/`floor`/`ceil`/`round`/`sign`) and predicates never
+// fault; `to_int` is the sole faulting method (NaN/inf/out-of-range). `min`/
+// `max` take a Float argument. Conversions return Int/Text.
+
+fn float_receiver() -> TypePattern {
+    TypePattern::Scalar(ScalarType::Float)
+}
+
+fn float_abs() -> MethodEntry {
+    MethodEntry {
+        receiver: float_receiver(),
+        name: "abs",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Float),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_float_abs"),
+        doc: "Absolute value.",
+        stability: Stability::Stable,
+    }
+}
+
+fn float_sqrt() -> MethodEntry {
+    MethodEntry {
+        receiver: float_receiver(),
+        name: "sqrt",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Float),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_float_sqrt"),
+        doc: "Square root. Negative inputs yield NaN (IEEE-754).",
+        stability: Stability::Stable,
+    }
+}
+
+fn float_floor() -> MethodEntry {
+    MethodEntry {
+        receiver: float_receiver(),
+        name: "floor",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Float),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_float_floor"),
+        doc: "Round toward negative infinity.",
+        stability: Stability::Stable,
+    }
+}
+
+fn float_ceil() -> MethodEntry {
+    MethodEntry {
+        receiver: float_receiver(),
+        name: "ceil",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Float),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_float_ceil"),
+        doc: "Round toward positive infinity.",
+        stability: Stability::Stable,
+    }
+}
+
+fn float_round() -> MethodEntry {
+    MethodEntry {
+        receiver: float_receiver(),
+        name: "round",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Float),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_float_round"),
+        doc: "Round half away from zero.",
+        stability: Stability::Stable,
+    }
+}
+
+fn float_sign() -> MethodEntry {
+    MethodEntry {
+        receiver: float_receiver(),
+        name: "sign",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Float),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_float_sign"),
+        doc: "Sign as -1.0 / 0.0 / 1.0. NaN yields NaN.",
+        stability: Stability::Stable,
+    }
+}
+
+fn float_to_int() -> MethodEntry {
+    MethodEntry {
+        receiver: float_receiver(),
+        name: "to_int",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        can_fault: true,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_float_to_int"),
+        doc: "Truncate toward zero to an Int. Faults on NaN, ±inf, or out of i64 range.",
+        stability: Stability::Stable,
+    }
+}
+
+fn float_to_text() -> MethodEntry {
+    MethodEntry {
+        receiver: float_receiver(),
+        name: "to_text",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Text),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_float_to_text"),
+        doc: "Format as Text (shortest round-trip form; inf/-inf/NaN as literals).",
+        stability: Stability::Stable,
+    }
+}
+
+fn float_is_nan() -> MethodEntry {
+    MethodEntry {
+        receiver: float_receiver(),
+        name: "is_nan",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_float_is_nan"),
+        doc: "True iff NaN.",
+        stability: Stability::Stable,
+    }
+}
+
+fn float_is_infinite() -> MethodEntry {
+    MethodEntry {
+        receiver: float_receiver(),
+        name: "is_infinite",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_float_is_infinite"),
+        doc: "True iff ±infinity.",
+        stability: Stability::Stable,
+    }
+}
+
+fn float_min() -> MethodEntry {
+    MethodEntry {
+        receiver: float_receiver(),
+        name: "min",
+        params: vec![TypePattern::Scalar(ScalarType::Float)],
+        result: TypePattern::Scalar(ScalarType::Float),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_float_min"),
+        doc: "The smaller of two floats. If either is NaN, returns the other.",
+        stability: Stability::Stable,
+    }
+}
+
+fn float_max() -> MethodEntry {
+    MethodEntry {
+        receiver: float_receiver(),
+        name: "max",
+        params: vec![TypePattern::Scalar(ScalarType::Float)],
+        result: TypePattern::Scalar(ScalarType::Float),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_float_max"),
+        doc: "The larger of two floats. If either is NaN, returns the other.",
+        stability: Stability::Stable,
+    }
+}
+
+fn int_to_float() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Int),
+        name: "to_float",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Float),
+        purity: Purity::Pure,
+        can_fault: false,
+        allocates: true,
+        lowering: MethodLowering::RuntimeSymbol("praxis_int_to_float"),
+        doc: "Widen to Float (explicit Int→Float conversion, §4.12).",
         stability: Stability::Stable,
     }
 }

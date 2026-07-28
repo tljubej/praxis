@@ -678,6 +678,54 @@ impl<'t> Parser<'t> {
             self.finish_node(); // ARG_LIST
             self.finish_node(); // CALL_EXPR
         }
+        // Postfix method calls / field access on an arbitrary expression:
+        // `expr.method(args)` or `expr.field`. This mirrors the loop in
+        // `parse_name_or_call` but applies to non-name primaries (literals,
+        // parenthesized expressions, call results), so `16.0.sqrt()` and
+        // `(0.0/0.0).is_nan()` parse without needing a `let` binding.
+        self.parse_method_or_field_postfix(cp);
+    }
+
+    /// Postfix `.method(args)` / `.field` chain on the expression preceding the
+    /// current position. `cp` is the checkpoint taken *before* that expression
+    /// was emitted, so `start_node_at(cp, …)` retroactively wraps it as the
+    /// METHOD_CALL_EXPR / FIELD_EXPR receiver. Not updated between iterations:
+    // each `.b().c()` must wrap the entire preceding expression (the previous
+    // METHOD_CALL_EXPR), which starts at the original `cp`.
+    fn parse_method_or_field_postfix(&mut self, cp: rowan::Checkpoint) {
+        while self.at(SyntaxKind::DOT) {
+            self.bump(); // `.`
+            if !self.at(SyntaxKind::Ident) {
+                let span = self.current_span();
+                self.error(span, "expected name after `.`");
+                break;
+            }
+            // Disambiguate field access (`p.x`) from method call (`p.x()`):
+            // an IDENT followed by `(` is a method call; otherwise field access.
+            if self.nth_kind(1) == SyntaxKind::L_PAREN {
+                self.bump(); // method name
+                self.start_node_at(cp, SyntaxKind::METHOD_CALL_EXPR);
+                self.bump(); // `(`
+                self.start_node(SyntaxKind::ARG_LIST);
+                if !self.at(SyntaxKind::R_PAREN) {
+                    loop {
+                        let before = self.meaningful_index();
+                        self.parse_expr();
+                        if !self.eat(SyntaxKind::COMMA) {
+                            break;
+                        }
+                        self.ensure_progress(before);
+                    }
+                }
+                self.expect(SyntaxKind::R_PAREN, "`)`");
+                self.finish_node(); // ARG_LIST
+                self.finish_node(); // METHOD_CALL_EXPR
+            } else {
+                self.start_node_at(cp, SyntaxKind::FIELD_EXPR);
+                self.bump(); // field name
+                self.finish_node(); // FIELD_EXPR
+            }
+        }
     }
 
     /// `|params| expr` — a closure expression (M7, §4.10). Params are bare names
@@ -714,7 +762,10 @@ impl<'t> Parser<'t> {
     fn parse_atom(&mut self) {
         let kind = self.peek();
         match kind {
-            SyntaxKind::IntLit | SyntaxKind::TextLit | SyntaxKind::BacktickTemplate => {
+            SyntaxKind::IntLit
+            | SyntaxKind::FloatLit
+            | SyntaxKind::TextLit
+            | SyntaxKind::BacktickTemplate => {
                 // Eat leading trivia *before* opening the node, so it attaches
                 // to the enclosing context rather than nesting inside the literal.
                 self.eat_trivia();
@@ -1165,43 +1216,7 @@ impl<'t> Parser<'t> {
         // (the previous METHOD_CALL_EXPR), which starts at the original `cp`.
         // Updating it to the position after each node (as an earlier version
         // did) dropped the receiver, breaking `a.b().c()`.
-        while self.at(SyntaxKind::DOT) {
-            self.bump(); // `.`
-                         // The name after `.`.
-            if !self.at(SyntaxKind::Ident) {
-                let span = self.current_span();
-                self.error(span, "expected name after `.`");
-                break;
-            }
-            // Disambiguate field access (`p.x`) from method call (`p.x()`):
-            // an IDENT followed by `(` is a method call; otherwise it's a
-            // field access (M7, §4.5).
-            if self.nth_kind(1) == SyntaxKind::L_PAREN {
-                // Method call: `.method(args)`.
-                self.bump(); // method name
-                self.start_node_at(cp, SyntaxKind::METHOD_CALL_EXPR);
-                self.bump(); // `(`
-                self.start_node(SyntaxKind::ARG_LIST);
-                if !self.at(SyntaxKind::R_PAREN) {
-                    loop {
-                        let before = self.meaningful_index();
-                        self.parse_expr();
-                        if !self.eat(SyntaxKind::COMMA) {
-                            break;
-                        }
-                        self.ensure_progress(before);
-                    }
-                }
-                self.expect(SyntaxKind::R_PAREN, "`)`");
-                self.finish_node(); // ARG_LIST
-                self.finish_node(); // METHOD_CALL_EXPR
-            } else {
-                // Field access: `.field` (M7, §4.5).
-                self.start_node_at(cp, SyntaxKind::FIELD_EXPR);
-                self.bump(); // field name
-                self.finish_node(); // FIELD_EXPR
-            }
-        }
+        self.parse_method_or_field_postfix(cp);
     }
 
     // -----------------------------------------------------------------------

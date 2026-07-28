@@ -26,6 +26,8 @@ pub const PRELUDE: &[PreludeEntry] = &[
     PreludeEntry::new("clamp", "Clamp a value into an inclusive range."),
     PreludeEntry::new("gcd", "Greatest common divisor of two integers."),
     PreludeEntry::new("lcm", "Least common multiple of two integers."),
+    PreludeEntry::new("pi", "The constant π as a Float."),
+    PreludeEntry::new("e", "Euler's number as a Float."),
     // Collections
     PreludeEntry::new("Vec", "Grow, iterate, and pipeline over an ordered list."),
     PreludeEntry::new("Deque", "Double-ended queue."),

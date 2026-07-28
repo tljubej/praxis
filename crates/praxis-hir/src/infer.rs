@@ -227,6 +227,8 @@ impl Inferer {
                         || s.name == "panic"
                         || s.name == "Some"
                         || s.name == "None"
+                        || s.name == "pi"
+                        || s.name == "e"
                         || Self::collection_ctor_for(&s.name).is_some())
             })
             .map(|s| (s.id, s.name.clone()))
@@ -295,6 +297,13 @@ impl Inferer {
                         "Option",
                         vec![("Some".into(), Some(vec![t])), ("None".into(), None)],
                     )
+                }
+                // Float constants (§4.12). Both are nullary `() -> Float`,
+                // monomorphic — no quantified vars. Lowered to a direct runtime
+                // call (`praxis_float_pi`/`praxis_float_e`) in MIR build.
+                "pi" | "e" => {
+                    let float_ty = db.float();
+                    db.func(vec![], float_ty)
                 }
                 other => panic!("unexpected builtin `{other}` seeded"),
             });
@@ -982,6 +991,7 @@ impl Inferer {
         };
         match tok.kind() {
             SyntaxKind::IntLit => self.db.int(),
+            SyntaxKind::FloatLit => self.db.float(),
             SyntaxKind::TextLit => self.db.text(),
             SyntaxKind::KW_TRUE | SyntaxKind::KW_FALSE => self.db.bool(),
             // Backtick templates are M6; treat as Text for now (a fresh var would
@@ -1022,11 +1032,20 @@ impl Inferer {
         // behavior underlined `a + b` even when only `a` was at fault).
         let lhs_range = lhs.as_ref().map(|e| e.syntax().text_range());
         let rhs_range = rhs.as_ref().map(|e| e.syntax().text_range());
+        // Detect a float-literal operand before the operands are moved below;
+        // arithmetic inference uses this to pick Float vs Int under the strict
+        // per-literal model (§4.12).
+        let any_float_operand = operand_is_float_literal(&lhs) || operand_is_float_literal(&rhs);
         let lt = lhs.map(|e| self.infer_expr(scope, &e));
         let rt = rhs.map(|e| self.infer_expr(scope, &e));
         let op_kind = b.op().map(|t| t.kind());
         match op_kind {
-            // Arithmetic: both operands and result are Int (§4.12).
+            // Arithmetic (§4.12). The result type follows the operand literal
+            // kind under the strict per-literal model: if either operand is a
+            // float literal, both operands and the result are Float; otherwise
+            // Int. Mixing a float literal with an Int-typed expression (e.g.
+            // `1 + 2.5` where `1` is an int literal and `2.5` is float) fails
+            // unification → a clean type error; there is no implicit widening.
             Some(
                 SyntaxKind::PLUS
                 | SyntaxKind::MINUS
@@ -1034,19 +1053,33 @@ impl Inferer {
                 | SyntaxKind::SLASH
                 | SyntaxKind::PERCENT,
             ) => {
-                let int = self.db.int();
+                // The result type follows the operands under the strict
+                // per-literal model (§4.12): Float if any operand is a float
+                // literal OR has an already-inferred Float type (e.g. a method
+                // call like `16.0.sqrt()`); otherwise Int. Mixing a Float
+                // operand with an Int-typed expression fails unification → a
+                // clean type error; there is no implicit widening.
+                let any_float_type = [lt, rt]
+                    .into_iter()
+                    .flatten()
+                    .any(|t| is_float_scalar(&self.db, t));
+                let target = if any_float_operand || any_float_type {
+                    self.db.float()
+                } else {
+                    self.db.int()
+                };
                 if let (Some(l), Some(r)) = (lt, rt) {
                     let whole = b.syntax().text_range();
                     let lhs_at = lhs_range.unwrap_or(whole);
                     let rhs_at = rhs_range.unwrap_or(whole);
-                    if let Err(e) = self.db.unify(l, int) {
+                    if let Err(e) = self.db.unify(l, target) {
                         self.diag_unify(self.file_span(lhs_at), e);
                     }
-                    if let Err(e) = self.db.unify(r, int) {
+                    if let Err(e) = self.db.unify(r, target) {
                         self.diag_unify(self.file_span(rhs_at), e);
                     }
                 }
-                int
+                target
             }
             // Comparisons: operands must match; result is Bool.
             Some(
@@ -1068,10 +1101,11 @@ impl Inferer {
                     // Equality (`==`/`!=`) on a composite type (record/tuple/
                     // enum/collection) is structural (§5.5) and requires every
                     // contained type to be equatable; functions are never
-                    // equatable. Ordering comparisons (`<`, `>`, …) are still
-                    // Int-only (§4.12), so they keep the native IntCmp path;
-                    // only `==`/`!=` admit composite operands. Emit Y004 for a
-                    // type that cannot be compared with `==`.
+                    // equatable. Ordering comparisons (`<`, `>`, …) are
+                    // scalar-only (Int, Float, Char, Text per `supports_ord`);
+                    // Float uses IEEE-754 semantics via `FloatCmp` in MIR. Only
+                    // `==`/`!=` admit composite operands. Emit Y004 for a type
+                    // that cannot be compared with `==`.
                     if matches!(op_kind, Some(SyntaxKind::EQ2 | SyntaxKind::NEQ)) {
                         let operand_ty = self.db.follow(l);
                         if !crate::capability::supports_eq(&self.db, operand_ty) {
@@ -1107,7 +1141,15 @@ impl Inferer {
         let operand_node = u.operand();
         let operand = operand_node.as_ref().map(|e| self.infer_expr(scope, e));
         let result = match u.op().map(|t| t.kind()) {
-            Some(SyntaxKind::MINUS) => self.db.int(),
+            // Negation follows the operand's literal kind under the strict
+            // per-literal model (§4.12): `-3.5` is Float, `-3` is Int.
+            Some(SyntaxKind::MINUS) => {
+                if operand_is_float_literal(&operand_node) {
+                    self.db.float()
+                } else {
+                    self.db.int()
+                }
+            }
             Some(SyntaxKind::BANG) => self.db.bool(),
             _ => self.db.fresh_var(),
         };
@@ -1593,6 +1635,7 @@ impl Inferer {
             "Text" => ScalarType::Text,
             "Bool" => ScalarType::Bool,
             "Char" => ScalarType::Char,
+            "Float" => ScalarType::Float,
             "Never" => ScalarType::Never,
             "Unit" => return Some(self.db.unit()),
             _ => {
@@ -1684,4 +1727,38 @@ fn is_syntactic_value(e: &Expr) -> bool {
         // binary/unary ops, and parse errors. Conservative but sound.
         _ => false,
     }
+}
+
+/// True iff `operand` is a float literal (`3.14`), possibly wrapped in
+/// parentheses. Used by arithmetic inference under the strict per-literal model
+/// to decide whether a binary op resolves to Float or Int (§4.12). Only a
+/// syntactic float literal triggers the Float path; a float-typed *variable*
+/// or expression unifies against whichever target the literal side picks, so
+/// `1.5 + x` infers `x : Float` (and `1 + x` keeps `x : Int`).
+fn operand_is_float_literal(operand: &Option<Expr>) -> bool {
+    let e = match operand {
+        Some(e) => e,
+        None => return false,
+    };
+    match e {
+        Expr::Literal(lit) => lit
+            .token()
+            .map(|t| t.kind() == SyntaxKind::FloatLit)
+            .unwrap_or(false),
+        Expr::Paren(p) => p
+            .expr()
+            .map(|inner| operand_is_float_literal(&Some(inner)))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// True iff `t` follows to a concrete `ScalarType::Float`. Used by arithmetic
+/// inference to pick the Float path when an operand is a float-typed
+/// *expression* (e.g. a method call like `16.0.sqrt()`), not just a literal.
+fn is_float_scalar(db: &TypeDb, t: Type) -> bool {
+    matches!(
+        db.data(db.follow(t)),
+        praxis_types::TypeData::Scalar(ScalarType::Float)
+    )
 }

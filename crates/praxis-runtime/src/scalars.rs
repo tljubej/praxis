@@ -34,6 +34,9 @@ pub type BytePayload = u8;
 /// `Char` payload: a validated Unicode scalar value (§4.3). Stored as `u32`.
 pub type CharPayload = u32;
 
+/// `Float` payload: IEEE 754 binary64 (§4.3).
+pub type FloatPayload = f64;
+
 // ---- Unit ------------------------------------------------------------------
 
 unsafe fn unit_trace(_: *mut u8, _: &mut dyn Tracer) {}
@@ -199,6 +202,54 @@ pub const CHAR: &TypeDescriptor = &TypeDescriptor {
     hash: Some(char_hash),
 };
 
+// ---- Float ------------------------------------------------------------------
+
+unsafe fn float_trace(_: *mut u8, _: &mut dyn Tracer) {}
+unsafe fn float_drop(_: *mut u8) {}
+unsafe fn float_format(payload: *const u8, out: &mut dyn fmt::Write) {
+    // SAFETY: caller guarantees `payload` points at a `FloatPayload`.
+    let v = unsafe { *(payload as *const FloatPayload) };
+    // Rust's default `{}` formatting renders finite values in the shortest
+    // round-trippable form, and `inf`/`-inf`/`NaN` as those literals (§4.12).
+    let _ = write!(out, "{v}");
+}
+unsafe fn float_equals(a: *const u8, b: *const u8) -> bool {
+    // SAFETY: caller guarantees both pointers point at `FloatPayload`s.
+    //
+    // IEEE-754 comparison: NaN compares unequal to everything, including
+    // itself. This matches the language's float comparison semantics (§4.12)
+    // and the Cranelift `fcmp` lowering used in generated code.
+    unsafe { *(a as *const FloatPayload) == *(b as *const FloatPayload) }
+}
+unsafe fn float_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
+    // SAFETY: caller guarantees `payload` points at a `FloatPayload`.
+    //
+    // Hash the bit pattern so that equal floats hash equally (and unequal NaN
+    // bit patterns can differ, which is acceptable — NaN equality is already
+    // false for every NaN pair). Canonicalize -0.0 and +0.0 to the same bits
+    // so they hash identically, matching `==` (which treats them as equal).
+    let v = unsafe { *(payload as *const FloatPayload) };
+    let bits = if v == 0.0 {
+        v.to_bits() & 0x7fff_ffff_ffff_ffff
+    } else {
+        v.to_bits()
+    };
+    hash_value(hasher, &bits);
+}
+
+/// Descriptor for the `Float` scalar (§4.3).
+pub const FLOAT: &TypeDescriptor = &TypeDescriptor {
+    id: TypeId(5),
+    name: "Float",
+    size: std::mem::size_of::<FloatPayload>(),
+    align: std::mem::align_of::<FloatPayload>(),
+    trace: float_trace,
+    drop_value: float_drop,
+    format: float_format,
+    equals: Some(float_equals),
+    hash: Some(float_hash),
+};
+
 // ---- validation helper -----------------------------------------------------
 
 /// True iff `v` is a valid Unicode scalar value (a `Char` payload invariant).
@@ -263,6 +314,44 @@ mod tests {
         buf.clear();
         unsafe { (CHAR.format)(ptr::addr_of!(ch) as *const u8, &mut buf) };
         assert_eq!(buf, "A");
+
+        // Float — finite value formats via Rust's shortest round-trip form.
+        let f: FloatPayload = 2.5;
+        buf.clear();
+        unsafe { (FLOAT.format)(ptr::addr_of!(f) as *const u8, &mut buf) };
+        assert_eq!(buf, "2.5");
+        assert!(unsafe {
+            (FLOAT.equals.unwrap())(ptr::addr_of!(f) as *const u8, ptr::addr_of!(f) as *const u8)
+        });
+        // NaN compares unequal to everything, including itself.
+        let nan: FloatPayload = f64::NAN;
+        assert!(!unsafe {
+            (FLOAT.equals.unwrap())(
+                ptr::addr_of!(nan) as *const u8,
+                ptr::addr_of!(nan) as *const u8,
+            )
+        });
+        // ±0.0 are equal.
+        let pos_zero: FloatPayload = 0.0;
+        let neg_zero: FloatPayload = -0.0;
+        assert!(unsafe {
+            (FLOAT.equals.unwrap())(
+                ptr::addr_of!(pos_zero) as *const u8,
+                ptr::addr_of!(neg_zero) as *const u8,
+            )
+        });
+        // Special values format as literals.
+        let inf: FloatPayload = f64::INFINITY;
+        let neg_inf: FloatPayload = f64::NEG_INFINITY;
+        buf.clear();
+        unsafe { (FLOAT.format)(ptr::addr_of!(inf) as *const u8, &mut buf) };
+        assert_eq!(buf, "inf");
+        buf.clear();
+        unsafe { (FLOAT.format)(ptr::addr_of!(neg_inf) as *const u8, &mut buf) };
+        assert_eq!(buf, "-inf");
+        buf.clear();
+        unsafe { (FLOAT.format)(ptr::addr_of!(nan) as *const u8, &mut buf) };
+        assert_eq!(buf, "NaN");
     }
 
     #[test]
@@ -280,6 +369,21 @@ mod tests {
         let mut h3 = StructHasher::new();
         unsafe { (INT.hash.unwrap())(ptr::addr_of!(b) as *const u8, &mut h3) };
         assert_ne!(h1.finish(), h3.finish());
+
+        // Float hashing is stable, and +0.0 / -0.0 collide (they compare equal).
+        let fp: FloatPayload = 2.5;
+        let mut fh1 = StructHasher::new();
+        unsafe { (FLOAT.hash.unwrap())(ptr::addr_of!(fp) as *const u8, &mut fh1) };
+        let mut fh2 = StructHasher::new();
+        unsafe { (FLOAT.hash.unwrap())(ptr::addr_of!(fp) as *const u8, &mut fh2) };
+        assert_eq!(fh1.finish(), fh2.finish());
+        let pos_zero: FloatPayload = 0.0;
+        let neg_zero: FloatPayload = -0.0;
+        let mut hp = StructHasher::new();
+        let mut hn = StructHasher::new();
+        unsafe { (FLOAT.hash.unwrap())(ptr::addr_of!(pos_zero) as *const u8, &mut hp) };
+        unsafe { (FLOAT.hash.unwrap())(ptr::addr_of!(neg_zero) as *const u8, &mut hn) };
+        assert_eq!(hp.finish(), hn.finish());
     }
 
     #[test]

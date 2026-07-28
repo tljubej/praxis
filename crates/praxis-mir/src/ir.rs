@@ -77,6 +77,12 @@ pub enum ScalarKind {
     Char,
     /// `bool` — the payload of a `Bool` object (represented as `i8`/`u8`).
     Bool,
+    /// `f64` — the payload of a `Float` object (§4.12). Carried through the
+    /// uniform `i64` scalar channel as `f64::to_bits()`; the backend bit-casts
+    /// to/from `f64` at each arithmetic/comparison point. Unlike `Int`, Float
+    /// arithmetic never faults (IEEE-754 produces inf/nan), so a `FloatBinOp`
+    /// is never followed by `CheckFault`.
+    Float,
 }
 
 /// A basic block: a straight-line list of instructions and one terminator.
@@ -92,6 +98,10 @@ pub struct Block {
 pub enum Inst {
     /// Load an immediate integer constant into a `Scalar(Int)` local.
     ConstInt { dst: LocalId, value: i64 },
+    /// Load an immediate `f64` constant into a `Scalar(Float)` local, carried
+    /// as its IEEE-754 bit pattern (`f64::to_bits()` as `i64`) so it rides the
+    /// uniform scalar channel. The backend bit-casts back to `f64` on use (§4.12).
+    ConstFloat { dst: LocalId, bits: i64 },
     /// Allocate a fresh `GcRef` and store it in `dst`. This is a GC safepoint
     /// (allocation may trigger collection). `kind` selects the runtime wrapper.
     Alloc {
@@ -132,6 +142,26 @@ pub enum Inst {
     },
     /// A comparison yielding a `Bool` scalar (`i8`).
     IntCmp {
+        op: CmpOp,
+        dst: LocalId,
+        lhs: LocalId,
+        rhs: LocalId,
+    },
+    /// An unchecked binary arithmetic op on `Float` scalars (§4.12). Never
+    /// faults — IEEE-754 produces inf/NaN for overflow and division by zero —
+    /// so unlike [`IntBinOp`](Self::IntBinOp) this is not followed by
+    /// [`CheckFault`](Self::CheckFault). Operands/results are bit-pattern `i64`s.
+    FloatBinOp {
+        op: FloatBinOp,
+        dst: LocalId,
+        lhs: LocalId,
+        rhs: LocalId,
+    },
+    /// A comparison of two `Float` scalars yielding a `Bool` scalar (§4.12).
+    /// Uses IEEE-754 ordering: NaN compares unordered against everything (so
+    /// `NaN == NaN` and `NaN < x` are both false). Operands are bit-pattern
+    /// `i64`s; the backend bit-casts to `f64` and emits an `fcmp`.
+    FloatCmp {
         op: CmpOp,
         dst: LocalId,
         lhs: LocalId,
@@ -210,6 +240,10 @@ pub enum AllocKind {
     /// A boxed `Char` initialized from a `u32` Unicode scalar (a `Scalar` local;
     /// M6 wires it for the input parser's `char`/`grid(char)`).
     Char { value: LocalId },
+    /// A boxed `Float` initialized from an `f64` bit pattern (a `Scalar(Float)`
+    /// local; §4.12). The runtime wrapper `praxis_alloc_float` reassembles the
+    /// `f64` from the `i64` bits.
+    Float { value: LocalId },
     /// A boxed nominal record (M7, §4.5). `record_def_id` identifies the struct
     /// type (index into `TypeDb::record_defs`); `fields` are the field-value
     /// locals in declaration order. The builder builds a `RecordSchema` from the
@@ -287,6 +321,18 @@ pub enum CmpOp {
     Gt,
     Le,
     Ge,
+}
+
+/// Float binary operators (§4.12). Unlike [`IntBinOp`], these never fault —
+/// IEEE-754 division by zero yields ±inf or NaN rather than a runtime fault, so
+/// a `FloatBinOp` is never followed by [`Inst::CheckFault`]. There is no `Rem`
+/// (the `%` operator is not defined for floats and is a type error in inference).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloatBinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
 }
 
 /// A block terminator.

@@ -337,10 +337,13 @@ pub struct TypedMatchArm {
 }
 
 /// A literal value. (M4 lowers Int/Bool/Unit; Text materializes via the runtime
-/// text descriptor. M6 adds Char for the input parser's `char`/`grid(char)`.)
+/// text descriptor. M6 adds Char for the input parser's `char`/`grid(char)`.
+/// Float literals land here too, §4.12.)
 #[derive(Clone, Debug)]
 pub enum Lit {
     Int(i64),
+    /// An IEEE-754 binary64 value (the payload of a `Float` object, §4.12).
+    Float(f64),
     Text(String),
     Bool(bool),
     /// A Unicode scalar value (the payload of a `Char` object).
@@ -416,6 +419,7 @@ pub fn lower(
     } = analysis;
     // Cache the scalar/unit handles once (these methods need &mut db).
     let int = db.int();
+    let float = db.float();
     let bool_ = db.bool();
     let text = db.text();
     let unit = db.unit();
@@ -431,6 +435,7 @@ pub fn lower(
         diagnostics: Vec::new(),
         catalog: builtin_catalog(),
         int,
+        float,
         bool_,
         text,
         unit,
@@ -612,6 +617,7 @@ struct Lowerer<'a> {
     /// allocate a fresh slot on every literal/binop (which would need `&mut db`
     /// repeatedly). Populated once at construction.
     int: Type,
+    float: Type,
     bool_: Type,
     text: Type,
     unit: Type,
@@ -1054,6 +1060,17 @@ impl<'a> Lowerer<'a> {
                     ty: self.int,
                 }
             }
+            SyntaxKind::FloatLit => {
+                let text = tok.text();
+                // Parse the lexed float token (`3.14`, `1e10`, …) as f64. The
+                // lexer guarantees a valid float syntax, so parse failure is a
+                // defensive fallback (substitute 0.0) rather than a panic.
+                let value = text.parse::<f64>().unwrap_or(0.0);
+                TypedExpr::Lit {
+                    value: Lit::Float(value),
+                    ty: self.float,
+                }
+            }
             SyntaxKind::TextLit => {
                 let raw = tok.text();
                 let unquoted = unquote_text(raw);
@@ -1148,7 +1165,40 @@ impl<'a> Lowerer<'a> {
                     SyntaxKind::PERCENT => BinOp::Rem,
                     _ => unreachable!(),
                 };
-                (op, self.int)
+                // The result type follows the operands under the strict
+                // per-literal model (§4.12): Float if either operand is a float
+                // literal or has a Float-typed lowering (e.g. a method call
+                // result); Int otherwise. This mirrors the inference-time check.
+                let lhs_is_float = matches!(
+                    lhs.as_deref(),
+                    Some(TypedExpr::Lit {
+                        value: Lit::Float(_),
+                        ..
+                    })
+                );
+                let rhs_is_float = matches!(
+                    rhs.as_deref(),
+                    Some(TypedExpr::Lit {
+                        value: Lit::Float(_),
+                        ..
+                    })
+                );
+                // Determine float-ness from the operands' resolved TypeData, not
+                // by Type-index equality: two independently-interned `Scalar(Float)`
+                // types are structurally equal but may have distinct indices, so a
+                // `Type == Type` check is unreliable. Match on the followed data.
+                let is_float_scalar = |e: &TypedExpr| {
+                    matches!(
+                        self.db.data(self.db.follow(expr_ty(e))),
+                        praxis_types::TypeData::Scalar(praxis_types::ScalarType::Float)
+                    )
+                };
+                let any_float_ty = [lhs.as_deref(), rhs.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .any(is_float_scalar);
+                let is_float = lhs_is_float || rhs_is_float || any_float_ty;
+                (op, if is_float { self.float } else { self.int })
             }
             Some(
                 SyntaxKind::EQ2
@@ -1183,7 +1233,18 @@ impl<'a> Lowerer<'a> {
     fn lower_unary(&mut self, u: &UnaryExpr) -> TypedExpr {
         let operand = u.operand().map(|e| Box::new(self.lower_expr(&e)));
         let (op, ty) = match u.op().map(|t| t.kind()) {
-            Some(SyntaxKind::MINUS) => (UnaryOp::Neg, self.int),
+            // Negation follows the operand's literal kind (§4.12): `-3.5` is
+            // Float, `-3` is Int. A float literal lowers to `Lit::Float`.
+            Some(SyntaxKind::MINUS) => {
+                let is_float = matches!(
+                    operand.as_deref(),
+                    Some(TypedExpr::Lit {
+                        value: Lit::Float(_),
+                        ..
+                    })
+                );
+                (UnaryOp::Neg, if is_float { self.float } else { self.int })
+            }
             Some(SyntaxKind::BANG) => (UnaryOp::Not, self.bool_),
             _ => (UnaryOp::Neg, self.db.fresh_var()),
         };
@@ -1731,6 +1792,7 @@ impl<'a> Lowerer<'a> {
                         let cleaned: String = tok.text().chars().filter(|c| *c != '_').collect();
                         Lit::Int(cleaned.parse::<i64>().unwrap_or(i64::MAX))
                     }
+                    SyntaxKind::FloatLit => Lit::Float(tok.text().parse::<f64>().unwrap_or(0.0)),
                     SyntaxKind::TextLit => Lit::Text(unquote_text(tok.text())),
                     SyntaxKind::KW_TRUE => Lit::Bool(true),
                     SyntaxKind::KW_FALSE => Lit::Bool(false),
@@ -1738,6 +1800,7 @@ impl<'a> Lowerer<'a> {
                 };
                 let ty = match &value {
                     Lit::Int(_) => self.int,
+                    Lit::Float(_) => self.float,
                     Lit::Bool(_) => self.bool_,
                     Lit::Text(_) => self.text,
                     // Char literals don't appear in patterns (no char-literal
