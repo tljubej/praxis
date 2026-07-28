@@ -233,6 +233,14 @@ mod tests {
             praxis_types::TypeData::Collection { ctor, args } => {
                 assert_eq!(*ctor, CollectionCtor::Vec);
                 assert_eq!(args.len(), 1);
+                assert!(
+                    matches!(
+                        db.data(args[0]),
+                        praxis_types::TypeData::Scalar(praxis_types::ScalarType::Int)
+                    ),
+                    "the Vec element must be Int, got {}",
+                    db.render(args[0])
+                );
             }
             other => panic!("expected Vec, got {other:?}"),
         }
@@ -250,6 +258,14 @@ mod tests {
             praxis_types::TypeData::Collection { ctor, args } => {
                 assert_eq!(*ctor, CollectionCtor::Grid);
                 assert_eq!(args.len(), 1);
+                assert!(
+                    matches!(
+                        db.data(args[0]),
+                        praxis_types::TypeData::Scalar(praxis_types::ScalarType::Char)
+                    ),
+                    "the Grid element must be Char, got {}",
+                    db.render(args[0])
+                );
             }
             other => panic!("expected Grid, got {other:?}"),
         }
@@ -271,12 +287,23 @@ mod tests {
         };
         let t = synthesize(&ast, &mut db);
         // Walk three Vec levels.
-        let d = db.data(t);
-        let praxis_types::TypeData::Collection { ctor, args } = d else {
-            panic!("expected Collection");
-        };
-        assert_eq!(*ctor, CollectionCtor::Vec);
-        assert_eq!(args.len(), 1);
+        let mut current = t;
+        for level in 1..=3 {
+            let praxis_types::TypeData::Collection { ctor, args } = db.data(current) else {
+                panic!("level {level} should be Vec, got {}", db.render(current));
+            };
+            assert_eq!(*ctor, CollectionCtor::Vec, "wrong ctor at level {level}");
+            assert_eq!(args.len(), 1, "wrong arity at level {level}");
+            current = args[0];
+        }
+        assert!(
+            matches!(
+                db.data(current),
+                praxis_types::TypeData::Scalar(praxis_types::ScalarType::Int)
+            ),
+            "nested leaf must be Int, got {}",
+            db.render(current)
+        );
     }
 
     #[test]

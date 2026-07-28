@@ -2916,6 +2916,7 @@ pub unsafe extern "C" fn praxis_run_parser(
 mod tests {
     use super::*;
     use crate::context::{Fault, Runtime};
+    use crate::parse_detail::ParseFail;
 
     /// A wired context backed by a real runtime.
     fn wired_ctx(rt: &mut Runtime) -> *mut RuntimeContext {
@@ -2926,6 +2927,22 @@ mod tests {
     unsafe fn drop_ctx(ctx: *mut RuntimeContext) {
         // Reclaim the leaked Box. The runtime outlives this call in tests.
         let _ = unsafe { Box::from_raw(ctx) };
+    }
+
+    /// Allocate through a safepointed ABI wrapper until its pre-allocation
+    /// collection causes the live registry to shrink. Returns the live count
+    /// immediately after that wrapper allocates its result.
+    unsafe fn allocate_until_automatic_collection(rt: &Runtime, ctx: *mut RuntimeContext) -> usize {
+        let mut before = rt.heap().stats().live_count;
+        for i in 0..10_000_i64 {
+            let _ = unsafe { praxis_alloc_int(ctx, i) };
+            let after = rt.heap().stats().live_count;
+            if after < before.saturating_add(1) {
+                return after;
+            }
+            before = after;
+        }
+        panic!("automatic collection did not run after 10,000 allocations");
     }
 
     #[test]
@@ -2950,6 +2967,30 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "known bug: ABI allocates fresh untracked Bool/Unit objects"]
+    fn bool_and_unit_abi_allocations_reuse_runtime_singletons() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let (true_ref, false_ref, unit_ref) = unsafe {
+            (
+                praxis_alloc_bool(ctx, 1),
+                praxis_alloc_bool(ctx, 0),
+                praxis_alloc_unit(ctx),
+            )
+        };
+        let expected = (
+            rt.immortals().true_(),
+            rt.immortals().false_(),
+            rt.immortals().unit(),
+        );
+        unsafe { drop_ctx(ctx) };
+
+        assert_eq!(true_ref.as_ptr(), expected.0.as_ptr());
+        assert_eq!(false_ref.as_ptr(), expected.1.as_ptr());
+        assert_eq!(unit_ref.as_ptr(), expected.2.as_ptr());
+    }
+
+    #[test]
     fn checked_add_returns_sum() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
@@ -2962,6 +3003,21 @@ mod tests {
             assert!(!rt.has_pending_fault());
         }
         unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    #[ignore = "known bug: Float.sign delegates zero to signum, which returns 1.0"]
+    fn float_sign_of_zero_is_zero() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let signed = unsafe {
+            let zero = praxis_alloc_float(ctx, 0.0_f64.to_bits() as i64);
+            let result = praxis_float_sign(ctx, zero);
+            f64::from_bits(praxis_float_load(ctx, result) as u64)
+        };
+        unsafe { drop_ctx(ctx) };
+
+        assert_eq!(signed, 0.0);
     }
 
     #[test]
@@ -3262,24 +3318,46 @@ mod tests {
 
     #[test]
     fn vec_push_many_survive_collection() {
-        // Stress: push 1000 elements (forcing many GCs) and read them all back.
+        // Stress: root the receiver/current element exactly as generated code
+        // does, push enough elements to force multiple automatic collections,
+        // and leave one unrooted allocation per iteration so collection is
+        // observable as a live-registry shrink.
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx wired; push mutates in place so `v` stays valid throughout.
         unsafe {
             let v = praxis_vec_new(ctx, crate::scalars::INT as *const _);
-            for i in 0..1000_i64 {
+            let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 2);
+            (*frame).slots[0] = v.as_ptr();
+            let mut observed_reclamation = false;
+            for i in 0..5000_i64 {
+                let before_alloc = rt.heap().stats().live_count;
                 let elem = praxis_alloc_int(ctx, i);
+                if rt.heap().stats().live_count < before_alloc.saturating_add(1) {
+                    observed_reclamation = true;
+                }
+                (*frame).slots[1] = elem.as_ptr();
+                let before_push = rt.heap().stats().live_count;
                 let _ = praxis_vec_push(ctx, v, elem);
+                if rt.heap().stats().live_count < before_push {
+                    observed_reclamation = true;
+                }
+                (*frame).slots[1] = std::ptr::null_mut();
+                let _ = rt.alloc_int(-i - 1);
             }
-            assert_eq!(praxis_int_load(ctx, praxis_vec_len(ctx, v)), 1000);
+            assert!(
+                observed_reclamation,
+                "the test must observe an automatic collection, not merely allocation pressure"
+            );
+            assert_eq!(praxis_int_load(ctx, praxis_vec_len(ctx, v)), 5000);
             // Spot-check first/middle/last.
             let zero = praxis_alloc_int(ctx, 0);
             assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, zero)), 0);
-            let five = praxis_alloc_int(ctx, 500);
-            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, five)), 500);
-            let nine = praxis_alloc_int(ctx, 999);
-            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, nine)), 999);
+            let middle = praxis_alloc_int(ctx, 2500);
+            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, middle)), 2500);
+            let last = praxis_alloc_int(ctx, 4999);
+            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, last)), 4999);
+            crate::shadow_frame::praxis_pop_shadow_frame(ctx, frame);
         }
         unsafe { drop_ctx(ctx) };
     }
@@ -3351,6 +3429,158 @@ mod tests {
         unsafe { drop_ctx(ctx) };
     }
 
+    #[test]
+    #[ignore = "known bug: Vec[Int] silently adopts the first non-Int descriptor"]
+    fn vec_push_rejects_a_value_with_the_wrong_descriptor() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let length_after;
+        unsafe {
+            let ints = praxis_vec_new(ctx, crate::scalars::INT as *const _);
+            let float = praxis_alloc_float(ctx, 1.5_f64.to_bits() as i64);
+            let _ = praxis_vec_push(ctx, ints, float);
+            length_after = ints.as_vec().len();
+        }
+        unsafe { drop_ctx(ctx) };
+
+        assert_eq!(
+            length_after, 0,
+            "an ABI type mismatch must not silently retag and mutate an explicitly typed Vec[Int]"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: Char conversion truncates i64 to u32 before validation"]
+    fn alloc_char_rejects_values_that_only_become_valid_after_truncation() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let result = unsafe { praxis_alloc_char(ctx, 0x1_0000_0041) };
+        let unit = rt.immortals().unit();
+        unsafe { drop_ctx(ctx) };
+
+        assert_eq!(
+            result.as_ptr(),
+            unit.as_ptr(),
+            "the ABI must range-check the i64 code point before converting it to u32"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: Grid cell-vector methods default their descriptor to Int"]
+    fn grid_cell_vectors_preserve_the_grid_element_descriptor() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let cell = rt.alloc_text("x");
+        let grid = rt.alloc_grid(crate::text::TEXT, vec![cell], 1);
+        let descriptors;
+        unsafe {
+            let zero = praxis_alloc_int(ctx, 0);
+            let cells = praxis_grid_cells(ctx, grid);
+            let row = praxis_grid_row(ctx, grid, zero);
+            let column = praxis_grid_column(ctx, grid, zero);
+            descriptors = [
+                (*vec_payload(cells).element_descriptor).id,
+                (*vec_payload(row).element_descriptor).id,
+                (*vec_payload(column).element_descriptor).id,
+            ];
+        }
+        unsafe { drop_ctx(ctx) };
+
+        assert!(
+            descriptors.iter().all(|id| *id == crate::text::TEXT.id),
+            "cells(), row(), and column() must return Vec values tagged with the Grid cell type"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: Grid[T](width,height) fills T-typed cells with Unit"]
+    fn constructed_grid_cells_satisfy_the_declared_element_descriptor() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let cell_descriptor;
+        unsafe {
+            let grid = praxis_grid_new(ctx, crate::scalars::INT as *const _, 1, 1);
+            cell_descriptor = grid_payload(grid).items[0].descriptor().id;
+        }
+        unsafe { drop_ctx(ctx) };
+
+        assert_eq!(
+            cell_descriptor,
+            crate::scalars::INT.id,
+            "a live Grid[Int] must never contain a Unit placeholder observable through get/format/hash"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: Grid point-vector methods default their descriptor to Int"]
+    fn grid_position_vectors_use_the_point_tuple_descriptor() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let cell = rt.alloc_int(1);
+        let grid = rt.alloc_grid(crate::scalars::INT, vec![cell], 1);
+        let descriptors;
+        unsafe {
+            let point = alloc_point(ctx, 0, 0);
+            let positions = praxis_grid_positions(ctx, grid);
+            let neighbors4 = praxis_grid_neighbors4(ctx, grid, point);
+            let neighbors8 = praxis_grid_neighbors8(ctx, grid, point);
+            let matches = praxis_grid_find_all(ctx, grid, cell);
+            descriptors = [
+                (*vec_payload(positions).element_descriptor).id,
+                (*vec_payload(neighbors4).element_descriptor).id,
+                (*vec_payload(neighbors8).element_descriptor).id,
+                (*vec_payload(matches).element_descriptor).id,
+            ];
+        }
+        unsafe { drop_ctx(ctx) };
+
+        assert!(
+            descriptors.iter().all(|id| *id == crate::tuples::TUPLE.id),
+            "position-producing Grid methods must return Vec[Tuple[Int, Int]] at runtime"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: absent Map.get returns Unit despite its value result type"]
+    fn absent_map_get_does_not_return_an_untyped_unit_sentinel() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let missing;
+        unsafe {
+            let map = praxis_map_new(ctx, crate::scalars::INT as *const _);
+            let key = praxis_alloc_int(ctx, 1);
+            missing = praxis_map_get(ctx, map, key);
+        }
+        unsafe { drop_ctx(ctx) };
+
+        assert_ne!(
+            missing.descriptor().id,
+            crate::scalars::UNIT.id,
+            "Map.get is statically value-typed; absence needs Option or a checked fault, not Unit"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: absent Grid.find returns Unit despite its point result type"]
+    fn absent_grid_find_does_not_return_an_untyped_unit_sentinel() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let missing;
+        unsafe {
+            let cell = praxis_alloc_int(ctx, 1);
+            let sought = praxis_alloc_int(ctx, 2);
+            let grid = rt.alloc_grid(crate::scalars::INT, vec![cell], 1);
+            missing = praxis_grid_find(ctx, grid, sought);
+        }
+        unsafe { drop_ctx(ctx) };
+
+        assert_ne!(
+            missing.descriptor().id,
+            crate::scalars::UNIT.id,
+            "Grid.find is statically point-typed; absence needs Option or a checked fault, not Unit"
+        );
+    }
+
     // --- GC pacing (§12.4, ADR-019) ----------------------------------------
     //
     // `maybe_collect` is the load-bearing mechanism for the M5 shadow-stack
@@ -3400,6 +3630,154 @@ mod tests {
             assert!(!ran2, "counter must reset after a collection");
         }
         unsafe { drop_ctx(ctx) };
+    }
+
+    #[test]
+    #[ignore = "known bug: checked integer arithmetic omits maybe_collect"]
+    fn checked_int_add_is_an_automatic_gc_safepoint() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let collected;
+        unsafe {
+            let lhs = praxis_alloc_int(ctx, 20);
+            let rhs = praxis_alloc_int(ctx, 22);
+            let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 2);
+            (*frame).slots[0] = lhs.as_ptr();
+            (*frame).slots[1] = rhs.as_ptr();
+
+            let mut before = rt.heap().stats().live_count;
+            let mut observed = false;
+            for _ in 0..10_000 {
+                let _ = praxis_int_add(ctx, lhs, rhs);
+                let after = rt.heap().stats().live_count;
+                if after < before.saturating_add(1) {
+                    observed = true;
+                    break;
+                }
+                before = after;
+            }
+            collected = observed;
+            crate::shadow_frame::praxis_pop_shadow_frame(ctx, frame);
+        }
+        unsafe { drop_ctx(ctx) };
+
+        assert!(
+            collected,
+            "every allocating ABI wrapper must participate in automatic GC pacing"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: maybe_collect omits RuntimeContext.input_source"]
+    fn automatic_gc_roots_the_ambient_input_buffer() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let live_after_collection;
+        unsafe {
+            (*ctx).input_source = rt.alloc_text("input that main has not read yet");
+            let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 0);
+            live_after_collection = allocate_until_automatic_collection(&rt, ctx);
+            crate::shadow_frame::praxis_pop_shadow_frame(ctx, frame);
+        }
+        unsafe { drop_ctx(ctx) };
+
+        assert!(
+            live_after_collection >= 2,
+            "the ambient input Text and the allocation returned after collection must both remain live"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: maybe_collect omits ParseDetail.partial"]
+    fn automatic_gc_roots_parse_failure_partial_values() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let partial = rt.alloc_int(99);
+        rt.parse_detail_mut()
+            .consider(ParseFail::here(0, "test").with_partial(Some(partial)), b"");
+        let live_after_collection;
+        unsafe {
+            let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 0);
+            live_after_collection = allocate_until_automatic_collection(&rt, ctx);
+            crate::shadow_frame::praxis_pop_shadow_frame(ctx, frame);
+        }
+        unsafe { drop_ctx(ctx) };
+
+        assert!(
+            live_after_collection >= 2,
+            "ParseDetail.partial is runtime-owned and must be included in every automatic root set"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: maybe_collect omits the runtime-owned crash snapshot"]
+    fn automatic_gc_roots_runtime_owned_crash_snapshots() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let captured = rt.alloc_int(7);
+        let local_name = b"value";
+        let meta = crate::debug::DebugLocalMeta {
+            source_name: local_name.as_ptr(),
+            name_len: local_name.len() as u32,
+            symbol_id: 1,
+            descriptor: crate::scalars::INT as *const _,
+            type_id: 0,
+            kind: crate::debug::LOCAL_KIND_USER,
+            span_start: 0,
+            span_end: 0,
+        };
+        let live_after_collection;
+        unsafe {
+            let debug_frame =
+                crate::debug::praxis_push_debug_frame(ctx, b"main".as_ptr(), 4, 1, &meta);
+            (*(*debug_frame).locals).value = captured;
+            crate::crash_snapshot::praxis_snapshot_debug_chain(ctx);
+            crate::debug::praxis_pop_debug_frame(ctx, debug_frame);
+            assert!(rt.crash_snapshot().is_some());
+
+            let shadow_frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 0);
+            live_after_collection = allocate_until_automatic_collection(&rt, ctx);
+            crate::shadow_frame::praxis_pop_shadow_frame(ctx, shadow_frame);
+        }
+        unsafe { drop_ctx(ctx) };
+
+        assert!(
+            live_after_collection >= 2,
+            "a runtime-owned CrashSnapshot must root its copied local values during automatic GC"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: Grid helpers do not root result Vecs across alloc_point"]
+    fn nested_allocating_helpers_root_intermediate_results() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let live_after_nested_allocation;
+        unsafe {
+            let anchor = praxis_alloc_int(ctx, 1);
+            let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 1);
+            (*frame).slots[0] = anchor.as_ptr();
+
+            // Model Grid.positions/find_all/neighbors: they hold a result Vec
+            // only in a Rust local while repeatedly calling alloc_point.
+            let _intermediate = praxis_vec_new(ctx, crate::tuples::TUPLE as *const _);
+            // Direct allocations raise pacing pressure without collecting.
+            for i in 0..3000_i64 {
+                let _ = rt.alloc_int(i);
+            }
+            // alloc_point calls safepointed praxis_alloc_tuple first, so this
+            // collection exposes whether the Rust-local result was rooted.
+            let _point = alloc_point(ctx, 3, 4);
+            live_after_nested_allocation = rt.heap().stats().live_count;
+
+            crate::shadow_frame::praxis_pop_shadow_frame(ctx, frame);
+        }
+        unsafe { drop_ctx(ctx) };
+
+        assert!(
+            live_after_nested_allocation >= 5,
+            "anchor + intermediate Vec + point tuple + two coordinates must all remain live"
+        );
     }
 
     // --- null-context safety (defensive guards, §10.4 spirit) --------------

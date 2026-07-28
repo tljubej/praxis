@@ -579,4 +579,78 @@ mod tests {
         let id_clones = names.iter().filter(|n| n.starts_with("id__")).count();
         assert_eq!(id_clones, 1, "expected 1 shared clone, got {names:?}");
     }
+
+    #[test]
+    #[ignore = "known bug: specialization renames clones without substituting their types"]
+    fn specialized_clone_carries_concrete_types_throughout() {
+        // Checking only the clone's mangled name does not prove
+        // monomorphization happened: every Type in the cloned function must be
+        // substituted as well. This matters for descriptor selection, GC
+        // tracing, debug metadata, and any non-uniform optimization.
+        let src = "fn id(x) { x }\nfn main() -> Int { id(42) }";
+        let map = SourceMap::new();
+        let id = map.intern("mono_type_test.px", src);
+        let parsed = parse(id, src);
+        let mut analysis = analyze_root(id, &parsed.tree);
+        let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+        let module = lower(id, &root, &mut analysis);
+        let mono = monomorphize(module, &analysis.names, &mut analysis.db);
+        let clone = mono
+            .items
+            .iter()
+            .find_map(|item| match item {
+                TypedItem::Fn(f) if f.name.starts_with("id__") => Some(f),
+                _ => None,
+            })
+            .expect("id clone");
+
+        assert_eq!(
+            analysis.db.render(clone.fn_type),
+            "(Int) -> Int",
+            "the clone's function type must be concrete"
+        );
+        assert_eq!(
+            analysis.db.render(clone.params[0].ty),
+            "Int",
+            "the cloned parameter must use the specialization"
+        );
+        assert_eq!(
+            analysis.db.render(clone.body.ty),
+            "Int",
+            "the cloned body/result must use the specialization"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: zero-argument generic call sites are skipped"]
+    fn zero_argument_generic_result_is_specialized_from_use_context() {
+        // `empty` is `forall T. () -> Vec[T]`; the subsequent push pins T to
+        // Int. An empty arg list is still a real generic call site and must not
+        // cause the original to be dropped without emitting a clone.
+        let names = mono_names(
+            "fn empty() { Vec() }\n\
+             fn main() -> Int { let values = empty(); values.push(1); values.len() }",
+        );
+        assert!(
+            names.iter().any(|n| n.starts_with("empty__")),
+            "expected a specialized zero-arg clone, got {names:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: rendered enum names omit payload types in the cache key"]
+    fn enum_payload_types_participate_in_monomorphization_cache_key() {
+        // TypeDb::render(Enum) currently emits only the nominal name. Using that
+        // string as a cache key must not merge Option[Int] and Option[Text]
+        // specializations.
+        let names = mono_names(
+            "fn id(x) { x }\n\
+             fn main() -> Unit { out(id(Some(1))); out(id(Some(\"text\"))) }",
+        );
+        let id_clones = names.iter().filter(|n| n.starts_with("id__")).count();
+        assert_eq!(
+            id_clones, 2,
+            "Option payload types are distinct concrete instantiations: {names:?}"
+        );
+    }
 }

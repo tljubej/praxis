@@ -265,6 +265,17 @@ mod tests {
         assert_eq!(once, twice);
     }
 
+    #[test]
+    #[ignore = "known bug: the formatter drops all trivia, including comments"]
+    fn regression_formatting_does_not_delete_comments() {
+        let src = "let answer = 42 // the units matter";
+        let once = format(src);
+        assert!(
+            once.contains("// the units matter"),
+            "formatting deleted a source comment: {once:?}"
+        );
+    }
+
     // --- M2: type annotations + tuples --------------------------------------
 
     #[test]

@@ -1416,9 +1416,13 @@ fn template_result_descriptor(
 mod tests {
     use super::*;
 
-    #[test]
-    fn parser_module_present() {
-        // The interpreter is exercised through the JIT integration tests.
+    fn test_plan(nodes: Vec<PlanNode>, root: u32) -> ParserPlan {
+        ParserPlan {
+            nodes: Box::leak(nodes.into_boxed_slice()),
+            template_parts: &[],
+            literals: &[],
+            root,
+        }
     }
 
     #[test]
@@ -1455,15 +1459,94 @@ mod tests {
         assert_eq!(len, 3);
     }
 
+    #[test]
+    #[ignore = "known bug: bounded section parsing loses the source's absolute offset"]
+    fn text_slices_in_later_sections_point_at_their_actual_source_bytes() {
+        let mut rt = crate::Runtime::new();
+        let input = rt.alloc_text("first\n\nsecond");
+        let mut ctx = rt.context();
+        ctx.input_source = input;
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Word,
+                },
+                PlanNode::Sections { child: 0 },
+            ],
+            1,
+        );
+
+        let (result, _) =
+            unsafe { walk(&mut ctx, &plan, plan.root, input.as_text().as_bytes(), 0) }
+                .expect("sections(word) should parse");
+        let values: Vec<&str> = result.as_vec().iter().map(GcRef::as_text).collect();
+
+        assert_eq!(values, vec!["first", "second"]);
+    }
+
+    #[test]
+    #[ignore = "known bug: Grid width/iteration count UTF-8 bytes rather than scalar values"]
+    fn unicode_grid_cells_are_parsed_once_per_scalar() {
+        let mut rt = crate::Runtime::new();
+        let input = rt.alloc_text("é");
+        let mut ctx = rt.context();
+        ctx.input_source = input;
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Char,
+                },
+                PlanNode::Grid { child: 0 },
+            ],
+            1,
+        );
+
+        let (grid, _) = unsafe { walk(&mut ctx, &plan, plan.root, input.as_text().as_bytes(), 0) }
+            .expect("one Unicode scalar is one valid grid cell");
+        let payload = unsafe { &*grid.payload::<crate::collections::GridPayload>() };
+
+        assert_eq!(payload.width, 1);
+        assert_eq!(payload.items.len(), 1);
+    }
+
+    #[test]
+    #[ignore = "known bug: csv does not bound child parsers to an individual token"]
+    fn csv_rest_parser_is_bounded_to_each_token() {
+        let mut rt = crate::Runtime::new();
+        let input = rt.alloc_text("a,b");
+        let mut ctx = rt.context();
+        ctx.input_source = input;
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Rest,
+                },
+                PlanNode::Csv { child: 0 },
+            ],
+            1,
+        );
+
+        let (result, _) =
+            unsafe { walk(&mut ctx, &plan, plan.root, input.as_text().as_bytes(), 0) }
+                .expect("csv(rest) should parse");
+        let values: Vec<&str> = result.as_vec().iter().map(GcRef::as_text).collect();
+
+        assert_eq!(values, vec!["a", "b"]);
+    }
+
     // --- M7-WS9: whitespace matcher (§7.2) -----------------------------------
 
     #[test]
-    fn consume_ws_space_run_skips_spaces_and_tabs() {
+    #[ignore = "known bug: SpaceRun currently accepts an empty run"]
+    fn consume_ws_space_run_requires_one_or_more_spaces_or_tabs() {
         use praxis_input_parser::WsPolicy;
         assert_eq!(consume_ws(b"  ,x", 0, WsPolicy::SpaceRun), Some(2));
         assert_eq!(consume_ws(b"\t\t,x", 0, WsPolicy::SpaceRun), Some(2));
-        // SpaceRun allows zero (so a template at offset 0 matches).
-        assert_eq!(consume_ws(b"x", 0, WsPolicy::SpaceRun), Some(0));
+        assert_eq!(
+            consume_ws(b"x", 0, WsPolicy::SpaceRun),
+            None,
+            "SpaceRun is the one-or-more policy; absence of whitespace must not match"
+        );
     }
 
     #[test]
@@ -1486,5 +1569,39 @@ mod tests {
         assert_eq!(consume_ws(b"\r\nx", 0, WsPolicy::Newline), Some(2));
         assert_eq!(consume_ws(b"\nx", 0, WsPolicy::Newline), Some(1));
         assert_eq!(consume_ws(b"x", 0, WsPolicy::Newline), None);
+    }
+
+    #[test]
+    #[ignore = "known bug: single-capture templates hard-code the Int descriptor"]
+    fn single_anonymous_template_capture_uses_its_child_descriptor() {
+        let parts: &'static [praxis_input_parser::TemplatePartNode] = Box::leak(
+            vec![praxis_input_parser::TemplatePartNode::Capture {
+                child: 0,
+                field_index: None,
+                name: None,
+            }]
+            .into_boxed_slice(),
+        );
+        let nodes: &'static [PlanNode] = Box::leak(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Word,
+                },
+                PlanNode::Template { parts },
+            ]
+            .into_boxed_slice(),
+        );
+        let plan = ParserPlan {
+            nodes,
+            template_parts: &[],
+            literals: &[],
+            root: 1,
+        };
+
+        assert_eq!(
+            child_descriptor(&plan, plan.root).id,
+            crate::text::TEXT.id,
+            "lines(`{{word}}`) must carry Text as its Vec element descriptor"
+        );
     }
 }

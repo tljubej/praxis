@@ -177,19 +177,31 @@ mod tests {
     }
 
     #[test]
-    fn slice_text_reads_through_owner() {
-        // Build an owner, then a slice over bytes [2..5) of "hello, world".
+    fn owned_text_bytes_can_be_borrowed_as_a_manual_subslice() {
         let owner = TextPayload::Owned("hello, world".into());
         let owner_ptr = ptr::addr_of!(owner);
-        // Simulate a slice GcRef: we can't make a real one without the heap, so
-        // construct the payload and verify text_bytes/text_str by handing them a
-        // pointer the owner payload lives at. For a unit test we forge a GcRef
-        // whose payload() resolves to the owner — but that needs a header.
-        // Instead, directly test the owned path is consistent with a manual slice:
         let bytes = unsafe { text_bytes(owner_ptr) };
         assert_eq!(&bytes[7..12], b"world");
         let s = unsafe { text_str(owner_ptr) };
         assert_eq!(s, "hello, world");
+    }
+
+    #[test]
+    fn source_slice_traces_its_owner_during_collection() {
+        let rt = crate::Runtime::new();
+        let owner = rt.alloc_text("hello");
+        let slice = rt.alloc_text_slice(owner, 1, 3);
+        let mut roots = crate::RootScope::new();
+        roots.root(slice);
+
+        rt.collect(&roots);
+
+        assert_eq!(
+            rt.heap().stats().live_count,
+            2,
+            "the rooted slice and its otherwise-unrooted owner must both survive"
+        );
+        assert_eq!(slice.as_text(), "ell");
     }
 
     #[test]

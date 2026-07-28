@@ -454,6 +454,18 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "known bug: KW_IN is lexed as a keyword but is_keyword() omits it"]
+    fn regression_in_is_classified_consistently_with_the_keyword_table() {
+        let kind = SyntaxKind::from_keyword("in").expect("`in` is a keyword");
+        assert_eq!(kind, SyntaxKind::KW_IN);
+        assert_eq!(kind.keyword_text(), Some("in"));
+        assert!(
+            kind.is_keyword(),
+            "every kind produced by from_keyword must satisfy is_keyword"
+        );
+    }
+
+    #[test]
     fn non_keywords_do_not_classify_as_keywords() {
         assert_eq!(SyntaxKind::from_keyword("out"), None); // builtin, not keyword
         assert_eq!(SyntaxKind::from_keyword("x"), None);

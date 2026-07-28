@@ -480,4 +480,43 @@ mod tests {
         assert_eq!(sanitize_name("ok_name"), "ok_name");
         assert_eq!(sanitize_name("x9"), "x9");
     }
+
+    #[test]
+    #[ignore = "known bug: debugger type recovery hard-codes every collection element as Int"]
+    fn regression_runtime_vec_descriptor_recovers_its_real_element_type() {
+        let runtime = Runtime::new();
+        let text = runtime.alloc_text("hello");
+        let value = runtime.alloc_vec(praxis_runtime::text::TEXT, vec![text]);
+        let mut db = TypeDb::new();
+
+        let ty = descriptor_to_type(value, &mut db).expect("Vec has a runtime type");
+        assert_eq!(db.render(ty), "Vec[Text]");
+    }
+
+    #[test]
+    #[ignore = "known bug: debugger scalar TypeId mapping is stale and Float collides with Text"]
+    fn regression_runtime_scalar_descriptors_recover_their_actual_types() {
+        let runtime = Runtime::new();
+        let values = [
+            (runtime.alloc_unit(), "Unit"),
+            (runtime.alloc_bool(true), "Bool"),
+            (runtime.alloc_int(1), "Int"),
+            (runtime.alloc_byte(1), "Byte"),
+            (runtime.alloc_char('x' as u32), "Char"),
+            (runtime.alloc_float(1.5), "Float"),
+            (runtime.alloc_text("x"), "Text"),
+        ];
+
+        for (value, expected) in values {
+            let mut db = TypeDb::new();
+            let ty = descriptor_to_type(value, &mut db)
+                .unwrap_or_else(|| panic!("no debugger type for {expected}"));
+            assert_eq!(
+                db.render(ty),
+                expected,
+                "descriptor {:?} was recovered as the wrong debugger type",
+                value.descriptor().id
+            );
+        }
+    }
 }

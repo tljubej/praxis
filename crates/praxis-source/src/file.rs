@@ -220,4 +220,22 @@ mod tests {
         assert!(map.is_empty());
         assert_eq!(map.len(), 0);
     }
+
+    #[cfg(miri)]
+    #[test]
+    fn regression_file_view_remains_valid_when_more_files_are_interned() {
+        let map = SourceMap::new();
+        let first = map.intern("first.px", "stable");
+        let view = map.get(first).expect("first file exists");
+
+        // Force the backing Vec through several reallocations while `view`
+        // remains live. Miri should reject the subsequent access until stored
+        // SourceFiles have stable addresses (or FileView retains a read guard).
+        for i in 0..4_096 {
+            map.intern(format!("later-{i}.px"), format!("revision {i}"));
+        }
+
+        assert_eq!(view.text(), "stable");
+        assert_eq!(view.path(), Path::new("first.px"));
+    }
 }

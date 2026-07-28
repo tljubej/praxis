@@ -551,17 +551,35 @@ error[T003]: unexpected byte in source
 
     #[test]
     fn keywords_split_from_identifiers() {
-        let (kinds, diags) = lex_text("let var fn if else while for match return");
+        let (kinds, diags) = lex_text(
+            "let var fn if else while for in loop match return break continue read struct enum true false",
+        );
         assert!(diags.is_empty());
-        assert!(kinds.contains(&SyntaxKind::KW_LET));
-        assert!(kinds.contains(&SyntaxKind::KW_VAR));
-        assert!(kinds.contains(&SyntaxKind::KW_FN));
-        assert!(kinds.contains(&SyntaxKind::KW_IF));
-        assert!(kinds.contains(&SyntaxKind::KW_ELSE));
-        assert!(kinds.contains(&SyntaxKind::KW_WHILE));
-        assert!(kinds.contains(&SyntaxKind::KW_FOR));
-        assert!(kinds.contains(&SyntaxKind::KW_MATCH));
-        assert!(kinds.contains(&SyntaxKind::KW_RETURN));
+        for keyword in [
+            SyntaxKind::KW_LET,
+            SyntaxKind::KW_VAR,
+            SyntaxKind::KW_FN,
+            SyntaxKind::KW_IF,
+            SyntaxKind::KW_ELSE,
+            SyntaxKind::KW_WHILE,
+            SyntaxKind::KW_FOR,
+            SyntaxKind::KW_IN,
+            SyntaxKind::KW_LOOP,
+            SyntaxKind::KW_MATCH,
+            SyntaxKind::KW_RETURN,
+            SyntaxKind::KW_BREAK,
+            SyntaxKind::KW_CONTINUE,
+            SyntaxKind::KW_READ,
+            SyntaxKind::KW_STRUCT,
+            SyntaxKind::KW_ENUM,
+            SyntaxKind::KW_TRUE,
+            SyntaxKind::KW_FALSE,
+        ] {
+            assert!(
+                kinds.contains(&keyword),
+                "missing keyword token {keyword:?}"
+            );
+        }
     }
 
     #[test]
@@ -578,6 +596,33 @@ error[T003]: unexpected byte in source
             meaningful.iter().all(|k| *k == SyntaxKind::Ident),
             "expected all identifiers, got {meaningful:?}"
         );
+    }
+
+    #[test]
+    #[ignore = "known bug: the byte classifier rejects a non-ASCII identifier start"]
+    fn regression_unicode_identifier_may_start_with_a_unicode_scalar() {
+        let (kinds, diags) = lex_text("let λ = 1");
+        assert!(diags.is_empty(), "Unicode identifier faulted: {diags:?}");
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::Ident)
+                .count(),
+            1,
+            "`λ` should be one identifier token"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: a lone `_` is emitted as Ident, making wildcard patterns bindings"]
+    fn regression_lone_underscore_has_its_dedicated_token_kind() {
+        let (kinds, diags) = lex_text("_");
+        assert!(diags.is_empty(), "underscore should lex cleanly: {diags:?}");
+        let meaningful: Vec<_> = kinds
+            .into_iter()
+            .filter(|kind| !kind.is_trivia() && *kind != SyntaxKind::EOF)
+            .collect();
+        assert_eq!(meaningful, vec![SyntaxKind::UNDERSCORE]);
     }
 
     #[test]

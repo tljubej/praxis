@@ -28,13 +28,18 @@ fn func1(db: &mut TypeDb, a: crate::Type, r: crate::Type) -> crate::Type {
 }
 
 #[test]
-fn scalar_interning_is_stable() {
+fn scalar_construction_preserves_structure_without_handle_deduplication() {
     let mut db = TypeDb::new();
     let a = db.int();
     let b = db.int();
-    // Two separately-interned Ints have equal *structure*; follow resolves both.
+    // `Type` is an arena handle, not a canonical structural id. Two calls mint
+    // different handles, while structural unification still recognizes both as
+    // Int. Checking only their payload shape would not test that distinction.
+    assert_ne!(a, b);
     assert!(is_int(&db, a));
     assert!(is_int(&db, b));
+    db.unify(a, b)
+        .expect("separately allocated Int shapes unify");
     let unit = db.unit();
     assert!(matches!(db.data(db.follow(unit)), TypeData::Unit));
 }
@@ -418,7 +423,7 @@ fn anonymous_record_renders_structurally() {
 }
 
 #[test]
-fn nominal_records_same_name_unify() {
+fn nominal_records_with_same_name_but_distinct_def_ids_do_not_unify() {
     let mut db = TypeDb::new();
     let i = db.int();
     let a = db.register_record("Point", vec![("x".into(), i)]);
@@ -744,4 +749,97 @@ fn anonymous_enums_different_shape_do_not_unify() {
     let a = db.anon_enum(vec![("Foo".into(), None)]);
     let b = db.anon_enum(vec![("Bar".into(), None)]);
     assert!(db.unify(a, b).is_err());
+}
+
+// ---- adversarial level/generalization coverage -----------------------------
+
+#[test]
+#[ignore = "known bug: level lowering raises older variables instead of lowering inner ones"]
+fn linking_an_outer_var_to_an_inner_type_prevents_inner_generalization() {
+    // The outer variable is part of the environment. Once it is unified with a
+    // type containing an inner variable, that inner variable must be lowered to
+    // the outer level; otherwise generalizing the result would quantify a
+    // variable that is still reachable from the outer environment.
+    let mut db = TypeDb::new();
+    let outer = db.fresh_var(); // level 0
+    let body = db.scoped_return(|db| {
+        let inner = db.fresh_var(); // level 1
+        let pair = db.tuple(vec![inner, inner]);
+        db.unify(outer, pair).expect("outer var accepts inner pair");
+        outer
+    });
+
+    let scheme = db.generalize(body);
+    assert!(
+        scheme.quantified.is_empty(),
+        "a type reachable through an outer variable must stay monomorphic, got {}",
+        db.render_scheme(&scheme)
+    );
+}
+
+#[test]
+#[ignore = "known bug: instantiation clones free variables instead of preserving identity"]
+fn instantiation_preserves_non_quantified_variable_identity() {
+    // A scheme may contain both a quantified variable and a free (environment)
+    // variable. Instantiation replaces only the quantified variable. Repeated
+    // occurrences of the free variable must remain the same slot, otherwise
+    // `(outer, T) -> outer` silently becomes `(A, T) -> B`.
+    let mut db = TypeDb::new();
+    let outer = db.fresh_var(); // free at the generalization site
+    let body = db.scoped_return(|db| {
+        let quantified = db.fresh_var();
+        db.func(vec![outer, quantified], outer)
+    });
+    let scheme = db.generalize(body);
+    assert_eq!(scheme.quantified.len(), 1);
+
+    let instantiated = db.instantiate(&scheme);
+    let (params, result) = match db.data(db.follow(instantiated)).clone() {
+        TypeData::Func { params, result } => (params, result),
+        other => panic!("expected function, got {other:?}"),
+    };
+    let int = db.int();
+    db.unify(params[0], int)
+        .expect("the free input variable accepts Int");
+    assert!(
+        is_int(&db, result),
+        "the repeated free variable in the result must be the same variable"
+    );
+}
+
+#[test]
+#[ignore = "known bug: deep_resolve does not recurse through record definitions"]
+fn deep_resolve_rewrites_record_field_links() {
+    // `deep_resolve` promises a type whose composite leaves are concrete, not
+    // merely linked. Record fields live in a side table and must participate in
+    // that recursive resolution just like tuple/collection elements.
+    let mut db = TypeDb::new();
+    let field_var = db.fresh_var();
+    let record = db.anon_record(vec![("value".into(), field_var)]);
+    let int = db.int();
+    db.unify(field_var, int).expect("field var ~ Int");
+
+    let resolved = db.deep_resolve(record);
+    let def = match db.data(db.follow(resolved)) {
+        TypeData::Record { def } => *def,
+        other => panic!("expected record, got {other:?}"),
+    };
+    let field_ty = db.record_def(def).field("value").expect("value field").1;
+    assert!(
+        matches!(db.data(field_ty), TypeData::Scalar(ScalarType::Int)),
+        "deep-resolved record field must not retain a Linked var: {:?}",
+        db.data(field_ty)
+    );
+}
+
+#[test]
+#[ignore = "known bug: enum unification distinguishes None from an empty payload"]
+fn empty_enum_payload_and_no_payload_are_equivalent() {
+    // EnumVariantDef documents `Some(vec![])` as equivalent to `None`.
+    // Unification must therefore not distinguish the two representations.
+    let mut db = TypeDb::new();
+    let no_payload = db.register_enum("E", vec![("Only".into(), None)]);
+    let empty_payload = db.register_enum("E", vec![("Only".into(), Some(Vec::new()))]);
+    db.unify(no_payload, empty_payload)
+        .expect("None and Some(empty) payloads are semantically identical");
 }

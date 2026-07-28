@@ -64,6 +64,26 @@ fn assert_faults(name: &str, fault_msg: &str) {
 }
 
 #[test]
+#[ignore = "known bug: --input read errors are silently converted to empty input"]
+fn missing_explicit_input_file_is_a_usage_error() {
+    let missing = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/run/definitely-missing-input.txt");
+    let output = Command::new(bin_path())
+        .args(["run", "--input"])
+        .arg(&missing)
+        .arg(fixture("constant.px"))
+        .output()
+        .expect("failed to run praxis");
+    let code = output.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(code, 2, "unreadable explicit input is a usage error");
+    assert!(
+        stderr.contains("failed to read") && stderr.contains("input"),
+        "the input I/O error must be reported, got: {stderr}"
+    );
+}
+
+#[test]
 fn run_pass_constant() {
     assert_passes("constant.px", "42");
 }

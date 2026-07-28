@@ -1,0 +1,640 @@
+//! Focused MIR/Cranelift regressions found by the post-M10 adversarial audit.
+//!
+//! These tests intentionally state the language/runtime contract. Some expose
+//! known implementation defects and therefore fail until the corresponding
+//! handover item is fixed; they must not be weakened to assert current behavior.
+
+use std::fmt::Write as _;
+
+use praxis_ast::AstNode;
+use praxis_codegen_cranelift::Jit;
+use praxis_hir::{analyze_root, lower, mono::monomorphize};
+use praxis_mir::{annotate, lower_module};
+use praxis_parser::parse;
+use praxis_runtime::{
+    collections::VecPayload, tuples::TuplePayload, GcRef, Runtime, RuntimeContext,
+};
+use praxis_source::SourceMap;
+
+fn compile(
+    src: &str,
+) -> (
+    Jit,
+    std::collections::HashMap<String, cranelift_module::FuncId>,
+) {
+    let map = SourceMap::new();
+    let file = map.intern("adversarial_audit.px", src);
+    let parsed = parse(file, src);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "parse diagnostics: {:?}",
+        parsed.diagnostics
+    );
+    let mut analysis = analyze_root(file, &parsed.tree);
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "analysis diagnostics: {:?}",
+        analysis.diagnostics
+    );
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).expect("source root");
+    let module = lower(file, &root, &mut analysis);
+    assert!(
+        module.diagnostics.is_empty(),
+        "lowering diagnostics: {:?}",
+        module.diagnostics
+    );
+    let module = monomorphize(module, &analysis.names, &mut analysis.db);
+    let mut funcs = lower_module(&module, &mut analysis.db);
+    for func in &mut funcs {
+        annotate(func);
+    }
+    let mut jit = Jit::new().expect("JIT construction");
+    let ids = jit
+        .compile(&funcs, &mut analysis.db)
+        .expect("JIT compilation");
+    (jit, ids)
+}
+
+fn run_main(src: &str) -> (Runtime, GcRef) {
+    run_main_with_input(src, "")
+}
+
+fn run_main_with_input(src: &str, input: &str) -> (Runtime, GcRef) {
+    let (jit, ids) = compile(src);
+    let main_id = *ids.get("main").expect("main function");
+    let mut runtime = Runtime::new();
+    let mut context = runtime.context();
+    context.input_source = runtime.alloc_text(input);
+    // `main` has no source parameters: its generated ABI is exactly `(ctx)`.
+    // Do not repeat the legacy test helper's phantom GcRef argument.
+    type ZeroArgMain = unsafe extern "C" fn(*mut RuntimeContext) -> GcRef;
+    let entry: ZeroArgMain = unsafe { std::mem::transmute(jit.entry(main_id)) };
+    let result = unsafe { entry(&mut context as *mut RuntimeContext) };
+    drop(jit);
+    (runtime, result)
+}
+
+/// Call a JIT entry through its raw i64 return channel. Fault epilogues are
+/// inspected this way so a buggy zero return is not first materialized as the
+/// invalid Rust value `GcRef(NonNull::new_unchecked(0))`.
+fn run_main_raw_with_input(src: &str, input: &str) -> (Runtime, usize, usize) {
+    type RawZeroArgMain = unsafe extern "C" fn(*mut RuntimeContext) -> usize;
+
+    let (jit, ids) = compile(src);
+    let main_id = *ids.get("main").expect("main function");
+    let mut runtime = Runtime::new();
+    let mut context = runtime.context();
+    context.input_source = runtime.alloc_text(input);
+    let unit = runtime.alloc_unit();
+    let unit_addr = unit.as_ptr() as usize;
+    let entry: RawZeroArgMain = unsafe { std::mem::transmute(jit.entry(main_id)) };
+    let result = unsafe { entry(&mut context as *mut RuntimeContext) };
+    drop(jit);
+    (runtime, result, unit_addr)
+}
+
+fn tuple_items(value: GcRef) -> Vec<GcRef> {
+    assert_eq!(
+        value.descriptor().id,
+        praxis_runtime::tuples::TUPLE.id,
+        "pipeline element should be a Tuple"
+    );
+    let payload = value.payload::<TuplePayload>();
+    // SAFETY: the descriptor check above establishes the payload shape. The
+    // copied GcRefs remain valid while the Runtime owned by the test is live.
+    unsafe { (*payload).items.clone() }
+}
+
+fn tuple_element_descriptor_ids(value: GcRef) -> Vec<praxis_runtime::descriptor::TypeId> {
+    assert_eq!(
+        value.descriptor().id,
+        praxis_runtime::tuples::TUPLE.id,
+        "value should be a Tuple"
+    );
+    let payload = value.payload::<TuplePayload>();
+    // SAFETY: the descriptor check establishes TuplePayload, and tuple
+    // construction installs a process-static TupleSchema.
+    let schema = unsafe { &*(*payload).schema };
+    schema
+        .descriptors
+        .iter()
+        // SAFETY: schema entries are pointers to process-static descriptors.
+        .map(|descriptor| unsafe { &**descriptor }.id)
+        .collect()
+}
+
+#[test]
+#[ignore = "known bug: generated fault epilogues return raw zero instead of Unit"]
+fn fault_epilogue_returns_the_valid_unit_sentinel() {
+    // The no-panic fault protocol promises a defined dummy value. Because
+    // GcRef is NonNull, integer zero is not a valid dummy; the generated fault
+    // epilogue must return RuntimeContext.unit_ref.
+    let (runtime, raw_result, unit_addr) =
+        run_main_raw_with_input("fn main() -> Int { 1 / 0 }", "");
+    assert_eq!(runtime.fault(), praxis_runtime::FaultKind::DivByZero);
+    assert_eq!(
+        raw_result, unit_addr,
+        "fault paths must return the Unit GcRef, never a null i64"
+    );
+}
+
+#[test]
+#[ignore = "known bug: enumerate tuples use an empty opaque schema"]
+fn enumerate_materializes_index_and_element_tuple_payloads() {
+    // The older enumerate test only counted results. Inspect the claimed
+    // `(index, element)` values themselves so an empty TupleSchema cannot pass.
+    let (runtime, result) =
+        run_main("fn main() {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.enumerate()\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    let values = result.as_vec();
+    assert_eq!(values.len(), 2);
+    let first = tuple_items(values[0]);
+    let second = tuple_items(values[1]);
+    assert_eq!(first.len(), 2, "enumerate tuples have arity two");
+    assert_eq!(second.len(), 2, "enumerate tuples have arity two");
+    assert_eq!((first[0].as_int(), first[1].as_int()), (0, 10));
+    assert_eq!((second[0].as_int(), second[1].as_int()), (1, 20));
+}
+
+#[test]
+#[ignore = "known bug: zip tuples use an empty opaque schema"]
+fn zip_materializes_both_tuple_elements() {
+    // Counting zipped values does not prove that either tuple element was
+    // stored. Read both payload slots.
+    let (runtime, result) = run_main(
+        "fn main() {\n  let a = Vec()\n  a.push(1)\n  a.push(2)\n  let b = Vec()\n  b.push(10)\n  b.push(20)\n  a.zip(b)\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    let values = result.as_vec();
+    assert_eq!(values.len(), 2);
+    let first = tuple_items(values[0]);
+    let second = tuple_items(values[1]);
+    assert_eq!(first.len(), 2, "zip tuples have arity two");
+    assert_eq!(second.len(), 2, "zip tuples have arity two");
+    assert_eq!((first[0].as_int(), first[1].as_int()), (1, 10));
+    assert_eq!((second[0].as_int(), second[1].as_int()), (2, 20));
+}
+
+#[test]
+#[ignore = "known bug: take counts source indices after a filter"]
+fn take_after_filter_counts_filtered_elements_not_source_indices() {
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter(|x| x % 2 == 0).take(2).sum()\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 6, "take(2) applies after filter");
+}
+
+#[test]
+#[ignore = "known bug: skip counts source indices after a filter"]
+fn skip_after_filter_counts_filtered_elements_not_source_indices() {
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(6)\n  v.filter(|x| x % 2 == 0).skip(1).sum()\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 10, "skip(1) drops the first filtered item");
+}
+
+#[test]
+#[ignore = "known bug: zip indexes the rhs with sparse pre-filter indices"]
+fn zip_after_filter_uses_dense_filtered_positions() {
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  let rhs = Vec()\n  rhs.push(10)\n  rhs.push(20)\n  v.filter(|x| x % 2 == 0).zip(rhs).count()\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        2,
+        "both filtered elements should pair with the two-element rhs"
+    );
+}
+
+#[test]
+#[ignore = "known bug: position reports the sparse source index after filter"]
+fn position_after_filter_reports_the_filtered_sequence_index() {
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.filter(|x| x % 2 == 0).position(|x| x == 4)\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        1,
+        "the filtered sequence is [2, 4], so 4 is at position one"
+    );
+}
+
+#[test]
+#[ignore = "known bug: a second flat_map reaches an unreachable MIR arm"]
+fn two_flat_map_stages_compose_without_a_compiler_panic() {
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let a = Vec()\n    a.push(x)\n    a\n  }).flat_map(|x| {\n    let b = Vec()\n    b.push(x)\n    b\n  }).count()\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+#[test]
+#[ignore = "known bug: take inside flat_map resets for every inner sequence"]
+fn take_after_flat_map_counts_the_global_flattened_stream() {
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let inner = Vec()\n    inner.push(x)\n    inner\n  }).take(1).count()\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+#[ignore = "known bug: position inside flat_map reports a per-inner index"]
+fn position_after_flat_map_uses_the_global_flattened_index() {
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let inner = Vec()\n    inner.push(x)\n    inner\n  }).position(|x| x == 2)\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+#[test]
+#[ignore = "known bug: flat_map any short-circuits only the current inner loop"]
+fn any_after_flat_map_short_circuits_the_whole_pipeline() {
+    let (runtime, result) = run_main(
+        "fn main() -> Bool {\n  let v = Vec()\n  v.push(1)\n  v.push(0)\n  v.flat_map(|x| {\n    let inner = Vec()\n    inner.push(x)\n    inner\n  }).any(|x| x == 1 || 10 / x > 0)\n}\n",
+    );
+    assert!(
+        !runtime.has_pending_fault(),
+        "the predicate must not run on 0 after any already found true: {:?}",
+        runtime.fault()
+    );
+    assert!(result.as_bool());
+}
+
+#[test]
+#[ignore = "known bug: Record tuple fields are dispatched through INT"]
+fn nested_record_inequality_dispatches_to_the_record_descriptor() {
+    // The pre-existing tuple-of-record test only covered equal records. If the
+    // tuple schema incorrectly records INT for a Record element, INT equality
+    // compares the RecordPayload's first machine word (the shared schema
+    // pointer) and declares every same-shaped record equal.
+    let (runtime, result) = run_main(
+        "struct P { x: Int }\nfn main() -> Int {\n  let a = (P { x: 1 }, 0)\n  let b = (P { x: 2 }, 0)\n  if a == b { 1 } else { 0 }\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+#[test]
+fn vec_float_push_adopts_float_descriptor_and_preserves_signed_zero_semantics() {
+    // This is a passing guard, not proof that codegen selected FLOAT:
+    // praxis_vec_push currently repairs the initial INT fallback by adopting
+    // the first pushed value's descriptor. Keep the signed-zero behavior
+    // covered while the direct empty-Vec regression below exposes codegen.
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  let a = Vec()\n  a.push(0.0)\n  let b = Vec()\n  b.push(-0.0)\n  if a == b { 1 } else { 0 }\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 1, "+0.0 and -0.0 are equal Floats");
+}
+
+#[test]
+#[ignore = "known bug: descriptor_for_type maps Float collection elements to INT"]
+fn empty_vec_float_has_the_float_element_descriptor_before_any_push() {
+    let (runtime, result) =
+        run_main("fn main() -> Vec[Float] {\n  let values: Vec[Float] = Vec()\n  values\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    let payload = result.payload::<VecPayload>();
+    // SAFETY: result is a Vec and the process-static descriptor pointer is
+    // initialized even when its items buffer is empty.
+    let descriptor = unsafe { &*(*payload).element_descriptor };
+    assert_eq!(
+        descriptor.id,
+        praxis_runtime::scalars::FLOAT.id,
+        "an empty Vec[Float] has no first push that can repair a wrong descriptor"
+    );
+}
+
+#[test]
+#[ignore = "known bug: record schema cache is keyed only by reusable RecordDefId"]
+fn record_schema_cache_is_scoped_by_type_database_not_bare_def_id() {
+    // record_def_id is positional and restarts in every independently analyzed
+    // program. Use a high id so unrelated tests cannot seed it accidentally,
+    // then compile two JIT generations with different shapes at the same id.
+    const TARGET: usize = 211;
+    let mut seed = String::new();
+    for i in 0..=TARGET {
+        writeln!(&mut seed, "struct Seed{i} {{ value: Int }}").unwrap();
+    }
+    writeln!(
+        &mut seed,
+        "fn main() -> Int {{ let x = Seed{TARGET} {{ value: 7 }}; x.value }}"
+    )
+    .unwrap();
+    let (seed_runtime, seed_result) = run_main(&seed);
+    assert!(!seed_runtime.has_pending_fault());
+    assert_eq!(seed_result.as_int(), 7);
+
+    let mut probe = String::new();
+    for i in 0..=TARGET {
+        writeln!(&mut probe, "struct Probe{i} {{ value: Text }}").unwrap();
+    }
+    writeln!(
+        &mut probe,
+        "fn main() -> Int {{\n  let a = Probe{TARGET} {{ value: \"left\" }}\n  let b = Probe{TARGET} {{ value: \"right\" }}\n  if a == b {{ 1 }} else {{ 0 }}\n}}"
+    )
+    .unwrap();
+    let (probe_runtime, probe_result) = run_main(&probe);
+    assert!(
+        !probe_runtime.has_pending_fault(),
+        "fault: {:?}",
+        probe_runtime.fault()
+    );
+    assert_eq!(
+        probe_result.as_int(),
+        0,
+        "a schema from the prior TypeDb must not make distinct Text fields compare as Ints"
+    );
+}
+
+#[test]
+#[ignore = "known bug: mutable structurally hashed keys can change their hash in place"]
+fn mutating_a_collection_key_does_not_break_map_lookup() {
+    // The type system currently admits mutable, structurally-hashed values as
+    // keys. A language implementation must reject that state or keep key hash
+    // identity stable; exposing Rust HashMap's "mutated key" failure is not a
+    // coherent source-language behavior.
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  let key = Vec()\n  key.push(1)\n  let m = Map()\n  m.insert(key, 42)\n  key.push(2)\n  if m.contains(key) { 1 } else { 0 }\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        1,
+        "a key accepted by the type checker must remain retrievable"
+    );
+}
+
+#[test]
+fn heavy_jit_loop_proves_that_automatic_collection_actually_ran() {
+    // Result-only stress tests can pass without ever crossing the collection
+    // threshold. This loop creates at least ten registered Int allocations per
+    // iteration (~100k total). With no sweep, live_count remains >=100k; after
+    // automatic GC it is well below that even though the arithmetic result is
+    // unchanged.
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  var sum = 0\n  var i = 0\n  while i < 10000 {\n    sum = sum + i\n    i = i + 1\n  }\n  sum\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 49_995_000);
+    assert!(
+        runtime.heap().stats().live_count < 90_000,
+        "the allocation stress probe did not demonstrate a sweep: {:?}",
+        runtime.heap().stats()
+    );
+}
+
+#[test]
+#[ignore = "known bug: nested sections lose their absolute source offsets"]
+fn sections_preserve_text_offsets_into_the_original_input() {
+    let src = "fn main() -> Text {\n  let groups = read sections(lines(word))\n  groups.get(1).get(0)\n}\n";
+    let (runtime, result) = run_main_with_input(src, "alpha\n\nbeta\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_text(), "beta");
+}
+
+#[test]
+#[ignore = "known bug: lines accepts a child parser that consumed only a prefix"]
+fn lines_require_each_child_parser_to_consume_the_whole_line() {
+    // `int` may consume the `12` prefix, but the trailing `junk` makes the line
+    // invalid under §7.5 full-consumption semantics.
+    let (runtime, _raw, _unit) = run_main_raw_with_input(
+        "fn main() -> Int {\n  let values = read lines(int)\n  values.len()\n}\n",
+        "12junk\n",
+    );
+    assert_eq!(
+        runtime.fault(),
+        praxis_runtime::FaultKind::ParseFailed,
+        "a partially consumed line must not be accepted"
+    );
+}
+
+#[test]
+#[ignore = "known bug: lines(rest) receives the full remaining input, not one line"]
+fn lines_rest_is_bounded_to_each_line() {
+    let src = "fn main() -> Text {\n  let values = read lines(rest)\n  values.get(1)\n}\n";
+    let (runtime, result) = run_main_with_input(src, "alpha\nbeta\ngamma\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_text(), "beta");
+}
+
+#[test]
+#[ignore = "known bug: anonymous word templates are tagged with the INT descriptor"]
+fn anonymous_word_template_vec_uses_the_text_element_descriptor() {
+    let src = "fn main() -> Vec[Text] {\n  read lines(`{word}`)\n}\n";
+    let (runtime, result) = run_main_with_input(src, "alpha\nbeta\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+
+    let mut rendered = String::new();
+    result.format(&mut rendered);
+    assert_eq!(rendered, "[alpha, beta]");
+
+    let payload = result.payload::<VecPayload>();
+    // SAFETY: result is a Vec according to both its static and runtime type.
+    let descriptor = unsafe { &*(*payload).element_descriptor };
+    assert_eq!(
+        descriptor.id,
+        praxis_runtime::text::TEXT.id,
+        "a Vec of word captures must dispatch through TEXT"
+    );
+}
+
+#[test]
+#[ignore = "known bug: text captures consume literals that follow the capture"]
+fn template_text_capture_stops_before_the_following_literal() {
+    let src = "fn main() -> Text {\n  let parsed = read `pre{body:text}post`\n  parsed.body\n}\n";
+    let (runtime, result) = run_main_with_input(src, "premiddlepost");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_text(), "middle");
+}
+
+#[test]
+#[ignore = "known bug: chars(int) advertises Char while storing Int objects"]
+fn chars_result_descriptor_matches_the_values_it_contains() {
+    let src = "fn main() -> Vec[Char] {\n  read chars(int, skip: none)\n}\n";
+    let (runtime, result) = run_main_with_input(src, "65");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    let payload = result.payload::<VecPayload>();
+    // SAFETY: result is a runtime Vec.
+    let payload = unsafe { &*payload };
+    assert_eq!(payload.items.len(), 1);
+    let declared = unsafe { &*payload.element_descriptor }.id;
+    let actual = payload.items[0].descriptor().id;
+    assert_eq!(
+        declared, actual,
+        "collection descriptors and stored object headers must agree"
+    );
+}
+
+#[test]
+fn one_generic_function_is_instantiated_at_int_and_text_in_one_program() {
+    // The pre-existing test named "two clones" calls `id` twice at Int and
+    // therefore proves clone reuse, not distinct monomorphic instantiations.
+    let (runtime, result) = run_main(
+        "fn id(x) { x }\nfn main() -> Int {\n  let word = id(\"four\")\n  id(38) + word.len()\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+// The tests below are ignored because the current implementation can dispatch
+// through a descriptor for the wrong payload shape (or return an invalid raw
+// GcRef). They are still executable, focused handover regressions; keeping them
+// out of the default process prevents a known bug from turning a test failure
+// into host-language undefined behavior.
+
+#[test]
+#[ignore = "known bug: descriptor_for_type maps Unit tuple fields to INT"]
+fn tuple_schema_uses_the_unit_descriptor_for_unit_elements() {
+    let (runtime, result) =
+        run_main("fn main() {\n  let unit = { let ignored = 1 }\n  (unit, 7)\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        tuple_element_descriptor_ids(result),
+        vec![
+            praxis_runtime::scalars::UNIT.id,
+            praxis_runtime::scalars::INT.id
+        ],
+        "format/equals/hash must never read Unit's zero-sized payload as an Int"
+    );
+}
+
+#[test]
+#[ignore = "known bug: descriptor_for_type maps Enum tuple fields to INT"]
+fn tuple_schema_uses_the_enum_descriptor_for_enum_elements() {
+    let (runtime, result) = run_main("enum Marker { A, B }\nfn main() {\n  (A, 7)\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        tuple_element_descriptor_ids(result),
+        vec![
+            praxis_runtime::enums::ENUM.id,
+            praxis_runtime::scalars::INT.id
+        ],
+        "enum payloads require ENUM format/equality/hash dispatch"
+    );
+}
+
+#[test]
+#[ignore = "known bug: Grid position Vecs are tagged as Vec[Int]"]
+fn grid_positions_vec_uses_the_point_tuple_descriptor() {
+    let (runtime, result) = run_main_with_input(
+        "fn main() {\n  let g = read grid(char)\n  g.positions()\n}\n",
+        "ab\ncd\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    let payload = result.payload::<VecPayload>();
+    // SAFETY: the source and runtime result are both Vec values. Merely
+    // inspecting the descriptor does not reinterpret any tuple payload.
+    let descriptor = unsafe { &*(*payload).element_descriptor };
+    assert_eq!(
+        descriptor.id,
+        praxis_runtime::tuples::TUPLE.id,
+        "positions/neighbors/find_all must return Vec[(Int, Int)]"
+    );
+}
+
+#[test]
+#[ignore = "known bug: Grid row/cells/column Vecs discard the cell descriptor"]
+fn grid_text_row_preserves_the_grid_cell_descriptor() {
+    let (runtime, result) = run_main_with_input(
+        "fn main() {\n  let g = read matrix(word)\n  g.row(0)\n}\n",
+        "alpha beta\ngamma delta\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    let payload = result.payload::<VecPayload>();
+    // SAFETY: result is a Vec. This avoids formatting the Text elements
+    // through the currently incorrect Int descriptor.
+    let descriptor = unsafe { &*(*payload).element_descriptor };
+    assert_eq!(
+        descriptor.id,
+        praxis_runtime::text::TEXT.id,
+        "row/cells/column must preserve Grid[T]'s T descriptor"
+    );
+}
+
+#[test]
+#[ignore = "known bug: absent Grid.find returns Unit under a Tuple static type"]
+fn absent_grid_find_has_no_unit_under_a_tuple_type() {
+    let (runtime, result) = run_main_with_input(
+        "fn main() {\n  let g = read matrix(int)\n  g.find(99)\n}\n",
+        "1 2\n3 4\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.descriptor().id,
+        praxis_runtime::tuples::TUPLE.id,
+        "a value statically typed (Int, Int) cannot be the Unit sentinel"
+    );
+}
+
+#[test]
+#[ignore = "known bug: absent Map.get returns Unit under its V static type"]
+fn absent_map_get_has_no_unit_under_the_value_type() {
+    let (runtime, result) =
+        run_main("fn main() {\n  let m = Map()\n  m.insert(1, 10)\n  m.get(2)\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.descriptor().id,
+        praxis_runtime::scalars::INT.id,
+        "a value statically typed Int cannot be the Unit sentinel"
+    );
+}
+
+#[test]
+#[ignore = "known bug: empty reduce/min_by/max_by return an uninitialized Gc local"]
+fn empty_element_returning_sinks_fault_instead_of_returning_uninitialized_gc_refs() {
+    let cases = [
+        (
+            "reduce",
+            "fn main() -> Int {\n  let v = Vec()\n  v.reduce(|a, x| a + x)\n}\n",
+        ),
+        (
+            "min_by",
+            "fn main() -> Int {\n  let v = Vec()\n  v.min_by(|a, b| a < b)\n}\n",
+        ),
+        (
+            "max_by",
+            "fn main() -> Int {\n  let v = Vec()\n  v.max_by(|a, b| a < b)\n}\n",
+        ),
+    ];
+
+    for (name, source) in cases {
+        // Use the integer return channel so the current zero/uninitialized
+        // result is never materialized as Rust's NonNull-backed GcRef.
+        let (runtime, raw_result, unit_addr) = run_main_raw_with_input(source, "");
+        assert_eq!(
+            runtime.fault(),
+            praxis_runtime::FaultKind::EmptyCollection,
+            "empty {name} needs a defined failure contract"
+        );
+        assert_eq!(
+            raw_result, unit_addr,
+            "the {name} fault path must return the valid Unit sentinel"
+        );
+    }
+}
+
+#[test]
+#[ignore = "known bug: Text ordering is lowered as an Int payload load"]
+fn text_ordering_is_lexicographic_without_payload_reinterpretation() {
+    let (runtime, result) = run_main("fn main() -> Bool {\n  \"apple\" < \"banana\"\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert!(result.as_bool());
+}
+
+#[test]
+#[ignore = "known bug: Char ordering is lowered as an eight-byte Int payload load"]
+fn char_ordering_uses_unicode_scalar_values_without_out_of_bounds_reads() {
+    let (runtime, result) = run_main_with_input(
+        "fn main() -> Bool {\n  let g = read grid(char)\n  g.get(0, 0) < g.get(1, 0)\n}\n",
+        "aβ\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert!(result.as_bool());
+}

@@ -75,4 +75,14 @@ mod tests {
             std::mem::size_of::<u16>()
         );
     }
+
+    #[cfg(miri)]
+    #[test]
+    fn out_of_range_raw_kind_maps_to_a_safe_error_kind() {
+        assert_eq!(
+            PraxisLanguage::kind_from_raw(RawSyntaxKind(u16::MAX)),
+            SyntaxKind::ERROR,
+            "the safe rowan Language boundary must not construct an invalid enum discriminant"
+        );
+    }
 }

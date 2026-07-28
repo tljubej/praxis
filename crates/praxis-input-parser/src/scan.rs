@@ -277,4 +277,23 @@ mod tests {
             _ => panic!("expected literal"),
         }
     }
+
+    #[test]
+    #[ignore = "known bug: ordinary template text is copied byte-by-byte as Latin-1"]
+    fn regression_unicode_literal_text_is_preserved() {
+        let parts = scan_template("λ={int}").unwrap();
+        match &parts[0] {
+            TemplatePart::Literal { text, .. } => assert_eq!(text, "λ="),
+            _ => panic!("expected literal"),
+        }
+    }
+
+    #[test]
+    #[ignore = "known bug: a terminal backslash falls through as ordinary text"]
+    fn regression_trailing_backslash_is_an_invalid_escape() {
+        assert!(matches!(
+            scan_template("prefix\\"),
+            Err(ScanError::InvalidEscape { byte_offset: 6, .. })
+        ));
+    }
 }

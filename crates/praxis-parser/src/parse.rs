@@ -1506,6 +1506,92 @@ mod tests {
         assert!(kinds.contains(&SyntaxKind::TextLit));
     }
 
+    // --- 2026-07 adversarial audit regressions -----------------------------
+
+    #[test]
+    #[ignore = "known bug: trivia is discarded without checking for a newline"]
+    fn regression_same_line_statements_require_a_semicolon() {
+        let out = parse_text("let a = 1 let b = 2");
+        assert!(
+            !out.diagnostics.is_empty(),
+            "two statements on one line must not parse as if a separator existed"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: parse_source_file does not consume semicolon separators"]
+    fn regression_semicolons_separate_top_level_statements() {
+        let out = parse_text("let a = 1; let b = 2");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert_eq!(
+            construct_names(&out.tree)
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::LET_STMT)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: optional return values ignore newline statement boundaries"]
+    fn regression_newline_terminates_a_bare_return() {
+        let out = parse_text("fn f() { return\n1 }");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let return_expr = out
+            .tree
+            .descendants()
+            .find(|node| node.kind() == SyntaxKind::RETURN_EXPR)
+            .expect("return expression");
+        assert_eq!(
+            return_expr.children().count(),
+            0,
+            "the next line must be a separate expression, not return's value"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: postfix parsing does not return from method/field access to call parsing"]
+    fn regression_postfix_forms_may_be_interleaved() {
+        let out = parse_text("(fs).get(0)(100)");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::CALL_EXPR)
+                .count(),
+            1,
+            "the final `(100)` must call the result of `.get(0)`"
+        );
+        assert_eq!(
+            out.tree.children().count(),
+            1,
+            "the postfix call must remain part of the same expression statement"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: the record-literal suppression flag leaks through parentheses"]
+    fn regression_parenthesized_record_literal_is_valid_in_a_condition() {
+        let out = parse_text("if (Point { x: 1 } == p) { 0 }");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            construct_names(&out.tree).contains(&SyntaxKind::RECORD_LIT_EXPR),
+            "the parenthesized condition must retain its record literal"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: record literals are unconditionally suppressed in match arm bodies"]
+    fn regression_match_arm_may_return_a_record_literal() {
+        let out = parse_text("match x { A => Point { x: 1 } }");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            construct_names(&out.tree).contains(&SyntaxKind::RECORD_LIT_EXPR),
+            "the arm body must contain a record literal"
+        );
+    }
+
     // --- Pratt precedence ---
 
     #[test]

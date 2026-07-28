@@ -340,9 +340,58 @@ fn round_up(n: usize, align: usize) -> usize {
 mod tests {
     use super::*;
     use crate::collections::{VecPayload, VEC};
+    use crate::descriptor::{TypeDescriptor, TypeId};
     use crate::roots::RootScope;
     use crate::scalars::{INT, UNIT};
-    use crate::GcRef;
+    use crate::{GcRef, Tracer};
+    use std::cell::Cell;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[repr(C)]
+    struct DropProbe(Arc<AtomicUsize>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    unsafe fn probe_trace(_: *mut u8, _: &mut dyn Tracer) {}
+    unsafe fn probe_drop(payload: *mut u8) {
+        unsafe { std::ptr::drop_in_place(payload as *mut DropProbe) };
+    }
+    unsafe fn probe_format(_: *const u8, _: &mut dyn std::fmt::Write) {}
+
+    const DROP_PROBE: &TypeDescriptor = &TypeDescriptor {
+        id: TypeId(u32::MAX - 1),
+        name: "DropProbe",
+        size: std::mem::size_of::<DropProbe>(),
+        align: std::mem::align_of::<DropProbe>(),
+        trace: probe_trace,
+        drop_value: probe_drop,
+        format: probe_format,
+        equals: None,
+        hash: None,
+    };
+
+    #[repr(C, align(64))]
+    struct Overaligned(u8);
+
+    unsafe fn overaligned_drop(_: *mut u8) {}
+    const OVERALIGNED: &TypeDescriptor = &TypeDescriptor {
+        id: TypeId(u32::MAX),
+        name: "Overaligned",
+        size: std::mem::size_of::<Overaligned>(),
+        align: std::mem::align_of::<Overaligned>(),
+        trace: probe_trace,
+        drop_value: overaligned_drop,
+        format: probe_format,
+        equals: None,
+        hash: None,
+    };
 
     #[test]
     fn alloc_int_round_trips_payload() {
@@ -491,6 +540,140 @@ mod tests {
         let mut out = String::new();
         unsafe { (outer.descriptor().format)(outer.payload::<u8>() as *const u8, &mut out) };
         assert_eq!(out, "[[1, 2], [3]]");
+    }
+
+    #[test]
+    fn collect_finalizes_unreachable_owned_payload_exactly_once() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let heap = Heap::new();
+        unsafe {
+            heap.alloc_with(
+                DROP_PROBE,
+                std::mem::size_of::<DropProbe>(),
+                std::mem::align_of::<DropProbe>(),
+                |payload| (payload as *mut DropProbe).write(DropProbe(Arc::clone(&drops))),
+            );
+        }
+
+        let roots = RootScope::new();
+        heap.collect(&roots);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        heap.collect(&roots);
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "a swept payload must never be finalized twice"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: Heap has no Drop implementation for live payloads"]
+    fn dropping_heap_finalizes_live_owned_payloads() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        {
+            let heap = Heap::new();
+            unsafe {
+                heap.alloc_with(
+                    DROP_PROBE,
+                    std::mem::size_of::<DropProbe>(),
+                    std::mem::align_of::<DropProbe>(),
+                    |payload| (payload as *mut DropProbe).write(DropProbe(Arc::clone(&drops))),
+                );
+            }
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+        }
+
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "tearing down a heap must run descriptor finalizers for live payloads"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: GcHeader::payload ignores allocator-inserted padding"]
+    fn overaligned_payload_accessor_matches_initialized_address() {
+        let initialized_at = Cell::new(std::ptr::null_mut());
+        let heap = Heap::new();
+        let value = unsafe {
+            heap.alloc_with(
+                OVERALIGNED,
+                std::mem::size_of::<Overaligned>(),
+                std::mem::align_of::<Overaligned>(),
+                |payload| {
+                    initialized_at.set(payload);
+                    (payload as *mut Overaligned).write(Overaligned(7));
+                },
+            )
+        };
+
+        assert_eq!(
+            value.payload::<Overaligned>() as *mut u8,
+            initialized_at.get(),
+            "GcHeader::payload must account for alignment padding inserted by Heap::alloc_raw"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: mark accepts roots owned by a different heap"]
+    fn foreign_heap_root_cannot_delay_reclamation() {
+        let first = Heap::new();
+        let second = Heap::new();
+        let value = first.alloc(INT, 1_i64);
+        let mut foreign_roots = RootScope::new();
+        foreign_roots.root(value);
+
+        second.collect(&foreign_roots);
+        first.collect(&RootScope::new());
+
+        assert_eq!(
+            first.stats().live_count,
+            0,
+            "a collection on another heap must not mutate this heap's mark colors"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: reset leaves GC pacing counters unchanged"]
+    fn reset_restores_collection_pacing() {
+        let mut heap = Heap::new();
+        heap.collect(&RootScope::new());
+        let _ = heap.alloc(INT, 1_i64);
+        assert_ne!(*heap.bytes_since_collect.borrow(), 0);
+        assert_ne!(*heap.collect_threshold.borrow(), INITIAL_COLLECT_THRESHOLD);
+
+        heap.reset();
+
+        assert_eq!(*heap.bytes_since_collect.borrow(), 0);
+        assert_eq!(*heap.collect_threshold.borrow(), INITIAL_COLLECT_THRESHOLD);
+    }
+
+    #[test]
+    #[ignore = "known bug: sweeping finalizes payloads but cannot reuse bump-arena storage"]
+    fn repeated_collection_reuses_dead_object_storage() {
+        let heap = Heap::new();
+        const OBJECTS_PER_CYCLE: usize = 4_096;
+
+        for i in 0..OBJECTS_PER_CYCLE {
+            let _ = heap.alloc(INT, i as i64);
+        }
+        heap.collect(&RootScope::new());
+        let first_cycle_bytes = heap.arena.allocated_bytes();
+
+        for cycle in 1..=8 {
+            for i in 0..OBJECTS_PER_CYCLE {
+                let _ = heap.alloc(INT, (cycle * OBJECTS_PER_CYCLE + i) as i64);
+            }
+            heap.collect(&RootScope::new());
+        }
+        let final_bytes = heap.arena.allocated_bytes();
+
+        assert!(
+            final_bytes <= first_cycle_bytes.saturating_mul(2),
+            "reclaiming the same bounded working set repeatedly grew the arena \
+             from {first_cycle_bytes} to {final_bytes} bytes"
+        );
     }
 
     #[test]

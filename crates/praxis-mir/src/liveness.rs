@@ -380,4 +380,181 @@ mod tests {
         };
         assert_eq!(annotate(&mut f), 0);
     }
+
+    #[test]
+    #[ignore = "known bug: forward annotation never removes roots after their last use"]
+    fn local_dead_after_its_last_use_is_not_rooted_at_a_later_safepoint() {
+        // The root set is specified to be minimal (ADR-016), not merely sound.
+        //
+        //     a = alloc(1)
+        //     consumed = a
+        //     b = alloc(2)   // `a` and `consumed` are both dead here
+        //     return b
+        //
+        // This is deliberately stronger than `dead_local_is_not_in_safepoint_roots`:
+        // that test only checks that an allocation does not root its own
+        // destination, which does not exercise removal after a last use.
+        let mut db = TypeDb::new();
+        let int = db.int();
+        let mut f = Function {
+            name: "last_use".into(),
+            params: Vec::new(),
+            return_local: LocalId(0),
+            locals: Vec::new(),
+            blocks: Vec::new(),
+            debug_names: Vec::new(),
+            debug_kinds: Vec::new(),
+            debug_spans: Vec::new(),
+            span: (0, 0),
+        };
+        let ret = gc_local(&mut f, "ret");
+        f.return_local = ret;
+        let one = int_local(&mut f);
+        let two = int_local(&mut f);
+        let a = gc_local(&mut f, "a");
+        let consumed = gc_local(&mut f, "consumed");
+        let b = gc_local(&mut f, "b");
+        let blk = f.new_block();
+        f.blocks[blk.0 as usize].insts.extend([
+            Inst::ConstInt { dst: one, value: 1 },
+            Inst::Alloc {
+                dst: a,
+                alloc: crate::ir::AllocKind::Int { value: one },
+                live_roots: Vec::new(),
+            },
+            Inst::MoveGc {
+                dst: consumed,
+                src: a,
+            },
+            Inst::ConstInt { dst: two, value: 2 },
+            Inst::Alloc {
+                dst: b,
+                alloc: crate::ir::AllocKind::Int { value: two },
+                live_roots: Vec::new(),
+            },
+        ]);
+        f.blocks[blk.0 as usize].term = Terminator::Return { value: b };
+        let _ = int;
+
+        annotate(&mut f);
+
+        let b_roots = f.blocks[blk.0 as usize]
+            .insts
+            .iter()
+            .find_map(|inst| match inst {
+                Inst::Alloc {
+                    dst, live_roots, ..
+                } if *dst == b => Some(live_roots.as_slice()),
+                _ => None,
+            })
+            .expect("b allocation");
+        assert!(
+            !b_roots.contains(&a),
+            "a is dead after the MoveGc and must not be retained at b's allocation"
+        );
+        assert!(
+            !b_roots.contains(&consumed),
+            "the unused MoveGc destination is also dead at b's allocation"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: root sets grow monotonically within a block"]
+    fn exact_roots_shrink_between_two_safepoints_in_one_block() {
+        // A value can be live at one safepoint and dead at the next. This
+        // catches a forward annotation walk that only ever adds definitions
+        // and therefore turns the root set into a monotonically growing set.
+        let mut db = TypeDb::new();
+        let int = db.int();
+        let mut f = Function {
+            name: "shrinking_roots".into(),
+            params: Vec::new(),
+            return_local: LocalId(0),
+            locals: Vec::new(),
+            blocks: Vec::new(),
+            debug_names: Vec::new(),
+            debug_kinds: Vec::new(),
+            debug_spans: Vec::new(),
+            span: (0, 0),
+        };
+        let ret = gc_local(&mut f, "ret");
+        f.return_local = ret;
+        let seed_scalar = int_local(&mut f);
+        let first_scalar = int_local(&mut f);
+        let second_scalar = int_local(&mut f);
+        let seed = gc_local(&mut f, "seed");
+        let first = gc_local(&mut f, "first");
+        let consumed = gc_local(&mut f, "consumed");
+        let second = gc_local(&mut f, "second");
+        let blk = f.new_block();
+        f.blocks[blk.0 as usize].insts.extend([
+            Inst::ConstInt {
+                dst: seed_scalar,
+                value: 10,
+            },
+            Inst::Alloc {
+                dst: seed,
+                alloc: crate::ir::AllocKind::Int { value: seed_scalar },
+                live_roots: Vec::new(),
+            },
+            Inst::ConstInt {
+                dst: first_scalar,
+                value: 20,
+            },
+            Inst::Alloc {
+                dst: first,
+                alloc: crate::ir::AllocKind::Int {
+                    value: first_scalar,
+                },
+                live_roots: Vec::new(),
+            },
+            // `seed` is live across `first`'s allocation, then consumed.
+            Inst::MoveGc {
+                dst: consumed,
+                src: seed,
+            },
+            Inst::ConstInt {
+                dst: second_scalar,
+                value: 30,
+            },
+            Inst::Alloc {
+                dst: second,
+                alloc: crate::ir::AllocKind::Int {
+                    value: second_scalar,
+                },
+                live_roots: Vec::new(),
+            },
+        ]);
+        f.blocks[blk.0 as usize].term = Terminator::Return { value: second };
+        let _ = int;
+
+        annotate(&mut f);
+
+        let roots_for = |needle: LocalId| {
+            f.blocks[blk.0 as usize]
+                .insts
+                .iter()
+                .find_map(|inst| match inst {
+                    Inst::Alloc {
+                        dst, live_roots, ..
+                    } if *dst == needle => Some(live_roots.clone()),
+                    _ => None,
+                })
+                .expect("allocation roots")
+        };
+        let first_roots = roots_for(first);
+        let second_roots = roots_for(second);
+        assert!(
+            first_roots.contains(&seed),
+            "seed is read after the first allocation and must be rooted there"
+        );
+        assert!(
+            !second_roots.contains(&seed),
+            "seed's lifetime ended before the second allocation"
+        );
+        assert!(
+            !second_roots.contains(&consumed),
+            "the unused copy must not make the later root set grow"
+        );
+    }
 }

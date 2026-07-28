@@ -167,7 +167,7 @@ pub fn point_schema() -> &'static TupleSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abi::praxis_alloc_tuple;
+    use crate::abi::{praxis_alloc_tuple, praxis_tuple_set};
 
     #[test]
     fn tuple_descriptor_reports_capabilities() {
@@ -193,5 +193,37 @@ mod tests {
         let embedded = unsafe { (*payload).schema };
         assert_eq!(embedded, schema as *const TupleSchema);
         assert_eq!(unsafe { (*payload).items.len() }, 2);
+    }
+
+    #[test]
+    #[ignore = "known bug: tuple equality compares schema pointers instead of shapes"]
+    fn tuple_equality_uses_shape_not_schema_allocation_identity() {
+        let mut rt = crate::Runtime::new();
+        let mut ctx = rt.context();
+        let runtime_schema = point_schema();
+        let independently_interned_schema = Box::leak(Box::new(TupleSchema {
+            descriptors: Box::leak(
+                vec![
+                    crate::scalars::INT as *const TypeDescriptor,
+                    crate::scalars::INT as *const TypeDescriptor,
+                ]
+                .into_boxed_slice(),
+            ),
+        }));
+        let left = unsafe { praxis_alloc_tuple(&mut ctx, runtime_schema) };
+        let right = unsafe { praxis_alloc_tuple(&mut ctx, independently_interned_schema) };
+        for (index, value) in [3_i64, 4].into_iter().enumerate() {
+            let left_value = rt.alloc_int(value);
+            let right_value = rt.alloc_int(value);
+            unsafe {
+                praxis_tuple_set(&mut ctx, left, index as i64, left_value);
+                praxis_tuple_set(&mut ctx, right, index as i64, right_value);
+            }
+        }
+
+        assert!(
+            left.equals(&right),
+            "equivalent (Int, Int) schemas from runtime and codegen must describe the same tuple type"
+        );
     }
 }

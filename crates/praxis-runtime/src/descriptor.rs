@@ -214,4 +214,42 @@ mod tests {
         assert!(hashable.is_equatable());
         assert!(hashable.is_hashable());
     }
+
+    #[test]
+    #[ignore = "known bug: Float and Text both use TypeId(5)"]
+    fn builtin_type_ids_are_globally_unique() {
+        let descriptors = [
+            crate::scalars::UNIT,
+            crate::scalars::BOOL,
+            crate::scalars::INT,
+            crate::scalars::BYTE,
+            crate::scalars::CHAR,
+            crate::scalars::FLOAT,
+            crate::text::TEXT,
+            crate::collections::VEC,
+            crate::collections::GRID,
+            crate::records::RECORD,
+            crate::enums::ENUM,
+            crate::tuples::TUPLE,
+            crate::closures::CLOSURE,
+            crate::var_cell::VAR_CELL,
+            crate::collections::DEQUE,
+            crate::maps::MAP,
+            crate::maps::SET,
+            crate::maps::COUNTER,
+            crate::heaps::MAX_HEAP,
+            crate::heaps::MIN_HEAP,
+            crate::bitset::BITSET,
+        ];
+        let mut by_id = std::collections::BTreeMap::new();
+
+        for descriptor in descriptors {
+            if let Some(previous) = by_id.insert(descriptor.id, descriptor.name) {
+                panic!(
+                    "built-in descriptors {previous} and {} share {:?}; descriptor IDs are runtime type identity",
+                    descriptor.name, descriptor.id
+                );
+            }
+        }
+    }
 }

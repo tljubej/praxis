@@ -45,6 +45,20 @@ fn has_type_error(text: &str) -> bool {
         .any(|d| d.code().category() == DiagnosticCategory::Type)
 }
 
+fn has_name_error(text: &str) -> bool {
+    analyze(text)
+        .diagnostics
+        .iter()
+        .any(|d| d.code().category() == DiagnosticCategory::Name)
+}
+
+fn has_input_error(text: &str) -> bool {
+    analyze(text)
+        .diagnostics
+        .iter()
+        .any(|d| d.code().category() == DiagnosticCategory::Input)
+}
+
 /// Like [`has_type_error`] but also runs lowering, so diagnostics emitted during
 /// lowering (e.g. exhaustiveness Y120/Y121, which need the lowered patterns) are
 /// included. The exhaustiveness checker runs in `lower()`, not `analyze()`.
@@ -65,6 +79,20 @@ fn has_type_error_with_lower(text: &str) -> bool {
             .diagnostics
             .iter()
             .any(|d| d.code().category() == DiagnosticCategory::Type)
+}
+
+/// Whether analysis and typed-HIR lowering both accepted `text` without any
+/// diagnostic category. Useful for invariants (missing fields, illegal
+/// assignment) where the implementation does not yet have a dedicated code.
+fn is_clean_with_lower(text: &str) -> bool {
+    use praxis_ast::AstNode;
+    let map = SourceMap::new();
+    let id = map.intern("lower_clean_test.px", text);
+    let parsed = parse(id, text);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = crate::lower::lower(id, &root, &mut analysis);
+    analysis.diagnostics.is_empty() && module.diagnostics.is_empty()
 }
 
 // --- §19-M2 criterion 1: infer non-recursive fn params and returns ---------
@@ -228,6 +256,18 @@ fn var_binding_is_monotype() {
 fn recursive_fn_with_annotations_type_checks() {
     let src = "fn fact(n: Int) -> Int { if n <= 1 { 1 } else { n * fact(n - 1) } }";
     assert!(!has_type_error(src));
+}
+
+#[test]
+fn recursive_fn_call_is_checked_against_its_eventual_signature() {
+    // The monomorphic placeholder installed for recursion must be the same slot
+    // used by recursive calls; a fresh, disconnected call type would accept
+    // Text here and only check the final body result.
+    let src = "fn recurse(n: Int) -> Int { recurse(\"wrong\") }";
+    assert!(
+        has_type_error(src),
+        "recursive calls must constrain the declaration being inferred"
+    );
 }
 
 // --- a representative whole program (clean) -------------------------------
@@ -550,5 +590,755 @@ fn mismatch_carries_a_help_hint_when_found_is_unit() {
         d.suggestions()[0].label.contains("Unit"),
         "the hint should explain the Unit value: {:?}",
         d.suggestions()[0].label
+    );
+}
+
+// ===========================================================================
+// Adversarial front-end regressions.
+//
+// These tests intentionally pin semantic contracts that cross AST accessors,
+// resolution, inference, and typed-HIR lowering. Several currently expose
+// known bugs and are expected to fail until the implementation is corrected.
+// ===========================================================================
+
+// --- annotation preservation ------------------------------------------------
+
+#[test]
+#[ignore = "known bug: direct tuple annotations are dropped by AST accessors"]
+fn tuple_parameter_annotation_is_enforced() {
+    // A direct TUPLE_TYPE child must not disappear merely because Param::ty()
+    // only recognizes TYPE_REF nodes.
+    let src = "fn bad(x: (Int, Text)) -> Int { x + 1 }";
+    assert!(
+        has_type_error(src),
+        "using a tuple-annotated parameter as Int must be rejected"
+    );
+}
+
+#[test]
+#[ignore = "known bug: direct function annotations are dropped by AST accessors"]
+fn function_parameter_annotation_is_enforced() {
+    // The annotation says the argument to `f` is Int, so calling it with Text
+    // is invalid even though bottom-up inference could otherwise choose Text.
+    let src = "fn bad(f: (Int) -> Int) -> Int { f(\"wrong\") }";
+    assert!(
+        has_type_error(src),
+        "function-typed parameter annotation must constrain calls"
+    );
+}
+
+#[test]
+#[ignore = "known bug: direct tuple return annotations are dropped by AST accessors"]
+fn tuple_return_annotation_is_enforced() {
+    let src = "fn bad() -> (Int, Text) { (1, true) }";
+    assert!(
+        has_type_error(src),
+        "direct tuple return annotations must not be silently ignored"
+    );
+}
+
+#[test]
+#[ignore = "known bug: user-enum annotations are not converted to inference types"]
+fn user_enum_annotation_is_enforced() {
+    // User enum names resolve, but inference must also turn the annotation into
+    // that enum type (not fall back to a fresh variable).
+    let src = "enum Tile { Empty }\nfn bad(tile: Tile) -> Int { tile + 1 }";
+    assert!(
+        has_type_error(src),
+        "a Tile parameter cannot be inferred as Int"
+    );
+}
+
+#[test]
+#[ignore = "known bug: direct function field annotations are dropped by AST accessors"]
+fn function_typed_record_field_annotation_is_enforced() {
+    // The older equality test initializes this field with a function, which
+    // accidentally pins the dropped annotation and therefore cannot detect the
+    // accessor bug. An Int initializer distinguishes the two paths.
+    let src = "struct Box { f: (Int) -> Int }\n\
+               fn main() -> Int { let value = Box { f: 1 }; 0 }";
+    assert!(
+        has_type_error(src),
+        "a function-typed record field cannot be initialized with Int"
+    );
+}
+
+#[test]
+#[ignore = "known bug: direct function enum payload annotations are dropped by AST accessors"]
+fn function_typed_enum_payload_annotation_is_enforced() {
+    let src = "enum Boxed { Box((Int) -> Int) }\n\
+               fn main() -> Boxed { Box(1) }";
+    assert!(
+        has_type_error(src),
+        "a function-typed enum payload cannot be constructed from Int"
+    );
+}
+
+#[test]
+#[ignore = "known bug: type definitions are inferred sequentially despite two-pass resolution"]
+fn forward_struct_annotation_is_enforced() {
+    let src = "fn bad(point: Point) -> Int { point + 1 }\n\
+               struct Point { x: Int }";
+    assert!(
+        has_type_error(src),
+        "a forward-resolved Point annotation cannot degrade to a fresh variable"
+    );
+}
+
+#[test]
+#[ignore = "known bug: resolver accepts value symbols in type position"]
+fn value_binding_name_is_not_accepted_as_a_type() {
+    let src = "let Alias = 1\nlet value: Alias = \"text\"";
+    assert!(
+        has_name_error(src),
+        "ordinary value bindings are not type declarations"
+    );
+}
+
+#[test]
+#[ignore = "known bug: collection annotation arity is never validated"]
+fn malformed_collection_type_arity_is_rejected() {
+    let src = "fn identity(value: Map[Int]) -> Map[Int] { value }";
+    assert!(
+        !is_clean_with_lower(src),
+        "Map has exactly two type arguments; malformed collection shapes must not enter TypeDb"
+    );
+}
+
+// --- mutation and control-flow typing ---------------------------------------
+
+#[test]
+#[ignore = "known bug: assignment lookup uses disconnected inference scopes"]
+fn local_var_reassignment_preserves_its_type() {
+    let src = "fn main() -> Int { var x = 0; x = \"bad\"; 0 }";
+    assert!(
+        has_type_error(src),
+        "local assignments must use the resolver's exact lhs symbol"
+    );
+}
+
+#[test]
+#[ignore = "known bug: assignment does not require a mutable var binding"]
+fn reassignment_to_let_is_rejected() {
+    let src = "fn main() -> Int { let x = 1; x = 2; x }";
+    assert!(
+        !is_clean_with_lower(src),
+        "`let` is immutable; only `var` may be reassigned"
+    );
+}
+
+#[test]
+#[ignore = "known bug: compound assignment checks equality but not numeric support"]
+fn compound_assignment_requires_a_numeric_target() {
+    let src = "var flag = true\nflag += false";
+    assert!(
+        has_type_error(src),
+        "matching operand types alone do not make Bool addition valid"
+    );
+}
+
+#[test]
+#[ignore = "known bug: if-without-else is inferred as its then-branch type"]
+fn if_without_else_cannot_produce_the_then_value_type() {
+    // MIR materializes Unit on the false path, so the expression cannot have
+    // type Int just because its then branch does.
+    let src = "fn maybe(flag: Bool) -> Int { if flag { 1 } }";
+    assert!(
+        has_type_error(src),
+        "the absent else path produces Unit, not Int"
+    );
+}
+
+#[test]
+#[ignore = "known bug: explicit return values are not unified with function results"]
+fn early_return_value_must_match_the_function_result() {
+    let src = "fn bad() -> Int { return \"wrong\"; 1 }";
+    assert!(
+        has_type_error(src),
+        "an early return must be checked even when the block tail has the declared type"
+    );
+}
+
+#[test]
+#[ignore = "known bug: inference retains a non-trailing block expression as the value"]
+fn expression_before_trailing_statement_is_not_the_block_value() {
+    // Lowering correctly demotes `1` to an effect statement and gives this
+    // block a Unit tail. Inference must make the same choice.
+    let src = "fn bad() -> Int { 1; let x = 2 }";
+    assert!(
+        has_type_error(src),
+        "inference and lowering must agree on the actual trailing expression"
+    );
+}
+
+#[test]
+#[ignore = "known bug: resolver/inference do not track function and loop control-flow context"]
+fn control_flow_terminators_require_a_legal_enclosing_context() {
+    for src in [
+        "return 1",
+        "fn main() -> Int { break 1; 0 }",
+        "fn main() -> Int { continue; 0 }",
+    ] {
+        assert!(
+            !is_clean_with_lower(src),
+            "out-of-context control flow must be rejected: {src}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "known bug: break values do not determine expression-loop type"]
+fn expression_loop_uses_its_break_value_type() {
+    let src = "fn main() -> Int { loop { break 42 } }";
+    assert!(
+        !has_type_error(src),
+        "an expression loop with `break Int` has type Int"
+    );
+}
+
+#[test]
+#[ignore = "known bug: Never is not treated as the bottom type during unification"]
+fn never_branch_coerces_to_the_other_branch_type() {
+    let src = "fn choose(flag: Bool) -> Int { if flag { panic(\"stop\") } else { 1 } }";
+    use praxis_ast::AstNode;
+
+    let map = SourceMap::new();
+    let id = map.intern("never_lub_test.px", src);
+    let parsed = parse(id, src);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    assert!(
+        !analysis
+            .diagnostics
+            .iter()
+            .any(|d| d.code().category() == DiagnosticCategory::Type),
+        "Never is the bottom type and must not conflict with an Int branch"
+    );
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = crate::lower::lower(id, &root, &mut analysis);
+    let choose = module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::TypedItem::Fn(f) if f.name == "choose" => Some(f),
+            _ => None,
+        })
+        .expect("choose function");
+    let if_ty = match &choose.body.tail {
+        crate::TypedExpr::If { ty, .. } => *ty,
+        other => panic!("expected if tail, got {other:?}"),
+    };
+    assert_eq!(
+        analysis.db.render(if_ty),
+        "Int",
+        "the branch join itself must choose Int, not merely suppress a mismatch"
+    );
+}
+
+// --- scalar and builtin operation constraints -------------------------------
+
+#[test]
+#[ignore = "known bug: parse does not constrain its input expression to Text"]
+fn parse_requires_text_input() {
+    let src = "fn main() -> Int { parse(1, int) }";
+    assert!(
+        has_type_error(src),
+        "the first argument of parse(text, parser) must be Text"
+    );
+}
+
+#[test]
+#[ignore = "known bug: unary minus chooses Float only for literal syntax"]
+fn unary_minus_accepts_float_typed_variables() {
+    let src = "fn negate(x: Float) -> Float { -x }";
+    assert!(
+        !has_type_error(src),
+        "Float negation must depend on the operand type, not only literal syntax"
+    );
+}
+
+#[test]
+#[ignore = "known bug: numeric inference admits the undefined Float remainder operation"]
+fn float_remainder_is_rejected() {
+    let src = "fn bad() -> Float { 5.0 % 2.0 }";
+    assert!(
+        has_type_error(src),
+        "the language defines no `%` operation for Float"
+    );
+}
+
+#[test]
+#[ignore = "known bug: lowering silently saturates out-of-range Int literals"]
+fn integer_literal_overflow_is_diagnosed() {
+    let src = "fn main() -> Int { 9223372036854775808 }";
+    assert!(
+        !is_clean_with_lower(src),
+        "an out-of-range literal must not silently become i64::MAX"
+    );
+}
+
+#[test]
+#[ignore = "known bug: ordering operators do not check orderability"]
+fn ordering_rejects_bool_operands() {
+    let src = "fn bad() -> Bool { true < false }";
+    assert!(
+        has_type_error(src),
+        "supports_ord says Bool has no defined total order"
+    );
+}
+
+#[test]
+#[ignore = "known bug: ordering operators do not check function orderability"]
+fn ordering_rejects_function_operands() {
+    let src = "fn id(x: Int) -> Int { x }\nfn bad() -> Bool { id < id }";
+    assert!(
+        has_type_error(src),
+        "function values have no structural ordering"
+    );
+}
+
+#[test]
+#[ignore = "known bug: ordering operators do not check composite orderability"]
+fn ordering_rejects_composites_without_a_matching_runtime_lowering() {
+    let src = "fn bad() -> Bool { (1, 2) < (1, 3) }";
+    assert!(
+        has_type_error(src),
+        "composite ordering cannot be admitted while MIR reinterprets the payload as one i64"
+    );
+}
+
+#[test]
+#[ignore = "known bug: assert has no prelude type scheme"]
+fn prelude_assert_requires_bool() {
+    let src = "fn main() -> Unit { assert(1) }";
+    assert!(
+        has_type_error(src),
+        "prelude calls need real schemes instead of unconstrained fresh types"
+    );
+}
+
+// --- capability constraints must survive polymorphism -----------------------
+
+#[test]
+#[ignore = "known bug: equality constraints are discarded at generalization"]
+fn polymorphic_equality_rejects_function_instantiation() {
+    let src = "fn equal(a, b) { a == b }\n\
+               fn f(x: Int) -> Int { x }\n\
+               fn g(x: Int) -> Int { x }\n\
+               fn main() -> Bool { equal(f, g) }";
+    assert!(
+        has_type_error(src),
+        "SupportsEq must be retained and checked when T becomes a function"
+    );
+}
+
+#[test]
+#[ignore = "known bug: iterable constraints are discarded at generalization"]
+fn iterable_constraint_rejects_int_instantiation() {
+    let src = "fn drain(values) -> Unit { for value in values { out(value) } }\n\
+               fn main() -> Unit { drain(1) }";
+    assert!(
+        has_type_error_with_lower(src),
+        "a generic Iterable constraint cannot disappear after generalization"
+    );
+}
+
+#[test]
+#[ignore = "known bug: method lookup cannot constrain an unresolved receiver"]
+fn collection_method_constrains_unannotated_receiver_parameter() {
+    // This is the §5.2 inference example: use of `.sum()` should constrain the
+    // unannotated parameter to a numeric iterable shape, then the call site
+    // pins its element type to Int.
+    let src = "fn total(values) { values.sum() }\n\
+               fn main() -> Int { let values = Vec(); values.push(1); total(values) }";
+    assert!(
+        !has_type_error_with_lower(src),
+        "method use plus the call site should infer a concrete collection receiver"
+    );
+}
+
+#[test]
+#[ignore = "known bug: numeric collection sinks do not constrain their element type"]
+fn sum_requires_int_elements() {
+    let src = "fn main() -> Int {\n\
+                 let values = Vec()\n\
+                 values.push(true)\n\
+                 values.sum()\n\
+               }";
+    assert!(
+        has_type_error_with_lower(src),
+        "sum/product/min/max lower as Int operations and must reject Bool elements"
+    );
+}
+
+#[test]
+#[ignore = "known bug: map operations do not enforce key hashability"]
+fn map_key_must_be_hashable() {
+    let src = "fn id(x: Int) -> Int { x }\n\
+               fn main() -> Unit { let map = Map(); map.insert(id, 1) }";
+    assert!(
+        has_type_error_with_lower(src),
+        "function values cannot be structural map keys"
+    );
+}
+
+#[test]
+#[ignore = "known bug: mutable structural values are admitted as hash keys"]
+fn mutable_collection_cannot_be_used_as_a_map_key() {
+    // Hashing a Vec by its current contents and then mutating it changes the
+    // bucket it belongs to. Map lookup/removal can no longer find that entry,
+    // so mutable collection identities must be rejected as keys even when
+    // their elements are otherwise hashable.
+    let src = "fn main() -> Unit {\n\
+                 let key = Vec()\n\
+                 key.push(1)\n\
+                 let table = Map()\n\
+                 table.insert(key, \"stored\")\n\
+                 key.push(2)\n\
+               }";
+    assert!(
+        has_type_error_with_lower(src),
+        "a mutable collection cannot be a structural map key"
+    );
+}
+
+#[test]
+#[ignore = "known bug: mutable structural values are admitted as set keys"]
+fn mutable_collection_cannot_be_used_as_a_set_element() {
+    // Set elements are hash keys too and have the same hash-stability
+    // requirement as Map keys.
+    let src = "fn main() -> Unit {\n\
+                 let key = Vec()\n\
+                 key.push(1)\n\
+                 let values = Set()\n\
+                 values.insert(key)\n\
+                 key.push(2)\n\
+               }";
+    assert!(
+        has_type_error_with_lower(src),
+        "a mutable collection cannot be a structural set key"
+    );
+}
+
+#[test]
+#[ignore = "known bug: heap operations do not enforce element orderability"]
+fn heap_element_must_be_orderable() {
+    let src = "fn id(x: Int) -> Int { x }\n\
+               fn main() -> Unit { let heap = MinHeap(); heap.push(id) }";
+    assert!(
+        has_type_error_with_lower(src),
+        "function values cannot be ordered by a heap"
+    );
+}
+
+#[test]
+#[ignore = "known bug: heap typing admits Text but runtime compares its payload as i64"]
+fn heap_element_requires_a_runtime_compatible_ordering() {
+    // Text is marked SupportsOrd, but HeapEntry::cmp does not dispatch through a
+    // descriptor comparison callback. Until that exists, accepting Text here
+    // produces pointer/layout ordering rather than lexicographic ordering.
+    let src = "fn main() -> Unit {\n\
+                 let heap = MinHeap()\n\
+                 heap.push(\"z\")\n\
+                 heap.push(\"a\")\n\
+               }";
+    assert!(
+        has_type_error_with_lower(src),
+        "heap element types need an ordering implemented by the runtime"
+    );
+}
+
+#[test]
+#[ignore = "known bug: Map.get is still typed as V instead of Option[V]"]
+fn map_get_returns_option() {
+    let src = "fn lookup(map: Map[Text, Int]) -> Option[Int] { map.get(\"key\") }";
+    assert!(
+        !has_type_error(src),
+        "normal map absence is represented by Option[V], not a dynamically typed Unit/V result"
+    );
+}
+
+#[test]
+#[ignore = "known bug: HIR lowering re-instantiates polymorphic call results without arguments"]
+fn lowered_polymorphic_call_result_uses_the_callsite_instantiation() {
+    use praxis_ast::AstNode;
+
+    let src = "fn id(value) { value }\nfn main() -> Float { id(1.5) }";
+    let map = SourceMap::new();
+    let id = map.intern("lower_call_type_test.px", src);
+    let parsed = parse(id, src);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = crate::lower::lower(id, &root, &mut analysis);
+    let main = module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::TypedItem::Fn(f) if f.name == "main" => Some(f),
+            _ => None,
+        })
+        .expect("main function");
+    let call_ty = match &main.body.tail {
+        crate::TypedExpr::Call { ty, .. } => *ty,
+        other => panic!("expected call tail, got {other:?}"),
+    };
+    assert_eq!(
+        analysis.db.render(call_ty),
+        "Float",
+        "typed HIR must preserve the concrete result inferred at this call site"
+    );
+}
+
+#[test]
+#[ignore = "known bug: HIR lowering instantiates method results without receiver substitutions"]
+fn lowered_generic_method_result_uses_the_receiver_instantiation() {
+    use praxis_ast::AstNode;
+
+    let src = "fn main() -> Float { let values = Vec(); values.push(1.5); values.get(0) }";
+    let map = SourceMap::new();
+    let id = map.intern("lower_method_type_test.px", src);
+    let parsed = parse(id, src);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = crate::lower::lower(id, &root, &mut analysis);
+    let main = module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::TypedItem::Fn(f) if f.name == "main" => Some(f),
+            _ => None,
+        })
+        .expect("main function");
+    let get_ty = match &main.body.tail {
+        crate::TypedExpr::MethodCall { name, ty, .. } if name == "get" => *ty,
+        other => panic!("expected get method tail, got {other:?}"),
+    };
+    assert_eq!(
+        analysis.db.render(get_ty),
+        "Float",
+        "typed HIR must carry Vec[Float].get as Float"
+    );
+}
+
+#[test]
+#[ignore = "known bug: HIR enum lowering looks up constructor text instead of the resolved symbol"]
+fn lowering_respects_a_local_that_shadows_an_enum_variant() {
+    use praxis_ast::AstNode;
+
+    let src = "enum E { A }\nfn main() -> Int { let A = 7; A }";
+    let map = SourceMap::new();
+    let id = map.intern("variant_shadow_test.px", src);
+    let parsed = parse(id, src);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = crate::lower::lower(id, &root, &mut analysis);
+    let main = module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::TypedItem::Fn(f) if f.name == "main" => Some(f),
+            _ => None,
+        })
+        .expect("main function");
+    let path_ty = match &main.body.tail {
+        crate::TypedExpr::Path { ty, .. } => *ty,
+        other => panic!("the shadowing local must remain a Path, got {other:?}"),
+    };
+    assert_eq!(analysis.db.render(path_ty), "Int");
+}
+
+// --- declaration ordering and analyzer robustness ---------------------------
+
+#[test]
+#[ignore = "known bug: inference does not predeclare later function signatures"]
+fn forward_call_is_checked_against_later_function_signature() {
+    let src = "fn first() -> Int { later(\"wrong\") }\n\
+               fn later(value: Int) -> Int { value }";
+    assert!(
+        has_type_error(src),
+        "two-pass resolution must be paired with placeholders for all function signatures"
+    );
+}
+
+#[test]
+#[ignore = "known bug: duplicate top-level functions survive with the same runtime symbol"]
+fn duplicate_function_declarations_are_rejected() {
+    let src = "fn duplicate() -> Int { 1 }\n\
+               fn duplicate() -> Int { 2 }\n\
+               fn main() -> Int { duplicate() }";
+    assert!(
+        !is_clean_with_lower(src),
+        "two functions cannot be emitted under one JIT symbol name"
+    );
+}
+
+#[test]
+#[ignore = "known bug: a parsed nested function trips an inference expect"]
+fn analyzing_nested_function_never_panics() {
+    // Even if nested named functions are ultimately rejected, `analyze`'s
+    // public contract says unsupported/malformed input becomes diagnostics.
+    let result = std::panic::catch_unwind(|| {
+        analyze("fn main() -> Int { fn local(x: Int) -> Int { x }; local(1) }")
+    });
+    assert!(
+        result.is_ok(),
+        "a parsed nested FnItem must not trip an internal `expect`"
+    );
+}
+
+// --- records and match exhaustiveness ---------------------------------------
+
+#[test]
+#[ignore = "known bug: record literals do not validate missing fields"]
+fn record_literal_requires_every_declared_field() {
+    let src = "struct Pair { left: Int, right: Int }\n\
+               fn main() -> Int { let pair = Pair { left: 1 }; pair.right }";
+    assert!(
+        !is_clean_with_lower(src),
+        "allocating a record with fewer payloads than its schema is invalid"
+    );
+}
+
+#[test]
+#[ignore = "known bug: record literals silently drop unknown fields and their initializers"]
+fn record_literal_rejects_unknown_fields() {
+    let src = "struct Point { x: Int }\n\
+               fn side_effect() -> Int { out(\"must not disappear\"); 2 }\n\
+               fn main() -> Int { let point = Point { x: 1, typo: side_effect() }; point.x }";
+    assert!(
+        !is_clean_with_lower(src),
+        "an unknown field must be diagnosed instead of deleting its initializer"
+    );
+}
+
+#[test]
+#[ignore = "known bug: record literals accept duplicate field payloads"]
+fn record_literal_rejects_duplicate_fields() {
+    let src = "struct Point { x: Int }\n\
+               fn main() -> Int { let point = Point { x: 1, x: 2 }; point.x }";
+    assert!(
+        !is_clean_with_lower(src),
+        "each record field must be initialized exactly once"
+    );
+}
+
+#[test]
+#[ignore = "known bug: underscore lexes and resolves as an ordinary binding"]
+fn wildcard_pattern_does_not_bind_a_value_named_underscore() {
+    let src = "fn main() -> Int { match 1 { _ => _ } }";
+    assert!(
+        has_name_error(src),
+        "the wildcard is not a binding visible in the arm body"
+    );
+}
+
+#[test]
+#[ignore = "known bug: exhaustiveness does not recursively inspect variant payloads"]
+fn nested_enum_pattern_must_cover_payload_constructors() {
+    let src = "enum Flag { On, Off }\n\
+               enum Wrapped { Wrap(Flag) }\n\
+               fn main() -> Int {\n\
+                 let value = Wrap(On)\n\
+                 match value { Wrap(On) => 1 }\n\
+               }";
+    assert!(
+        has_type_error_with_lower(src),
+        "covering one nested payload constructor is not exhaustive"
+    );
+}
+
+#[test]
+#[ignore = "known bug: exhaustiveness does not flag duplicate constructor arms"]
+fn duplicate_enum_arm_is_unreachable() {
+    let src = "enum E { A, B }\n\
+               fn main() -> Int {\n\
+                 let value = A\n\
+                 match value { A => 1, A => 2, B => 3 }\n\
+               }";
+    assert!(
+        has_type_error_with_lower(src),
+        "a duplicate variant arm adds no coverage and must be Y121"
+    );
+}
+
+#[test]
+#[ignore = "known bug: unknown constructor patterns lower to catch-all wildcards"]
+fn unknown_enum_variant_pattern_is_rejected() {
+    let src = "enum E { A }\n\
+               fn main() -> Int { let value = A; match value { Typo(payload) => 1 } }";
+    assert!(
+        !is_clean_with_lower(src),
+        "a misspelled variant cannot silently become an exhaustive wildcard"
+    );
+}
+
+// --- input-parser conversion preserves source structure ---------------------
+
+#[test]
+#[ignore = "known bug: every template capture reuses the first capture kind"]
+fn mixed_template_capture_kinds_are_preserved() {
+    let src = "fn main() -> Int {\n\
+                 let row = read `{name:word},{port:int}`\n\
+                 row.port + 1\n\
+               }";
+    assert!(
+        !has_type_error(src),
+        "the `port` capture is Int even when an earlier capture is Word"
+    );
+}
+
+#[test]
+#[ignore = "known bug: unknown template capture kinds silently default to Int"]
+fn unknown_template_capture_parser_is_diagnosed() {
+    let src = "let value = read `{value:intr}`";
+    assert!(
+        has_input_error(src),
+        "a misspelled capture parser must not silently default to Int"
+    );
+}
+
+#[test]
+#[ignore = "known bug: unknown parser constructors are dropped without a diagnostic"]
+fn unknown_parser_constructor_is_diagnosed() {
+    let src = "let value = read frobnicate(int)";
+    assert!(
+        has_input_error(src),
+        "unknown constructor conversion must emit I010-style feedback"
+    );
+}
+
+#[test]
+#[ignore = "known bug: parser conversion discards extra constructor arguments"]
+fn optional_rejects_extra_arguments() {
+    let src = "let value = read optional(int, word)";
+    assert!(
+        has_input_error(src),
+        "special constructors must validate source arity before discarding arguments"
+    );
+}
+
+// --- closure escape analysis ------------------------------------------------
+
+#[test]
+#[ignore = "known bug: escape analysis skips the callee expression of calls"]
+fn immediately_invoked_closure_boxes_its_mutable_capture() {
+    use praxis_ast::AstNode;
+
+    let src = "fn main() -> Int { var count = 0; (|n| { count += n; count })(1) }";
+    let map = SourceMap::new();
+    let id = map.intern("immediate_closure_test.px", src);
+    let parsed = parse(id, src);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    let count = analysis
+        .names
+        .all()
+        .iter()
+        .find(|s| s.name == "count" && s.kind == SymbolKind::Var)
+        .expect("count var")
+        .id;
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = crate::lower::lower(id, &root, &mut analysis);
+    assert!(
+        module.escaping_vars.contains(&count),
+        "a closure in Call.callee_expr still requires its captured var to be boxed"
     );
 }

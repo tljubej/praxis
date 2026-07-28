@@ -3688,9 +3688,24 @@ mod tests {
         let map = SourceMap::new();
         let file = map.intern("build_test.px", src);
         let parsed = parse(file, src);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "parse diagnostics: {:?}",
+            parsed.diagnostics
+        );
         let mut analysis = analyze_root(file, &parsed.tree);
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "analysis diagnostics: {:?}",
+            analysis.diagnostics
+        );
         let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
         let module = lower(file, &root, &mut analysis);
+        assert!(
+            module.diagnostics.is_empty(),
+            "lowering diagnostics: {:?}",
+            module.diagnostics
+        );
         let funcs = lower_module(&module, &mut analysis.db);
         (funcs, analysis)
     }
@@ -3811,6 +3826,281 @@ mod tests {
                 praxis_types::TypeData::Unit
             ),
             "the Unit value's slot must carry the Unit type"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: closure capture indices are moved through rootable Gc locals"]
+    fn closure_capture_indices_never_flow_through_gc_locals() {
+        // Runtime ABI indices are raw integers, not GcRefs. Moving a scalar
+        // capture index into a `LocalKind::Gc` slot makes an illegal state
+        // representable: liveness can then spill e.g. integer `1` as if it
+        // were a heap pointer, and a later collection will dereference 0x1.
+        let (funcs, _analysis) = lower_src_to_mir(
+            "fn main() -> Int {\n  let a = 10\n  let b = 20\n  let f = |x| x + a + b\n  f(12)\n}\n",
+        );
+
+        let bad_moves: Vec<(&str, LocalId, LocalId)> = funcs
+            .iter()
+            .flat_map(|f| {
+                f.blocks.iter().flat_map(move |block| {
+                    block.insts.iter().filter_map(move |inst| match inst {
+                        Inst::MoveGc { dst, src }
+                            if f.locals[dst.0 as usize].kind == LocalKind::Gc
+                                && matches!(
+                                    f.locals[src.0 as usize].kind,
+                                    LocalKind::Scalar(_)
+                                ) =>
+                        {
+                            Some((f.name.as_str(), *dst, *src))
+                        }
+                        _ => None,
+                    })
+                })
+            })
+            .collect();
+
+        assert!(
+            bad_moves.is_empty(),
+            "raw scalar values must never inhabit GC-rootable locals: {bad_moves:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: dynamic take arguments fall through to a Unit intrinsic stub"]
+    fn dynamic_take_argument_does_not_silently_lower_to_unit() {
+        // `take` is typed to accept any Int expression, not literals only. The
+        // intrinsic fallback must preserve that contract instead of returning
+        // Unit and letting the outer pipeline reinterpret Unit as a Vec.
+        let (funcs, _analysis) = lower_src_to_mir(
+            "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let n = 2\n  v.take(n).sum()\n}\n",
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let unit_fallbacks: Vec<_> = main
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .filter(|inst| {
+                matches!(
+                    inst,
+                    Inst::Alloc {
+                        alloc: AllocKind::Unit,
+                        ..
+                    }
+                )
+            })
+            .collect();
+
+        assert!(
+            unit_fallbacks.is_empty(),
+            "a well-typed `take(n)` pipeline must not lower through a Unit fallback"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: dynamic skip arguments fall through to a Unit intrinsic stub"]
+    fn dynamic_skip_argument_does_not_silently_lower_to_unit() {
+        let (funcs, _analysis) = lower_src_to_mir(
+            "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let n = 2\n  v.skip(n).sum()\n}\n",
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let unit_fallbacks: Vec<_> = main
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .filter(|inst| {
+                matches!(
+                    inst,
+                    Inst::Alloc {
+                        alloc: AllocKind::Unit,
+                        ..
+                    }
+                )
+            })
+            .collect();
+
+        assert!(
+            unit_fallbacks.is_empty(),
+            "a well-typed `skip(n)` pipeline must not lower through a Unit fallback"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: call results use Type(0) as an untyped sentinel"]
+    fn call_result_locals_retain_their_inferred_static_types() {
+        let (funcs, analysis) = lower_src_to_mir(
+            "fn id(n: Int) -> Int { n }\nfn main() -> Int {\n  let v = Vec()\n  let n = v.len()\n  id(n)\n}\n",
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let call_results: Vec<_> = main
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .filter_map(|inst| match inst {
+                Inst::Call { dst, callee, .. } => Some((*dst, callee)),
+                _ => None,
+            })
+            .collect();
+        assert!(!call_results.is_empty(), "expected len and id calls");
+        for (dst, callee) in call_results {
+            assert!(
+                matches!(
+                    analysis
+                        .db
+                        .data(analysis.db.follow(main.locals[dst.0 as usize].ty)),
+                    praxis_types::TypeData::Scalar(praxis_types::ScalarType::Int)
+                ),
+                "the {callee:?} result is statically Int but local {dst:?} carries {:?}",
+                main.locals[dst.0 as usize].ty
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "known bug: fused pipeline Vec/Unit result slots are typed as Int"]
+    fn pipeline_runtime_call_destinations_retain_vec_and_unit_types() {
+        let (funcs, analysis) =
+            lower_src_to_mir("fn main() {\n  let v = Vec()\n  v.push(1)\n  v.map(|x| x)\n}\n");
+        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+
+        for inst in main.blocks.iter().flat_map(|block| &block.insts) {
+            let Inst::Call {
+                dst,
+                callee: CallTarget::Runtime(name),
+                ..
+            } = inst
+            else {
+                continue;
+            };
+            let local_ty = main.locals[dst.0 as usize].ty;
+            match name.as_str() {
+                "praxis_vec_new" => assert!(
+                    matches!(
+                        analysis.db.data(analysis.db.follow(local_ty)),
+                        praxis_types::TypeData::Collection {
+                            ctor: praxis_types::CollectionCtor::Vec,
+                            ..
+                        }
+                    ),
+                    "praxis_vec_new must define a Vec-typed local, got {local_ty:?}"
+                ),
+                "praxis_vec_push" => assert!(
+                    matches!(
+                        analysis.db.data(analysis.db.follow(local_ty)),
+                        praxis_types::TypeData::Unit
+                    ),
+                    "praxis_vec_push must define a Unit-typed local, got {local_ty:?}"
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "known bug: continue in a for loop jumps past the index increment"]
+    fn for_continue_targets_the_increment_block_not_the_header() {
+        let (funcs, _analysis) = lower_src_to_mir(
+            "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  for x in v { continue }\n  0\n}\n",
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let (header, body) = main
+            .blocks
+            .iter()
+            .find_map(|block| {
+                let has_len_call = block.insts.iter().any(|inst| {
+                    matches!(
+                        inst,
+                        Inst::Call {
+                            callee: CallTarget::Runtime(name),
+                            ..
+                        } if name == "praxis_vec_len"
+                    )
+                });
+                match (&block.term, has_len_call) {
+                    (Terminator::Branch { then_block, .. }, true) => Some((block.id, *then_block)),
+                    _ => None,
+                }
+            })
+            .expect("for-loop header and body");
+        let Terminator::Jump { target } = &main.blocks[body.0 as usize].term else {
+            panic!("continue should terminate the for body with a jump");
+        };
+        assert_ne!(
+            *target, header,
+            "jumping straight to the header leaves the index unchanged and loops forever"
+        );
+        assert!(
+            main.blocks[target.0 as usize].insts.iter().any(|inst| {
+                matches!(
+                    inst,
+                    Inst::Materialize {
+                        scalar: ScalarKind::Int,
+                        ..
+                    }
+                )
+            }),
+            "the continue target must increment and re-materialize the loop index"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: enumerate emits an opaque Type(0) tuple schema"]
+    fn enumerate_tuple_allocation_carries_a_real_two_element_type() {
+        // Codegen builds TupleSchema from AllocKind::Tuple.ty. Supplying the
+        // opaque Type(0) does not make codegen infer a schema from runtime
+        // values; it creates a zero-field tuple and all tuple_set calls become
+        // no-ops. Assert the MIR/codegen boundary carries the actual shape.
+        let (funcs, analysis) =
+            lower_src_to_mir("fn main() {\n  let v = Vec()\n  v.push(10)\n  v.enumerate()\n}\n");
+        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let tuple_ty = main
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .find_map(|inst| match inst {
+                Inst::Alloc {
+                    alloc: AllocKind::Tuple { ty, .. },
+                    ..
+                } => Some(*ty),
+                _ => None,
+            })
+            .expect("enumerate should allocate an (index, item) tuple");
+
+        assert!(
+            matches!(
+                analysis.db.data(analysis.db.follow(tuple_ty)),
+                praxis_types::TypeData::Tuple(elements) if elements.len() == 2
+            ),
+            "enumerate must carry a two-element tuple type into codegen, got {tuple_ty:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: zip emits an opaque Type(0) tuple schema"]
+    fn zip_tuple_allocation_carries_a_real_two_element_type() {
+        let (funcs, analysis) = lower_src_to_mir(
+            "fn main() {\n  let lhs = Vec()\n  lhs.push(10)\n  let rhs = Vec()\n  rhs.push(20)\n  lhs.zip(rhs)\n}\n",
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let tuple_ty = main
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .find_map(|inst| match inst {
+                Inst::Alloc {
+                    alloc: AllocKind::Tuple { ty, .. },
+                    ..
+                } => Some(*ty),
+                _ => None,
+            })
+            .expect("zip should allocate an (left, right) tuple");
+
+        assert!(
+            matches!(
+                analysis.db.data(analysis.db.follow(tuple_ty)),
+                praxis_types::TypeData::Tuple(elements) if elements.len() == 2
+            ),
+            "zip must carry a two-element tuple type into codegen, got {tuple_ty:?}"
         );
     }
 }

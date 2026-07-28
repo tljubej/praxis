@@ -139,6 +139,41 @@ mod tests {
     use super::*;
     use crate::abi::praxis_alloc_int;
     use crate::context::{Runtime, RuntimeContext};
+    use crate::descriptor::{TypeDescriptor, TypeId};
+    use crate::{Heap, Tracer};
+
+    unsafe fn test_trace(_: *mut u8, _: &mut dyn Tracer) {}
+    unsafe fn test_drop(_: *mut u8) {}
+    unsafe fn test_format(payload: *const u8, out: &mut dyn std::fmt::Write) {
+        let value = unsafe { *(payload as *const i64) };
+        let _ = write!(out, "{value}");
+    }
+    unsafe fn test_equals(a: *const u8, b: *const u8) -> bool {
+        unsafe { *(a as *const i64) == *(b as *const i64) }
+    }
+
+    const LOGICAL_A: &TypeDescriptor = &TypeDescriptor {
+        id: TypeId(u32::MAX - 10),
+        name: "LogicalA",
+        size: std::mem::size_of::<i64>(),
+        align: std::mem::align_of::<i64>(),
+        trace: test_trace,
+        drop_value: test_drop,
+        format: test_format,
+        equals: Some(test_equals),
+        hash: None,
+    };
+    const LOGICAL_B: &TypeDescriptor = &TypeDescriptor {
+        id: TypeId(u32::MAX - 11),
+        name: "LogicalB",
+        size: std::mem::size_of::<i64>(),
+        align: std::mem::align_of::<i64>(),
+        trace: test_trace,
+        drop_value: test_drop,
+        format: test_format,
+        equals: Some(test_equals),
+        hash: None,
+    };
 
     /// Wire a fresh runtime and return its context pointer (test helper).
     fn wired_ctx(rt: &mut Runtime) -> *mut RuntimeContext {
@@ -187,5 +222,45 @@ mod tests {
             h.finish()
         };
         assert_eq!(ha, hb, "equal keys hash equal");
+    }
+
+    #[test]
+    #[ignore = "known bug: DynamicKey::eq does not compare descriptor identity"]
+    fn dynamic_keys_with_different_descriptors_are_never_equal() {
+        let heap = Heap::new();
+        let a = heap.alloc(LOGICAL_A, 7_i64);
+        let b = heap.alloc(LOGICAL_B, 7_i64);
+
+        assert_ne!(
+            DynamicKey::new(a),
+            DynamicKey::new(b),
+            "runtime type identity is part of structural key equality"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: mutable structural keys invalidate Rust hash-table buckets"]
+    fn mutating_a_structural_key_does_not_break_lookup_by_the_same_value() {
+        use std::collections::HashSet;
+
+        let rt = Runtime::new();
+        let key = rt.alloc_vec(crate::scalars::INT, Vec::new());
+        let wrapped = DynamicKey::new(key);
+        let mut set = HashSet::new();
+        assert!(set.insert(wrapped));
+
+        for i in 0..4096_i64 {
+            let item = rt.alloc_int(i);
+            unsafe {
+                (*key.payload::<crate::collections::VecPayload>())
+                    .items
+                    .push(item);
+            }
+            assert!(
+                set.contains(&wrapped),
+                "mutating a key after insertion changed its bucket at length {}",
+                i + 1
+            );
+        }
     }
 }

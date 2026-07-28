@@ -321,4 +321,35 @@ mod tests {
         assert!(err.is_some());
         assert_eq!(err.unwrap().code, "I022");
     }
+
+    #[test]
+    #[ignore = "known bug: an empty separator reaches a non-advancing runtime loop"]
+    fn empty_separator_is_rejected_before_plan_construction() {
+        let ast = ParserAst::Sep {
+            separator: String::new(),
+            child: Box::new(atom()),
+            span: Span::at(0),
+        };
+
+        assert!(
+            !validate(&ast).is_empty(),
+            "sep(\"\", P) must be rejected because it can never advance"
+        );
+    }
+
+    #[test]
+    #[ignore = "known bug: repeated-tail names are omitted from duplicate-field validation"]
+    fn repeated_section_tail_cannot_reuse_a_fixed_field_name() {
+        let ast = ParserAst::SectionsNamed {
+            fields: vec![("items".to_string(), atom())],
+            repeated_tail: Some(("items".to_string(), Box::new(atom()))),
+            span: Span::at(0),
+        };
+
+        let errors = validate(&ast);
+        assert!(
+            errors.iter().any(|error| error.code == "I024"),
+            "the generated record cannot contain two fields named `items`"
+        );
+    }
 }

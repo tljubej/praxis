@@ -762,6 +762,19 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "known bug: Fault::set(None) creates pending=true, kind=None"]
+    fn setting_none_cannot_create_a_pending_fault() {
+        let mut fault = Fault::clear();
+        fault.set(FaultKind::None);
+
+        assert!(
+            !fault.is_pending(),
+            "FaultKind::None represents the absence of a fault and must not be pending"
+        );
+        assert_eq!(fault.kind, FaultKind::None);
+    }
+
+    #[test]
     fn runtime_allocates_and_reads_scalars() {
         let rt = Runtime::new();
         let i = rt.alloc_int(-123);

@@ -325,4 +325,17 @@ mod tests {
         assert!(VEC.is_hashable());
         assert_eq!(VEC.name, "Vec");
     }
+
+    #[test]
+    #[ignore = "known bug: Vec equality omits the per-instance element descriptor"]
+    fn empty_vectors_with_different_element_types_are_not_equal() {
+        let rt = crate::Runtime::new();
+        let ints = rt.alloc_vec(crate::scalars::INT, Vec::new());
+        let floats = rt.alloc_vec(crate::scalars::FLOAT, Vec::new());
+
+        assert!(
+            !ints.equals(&floats),
+            "a collection's element descriptor is part of its runtime type identity"
+        );
+    }
 }

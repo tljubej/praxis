@@ -189,4 +189,24 @@ mod tests {
         assert!(!MIN_HEAP.is_hashable());
         assert_eq!(MIN_HEAP.name, "MinHeap");
     }
+
+    #[test]
+    #[ignore = "known bug: HeapEntry orders every payload as an i64"]
+    fn float_heap_entries_use_numeric_order() {
+        let rt = crate::Runtime::new();
+        let minus_two = HeapEntry {
+            value: rt.alloc_float(-2.0),
+            descriptor: crate::scalars::FLOAT,
+        };
+        let minus_one = HeapEntry {
+            value: rt.alloc_float(-1.0),
+            descriptor: crate::scalars::FLOAT,
+        };
+
+        assert_eq!(
+            minus_two.cmp(&minus_one),
+            std::cmp::Ordering::Less,
+            "orderable Float values must use IEEE numeric ordering, not signed bit-pattern order"
+        );
+    }
 }

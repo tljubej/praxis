@@ -251,6 +251,8 @@ fn is_real_ref(r: GcRef) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scalars::INT;
+    use crate::{Runtime, LOCAL_KIND_USER};
 
     #[test]
     fn empty_snapshot_roots_nothing() {
@@ -269,5 +271,36 @@ mod tests {
         assert!(slot.is_set());
         slot.clear();
         assert!(!slot.is_set());
+    }
+
+    #[test]
+    fn explicit_collection_preserves_values_held_by_a_crash_snapshot() {
+        let runtime = Runtime::new();
+        let value = runtime.heap().alloc(INT, 42_i64);
+        let snapshot = CrashSnapshot {
+            frames: vec![SnapshotFrame {
+                parent: usize::MAX,
+                func_name: std::ptr::null(),
+                func_name_len: 0,
+                locals: vec![DebugLocal {
+                    source_name: std::ptr::null(),
+                    name_len: 0,
+                    symbol_id: 0,
+                    descriptor: INT as *const _,
+                    value,
+                    type_id: 0,
+                    kind: LOCAL_KIND_USER,
+                    span_start: 0,
+                    span_end: 0,
+                }],
+                source_span: (0, 0),
+            }],
+            fault_kind: crate::FaultKind::None,
+        };
+
+        runtime.collect(&snapshot);
+
+        assert_eq!(runtime.heap().stats().live_count, 1);
+        assert_eq!(value.as_int(), 42);
     }
 }
