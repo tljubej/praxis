@@ -249,6 +249,78 @@ unsafe fn deque_owned_bytes(payload: *const u8) -> usize {
 // spec-faithful `Grid[T]`. Grid methods (neighbors, indexing, etc.) are M8.
 // ===========================================================================
 
+/// A validated grid shape: a non-negative width and height whose product is a
+/// cell count the runtime can actually allocate.
+///
+/// This is the *only* route from a user-supplied `Int` pair to a cell count
+/// (RT-07). `Grid[T](w, h)` used to reach `vec![unit; (w as usize) * (h as
+/// usize)]` directly, where `w = -1` became `usize::MAX` and the product
+/// overflowed — either an allocation the host could not serve (an OOM abort) or
+/// a capacity-overflow panic, both crossing `extern "C"`. Neither is expressible
+/// now: `GridExtent` holds `usize`s, and the multiplication it proves is the one
+/// `cells()` returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridExtent {
+    width: usize,
+    height: usize,
+    cells: usize,
+}
+
+impl GridExtent {
+    /// The largest grid the runtime will construct: 2^28 cells, which is 2 GiB
+    /// of `GcRef` storage before a single cell object exists.
+    ///
+    /// A cap, not a `checked_mul`, because a product that merely *fits* in a
+    /// `usize` is still an allocation no host can serve — `Grid[Int](2^40, 2)`
+    /// multiplies cleanly and then aborts the process. The number is a judgement
+    /// about what a Praxis program plausibly asks for; a program that wants more
+    /// gets a fault it can see rather than a SIGKILL it cannot.
+    pub const MAX_CELLS: usize = 1 << 28;
+
+    /// The extent `width × height` names, or `None` if either side is negative
+    /// or the grid would exceed [`MAX_CELLS`](Self::MAX_CELLS).
+    #[must_use]
+    pub const fn new(width: i64, height: i64) -> Option<GridExtent> {
+        if width < 0 || height < 0 {
+            return None;
+        }
+        // Both are now non-negative, so the casts are exact on a 64-bit host.
+        let (width, height) = (width as usize, height as usize);
+        let Some(cells) = width.checked_mul(height) else {
+            return None;
+        };
+        if cells > Self::MAX_CELLS {
+            return None;
+        }
+        Some(GridExtent {
+            width,
+            height,
+            cells,
+        })
+    }
+
+    /// The column count.
+    #[inline]
+    #[must_use]
+    pub const fn width(self) -> usize {
+        self.width
+    }
+
+    /// The row count.
+    #[inline]
+    #[must_use]
+    pub const fn height(self) -> usize {
+        self.height
+    }
+
+    /// The total cell count — `width * height`, proven not to overflow.
+    #[inline]
+    #[must_use]
+    pub const fn cells(self) -> usize {
+        self.cells
+    }
+}
+
 /// The `Grid[T]` payload: a row-major sequence of `GcRef`s plus the fixed
 /// column count (width). `items.len() == width * height`. Mirrors `VecPayload`
 /// but carries rectangular shape so M8 methods and indexing are cheap.

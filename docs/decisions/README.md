@@ -46,3 +46,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-038: Built-in type identity is derived; descriptors are `static`](./038-derived-builtin-type-identity.md)
 - [ADR-039: The `GcHeader` owns the object layout; allocations carry their heap](./039-gc-header-layout-authority-and-heap-provenance.md)
 - [ADR-040: A `Safepoint` token gates allocation, with one named unpaced route](./040-safepoint-token-and-the-unpaced-back-door.md)
+- [ADR-041: A size the host cannot serve is a fault, not an abort](./041-bounded-extents-fault-instead-of-aborting.md)

@@ -45,7 +45,7 @@ unsafe fn map_trace(payload: *mut u8, tracer: &mut dyn Tracer) {
     // SAFETY: caller guarantees `payload` points at an initialized MapPayload.
     let p = unsafe { &*(payload as *const MapPayload) };
     for (k, v) in p.entries.iter() {
-        tracer.trace(k.value);
+        tracer.trace(k.value());
         tracer.trace(*v);
     }
 }
@@ -64,8 +64,8 @@ unsafe fn map_format(payload: *const u8, out: &mut dyn fmt::Write) {
         if i > 0 {
             let _ = out.write_str(", ");
         }
-        let k_payload = k.value.payload::<u8>() as *const u8;
-        (k.descriptor.format)(k_payload, out);
+        let k_payload = k.value().payload::<u8>() as *const u8;
+        (k.descriptor().format)(k_payload, out);
         let _ = out.write_str(": ");
         let v_payload = v.payload::<u8>() as *const u8;
         (val_desc.format)(v_payload, out);
@@ -117,7 +117,7 @@ unsafe fn map_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     let mut acc: u64 = 0;
     for (k, v) in p.entries.iter() {
         let mut kh = crate::descriptor::StructHasher::new();
-        let k_payload = k.value.payload::<u8>() as *const u8;
+        let k_payload = k.value().payload::<u8>() as *const u8;
         // SAFETY: key payload matches the key descriptor.
         unsafe { hash_key(k_payload, &mut kh) };
         let mut vh = crate::descriptor::StructHasher::new();
@@ -179,7 +179,7 @@ unsafe fn set_trace(payload: *mut u8, tracer: &mut dyn Tracer) {
     // SAFETY: caller guarantees `payload` points at an initialized SetPayload.
     let p = unsafe { &*(payload as *const SetPayload) };
     for k in p.entries.iter() {
-        tracer.trace(k.value);
+        tracer.trace(k.value());
     }
 }
 
@@ -196,8 +196,8 @@ unsafe fn set_format(payload: *const u8, out: &mut dyn fmt::Write) {
         if i > 0 {
             let _ = out.write_str(", ");
         }
-        let k_payload = k.value.payload::<u8>() as *const u8;
-        (k.descriptor.format)(k_payload, out);
+        let k_payload = k.value().payload::<u8>() as *const u8;
+        (k.descriptor().format)(k_payload, out);
     }
     let _ = out.write_str("}");
 }
@@ -220,7 +220,7 @@ unsafe fn set_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     let mut acc: u64 = 0;
     for k in p.entries.iter() {
         let mut h = crate::descriptor::StructHasher::new();
-        let k_payload = k.value.payload::<u8>() as *const u8;
+        let k_payload = k.value().payload::<u8>() as *const u8;
         // SAFETY: element payload matches the element descriptor.
         unsafe { hash_el(k_payload, &mut h) };
         acc ^= h.finish();
@@ -273,7 +273,7 @@ unsafe fn counter_trace(payload: *mut u8, tracer: &mut dyn Tracer) {
     // SAFETY: caller guarantees `payload` points at an initialized CounterPayload.
     let p = unsafe { &*(payload as *const CounterPayload) };
     for (k, v) in p.entries.iter() {
-        tracer.trace(k.value);
+        tracer.trace(k.value());
         tracer.trace(*v);
     }
 }
@@ -291,8 +291,8 @@ unsafe fn counter_format(payload: *const u8, out: &mut dyn fmt::Write) {
         if i > 0 {
             let _ = out.write_str(", ");
         }
-        let k_payload = k.value.payload::<u8>() as *const u8;
-        (k.descriptor.format)(k_payload, out);
+        let k_payload = k.value().payload::<u8>() as *const u8;
+        (k.descriptor().format)(k_payload, out);
         let _ = out.write_str(": ");
         let v_payload = v.payload::<u8>() as *const u8;
         // Counter values are always Int; format via INT.
@@ -332,7 +332,7 @@ unsafe fn counter_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     let mut acc: u64 = 0;
     for (k, v) in p.entries.iter() {
         let mut kh = crate::descriptor::StructHasher::new();
-        let k_payload = k.value.payload::<u8>() as *const u8;
+        let k_payload = k.value().payload::<u8>() as *const u8;
         // SAFETY: key payload matches the key descriptor.
         unsafe { hash_key(k_payload, &mut kh) };
         let v_i = unsafe { *(v.payload::<i64>()) };

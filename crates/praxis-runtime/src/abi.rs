@@ -2502,7 +2502,7 @@ pub unsafe extern "C" fn praxis_min_heap_is_empty(
 // BitSet (M8-WS5, §6.1). A compact set of non-negative integers.
 // ---------------------------------------------------------------------------
 
-use crate::bitset::BitSetPayload;
+use crate::bitset::{BitIndex, BitSetPayload};
 
 unsafe fn bitset_payload(r: GcRef) -> &'static BitSetPayload {
     unsafe { &*r.payload::<BitSetPayload>() }
@@ -2531,11 +2531,12 @@ pub unsafe extern "C" fn praxis_bitset_new(ctx: *mut RuntimeContext) -> GcRef {
     }
 }
 
-/// Set bit `value` (must be a non-negative `Int`); returns Unit.
+/// Set bit `value`; returns Unit. Faults `InvalidSize` if `value` is negative
+/// or above [`BitIndex::MAX`] — a member this set cannot hold (RT-07).
 ///
 /// # Safety
 /// `ctx` must be live and wired; `bs` must be a valid `BitSet` `GcRef`; `value`
-/// must be a non-negative `Int` `GcRef`.
+/// must be a valid `Int` `GcRef`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_bitset_insert(
     ctx: *mut RuntimeContext,
@@ -2546,13 +2547,18 @@ pub unsafe extern "C" fn praxis_bitset_insert(
     let scope = unsafe { NativeScope::new(ctx) };
     let p = unsafe { bitset_payload_mut(scope.root(bs)) };
     let i = unsafe { int_payload(value) };
-    if i >= 0 {
-        p.insert(i as usize);
-    }
+    // An insert that cannot be honoured is a fault, not a silent no-op: the
+    // caller asked the set to contain something, and it will not.
+    let Some(index) = BitIndex::new(i) else {
+        unsafe { set_fault(ctx, RaisedFault::INVALID_SIZE) };
+        return unsafe { unit_sentinel(ctx) };
+    };
+    p.insert(index);
     unsafe { unit_sentinel(ctx) }
 }
 
-/// Clear bit `value`; returns Unit.
+/// Clear bit `value`; returns Unit. A value the set cannot hold is a value it
+/// does not contain, so removing one is a no-op rather than a fault.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `bs` and `value` must be valid `GcRef`s.
@@ -2565,13 +2571,14 @@ pub unsafe extern "C" fn praxis_bitset_remove(
     let scope = unsafe { NativeScope::new(ctx) };
     let p = unsafe { bitset_payload_mut(scope.root(bs)) };
     let i = unsafe { int_payload(value) };
-    if i >= 0 {
-        p.remove(i as usize);
+    if let Some(index) = BitIndex::new(i) {
+        p.remove(index);
     }
     unsafe { unit_sentinel(ctx) }
 }
 
-/// True iff bit `value` is set, as a boxed Bool.
+/// True iff bit `value` is set, as a boxed Bool. A value the set cannot hold is
+/// simply absent — the query is total.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `bs` and `value` must be valid `GcRef`s.
@@ -2583,7 +2590,7 @@ pub unsafe extern "C" fn praxis_bitset_contains(
 ) -> GcRef {
     let p = unsafe { bitset_payload(bs) };
     let i = unsafe { int_payload(value) };
-    let present = i >= 0 && p.contains(i as usize);
+    let present = BitIndex::new(i).is_some_and(|index| p.contains(index));
     unsafe { bool_ref(ctx, present) }
 }
 
@@ -2614,7 +2621,7 @@ pub unsafe extern "C" fn praxis_bitset_is_empty(ctx: *mut RuntimeContext, bs: Gc
 // behind runtime wrappers (§11.5 realloc safety).
 // ---------------------------------------------------------------------------
 
-use crate::collections::GridPayload;
+use crate::collections::{GridExtent, GridPayload};
 
 unsafe fn grid_payload(r: GcRef) -> &'static GridPayload {
     unsafe { &*r.payload::<GridPayload>() }
@@ -2655,9 +2662,35 @@ fn grid_height(items_len: usize, width: usize) -> usize {
     items_len.checked_div(width).unwrap_or(0)
 }
 
+/// The in-bounds neighbour at `(px + dx, py + dy)`, or `None` if it falls
+/// outside a `width × height` grid.
+///
+/// The offsets are `checked_add` because `px`/`py` come out of a user-supplied
+/// point tuple: `(i64::MAX, 0).neighbors4()` overflowed the addition and
+/// panicked *inside* `extern "C"` (RT-07). A coordinate that overflows is
+/// outside every grid — `GridExtent` bounds the extents far below `i64::MAX` —
+/// so "outside" is the whole answer, not a special case.
+fn grid_neighbor(
+    px: i64,
+    py: i64,
+    dx: i64,
+    dy: i64,
+    width: usize,
+    height: usize,
+) -> Option<(i64, i64)> {
+    let nx = px.checked_add(dx)?;
+    let ny = py.checked_add(dy)?;
+    // Both non-negative below, so the casts are exact.
+    (nx >= 0 && ny >= 0 && (nx as usize) < width && (ny as usize) < height).then_some((nx, ny))
+}
+
 /// Allocate an empty `Grid[T]` with the given element descriptor, width, and
 /// height, all cells initialized to Unit. (The input parser also constructs
 /// grids directly; this wrapper is for source `Grid[T]()` + a follow-up fill.)
+///
+/// Faults `InvalidSize` if either extent is negative or the grid would exceed
+/// [`GridExtent::MAX_CELLS`] — the sizes arrive from source and used to become a
+/// `usize` cast (RT-07).
 ///
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
@@ -2674,8 +2707,12 @@ pub unsafe extern "C" fn praxis_grid_new(
     } else {
         unsafe { &*element_descriptor }
     };
+    let Some(extent) = GridExtent::new(width, height) else {
+        unsafe { set_fault(ctx, RaisedFault::INVALID_SIZE) };
+        return unsafe { unit_sentinel(ctx) };
+    };
     let unit = unsafe { unit_sentinel(ctx) };
-    let cells = vec![unit; (width as usize) * (height as usize)];
+    let cells = vec![unit; extent.cells()];
     unsafe {
         gc_alloc_with(
             ctx,
@@ -2686,7 +2723,7 @@ pub unsafe extern "C" fn praxis_grid_new(
                 (payload as *mut GridPayload).write(GridPayload {
                     element_descriptor,
                     items: cells,
-                    width: width as usize,
+                    width: extent.width(),
                 });
             },
         )
@@ -2801,8 +2838,7 @@ pub unsafe extern "C" fn praxis_grid_neighbors4(
     let scope = unsafe { NativeScope::new(ctx) };
     let rp = unsafe { vec_payload_mut(scope.root(result)) };
     for (dx, dy) in [(0i64, -1), (0, 1), (-1, 0), (1, 0)] {
-        let (nx, ny) = (px + dx, py + dy);
-        if nx >= 0 && ny >= 0 && (nx as usize) < p.width && (ny as usize) < height {
+        if let Some((nx, ny)) = grid_neighbor(px, py, dx, dy, p.width, height) {
             let pt_ref = unsafe { alloc_point(ctx, nx, ny) };
             rp.items.push(pt_ref);
         }
@@ -2833,8 +2869,7 @@ pub unsafe extern "C" fn praxis_grid_neighbors8(
             if dx == 0 && dy == 0 {
                 continue;
             }
-            let (nx, ny) = (px + dx, py + dy);
-            if nx >= 0 && ny >= 0 && (nx as usize) < p.width && (ny as usize) < height {
+            if let Some((nx, ny)) = grid_neighbor(px, py, dx, dy, p.width, height) {
                 let pt_ref = unsafe { alloc_point(ctx, nx, ny) };
                 rp.items.push(pt_ref);
             }
@@ -4072,6 +4107,166 @@ mod tests {
                 .all(|id| *id == crate::tuples::TUPLE.id()),
             "position-producing Grid methods must return Vec[Tuple[Int, Int]] at runtime"
         );
+    }
+
+    /// RT-07. Each of these extents used to reach `vec![unit; (w as usize) * (h
+    /// as usize)]`: `-1` became `usize::MAX`, and the products either overflowed
+    /// (a capacity panic across `extern "C"`) or asked the host for terabytes (an
+    /// OOM abort). The wrapper must answer with a fault, and the heap must be
+    /// untouched — a partly-built grid is as bad as a crash.
+    #[test]
+    fn a_negative_or_absurd_grid_extent_faults_instead_of_allocating() {
+        let absurd = GridExtent::MAX_CELLS as i64 + 1;
+        for (width, height) in [
+            (-1_i64, 4_i64),
+            (4, -1),
+            (-1, -1),
+            (i64::MIN, 1),
+            // Overflows the `usize` multiplication outright.
+            (i64::MAX, 2),
+            (1 << 40, 1 << 40),
+            // Multiplies cleanly and is still an allocation no host can serve.
+            (absurd, 1),
+            (1, absurd),
+        ] {
+            let mut rt = Runtime::new();
+            let ctx = wired_ctx(&mut rt);
+            let live_before = rt.heap().stats().live_count;
+            let result =
+                unsafe { praxis_grid_new(ctx, &crate::scalars::INT as *const _, width, height) };
+            let live_after = rt.heap().stats().live_count;
+            let unit = rt.immortals().unit();
+            unsafe { drop_ctx(ctx) };
+
+            assert_eq!(
+                rt.fault(),
+                FaultKind::InvalidSize,
+                "Grid[Int]({width}, {height}) must fault"
+            );
+            assert_eq!(
+                result.as_ptr(),
+                unit.as_ptr(),
+                "a faulted Grid[Int]({width}, {height}) returns the Unit sentinel"
+            );
+            assert_eq!(
+                live_after, live_before,
+                "a rejected Grid[Int]({width}, {height}) allocates nothing"
+            );
+        }
+    }
+
+    /// The other side of the same gate: an extent the runtime *can* serve still
+    /// builds the grid it asked for, including the degenerate zero cases.
+    #[test]
+    fn an_in_range_grid_extent_still_builds_its_cells() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let shapes: Vec<(i64, i64, usize, usize)> = vec![(0, 0, 0, 0), (0, 5, 0, 0), (3, 2, 6, 3)];
+        let mut observed = Vec::new();
+        for (width, height, _, _) in &shapes {
+            let grid =
+                unsafe { praxis_grid_new(ctx, &crate::scalars::INT as *const _, *width, *height) };
+            let p = unsafe { grid_payload(grid) };
+            observed.push((p.items.len(), p.width));
+        }
+        unsafe { drop_ctx(ctx) };
+
+        assert_eq!(rt.fault(), FaultKind::None, "no in-range extent faults");
+        for ((w, h, cells, width), (got_cells, got_width)) in shapes.iter().zip(observed) {
+            assert_eq!(
+                (got_cells, got_width),
+                (*cells, *width),
+                "Grid[Int]({w}, {h}) shape"
+            );
+        }
+    }
+
+    /// RT-07. `bs.insert(10^18)` asked `Vec::resize` for 10^16 words — an OOM
+    /// abort from inside `extern "C"`. A member the set cannot hold is now a
+    /// fault, and a negative one no longer vanishes silently.
+    #[test]
+    fn a_bitset_member_outside_the_representable_range_faults() {
+        for member in [-1_i64, i64::MIN, i64::MAX, BitIndex::MAX + 1] {
+            let mut rt = Runtime::new();
+            let ctx = wired_ctx(&mut rt);
+            let words;
+            unsafe {
+                let bs = praxis_bitset_new(ctx);
+                let value = praxis_alloc_int(ctx, member);
+                let _ = praxis_bitset_insert(ctx, bs, value);
+                words = bitset_payload(bs).words.len();
+            }
+            unsafe { drop_ctx(ctx) };
+
+            assert_eq!(
+                rt.fault(),
+                FaultKind::InvalidSize,
+                "BitSet.insert({member}) must fault"
+            );
+            assert_eq!(words, 0, "BitSet.insert({member}) must allocate no words");
+        }
+    }
+
+    /// Queries stay total: a value the set cannot hold is a value it does not
+    /// contain, and removing one is a no-op. Neither may fault, and neither may
+    /// grow the word vector.
+    #[test]
+    fn bitset_queries_outside_the_range_are_absent_rather_than_faults() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let (present, words) = unsafe {
+            let bs = praxis_bitset_new(ctx);
+            let huge = praxis_alloc_int(ctx, i64::MAX);
+            let _ = praxis_bitset_remove(ctx, bs, huge);
+            let answer = praxis_bitset_contains(ctx, bs, huge);
+            (
+                praxis_bool_load(ctx, answer) != 0,
+                bitset_payload(bs).words.len(),
+            )
+        };
+        unsafe { drop_ctx(ctx) };
+
+        assert!(!present, "an unrepresentable member is absent");
+        assert_eq!(words, 0, "a query allocates no words");
+        assert_eq!(rt.fault(), FaultKind::None, "a query does not fault");
+    }
+
+    /// RT-07. `(i64::MAX, i64::MAX).neighbors4()` overflowed the offset addition
+    /// and panicked across `extern "C"`. Every such neighbour is outside every
+    /// grid, so the answer is an empty Vec.
+    #[test]
+    fn neighbors_of_an_extreme_point_are_empty_rather_than_a_panic() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let cell = rt.alloc_int(1);
+        let grid = rt.alloc_grid(&crate::scalars::INT, vec![cell], 1);
+        let counts = unsafe {
+            let mut counts = Vec::new();
+            for (x, y) in [
+                (i64::MAX, i64::MAX),
+                (i64::MIN, i64::MIN),
+                (i64::MAX, 0),
+                (0, i64::MIN),
+            ] {
+                let point = alloc_point(ctx, x, y);
+                counts.push((
+                    vec_payload(praxis_grid_neighbors4(ctx, grid, point))
+                        .items
+                        .len(),
+                    vec_payload(praxis_grid_neighbors8(ctx, grid, point))
+                        .items
+                        .len(),
+                ));
+            }
+            counts
+        };
+        unsafe { drop_ctx(ctx) };
+
+        assert!(
+            counts.iter().all(|(n4, n8)| *n4 == 0 && *n8 == 0),
+            "an out-of-range point has no in-grid neighbours: {counts:?}"
+        );
+        assert_eq!(rt.fault(), FaultKind::None);
     }
 
     #[test]

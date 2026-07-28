@@ -12,6 +12,42 @@ use std::fmt;
 
 use crate::descriptor::{BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
 
+/// A value a `BitSet` can actually hold: non-negative, and small enough that
+/// the word vector backing it stays a real allocation.
+///
+/// This is the only route from a user-supplied `Int` to a bit position (RT-07).
+/// `insert` used to take a bare `usize` cast from an `i64`, so `bs.insert(-1)`
+/// was silently dropped and `bs.insert(10^18)` asked for a 10^16-word `Vec` —
+/// an OOM abort *inside* `extern "C"`. Neither is expressible now: the range
+/// check happens where the value enters, once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BitIndex(usize);
+
+impl BitIndex {
+    /// The largest member a `BitSet` accepts: 2^32 - 1, whose word vector is
+    /// 512 MiB. A cap rather than "anything a `usize` holds", for the same
+    /// reason [`GridExtent::MAX_CELLS`](crate::collections::GridExtent::MAX_CELLS)
+    /// is one — a `Vec` request the host cannot serve is not an error the
+    /// process survives.
+    pub const MAX: i64 = u32::MAX as i64;
+
+    /// The bit `value` names, or `None` if it is negative or above
+    /// [`MAX`](Self::MAX).
+    #[must_use]
+    pub const fn new(value: i64) -> Option<BitIndex> {
+        if value < 0 || value > Self::MAX {
+            return None;
+        }
+        Some(BitIndex(value as usize))
+    }
+
+    /// The word holding this bit, and its position within that word.
+    #[inline]
+    const fn word_and_bit(self) -> (usize, usize) {
+        (self.0 / 64, self.0 % 64)
+    }
+}
+
 /// The `BitSet` payload: a growable vector of 64-bit words. Bit `i` is in word
 /// `i / 64` at position `i % 64`. Both fields are `Drop`.
 #[repr(C)]
@@ -21,27 +57,28 @@ pub struct BitSetPayload {
 }
 
 impl BitSetPayload {
-    /// True iff bit `i` is set. `i` must be non-negative.
-    pub(crate) fn contains(&self, i: usize) -> bool {
-        let (word, bit) = (i / 64, i % 64);
+    /// True iff bit `i` is set.
+    pub(crate) fn contains(&self, i: BitIndex) -> bool {
+        let (word, bit) = i.word_and_bit();
         match self.words.get(word) {
             Some(w) => (w >> bit) & 1 == 1,
             None => false,
         }
     }
 
-    /// Set bit `i`, growing the words vector as needed.
-    pub(crate) fn insert(&mut self, i: usize) {
-        let (word, bit) = (i / 64, i % 64);
+    /// Set bit `i`, growing the words vector as needed. The growth is bounded
+    /// by [`BitIndex::MAX`], which is what makes this a real allocation.
+    pub(crate) fn insert(&mut self, i: BitIndex) {
+        let (word, bit) = i.word_and_bit();
         if self.words.len() <= word {
             self.words.resize(word + 1, 0);
         }
         self.words[word] |= 1u64 << bit;
     }
 
-    /// Clear bit `i` (no-op if not set or out of range).
-    pub(crate) fn remove(&mut self, i: usize) {
-        let (word, bit) = (i / 64, i % 64);
+    /// Clear bit `i` (no-op if not set or beyond the current words).
+    pub(crate) fn remove(&mut self, i: BitIndex) {
+        let (word, bit) = i.word_and_bit();
         if let Some(w) = self.words.get_mut(word) {
             *w &= !(1u64 << bit);
         }
@@ -157,30 +194,57 @@ mod tests {
         assert_eq!(BITSET.name, "BitSet");
     }
 
+    /// Shorthand: a bit that is in range by construction.
+    fn bit(i: i64) -> BitIndex {
+        BitIndex::new(i).expect("in-range test bit")
+    }
+
     #[test]
     fn bitset_insert_contains_count() {
         let mut b = BitSetPayload { words: Vec::new() };
-        b.insert(0);
-        b.insert(63);
-        b.insert(64);
-        b.insert(1000);
-        assert!(b.contains(0));
-        assert!(b.contains(63));
-        assert!(b.contains(64));
-        assert!(b.contains(1000));
-        assert!(!b.contains(1));
-        assert!(!b.contains(65));
+        b.insert(bit(0));
+        b.insert(bit(63));
+        b.insert(bit(64));
+        b.insert(bit(1000));
+        assert!(b.contains(bit(0)));
+        assert!(b.contains(bit(63)));
+        assert!(b.contains(bit(64)));
+        assert!(b.contains(bit(1000)));
+        assert!(!b.contains(bit(1)));
+        assert!(!b.contains(bit(65)));
         assert_eq!(b.count(), 4);
     }
 
     #[test]
     fn bitset_remove_clears_bit() {
         let mut b = BitSetPayload { words: Vec::new() };
-        b.insert(5);
-        assert!(b.contains(5));
-        b.remove(5);
-        assert!(!b.contains(5));
+        b.insert(bit(5));
+        assert!(b.contains(bit(5)));
+        b.remove(bit(5));
+        assert!(!b.contains(bit(5)));
         // Removing an unset bit is a no-op.
-        b.remove(999);
+        b.remove(bit(999));
+    }
+
+    /// RT-07. A member the set cannot hold has no `BitIndex`, so there is no
+    /// value to hand `insert` — the resize toward a huge word count is
+    /// unwritable rather than merely unreached.
+    #[test]
+    fn a_bit_outside_the_representable_range_has_no_index() {
+        assert!(BitIndex::new(-1).is_none(), "negative");
+        assert!(BitIndex::new(i64::MIN).is_none(), "most negative");
+        assert!(
+            BitIndex::new(BitIndex::MAX + 1).is_none(),
+            "one past the cap"
+        );
+        assert!(
+            BitIndex::new(i64::MAX).is_none(),
+            "the value that asked for a 10^16-word Vec"
+        );
+        assert!(BitIndex::new(0).is_some(), "zero is a member");
+        assert!(
+            BitIndex::new(BitIndex::MAX).is_some(),
+            "the cap is a member"
+        );
     }
 }

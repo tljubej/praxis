@@ -73,6 +73,14 @@ pub enum FaultKind {
     /// than panicking across the ABI — but the recovery is a fault, not a
     /// silent success, and now says so.
     InvalidText = 9,
+    /// A size or extent the runtime cannot honour: a negative `Grid` width or
+    /// height, a `width * height` that overflows or exceeds
+    /// [`GridExtent::MAX_CELLS`](crate::collections::GridExtent::MAX_CELLS), or
+    /// a `BitSet` member outside [`BitIndex`](crate::bitset::BitIndex)'s range
+    /// (§9.2). These reached Rust as a `usize` cast and became an OOM abort or
+    /// a capacity-overflow panic *across* `extern "C"`; they are now faults
+    /// (RT-07).
+    InvalidSize = 10,
 }
 
 /// A [`FaultKind`] that is actually a fault.
@@ -108,6 +116,8 @@ impl RaisedFault {
     pub const INVALID_CHAR: RaisedFault = RaisedFault(FaultKind::InvalidChar);
     /// A byte buffer that had to be `Text` was not valid UTF-8 (§4.3).
     pub const INVALID_TEXT: RaisedFault = RaisedFault(FaultKind::InvalidText);
+    /// A size or extent the runtime cannot honour (§9.2).
+    pub const INVALID_SIZE: RaisedFault = RaisedFault(FaultKind::InvalidSize);
 
     /// The raisable fault `kind` names, or `None` for [`FaultKind::None`] —
     /// which is the *absence* of a fault and cannot be raised.
@@ -140,6 +150,7 @@ impl std::fmt::Display for FaultKind {
             FaultKind::FloatToInt => write!(f, "float-to-int conversion out of range"),
             FaultKind::InvalidChar => write!(f, "not a Unicode scalar value"),
             FaultKind::InvalidText => write!(f, "invalid UTF-8 in Text"),
+            FaultKind::InvalidSize => write!(f, "size or extent out of range"),
         }
     }
 }

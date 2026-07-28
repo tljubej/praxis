@@ -194,7 +194,7 @@ runtime_symbols! {
     AllocUnit = "praxis_alloc_unit": (Ctx) -> Gc, Pure;
     AllocVarCell = "praxis_alloc_var_cell": (Ctx, Gc) -> Gc, Allocates;
     BitsetContains = "praxis_bitset_contains": (Ctx, Gc, Gc) -> Gc, Pure;
-    BitsetInsert = "praxis_bitset_insert": (Ctx, Gc, Gc) -> Gc, Allocates;
+    BitsetInsert = "praxis_bitset_insert": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     BitsetIsEmpty = "praxis_bitset_is_empty": (Ctx, Gc) -> Gc, Pure;
     BitsetLen = "praxis_bitset_len": (Ctx, Gc) -> Gc, Allocates;
     BitsetNew = "praxis_bitset_new": (Ctx) -> Gc, Allocates;
@@ -246,7 +246,7 @@ runtime_symbols! {
     GridHeight = "praxis_grid_height": (Ctx, Gc) -> Gc, Allocates;
     GridNeighbors4 = "praxis_grid_neighbors4": (Ctx, Gc, Gc) -> Gc, Allocates;
     GridNeighbors8 = "praxis_grid_neighbors8": (Ctx, Gc, Gc) -> Gc, Allocates;
-    GridNew = "praxis_grid_new": (Ctx, Ptr, RawI64, RawI64) -> Gc, Allocates;
+    GridNew = "praxis_grid_new": (Ctx, Ptr, RawI64, RawI64) -> Gc, AllocatesAndFaults;
     GridPositions = "praxis_grid_positions": (Ctx, Gc) -> Gc, Allocates;
     GridRotateLeft = "praxis_grid_rotate_left": (Ctx, Gc) -> Gc, Allocates;
     GridRotateRight = "praxis_grid_rotate_right": (Ctx, Gc) -> Gc, Allocates;
