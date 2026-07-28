@@ -13,7 +13,7 @@ Update this file at the end of every stage.
 |---|---|---|
 | S1 — Runtime identity registry | **done** | `055e894` |
 | S2 — Independent hardening | **done** | `5629736`, `70ea4be` |
-| S3 — ABI manifest, MIR representation, fault values | **part done** — P0-13 closed | `8a30db1`, `7075017` |
+| S3 — ABI manifest, MIR representation, fault values | **part done** — P0-13, P0-04, P0-08 closed; P0-02 and P0-03 remain | `8a30db1`, `7075017`, `91b64c1` |
 | S4 — Object layout and heap provenance | **done** | `dfe42b6` |
 | S5 — Root-set completeness, native RAII roots | not started | |
 | S6 … S21 | not started | |
@@ -22,15 +22,16 @@ Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10. It fell out of S1.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **987 passed, 0 failed, 138 ignored**. `just ci` is green.
+Now: **992 passed, 0 failed, 137 ignored**. `just ci` is green.
 
-Eleven of the audit's ignored regressions are un-ignored and passing. The two
+Twelve of the audit's ignored regressions are un-ignored and passing. The three
 added this session:
 
 | Test | File |
 |---|---|
 | `overaligned_payload_accessor_matches_initialized_address` | `praxis-runtime/src/heap.rs` |
 | `foreign_heap_root_cannot_delay_reclamation` | `praxis-runtime/src/heap.rs` |
+| `fault_epilogue_returns_the_valid_unit_sentinel` | `praxis-codegen-cranelift/tests/adversarial_audit.rs` |
 
 (Earlier nine: `builtin_type_ids_are_globally_unique`,
 `regression_unicode_identifier_may_start_with_a_unicode_scalar`,
@@ -123,6 +124,25 @@ The trailing phantom `GcRef` is gone (a zero-parameter `main` never had it), so
 callers no longer allocate a Unit to fill it. `evaluate.rs`'s `null_sentinel()`
 is deleted with it.
 
+**`Int` arithmetic is lowered natively; two new raise wrappers exist.**
+`Inst::IntBinOp` emits `iadd`/`isub`/`imul`/`sdiv`/`srem` on the scalar channel
+with the overflow predicate computed inline, then calls
+`praxis_raise_int_overflow_if` / `praxis_raise_div_by_zero_if` **with the
+predicate** rather than branching around the call. Consequences worth knowing:
+
+- Arithmetic no longer allocates, so an arithmetic site is not a safepoint.
+  Anything that assumed `IntBinOp` needed a root spill is now over-spilling.
+- `sdiv`/`srem` *trap* (process abort) on a zero divisor and on `i64::MIN / -1`,
+  so the lowering substitutes a divisor of `1` in both cases and reports the
+  fault. Do not remove that substitution.
+- The raise wrappers are unconditional calls. If a later stage wants the
+  branch-around form instead, `Inst::CheckFault`'s arm already shows how to
+  split a Cranelift block mid-MIR-block.
+
+**Fault epilogues return `ctx.unit_ref`, not `iconst 0`.** `UNIT_REF_OFFSET` in
+`lower.rs` is the load. Both fault exits (the `Terminator::Fault` block and the
+stack-overflow guard) use it.
+
 **Effect classification is a judgement, and it is recorded per row.**
 `Allocates` means "may trigger a collection", so a wrapper that only hands back
 an immortal singleton is `Pure` however "alloc" its name reads —
@@ -167,21 +187,28 @@ re-deriving it.
 
 ## 4. Where to start
 
-**Finish S3.** Three findings remain, and two of them must land together:
+**Finish S3: P0-02 and P0-03 are what remain.** Both need F16 (`MirType` +
+raw-word elimination, XL, tier 2). They land the *representation only*:
 
-- **P0-04 + P0-08 (one commit, H4).** The arithmetic wrappers already return
-  `unit_sentinel` on fault, and codegen calls `Symbol::IntLoad` on that result
-  *before* `call_check_fault` — an 8-byte read past a size-0 Unit payload, live
-  today. Separately, `Terminator::Fault` returns `iconst 0` — a null `GcRef`
-  across an ABI that promises a valid one. Fixing the epilogue alone converts a
-  loud segfault into a silently wrong value, so they are one unit. P0-08 also
-  wants `IntBinOp` lowered natively (no `AllocInt`/`IntLoad` pair per
-  arithmetic op) with two new non-allocating raise symbols. **Adding those
-  symbols is now cheap** — see §3.
-- **P0-02 + P0-03** need F16 (`MirType`, XL, tier 2). They land the
-  representation only: the ~35 `build.rs` sites with no available type are
-  marked `Opaque` explicitly, and the verifier's no-`Opaque`-in-a-descriptor-
-  position rule stays **off** until S15 (H10). Do not turn it on here.
+- Replace `Type(0)` with `MirType::{Known, Opaque}`. Roughly 35 of the ~40
+  sites have no correct type available until HIR-01 carries inferred per-use
+  types (S15), so mark those `Opaque` **explicitly** — that is the point of the
+  representation, not a shortcut.
+- The MIR verifier's "no `Opaque` in a descriptor-producing position" rule
+  stays **off** until S15 (H10). Turning it on here refuses to compile
+  currently-working programs.
+- H9: `descriptor_for_type` takes `praxis_types::Type`, not `MirType`, so P0-02
+  lands first with `Opaque => emit no descriptor` while the `Known` path keeps
+  its `_ => INT` fallback. P0-11 (S7) makes the `Known` path exhaustive.
+- P0-03 is the same foundation's other half: get raw non-pointer words
+  (`LoadCapture` indices, `TupleShape`) out of GC-rootable slots.
+
+Exit criteria still open for S3:
+`closure_capture_indices_never_flow_through_gc_locals`,
+`call_result_locals_retain_their_inferred_static_types`,
+`pipeline_runtime_call_destinations_retain_vec_and_unit_types` (all in
+`praxis-mir/src/build.rs`). The two tuple-allocation tests in the same file are
+**not** S3 criteria — they need MIR-05's real tuple type in S21.
 
 Then **S5** (weight 36, hard barrier before S6): F7's composite `RuntimeRoots`,
 P0-06 + P0-07 in one commit (H1 — deleting the null-`roots` early return before
@@ -189,7 +216,7 @@ the native arm exists converts a growth bug into use-after-free), DBG-04, and
 the ABI bump to 9.
 
 Re-read §6 of the plan before either. The hazards that still bind: **H1**,
-**H2**, **H4**, **H17**. **H6 and H16 are discharged.**
+**H2**, **H3**, **H9**, **H10**, **H17**. **H4, H6 and H16 are discharged.**
 
 ## 5. Design decisions still open
 
@@ -242,3 +269,18 @@ Things the plan states that are no longer or were not quite true.
   so an absent symbol is unspellable. The tests that exist assert the property
   that replaced the bug — signatures derived from rows, narrow params declared
   narrow, void wrappers with no result.
+- **P0-08's raise symbols take a predicate.** The plan says "two non-allocating
+  raise symbols"; they are `praxis_raise_int_overflow_if` and
+  `praxis_raise_div_by_zero_if`, each `(ctx, condition: i64) -> void`. Taking
+  the condition instead of branching around the call keeps an arithmetic site
+  in one basic block, which is what let native lowering land without touching
+  the block bookkeeping. If a future stage prefers the branch form, nothing
+  about the fault protocol changes.
+- **P0-08 raised a question the plan does not answer.** The two loop-increment
+  `Inst::IntBinOp` sites in `build.rs` (the `for`-loop index bump) are *not*
+  followed by a `check_fault`. An overflow there now sets a pending fault that
+  is only observed at the next check. That is harmless (faults are sticky and
+  the index would have to reach `i64::MAX`), but a MIR verifier rule "every
+  faulting instruction is followed by a CheckFault" — MIR-10, S9 — would flag
+  it, and the right answer is probably to mark the increment non-faulting
+  rather than to add a check.
