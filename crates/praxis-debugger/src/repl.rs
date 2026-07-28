@@ -72,6 +72,24 @@ impl Repl {
         }
     }
 
+    /// Consume the REPL and hand back the live session, dropping the snapshot
+    /// first.
+    ///
+    /// The order is the point. A `CrashSnapshot` holds `GcRef`s into the
+    /// session's heap, and since S6 the heap finalizes its payloads on drop —
+    /// so a snapshot outliving the runtime is a use-after-free waiting to be
+    /// read (hazard H8). Destructuring here makes that explicit instead of
+    /// relying on field declaration order surviving the next edit. The caller
+    /// gets a session it can [`DebugSession::teardown`].
+    #[must_use]
+    pub fn into_session(self) -> Option<DebugSession> {
+        let Repl {
+            snapshot, session, ..
+        } = self;
+        drop(snapshot);
+        session
+    }
+
     /// Borrow the live session, if any. M10b commands use this to reach the
     /// `Jit`/`Runtime`/`TypeDb`; returns `None` for navigation-only REPLs.
     pub fn session(&self) -> Option<&DebugSession> {
@@ -112,15 +130,28 @@ impl Repl {
             Some(f) => f,
             None => return Err("no frame selected".to_string()),
         };
+        // Clone the `Rc` before the `&mut` borrows below: the evaluation
+        // generation is a session field like the others.
+        let generation = std::rc::Rc::clone(&session.eval_generation);
         let db = &mut session.analysis.db;
         match mode {
-            crate::evaluate::Mode::Print => {
-                crate::evaluate::evaluate(db, &mut session.runtime, &self.snapshot, frame, expr)
-            }
+            crate::evaluate::Mode::Print => crate::evaluate::evaluate(
+                db,
+                &mut session.runtime,
+                &self.snapshot,
+                frame,
+                expr,
+                &generation,
+            ),
             crate::evaluate::Mode::Type => crate::evaluate::type_of(db, frame, expr),
-            crate::evaluate::Mode::Heap => {
-                crate::evaluate::heap(db, &mut session.runtime, &self.snapshot, frame, expr)
-            }
+            crate::evaluate::Mode::Heap => crate::evaluate::heap(
+                db,
+                &mut session.runtime,
+                &self.snapshot,
+                frame,
+                expr,
+                &generation,
+            ),
         }
     }
 

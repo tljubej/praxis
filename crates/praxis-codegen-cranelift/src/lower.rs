@@ -24,6 +24,8 @@ use praxis_mir::{
 use praxis_runtime::{DebugLocalMeta, RuntimeContext, ShadowFrame, MAX_SHADOW_SLOTS};
 use praxis_stdlib::abi::{AbiKind, AbiRet, RuntimeSymbol};
 
+use crate::generation::Generation;
+
 /// The uniform Cranelift type for a `GcRef` and every scalar payload: `i64`.
 /// `GcRef` is `#[repr(transparent)]` over a pointer; `Int`/`Bool` payloads are
 /// `i64`/`bool`. `i64` carries both faithfully on a 64-bit host.
@@ -53,6 +55,7 @@ pub(crate) fn lower_function<M: Module>(
     mir: &MirFunction,
     user_funcs: &HashMap<String, FuncId>,
     db: &mut praxis_types::TypeDb,
+    generation: &Generation,
 ) -> Result<()> {
     // Use the module's own Context (the 0.134 idiom): build into `ctx.func`,
     // then `define_function(id, &mut ctx)`.
@@ -132,14 +135,15 @@ pub(crate) fn lower_function<M: Module>(
     // local's shadow slot index doubles as its debug-local index.
     let debug_frame_var = builder.declare_var(GC);
     let debug_frame_ptr = {
-        // Build the &'static [DebugLocalMeta] for this function's Gc locals.
-        // Each entry carries the source name (embedded as &'static str), a
-        // per-local symbol id placeholder, and the static type descriptor
-        // resolved from the MIR local's Type.
-        let metas = build_debug_local_metas(mir, db);
-        let meta_ptr_val = builder.ins().iconst(GC, metas.as_ptr() as i64);
-        // Embed the function name as a &'static str (ptr + len) for the frame.
-        let name_static = leak_static_str(&mir.name);
+        // Build the `[DebugLocalMeta]` for this function's Gc locals in the
+        // generation arena. Each entry carries the source name (interned in the
+        // same arena), a per-local symbol id placeholder, and the static type
+        // descriptor resolved from the MIR local's Type.
+        let (metas_ptr, _metas_len) = build_debug_local_metas(mir, db, generation);
+        let meta_ptr_val = builder.ins().iconst(GC, metas_ptr as i64);
+        // Embed the function name (ptr + len) for the frame, interned so the
+        // same function lowered twice into one generation costs one copy.
+        let name_static = generation.alloc_str(&mir.name);
         let name_ptr_val = builder.ins().iconst(GC, name_static.as_ptr() as i64);
         let name_len_val = builder.ins().iconst(GC, name_static.len() as i64);
         let count_val = builder.ins().iconst(GC, gc_count as i64);
@@ -252,6 +256,7 @@ pub(crate) fn lower_function<M: Module>(
                 user_funcs,
                 &mut user_func_cache,
                 db,
+                generation,
             )?;
         }
         lower_terminator(
@@ -388,6 +393,7 @@ fn lower_inst<M: Module>(
     user_funcs: &HashMap<String, FuncId>,
     user_cache: &mut HashMap<String, FuncRef>,
     db: &praxis_types::TypeDb,
+    generation: &Generation,
 ) -> Result<()> {
     match inst {
         Inst::ConstInt { dst, value } => {
@@ -450,7 +456,7 @@ fn lower_inst<M: Module>(
                 AllocKind::Text { value } => {
                     // Embed the string as a data object, then call praxis_alloc_text
                     // with (ptr, len).
-                    let (ptr, len_val) = embed_text(builder, module, value)?;
+                    let (ptr, len_val) = embed_text(builder, generation, value);
                     let result = call_symbol(
                         builder,
                         ctx_val,
@@ -495,7 +501,7 @@ fn lower_inst<M: Module>(
                     // def-id, leak it, embed its address, and call
                     // praxis_alloc_record(ctx, schema_ptr). Then fill in each
                     // field via praxis_record_set_field.
-                    let schema_ptr = record_schema_for(db, *record_def_id)?;
+                    let schema_ptr = record_schema_for(db, *record_def_id, generation)?;
                     let schema_imm = builder.ins().iconst(GC, schema_ptr as i64);
                     // praxis_alloc_record(ctx, schema_ptr) -> GcRef.
                     let record_ref = call_symbol(
@@ -559,7 +565,7 @@ fn lower_inst<M: Module>(
                     // tuple's static type, leak it, embed its address, and call
                     // praxis_alloc_tuple(ctx, schema_ptr). Then fill in each
                     // element via praxis_tuple_set.
-                    let schema_ptr = tuple_schema_for(db, *ty)?;
+                    let schema_ptr = tuple_schema_for(db, *ty, generation)?;
                     let schema_imm = builder.ins().iconst(GC, schema_ptr as i64);
                     // praxis_alloc_tuple(ctx, schema_ptr) -> GcRef.
                     let tuple_ref = call_symbol(
@@ -1490,9 +1496,17 @@ fn user_funcref<M: Module>(
     Ok(fr)
 }
 
-/// Build (and cache) a `'static RecordSchema` for record def `id`, returning
-/// its address as a raw pointer the JIT embeds as an immediate. The schema is
-/// `Box::leak`'d once per def-id (mirroring how text literals are leaked).
+/// Build (and cache) a `RecordSchema` for record def `id` in this JIT
+/// generation, returning its address as a raw pointer the JIT embeds as an
+/// immediate.
+///
+/// **The cache belongs to the generation, and its key carries the generation
+/// id.** A `RecordDefId` is a *per-`TypeDb` positional index*: the debugger
+/// mints a fresh `TypeDb` per `p EXPR` and per `reload`, so `RecordDefId(0)` in
+/// one program names a different struct than in the next. The process-global
+/// map this replaces was keyed on the bare `u32` and handed the second program
+/// the first program's schema — whose field descriptors then read a `Text`
+/// header as an `i64` (MIR-12, DBG-06).
 ///
 /// Every field descriptor is resolved through the F11 bridge and every one must
 /// resolve: the schema is what `equals`/`hash`/`format` dispatch through, so a
@@ -1501,47 +1515,28 @@ fn user_funcref<M: Module>(
 fn record_schema_for(
     db: &praxis_types::TypeDb,
     id: u32,
+    generation: &Generation,
 ) -> Result<*const praxis_runtime::records::RecordSchema> {
-    use praxis_runtime::records::{RecordField, RecordSchema};
+    use praxis_runtime::records::RecordField;
     use praxis_types::data::RecordDefId;
-    use std::sync::Mutex;
-    // A process-wide cache: def-id → leaked schema pointer. The schema is
-    // immutable and 'static once built, so caching across compiles is sound.
-    // The raw pointer is wrapped (SendPtr) so the Mutex can be shared across
-    // threads (inference/compilation are single-threaded today, but the Mutex
-    // satisfies the OnceLock's Sync requirement).
-    struct SendPtr(*const RecordSchema);
-    unsafe impl Send for SendPtr {}
-    static CACHE: std::sync::OnceLock<Mutex<HashMap<u32, SendPtr>>> = std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(p) = cache.lock().unwrap().get(&id) {
-        return Ok(p.0);
-    }
-    let def = db.record_def(RecordDefId(id));
-    let fields: Vec<RecordField> = def
-        .fields
-        .iter()
-        .map(|f| {
-            Ok(RecordField {
-                name: Box::leak(f.name.clone().into_boxed_str()),
-                descriptor: descriptor_for_type(db, f.ty)
-                    .with_context(|| format!("record field `{}`", f.name))?,
+    generation.record_schema(id, || {
+        let def = db.record_def(RecordDefId(id));
+        def.fields
+            .iter()
+            .map(|f| {
+                Ok(RecordField {
+                    name: generation.alloc_str(&f.name),
+                    descriptor: descriptor_for_type(db, f.ty)
+                        .with_context(|| format!("record field `{}`", f.name))?,
+                })
             })
-        })
-        .collect::<Result<_>>()?;
-    let leaked_fields: &'static [RecordField] = Box::leak(fields.into_boxed_slice());
-    let schema = Box::leak(Box::new(RecordSchema {
-        fields: leaked_fields,
-    }));
-    let ptr = SendPtr(schema as *const RecordSchema);
-    let raw = ptr.0;
-    cache.lock().unwrap().insert(id, ptr);
-    Ok(raw)
+            .collect::<Result<Vec<_>>>()
+    })
 }
 
-/// Build (and cache) a `'static TupleSchema` for the tuple type `ty`, returning
-/// its address as a raw pointer the JIT embeds as an immediate. The schema is
-/// `Box::leak`'d once per distinct tuple shape (mirroring `record_schema_for`).
+/// Build (and cache) a `TupleSchema` for the tuple type `ty` in this JIT
+/// generation, returning its address as a raw pointer the JIT embeds as an
+/// immediate.
 ///
 /// The cache is keyed by the **resolved element-descriptor sequence**, not by
 /// the static `Type` id: the type arena does not structurally intern tuples
@@ -1552,10 +1547,9 @@ fn record_schema_for(
 fn tuple_schema_for(
     db: &praxis_types::TypeDb,
     ty: MirType,
+    generation: &Generation,
 ) -> Result<*const praxis_runtime::tuples::TupleSchema> {
-    use praxis_runtime::tuples::TupleSchema;
     use praxis_types::data::TypeData;
-    use std::sync::Mutex;
     // Resolve the element types. `Opaque` means the lowering had no tuple type
     // (the fused `enumerate`/`zip` pipelines, until MIR-05); a non-tuple type is
     // a misuse (the HIR only lowers `TypedExpr::Tuple` here). Both degrade to a
@@ -1572,37 +1566,21 @@ fn tuple_schema_for(
         .iter()
         .enumerate()
         .map(|(i, t)| descriptor_for_type(db, *t).with_context(|| format!("tuple element {i}")))
-        .collect::<Result<_>>()?;
-    // A process-wide cache keyed by the descriptor sequence (structural shape).
-    // SendPtr wraps the raw pointer so the Mutex can be shared across threads.
-    struct SendPtr(*const TupleSchema);
-    unsafe impl Send for SendPtr {}
-    static CACHE: std::sync::OnceLock<Mutex<HashMap<Vec<usize>, SendPtr>>> =
-        std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    // Use the descriptor pointers as addresses for the cache key — structurally
-    // identical tuples resolve to the same descriptor pointers.
-    let key: Vec<usize> = descriptors.iter().map(|p| *p as usize).collect();
-    if let Some(p) = cache.lock().unwrap().get(&key) {
-        return Ok(p.0);
-    }
-    let leaked_descriptors: &'static [*const praxis_runtime::descriptor::TypeDescriptor] =
-        Box::leak(descriptors.into_boxed_slice());
-    let schema = Box::leak(Box::new(TupleSchema {
-        descriptors: leaked_descriptors,
-    }));
-    let ptr = SendPtr(schema as *const TupleSchema);
-    let raw = ptr.0;
-    cache.lock().unwrap().insert(key, ptr);
-    Ok(raw)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(generation.tuple_schema(&descriptors))
 }
 
-/// Build the `&'static [DebugLocalMeta]` for a function's `Gc` locals, in the
+/// Build the `[DebugLocalMeta]` array for a function's `Gc` locals, in the
 /// same order as the `gc_slot` map iterates them (so a local's shadow-slot
-/// index doubles as its debug-local index). Each entry carries the source name
-/// (embedded as `&'static str`, empty for temps), a per-local symbol-id
-/// placeholder, the static type descriptor resolved from the MIR local's `Type`
-/// (§9.3, M10-WS2), the user-vs-temp classification, and the source span.
+/// index doubles as its debug-local index), and store it in the generation
+/// arena. Each entry carries the source name (interned in the same arena, empty
+/// for temps), a per-local symbol-id placeholder, the static type descriptor
+/// resolved from the MIR local's `Type` (§9.3, M10-WS2), the user-vs-temp
+/// classification, and the source span.
+///
+/// The array is deduplicated by content: a function lowered twice into one
+/// generation — which is what a debugger session does on every `p EXPR` —
+/// yields the same metadata and pays for it once (DBG-05, MIR-13).
 ///
 /// The symbol id is a best-effort placeholder: MIR locals do not yet carry the
 /// HIR `SymbolId`, so we use the local's position. This is sufficient for the
@@ -1615,7 +1593,8 @@ fn tuple_schema_for(
 fn build_debug_local_metas(
     mir: &MirFunction,
     db: &mut praxis_types::TypeDb,
-) -> &'static [DebugLocalMeta] {
+    generation: &Generation,
+) -> (*const DebugLocalMeta, usize) {
     use praxis_mir::ir::LocalDebugKind;
     let mut metas: Vec<DebugLocalMeta> = Vec::new();
     let mut symbol_id = 0u32;
@@ -1627,7 +1606,7 @@ fn build_debug_local_metas(
         // empty name (the debugger names them `<tmp#N>` via the symbol id).
         let name: &'static str = mir
             .debug_name(local.id)
-            .map(|n| Box::leak(n.to_string().into_boxed_str()) as &'static str)
+            .map(|n| generation.alloc_str(n))
             .unwrap_or("");
         // Deep-resolve the local's type before capturing its id, so the id
         // points at a fully-concrete type (e.g. Vec[Int], not Vec[?T]). The
@@ -1663,16 +1642,7 @@ fn build_debug_local_metas(
         });
         symbol_id += 1;
     }
-    Box::leak(metas.into_boxed_slice())
-}
-
-/// Leak a `&str` into `&'static str` for embedding in a runtime call (the
-/// runtime reads it by raw pointer). Used by the prologue to pass the function
-/// name to `praxis_push_debug_frame` (M10-WS2). The caller turns the result
-/// into `(ptr, len)` iconsts through its own builder. Lighter than
-/// [`embed_text`]: no GC `Text` allocation, just a process-static string.
-fn leak_static_str(s: &str) -> &'static str {
-    Box::leak(s.to_string().into_boxed_str())
+    generation.debug_local_metas(metas)
 }
 
 /// The runtime descriptor for values of type `ty`, or a compile error.
@@ -1766,23 +1736,26 @@ fn collection_element_descriptor_for(
     }
 }
 
-/// Embed a string literal as a leaked `&'static str` and produce (ptr, len)
-/// `iconst` values for `praxis_alloc_text`. The leak is bounded by the JIT
-/// generation's lifetime (one `run`); a `JitGeneration` arena (§10.5) reclaims
-/// these in watch/debugger mode (M-later).
-fn embed_text<M: Module>(
+/// Embed a string literal in the generation arena and produce (ptr, len)
+/// `iconst` values for `praxis_alloc_text`.
+///
+/// The bytes live exactly as long as the JIT generation that compiled the
+/// literal, and are interned — a literal repeated across functions, or a
+/// program recompiled into the same generation, costs one copy. This used to be
+/// a `Box::leak` with a comment promising a `JitGeneration` arena "M-later";
+/// that arena is [`Generation`] and this is its call site (MIR-13).
+fn embed_text(
     builder: &mut FunctionBuilder,
-    module: &mut M,
+    generation: &Generation,
     value: &str,
-) -> Result<(Value, Value)> {
-    let leaked: &'static str = Box::leak(value.to_string().into_boxed_str());
-    let ptr_val = leaked.as_ptr() as i64;
-    let len_val = leaked.len() as i64;
-    let _ = module;
-    Ok((
+) -> (Value, Value) {
+    let stored = generation.alloc_str(value);
+    let ptr_val = stored.as_ptr() as i64;
+    let len_val = stored.len() as i64;
+    (
         builder.ins().iconst(GC, ptr_val),
         builder.ins().iconst(GC, len_val),
-    ))
+    )
 }
 
 /// Memory flags for an in-register bit-cast between the uniform i64 scalar
@@ -1912,8 +1885,12 @@ mod tests {
             None,
         );
 
-        let metas = build_debug_local_metas(&f, &mut db);
-        assert_eq!(metas.len(), 2);
+        let generation = Generation::new();
+        let (ptr, len) = build_debug_local_metas(&f, &mut db, &generation);
+        assert_eq!(len, 2);
+        // SAFETY: `build_debug_local_metas` returns `len` initialized entries
+        // owned by `generation`, which outlives this borrow.
+        let metas = unsafe { std::slice::from_raw_parts(ptr, len) };
         assert!(
             !metas[0].descriptor.is_null(),
             "a Known local keeps its descriptor"
@@ -1981,8 +1958,10 @@ mod tests {
     #[test]
     fn an_opaque_tuple_type_yields_an_empty_schema() {
         let db = praxis_types::TypeDb::new();
-        let schema = tuple_schema_for(&db, MirType::Opaque).expect("no elements to resolve");
-        // SAFETY: `tuple_schema_for` returns a leaked `'static` schema.
+        let generation = Generation::new();
+        let schema =
+            tuple_schema_for(&db, MirType::Opaque, &generation).expect("no elements to resolve");
+        // SAFETY: the schema is owned by `generation`, which outlives the read.
         assert_eq!(unsafe { &*schema }.arity(), 0);
     }
 }

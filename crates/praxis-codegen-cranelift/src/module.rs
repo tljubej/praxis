@@ -6,6 +6,7 @@
 //! `JITBuilder::symbol` so the JIT resolves imported calls without a linker.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use anyhow::anyhow;
 use cranelift::codegen::isa::CallConv;
@@ -14,8 +15,9 @@ use cranelift_frontend::FunctionBuilderContext;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 use praxis_mir::Function as MirFunction;
-use praxis_runtime::{GcRef, RuntimeContext};
+use praxis_runtime::{GcRef, HeapDrained, RuntimeContext};
 
+use crate::generation::Generation;
 use crate::lower;
 use crate::symbols;
 
@@ -41,21 +43,44 @@ pub enum JitError {
     Module(#[from] Box<cranelift_module::ModuleError>),
 }
 
-/// Owns one JIT generation: the `JITModule` (code + data memory) and the
-/// per-thread `FunctionBuilderContext` reused across lowered functions.
+/// Owns one JIT generation: the `JITModule` (code + data memory), the
+/// per-thread `FunctionBuilderContext` reused across lowered functions, and the
+/// [`Generation`] arena that owns every piece of metadata the generated code
+/// and the runtime reach by raw pointer (F13).
+///
+/// **Field order is load-bearing.** Rust drops fields in declaration order, so
+/// `module` — the executable code holding arena addresses as immediates — is
+/// torn down before `generation`. (Dropping a generation does not free its
+/// arena anyway; see [`Generation::retire`]. The order still states the
+/// intent, and it is what makes an eventual `Drop`-based reclamation correct.)
 pub struct Jit {
     module: JITModule,
     fn_ctx: FunctionBuilderContext,
+    generation: Rc<Generation>,
 }
 
 impl Jit {
-    /// Create a fresh JIT with the `praxis_*` symbols registered.
+    /// Create a fresh JIT with the `praxis_*` symbols registered, in its own
+    /// new generation.
     ///
     /// # Errors
     /// Returns [`JitError::UnsupportedTarget`] if the host CPU isn't supported,
     /// or if its pointer width or endianness is not the one the lowering
     /// assumes (see [`Jit::check_target`]).
     pub fn new() -> Result<Self, JitError> {
+        Self::in_generation(Rc::new(Generation::new()))
+    }
+
+    /// Create a fresh JIT that compiles into an *existing* generation.
+    ///
+    /// The debugger uses this: every `p EXPR` compiles a throwaway module, but
+    /// they all share the session's one arena, so the metadata they mint is
+    /// interned instead of accumulating (DBG-05). The values a `p` leaves in
+    /// the heap keep pointing at schemas the shared generation still owns.
+    ///
+    /// # Errors
+    /// As [`Jit::new`].
+    pub fn in_generation(generation: Rc<Generation>) -> Result<Self, JitError> {
         let mut builder = JITBuilder::new(cranelift_module::default_libcall_names())
             .map_err(|e| JitError::UnsupportedTarget(format!("{e:?}")))?;
         // Resolve `praxis_*` imports through `symbols::resolve` — the one
@@ -69,7 +94,33 @@ impl Jit {
         Ok(Jit {
             module,
             fn_ctx: FunctionBuilderContext::new(),
+            generation,
         })
+    }
+
+    /// A handle on this JIT's generation, for a host that wants to compile a
+    /// second module into the same arena or to retire it later.
+    pub fn generation(&self) -> Rc<Generation> {
+        Rc::clone(&self.generation)
+    }
+
+    /// Tear down this JIT and reclaim its generation's arena.
+    ///
+    /// Requires a [`HeapDrained`] because live `RecordPayload`s and
+    /// `TuplePayload`s hold raw pointers into that arena (hazard H15); only
+    /// [`Runtime::teardown`](praxis_runtime::Runtime::teardown) can mint one.
+    /// A `Jit` that is merely dropped leaks its arena, which is the pre-S8
+    /// behaviour.
+    pub fn retire(self, proof: HeapDrained) {
+        let Jit {
+            module,
+            fn_ctx,
+            generation,
+        } = self;
+        // The code goes first: it is what embedded the arena's addresses.
+        drop(module);
+        drop(fn_ctx);
+        Generation::retire(generation, proof);
     }
 
     /// Reject a target the lowering does not actually support.
@@ -123,10 +174,19 @@ impl Jit {
             ids.insert(f.name.clone(), id);
         }
 
-        // Second pass: lower and define each function.
+        // Second pass: lower and define each function. Every piece of metadata
+        // the lowering mints — schemas, names, debug locals, text literals —
+        // goes into this JIT's generation rather than into a `Box::leak`.
         for f in funcs {
-            lower::lower_function(&mut self.module, &mut self.fn_ctx, f, &ids, db)
-                .map_err(|e| JitError::Cranelift(e.into()))?;
+            lower::lower_function(
+                &mut self.module,
+                &mut self.fn_ctx,
+                f,
+                &ids,
+                db,
+                &self.generation,
+            )
+            .map_err(|e| JitError::Cranelift(e.into()))?;
         }
 
         // Finalize: allocate executable memory and resolve relocations.

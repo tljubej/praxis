@@ -600,6 +600,7 @@ name = "praxis-codegen-cranelift"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bumpalo",
  "cranelift",
  "cranelift-frontend",
  "cranelift-jit",

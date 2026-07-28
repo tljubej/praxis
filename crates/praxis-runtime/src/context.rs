@@ -587,6 +587,23 @@ impl Runtime {
         self.crash_snapshot.clear();
         self.parse_detail.clear();
     }
+
+    /// Consume the runtime, drop the heap, and return the proof that no live
+    /// object can still name a JIT generation's arena (F13, hazard H15).
+    ///
+    /// This is the *only* constructor of [`HeapDrained`], and reclaiming a
+    /// generation requires one. Dropping the heap runs every finalizer
+    /// (`Heap::drop`), so after this call no `RecordPayload` or `TuplePayload`
+    /// survives to dereference a schema pointer.
+    ///
+    /// A host that never calls this loses nothing but memory: an un-retired
+    /// generation leaks its arena, which is exactly what the pre-S8
+    /// `Box::leak` did.
+    #[must_use]
+    pub fn teardown(self) -> crate::teardown::HeapDrained {
+        drop(self);
+        crate::teardown::HeapDrained::new()
+    }
 }
 
 impl Default for Runtime {

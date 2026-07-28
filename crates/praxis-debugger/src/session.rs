@@ -16,8 +16,9 @@
 //! a synthetic snapshot directly.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
-use praxis_codegen_cranelift::Jit;
+use praxis_codegen_cranelift::{Generation, Jit};
 use praxis_hir::Analysis;
 use praxis_runtime::Runtime;
 
@@ -64,6 +65,17 @@ pub struct DebugSession {
     /// The input source path, if `--input` was given (retained for §9.7
     /// metadata; not re-read — `input_text` is the source of truth).
     pub input_path: Option<PathBuf>,
+    /// The JIT generation every `p EXPR` / `heap EXPR` compiles into (F13,
+    /// DBG-05).
+    ///
+    /// `p` compiles a throwaway module per command. Before S8 each one leaked
+    /// its schemas, names and debug metadata for the life of the process, so a
+    /// long session grew without bound. Sharing one generation makes that
+    /// metadata *interned*: the same expression evaluated a hundred times
+    /// allocates once. It is deliberately separate from `jit`'s generation and
+    /// survives `reload`, because the values a `p` left in the heap keep
+    /// pointing at schemas this arena owns.
+    pub eval_generation: Rc<Generation>,
 }
 
 impl DebugSession {
@@ -97,6 +109,30 @@ impl DebugSession {
         // SAFETY: main_entry is a finalized entry in self.jit (set at session
         // construction or the last successful reload).
         unsafe { self.rerun_main() }
+    }
+
+    /// Tear the session down in the one order that is sound: heap first, then
+    /// the generation arenas its objects pointed into (F13, hazard H15).
+    ///
+    /// Every `RecordPayload` and `TuplePayload` in the heap holds a raw
+    /// `*const …Schema` into one of these two arenas — `jit`'s for values `main`
+    /// built, `eval_generation`'s for values a `p EXPR` built. Dropping the
+    /// runtime runs their finalizers and yields the
+    /// [`HeapDrained`](praxis_runtime::HeapDrained) that `retire` demands, so
+    /// the ordering is checked by the compiler rather than by this comment.
+    ///
+    /// A session that is merely dropped leaks both arenas, which is what every
+    /// pre-S8 run did.
+    pub fn teardown(self) {
+        let DebugSession {
+            jit,
+            runtime,
+            eval_generation,
+            ..
+        } = self;
+        let proof = runtime.teardown();
+        jit.retire(proof.clone());
+        Generation::retire(eval_generation, proof);
     }
 
     /// `reload` (§9.7): re-read the source from `source_path`, recompile, and

@@ -26,9 +26,10 @@
 //! the returned `GcRef` via its descriptor (ADR-032: allocate on the main heap).
 
 use std::io::Write;
+use std::rc::Rc;
 
 use praxis_ast::AstNode;
-use praxis_codegen_cranelift::Jit;
+use praxis_codegen_cranelift::{Generation, Jit};
 use praxis_hir::{analyze_root, lower, mono::monomorphize, TypedItem};
 use praxis_mir::{annotate, lower_module};
 use praxis_runtime::{
@@ -83,6 +84,7 @@ pub fn evaluate(
     snapshot: &CrashSnapshot,
     frame: &SnapshotFrame,
     expr_text: &str,
+    generation: &Rc<Generation>,
 ) -> EvalResult {
     let bindings = collect_bindings(frame, db);
     let source = synthesize(db, &bindings, expr_text);
@@ -90,7 +92,7 @@ pub fn evaluate(
     // Purity gate (§9.5, §19.10): reject mutating/diverging expressions. Runs
     // on the HIR tail expression, before JIT.
     assert_read_only(&typed_fn.body.tail)?;
-    let result = exec(runtime, snapshot, &bindings, &source)?;
+    let result = exec(runtime, snapshot, &bindings, &source, generation)?;
     let mut out = String::new();
     result.format(&mut out);
     Ok(if out.is_empty() {
@@ -124,12 +126,13 @@ pub fn heap(
     snapshot: &CrashSnapshot,
     frame: &SnapshotFrame,
     expr_text: &str,
+    generation: &Rc<Generation>,
 ) -> EvalResult {
     let bindings = collect_bindings(frame, db);
     let source = synthesize(db, &bindings, expr_text);
     let (typed_fn, expr_ty, fresh_db) = build_pipeline(&source)?;
     assert_read_only(&typed_fn.body.tail)?;
-    let result = exec(runtime, snapshot, &bindings, &source)?;
+    let result = exec(runtime, snapshot, &bindings, &source, generation)?;
     let type_str = fresh_db.render(expr_ty);
     let mut value_str = String::new();
     result.format(&mut value_str);
@@ -229,6 +232,7 @@ fn exec(
     snapshot: &CrashSnapshot,
     bindings: &[LocalBinding],
     source: &str,
+    generation: &Rc<Generation>,
 ) -> Result<GcRef, String> {
     if bindings.len() > MAX_SUPPORTED_ARITY {
         return Err(format!(
@@ -238,6 +242,10 @@ fn exec(
     }
     // Recompile into a fresh Jit (the session's main Jit is untouched; multiple
     // Jits coexist — confirmed by the jit.rs test suite creating one per test).
+    // The *generation* is shared, though: the module is thrown away after the
+    // call, but the schemas and debug metadata it minted may still be named by
+    // values this call left in the heap, and interning them is what keeps a
+    // long session from growing without bound (DBG-05).
     let map = praxis_source::SourceMap::new();
     let file = map.intern("p_expr.px", source);
     let parsed = praxis_parser::parse(file, source);
@@ -250,7 +258,8 @@ fn exec(
     for f in &mut funcs {
         annotate(f);
     }
-    let mut jit = Jit::new().map_err(|e| format!("JIT init failed: {e}"))?;
+    let mut jit =
+        Jit::in_generation(Rc::clone(generation)).map_err(|e| format!("JIT init failed: {e}"))?;
     let ids = jit
         .compile(&funcs, &mut analysis.db)
         .map_err(|e| format!("JIT compile failed: {e}"))?;
@@ -495,6 +504,7 @@ mod tests {
             &snapshot,
             &snapshot.frames[0],
             "1 + 2",
+            &Rc::new(Generation::new()),
         )
         .expect("p 1 + 2 evaluates");
         assert_eq!(out, "3");
@@ -520,6 +530,69 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![33, 44],
             "the temp, which is never a parameter, survived too"
+        );
+    }
+
+    /// DBG-05/MIR-13: a debugger session that evaluates `p EXPR` a hundred
+    /// times must not leak a hundred copies of the metadata.
+    ///
+    /// Each `p` compiles a throwaway module. Before S8 every one of them minted
+    /// its function-name strings, debug-local metadata and schemas with
+    /// `Box::leak`, so the process grew for the life of the session and nothing
+    /// was ever reclaimable. They now belong to the session's one
+    /// [`Generation`] and are interned by content, so after the caches are
+    /// primed the arena stops moving entirely.
+    #[test]
+    fn repeated_evaluation_stops_growing_the_generation() {
+        let mut runtime = Runtime::new();
+        let mut db = TypeDb::new();
+        let int = db.int();
+        let xs = runtime.alloc_vec(
+            &praxis_runtime::scalars::INT,
+            vec![runtime.alloc_int(11), runtime.alloc_int(22)],
+        );
+        let snapshot = CrashSnapshot {
+            frames: vec![SnapshotFrame {
+                parent: 0,
+                func_name: "main".as_ptr(),
+                func_name_len: 4,
+                locals: vec![snapshot_local(
+                    "xs",
+                    xs,
+                    int,
+                    praxis_runtime::LOCAL_KIND_USER,
+                )],
+                source_span: (0, 0),
+            }],
+            fault_kind: praxis_runtime::FaultKind::IndexOutOfBounds,
+        };
+        let generation = Rc::new(Generation::new());
+        let mut eval = |n: usize| {
+            for _ in 0..n {
+                let out = evaluate(
+                    &mut db,
+                    &mut runtime,
+                    &snapshot,
+                    &snapshot.frames[0],
+                    "xs.len()",
+                    &generation,
+                )
+                .expect("`p xs.len()` evaluates");
+                assert_eq!(out, "2");
+            }
+        };
+        // Two rounds to prime every cache, then measure across twenty more.
+        eval(2);
+        let primed = generation.stats();
+        assert!(
+            primed.allocated_bytes > 0,
+            "the evaluation must actually have put metadata in the arena"
+        );
+        eval(20);
+        assert_eq!(
+            generation.stats(),
+            primed,
+            "twenty more evaluations of one expression must allocate nothing new"
         );
     }
 

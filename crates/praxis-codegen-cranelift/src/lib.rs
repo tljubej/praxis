@@ -13,8 +13,10 @@
 //! frame (§12.3) is implemented; the per-safepoint root set comes from MIR
 //! liveness (`live_roots`).
 
+pub mod generation;
 mod lower;
 mod module;
 pub mod symbols;
 
+pub use generation::{Generation, GenerationId, GenerationStats};
 pub use module::{Jit, JitError, RunnableFunction};

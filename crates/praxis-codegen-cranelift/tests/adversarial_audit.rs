@@ -311,7 +311,6 @@ fn empty_vec_float_has_the_float_element_descriptor_before_any_push() {
 }
 
 #[test]
-#[ignore = "known bug: record schema cache is keyed only by reusable RecordDefId"]
 fn record_schema_cache_is_scoped_by_type_database_not_bare_def_id() {
     // record_def_id is positional and restarts in every independently analyzed
     // program. Use a high id so unrelated tests cannot seed it accidentally,

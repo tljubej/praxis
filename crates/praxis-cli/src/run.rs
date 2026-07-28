@@ -221,6 +221,7 @@ pub fn run(
                     source_path: path.to_path_buf(),
                     input_text: input_text.clone(),
                     input_path: input_file.map(Path::new).map(std::path::Path::to_path_buf),
+                    eval_generation: std::rc::Rc::new(praxis_codegen_cranelift::Generation::new()),
                 };
                 let mut repl = praxis_debugger::repl::Repl::new_session(snapshot, session);
                 let stdin = std::io::stdin();
@@ -228,6 +229,12 @@ pub fn run(
                 let stderr = std::io::stderr();
                 let mut stderr = stderr.lock();
                 repl.run(&mut stdin, &mut stderr);
+                // Drop the snapshot, then the heap, then the JIT generations
+                // its objects pointed into (F13, H15). `teardown` is what makes
+                // that order a compile-time obligation.
+                if let Some(session) = repl.into_session() {
+                    session.teardown();
+                }
             } else {
                 let ctx = praxis_debugger::render::RenderCtx::new(&analysis.db, &text);
                 praxis_debugger::render::render_noninteractive(
@@ -238,7 +245,7 @@ pub fn run(
                     color.palette(),
                     &ctx,
                 )?;
-                drop(jit);
+                jit.retire(runtime.teardown());
             }
         } else {
             let ctx = praxis_debugger::render::RenderCtx::new(&analysis.db, &text);
@@ -250,7 +257,7 @@ pub fn run(
                 color.palette(),
                 &ctx,
             )?;
-            drop(jit);
+            jit.retire(runtime.teardown());
         }
         return Ok(1);
     }
@@ -268,6 +275,10 @@ pub fn run(
         result.format(&mut out);
         println!("{out}");
     }
-    drop(jit);
+    // The run is over and `result` has been rendered: drop the heap, then
+    // reclaim the generation arena its objects pointed into (F13, hazard H15).
+    // `Runtime::teardown` mints the proof `retire` demands, so this cannot be
+    // written the other way round.
+    jit.retire(runtime.teardown());
     Ok(0)
 }

@@ -12,6 +12,7 @@ praxis-repr.workspace = true
 praxis-runtime.workspace = true
 praxis-types.workspace = true
 praxis-stdlib.workspace = true
+bumpalo.workspace = true
 cranelift.workspace = true
 cranelift-frontend.workspace = true
 cranelift-jit.workspace = true
