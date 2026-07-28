@@ -14,7 +14,9 @@
 //! and the payload size in bytes for precise sweep and debugging.
 
 use std::cell::Cell;
+use std::num::NonZeroU32;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::descriptor::TypeDescriptor;
 
@@ -24,49 +26,186 @@ pub(crate) const WHITE: u8 = 0;
 pub(crate) const GREY: u8 = 1;
 pub(crate) const BLACK: u8 = 2;
 
+/// The identity of the heap that owns an allocation.
+///
+/// Every [`Heap`](crate::Heap) mints one at construction (and a fresh one at
+/// `reset`), and every header it allocates carries it. That makes "is this
+/// object mine?" an O(1) test the collector can run *before* it dereferences
+/// anything the header points at — which is what lets `Heap::mark` reject a
+/// root belonging to another heap, or a header the sweep has already poisoned.
+///
+/// `NonZeroU32` because 0 is reserved as the poisoned/unowned encoding in the
+/// header's `heap_id` field.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct HeapId(NonZeroU32);
+
+impl HeapId {
+    /// Mint a fresh, process-unique identity.
+    ///
+    /// # Panics
+    /// Panics after `u32::MAX - 1` heaps have been created in one process,
+    /// which no real program reaches (it would require minting one heap per
+    /// microsecond for over an hour).
+    pub(crate) fn mint() -> HeapId {
+        static NEXT: AtomicU32 = AtomicU32::new(1);
+        let raw = NEXT.fetch_add(1, Ordering::Relaxed);
+        HeapId(NonZeroU32::new(raw).expect("HeapId space exhausted"))
+    }
+
+    /// The raw value stored in a header. Never 0.
+    #[inline]
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
 /// Header prepended to every GC allocation (§12.2).
 ///
-/// Layout is `#[repr(C)]` and the payload follows immediately after this header
-/// in the same allocation. The header is addressable as `*mut GcHeader` and the
-/// payload is reached via [`GcHeader::payload`].
+/// Layout is `#[repr(C)]` and the payload follows this header in the same
+/// allocation, at [`GcHeader::payload_offset_for`] bytes from the header's
+/// address — *not* necessarily at `size_of::<GcHeader>()`, because an
+/// over-aligned payload is padded forward. The header is addressable as
+/// `*mut GcHeader` and the payload is reached via [`GcHeader::payload`].
+///
+/// The fields are private: the allocator ([`Heap::alloc_raw`](crate::Heap)) is
+/// the only constructor, so an initialized header is the only kind that exists,
+/// and `payload_offset` cannot disagree with the address the allocator handed
+/// to the payload initializer.
 #[repr(C)]
 pub struct GcHeader {
     /// The descriptor that centralizes every payload-aware operation (§11.4).
     /// Stored as a typed pointer so the header's layout does not depend on the
     /// descriptor's definition, yet access is type-safe.
-    pub(crate) descriptor: *const TypeDescriptor,
-    /// Tri-color mark byte for the collector (ADR-011). `Cell` so the mark phase
-    /// can recolor a header reached through a shared `&GcHeader`.
-    pub(crate) mark: Cell<u8>,
+    ///
+    /// Null means **poisoned**: the storage has been swept and its payload
+    /// finalized. `Cell` so `poison` can run through a shared reference during
+    /// the sweep, which walks the live registry by shared borrow.
+    descriptor: Cell<*const TypeDescriptor>,
     /// Size of the payload in bytes (excludes the header). Used for stats and
     /// debugging; precise sweep uses the live-set registry, not this field.
-    pub(crate) size: u32,
+    size: u32,
+    /// Distance in bytes from this header's address to its payload's. **The
+    /// single layout authority** — written by the allocator from the same
+    /// calculation that produced the address it initialized, and read by
+    /// [`GcHeader::payload`], by the collector, and by generated code.
+    payload_offset: u16,
+    /// Tri-color mark byte for the collector (ADR-011). `Cell` so the mark phase
+    /// can recolor a header reached through a shared `&GcHeader`.
+    mark: Cell<u8>,
+    /// Explicit padding, so the `#[repr(C)]` layout has no implicit holes.
+    _pad: u8,
+    /// Which heap owns this allocation ([`HeapId`]). 0 means poisoned/unowned.
+    /// `Cell` for the same reason as `descriptor`.
+    heap_id: Cell<u32>,
 }
 
 impl GcHeader {
+    /// Where the payload begins, relative to the header's address, for a
+    /// payload with the given alignment.
+    ///
+    /// This is **the** object-layout calculation: `Heap::alloc_raw` uses it to
+    /// place the payload, `payload_offset` records what it returned, and
+    /// generated code calls it to reach a payload directly. `const` so codegen
+    /// can fold it into an immediate.
+    ///
+    /// # Panics
+    /// Panics if `payload_align` is not a power of two.
+    #[inline]
+    pub const fn payload_offset_for(payload_align: usize) -> usize {
+        assert!(
+            payload_align.is_power_of_two(),
+            "payload alignment must be a power of two"
+        );
+        round_up(std::mem::size_of::<GcHeader>(), payload_align)
+    }
+
+    /// Construct an initialized header. Only the allocator calls this.
+    #[inline]
+    pub(crate) fn new(
+        descriptor: &'static TypeDescriptor,
+        size: u32,
+        payload_offset: u16,
+        heap_id: HeapId,
+    ) -> GcHeader {
+        GcHeader {
+            descriptor: Cell::new(descriptor as *const TypeDescriptor),
+            size,
+            payload_offset,
+            mark: Cell::new(WHITE),
+            _pad: 0,
+            heap_id: Cell::new(heap_id.get()),
+        }
+    }
+
     /// The descriptor describing this object's payload (§11.4).
     ///
     /// Descriptors are always `'static` (built-in constants or compiler-emitted
     /// statics), so the returned lifetime is unconstrained.
+    ///
+    /// # Panics
+    /// Panics if the header has been poisoned by the sweep. Callers that may
+    /// hold a stale reference must check [`GcHeader::is_poisoned`] first; the
+    /// collector does this via [`GcHeader::heap_id`].
     #[inline]
     pub fn descriptor(&self) -> &'static TypeDescriptor {
+        let ptr = self.descriptor.get();
+        assert!(
+            !ptr.is_null(),
+            "descriptor read from a poisoned (swept) GcHeader"
+        );
         // SAFETY: every live `GcHeader` is allocated with a descriptor pointer
         // that points at a `'static TypeDescriptor`. The allocator is the only
-        // constructor of headers, and it upholds this.
-        unsafe { &*self.descriptor }
+        // constructor of headers, and it upholds this; the null case — the only
+        // other value the field ever holds — is rejected above.
+        unsafe { &*ptr }
     }
 
-    /// Pointer to the payload bytes immediately following this header.
+    /// The payload size in bytes recorded at allocation.
+    #[inline]
+    pub fn size(&self) -> u32 {
+        self.size
+    }
+
+    /// Pointer to this header's payload bytes.
     ///
     /// The caller is responsible for knowing the payload type (via the
     /// descriptor); this is the low-level escape hatch used by descriptor
     /// callbacks and typed accessors.
     #[inline]
     pub fn payload<T>(&self) -> *mut T {
-        // SAFETY: the payload follows the header in the same allocation. This is
-        // a raw pointer calculation; dereferencing safely is the caller's job.
+        // SAFETY: the payload lives `payload_offset` bytes into the same
+        // allocation, at the exact address the allocator initialized. This is a
+        // raw pointer calculation; dereferencing safely is the caller's job.
         let header_ptr = self as *const GcHeader as *mut u8;
-        unsafe { header_ptr.add(std::mem::size_of::<GcHeader>()) as *mut T }
+        unsafe { header_ptr.add(self.payload_offset as usize) as *mut T }
+    }
+
+    /// The heap that owns this allocation, or `None` if the header is poisoned.
+    #[inline]
+    pub fn heap_id(&self) -> Option<HeapId> {
+        NonZeroU32::new(self.heap_id.get()).map(HeapId)
+    }
+
+    /// Whether this header's storage has been swept.
+    ///
+    /// A poisoned header is not an object: its payload has been finalized and
+    /// its bytes may be reused. Reading anything but this predicate off it is a
+    /// bug.
+    #[inline]
+    pub fn is_poisoned(&self) -> bool {
+        self.descriptor.get().is_null()
+    }
+
+    /// Mark this header's storage as reclaimed: no descriptor, no owning heap.
+    ///
+    /// Called by the sweep *after* finalizing the payload and before the header
+    /// leaves the live registry, so a stale `GcRef` that reaches it afterwards
+    /// is rejected by [`GcHeader::heap_id`] instead of being traced through
+    /// freed storage.
+    #[inline]
+    pub(crate) fn poison(&self) {
+        self.descriptor.set(std::ptr::null());
+        self.heap_id.set(0);
     }
 
     /// Current mark color (ADR-011).
@@ -80,6 +219,29 @@ impl GcHeader {
     pub(crate) fn set_mark_color(&self, color: u8) {
         self.mark.set(color);
     }
+
+    /// A header owned by no heap, for tests that need a non-null `GcRef`
+    /// address and never dereference the object behind it.
+    #[cfg(test)]
+    pub(crate) fn detached() -> GcHeader {
+        GcHeader {
+            descriptor: Cell::new(std::ptr::null()),
+            size: 0,
+            payload_offset: std::mem::size_of::<GcHeader>() as u16,
+            mark: Cell::new(WHITE),
+            _pad: 0,
+            heap_id: Cell::new(0),
+        }
+    }
+}
+
+/// Round `n` up to the next multiple of `align` (which must be a power of two).
+///
+/// The object-layout primitive behind [`GcHeader::payload_offset_for`]; kept
+/// `const` so the offset folds into a compile-time immediate.
+pub(crate) const fn round_up(n: usize, align: usize) -> usize {
+    debug_assert!(align.is_power_of_two());
+    (n + align - 1) & !(align - 1)
 }
 
 /// A non-null, uniformly-typed reference to a garbage-collected object.
@@ -207,15 +369,78 @@ mod tests {
 
     #[test]
     fn gcref_round_trips_a_real_header() {
-        let mut header = GcHeader {
-            descriptor: std::ptr::null(),
-            mark: Cell::new(WHITE),
-            size: 0,
-        };
+        let mut header = GcHeader::detached();
         let nn = NonNull::from(&mut header);
         // SAFETY: `nn` points at a live, aligned `GcHeader`.
         let r = unsafe { GcRef::from_non_null(nn) };
         assert_eq!(r.as_ptr(), nn.as_ptr());
         assert_eq!(r.as_non_null(), nn);
+    }
+
+    #[test]
+    fn round_up_is_correct() {
+        assert_eq!(round_up(0, 8), 0);
+        assert_eq!(round_up(1, 8), 8);
+        assert_eq!(round_up(8, 8), 8);
+        assert_eq!(round_up(9, 8), 16);
+        assert_eq!(round_up(16, 1), 16);
+    }
+
+    /// The header must stay small and 8-aligned: it prefixes every allocation,
+    /// and `#[repr(C)]` plus this assertion is what lets generated code compute
+    /// a payload address (see `payload_offset_for`).
+    #[test]
+    fn header_layout_is_fixed() {
+        assert_eq!(std::mem::size_of::<GcHeader>(), 24);
+        assert_eq!(std::mem::align_of::<GcHeader>(), 8);
+    }
+
+    /// `payload_offset_for` is the single layout authority. For any alignment
+    /// up to the header's own it is the header size; beyond that it pads.
+    #[test]
+    fn payload_offset_pads_only_for_overaligned_payloads() {
+        let header = std::mem::size_of::<GcHeader>();
+        for align in [1_usize, 2, 4, 8] {
+            assert_eq!(GcHeader::payload_offset_for(align), header);
+        }
+        assert_eq!(GcHeader::payload_offset_for(16), 32);
+        assert_eq!(GcHeader::payload_offset_for(64), 64);
+    }
+
+    /// The offset a header records must be the one `payload_offset_for`
+    /// computes — the invariant that makes `payload()` and the allocator agree.
+    #[test]
+    fn payload_offset_is_recorded_in_the_header() {
+        let header = GcHeader::new(
+            &crate::scalars::INT,
+            8,
+            GcHeader::payload_offset_for(8) as u16,
+            HeapId::mint(),
+        );
+        let base = &header as *const GcHeader as usize;
+        assert_eq!(
+            header.payload::<i64>() as usize - base,
+            GcHeader::payload_offset_for(8)
+        );
+    }
+
+    #[test]
+    fn a_poisoned_header_has_no_heap_and_reports_itself() {
+        let header = GcHeader::new(&crate::scalars::INT, 8, 24, HeapId::mint());
+        assert!(!header.is_poisoned());
+        assert!(header.heap_id().is_some());
+
+        header.poison();
+
+        assert!(header.is_poisoned());
+        assert_eq!(header.heap_id(), None);
+    }
+
+    #[test]
+    fn minted_heap_ids_are_distinct_and_non_zero() {
+        let a = HeapId::mint();
+        let b = HeapId::mint();
+        assert_ne!(a, b);
+        assert_ne!(a.get(), 0);
     }
 }

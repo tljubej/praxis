@@ -19,7 +19,7 @@ use std::ptr::NonNull;
 use bumpalo::Bump;
 
 use crate::descriptor::TypeDescriptor;
-use crate::gc::{GcHeader, GcRef, BLACK, GREY, WHITE};
+use crate::gc::{GcHeader, GcRef, HeapId, BLACK, GREY, WHITE};
 use crate::roots::RootSet;
 use crate::Tracer;
 
@@ -32,6 +32,11 @@ use crate::Tracer;
 #[repr(C)]
 pub struct Heap {
     arena: Bump,
+    /// This heap's identity, stamped into every header it allocates. The mark
+    /// phase compares it against a root's `heap_id` before touching anything
+    /// the header points at, so a root from another heap — or one whose storage
+    /// this heap has already swept — is rejected rather than traced.
+    id: HeapId,
     /// Every live allocation's header pointer. Precise sweep iterates this.
     /// Wrapped in a `RefCell` because `collect` mutates it while a `&Heap` is
     /// reborrowed by the tracer callbacks.
@@ -71,10 +76,25 @@ impl Heap {
     pub fn new() -> Self {
         Heap {
             arena: Bump::new(),
+            id: HeapId::mint(),
             live: RefCell::new(Vec::new()),
             bytes_since_collect: RefCell::new(0),
             collect_threshold: RefCell::new(INITIAL_COLLECT_THRESHOLD),
         }
+    }
+
+    /// This heap's identity. Every header it allocates carries it.
+    pub fn id(&self) -> HeapId {
+        self.id
+    }
+
+    /// Whether `value` was allocated by this heap and has not been swept.
+    ///
+    /// O(1): it reads the owning id out of the header rather than searching the
+    /// live registry. This is the guard the collector applies to every root.
+    #[inline]
+    pub fn owns(&self, value: GcRef) -> bool {
+        value.header().heap_id() == Some(self.id)
     }
 
     /// Current allocation count.
@@ -176,16 +196,23 @@ impl Heap {
         descriptor: &'static TypeDescriptor,
         init: impl FnOnce(*mut u8),
     ) -> GcRef {
-        let header_size = std::mem::size_of::<GcHeader>();
         let header_align = std::mem::align_of::<GcHeader>();
         let payload_size = descriptor.size();
         let payload_align = descriptor.align();
 
-        // The allocation must satisfy both header and payload alignment; the
-        // payload starts exactly `header_size` bytes in, padded so the payload
-        // is properly aligned.
-        let padded_header_size = round_up(header_size, payload_align);
-        let total = padded_header_size
+        // The allocation must satisfy both header and payload alignment. Where
+        // the payload starts is `GcHeader::payload_offset_for`'s decision and
+        // nobody else's — the same call the header records and `payload()`
+        // reads back.
+        let payload_offset = GcHeader::payload_offset_for(payload_align);
+        let recorded_offset = u16::try_from(payload_offset).unwrap_or_else(|_| {
+            panic!(
+                "payload alignment {payload_align} of descriptor {} exceeds the \
+                 largest offset a GcHeader can record",
+                descriptor.name
+            )
+        });
+        let total = payload_offset
             .checked_add(payload_size)
             .expect("allocation size overflow");
         let align = header_align.max(payload_align);
@@ -195,16 +222,17 @@ impl Heap {
         let base = self.arena.alloc_layout(layout);
         let base_ptr = base.as_ptr();
         let header_ptr = base_ptr as *mut GcHeader;
-        let payload_ptr = base_ptr.add(padded_header_size);
+        let payload_ptr = base_ptr.add(payload_offset);
 
         // Write the header. Mark starts white (unscanned).
         std::ptr::write(
             header_ptr,
-            GcHeader {
-                descriptor: descriptor as *const TypeDescriptor,
-                mark: std::cell::Cell::new(WHITE),
-                size: descriptor.size() as u32,
-            },
+            GcHeader::new(
+                descriptor,
+                descriptor.size() as u32,
+                recorded_offset,
+                self.id,
+            ),
         );
         // Initialize the payload.
         init(payload_ptr);
@@ -267,6 +295,14 @@ impl Heap {
 
         while let Some(r) = worklist.pop() {
             let header = r.header();
+            // Provenance check, before anything the header points at is read.
+            // A reference this heap did not allocate is not this heap's to
+            // color: marking a foreign object black delays *its* heap's
+            // reclamation of it, and a swept object's descriptor is a null
+            // pointer into finalized storage. Both are rejected here.
+            if header.heap_id() != Some(self.id) {
+                continue;
+            }
             if header.mark_color() == BLACK {
                 continue;
             }
@@ -300,6 +336,10 @@ impl Heap {
                 let payload = header.payload::<u8>();
                 // SAFETY: payload matches `desc` and is about to become invalid.
                 unsafe { (desc.drop_value)(payload) };
+                // Poison before unregistering, so a stale `GcRef` that still
+                // names this storage is rejected by the mark phase's provenance
+                // check instead of being traced through a finalized payload.
+                header.poison();
                 live.swap_remove(i);
             } else {
                 // Reset to white for the next collection and keep it.
@@ -321,8 +361,14 @@ impl Heap {
             let payload = header.payload::<u8>();
             // SAFETY: payload matches `desc`, becomes invalid after this.
             unsafe { (desc.drop_value)(payload) };
+            header.poison();
         }
         self.arena.reset();
+        // A reset heap is a different heap: the immortals it handed out are
+        // gone, and every `GcRef` minted before this point names storage the
+        // arena is free to hand out again. A fresh identity makes those refs
+        // fail the mark phase's provenance check rather than be traced.
+        self.id = HeapId::mint();
     }
 }
 
@@ -330,12 +376,6 @@ impl Default for Heap {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Round `n` up to the next multiple of `align` (which must be a power of two).
-fn round_up(n: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
-    (n + align - 1) & !(align - 1)
 }
 
 #[cfg(test)]
@@ -592,7 +632,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: GcHeader::payload ignores allocator-inserted padding"]
     fn overaligned_payload_accessor_matches_initialized_address() {
         let initialized_at = Cell::new(std::ptr::null_mut());
         let heap = Heap::new();
@@ -616,7 +655,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: mark accepts roots owned by a different heap"]
     fn foreign_heap_root_cannot_delay_reclamation() {
         let first = Heap::new();
         let second = Heap::new();
@@ -676,12 +714,97 @@ mod tests {
         );
     }
 
+    /// The allocator must record the offset it actually used, for every
+    /// alignment — this is the invariant that makes `GcHeader::payload` and
+    /// `alloc_raw` two readings of one calculation rather than two
+    /// calculations that happen to agree.
     #[test]
-    fn round_up_is_correct() {
-        assert_eq!(round_up(0, 8), 0);
-        assert_eq!(round_up(1, 8), 8);
-        assert_eq!(round_up(8, 8), 8);
-        assert_eq!(round_up(9, 8), 16);
-        assert_eq!(round_up(16, 1), 16);
+    fn every_allocation_records_the_offset_it_was_laid_out_with() {
+        let heap = Heap::new();
+
+        let int = heap.alloc(&INT, 1_i64);
+        assert_eq!(
+            int.payload::<i64>() as usize - int.as_ptr() as usize,
+            GcHeader::payload_offset_for(INT.align())
+        );
+
+        let over = unsafe {
+            heap.alloc_with(
+                &OVERALIGNED,
+                std::mem::size_of::<Overaligned>(),
+                std::mem::align_of::<Overaligned>(),
+                |payload| (payload as *mut Overaligned).write(Overaligned(1)),
+            )
+        };
+        assert_eq!(
+            over.payload::<Overaligned>() as usize - over.as_ptr() as usize,
+            GcHeader::payload_offset_for(OVERALIGNED.align())
+        );
+        assert_eq!(over.payload::<Overaligned>() as usize % 64, 0);
+    }
+
+    /// Every allocation carries its heap's identity, and only that heap's.
+    #[test]
+    fn allocations_carry_their_owning_heap() {
+        let first = Heap::new();
+        let second = Heap::new();
+        let mine = first.alloc(&INT, 1_i64);
+
+        assert_eq!(mine.header().heap_id(), Some(first.id()));
+        assert!(first.owns(mine));
+        assert!(!second.owns(mine));
+    }
+
+    /// Sweep poisons before it unregisters, so the storage stops claiming to be
+    /// a typed object the moment it stops being one. This is the precondition
+    /// for reusing swept arena storage (RT-01): without it, a stale `GcRef`
+    /// would be traced into whatever the allocator put there next.
+    #[test]
+    fn sweeping_poisons_the_reclaimed_header() {
+        let heap = Heap::new();
+        let doomed = heap.alloc(&INT, 1_i64);
+        assert!(!doomed.header().is_poisoned());
+
+        heap.collect(&RootScope::new());
+
+        assert_eq!(heap.stats().live_count, 0);
+        assert!(doomed.header().is_poisoned());
+        assert_eq!(doomed.header().heap_id(), None);
+    }
+
+    /// A stale root — one naming storage this heap has already swept — must be
+    /// rejected by the same provenance check that rejects a foreign root,
+    /// rather than dereferencing the finalized payload's descriptor.
+    #[test]
+    fn a_swept_reference_is_not_traced_again() {
+        let heap = Heap::new();
+        let stale = heap.alloc(&INT, 1_i64);
+        heap.collect(&RootScope::new());
+        assert!(stale.header().is_poisoned());
+
+        let mut stale_roots = RootScope::new();
+        stale_roots.root(stale);
+        heap.collect(&stale_roots);
+
+        assert_eq!(
+            heap.stats().live_count,
+            0,
+            "a poisoned header must not be resurrected by rooting it"
+        );
+    }
+
+    /// A reset heap is a different heap, so the refs it minted before the reset
+    /// no longer pass the provenance check even though the arena may hand their
+    /// addresses out again.
+    #[test]
+    fn reset_mints_a_new_heap_identity() {
+        let mut heap = Heap::new();
+        let before = heap.id();
+        let _ = heap.alloc(&INT, 1_i64);
+
+        heap.reset();
+
+        assert_ne!(heap.id(), before);
+        assert_eq!(heap.alloc(&INT, 2_i64).header().heap_id(), Some(heap.id()));
     }
 }

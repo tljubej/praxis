@@ -1089,12 +1089,15 @@ fn lower_inst<M: Module>(
             builder.def_var(vars[dst.0 as usize], field);
         }
         Inst::EnumTag { dst, src } => {
-            // Read the tag directly from the EnumPayload at offset 0. The
-            // payload starts at gc_ref + size_of(GcHeader). The tag is a u32 at
             // Read the tag directly from the EnumPayload. The payload starts at
-            // gc_ref + size_of(GcHeader). The tag is a u32 at offset 0.
+            // gc_ref + GcHeader::payload_offset_for(align_of(EnumPayload)) —
+            // the runtime's single object-layout authority, not a header size
+            // this file re-derives. The tag is a u32 at offset 0 of the payload.
             let enum_ref = builder.use_var(vars[src.0 as usize]);
-            let payload_offset = core::mem::size_of::<praxis_runtime::gc::GcHeader>() as i64;
+            let payload_offset =
+                praxis_runtime::gc::GcHeader::payload_offset_for(core::mem::align_of::<
+                    praxis_runtime::enums::EnumPayload,
+                >()) as i64;
             let tag_ptr = builder.ins().iadd_imm_s(enum_ref, payload_offset);
             // Read just the u32 tag (not a full I64 — the 4 bytes of padding
             // after the tag are uninitialized bumpalo memory). In Cranelift

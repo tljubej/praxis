@@ -45,7 +45,12 @@ use crate::{collections::VecPayload, descriptor::TypeDescriptor};
 /// is generalized across all M8 collection kinds as they land (Deque/Map/Set/
 /// Counter/Heap/BitSet/complete Grid); each adds its own `praxis_<kind>_*`
 /// wrappers within this version window.
-pub const RUNTIME_ABI_VERSION: u32 = 7;
+/// v8 (repair S4): `GcHeader` repacked from 16 to 24 bytes — it gained
+/// `payload_offset` (the single object-layout authority, replacing three
+/// independent copies of the calculation) and `heap_id` (allocation
+/// provenance). Generated code reads the header to reach an enum payload, so
+/// this is an incompatible layout change.
+pub const RUNTIME_ABI_VERSION: u32 = 8;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -67,7 +72,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 7;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 8;
 
 // ---------------------------------------------------------------------------
 // Internals the wrappers share.
@@ -2958,8 +2963,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_seven_at_milestone_8_ws1() {
-        assert_eq!(RUNTIME_ABI_VERSION, 7);
+    fn version_is_eight_after_the_gc_header_repack() {
+        assert_eq!(RUNTIME_ABI_VERSION, 8);
     }
 
     #[test]

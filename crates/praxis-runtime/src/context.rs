@@ -747,11 +747,7 @@ mod tests {
 
     #[test]
     fn placeholder_reports_no_fault() {
-        let mut header = GcHeader {
-            descriptor: std::ptr::null(),
-            mark: std::cell::Cell::new(0),
-            size: 0,
-        };
+        let mut header = GcHeader::detached();
         let nn = NonNull::from(&mut header);
         // SAFETY: local live header for the duration of this test.
         let gcref = unsafe { GcRef::from_non_null(nn) };
@@ -762,11 +758,7 @@ mod tests {
 
     #[test]
     fn has_pending_fault_flips_with_non_null_pointer() {
-        let mut header = GcHeader {
-            descriptor: std::ptr::null(),
-            mark: std::cell::Cell::new(0),
-            size: 0,
-        };
+        let mut header = GcHeader::detached();
         let nn = NonNull::from(&mut header);
         let gcref = unsafe { GcRef::from_non_null(nn) };
         let mut ctx = unsafe { RuntimeContext::placeholder(gcref) };

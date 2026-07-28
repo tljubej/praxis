@@ -53,7 +53,7 @@ pub use descriptor::{
     BuiltinTypeId, CompareFn, DropFn, DynamicHasher, EqualsFn, FormatFn, HashFn, StructHasher,
     TraceFn, Tracer, TypeDescriptor, TypeId, BUILTINS,
 };
-pub use gc::{GcHeader, GcRef};
+pub use gc::{GcHeader, GcRef, HeapId};
 pub use heap::{Heap, HeapStats};
 pub use immortal::Immortals;
 pub use parse_detail::{ParseDetail, ParseFail};

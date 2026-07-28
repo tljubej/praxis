@@ -208,11 +208,7 @@ mod tests {
     fn dummy_ref() -> *mut GcHeader {
         // A leaked header; only its non-null address matters for root-walking
         // tests. The collector is never run against these.
-        let header = Box::leak(Box::new(GcHeader {
-            descriptor: std::ptr::null(),
-            mark: std::cell::Cell::new(0),
-            size: 0,
-        }));
+        let header = Box::leak(Box::new(GcHeader::detached()));
         NonNull::from(header).as_ptr()
     }
 

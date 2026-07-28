@@ -93,11 +93,7 @@ mod tests {
     fn dummy_ref(n: usize) -> GcRef {
         // A `GcRef` whose header is a stack `GcHeader` — never dereferenced by
         // these root-set tests; only the pointer identity is observed.
-        let header = Box::leak(Box::new(crate::GcHeader {
-            descriptor: std::ptr::null(),
-            mark: std::cell::Cell::new(0),
-            size: 0,
-        }));
+        let header = Box::leak(Box::new(crate::GcHeader::detached()));
         let nn = NonNull::from(header);
         // SAFETY: `nn` points at a leaked, aligned, live header.
         let r = unsafe { GcRef::from_non_null(nn) };
