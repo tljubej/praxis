@@ -3346,14 +3346,13 @@ fn adv_pipeline_empty_source_all_is_true() {
 
 #[test]
 fn adv_pipeline_empty_source_reduce() {
-    // Empty source → reduce. The acc is never seeded (seen stays false).
-    // Document current behavior: returns whatever the unseeded Gc slot holds.
-    // We at least confirm it doesn't crash the host (no Rust panic).
+    // Empty source → reduce. `reduce` seeds from the first element, and there
+    // is none — so the answer is a fault, not whatever the unseeded Gc slot
+    // happened to hold (MIR-09). This test used to assert only that the host
+    // survived, because there was no contract to assert; now there is.
     let src = "fn main() -> Int {\n  let v = Vec()\n  v.reduce(|a, x| a + x)\n}\n";
     let (rt, _result) = run_main(src);
-    // We do NOT assert the value (it's undefined for empty); we only assert
-    // the host survived (no abort/panic). A fault is acceptable; a crash is not.
-    let _ = rt.has_pending_fault();
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
 }
 
 #[test]

@@ -585,7 +585,6 @@ fn absent_map_get_has_no_unit_under_the_value_type() {
 }
 
 #[test]
-#[ignore = "known bug: empty reduce/min_by/max_by return an uninitialized Gc local"]
 fn empty_element_returning_sinks_fault_instead_of_returning_uninitialized_gc_refs() {
     let cases = [
         (

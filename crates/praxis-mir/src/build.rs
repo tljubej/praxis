@@ -2114,7 +2114,15 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
 
     // Exit: materialize the sink's result out of its accumulator(s).
     b.cur = exit;
-    sink_finish(b, &sink, acc_scalar, acc_gc, collect_vec, result_ty)
+    sink_finish(
+        b,
+        &sink,
+        acc_scalar,
+        acc_gc,
+        seen_flag,
+        collect_vec,
+        result_ty,
+    )
 }
 
 /// Run one streaming stage in-place. Emits branches directly into `b.cur` and
@@ -2438,7 +2446,7 @@ fn sink_alloc(
         Sink::MinBy(_) | Sink::MaxBy(_) => {
             // Hold the running best element in a Gc slot; the seen-flag gates
             // the first comparison.
-            let acc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+            let acc = seeded_gc_accumulator(b);
             if let Some(init) = sink_init_slot {
                 b.push(Inst::MoveGc {
                     dst: acc,
@@ -2465,8 +2473,8 @@ fn sink_alloc(
             (None, Some(acc), None)
         }
         Sink::Reduce(_) => {
-            // Seed from the first element; allocate an opaque Gc slot now.
-            let acc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+            // Seeded from the first element; until then it holds Unit.
+            let acc = seeded_gc_accumulator(b);
             let seen = b.alloc_scalar(ScalarKind::Bool);
             b.push(Inst::ConstInt {
                 dst: seen,
@@ -2476,6 +2484,60 @@ fn sink_alloc(
         }
         Sink::Collect => (None, None, None),
     }
+}
+
+/// A `Gc` accumulator slot for a sink that seeds from the *first* element,
+/// initialized to the Unit singleton (MIR-09).
+///
+/// The initializer is not decoration. `reduce`/`min_by`/`max_by` only ever
+/// wrote this slot from inside the loop body, so on an empty sequence nothing
+/// wrote it at all — and the slot is a `Gc` local, which means the liveness
+/// pass roots it at the loop header's safepoints and the backend spills
+/// whatever the register happened to hold into the shadow frame for the
+/// collector to dereference. Holding a valid `GcRef` from the start makes that
+/// unrepresentable; [`emit_empty_collection_guard`] is what turns "we never got
+/// a first element" into an answer.
+fn seeded_gc_accumulator(b: &mut Builder<'_>) -> LocalId {
+    let acc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+    b.push(Inst::Alloc {
+        dst: acc,
+        alloc: AllocKind::Unit,
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
+    });
+    acc
+}
+
+/// Raise [`FaultKind::EmptyCollection`] when `seen` is false (MIR-09).
+///
+/// Emitted at the exit of a sink that has no answer for an empty sequence.
+/// The raise is followed by the ordinary fault check, so control leaves through
+/// the function's fault epilogue — which returns the Unit sentinel — rather
+/// than falling through to a result that was never computed. The jump out of
+/// the empty block is therefore unreachable at runtime; it exists so the block
+/// has a terminator and the two paths rejoin.
+fn emit_empty_collection_guard(b: &mut Builder<'_>, seen: LocalId) {
+    let empty = b.func.new_block();
+    let have = b.func.new_block();
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+        cond: seen,
+        then_block: have,
+        else_block: empty,
+    };
+
+    b.cur = empty;
+    let sentinel = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
+    b.push(Inst::Call {
+        dst: sentinel,
+        callee: CallTarget::Runtime(RuntimeSymbol::RaiseEmptyCollection),
+        args: Vec::new(),
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
+    });
+    b.check_fault();
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: have };
+
+    b.cur = have;
 }
 
 /// Emit `idx += 1` (extract, add, re-materialize into the Gc slot).
@@ -2919,17 +2981,28 @@ fn continue_loop(b: &mut Builder<'_>) {
 }
 
 /// Materialize the sink's final result out of its accumulator(s).
+#[allow(clippy::too_many_arguments)]
 fn sink_finish(
     b: &mut Builder<'_>,
     sink: &Sink,
     acc_scalar: Option<LocalId>,
     acc_gc: Option<LocalId>,
+    seen_flag: Option<LocalId>,
     collect_vec: Option<LocalId>,
     _result_ty: Type,
 ) -> LocalId {
     match sink {
         Sink::Collect => collect_vec.unwrap(),
-        Sink::Fold { .. } | Sink::Reduce(_) | Sink::MinBy(_) | Sink::MaxBy(_) => acc_gc.unwrap(),
+        // `fold` always has an answer: its accumulator starts at `init`.
+        Sink::Fold { .. } => acc_gc.unwrap(),
+        // MIR-09. These three seed from the first element, so on an empty
+        // sequence there is no answer and the accumulator was never written.
+        // Fault rather than hand back an unwritten `Gc` slot.
+        Sink::Reduce(_) | Sink::MinBy(_) | Sink::MaxBy(_) => {
+            let acc = acc_gc.unwrap();
+            emit_empty_collection_guard(b, seen_flag.expect("seeded sinks carry a seen flag"));
+            acc
+        }
         Sink::Any(_) | Sink::All(_) => {
             let acc = acc_scalar.unwrap();
             let dst = b.alloc_gc(MirType::Known(b.bool_ty), None, LocalDebugKind::Temp, None);
@@ -2942,6 +3015,12 @@ fn sink_finish(
             });
             dst
         }
+        // `min`/`max` are the scalar siblings of the three above and share the
+        // empty case, but *not* the defect: their accumulator starts at `0`, so
+        // an empty sequence yields a defined — if debatable — answer rather than
+        // an unwritten slot. Whether `0` is the right answer is D1's question
+        // (absence in the source language), not MIR-09's, and the suite pins the
+        // current behaviour deliberately.
         Sink::Sum
         | Sink::Product
         | Sink::Count

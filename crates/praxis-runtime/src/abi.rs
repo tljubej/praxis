@@ -229,6 +229,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
             crate::shadow_frame::praxis_push_shadow_frame as *const ()
         }
         RuntimeSymbol::RaiseDivByZeroIf => praxis_raise_div_by_zero_if as *const (),
+        RuntimeSymbol::RaiseEmptyCollection => praxis_raise_empty_collection as *const (),
         RuntimeSymbol::RaiseIntOverflowIf => praxis_raise_int_overflow_if as *const (),
         RuntimeSymbol::RaiseStackOverflow => praxis_raise_stack_overflow as *const (),
         RuntimeSymbol::RecordField => praxis_record_field as *const (),
@@ -998,6 +999,31 @@ pub unsafe extern "C" fn praxis_check_fault(ctx: *mut RuntimeContext) -> i64 {
 #[no_mangle]
 pub unsafe extern "C" fn praxis_raise_stack_overflow(ctx: *mut RuntimeContext) {
     unsafe { set_fault(ctx, RaisedFault::STACK_OVERFLOW) };
+}
+
+/// Raise a [`FaultKind::EmptyCollection`] fault on `ctx` (§9.2).
+///
+/// `reduce`, `min_by` and `max_by` have no answer for an empty sequence: they
+/// seed their accumulator from the first element, and there is no first
+/// element. The lowering used to hand back the accumulator anyway — a `Gc` slot
+/// no instruction had ever written, so the caller received whatever the
+/// register held, materialized as a `GcRef` that is `NonNull` by type and
+/// arbitrary in fact (MIR-09). This is the defined failure instead; a fault
+/// is what the other empty-collection accessors (`Deque.pop_front`, heap
+/// `pop`/`peek`) already raise for the same reason.
+///
+/// Unconditional, unlike the two arithmetic raise wrappers: the emptiness test
+/// is a branch generated code has to make anyway (the seen-flag gates the whole
+/// sink), so there is no predicate worth passing. It returns the Unit sentinel
+/// rather than nothing, so the MIR `Call` that emits it has an ordinary `Gc`
+/// destination — a `Void` row would put the context pointer in a rootable slot.
+///
+/// # Safety
+/// `ctx` must point at a live, wired `RuntimeContext`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_raise_empty_collection(ctx: *mut RuntimeContext) -> GcRef {
+    unsafe { set_fault(ctx, RaisedFault::EMPTY_COLLECTION) };
+    unsafe { unit_sentinel(ctx) }
 }
 
 /// Raise a [`FaultKind::IntOverflow`] fault on `ctx` iff `condition` is
