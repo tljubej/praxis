@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn explicit_collection_preserves_values_held_by_a_crash_snapshot() {
         let runtime = Runtime::new();
-        let value = runtime.heap().alloc(&INT, 42_i64);
+        let value = runtime.heap().alloc_unpaced(&INT, 42_i64);
         let snapshot = CrashSnapshot {
             frames: vec![SnapshotFrame {
                 parent: usize::MAX,

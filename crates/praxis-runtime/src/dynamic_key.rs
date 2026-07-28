@@ -226,8 +226,8 @@ mod tests {
     #[ignore = "known bug: DynamicKey::eq does not compare descriptor identity"]
     fn dynamic_keys_with_different_descriptors_are_never_equal() {
         let heap = Heap::new();
-        let a = heap.alloc(&LOGICAL_A, 7_i64);
-        let b = heap.alloc(&LOGICAL_B, 7_i64);
+        let a = heap.alloc_unpaced(&LOGICAL_A, 7_i64);
+        let b = heap.alloc_unpaced(&LOGICAL_B, 7_i64);
 
         assert_ne!(
             DynamicKey::new(a),

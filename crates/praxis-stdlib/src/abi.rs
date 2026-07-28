@@ -323,6 +323,48 @@ runtime_symbols! {
     WriteStdout = "praxis_write_stdout": (Ctx, Gc) -> Gc, Pure;
 }
 
+/// Build-time coverage of the effect table (P0-08c).
+///
+/// The allocation effect used to live on `MethodEntry.allocates`, a hand-written
+/// `bool` per catalog row that had already drifted from the wrapper it described
+/// (`Vec.len` said `false`; `praxis_vec_len` boxes its result and can collect).
+/// The field is deleted; the manifest is the one answer, and this walks every
+/// row of it *at compile time* so a symbol can neither be added without an
+/// effect nor left out of [`RuntimeSymbol::ALL`], which is what the rest of the
+/// workspace iterates.
+///
+/// Anything checkable statically is checked here rather than in a test: a
+/// classification error should fail the build, not a test run.
+const _: () = {
+    // `ALL` is generated from the same rows as the enum, so a non-empty `ALL`
+    // that ends at the last variant means every variant is present.
+    assert!(!RuntimeSymbol::ALL.is_empty());
+
+    let mut i = 0;
+    while i < RuntimeSymbol::ALL.len() {
+        let sym = RuntimeSymbol::ALL[i];
+        let sig = sym.sig();
+
+        // Every wrapper leads with the context pointer. Without it there is no
+        // route to the heap, the fault slot or the root set — so a wrapper
+        // lacking one could be neither a safepoint nor a faulting call, and any
+        // effect other than `Pure` would be a lie.
+        assert!(matches!(sig.params[0], AbiKind::Ctx));
+
+        // A wrapper that returns nothing produced no object, so `Allocates`
+        // would misclassify it — and `Allocates` is exactly what makes a call
+        // site a safepoint that the caller must spill its live roots across.
+        assert!(!(matches!(sig.ret, AbiRet::Void) && sig.effect.allocates()));
+
+        // The two queries partition the four variants; `allocates`/`faults`
+        // must agree with the row rather than being independently answerable.
+        assert!(sig.effect.allocates() == sym.allocates());
+        assert!(sig.effect.faults() == sym.faults());
+
+        i += 1;
+    }
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -19,7 +19,7 @@
 use crate::context::{FaultKind, RuntimeContext};
 use crate::dynamic_key::DynamicKey;
 use crate::gc::GcRef;
-use crate::heap::Heap;
+use crate::heap::{Heap, Safepoint};
 use crate::roots::{NativeScope, Rooted};
 use crate::scalars;
 use crate::{collections::VecPayload, descriptor::TypeDescriptor};
@@ -291,6 +291,85 @@ unsafe fn maybe_collect(ctx: *mut RuntimeContext) {
     unsafe { heap(ctx).maybe_collect(&roots) };
 }
 
+/// Pace the collector and mint the token one allocation needs (P0-08b).
+///
+/// Every `praxis_*` wrapper reaches the heap through [`gc_alloc`] or
+/// [`gc_alloc_with`], which call this — and even a wrapper that reached
+/// `Heap::alloc` directly would have to come through here, because the token
+/// has no other producer. That is the whole point: fourteen wrappers used to
+/// gc-allocate without pacing, so a program whose pressure came from `Text`,
+/// `.len()` or checked arithmetic could run arbitrarily long without the
+/// collector ever being offered a turn.
+///
+/// # Safety
+/// `ctx` must point at a live, wired `RuntimeContext`. Every allocating
+/// wrapper already requires this to reach the heap at all.
+#[inline]
+unsafe fn safepoint<'a>(ctx: *mut RuntimeContext) -> (&'a Heap, Safepoint<'a>) {
+    // SAFETY: caller upholds ctx validity.
+    let h = unsafe { heap(ctx) };
+    // SAFETY: as above; the roots are read out of the same live context.
+    let roots = unsafe { crate::roots::RuntimeRoots::from_context(ctx) };
+    let sp = h.pace(&roots);
+    (h, sp)
+}
+
+/// Pace the collector, then allocate a `Copy` payload (§12.4).
+///
+/// # Safety
+/// `ctx` must be live and wired; `T` must match `descriptor`'s payload type.
+#[inline]
+unsafe fn gc_alloc<T: Copy>(
+    ctx: *mut RuntimeContext,
+    descriptor: &'static TypeDescriptor,
+    value: T,
+) -> GcRef {
+    // SAFETY: caller upholds ctx validity.
+    let (h, sp) = unsafe { safepoint(ctx) };
+    h.alloc(sp, descriptor, value)
+}
+
+/// Pace the collector, then allocate a payload that owns Rust resources.
+///
+/// # Safety
+/// `ctx` must be live and wired; `init` must fully initialize `size` bytes as
+/// `descriptor`'s payload type ([`Heap::alloc_with`]'s contract).
+#[inline]
+unsafe fn gc_alloc_with(
+    ctx: *mut RuntimeContext,
+    descriptor: &'static TypeDescriptor,
+    size: usize,
+    align: usize,
+    init: impl FnOnce(*mut u8),
+) -> GcRef {
+    // SAFETY: caller upholds ctx validity.
+    let (h, sp) = unsafe { safepoint(ctx) };
+    // SAFETY: forwarded from this function's contract.
+    unsafe { h.alloc_with(sp, descriptor, size, align, init) }
+}
+
+/// The immortal `Bool` for `value`, off the context's cached singletons.
+///
+/// Never an allocation: there are exactly two `Bool` values and the runtime
+/// minted both at startup. Every wrapper that answers a predicate used to call
+/// `alloc_immortal` instead, consuming unregistered arena storage — permanently
+/// — once per comparison, `contains`, `is_empty` or emptiness check a program
+/// evaluated (RT-03). It is also what makes those rows honestly `Effect::Pure`:
+/// nothing here can collect, so the call site is not a safepoint.
+///
+/// # Safety
+/// `ctx` must point at a live, wired `RuntimeContext`.
+#[inline]
+unsafe fn bool_ref(ctx: *mut RuntimeContext, value: bool) -> GcRef {
+    // SAFETY: caller upholds ctx validity.
+    let c = unsafe { &*ctx };
+    if value {
+        c.true_ref
+    } else {
+        c.false_ref
+    }
+}
+
 /// Read the `i64` payload of an `Int` `GcRef`. Used by every arithmetic wrapper.
 #[inline]
 unsafe fn int_payload(r: GcRef) -> i64 {
@@ -322,14 +401,12 @@ unsafe fn unit_sentinel(ctx: *mut RuntimeContext) -> GcRef {
 /// `ctx` must point at a live, wired `RuntimeContext` whose `heap` is valid.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_int(ctx: *mut RuntimeContext, value: i64) -> GcRef {
-    // Trigger a collection on allocation pressure before allocating, rooted at
-    // the current shadow frame. The new object is not yet a root, but it is
-    // returned by value to the caller, which spills it — so it is safe across
-    // this collection (the *previous* allocation's result was already spilled
-    // by the backend before this wrapper was called).
-    unsafe { maybe_collect(ctx) };
+    // `gc_alloc` paces first, rooted at the whole `RuntimeRoots`. The new object
+    // is not yet a root, but it is returned by value to the caller, which spills
+    // it — so it is safe across this collection (the *previous* allocation's
+    // result was already spilled by the backend before this wrapper was called).
     // SAFETY: caller upholds the ctx/heap validity.
-    unsafe { heap(ctx).alloc(&scalars::INT, value) }
+    unsafe { gc_alloc(ctx, &scalars::INT, value) }
 }
 
 /// Allocate a boxed `Bool` from a 0/1 value (§4.3). Returns the immortal
@@ -374,8 +451,6 @@ pub unsafe extern "C" fn praxis_alloc_unit(ctx: *mut RuntimeContext) -> GcRef {
 /// `ctx` must point at a live, wired `RuntimeContext`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_char(ctx: *mut RuntimeContext, value: i64) -> GcRef {
-    // Trigger a collection on allocation pressure before allocating.
-    unsafe { maybe_collect(ctx) };
     let code = value as u32;
     if !crate::scalars::is_valid_char(code) {
         // Defensive: the parser validates scalars, but a malformed code point must
@@ -384,7 +459,7 @@ pub unsafe extern "C" fn praxis_alloc_char(ctx: *mut RuntimeContext, value: i64)
         return unsafe { unit_sentinel(ctx) };
     }
     // SAFETY: caller upholds ctx/heap validity; code is a validated scalar.
-    unsafe { heap(ctx).alloc(&scalars::CHAR, code) }
+    unsafe { gc_alloc(ctx, &scalars::CHAR, code) }
 }
 
 /// Allocate an owned `Text` from a UTF-8 byte buffer (§4.3, ADR-013).
@@ -418,7 +493,8 @@ pub unsafe extern "C" fn praxis_alloc_text(
     };
     // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::text::TEXT,
             std::mem::size_of::<crate::text::TextPayload>(),
             std::mem::align_of::<crate::text::TextPayload>(),
@@ -482,11 +558,9 @@ pub unsafe extern "C" fn praxis_char_load(_ctx: *mut RuntimeContext, r: GcRef) -
 /// `ctx` must point at a live, wired `RuntimeContext`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_float(ctx: *mut RuntimeContext, value: i64) -> GcRef {
-    // Trigger a collection on allocation pressure before allocating.
-    unsafe { maybe_collect(ctx) };
     let f = f64::from_bits(value as u64);
     // SAFETY: caller upholds ctx/heap validity; all f64 values are valid Floats.
-    unsafe { heap(ctx).alloc(&scalars::FLOAT, f) }
+    unsafe { gc_alloc(ctx, &scalars::FLOAT, f) }
 }
 
 /// Read a `Float` payload as its IEEE-754 bit pattern widened to `i64`
@@ -527,9 +601,8 @@ unsafe fn float_payload(r: GcRef) -> f64 {
 #[no_mangle]
 pub unsafe extern "C" fn praxis_int_to_float(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     let i = unsafe { int_payload(r) };
-    unsafe { maybe_collect(ctx) };
     // SAFETY: ctx/heap valid; every widened int is a valid Float payload.
-    unsafe { heap(ctx).alloc(&scalars::FLOAT, i as f64) }
+    unsafe { gc_alloc(ctx, &scalars::FLOAT, i as f64) }
 }
 
 /// Narrow a `Float` to an `Int` by truncating toward zero (§4.12). Faults
@@ -553,17 +626,15 @@ pub unsafe extern "C" fn praxis_float_to_int(ctx: *mut RuntimeContext, r: GcRef)
     // The range check above bounds f to (-2^63, 2^63); truncation toward zero is
     // then exact for every representable integer and inexact-but-safe for the
     // fractional part (which is discarded).
-    unsafe { maybe_collect(ctx) };
     // SAFETY: ctx/heap valid; the value is in i64 range.
-    unsafe { heap(ctx).alloc(&scalars::INT, f as i64) }
+    unsafe { gc_alloc(ctx, &scalars::INT, f as i64) }
 }
 
 /// Re-box a `Float` after a pure transform (no fault possible). Used by
 /// `abs`/`sqrt`/`floor`/`ceil`/`round`/`sign`.
 unsafe fn rebox_float(ctx: *mut RuntimeContext, out: f64) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     // SAFETY: ctx/heap valid; every f64 is a valid Float payload.
-    unsafe { heap(ctx).alloc(&scalars::FLOAT, out) }
+    unsafe { gc_alloc(ctx, &scalars::FLOAT, out) }
 }
 
 /// `Float.abs()` — absolute value (§4.12).
@@ -648,7 +719,7 @@ pub unsafe extern "C" fn praxis_float_sign(ctx: *mut RuntimeContext, r: GcRef) -
 pub unsafe extern "C" fn praxis_float_is_nan(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     let result = unsafe { float_payload(r) }.is_nan();
     // SAFETY: ctx valid; Bool immortal path.
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, result) }
+    unsafe { bool_ref(ctx, result) }
 }
 
 /// `Float.is_infinite()` — true iff ±infinity (§4.12).
@@ -659,7 +730,7 @@ pub unsafe extern "C" fn praxis_float_is_nan(ctx: *mut RuntimeContext, r: GcRef)
 pub unsafe extern "C" fn praxis_float_is_infinite(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     let result = unsafe { float_payload(r) }.is_infinite();
     // SAFETY: ctx valid; Bool immortal path.
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, result) }
+    unsafe { bool_ref(ctx, result) }
 }
 
 /// `Float.min(other)` — the smaller of two floats (§4.12). Per IEEE-754 /
@@ -706,7 +777,8 @@ pub unsafe extern "C" fn praxis_float_to_text(ctx: *mut RuntimeContext, r: GcRef
     let s = format!("{f}");
     // SAFETY: `s` is valid UTF-8 for the duration of the call; ctx/heap valid.
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::text::TEXT,
             std::mem::size_of::<crate::text::TextPayload>(),
             std::mem::align_of::<crate::text::TextPayload>(),
@@ -725,9 +797,8 @@ pub unsafe extern "C" fn praxis_float_to_text(ctx: *mut RuntimeContext, r: GcRef
 /// `ctx` must be live and wired.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_float_pi(ctx: *mut RuntimeContext) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     // SAFETY: ctx/heap valid.
-    unsafe { heap(ctx).alloc(&scalars::FLOAT, core::f64::consts::PI) }
+    unsafe { gc_alloc(ctx, &scalars::FLOAT, core::f64::consts::PI) }
 }
 
 /// `e()` — Euler's number as a `Float` (§4.12 prelude free function).
@@ -736,9 +807,8 @@ pub unsafe extern "C" fn praxis_float_pi(ctx: *mut RuntimeContext) -> GcRef {
 /// `ctx` must be live and wired.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_float_e(ctx: *mut RuntimeContext) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     // SAFETY: ctx/heap valid.
-    unsafe { heap(ctx).alloc(&scalars::FLOAT, core::f64::consts::E) }
+    unsafe { gc_alloc(ctx, &scalars::FLOAT, core::f64::consts::E) }
 }
 
 // ---------------------------------------------------------------------------
@@ -760,7 +830,7 @@ macro_rules! checked_int_binop {
             let a = unsafe { int_payload(lhs) };
             let b = unsafe { int_payload(rhs) };
             match a.$op(b) {
-                Some(result) => unsafe { heap(ctx).alloc(&scalars::INT, result) },
+                Some(result) => unsafe { gc_alloc(ctx, &scalars::INT, result) },
                 None => {
                     unsafe { set_fault(ctx, $fault) };
                     unsafe { unit_sentinel(ctx) }
@@ -797,7 +867,7 @@ pub unsafe extern "C" fn praxis_int_div(ctx: *mut RuntimeContext, lhs: GcRef, rh
     }
     // Division truncates toward zero (Rust's `i64::div_euclid` rounds differently;
     // Praxis follows C/Rust integer division semantics toward zero).
-    unsafe { heap(ctx).alloc(&scalars::INT, a / b) }
+    unsafe { gc_alloc(ctx, &scalars::INT, a / b) }
 }
 
 /// Checked `Int` remainder (§4.12). Faults on division by zero, and on overflow
@@ -820,7 +890,7 @@ pub unsafe extern "C" fn praxis_int_rem(ctx: *mut RuntimeContext, lhs: GcRef, rh
         unsafe { set_fault(ctx, FaultKind::IntOverflow) };
         return unsafe { unit_sentinel(ctx) };
     }
-    unsafe { heap(ctx).alloc(&scalars::INT, a % b) }
+    unsafe { gc_alloc(ctx, &scalars::INT, a % b) }
 }
 
 /// Negate an `Int` (§4.12). Faults on overflow (`Int::MIN`).
@@ -831,7 +901,7 @@ pub unsafe extern "C" fn praxis_int_rem(ctx: *mut RuntimeContext, lhs: GcRef, rh
 pub unsafe extern "C" fn praxis_int_neg(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     let a = unsafe { int_payload(r) };
     match a.checked_neg() {
-        Some(result) => unsafe { heap(ctx).alloc(&scalars::INT, result) },
+        Some(result) => unsafe { gc_alloc(ctx, &scalars::INT, result) },
         None => {
             unsafe { set_fault(ctx, FaultKind::IntOverflow) };
             unsafe { unit_sentinel(ctx) }
@@ -859,7 +929,7 @@ macro_rules! int_cmp {
             let b = unsafe { int_payload(rhs) };
             let result = a $op b;
             // SAFETY: ctx/heap valid; Bool immortal path.
-            unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, result) }
+            unsafe { bool_ref(ctx, result) }
         }
     };
 }
@@ -983,7 +1053,6 @@ pub unsafe extern "C" fn praxis_vec_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     let element_descriptor = if element_descriptor.is_null() {
         &scalars::INT
     } else {
@@ -992,7 +1061,8 @@ pub unsafe extern "C" fn praxis_vec_new(
     };
     // SAFETY: VecPayload matches VEC's size/align and is fully initialized.
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::collections::VEC,
             std::mem::size_of::<VecPayload>(),
             std::mem::align_of::<VecPayload>(),
@@ -1018,7 +1088,6 @@ pub unsafe extern "C" fn praxis_alloc_record(
     ctx: *mut RuntimeContext,
     schema_ptr: *const crate::records::RecordSchema,
 ) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     if schema_ptr.is_null() {
         return unit_sentinel(ctx);
     }
@@ -1030,7 +1099,8 @@ pub unsafe extern "C" fn praxis_alloc_record(
     // Every field slot starts as Unit (a valid GcRef), keeping the GC sound
     // before the caller fills them in via praxis_record_set_field.
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::records::RECORD,
             std::mem::size_of::<crate::records::RecordPayload>(),
             std::mem::align_of::<crate::records::RecordPayload>(),
@@ -1105,12 +1175,12 @@ pub unsafe extern "C" fn praxis_alloc_enum(
     tag: i64,
     arity: i64,
 ) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     let unit = unit_sentinel(ctx);
     let items = vec![unit; arity as usize];
     // SAFETY: EnumPayload matches ENUM's size/align and is fully initialized.
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::enums::ENUM,
             std::mem::size_of::<crate::enums::EnumPayload>(),
             std::mem::align_of::<crate::enums::EnumPayload>(),
@@ -1161,7 +1231,7 @@ pub unsafe extern "C" fn praxis_enum_tag(ctx: *mut RuntimeContext, enum_value: G
     let tag = unsafe { (*payload).tag as i64 };
     // SAFETY: alloc boxes the i64 into a fresh Int object. The tag value is
     // already in a register, so GC collecting enum_value here is safe.
-    unsafe { heap(ctx).alloc(&crate::scalars::INT, tag) }
+    unsafe { gc_alloc(ctx, &crate::scalars::INT, tag) }
 }
 
 /// Read payload slot `idx` of an enum value (M7, §4.6). Returns the slot's
@@ -1197,7 +1267,6 @@ pub unsafe extern "C" fn praxis_alloc_tuple(
     ctx: *mut RuntimeContext,
     schema_ptr: *const crate::tuples::TupleSchema,
 ) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     if schema_ptr.is_null() {
         return unit_sentinel(ctx);
     }
@@ -1209,7 +1278,8 @@ pub unsafe extern "C" fn praxis_alloc_tuple(
     // Every element slot starts as Unit (a valid GcRef), keeping the GC sound
     // before the caller fills them in via praxis_tuple_set.
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::tuples::TUPLE,
             std::mem::size_of::<crate::tuples::TuplePayload>(),
             std::mem::align_of::<crate::tuples::TuplePayload>(),
@@ -1316,12 +1386,12 @@ pub unsafe extern "C" fn praxis_alloc_closure(
     fn_ptr: *const u8,
     n_captures: i64,
 ) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     let unit = unit_sentinel(ctx);
     let env = vec![unit; n_captures as usize];
     // SAFETY: ClosurePayload matches CLOSURE's size/align and is fully initialized.
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::closures::CLOSURE,
             std::mem::size_of::<crate::closures::ClosurePayload>(),
             std::mem::align_of::<crate::closures::ClosurePayload>(),
@@ -1405,10 +1475,10 @@ pub unsafe extern "C" fn praxis_closure_capture(
 /// `ctx` must be live and wired; `value` must be a valid `GcRef`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_var_cell(ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     // SAFETY: VarCellPayload matches VAR_CELL's size/align and is fully initialized.
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::var_cell::VAR_CELL,
             std::mem::size_of::<crate::var_cell::VarCellPayload>(),
             std::mem::align_of::<crate::var_cell::VarCellPayload>(),
@@ -1508,7 +1578,7 @@ pub unsafe extern "C" fn praxis_vec_len(ctx: *mut RuntimeContext, vec: GcRef) ->
     let p = unsafe { vec_payload(vec) };
     let len = p.items.len() as i64;
     // len allocates the returned Int, but the input vec is still live via `vec`.
-    unsafe { heap(ctx).alloc(&scalars::INT, len) }
+    unsafe { gc_alloc(ctx, &scalars::INT, len) }
 }
 
 /// The element at `index`, or an `IndexOutOfBounds` fault if out of range
@@ -1546,7 +1616,7 @@ pub unsafe extern "C" fn praxis_vec_is_empty(ctx: *mut RuntimeContext, vec: GcRe
     let p = unsafe { vec_payload(vec) };
     let empty = p.items.is_empty();
     // SAFETY: ctx/heap valid; Bool immortal path.
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, empty) }
+    unsafe { bool_ref(ctx, empty) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1586,7 +1656,6 @@ pub unsafe extern "C" fn praxis_deque_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     let element_descriptor = if element_descriptor.is_null() {
         &scalars::INT
     } else {
@@ -1595,7 +1664,8 @@ pub unsafe extern "C" fn praxis_deque_new(
     };
     // SAFETY: DequePayload matches DEQUE's size/align and is fully initialized.
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::collections::DEQUE,
             std::mem::size_of::<DequePayload>(),
             std::mem::align_of::<DequePayload>(),
@@ -1701,7 +1771,7 @@ pub unsafe extern "C" fn praxis_deque_pop_back(ctx: *mut RuntimeContext, deque: 
 pub unsafe extern "C" fn praxis_deque_len(ctx: *mut RuntimeContext, deque: GcRef) -> GcRef {
     let p = unsafe { deque_payload(deque) };
     let len = p.items.len() as i64;
-    unsafe { heap(ctx).alloc(&scalars::INT, len) }
+    unsafe { gc_alloc(ctx, &scalars::INT, len) }
 }
 
 /// The element at `index` (0-based from the front); faults `IndexOutOfBounds`.
@@ -1732,7 +1802,7 @@ pub unsafe extern "C" fn praxis_deque_get(
 pub unsafe extern "C" fn praxis_deque_is_empty(ctx: *mut RuntimeContext, deque: GcRef) -> GcRef {
     let p = unsafe { deque_payload(deque) };
     let empty = p.items.is_empty();
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, empty) }
+    unsafe { bool_ref(ctx, empty) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1784,7 +1854,6 @@ pub unsafe extern "C" fn praxis_map_new(
     ctx: *mut RuntimeContext,
     key_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     let key_descriptor = if key_descriptor.is_null() {
         &scalars::INT
     } else {
@@ -1797,7 +1866,8 @@ pub unsafe extern "C" fn praxis_map_new(
     // from the first inserted value.
     let value_descriptor = &scalars::INT;
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::maps::MAP,
             std::mem::size_of::<MapPayload>(),
             std::mem::align_of::<MapPayload>(),
@@ -1864,7 +1934,7 @@ pub unsafe extern "C" fn praxis_map_contains(
 ) -> GcRef {
     let p = unsafe { map_payload(map) };
     let present = p.entries.contains_key(&DynamicKey::new(key));
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, present) }
+    unsafe { bool_ref(ctx, present) }
 }
 
 /// Remove `key`; returns Unit (the removed value, if any, is dropped).
@@ -1890,7 +1960,7 @@ pub unsafe extern "C" fn praxis_map_remove(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_map_len(ctx: *mut RuntimeContext, map: GcRef) -> GcRef {
     let p = unsafe { map_payload(map) };
-    unsafe { heap(ctx).alloc(&scalars::INT, p.entries.len() as i64) }
+    unsafe { gc_alloc(ctx, &scalars::INT, p.entries.len() as i64) }
 }
 
 /// True iff the map is empty, as a boxed Bool.
@@ -1900,7 +1970,7 @@ pub unsafe extern "C" fn praxis_map_len(ctx: *mut RuntimeContext, map: GcRef) ->
 #[no_mangle]
 pub unsafe extern "C" fn praxis_map_is_empty(ctx: *mut RuntimeContext, map: GcRef) -> GcRef {
     let p = unsafe { map_payload(map) };
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, p.entries.is_empty()) }
+    unsafe { bool_ref(ctx, p.entries.is_empty()) }
 }
 
 /// `distance[key] min= candidate` (§6.2): keep the smaller value, or insert if
@@ -1977,14 +2047,14 @@ pub unsafe extern "C" fn praxis_set_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     let element_descriptor = if element_descriptor.is_null() {
         &scalars::INT
     } else {
         unsafe { &*element_descriptor }
     };
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::maps::SET,
             std::mem::size_of::<SetPayload>(),
             std::mem::align_of::<SetPayload>(),
@@ -2043,7 +2113,7 @@ pub unsafe extern "C" fn praxis_set_contains(
 ) -> GcRef {
     let p = unsafe { set_payload(set) };
     let present = p.entries.contains(&DynamicKey::new(value));
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, present) }
+    unsafe { bool_ref(ctx, present) }
 }
 
 /// The number of elements, as a boxed Int.
@@ -2053,7 +2123,7 @@ pub unsafe extern "C" fn praxis_set_contains(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_set_len(ctx: *mut RuntimeContext, set: GcRef) -> GcRef {
     let p = unsafe { set_payload(set) };
-    unsafe { heap(ctx).alloc(&scalars::INT, p.entries.len() as i64) }
+    unsafe { gc_alloc(ctx, &scalars::INT, p.entries.len() as i64) }
 }
 
 /// True iff the set is empty, as a boxed Bool.
@@ -2063,7 +2133,7 @@ pub unsafe extern "C" fn praxis_set_len(ctx: *mut RuntimeContext, set: GcRef) ->
 #[no_mangle]
 pub unsafe extern "C" fn praxis_set_is_empty(ctx: *mut RuntimeContext, set: GcRef) -> GcRef {
     let p = unsafe { set_payload(set) };
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, p.entries.is_empty()) }
+    unsafe { bool_ref(ctx, p.entries.is_empty()) }
 }
 
 // --- Counter[T] -------------------------------------------------------------
@@ -2078,14 +2148,14 @@ pub unsafe extern "C" fn praxis_counter_new(
     ctx: *mut RuntimeContext,
     key_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     let key_descriptor = if key_descriptor.is_null() {
         &scalars::INT
     } else {
         unsafe { &*key_descriptor }
     };
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::maps::COUNTER,
             std::mem::size_of::<CounterPayload>(),
             std::mem::align_of::<CounterPayload>(),
@@ -2115,7 +2185,7 @@ pub unsafe extern "C" fn praxis_counter_get(
         Some(v) => unsafe { int_payload(*v) },
         None => 0, // §6.2: absent reads as zero.
     };
-    unsafe { heap(ctx).alloc(&scalars::INT, count) }
+    unsafe { gc_alloc(ctx, &scalars::INT, count) }
 }
 
 /// Increment the count for `key` by one (inserting 1 if absent); returns Unit.
@@ -2128,7 +2198,6 @@ pub unsafe extern "C" fn praxis_counter_inc(
     counter: GcRef,
     key: GcRef,
 ) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     let scope = unsafe { NativeScope::new(ctx) };
     let p = unsafe { counter_payload_mut(scope.root(counter)) };
     let dk = DynamicKey::new(key);
@@ -2136,10 +2205,10 @@ pub unsafe extern "C" fn praxis_counter_inc(
         Some(v) => {
             let cur = unsafe { int_payload(*v) };
             // SAFETY: ctx is wired; alloc a fresh Int for the incremented value.
-            *v = unsafe { heap(ctx).alloc(&scalars::INT, cur + 1) };
+            *v = unsafe { gc_alloc(ctx, &scalars::INT, cur + 1) };
         }
         None => {
-            let one = unsafe { heap(ctx).alloc(&scalars::INT, 1_i64) };
+            let one = unsafe { gc_alloc(ctx, &scalars::INT, 1_i64) };
             p.entries.insert(dk, one);
         }
     }
@@ -2153,7 +2222,7 @@ pub unsafe extern "C" fn praxis_counter_inc(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_counter_len(ctx: *mut RuntimeContext, counter: GcRef) -> GcRef {
     let p = unsafe { counter_payload(counter) };
-    unsafe { heap(ctx).alloc(&scalars::INT, p.entries.len() as i64) }
+    unsafe { gc_alloc(ctx, &scalars::INT, p.entries.len() as i64) }
 }
 
 /// True iff the counter has no keys, as a boxed Bool.
@@ -2166,7 +2235,7 @@ pub unsafe extern "C" fn praxis_counter_is_empty(
     counter: GcRef,
 ) -> GcRef {
     let p = unsafe { counter_payload(counter) };
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, p.entries.is_empty()) }
+    unsafe { bool_ref(ctx, p.entries.is_empty()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -2206,14 +2275,14 @@ pub unsafe extern "C" fn praxis_max_heap_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     let element_descriptor = if element_descriptor.is_null() {
         &scalars::INT
     } else {
         unsafe { &*element_descriptor }
     };
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::heaps::MAX_HEAP,
             std::mem::size_of::<MaxHeapPayload>(),
             std::mem::align_of::<MaxHeapPayload>(),
@@ -2287,7 +2356,7 @@ pub unsafe extern "C" fn praxis_max_heap_peek(ctx: *mut RuntimeContext, heap_ref
 #[no_mangle]
 pub unsafe extern "C" fn praxis_max_heap_len(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     let p = unsafe { max_heap_payload(heap_ref) };
-    unsafe { heap(ctx).alloc(&scalars::INT, p.items.len() as i64) }
+    unsafe { gc_alloc(ctx, &scalars::INT, p.items.len() as i64) }
 }
 
 /// True iff the heap is empty, as a boxed Bool.
@@ -2300,7 +2369,7 @@ pub unsafe extern "C" fn praxis_max_heap_is_empty(
     heap_ref: GcRef,
 ) -> GcRef {
     let p = unsafe { max_heap_payload(heap_ref) };
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, p.items.is_empty()) }
+    unsafe { bool_ref(ctx, p.items.is_empty()) }
 }
 
 // --- MinHeap (mirrors MaxHeap with Reverse wrapping) -----------------------
@@ -2315,14 +2384,14 @@ pub unsafe extern "C" fn praxis_min_heap_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     let element_descriptor = if element_descriptor.is_null() {
         &scalars::INT
     } else {
         unsafe { &*element_descriptor }
     };
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::heaps::MIN_HEAP,
             std::mem::size_of::<MinHeapPayload>(),
             std::mem::align_of::<MinHeapPayload>(),
@@ -2396,7 +2465,7 @@ pub unsafe extern "C" fn praxis_min_heap_peek(ctx: *mut RuntimeContext, heap_ref
 #[no_mangle]
 pub unsafe extern "C" fn praxis_min_heap_len(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     let p = unsafe { min_heap_payload(heap_ref) };
-    unsafe { heap(ctx).alloc(&scalars::INT, p.items.len() as i64) }
+    unsafe { gc_alloc(ctx, &scalars::INT, p.items.len() as i64) }
 }
 
 /// True iff the heap is empty, as a boxed Bool.
@@ -2409,7 +2478,7 @@ pub unsafe extern "C" fn praxis_min_heap_is_empty(
     heap_ref: GcRef,
 ) -> GcRef {
     let p = unsafe { min_heap_payload(heap_ref) };
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, p.items.is_empty()) }
+    unsafe { bool_ref(ctx, p.items.is_empty()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -2432,9 +2501,9 @@ unsafe fn bitset_payload_mut<'s>(r: Rooted<'s>) -> &'s mut BitSetPayload {
 /// `ctx` must be live and wired.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_bitset_new(ctx: *mut RuntimeContext) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::bitset::BITSET,
             std::mem::size_of::<BitSetPayload>(),
             std::mem::align_of::<BitSetPayload>(),
@@ -2498,7 +2567,7 @@ pub unsafe extern "C" fn praxis_bitset_contains(
     let p = unsafe { bitset_payload(bs) };
     let i = unsafe { int_payload(value) };
     let present = i >= 0 && p.contains(i as usize);
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, present) }
+    unsafe { bool_ref(ctx, present) }
 }
 
 /// The number of set bits, as a boxed Int.
@@ -2508,7 +2577,7 @@ pub unsafe extern "C" fn praxis_bitset_contains(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_bitset_len(ctx: *mut RuntimeContext, bs: GcRef) -> GcRef {
     let p = unsafe { bitset_payload(bs) };
-    unsafe { heap(ctx).alloc(&scalars::INT, p.count() as i64) }
+    unsafe { gc_alloc(ctx, &scalars::INT, p.count() as i64) }
 }
 
 /// True iff the bitset is empty, as a boxed Bool.
@@ -2518,7 +2587,7 @@ pub unsafe extern "C" fn praxis_bitset_len(ctx: *mut RuntimeContext, bs: GcRef) 
 #[no_mangle]
 pub unsafe extern "C" fn praxis_bitset_is_empty(ctx: *mut RuntimeContext, bs: GcRef) -> GcRef {
     let p = unsafe { bitset_payload(bs) };
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, p.count() == 0) }
+    unsafe { bool_ref(ctx, p.count() == 0) }
 }
 
 // ---------------------------------------------------------------------------
@@ -2551,9 +2620,9 @@ unsafe fn alloc_point(ctx: *mut RuntimeContext, x: i64, y: i64) -> GcRef {
     let schema = crate::tuples::point_schema();
     let schema_ptr = schema as *const crate::tuples::TupleSchema;
     let tup = scope.root(unsafe { praxis_alloc_tuple(ctx, schema_ptr) });
-    let x_ref = scope.root(unsafe { heap(ctx).alloc(&scalars::INT, x) });
+    let x_ref = scope.root(unsafe { gc_alloc(ctx, &scalars::INT, x) });
     unsafe { praxis_tuple_set(ctx, tup.get(), 0, x_ref.get()) };
-    let y_ref = unsafe { heap(ctx).alloc(&scalars::INT, y) };
+    let y_ref = unsafe { gc_alloc(ctx, &scalars::INT, y) };
     unsafe { praxis_tuple_set(ctx, tup.get(), 1, y_ref) };
     tup.get()
 }
@@ -2583,7 +2652,6 @@ pub unsafe extern "C" fn praxis_grid_new(
     width: i64,
     height: i64,
 ) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     let element_descriptor = if element_descriptor.is_null() {
         &scalars::INT
     } else {
@@ -2592,7 +2660,8 @@ pub unsafe extern "C" fn praxis_grid_new(
     let unit = unsafe { unit_sentinel(ctx) };
     let cells = vec![unit; (width as usize) * (height as usize)];
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::collections::GRID,
             std::mem::size_of::<GridPayload>(),
             std::mem::align_of::<GridPayload>(),
@@ -2614,7 +2683,7 @@ pub unsafe extern "C" fn praxis_grid_new(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_grid_width(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
     let p = unsafe { grid_payload(grid) };
-    unsafe { heap(ctx).alloc(&scalars::INT, p.width as i64) }
+    unsafe { gc_alloc(ctx, &scalars::INT, p.width as i64) }
 }
 
 /// The grid height (number of rows), as a boxed Int.
@@ -2626,7 +2695,7 @@ pub unsafe extern "C" fn praxis_grid_height(ctx: *mut RuntimeContext, grid: GcRe
     let p = unsafe { grid_payload(grid) };
     // height = items.len() / width.
     let height = grid_height(p.items.len(), p.width);
-    unsafe { heap(ctx).alloc(&scalars::INT, height as i64) }
+    unsafe { gc_alloc(ctx, &scalars::INT, height as i64) }
 }
 
 /// The cell at `(x, y)`; faults `IndexOutOfBounds` if out of range.
@@ -2692,7 +2761,7 @@ pub unsafe extern "C" fn praxis_grid_contains(
     let (xi, yi) = (unsafe { int_payload(x) }, unsafe { int_payload(y) });
     let height = grid_height(p.items.len(), p.width);
     let inside = xi >= 0 && yi >= 0 && (xi as usize) < p.width && (yi as usize) < height;
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, inside) }
+    unsafe { bool_ref(ctx, inside) }
 }
 
 /// The 4 orthogonal neighbors of `point` that lie inside the grid, as a `Vec`.
@@ -2913,7 +2982,6 @@ pub unsafe extern "C" fn praxis_grid_find_all(
 /// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_grid_transpose(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     let p = unsafe { grid_payload(grid) };
     let height = grid_height(p.items.len(), p.width);
     let new_width = height;
@@ -2927,7 +2995,8 @@ pub unsafe extern "C" fn praxis_grid_transpose(ctx: *mut RuntimeContext, grid: G
     }
     let _ = ctx;
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::collections::GRID,
             std::mem::size_of::<GridPayload>(),
             std::mem::align_of::<GridPayload>(),
@@ -2948,7 +3017,6 @@ pub unsafe extern "C" fn praxis_grid_transpose(ctx: *mut RuntimeContext, grid: G
 /// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_grid_rotate_left(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     let p = unsafe { grid_payload(grid) };
     let height = grid_height(p.items.len(), p.width);
     // Rotate left (90° CCW): result is H×W (width=height, height=width).
@@ -2964,7 +3032,8 @@ pub unsafe extern "C" fn praxis_grid_rotate_left(ctx: *mut RuntimeContext, grid:
         }
     }
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::collections::GRID,
             std::mem::size_of::<GridPayload>(),
             std::mem::align_of::<GridPayload>(),
@@ -2985,7 +3054,6 @@ pub unsafe extern "C" fn praxis_grid_rotate_left(ctx: *mut RuntimeContext, grid:
 /// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_grid_rotate_right(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
-    unsafe { maybe_collect(ctx) };
     let p = unsafe { grid_payload(grid) };
     let height = grid_height(p.items.len(), p.width);
     // Rotate right (90° CW): result is H×W (width=height, height=width).
@@ -3001,7 +3069,8 @@ pub unsafe extern "C" fn praxis_grid_rotate_right(ctx: *mut RuntimeContext, grid
         }
     }
     unsafe {
-        heap(ctx).alloc_with(
+        gc_alloc_with(
+            ctx,
             &crate::collections::GRID,
             std::mem::size_of::<GridPayload>(),
             std::mem::align_of::<GridPayload>(),
@@ -3042,7 +3111,7 @@ pub unsafe extern "C" fn praxis_text_len(ctx: *mut RuntimeContext, text: GcRef) 
     // SAFETY: caller guarantees `text` is Text.
     let s = unsafe { text_str(text) };
     let len = s.chars().count() as i64;
-    unsafe { heap(ctx).alloc(&scalars::INT, len) }
+    unsafe { gc_alloc(ctx, &scalars::INT, len) }
 }
 
 /// True iff `text` has no chars, as a boxed `Bool`.
@@ -3054,7 +3123,7 @@ pub unsafe extern "C" fn praxis_text_is_empty(ctx: *mut RuntimeContext, text: Gc
     // SAFETY: caller guarantees `text` is Text.
     let s = unsafe { text_str(text) };
     // SAFETY: ctx/heap valid; Bool immortal path.
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, s.is_empty()) }
+    unsafe { bool_ref(ctx, s.is_empty()) }
 }
 
 /// The Unicode scalar value (as a boxed `Int`) of the char at `index`, or an
@@ -3080,7 +3149,7 @@ pub unsafe extern "C" fn praxis_text_get(
     match s.chars().nth(idx as usize) {
         Some(ch) => {
             // Return the scalar value as an Int (Char is reserved; M5 uses Int).
-            unsafe { heap(ctx).alloc(&scalars::INT, ch as i64) }
+            unsafe { gc_alloc(ctx, &scalars::INT, ch as i64) }
         }
         None => {
             unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
@@ -3271,6 +3340,106 @@ mod tests {
         }
         unsafe { drop_ctx(ctx) };
         assert_eq!(seen.len(), 3, "true, false and unit — and nothing else");
+    }
+
+    /// Every wrapper that answers a *predicate* hands back one of the two `Bool`
+    /// singletons. This is the rest of RT-03: `praxis_alloc_bool` was only the
+    /// most obvious of two dozen sites minting a fresh immortal per call, and
+    /// the comparisons and `is_empty`/`contains` family are the ones a real
+    /// program calls in a loop. It is also what makes their `Effect::Pure` rows
+    /// honest — nothing here can collect, so the call site is not a safepoint.
+    #[test]
+    fn predicate_wrappers_return_bool_singletons_and_allocate_nothing() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let (immortal_true, immortal_false) = (rt.immortals().true_(), rt.immortals().false_());
+        // SAFETY: ctx wired; every argument below is allocated through the ABI.
+        unsafe {
+            let one = praxis_alloc_int(ctx, 1);
+            let two = praxis_alloc_int(ctx, 2);
+            let empty_vec = praxis_vec_new(ctx, &scalars::INT);
+            let empty_text = praxis_alloc_text(ctx, std::ptr::null(), 0);
+            let live_before = rt.heap().stats().live_count;
+
+            let answers = [
+                (praxis_int_eq(ctx, one, two), false),
+                (praxis_int_ne(ctx, one, two), true),
+                (praxis_int_lt(ctx, one, two), true),
+                (praxis_int_gt(ctx, one, two), false),
+                (praxis_int_le(ctx, one, one), true),
+                (praxis_int_ge(ctx, one, two), false),
+                (praxis_vec_is_empty(ctx, empty_vec), true),
+                (praxis_text_is_empty(ctx, empty_text), true),
+            ];
+
+            assert_eq!(
+                rt.heap().stats().live_count,
+                live_before,
+                "a predicate wrapper must not allocate"
+            );
+            for (answer, expected) in answers {
+                let want = if expected {
+                    immortal_true
+                } else {
+                    immortal_false
+                };
+                assert_eq!(
+                    answer.as_ptr(),
+                    want.as_ptr(),
+                    "predicate answered with a fresh Bool instead of the singleton"
+                );
+            }
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// The other half of P0-08b: the wrappers that box a *derived* scalar —
+    /// `Text` construction, the `.len()` family, `Grid` extents, checked
+    /// arithmetic — gc-allocated without ever calling `maybe_collect`. A program
+    /// whose pressure came from those (a text-processing loop, say) could run
+    /// arbitrarily long with the collector never offered a turn. Each is driven
+    /// here until its own pacing collects.
+    #[test]
+    fn every_scalar_boxing_wrapper_paces_the_collector() {
+        // (name, a closure that performs one allocating call)
+        type Call = unsafe extern "C" fn(*mut RuntimeContext, GcRef) -> GcRef;
+        let cases: [(&str, Call); 5] = [
+            ("praxis_text_len", praxis_text_len),
+            ("praxis_vec_len", praxis_vec_len),
+            ("praxis_grid_width", praxis_grid_width),
+            ("praxis_grid_height", praxis_grid_height),
+            ("praxis_float_to_text", praxis_float_to_text),
+        ];
+        for (name, call) in cases {
+            let mut rt = Runtime::new();
+            let ctx = wired_ctx(&mut rt);
+            // SAFETY: ctx wired; each receiver matches its wrapper.
+            unsafe {
+                let receiver = match name {
+                    "praxis_text_len" => praxis_alloc_text(ctx, "hello".as_ptr(), 5),
+                    "praxis_vec_len" => praxis_vec_new(ctx, &scalars::INT),
+                    "praxis_float_to_text" => praxis_alloc_float(ctx, 1.5_f64.to_bits() as i64),
+                    _ => praxis_grid_new(ctx, &scalars::INT, 2, 2),
+                };
+                let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 1);
+                (*frame).slots[0] = receiver.as_ptr();
+
+                let mut before = rt.heap().stats().live_count;
+                let mut paced = false;
+                for _ in 0..10_000 {
+                    let _ = call(ctx, receiver);
+                    let after = rt.heap().stats().live_count;
+                    if after < before.saturating_add(1) {
+                        paced = true;
+                        break;
+                    }
+                    before = after;
+                }
+                crate::shadow_frame::praxis_pop_shadow_frame(ctx, frame);
+                assert!(paced, "{name} never gave the collector a turn");
+            }
+            unsafe { drop_ctx(ctx) };
+        }
     }
 
     #[test]
@@ -3947,7 +4116,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: checked integer arithmetic omits maybe_collect"]
     fn checked_int_add_is_an_automatic_gc_safepoint() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);

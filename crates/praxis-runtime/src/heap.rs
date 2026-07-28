@@ -14,14 +14,31 @@
 
 use std::alloc::Layout;
 use std::cell::RefCell;
+use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use bumpalo::Bump;
 
 use crate::descriptor::TypeDescriptor;
 use crate::gc::{GcHeader, GcRef, HeapId, BLACK, GREY, WHITE};
-use crate::roots::RootSet;
+use crate::roots::{RootSet, RuntimeRoots};
 use crate::Tracer;
+
+/// Proof that the collector was given a chance to run at this point.
+///
+/// [`Heap::alloc`] and [`Heap::alloc_with`] demand one, and [`Heap::pace`] —
+/// which *performs* the [`Heap::maybe_collect`] — is its only producer. The
+/// field is private to this module, so "allocate on the paced path without
+/// pacing" has no spelling: obtaining the token is the pacing.
+///
+/// `pace` in turn takes a [`RuntimeRoots`], which is constructible only from a
+/// live `RuntimeContext` and is exhaustive over the runtime's owners, so the
+/// collection a token permits can never run against a partial root set.
+///
+/// Deliberately neither `Copy` nor `Clone`: one token, one allocation. A
+/// wrapper that allocates twice paces twice.
+#[must_use = "a Safepoint is the permission to allocate; dropping it wasted a pacing check"]
+pub struct Safepoint<'a>(PhantomData<&'a Heap>);
 
 /// A precise, non-moving GC heap (§12.1, ADR-011).
 ///
@@ -107,10 +124,20 @@ impl Heap {
     /// Allocate an immortal object: same layout as [`Heap::alloc`], but **not**
     /// registered in the live set, so the collector never reclaims it (§4.3,
     /// M3 deliverable). Used for the `Unit`/`Bool` singletons.
+    ///
+    /// Restricted to [`Immortals::new`](crate::immortal::Immortals::new) by the
+    /// [`ImmortalWitness`](crate::immortal::ImmortalWitness) it takes, which
+    /// only that module can construct. The restriction is load-bearing twice
+    /// over: an immortal is invisible to sweep *and* to [`Heap`]'s `Drop`, so
+    /// every immortal payload must be `Copy` (nothing to finalize) and must be
+    /// minted exactly once at startup. Minting one per call — which the `Bool`
+    /// wrappers used to do — is unregistered arena storage nothing ever
+    /// reclaims (RT-03).
     pub(crate) fn alloc_immortal<T: Copy>(
         &self,
         descriptor: &'static TypeDescriptor,
         value: T,
+        _witness: crate::immortal::ImmortalWitness,
     ) -> GcRef {
         assert_eq!(
             std::mem::size_of::<T>(),
@@ -132,25 +159,37 @@ impl Heap {
         r
     }
 
+    /// Give the collector a chance to run, and hand back the [`Safepoint`] that
+    /// permits one allocation.
+    ///
+    /// This is the only producer of a `Safepoint`, and it is what makes
+    /// "allocate without pacing" unwritable on the paced path: the token
+    /// [`Heap::alloc`] demands cannot be obtained except by performing the
+    /// [`Heap::maybe_collect`] that mints it, against the whole
+    /// [`RuntimeRoots`] (P0-08b).
+    pub fn pace(&self, roots: &RuntimeRoots<'_>) -> Safepoint<'_> {
+        self.maybe_collect(roots);
+        Safepoint(PhantomData)
+    }
+
     /// Allocate an object with the given descriptor and a `Copy` payload `value`,
     /// returning a reference to it.
     ///
-    /// For payloads that own Rust resources (`Box<str>`, `VecPayload`) use
-    /// [`Heap::alloc_with`], which writes the value via `ptr::write` so its
-    /// `Drop` later runs correctly.
+    /// Takes the [`Safepoint`] minted by [`Heap::pace`]: an allocation on this
+    /// path has necessarily given the collector its chance. For payloads that
+    /// own Rust resources (`Box<str>`, `VecPayload`) use [`Heap::alloc_with`],
+    /// which writes the value via `ptr::write` so its `Drop` later runs
+    /// correctly.
     ///
     /// # Panics
     /// Panics if `T`'s size does not match `descriptor.size`.
-    pub fn alloc<T: Copy>(&self, descriptor: &'static TypeDescriptor, value: T) -> GcRef {
-        assert_eq!(
-            std::mem::size_of::<T>(),
-            descriptor.size(),
-            "payload size mismatch for descriptor {}",
-            descriptor.name
-        );
-        // SAFETY: `T: Copy`, so writing the bytes is sufficient initialization
-        // (no `Drop` to run later).
-        unsafe { self.alloc_raw(descriptor, |payload| (payload as *mut T).write(value)) }
+    pub fn alloc<T: Copy>(
+        &self,
+        _safepoint: Safepoint<'_>,
+        descriptor: &'static TypeDescriptor,
+        value: T,
+    ) -> GcRef {
+        self.alloc_unpaced(descriptor, value)
     }
 
     /// Allocate an object whose payload owns Rust resources, initializing it
@@ -163,6 +202,57 @@ impl Heap {
     /// leaking the partially-initialized resources). The descriptor's `size`/
     /// `align` must match the value `init` writes.
     pub unsafe fn alloc_with(
+        &self,
+        _safepoint: Safepoint<'_>,
+        descriptor: &'static TypeDescriptor,
+        size: usize,
+        align: usize,
+        init: impl FnOnce(*mut u8),
+    ) -> GcRef {
+        // SAFETY: forwarded from the caller's contract above.
+        unsafe { self.alloc_with_unpaced(descriptor, size, align, init) }
+    }
+
+    /// [`Heap::alloc`] **without** pacing the collector.
+    ///
+    /// The heap grows by this allocation and nothing here gives the collector a
+    /// chance to reclaim; something else must pace, or the arena grows until it
+    /// does. Two callers legitimately cannot pace, and they are the only ones:
+    ///
+    /// * the host's own `Runtime::alloc_*` helpers — the host holds their
+    ///   results in Rust locals that no root set can see, so a collection
+    ///   *here* would reclaim the value being returned;
+    /// * the parser interpreter (`parser.rs`), whose intermediates are still
+    ///   unrooted. IPR-14 (S20) gives them `NativeScope`s and moves it to the
+    ///   paced path in the same commit that adds its safepoints — until then,
+    ///   pacing the parser converts a memory-growth bug into a use-after-free
+    ///   (hazard H1).
+    ///
+    /// A `praxis_*` wrapper must never use this: generated code roots what it
+    /// holds across a call the manifest declares `Allocates`, which is exactly
+    /// what makes the paced path safe there.
+    pub(crate) fn alloc_unpaced<T: Copy>(
+        &self,
+        descriptor: &'static TypeDescriptor,
+        value: T,
+    ) -> GcRef {
+        assert_eq!(
+            std::mem::size_of::<T>(),
+            descriptor.size(),
+            "payload size mismatch for descriptor {}",
+            descriptor.name
+        );
+        // SAFETY: `T: Copy`, so writing the bytes is sufficient initialization
+        // (no `Drop` to run later).
+        unsafe { self.alloc_raw(descriptor, |payload| (payload as *mut T).write(value)) }
+    }
+
+    /// [`Heap::alloc_with`] **without** pacing the collector. See
+    /// [`Heap::alloc_unpaced`] for who may call this and why.
+    ///
+    /// # Safety
+    /// As [`Heap::alloc_with`].
+    pub(crate) unsafe fn alloc_with_unpaced(
         &self,
         descriptor: &'static TypeDescriptor,
         size: usize,
@@ -250,7 +340,7 @@ impl Heap {
     /// Every `GcRef` reachable from `roots` (plus everything transitively
     /// reachable through descriptor `trace` callbacks) is marked black and
     /// survives; everything else is finalized via `drop_value` and reclaimed.
-    pub fn collect(&self, roots: &crate::roots::RuntimeRoots<'_>) {
+    pub fn collect(&self, roots: &RuntimeRoots<'_>) {
         self.collect_inner(roots);
     }
 
@@ -284,7 +374,7 @@ impl Heap {
     /// without the host forcing it.
     ///
     /// Returns `true` if a collection ran.
-    pub fn maybe_collect(&self, roots: &crate::roots::RuntimeRoots<'_>) -> bool {
+    pub fn maybe_collect(&self, roots: &RuntimeRoots<'_>) -> bool {
         let should = *self.bytes_since_collect.borrow() >= *self.collect_threshold.borrow();
         if should {
             self.collect(roots);
@@ -458,7 +548,7 @@ mod tests {
     #[test]
     fn alloc_int_round_trips_payload() {
         let heap = Heap::new();
-        let r = heap.alloc(&INT, 42_i64);
+        let r = heap.alloc_unpaced(&INT, 42_i64);
         assert_eq!(r.descriptor().name, "Int");
         // SAFETY: `r` was allocated with INT, payload is i64.
         let v = unsafe { *r.payload::<i64>() };
@@ -469,7 +559,7 @@ mod tests {
     #[test]
     fn collect_reclaims_unrooted_allocation() {
         let heap = Heap::new();
-        let _ = heap.alloc(&INT, 1_i64);
+        let _ = heap.alloc_unpaced(&INT, 1_i64);
         assert_eq!(heap.stats().live_count, 1);
 
         let roots = RootScope::new(); // nothing rooted
@@ -485,7 +575,7 @@ mod tests {
     fn collect_preserves_rooted_allocation() {
         let heap = Heap::new();
         let mut scope = RootScope::new();
-        let r = heap.alloc(&INT, 7_i64);
+        let r = heap.alloc_unpaced(&INT, 7_i64);
         scope.root(r);
         assert_eq!(heap.stats().live_count, 1);
 
@@ -508,13 +598,13 @@ mod tests {
         // Build [10, 20, 30] as Int GcRefs.
         let elems: Vec<GcRef> = [10_i64, 20, 30]
             .iter()
-            .map(|&v| heap.alloc(&INT, v))
+            .map(|&v| heap.alloc_unpaced(&INT, v))
             .collect();
 
         // Wrap in a Vec[T] payload. Element type is recorded in the payload
         // (ADR-013).
         let vec_ref = unsafe {
-            heap.alloc_with(
+            heap.alloc_with_unpaced(
                 &VEC,
                 std::mem::size_of::<VecPayload>(),
                 std::mem::align_of::<VecPayload>(),
@@ -531,7 +621,7 @@ mod tests {
 
         // Allocate garbage that should be reclaimed.
         for i in 0..5_i64 {
-            let _ = heap.alloc(&INT, 1000 + i);
+            let _ = heap.alloc_unpaced(&INT, 1000 + i);
         }
         assert_eq!(heap.stats().live_count, 9); // vec + 3 ints + 5 garbage
 
@@ -557,9 +647,9 @@ mod tests {
         let mut scope = RootScope::new();
 
         let inner_alloc = |ints: &[i64]| -> GcRef {
-            let elems: Vec<GcRef> = ints.iter().map(|&v| heap.alloc(&INT, v)).collect();
+            let elems: Vec<GcRef> = ints.iter().map(|&v| heap.alloc_unpaced(&INT, v)).collect();
             unsafe {
-                heap.alloc_with(
+                heap.alloc_with_unpaced(
                     &VEC,
                     std::mem::size_of::<VecPayload>(),
                     std::mem::align_of::<VecPayload>(),
@@ -576,7 +666,7 @@ mod tests {
         let inner0 = inner_alloc(&[1, 2]);
         let inner1 = inner_alloc(&[3]);
         let outer = unsafe {
-            heap.alloc_with(
+            heap.alloc_with_unpaced(
                 &VEC,
                 std::mem::size_of::<VecPayload>(),
                 std::mem::align_of::<VecPayload>(),
@@ -592,7 +682,7 @@ mod tests {
         scope.root(outer);
 
         // Garbage.
-        let _ = heap.alloc(&UNIT, ());
+        let _ = heap.alloc_unpaced(&UNIT, ());
 
         heap.collect_with(&scope);
 
@@ -609,7 +699,7 @@ mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         let heap = Heap::new();
         unsafe {
-            heap.alloc_with(
+            heap.alloc_with_unpaced(
                 &DROP_PROBE,
                 std::mem::size_of::<DropProbe>(),
                 std::mem::align_of::<DropProbe>(),
@@ -636,7 +726,7 @@ mod tests {
         {
             let heap = Heap::new();
             unsafe {
-                heap.alloc_with(
+                heap.alloc_with_unpaced(
                     &DROP_PROBE,
                     std::mem::size_of::<DropProbe>(),
                     std::mem::align_of::<DropProbe>(),
@@ -658,7 +748,7 @@ mod tests {
         let initialized_at = Cell::new(std::ptr::null_mut());
         let heap = Heap::new();
         let value = unsafe {
-            heap.alloc_with(
+            heap.alloc_with_unpaced(
                 &OVERALIGNED,
                 std::mem::size_of::<Overaligned>(),
                 std::mem::align_of::<Overaligned>(),
@@ -680,7 +770,7 @@ mod tests {
     fn foreign_heap_root_cannot_delay_reclamation() {
         let first = Heap::new();
         let second = Heap::new();
-        let value = first.alloc(&INT, 1_i64);
+        let value = first.alloc_unpaced(&INT, 1_i64);
         let mut foreign_roots = RootScope::new();
         foreign_roots.root(value);
 
@@ -698,7 +788,7 @@ mod tests {
     fn reset_restores_collection_pacing() {
         let mut heap = Heap::new();
         heap.collect_with(&RootScope::new());
-        let _ = heap.alloc(&INT, 1_i64);
+        let _ = heap.alloc_unpaced(&INT, 1_i64);
         assert_ne!(*heap.bytes_since_collect.borrow(), 0);
         assert_ne!(*heap.collect_threshold.borrow(), INITIAL_COLLECT_THRESHOLD);
 
@@ -715,14 +805,14 @@ mod tests {
         const OBJECTS_PER_CYCLE: usize = 4_096;
 
         for i in 0..OBJECTS_PER_CYCLE {
-            let _ = heap.alloc(&INT, i as i64);
+            let _ = heap.alloc_unpaced(&INT, i as i64);
         }
         heap.collect_with(&RootScope::new());
         let first_cycle_bytes = heap.arena.allocated_bytes();
 
         for cycle in 1..=8 {
             for i in 0..OBJECTS_PER_CYCLE {
-                let _ = heap.alloc(&INT, (cycle * OBJECTS_PER_CYCLE + i) as i64);
+                let _ = heap.alloc_unpaced(&INT, (cycle * OBJECTS_PER_CYCLE + i) as i64);
             }
             heap.collect_with(&RootScope::new());
         }
@@ -743,14 +833,14 @@ mod tests {
     fn every_allocation_records_the_offset_it_was_laid_out_with() {
         let heap = Heap::new();
 
-        let int = heap.alloc(&INT, 1_i64);
+        let int = heap.alloc_unpaced(&INT, 1_i64);
         assert_eq!(
             int.payload::<i64>() as usize - int.as_ptr() as usize,
             GcHeader::payload_offset_for(INT.align())
         );
 
         let over = unsafe {
-            heap.alloc_with(
+            heap.alloc_with_unpaced(
                 &OVERALIGNED,
                 std::mem::size_of::<Overaligned>(),
                 std::mem::align_of::<Overaligned>(),
@@ -769,7 +859,7 @@ mod tests {
     fn allocations_carry_their_owning_heap() {
         let first = Heap::new();
         let second = Heap::new();
-        let mine = first.alloc(&INT, 1_i64);
+        let mine = first.alloc_unpaced(&INT, 1_i64);
 
         assert_eq!(mine.header().heap_id(), Some(first.id()));
         assert!(first.owns(mine));
@@ -783,7 +873,7 @@ mod tests {
     #[test]
     fn sweeping_poisons_the_reclaimed_header() {
         let heap = Heap::new();
-        let doomed = heap.alloc(&INT, 1_i64);
+        let doomed = heap.alloc_unpaced(&INT, 1_i64);
         assert!(!doomed.header().is_poisoned());
 
         heap.collect_with(&RootScope::new());
@@ -799,7 +889,7 @@ mod tests {
     #[test]
     fn a_swept_reference_is_not_traced_again() {
         let heap = Heap::new();
-        let stale = heap.alloc(&INT, 1_i64);
+        let stale = heap.alloc_unpaced(&INT, 1_i64);
         heap.collect_with(&RootScope::new());
         assert!(stale.header().is_poisoned());
 
@@ -821,11 +911,14 @@ mod tests {
     fn reset_mints_a_new_heap_identity() {
         let mut heap = Heap::new();
         let before = heap.id();
-        let _ = heap.alloc(&INT, 1_i64);
+        let _ = heap.alloc_unpaced(&INT, 1_i64);
 
         heap.reset();
 
         assert_ne!(heap.id(), before);
-        assert_eq!(heap.alloc(&INT, 2_i64).header().heap_id(), Some(heap.id()));
+        assert_eq!(
+            heap.alloc_unpaced(&INT, 2_i64).header().heap_id(),
+            Some(heap.id())
+        );
     }
 }

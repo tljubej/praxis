@@ -503,7 +503,7 @@ impl Default for Runtime {
 impl Runtime {
     /// Allocate an `Int` (§4.3).
     pub fn alloc_int(&self, value: i64) -> GcRef {
-        self.heap.alloc(&crate::scalars::INT, value)
+        self.heap.alloc_unpaced(&crate::scalars::INT, value)
     }
 
     /// Allocate a `Bool` as the corresponding immortal singleton (§4.3). Booleans
@@ -514,7 +514,7 @@ impl Runtime {
 
     /// Allocate a `Byte` (§4.3).
     pub fn alloc_byte(&self, value: u8) -> GcRef {
-        self.heap.alloc(&crate::scalars::BYTE, value)
+        self.heap.alloc_unpaced(&crate::scalars::BYTE, value)
     }
 
     /// Allocate a `Char` (§4.3). Panics if `value` is not a valid scalar value.
@@ -523,13 +523,13 @@ impl Runtime {
             crate::scalars::is_valid_char(value),
             "{value:#x} is not a valid Unicode scalar"
         );
-        self.heap.alloc(&crate::scalars::CHAR, value)
+        self.heap.alloc_unpaced(&crate::scalars::CHAR, value)
     }
 
     /// Allocate a `Float` (§4.3, §4.12). All finite values, ±infinity, and NaN
     /// are valid payloads — `Float` arithmetic never faults (IEEE-754).
     pub fn alloc_float(&self, value: f64) -> GcRef {
-        self.heap.alloc(&crate::scalars::FLOAT, value)
+        self.heap.alloc_unpaced(&crate::scalars::FLOAT, value)
     }
 
     /// The immortal `Unit` (§4.3).
@@ -542,7 +542,7 @@ impl Runtime {
         let owned: Box<str> = value.into();
         // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
         unsafe {
-            self.heap.alloc_with(
+            self.heap.alloc_with_unpaced(
                 &crate::text::TEXT,
                 std::mem::size_of::<crate::text::TextPayload>(),
                 std::mem::align_of::<crate::text::TextPayload>(),
@@ -569,7 +569,7 @@ impl Runtime {
         let payload = crate::text::TextPayload::Slice { owner, start, len };
         // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
         unsafe {
-            self.heap.alloc_with(
+            self.heap.alloc_with_unpaced(
                 &crate::text::TEXT,
                 std::mem::size_of::<crate::text::TextPayload>(),
                 std::mem::align_of::<crate::text::TextPayload>(),
@@ -587,7 +587,7 @@ impl Runtime {
     ) -> GcRef {
         // SAFETY: VecPayload matches VEC's size/align and is fully initialized.
         unsafe {
-            self.heap.alloc_with(
+            self.heap.alloc_with_unpaced(
                 &crate::collections::VEC,
                 std::mem::size_of::<VecPayload>(),
                 std::mem::align_of::<VecPayload>(),
@@ -618,7 +618,7 @@ impl Runtime {
         );
         // SAFETY: GridPayload matches GRID's size/align and is fully initialized.
         unsafe {
-            self.heap.alloc_with(
+            self.heap.alloc_with_unpaced(
                 &crate::collections::GRID,
                 std::mem::size_of::<crate::collections::GridPayload>(),
                 std::mem::align_of::<crate::collections::GridPayload>(),
@@ -651,7 +651,7 @@ impl Runtime {
         );
         // SAFETY: RecordPayload matches RECORD's size/align and is fully initialized.
         unsafe {
-            self.heap.alloc_with(
+            self.heap.alloc_with_unpaced(
                 &crate::records::RECORD,
                 std::mem::size_of::<crate::records::RecordPayload>(),
                 std::mem::align_of::<crate::records::RecordPayload>(),

@@ -115,13 +115,13 @@ impl Rt {
     /// Allocate a boxed `Int`.
     fn alloc_int(&self, value: i64) -> GcRef {
         // SAFETY: ctx is valid (caller upholds).
-        unsafe { heap_ref(self.ctx).alloc(&scalars::INT, value) }
+        unsafe { heap_ref(self.ctx).alloc_unpaced(&scalars::INT, value) }
     }
 
     /// Allocate a boxed `Char` from a Unicode scalar.
     fn alloc_char(&self, value: u32) -> GcRef {
         // SAFETY: ctx is valid.
-        unsafe { heap_ref(self.ctx).alloc(&scalars::CHAR, value) }
+        unsafe { heap_ref(self.ctx).alloc_unpaced(&scalars::CHAR, value) }
     }
 
     /// Allocate a source-slice `Text` pointing into `owner`.
@@ -129,7 +129,7 @@ impl Rt {
         let payload = TextPayload::Slice { owner, start, len };
         // SAFETY: ctx is valid; payload matches TEXT's layout.
         unsafe {
-            heap_ref(self.ctx).alloc_with(
+            heap_ref(self.ctx).alloc_with_unpaced(
                 &crate::text::TEXT,
                 std::mem::size_of::<TextPayload>(),
                 std::mem::align_of::<TextPayload>(),
@@ -150,7 +150,7 @@ impl Rt {
         };
         // SAFETY: ctx is valid.
         unsafe {
-            heap_ref(self.ctx).alloc_with(
+            heap_ref(self.ctx).alloc_with_unpaced(
                 &crate::collections::VEC,
                 std::mem::size_of::<crate::collections::VecPayload>(),
                 std::mem::align_of::<crate::collections::VecPayload>(),
@@ -166,7 +166,7 @@ impl Rt {
         let payload = crate::enums::EnumPayload { tag, items };
         // SAFETY: ctx is valid; payload matches ENUM's layout.
         unsafe {
-            heap_ref(self.ctx).alloc_with(
+            heap_ref(self.ctx).alloc_with_unpaced(
                 &crate::enums::ENUM,
                 std::mem::size_of::<crate::enums::EnumPayload>(),
                 std::mem::align_of::<crate::enums::EnumPayload>(),
@@ -735,7 +735,7 @@ fn alloc_grid(
     };
     // SAFETY: ctx is valid.
     let grid_ref = unsafe {
-        heap_ref(rt.ctx).alloc_with(
+        heap_ref(rt.ctx).alloc_with_unpaced(
             &crate::collections::GRID,
             std::mem::size_of::<crate::collections::GridPayload>(),
             std::mem::align_of::<crate::collections::GridPayload>(),
@@ -846,7 +846,7 @@ fn walk_grid(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize
     };
     // SAFETY: ctx is valid.
     let grid_ref = unsafe {
-        heap_ref(rt.ctx).alloc_with(
+        heap_ref(rt.ctx).alloc_with_unpaced(
             &crate::collections::GRID,
             std::mem::size_of::<crate::collections::GridPayload>(),
             std::mem::align_of::<crate::collections::GridPayload>(),
@@ -1082,7 +1082,7 @@ fn alloc_record(rt: &Rt, captures: &[(Option<&'static str>, u32, GcRef)]) -> GcR
     let payload = crate::records::RecordPayload { schema, items };
     // SAFETY: ctx is valid; payload matches RECORD's layout.
     unsafe {
-        heap_ref(rt.ctx).alloc_with(
+        heap_ref(rt.ctx).alloc_with_unpaced(
             &crate::records::RECORD,
             std::mem::size_of::<crate::records::RecordPayload>(),
             std::mem::align_of::<crate::records::RecordPayload>(),
@@ -1106,7 +1106,7 @@ fn alloc_tuple(rt: &Rt, elements: &[u32], plan: &ParserPlan, values: Vec<GcRef>)
     };
     // SAFETY: ctx is valid; payload matches TUPLE's layout.
     unsafe {
-        heap_ref(rt.ctx).alloc_with(
+        heap_ref(rt.ctx).alloc_with_unpaced(
             &crate::tuples::TUPLE,
             std::mem::size_of::<crate::tuples::TuplePayload>(),
             std::mem::align_of::<crate::tuples::TuplePayload>(),

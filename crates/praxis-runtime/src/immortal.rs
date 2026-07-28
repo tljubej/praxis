@@ -13,6 +13,16 @@ use crate::heap::Heap;
 use crate::scalars::{BoolPayload, BOOL, UNIT};
 use crate::GcRef;
 
+/// Proof that an [`Heap::alloc_immortal`] call comes from this module.
+///
+/// The inner field is private to `immortal.rs`, so [`Immortals::new`] is the
+/// only place a witness can be constructed and therefore the only place an
+/// immortal can be minted. Restricting it here is what keeps two properties
+/// true: an immortal is never swept and never dropped, so its payload must be
+/// `Copy` and it must be allocated exactly once — a wrapper that minted one per
+/// call consumed unregistered arena storage permanently (RT-03).
+pub(crate) struct ImmortalWitness(());
+
 /// The immortal singletons, pre-allocated at runtime start (§4.3).
 #[repr(C)]
 pub struct Immortals {
@@ -28,9 +38,9 @@ impl Immortals {
         // Bypass `Heap::alloc`'s live-set registration: immortals are managed
         // out-of-band. We use the same low-level layout so the descriptors and
         // accessors still work on them.
-        let unit = heap.alloc_immortal(&UNIT, ());
-        let true_ = heap.alloc_immortal(&BOOL, 1_u8);
-        let false_ = heap.alloc_immortal(&BOOL, 0_u8);
+        let unit = heap.alloc_immortal(&UNIT, (), ImmortalWitness(()));
+        let true_ = heap.alloc_immortal(&BOOL, 1_u8, ImmortalWitness(()));
+        let false_ = heap.alloc_immortal(&BOOL, 0_u8, ImmortalWitness(()));
         // Immortals start black so a mark phase that happens to visit them (e.g.
         // via a root that aliases them) does not transiently un-protect them.
         unit.header().set_mark_color(crate::gc::BLACK);
