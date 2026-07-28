@@ -25,9 +25,12 @@ pub enum Purity {
 /// How a catalog entry lowers to actual code.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum MethodLowering {
-    /// Lowers to a call into the named `extern "C"` runtime wrapper, e.g.
-    /// `praxis_vec_push` (§11.1).
-    RuntimeSymbol(&'static str),
+    /// Lowers to a call into the runtime wrapper named by the ABI manifest,
+    /// e.g. [`RuntimeSymbol::VecPush`] (§11.1). Carrying the symbol rather than
+    /// its name means a catalog row cannot name a wrapper that does not exist,
+    /// and the row's allocation/fault behaviour comes from the manifest instead
+    /// of being restated here.
+    RuntimeSymbol(crate::abi::RuntimeSymbol),
     /// Lowers to a compiler intrinsic (no runtime symbol). Reserved for the
     /// sequence pipeline and a handful of primitives that the compiler folds
     /// directly.
@@ -58,8 +61,6 @@ pub struct MethodEntry {
     /// Whether the method may raise a runtime fault (§9.1), e.g. an
     /// out-of-bounds index.
     pub can_fault: bool,
-    /// Whether the method may allocate (relevant to GC safepoint placement).
-    pub allocates: bool,
     /// How the method lowers.
     pub lowering: MethodLowering,
     /// One-line documentation, surfaced in hover.
@@ -72,6 +73,20 @@ impl MethodEntry {
     /// The arity (number of explicit parameters, excluding the receiver).
     pub fn arity(&self) -> usize {
         self.params.len()
+    }
+
+    /// Whether calling this method may allocate, and so whether its call site
+    /// is a GC safepoint.
+    ///
+    /// Derived from the ABI manifest, not restated per row: a catalog entry
+    /// that disagreed with the wrapper it lowers to was the drift this
+    /// replaces. An intrinsic has no wrapper — the MIR lowering it expands to
+    /// carries its own per-instruction effects.
+    pub fn allocates(&self) -> bool {
+        match self.lowering {
+            MethodLowering::RuntimeSymbol(sym) => sym.allocates(),
+            MethodLowering::Intrinsic(_) => false,
+        }
     }
 }
 
@@ -199,8 +214,7 @@ mod tests {
             result: TypePattern::Unit,
             purity: Purity::Impure,
             can_fault: false,
-            allocates: true,
-            lowering: MethodLowering::RuntimeSymbol("praxis_vec_push"),
+            lowering: MethodLowering::RuntimeSymbol(crate::abi::RuntimeSymbol::VecPush),
             doc: "Append a value to the end of the vector.",
             stability: Stability::Stable,
         }
@@ -214,8 +228,7 @@ mod tests {
             result: TypePattern::Scalar(ScalarType::Int),
             purity: Purity::Pure,
             can_fault: false,
-            allocates: false,
-            lowering: MethodLowering::RuntimeSymbol("praxis_vec_len"),
+            lowering: MethodLowering::RuntimeSymbol(crate::abi::RuntimeSymbol::VecLen),
             doc: "Number of elements in the vector.",
             stability: Stability::Stable,
         }
@@ -277,7 +290,14 @@ mod tests {
     fn entry_reports_capabilities() {
         let e = vec_push();
         assert_eq!(e.arity(), 1);
-        assert!(e.allocates);
+        // `allocates` is the manifest's answer, not a field the row restates.
+        // Both of these are safepoints, and `len` is the interesting one: the
+        // row used to declare `allocates: false` because "reading a length
+        // allocates nothing" — but `praxis_vec_len` boxes the count into a
+        // fresh `Int`, so a collection can run inside it. That disagreement is
+        // exactly what deriving the answer from the wrapper removes.
+        assert!(e.allocates());
+        assert!(vec_len().allocates());
         assert!(!e.can_fault);
         assert_eq!(e.purity, Purity::Impure);
     }

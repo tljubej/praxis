@@ -297,13 +297,13 @@ fn exec(
 unsafe fn call_with_arity(entry: *const u8, ctx: *mut RuntimeContext, vals: &[GcRef]) -> GcRef {
     match vals.len() {
         0 => {
-            // The ABI always passes ctx + ≥1 GcRef slot; a zero-arg fn never
-            // reads the placeholder, so the immortal Unit (or any
-            // non-dereferenced GcRef) is safe. Reuse the dangling sentinel.
-            let f: unsafe extern "C" fn(*mut RuntimeContext, GcRef) -> GcRef =
+            // A zero-parameter synthetic function is `fn(ctx) -> GcRef`, which
+            // is what codegen emitted for it. The previous arm transmuted to a
+            // one-slot signature and filled the slot with a dangling `GcRef` —
+            // an invalid value handed across an ABI that promises a valid one.
+            let f: unsafe extern "C" fn(*mut RuntimeContext) -> GcRef =
                 unsafe { std::mem::transmute(entry) };
-            let placeholder = null_sentinel();
-            unsafe { f(ctx, placeholder) }
+            unsafe { f(ctx) }
         }
         1 => {
             let f: unsafe extern "C" fn(*mut RuntimeContext, GcRef) -> GcRef =
@@ -350,16 +350,6 @@ unsafe fn call_with_arity(entry: *const u8, ctx: *mut RuntimeContext, vals: &[Gc
         }
         n => unreachable!("arity {n} exceeds MAX_SUPPORTED_ARITY, guarded by exec"),
     }
-}
-
-/// A null-ish GcRef for the unused ABI slot when calling a zero-arg synthetic
-/// function. The dangling sentinel is never dereferenced (mirrors the debug
-/// frame's null-slot pattern); a zero-arg `__p_expr` never reads its slot.
-fn null_sentinel() -> GcRef {
-    use std::ptr::NonNull;
-    let nn = NonNull::<praxis_runtime::GcHeader>::dangling();
-    // SAFETY: dangling NonNull is non-null and aligned; never dereferenced.
-    unsafe { GcRef::from_non_null(nn) }
 }
 
 /// Make a snapshot local name safe as a Praxis identifier. Snapshot source
@@ -472,10 +462,14 @@ mod tests {
     fn synthesize_with_typed_params() {
         let mut db = TypeDb::new();
         let int = db.int();
+        // A real heap value: a `LocalBinding` carries a live `GcRef`, and
+        // `synthesize` reading only the name and type is not a licence to put
+        // an invalid one there.
+        let runtime = praxis_runtime::Runtime::new();
         let bindings = vec![LocalBinding {
             name: "n".to_string(),
             ty: int,
-            value: null_sentinel(),
+            value: runtime.alloc_int(7),
         }];
         let src = synthesize(&db, &bindings, "n + 1");
         assert_eq!(src, "fn __p_expr(n: Int) { n + 1 }");

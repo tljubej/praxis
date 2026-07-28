@@ -132,8 +132,7 @@ mod tests {
                 result: TypePattern::Unit,
                 purity: Purity::Impure,
                 can_fault: false,
-                allocates: true,
-                lowering: MethodLowering::RuntimeSymbol("praxis_vec_push"),
+                lowering: MethodLowering::RuntimeSymbol(praxis_stdlib::abi::RuntimeSymbol::VecPush),
                 doc: "Append a value.",
                 stability: Stability::Stable,
             })

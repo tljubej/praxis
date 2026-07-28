@@ -238,7 +238,7 @@ mod tests {
         let call = TypedExpr::MethodCall {
             receiver: Box::new(receiver),
             name: "push".to_string(),
-            lowering_symbol: "praxis_vec_push".to_string(),
+            lowering_symbol: Some(praxis_stdlib::abi::RuntimeSymbol::VecPush),
             args: vec![arg],
             purity: Purity::Impure,
             ty: db.unit(),
@@ -260,7 +260,7 @@ mod tests {
         let call = TypedExpr::MethodCall {
             receiver: Box::new(receiver),
             name: "len".to_string(),
-            lowering_symbol: "praxis_vec_len".to_string(),
+            lowering_symbol: Some(praxis_stdlib::abi::RuntimeSymbol::VecLen),
             args: vec![],
             purity: Purity::Pure,
             ty: db.int(),
@@ -282,7 +282,7 @@ mod tests {
         let impure = TypedExpr::MethodCall {
             receiver: Box::new(receiver),
             name: "push".to_string(),
-            lowering_symbol: "praxis_vec_push".to_string(),
+            lowering_symbol: Some(praxis_stdlib::abi::RuntimeSymbol::VecPush),
             args: vec![lit_int(&mut db)],
             purity: Purity::Impure,
             ty: db.unit(),

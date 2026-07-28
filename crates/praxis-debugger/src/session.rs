@@ -21,13 +21,12 @@ use praxis_codegen_cranelift::Jit;
 use praxis_hir::Analysis;
 use praxis_runtime::Runtime;
 
-/// The type-erased entry pointer for `main` (the uniform calling convention:
-/// `unsafe extern "C" fn(*mut RuntimeContext, GcRef) -> GcRef`). Cached so
-/// `restart` can re-call without re-resolving the `FuncId`.
-pub type MainEntry = unsafe extern "C" fn(
-    *mut praxis_runtime::RuntimeContext,
-    praxis_runtime::GcRef,
-) -> praxis_runtime::GcRef;
+/// The type-erased entry pointer for `main`: `unsafe extern "C"
+/// fn(*mut RuntimeContext) -> GcRef`, which is what codegen emits for a
+/// zero-parameter function. Cached so `restart` can re-call without
+/// re-resolving the `FuncId`.
+pub type MainEntry =
+    unsafe extern "C" fn(*mut praxis_runtime::RuntimeContext) -> praxis_runtime::GcRef;
 
 /// Everything the crash REPL needs to evaluate expressions, render context,
 /// and restart/reload. Owned by the [`crate::repl::Repl`].
@@ -87,9 +86,8 @@ impl DebugSession {
         if !self.input_text.is_empty() {
             ctx.input_source = self.runtime.alloc_text(&self.input_text);
         }
-        let unit = self.runtime.alloc_unit();
         // SAFETY: caller guarantees main_entry is a finalized entry in self.jit.
-        unsafe { (self.main_entry)(&mut ctx as *mut RuntimeContext, unit) }
+        unsafe { (self.main_entry)(&mut ctx as *mut RuntimeContext) }
     }
 
     /// `restart` (§9.7): rerun the *same* compiled code with the same input.

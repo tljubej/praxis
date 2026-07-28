@@ -16,6 +16,7 @@ use praxis_hir::{
     capture::Capture, AssignOp, BinOp, Lit, TypedBlock, TypedExpr, TypedFn, TypedItem, TypedModule,
     TypedParam, TypedStmt, UnaryOp,
 };
+use praxis_stdlib::abi::RuntimeSymbol;
 use praxis_types::{Type, TypeDb};
 
 use crate::ir::{
@@ -399,7 +400,7 @@ fn lower_closure_fn(
         let dst = b.alloc_gc(cap.ty, Some(cap.name.clone()), LocalDebugKind::User, None);
         b.push(Inst::Call {
             dst,
-            callee: CallTarget::Runtime("praxis_closure_capture".to_string()),
+            callee: CallTarget::Runtime(RuntimeSymbol::ClosureCapture),
             args: vec![self_local, idx_gc],
             live_roots: Vec::new(),
         });
@@ -528,7 +529,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                 );
                 b.push(Inst::Call {
                     dst: cell,
-                    callee: CallTarget::Runtime("praxis_alloc_var_cell".to_string()),
+                    callee: CallTarget::Runtime(RuntimeSymbol::AllocVarCell),
                     args: vec![v],
                     live_roots: Vec::new(),
                 });
@@ -566,7 +567,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                 if escaping {
                     b.push(Inst::Call {
                         dst,
-                        callee: CallTarget::Runtime("praxis_var_cell_set".to_string()),
+                        callee: CallTarget::Runtime(RuntimeSymbol::VarCellSet),
                         args: vec![dst, v],
                         live_roots: Vec::new(),
                     });
@@ -581,7 +582,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                     let cur = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, Some(*span));
                     b.push(Inst::Call {
                         dst: cur,
-                        callee: CallTarget::Runtime("praxis_var_cell_get".to_string()),
+                        callee: CallTarget::Runtime(RuntimeSymbol::VarCellGet),
                         args: vec![dst],
                         live_roots: Vec::new(),
                     });
@@ -598,7 +599,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                 if escaping {
                     b.push(Inst::Call {
                         dst,
-                        callee: CallTarget::Runtime("praxis_var_cell_set".to_string()),
+                        callee: CallTarget::Runtime(RuntimeSymbol::VarCellSet),
                         args: vec![dst, materialized],
                         live_roots: Vec::new(),
                     });
@@ -632,7 +633,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                         let value = b.alloc_temp(*ty, e);
                         b.push(Inst::Call {
                             dst: value,
-                            callee: CallTarget::Runtime("praxis_var_cell_get".to_string()),
+                            callee: CallTarget::Runtime(RuntimeSymbol::VarCellGet),
                             args: vec![slot],
                             live_roots: Vec::new(),
                         });
@@ -862,7 +863,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 let dst = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, espan);
                 b.push(Inst::Call {
                     dst,
-                    callee: CallTarget::Runtime("praxis_write_stdout".to_string()),
+                    callee: CallTarget::Runtime(RuntimeSymbol::WriteStdout),
                     args: vec![arg_local],
                     live_roots: Vec::new(),
                 });
@@ -873,14 +874,14 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // allocate a Float. No arguments; no fault.
             if callee_name == "pi" || callee_name == "e" {
                 let sym = if callee_name == "pi" {
-                    "praxis_float_pi"
+                    RuntimeSymbol::FloatPi
                 } else {
-                    "praxis_float_e"
+                    RuntimeSymbol::FloatE
                 };
                 let dst = b.alloc_gc(*ty, None, LocalDebugKind::Temp, None);
                 b.push(Inst::Call {
                     dst,
-                    callee: CallTarget::Runtime(sym.to_string()),
+                    callee: CallTarget::Runtime(sym),
                     args: vec![],
                     live_roots: Vec::new(),
                 });
@@ -935,13 +936,13 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // first tries to recognize a *chain* and fuse it into one loop; if
             // that declines, fall back to the per-combinator eager lowerer
             // (M8-WS8) which handles single combinators and is the safe default.
-            if lowering_symbol.is_empty() {
+            let Some(symbol) = *lowering_symbol else {
                 // Reconstruct the MethodCall node so the recognizer can walk
                 // the receiver chain.
                 let call = TypedExpr::MethodCall {
                     receiver: receiver.clone(),
                     name: name.clone(),
-                    lowering_symbol: lowering_symbol.clone(),
+                    lowering_symbol: *lowering_symbol,
                     args: args.clone(),
                     purity: *purity,
                     ty: *ty,
@@ -951,7 +952,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     return lower_pipeline(b, plan);
                 }
                 return lower_pipeline_combinator(b, receiver, name, args, *ty);
-            }
+            };
             let mut arg_locals: Vec<LocalId> = Vec::with_capacity(args.len() + 1);
             arg_locals.push(lower_expr_gc(b, receiver));
             for a in args {
@@ -968,7 +969,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             );
             b.push(Inst::Call {
                 dst,
-                callee: CallTarget::Runtime(lowering_symbol.clone()),
+                callee: CallTarget::Runtime(symbol),
                 args: arg_locals,
                 live_roots: Vec::new(),
             });
@@ -1064,7 +1065,7 @@ fn lower_read(b: &mut Builder<'_>, plan_index: u32) -> LocalId {
     let input = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: input,
-        callee: CallTarget::Runtime("praxis_get_input".to_string()),
+        callee: CallTarget::Runtime(RuntimeSymbol::GetInput),
         args: vec![],
         live_roots: Vec::new(),
     });
@@ -1098,7 +1099,7 @@ fn run_parser_plan(b: &mut Builder<'_>, plan_index: u32, input: LocalId) -> Loca
     let dst = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst,
-        callee: CallTarget::Runtime("praxis_run_parser".to_string()),
+        callee: CallTarget::Runtime(RuntimeSymbol::RunParser),
         args: vec![idx_gc, input],
         live_roots: Vec::new(),
     });
@@ -1503,7 +1504,7 @@ fn lower_for(
     let len_dst = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: len_dst,
-        callee: CallTarget::Runtime(len_sym.to_string()),
+        callee: CallTarget::Runtime(len_sym),
         args: vec![iter_local],
         live_roots: vec![iter_local, idx_gc],
     });
@@ -1545,7 +1546,7 @@ fn lower_for(
     let item_gc = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: item_gc,
-        callee: CallTarget::Runtime(get_sym.to_string()),
+        callee: CallTarget::Runtime(get_sym),
         args: vec![iter_local, idx_gc],
         live_roots: vec![iter_local, idx_gc],
     });
@@ -1981,7 +1982,7 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     let item = b.alloc_gc(source_item_ty, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: item,
-        callee: CallTarget::Runtime("praxis_vec_get".to_string()),
+        callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
         args: vec![src, idx],
         live_roots: loop_roots.clone(),
     });
@@ -2200,7 +2201,7 @@ fn run_stage(
             let other_item = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
             b.push(Inst::Call {
                 dst: other_item,
-                callee: CallTarget::Runtime("praxis_vec_get".to_string()),
+                callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
                 args: vec![other, idx],
                 live_roots: loop_roots.to_vec(),
             });
@@ -2258,7 +2259,7 @@ fn idx_ge_len(
     let len_dst = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: len_dst,
-        callee: CallTarget::Runtime("praxis_vec_len".to_string()),
+        callee: CallTarget::Runtime(RuntimeSymbol::VecLen),
         args: vec![other],
         live_roots: loop_roots.to_vec(),
     });
@@ -2297,7 +2298,7 @@ fn emit_bounds_check(
     let len_dst = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: len_dst,
-        callee: CallTarget::Runtime("praxis_vec_len".to_string()),
+        callee: CallTarget::Runtime(RuntimeSymbol::VecLen),
         args: vec![src],
         live_roots: loop_roots.to_vec(),
     });
@@ -2727,7 +2728,7 @@ fn emit_sink_body(
             roots.extend(loop_roots.iter().copied());
             b.push(Inst::Call {
                 dst: unit,
-                callee: CallTarget::Runtime("praxis_vec_push".to_string()),
+                callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
                 args: vec![result, item],
                 live_roots: roots,
             });
@@ -2793,7 +2794,7 @@ fn emit_flat_map_inner(
     let inner_item = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: inner_item,
-        callee: CallTarget::Runtime("praxis_vec_get".to_string()),
+        callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
         args: vec![inner_vec, inner_idx],
         live_roots: roots.clone(),
     });
@@ -3057,7 +3058,7 @@ fn alloc_empty_vec(b: &mut Builder<'_>, live: Vec<LocalId>) -> LocalId {
     let result = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: result,
-        callee: CallTarget::Runtime("praxis_vec_new".to_string()),
+        callee: CallTarget::Runtime(RuntimeSymbol::VecNew),
         args: vec![null_gc],
         live_roots: live,
     });
@@ -3089,7 +3090,7 @@ fn lower_seq_map(
         let unit = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
         b.push(Inst::Call {
             dst: unit,
-            callee: CallTarget::Runtime("praxis_vec_push".to_string()),
+            callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
             args: vec![locals[1], mapped],
             live_roots: vec![locals[1], mapped],
         });
@@ -3134,7 +3135,7 @@ fn lower_seq_filter(
         let unit = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
         b.push(Inst::Call {
             dst: unit,
-            callee: CallTarget::Runtime("praxis_vec_push".to_string()),
+            callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
             args: vec![locals[1], item],
             live_roots: vec![locals[1], item],
         });
@@ -3151,7 +3152,7 @@ fn lower_seq_collect(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type)
         let unit = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
         b.push(Inst::Call {
             dst: unit,
-            callee: CallTarget::Runtime("praxis_vec_push".to_string()),
+            callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
             args: vec![locals[0], item],
             live_roots: vec![locals[0], item],
         });
@@ -3198,7 +3199,7 @@ fn emit_index_loop<F>(
     let len_dst = b.alloc_gc(b.int_ty, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: len_dst,
-        callee: CallTarget::Runtime("praxis_vec_len".to_string()),
+        callee: CallTarget::Runtime(RuntimeSymbol::VecLen),
         args: vec![src],
         live_roots: roots.clone(),
     });
@@ -3233,7 +3234,7 @@ fn emit_index_loop<F>(
     let item = b.alloc_gc(Type(0), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: item,
-        callee: CallTarget::Runtime("praxis_vec_get".to_string()),
+        callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
         args: vec![src, idx],
         live_roots: roots.clone(),
     });
@@ -3267,33 +3268,33 @@ fn emit_index_loop<F>(
 
 /// Pick the `praxis_<kind>_len` runtime symbol for an iterable expression by its
 /// static collection ctor. Defaults to `praxis_vec_len` (the common Vec case).
-fn len_symbol_for(db: &TypeDb, iter: &TypedExpr) -> &'static str {
+fn len_symbol_for(db: &TypeDb, iter: &TypedExpr) -> RuntimeSymbol {
     use praxis_types::data::TypeData;
     let ty = expr_static_type(iter);
     match db.data(db.follow(ty)) {
         TypeData::Collection { ctor, .. } => match ctor {
-            praxis_types::CollectionCtor::Vec => "praxis_vec_len",
-            praxis_types::CollectionCtor::Deque => "praxis_deque_len",
-            praxis_types::CollectionCtor::Map => "praxis_map_len",
-            praxis_types::CollectionCtor::Set => "praxis_set_len",
-            praxis_types::CollectionCtor::Counter => "praxis_counter_len",
-            _ => "praxis_vec_len",
+            praxis_types::CollectionCtor::Vec => RuntimeSymbol::VecLen,
+            praxis_types::CollectionCtor::Deque => RuntimeSymbol::DequeLen,
+            praxis_types::CollectionCtor::Map => RuntimeSymbol::MapLen,
+            praxis_types::CollectionCtor::Set => RuntimeSymbol::SetLen,
+            praxis_types::CollectionCtor::Counter => RuntimeSymbol::CounterLen,
+            _ => RuntimeSymbol::VecLen,
         },
-        _ => "praxis_vec_len",
+        _ => RuntimeSymbol::VecLen,
     }
 }
 
 /// Pick the `praxis_<kind>_get` runtime symbol for element access.
-fn get_symbol_for(db: &TypeDb, iter: &TypedExpr) -> &'static str {
+fn get_symbol_for(db: &TypeDb, iter: &TypedExpr) -> RuntimeSymbol {
     use praxis_types::data::TypeData;
     let ty = expr_static_type(iter);
     match db.data(db.follow(ty)) {
         TypeData::Collection { ctor, .. } => match ctor {
-            praxis_types::CollectionCtor::Vec => "praxis_vec_get",
-            praxis_types::CollectionCtor::Deque => "praxis_deque_get",
-            _ => "praxis_vec_get",
+            praxis_types::CollectionCtor::Vec => RuntimeSymbol::VecGet,
+            praxis_types::CollectionCtor::Deque => RuntimeSymbol::DequeGet,
+            _ => RuntimeSymbol::VecGet,
         },
-        _ => "praxis_vec_get",
+        _ => RuntimeSymbol::VecGet,
     }
 }
 
@@ -3981,7 +3982,7 @@ mod tests {
                 continue;
             };
             let local_ty = main.locals[dst.0 as usize].ty;
-            match name.as_str() {
+            match name.name() {
                 "praxis_vec_new" => assert!(
                     matches!(
                         analysis.db.data(analysis.db.follow(local_ty)),
@@ -4020,7 +4021,7 @@ mod tests {
                         Inst::Call {
                             callee: CallTarget::Runtime(name),
                             ..
-                        } if name == "praxis_vec_len"
+                        } if *name == RuntimeSymbol::VecLen
                     )
                 });
                 match (&block.term, has_len_call) {

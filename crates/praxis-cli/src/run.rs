@@ -175,13 +175,11 @@ pub fn run(
     }
 
     // SAFETY: `entry` was just finalized for `main_id`; the JIT outlives the
-    // call. `main` takes one unused GcRef slot (the uniform calling convention
-    // passes the context plus the declared params — zero here — but the entry
-    // pointer type carries one placeholder slot).
+    // call. `main` declares no parameters, so the entry takes the context and
+    // nothing else — the shape `abi_signature` emitted for it.
     let entry: praxis_debugger::session::MainEntry =
         unsafe { std::mem::transmute(jit.entry(main_id)) };
-    let unit = runtime.alloc_unit();
-    let result = unsafe { entry(&mut ctx as *mut RuntimeContext, unit) };
+    let result = unsafe { entry(&mut ctx as *mut RuntimeContext) };
 
     if runtime.has_pending_fault() {
         let kind = runtime.fault();

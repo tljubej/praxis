@@ -257,15 +257,16 @@ pub enum TypedExpr {
         span: (u32, u32),
     },
     /// `receiver.method(args)` (M5, §16.2). `lowering_symbol` is the runtime
-    /// wrapper name the catalog resolved (e.g. `praxis_vec_push`), so the MIR
-    /// builder emits a direct call without re-resolving the catalog. `purity`
+    /// wrapper the catalog resolved (e.g. `RuntimeSymbol::VecPush`), so the MIR
+    /// builder emits a direct call without re-resolving the catalog; `None`
+    /// means the method is an intrinsic and MIR lowers it itself. `purity`
     /// (M10b-WS4) is the catalog's purity tag, so the crash debugger's read-only
     /// `p EXPR` evaluator can reject impure calls (§9.5, §19.10 "no command can
     /// mutate").
     MethodCall {
         receiver: Box<TypedExpr>,
         name: String,
-        lowering_symbol: String,
+        lowering_symbol: Option<praxis_stdlib::abi::RuntimeSymbol>,
         args: Vec<TypedExpr>,
         purity: praxis_stdlib::Purity,
         ty: Type,
@@ -1630,12 +1631,10 @@ impl<'a> Lowerer<'a> {
         if let Some(entry) = hits.first() {
             let ty = pattern_to_type(self.db, &entry.result);
             let lowering_symbol = match &entry.lowering {
-                praxis_stdlib::MethodLowering::RuntimeSymbol(sym) => sym.to_string(),
-                praxis_stdlib::MethodLowering::Intrinsic(_) => {
-                    // Intrinsics are not yet emitted (M8 pipeline); leave empty
-                    // so MIR skips the call for now.
-                    String::new()
-                }
+                praxis_stdlib::MethodLowering::RuntimeSymbol(sym) => Some(*sym),
+                // An intrinsic has no runtime symbol: the MIR builder lowers it
+                // (the M8 pipeline combinators) rather than emitting a call.
+                praxis_stdlib::MethodLowering::Intrinsic(_) => None,
             };
             TypedExpr::MethodCall {
                 receiver: Box::new(receiver),

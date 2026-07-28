@@ -19,10 +19,15 @@ use praxis_runtime::{GcRef, RuntimeContext};
 use crate::lower;
 use crate::symbols;
 
-/// A compiled, callable Praxis function: `fn(*mut RuntimeContext, ...) -> GcRef`.
-/// (M4 functions take exactly one `GcRef` slot per param; this signature covers
-/// the zero-extra-param entry case used for `main`.)
-pub type RunnableFunction = unsafe extern "C" fn(*mut RuntimeContext, GcRef) -> GcRef;
+/// A compiled, callable entry point: `fn(*mut RuntimeContext) -> GcRef`.
+///
+/// This is exactly what `lower::abi_signature` emits for a zero-parameter
+/// function such as `main`: the hidden context pointer and nothing else. It
+/// previously declared a trailing `GcRef` the generated code never had, and
+/// every caller invented a value to fill it — an ABI mismatch that happened to
+/// be harmless on the supported host. A function *with* parameters is called
+/// through its own transmuted type (see the debugger's `call_with_arity`).
+pub type RunnableFunction = unsafe extern "C" fn(*mut RuntimeContext) -> GcRef;
 
 /// Errors that can arise during JIT compilation. Variants box their payloads
 /// to keep the enum small (clippy::result_large_err).

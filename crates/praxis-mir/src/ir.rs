@@ -15,6 +15,7 @@
 #![allow(dead_code)] // Some variants/fields are consumed by the Cranelift backend
                      // (praxis-codegen-cranelift) which lands later in M4.
 
+use praxis_stdlib::abi::RuntimeSymbol;
 use praxis_types::Type;
 
 /// A whole lowered function: its locals, basic blocks, and debug metadata.
@@ -330,10 +331,11 @@ pub enum CallTarget {
     /// A user-defined function, by its MIR-local index-resolved name. The
     /// backend resolves this to the JIT'd function pointer.
     User(String),
-    /// A built-in runtime wrapper, by its `praxis_*` symbol name (M5, §11.1).
-    /// The backend resolves this through the registered symbol table. Method
-    /// calls (`receiver.push(x)`) lower to this variant.
-    Runtime(String),
+    /// A built-in runtime wrapper, named by the ABI manifest
+    /// (`praxis_stdlib::abi`, M5, §11.1). The backend derives the call
+    /// signature from the symbol's row rather than from the argument count.
+    /// Method calls (`receiver.push(x)`) lower to this variant.
+    Runtime(RuntimeSymbol),
 }
 
 /// Checked integer binary operators (§4.12). All fault on overflow; `Div`/`Rem`

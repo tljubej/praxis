@@ -92,9 +92,9 @@ fn every_runtime_symbol_mir_emits_is_registered() {
                     ..
                 } = inst
                 {
-                    seen.insert(name.clone());
+                    seen.insert(*name);
                     assert!(
-                        praxis_codegen_cranelift::symbols::resolve(name).is_some(),
+                        praxis_codegen_cranelift::symbols::resolve(name.name()).is_some(),
                         "MIR emits `{name}`, which the runtime symbol table does not know"
                     );
                 }
@@ -138,9 +138,7 @@ fn run_main_with_input(src: &str, input: &str) -> (Runtime, GcRef) {
     let input_ref = rt.alloc_text(input);
     ctx.input_source = input_ref;
     let entry: RunnableFunction = unsafe { std::mem::transmute(jit.entry(main_id)) };
-    // main takes no GcRef params beyond the context; pass Unit as the unused slot.
-    let unit = rt.alloc_unit();
-    let result = unsafe { entry(&mut ctx as *mut RuntimeContext, unit) };
+    let result = unsafe { entry(&mut ctx as *mut RuntimeContext) };
     // Keep the JIT alive for the call (it owns the executable memory).
     drop(jit);
     (rt, result)
@@ -158,8 +156,7 @@ fn run_main_no_input(src: &str) -> (Runtime, GcRef) {
     let mut ctx = rt.context();
     // Intentionally do NOT touch ctx.input_source: it stays at the default Unit.
     let entry: RunnableFunction = unsafe { std::mem::transmute(jit.entry(main_id)) };
-    let unit = rt.alloc_unit();
-    let result = unsafe { entry(&mut ctx as *mut RuntimeContext, unit) };
+    let result = unsafe { entry(&mut ctx as *mut RuntimeContext) };
     drop(jit);
     (rt, result)
 }

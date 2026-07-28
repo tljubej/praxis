@@ -21,6 +21,7 @@ use praxis_mir::{
     LocalKind, ScalarKind, Terminator,
 };
 use praxis_runtime::{DebugLocalMeta, RuntimeContext, ShadowFrame, MAX_SHADOW_SLOTS};
+use praxis_stdlib::abi::{AbiKind, AbiRet, RuntimeSymbol};
 
 /// The uniform Cranelift type for a `GcRef` and every scalar payload: `i64`.
 /// `GcRef` is `#[repr(transparent)]` over a pointer; `Int`/`Bool` payloads are
@@ -38,92 +39,6 @@ const SLOTS_OFFSET: i64 = core::mem::offset_of!(ShadowFrame, slots) as i64;
 /// branch to the stack-overflow fault epilogue (§9.2, §17.4). Computed from the
 /// `#[repr(C)]` layout, like `SLOTS_OFFSET`.
 const RECURSION_DEPTH_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, recursion_depth) as i64;
-
-/// The `praxis_*` symbols the lowering references, each mapped to its name.
-/// The `praxis_*` symbols the lowering references. Some (e.g. `IntNeg`) are
-/// reserved ABI symbols the lowering does not yet emit directly (unary neg is
-/// routed through `IntBinOp::Sub` in MIR) but remain here so the symbol table
-/// stays complete for the wrappers that exist.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
-enum Symbol {
-    AllocInt,
-    AllocBool,
-    AllocUnit,
-    AllocText,
-    AllocChar,
-    AllocFloat,
-    IntLoad,
-    BoolLoad,
-    CharLoad,
-    FloatLoad,
-    IntAdd,
-    IntSub,
-    IntMul,
-    IntDiv,
-    IntRem,
-    IntNeg,
-    IntEq,
-    IntNe,
-    IntLt,
-    IntGt,
-    IntLe,
-    IntGe,
-    CheckFault,
-    /// Prologue helper: allocate + push a shadow-stack frame (ADR-019).
-    PushShadowFrame,
-    /// Epilogue helper: pop + free the shadow-stack frame (ADR-019).
-    PopShadowFrame,
-    /// Prologue helper: allocate + push a debug frame (§9.3, ADR-021, M10-WS2).
-    PushDebugFrame,
-    /// Epilogue helper: pop + free the debug frame (§9.3, ADR-021, M10-WS2).
-    PopDebugFrame,
-    /// Prologue helper: set the just-pushed frame's source span (§9.3, M10-WS1).
-    SetFrameSourceSpan,
-    /// Fault-epilogue helper: snapshot the debug-frame chain before unwind
-    /// (§9.3, M10-WS3). Idempotent — only the first (innermost) call captures.
-    SnapshotDebugChain,
-    /// Prologue guard: raise `FaultKind::StackOverflow` when recursion exceeds
-    /// `MAX_RECURSION_DEPTH` (§9.2, §17.4).
-    RaiseStackOverflow,
-}
-
-impl Symbol {
-    fn name(self) -> &'static str {
-        match self {
-            Symbol::AllocInt => "praxis_alloc_int",
-            Symbol::AllocBool => "praxis_alloc_bool",
-            Symbol::AllocUnit => "praxis_alloc_unit",
-            Symbol::AllocText => "praxis_alloc_text",
-            Symbol::AllocChar => "praxis_alloc_char",
-            Symbol::AllocFloat => "praxis_alloc_float",
-            Symbol::IntLoad => "praxis_int_load",
-            Symbol::BoolLoad => "praxis_bool_load",
-            Symbol::CharLoad => "praxis_char_load",
-            Symbol::FloatLoad => "praxis_float_load",
-            Symbol::IntAdd => "praxis_int_add",
-            Symbol::IntSub => "praxis_int_sub",
-            Symbol::IntMul => "praxis_int_mul",
-            Symbol::IntDiv => "praxis_int_div",
-            Symbol::IntRem => "praxis_int_rem",
-            Symbol::IntNeg => "praxis_int_neg",
-            Symbol::IntEq => "praxis_int_eq",
-            Symbol::IntNe => "praxis_int_ne",
-            Symbol::IntLt => "praxis_int_lt",
-            Symbol::IntGt => "praxis_int_gt",
-            Symbol::IntLe => "praxis_int_le",
-            Symbol::IntGe => "praxis_int_ge",
-            Symbol::CheckFault => "praxis_check_fault",
-            Symbol::PushShadowFrame => "praxis_push_shadow_frame",
-            Symbol::PopShadowFrame => "praxis_pop_shadow_frame",
-            Symbol::PushDebugFrame => "praxis_push_debug_frame",
-            Symbol::PopDebugFrame => "praxis_pop_debug_frame",
-            Symbol::SetFrameSourceSpan => "praxis_set_frame_source_span",
-            Symbol::SnapshotDebugChain => "praxis_snapshot_debug_chain",
-            Symbol::RaiseStackOverflow => "praxis_raise_stack_overflow",
-        }
-    }
-}
 
 /// Lower one MIR function into a Cranelift function and define it in `module`.
 pub(crate) fn lower_function<M: Module>(
@@ -191,16 +106,15 @@ pub(crate) fn lower_function<M: Module>(
     // `praxis_alloc_*` wrappers trigger (§12.4, ADR-019).
     let frame_var = builder.declare_var(GC);
     let frame_ptr = {
-        let fr = import(
-            module,
-            &mut builder,
-            &mut HashMap::new(),
-            Symbol::PushShadowFrame,
-            &push_shadow_frame_sig(),
-        )?;
         let count_val = builder.ins().iconst(GC, gc_count as i64);
-        let call = builder.ins().call(fr, &[ctx_val, count_val]);
-        builder.func.dfg.first_result(call)
+        call_symbol(
+            &mut builder,
+            ctx_val,
+            &[count_val],
+            RuntimeSymbol::PushShadowFrame,
+            module,
+            &mut HashMap::new(),
+        )?
     };
     builder.def_var(frame_var, frame_ptr);
 
@@ -222,19 +136,15 @@ pub(crate) fn lower_function<M: Module>(
         let name_static = leak_static_str(&mir.name);
         let name_ptr_val = builder.ins().iconst(GC, name_static.as_ptr() as i64);
         let name_len_val = builder.ins().iconst(GC, name_static.len() as i64);
-        let fr = import(
-            module,
-            &mut builder,
-            &mut HashMap::new(),
-            Symbol::PushDebugFrame,
-            &push_debug_frame_sig(),
-        )?;
         let count_val = builder.ins().iconst(GC, gc_count as i64);
-        let call = builder.ins().call(
-            fr,
-            &[ctx_val, name_ptr_val, name_len_val, count_val, meta_ptr_val],
-        );
-        builder.func.dfg.first_result(call)
+        call_symbol(
+            &mut builder,
+            ctx_val,
+            &[name_ptr_val, name_len_val, count_val, meta_ptr_val],
+            RuntimeSymbol::PushDebugFrame,
+            module,
+            &mut HashMap::new(),
+        )?
     };
     builder.def_var(debug_frame_var, debug_frame_ptr);
 
@@ -245,19 +155,19 @@ pub(crate) fn lower_function<M: Module>(
     // span (synthetic/closure functions) is a no-op: the setter still writes
     // it, and the debugger treats `(0, 0)` as "no span recorded".
     {
-        let fr = import(
-            module,
-            &mut builder,
-            &mut HashMap::new(),
-            Symbol::SetFrameSourceSpan,
-            &set_frame_source_span_sig(),
-        )?;
         let start = builder.ins().iconst(GC, mir.span.0 as i64);
         let end = builder.ins().iconst(GC, mir.span.1 as i64);
-        builder.ins().call(fr, &[ctx_val, start, end]);
+        call_symbol(
+            &mut builder,
+            ctx_val,
+            &[start, end],
+            RuntimeSymbol::SetFrameSourceSpan,
+            module,
+            &mut HashMap::new(),
+        )?;
     }
 
-    let mut import_cache: HashMap<Symbol, FuncRef> = HashMap::new();
+    let mut import_cache: HashMap<RuntimeSymbol, FuncRef> = HashMap::new();
     let mut user_func_cache: HashMap<String, FuncRef> = HashMap::new();
     let spill = SpillCtx {
         frame_var,
@@ -301,14 +211,14 @@ pub(crate) fn lower_function<M: Module>(
     // return the Unit sentinel. Mirrors `Terminator::Fault` below.
     {
         builder.switch_to_block(over_limit);
-        let fr = import(
-            module,
+        call_symbol(
             &mut builder,
+            ctx_val,
+            &[],
+            RuntimeSymbol::RaiseStackOverflow,
+            module,
             &mut import_cache,
-            Symbol::RaiseStackOverflow,
-            &raise_stack_overflow_sig(),
         )?;
-        builder.ins().call(fr, &[ctx_val]);
         // Snapshot the (deep) debug-frame chain before unwinding (M10-WS3).
         emit_snapshot_debug_chain(&mut builder, ctx_val, module, &mut import_cache)?;
         emit_pop_shadow_frame(&mut builder, ctx_val, &spill, module, &mut import_cache)?;
@@ -472,7 +382,7 @@ fn lower_inst<M: Module>(
     spill: &SpillCtx<'_>,
     blocks: &[Block],
     module: &mut M,
-    imports: &mut HashMap<Symbol, FuncRef>,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
     user_funcs: &HashMap<String, FuncId>,
     user_cache: &mut HashMap<String, FuncRef>,
     db: &praxis_types::TypeDb,
@@ -502,39 +412,77 @@ fn lower_inst<M: Module>(
             match alloc {
                 AllocKind::Int { value } => {
                     let arg = builder.use_var(vars[value.0 as usize]);
-                    let result = call_alloc_int(builder, ctx_val, arg, module, imports)?;
+                    let result = call_symbol(
+                        builder,
+                        ctx_val,
+                        &[arg],
+                        RuntimeSymbol::AllocInt,
+                        module,
+                        imports,
+                    )?;
                     builder.def_var(vars[dst.0 as usize], result);
                 }
                 AllocKind::Bool { value } => {
                     let arg = builder.use_var(vars[value.0 as usize]);
-                    let result =
-                        call_symbol1(builder, ctx_val, arg, Symbol::AllocBool, module, imports)?;
+                    let result = call_symbol(
+                        builder,
+                        ctx_val,
+                        &[arg],
+                        RuntimeSymbol::AllocBool,
+                        module,
+                        imports,
+                    )?;
                     builder.def_var(vars[dst.0 as usize], result);
                 }
                 AllocKind::Unit => {
-                    let result =
-                        call_symbol0(builder, ctx_val, Symbol::AllocUnit, module, imports)?;
+                    let result = call_symbol(
+                        builder,
+                        ctx_val,
+                        &[],
+                        RuntimeSymbol::AllocUnit,
+                        module,
+                        imports,
+                    )?;
                     builder.def_var(vars[dst.0 as usize], result);
                 }
                 AllocKind::Text { value } => {
                     // Embed the string as a data object, then call praxis_alloc_text
                     // with (ptr, len).
                     let (ptr, len_val) = embed_text(builder, module, value)?;
-                    let result = call_alloc_text(builder, ctx_val, ptr, len_val, module, imports)?;
+                    let result = call_symbol(
+                        builder,
+                        ctx_val,
+                        &[ptr, len_val],
+                        RuntimeSymbol::AllocText,
+                        module,
+                        imports,
+                    )?;
                     builder.def_var(vars[dst.0 as usize], result);
                 }
                 AllocKind::Char { value } => {
                     let arg = builder.use_var(vars[value.0 as usize]);
-                    let result =
-                        call_symbol1(builder, ctx_val, arg, Symbol::AllocChar, module, imports)?;
+                    let result = call_symbol(
+                        builder,
+                        ctx_val,
+                        &[arg],
+                        RuntimeSymbol::AllocChar,
+                        module,
+                        imports,
+                    )?;
                     builder.def_var(vars[dst.0 as usize], result);
                 }
                 AllocKind::Float { value } => {
                     // The scalar local holds the f64 bit pattern as i64; the
                     // runtime wrapper `praxis_alloc_float` reassembles the f64.
                     let arg = builder.use_var(vars[value.0 as usize]);
-                    let result =
-                        call_symbol1(builder, ctx_val, arg, Symbol::AllocFloat, module, imports)?;
+                    let result = call_symbol(
+                        builder,
+                        ctx_val,
+                        &[arg],
+                        RuntimeSymbol::AllocFloat,
+                        module,
+                        imports,
+                    )?;
                     builder.def_var(vars[dst.0 as usize], result);
                 }
                 AllocKind::Record {
@@ -548,11 +496,11 @@ fn lower_inst<M: Module>(
                     let schema_ptr = record_schema_for(db, *record_def_id);
                     let schema_imm = builder.ins().iconst(GC, schema_ptr as i64);
                     // praxis_alloc_record(ctx, schema_ptr) -> GcRef.
-                    let record_ref = call_runtime_by_name(
+                    let record_ref = call_symbol(
                         builder,
                         ctx_val,
                         &[schema_imm],
-                        "praxis_alloc_record",
+                        RuntimeSymbol::AllocRecord,
                         module,
                         imports,
                     )?;
@@ -562,11 +510,11 @@ fn lower_inst<M: Module>(
                     for (idx, field_local) in fields.iter().enumerate() {
                         let field_val = builder.use_var(vars[field_local.0 as usize]);
                         let idx_val = builder.ins().iconst(GC, idx as i64);
-                        call_runtime_by_name(
+                        call_symbol(
                             builder,
                             ctx_val,
                             &[record_ref, idx_val, field_val],
-                            "praxis_record_set_field",
+                            RuntimeSymbol::RecordSetField,
                             module,
                             imports,
                         )?;
@@ -582,22 +530,22 @@ fn lower_inst<M: Module>(
                     // each payload via praxis_enum_set_payload.
                     let tag_val = builder.ins().iconst(GC, *variant_idx as i64);
                     let arity_val = builder.ins().iconst(GC, args.len() as i64);
-                    let enum_ref = call_runtime_by_name(
+                    let enum_ref = call_symbol(
                         builder,
                         ctx_val,
                         &[tag_val, arity_val],
-                        "praxis_alloc_enum",
+                        RuntimeSymbol::AllocEnum,
                         module,
                         imports,
                     )?;
                     for (idx, arg_local) in args.iter().enumerate() {
                         let arg_val = builder.use_var(vars[arg_local.0 as usize]);
                         let idx_val = builder.ins().iconst(GC, idx as i64);
-                        call_runtime_by_name(
+                        call_symbol(
                             builder,
                             ctx_val,
                             &[enum_ref, idx_val, arg_val],
-                            "praxis_enum_set_payload",
+                            RuntimeSymbol::EnumSetPayload,
                             module,
                             imports,
                         )?;
@@ -612,11 +560,11 @@ fn lower_inst<M: Module>(
                     let schema_ptr = tuple_schema_for(db, *ty);
                     let schema_imm = builder.ins().iconst(GC, schema_ptr as i64);
                     // praxis_alloc_tuple(ctx, schema_ptr) -> GcRef.
-                    let tuple_ref = call_runtime_by_name(
+                    let tuple_ref = call_symbol(
                         builder,
                         ctx_val,
                         &[schema_imm],
-                        "praxis_alloc_tuple",
+                        RuntimeSymbol::AllocTuple,
                         module,
                         imports,
                     )?;
@@ -624,11 +572,11 @@ fn lower_inst<M: Module>(
                     for (idx, el_local) in elements.iter().enumerate() {
                         let el_val = builder.use_var(vars[el_local.0 as usize]);
                         let idx_val = builder.ins().iconst(GC, idx as i64);
-                        call_runtime_by_name(
+                        call_symbol(
                             builder,
                             ctx_val,
                             &[tuple_ref, idx_val, el_val],
-                            "praxis_tuple_set",
+                            RuntimeSymbol::TupleSet,
                             module,
                             imports,
                         )?;
@@ -645,22 +593,22 @@ fn lower_inst<M: Module>(
                     let fr = user_funcref(fn_name, user_funcs, user_cache, module, builder)?;
                     let fn_ptr_val = builder.ins().func_addr(GC, fr);
                     let n_val = builder.ins().iconst(GC, captures.len() as i64);
-                    let closure_ref = call_runtime_by_name(
+                    let closure_ref = call_symbol(
                         builder,
                         ctx_val,
                         &[fn_ptr_val, n_val],
-                        "praxis_alloc_closure",
+                        RuntimeSymbol::AllocClosure,
                         module,
                         imports,
                     )?;
                     for (idx, cap_local) in captures.iter().enumerate() {
                         let cap_val = builder.use_var(vars[cap_local.0 as usize]);
                         let idx_val = builder.ins().iconst(GC, idx as i64);
-                        call_runtime_by_name(
+                        call_symbol(
                             builder,
                             ctx_val,
                             &[closure_ref, idx_val, cap_val],
-                            "praxis_closure_set_capture",
+                            RuntimeSymbol::ClosureSetCapture,
                             module,
                             imports,
                         )?;
@@ -678,11 +626,11 @@ fn lower_inst<M: Module>(
                         CollectionCtor::Vec => {
                             let el_desc = collection_element_descriptor_for(db, args[0]);
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
-                            let vec_ref = call_runtime_by_name(
+                            let vec_ref = call_symbol(
                                 builder,
                                 ctx_val,
                                 &[el_imm],
-                                "praxis_vec_new",
+                                RuntimeSymbol::VecNew,
                                 module,
                                 imports,
                             )?;
@@ -693,11 +641,11 @@ fn lower_inst<M: Module>(
                             // passed to praxis_deque_new (M8-WS2, §6.1).
                             let el_desc = collection_element_descriptor_for(db, args[0]);
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
-                            let deque_ref = call_runtime_by_name(
+                            let deque_ref = call_symbol(
                                 builder,
                                 ctx_val,
                                 &[el_imm],
-                                "praxis_deque_new",
+                                RuntimeSymbol::DequeNew,
                                 module,
                                 imports,
                             )?;
@@ -709,11 +657,11 @@ fn lower_inst<M: Module>(
                             // inserted value at runtime (§11.3).
                             let key_desc = collection_element_descriptor_for(db, args[0]);
                             let key_imm = builder.ins().iconst(GC, key_desc as i64);
-                            let map_ref = call_runtime_by_name(
+                            let map_ref = call_symbol(
                                 builder,
                                 ctx_val,
                                 &[key_imm],
-                                "praxis_map_new",
+                                RuntimeSymbol::MapNew,
                                 module,
                                 imports,
                             )?;
@@ -723,11 +671,11 @@ fn lower_inst<M: Module>(
                             // Set: pass the element descriptor.
                             let el_desc = collection_element_descriptor_for(db, args[0]);
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
-                            let set_ref = call_runtime_by_name(
+                            let set_ref = call_symbol(
                                 builder,
                                 ctx_val,
                                 &[el_imm],
-                                "praxis_set_new",
+                                RuntimeSymbol::SetNew,
                                 module,
                                 imports,
                             )?;
@@ -737,11 +685,11 @@ fn lower_inst<M: Module>(
                             // Counter: pass the key descriptor.
                             let key_desc = collection_element_descriptor_for(db, args[0]);
                             let key_imm = builder.ins().iconst(GC, key_desc as i64);
-                            let counter_ref = call_runtime_by_name(
+                            let counter_ref = call_symbol(
                                 builder,
                                 ctx_val,
                                 &[key_imm],
-                                "praxis_counter_new",
+                                RuntimeSymbol::CounterNew,
                                 module,
                                 imports,
                             )?;
@@ -753,28 +701,22 @@ fn lower_inst<M: Module>(
                             let el_desc = collection_element_descriptor_for(db, args[0]);
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
                             let sym = if *ctor == CollectionCtor::MinHeap {
-                                "praxis_min_heap_new"
+                                RuntimeSymbol::MinHeapNew
                             } else {
-                                "praxis_max_heap_new"
+                                RuntimeSymbol::MaxHeapNew
                             };
-                            let heap_ref = call_runtime_by_name(
-                                builder,
-                                ctx_val,
-                                &[el_imm],
-                                sym,
-                                module,
-                                imports,
-                            )?;
+                            let heap_ref =
+                                call_symbol(builder, ctx_val, &[el_imm], sym, module, imports)?;
                             builder.def_var(vars[dst.0 as usize], heap_ref);
                         }
                         CollectionCtor::BitSet => {
                             // BitSet is nullary (no element descriptor); elements
                             // are always Int. praxis_bitset_new takes only ctx.
-                            let bs_ref = call_runtime_by_name(
+                            let bs_ref = call_symbol(
                                 builder,
                                 ctx_val,
                                 &[],
-                                "praxis_bitset_new",
+                                RuntimeSymbol::BitsetNew,
                                 module,
                                 imports,
                             )?;
@@ -790,11 +732,11 @@ fn lower_inst<M: Module>(
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
                             let w_imm = builder.ins().iconst(GC, 0);
                             let h_imm = builder.ins().iconst(GC, 0);
-                            let grid_ref = call_runtime_by_name(
+                            let grid_ref = call_symbol(
                                 builder,
                                 ctx_val,
                                 &[el_imm, w_imm, h_imm],
-                                "praxis_grid_new",
+                                RuntimeSymbol::GridNew,
                                 module,
                                 imports,
                             )?;
@@ -817,15 +759,15 @@ fn lower_inst<M: Module>(
         Inst::ExtractScalar { dst, src, scalar } => {
             let src_val = builder.use_var(vars[src.0 as usize]);
             let sym = match scalar {
-                ScalarKind::Int => Symbol::IntLoad,
-                ScalarKind::Bool => Symbol::BoolLoad,
-                ScalarKind::Char => Symbol::CharLoad,
+                ScalarKind::Int => RuntimeSymbol::IntLoad,
+                ScalarKind::Bool => RuntimeSymbol::BoolLoad,
+                ScalarKind::Char => RuntimeSymbol::CharLoad,
                 // Float's payload is read as its f64 bit pattern (i64 channel).
-                ScalarKind::Float => Symbol::FloatLoad,
+                ScalarKind::Float => RuntimeSymbol::FloatLoad,
                 // Byte is not yet wired (reserved); read as Int defensively.
-                ScalarKind::Byte => Symbol::IntLoad,
+                ScalarKind::Byte => RuntimeSymbol::IntLoad,
             };
-            let result = call_symbol1(builder, ctx_val, src_val, sym, module, imports)?;
+            let result = call_symbol(builder, ctx_val, &[src_val], sym, module, imports)?;
             builder.def_var(vars[dst.0 as usize], result);
         }
         Inst::Materialize {
@@ -840,15 +782,15 @@ fn lower_inst<M: Module>(
             // Char → praxis_alloc_char.
             let src_val = builder.use_var(vars[src.0 as usize]);
             let sym = match scalar {
-                ScalarKind::Int => Symbol::AllocInt,
-                ScalarKind::Bool => Symbol::AllocBool,
-                ScalarKind::Char => Symbol::AllocChar,
+                ScalarKind::Int => RuntimeSymbol::AllocInt,
+                ScalarKind::Bool => RuntimeSymbol::AllocBool,
+                ScalarKind::Char => RuntimeSymbol::AllocChar,
                 // Float's bit pattern is boxed by praxis_alloc_float.
-                ScalarKind::Float => Symbol::AllocFloat,
+                ScalarKind::Float => RuntimeSymbol::AllocFloat,
                 // Byte is not yet wired (reserved); box as Int defensively.
-                ScalarKind::Byte => Symbol::AllocInt,
+                ScalarKind::Byte => RuntimeSymbol::AllocInt,
             };
-            let result = call_symbol1(builder, ctx_val, src_val, sym, module, imports)?;
+            let result = call_symbol(builder, ctx_val, &[src_val], sym, module, imports)?;
             builder.def_var(vars[dst.0 as usize], result);
         }
         Inst::StoreScalar { .. } => {
@@ -859,25 +801,53 @@ fn lower_inst<M: Module>(
             let l = builder.use_var(vars[lhs.0 as usize]);
             let r = builder.use_var(vars[rhs.0 as usize]);
             let sym = match op {
-                IntBinOp::Add => Symbol::IntAdd,
-                IntBinOp::Sub => Symbol::IntSub,
-                IntBinOp::Mul => Symbol::IntMul,
-                IntBinOp::Div => Symbol::IntDiv,
-                IntBinOp::Rem => Symbol::IntRem,
+                IntBinOp::Add => RuntimeSymbol::IntAdd,
+                IntBinOp::Sub => RuntimeSymbol::IntSub,
+                IntBinOp::Mul => RuntimeSymbol::IntMul,
+                IntBinOp::Div => RuntimeSymbol::IntDiv,
+                IntBinOp::Rem => RuntimeSymbol::IntRem,
             };
             // praxis_int_* take (ctx, lhs_gc, rhs_gc) — but the operands here are
             // already scalar i64s extracted previously. The wrappers expect GcRef
             // operands. To bridge, re-alloc each scalar first.
             // (The builder emits Extract then BinOp; here we re-materialize to
             //  match the wrapper's GcRef ABI. A future pass can fold the extract.)
-            let l_gc = call_symbol1(builder, ctx_val, l, Symbol::AllocInt, module, imports)?;
-            let r_gc = call_symbol1(builder, ctx_val, r, Symbol::AllocInt, module, imports)?;
-            let result = call_symbol2(builder, ctx_val, l_gc, r_gc, sym, module, imports)?;
+            let l_gc = call_symbol(
+                builder,
+                ctx_val,
+                &[l],
+                RuntimeSymbol::AllocInt,
+                module,
+                imports,
+            )?;
+            let r_gc = call_symbol(
+                builder,
+                ctx_val,
+                &[r],
+                RuntimeSymbol::AllocInt,
+                module,
+                imports,
+            )?;
+            let result = call_symbol(builder, ctx_val, &[l_gc, r_gc], sym, module, imports)?;
             // The result is a GcRef; load it back to a scalar for the dst slot.
-            let scalar = call_symbol1(builder, ctx_val, result, Symbol::IntLoad, module, imports)?;
+            let scalar = call_symbol(
+                builder,
+                ctx_val,
+                &[result],
+                RuntimeSymbol::IntLoad,
+                module,
+                imports,
+            )?;
             builder.def_var(vars[dst.0 as usize], scalar);
             // Fault check after faultable arith.
-            let _ = call_check_fault(builder, ctx_val, module, imports)?;
+            let _ = call_symbol(
+                builder,
+                ctx_val,
+                &[],
+                RuntimeSymbol::CheckFault,
+                module,
+                imports,
+            )?;
         }
         Inst::IntCmp { op, dst, lhs, rhs } => {
             // Compare the scalar operands directly in Cranelift (no boxing). The
@@ -952,20 +922,22 @@ fn lower_inst<M: Module>(
                 .iter()
                 .map(|a| builder.use_var(vars[a.0 as usize]))
                 .collect();
-            let funcref = match callee {
+            let result = match callee {
                 CallTarget::User(name) => {
-                    user_funcref(name, user_funcs, user_cache, module, builder)?
+                    let funcref = user_funcref(name, user_funcs, user_cache, module, builder)?;
+                    let mut call_args = vec![ctx_val];
+                    call_args.extend(arg_vals);
+                    let call = builder.ins().call(funcref, &call_args);
+                    builder.func.dfg.first_result(call)
                 }
-                CallTarget::Runtime(name) => {
-                    // Runtime wrapper signature: fn(ctx, args...) -> i64.
-                    // args already includes the receiver as the first element.
-                    runtime_funcref(name, builder, module, imports, args.len())?
+                // The wrapper's shape comes from its manifest row, not from the
+                // argument count: `call_symbol` checks the arity and narrows
+                // each argument to the width the row declares. `args` already
+                // includes the receiver as its first element.
+                CallTarget::Runtime(sym) => {
+                    call_symbol(builder, ctx_val, &arg_vals, *sym, module, imports)?
                 }
             };
-            let mut call_args = vec![ctx_val];
-            call_args.extend(arg_vals);
-            let call = builder.ins().call(funcref, &call_args);
-            let result = builder.func.dfg.first_result(call);
             builder.def_var(vars[dst.0 as usize], result);
         }
         Inst::CallIndirect {
@@ -988,11 +960,11 @@ fn lower_inst<M: Module>(
                 .map(|a| builder.use_var(vars[a.0 as usize]))
                 .collect();
             // fn_ptr = praxis_closure_fn_ptr(closure). (No ctx arg.)
-            let fn_ptr = call_runtime_by_name(
+            let fn_ptr = call_symbol(
                 builder,
                 ctx_val,
                 &[callee_val],
-                "praxis_closure_fn_ptr",
+                RuntimeSymbol::ClosureFnPtr,
                 module,
                 imports,
             )?;
@@ -1023,11 +995,11 @@ fn lower_inst<M: Module>(
             spill.emit_spill(builder, live_roots, vars);
             let l = builder.use_var(vars[lhs.0 as usize]);
             let r = builder.use_var(vars[rhs.0 as usize]);
-            let result = call_runtime_by_name(
+            let result = call_symbol(
                 builder,
                 ctx_val,
                 &[l, r],
-                "praxis_struct_eq",
+                RuntimeSymbol::StructEq,
                 module,
                 imports,
             )?;
@@ -1058,7 +1030,14 @@ fn lower_inst<M: Module>(
             // `x / 0`). The faulting op's own result is genuinely never
             // produced (the fault happens during it), so it stays `<uninit>`.
             spill.emit_spill(builder, live_roots, vars);
-            let pending = call_check_fault(builder, ctx_val, module, imports)?;
+            let pending = call_symbol(
+                builder,
+                ctx_val,
+                &[],
+                RuntimeSymbol::CheckFault,
+                module,
+                imports,
+            )?;
             let fault_block = blocks[on_fault.0 as usize];
             let fallthrough = builder.create_block();
             builder
@@ -1078,11 +1057,11 @@ fn lower_inst<M: Module>(
             // praxis_record_field(ctx, record, idx) -> GcRef. Not a safepoint.
             let record = builder.use_var(vars[src.0 as usize]);
             let idx_val = builder.ins().iconst(GC, *field_idx as i64);
-            let field = call_runtime_by_name(
+            let field = call_symbol(
                 builder,
                 ctx_val,
                 &[record, idx_val],
-                "praxis_record_field",
+                RuntimeSymbol::RecordField,
                 module,
                 imports,
             )?;
@@ -1114,11 +1093,11 @@ fn lower_inst<M: Module>(
             // directly, because Vec's field order is repr(Rust) and not stable.
             let enum_ref = builder.use_var(vars[src.0 as usize]);
             let idx_val = builder.ins().iconst(GC, *idx as i64);
-            let slot_val = call_runtime_by_name(
+            let slot_val = call_symbol(
                 builder,
                 ctx_val,
                 &[enum_ref, idx_val],
-                "praxis_enum_payload",
+                RuntimeSymbol::EnumPayload,
                 module,
                 imports,
             )?;
@@ -1137,7 +1116,7 @@ fn lower_terminator<M: Module>(
     ctx_val: Value,
     spill: &SpillCtx<'_>,
     module: &mut M,
-    imports: &mut HashMap<Symbol, FuncRef>,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
     _user_funcs: &HashMap<String, FuncId>,
     _user_cache: &mut HashMap<String, FuncRef>,
 ) -> Result<()> {
@@ -1188,17 +1167,17 @@ fn emit_pop_shadow_frame<M: Module>(
     ctx_val: Value,
     spill: &SpillCtx<'_>,
     module: &mut M,
-    imports: &mut HashMap<Symbol, FuncRef>,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
 ) -> Result<()> {
-    let fr = import(
-        module,
-        builder,
-        imports,
-        Symbol::PopShadowFrame,
-        &pop_shadow_frame_sig(),
-    )?;
     let frame_ptr = builder.use_var(spill.frame_var);
-    builder.ins().call(fr, &[ctx_val, frame_ptr]);
+    call_symbol(
+        builder,
+        ctx_val,
+        &[frame_ptr],
+        RuntimeSymbol::PopShadowFrame,
+        module,
+        imports,
+    )?;
     Ok(())
 }
 
@@ -1209,17 +1188,17 @@ fn emit_pop_debug_frame<M: Module>(
     ctx_val: Value,
     spill: &SpillCtx<'_>,
     module: &mut M,
-    imports: &mut HashMap<Symbol, FuncRef>,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
 ) -> Result<()> {
-    let fr = import(
-        module,
-        builder,
-        imports,
-        Symbol::PopDebugFrame,
-        &pop_debug_frame_sig(),
-    )?;
     let frame_ptr = builder.use_var(spill.debug_frame_var);
-    builder.ins().call(fr, &[ctx_val, frame_ptr]);
+    call_symbol(
+        builder,
+        ctx_val,
+        &[frame_ptr],
+        RuntimeSymbol::PopDebugFrame,
+        module,
+        imports,
+    )?;
     Ok(())
 }
 
@@ -1230,33 +1209,69 @@ fn emit_snapshot_debug_chain<M: Module>(
     builder: &mut FunctionBuilder,
     ctx_val: Value,
     module: &mut M,
-    imports: &mut HashMap<Symbol, FuncRef>,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
 ) -> Result<()> {
-    let fr = import(
-        module,
+    call_symbol(
         builder,
+        ctx_val,
+        &[],
+        RuntimeSymbol::SnapshotDebugChain,
+        module,
         imports,
-        Symbol::SnapshotDebugChain,
-        &snapshot_debug_chain_sig(),
     )?;
-    builder.ins().call(fr, &[ctx_val]);
     Ok(())
 }
 
 // --- helpers: declare imports + emit calls -------------------------------
 
-/// Declare (lazily) and return the `FuncRef` for a `praxis_*` `Symbol`.
+/// The Cranelift type one ABI parameter kind is passed as.
+///
+/// `RawU32` is the reason this function exists: it is the one kind narrower
+/// than a machine word, and the arity-derived signature this replaces passed an
+/// `i64` there.
+fn abi_type(kind: AbiKind, pointer: types::Type) -> types::Type {
+    match kind {
+        AbiKind::Ctx | AbiKind::Gc | AbiKind::Ptr => pointer,
+        AbiKind::RawI64 => types::I64,
+        AbiKind::RawU32 => types::I32,
+    }
+}
+
+/// The Cranelift signature for a runtime symbol, derived from its manifest row.
+///
+/// Call convention and pointer width come from the module's ISA rather than
+/// from a literal, so a target whose conventions differ produces a wrong-target
+/// error at `Jit::new` instead of a wrong signature here.
+fn signature_for<M: Module>(sym: RuntimeSymbol, module: &M) -> Signature {
+    let pointer = module.target_config().pointer_type();
+    let abi = sym.sig();
+    let mut sig = Signature::new(module.isa().default_call_conv());
+    for &kind in abi.params {
+        sig.params.push(AbiParam::new(abi_type(kind, pointer)));
+    }
+    match abi.ret {
+        AbiRet::Gc | AbiRet::Ptr => sig.returns.push(AbiParam::new(pointer)),
+        AbiRet::RawI64 => sig.returns.push(AbiParam::new(types::I64)),
+        AbiRet::Void => {}
+    }
+    sig
+}
+
+/// Declare (lazily) and return the `FuncRef` for a runtime symbol.
+///
+/// The signature is the manifest's, never the call site's guess — that is what
+/// makes "the compiler called a wrapper with the wrong shape" unrepresentable.
 fn import<M: Module>(
     module: &mut M,
     builder: &mut FunctionBuilder,
-    imports: &mut HashMap<Symbol, FuncRef>,
-    sym: Symbol,
-    sig: &Signature,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
+    sym: RuntimeSymbol,
 ) -> Result<FuncRef> {
     if let Some(&fr) = imports.get(&sym) {
         return Ok(fr);
     }
-    let id = match module.declare_function(sym.name(), Linkage::Import, sig) {
+    let sig = signature_for(sym, module);
+    let id = match module.declare_function(sym.name(), Linkage::Import, &sig) {
         Ok(id) => id,
         Err(_) => func_id_for(module, sym.name())?,
     };
@@ -1265,102 +1280,50 @@ fn import<M: Module>(
     Ok(fr)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn call_alloc_int<M: Module>(
+/// Emit a call to `sym`, narrowing each argument to the width its manifest row
+/// declares.
+///
+/// Every value in the lowering is carried as an `I64`; a parameter declared
+/// `RawU32` therefore needs an explicit `ireduce`. Doing it here, from the
+/// manifest, means no call site can forget — the arity-only path this replaces
+/// fed the full 64-bit value into `praxis_record_field`'s `u32` index.
+fn call_symbol<M: Module>(
     builder: &mut FunctionBuilder,
     ctx: Value,
-    arg: Value,
+    args: &[Value],
+    sym: RuntimeSymbol,
     module: &mut M,
-    imports: &mut HashMap<Symbol, FuncRef>,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
 ) -> Result<Value> {
-    let fr = import(
-        module,
-        builder,
-        imports,
-        Symbol::AllocInt,
-        &unary_wrapped_sig(),
-    )?;
-    let call = builder.ins().call(fr, &[ctx, arg]);
-    Ok(builder.func.dfg.first_result(call))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn call_symbol0<M: Module>(
-    builder: &mut FunctionBuilder,
-    ctx: Value,
-    sym: Symbol,
-    module: &mut M,
-    imports: &mut HashMap<Symbol, FuncRef>,
-) -> Result<Value> {
-    let fr = import(module, builder, imports, sym, &ctx_only_sig())?;
-    let call = builder.ins().call(fr, &[ctx]);
-    Ok(builder.func.dfg.first_result(call))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn call_symbol1<M: Module>(
-    builder: &mut FunctionBuilder,
-    ctx: Value,
-    arg: Value,
-    sym: Symbol,
-    module: &mut M,
-    imports: &mut HashMap<Symbol, FuncRef>,
-) -> Result<Value> {
-    let fr = import(module, builder, imports, sym, &unary_wrapped_sig())?;
-    let call = builder.ins().call(fr, &[ctx, arg]);
-    Ok(builder.func.dfg.first_result(call))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn call_symbol2<M: Module>(
-    builder: &mut FunctionBuilder,
-    ctx: Value,
-    a: Value,
-    b: Value,
-    sym: Symbol,
-    module: &mut M,
-    imports: &mut HashMap<Symbol, FuncRef>,
-) -> Result<Value> {
-    let fr = import(module, builder, imports, sym, &binary_wrapped_sig())?;
-    let call = builder.ins().call(fr, &[ctx, a, b]);
-    Ok(builder.func.dfg.first_result(call))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn call_alloc_text<M: Module>(
-    builder: &mut FunctionBuilder,
-    ctx: Value,
-    ptr: Value,
-    len: Value,
-    module: &mut M,
-    imports: &mut HashMap<Symbol, FuncRef>,
-) -> Result<Value> {
-    let fr = import(
-        module,
-        builder,
-        imports,
-        Symbol::AllocText,
-        &text_alloc_sig(),
-    )?;
-    let call = builder.ins().call(fr, &[ctx, ptr, len]);
-    Ok(builder.func.dfg.first_result(call))
-}
-
-fn call_check_fault<M: Module>(
-    builder: &mut FunctionBuilder,
-    ctx: Value,
-    module: &mut M,
-    imports: &mut HashMap<Symbol, FuncRef>,
-) -> Result<Value> {
-    let fr = import(
-        module,
-        builder,
-        imports,
-        Symbol::CheckFault,
-        &check_fault_sig(),
-    )?;
-    let call = builder.ins().call(fr, &[ctx]);
-    Ok(builder.func.dfg.first_result(call))
+    let abi = sym.sig();
+    anyhow::ensure!(
+        args.len() == abi.arity(),
+        "runtime symbol `{sym}` takes {} arguments, {} were passed",
+        abi.arity(),
+        args.len()
+    );
+    let pointer = module.target_config().pointer_type();
+    let fr = import(module, builder, imports, sym)?;
+    let mut call_args = Vec::with_capacity(args.len() + 1);
+    call_args.push(ctx);
+    for (&arg, &kind) in args.iter().zip(&abi.params[1..]) {
+        let want = abi_type(kind, pointer);
+        let have = builder.func.dfg.value_type(arg);
+        call_args.push(if have == want {
+            arg
+        } else if have.bits() > want.bits() {
+            builder.ins().ireduce(want, arg)
+        } else {
+            builder.ins().uextend(want, arg)
+        });
+    }
+    let call = builder.ins().call(fr, &call_args);
+    // A void wrapper has no result; callers of those ignore the value, so hand
+    // back the context pointer rather than complicating every call site.
+    Ok(match abi.ret {
+        AbiRet::Void => ctx,
+        _ => builder.func.dfg.first_result(call),
+    })
 }
 
 /// Resolve a user-function call target to a FuncRef declared in the current func.
@@ -1381,77 +1344,6 @@ fn user_funcref<M: Module>(
     let fr = module.declare_func_in_func(id, builder.func);
     cache.insert(name.to_string(), fr);
     Ok(fr)
-}
-
-/// Resolve a runtime-wrapper call target (`praxis_vec_push`, …) to a FuncRef.
-/// Runtime wrappers are variadic, so the signature is built from the arg count:
-/// `fn(ctx: i64, args: i64...) -> i64`. The symbol is already registered in the
-/// JIT module's symbol table (module.rs); here we declare an *import* with the
-/// matching signature so Cranelift can call it.
-fn runtime_funcref<M: Module>(
-    name: &str,
-    builder: &mut FunctionBuilder,
-    module: &mut M,
-    imports: &mut HashMap<Symbol, FuncRef>,
-    // The caller passes the total arg count (excluding ctx) so the signature
-    // matches. We encode the runtime symbol as a synthetic Symbol keyed by name;
-    // to keep the cache keyed by Symbol, we intern by declaring fresh each call
-    // (runtime calls are rare in a function, so this is fine).
-    arg_count_excluding_ctx: usize,
-) -> Result<FuncRef> {
-    // Build a signature: fn(ctx, arg0, arg1, ...) -> i64.
-    let mut sig = Signature::new(CallConv::Fast);
-    sig.params.push(AbiParam::new(GC)); // ctx
-    for _ in 0..arg_count_excluding_ctx {
-        sig.params.push(AbiParam::new(GC));
-    }
-    sig.returns.push(AbiParam::new(GC));
-    // The import must be one the runtime symbol table knows. Without this the
-    // JIT falls back to `dlsym`, which finds any `#[no_mangle]` symbol of the
-    // statically linked runtime — so a symbol the compiler never registered
-    // "works" locally and the registration list is free to rot. Fail at
-    // compile time instead.
-    if crate::symbols::resolve(name).is_none() {
-        return Err(anyhow!(
-            "runtime symbol `{name}` is not in the runtime symbol table \
-             (crates/praxis-codegen-cranelift/src/symbols.rs)"
-        ));
-    }
-    // Declare the import. `declare_function` with `Linkage::Import` resolves
-    // through the JIT's registered symbol table at finalize time.
-    let id = match module.declare_function(name, Linkage::Import, &sig) {
-        Ok(id) => id,
-        Err(_) => {
-            // Already declared (e.g. a prior call in the same module); fetch it.
-            module
-                .get_name(name)
-                .and_then(|f| match f {
-                    cranelift_module::FuncOrDataId::Func(id) => Some(id),
-                    _ => None,
-                })
-                .ok_or_else(|| anyhow!("runtime symbol `{name}` not declared"))?
-        }
-    };
-    let fr = module.declare_func_in_func(id, builder.func);
-    let _ = imports; // runtime symbols are not cached by Symbol (they're name-keyed)
-    Ok(fr)
-}
-
-/// Call a runtime wrapper by name with the given Cranelift value args (ctx is
-/// prepended automatically). Returns the call's result value.
-fn call_runtime_by_name<M: Module>(
-    builder: &mut FunctionBuilder,
-    ctx_val: cranelift::codegen::ir::Value,
-    args: &[cranelift::codegen::ir::Value],
-    name: &str,
-    module: &mut M,
-    imports: &mut HashMap<Symbol, FuncRef>,
-) -> Result<cranelift::codegen::ir::Value> {
-    let fr = runtime_funcref(name, builder, module, imports, args.len())?;
-    let mut call_args = vec![ctx_val];
-    call_args.extend_from_slice(args);
-    let call = builder.ins().call(fr, &call_args);
-    Ok(builder.func.dfg.first_result(call))
 }
 
 /// Build (and cache) a `'static RecordSchema` for record def `id`, returning
@@ -1709,113 +1601,6 @@ fn collection_element_descriptor_for(
     descriptor_for_type(db, element_type)
 }
 
-// --- signatures ----------------------------------------------------------
-
-fn unary_wrapped_sig() -> Signature {
-    // fn(ctx: i64, a: i64) -> i64
-    let mut sig = Signature::new(CallConv::Fast);
-    sig.params.push(AbiParam::new(GC));
-    sig.params.push(AbiParam::new(GC));
-    sig.returns.push(AbiParam::new(GC));
-    sig
-}
-
-fn binary_wrapped_sig() -> Signature {
-    let mut sig = Signature::new(CallConv::Fast);
-    sig.params.push(AbiParam::new(GC));
-    sig.params.push(AbiParam::new(GC));
-    sig.params.push(AbiParam::new(GC));
-    sig.returns.push(AbiParam::new(GC));
-    sig
-}
-
-fn ctx_only_sig() -> Signature {
-    let mut sig = Signature::new(CallConv::Fast);
-    sig.params.push(AbiParam::new(GC));
-    sig.returns.push(AbiParam::new(GC));
-    sig
-}
-
-fn text_alloc_sig() -> Signature {
-    let mut sig = Signature::new(CallConv::Fast);
-    sig.params.push(AbiParam::new(GC));
-    sig.params.push(AbiParam::new(GC));
-    sig.params.push(AbiParam::new(GC));
-    sig.returns.push(AbiParam::new(GC));
-    sig
-}
-
-fn check_fault_sig() -> Signature {
-    // fn(ctx: i64) -> i64
-    let mut sig = Signature::new(CallConv::Fast);
-    sig.params.push(AbiParam::new(GC));
-    sig.returns.push(AbiParam::new(GC));
-    sig
-}
-
-/// `fn(ctx: i64, slot_count: i64) -> i64` — returns the frame pointer.
-fn push_shadow_frame_sig() -> Signature {
-    let mut sig = Signature::new(CallConv::Fast);
-    sig.params.push(AbiParam::new(GC)); // ctx
-    sig.params.push(AbiParam::new(GC)); // slot_count
-    sig.returns.push(AbiParam::new(GC)); // *mut ShadowFrame
-    sig
-}
-
-/// `fn(ctx: i64, frame: i64) -> void`.
-fn pop_shadow_frame_sig() -> Signature {
-    let mut sig = Signature::new(CallConv::Fast);
-    sig.params.push(AbiParam::new(GC)); // ctx
-    sig.params.push(AbiParam::new(GC)); // frame
-    sig
-}
-
-/// `fn(ctx: i64, func_name: i64, func_name_len: i64, local_count: i64,
-/// local_metas: i64) -> i64` — returns `*mut DebugFrame` (§9.3, M10-WS2).
-fn push_debug_frame_sig() -> Signature {
-    let mut sig = Signature::new(CallConv::Fast);
-    sig.params.push(AbiParam::new(GC)); // ctx
-    sig.params.push(AbiParam::new(GC)); // func_name ptr
-    sig.params.push(AbiParam::new(GC)); // func_name_len
-    sig.params.push(AbiParam::new(GC)); // local_count
-    sig.params.push(AbiParam::new(GC)); // local_metas ptr
-    sig.returns.push(AbiParam::new(GC)); // *mut DebugFrame
-    sig
-}
-
-/// `fn(ctx: i64, frame: i64) -> void` — pops the debug frame (§9.3, M10-WS2).
-fn pop_debug_frame_sig() -> Signature {
-    let mut sig = Signature::new(CallConv::Fast);
-    sig.params.push(AbiParam::new(GC)); // ctx
-    sig.params.push(AbiParam::new(GC)); // frame
-    sig
-}
-
-/// `fn(ctx: i64, start: i64, end: i64) -> void` — sets the just-pushed frame's
-/// source span (§9.3, M10-WS1).
-fn set_frame_source_span_sig() -> Signature {
-    let mut sig = Signature::new(CallConv::Fast);
-    sig.params.push(AbiParam::new(GC)); // ctx
-    sig.params.push(AbiParam::new(GC)); // start
-    sig.params.push(AbiParam::new(GC)); // end
-    sig
-}
-
-/// `fn(ctx: i64) -> void` — snapshots the debug-frame chain before unwind
-/// (§9.3, M10-WS3). Idempotent.
-fn snapshot_debug_chain_sig() -> Signature {
-    let mut sig = Signature::new(CallConv::Fast);
-    sig.params.push(AbiParam::new(GC)); // ctx
-    sig
-}
-
-/// `fn(ctx: i64) -> void` — raises `FaultKind::StackOverflow`.
-fn raise_stack_overflow_sig() -> Signature {
-    let mut sig = Signature::new(CallConv::Fast);
-    sig.params.push(AbiParam::new(GC)); // ctx
-    sig
-}
-
 /// Embed a string literal as a leaked `&'static str` and produce (ptr, len)
 /// `iconst` values for `praxis_alloc_text`. The leak is bounded by the JIT
 /// generation's lifetime (one `run`); a `JitGeneration` arena (§10.5) reclaims
@@ -1852,4 +1637,78 @@ fn i64_to_f64(builder: &mut FunctionBuilder, v: Value) -> Value {
 /// Reinterpret an `f64` value as its `i64` bit pattern (§4.12).
 fn f64_to_i64(builder: &mut FunctionBuilder, v: Value) -> Value {
     builder.ins().bitcast(GC, bitcast_flags(), v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cranelift_jit::{JITBuilder, JITModule};
+
+    fn test_module() -> JITModule {
+        let builder = JITBuilder::new(cranelift_module::default_libcall_names())
+            .expect("host target is supported");
+        JITModule::new(builder)
+    }
+
+    /// P0-13: the signature comes from the manifest row, not from the argument
+    /// count. The arity-derived path this replaces gave every parameter the
+    /// pointer type, so `praxis_record_field`'s `u32` index received a full
+    /// 64-bit value across a C ABI that declares 32 bits.
+    #[test]
+    fn narrow_parameters_are_declared_narrow() {
+        let module = test_module();
+        let sig = signature_for(RuntimeSymbol::RecordField, &module);
+        let pointer = module.target_config().pointer_type();
+        assert_eq!(
+            sig.params.iter().map(|p| p.value_type).collect::<Vec<_>>(),
+            vec![pointer, pointer, types::I32],
+            "praxis_record_field(ctx, record, idx: u32)"
+        );
+        assert_eq!(sig.returns.len(), 1);
+    }
+
+    /// A wrapper that returns nothing must declare no results. The arity-only
+    /// synthesis gave every symbol an `i64` return, so a call to
+    /// `praxis_pop_shadow_frame` read a result register the callee never wrote.
+    #[test]
+    fn void_wrappers_declare_no_result() {
+        let module = test_module();
+        assert!(signature_for(RuntimeSymbol::PopShadowFrame, &module)
+            .returns
+            .is_empty());
+        assert!(signature_for(RuntimeSymbol::SetFrameSourceSpan, &module)
+            .returns
+            .is_empty());
+        assert!(signature_for(RuntimeSymbol::SnapshotDebugChain, &module)
+            .returns
+            .is_empty());
+    }
+
+    /// Call convention and pointer width are the ISA's, not literals. Reading
+    /// them from the module is what lets `Jit::check_target` be the single
+    /// place a wrong target is rejected.
+    #[test]
+    fn signatures_take_their_conventions_from_the_isa() {
+        let module = test_module();
+        let sig = signature_for(RuntimeSymbol::AllocInt, &module);
+        assert_eq!(sig.call_conv, module.isa().default_call_conv());
+        assert_eq!(
+            sig.params[0].value_type,
+            module.target_config().pointer_type()
+        );
+    }
+
+    /// Every symbol in the manifest produces a well-formed signature, and its
+    /// parameter count matches the row. This is the standing check that the
+    /// manifest and the backend cannot disagree about shape.
+    #[test]
+    fn every_symbol_has_a_derivable_signature() {
+        let module = test_module();
+        for &sym in RuntimeSymbol::ALL {
+            let sig = signature_for(sym, &module);
+            assert_eq!(sig.params.len(), sym.sig().params.len(), "{sym}");
+            let want_result = !matches!(sym.sig().ret, AbiRet::Void);
+            assert_eq!(sig.returns.len(), usize::from(want_result), "{sym}");
+        }
+    }
 }
