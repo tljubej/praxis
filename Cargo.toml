@@ -10,6 +10,7 @@ members = [
     "crates/praxis-input-parser",
     "crates/praxis-hir",
     "crates/praxis-runtime",
+    "crates/praxis-repr",
     "crates/praxis-stdlib",
     "crates/praxis-mir",
     "crates/praxis-codegen-cranelift",
@@ -50,6 +51,7 @@ praxis-input-parser = { path = "crates/praxis-input-parser" }
 praxis-lsp = { path = "crates/praxis-lsp" }
 praxis-mir = { path = "crates/praxis-mir" }
 praxis-parser = { path = "crates/praxis-parser" }
+praxis-repr = { path = "crates/praxis-repr" }
 praxis-runtime = { path = "crates/praxis-runtime" }
 praxis-source = { path = "crates/praxis-source" }
 praxis-stdlib = { path = "crates/praxis-stdlib" }

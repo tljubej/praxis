@@ -1070,12 +1070,9 @@ pub unsafe extern "C" fn praxis_vec_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    let element_descriptor = if element_descriptor.is_null() {
-        &scalars::INT
-    } else {
-        // SAFETY: caller guarantees a valid `'static` descriptor pointer.
-        unsafe { &*element_descriptor }
-    };
+    // A null descriptor is kept null: it means "the caller has no static
+    // element type", which is a thing this payload can hold (P0-11). Spelling
+    // it `INT` is what made an empty `Vec[Float]` claim to hold `Int`s.
     // SAFETY: VecPayload matches VEC's size/align and is fully initialized.
     unsafe {
         gc_alloc_with(
@@ -1563,26 +1560,44 @@ pub unsafe extern "C" fn praxis_vec_push(
     // SAFETY: caller guarantees `vec` is a valid Vec.
     let scope = unsafe { NativeScope::new(ctx) };
     let p = unsafe { vec_payload_mut(scope.root(vec)) };
-    // M8-WS1: if the element descriptor is still the construction-time default
-    // (`INT`, used when the element type was not yet pinned at construction — the
-    // `forall T. () -> Vec[T]` builtin leaves `T` generalized until first use),
-    // and the pushed value is itself a non-scalar-Int GC object, adopt the pushed
-    // value's descriptor. This is sound because the type checker guarantees every
-    // element shares one type: the first push fixes the descriptor for the whole
-    // vector, making structural equality/hashing of nested collections dispatch
-    // correctly regardless of construction-time inference (§5.5, §11.2). It is a
-    // no-op for the common `Vec[Int]` case (descriptor already matches).
-    let pushed_desc = value.descriptor();
-    // Built-in descriptors are `static`, so their address is their identity and
-    // `ptr::eq` would work equally well here; `TypeId` equality is used because
-    // it reads as the type question being asked.
-    let cur_is_int = unsafe { (*p.element_descriptor).id() } == scalars::INT.id();
-    let pushed_is_int = pushed_desc.id() == scalars::INT.id();
-    if cur_is_int && !pushed_is_int {
-        p.element_descriptor = pushed_desc;
+    // A vector that was never told its element type adopts the first pushed
+    // value's — the `forall T. () -> Vec[T]` builtin leaves `T` generalized
+    // until first use, so construction genuinely has nothing to record. A
+    // vector that *was* told rejects a mismatch instead of retagging itself:
+    // retagging turned an explicitly typed `Vec[Int]` into a `Vec[Float]` on
+    // one bad push, and every later `equals`/`hash`/`format` then read the
+    // remaining `Int` payloads as `f64` (P0-11).
+    if !unsafe { adopt_or_reject(ctx, &mut p.element_descriptor, value) } {
+        return unsafe { unit_sentinel(ctx) };
     }
     p.items.push(value);
     unsafe { unit_sentinel(ctx) }
+}
+
+/// Reconcile a collection's element descriptor with a value about to be stored
+/// in it: adopt the value's descriptor if the collection has none, accept if
+/// they agree, and raise `TypeMismatch` if they do not.
+///
+/// Returns whether the store may proceed. Descriptors are `static`, so pointer
+/// identity is the authoritative test (ADR-038).
+///
+/// # Safety
+/// `ctx` must be live and wired; `value` must be a valid `GcRef`.
+unsafe fn adopt_or_reject(
+    ctx: *mut RuntimeContext,
+    element_descriptor: &mut *const TypeDescriptor,
+    value: GcRef,
+) -> bool {
+    let pushed = value.descriptor();
+    if element_descriptor.is_null() {
+        *element_descriptor = pushed;
+        return true;
+    }
+    if std::ptr::eq(*element_descriptor, pushed) {
+        return true;
+    }
+    unsafe { set_fault(ctx, RaisedFault::TYPE_MISMATCH) };
+    false
 }
 
 /// The number of elements in `vec`, as a boxed `Int` (§11.1).
@@ -1663,7 +1678,7 @@ unsafe fn deque_payload_mut<'s>(r: Rooted<'s>) -> &'s mut DequePayload {
 }
 
 /// Allocate a new empty `Deque[T]` with the given element descriptor (§11.2).
-/// A null descriptor defaults to `INT` (matching `praxis_vec_new`).
+/// A null descriptor stays null — "not told yet" — exactly as `praxis_vec_new`.
 ///
 /// # Safety
 /// `ctx` must be live and wired. `element_descriptor` must be a valid pointer to
@@ -1673,12 +1688,6 @@ pub unsafe extern "C" fn praxis_deque_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    let element_descriptor = if element_descriptor.is_null() {
-        &scalars::INT
-    } else {
-        // SAFETY: caller guarantees a valid `'static` descriptor pointer.
-        unsafe { &*element_descriptor }
-    };
     // SAFETY: DequePayload matches DEQUE's size/align and is fully initialized.
     unsafe {
         gc_alloc_with(
@@ -1710,11 +1719,8 @@ pub unsafe extern "C" fn praxis_deque_push_front(
     unsafe { maybe_collect(ctx) };
     let scope = unsafe { NativeScope::new(ctx) };
     let p = unsafe { deque_payload_mut(scope.root(deque)) };
-    let pushed_desc = value.descriptor();
-    let cur_is_int = unsafe { (*p.element_descriptor).id() } == scalars::INT.id();
-    let pushed_is_int = pushed_desc.id() == scalars::INT.id();
-    if cur_is_int && !pushed_is_int {
-        p.element_descriptor = pushed_desc;
+    if !unsafe { adopt_or_reject(ctx, &mut p.element_descriptor, value) } {
+        return unsafe { unit_sentinel(ctx) };
     }
     p.items.push_front(value);
     unsafe { unit_sentinel(ctx) }
@@ -1734,11 +1740,8 @@ pub unsafe extern "C" fn praxis_deque_push_back(
     unsafe { maybe_collect(ctx) };
     let scope = unsafe { NativeScope::new(ctx) };
     let p = unsafe { deque_payload_mut(scope.root(deque)) };
-    let pushed_desc = value.descriptor();
-    let cur_is_int = unsafe { (*p.element_descriptor).id() } == scalars::INT.id();
-    let pushed_is_int = pushed_desc.id() == scalars::INT.id();
-    if cur_is_int && !pushed_is_int {
-        p.element_descriptor = pushed_desc;
+    if !unsafe { adopt_or_reject(ctx, &mut p.element_descriptor, value) } {
+        return unsafe { unit_sentinel(ctx) };
     }
     p.items.push_back(value);
     unsafe { unit_sentinel(ctx) }
@@ -2684,8 +2687,56 @@ fn grid_neighbor(
     (nx >= 0 && ny >= 0 && (nx as usize) < width && (ny as usize) < height).then_some((nx, ny))
 }
 
+/// The zero value of the type `descriptor` names, or `None` if that type has no
+/// natural default.
+///
+/// Only the scalars and `Unit` have one. A `Grid[Vec[Int]](3, 3)` would need
+/// nine distinct empty vectors and, worse, no way to know their element type —
+/// so it is refused rather than filled with something of the wrong type. A null
+/// descriptor means the caller never said what the cells are, which is likewise
+/// nothing this can invent.
+///
+/// # Safety
+/// `ctx` must be live and wired.
+unsafe fn default_cell(
+    ctx: *mut RuntimeContext,
+    descriptor: *const TypeDescriptor,
+) -> Option<GcRef> {
+    use crate::descriptor::BuiltinTypeId as B;
+    // SAFETY: a non-null descriptor is a valid `&'static`.
+    let builtin = unsafe { descriptor.as_ref() }?.as_builtin()?;
+    unsafe {
+        match builtin {
+            B::Unit => Some(unit_sentinel(ctx)),
+            B::Bool => Some(bool_ref(ctx, false)),
+            B::Int => Some(gc_alloc(ctx, &scalars::INT, 0_i64)),
+            B::Byte => Some(gc_alloc(ctx, &scalars::BYTE, 0_u8)),
+            B::Char => Some(gc_alloc(ctx, &scalars::CHAR, '\0')),
+            B::Float => Some(gc_alloc(ctx, &scalars::FLOAT, 0.0_f64)),
+            B::Text => Some(praxis_alloc_text(ctx, std::ptr::null(), 0)),
+            // A composite has no zero value the runtime can invent: a
+            // `Grid[Vec[Int]]` must be filled by the program that knows what its
+            // cells are.
+            B::Vec
+            | B::Deque
+            | B::Grid
+            | B::Map
+            | B::Set
+            | B::Counter
+            | B::MinHeap
+            | B::MaxHeap
+            | B::BitSet
+            | B::Tuple
+            | B::Record
+            | B::Enum
+            | B::Closure
+            | B::VarCell => None,
+        }
+    }
+}
+
 /// Allocate an empty `Grid[T]` with the given element descriptor, width, and
-/// height, all cells initialized to Unit. (The input parser also constructs
+/// height, all cells initialized to the cell type's zero value. (The input parser also constructs
 /// grids directly; this wrapper is for source `Grid[T]()` + a follow-up fill.)
 ///
 /// Faults `InvalidSize` if either extent is negative or the grid would exceed
@@ -2702,17 +2753,23 @@ pub unsafe extern "C" fn praxis_grid_new(
     width: i64,
     height: i64,
 ) -> GcRef {
-    let element_descriptor = if element_descriptor.is_null() {
-        &scalars::INT
-    } else {
-        unsafe { &*element_descriptor }
-    };
     let Some(extent) = GridExtent::new(width, height) else {
         unsafe { set_fault(ctx, RaisedFault::INVALID_SIZE) };
         return unsafe { unit_sentinel(ctx) };
     };
-    let unit = unsafe { unit_sentinel(ctx) };
-    let cells = vec![unit; extent.cells()];
+    // Every cell of a `Grid[T]` must *be* a `T`. Filling with the Unit sentinel
+    // under a `T` element descriptor is the same lie as a mislabelled element
+    // descriptor, one level down: `get`, `format`, `equals` and `hash` all
+    // dispatch `T`'s callbacks against a zero-sized Unit payload (P0-11).
+    let cells = if extent.cells() == 0 {
+        Vec::new()
+    } else {
+        let Some(fill) = (unsafe { default_cell(ctx, element_descriptor) }) else {
+            unsafe { set_fault(ctx, RaisedFault::TYPE_MISMATCH) };
+            return unsafe { unit_sentinel(ctx) };
+        };
+        vec![fill; extent.cells()]
+    };
     unsafe {
         gc_alloc_with(
             ctx,
@@ -2795,6 +2852,9 @@ pub unsafe extern "C" fn praxis_grid_set(
         unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
         return unsafe { unit_sentinel(ctx) };
     }
+    if !unsafe { adopt_or_reject(ctx, &mut p.element_descriptor, value) } {
+        return unsafe { unit_sentinel(ctx) };
+    }
     p.items[(yi as usize) * p.width + (xi as usize)] = value;
     unsafe { unit_sentinel(ctx) }
 }
@@ -2834,7 +2894,7 @@ pub unsafe extern "C" fn praxis_grid_neighbors4(
     let pt = unsafe { &*tp };
     let (px, py) = unsafe { (int_payload(pt.items[0]), int_payload(pt.items[1])) };
     let height = grid_height(p.items.len(), p.width);
-    let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
+    let result = unsafe { praxis_vec_new(ctx, &crate::tuples::TUPLE as *const _) };
     let scope = unsafe { NativeScope::new(ctx) };
     let rp = unsafe { vec_payload_mut(scope.root(result)) };
     for (dx, dy) in [(0i64, -1), (0, 1), (-1, 0), (1, 0)] {
@@ -2861,7 +2921,7 @@ pub unsafe extern "C" fn praxis_grid_neighbors8(
     let pt = unsafe { &*tp };
     let (px, py) = unsafe { (int_payload(pt.items[0]), int_payload(pt.items[1])) };
     let height = grid_height(p.items.len(), p.width);
-    let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
+    let result = unsafe { praxis_vec_new(ctx, &crate::tuples::TUPLE as *const _) };
     let scope = unsafe { NativeScope::new(ctx) };
     let rp = unsafe { vec_payload_mut(scope.root(result)) };
     for dy in -1i64..=1 {
@@ -2886,7 +2946,7 @@ pub unsafe extern "C" fn praxis_grid_neighbors8(
 pub unsafe extern "C" fn praxis_grid_positions(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
     unsafe { maybe_collect(ctx) };
     let p = unsafe { grid_payload(grid) };
-    let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
+    let result = unsafe { praxis_vec_new(ctx, &crate::tuples::TUPLE as *const _) };
     let scope = unsafe { NativeScope::new(ctx) };
     let rp = unsafe { vec_payload_mut(scope.root(result)) };
     for i in 0..p.items.len() {
@@ -2903,7 +2963,7 @@ pub unsafe extern "C" fn praxis_grid_positions(ctx: *mut RuntimeContext, grid: G
 #[no_mangle]
 pub unsafe extern "C" fn praxis_grid_cells(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
     let p = unsafe { grid_payload(grid) };
-    let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
+    let result = unsafe { praxis_vec_new(ctx, p.element_descriptor) };
     let scope = unsafe { NativeScope::new(ctx) };
     let rp = unsafe { vec_payload_mut(scope.root(result)) };
     for cell in p.items.iter() {
@@ -2927,7 +2987,7 @@ pub unsafe extern "C" fn praxis_grid_row(ctx: *mut RuntimeContext, grid: GcRef, 
         return unsafe { unit_sentinel(ctx) };
     }
     let start = (yi as usize) * p.width;
-    let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
+    let result = unsafe { praxis_vec_new(ctx, p.element_descriptor) };
     let scope = unsafe { NativeScope::new(ctx) };
     let rp = unsafe { vec_payload_mut(scope.root(result)) };
     for x in 0..p.width {
@@ -2953,7 +3013,7 @@ pub unsafe extern "C" fn praxis_grid_column(
         unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
         return unsafe { unit_sentinel(ctx) };
     }
-    let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
+    let result = unsafe { praxis_vec_new(ctx, p.element_descriptor) };
     let scope = unsafe { NativeScope::new(ctx) };
     let rp = unsafe { vec_payload_mut(scope.root(result)) };
     let mut idx = xi as usize;
@@ -3008,7 +3068,7 @@ pub unsafe extern "C" fn praxis_grid_find_all(
     let p = unsafe { grid_payload(grid) };
     let val_desc = value.descriptor();
     let eq = val_desc.equals;
-    let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
+    let result = unsafe { praxis_vec_new(ctx, &crate::tuples::TUPLE as *const _) };
     let scope = unsafe { NativeScope::new(ctx) };
     let rp = unsafe { vec_payload_mut(scope.root(result)) };
     for (i, cell) in p.items.iter().enumerate() {
@@ -3963,7 +4023,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: Vec[Int] silently adopts the first non-Int descriptor"]
     fn vec_push_rejects_a_value_with_the_wrong_descriptor() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
@@ -4033,7 +4092,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: Grid cell-vector methods default their descriptor to Int"]
     fn grid_cell_vectors_preserve_the_grid_element_descriptor() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
@@ -4060,7 +4118,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: Grid[T](width,height) fills T-typed cells with Unit"]
     fn constructed_grid_cells_satisfy_the_declared_element_descriptor() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
@@ -4079,7 +4136,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: Grid point-vector methods default their descriptor to Int"]
     fn grid_position_vectors_use_the_point_tuple_descriptor() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);

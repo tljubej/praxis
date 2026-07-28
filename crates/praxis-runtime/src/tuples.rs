@@ -34,6 +34,25 @@ impl TupleSchema {
     pub fn arity(&self) -> usize {
         self.descriptors.len()
     }
+
+    /// Whether two schemas describe the *same* tuple shape: equal arity and the
+    /// same element descriptor in every slot.
+    ///
+    /// Shape, not allocation identity (RT-11). Schemas are interned per shape
+    /// *within* a producer, but there are three producers — the codegen's
+    /// `tuple_schema_for` cache, the runtime's `point_schema`, and the input
+    /// parser — and two of them minting an `(Int, Int)` used to yield tuples
+    /// that compared unequal to each other. Descriptors are `static`, so slot
+    /// comparison is pointer comparison (ADR-038).
+    #[must_use]
+    pub fn same_shape(&self, other: &TupleSchema) -> bool {
+        self.descriptors.len() == other.descriptors.len()
+            && self
+                .descriptors
+                .iter()
+                .zip(other.descriptors.iter())
+                .all(|(a, b)| std::ptr::eq(*a, *b))
+    }
 }
 
 /// The `Tuple` payload: a pointer to the static schema plus the element values
@@ -80,10 +99,14 @@ unsafe fn tuple_equals(a: *const u8, b: *const u8) -> bool {
     // with compatible element descriptors.
     let pa = unsafe { &*(a as *const TuplePayload) };
     let pb = unsafe { &*(b as *const TuplePayload) };
-    // Structural equality is shape + element-wise equality (§5.5). The schemas
-    // are interned by shape, so distinct shapes are distinct pointers; if the
-    // schemas disagree the tuples are different shapes and never equal.
-    if pa.schema != pb.schema {
+    // Structural equality is shape + element-wise equality (§5.5). Shape is
+    // compared slot by slot, not by schema *address*: three independent
+    // producers intern schemas, so two `(Int, Int)` tuples could hold different
+    // pointers to the same shape and compare unequal (RT-11).
+    if pa.schema.is_null() || pb.schema.is_null() {
+        return false;
+    }
+    if !unsafe { (*pa.schema).same_shape(&*pb.schema) } {
         return false;
     }
     if pa.items.len() != pb.items.len() {
@@ -112,8 +135,13 @@ unsafe fn tuple_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     // Length first to distinguish prefixes (standard sequence-hash practice).
     hasher.write_bytes(&(p.items.len() as u64).to_le_bytes());
     for (i, item) in p.items.iter().enumerate() {
+        // The slot's type is part of the shape `eq` now compares, so it is part
+        // of the hash too — two tuples that differ only in shape must be free to
+        // land in different buckets.
+        let elem_desc = unsafe { &*schema.descriptors[i] };
+        hasher.write_bytes(&elem_desc.id().to_u32().to_le_bytes());
         // If the element type is not hashable, the tuple is not hashable (§5.5).
-        let Some(hash_elem) = unsafe { &*schema.descriptors[i] }.hash else {
+        let Some(hash_elem) = elem_desc.hash else {
             return;
         };
         let elem_payload = item.payload::<u8>() as *const u8;
@@ -209,7 +237,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: tuple equality compares schema pointers instead of shapes"]
     fn tuple_equality_uses_shape_not_schema_allocation_identity() {
         let mut rt = crate::Runtime::new();
         let mut ctx = rt.context();

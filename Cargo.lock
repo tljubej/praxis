@@ -608,6 +608,7 @@ dependencies = [
  "praxis-hir",
  "praxis-mir",
  "praxis-parser",
+ "praxis-repr",
  "praxis-runtime",
  "praxis-source",
  "praxis-stdlib",
@@ -627,6 +628,7 @@ dependencies = [
  "praxis-hir",
  "praxis-mir",
  "praxis-parser",
+ "praxis-repr",
  "praxis-runtime",
  "praxis-source",
  "praxis-stdlib",
@@ -690,6 +692,15 @@ dependencies = [
  "praxis-test-support",
  "proptest",
  "rowan",
+]
+
+[[package]]
+name = "praxis-repr"
+version = "0.1.0"
+dependencies = [
+ "praxis-runtime",
+ "praxis-stdlib",
+ "praxis-types",
 ]
 
 [[package]]

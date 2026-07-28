@@ -267,7 +267,6 @@ fn any_after_flat_map_short_circuits_the_whole_pipeline() {
 }
 
 #[test]
-#[ignore = "known bug: Record tuple fields are dispatched through INT"]
 fn nested_record_inequality_dispatches_to_the_record_descriptor() {
     // The pre-existing tuple-of-record test only covered equal records. If the
     // tuple schema incorrectly records INT for a Record element, INT equality
@@ -294,18 +293,19 @@ fn vec_float_push_adopts_float_descriptor_and_preserves_signed_zero_semantics() 
 }
 
 #[test]
-#[ignore = "known bug: descriptor_for_type maps Float collection elements to INT"]
+#[ignore = "blocked on TY-08 (S13): the `let values: Vec[Float]` annotation never reaches the initializer, so the element type is still a variable at the construction site"]
 fn empty_vec_float_has_the_float_element_descriptor_before_any_push() {
     let (runtime, result) =
         run_main("fn main() -> Vec[Float] {\n  let values: Vec[Float] = Vec()\n  values\n}\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     let payload = result.payload::<VecPayload>();
-    // SAFETY: result is a Vec and the process-static descriptor pointer is
-    // initialized even when its items buffer is empty.
-    let descriptor = unsafe { &*(*payload).element_descriptor };
+    // SAFETY: result is a Vec. The descriptor may be null ("never told its
+    // element type"), which is read as an `Option` rather than dereferenced —
+    // a null deref here aborts the whole test process.
+    let descriptor = unsafe { (*payload).element() };
     assert_eq!(
-        descriptor.id(),
-        praxis_runtime::scalars::FLOAT.id(),
+        descriptor.map(|d| d.id()),
+        Some(praxis_runtime::scalars::FLOAT.id()),
         "an empty Vec[Float] has no first push that can repair a wrong descriptor"
     );
 }
@@ -489,10 +489,13 @@ fn one_generic_function_is_instantiated_at_int_and_text_in_one_program() {
 // into host-language undefined behavior.
 
 #[test]
-#[ignore = "known bug: descriptor_for_type maps Unit tuple fields to INT"]
 fn tuple_schema_uses_the_unit_descriptor_for_unit_elements() {
-    let (runtime, result) =
-        run_main("fn main() {\n  let unit = { let ignored = 1 }\n  (unit, 7)\n}\n");
+    // `push` returns Unit, which is the shortest Unit-valued expression the
+    // grammar accepts today: a `{ ... }` block in statement position is read as
+    // a call of the following parenthesized expression until FE-04 lands (S12).
+    let (runtime, result) = run_main(
+        "fn main() {\n  let xs = Vec()\n  let nothing = xs.push(1)\n  let pair = (nothing, 7)\n  pair\n}\n",
+    );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(
         tuple_element_descriptor_ids(result),
@@ -505,7 +508,6 @@ fn tuple_schema_uses_the_unit_descriptor_for_unit_elements() {
 }
 
 #[test]
-#[ignore = "known bug: descriptor_for_type maps Enum tuple fields to INT"]
 fn tuple_schema_uses_the_enum_descriptor_for_enum_elements() {
     let (runtime, result) = run_main("enum Marker { A, B }\nfn main() {\n  (A, 7)\n}\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
@@ -520,7 +522,6 @@ fn tuple_schema_uses_the_enum_descriptor_for_enum_elements() {
 }
 
 #[test]
-#[ignore = "known bug: Grid position Vecs are tagged as Vec[Int]"]
 fn grid_positions_vec_uses_the_point_tuple_descriptor() {
     let (runtime, result) = run_main_with_input(
         "fn main() {\n  let g = read grid(char)\n  g.positions()\n}\n",
@@ -539,7 +540,6 @@ fn grid_positions_vec_uses_the_point_tuple_descriptor() {
 }
 
 #[test]
-#[ignore = "known bug: Grid row/cells/column Vecs discard the cell descriptor"]
 fn grid_text_row_preserves_the_grid_cell_descriptor() {
     let (runtime, result) = run_main_with_input(
         "fn main() {\n  let g = read matrix(word)\n  g.row(0)\n}\n",

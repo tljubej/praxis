@@ -1,0 +1,12 @@
+[package]
+name = "praxis-repr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The total, bidirectional bridge between a static Praxis Type and its runtime TypeDescriptor"
+
+[dependencies]
+praxis-types.workspace = true
+praxis-runtime.workspace = true
+praxis-stdlib.workspace = true

@@ -35,7 +35,7 @@ use praxis_runtime::{
     crash_snapshot::SnapshotFrame, CrashSnapshot, GcRef, NativeScope, RootSet, Runtime,
     RuntimeContext,
 };
-use praxis_types::{CollectionCtor, Type, TypeData, TypeDb};
+use praxis_types::{Type, TypeDb};
 
 use crate::purity::assert_read_only;
 
@@ -147,13 +147,17 @@ pub fn heap(
 /// old `name != "<tmp>"` string match (the codegen no longer emits `"<tmp>"`;
 /// temps now carry an empty name and the `Temp` kind).
 ///
-/// The type is derived primarily from the **runtime value's descriptor** (via
-/// [`descriptor_to_type`]), which is always concrete — the static `type_id`
-/// (WS1) is only a fallback. This is necessary because Praxis's inference
-/// leaves collection element types as unbound vars when a `Vec()` is filled by
-/// later `push` calls (`let xs = Vec(); xs.push(11)` types `xs` as `Vec[?T]`,
-/// not `Vec[Int]`); the runtime descriptor carries the real element type, so
+/// The type is derived primarily from **what the value itself records** (via
+/// [`praxis_repr::type_for_value`]), which is always concrete — the static
+/// `type_id` (WS1) is only a fallback. This is necessary because Praxis's
+/// inference leaves collection element types as unbound vars when a `Vec()` is
+/// filled by later `push` calls (`let xs = Vec(); xs.push(11)` types `xs` as
+/// `Vec[?T]`, not `Vec[Int]`); the payload carries the real element type, so
 /// `p xs.len()` / `p xs.get(0)` type-check correctly.
+///
+/// The bridge reads the payload rather than guessing from the top-level
+/// descriptor, so a `Vec[Text]` is now a `Vec[Text]` here and not the `Vec[Int]`
+/// the hand-written map answered for every vector (DBG-02, bounded by P0-11).
 fn collect_bindings(frame: &SnapshotFrame, db: &mut TypeDb) -> Vec<LocalBinding> {
     frame
         .locals
@@ -162,7 +166,9 @@ fn collect_bindings(frame: &SnapshotFrame, db: &mut TypeDb) -> Vec<LocalBinding>
         .filter(|l| l.is_user() && !l.name().is_empty())
         .map(|l| LocalBinding {
             name: sanitize_name(&l.name()),
-            ty: descriptor_to_type(l.value, db).unwrap_or(Type(l.type_id)),
+            // SAFETY: `is_real_ref` filtered the sentinel, and a snapshot
+            // local's `GcRef` is rooted by the snapshot itself (ADR-033).
+            ty: unsafe { praxis_repr::type_for_value(l.value, db) }.unwrap_or(Type(l.type_id)),
             value: l.value,
         })
         .collect()
@@ -380,71 +386,6 @@ fn sanitize_name(name: &str) -> String {
     }
 }
 
-/// Map a runtime value's descriptor to its static `Type` (M10b-WS4). The
-/// runtime `TypeDescriptor` carries a stable `TypeId` per kind, so the
-/// top-level shape (Vec/Map/Int/Text/…) is always recoverable exactly — even
-/// when inference left the static `type_id` as `Vec[?T]` (the inference gap
-/// for `Vec()` filled by later `push` calls).
-///
-/// Collection element types default to `Int` (the overwhelmingly common `p
-/// EXPR` case). This is sound for evaluation: `p xs.len()` doesn't read the
-/// element type; `p xs.get(0)` type-checks against `Int` and the runtime
-/// returns + formats the real value through its own descriptor. Returns `None`
-/// for descriptors we don't map (the caller falls back to the static
-/// `type_id`).
-fn descriptor_to_type(value: GcRef, db: &mut TypeDb) -> Option<Type> {
-    descriptor_id_to_type(value.descriptor().id(), db)
-}
-
-/// Map a top-level descriptor id to its static `Type` (collections default
-/// their element type to `Int`).
-///
-/// The match is over [`BuiltinTypeId`] and has no catch-all arm, so a new
-/// built-in type is a compile error here rather than a silent `None`. Reading
-/// the *real* element type out of the payload is the bidirectional-bridge work;
-/// this function only recovers the top-level shape.
-fn descriptor_id_to_type(id: praxis_runtime::TypeId, db: &mut TypeDb) -> Option<Type> {
-    use praxis_runtime::descriptor::BuiltinTypeId as B;
-
-    let unary = |db: &mut TypeDb, ctor| {
-        let elem = db.int();
-        Some(db.intern(TypeData::Collection {
-            ctor,
-            args: vec![elem],
-        }))
-    };
-
-    match id.as_builtin()? {
-        // Scalars recover exactly.
-        B::Unit => Some(db.unit()),
-        B::Bool => Some(db.bool()),
-        B::Int => Some(db.int()),
-        B::Byte => Some(db.scalar(praxis_types::ScalarType::Byte)),
-        B::Char => Some(db.char()),
-        B::Float => Some(db.float()),
-        B::Text => Some(db.text()),
-        // Single-element collections (element defaults to Int).
-        B::Vec => unary(db, CollectionCtor::Vec),
-        B::Deque => unary(db, CollectionCtor::Deque),
-        B::Grid => unary(db, CollectionCtor::Grid),
-        B::Set => unary(db, CollectionCtor::Set),
-        B::Counter => unary(db, CollectionCtor::Counter),
-        B::MinHeap => unary(db, CollectionCtor::MinHeap),
-        B::MaxHeap => unary(db, CollectionCtor::MaxHeap),
-        // Map defaults to Map[Int, Int].
-        B::Map => {
-            let k = db.int();
-            Some(db.intern(TypeData::Collection {
-                ctor: CollectionCtor::Map,
-                args: vec![k, k],
-            }))
-        }
-        // Uniform descriptors whose real type lives in the payload schema, and
-        // the internal ones: fall back to the static type_id (caller handles it).
-        B::BitSet | B::Tuple | B::Record | B::Enum | B::Closure | B::VarCell => None,
-    }
-}
-
 /// True iff `r` is a real GC reference (not the null sentinel). Mirrors the
 /// check in crash_snapshot / render.
 fn is_real_ref(r: GcRef) -> bool {
@@ -604,14 +545,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: debugger type recovery hard-codes every collection element as Int"]
     fn regression_runtime_vec_descriptor_recovers_its_real_element_type() {
         let runtime = Runtime::new();
         let text = runtime.alloc_text("hello");
         let value = runtime.alloc_vec(&praxis_runtime::text::TEXT, vec![text]);
         let mut db = TypeDb::new();
 
-        let ty = descriptor_to_type(value, &mut db).expect("Vec has a runtime type");
+        // SAFETY: `value` was just allocated on `runtime`'s live heap.
+        let ty =
+            unsafe { praxis_repr::type_for_value(value, &mut db) }.expect("Vec has a runtime type");
         assert_eq!(db.render(ty), "Vec[Text]");
     }
 
@@ -630,8 +572,9 @@ mod tests {
 
         for (value, expected) in values {
             let mut db = TypeDb::new();
-            let ty = descriptor_to_type(value, &mut db)
-                .unwrap_or_else(|| panic!("no debugger type for {expected}"));
+            // SAFETY: `value` was just allocated on `runtime`'s live heap.
+            let ty = unsafe { praxis_repr::type_for_value(value, &mut db) }
+                .unwrap_or_else(|e| panic!("no debugger type for {expected}: {e}"));
             assert_eq!(
                 db.render(ty),
                 expected,

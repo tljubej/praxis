@@ -31,13 +31,40 @@ use crate::GcRef;
 /// are `Drop`, so [`VEC`]`'s `drop_value` releases them on sweep (§12.5).
 #[repr(C)]
 pub struct VecPayload {
-    /// The descriptor for every element in `items`. Set at construction; all
-    /// elements must share it. Read by `trace`/`format`/`equals` to dispatch
-    /// without a scattered type switch (§11.4).
+    /// The descriptor for every element in `items`, or **null** when this
+    /// vector has not been told its element type. Read by
+    /// `trace`/`format`/`equals` to dispatch without a scattered type switch
+    /// (§11.4); read it through [`VecPayload::element`], not directly.
+    ///
+    /// Null is the honest encoding of "unknown", and it only survives while the
+    /// vector is empty: the first `push` adopts the pushed value's descriptor.
+    /// It used to be spelled `INT`, which is why an empty `Vec[Float]` claimed
+    /// to hold `Int`s and why `push` had licence to *retag* a vector that had
+    /// been told its type (P0-11).
     pub element_descriptor: *const TypeDescriptor,
     /// The elements, in order. A `Vec` (not `Box<[T]>`) so `push` mutates in
     /// place.
     pub items: Vec<GcRef>,
+}
+
+impl VecPayload {
+    /// The element descriptor, or `None` if this vector was never told its
+    /// element type. `None` implies `items` is empty.
+    #[must_use]
+    pub fn element(&self) -> Option<&'static TypeDescriptor> {
+        // SAFETY: a non-null element descriptor is always a `&'static` written
+        // by the constructor or by the first `push`.
+        (!self.element_descriptor.is_null()).then(|| unsafe { &*self.element_descriptor })
+    }
+}
+
+/// Whether two collections agree on their element type (RT-10).
+///
+/// Descriptors are `static`, so pointer identity is the authoritative test
+/// (ADR-038). Two nulls agree — both collections are element-typeless, which
+/// means both are empty.
+pub(crate) fn same_element(a: *const TypeDescriptor, b: *const TypeDescriptor) -> bool {
+    std::ptr::eq(a, b)
 }
 
 unsafe fn vec_trace(payload: *mut u8, tracer: &mut dyn Tracer) {
@@ -58,8 +85,12 @@ unsafe fn vec_drop(payload: *mut u8) {
 unsafe fn vec_format(payload: *const u8, out: &mut dyn fmt::Write) {
     // SAFETY: caller guarantees `payload` points at an initialized `VecPayload`.
     let p = unsafe { &*(payload as *const VecPayload) };
-    let elem_desc = unsafe { &*p.element_descriptor };
     let _ = out.write_str("[");
+    // No element descriptor means no elements to format.
+    let Some(elem_desc) = p.element() else {
+        let _ = out.write_str("]");
+        return;
+    };
     for (i, item) in p.items.iter().enumerate() {
         if i > 0 {
             let _ = out.write_str(", ");
@@ -76,12 +107,23 @@ unsafe fn vec_equals(a: *const u8, b: *const u8) -> bool {
     // with compatible element descriptors.
     let pa = unsafe { &*(a as *const VecPayload) };
     let pb = unsafe { &*(b as *const VecPayload) };
+    // Runtime element type is part of collection identity (RT-10). Without it
+    // an empty `Vec[Int]` and an empty `Vec[Text]` compared equal — both were
+    // "zero elements" — and a non-empty pair dispatched the *left* element
+    // descriptor's callback against the right's payloads.
+    if !same_element(pa.element_descriptor, pb.element_descriptor) {
+        return false;
+    }
     if pa.items.len() != pb.items.len() {
         return false;
     }
     // Element-wise equality through the element descriptor (§11.4). If the
     // element type is not equatable, the collection is not equatable (§5.5).
-    let Some(eq) = unsafe { &*pa.element_descriptor }.equals else {
+    let Some(elem) = pa.element() else {
+        // Both are element-typeless, hence both empty, hence equal.
+        return true;
+    };
+    let Some(eq) = elem.equals else {
         return false;
     };
     for (x, y) in pa.items.iter().zip(pb.items.iter()) {
@@ -97,7 +139,7 @@ unsafe fn vec_equals(a: *const u8, b: *const u8) -> bool {
 unsafe fn vec_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     // SAFETY: caller guarantees `payload` points at an initialized `VecPayload`.
     let p = unsafe { &*(payload as *const VecPayload) };
-    let Some(hash_elem) = unsafe { &*p.element_descriptor }.hash else {
+    let Some(hash_elem) = p.element().and_then(|d| d.hash) else {
         return;
     };
     // Length first to distinguish prefixes (standard sequence-hash practice).
@@ -149,10 +191,22 @@ use std::collections::VecDeque;
 /// Both fields are `Drop`, so [`DEQUE`]'s `drop_value` releases them on sweep.
 #[repr(C)]
 pub struct DequePayload {
-    /// The descriptor for every element (homogeneous, like `VecPayload`).
+    /// The descriptor for every element, or null for "not told yet" —
+    /// [`VecPayload::element_descriptor`]'s contract exactly. Read it through
+    /// [`DequePayload::element`].
     pub element_descriptor: *const TypeDescriptor,
     /// The elements. A `VecDeque` so both ends are cheap to mutate.
     pub items: VecDeque<GcRef>,
+}
+
+impl DequePayload {
+    /// The element descriptor, or `None` if this deque was never told its
+    /// element type. `None` implies `items` is empty.
+    #[must_use]
+    pub fn element(&self) -> Option<&'static TypeDescriptor> {
+        // SAFETY: a non-null element descriptor is always a `&'static`.
+        (!self.element_descriptor.is_null()).then(|| unsafe { &*self.element_descriptor })
+    }
 }
 
 unsafe fn deque_trace(payload: *mut u8, tracer: &mut dyn Tracer) {
@@ -171,8 +225,11 @@ unsafe fn deque_drop(payload: *mut u8) {
 unsafe fn deque_format(payload: *const u8, out: &mut dyn fmt::Write) {
     // SAFETY: caller guarantees `payload` points at an initialized DequePayload.
     let p = unsafe { &*(payload as *const DequePayload) };
-    let elem_desc = unsafe { &*p.element_descriptor };
     let _ = out.write_str("[");
+    let Some(elem_desc) = p.element() else {
+        let _ = out.write_str("]");
+        return;
+    };
     for (i, item) in p.items.iter().enumerate() {
         if i > 0 {
             let _ = out.write_str(", ");
@@ -187,10 +244,17 @@ unsafe fn deque_equals(a: *const u8, b: *const u8) -> bool {
     // SAFETY: caller guarantees both pointers point at initialized DequePayloads.
     let pa = unsafe { &*(a as *const DequePayload) };
     let pb = unsafe { &*(b as *const DequePayload) };
+    // Element type is part of identity (RT-10).
+    if !same_element(pa.element_descriptor, pb.element_descriptor) {
+        return false;
+    }
     if pa.items.len() != pb.items.len() {
         return false;
     }
-    let Some(eq) = (unsafe { &*pa.element_descriptor }).equals else {
+    let Some(elem) = pa.element() else {
+        return true;
+    };
+    let Some(eq) = elem.equals else {
         return false;
     };
     for (x, y) in pa.items.iter().zip(pb.items.iter()) {
@@ -206,7 +270,7 @@ unsafe fn deque_equals(a: *const u8, b: *const u8) -> bool {
 unsafe fn deque_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     // SAFETY: caller guarantees `payload` points at an initialized DequePayload.
     let p = unsafe { &*(payload as *const DequePayload) };
-    let Some(hash_elem) = (unsafe { &*p.element_descriptor }).hash else {
+    let Some(hash_elem) = p.element().and_then(|d| d.hash) else {
         return;
     };
     hasher.write_bytes(&(p.items.len() as u64).to_le_bytes());
@@ -326,12 +390,24 @@ impl GridExtent {
 /// but carries rectangular shape so M8 methods and indexing are cheap.
 #[repr(C)]
 pub struct GridPayload {
-    /// The descriptor for every cell in `items` (homogeneous, like Vec).
+    /// The descriptor for every cell in `items`, or null for "not told yet" —
+    /// [`VecPayload::element_descriptor`]'s contract exactly. Read it through
+    /// [`GridPayload::element`].
     pub element_descriptor: *const TypeDescriptor,
     /// Row-major cells: `items[row * width + col]`.
     pub items: Vec<GcRef>,
     /// The number of columns (all rows share this width).
     pub width: usize,
+}
+
+impl GridPayload {
+    /// The cell descriptor, or `None` if this grid was never told its cell
+    /// type. `None` implies `items` is empty.
+    #[must_use]
+    pub fn element(&self) -> Option<&'static TypeDescriptor> {
+        // SAFETY: a non-null element descriptor is always a `&'static`.
+        (!self.element_descriptor.is_null()).then(|| unsafe { &*self.element_descriptor })
+    }
 }
 
 unsafe fn grid_trace(payload: *mut u8, tracer: &mut dyn Tracer) {
@@ -350,8 +426,11 @@ unsafe fn grid_drop(payload: *mut u8) {
 unsafe fn grid_format(payload: *const u8, out: &mut dyn fmt::Write) {
     // SAFETY: caller guarantees `payload` points at an initialized GridPayload.
     let p = unsafe { &*(payload as *const GridPayload) };
-    let elem_desc = unsafe { &*p.element_descriptor };
     let _ = out.write_str("[");
+    let Some(elem_desc) = p.element() else {
+        let _ = out.write_str("]");
+        return;
+    };
     for (i, cell) in p.items.iter().enumerate() {
         if i > 0 {
             let _ = out.write_str(", ");
@@ -366,10 +445,17 @@ unsafe fn grid_equals(a: *const u8, b: *const u8) -> bool {
     // SAFETY: caller guarantees both pointers point at initialized GridPayloads.
     let pa = unsafe { &*(a as *const GridPayload) };
     let pb = unsafe { &*(b as *const GridPayload) };
+    // Cell type is part of identity (RT-10).
+    if !same_element(pa.element_descriptor, pb.element_descriptor) {
+        return false;
+    }
     if pa.width != pb.width || pa.items.len() != pb.items.len() {
         return false;
     }
-    let Some(eq) = (unsafe { &*pa.element_descriptor }).equals else {
+    let Some(elem) = pa.element() else {
+        return true;
+    };
+    let Some(eq) = elem.equals else {
         return false;
     };
     for (x, y) in pa.items.iter().zip(pb.items.iter()) {
@@ -385,7 +471,7 @@ unsafe fn grid_equals(a: *const u8, b: *const u8) -> bool {
 unsafe fn grid_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     // SAFETY: caller guarantees `payload` points at an initialized GridPayload.
     let p = unsafe { &*(payload as *const GridPayload) };
-    let Some(hash_elem) = (unsafe { &*p.element_descriptor }).hash else {
+    let Some(hash_elem) = p.element().and_then(|d| d.hash) else {
         return;
     };
     hasher.write_bytes(&(p.items.len() as u64).to_le_bytes());
@@ -438,7 +524,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: Vec equality omits the per-instance element descriptor"]
     fn empty_vectors_with_different_element_types_are_not_equal() {
         let rt = crate::Runtime::new();
         let ints = rt.alloc_vec(&crate::scalars::INT, Vec::new());

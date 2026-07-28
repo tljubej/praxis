@@ -81,6 +81,12 @@ pub enum FaultKind {
     /// a capacity-overflow panic *across* `extern "C"`; they are now faults
     /// (RT-07).
     InvalidSize = 10,
+    /// A value did not have the type its destination declared: pushing a
+    /// `Float` into a `Vec[Int]`, or constructing a `Grid[T]` whose cell type
+    /// has no default value to fill with (§9.2). The collection used to *retag*
+    /// itself to the intruder's type, so every element already stored was then
+    /// read through the wrong layout (P0-11).
+    TypeMismatch = 11,
 }
 
 /// A [`FaultKind`] that is actually a fault.
@@ -118,6 +124,8 @@ impl RaisedFault {
     pub const INVALID_TEXT: RaisedFault = RaisedFault(FaultKind::InvalidText);
     /// A size or extent the runtime cannot honour (§9.2).
     pub const INVALID_SIZE: RaisedFault = RaisedFault(FaultKind::InvalidSize);
+    /// A value did not have the type its destination declared (§9.2).
+    pub const TYPE_MISMATCH: RaisedFault = RaisedFault(FaultKind::TypeMismatch);
 
     /// The raisable fault `kind` names, or `None` for [`FaultKind::None`] —
     /// which is the *absence* of a fault and cannot be raised.
@@ -151,6 +159,7 @@ impl std::fmt::Display for FaultKind {
             FaultKind::InvalidChar => write!(f, "not a Unicode scalar value"),
             FaultKind::InvalidText => write!(f, "invalid UTF-8 in Text"),
             FaultKind::InvalidSize => write!(f, "size or extent out of range"),
+            FaultKind::TypeMismatch => write!(f, "value does not have the declared type"),
         }
     }
 }

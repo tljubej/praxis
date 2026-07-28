@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use cranelift::codegen::ir::condcodes::IntCC;
 use cranelift::codegen::ir::FuncRef;
 use cranelift::codegen::ir::MemFlagsData as MemFlags;
@@ -495,7 +495,7 @@ fn lower_inst<M: Module>(
                     // def-id, leak it, embed its address, and call
                     // praxis_alloc_record(ctx, schema_ptr). Then fill in each
                     // field via praxis_record_set_field.
-                    let schema_ptr = record_schema_for(db, *record_def_id);
+                    let schema_ptr = record_schema_for(db, *record_def_id)?;
                     let schema_imm = builder.ins().iconst(GC, schema_ptr as i64);
                     // praxis_alloc_record(ctx, schema_ptr) -> GcRef.
                     let record_ref = call_symbol(
@@ -559,7 +559,7 @@ fn lower_inst<M: Module>(
                     // tuple's static type, leak it, embed its address, and call
                     // praxis_alloc_tuple(ctx, schema_ptr). Then fill in each
                     // element via praxis_tuple_set.
-                    let schema_ptr = tuple_schema_for(db, *ty);
+                    let schema_ptr = tuple_schema_for(db, *ty)?;
                     let schema_imm = builder.ins().iconst(GC, schema_ptr as i64);
                     // praxis_alloc_tuple(ctx, schema_ptr) -> GcRef.
                     let tuple_ref = call_symbol(
@@ -626,7 +626,7 @@ fn lower_inst<M: Module>(
                     use praxis_types::CollectionCtor;
                     match ctor {
                         CollectionCtor::Vec => {
-                            let el_desc = collection_element_descriptor_for(db, args, 0);
+                            let el_desc = collection_element_descriptor_for(db, args, 0)?;
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
                             let vec_ref = call_symbol(
                                 builder,
@@ -641,7 +641,7 @@ fn lower_inst<M: Module>(
                         CollectionCtor::Deque => {
                             // Deque mirrors Vec: a single element descriptor
                             // passed to praxis_deque_new (M8-WS2, §6.1).
-                            let el_desc = collection_element_descriptor_for(db, args, 0);
+                            let el_desc = collection_element_descriptor_for(db, args, 0)?;
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
                             let deque_ref = call_symbol(
                                 builder,
@@ -657,7 +657,7 @@ fn lower_inst<M: Module>(
                             // Map: pass the key descriptor to praxis_map_new.
                             // The value descriptor is adopted from the first
                             // inserted value at runtime (§11.3).
-                            let key_desc = collection_element_descriptor_for(db, args, 0);
+                            let key_desc = collection_element_descriptor_for(db, args, 0)?;
                             let key_imm = builder.ins().iconst(GC, key_desc as i64);
                             let map_ref = call_symbol(
                                 builder,
@@ -671,7 +671,7 @@ fn lower_inst<M: Module>(
                         }
                         CollectionCtor::Set => {
                             // Set: pass the element descriptor.
-                            let el_desc = collection_element_descriptor_for(db, args, 0);
+                            let el_desc = collection_element_descriptor_for(db, args, 0)?;
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
                             let set_ref = call_symbol(
                                 builder,
@@ -685,7 +685,7 @@ fn lower_inst<M: Module>(
                         }
                         CollectionCtor::Counter => {
                             // Counter: pass the key descriptor.
-                            let key_desc = collection_element_descriptor_for(db, args, 0);
+                            let key_desc = collection_element_descriptor_for(db, args, 0)?;
                             let key_imm = builder.ins().iconst(GC, key_desc as i64);
                             let counter_ref = call_symbol(
                                 builder,
@@ -700,7 +700,7 @@ fn lower_inst<M: Module>(
                         CollectionCtor::MinHeap | CollectionCtor::MaxHeap => {
                             // Heaps: pass the element descriptor; the runtime
                             // selects min vs max by the construction symbol.
-                            let el_desc = collection_element_descriptor_for(db, args, 0);
+                            let el_desc = collection_element_descriptor_for(db, args, 0)?;
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
                             let sym = if *ctor == CollectionCtor::MinHeap {
                                 RuntimeSymbol::MinHeapNew
@@ -730,7 +730,7 @@ fn lower_inst<M: Module>(
                             // constructor; source construction is for manual
                             // grids filled via set.) praxis_grid_new takes
                             // (descriptor, width, height).
-                            let el_desc = collection_element_descriptor_for(db, args, 0);
+                            let el_desc = collection_element_descriptor_for(db, args, 0)?;
                             let el_imm = builder.ins().iconst(GC, el_desc as i64);
                             let w_imm = builder.ins().iconst(GC, 0);
                             let h_imm = builder.ins().iconst(GC, 0);
@@ -1492,15 +1492,16 @@ fn user_funcref<M: Module>(
 
 /// Build (and cache) a `'static RecordSchema` for record def `id`, returning
 /// its address as a raw pointer the JIT embeds as an immediate. The schema is
-/// `Box::leak`'d once per def-id (mirroring how text literals are leaked); the
-/// field descriptors are resolved from the runtime's scalar/collection
-/// descriptor table via a best-effort mapping (M7: scalar fields only; nested
-/// records/collections default to the INT descriptor, which is sound for GC
-/// tracing since every value is a GcRef).
+/// `Box::leak`'d once per def-id (mirroring how text literals are leaked).
+///
+/// Every field descriptor is resolved through the F11 bridge and every one must
+/// resolve: the schema is what `equals`/`hash`/`format` dispatch through, so a
+/// field mislabelled `Int` reads an `f64` or a `Text` header as an `i64`
+/// (P0-11). A field whose type has no runtime object fails the compile.
 fn record_schema_for(
     db: &praxis_types::TypeDb,
     id: u32,
-) -> *const praxis_runtime::records::RecordSchema {
+) -> Result<*const praxis_runtime::records::RecordSchema> {
     use praxis_runtime::records::{RecordField, RecordSchema};
     use praxis_types::data::RecordDefId;
     use std::sync::Mutex;
@@ -1514,17 +1515,20 @@ fn record_schema_for(
     static CACHE: std::sync::OnceLock<Mutex<HashMap<u32, SendPtr>>> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(p) = cache.lock().unwrap().get(&id) {
-        return p.0;
+        return Ok(p.0);
     }
     let def = db.record_def(RecordDefId(id));
     let fields: Vec<RecordField> = def
         .fields
         .iter()
-        .map(|f| RecordField {
-            name: Box::leak(f.name.clone().into_boxed_str()),
-            descriptor: descriptor_for_type(db, f.ty),
+        .map(|f| {
+            Ok(RecordField {
+                name: Box::leak(f.name.clone().into_boxed_str()),
+                descriptor: descriptor_for_type(db, f.ty)
+                    .with_context(|| format!("record field `{}`", f.name))?,
+            })
         })
-        .collect();
+        .collect::<Result<_>>()?;
     let leaked_fields: &'static [RecordField] = Box::leak(fields.into_boxed_slice());
     let schema = Box::leak(Box::new(RecordSchema {
         fields: leaked_fields,
@@ -1532,7 +1536,7 @@ fn record_schema_for(
     let ptr = SendPtr(schema as *const RecordSchema);
     let raw = ptr.0;
     cache.lock().unwrap().insert(id, ptr);
-    raw
+    Ok(raw)
 }
 
 /// Build (and cache) a `'static TupleSchema` for the tuple type `ty`, returning
@@ -1548,7 +1552,7 @@ fn record_schema_for(
 fn tuple_schema_for(
     db: &praxis_types::TypeDb,
     ty: MirType,
-) -> *const praxis_runtime::tuples::TupleSchema {
+) -> Result<*const praxis_runtime::tuples::TupleSchema> {
     use praxis_runtime::tuples::TupleSchema;
     use praxis_types::data::TypeData;
     use std::sync::Mutex;
@@ -1561,10 +1565,14 @@ fn tuple_schema_for(
         Some(TypeData::Tuple(els)) => els.clone(),
         _ => Vec::new(),
     };
+    // Every slot must resolve. The schema is what tuple equality, hashing and
+    // formatting dispatch through, so a `Unit` or `Enum` element mislabelled
+    // `Int` reads its payload as an `i64` (P0-11).
     let descriptors: Vec<*const praxis_runtime::descriptor::TypeDescriptor> = element_types
         .iter()
-        .map(|t| descriptor_for_type(db, *t))
-        .collect();
+        .enumerate()
+        .map(|(i, t)| descriptor_for_type(db, *t).with_context(|| format!("tuple element {i}")))
+        .collect::<Result<_>>()?;
     // A process-wide cache keyed by the descriptor sequence (structural shape).
     // SendPtr wraps the raw pointer so the Mutex can be shared across threads.
     struct SendPtr(*const TupleSchema);
@@ -1576,7 +1584,7 @@ fn tuple_schema_for(
     // identical tuples resolve to the same descriptor pointers.
     let key: Vec<usize> = descriptors.iter().map(|p| *p as usize).collect();
     if let Some(p) = cache.lock().unwrap().get(&key) {
-        return p.0;
+        return Ok(p.0);
     }
     let leaked_descriptors: &'static [*const praxis_runtime::descriptor::TypeDescriptor] =
         Box::leak(descriptors.into_boxed_slice());
@@ -1586,7 +1594,7 @@ fn tuple_schema_for(
     let ptr = SendPtr(schema as *const TupleSchema);
     let raw = ptr.0;
     cache.lock().unwrap().insert(key, ptr);
-    raw
+    Ok(raw)
 }
 
 /// Build the `&'static [DebugLocalMeta]` for a function's `Gc` locals, in the
@@ -1643,7 +1651,7 @@ fn build_debug_local_metas(
             name_len: name.len() as u32,
             symbol_id,
             descriptor: resolved_ty
-                .map(|t| descriptor_for_type(db, t))
+                .map(|t| debug_descriptor_for_type(db, t))
                 .unwrap_or(std::ptr::null()),
             // The full static `Type` id (M10-WS1b): `Type(u32)`. Lets the
             // debugger reconstruct the exact local type (incl. collection
@@ -1667,73 +1675,52 @@ fn leak_static_str(s: &str) -> &'static str {
     Box::leak(s.to_string().into_boxed_str())
 }
 
-/// Best-effort mapping from a static `Type` to its runtime `TypeDescriptor`.
+/// The runtime descriptor for values of type `ty`, or a compile error.
 ///
-/// Scalars map to their descriptor; collections map to their single static
-/// collection descriptor (the per-instance element type lives in the payload,
-/// §11.2, so one descriptor serves all `Vec[T]`); records/enums/tuples map to
-/// their top-level descriptor (field descriptors are resolved recursively here
-/// and embedded into the payload at construction). Everything else defaults to
-/// `INT` — sound for GC tracing because every value is a uniform `GcRef`, and
-/// the descriptor's `trace` callback is only called on the top-level object, not
-/// per-field.
+/// A thin wrapper over [`praxis_repr::descriptor_for_type`], which is the single
+/// exhaustive map (F11). This function exists only to turn its
+/// [`NoRuntimeRepr`](praxis_repr::NoRuntimeRepr) into the `anyhow` error the
+/// lowering already propagates, with the offending type rendered.
 ///
-/// **M8 WS1:** the `Collection` arm is what closes the M7 `Vec[T]()` null-
-/// descriptor carryover. `Vec[Vec[Int]]` now resolves the outer descriptor to
-/// `VEC` and (via the recursive call used by `collection_element_descriptor_for`)
-/// the inner element descriptor to `VEC` as well, so structural equality/hashing
-/// of nested collections dispatch correctly. The collection descriptor itself
-/// is a process-static const; only the *element* descriptor (passed to
-/// `praxis_<kind>_new` at construction) needs resolving per element type, and
-/// that resolution is cached by `collection_element_descriptor_for`.
+/// **Failing the compile is the decision** (D9). The predecessor had three
+/// `_ => INT` arms, so `Float`, `Unit`, `Record`, `Enum`, a closure, a `Range`
+/// and an unresolved variable all became the `Int` descriptor — and a record
+/// schema built from them dispatched `Int`'s equality callback against an `f64`
+/// payload (P0-11). Reaching a type with no runtime object at a
+/// descriptor-producing site is an upstream compiler bug; refusing to emit is
+/// how it stays visible instead of becoming a wrong payload read.
 fn descriptor_for_type(
     db: &praxis_types::TypeDb,
     ty: praxis_types::Type,
+) -> Result<*const praxis_runtime::descriptor::TypeDescriptor> {
+    praxis_repr::descriptor_for_type(db, ty)
+        .map(|d| d as *const _)
+        .map_err(|e| {
+            anyhow!(
+                "cannot emit a runtime descriptor for `{}`: {}",
+                db.render(ty),
+                e.reason
+            )
+        })
+}
+
+/// The runtime descriptor for `ty` if it has one, and a *null* descriptor if it
+/// does not.
+///
+/// Only for debug metadata, where absence is already representable and already
+/// rendered: `MirType::Opaque` locals emit a null descriptor plus
+/// `NO_STATIC_TYPE`, and the debugger omits the type column for both (P0-02).
+/// A `Never`-typed local — the result of a `return` or a `panic()` — is the
+/// common case, and refusing to compile a working program because its debug
+/// info is incomplete is not what D9 decided.
+///
+/// This is *not* a fallback for a dispatch-producing site. There, absence has no
+/// honest encoding and [`descriptor_for_type`] fails the compile.
+fn debug_descriptor_for_type(
+    db: &praxis_types::TypeDb,
+    ty: praxis_types::Type,
 ) -> *const praxis_runtime::descriptor::TypeDescriptor {
-    use praxis_runtime::descriptor::TypeDescriptor;
-    use praxis_types::data::TypeData;
-    use praxis_types::CollectionCtor;
-    match db.data(db.follow(ty)) {
-        TypeData::Scalar(s) => match s {
-            praxis_types::ScalarType::Int | praxis_types::ScalarType::Never => {
-                &praxis_runtime::scalars::INT as *const TypeDescriptor
-            }
-            praxis_types::ScalarType::Bool => {
-                &praxis_runtime::scalars::BOOL as *const TypeDescriptor
-            }
-            praxis_types::ScalarType::Text => &praxis_runtime::text::TEXT as *const TypeDescriptor,
-            praxis_types::ScalarType::Char => {
-                &praxis_runtime::scalars::CHAR as *const TypeDescriptor
-            }
-            _ => &praxis_runtime::scalars::INT as *const TypeDescriptor,
-        },
-        // Tuples resolve to the TUPLE descriptor (M7 Part 2). Records/enums use
-        // a single top-level descriptor per value (RECORD/ENUM), but their field
-        // descriptors are resolved here; a nested record's field descriptor
-        // defaulting to INT is sound for GC tracing since every value is a GcRef.
-        TypeData::Tuple(_) => &praxis_runtime::tuples::TUPLE as *const TypeDescriptor,
-        // Collections resolve to their single static descriptor const. The
-        // per-instance element type lives in the payload (§11.2), so `VEC` serves
-        // all `Vec[T]`, `MAP` all `Map[K,V]`, etc. The element descriptor is
-        // resolved separately at construction via `collection_element_descriptor_for`.
-        TypeData::Collection { ctor, .. } => match ctor {
-            CollectionCtor::Vec => &praxis_runtime::collections::VEC as *const TypeDescriptor,
-            CollectionCtor::Grid => &praxis_runtime::collections::GRID as *const TypeDescriptor,
-            CollectionCtor::Deque => &praxis_runtime::collections::DEQUE as *const TypeDescriptor,
-            CollectionCtor::Map => &praxis_runtime::maps::MAP as *const TypeDescriptor,
-            CollectionCtor::Set => &praxis_runtime::maps::SET as *const TypeDescriptor,
-            CollectionCtor::Counter => &praxis_runtime::maps::COUNTER as *const TypeDescriptor,
-            CollectionCtor::MinHeap => &praxis_runtime::heaps::MIN_HEAP as *const TypeDescriptor,
-            CollectionCtor::MaxHeap => &praxis_runtime::heaps::MAX_HEAP as *const TypeDescriptor,
-            CollectionCtor::BitSet => &praxis_runtime::bitset::BITSET as *const TypeDescriptor,
-            // Other collection ctors (MinHeap/MaxHeap/BitSet/Range/Seq) land in
-            // their own workstreams and will add arms here. Until then they fall
-            // through to INT — sound for GC tracing only; these types cannot yet
-            // be constructed, so the arm is unreachable.
-            _ => &praxis_runtime::scalars::INT as *const TypeDescriptor,
-        },
-        _ => &praxis_runtime::scalars::INT as *const TypeDescriptor,
-    }
+    praxis_repr::descriptor_for_type(db, ty).map_or(std::ptr::null(), |d| d as *const _)
 }
 
 /// Resolve the element descriptor(s) for a collection's payload, for use at
@@ -1744,22 +1731,38 @@ fn descriptor_for_type(
 /// The descriptor is resolved recursively via [`descriptor_for_type`] so nested
 /// collections (e.g. `Map[Vec[Int], Int]`) resolve the key descriptor to `VEC`,
 /// making structural equality/hashing dispatch correctly on map keys (§11.3).
-/// Cached by the element type's resolved descriptor pointer: two same-shaped
-/// element types share one descriptor pointer, avoiding re-leak per call site
-/// (mirrors the `tuple_schema_for` caching idiom, lower.rs:1047).
+///
+/// A *null* descriptor is the honest encoding of "this lowering has no static
+/// element type", and every `praxis_*_new` wrapper reads it that way. Two
+/// situations produce it, and neither is P0-11's fallback:
+///
+/// - `MirType::Opaque` — a fused pipeline's result Vec, which genuinely has no
+///   type until MIR-05 (S21), or a construction whose result type did not match
+///   its ctor.
+/// - a `Known` type that is still an inference *variable* — `let xs = Vec()`
+///   generalizes at the `let`, so the construction site's own element type is
+///   never resolved. That is HIR-01/MONO-01 (S15), and failing the compile on it
+///   would reject working programs, which hazard H10 exists to prevent.
+///
+/// A `Known` type that *cannot* have a runtime object — `Vec[Range]`,
+/// `Vec[Never]` — is still a compile error. That distinction is what
+/// [`praxis_repr::NoReprCause`] records.
 fn collection_element_descriptor_for(
     db: &praxis_types::TypeDb,
     args: &[MirType],
     index: usize,
-) -> *const praxis_runtime::descriptor::TypeDescriptor {
-    match args.get(index).copied() {
-        Some(MirType::Known(element_type)) => descriptor_for_type(db, element_type),
-        // No static element type here — a fused pipeline's result Vec, or a
-        // construction whose result type did not match its ctor. The wrappers
-        // all read a null descriptor as "unknown element type" and adopt the
-        // first inserted value's descriptor, which is the honest answer; the
-        // old code indexed `args[0]` and would have panicked in the JIT.
-        Some(MirType::Opaque) | None => std::ptr::null(),
+) -> Result<*const praxis_runtime::descriptor::TypeDescriptor> {
+    let Some(MirType::Known(element_type)) = args.get(index).copied() else {
+        return Ok(std::ptr::null());
+    };
+    match praxis_repr::descriptor_for_type(db, element_type) {
+        Ok(d) => Ok(d as *const _),
+        Err(e) if e.is_unresolved() => Ok(std::ptr::null()),
+        Err(e) => Err(anyhow!(
+            "collection type argument {index}: cannot emit a runtime descriptor for `{}`: {}",
+            db.render(element_type),
+            e.reason
+        )),
     }
 }
 
@@ -1936,12 +1939,39 @@ mod tests {
     fn an_opaque_element_type_resolves_to_no_descriptor() {
         let mut db = praxis_types::TypeDb::new();
         let int = db.int();
-        assert!(collection_element_descriptor_for(&db, &[MirType::Opaque], 0).is_null());
-        assert!(collection_element_descriptor_for(&db, &[], 0).is_null());
+        assert!(
+            collection_element_descriptor_for(&db, &[MirType::Opaque], 0)
+                .unwrap()
+                .is_null()
+        );
+        assert!(collection_element_descriptor_for(&db, &[], 0)
+            .unwrap()
+            .is_null());
         assert!(core::ptr::eq(
-            collection_element_descriptor_for(&db, &[MirType::Known(int)], 0),
+            collection_element_descriptor_for(&db, &[MirType::Known(int)], 0).unwrap(),
             &praxis_runtime::scalars::INT
         ));
+    }
+
+    /// P0-11's other half at this boundary: an element type with no runtime
+    /// object is a compile error, not a null descriptor. `Opaque` means "no
+    /// static type here"; `Vec[Range]` means "a type that cannot exist", and
+    /// conflating the two is how the wrappers ended up adopting whatever was
+    /// pushed first.
+    #[test]
+    fn a_known_element_type_with_no_descriptor_fails_the_compile() {
+        let mut db = praxis_types::TypeDb::new();
+        let int = db.int();
+        let range = db.intern(praxis_types::data::TypeData::Collection {
+            ctor: praxis_types::CollectionCtor::Range,
+            args: vec![int],
+        });
+        let err = collection_element_descriptor_for(&db, &[MirType::Known(range)], 0)
+            .expect_err("Range has no runtime object");
+        assert!(
+            err.to_string().contains("Range"),
+            "the diagnostic must name the offending type: {err}"
+        );
     }
 
     /// A tuple allocation with no static type degrades to the empty schema —
@@ -1951,7 +1981,7 @@ mod tests {
     #[test]
     fn an_opaque_tuple_type_yields_an_empty_schema() {
         let db = praxis_types::TypeDb::new();
-        let schema = tuple_schema_for(&db, MirType::Opaque);
+        let schema = tuple_schema_for(&db, MirType::Opaque).expect("no elements to resolve");
         // SAFETY: `tuple_schema_for` returns a leaked `'static` schema.
         assert_eq!(unsafe { &*schema }.arity(), 0);
     }
