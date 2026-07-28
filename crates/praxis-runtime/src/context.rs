@@ -636,24 +636,27 @@ impl Runtime {
     /// spanning `[start, start+len)` (§7.10, ADR-013). The slice's descriptor
     /// traces `owner`, keeping the backing alive.
     ///
-    /// # Panics
-    /// Debug-build assertion that the byte range lands within the owner; the
-    /// parser guarantees this by construction.
-    pub fn alloc_text_slice(&self, owner: GcRef, start: usize, len: usize) -> GcRef {
-        debug_assert!(
-            start.saturating_add(len) <= owner.as_text().len(),
-            "source-slice Text range [{start}, {start}+{len}) exceeds owner length"
-        );
-        let payload = crate::text::TextPayload::Slice { owner, start, len };
+    /// Returns `None` if the range is not a `Text`: past the owner's end, an
+    /// overflowing length, or ends that split a multi-byte scalar. This used to
+    /// be a `debug_assert` on the range only, so a release build sliced out of
+    /// range or produced a `Text` that read as empty (RT-06).
+    ///
+    /// # Safety
+    /// `owner` must be a live `Text` `GcRef`.
+    #[must_use]
+    pub unsafe fn alloc_text_slice(&self, owner: GcRef, start: usize, len: usize) -> Option<GcRef> {
+        // SAFETY: caller guarantees `owner` is a live Text.
+        let slice = unsafe { crate::text::SourceSlice::new(owner, start, len) }?;
+        let payload = crate::text::TextPayload::Slice(slice);
         // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
-        unsafe {
+        Some(unsafe {
             self.heap.alloc_with_unpaced(
                 &crate::text::TEXT,
                 std::mem::size_of::<crate::text::TextPayload>(),
                 std::mem::align_of::<crate::text::TextPayload>(),
                 |ptr| (ptr as *mut crate::text::TextPayload).write(payload),
             )
-        }
+        })
     }
 
     /// Allocate a `Vec[T]` from a slice of already-allocated element refs and the

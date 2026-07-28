@@ -124,18 +124,26 @@ impl Rt {
         unsafe { heap_ref(self.ctx).alloc_unpaced(&scalars::CHAR, value) }
     }
 
-    /// Allocate a source-slice `Text` pointing into `owner`.
-    fn alloc_text_slice(&self, owner: GcRef, start: usize, len: usize) -> GcRef {
-        let payload = TextPayload::Slice { owner, start, len };
+    /// Allocate a source-slice `Text` pointing into `owner`, or `None` if the
+    /// range is not a `Text` (RT-06).
+    ///
+    /// The parser computes its offsets from byte positions in the very buffer
+    /// it is slicing, so `None` means the interpreter has a bug — but it must
+    /// still surface as a parse fault rather than a panic across the ABI
+    /// (§10.4), which is why this is fallible rather than an assert.
+    fn alloc_text_slice(&self, owner: GcRef, start: usize, len: usize) -> Option<GcRef> {
+        // SAFETY: `owner` is the context's input buffer, a live Text.
+        let slice = unsafe { crate::text::SourceSlice::new(owner, start, len) }?;
+        let payload = TextPayload::Slice(slice);
         // SAFETY: ctx is valid; payload matches TEXT's layout.
-        unsafe {
+        Some(unsafe {
             heap_ref(self.ctx).alloc_with_unpaced(
                 &crate::text::TEXT,
                 std::mem::size_of::<TextPayload>(),
                 std::mem::align_of::<TextPayload>(),
                 |ptr| (ptr as *mut TextPayload).write(payload),
             )
-        }
+        })
     }
 
     /// Allocate a `Vec` from element refs.
@@ -277,18 +285,18 @@ fn walk_atomic(rt: &Rt, kind: AtomicKind, bytes: &[u8], offset: usize) -> WalkRe
                 return Err(ParseFail::at(offset + (rest.len() - s.len()), 0, "word"));
             }
             let leading = rest.len() - s.len();
-            Ok((
-                rt.alloc_text_slice(rt_owner(rt), offset + leading, len),
-                offset + leading + len,
-            ))
+            let slice = rt
+                .alloc_text_slice(rt_owner(rt), offset + leading, len)
+                .ok_or_else(|| ParseFail::at(offset + leading, len, "word"))?;
+            Ok((slice, offset + leading + len))
         }
         AtomicKind::Text | AtomicKind::Rest => {
             // `text`/`rest`: consume the remainder of the current region.
             // For a standalone atomic, the region is the whole remaining input.
-            Ok((
-                rt.alloc_text_slice(rt_owner(rt), offset, rest.len()),
-                bytes.len(),
-            ))
+            let slice = rt
+                .alloc_text_slice(rt_owner(rt), offset, rest.len())
+                .ok_or_else(|| ParseFail::at(offset, rest.len(), "text"))?;
+            Ok((slice, bytes.len()))
         }
     }
 }

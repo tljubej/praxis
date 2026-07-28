@@ -30,13 +30,62 @@ use crate::GcRef;
 pub enum TextPayload {
     /// An owned, heap-allocated UTF-8 string (string literals, runtime-built text).
     Owned(Box<str>),
-    /// A zero-copy view into `owner`'s bytes, spanning `[start, start+len)` (§7.10).
-    /// `owner` is traced by the descriptor so the slice keeps its backing alive.
-    Slice {
-        owner: GcRef,
-        start: usize,
-        len: usize,
-    },
+    /// A zero-copy view into another `Text`'s bytes (§7.10). `owner` is traced
+    /// by the descriptor so the slice keeps its backing alive.
+    Slice(SourceSlice),
+}
+
+/// A validated zero-copy view of `owner`'s bytes over `[start, start + len)`.
+///
+/// The fields are private and [`SourceSlice::new`] is the only constructor,
+/// because the range is not a hint: a view whose end runs past the owner, or
+/// whose ends fall inside a multi-byte scalar, is not a `Text`. Both used to be
+/// constructible — the safe host helper only `debug_assert`'d the range and
+/// nothing checked scalar boundaries at all — and the damage surfaced far from
+/// its cause, as a release-build panic slicing out of range or as `text_str`
+/// quietly returning `""` for a `Text` that had content (RT-06).
+///
+/// `#[repr(C)]` and field-ordered as the old inline variant was, so the payload
+/// layout is unchanged.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SourceSlice {
+    owner: GcRef,
+    start: usize,
+    len: usize,
+}
+
+impl SourceSlice {
+    /// A view of `owner`'s bytes over `[start, start + len)`, or `None` if that
+    /// is not a `Text`: a range past the end, a length that overflows, or ends
+    /// that are not UTF-8 scalar boundaries.
+    ///
+    /// # Safety
+    /// `owner` must be a live `Text` `GcRef` — its payload is read to validate
+    /// the range.
+    #[must_use]
+    pub unsafe fn new(owner: GcRef, start: usize, len: usize) -> Option<SourceSlice> {
+        // SAFETY: caller guarantees `owner` is a live Text.
+        let bytes = unsafe { text_bytes(owner.payload::<TextPayload>() as *const TextPayload) };
+        let end = start.checked_add(len)?;
+        if end > bytes.len() {
+            return None;
+        }
+        // Both ends must begin a scalar. A view that splits one is not UTF-8,
+        // and reading it as a `&str` would fail.
+        let whole = std::str::from_utf8(bytes).ok()?;
+        if !whole.is_char_boundary(start) || !whole.is_char_boundary(end) {
+            return None;
+        }
+        Some(SourceSlice { owner, start, len })
+    }
+
+    /// The `Text` this view borrows from. Traced, so the backing stays alive.
+    #[inline]
+    #[must_use]
+    pub fn owner(self) -> GcRef {
+        self.owner
+    }
 }
 
 impl TextPayload {
@@ -59,18 +108,16 @@ pub unsafe fn text_bytes(payload: *const TextPayload) -> &'static [u8] {
     // SAFETY: caller guarantees `payload` points at a valid TextPayload.
     match unsafe { &*payload } {
         TextPayload::Owned(boxed) => boxed.as_bytes(),
-        TextPayload::Slice { owner, start, len } => {
+        TextPayload::Slice(slice) => {
             // SAFETY: caller guarantees the owner chain is valid; non-moving GC.
-            let owner_payload = owner.payload::<TextPayload>() as *const TextPayload;
+            let owner_payload = slice.owner.payload::<TextPayload>() as *const TextPayload;
             let owner_bytes = unsafe { text_bytes(owner_payload) };
-            let end = *start + *len;
-            // Offsets are byte-accurate by construction (the parser computes them
-            // from byte positions); defensive bounds check never fires in practice.
-            if end <= owner_bytes.len() {
-                &owner_bytes[*start..end]
-            } else {
-                &owner_bytes[*start..]
-            }
+            // In range by construction: `SourceSlice::new` is the only
+            // constructor and it rejects anything else. There used to be a
+            // clamp here — `&owner_bytes[start..]` when the end ran past —
+            // which turned a bad range into a *different, plausible* Text, and
+            // panicked anyway when `start` itself was out of range (RT-06).
+            &owner_bytes[slice.start..slice.start + slice.len]
         }
     }
 }
@@ -81,11 +128,15 @@ pub unsafe fn text_bytes(payload: *const TextPayload) -> &'static [u8] {
 /// See [`text_bytes`]; additionally the bytes must be valid UTF-8 (always true
 /// for Text by construction — the parser only splits on UTF-8 boundaries).
 pub unsafe fn text_str(payload: *const TextPayload) -> &'static str {
-    // SAFETY: Text payloads are always valid UTF-8 by construction. The input
-    // buffer is read as UTF-8 (lossy on malformed input at the ABI boundary);
-    // all offsets land on scalar boundaries.
+    // SAFETY: Text payloads are always valid UTF-8 by construction. An owned
+    // payload is a `Box<str>`; a slice comes from `TextPayload::slice`, which
+    // rejects ends that are not scalar boundaries. The `unwrap_or("")` this
+    // replaces is why a mis-sliced Text read as empty instead of failing
+    // (RT-06); `from_utf8_unchecked` would be the same lie without the
+    // diagnosis, so the error case panics with one.
     let bytes = unsafe { text_bytes(payload) };
-    std::str::from_utf8(bytes).unwrap_or("")
+    std::str::from_utf8(bytes)
+        .expect("a Text payload is UTF-8 by construction; SourceSlice::new enforces it")
 }
 
 // ---- descriptor callbacks -------------------------------------------------
@@ -96,7 +147,7 @@ unsafe fn text_trace(payload: *mut u8, tracer: &mut dyn Tracer) {
         // Owned text has no nested GcRef; trace is a no-op.
         TextPayload::Owned(_) => {}
         // A slice must keep its owner alive (ADR-013).
-        TextPayload::Slice { owner, .. } => tracer.trace(*owner),
+        TextPayload::Slice(slice) => tracer.trace(slice.owner),
     }
 }
 
@@ -154,7 +205,7 @@ unsafe fn text_owned_bytes(payload: *const u8) -> usize {
     // SAFETY: caller guarantees `payload` points at an initialized TextPayload.
     match unsafe { &*(payload as *const TextPayload) } {
         TextPayload::Owned(s) => s.len(),
-        TextPayload::Slice { .. } => 0,
+        TextPayload::Slice(_) => 0,
     }
 }
 
@@ -208,7 +259,8 @@ mod tests {
     fn source_slice_traces_its_owner_during_collection() {
         let rt = crate::Runtime::new();
         let owner = rt.alloc_text("hello");
-        let slice = rt.alloc_text_slice(owner, 1, 3);
+        // SAFETY: `owner` is the live Text allocated above.
+        let slice = unsafe { rt.alloc_text_slice(owner, 1, 3) }.expect("[1, 4) is in range");
         let mut roots = crate::RootScope::new();
         roots.root(slice);
 
@@ -220,6 +272,57 @@ mod tests {
             "the rooted slice and its otherwise-unrooted owner must both survive"
         );
         assert_eq!(slice.as_text(), "ell");
+    }
+
+    /// The range is not a hint. A view past the owner's end, one whose length
+    /// overflows, or one whose ends split a multi-byte scalar is not a `Text`,
+    /// and must be unconstructible rather than clamped: the old code
+    /// `debug_assert`'d the range only, so a release build either sliced out of
+    /// range or produced a `Text` that `text_str` read as `""` (RT-06).
+    #[test]
+    fn an_out_of_range_or_non_boundary_slice_is_unconstructible() {
+        let rt = crate::Runtime::new();
+        // "héllo" — 'é' is two bytes, so byte 1 starts it and byte 2 splits it.
+        let owner = rt.alloc_text("héllo");
+        let bytes = owner.as_text().len();
+        assert_eq!(bytes, 6);
+
+        // SAFETY: `owner` is a live Text for every call below.
+        unsafe {
+            assert!(
+                rt.alloc_text_slice(owner, 0, bytes).is_some(),
+                "the whole owner is a valid slice of itself"
+            );
+            assert!(
+                rt.alloc_text_slice(owner, bytes, 0).is_some(),
+                "an empty slice at the end is in range"
+            );
+            assert!(
+                rt.alloc_text_slice(owner, 0, bytes + 1).is_none(),
+                "a slice past the end is not a Text"
+            );
+            assert!(
+                rt.alloc_text_slice(owner, bytes + 1, 0).is_none(),
+                "a start past the end is not a Text"
+            );
+            assert!(
+                rt.alloc_text_slice(owner, 1, usize::MAX).is_none(),
+                "an overflowing length is not a Text"
+            );
+            assert!(
+                rt.alloc_text_slice(owner, 2, 1).is_none(),
+                "a start inside a multi-byte scalar is not a Text"
+            );
+            assert!(
+                rt.alloc_text_slice(owner, 1, 1).is_none(),
+                "an end inside a multi-byte scalar is not a Text"
+            );
+            // The boundaries either side of 'é' are fine.
+            let e = rt
+                .alloc_text_slice(owner, 1, 2)
+                .expect("[1, 3) is a scalar");
+            assert_eq!(e.as_text(), "é");
+        }
     }
 
     #[test]

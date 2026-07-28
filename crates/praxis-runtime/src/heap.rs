@@ -1113,11 +1113,10 @@ mod tests {
                 std::mem::size_of::<TextPayload>(),
                 std::mem::align_of::<TextPayload>(),
                 |p| {
-                    (p as *mut TextPayload).write(TextPayload::Slice {
-                        owner: owner_ref,
-                        start: 0,
-                        len: 4096,
-                    })
+                    // SAFETY: `owner_ref` is the live Text allocated just above.
+                    let slice = crate::text::SourceSlice::new(owner_ref, 0, 4096)
+                        .expect("the whole owner is a valid slice of itself");
+                    (p as *mut TextPayload).write(TextPayload::Slice(slice))
                 },
             );
         }
