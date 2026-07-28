@@ -15,23 +15,46 @@ Update this file at the end of every stage.
 | S2 — Independent hardening | **done** | `5629736`, `70ea4be` |
 | S3 — ABI manifest, MIR representation, fault values | **done** | `8a30db1`, `7075017`, `91b64c1`, `1f7eca7` |
 | S4 — Object layout and heap provenance | **done** | `dfe42b6` |
-| S5 — Root-set completeness, native RAII roots | not started | |
+| S5 — Root-set completeness, native RAII roots | **done** | `7911337` |
 | S6 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10. It fell out of S1.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **999 passed, 0 failed, 134 ignored**. `just ci` is green.
+Now: **1004 passed, 0 failed, 130 ignored**. `just ci` is green.
 
-Fifteen of the audit's ignored regressions are un-ignored and passing. The three
-added this session (S3's remaining exit criteria):
+Nineteen of the audit's ignored regressions are un-ignored and passing. The
+seven added this session (S3's and S5's remaining exit criteria):
 
 | Test | File |
 |---|---|
 | `closure_capture_indices_never_flow_through_gc_locals` | `praxis-mir/src/build.rs` |
 | `call_result_locals_retain_their_inferred_static_types` | `praxis-mir/src/build.rs` |
 | `pipeline_runtime_call_destinations_retain_vec_and_unit_types` | `praxis-mir/src/build.rs` |
+| `automatic_gc_roots_the_ambient_input_buffer` | `praxis-runtime/src/abi.rs` |
+| `automatic_gc_roots_parse_failure_partial_values` | `praxis-runtime/src/abi.rs` |
+| `automatic_gc_roots_runtime_owned_crash_snapshots` | `praxis-runtime/src/abi.rs` |
+| `nested_allocating_helpers_root_intermediate_results` | `praxis-runtime/src/abi.rs` |
+
+Three of these were rewritten rather than merely un-ignored, each checked
+against the unfixed code first so it is a real gate:
+`pipeline_runtime_call_destinations_retain_vec_and_unit_types` (the Vec half
+moved from a `Call` to an `Alloc`), `nested_allocating_helpers_root_intermediate_results`
+(now calls the real `praxis_grid_positions` over a 40×40 grid, because the
+sketch it inlined no longer models the fix), and — outside the four —
+`maybe_collect_runs_under_pressure`, whose premise the P0-06 fix inverted.
+
+Findings with no gating test that got one this session: **P0-02**
+(`an_opaque_local_carries_neither_a_descriptor_nor_a_type_id`,
+`an_opaque_element_type_resolves_to_no_descriptor`,
+`an_opaque_tuple_type_yields_an_empty_schema` in
+`praxis-codegen-cranelift/src/lower.rs`), **P0-03**
+(`a_closure_prologue_reads_its_captures_by_immediate_index`), and **DBG-04**
+(`snapshot_values_survive_a_collection_inside_the_evaluated_expression` in
+`praxis-debugger/src/evaluate.rs` — it drives `evaluate` with the heap already
+past its threshold and reads back a snapshot *temp*, the value that is never a
+`__p_expr` parameter and so the one a generated prologue does not mask).
 
 (Earlier three: `overaligned_payload_accessor_matches_initialized_address`,
 `foreign_heap_root_cannot_delay_reclamation`,
@@ -74,6 +97,15 @@ for what this means for a stage that adds a symbol (it is now two lines).
 
 **F6 — GcHeader repack: landed whole.** See ADR-039 and §3.
 
+**F7 — composite root set and native RAII roots: landed, minus `Safepoint`.**
+`RuntimeRoots` is the only thing `Heap::collect`/`maybe_collect` takes, and
+`NativeScope`/`Rooted` are how native code roots what it holds. **Not done:**
+the `#[must_use] Safepoint` token on `Heap::alloc_with` — minting one requires
+the wrapper to hold a `RuntimeRoots`, which means calling `maybe_collect`, which
+*is* P0-08b. It belongs to S6, with the 14 unpaced wrappers, not here (H2).
+`ScopedVec` is also unwritten: no site needed it once the payload accessors took
+`Rooted`, and the parser interpreter (the one place the plan wants it) is S20.
+
 **F16 — MirType and raw-word elimination: landed, minus `TupleShape`.**
 `MirType::{Known, Opaque}` is `Local.ty`, `AllocKind::Tuple.ty` and
 `AllocKind::Collection.args`; `Inst::LoadCapture` carries the capture index as
@@ -93,6 +125,39 @@ Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
 ### From this session
+
+**`Heap::collect` and `maybe_collect` take a `&RuntimeRoots`, not a `&dyn
+RootSet`.** In-crate tests use `Heap::collect_with` / `Runtime::collect_with`
+(both `#[cfg(test)]`); a host that wants to force a collection calls
+`Runtime::collect_now()`, which takes no root set on purpose. `RootSet` and
+`RootScope` still exist and are still what `ShadowFrame` / `CrashSnapshot` /
+`NativeRootFrame` implement — only the *entry point* is sealed.
+
+**`RuntimeRoots::from_context` is exhaustive over five arms**, and its
+`push_roots` destructures the struct rather than reading fields, so adding an
+owner to `RuntimeContext` without rooting it is a compile error. If you add a
+field that can hold a `GcRef`, that is where it goes.
+
+**Native code roots through `NativeScope`.** `unsafe { NativeScope::new(ctx) }`
+pushes a frame onto `ctx.native_roots` and pops it on `Drop`; `scope.root(r)`
+takes `&self` (the roots are behind a `RefCell`) so several `Rooted` may be live
+at once. Each scope costs one `Box`; if that shows up in a profile, S6 is the
+stage that revisits the allocation path.
+
+**`*_payload_mut` takes a `Rooted<'s>` and returns `&'s mut T`.** All nine
+accessors and their 26 call sites. If you add a wrapper that needs one, open a
+scope — that is the point, not an inconvenience: the old `&'static mut` said
+the payload outlives the program.
+
+**`ctx.native_roots` is a new `RuntimeContext` field** (appended, so
+generated-code offsets are unchanged) and **`RUNTIME_ABI_VERSION` /
+`COMPILER_EXPECTED_ABI_VERSION` are 9.**
+
+**Automatic collection now happens with no generated frame on the stack.** That
+is the whole point of P0-06, and it is the thing most likely to surprise: any
+test that allocated through the `praxis_*` wrappers and assumed the pacing
+counter kept climbing is now wrong. `maybe_collect_runs_under_pressure` was
+rewritten for exactly this.
 
 **A MIR local's `ty` is a `MirType`, not a `Type`.** `MirType::known() ->
 Option<Type>` is the only reader, so every consumer decides what to do with the
@@ -235,13 +300,31 @@ re-deriving it.
 
 ## 4. Where to start
 
-**S5** (weight 36, hard barrier before S6): F7's composite `RuntimeRoots`,
-P0-06 + P0-07 in one commit (H1 — deleting the null-`roots` early return before
-the native arm exists converts a growth bug into use-after-free), DBG-04, and
-the ABI bump to 9.
+**S6** (weight 27): allocation pacing, effect metadata, heap lifecycle —
+P0-08b, P0-08c, RT-01 … RT-05. S5 was its hard barrier and is done, so H2 no
+longer binds.
 
-Re-read §6 of the plan before either. The hazards that still bind: **H1**,
-**H2**, **H3**, **H9**, **H10**, **H17**. **H4, H6 and H16 are discharged.**
+- **P0-08b**: 14 wrappers gc-allocate without calling `maybe_collect`. The
+  manifest is the intent — make the wrappers match the `Effect` rows, not the
+  reverse (see §3's effect-classification note). The durable form is F7's
+  `#[must_use] Safepoint` token on `Heap::alloc_with`: it can only be minted
+  from a `RuntimeRoots`, so "allocate without pacing" stops being writable.
+- **H7 binds**: RT-01's free list must not land before S4's sweep poisoning —
+  which it has, so this is satisfied; re-read it anyway before reusing storage.
+- **H8 binds**: RT-02's `Heap` `Drop` needs the snapshot-ownership audit in the
+  same change. `take_crash_snapshot` has callers in `praxis-cli/src/run.rs` and
+  `praxis-debugger/src/repl.rs`.
+- RT-05 is "delete `Runtime::heap_mut().reset()`", not a live blocker.
+- One ABI bump for the stage if RT-03 (`true_ref`/`false_ref`) lands (H17).
+
+Then **S7** (weight 23): descriptor totality (P0-11), typed collection
+construction, fault representation. Note P0-11 is what makes the `Known` arm of
+`descriptor_for_type` exhaustive and what turns `alloc_empty_vec`'s element
+descriptor honest — §8.2 warns its Vec-adopts-first-push assertions near
+`adversarial_audit.rs` invert.
+
+Re-read §6 of the plan first. The hazards that still bind: **H3**, **H7**,
+**H8**, **H9**, **H10**, **H17**. **H1, H2, H4, H6 and H16 are discharged.**
 
 ## 5. Design decisions still open
 
@@ -301,6 +384,14 @@ Things the plan states that are no longer or were not quite true.
   in one basic block, which is what let native lowering land without touching
   the block bookkeeping. If a future stage prefers the branch form, nothing
   about the fault protocol changes.
+- **The parser interpreter cannot collect today, so S5 did not touch it.**
+  H1 lists `parser.rs`'s unrooted `Vec<GcRef>` intermediates alongside the grid
+  helpers, but the two are not in the same state: the grid helpers call
+  `praxis_*` wrappers (which pace), while `parser.rs` allocates only through
+  `heap_ref(ctx).alloc*`, which never calls `maybe_collect`. Its intermediates
+  are latent, not live. **IPR-14 (S20) must give them `NativeScope`s in the same
+  commit that adds its safepoints** — that is when H1's mechanism actually
+  arrives for the parser.
 - **P0-08 raised a question the plan does not answer.** The two loop-increment
   `Inst::IntBinOp` sites in `build.rs` (the `for`-loop index bump) are *not*
   followed by a `check_fault`. An overflow there now sets a pending fault that
