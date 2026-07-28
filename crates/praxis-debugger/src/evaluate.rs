@@ -139,9 +139,12 @@ pub fn heap(
     })
 }
 
-/// Extract the named, real-valued locals from `frame`, pairing each with a
+/// Extract the named, real-valued user locals from `frame`, pairing each with a
 /// static `Type` and its current `GcRef`. Skips sentinel (uninit) values and
-/// `<tmp>`/empty-named locals (synthetic temps the user never wrote).
+/// compiler temporaries (only bindings the programmer wrote are valid `p EXPR`
+/// parameters). The temp filter is structural — `l.is_user()` — replacing the
+/// old `name != "<tmp>"` string match (the codegen no longer emits `"<tmp>"`;
+/// temps now carry an empty name and the `Temp` kind).
 ///
 /// The type is derived primarily from the **runtime value's descriptor** (via
 /// [`descriptor_to_type`]), which is always concrete — the static `type_id`
@@ -155,10 +158,7 @@ fn collect_bindings(frame: &SnapshotFrame, db: &mut TypeDb) -> Vec<LocalBinding>
         .locals
         .iter()
         .filter(|l| is_real_ref(l.value))
-        .filter(|l| {
-            let name = l.name();
-            !name.is_empty() && name != "<tmp>"
-        })
+        .filter(|l| l.is_user() && !l.name().is_empty())
         .map(|l| LocalBinding {
             name: sanitize_name(&l.name()),
             ty: descriptor_to_type(l.value, db).unwrap_or(Type(l.type_id)),

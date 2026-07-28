@@ -150,6 +150,16 @@ pub struct DebugLocal {
     /// against the selected frame (§9.5). `0` until the backend threads it
     /// (M10b); sound as a fallback since the debugger treats `0` as "unknown".
     pub type_id: u32,
+    /// The debugger classification: `LOCAL_KIND_USER` (a binding the programmer
+    /// wrote) or `LOCAL_KIND_TEMP` (a compiler intermediate). See
+    /// [`crate::debug::LOCAL_KIND_USER`]. Replaces the old `"<tmp>"` string
+    /// placeholder.
+    pub kind: u8,
+    /// The local's source span start (byte offset), paired with `span_end`.
+    pub span_start: u32,
+    /// The local's source span end (byte offset). `(span_start, span_end) ==
+    /// (0, 0)` means "no span" (the return slot, span-less captures).
+    pub span_end: u32,
 }
 
 /// One frame in the crash-debugger's snapshot chain (§9.3, M5/M10).

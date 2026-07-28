@@ -229,6 +229,7 @@ mod tests {
             body: crate::lower::TypedExpr::Lit {
                 value: crate::lower::Lit::Int(0),
                 ty: praxis_types::Type(0),
+                span: (0, 0),
             },
         }
     }

@@ -31,8 +31,8 @@ pub mod scope;
 pub mod symbol;
 
 pub use lower::{
-    expr_ty, lower, AssignOp, BinOp, Lit, TypedBlock, TypedExpr, TypedFn, TypedItem, TypedMatchArm,
-    TypedModule, TypedParam, TypedPattern, TypedStmt, UnaryOp,
+    expr_span, expr_ty, lower, stmt_span, AssignOp, BinOp, Lit, TypedBlock, TypedExpr, TypedFn,
+    TypedItem, TypedMatchArm, TypedModule, TypedParam, TypedPattern, TypedStmt, UnaryOp,
 };
 pub use name_table::NameTable;
 pub use resolve::{NameRef, NameResolution, ResolvedRef};

@@ -99,7 +99,9 @@ pub struct TypedBlock {
     pub ty: Type,
 }
 
-/// A statement.
+/// A statement. Every variant carries its source `span` `[start, end)` (byte
+/// offsets into the program source), threaded from the rowan AST node during
+/// lowering. `TypedStmt::Expr` carries the span on its inner expression.
 #[derive(Clone, Debug)]
 pub enum TypedStmt {
     /// `let name = expr` (immutable binding).
@@ -108,6 +110,7 @@ pub enum TypedStmt {
         name: String,
         ty: Type,
         init: TypedExpr,
+        span: (u32, u32),
     },
     /// `var name = expr` (mutable binding).
     Var {
@@ -115,6 +118,7 @@ pub enum TypedStmt {
         name: String,
         ty: Type,
         init: TypedExpr,
+        span: (u32, u32),
     },
     /// `name = expr` / `name += expr` / …
     Assign {
@@ -122,6 +126,7 @@ pub enum TypedStmt {
         name: String,
         op: AssignOp,
         value: TypedExpr,
+        span: (u32, u32),
     },
     /// A bare expression evaluated for effect.
     Expr(TypedExpr),
@@ -148,27 +153,38 @@ pub enum AssignOp {
 #[derive(Clone, Debug)]
 pub enum TypedExpr {
     /// An integer / text / bool literal.
-    Lit { value: Lit, ty: Type },
+    Lit {
+        value: Lit,
+        ty: Type,
+        span: (u32, u32),
+    },
     /// A name reference (variable, parameter, function).
-    Path { symbol: SymbolId, ty: Type },
+    Path {
+        symbol: SymbolId,
+        ty: Type,
+        span: (u32, u32),
+    },
     /// `a op b`.
     Bin {
         op: BinOp,
         lhs: Box<TypedExpr>,
         rhs: Box<TypedExpr>,
         ty: Type,
+        span: (u32, u32),
     },
     /// `op a`.
     Unary {
         op: UnaryOp,
         operand: Box<TypedExpr>,
         ty: Type,
+        span: (u32, u32),
     },
     /// `( a )` — transparent; lowered to the inner expression directly, so this
     /// variant exists only when the inner expr is missing (malformed).
     Paren {
         inner: Option<Box<TypedExpr>>,
         ty: Type,
+        span: (u32, u32),
     },
     /// A block used as an expression.
     Block(Box<TypedBlock>),
@@ -178,12 +194,14 @@ pub enum TypedExpr {
         then_block: Box<TypedBlock>,
         else_block: Option<Box<TypedBlock>>,
         ty: Type,
+        span: (u32, u32),
     },
     /// `while cond { body }` — always `Unit`.
     While {
         cond: Box<TypedExpr>,
         body: Box<TypedBlock>,
         ty: Type,
+        span: (u32, u32),
     },
     /// `for binding in iter { body }` (M8, §4.11). `binding` is the loop
     /// variable's symbol; `item_ty` is the iterator's element type. Yields Unit.
@@ -193,22 +211,29 @@ pub enum TypedExpr {
         body: Box<TypedBlock>,
         item_ty: Type,
         ty: Type,
+        span: (u32, u32),
     },
     /// `loop { body }` (M8, §4.11). An infinite loop terminated by `break`;
     /// its type is the break-value type (Unit if no break carries a value).
-    Loop { body: Box<TypedBlock>, ty: Type },
+    Loop {
+        body: Box<TypedBlock>,
+        ty: Type,
+        span: (u32, u32),
+    },
     /// `break [expr]` (M8, §4.11). Diverges from the enclosing loop. `value` is
     /// the optional break value; `ty` is `Never`.
     Break {
         value: Option<Box<TypedExpr>>,
         ty: Type,
+        span: (u32, u32),
     },
     /// `continue` (M8, §4.11). Diverges; `ty` is `Never`.
-    Continue { ty: Type },
+    Continue { ty: Type, span: (u32, u32) },
     /// `return [expr]` (M8, §4.11). Diverges from the enclosing function.
     Return {
         value: Option<Box<TypedExpr>>,
         ty: Type,
+        span: (u32, u32),
     },
     /// `callee(args)`.
     Call {
@@ -229,6 +254,7 @@ pub enum TypedExpr {
         /// that the MIR builder lowers to `Inst::CallIndirect`.
         callee_expr: Option<Box<TypedExpr>>,
         ty: Type,
+        span: (u32, u32),
     },
     /// `receiver.method(args)` (M5, §16.2). `lowering_symbol` is the runtime
     /// wrapper name the catalog resolved (e.g. `praxis_vec_push`), so the MIR
@@ -243,18 +269,28 @@ pub enum TypedExpr {
         args: Vec<TypedExpr>,
         purity: praxis_stdlib::Purity,
         ty: Type,
+        span: (u32, u32),
     },
     /// `( a, b, … )` — at least two elements.
-    Tuple { elements: Vec<TypedExpr>, ty: Type },
+    Tuple {
+        elements: Vec<TypedExpr>,
+        ty: Type,
+        span: (u32, u32),
+    },
     /// `read parser_expression` (§7.1, M6). `plan_index` identifies the compiled
     /// [`ParserPlan`] in the global slab; the runtime interpreter looks it up.
-    Read { plan_index: u32, ty: Type },
+    Read {
+        plan_index: u32,
+        ty: Type,
+        span: (u32, u32),
+    },
     /// `parse(text, parser_expression)` (§7.1, M6). The `text` arg is lowered as
     /// an ordinary expression; `plan_index` identifies the parser plan.
     Parse {
         text: Box<TypedExpr>,
         plan_index: u32,
         ty: Type,
+        span: (u32, u32),
     },
     /// `Name { field: expr, … }` record literal (M7, §4.5). `record_def_id`
     /// identifies the struct type (index into `TypeDb::record_defs`); `fields`
@@ -264,6 +300,7 @@ pub enum TypedExpr {
         record_def_id: praxis_types::RecordDefId,
         fields: Vec<(u32, TypedExpr)>,
         ty: Type,
+        span: (u32, u32),
     },
     /// `receiver.field` field access (M7, §4.5). `field_idx` is the field's
     /// index in the record's `RecordDef`.
@@ -271,6 +308,7 @@ pub enum TypedExpr {
         receiver: Box<TypedExpr>,
         field_idx: u32,
         ty: Type,
+        span: (u32, u32),
     },
     /// An enum variant construction (M7, §4.6): `Number(5)` or bare `Empty`.
     /// `enum_def_id` identifies the enum, `variant_idx` the variant, and `args`
@@ -280,12 +318,14 @@ pub enum TypedExpr {
         variant_idx: u32,
         args: Vec<TypedExpr>,
         ty: Type,
+        span: (u32, u32),
     },
     /// `match scrutinee { pattern => body, … }` (M7, §4.6).
     Match {
         scrutinee: Box<TypedExpr>,
         arms: Vec<TypedMatchArm>,
         ty: Type,
+        span: (u32, u32),
     },
     /// `|params| body` closure (M7, §4.10). `fn_name` is a synthesized unique
     /// name for the closure's synthetic MIR function; `fn_type` is the inferred
@@ -297,6 +337,7 @@ pub enum TypedExpr {
         fn_type: Type,
         fn_name: String,
         ty: Type,
+        span: (u32, u32),
     },
 }
 
@@ -645,6 +686,15 @@ impl<'a> Lowerer<'a> {
         )
     }
 
+    /// The byte span `[start, end)` of a rowen syntax node, as a `(u32, u32)`
+    /// pair threaded onto the typed tree for debugger provenance (per-temp
+    /// `@ "expr"` rendering) and future diagnostics. Used at every `TypedExpr`/
+    /// `TypedStmt` construction site.
+    fn node_span(&self, node: &praxis_ast::SyntaxNode) -> (u32, u32) {
+        let r = node.text_range();
+        (u32::from(r.start()), u32::from(r.end()))
+    }
+
     fn diag(&mut self, at: TextRange, number: u32, msg: impl Into<String>) {
         self.diagnostics.push(Diagnostic::new(
             Severity::Error,
@@ -694,6 +744,7 @@ impl<'a> Lowerer<'a> {
                 tail: TypedExpr::Lit {
                     value: Lit::Unit,
                     ty: self.unit,
+                    span: self.node_span(item.syntax()),
                 },
                 ty: self.unit,
             });
@@ -790,6 +841,7 @@ impl<'a> Lowerer<'a> {
         let tail = tail.unwrap_or(TypedExpr::Lit {
             value: Lit::Unit,
             ty: self.unit,
+            span: self.node_span(block.syntax()),
         });
         let ty = expr_ty(&tail);
         Some(TypedBlock { stmts, tail, ty })
@@ -826,6 +878,7 @@ impl<'a> Lowerer<'a> {
             name,
             ty,
             init,
+            span: self.node_span(stmt.syntax()),
         })
     }
 
@@ -842,6 +895,7 @@ impl<'a> Lowerer<'a> {
             name,
             ty,
             init,
+            span: self.node_span(stmt.syntax()),
         })
     }
 
@@ -865,12 +919,14 @@ impl<'a> Lowerer<'a> {
             name,
             op,
             value,
+            span: self.node_span(stmt.syntax()),
         })
     }
 
     // --- expressions -------------------------------------------------------
 
     fn lower_expr(&mut self, expr: &Expr) -> TypedExpr {
+        let span = self.node_span(expr.syntax());
         match expr {
             Expr::Literal(l) => self.lower_literal(l),
             Expr::Path(p) => self.lower_path(p),
@@ -881,6 +937,7 @@ impl<'a> Lowerer<'a> {
                 None => TypedExpr::Paren {
                     inner: None,
                     ty: self.db.fresh_var(),
+                    span,
                 },
             },
             Expr::Block(b) => self
@@ -889,6 +946,7 @@ impl<'a> Lowerer<'a> {
                 .unwrap_or_else(|| TypedExpr::Lit {
                     value: Lit::Unit,
                     ty: self.unit,
+                    span,
                 }),
             Expr::If(i) => self.lower_if(i),
             Expr::While(w) => self.lower_while(w),
@@ -913,6 +971,7 @@ impl<'a> Lowerer<'a> {
             Expr::Error(_) => TypedExpr::Lit {
                 value: Lit::Int(0),
                 ty: self.db.fresh_var(),
+                span,
             },
         }
     }
@@ -928,6 +987,7 @@ impl<'a> Lowerer<'a> {
     /// cell, and the binding site boxes the `var` so writes are visible across
     /// frames.
     fn lower_closure(&mut self, c: &praxis_ast::ClosureExpr) -> TypedExpr {
+        let span = self.node_span(c.syntax());
         // The closure's inferred Func type comes from inference: re-derive it by
         // reading the body's type and the param types. Inference already pinned
         // these; we read them off the lowered params/body rather than re-querying
@@ -942,6 +1002,7 @@ impl<'a> Lowerer<'a> {
                     tail: TypedExpr::Lit {
                         value: Lit::Unit,
                         ty: self.unit,
+                        span,
                     },
                     ty: self.unit,
                 })
@@ -960,6 +1021,7 @@ impl<'a> Lowerer<'a> {
                 tail: TypedExpr::Lit {
                     value: Lit::Unit,
                     ty: self.unit,
+                    span,
                 },
                 ty: self.unit,
             },
@@ -982,6 +1044,7 @@ impl<'a> Lowerer<'a> {
                     fn_type,
                     fn_name: self.fresh_closure_name(),
                     ty: fn_type,
+                    span,
                 };
             }
         };
@@ -1030,6 +1093,7 @@ impl<'a> Lowerer<'a> {
             fn_type,
             fn_name,
             ty: fn_type,
+            span,
         }
     }
 
@@ -1041,10 +1105,12 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_literal(&mut self, lit: &Literal) -> TypedExpr {
+        let span = self.node_span(lit.syntax());
         let Some(tok) = lit.token() else {
             return TypedExpr::Lit {
                 value: Lit::Int(0),
                 ty: self.db.fresh_var(),
+                span,
             };
         };
         match tok.kind() {
@@ -1058,6 +1124,7 @@ impl<'a> Lowerer<'a> {
                 TypedExpr::Lit {
                     value: Lit::Int(value),
                     ty: self.int,
+                    span,
                 }
             }
             SyntaxKind::FloatLit => {
@@ -1069,6 +1136,7 @@ impl<'a> Lowerer<'a> {
                 TypedExpr::Lit {
                     value: Lit::Float(value),
                     ty: self.float,
+                    span,
                 }
             }
             SyntaxKind::TextLit => {
@@ -1077,6 +1145,7 @@ impl<'a> Lowerer<'a> {
                 TypedExpr::Lit {
                     value: Lit::Text(unquoted),
                     ty: self.text,
+                    span,
                 }
             }
             SyntaxKind::BacktickTemplate => {
@@ -1089,24 +1158,29 @@ impl<'a> Lowerer<'a> {
                 TypedExpr::Lit {
                     value: Lit::Text(inner),
                     ty: self.text,
+                    span,
                 }
             }
             SyntaxKind::KW_TRUE => TypedExpr::Lit {
                 value: Lit::Bool(true),
                 ty: self.bool_,
+                span,
             },
             SyntaxKind::KW_FALSE => TypedExpr::Lit {
                 value: Lit::Bool(false),
                 ty: self.bool_,
+                span,
             },
             _ => TypedExpr::Lit {
                 value: Lit::Int(0),
                 ty: self.db.fresh_var(),
+                span,
             },
         }
     }
 
     fn lower_path(&mut self, p: &PathExpr) -> TypedExpr {
+        let span = self.node_span(p.syntax());
         // M7-WS4: detect a zero-payload enum variant used as a bare path (`Empty`).
         if let Some(tok) = p.name() {
             let name = tok.text().to_string();
@@ -1121,6 +1195,7 @@ impl<'a> Lowerer<'a> {
                         variant_idx: variant_idx as u32,
                         args: Vec::new(),
                         ty: enum_ty,
+                        span,
                     };
                 }
             }
@@ -1141,10 +1216,11 @@ impl<'a> Lowerer<'a> {
             .name()
             .and_then(|t| self.resolve_symbol_at(t.text_range()))
             .unwrap_or(SymbolId(u32::MAX));
-        TypedExpr::Path { symbol, ty }
+        TypedExpr::Path { symbol, ty, span }
     }
 
     fn lower_bin(&mut self, b: &BinExpr) -> TypedExpr {
+        let span = self.node_span(b.syntax());
         let (lhs, rhs) = b.operands();
         let lhs = lhs.map(|e| Box::new(self.lower_expr(&e)));
         let rhs = rhs.map(|e| Box::new(self.lower_expr(&e)));
@@ -1227,10 +1303,12 @@ impl<'a> Lowerer<'a> {
             lhs: lhs.unwrap_or_else(|| Box::new(unit_lit(self.db))),
             rhs: rhs.unwrap_or_else(|| Box::new(unit_lit(self.db))),
             ty,
+            span,
         }
     }
 
     fn lower_unary(&mut self, u: &UnaryExpr) -> TypedExpr {
+        let span = self.node_span(u.syntax());
         let operand = u.operand().map(|e| Box::new(self.lower_expr(&e)));
         let (op, ty) = match u.op().map(|t| t.kind()) {
             // Negation follows the operand's literal kind (§4.12): `-3.5` is
@@ -1252,10 +1330,12 @@ impl<'a> Lowerer<'a> {
             op,
             operand: operand.unwrap_or_else(|| Box::new(unit_lit(self.db))),
             ty,
+            span,
         }
     }
 
     fn lower_if(&mut self, i: &IfExpr) -> TypedExpr {
+        let span = self.node_span(i.syntax());
         let cond = i.cond().map(|c| Box::new(self.lower_expr(&c)));
         let then_block = i
             .then_branch()
@@ -1278,6 +1358,7 @@ impl<'a> Lowerer<'a> {
             }),
             else_block: else_block.map(Box::new),
             ty,
+            span,
         }
     }
 
@@ -1299,6 +1380,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_while(&mut self, w: &WhileExpr) -> TypedExpr {
+        let span = self.node_span(w.syntax());
         let cond = w.cond().map(|c| Box::new(self.lower_expr(&c)));
         let body = w.body().and_then(|b| self.lower_block(&b)).map(Box::new);
         TypedExpr::While {
@@ -1311,11 +1393,13 @@ impl<'a> Lowerer<'a> {
                 })
             }),
             ty: self.unit,
+            span,
         }
     }
 
     /// `for binding in iter { body }` (M8, §4.11).
     fn lower_for(&mut self, f: &ForExpr) -> TypedExpr {
+        let span = self.node_span(f.syntax());
         let iter = f
             .iter()
             .map(|i| Box::new(self.lower_expr(&i)))
@@ -1351,6 +1435,7 @@ impl<'a> Lowerer<'a> {
             body,
             item_ty,
             ty: self.unit,
+            span,
         }
     }
 
@@ -1358,6 +1443,7 @@ impl<'a> Lowerer<'a> {
     /// loops via `break expr` refine this in the MIR; the HIR conservatively
     /// reports Unit so a `loop` used as a value still type-checks broadly).
     fn lower_loop(&mut self, l: &LoopExpr) -> TypedExpr {
+        let span = self.node_span(l.syntax());
         let body = l
             .body()
             .and_then(|b| self.lower_block(&b))
@@ -1372,36 +1458,43 @@ impl<'a> Lowerer<'a> {
         TypedExpr::Loop {
             body,
             ty: self.unit,
+            span,
         }
     }
 
     /// `break [expr]` (M8, §4.11). Diverges; the optional value is lowered but
     /// the expression's type is `Never`.
     fn lower_break(&mut self, b: &BreakExpr) -> TypedExpr {
+        let span = self.node_span(b.syntax());
         let value = b.value().map(|v| Box::new(self.lower_expr(&v)));
         TypedExpr::Break {
             value,
             ty: self.db.never(),
+            span,
         }
     }
 
     /// `continue` (M8, §4.11). Diverges; type `Never`.
-    fn lower_continue(&mut self, _c: &ContinueExpr) -> TypedExpr {
+    fn lower_continue(&mut self, c: &ContinueExpr) -> TypedExpr {
         TypedExpr::Continue {
             ty: self.db.never(),
+            span: self.node_span(c.syntax()),
         }
     }
 
     /// `return [expr]` (M8, §4.11). Diverges; type `Never`.
     fn lower_return(&mut self, r: &ReturnExpr) -> TypedExpr {
+        let span = self.node_span(r.syntax());
         let value = r.value().map(|v| Box::new(self.lower_expr(&v)));
         TypedExpr::Return {
             value,
             ty: self.db.never(),
+            span,
         }
     }
 
     fn lower_call(&mut self, c: &CallExpr) -> TypedExpr {
+        let span = self.node_span(c.syntax());
         let callee_tok = c.callee().and_then(|p| p.name());
         // Postfix call on an arbitrary expression (`expr(args)`, M8 §4.10):
         // when there is no named (PathExpr) callee, the callee is an expression
@@ -1436,6 +1529,7 @@ impl<'a> Lowerer<'a> {
                     variant_idx: variant_idx as u32,
                     args,
                     ty: enum_ty,
+                    span,
                 };
             }
         }
@@ -1469,6 +1563,7 @@ impl<'a> Lowerer<'a> {
             arg_types,
             callee_expr,
             ty,
+            span,
         }
     }
 
@@ -1505,6 +1600,7 @@ impl<'a> Lowerer<'a> {
     /// the built-in catalog via the [`crate::catalog`] bridge, recording the
     /// runtime lowering symbol so the MIR builder emits a direct call.
     fn lower_method_call(&mut self, m: &MethodCallExpr) -> TypedExpr {
+        let span = self.node_span(m.syntax());
         // Lower the receiver (or fall back to a Unit-typed literal if the tree
         // is malformed so the rest of the expression still lowers).
         let receiver = match m.receiver() {
@@ -1512,6 +1608,7 @@ impl<'a> Lowerer<'a> {
             None => TypedExpr::Lit {
                 value: Lit::Unit,
                 ty: self.unit,
+                span,
             },
         };
         let name = m
@@ -1547,6 +1644,7 @@ impl<'a> Lowerer<'a> {
                 args,
                 purity: entry.purity,
                 ty,
+                span,
             }
         } else {
             // Unknown method: emit a Y110 diagnostic and lower to Unit so the
@@ -1561,21 +1659,24 @@ impl<'a> Lowerer<'a> {
             TypedExpr::Lit {
                 value: Lit::Unit,
                 ty: self.unit,
+                span,
             }
         }
     }
 
     fn lower_tuple(&mut self, t: &TupleExpr) -> TypedExpr {
+        let span = self.node_span(t.syntax());
         let elements: Vec<TypedExpr> = t.elements().map(|e| self.lower_expr(&e)).collect();
         let tys: Vec<Type> = elements.iter().map(expr_ty).collect();
         let ty = self.db.tuple(tys);
-        TypedExpr::Tuple { elements, ty }
+        TypedExpr::Tuple { elements, ty, span }
     }
 
     /// Lower a `read parser_expression` (§7.1, M6). Analyzes the parser expr
     /// (validate + synthesize type + lower to plan), then produces a `TypedExpr`
     /// carrying the plan index and synthesized result type.
     fn lower_read(&mut self, r: &praxis_ast::ReadExpr) -> TypedExpr {
+        let span = self.node_span(r.syntax());
         let Some(parser_expr) = r.parser_expr() else {
             return self.error_expr();
         };
@@ -1588,6 +1689,7 @@ impl<'a> Lowerer<'a> {
             Some(analysis) => TypedExpr::Read {
                 plan_index: analysis.plan_index,
                 ty: analysis.result_type,
+                span,
             },
             None => self.error_expr(),
         }
@@ -1595,6 +1697,7 @@ impl<'a> Lowerer<'a> {
 
     /// Lower a `parse(text, parser_expression)` call (§7.1, M6).
     fn lower_parse(&mut self, p: &praxis_ast::ParseExpr) -> TypedExpr {
+        let span = self.node_span(p.syntax());
         let text_expr = p
             .text_expr()
             .map(|e| self.lower_expr(&e))
@@ -1615,11 +1718,13 @@ impl<'a> Lowerer<'a> {
                         text: Box::new(text_expr),
                         plan_index: analysis.plan_index,
                         ty: analysis.result_type,
+                        span,
                     },
                     None => TypedExpr::Parse {
                         text: Box::new(text_expr),
                         plan_index: 0,
                         ty,
+                        span,
                     },
                 }
             }
@@ -1627,15 +1732,18 @@ impl<'a> Lowerer<'a> {
                 text: Box::new(text_expr),
                 plan_index: 0,
                 ty,
+                span,
             },
         }
     }
 
     /// A typed expression representing a lowering error (Unit-typed literal).
+    /// No source span is available (this is a synthetic fallback).
     fn error_expr(&self) -> TypedExpr {
         TypedExpr::Lit {
             value: Lit::Unit,
             ty: self.unit,
+            span: (0, 0),
         }
     }
 
@@ -1643,6 +1751,7 @@ impl<'a> Lowerer<'a> {
     /// struct type from the symbol table, pairs each initializer with its field
     /// index, and produces a `TypedExpr::RecordLit`.
     fn lower_record_lit(&mut self, r: &RecordLitExpr) -> TypedExpr {
+        let span = self.node_span(r.syntax());
         let struct_ty = r
             .name()
             .and_then(|p| p.name())
@@ -1672,10 +1781,12 @@ impl<'a> Lowerer<'a> {
                     // the right value).
                     None => {
                         let range = name_tok.text_range();
+                        let span = (u32::from(range.start()), u32::from(range.end()));
                         self.resolve_symbol_at(range)
                             .map(|symbol| TypedExpr::Path {
                                 symbol,
                                 ty: self.symbol_type(symbol),
+                                span,
                             })
                             .unwrap_or_else(|| self.error_expr())
                     }
@@ -1690,12 +1801,14 @@ impl<'a> Lowerer<'a> {
             record_def_id,
             fields,
             ty: struct_ty,
+            span,
         }
     }
 
     /// Lower a `receiver.field` field access (M7, §4.5). Looks up the field's
     /// index and type from the receiver's record type.
     fn lower_field_get(&mut self, f: &FieldExpr) -> TypedExpr {
+        let span = self.node_span(f.syntax());
         let receiver = match f.receiver() {
             Some(r) => self.lower_expr(&r),
             None => return self.error_expr(),
@@ -1723,6 +1836,7 @@ impl<'a> Lowerer<'a> {
             receiver: Box::new(receiver),
             field_idx: field_idx as u32,
             ty: field_ty,
+            span,
         }
     }
 
@@ -1731,6 +1845,7 @@ impl<'a> Lowerer<'a> {
     /// `None` for wildcard) and payload bindings. The MIR builder lowers this to
     /// a tag-compare branch chain.
     fn lower_match(&mut self, m: &praxis_ast::MatchExpr) -> TypedExpr {
+        let span = self.node_span(m.syntax());
         let scrutinee = match m.scrutinee() {
             Some(s) => self.lower_expr(&s),
             None => return self.error_expr(),
@@ -1766,6 +1881,7 @@ impl<'a> Lowerer<'a> {
             scrutinee: Box::new(scrutinee),
             arms,
             ty,
+            span,
         }
     }
 
@@ -1904,6 +2020,50 @@ impl<'a> Lowerer<'a> {
             praxis_types::TypeData::Func { result, .. } => Some(*result),
             _ => None,
         }
+    }
+}
+
+/// The source span `[start, end)` (byte offsets) carried by a typed expression.
+/// Public so the MIR builder can thread each expression's provenance into the
+/// debug-frame locals without re-matching the whole enum. `TypedExpr::Block`
+/// has no top-level span field (it carries the inner block's tail span); this
+/// returns `(0, 0)` for it.
+pub fn expr_span(e: &TypedExpr) -> (u32, u32) {
+    match e {
+        TypedExpr::Lit { span, .. }
+        | TypedExpr::Path { span, .. }
+        | TypedExpr::Bin { span, .. }
+        | TypedExpr::Unary { span, .. }
+        | TypedExpr::Paren { span, .. }
+        | TypedExpr::If { span, .. }
+        | TypedExpr::While { span, .. }
+        | TypedExpr::For { span, .. }
+        | TypedExpr::Loop { span, .. }
+        | TypedExpr::Break { span, .. }
+        | TypedExpr::Continue { span, .. }
+        | TypedExpr::Return { span, .. }
+        | TypedExpr::Call { span, .. }
+        | TypedExpr::MethodCall { span, .. }
+        | TypedExpr::Tuple { span, .. }
+        | TypedExpr::Read { span, .. }
+        | TypedExpr::Parse { span, .. }
+        | TypedExpr::RecordLit { span, .. }
+        | TypedExpr::FieldGet { span, .. }
+        | TypedExpr::EnumVariant { span, .. }
+        | TypedExpr::Match { span, .. }
+        | TypedExpr::Closure { span, .. } => *span,
+        TypedExpr::Block(b) => expr_span(&b.tail),
+    }
+}
+
+/// The source span `[start, end)` (byte offsets) carried by a typed statement.
+/// `TypedStmt::Expr` carries the span on its inner expression.
+pub fn stmt_span(s: &TypedStmt) -> (u32, u32) {
+    match s {
+        TypedStmt::Let { span, .. }
+        | TypedStmt::Var { span, .. }
+        | TypedStmt::Assign { span, .. } => *span,
+        TypedStmt::Expr(e) => expr_span(e),
     }
 }
 
@@ -2049,11 +2209,13 @@ fn map_pattern_scalar(s: PatternScalar) -> praxis_types::ScalarType {
     s
 }
 
-/// A `Unit`-typed literal placeholder (for malformed subtrees).
+/// A `Unit`-typed literal placeholder (for malformed subtrees). No source span
+/// is available (synthetic fallback).
 fn unit_lit(db: &mut TypeDb) -> TypedExpr {
     TypedExpr::Lit {
         value: Lit::Unit,
         ty: db.unit(),
+        span: (0, 0),
     }
 }
 

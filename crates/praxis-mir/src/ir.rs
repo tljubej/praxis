@@ -34,12 +34,38 @@ pub struct Function {
     /// Source-name metadata per local, for fault snapshots (§19 M4 acceptance:
     /// "named locals are available as `GcRef` values in fault snapshots").
     pub debug_names: Vec<Option<String>>,
+    /// The debugger classification per local (user binding vs. compiler temp),
+    /// threaded to the backend so the crash debugger can separate the two in
+    /// its `locals` display and name temps with their materializing expression.
+    /// `Scalar` locals (which the backend never shows) default to `Temp`.
+    pub debug_kinds: Vec<LocalDebugKind>,
+    /// Per-local source span `[start, end)` (byte offsets) for debugger
+    /// provenance — the `@ "expr"` the crash debugger prints for a temp. User
+    /// locals carry their binding's span; temps carry the lowered expression's
+    /// span. `None` for span-less locals (the return slot, scalar scratch).
+    pub debug_spans: Vec<Option<(u32, u32)>>,
     /// The function's source span `[start, end)` as byte offsets into the
     /// program source (§9.3, M10-WS1). Threaded AST → HIR → MIR → backend so
     /// the crash debugger's `source` command can render the faulting function.
     /// `(0, 0)` for synthetic functions with no source (closures get the
     /// literal's span; the `__p_expr` debugger function is span-less).
     pub span: (u32, u32),
+}
+
+/// How a local appears in the crash debugger (§9.4 `locals`).
+///
+/// `User` locals are bindings the programmer wrote (`let x`, params, captures);
+/// they render as `name: Type = value`. `Temp` locals are compiler-generated
+/// intermediates (the hidden slot holding `a+b` in `a+b+c`); they render as
+/// `<tmp#N: Type> @ "expr" = value`. This replaces the old `"<tmp>"` string
+/// placeholder: the split is now structural, not string-based.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalDebugKind {
+    /// A user-written binding, parameter, or capture: has a source name.
+    User,
+    /// A compiler-generated temporary: anonymous, named by the debugger with a
+    /// per-frame index and the expression it materialized.
+    Temp,
 }
 
 /// A local slot.
@@ -201,7 +227,16 @@ pub enum Inst {
     },
     /// Test `pending_fault`; if set, jump to `on_fault`. Inserted after any
     /// faultable operation (checked arith, div/rem, calls).
-    CheckFault { on_fault: BlockId },
+    ///
+    /// `live_roots` are the GC locals live across this point — the backend
+    /// spills them into the debug frame *before* the fault test, so a snapshot
+    /// taken on the fault path (e.g. a div-by-zero) sees their current values
+    /// rather than stale `<uninit>` slots. This makes `CheckFault` a debugger
+    /// safepoint even though it is not a GC safepoint (it allocates nothing).
+    CheckFault {
+        on_fault: BlockId,
+        live_roots: Vec<LocalId>,
+    },
     /// Copy one `Gc` local into another (a move; no allocation).
     MoveGc { dst: LocalId, src: LocalId },
     /// Read a field out of a record `GcRef` into a `Gc` local (M7, §4.5).
@@ -366,11 +401,22 @@ pub struct LocalId(pub u32);
 pub struct BlockId(pub u32);
 
 impl Function {
-    /// Append a new local, returning its id.
-    pub fn new_local(&mut self, kind: LocalKind, ty: Type, debug_name: Option<String>) -> LocalId {
+    /// Append a new local, returning its id. `debug_name`/`debug_kind`/`debug_span`
+    /// are the per-local debugger metadata (name, user-vs-temp classification,
+    /// source span); only meaningful for `Gc` locals (the backend skips others).
+    pub fn new_local(
+        &mut self,
+        kind: LocalKind,
+        ty: Type,
+        debug_name: Option<String>,
+        debug_kind: LocalDebugKind,
+        debug_span: Option<(u32, u32)>,
+    ) -> LocalId {
         let id = LocalId(self.locals.len() as u32);
         self.locals.push(Local { id, kind, ty });
         self.debug_names.push(debug_name);
+        self.debug_kinds.push(debug_kind);
+        self.debug_spans.push(debug_span);
         id
     }
 
@@ -391,6 +437,21 @@ impl Function {
             .get(local.0 as usize)
             .and_then(Option::as_deref)
     }
+
+    /// The debugger classification (user vs. temp) for a local. Defaults to
+    /// `Temp` for locals allocated before the kinds table existed (defensive).
+    pub fn debug_kind(&self, local: LocalId) -> LocalDebugKind {
+        self.debug_kinds
+            .get(local.0 as usize)
+            .copied()
+            .unwrap_or(LocalDebugKind::Temp)
+    }
+
+    /// The source span for a local, if threaded. `None` for span-less locals
+    /// (scalar scratch, the return slot).
+    pub fn debug_span(&self, local: LocalId) -> Option<(u32, u32)> {
+        self.debug_spans.get(local.0 as usize).copied().flatten()
+    }
 }
 
 #[cfg(test)]
@@ -406,15 +467,33 @@ mod tests {
             locals: Vec::new(),
             blocks: Vec::new(),
             debug_names: Vec::new(),
+            debug_kinds: Vec::new(),
+            debug_spans: Vec::new(),
             span: (0, 0),
         };
-        let a = f.new_local(LocalKind::Gc, Type(0), Some("x".into()));
-        let b = f.new_local(LocalKind::Scalar(ScalarKind::Int), Type(0), None);
+        let a = f.new_local(
+            LocalKind::Gc,
+            Type(0),
+            Some("x".into()),
+            LocalDebugKind::User,
+            Some((1, 5)),
+        );
+        let b = f.new_local(
+            LocalKind::Scalar(ScalarKind::Int),
+            Type(0),
+            None,
+            LocalDebugKind::Temp,
+            None,
+        );
         let blk = f.new_block();
         assert_eq!(a, LocalId(0));
         assert_eq!(b, LocalId(1));
         assert_eq!(blk, BlockId(0));
         assert_eq!(f.debug_name(a), Some("x"));
         assert_eq!(f.debug_name(b), None);
+        assert_eq!(f.debug_kind(a), LocalDebugKind::User);
+        assert_eq!(f.debug_kind(b), LocalDebugKind::Temp);
+        assert_eq!(f.debug_span(a), Some((1, 5)));
+        assert_eq!(f.debug_span(b), None);
     }
 }

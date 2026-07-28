@@ -1033,7 +1033,10 @@ fn lower_inst<M: Module>(
             )?;
             builder.def_var(vars[dst.0 as usize], result);
         }
-        Inst::CheckFault { on_fault } => {
+        Inst::CheckFault {
+            on_fault,
+            live_roots,
+        } => {
             // Divert to the fault block when a fault is pending (§10.4). The
             // faultable op just before this set `pending_fault` (or a callee
             // did); `praxis_check_fault` returns 1 iff a fault is pending. If so,
@@ -1047,6 +1050,14 @@ fn lower_inst<M: Module>(
             // caller receives the Unit sentinel from a child and would otherwise
             // feed it to an arithmetic wrapper before the host can observe the
             // fault). Branching here keeps every operand on the fault path valid.
+            //
+            // Spill live roots into the debug frame *before* the fault test:
+            // CheckFault is a debugger (not GC) safepoint. Without this, a
+            // snapshot taken on the fault path sees `<uninit>` for operands
+            // computed since the last GC safepoint (e.g. the `0` divisor in
+            // `x / 0`). The faulting op's own result is genuinely never
+            // produced (the fault happens during it), so it stays `<uninit>`.
+            spill.emit_spill(builder, live_roots, vars);
             let pending = call_check_fault(builder, ctx_val, module, imports)?;
             let fault_block = blocks[on_fault.0 as usize];
             let fallthrough = builder.create_block();
@@ -1529,35 +1540,47 @@ fn tuple_schema_for(
 /// Build the `&'static [DebugLocalMeta]` for a function's `Gc` locals, in the
 /// same order as the `gc_slot` map iterates them (so a local's shadow-slot
 /// index doubles as its debug-local index). Each entry carries the source name
-/// (embedded as `&'static str`), a per-local symbol-id placeholder, and the
-/// static type descriptor resolved from the MIR local's `Type` (§9.3, M10-WS2).
+/// (embedded as `&'static str`, empty for temps), a per-local symbol-id
+/// placeholder, the static type descriptor resolved from the MIR local's `Type`
+/// (§9.3, M10-WS2), the user-vs-temp classification, and the source span.
 ///
 /// The symbol id is a best-effort placeholder: MIR locals do not yet carry the
 /// HIR `SymbolId`, so we use the local's position. This is sufficient for the
-/// crash debugger to *display* locals (the source name disambiguates in the
-/// common case); full shadow-disambiguation by real symbol id is an M10b
-/// refinement once MIR threads the id.
+/// crash debugger to *display* locals; full shadow-disambiguation by real
+/// symbol id is an M10b refinement once MIR threads the id.
+///
+/// Temps no longer get the old `"<tmp>"` name placeholder: the debugger now
+/// classifies them structurally via `kind` and renders them as
+/// `<tmp#N: Type> @ "expr"` using the symbol id and span threaded here.
 fn build_debug_local_metas(
     mir: &MirFunction,
     db: &mut praxis_types::TypeDb,
 ) -> &'static [DebugLocalMeta] {
+    use praxis_mir::ir::LocalDebugKind;
     let mut metas: Vec<DebugLocalMeta> = Vec::new();
     let mut symbol_id = 0u32;
     for local in &mir.locals {
         if local.kind != LocalKind::Gc {
             continue;
         }
-        // The source name; anonymous temps get "<tmp>".
+        // The source name. User locals carry their written name; temps carry an
+        // empty name (the debugger names them `<tmp#N>` via the symbol id).
         let name: &'static str = mir
             .debug_name(local.id)
             .map(|n| Box::leak(n.to_string().into_boxed_str()) as &'static str)
-            .unwrap_or("<tmp>");
+            .unwrap_or("");
         // Deep-resolve the local's type before capturing its id, so the id
         // points at a fully-concrete type (e.g. Vec[Int], not Vec[?T]). The
         // element/param vars of a composite are left untouched by `follow`
         // (top-level only); `deep_resolve` recurses and interns a resolved
         // copy. Idempotent on already-resolved types. (M10b-WS4)
         let resolved_ty = db.deep_resolve(local.ty);
+        // Thread the user-vs-temp classification and source span from the MIR.
+        let kind = match mir.debug_kind(local.id) {
+            LocalDebugKind::User => praxis_runtime::LOCAL_KIND_USER,
+            LocalDebugKind::Temp => praxis_runtime::LOCAL_KIND_TEMP,
+        };
+        let (span_start, span_end) = mir.debug_span(local.id).unwrap_or((0, 0));
         metas.push(DebugLocalMeta {
             source_name: name.as_ptr(),
             name_len: name.len() as u32,
@@ -1567,6 +1590,9 @@ fn build_debug_local_metas(
             // debugger reconstruct the exact local type (incl. collection
             // element types / record shapes) the runtime `descriptor` loses.
             type_id: resolved_ty.0,
+            kind,
+            span_start,
+            span_end,
         });
         symbol_id += 1;
     }

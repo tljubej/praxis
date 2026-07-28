@@ -48,7 +48,7 @@ pub use context::{
     MAX_RECURSION_DEPTH,
 };
 pub use crash_snapshot::{CrashSnapshot, SnapshotFrame, SnapshotSlot};
-pub use debug::DebugLocalMeta;
+pub use debug::{DebugLocalMeta, LOCAL_KIND_TEMP, LOCAL_KIND_USER};
 pub use descriptor::{
     DropFn, DynamicHasher, EqualsFn, FormatFn, HashFn, StructHasher, TraceFn, Tracer,
     TypeDescriptor, TypeId,

@@ -16,9 +16,19 @@ use std::ptr::NonNull;
 use crate::context::{DebugFrame, DebugLocal, RuntimeContext};
 use crate::gc::GcRef;
 
+/// How a local appears in the crash debugger (§9.4 `locals`). Mirrors
+/// [`praxis_mir::ir::LocalDebugKind`], flattened to a `u8` for the FFI
+/// boundary: `0` = a user-written binding, `1` = a compiler temp. Stored on
+/// each [`DebugLocalMeta`] so the debugger can separate the two in its display
+/// and name temps with their materializing expression instead of the old
+/// `"<tmp>"` placeholder.
+pub const LOCAL_KIND_USER: u8 = 0;
+pub const LOCAL_KIND_TEMP: u8 = 1;
+
 /// One local's metadata at frame construction: the source name (ptr + len),
-/// the compiler-assigned symbol id, the local's static type descriptor, and the
-/// full static `Type` id. Flattened for FFI.
+/// the compiler-assigned symbol id, the local's static type descriptor, the
+/// full static `Type` id, the user-vs-temp classification, and the source span.
+/// Flattened for FFI.
 #[repr(C)]
 pub struct DebugLocalMeta {
     pub source_name: *const u8,
@@ -31,6 +41,16 @@ pub struct DebugLocalMeta {
     /// Lets the debugger reconstruct the exact local type (incl. collection
     /// element types / record shapes) the runtime `descriptor` alone loses.
     pub type_id: u32,
+    /// The debugger classification: `LOCAL_KIND_USER` (a binding the programmer
+    /// wrote) or `LOCAL_KIND_TEMP` (a compiler intermediate). Replaces the old
+    /// `"<tmp>"` string placeholder — the split is now structural.
+    pub kind: u8,
+    /// The local's source span `[start, end)` (byte offsets into program
+    /// source) for debugger provenance. User locals carry their binding's span;
+    /// temps carry the expression they materialize (rendered as `@ "expr"`).
+    /// `(0, 0)` means "no span" (the return slot, span-less captures).
+    pub span_start: u32,
+    pub span_end: u32,
 }
 
 /// Allocate a debug frame for `func_name` with `local_count` local slots, chain
@@ -72,6 +92,9 @@ pub unsafe extern "C" fn praxis_push_debug_frame(
                 descriptor: m.descriptor,
                 value: GcRef::null_sentinel_ref(),
                 type_id: m.type_id,
+                kind: m.kind,
+                span_start: m.span_start,
+                span_end: m.span_end,
             })
             .collect()
     };
@@ -211,6 +234,21 @@ impl DebugLocal {
             .into_owned()
         }
     }
+
+    /// True iff this local is a user-written binding (a `let`/`var`/param/
+    /// capture), as opposed to a compiler-generated temporary.
+    pub fn is_user(&self) -> bool {
+        self.kind == LOCAL_KIND_USER
+    }
+
+    /// The local's source span `[start, end)` (byte offsets into program
+    /// source), or `None` if none was threaded. `None` is signalled by the
+    /// `(0, 0)` sentinel (the zero-width span at offset 0 is not a meaningful
+    /// program location for a local that exists).
+    pub fn span(&self) -> Option<(u32, u32)> {
+        let s = (self.span_start, self.span_end);
+        (s != (0, 0)).then_some(s)
+    }
 }
 
 impl GcRef {
@@ -273,6 +311,9 @@ mod tests {
                 symbol_id: 10,
                 descriptor: crate::scalars::INT,
                 type_id: 1,
+                kind: LOCAL_KIND_USER,
+                span_start: 5,
+                span_end: 6,
             },
             DebugLocalMeta {
                 source_name: name_a.as_ptr(),
@@ -280,6 +321,9 @@ mod tests {
                 symbol_id: 20,
                 descriptor: crate::scalars::INT,
                 type_id: 1,
+                kind: LOCAL_KIND_USER,
+                span_start: 20,
+                span_end: 21,
             },
         ];
         // SAFETY: ctx wired; metas is valid.
@@ -299,6 +343,11 @@ mod tests {
             // M10-WS1b: the full static Type id is carried through.
             assert_eq!(locals[0].type_id, 1);
             assert_eq!(locals[1].type_id, 1);
+            // Debugger classification + span are carried through (replaces the
+            // old `"<tmp>"` string placeholder; the renderer partitions on this).
+            assert!(locals[0].is_user());
+            assert_eq!(locals[0].span(), Some((5, 6)));
+            assert_eq!(locals[1].span(), Some((20, 21)));
             praxis_pop_debug_frame(ctx, frame);
         }
         unsafe { drop_ctx(ctx) };

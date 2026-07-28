@@ -244,13 +244,20 @@ fn apply_forward(live: &mut BTreeSet<LocalId>, inst: &Inst) {
 
 /// Returns a mutable reference to an instruction's `live_roots` slot iff it is
 /// a safepoint.
+///
+/// `CheckFault` is included: it is not a GC safepoint (it allocates nothing),
+/// but it is the point at which a fault may divert control, so the debugger
+/// needs the live values spilled *here* to render a faithful snapshot (without
+/// it, a div-by-zero's operands show as `<uninit>` because no GC safepoint ran
+/// between their allocation and the fault).
 fn safepoint_roots_slot(inst: &mut Inst) -> Option<&mut Vec<LocalId>> {
     match inst {
         Inst::Alloc { live_roots, .. }
         | Inst::Materialize { live_roots, .. }
         | Inst::Call { live_roots, .. }
         | Inst::CallIndirect { live_roots, .. }
-        | Inst::StructEq { live_roots, .. } => Some(live_roots),
+        | Inst::StructEq { live_roots, .. }
+        | Inst::CheckFault { live_roots, .. } => Some(live_roots),
         _ => None,
     }
 }
@@ -258,14 +265,28 @@ fn safepoint_roots_slot(inst: &mut Inst) -> Option<&mut Vec<LocalId>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Block, Function, Inst, IntBinOp, LocalId, LocalKind, ScalarKind, Terminator};
+    use crate::ir::{
+        Block, Function, Inst, IntBinOp, LocalDebugKind, LocalId, LocalKind, ScalarKind, Terminator,
+    };
     use praxis_types::{Type, TypeDb};
 
     fn gc_local(func: &mut Function, name: &str) -> LocalId {
-        func.new_local(LocalKind::Gc, Type(0), Some(name.into()))
+        func.new_local(
+            LocalKind::Gc,
+            Type(0),
+            Some(name.into()),
+            LocalDebugKind::User,
+            None,
+        )
     }
     fn int_local(func: &mut Function) -> LocalId {
-        func.new_local(LocalKind::Scalar(ScalarKind::Int), Type(0), None)
+        func.new_local(
+            LocalKind::Scalar(ScalarKind::Int),
+            Type(0),
+            None,
+            LocalDebugKind::Temp,
+            None,
+        )
     }
 
     #[test]
@@ -282,6 +303,8 @@ mod tests {
             locals: Vec::new(),
             blocks: Vec::new(),
             debug_names: Vec::new(),
+            debug_kinds: Vec::new(),
+            debug_spans: Vec::new(),
             span: (0, 0),
         };
         let ret = gc_local(&mut f, "ret");
@@ -346,6 +369,8 @@ mod tests {
             locals: Vec::new(),
             blocks: Vec::new(),
             debug_names: Vec::new(),
+            debug_kinds: Vec::new(),
+            debug_spans: Vec::new(),
             span: (0, 0),
         };
         let _blk: Block = Block {

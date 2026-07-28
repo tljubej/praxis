@@ -187,6 +187,7 @@ mod tests {
         TypedExpr::Lit {
             value: Lit::Int(1),
             ty: db.int(),
+            span: (0, 0),
         }
     }
 
@@ -196,6 +197,7 @@ mod tests {
             lhs: Box::new(lhs),
             rhs: Box::new(rhs),
             ty: db.int(),
+            span: (0, 0),
         }
     }
 
@@ -206,6 +208,7 @@ mod tests {
         let path = TypedExpr::Path {
             symbol: praxis_hir::SymbolId(0),
             ty: db.int(),
+            span: (0, 0),
         };
         assert!(assert_read_only(&path).is_ok());
     }
@@ -217,6 +220,7 @@ mod tests {
         let two = TypedExpr::Lit {
             value: Lit::Int(2),
             ty: db.int(),
+            span: (0, 0),
         };
         let expr = bin_int(&mut db, one, two);
         assert!(assert_read_only(&expr).is_ok());
@@ -228,6 +232,7 @@ mod tests {
         let receiver = TypedExpr::Path {
             symbol: praxis_hir::SymbolId(0),
             ty: db.int(),
+            span: (0, 0),
         };
         let arg = lit_int(&mut db);
         let call = TypedExpr::MethodCall {
@@ -237,6 +242,7 @@ mod tests {
             args: vec![arg],
             purity: Purity::Impure,
             ty: db.unit(),
+            span: (0, 0),
         };
         let err = assert_read_only(&call).unwrap_err();
         assert!(err.contains("impure"), "{err}");
@@ -249,6 +255,7 @@ mod tests {
         let receiver = TypedExpr::Path {
             symbol: praxis_hir::SymbolId(0),
             ty: db.int(),
+            span: (0, 0),
         };
         let call = TypedExpr::MethodCall {
             receiver: Box::new(receiver),
@@ -257,6 +264,7 @@ mod tests {
             args: vec![],
             purity: Purity::Pure,
             ty: db.int(),
+            span: (0, 0),
         };
         assert!(assert_read_only(&call).is_ok());
     }
@@ -269,6 +277,7 @@ mod tests {
         let receiver = TypedExpr::Path {
             symbol: praxis_hir::SymbolId(0),
             ty: db.int(),
+            span: (0, 0),
         };
         let impure = TypedExpr::MethodCall {
             receiver: Box::new(receiver),
@@ -277,6 +286,7 @@ mod tests {
             args: vec![lit_int(&mut db)],
             purity: Purity::Impure,
             ty: db.unit(),
+            span: (0, 0),
         };
         let expr = bin_int(&mut db, one, impure);
         assert!(assert_read_only(&expr).is_err());
@@ -288,12 +298,14 @@ mod tests {
         let read = TypedExpr::Read {
             plan_index: 0,
             ty: db.int(),
+            span: (0, 0),
         };
         assert!(assert_read_only(&read).unwrap_err().contains("read"));
         let parse = TypedExpr::Parse {
             text: Box::new(lit_int(&mut db)),
             plan_index: 0,
             ty: db.int(),
+            span: (0, 0),
         };
         assert!(assert_read_only(&parse).unwrap_err().contains("parse"));
     }
@@ -310,10 +322,12 @@ mod tests {
                 tail: TypedExpr::Lit {
                     value: Lit::Int(0),
                     ty,
+                    span: (0, 0),
                 },
                 ty,
             }),
             ty,
+            span: (0, 0),
         };
         assert!(assert_read_only(&loop_).unwrap_err().contains("loop"));
     }

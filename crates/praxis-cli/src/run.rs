@@ -177,13 +177,17 @@ pub fn run(
             // frame) degrades to the noninteractive render.
             if let Some(snapshot) = runtime.take_crash_snapshot() {
                 // Show the fault line + §7.11 detail before the prompt, so the
-                // user sees what happened (§9.4's banner).
+                // user sees what happened (§9.4's banner). Enrich the locals
+                // render with the live TypeDb + source text so temps show their
+                // type and materializing expression.
+                let ctx = praxis_debugger::render::RenderCtx::new(&analysis.db, &text);
                 praxis_debugger::render::render_noninteractive(
                     &mut std::io::stderr(),
                     kind,
                     Some(&snapshot),
                     Some(runtime.parse_detail()),
                     color.palette(),
+                    &ctx,
                 )?;
                 // M10b: hand the live compile/run state to the REPL as a
                 // `DebugSession`, so `p EXPR`/`source`/`restart`/`reload` can
@@ -210,22 +214,26 @@ pub fn run(
                 let mut stderr = stderr.lock();
                 repl.run(&mut stdin, &mut stderr);
             } else {
+                let ctx = praxis_debugger::render::RenderCtx::new(&analysis.db, &text);
                 praxis_debugger::render::render_noninteractive(
                     &mut std::io::stderr(),
                     kind,
                     None,
                     Some(runtime.parse_detail()),
                     color.palette(),
+                    &ctx,
                 )?;
                 drop(jit);
             }
         } else {
+            let ctx = praxis_debugger::render::RenderCtx::new(&analysis.db, &text);
             praxis_debugger::render::render_noninteractive(
                 &mut std::io::stderr(),
                 kind,
                 runtime.crash_snapshot(),
                 Some(runtime.parse_detail()),
                 color.palette(),
+                &ctx,
             )?;
             drop(jit);
         }

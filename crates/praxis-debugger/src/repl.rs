@@ -24,7 +24,7 @@ use praxis_runtime::CrashSnapshot;
 
 use crate::render::{
     render_backtrace, render_frame_locals, render_input_context, render_parser_context,
-    render_source_span,
+    render_source_span, RenderCtx,
 };
 use crate::session::DebugSession;
 
@@ -263,7 +263,11 @@ impl Repl {
                 }
             }
             "locals" => {
-                let _ = render_frame_locals(out, &self.snapshot, self.selected, usize::MAX);
+                let ctx = match self.session.as_ref() {
+                    Some(s) => RenderCtx::new(&s.analysis.db, &s.source_text),
+                    None => RenderCtx::bare(),
+                };
+                let _ = render_frame_locals(out, &self.snapshot, self.selected, usize::MAX, &ctx);
             }
             "help" | "?" => {
                 let _ = writeln!(out, "{}", HELP_TEXT);

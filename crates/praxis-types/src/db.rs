@@ -63,6 +63,23 @@ impl TypeDb {
         self.level
     }
 
+    /// The number of type slots interned. A `Type(n)` is valid iff `n` indexes a
+    /// real slot (i.e. `(n as usize) < len()`); the debugger uses this to guard
+    /// against the `0` "unknown" sentinel and out-of-range ids before rendering
+    /// a local's type.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// True iff no type slots have been interned.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
     /// Push the binding level one deeper. Returns the previous level so the caller
     /// can restore it (`db.set_level(prev)`) when the scope ends.
     #[must_use]

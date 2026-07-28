@@ -222,10 +222,18 @@ fn m10ws4_noninteractive_renders_backtrace_and_locals() {
     assert!(stderr.contains("Backtrace:"), "backtrace header present");
     assert!(stderr.contains("#0"), "backtrace numbers frames");
     assert!(stderr.contains("main"), "frame name shown");
-    // The named local `xs` with its Vec value renders.
+    // The named local `xs` with its Vec value renders (now in the `locals:`
+    // section with a type column: `xs: <type> = [11, 22]`).
     assert!(
-        stderr.contains("xs = [11, 22]"),
+        stderr.contains("xs:") && stderr.contains("[11, 22]"),
         "named local renders with value: {stderr}"
+    );
+    // Temps are now in a separate `temps:` section, annotated with the
+    // expression they materialized (`@ "..."`).
+    assert!(stderr.contains("temps:"), "temps section present: {stderr}");
+    assert!(
+        stderr.contains("xs.get(99)"),
+        "faulting temp shows its materializing expression: {stderr}"
     );
 }
 
@@ -297,8 +305,65 @@ fn m10ws5_repl_bt_and_locals_and_quit() {
     assert!(out.contains("Praxis crash>"), "REPL prompt shown: {out}");
     assert!(out.contains("#0"), "bt ran: {out}");
     assert!(out.contains("main"), "frame name shown: {out}");
-    // The named local `xs = [11, 22]` renders in `locals`.
-    assert!(out.contains("xs = [11, 22]"), "locals ran: {out}");
+    // The named local `xs: <type> = [11, 22]` renders in the `locals:` section.
+    assert!(
+        out.contains("xs:") && out.contains("[11, 22]"),
+        "locals ran: {out}"
+    );
+    assert!(out.contains("locals:"), "locals section header: {out}");
+    assert!(out.contains("temps:"), "temps section header: {out}");
+}
+
+#[test]
+fn m11_locals_split_users_and_temps_with_types() {
+    // A program with three `let` locals and a binop chain that overflows. The
+    // `locals` display must: (1) separate user bindings into a `locals:` section
+    // with a type column, (2) list compiler temps in a `temps:` section with a
+    // per-frame id and type, and (3) keep the user's variables visible rather
+    // than buried among temps.
+    let (code, out) = run_repl_with_cmds("debug_temps.px", "locals\nquit\n");
+    assert_eq!(code, 1, "overflow faults and exits 1 after REPL quits");
+    // User locals render as `name: Type = value`.
+    assert!(out.contains("a: Int = 10"), "user local a with type: {out}");
+    assert!(out.contains("b: Int = 20"), "user local b with type: {out}");
+    assert!(out.contains("c: Int = 30"), "user local c with type: {out}");
+    // Temps render as `<tmp#N: Type>` in their own section.
+    assert!(out.contains("temps:"), "temps section header: {out}");
+    assert!(
+        out.contains("<tmp#") && out.contains(": Int>"),
+        "temps tagged with id and type: {out}"
+    );
+    // Literal and binop materialization temps show their provenance too — not
+    // just call results — so an opaque `<tmp>` is never left unexplained.
+    assert!(
+        out.contains("@ \"10\""),
+        "literal temp shows its source: {out}"
+    );
+    assert!(
+        out.contains("@ \"a + b\""),
+        "binop temp shows its source: {out}"
+    );
+    assert!(
+        out.contains("@ \"a + b + c + 9223372036854775807\""),
+        "faulting binop temp shows its source: {out}"
+    );
+}
+
+#[test]
+fn m11_temp_provenance_shows_materializing_expression() {
+    // The faulting method-call temp must show the expression it materialized
+    // (`@ "xs.get(99)"`), so the user can tell *what* a temp is rather than
+    // staring at an opaque `<tmp>`.
+    let (code, out) = run_repl_with_cmds("debug_backtrace.px", "locals\nquit\n");
+    assert_eq!(code, 1);
+    assert!(
+        out.contains("@ \"xs.get(99)\""),
+        "faulting temp shows its materializing expression: {out}"
+    );
+    assert!(
+        out.contains("@ \"xs.push(11)\""),
+        "push temp shows its expression too: {out}"
+    );
 }
 
 #[test]
