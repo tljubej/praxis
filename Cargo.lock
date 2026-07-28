@@ -610,6 +610,7 @@ dependencies = [
  "praxis-parser",
  "praxis-runtime",
  "praxis-source",
+ "praxis-stdlib",
  "praxis-test-support",
  "praxis-types",
  "thiserror",
@@ -698,6 +699,7 @@ dependencies = [
  "bumpalo",
  "praxis-input-parser",
  "praxis-source",
+ "praxis-stdlib",
 ]
 
 [[package]]
