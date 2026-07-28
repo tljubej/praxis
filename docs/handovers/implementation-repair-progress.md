@@ -16,16 +16,18 @@ Update this file at the end of every stage.
 | S3 — ABI manifest, MIR representation, fault values | **done** | `8a30db1`, `7075017`, `91b64c1`, `1f7eca7` |
 | S4 — Object layout and heap provenance | **done** | `dfe42b6` |
 | S5 — Root-set completeness, native RAII roots | **done** | `7911337` |
-| S6 … S21 | not started | |
+| S6 — Allocation pacing, effect metadata, heap lifecycle | **part done** — RT-03, RT-05 and RT-04's reset half closed; P0-08b, P0-08c, RT-01, RT-02 remain | `7182d56` |
+| S7 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10. It fell out of S1.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1004 passed, 0 failed, 130 ignored**. `just ci` is green.
+Now: **1008 passed, 0 failed, 128 ignored**. `just ci` is green.
 
-Nineteen of the audit's ignored regressions are un-ignored and passing. The
-seven added this session (S3's and S5's remaining exit criteria):
+Twenty-one of the audit's ignored regressions are un-ignored and passing. The
+nine added this session (S3's and S5's remaining exit criteria, and two of
+S6's):
 
 | Test | File |
 |---|---|
@@ -36,6 +38,8 @@ seven added this session (S3's and S5's remaining exit criteria):
 | `automatic_gc_roots_parse_failure_partial_values` | `praxis-runtime/src/abi.rs` |
 | `automatic_gc_roots_runtime_owned_crash_snapshots` | `praxis-runtime/src/abi.rs` |
 | `nested_allocating_helpers_root_intermediate_results` | `praxis-runtime/src/abi.rs` |
+| `bool_and_unit_abi_allocations_reuse_runtime_singletons` | `praxis-runtime/src/abi.rs` |
+| `reset_restores_collection_pacing` | `praxis-runtime/src/heap.rs` |
 
 Three of these were rewritten rather than merely un-ignored, each checked
 against the unfixed code first so it is a real gate:
@@ -149,9 +153,14 @@ accessors and their 26 call sites. If you add a wrapper that needs one, open a
 scope — that is the point, not an inconvenience: the old `&'static mut` said
 the payload outlives the program.
 
-**`ctx.native_roots` is a new `RuntimeContext` field** (appended, so
-generated-code offsets are unchanged) and **`RUNTIME_ABI_VERSION` /
-`COMPILER_EXPECTED_ABI_VERSION` are 9.**
+**`RuntimeContext` gained three fields** — `native_roots` (S5), then `true_ref`
+and `false_ref` (S6) — all appended, so generated-code offsets are unchanged.
+**`RUNTIME_ABI_VERSION` / `COMPILER_EXPECTED_ABI_VERSION` are 10.**
+
+**`praxis_alloc_bool` / `praxis_alloc_unit` return cached singletons** off the
+context and allocate nothing. **`Heap::reset` resets the pacing counter and
+threshold.** **`Runtime::heap_mut` is gone** — there is no safe route to
+`&mut Heap` from a `Runtime`, which is what made `Heap::reset` dangerous.
 
 **Automatic collection now happens with no generated frame on the stack.** That
 is the whole point of P0-06, and it is the thing most likely to surprise: any
@@ -300,22 +309,48 @@ re-deriving it.
 
 ## 4. Where to start
 
-**S6** (weight 27): allocation pacing, effect metadata, heap lifecycle —
-P0-08b, P0-08c, RT-01 … RT-05. S5 was its hard barrier and is done, so H2 no
-longer binds.
+**Finish S6.** Four findings remain, and the first needs a decision.
 
-- **P0-08b**: 14 wrappers gc-allocate without calling `maybe_collect`. The
-  manifest is the intent — make the wrappers match the `Effect` rows, not the
-  reverse (see §3's effect-classification note). The durable form is F7's
-  `#[must_use] Safepoint` token on `Heap::alloc_with`: it can only be minted
-  from a `RuntimeRoots`, so "allocate without pacing" stops being writable.
-- **H7 binds**: RT-01's free list must not land before S4's sweep poisoning —
-  which it has, so this is satisfied; re-read it anyway before reusing storage.
-- **H8 binds**: RT-02's `Heap` `Drop` needs the snapshot-ownership audit in the
-  same change. `take_crash_snapshot` has callers in `praxis-cli/src/run.rs` and
-  `praxis-debugger/src/repl.rs`.
-- RT-05 is "delete `Runtime::heap_mut().reset()`", not a live blocker.
-- One ABI bump for the stage if RT-03 (`true_ref`/`false_ref`) lands (H17).
+- **P0-08b** (14 wrappers gc-allocate without calling `maybe_collect`). The
+  manifest is the intent — make the wrappers match their `Effect` rows, not the
+  reverse (see the effect-classification note below). **The durable form has an
+  unresolved conflict.** F7's `#[must_use] Safepoint` token is minted by
+  `RuntimeRoots::pace()`, which performs the `maybe_collect`, and
+  `Heap::alloc_with(sp, …)` then cannot be called without one — "allocate
+  without pacing" stops being writable. But `Heap::alloc*` is also the parser
+  interpreter's allocator (`heap_ref(ctx).alloc*` throughout
+  `praxis-runtime/src/parser.rs`), and requiring a token there makes the parser
+  pace — which is IPR-14, and H1 forbids it until the parser's intermediates
+  are rooted (S20). Three ways out, in preference order:
+  1. Land IPR-14's `NativeScope`s in `parser.rs` *first* (out of stage order),
+     then the token applies everywhere with no escape hatch.
+  2. Ship the token with a `Heap::alloc_unpaced` back door used only by
+     `parser.rs`, documented as S20's remaining work. Honest, but it is an
+     escape hatch and someone will reach for it.
+  3. Do P0-08b as "add `maybe_collect` to the 14 wrappers" and defer the token.
+     Closes the finding, leaves the invariant unenforced.
+- **RT-01** (free-list reuse of swept storage): `sweep` finalizes and
+  unregisters, but bumpalo cannot reuse individual blocks, so a bounded
+  allocate/collect cycle grows the arena forever. A layout-keyed free list in
+  `Heap` (push the block in `sweep` after `poison`, pop it in `alloc_raw`) is
+  what `repeated_collection_reuses_dead_object_storage` measures. H7's
+  precondition — sweep poisoning — landed in S4.
+- **RT-02** (`Heap` `Drop`): needs H8's snapshot-ownership audit in the same
+  change. `take_crash_snapshot` has callers in `praxis-cli/src/run.rs:193` and
+  `praxis-debugger/src/repl.rs:149`; both take the snapshot *out* of the
+  runtime, so a `Drop` that finalizes live payloads makes any `GcRef` they still
+  hold a visible use-after-free. Gated by
+  `dropping_heap_finalizes_live_owned_payloads`.
+- **P0-08c**: a build-time assert that the effect table covers every symbol.
+  `MethodEntry.allocates` is already deleted (F4).
+- **RT-04's other half** is untouched and has no gating test: pacing counts the
+  fixed `[header|payload]` layout but not the `Box<str>` / `Vec` / `HashMap`
+  backing allocations a payload owns, so a Text-heavy program under-reports its
+  pressure by most of its footprint. It also still doubles the threshold on an
+  *explicit* collection, not just a paced one.
+- The stage's one ABI bump is spent (10, for RT-03). Anything further in S6
+  that changes a `#[repr(C)]` type read by generated code should go with it in
+  a single further bump.
 
 Then **S7** (weight 23): descriptor totality (P0-11), typed collection
 construction, fault representation. Note P0-11 is what makes the `Known` arm of
@@ -328,10 +363,13 @@ Re-read §6 of the plan first. The hazards that still bind: **H3**, **H7**,
 
 ## 5. Design decisions still open
 
-None have been answered. Three block a stage outright (D1, D3, D5).
+None have been answered. Three block a stage outright (D1, D3, D5). **D14 is
+new** — it fell out of S5 and blocks the durable form of P0-08b; §4 spells out
+the three options.
 
 | | Decision | Blocks |
 |---|---|---|
+| D14 | Whether the parser interpreter gets its `NativeScope`s (IPR-14) before P0-08b's `Safepoint` token, or the token ships with an un-paced back door for it | S6 |
 | D9 | What the JIT does when `descriptor_for_type` returns `Err` — diagnose, or fall back and reintroduce the bug | S7 |
 | D3 | NaN ordering, and whether Text/tuples/records/collections are orderable at all. **This is what `TypeDescriptor::compare` is waiting for** | S10, blocking P0-12 |
 | D7 | After `_` lexes as `UNDERSCORE`, is it still legal in `let _ = f()`, `fn g(_)`, `\|_\| 0`? | S12 |
