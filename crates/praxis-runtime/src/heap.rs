@@ -67,6 +67,55 @@ pub struct Heap {
     /// Doubled after each collection so the heap grows geometrically (amortized
     /// O(1) allocations per collection), a standard GC pacing heuristic.
     collect_threshold: RefCell<usize>,
+    /// Swept blocks, keyed by the exact `[header|payload]` layout they were laid
+    /// out with, ready to be handed back out (RT-01).
+    ///
+    /// A `bumpalo::Bump` can only reclaim *everything* — it has no route to
+    /// return one block — so sweep finalized and unregistered a dead object but
+    /// its bytes stayed spent. A program that allocated and collected a bounded
+    /// working set in a loop grew the arena forever while `live_count` returned
+    /// to zero each cycle.
+    ///
+    /// Keying on the whole layout rather than on a descriptor is what makes
+    /// handing a block back sound: an exact `(size, align)` match means the
+    /// reused storage is large enough and correctly aligned for whatever the
+    /// next allocation puts there, whoever allocated it first.
+    free: RefCell<std::collections::HashMap<BlockLayout, Vec<NonNull<u8>>>>,
+}
+
+/// The size and alignment of one whole `[header|payload]` allocation — the
+/// free-list key. Not the payload's own layout: the payload's offset within the
+/// block is recomputed and re-recorded on every reuse, so two descriptors that
+/// split the same total differently still share a block.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct BlockLayout {
+    size: usize,
+    align: usize,
+}
+
+impl BlockLayout {
+    /// The block `descriptor`'s objects occupy, and where their payload starts
+    /// within it. The single calculation both [`Heap::alloc_raw`] and
+    /// [`Heap::sweep`] read, so a block can only be filed under the layout it
+    /// actually has.
+    ///
+    /// # Panics
+    /// Panics if the payload alignment exceeds what a `GcHeader` can record, or
+    /// if the total size overflows.
+    fn of(descriptor: &TypeDescriptor) -> (usize, BlockLayout) {
+        let payload_align = descriptor.align();
+        let payload_offset = GcHeader::payload_offset_for(payload_align);
+        let size = payload_offset
+            .checked_add(descriptor.size())
+            .expect("allocation size overflow");
+        let align = std::mem::align_of::<GcHeader>().max(payload_align);
+        (payload_offset, BlockLayout { size, align })
+    }
+
+    /// This block as a [`Layout`], for the arena.
+    fn layout(self) -> Layout {
+        Layout::from_size_align(self.size, self.align).expect("invalid layout")
+    }
 }
 
 /// The initial collection threshold (bytes). Small enough that the first
@@ -97,6 +146,7 @@ impl Heap {
             live: RefCell::new(Vec::new()),
             bytes_since_collect: RefCell::new(0),
             collect_threshold: RefCell::new(INITIAL_COLLECT_THRESHOLD),
+            free: RefCell::new(std::collections::HashMap::new()),
         }
     }
 
@@ -278,6 +328,9 @@ impl Heap {
     /// The shared low-level allocator: lay out `[GcHeader | payload]`, run `init`
     /// on the payload, register the header in `live`.
     ///
+    /// Storage comes from the free list of swept blocks when one of the exact
+    /// layout is available, and from the arena otherwise (RT-01).
+    ///
     /// # Safety
     /// `init` must fully initialize `descriptor.size` bytes of the payload and
     /// the bytes must be valid as the descriptor's payload type thereafter.
@@ -286,30 +339,32 @@ impl Heap {
         descriptor: &'static TypeDescriptor,
         init: impl FnOnce(*mut u8),
     ) -> GcRef {
-        let header_align = std::mem::align_of::<GcHeader>();
-        let payload_size = descriptor.size();
-        let payload_align = descriptor.align();
-
-        // The allocation must satisfy both header and payload alignment. Where
-        // the payload starts is `GcHeader::payload_offset_for`'s decision and
-        // nobody else's — the same call the header records and `payload()`
-        // reads back.
-        let payload_offset = GcHeader::payload_offset_for(payload_align);
+        // Where the payload starts is `GcHeader::payload_offset_for`'s decision
+        // and nobody else's — the same call the header records and `payload()`
+        // reads back — and the block that holds it is `BlockLayout::of`'s, the
+        // same call `sweep` files a reclaimed block under.
+        let (payload_offset, block) = BlockLayout::of(descriptor);
         let recorded_offset = u16::try_from(payload_offset).unwrap_or_else(|_| {
             panic!(
-                "payload alignment {payload_align} of descriptor {} exceeds the \
+                "payload alignment {} of descriptor {} exceeds the \
                  largest offset a GcHeader can record",
+                descriptor.align(),
                 descriptor.name
             )
         });
-        let total = payload_offset
-            .checked_add(payload_size)
-            .expect("allocation size overflow");
-        let align = header_align.max(payload_align);
 
-        let layout = Layout::from_size_align(total, align).expect("invalid layout");
-
-        let base = self.arena.alloc_layout(layout);
+        // Reuse a swept block of this exact layout, or take fresh arena bytes.
+        // The block was poisoned and its payload finalized before it was filed,
+        // so nothing outstanding claims it is still a typed object.
+        let reused = self
+            .free
+            .borrow_mut()
+            .get_mut(&block)
+            .and_then(|blocks| blocks.pop());
+        let base = match reused {
+            Some(base) => base,
+            None => self.arena.alloc_layout(block.layout()),
+        };
         let base_ptr = base.as_ptr();
         let header_ptr = base_ptr as *mut GcHeader;
         let payload_ptr = base_ptr.add(payload_offset);
@@ -330,7 +385,9 @@ impl Heap {
         let nn = NonNull::new(header_ptr).expect("bumpalo never returns null");
         self.live.borrow_mut().push(nn);
         // Account for the allocation against the collection pacing counter.
-        *self.bytes_since_collect.borrow_mut() += total;
+        // Reused storage counts too: pacing measures the pressure a program is
+        // putting on the collector, not the arena's high-water mark.
+        *self.bytes_since_collect.borrow_mut() += block.size;
         // SAFETY: `nn` points at the just-allocated, initialized header.
         unsafe { GcRef::from_non_null(nn) }
     }
@@ -428,9 +485,11 @@ impl Heap {
         }
     }
 
-    /// Sweep phase: finalize and unregister every still-white allocation.
+    /// Sweep phase: finalize every still-white allocation, unregister it, and
+    /// file its storage for reuse.
     fn sweep(&self) {
         let mut live = self.live.borrow_mut();
+        let mut free = self.free.borrow_mut();
         let mut i = 0;
         while i < live.len() {
             // SAFETY: every entry in `live` was pushed by `alloc_raw` and points
@@ -440,12 +499,20 @@ impl Heap {
                 // Finalize: run the descriptor's drop_value on the payload.
                 let desc = header.descriptor();
                 let payload = header.payload::<u8>();
+                // Read the block's layout while the descriptor is still there —
+                // `poison` takes it away.
+                let (_, block) = BlockLayout::of(desc);
                 // SAFETY: payload matches `desc` and is about to become invalid.
                 unsafe { (desc.drop_value)(payload) };
                 // Poison before unregistering, so a stale `GcRef` that still
                 // names this storage is rejected by the mark phase's provenance
                 // check instead of being traced through a finalized payload.
+                // This is also RT-01's precondition: between filing the block
+                // and handing it out again, it must not claim to be a typed
+                // object, or a stale reference would be traced through whatever
+                // the allocator put there next (hazard H7).
                 header.poison();
+                free.entry(block).or_default().push(live[i].cast::<u8>());
                 live.swap_remove(i);
             } else {
                 // Reset to white for the next collection and keep it.
@@ -470,6 +537,8 @@ impl Heap {
             header.poison();
         }
         self.arena.reset();
+        // Every filed block points into the arena that just went away.
+        self.free.borrow_mut().clear();
         // Pacing is part of the heap's state, so a reset heap paces like a fresh
         // one. Leaving the counter and the geometrically-grown threshold in
         // place meant a reset heap could run for megabytes before its first
@@ -799,7 +868,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: sweeping finalizes payloads but cannot reuse bump-arena storage"]
     fn repeated_collection_reuses_dead_object_storage() {
         let heap = Heap::new();
         const OBJECTS_PER_CYCLE: usize = 4_096;
@@ -902,6 +970,58 @@ mod tests {
             0,
             "a poisoned header must not be resurrected by rooting it"
         );
+    }
+
+    /// The free list is keyed by the whole block, not by the type that happened
+    /// to occupy it first, so a reclaimed `Int` block houses the next `Float`.
+    /// The reused object must be indistinguishable from a fresh one: re-headed
+    /// with this heap's id, unpoisoned, and reading back as its new type.
+    #[test]
+    fn a_reclaimed_block_is_reused_for_the_next_object_of_its_layout() {
+        use crate::scalars::FLOAT;
+        let heap = Heap::new();
+
+        let doomed = heap.alloc_unpaced(&INT, 1_i64);
+        let address = doomed.as_ptr();
+        heap.collect_with(&RootScope::new());
+        assert!(doomed.header().is_poisoned());
+
+        // `Float`'s payload has `Int`'s size and alignment, so it files under
+        // the same `BlockLayout`.
+        let reused = heap.alloc_unpaced(&FLOAT, 2.5_f64);
+
+        assert_eq!(
+            reused.as_ptr(),
+            address,
+            "a swept block must be handed back out, not left spent"
+        );
+        assert!(!reused.header().is_poisoned());
+        assert_eq!(reused.header().heap_id(), Some(heap.id()));
+        assert_eq!(reused.descriptor().name, "Float");
+        // SAFETY: `reused` was just allocated with FLOAT.
+        assert_eq!(unsafe { *reused.payload::<f64>() }, 2.5);
+        assert_eq!(heap.stats().live_count, 1);
+    }
+
+    /// Blocks that are still filed when the arena is torn down must not be
+    /// handed out afterwards — they point into storage `Bump::reset` reclaimed.
+    #[test]
+    fn reset_discards_the_free_list() {
+        let mut heap = Heap::new();
+        let doomed = heap.alloc_unpaced(&INT, 1_i64);
+        let stale = doomed.as_ptr();
+        heap.collect_with(&RootScope::new());
+        assert_eq!(heap.free.borrow().values().map(Vec::len).sum::<usize>(), 1);
+
+        heap.reset();
+
+        assert_eq!(heap.free.borrow().values().map(Vec::len).sum::<usize>(), 0);
+        let fresh = heap.alloc_unpaced(&INT, 2_i64);
+        assert_eq!(fresh.header().heap_id(), Some(heap.id()));
+        // The address may legitimately be reused by the fresh arena; what must
+        // not happen is the *stale block* being handed out with the old layout
+        // bookkeeping still attached. The fresh heap identity is the check.
+        let _ = stale;
     }
 
     /// A reset heap is a different heap, so the refs it minted before the reset
