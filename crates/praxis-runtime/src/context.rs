@@ -15,6 +15,7 @@ use crate::gc::GcRef;
 use crate::heap::Heap;
 use crate::immortal::{read_bool, Immortals};
 use crate::parse_detail::ParseDetail;
+#[cfg(test)]
 use crate::roots::RootSet;
 use crate::shadow_frame::ShadowFrame;
 use crate::{collections::VecPayload, descriptor::TypeDescriptor};
@@ -243,6 +244,14 @@ pub struct RuntimeContext {
     /// `praxis_snapshot_debug_chain` — it is appended at the end of
     /// `RuntimeContext` for ABI stability.
     pub crash_snapshot: *mut crate::SnapshotSlot,
+    /// The head of the native root-frame chain (P0-07): what the runtime's own
+    /// Rust code holds live across an allocation.
+    ///
+    /// Pushed and popped by [`crate::roots::NativeScope`], never by generated
+    /// code — which is why it, like `parse_detail` and `crash_snapshot`, is
+    /// appended at the end of the struct. It is the fifth arm of
+    /// [`crate::roots::RuntimeRoots`].
+    pub native_roots: *mut crate::roots::NativeRootFrame,
 }
 
 impl RuntimeContext {
@@ -267,6 +276,7 @@ impl RuntimeContext {
             recursion_depth: 0,
             parse_detail: std::ptr::null_mut(),
             crash_snapshot: std::ptr::null_mut(),
+            native_roots: std::ptr::null_mut(),
         }
     }
 
@@ -359,10 +369,32 @@ impl Runtime {
         &self.immortals
     }
 
-    /// Run a mark-and-sweep collection (§12.1). Everything reachable from
-    /// `roots` survives; everything else is reclaimed.
-    pub fn collect(&self, roots: &dyn RootSet) {
-        self.heap.collect(roots);
+    /// Force a mark-and-sweep collection (§12.1) rooted from everything this
+    /// runtime owns — the shadow chain, the ambient input buffer, a parse
+    /// failure's partial value, the crash snapshot, and any native root frame.
+    ///
+    /// This is the host's collection entry point. It takes no root set: a host
+    /// that could name its own would be choosing which of the runtime's owners
+    /// to honour, and choosing wrong is P0-06.
+    pub fn collect_now(&mut self) {
+        let mut ctx = self.context();
+        // SAFETY: `ctx` is a fresh view of this live runtime, and the arms it
+        // points at (parse detail, snapshot slot) are owned by `self`, which
+        // outlives the borrow.
+        let roots = unsafe { crate::roots::RuntimeRoots::from_context(&mut ctx) };
+        self.heap.collect(&roots);
+    }
+
+    /// Run a mark-and-sweep collection (§12.1) against an arbitrary root set.
+    ///
+    /// Test-only. Production collection goes through
+    /// [`Heap::collect`](crate::Heap::collect), which accepts only a
+    /// [`RuntimeRoots`](crate::roots::RuntimeRoots) read out of a live context
+    /// — a host that could pass its own `&dyn RootSet` could collect against a
+    /// set that omits the runtime's own owners, which is P0-06 by another name.
+    #[cfg(test)]
+    pub fn collect_with(&self, roots: &dyn RootSet) {
+        self.heap.collect_with(roots);
     }
 
     /// A `RuntimeContext` view of this runtime, suitable for generated code.
@@ -383,6 +415,8 @@ impl Runtime {
             recursion_depth: 0,
             parse_detail: &mut self.parse_detail as *mut ParseDetail,
             crash_snapshot: &mut self.crash_snapshot as *mut SnapshotSlot,
+            // No native frame is on the Rust stack when the context is minted.
+            native_roots: std::ptr::null_mut(),
         }
     }
 
@@ -836,7 +870,7 @@ mod tests {
         let true_before = rt.immortals().true_().as_ptr();
         let false_before = rt.immortals().false_().as_ptr();
         let roots = RootScope::new();
-        rt.collect(&roots);
+        rt.collect_with(&roots);
         assert_eq!(rt.immortals().unit().as_ptr(), unit_before);
         assert_eq!(rt.immortals().true_().as_ptr(), true_before);
         assert_eq!(rt.immortals().false_().as_ptr(), false_before);

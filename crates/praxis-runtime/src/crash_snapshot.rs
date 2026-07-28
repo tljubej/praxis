@@ -298,7 +298,7 @@ mod tests {
             fault_kind: crate::FaultKind::None,
         };
 
-        runtime.collect(&snapshot);
+        runtime.collect_with(&snapshot);
 
         assert_eq!(runtime.heap().stats().live_count, 1);
         assert_eq!(value.as_int(), 42);

@@ -58,7 +58,7 @@ pub use heap::{Heap, HeapStats};
 pub use immortal::Immortals;
 pub use parse_detail::{ParseDetail, ParseFail};
 pub use records::{RecordField, RecordPayload, RecordSchema};
-pub use roots::{RootScope, RootSet};
+pub use roots::{NativeRootFrame, NativeScope, RootScope, RootSet, Rooted, RuntimeRoots};
 pub use shadow_frame::{ShadowFrame, MAX_SHADOW_SLOTS};
 pub use text::TextPayload;
 pub use tuples::{TuplePayload, TupleSchema};

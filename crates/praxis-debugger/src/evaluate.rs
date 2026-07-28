@@ -32,7 +32,8 @@ use praxis_codegen_cranelift::Jit;
 use praxis_hir::{analyze_root, lower, mono::monomorphize, TypedItem};
 use praxis_mir::{annotate, lower_module};
 use praxis_runtime::{
-    crash_snapshot::SnapshotFrame, CrashSnapshot, GcRef, RootScope, Runtime, RuntimeContext,
+    crash_snapshot::SnapshotFrame, CrashSnapshot, GcRef, NativeScope, RootSet, Runtime,
+    RuntimeContext,
 };
 use praxis_types::{CollectionCtor, Type, TypeData, TypeDb};
 
@@ -251,15 +252,28 @@ fn exec(
         .get(P_EXPR_FN)
         .ok_or_else(|| "internal: __p_expr FuncId not found".to_string())?;
 
-    // Root the snapshot + the call args for the duration of the call (§12.3).
-    // The synthetic fn pushes its own shadow frame at entry, but the args are
-    // in flight before the prologue spills them; this scope is the safety net.
-    let mut scope = RootScope::child(snapshot);
+    let mut ctx: RuntimeContext = runtime.context();
+    // Root the snapshot's values + the call args for the duration of the call
+    // (§12.3). The synthetic fn pushes its own shadow frame at entry, but the
+    // args are in flight before the prologue spills them, and the REPL has
+    // *taken* the snapshot out of the runtime — so `RuntimeRoots` cannot see
+    // it through `ctx.crash_snapshot`. This used to be a `RootScope` attached
+    // to nothing at all: the collector never consulted it, so a collection
+    // inside `__p_expr` could reclaim the very locals being printed (DBG-04).
+    // A `NativeScope` chains onto the context, which is what the collector
+    // actually walks.
+    // SAFETY: `ctx` is live for the whole call below, and the scope is dropped
+    // before it.
+    let scope = unsafe { NativeScope::new(&mut ctx) };
+    let mut snapshot_roots = Vec::new();
+    snapshot.push_roots(&mut snapshot_roots);
+    for r in snapshot_roots {
+        scope.root(r);
+    }
     for b in bindings {
         scope.root(b.value);
     }
 
-    let mut ctx: RuntimeContext = runtime.context();
     // Clear the *stale* fault left by the original crash that triggered the
     // REPL — `__p_expr`'s safepoints (`CheckFault`) would otherwise see it and
     // bail immediately. We do NOT clear the snapshot (still rooting the args).
@@ -481,6 +495,112 @@ mod tests {
         assert_eq!(sanitize_name("a-b"), "_x");
         assert_eq!(sanitize_name("ok_name"), "ok_name");
         assert_eq!(sanitize_name("x9"), "x9");
+    }
+
+    /// DBG-04: the values the `p` evaluator holds must be in the collector's
+    /// root set for the duration of the synthetic call.
+    ///
+    /// The evaluator used to build a `RootScope::child(snapshot)` — a root set
+    /// attached to nothing at all. Nothing consulted it: automatic collection
+    /// roots from the context, and the REPL has already *taken* the snapshot
+    /// out of the runtime, so `RuntimeRoots` cannot reach it through
+    /// `ctx.crash_snapshot` either.
+    ///
+    /// Generated prologues mask the argument case (the first safepoint spills
+    /// the params into the shadow frame before anything can collect), so the
+    /// exposed values are the snapshot locals `collect_bindings` filters out —
+    /// the compiler temps, which are never passed as parameters. This drives
+    /// the heap past its threshold first, so the first allocation inside
+    /// `__p_expr` collects, then reads the temp back.
+    #[test]
+    fn snapshot_values_survive_a_collection_inside_the_evaluated_expression() {
+        let mut runtime = Runtime::new();
+        let mut db = TypeDb::new();
+        let int = db.int();
+
+        let named = runtime.alloc_vec(
+            &praxis_runtime::scalars::INT,
+            vec![runtime.alloc_int(11), runtime.alloc_int(22)],
+        );
+        let temp = runtime.alloc_vec(
+            &praxis_runtime::scalars::INT,
+            vec![runtime.alloc_int(33), runtime.alloc_int(44)],
+        );
+        let frame = SnapshotFrame {
+            parent: 0,
+            func_name: "main".as_ptr(),
+            func_name_len: 4,
+            locals: vec![
+                snapshot_local("xs", named, int, praxis_runtime::LOCAL_KIND_USER),
+                // A temp: in the snapshot, never a `__p_expr` parameter.
+                snapshot_local("", temp, int, praxis_runtime::LOCAL_KIND_TEMP),
+            ],
+            source_span: (0, 0),
+        };
+        let snapshot = CrashSnapshot {
+            frames: vec![frame],
+            fault_kind: praxis_runtime::FaultKind::IndexOutOfBounds,
+        };
+
+        // Push well past the 64 KiB pacing threshold without collecting, so the
+        // first allocation the synthetic function makes triggers a collection.
+        for i in 0..5000_i64 {
+            let _ = runtime.alloc_int(i);
+        }
+
+        let out = evaluate(
+            &mut db,
+            &mut runtime,
+            &snapshot,
+            &snapshot.frames[0],
+            "1 + 2",
+        )
+        .expect("p 1 + 2 evaluates");
+        assert_eq!(out, "3");
+
+        // Both snapshot values must still be readable. An unrooted Vec is swept:
+        // its element buffer is dropped, so this reads freed memory.
+        assert_eq!(
+            snapshot.frames[0].locals[0]
+                .value
+                .as_vec()
+                .iter()
+                .map(|v| v.as_int())
+                .collect::<Vec<_>>(),
+            vec![11, 22],
+            "the named local survived"
+        );
+        assert_eq!(
+            snapshot.frames[0].locals[1]
+                .value
+                .as_vec()
+                .iter()
+                .map(|v| v.as_int())
+                .collect::<Vec<_>>(),
+            vec![33, 44],
+            "the temp, which is never a parameter, survived too"
+        );
+    }
+
+    /// A `DebugLocal` holding a real value, as `praxis_snapshot_debug_chain`
+    /// would have copied it out of a live frame.
+    fn snapshot_local(
+        name: &'static str,
+        value: GcRef,
+        ty: Type,
+        kind: u8,
+    ) -> praxis_runtime::context::DebugLocal {
+        praxis_runtime::context::DebugLocal {
+            source_name: name.as_ptr(),
+            name_len: name.len() as u32,
+            symbol_id: 0,
+            descriptor: &praxis_runtime::collections::VEC as *const _,
+            value,
+            type_id: ty.0,
+            kind,
+            span_start: 0,
+            span_end: 0,
+        }
     }
 
     #[test]

@@ -4297,7 +4297,7 @@ fn m10ws3_snapshot_retains_reachable_objects_across_gc() {
     // snapshot's locals).
     let src =
         "fn main() -> Int {\n  let xs = Vec()\n  xs.push(11)\n  xs.push(22)\n  xs.get(99)\n}\n";
-    let (rt, _result) = run_main(src);
+    let (mut rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
     let snap = rt.crash_snapshot().expect("snapshot captured");
     // The snapshot references GcRefs (the locals in the faulting frames).
@@ -4307,13 +4307,16 @@ fn m10ws3_snapshot_retains_reachable_objects_across_gc() {
         !roots.is_empty(),
         "snapshot must root at least one GcRef (the Vec locals)"
     );
-    // Force a collection with the snapshot as the root set. If retention is
-    // broken, the referenced objects are reclaimed and dereferencing a root
-    // would be use-after-free (the test would crash / valgrind would flag it).
-    // We collect several times to stress the mark/sweep.
+    // Force a collection through the runtime's own root set — the host no
+    // longer names one, and the runtime-owned snapshot is an arm of it (P0-06),
+    // so this is now a test that the snapshot is rooted *automatically* rather
+    // than because this test remembered to pass it. If retention is broken, the
+    // referenced objects are reclaimed and dereferencing a root would be
+    // use-after-free. Collect several times to stress the mark/sweep.
     for _ in 0..3 {
-        rt.collect(snap);
+        rt.collect_now();
     }
+    let snap = rt.crash_snapshot().expect("snapshot survives collection");
     // The roots are still valid GcRefs into the (non-moving) heap; reading one
     // as a Vec and checking its length confirms the object survived collection.
     // Find a Vec-typed root among the snapshot locals.

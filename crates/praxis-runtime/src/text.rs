@@ -194,7 +194,7 @@ mod tests {
         let mut roots = crate::RootScope::new();
         roots.root(slice);
 
-        rt.collect(&roots);
+        rt.collect_with(&roots);
 
         assert_eq!(
             rt.heap().stats().live_count,

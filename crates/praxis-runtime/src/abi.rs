@@ -20,6 +20,7 @@ use crate::context::{FaultKind, RuntimeContext};
 use crate::dynamic_key::DynamicKey;
 use crate::gc::GcRef;
 use crate::heap::Heap;
+use crate::roots::{NativeScope, Rooted};
 use crate::scalars;
 use crate::{collections::VecPayload, descriptor::TypeDescriptor};
 pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
@@ -51,7 +52,13 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// independent copies of the calculation) and `heap_id` (allocation
 /// provenance). Generated code reads the header to reach an enum payload, so
 /// this is an incompatible layout change.
-pub const RUNTIME_ABI_VERSION: u32 = 8;
+/// v9 (repair S5): `RuntimeContext` gained `native_roots`, the head of the
+/// native root-frame chain, so the runtime's own Rust helpers can root what
+/// they hold across an allocation. Appended after `crash_snapshot`, so every
+/// generated-code-read offset is unchanged — but the struct's size changed and
+/// the automatic collector's root set is now the whole `RuntimeRoots`, which is
+/// a behavioural contract generated code depends on.
+pub const RUNTIME_ABI_VERSION: u32 = 9;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -73,7 +80,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 8;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 9;
 
 // ---------------------------------------------------------------------------
 // The runtime symbol table (F4).
@@ -263,24 +270,21 @@ unsafe fn heap<'a>(ctx: *mut RuntimeContext) -> &'a Heap {
 /// shadow-stack frame chain (§12.4, ADR-019). Called by every allocating
 /// `praxis_*` wrapper. Safe to call with a null/unwired context (no-op).
 ///
-/// The roots are read from `ctx.roots`: the current shadow frame, whose
-/// `RootSet` impl walks the whole parent chain. If `roots` is null (no frame
-/// pushed yet — e.g. during host-driven allocation before `main`), the
-/// immortals are the only survivors, which is correct.
+/// The roots are every arm of [`RuntimeRoots`](crate::roots::RuntimeRoots) —
+/// the shadow-stack chain, the ambient input buffer, a parse failure's partial
+/// value, a runtime-owned crash snapshot, and the native root frames. This used
+/// to read `ctx.roots` alone **and return early when it was null**, which meant
+/// nothing was collected at all during host-driven allocation or anywhere in
+/// the parser interpreter, and that the other four owners were invisible to
+/// automatic GC even when a frame was pushed (P0-06).
 #[inline]
 unsafe fn maybe_collect(ctx: *mut RuntimeContext) {
     if ctx.is_null() {
         return;
     }
     // SAFETY: ctx is live and wired.
-    let roots_ptr = unsafe { (*ctx).roots };
-    if roots_ptr.is_null() {
-        return;
-    }
-    // SAFETY: `roots_ptr` is a live shadow frame (pushed by a prologue that has
-    // not yet returned).
-    let frame: &dyn crate::RootSet = unsafe { &*roots_ptr };
-    unsafe { heap(ctx).maybe_collect(frame) };
+    let roots = unsafe { crate::roots::RuntimeRoots::from_context(ctx) };
+    unsafe { heap(ctx).maybe_collect(&roots) };
 }
 
 /// Read the `i64` payload of an `Int` `GcRef`. Used by every arithmetic wrapper.
@@ -945,12 +949,13 @@ unsafe fn vec_payload(r: GcRef) -> &'static VecPayload {
 /// Vec. Used by `push` to mutate the vector in place (§11.1).
 ///
 /// # Safety
-/// `r` must be a valid `Vec` `GcRef`.
-unsafe fn vec_payload_mut(r: GcRef) -> &'static mut VecPayload {
-    // SAFETY: caller guarantees `r` is a Vec; the non-moving GC keeps the
-    // payload stable. We hold `&mut` only for the duration of this wrapper call,
-    // which is single-threaded and not reentrant through the GC.
-    unsafe { &mut *r.payload::<VecPayload>() }
+/// `r` must be a valid `Vec` `GcRef`, rooted for `'s`.
+unsafe fn vec_payload_mut<'s>(r: Rooted<'s>) -> &'s mut VecPayload {
+    // SAFETY: caller guarantees `r` is a Vec; the non-moving GC (ADR-011) keeps
+    // the payload address stable for the object's lifetime, and `Rooted` proves
+    // the object is in the collector's root set for `'s`, so a collection
+    // triggered while this reference is held cannot reclaim what it points at.
+    unsafe { &mut *r.get().payload::<VecPayload>() }
 }
 
 /// Allocate a new empty `Vec[T]` with the given element descriptor (§11.2).
@@ -1455,7 +1460,8 @@ pub unsafe extern "C" fn praxis_vec_push(
     // collection via the caller's shadow frame.
     unsafe { maybe_collect(ctx) };
     // SAFETY: caller guarantees `vec` is a valid Vec.
-    let p = unsafe { vec_payload_mut(vec) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { vec_payload_mut(scope.root(vec)) };
     // M8-WS1: if the element descriptor is still the construction-time default
     // (`INT`, used when the element type was not yet pinned at construction — the
     // `forall T. () -> Vec[T]` builtin leaves `T` generalized until first use),
@@ -1549,10 +1555,10 @@ unsafe fn deque_payload(r: GcRef) -> &'static DequePayload {
 /// Read the `DequePayload` out of a `GcRef` as a mutable ref, asserting Deque.
 ///
 /// # Safety
-/// `r` must be a valid `Deque` `GcRef`.
-unsafe fn deque_payload_mut(r: GcRef) -> &'static mut DequePayload {
+/// `r` must be a valid `Deque` `GcRef`, rooted for `'s`.
+unsafe fn deque_payload_mut<'s>(r: Rooted<'s>) -> &'s mut DequePayload {
     // SAFETY: caller guarantees `r` is a Deque; non-moving GC keeps it stable.
-    unsafe { &mut *r.payload::<DequePayload>() }
+    unsafe { &mut *r.get().payload::<DequePayload>() }
 }
 
 /// Allocate a new empty `Deque[T]` with the given element descriptor (§11.2).
@@ -1601,7 +1607,8 @@ pub unsafe extern "C" fn praxis_deque_push_front(
     value: GcRef,
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
-    let p = unsafe { deque_payload_mut(deque) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { deque_payload_mut(scope.root(deque)) };
     let pushed_desc = value.descriptor();
     let cur_is_int = unsafe { (*p.element_descriptor).id() } == scalars::INT.id();
     let pushed_is_int = pushed_desc.id() == scalars::INT.id();
@@ -1624,7 +1631,8 @@ pub unsafe extern "C" fn praxis_deque_push_back(
     value: GcRef,
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
-    let p = unsafe { deque_payload_mut(deque) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { deque_payload_mut(scope.root(deque)) };
     let pushed_desc = value.descriptor();
     let cur_is_int = unsafe { (*p.element_descriptor).id() } == scalars::INT.id();
     let pushed_is_int = pushed_desc.id() == scalars::INT.id();
@@ -1643,7 +1651,8 @@ pub unsafe extern "C" fn praxis_deque_push_back(
 pub unsafe extern "C" fn praxis_deque_pop_front(ctx: *mut RuntimeContext, deque: GcRef) -> GcRef {
     // No allocation in the common case, but `pop_front` on a VecDeque does not
     // allocate Rust heap, so no collection is needed; `deque` stays live.
-    let p = unsafe { deque_payload_mut(deque) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { deque_payload_mut(scope.root(deque)) };
     match p.items.pop_front() {
         Some(v) => v,
         None => {
@@ -1659,7 +1668,8 @@ pub unsafe extern "C" fn praxis_deque_pop_front(ctx: *mut RuntimeContext, deque:
 /// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_deque_pop_back(ctx: *mut RuntimeContext, deque: GcRef) -> GcRef {
-    let p = unsafe { deque_payload_mut(deque) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { deque_payload_mut(scope.root(deque)) };
     match p.items.pop_back() {
         Some(v) => v,
         None => {
@@ -1728,24 +1738,24 @@ unsafe fn map_payload(r: GcRef) -> &'static MapPayload {
     unsafe { &*r.payload::<MapPayload>() }
 }
 
-unsafe fn map_payload_mut(r: GcRef) -> &'static mut MapPayload {
-    unsafe { &mut *r.payload::<MapPayload>() }
+unsafe fn map_payload_mut<'s>(r: Rooted<'s>) -> &'s mut MapPayload {
+    unsafe { &mut *r.get().payload::<MapPayload>() }
 }
 
 unsafe fn set_payload(r: GcRef) -> &'static SetPayload {
     unsafe { &*r.payload::<SetPayload>() }
 }
 
-unsafe fn set_payload_mut(r: GcRef) -> &'static mut SetPayload {
-    unsafe { &mut *r.payload::<SetPayload>() }
+unsafe fn set_payload_mut<'s>(r: Rooted<'s>) -> &'s mut SetPayload {
+    unsafe { &mut *r.get().payload::<SetPayload>() }
 }
 
 unsafe fn counter_payload(r: GcRef) -> &'static CounterPayload {
     unsafe { &*r.payload::<CounterPayload>() }
 }
 
-unsafe fn counter_payload_mut(r: GcRef) -> &'static mut CounterPayload {
-    unsafe { &mut *r.payload::<CounterPayload>() }
+unsafe fn counter_payload_mut<'s>(r: Rooted<'s>) -> &'s mut CounterPayload {
+    unsafe { &mut *r.get().payload::<CounterPayload>() }
 }
 
 /// Allocate an empty `Map[K, V]`. `key_descriptor` selects the structural
@@ -1801,7 +1811,8 @@ pub unsafe extern "C" fn praxis_map_insert(
     value: GcRef,
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
-    let p = unsafe { map_payload_mut(map) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { map_payload_mut(scope.root(map)) };
     // Adopt the value's descriptor if the default is still in place, so nested
     // values format/trace correctly (mirrors the Vec push-descriptor adoption).
     let val_desc = value.descriptor();
@@ -1852,7 +1863,8 @@ pub unsafe extern "C" fn praxis_map_remove(
     map: GcRef,
     key: GcRef,
 ) -> GcRef {
-    let p = unsafe { map_payload_mut(map) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { map_payload_mut(scope.root(map)) };
     p.entries.remove(&DynamicKey::new(key));
     unsafe { unit_sentinel(ctx) }
 }
@@ -1892,7 +1904,8 @@ pub unsafe extern "C" fn praxis_map_update_min(
     value: GcRef,
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
-    let p = unsafe { map_payload_mut(map) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { map_payload_mut(scope.root(map)) };
     let cand = unsafe { int_payload(value) };
     match p.entries.get_mut(&DynamicKey::new(key)) {
         Some(existing) => {
@@ -1921,7 +1934,8 @@ pub unsafe extern "C" fn praxis_map_update_max(
     value: GcRef,
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
-    let p = unsafe { map_payload_mut(map) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { map_payload_mut(scope.root(map)) };
     let cand = unsafe { int_payload(value) };
     match p.entries.get_mut(&DynamicKey::new(key)) {
         Some(existing) => {
@@ -1981,7 +1995,8 @@ pub unsafe extern "C" fn praxis_set_insert(
     value: GcRef,
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
-    let p = unsafe { set_payload_mut(set) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { set_payload_mut(scope.root(set)) };
     p.entries.insert(DynamicKey::new(value));
     unsafe { unit_sentinel(ctx) }
 }
@@ -1996,7 +2011,8 @@ pub unsafe extern "C" fn praxis_set_remove(
     set: GcRef,
     value: GcRef,
 ) -> GcRef {
-    let p = unsafe { set_payload_mut(set) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { set_payload_mut(scope.root(set)) };
     p.entries.remove(&DynamicKey::new(value));
     unsafe { unit_sentinel(ctx) }
 }
@@ -2099,7 +2115,8 @@ pub unsafe extern "C" fn praxis_counter_inc(
     key: GcRef,
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
-    let p = unsafe { counter_payload_mut(counter) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { counter_payload_mut(scope.root(counter)) };
     let dk = DynamicKey::new(key);
     match p.entries.get_mut(&dk) {
         Some(v) => {
@@ -2149,16 +2166,16 @@ pub unsafe extern "C" fn praxis_counter_is_empty(
 use crate::heaps::{HeapEntry, MaxHeapPayload, MinHeapPayload};
 use std::collections::BinaryHeap;
 
-unsafe fn max_heap_payload_mut(r: GcRef) -> &'static mut MaxHeapPayload {
-    unsafe { &mut *r.payload::<MaxHeapPayload>() }
+unsafe fn max_heap_payload_mut<'s>(r: Rooted<'s>) -> &'s mut MaxHeapPayload {
+    unsafe { &mut *r.get().payload::<MaxHeapPayload>() }
 }
 
 unsafe fn max_heap_payload(r: GcRef) -> &'static MaxHeapPayload {
     unsafe { &*r.payload::<MaxHeapPayload>() }
 }
 
-unsafe fn min_heap_payload_mut(r: GcRef) -> &'static mut MinHeapPayload {
-    unsafe { &mut *r.payload::<MinHeapPayload>() }
+unsafe fn min_heap_payload_mut<'s>(r: Rooted<'s>) -> &'s mut MinHeapPayload {
+    unsafe { &mut *r.get().payload::<MinHeapPayload>() }
 }
 
 unsafe fn min_heap_payload(r: GcRef) -> &'static MinHeapPayload {
@@ -2207,7 +2224,8 @@ pub unsafe extern "C" fn praxis_max_heap_push(
     value: GcRef,
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
-    let p = unsafe { max_heap_payload_mut(heap_ref) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { max_heap_payload_mut(scope.root(heap_ref)) };
     p.items.push(HeapEntry {
         value,
         descriptor: value.descriptor(),
@@ -2221,7 +2239,8 @@ pub unsafe extern "C" fn praxis_max_heap_push(
 /// `ctx` must be live and wired; `heap_ref` must be a valid `MaxHeap` `GcRef`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_max_heap_pop(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
-    let p = unsafe { max_heap_payload_mut(heap_ref) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { max_heap_payload_mut(scope.root(heap_ref)) };
     match p.items.pop() {
         Some(e) => e.value,
         None => {
@@ -2314,7 +2333,8 @@ pub unsafe extern "C" fn praxis_min_heap_push(
     value: GcRef,
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
-    let p = unsafe { min_heap_payload_mut(heap_ref) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { min_heap_payload_mut(scope.root(heap_ref)) };
     p.items.push(std::cmp::Reverse(HeapEntry {
         value,
         descriptor: value.descriptor(),
@@ -2328,7 +2348,8 @@ pub unsafe extern "C" fn praxis_min_heap_push(
 /// `ctx` must be live and wired; `heap_ref` must be a valid `MinHeap` `GcRef`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_min_heap_pop(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
-    let p = unsafe { min_heap_payload_mut(heap_ref) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { min_heap_payload_mut(scope.root(heap_ref)) };
     match p.items.pop() {
         Some(e) => e.0.value,
         None => {
@@ -2387,8 +2408,8 @@ unsafe fn bitset_payload(r: GcRef) -> &'static BitSetPayload {
     unsafe { &*r.payload::<BitSetPayload>() }
 }
 
-unsafe fn bitset_payload_mut(r: GcRef) -> &'static mut BitSetPayload {
-    unsafe { &mut *r.payload::<BitSetPayload>() }
+unsafe fn bitset_payload_mut<'s>(r: Rooted<'s>) -> &'s mut BitSetPayload {
+    unsafe { &mut *r.get().payload::<BitSetPayload>() }
 }
 
 /// Allocate an empty `BitSet` (§6.1). Nullary — no element descriptor.
@@ -2422,7 +2443,8 @@ pub unsafe extern "C" fn praxis_bitset_insert(
     value: GcRef,
 ) -> GcRef {
     unsafe { maybe_collect(ctx) };
-    let p = unsafe { bitset_payload_mut(bs) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { bitset_payload_mut(scope.root(bs)) };
     let i = unsafe { int_payload(value) };
     if i >= 0 {
         p.insert(i as usize);
@@ -2440,7 +2462,8 @@ pub unsafe extern "C" fn praxis_bitset_remove(
     bs: GcRef,
     value: GcRef,
 ) -> GcRef {
-    let p = unsafe { bitset_payload_mut(bs) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { bitset_payload_mut(scope.root(bs)) };
     let i = unsafe { int_payload(value) };
     if i >= 0 {
         p.remove(i as usize);
@@ -2497,22 +2520,28 @@ unsafe fn grid_payload(r: GcRef) -> &'static GridPayload {
     unsafe { &*r.payload::<GridPayload>() }
 }
 
-unsafe fn grid_payload_mut(r: GcRef) -> &'static mut GridPayload {
-    unsafe { &mut *r.payload::<GridPayload>() }
+unsafe fn grid_payload_mut<'s>(r: Rooted<'s>) -> &'s mut GridPayload {
+    unsafe { &mut *r.get().payload::<GridPayload>() }
 }
 
 /// Allocate a `(x, y)` point tuple from two `i64` coordinates. The schema is
 /// the cached `(Int, Int)` point schema; elements are filled via
 /// `praxis_tuple_set`. Returns the point `GcRef`.
+///
+/// Three allocations, and each one may collect: the tuple must survive the two
+/// coordinate allocations, and the x coordinate must survive the y's. Nothing
+/// generated is on the stack here — the caller is a runtime helper — so the
+/// only thing that can root them is a native scope.
 unsafe fn alloc_point(ctx: *mut RuntimeContext, x: i64, y: i64) -> GcRef {
+    let scope = unsafe { NativeScope::new(ctx) };
     let schema = crate::tuples::point_schema();
     let schema_ptr = schema as *const crate::tuples::TupleSchema;
-    let tup = unsafe { praxis_alloc_tuple(ctx, schema_ptr) };
-    let x_ref = unsafe { heap(ctx).alloc(&scalars::INT, x) };
-    unsafe { praxis_tuple_set(ctx, tup, 0, x_ref) };
+    let tup = scope.root(unsafe { praxis_alloc_tuple(ctx, schema_ptr) });
+    let x_ref = scope.root(unsafe { heap(ctx).alloc(&scalars::INT, x) });
+    unsafe { praxis_tuple_set(ctx, tup.get(), 0, x_ref.get()) };
     let y_ref = unsafe { heap(ctx).alloc(&scalars::INT, y) };
-    unsafe { praxis_tuple_set(ctx, tup, 1, y_ref) };
-    tup
+    unsafe { praxis_tuple_set(ctx, tup.get(), 1, y_ref) };
+    tup.get()
 }
 
 /// The (x, y) coordinates of a flat `idx` in a grid of `width`.
@@ -2621,7 +2650,8 @@ pub unsafe extern "C" fn praxis_grid_set(
     y: GcRef,
     value: GcRef,
 ) -> GcRef {
-    let p = unsafe { grid_payload_mut(grid) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { grid_payload_mut(scope.root(grid)) };
     let (xi, yi) = (unsafe { int_payload(x) }, unsafe { int_payload(y) });
     let height = grid_height(p.items.len(), p.width);
     if xi < 0 || yi < 0 || xi as usize >= p.width || yi as usize >= height {
@@ -2668,7 +2698,8 @@ pub unsafe extern "C" fn praxis_grid_neighbors4(
     let (px, py) = unsafe { (int_payload(pt.items[0]), int_payload(pt.items[1])) };
     let height = grid_height(p.items.len(), p.width);
     let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
-    let rp = unsafe { vec_payload_mut(result) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let rp = unsafe { vec_payload_mut(scope.root(result)) };
     for (dx, dy) in [(0i64, -1), (0, 1), (-1, 0), (1, 0)] {
         let (nx, ny) = (px + dx, py + dy);
         if nx >= 0 && ny >= 0 && (nx as usize) < p.width && (ny as usize) < height {
@@ -2695,7 +2726,8 @@ pub unsafe extern "C" fn praxis_grid_neighbors8(
     let (px, py) = unsafe { (int_payload(pt.items[0]), int_payload(pt.items[1])) };
     let height = grid_height(p.items.len(), p.width);
     let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
-    let rp = unsafe { vec_payload_mut(result) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let rp = unsafe { vec_payload_mut(scope.root(result)) };
     for dy in -1i64..=1 {
         for dx in -1i64..=1 {
             if dx == 0 && dy == 0 {
@@ -2720,7 +2752,8 @@ pub unsafe extern "C" fn praxis_grid_positions(ctx: *mut RuntimeContext, grid: G
     unsafe { maybe_collect(ctx) };
     let p = unsafe { grid_payload(grid) };
     let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
-    let rp = unsafe { vec_payload_mut(result) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let rp = unsafe { vec_payload_mut(scope.root(result)) };
     for i in 0..p.items.len() {
         let (x, y) = grid_xy(i, p.width);
         rp.items.push(unsafe { alloc_point(ctx, x, y) });
@@ -2736,7 +2769,8 @@ pub unsafe extern "C" fn praxis_grid_positions(ctx: *mut RuntimeContext, grid: G
 pub unsafe extern "C" fn praxis_grid_cells(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
     let p = unsafe { grid_payload(grid) };
     let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
-    let rp = unsafe { vec_payload_mut(result) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let rp = unsafe { vec_payload_mut(scope.root(result)) };
     for cell in p.items.iter() {
         rp.items.push(*cell);
     }
@@ -2759,7 +2793,8 @@ pub unsafe extern "C" fn praxis_grid_row(ctx: *mut RuntimeContext, grid: GcRef, 
     }
     let start = (yi as usize) * p.width;
     let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
-    let rp = unsafe { vec_payload_mut(result) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let rp = unsafe { vec_payload_mut(scope.root(result)) };
     for x in 0..p.width {
         rp.items.push(p.items[start + x]);
     }
@@ -2784,7 +2819,8 @@ pub unsafe extern "C" fn praxis_grid_column(
         return unsafe { unit_sentinel(ctx) };
     }
     let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
-    let rp = unsafe { vec_payload_mut(result) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let rp = unsafe { vec_payload_mut(scope.root(result)) };
     let mut idx = xi as usize;
     while idx < p.items.len() {
         rp.items.push(p.items[idx]);
@@ -2838,7 +2874,8 @@ pub unsafe extern "C" fn praxis_grid_find_all(
     let val_desc = value.descriptor();
     let eq = val_desc.equals;
     let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
-    let rp = unsafe { vec_payload_mut(result) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let rp = unsafe { vec_payload_mut(scope.root(result)) };
     for (i, cell) in p.items.iter().enumerate() {
         let matches = match eq {
             Some(equals) => {
@@ -3159,8 +3196,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_eight_after_the_gc_header_repack() {
-        assert_eq!(RUNTIME_ABI_VERSION, 8);
+    fn version_is_nine_after_the_native_root_frame() {
+        assert_eq!(RUNTIME_ABI_VERSION, 9);
     }
 
     #[test]
@@ -3841,9 +3878,8 @@ mod tests {
         // SAFETY: ctx wired.
         unsafe {
             let _ = praxis_alloc_int(ctx, 1);
-            // Root nothing — nothing live matters; we only ask whether collection
-            // *ran*.
-            let roots = crate::roots::RootScope::new();
+            // Nothing live matters here; we only ask whether collection *ran*.
+            let roots = crate::roots::RuntimeRoots::from_context(ctx);
             let ran = rt.heap().maybe_collect(&roots);
             assert!(
                 !ran,
@@ -3855,23 +3891,24 @@ mod tests {
 
     #[test]
     fn maybe_collect_runs_under_pressure() {
-        // Allocate well past the 64 KiB threshold, then call `maybe_collect`
-        // directly and assert it ran. (Each Int object is ~32 bytes of header +
-        // payload, so ~2500 ints crosses the line.)
+        // Allocating past the 64 KiB threshold collects. This used to allocate
+        // 3000 Ints and *then* call `maybe_collect` by hand, because the
+        // automatic path returned early whenever `ctx.roots` was null — which
+        // is exactly the case here, with no generated frame on the stack. With
+        // that early return gone (P0-06) the allocation loop collects on its
+        // own, and the helper asserts it happens within 10,000 allocations.
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx wired.
         unsafe {
-            for i in 0..3000_i64 {
-                let _ = praxis_alloc_int(ctx, i);
-            }
-            let roots = crate::roots::RootScope::new();
-            let ran = rt.heap().maybe_collect(&roots);
-            assert!(ran, "heavy allocation should trip the threshold");
-            // After a collection the pacing counter resets, so an immediate second
+            let _ = allocate_until_automatic_collection(&rt, ctx);
+            // After a collection the pacing counter resets, so an immediate
             // call (no new allocations) does not collect again.
-            let ran2 = rt.heap().maybe_collect(&roots);
-            assert!(!ran2, "counter must reset after a collection");
+            let roots = crate::roots::RuntimeRoots::from_context(ctx);
+            assert!(
+                !rt.heap().maybe_collect(&roots),
+                "counter must reset after a collection"
+            );
         }
         unsafe { drop_ctx(ctx) };
     }
@@ -3912,7 +3949,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: maybe_collect omits RuntimeContext.input_source"]
     fn automatic_gc_roots_the_ambient_input_buffer() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
@@ -3932,7 +3968,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: maybe_collect omits ParseDetail.partial"]
     fn automatic_gc_roots_parse_failure_partial_values() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
@@ -3954,7 +3989,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: maybe_collect omits the runtime-owned crash snapshot"]
     fn automatic_gc_roots_runtime_owned_crash_snapshots() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
@@ -3992,35 +4026,57 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: Grid helpers do not root result Vecs across alloc_point"]
     fn nested_allocating_helpers_root_intermediate_results() {
+        // `Grid.positions` builds its result Vec in a Rust local and fills it by
+        // calling `alloc_point`, which allocates three times per point. Every
+        // one of those is a safepoint, and until P0-07 nothing rooted the result
+        // Vec, the points already in it, or the tuple `alloc_point` was midway
+        // through filling — the shadow stack only sees what generated code
+        // spilled, and this is all native code.
+        //
+        // This calls the real helper rather than inlining a sketch of it: the
+        // fix is that the helper opens a `NativeScope`, not that a bare Rust
+        // local became magically visible to the collector, and reading the
+        // points back afterwards is what proves nothing was reclaimed.
+        // The grid is wide enough that the helper's own point allocations cross
+        // the pacing threshold partway through the loop — the collection has to
+        // happen *inside* the helper for this to test anything.
+        const W: usize = 40;
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
-        let live_after_nested_allocation;
+        let mut coords: Vec<(i64, i64)> = Vec::new();
+        let collections_inside_the_helper;
         unsafe {
-            let anchor = praxis_alloc_int(ctx, 1);
+            let cells: Vec<GcRef> = (0..(W * W) as i64).map(|i| rt.alloc_int(i)).collect();
+            let grid = rt.alloc_grid(&scalars::INT, cells, W);
             let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 1);
-            (*frame).slots[0] = anchor.as_ptr();
+            (*frame).slots[0] = grid.as_ptr();
 
-            // Model Grid.positions/find_all/neighbors: they hold a result Vec
-            // only in a Rust local while repeatedly calling alloc_point.
-            let _intermediate = praxis_vec_new(ctx, &crate::tuples::TUPLE as *const _);
-            // Direct allocations raise pacing pressure without collecting.
-            for i in 0..3000_i64 {
-                let _ = rt.alloc_int(i);
+            let before = rt.heap().stats().live_count;
+            let positions = praxis_grid_positions(ctx, grid);
+            // Every point survived, so the live count only grew; a collection
+            // that reclaimed the half-built result would show up as a drop.
+            collections_inside_the_helper = rt.heap().stats().live_count > before;
+
+            let items = &(*positions.payload::<VecPayload>()).items;
+            assert_eq!(items.len(), W * W, "one position per cell");
+            for point in items {
+                let tuple = &*point.payload::<crate::tuples::TuplePayload>();
+                coords.push((int_payload(tuple.items[0]), int_payload(tuple.items[1])));
             }
-            // alloc_point calls safepointed praxis_alloc_tuple first, so this
-            // collection exposes whether the Rust-local result was rooted.
-            let _point = alloc_point(ctx, 3, 4);
-            live_after_nested_allocation = rt.heap().stats().live_count;
 
             crate::shadow_frame::praxis_pop_shadow_frame(ctx, frame);
         }
         unsafe { drop_ctx(ctx) };
 
-        assert!(
-            live_after_nested_allocation >= 5,
-            "anchor + intermediate Vec + point tuple + two coordinates must all remain live"
+        assert!(collections_inside_the_helper);
+        let expected: Vec<(i64, i64)> = (0..W * W)
+            .map(|i| ((i % W) as i64, (i / W) as i64))
+            .collect();
+        assert_eq!(
+            coords, expected,
+            "every point and coordinate the helper allocated must survive the \
+             collections the helper itself triggers"
         );
     }
 

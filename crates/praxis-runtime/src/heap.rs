@@ -250,7 +250,23 @@ impl Heap {
     /// Every `GcRef` reachable from `roots` (plus everything transitively
     /// reachable through descriptor `trace` callbacks) is marked black and
     /// survives; everything else is finalized via `drop_value` and reclaimed.
-    pub fn collect(&self, roots: &dyn RootSet) {
+    pub fn collect(&self, roots: &crate::roots::RuntimeRoots<'_>) {
+        self.collect_inner(roots);
+    }
+
+    /// [`Heap::collect`] against an arbitrary root set.
+    ///
+    /// Test-only: production collection roots from a
+    /// [`RuntimeRoots`](crate::roots::RuntimeRoots), which is constructible
+    /// only from a live `RuntimeContext` and is exhaustive over the runtime's
+    /// owners. Accepting a `&dyn RootSet` on the production path is what let
+    /// the automatic collector root from the shadow chain alone (P0-06).
+    #[cfg(test)]
+    pub fn collect_with(&self, roots: &dyn RootSet) {
+        self.collect_inner(roots);
+    }
+
+    fn collect_inner(&self, roots: &dyn RootSet) {
         self.mark(roots);
         self.sweep();
         // Reset the pacing counter and grow the threshold geometrically.
@@ -268,7 +284,7 @@ impl Heap {
     /// without the host forcing it.
     ///
     /// Returns `true` if a collection ran.
-    pub fn maybe_collect(&self, roots: &dyn RootSet) -> bool {
+    pub fn maybe_collect(&self, roots: &crate::roots::RuntimeRoots<'_>) -> bool {
         let should = *self.bytes_since_collect.borrow() >= *self.collect_threshold.borrow();
         if should {
             self.collect(roots);
@@ -451,7 +467,7 @@ mod tests {
         assert_eq!(heap.stats().live_count, 1);
 
         let roots = RootScope::new(); // nothing rooted
-        heap.collect(&roots);
+        heap.collect_with(&roots);
         assert_eq!(
             heap.stats().live_count,
             0,
@@ -467,7 +483,7 @@ mod tests {
         scope.root(r);
         assert_eq!(heap.stats().live_count, 1);
 
-        heap.collect(&scope);
+        heap.collect_with(&scope);
         assert_eq!(heap.stats().live_count, 1, "rooted Int survives");
         // Payload still readable after collection.
         // SAFETY: `r` survived and was allocated with INT.
@@ -513,7 +529,7 @@ mod tests {
         }
         assert_eq!(heap.stats().live_count, 9); // vec + 3 ints + 5 garbage
 
-        heap.collect(&scope);
+        heap.collect_with(&scope);
 
         // The vec and its 3 elements survive; the 5 garbage ints are reclaimed.
         assert_eq!(heap.stats().live_count, 4);
@@ -572,7 +588,7 @@ mod tests {
         // Garbage.
         let _ = heap.alloc(&UNIT, ());
 
-        heap.collect(&scope);
+        heap.collect_with(&scope);
 
         // outer + 2 inner vecs + 3 ints = 6 survivors; the Unit garbage dies.
         assert_eq!(heap.stats().live_count, 6);
@@ -596,10 +612,10 @@ mod tests {
         }
 
         let roots = RootScope::new();
-        heap.collect(&roots);
+        heap.collect_with(&roots);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
 
-        heap.collect(&roots);
+        heap.collect_with(&roots);
         assert_eq!(
             drops.load(Ordering::SeqCst),
             1,
@@ -662,8 +678,8 @@ mod tests {
         let mut foreign_roots = RootScope::new();
         foreign_roots.root(value);
 
-        second.collect(&foreign_roots);
-        first.collect(&RootScope::new());
+        second.collect_with(&foreign_roots);
+        first.collect_with(&RootScope::new());
 
         assert_eq!(
             first.stats().live_count,
@@ -676,7 +692,7 @@ mod tests {
     #[ignore = "known bug: reset leaves GC pacing counters unchanged"]
     fn reset_restores_collection_pacing() {
         let mut heap = Heap::new();
-        heap.collect(&RootScope::new());
+        heap.collect_with(&RootScope::new());
         let _ = heap.alloc(&INT, 1_i64);
         assert_ne!(*heap.bytes_since_collect.borrow(), 0);
         assert_ne!(*heap.collect_threshold.borrow(), INITIAL_COLLECT_THRESHOLD);
@@ -696,14 +712,14 @@ mod tests {
         for i in 0..OBJECTS_PER_CYCLE {
             let _ = heap.alloc(&INT, i as i64);
         }
-        heap.collect(&RootScope::new());
+        heap.collect_with(&RootScope::new());
         let first_cycle_bytes = heap.arena.allocated_bytes();
 
         for cycle in 1..=8 {
             for i in 0..OBJECTS_PER_CYCLE {
                 let _ = heap.alloc(&INT, (cycle * OBJECTS_PER_CYCLE + i) as i64);
             }
-            heap.collect(&RootScope::new());
+            heap.collect_with(&RootScope::new());
         }
         let final_bytes = heap.arena.allocated_bytes();
 
@@ -765,7 +781,7 @@ mod tests {
         let doomed = heap.alloc(&INT, 1_i64);
         assert!(!doomed.header().is_poisoned());
 
-        heap.collect(&RootScope::new());
+        heap.collect_with(&RootScope::new());
 
         assert_eq!(heap.stats().live_count, 0);
         assert!(doomed.header().is_poisoned());
@@ -779,12 +795,12 @@ mod tests {
     fn a_swept_reference_is_not_traced_again() {
         let heap = Heap::new();
         let stale = heap.alloc(&INT, 1_i64);
-        heap.collect(&RootScope::new());
+        heap.collect_with(&RootScope::new());
         assert!(stale.header().is_poisoned());
 
         let mut stale_roots = RootScope::new();
         stale_roots.root(stale);
-        heap.collect(&stale_roots);
+        heap.collect_with(&stale_roots);
 
         assert_eq!(
             heap.stats().live_count,
