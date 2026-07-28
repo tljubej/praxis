@@ -63,6 +63,68 @@ pub enum FaultKind {
     /// itself never faults (per IEEE-754 it produces inf/nan); only the
     /// narrowing `to_int` conversion does.
     FloatToInt = 7,
+    /// A code point was not a Unicode scalar value: negative, above
+    /// `0x10FFFF`, or in the surrogate range `D800..=DFFF` (§4.3). Raised by
+    /// `praxis_alloc_char`, which previously had no kind of its own to report
+    /// and raised `None` (RT-17/RT-18).
+    InvalidChar = 8,
+    /// A byte buffer that had to be `Text` was not valid UTF-8 (§4.3). Raised
+    /// by `praxis_alloc_text`, which recovers with a lossy conversion rather
+    /// than panicking across the ABI — but the recovery is a fault, not a
+    /// silent success, and now says so.
+    InvalidText = 9,
+}
+
+/// A [`FaultKind`] that is actually a fault.
+///
+/// [`Fault::set`] takes one of these, so "raise the absence of a fault" has no
+/// spelling. It used to take a bare `FaultKind`, and two callers passed `None`
+/// for want of a kind that described them: the result was `{pending: true, kind:
+/// None}`, on which generated code branched to its fault path while the host
+/// reported "no fault" and exited zero (RT-17).
+///
+/// The associated constants are the whole raisable set. There is no
+/// `RaisedFault(FaultKind::None)` to construct — [`RaisedFault::new`] is the
+/// only fallible route in, and it is for a kind that arrives as data.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RaisedFault(FaultKind);
+
+impl RaisedFault {
+    /// Integer arithmetic overflowed (§4.12).
+    pub const INT_OVERFLOW: RaisedFault = RaisedFault(FaultKind::IntOverflow);
+    /// Division or remainder by zero (§4.12).
+    pub const DIV_BY_ZERO: RaisedFault = RaisedFault(FaultKind::DivByZero);
+    /// A collection index was out of bounds (§9.2).
+    pub const INDEX_OUT_OF_BOUNDS: RaisedFault = RaisedFault(FaultKind::IndexOutOfBounds);
+    /// An input parse mismatch (§7.11).
+    pub const PARSE_FAILED: RaisedFault = RaisedFault(FaultKind::ParseFailed);
+    /// An operation required a non-empty collection (§9.2).
+    pub const EMPTY_COLLECTION: RaisedFault = RaisedFault(FaultKind::EmptyCollection);
+    /// Recursion exceeded the depth limit (§9.2, §17.4).
+    pub const STACK_OVERFLOW: RaisedFault = RaisedFault(FaultKind::StackOverflow);
+    /// A `Float` had no exact `Int` (§4.12).
+    pub const FLOAT_TO_INT: RaisedFault = RaisedFault(FaultKind::FloatToInt);
+    /// A code point was not a Unicode scalar value (§4.3).
+    pub const INVALID_CHAR: RaisedFault = RaisedFault(FaultKind::InvalidChar);
+    /// A byte buffer that had to be `Text` was not valid UTF-8 (§4.3).
+    pub const INVALID_TEXT: RaisedFault = RaisedFault(FaultKind::InvalidText);
+
+    /// The raisable fault `kind` names, or `None` for [`FaultKind::None`] —
+    /// which is the *absence* of a fault and cannot be raised.
+    #[must_use]
+    pub const fn new(kind: FaultKind) -> Option<RaisedFault> {
+        match kind {
+            FaultKind::None => None,
+            raisable => Some(RaisedFault(raisable)),
+        }
+    }
+
+    /// The kind this raises.
+    #[inline]
+    #[must_use]
+    pub const fn kind(self) -> FaultKind {
+        self.0
+    }
 }
 
 impl std::fmt::Display for FaultKind {
@@ -76,40 +138,56 @@ impl std::fmt::Display for FaultKind {
             FaultKind::EmptyCollection => write!(f, "empty collection"),
             FaultKind::StackOverflow => write!(f, "stack overflow (recursion limit)"),
             FaultKind::FloatToInt => write!(f, "float-to-int conversion out of range"),
+            FaultKind::InvalidChar => write!(f, "not a Unicode scalar value"),
+            FaultKind::InvalidText => write!(f, "invalid UTF-8 in Text"),
         }
     }
 }
 
 /// The fault record a [`RuntimeContext`] points at. `pending_fault` is non-null
-/// and points at the owning runtime's slot; a fault is "pending" when
-/// [`Fault::kind`] is not [`FaultKind::None`] (the `pending` bool mirrors that
-/// for a cheap single-byte check in generated code).
+/// and points at the owning runtime's slot.
+///
+/// **The kind is the whole state.** There used to be a `pending: bool` beside
+/// it, documented as a mirror of `kind != None` and justified as "a cheap
+/// single-byte check in generated code" — but generated code never read it (it
+/// calls `praxis_check_fault`), and the two could disagree: `set(FaultKind::None)`
+/// produced `{pending: true, kind: None}`, on which generated code branched to
+/// its fault path while the host reported "no fault" (RT-17). One field cannot
+/// contradict itself.
 #[repr(C)]
 pub struct Fault {
-    /// True iff a fault is pending (mirrors `kind != None`).
-    pub pending: bool,
-    /// The kind of fault, when pending.
-    pub kind: FaultKind,
+    /// The pending fault, or [`FaultKind::None`] for no fault. Private: the
+    /// only way to raise one is [`Fault::set`], which takes a [`RaisedFault`].
+    kind: FaultKind,
 }
 
 impl Fault {
     /// A fresh, clear fault record (no fault pending).
     pub fn clear() -> Self {
         Fault {
-            pending: false,
             kind: FaultKind::None,
         }
     }
 
-    /// Mark a fault of `kind` as pending.
-    pub fn set(&mut self, kind: FaultKind) {
-        self.pending = true;
-        self.kind = kind;
+    /// Raise `fault`.
+    ///
+    /// Takes a [`RaisedFault`] rather than a `FaultKind` so that "raise no
+    /// fault" — the state generated code and the host disagreed about — has no
+    /// spelling.
+    pub fn set(&mut self, fault: RaisedFault) {
+        self.kind = fault.kind();
+    }
+
+    /// The pending fault kind, or [`FaultKind::None`].
+    #[inline]
+    #[must_use]
+    pub fn kind(&self) -> FaultKind {
+        self.kind
     }
 
     /// True iff a fault is pending.
     pub fn is_pending(&self) -> bool {
-        self.pending
+        self.kind != FaultKind::None
     }
 }
 
@@ -430,7 +508,7 @@ impl Runtime {
 
     /// The current fault state (§10.4). `FaultKind::None` when no fault is set.
     pub fn fault(&self) -> FaultKind {
-        self.fault.kind
+        self.fault.kind()
     }
 
     /// True iff a fault is pending.
@@ -440,7 +518,7 @@ impl Runtime {
 
     /// Clear any pending fault, returning the kind that was pending (if any).
     pub fn take_fault(&mut self) -> Option<FaultKind> {
-        let kind = self.fault.kind;
+        let kind = self.fault.kind();
         if self.fault.is_pending() {
             self.fault = Fault::clear();
             Some(kind)
@@ -829,22 +907,47 @@ mod tests {
         let mut ctx = unsafe { RuntimeContext::placeholder(gcref) };
         assert!(!ctx.has_pending_fault());
         let mut fault = Fault::clear();
-        fault.set(FaultKind::IntOverflow);
+        fault.set(RaisedFault::INT_OVERFLOW);
         ctx.pending_fault = &mut fault;
         assert!(ctx.has_pending_fault());
     }
 
+    /// The audit wrote this as `fault.set(FaultKind::None)` followed by
+    /// `assert!(!fault.is_pending())`. That line no longer compiles: `set`
+    /// takes a [`RaisedFault`], and there is no `RaisedFault` for `None`. The
+    /// property is now structural, so what is left to test is the one place a
+    /// `FaultKind` arriving as data becomes a raisable one — and that it
+    /// rejects the absence of a fault (RT-17).
     #[test]
-    #[ignore = "known bug: Fault::set(None) creates pending=true, kind=None"]
     fn setting_none_cannot_create_a_pending_fault() {
-        let mut fault = Fault::clear();
-        fault.set(FaultKind::None);
-
         assert!(
-            !fault.is_pending(),
-            "FaultKind::None represents the absence of a fault and must not be pending"
+            RaisedFault::new(FaultKind::None).is_none(),
+            "FaultKind::None represents the absence of a fault and cannot be raised"
         );
-        assert_eq!(fault.kind, FaultKind::None);
+
+        let mut fault = Fault::clear();
+        assert!(!fault.is_pending());
+        assert_eq!(fault.kind(), FaultKind::None);
+
+        // Every other kind round-trips, and raising one is what makes a fault
+        // pending — there is no second field to disagree with the kind.
+        for kind in [
+            FaultKind::IntOverflow,
+            FaultKind::DivByZero,
+            FaultKind::IndexOutOfBounds,
+            FaultKind::ParseFailed,
+            FaultKind::EmptyCollection,
+            FaultKind::StackOverflow,
+            FaultKind::FloatToInt,
+            FaultKind::InvalidChar,
+            FaultKind::InvalidText,
+        ] {
+            let raised = RaisedFault::new(kind).expect("every non-None kind is raisable");
+            assert_eq!(raised.kind(), kind);
+            fault.set(raised);
+            assert!(fault.is_pending(), "{kind} must be pending once raised");
+            assert_eq!(fault.kind(), kind);
+        }
     }
 
     #[test]

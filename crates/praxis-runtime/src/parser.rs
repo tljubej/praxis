@@ -64,7 +64,7 @@ unsafe fn fault_sentinel(ctx: *mut RuntimeContext) -> GcRef {
 /// Mark a parse fault on the context.
 unsafe fn set_parse_fault(ctx: *mut RuntimeContext) {
     let fault = unsafe { &mut *(*ctx).pending_fault };
-    fault.set(crate::FaultKind::ParseFailed);
+    fault.set(crate::context::RaisedFault::PARSE_FAILED);
 }
 
 /// Clear the runtime's [`ParseDetail`] slot at the start of a parse.

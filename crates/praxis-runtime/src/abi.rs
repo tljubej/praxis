@@ -16,7 +16,7 @@
 //! zero the wrapper writes the fault into the context's fault slot and returns a
 //! defined sentinel.
 
-use crate::context::{FaultKind, RuntimeContext};
+use crate::context::{RaisedFault, RuntimeContext};
 use crate::dynamic_key::DynamicKey;
 use crate::gc::GcRef;
 use crate::heap::{Heap, Safepoint};
@@ -62,7 +62,13 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// generated-code-read offset is unchanged — but the struct's size changed and
 /// the automatic collector's root set is now the whole `RuntimeRoots`, which is
 /// a behavioural contract generated code depends on.
-pub const RUNTIME_ABI_VERSION: u32 = 10;
+/// v11 (repair S7): `Fault` lost its `pending: bool`, so the struct behind
+/// `RuntimeContext.pending_fault` is one `FaultKind` wide. Generated code never
+/// read the field — it calls `praxis_check_fault` — but the type is `#[repr(C)]`
+/// and reachable from the context, so the shape change is declared rather than
+/// assumed. `FaultKind` also gained `InvalidChar` and `InvalidText`, the two
+/// kinds that previously had to be raised as `None` (RT-17).
+pub const RUNTIME_ABI_VERSION: u32 = 11;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -84,7 +90,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 10;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 11;
 
 // ---------------------------------------------------------------------------
 // The runtime symbol table (F4).
@@ -254,11 +260,15 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
 // Internals the wrappers share.
 // ---------------------------------------------------------------------------
 
-/// Mark `kind` as pending on `ctx`'s fault slot (§10.4). Does nothing if the
-/// context's fault pointer is null (a misuse, but never panics across the ABI).
-unsafe fn set_fault(ctx: *mut RuntimeContext, kind: FaultKind) {
-    if let Some(fault) = unsafe { (*ctx).pending_fault.as_mut() } {
-        fault.set(kind);
+/// Raise `fault` on `ctx`'s fault slot (§10.4). Does nothing if the context's
+/// fault pointer is null (a misuse, but never panics across the ABI).
+///
+/// Takes a [`RaisedFault`], not a `FaultKind`: two wrappers used to pass
+/// `FaultKind::None` for want of a kind that described them, leaving generated
+/// code branching to its fault path while the host reported "no fault" (RT-17).
+unsafe fn set_fault(ctx: *mut RuntimeContext, fault: RaisedFault) {
+    if let Some(slot) = unsafe { (*ctx).pending_fault.as_mut() } {
+        slot.set(fault);
     }
 }
 
@@ -451,11 +461,18 @@ pub unsafe extern "C" fn praxis_alloc_unit(ctx: *mut RuntimeContext) -> GcRef {
 /// `ctx` must point at a live, wired `RuntimeContext`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_char(ctx: *mut RuntimeContext, value: i64) -> GcRef {
-    let code = value as u32;
+    // Range-check the `i64` *before* narrowing it. `value as u32` truncates, so
+    // `0x1_0000_0041` became `0x41` and a program that computed a nonsense code
+    // point silently got `'A'` (RT-18). The scalar ABI is 64 bits wide; a code
+    // point is not, and the conversion has to say so rather than wrap.
+    let Ok(code) = u32::try_from(value) else {
+        unsafe { set_fault(ctx, RaisedFault::INVALID_CHAR) };
+        return unsafe { unit_sentinel(ctx) };
+    };
     if !crate::scalars::is_valid_char(code) {
         // Defensive: the parser validates scalars, but a malformed code point must
         // not panic across the ABI.
-        unsafe { set_fault(ctx, FaultKind::None) };
+        unsafe { set_fault(ctx, RaisedFault::INVALID_CHAR) };
         return unsafe { unit_sentinel(ctx) };
     }
     // SAFETY: caller upholds ctx/heap validity; code is a validated scalar.
@@ -485,7 +502,7 @@ pub unsafe extern "C" fn praxis_alloc_text(
     let owned: Box<str> = match std::str::from_utf8(slice) {
         Ok(s) => s.into(),
         Err(_) => {
-            unsafe { set_fault(ctx, FaultKind::None) };
+            unsafe { set_fault(ctx, RaisedFault::INVALID_TEXT) };
             std::string::String::from_utf8_lossy(slice)
                 .into_owned()
                 .into_boxed_str()
@@ -620,7 +637,7 @@ pub unsafe extern "C" fn praxis_float_to_int(ctx: *mut RuntimeContext, r: GcRef)
     // -inf→i64::MIN, nan→0), which would silently produce a plausible-but-wrong
     // value; per §4.12 these cases fault instead.
     if f.is_nan() || f.is_infinite() || f < i64::MIN as f64 || f >= i64::MAX as f64 {
-        unsafe { set_fault(ctx, FaultKind::FloatToInt) };
+        unsafe { set_fault(ctx, RaisedFault::FLOAT_TO_INT) };
         return unsafe { unit_sentinel(ctx) };
     }
     // The range check above bounds f to (-2^63, 2^63); truncation toward zero is
@@ -840,9 +857,9 @@ macro_rules! checked_int_binop {
     };
 }
 
-checked_int_binop!(praxis_int_add, checked_add, FaultKind::IntOverflow);
-checked_int_binop!(praxis_int_sub, checked_sub, FaultKind::IntOverflow);
-checked_int_binop!(praxis_int_mul, checked_mul, FaultKind::IntOverflow);
+checked_int_binop!(praxis_int_add, checked_add, RaisedFault::INT_OVERFLOW);
+checked_int_binop!(praxis_int_sub, checked_sub, RaisedFault::INT_OVERFLOW);
+checked_int_binop!(praxis_int_mul, checked_mul, RaisedFault::INT_OVERFLOW);
 
 /// Checked `Int` division (§4.12). Faults on division by zero, and on overflow
 /// (`Int::MIN / -1`, the one signed-division case that overflows §4.12).
@@ -854,7 +871,7 @@ pub unsafe extern "C" fn praxis_int_div(ctx: *mut RuntimeContext, lhs: GcRef, rh
     let a = unsafe { int_payload(lhs) };
     let b = unsafe { int_payload(rhs) };
     if b == 0 {
-        unsafe { set_fault(ctx, FaultKind::DivByZero) };
+        unsafe { set_fault(ctx, RaisedFault::DIV_BY_ZERO) };
         return unsafe { unit_sentinel(ctx) };
     }
     // `i64::MIN / -1` is the sole overflowing signed division: the mathematical
@@ -862,7 +879,7 @@ pub unsafe extern "C" fn praxis_int_div(ctx: *mut RuntimeContext, lhs: GcRef, rh
     // debug builds (violating the no-panic-across-the-ABI rule, §10.4). Treat it
     // as checked-arithmetic overflow per §4.12.
     if a == i64::MIN && b == -1 {
-        unsafe { set_fault(ctx, FaultKind::IntOverflow) };
+        unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
         return unsafe { unit_sentinel(ctx) };
     }
     // Division truncates toward zero (Rust's `i64::div_euclid` rounds differently;
@@ -880,14 +897,14 @@ pub unsafe extern "C" fn praxis_int_rem(ctx: *mut RuntimeContext, lhs: GcRef, rh
     let a = unsafe { int_payload(lhs) };
     let b = unsafe { int_payload(rhs) };
     if b == 0 {
-        unsafe { set_fault(ctx, FaultKind::DivByZero) };
+        unsafe { set_fault(ctx, RaisedFault::DIV_BY_ZERO) };
         return unsafe { unit_sentinel(ctx) };
     }
     // `i64::MIN % -1`: the remainder is 0 mathematically, but the raw `%` traps
     // on this exact case in debug builds because the corresponding quotient
     // overflows. Guard it for the same no-panic reason as `praxis_int_div`.
     if a == i64::MIN && b == -1 {
-        unsafe { set_fault(ctx, FaultKind::IntOverflow) };
+        unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
         return unsafe { unit_sentinel(ctx) };
     }
     unsafe { gc_alloc(ctx, &scalars::INT, a % b) }
@@ -903,7 +920,7 @@ pub unsafe extern "C" fn praxis_int_neg(ctx: *mut RuntimeContext, r: GcRef) -> G
     match a.checked_neg() {
         Some(result) => unsafe { gc_alloc(ctx, &scalars::INT, result) },
         None => {
-            unsafe { set_fault(ctx, FaultKind::IntOverflow) };
+            unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
             unsafe { unit_sentinel(ctx) }
         }
     }
@@ -972,7 +989,7 @@ pub unsafe extern "C" fn praxis_check_fault(ctx: *mut RuntimeContext) -> i64 {
 /// `ctx` must point at a live, wired `RuntimeContext`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_raise_stack_overflow(ctx: *mut RuntimeContext) {
-    unsafe { set_fault(ctx, FaultKind::StackOverflow) };
+    unsafe { set_fault(ctx, RaisedFault::STACK_OVERFLOW) };
 }
 
 /// Raise a [`FaultKind::IntOverflow`] fault on `ctx` iff `condition` is
@@ -990,7 +1007,7 @@ pub unsafe extern "C" fn praxis_raise_stack_overflow(ctx: *mut RuntimeContext) {
 #[no_mangle]
 pub unsafe extern "C" fn praxis_raise_int_overflow_if(ctx: *mut RuntimeContext, condition: i64) {
     if condition != 0 {
-        unsafe { set_fault(ctx, FaultKind::IntOverflow) };
+        unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
     }
 }
 
@@ -1002,7 +1019,7 @@ pub unsafe extern "C" fn praxis_raise_int_overflow_if(ctx: *mut RuntimeContext, 
 #[no_mangle]
 pub unsafe extern "C" fn praxis_raise_div_by_zero_if(ctx: *mut RuntimeContext, condition: i64) {
     if condition != 0 {
-        unsafe { set_fault(ctx, FaultKind::DivByZero) };
+        unsafe { set_fault(ctx, RaisedFault::DIV_BY_ZERO) };
     }
 }
 
@@ -1598,7 +1615,7 @@ pub unsafe extern "C" fn praxis_vec_get(
     // SAFETY: caller guarantees `index` is a valid Int.
     let idx = unsafe { int_payload(index) };
     if idx < 0 || idx as usize >= p.items.len() {
-        unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+        unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
         return unsafe { unit_sentinel(ctx) };
     }
     // Return the element by value (a copy of the GcRef). No allocation, so no
@@ -1740,7 +1757,7 @@ pub unsafe extern "C" fn praxis_deque_pop_front(ctx: *mut RuntimeContext, deque:
     match p.items.pop_front() {
         Some(v) => v,
         None => {
-            unsafe { set_fault(ctx, FaultKind::EmptyCollection) };
+            unsafe { set_fault(ctx, RaisedFault::EMPTY_COLLECTION) };
             unsafe { unit_sentinel(ctx) }
         }
     }
@@ -1757,7 +1774,7 @@ pub unsafe extern "C" fn praxis_deque_pop_back(ctx: *mut RuntimeContext, deque: 
     match p.items.pop_back() {
         Some(v) => v,
         None => {
-            unsafe { set_fault(ctx, FaultKind::EmptyCollection) };
+            unsafe { set_fault(ctx, RaisedFault::EMPTY_COLLECTION) };
             unsafe { unit_sentinel(ctx) }
         }
     }
@@ -1788,7 +1805,7 @@ pub unsafe extern "C" fn praxis_deque_get(
     let p = unsafe { deque_payload(deque) };
     let idx = unsafe { int_payload(index) };
     if idx < 0 || idx as usize >= p.items.len() {
-        unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+        unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
         return unsafe { unit_sentinel(ctx) };
     }
     p.items[idx as usize]
@@ -2327,7 +2344,7 @@ pub unsafe extern "C" fn praxis_max_heap_pop(ctx: *mut RuntimeContext, heap_ref:
     match p.items.pop() {
         Some(e) => e.value,
         None => {
-            unsafe { set_fault(ctx, FaultKind::EmptyCollection) };
+            unsafe { set_fault(ctx, RaisedFault::EMPTY_COLLECTION) };
             unsafe { unit_sentinel(ctx) }
         }
     }
@@ -2343,7 +2360,7 @@ pub unsafe extern "C" fn praxis_max_heap_peek(ctx: *mut RuntimeContext, heap_ref
     match p.items.peek() {
         Some(e) => e.value,
         None => {
-            unsafe { set_fault(ctx, FaultKind::EmptyCollection) };
+            unsafe { set_fault(ctx, RaisedFault::EMPTY_COLLECTION) };
             unsafe { unit_sentinel(ctx) }
         }
     }
@@ -2436,7 +2453,7 @@ pub unsafe extern "C" fn praxis_min_heap_pop(ctx: *mut RuntimeContext, heap_ref:
     match p.items.pop() {
         Some(e) => e.0.value,
         None => {
-            unsafe { set_fault(ctx, FaultKind::EmptyCollection) };
+            unsafe { set_fault(ctx, RaisedFault::EMPTY_COLLECTION) };
             unsafe { unit_sentinel(ctx) }
         }
     }
@@ -2452,7 +2469,7 @@ pub unsafe extern "C" fn praxis_min_heap_peek(ctx: *mut RuntimeContext, heap_ref
     match p.items.peek() {
         Some(e) => e.0.value,
         None => {
-            unsafe { set_fault(ctx, FaultKind::EmptyCollection) };
+            unsafe { set_fault(ctx, RaisedFault::EMPTY_COLLECTION) };
             unsafe { unit_sentinel(ctx) }
         }
     }
@@ -2714,7 +2731,7 @@ pub unsafe extern "C" fn praxis_grid_get(
     let (xi, yi) = (unsafe { int_payload(x) }, unsafe { int_payload(y) });
     let height = grid_height(p.items.len(), p.width);
     if xi < 0 || yi < 0 || xi as usize >= p.width || yi as usize >= height {
-        unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+        unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
         return unsafe { unit_sentinel(ctx) };
     }
     p.items[(yi as usize) * p.width + (xi as usize)]
@@ -2738,7 +2755,7 @@ pub unsafe extern "C" fn praxis_grid_set(
     let (xi, yi) = (unsafe { int_payload(x) }, unsafe { int_payload(y) });
     let height = grid_height(p.items.len(), p.width);
     if xi < 0 || yi < 0 || xi as usize >= p.width || yi as usize >= height {
-        unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+        unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
         return unsafe { unit_sentinel(ctx) };
     }
     p.items[(yi as usize) * p.width + (xi as usize)] = value;
@@ -2871,7 +2888,7 @@ pub unsafe extern "C" fn praxis_grid_row(ctx: *mut RuntimeContext, grid: GcRef, 
     let yi = unsafe { int_payload(y) };
     let height = grid_height(p.items.len(), p.width);
     if yi < 0 || yi as usize >= height {
-        unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+        unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
         return unsafe { unit_sentinel(ctx) };
     }
     let start = (yi as usize) * p.width;
@@ -2898,7 +2915,7 @@ pub unsafe extern "C" fn praxis_grid_column(
     let p = unsafe { grid_payload(grid) };
     let xi = unsafe { int_payload(x) };
     if xi < 0 || xi as usize >= p.width {
-        unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+        unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
         return unsafe { unit_sentinel(ctx) };
     }
     let result = unsafe { praxis_vec_new(ctx, std::ptr::null()) };
@@ -3143,7 +3160,7 @@ pub unsafe extern "C" fn praxis_text_get(
     // SAFETY: caller guarantees `index` is a valid Int.
     let idx = unsafe { int_payload(index) };
     if idx < 0 {
-        unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+        unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
         return unsafe { unit_sentinel(ctx) };
     }
     match s.chars().nth(idx as usize) {
@@ -3152,7 +3169,7 @@ pub unsafe extern "C" fn praxis_text_get(
             unsafe { gc_alloc(ctx, &scalars::INT, ch as i64) }
         }
         None => {
-            unsafe { set_fault(ctx, FaultKind::IndexOutOfBounds) };
+            unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
             unsafe { unit_sentinel(ctx) }
         }
     }
@@ -3228,7 +3245,7 @@ pub unsafe extern "C" fn praxis_run_parser(
     // `run_plan` with a non-Text payload would reinterpret foreign bytes as a
     // TextPayload and segfault; fault cleanly instead.
     if input.descriptor().id() != crate::text::TEXT.id() {
-        unsafe { set_fault(ctx, FaultKind::ParseFailed) };
+        unsafe { set_fault(ctx, RaisedFault::PARSE_FAILED) };
         return unsafe { unit_sentinel(ctx) };
     }
     let idx = unsafe { int_payload(plan_index_gc) };
@@ -3239,7 +3256,7 @@ pub unsafe extern "C" fn praxis_run_parser(
         None => {
             // A `None` return means the plan index was out of range or the
             // interpreter was not linked. Treat as a parse fault.
-            unsafe { set_fault(ctx, FaultKind::ParseFailed) };
+            unsafe { set_fault(ctx, RaisedFault::PARSE_FAILED) };
             unsafe { unit_sentinel(ctx) }
         }
     }
@@ -3248,7 +3265,7 @@ pub unsafe extern "C" fn praxis_run_parser(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::{Fault, Runtime};
+    use crate::context::{Fault, FaultKind, Runtime};
     use crate::parse_detail::ParseFail;
 
     /// A wired context backed by a real runtime.
@@ -3279,8 +3296,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_ten_after_the_cached_bool_immortals() {
-        assert_eq!(RUNTIME_ABI_VERSION, 10);
+    fn version_is_eleven_after_the_fault_repack() {
+        assert_eq!(RUNTIME_ABI_VERSION, 11);
     }
 
     #[test]
@@ -3740,7 +3757,7 @@ mod tests {
     fn fault_clear_default_is_none() {
         let f = Fault::clear();
         assert!(!f.is_pending());
-        assert_eq!(f.kind, FaultKind::None);
+        assert_eq!(f.kind(), FaultKind::None);
     }
 
     // --- Vec[T] collection wrappers (M5) -----------------------------------
@@ -3931,7 +3948,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: Char conversion truncates i64 to u32 before validation"]
     fn alloc_char_rejects_values_that_only_become_valid_after_truncation() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
@@ -3944,6 +3960,41 @@ mod tests {
             unit.as_ptr(),
             "the ABI must range-check the i64 code point before converting it to u32"
         );
+        // And the fault it raises must name itself. `praxis_alloc_char` used to
+        // raise `FaultKind::None`, so the host reported "no fault" while
+        // generated code took its fault path (RT-17).
+        assert_eq!(rt.fault(), FaultKind::InvalidChar);
+        assert!(rt.has_pending_fault());
+    }
+
+    /// A negative code point is out of range for the same reason a too-large
+    /// one is, and `as u32` wraps it into the valid range just as silently.
+    #[test]
+    fn alloc_char_rejects_a_negative_code_point() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let result = unsafe { praxis_alloc_char(ctx, -1) };
+        let unit = rt.immortals().unit();
+        unsafe { drop_ctx(ctx) };
+
+        assert_eq!(result.as_ptr(), unit.as_ptr());
+        assert_eq!(rt.fault(), FaultKind::InvalidChar);
+    }
+
+    /// Malformed UTF-8 recovers lossily rather than panicking across the ABI —
+    /// but the recovery is a fault, and it used to raise `FaultKind::None`
+    /// (RT-17).
+    #[test]
+    fn alloc_text_reports_invalid_utf8_as_its_own_fault_kind() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let bad = [0xF0_u8, 0x28, 0x8C, 0x28];
+        let result = unsafe { praxis_alloc_text(ctx, bad.as_ptr(), bad.len()) };
+        unsafe { drop_ctx(ctx) };
+
+        assert_eq!(result.descriptor().name, "Text");
+        assert_eq!(rt.fault(), FaultKind::InvalidText);
+        assert!(rt.has_pending_fault());
     }
 
     #[test]
