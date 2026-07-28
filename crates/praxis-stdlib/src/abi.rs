@@ -1,0 +1,423 @@
+//! The runtime ABI manifest: one row per `praxis_*` symbol the JIT can call.
+//!
+//! Everything the compiler needs to know about a runtime wrapper — its exact
+//! symbol name, its parameter and return kinds, and whether calling it can
+//! allocate or fault — is **one row** in [`runtime_symbols!`] below. Before
+//! this manifest that knowledge was spread over five places (a `Symbol` enum,
+//! an arity-derived signature synthesizer, a JIT registration list, a
+//! name→pointer resolver and a MIR string literal), and they had already
+//! drifted: the registration list was missing symbols that a `dlsym` fallback
+//! silently found, and the arity-only signature fed an `i64` immediate into a
+//! `u32` parameter.
+//!
+//! A call target is now a [`RuntimeSymbol`], not a string. Adding a wrapper
+//! means adding a row here and one arm to `praxis_runtime::abi::address`; both
+//! are exhaustive matches, so anything else that must change is a compile
+//! error rather than a runtime surprise.
+//!
+//! This crate is the right home because it is the lowest common dependency of
+//! the compiler crates that need the manifest (`praxis-mir`,
+//! `praxis-codegen-cranelift`) and of `praxis-runtime`, which supplies the
+//! addresses.
+
+/// The kind of one ABI parameter — what a value in that position *is*, which
+/// fixes the machine type the caller must pass.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum AbiKind {
+    /// `*mut RuntimeContext`. Always the first parameter of every wrapper.
+    Ctx,
+    /// A `GcRef` — a non-null pointer to a `GcHeader`. Pointer-width.
+    Gc,
+    /// A raw, unboxed `i64`. **Not** a GC reference: never rooted, never traced.
+    RawI64,
+    /// A raw, unboxed `u32`. Narrower than a machine word, so passing an `i64`
+    /// here is exactly the mismatch this manifest exists to prevent.
+    RawU32,
+    /// A pointer-width raw word that is not a `GcRef`: a `*const u8`, a
+    /// descriptor or schema pointer, a frame pointer, or a `usize` length.
+    Ptr,
+}
+
+/// What a wrapper returns.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum AbiRet {
+    /// A `GcRef`.
+    Gc,
+    /// A raw `i64`.
+    RawI64,
+    /// A pointer-width raw word (a frame pointer, a function pointer).
+    Ptr,
+    /// Nothing.
+    Void,
+}
+
+/// The one answer to "does calling this need a root set, or a fault check?"
+///
+/// `Allocates` means the call **may trigger a collection**, so every live
+/// `GcRef` the caller holds must be rooted across it — that is what makes a
+/// call site a safepoint. A wrapper that only hands back an immortal singleton
+/// (`true`, `false`, `unit`) allocates nothing collectable and is therefore not
+/// a safepoint, however "alloc" its name reads.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Effect {
+    /// Neither allocates nor faults.
+    Pure,
+    /// May set a pending fault; cannot allocate.
+    Faults,
+    /// May allocate (and therefore collect); cannot fault.
+    Allocates,
+    /// Both.
+    AllocatesAndFaults,
+}
+
+impl Effect {
+    /// Whether a call to this symbol is a safepoint.
+    #[inline]
+    pub const fn allocates(self) -> bool {
+        matches!(self, Effect::Allocates | Effect::AllocatesAndFaults)
+    }
+
+    /// Whether a call to this symbol needs a fault check afterwards.
+    #[inline]
+    pub const fn faults(self) -> bool {
+        matches!(self, Effect::Faults | Effect::AllocatesAndFaults)
+    }
+}
+
+/// One wrapper's full ABI: what it takes, what it gives back, what it may do.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AbiSig {
+    /// Parameter kinds, including the leading [`AbiKind::Ctx`].
+    pub params: &'static [AbiKind],
+    /// Return kind.
+    pub ret: AbiRet,
+    /// Allocation and fault behaviour.
+    pub effect: Effect,
+}
+
+impl AbiSig {
+    /// Parameter count excluding the leading context pointer.
+    #[inline]
+    pub const fn arity(&self) -> usize {
+        self.params.len() - 1
+    }
+}
+
+/// Declare the manifest. One row per symbol:
+/// `Variant = "praxis_name": (ParamKinds…) -> Ret, Effect;`
+macro_rules! runtime_symbols {
+    ($( $variant:ident = $name:literal : ( $($kind:ident),* ) -> $ret:ident , $effect:ident ; )*) => {
+        /// Every `praxis_*` runtime wrapper generated code may call.
+        ///
+        /// A call target in MIR is one of these, so "the compiler emitted a call
+        /// to a symbol that does not exist" is not a representable state.
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+        pub enum RuntimeSymbol {
+            $(
+                #[doc = concat!("`", $name, "`")]
+                $variant,
+            )*
+        }
+
+        impl RuntimeSymbol {
+            /// Every symbol, in declaration order.
+            pub const ALL: &'static [RuntimeSymbol] = &[$(RuntimeSymbol::$variant),*];
+
+            /// The exact linker symbol name. This is the only place the string
+            /// is written.
+            #[inline]
+            pub const fn name(self) -> &'static str {
+                match self { $(RuntimeSymbol::$variant => $name,)* }
+            }
+
+            /// This symbol's parameter kinds, return kind and effect.
+            #[inline]
+            pub const fn sig(self) -> AbiSig {
+                match self {
+                    $(RuntimeSymbol::$variant => AbiSig {
+                        params: &[$(AbiKind::$kind),*],
+                        ret: AbiRet::$ret,
+                        effect: Effect::$effect,
+                    },)*
+                }
+            }
+
+            /// Recover a symbol from its linker name. The inverse of
+            /// [`RuntimeSymbol::name`]; used where a name crosses a boundary
+            /// that is not yet typed.
+            pub fn from_name(name: &str) -> Option<RuntimeSymbol> {
+                match name {
+                    $($name => Some(RuntimeSymbol::$variant),)*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+impl RuntimeSymbol {
+    /// Whether calling this symbol may trigger a collection (a safepoint).
+    #[inline]
+    pub const fn allocates(self) -> bool {
+        self.sig().effect.allocates()
+    }
+
+    /// Whether calling this symbol may set a pending fault.
+    #[inline]
+    pub const fn faults(self) -> bool {
+        self.sig().effect.faults()
+    }
+
+    /// Parameter count excluding the leading context pointer.
+    #[inline]
+    pub const fn arity(self) -> usize {
+        self.sig().arity()
+    }
+}
+
+impl std::fmt::Display for RuntimeSymbol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+runtime_symbols! {
+    AllocBool = "praxis_alloc_bool": (Ctx, RawI64) -> Gc, Pure;
+    AllocChar = "praxis_alloc_char": (Ctx, RawI64) -> Gc, AllocatesAndFaults;
+    AllocClosure = "praxis_alloc_closure": (Ctx, Ptr, RawI64) -> Gc, Allocates;
+    AllocEnum = "praxis_alloc_enum": (Ctx, RawI64, RawI64) -> Gc, Allocates;
+    AllocFloat = "praxis_alloc_float": (Ctx, RawI64) -> Gc, Allocates;
+    AllocInt = "praxis_alloc_int": (Ctx, RawI64) -> Gc, Allocates;
+    AllocRecord = "praxis_alloc_record": (Ctx, Ptr) -> Gc, Allocates;
+    AllocText = "praxis_alloc_text": (Ctx, Ptr, Ptr) -> Gc, AllocatesAndFaults;
+    AllocTuple = "praxis_alloc_tuple": (Ctx, Ptr) -> Gc, Allocates;
+    AllocUnit = "praxis_alloc_unit": (Ctx) -> Gc, Pure;
+    AllocVarCell = "praxis_alloc_var_cell": (Ctx, Gc) -> Gc, Allocates;
+    BitsetContains = "praxis_bitset_contains": (Ctx, Gc, Gc) -> Gc, Pure;
+    BitsetInsert = "praxis_bitset_insert": (Ctx, Gc, Gc) -> Gc, Allocates;
+    BitsetIsEmpty = "praxis_bitset_is_empty": (Ctx, Gc) -> Gc, Pure;
+    BitsetLen = "praxis_bitset_len": (Ctx, Gc) -> Gc, Allocates;
+    BitsetNew = "praxis_bitset_new": (Ctx) -> Gc, Allocates;
+    BitsetRemove = "praxis_bitset_remove": (Ctx, Gc, Gc) -> Gc, Pure;
+    BoolLoad = "praxis_bool_load": (Ctx, Gc) -> RawI64, Pure;
+    CharLoad = "praxis_char_load": (Ctx, Gc) -> RawI64, Pure;
+    CheckFault = "praxis_check_fault": (Ctx) -> RawI64, Pure;
+    ClosureCapture = "praxis_closure_capture": (Ctx, Gc, RawI64) -> Gc, Pure;
+    ClosureFnPtr = "praxis_closure_fn_ptr": (Ctx, Gc) -> Ptr, Pure;
+    ClosureSetCapture = "praxis_closure_set_capture": (Ctx, Gc, RawI64, Gc) -> Gc, Pure;
+    CounterGet = "praxis_counter_get": (Ctx, Gc, Gc) -> Gc, Allocates;
+    CounterInc = "praxis_counter_inc": (Ctx, Gc, Gc) -> Gc, Allocates;
+    CounterIsEmpty = "praxis_counter_is_empty": (Ctx, Gc) -> Gc, Pure;
+    CounterLen = "praxis_counter_len": (Ctx, Gc) -> Gc, Allocates;
+    CounterNew = "praxis_counter_new": (Ctx, Ptr) -> Gc, Allocates;
+    DequeGet = "praxis_deque_get": (Ctx, Gc, Gc) -> Gc, Faults;
+    DequeIsEmpty = "praxis_deque_is_empty": (Ctx, Gc) -> Gc, Pure;
+    DequeLen = "praxis_deque_len": (Ctx, Gc) -> Gc, Allocates;
+    DequeNew = "praxis_deque_new": (Ctx, Ptr) -> Gc, Allocates;
+    DequePopBack = "praxis_deque_pop_back": (Ctx, Gc) -> Gc, Faults;
+    DequePopFront = "praxis_deque_pop_front": (Ctx, Gc) -> Gc, Faults;
+    DequePushBack = "praxis_deque_push_back": (Ctx, Gc, Gc) -> Gc, Allocates;
+    DequePushFront = "praxis_deque_push_front": (Ctx, Gc, Gc) -> Gc, Allocates;
+    EnumPayload = "praxis_enum_payload": (Ctx, Gc, RawI64) -> Gc, Pure;
+    EnumSetPayload = "praxis_enum_set_payload": (Ctx, Gc, RawI64, Gc) -> Gc, Pure;
+    EnumTag = "praxis_enum_tag": (Ctx, Gc) -> Gc, Allocates;
+    FloatAbs = "praxis_float_abs": (Ctx, Gc) -> Gc, Allocates;
+    FloatCeil = "praxis_float_ceil": (Ctx, Gc) -> Gc, Allocates;
+    FloatE = "praxis_float_e": (Ctx) -> Gc, Allocates;
+    FloatFloor = "praxis_float_floor": (Ctx, Gc) -> Gc, Allocates;
+    FloatIsInfinite = "praxis_float_is_infinite": (Ctx, Gc) -> Gc, Pure;
+    FloatIsNan = "praxis_float_is_nan": (Ctx, Gc) -> Gc, Pure;
+    FloatLoad = "praxis_float_load": (Ctx, Gc) -> RawI64, Pure;
+    FloatMax = "praxis_float_max": (Ctx, Gc, Gc) -> Gc, Allocates;
+    FloatMin = "praxis_float_min": (Ctx, Gc, Gc) -> Gc, Allocates;
+    FloatPi = "praxis_float_pi": (Ctx) -> Gc, Allocates;
+    FloatRound = "praxis_float_round": (Ctx, Gc) -> Gc, Allocates;
+    FloatSign = "praxis_float_sign": (Ctx, Gc) -> Gc, Allocates;
+    FloatSqrt = "praxis_float_sqrt": (Ctx, Gc) -> Gc, Allocates;
+    FloatToInt = "praxis_float_to_int": (Ctx, Gc) -> Gc, AllocatesAndFaults;
+    FloatToText = "praxis_float_to_text": (Ctx, Gc) -> Gc, Allocates;
+    GetInput = "praxis_get_input": (Ctx) -> Gc, Pure;
+    GridCells = "praxis_grid_cells": (Ctx, Gc) -> Gc, Allocates;
+    GridColumn = "praxis_grid_column": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    GridContains = "praxis_grid_contains": (Ctx, Gc, Gc, Gc) -> Gc, Pure;
+    GridFind = "praxis_grid_find": (Ctx, Gc, Gc) -> Gc, Allocates;
+    GridFindAll = "praxis_grid_find_all": (Ctx, Gc, Gc) -> Gc, Allocates;
+    GridGet = "praxis_grid_get": (Ctx, Gc, Gc, Gc) -> Gc, Faults;
+    GridHeight = "praxis_grid_height": (Ctx, Gc) -> Gc, Allocates;
+    GridNeighbors4 = "praxis_grid_neighbors4": (Ctx, Gc, Gc) -> Gc, Allocates;
+    GridNeighbors8 = "praxis_grid_neighbors8": (Ctx, Gc, Gc) -> Gc, Allocates;
+    GridNew = "praxis_grid_new": (Ctx, Ptr, RawI64, RawI64) -> Gc, Allocates;
+    GridPositions = "praxis_grid_positions": (Ctx, Gc) -> Gc, Allocates;
+    GridRotateLeft = "praxis_grid_rotate_left": (Ctx, Gc) -> Gc, Allocates;
+    GridRotateRight = "praxis_grid_rotate_right": (Ctx, Gc) -> Gc, Allocates;
+    GridRow = "praxis_grid_row": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    GridSet = "praxis_grid_set": (Ctx, Gc, Gc, Gc, Gc) -> Gc, Faults;
+    GridTranspose = "praxis_grid_transpose": (Ctx, Gc) -> Gc, Allocates;
+    GridWidth = "praxis_grid_width": (Ctx, Gc) -> Gc, Allocates;
+    IntAdd = "praxis_int_add": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    IntDiv = "praxis_int_div": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    IntEq = "praxis_int_eq": (Ctx, Gc, Gc) -> Gc, Pure;
+    IntGe = "praxis_int_ge": (Ctx, Gc, Gc) -> Gc, Pure;
+    IntGt = "praxis_int_gt": (Ctx, Gc, Gc) -> Gc, Pure;
+    IntLe = "praxis_int_le": (Ctx, Gc, Gc) -> Gc, Pure;
+    IntLoad = "praxis_int_load": (Ctx, Gc) -> RawI64, Pure;
+    IntLt = "praxis_int_lt": (Ctx, Gc, Gc) -> Gc, Pure;
+    IntMul = "praxis_int_mul": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    IntNe = "praxis_int_ne": (Ctx, Gc, Gc) -> Gc, Pure;
+    IntNeg = "praxis_int_neg": (Ctx, Gc) -> Gc, AllocatesAndFaults;
+    IntRem = "praxis_int_rem": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    IntSub = "praxis_int_sub": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    IntToFloat = "praxis_int_to_float": (Ctx, Gc) -> Gc, Allocates;
+    MapContains = "praxis_map_contains": (Ctx, Gc, Gc) -> Gc, Pure;
+    MapGet = "praxis_map_get": (Ctx, Gc, Gc) -> Gc, Pure;
+    MapInsert = "praxis_map_insert": (Ctx, Gc, Gc, Gc) -> Gc, Allocates;
+    MapIsEmpty = "praxis_map_is_empty": (Ctx, Gc) -> Gc, Pure;
+    MapLen = "praxis_map_len": (Ctx, Gc) -> Gc, Allocates;
+    MapNew = "praxis_map_new": (Ctx, Ptr) -> Gc, Allocates;
+    MapRemove = "praxis_map_remove": (Ctx, Gc, Gc) -> Gc, Pure;
+    MapUpdateMax = "praxis_map_update_max": (Ctx, Gc, Gc, Gc) -> Gc, Allocates;
+    MapUpdateMin = "praxis_map_update_min": (Ctx, Gc, Gc, Gc) -> Gc, Allocates;
+    MaxHeapIsEmpty = "praxis_max_heap_is_empty": (Ctx, Gc) -> Gc, Pure;
+    MaxHeapLen = "praxis_max_heap_len": (Ctx, Gc) -> Gc, Allocates;
+    MaxHeapNew = "praxis_max_heap_new": (Ctx, Ptr) -> Gc, Allocates;
+    MaxHeapPeek = "praxis_max_heap_peek": (Ctx, Gc) -> Gc, Faults;
+    MaxHeapPop = "praxis_max_heap_pop": (Ctx, Gc) -> Gc, Faults;
+    MaxHeapPush = "praxis_max_heap_push": (Ctx, Gc, Gc) -> Gc, Allocates;
+    MinHeapIsEmpty = "praxis_min_heap_is_empty": (Ctx, Gc) -> Gc, Pure;
+    MinHeapLen = "praxis_min_heap_len": (Ctx, Gc) -> Gc, Allocates;
+    MinHeapNew = "praxis_min_heap_new": (Ctx, Ptr) -> Gc, Allocates;
+    MinHeapPeek = "praxis_min_heap_peek": (Ctx, Gc) -> Gc, Faults;
+    MinHeapPop = "praxis_min_heap_pop": (Ctx, Gc) -> Gc, Faults;
+    MinHeapPush = "praxis_min_heap_push": (Ctx, Gc, Gc) -> Gc, Allocates;
+    PopDebugFrame = "praxis_pop_debug_frame": (Ctx, Ptr) -> Void, Pure;
+    PopShadowFrame = "praxis_pop_shadow_frame": (Ctx, Ptr) -> Void, Pure;
+    PushDebugFrame = "praxis_push_debug_frame": (Ctx, Ptr, RawU32, RawU32, Ptr) -> Ptr, Pure;
+    PushShadowFrame = "praxis_push_shadow_frame": (Ctx, RawU32) -> Ptr, Pure;
+    RaiseStackOverflow = "praxis_raise_stack_overflow": (Ctx) -> Void, Faults;
+    RecordField = "praxis_record_field": (Ctx, Gc, RawU32) -> Gc, Pure;
+    RecordSetField = "praxis_record_set_field": (Ctx, Gc, RawU32, Gc) -> Gc, Pure;
+    RunParser = "praxis_run_parser": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    SetContains = "praxis_set_contains": (Ctx, Gc, Gc) -> Gc, Pure;
+    SetFrameSourceSpan = "praxis_set_frame_source_span": (Ctx, RawU32, RawU32) -> Void, Pure;
+    SetInsert = "praxis_set_insert": (Ctx, Gc, Gc) -> Gc, Allocates;
+    SetIsEmpty = "praxis_set_is_empty": (Ctx, Gc) -> Gc, Pure;
+    SetLen = "praxis_set_len": (Ctx, Gc) -> Gc, Allocates;
+    SetNew = "praxis_set_new": (Ctx, Ptr) -> Gc, Allocates;
+    SetRemove = "praxis_set_remove": (Ctx, Gc, Gc) -> Gc, Pure;
+    SnapshotDebugChain = "praxis_snapshot_debug_chain": (Ctx) -> Void, Pure;
+    StructEq = "praxis_struct_eq": (Ctx, Gc, Gc) -> RawI64, Pure;
+    TextGet = "praxis_text_get": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    TextIsEmpty = "praxis_text_is_empty": (Ctx, Gc) -> Gc, Pure;
+    TextLen = "praxis_text_len": (Ctx, Gc) -> Gc, Allocates;
+    TupleGet = "praxis_tuple_get": (Ctx, Gc, RawI64) -> Gc, Pure;
+    TupleSet = "praxis_tuple_set": (Ctx, Gc, RawI64, Gc) -> Gc, Pure;
+    VarCellGet = "praxis_var_cell_get": (Ctx, Gc) -> Gc, Pure;
+    VarCellSet = "praxis_var_cell_set": (Ctx, Gc, Gc) -> Gc, Pure;
+    VecGet = "praxis_vec_get": (Ctx, Gc, Gc) -> Gc, Faults;
+    VecIsEmpty = "praxis_vec_is_empty": (Ctx, Gc) -> Gc, Pure;
+    VecLen = "praxis_vec_len": (Ctx, Gc) -> Gc, Allocates;
+    VecNew = "praxis_vec_new": (Ctx, Ptr) -> Gc, Allocates;
+    VecPush = "praxis_vec_push": (Ctx, Gc, Gc) -> Gc, Allocates;
+    WriteStdout = "praxis_write_stdout": (Ctx, Gc) -> Gc, Pure;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// The manifest is a bijection between variants and linker names. A typo
+    /// that duplicated a name would otherwise make two symbols resolve to one
+    /// address.
+    #[test]
+    fn names_are_unique_and_well_formed() {
+        let mut seen = HashSet::new();
+        for &sym in RuntimeSymbol::ALL {
+            assert!(
+                sym.name().starts_with("praxis_"),
+                "{sym} is not a praxis_* symbol"
+            );
+            assert!(seen.insert(sym.name()), "duplicate symbol name {sym}");
+        }
+        assert_eq!(seen.len(), RuntimeSymbol::ALL.len());
+    }
+
+    /// `ALL` must list every variant. It is generated from the same rows as the
+    /// enum, so this is really a check that the macro was not edited apart.
+    #[test]
+    fn from_name_round_trips_every_symbol() {
+        for &sym in RuntimeSymbol::ALL {
+            assert_eq!(RuntimeSymbol::from_name(sym.name()), Some(sym));
+        }
+        assert_eq!(RuntimeSymbol::from_name("praxis_not_a_symbol"), None);
+    }
+
+    /// Every wrapper takes the context pointer first: the fault slot, the heap
+    /// and the root set all hang off it, so a wrapper without it could not
+    /// allocate, fault or be a safepoint.
+    #[test]
+    fn every_symbol_leads_with_the_context_pointer() {
+        for &sym in RuntimeSymbol::ALL {
+            let sig = sym.sig();
+            assert_eq!(
+                sig.params.first(),
+                Some(&AbiKind::Ctx),
+                "{sym} does not take ctx first"
+            );
+            assert!(
+                !sig.params[1..].contains(&AbiKind::Ctx),
+                "{sym} takes ctx more than once"
+            );
+        }
+    }
+
+    #[test]
+    fn effect_queries_agree_with_the_variants() {
+        assert!(!Effect::Pure.allocates() && !Effect::Pure.faults());
+        assert!(!Effect::Faults.allocates() && Effect::Faults.faults());
+        assert!(Effect::Allocates.allocates() && !Effect::Allocates.faults());
+        assert!(Effect::AllocatesAndFaults.allocates() && Effect::AllocatesAndFaults.faults());
+    }
+
+    /// Spot-check the rows the compiler is most sensitive to: the two that take
+    /// a narrow `u32` (the arity-only signature synthesis this manifest
+    /// replaces passed an `i64` here), and the arithmetic wrappers whose
+    /// fault-and-allocate pair drives both the safepoint and the fault check.
+    #[test]
+    fn narrow_and_faulting_rows_are_recorded_exactly() {
+        assert_eq!(
+            RuntimeSymbol::RecordField.sig().params,
+            &[AbiKind::Ctx, AbiKind::Gc, AbiKind::RawU32]
+        );
+        assert_eq!(
+            RuntimeSymbol::RecordSetField.sig().params,
+            &[AbiKind::Ctx, AbiKind::Gc, AbiKind::RawU32, AbiKind::Gc]
+        );
+        assert_eq!(
+            RuntimeSymbol::PushShadowFrame.sig().params,
+            &[AbiKind::Ctx, AbiKind::RawU32]
+        );
+        assert_eq!(RuntimeSymbol::PushShadowFrame.sig().ret, AbiRet::Ptr);
+        assert_eq!(RuntimeSymbol::PopShadowFrame.sig().ret, AbiRet::Void);
+
+        for sym in [
+            RuntimeSymbol::IntAdd,
+            RuntimeSymbol::IntSub,
+            RuntimeSymbol::IntMul,
+            RuntimeSymbol::IntDiv,
+            RuntimeSymbol::IntRem,
+            RuntimeSymbol::IntNeg,
+        ] {
+            assert_eq!(sym.sig().effect, Effect::AllocatesAndFaults, "{sym}");
+        }
+        // Comparisons hand back an immortal Bool: no collection can happen
+        // inside them, so they are not safepoints.
+        for sym in [
+            RuntimeSymbol::IntEq,
+            RuntimeSymbol::IntLt,
+            RuntimeSymbol::IntGe,
+        ] {
+            assert_eq!(sym.sig().effect, Effect::Pure, "{sym}");
+        }
+    }
+}

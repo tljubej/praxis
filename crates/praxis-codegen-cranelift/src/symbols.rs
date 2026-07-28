@@ -1,161 +1,50 @@
-//! Registration of the `praxis_*` runtime symbols the JIT'd code calls (§10.2).
+//! Resolution of the `praxis_*` runtime symbols the JIT'd code calls (§10.2).
 //!
 //! The Cranelift JIT resolves imported symbols by name through a resolver
-//! closure; this module hands it `(name -> function pointer)` pairs for every
-//! `praxis_*` extern wrapper in `praxis-runtime::abi`. Each entry is looked up
-//! by the exact symbol name the lowering emits.
+//! closure. That closure is the last place in the pipeline where a symbol is
+//! still a string, so this module is a thin adapter over the two typed halves:
+//! [`RuntimeSymbol::from_name`] recovers the symbol, and
+//! `praxis_runtime::abi::address` gives its address. Both are exhaustive over
+//! the manifest in `praxis_stdlib::abi`, so there is no list here to drift.
 
-use praxis_runtime::abi::*;
-use praxis_runtime::shadow_frame::{praxis_pop_shadow_frame, praxis_push_shadow_frame};
+use praxis_stdlib::abi::RuntimeSymbol;
 
-/// Look up a `praxis_*` runtime symbol by name, returning its address as a
-/// `*const u8`. Returns `None` for unknown names (Cranelift then reports the
-/// unresolved import as a definition error — surfaced as a [`crate::JitError`]).
+/// Look up a `praxis_*` runtime symbol by name, returning its address.
+///
+/// Returns `None` for a name the manifest does not contain — Cranelift then
+/// reports the unresolved import as a definition error, surfaced as a
+/// [`crate::JitError`]. There is deliberately no `dlsym` fallback: it would
+/// find any `#[no_mangle]` symbol of the statically linked runtime, so a symbol
+/// the compiler never declared would "work" locally and the manifest would be
+/// free to rot.
 #[must_use]
 pub fn resolve(name: &str) -> Option<*const u8> {
-    let ptr: *const () = match name {
-        "praxis_alloc_int" => praxis_alloc_int as *const (),
-        "praxis_alloc_bool" => praxis_alloc_bool as *const (),
-        "praxis_alloc_unit" => praxis_alloc_unit as *const (),
-        "praxis_alloc_text" => praxis_alloc_text as *const (),
-        "praxis_alloc_char" => praxis_alloc_char as *const (),
-        "praxis_alloc_float" => praxis_alloc_float as *const (),
-        "praxis_int_load" => praxis_int_load as *const (),
-        "praxis_bool_load" => praxis_bool_load as *const (),
-        "praxis_char_load" => praxis_char_load as *const (),
-        "praxis_float_load" => praxis_float_load as *const (),
-        "praxis_int_to_float" => praxis_int_to_float as *const (),
-        "praxis_float_to_int" => praxis_float_to_int as *const (),
-        "praxis_float_abs" => praxis_float_abs as *const (),
-        "praxis_float_sqrt" => praxis_float_sqrt as *const (),
-        "praxis_float_floor" => praxis_float_floor as *const (),
-        "praxis_float_ceil" => praxis_float_ceil as *const (),
-        "praxis_float_round" => praxis_float_round as *const (),
-        "praxis_float_sign" => praxis_float_sign as *const (),
-        "praxis_float_is_nan" => praxis_float_is_nan as *const (),
-        "praxis_float_is_infinite" => praxis_float_is_infinite as *const (),
-        "praxis_float_min" => praxis_float_min as *const (),
-        "praxis_float_max" => praxis_float_max as *const (),
-        "praxis_float_to_text" => praxis_float_to_text as *const (),
-        "praxis_float_pi" => praxis_float_pi as *const (),
-        "praxis_float_e" => praxis_float_e as *const (),
-        "praxis_int_add" => praxis_int_add as *const (),
-        "praxis_int_sub" => praxis_int_sub as *const (),
-        "praxis_int_mul" => praxis_int_mul as *const (),
-        "praxis_int_div" => praxis_int_div as *const (),
-        "praxis_int_rem" => praxis_int_rem as *const (),
-        "praxis_int_neg" => praxis_int_neg as *const (),
-        "praxis_int_eq" => praxis_int_eq as *const (),
-        "praxis_int_ne" => praxis_int_ne as *const (),
-        "praxis_int_lt" => praxis_int_lt as *const (),
-        "praxis_int_gt" => praxis_int_gt as *const (),
-        "praxis_int_le" => praxis_int_le as *const (),
-        "praxis_int_ge" => praxis_int_ge as *const (),
-        "praxis_check_fault" => praxis_check_fault as *const (),
-        "praxis_push_shadow_frame" => praxis_push_shadow_frame as *const (),
-        "praxis_pop_shadow_frame" => praxis_pop_shadow_frame as *const (),
-        "praxis_raise_stack_overflow" => praxis_raise_stack_overflow as *const (),
-        "praxis_vec_new" => praxis_vec_new as *const (),
-        "praxis_vec_push" => praxis_vec_push as *const (),
-        "praxis_vec_len" => praxis_vec_len as *const (),
-        "praxis_vec_get" => praxis_vec_get as *const (),
-        "praxis_vec_is_empty" => praxis_vec_is_empty as *const (),
-        "praxis_deque_new" => praxis_deque_new as *const (),
-        "praxis_deque_push_front" => praxis_deque_push_front as *const (),
-        "praxis_deque_push_back" => praxis_deque_push_back as *const (),
-        "praxis_deque_pop_front" => praxis_deque_pop_front as *const (),
-        "praxis_deque_pop_back" => praxis_deque_pop_back as *const (),
-        "praxis_deque_len" => praxis_deque_len as *const (),
-        "praxis_deque_get" => praxis_deque_get as *const (),
-        "praxis_deque_is_empty" => praxis_deque_is_empty as *const (),
-        "praxis_map_new" => praxis_map_new as *const (),
-        "praxis_map_insert" => praxis_map_insert as *const (),
-        "praxis_map_get" => praxis_map_get as *const (),
-        "praxis_map_contains" => praxis_map_contains as *const (),
-        "praxis_map_remove" => praxis_map_remove as *const (),
-        "praxis_map_len" => praxis_map_len as *const (),
-        "praxis_map_is_empty" => praxis_map_is_empty as *const (),
-        "praxis_map_update_min" => praxis_map_update_min as *const (),
-        "praxis_map_update_max" => praxis_map_update_max as *const (),
-        "praxis_set_new" => praxis_set_new as *const (),
-        "praxis_set_insert" => praxis_set_insert as *const (),
-        "praxis_set_remove" => praxis_set_remove as *const (),
-        "praxis_set_contains" => praxis_set_contains as *const (),
-        "praxis_set_len" => praxis_set_len as *const (),
-        "praxis_set_is_empty" => praxis_set_is_empty as *const (),
-        "praxis_counter_new" => praxis_counter_new as *const (),
-        "praxis_counter_get" => praxis_counter_get as *const (),
-        "praxis_counter_inc" => praxis_counter_inc as *const (),
-        "praxis_counter_len" => praxis_counter_len as *const (),
-        "praxis_counter_is_empty" => praxis_counter_is_empty as *const (),
-        "praxis_max_heap_new" => praxis_max_heap_new as *const (),
-        "praxis_max_heap_push" => praxis_max_heap_push as *const (),
-        "praxis_max_heap_pop" => praxis_max_heap_pop as *const (),
-        "praxis_max_heap_peek" => praxis_max_heap_peek as *const (),
-        "praxis_max_heap_len" => praxis_max_heap_len as *const (),
-        "praxis_max_heap_is_empty" => praxis_max_heap_is_empty as *const (),
-        "praxis_min_heap_new" => praxis_min_heap_new as *const (),
-        "praxis_min_heap_push" => praxis_min_heap_push as *const (),
-        "praxis_min_heap_pop" => praxis_min_heap_pop as *const (),
-        "praxis_min_heap_peek" => praxis_min_heap_peek as *const (),
-        "praxis_min_heap_len" => praxis_min_heap_len as *const (),
-        "praxis_min_heap_is_empty" => praxis_min_heap_is_empty as *const (),
-        "praxis_bitset_new" => praxis_bitset_new as *const (),
-        "praxis_bitset_insert" => praxis_bitset_insert as *const (),
-        "praxis_bitset_remove" => praxis_bitset_remove as *const (),
-        "praxis_bitset_contains" => praxis_bitset_contains as *const (),
-        "praxis_bitset_len" => praxis_bitset_len as *const (),
-        "praxis_bitset_is_empty" => praxis_bitset_is_empty as *const (),
-        "praxis_grid_new" => praxis_grid_new as *const (),
-        "praxis_grid_width" => praxis_grid_width as *const (),
-        "praxis_grid_height" => praxis_grid_height as *const (),
-        "praxis_grid_get" => praxis_grid_get as *const (),
-        "praxis_grid_set" => praxis_grid_set as *const (),
-        "praxis_grid_contains" => praxis_grid_contains as *const (),
-        "praxis_grid_neighbors4" => praxis_grid_neighbors4 as *const (),
-        "praxis_grid_neighbors8" => praxis_grid_neighbors8 as *const (),
-        "praxis_grid_positions" => praxis_grid_positions as *const (),
-        "praxis_grid_cells" => praxis_grid_cells as *const (),
-        "praxis_grid_row" => praxis_grid_row as *const (),
-        "praxis_grid_column" => praxis_grid_column as *const (),
-        "praxis_grid_find" => praxis_grid_find as *const (),
-        "praxis_grid_find_all" => praxis_grid_find_all as *const (),
-        "praxis_grid_transpose" => praxis_grid_transpose as *const (),
-        "praxis_grid_rotate_left" => praxis_grid_rotate_left as *const (),
-        "praxis_grid_rotate_right" => praxis_grid_rotate_right as *const (),
-        "praxis_text_len" => praxis_text_len as *const (),
-        "praxis_text_is_empty" => praxis_text_is_empty as *const (),
-        "praxis_text_get" => praxis_text_get as *const (),
-        "praxis_write_stdout" => praxis_write_stdout as *const (),
-        "praxis_get_input" => praxis_get_input as *const (),
-        "praxis_run_parser" => praxis_run_parser as *const (),
-        "praxis_alloc_record" => praxis_alloc_record as *const (),
-        "praxis_record_set_field" => praxis_record_set_field as *const (),
-        "praxis_record_field" => praxis_record_field as *const (),
-        "praxis_alloc_enum" => praxis_alloc_enum as *const (),
-        "praxis_enum_set_payload" => praxis_enum_set_payload as *const (),
-        "praxis_enum_tag" => praxis_enum_tag as *const (),
-        "praxis_enum_payload" => praxis_enum_payload as *const (),
-        "praxis_alloc_tuple" => praxis_alloc_tuple as *const (),
-        "praxis_tuple_set" => praxis_tuple_set as *const (),
-        "praxis_tuple_get" => praxis_tuple_get as *const (),
-        "praxis_struct_eq" => praxis_struct_eq as *const (),
-        "praxis_alloc_closure" => praxis_alloc_closure as *const (),
-        "praxis_closure_set_capture" => praxis_closure_set_capture as *const (),
-        "praxis_closure_fn_ptr" => praxis_closure_fn_ptr as *const (),
-        "praxis_closure_capture" => praxis_closure_capture as *const (),
-        "praxis_alloc_var_cell" => praxis_alloc_var_cell as *const (),
-        "praxis_var_cell_get" => praxis_var_cell_get as *const (),
-        "praxis_var_cell_set" => praxis_var_cell_set as *const (),
-        "praxis_push_debug_frame" => praxis_runtime::debug::praxis_push_debug_frame as *const (),
-        "praxis_pop_debug_frame" => praxis_runtime::debug::praxis_pop_debug_frame as *const (),
-        "praxis_set_frame_source_span" => {
-            praxis_runtime::debug::praxis_set_frame_source_span as *const ()
+    RuntimeSymbol::from_name(name).map(praxis_runtime::abi::address)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every symbol in the manifest resolves to a real, distinct address. This
+    /// is what makes "declared in the manifest" and "callable from JIT'd code"
+    /// the same statement.
+    #[test]
+    fn every_manifest_symbol_resolves_to_a_distinct_address() {
+        let mut seen = std::collections::HashMap::new();
+        for &sym in RuntimeSymbol::ALL {
+            let addr = resolve(sym.name())
+                .unwrap_or_else(|| panic!("{sym} is in the manifest but does not resolve"));
+            assert!(!addr.is_null(), "{sym} resolved to null");
+            if let Some(other) = seen.insert(addr, sym) {
+                panic!("{sym} and {other} share an address — a copy-paste in the address table");
+            }
         }
-        "praxis_snapshot_debug_chain" => {
-            praxis_runtime::crash_snapshot::praxis_snapshot_debug_chain as *const ()
-        }
-        _ => return None,
-    };
-    Some(ptr as *const u8)
+    }
+
+    #[test]
+    fn an_unknown_name_does_not_resolve() {
+        assert!(resolve("praxis_not_a_real_runtime_symbol").is_none());
+        assert!(resolve("malloc").is_none());
+    }
 }

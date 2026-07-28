@@ -12,6 +12,7 @@
 //! "reject duplicate entries" invariant. The full method set is filled in
 //! alongside the features that exercise each method.
 
+pub mod abi;
 pub mod builtins;
 pub mod catalog;
 pub mod completion;

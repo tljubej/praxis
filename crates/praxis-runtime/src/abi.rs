@@ -22,6 +22,7 @@ use crate::gc::GcRef;
 use crate::heap::Heap;
 use crate::scalars;
 use crate::{collections::VecPayload, descriptor::TypeDescriptor};
+pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 
 /// The runtime ABI version for this build. Bump this whenever the layout of
 /// [`RuntimeContext`](crate::RuntimeContext), the calling convention, or the
@@ -73,6 +74,168 @@ pub fn assert_abi_version() {
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
 const COMPILER_EXPECTED_ABI_VERSION: u32 = 8;
+
+// ---------------------------------------------------------------------------
+// The runtime symbol table (F4).
+// ---------------------------------------------------------------------------
+
+/// The address of a runtime wrapper, for the JIT to resolve an import to.
+///
+/// This match is the **only** symbol→address table in the workspace, and it is
+/// exhaustive over [`RuntimeSymbol`]: adding a row to the manifest without
+/// giving it an address here is a compile error, which is the property the old
+/// name-keyed resolver could not have. There is no fallback — the JIT never
+/// reaches `dlsym`, so a symbol the compiler failed to register cannot
+/// accidentally "work" because it happens to be linked in.
+#[must_use]
+pub fn address(symbol: RuntimeSymbol) -> *const u8 {
+    let ptr: *const () = match symbol {
+        RuntimeSymbol::AllocBool => praxis_alloc_bool as *const (),
+        RuntimeSymbol::AllocChar => praxis_alloc_char as *const (),
+        RuntimeSymbol::AllocClosure => praxis_alloc_closure as *const (),
+        RuntimeSymbol::AllocEnum => praxis_alloc_enum as *const (),
+        RuntimeSymbol::AllocFloat => praxis_alloc_float as *const (),
+        RuntimeSymbol::AllocInt => praxis_alloc_int as *const (),
+        RuntimeSymbol::AllocRecord => praxis_alloc_record as *const (),
+        RuntimeSymbol::AllocText => praxis_alloc_text as *const (),
+        RuntimeSymbol::AllocTuple => praxis_alloc_tuple as *const (),
+        RuntimeSymbol::AllocUnit => praxis_alloc_unit as *const (),
+        RuntimeSymbol::AllocVarCell => praxis_alloc_var_cell as *const (),
+        RuntimeSymbol::BitsetContains => praxis_bitset_contains as *const (),
+        RuntimeSymbol::BitsetInsert => praxis_bitset_insert as *const (),
+        RuntimeSymbol::BitsetIsEmpty => praxis_bitset_is_empty as *const (),
+        RuntimeSymbol::BitsetLen => praxis_bitset_len as *const (),
+        RuntimeSymbol::BitsetNew => praxis_bitset_new as *const (),
+        RuntimeSymbol::BitsetRemove => praxis_bitset_remove as *const (),
+        RuntimeSymbol::BoolLoad => praxis_bool_load as *const (),
+        RuntimeSymbol::CharLoad => praxis_char_load as *const (),
+        RuntimeSymbol::CheckFault => praxis_check_fault as *const (),
+        RuntimeSymbol::ClosureCapture => praxis_closure_capture as *const (),
+        RuntimeSymbol::ClosureFnPtr => praxis_closure_fn_ptr as *const (),
+        RuntimeSymbol::ClosureSetCapture => praxis_closure_set_capture as *const (),
+        RuntimeSymbol::CounterGet => praxis_counter_get as *const (),
+        RuntimeSymbol::CounterInc => praxis_counter_inc as *const (),
+        RuntimeSymbol::CounterIsEmpty => praxis_counter_is_empty as *const (),
+        RuntimeSymbol::CounterLen => praxis_counter_len as *const (),
+        RuntimeSymbol::CounterNew => praxis_counter_new as *const (),
+        RuntimeSymbol::DequeGet => praxis_deque_get as *const (),
+        RuntimeSymbol::DequeIsEmpty => praxis_deque_is_empty as *const (),
+        RuntimeSymbol::DequeLen => praxis_deque_len as *const (),
+        RuntimeSymbol::DequeNew => praxis_deque_new as *const (),
+        RuntimeSymbol::DequePopBack => praxis_deque_pop_back as *const (),
+        RuntimeSymbol::DequePopFront => praxis_deque_pop_front as *const (),
+        RuntimeSymbol::DequePushBack => praxis_deque_push_back as *const (),
+        RuntimeSymbol::DequePushFront => praxis_deque_push_front as *const (),
+        RuntimeSymbol::EnumPayload => praxis_enum_payload as *const (),
+        RuntimeSymbol::EnumSetPayload => praxis_enum_set_payload as *const (),
+        RuntimeSymbol::EnumTag => praxis_enum_tag as *const (),
+        RuntimeSymbol::FloatAbs => praxis_float_abs as *const (),
+        RuntimeSymbol::FloatCeil => praxis_float_ceil as *const (),
+        RuntimeSymbol::FloatE => praxis_float_e as *const (),
+        RuntimeSymbol::FloatFloor => praxis_float_floor as *const (),
+        RuntimeSymbol::FloatIsInfinite => praxis_float_is_infinite as *const (),
+        RuntimeSymbol::FloatIsNan => praxis_float_is_nan as *const (),
+        RuntimeSymbol::FloatLoad => praxis_float_load as *const (),
+        RuntimeSymbol::FloatMax => praxis_float_max as *const (),
+        RuntimeSymbol::FloatMin => praxis_float_min as *const (),
+        RuntimeSymbol::FloatPi => praxis_float_pi as *const (),
+        RuntimeSymbol::FloatRound => praxis_float_round as *const (),
+        RuntimeSymbol::FloatSign => praxis_float_sign as *const (),
+        RuntimeSymbol::FloatSqrt => praxis_float_sqrt as *const (),
+        RuntimeSymbol::FloatToInt => praxis_float_to_int as *const (),
+        RuntimeSymbol::FloatToText => praxis_float_to_text as *const (),
+        RuntimeSymbol::GetInput => praxis_get_input as *const (),
+        RuntimeSymbol::GridCells => praxis_grid_cells as *const (),
+        RuntimeSymbol::GridColumn => praxis_grid_column as *const (),
+        RuntimeSymbol::GridContains => praxis_grid_contains as *const (),
+        RuntimeSymbol::GridFind => praxis_grid_find as *const (),
+        RuntimeSymbol::GridFindAll => praxis_grid_find_all as *const (),
+        RuntimeSymbol::GridGet => praxis_grid_get as *const (),
+        RuntimeSymbol::GridHeight => praxis_grid_height as *const (),
+        RuntimeSymbol::GridNeighbors4 => praxis_grid_neighbors4 as *const (),
+        RuntimeSymbol::GridNeighbors8 => praxis_grid_neighbors8 as *const (),
+        RuntimeSymbol::GridNew => praxis_grid_new as *const (),
+        RuntimeSymbol::GridPositions => praxis_grid_positions as *const (),
+        RuntimeSymbol::GridRotateLeft => praxis_grid_rotate_left as *const (),
+        RuntimeSymbol::GridRotateRight => praxis_grid_rotate_right as *const (),
+        RuntimeSymbol::GridRow => praxis_grid_row as *const (),
+        RuntimeSymbol::GridSet => praxis_grid_set as *const (),
+        RuntimeSymbol::GridTranspose => praxis_grid_transpose as *const (),
+        RuntimeSymbol::GridWidth => praxis_grid_width as *const (),
+        RuntimeSymbol::IntAdd => praxis_int_add as *const (),
+        RuntimeSymbol::IntDiv => praxis_int_div as *const (),
+        RuntimeSymbol::IntEq => praxis_int_eq as *const (),
+        RuntimeSymbol::IntGe => praxis_int_ge as *const (),
+        RuntimeSymbol::IntGt => praxis_int_gt as *const (),
+        RuntimeSymbol::IntLe => praxis_int_le as *const (),
+        RuntimeSymbol::IntLoad => praxis_int_load as *const (),
+        RuntimeSymbol::IntLt => praxis_int_lt as *const (),
+        RuntimeSymbol::IntMul => praxis_int_mul as *const (),
+        RuntimeSymbol::IntNe => praxis_int_ne as *const (),
+        RuntimeSymbol::IntNeg => praxis_int_neg as *const (),
+        RuntimeSymbol::IntRem => praxis_int_rem as *const (),
+        RuntimeSymbol::IntSub => praxis_int_sub as *const (),
+        RuntimeSymbol::IntToFloat => praxis_int_to_float as *const (),
+        RuntimeSymbol::MapContains => praxis_map_contains as *const (),
+        RuntimeSymbol::MapGet => praxis_map_get as *const (),
+        RuntimeSymbol::MapInsert => praxis_map_insert as *const (),
+        RuntimeSymbol::MapIsEmpty => praxis_map_is_empty as *const (),
+        RuntimeSymbol::MapLen => praxis_map_len as *const (),
+        RuntimeSymbol::MapNew => praxis_map_new as *const (),
+        RuntimeSymbol::MapRemove => praxis_map_remove as *const (),
+        RuntimeSymbol::MapUpdateMax => praxis_map_update_max as *const (),
+        RuntimeSymbol::MapUpdateMin => praxis_map_update_min as *const (),
+        RuntimeSymbol::MaxHeapIsEmpty => praxis_max_heap_is_empty as *const (),
+        RuntimeSymbol::MaxHeapLen => praxis_max_heap_len as *const (),
+        RuntimeSymbol::MaxHeapNew => praxis_max_heap_new as *const (),
+        RuntimeSymbol::MaxHeapPeek => praxis_max_heap_peek as *const (),
+        RuntimeSymbol::MaxHeapPop => praxis_max_heap_pop as *const (),
+        RuntimeSymbol::MaxHeapPush => praxis_max_heap_push as *const (),
+        RuntimeSymbol::MinHeapIsEmpty => praxis_min_heap_is_empty as *const (),
+        RuntimeSymbol::MinHeapLen => praxis_min_heap_len as *const (),
+        RuntimeSymbol::MinHeapNew => praxis_min_heap_new as *const (),
+        RuntimeSymbol::MinHeapPeek => praxis_min_heap_peek as *const (),
+        RuntimeSymbol::MinHeapPop => praxis_min_heap_pop as *const (),
+        RuntimeSymbol::MinHeapPush => praxis_min_heap_push as *const (),
+        RuntimeSymbol::PopDebugFrame => crate::debug::praxis_pop_debug_frame as *const (),
+        RuntimeSymbol::PopShadowFrame => crate::shadow_frame::praxis_pop_shadow_frame as *const (),
+        RuntimeSymbol::PushDebugFrame => crate::debug::praxis_push_debug_frame as *const (),
+        RuntimeSymbol::PushShadowFrame => {
+            crate::shadow_frame::praxis_push_shadow_frame as *const ()
+        }
+        RuntimeSymbol::RaiseStackOverflow => praxis_raise_stack_overflow as *const (),
+        RuntimeSymbol::RecordField => praxis_record_field as *const (),
+        RuntimeSymbol::RecordSetField => praxis_record_set_field as *const (),
+        RuntimeSymbol::RunParser => praxis_run_parser as *const (),
+        RuntimeSymbol::SetContains => praxis_set_contains as *const (),
+        RuntimeSymbol::SetFrameSourceSpan => {
+            crate::debug::praxis_set_frame_source_span as *const ()
+        }
+        RuntimeSymbol::SetInsert => praxis_set_insert as *const (),
+        RuntimeSymbol::SetIsEmpty => praxis_set_is_empty as *const (),
+        RuntimeSymbol::SetLen => praxis_set_len as *const (),
+        RuntimeSymbol::SetNew => praxis_set_new as *const (),
+        RuntimeSymbol::SetRemove => praxis_set_remove as *const (),
+        RuntimeSymbol::SnapshotDebugChain => {
+            crate::crash_snapshot::praxis_snapshot_debug_chain as *const ()
+        }
+        RuntimeSymbol::StructEq => praxis_struct_eq as *const (),
+        RuntimeSymbol::TextGet => praxis_text_get as *const (),
+        RuntimeSymbol::TextIsEmpty => praxis_text_is_empty as *const (),
+        RuntimeSymbol::TextLen => praxis_text_len as *const (),
+        RuntimeSymbol::TupleGet => praxis_tuple_get as *const (),
+        RuntimeSymbol::TupleSet => praxis_tuple_set as *const (),
+        RuntimeSymbol::VarCellGet => praxis_var_cell_get as *const (),
+        RuntimeSymbol::VarCellSet => praxis_var_cell_set as *const (),
+        RuntimeSymbol::VecGet => praxis_vec_get as *const (),
+        RuntimeSymbol::VecIsEmpty => praxis_vec_is_empty as *const (),
+        RuntimeSymbol::VecLen => praxis_vec_len as *const (),
+        RuntimeSymbol::VecNew => praxis_vec_new as *const (),
+        RuntimeSymbol::VecPush => praxis_vec_push as *const (),
+        RuntimeSymbol::WriteStdout => praxis_write_stdout as *const (),
+    };
+    ptr as *const u8
+}
 
 // ---------------------------------------------------------------------------
 // Internals the wrappers share.
