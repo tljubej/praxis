@@ -522,10 +522,18 @@ impl Heap {
         }
     }
 
-    /// Reset the heap to empty, dropping everything. Used by tests and, later,
-    /// runtime teardown. Immortal singletons must be re-allocated afterwards.
-    pub fn reset(&mut self) {
-        // Finalize every live allocation before tearing down the arena.
+    /// Finalize and unregister **every** still-live allocation, reachable or
+    /// not, and discard the free list.
+    ///
+    /// Sweep only finalizes what it proved unreachable, so this is the other
+    /// half: at teardown, whatever a program left live still owns the
+    /// `Box<str>` / `Vec` / `HashMap` backing allocations its payload points
+    /// at, and those are not in the arena — dropping the `Bump` reclaims the
+    /// `[header|payload]` blocks and leaks everything they own (RT-02).
+    ///
+    /// After this the heap holds nothing, so [`Heap::reset`] and `Drop` can
+    /// both use it and neither can double-finalize.
+    fn finalize_all(&self) {
         let live = std::mem::take(&mut *self.live.borrow_mut());
         for nn in live {
             // SAFETY: each `nn` is a live, initialized allocation.
@@ -536,9 +544,16 @@ impl Heap {
             unsafe { (desc.drop_value)(payload) };
             header.poison();
         }
-        self.arena.reset();
-        // Every filed block points into the arena that just went away.
+        // Every filed block points into storage that is about to go away.
         self.free.borrow_mut().clear();
+    }
+
+    /// Reset the heap to empty, dropping everything. Used by tests and, later,
+    /// runtime teardown. Immortal singletons must be re-allocated afterwards.
+    pub fn reset(&mut self) {
+        // Finalize every live allocation before tearing down the arena.
+        self.finalize_all();
+        self.arena.reset();
         // Pacing is part of the heap's state, so a reset heap paces like a fresh
         // one. Leaving the counter and the geometrically-grown threshold in
         // place meant a reset heap could run for megabytes before its first
@@ -550,6 +565,38 @@ impl Heap {
         // arena is free to hand out again. A fresh identity makes those refs
         // fail the mark phase's provenance check rather than be traced.
         self.id = HeapId::mint();
+    }
+}
+
+impl Drop for Heap {
+    /// Finalize whatever the program left live (RT-02).
+    ///
+    /// `Bump::drop` reclaims the `[header|payload]` blocks, and nothing else:
+    /// the `Box<str>` behind a `Text`, the `Vec<GcRef>` behind a `Vec[T]`, the
+    /// `HashMap` behind a `Map[K,V]` are ordinary Rust allocations the arena
+    /// never owned. Without this, every object still reachable at teardown
+    /// leaked its backing store.
+    ///
+    /// **A `GcRef` does not outlive the heap.** Finalizing here makes that a
+    /// visible use-after-free for a host that reads one afterwards, where it
+    /// used to be a quiet read of stale-but-intact bytes (hazard H8). The two
+    /// consumers that take a value out of the runtime were audited with this
+    /// change:
+    ///
+    /// * `praxis-cli/src/run.rs` takes the crash snapshot, renders it, then
+    ///   moves the `Runtime` into the `DebugSession` the `Repl` owns. `Repl`
+    ///   declares `snapshot` before `session`, so the snapshot is dropped
+    ///   first and nothing reads a `GcRef` after teardown.
+    /// * `praxis-debugger/src/repl.rs` replaces its snapshot after a
+    ///   `restart`/`reload` while the runtime is still alive.
+    ///
+    /// `CrashSnapshot` and `ParseDetail` hold `GcRef`s but have no `Drop` that
+    /// dereferences one, so field order within `Runtime` — where `heap` is
+    /// declared first and therefore dropped first — is safe either way. No
+    /// descriptor's `drop_value` dereferences a `GcRef` either, so finalization
+    /// order among live objects does not matter.
+    fn drop(&mut self) {
+        self.finalize_all();
     }
 }
 
@@ -789,7 +836,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: Heap has no Drop implementation for live payloads"]
     fn dropping_heap_finalizes_live_owned_payloads() {
         let drops = Arc::new(AtomicUsize::new(0));
         {
@@ -809,6 +855,56 @@ mod tests {
             drops.load(Ordering::SeqCst),
             1,
             "tearing down a heap must run descriptor finalizers for live payloads"
+        );
+    }
+
+    /// Reachability is irrelevant at teardown: an object the collector would
+    /// have *kept* still owns its backing allocations, and the heap is the last
+    /// owner. Rooting it must not exempt it.
+    #[test]
+    fn dropping_heap_finalizes_reachable_payloads_too() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        {
+            let heap = Heap::new();
+            let mut scope = RootScope::new();
+            let probe = unsafe {
+                heap.alloc_with_unpaced(
+                    &DROP_PROBE,
+                    std::mem::size_of::<DropProbe>(),
+                    std::mem::align_of::<DropProbe>(),
+                    |payload| (payload as *mut DropProbe).write(DropProbe(Arc::clone(&drops))),
+                )
+            };
+            scope.root(probe);
+            heap.collect_with(&scope);
+            assert_eq!(drops.load(Ordering::SeqCst), 0, "a rooted probe survives");
+        }
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    /// `reset` and `Drop` share one finalizer loop, and it empties the registry
+    /// — so a heap that is reset and then dropped finalizes each payload once,
+    /// not twice.
+    #[test]
+    fn resetting_then_dropping_finalizes_each_payload_once() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        {
+            let mut heap = Heap::new();
+            unsafe {
+                heap.alloc_with_unpaced(
+                    &DROP_PROBE,
+                    std::mem::size_of::<DropProbe>(),
+                    std::mem::align_of::<DropProbe>(),
+                    |payload| (payload as *mut DropProbe).write(DropProbe(Arc::clone(&drops))),
+                );
+            }
+            heap.reset();
+            assert_eq!(drops.load(Ordering::SeqCst), 1, "reset finalizes");
+        }
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "the drop after a reset must find nothing left to finalize"
         );
     }
 

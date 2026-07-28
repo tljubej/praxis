@@ -303,4 +303,45 @@ mod tests {
         assert_eq!(runtime.heap().stats().live_count, 1);
         assert_eq!(value.as_int(), 42);
     }
+
+    /// A snapshot taken *out* of the runtime outlives it in both hosts: the CLI
+    /// moves the runtime into the `DebugSession` the `Repl` owns alongside the
+    /// snapshot, and the debugger REPL replaces its snapshot after a restart.
+    /// Now that `Heap` finalizes live payloads on `Drop` (RT-02), that ordering
+    /// is load-bearing — so the property this pins is that dropping the
+    /// snapshot after the runtime is *itself* harmless: a `CrashSnapshot` holds
+    /// `GcRef`s but has no `Drop` that dereferences one (hazard H8).
+    #[test]
+    fn a_snapshot_may_be_dropped_after_the_runtime_it_names() {
+        let snapshot = {
+            let runtime = Runtime::new();
+            let value = runtime.heap().alloc_unpaced(&INT, 42_i64);
+            CrashSnapshot {
+                frames: vec![SnapshotFrame {
+                    parent: usize::MAX,
+                    func_name: std::ptr::null(),
+                    func_name_len: 0,
+                    locals: vec![DebugLocal {
+                        source_name: std::ptr::null(),
+                        name_len: 0,
+                        symbol_id: 0,
+                        descriptor: &INT as *const _,
+                        value,
+                        type_id: 0,
+                        kind: LOCAL_KIND_USER,
+                        span_start: 0,
+                        span_end: 0,
+                    }],
+                    source_span: (0, 0),
+                }],
+                fault_kind: crate::FaultKind::None,
+            }
+            // `runtime` — and its heap, which finalizes `value` — dies here.
+        };
+        // The frames are still readable as plain data; only the objects they
+        // *name* are gone. Reading `value.as_int()` here would be the
+        // use-after-free the audit warns about, and is deliberately not done.
+        assert_eq!(snapshot.len(), 1);
+        drop(snapshot);
+    }
 }
