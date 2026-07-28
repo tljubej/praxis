@@ -17,11 +17,61 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::fmt::Write as _;
 
 use crate::descriptor::{BuiltinTypeId, Tracer, TypeDescriptor};
 use crate::dynamic_key::DynamicKey;
 use crate::DynamicHasher;
 use crate::GcRef;
+
+// ---------------------------------------------------------------------------
+// Deterministic rendering (RT-16)
+// ---------------------------------------------------------------------------
+
+/// Render one value through `descriptor` into `out`.
+///
+/// # Safety
+/// `value`'s payload must match `descriptor`.
+pub(crate) unsafe fn render_into(
+    out: &mut dyn fmt::Write,
+    descriptor: &TypeDescriptor,
+    value: GcRef,
+) {
+    let payload = value.payload::<u8>() as *const u8;
+    // SAFETY: the caller guarantees the payload matches the descriptor.
+    unsafe { (descriptor.format)(payload, out) };
+}
+
+/// Write `entries` between `open` and `close`, **sorted**, comma-separated.
+///
+/// Rust's hash collections randomize their iteration order per process, so the
+/// same `Map` printed by two runs of the same program produced two different
+/// strings (RT-16). §19 promises structural, deterministic formatting, and a
+/// program whose expected output cannot be written down does not have one.
+///
+/// The sort key is the *rendered entry*, not the value: it is the only total
+/// order available today, because `TypeDescriptor::compare` is `None` on every
+/// descriptor pending design decision D3. So `{10: a, 9: b}` renders with `10`
+/// first — lexicographic, not numeric. That is a real limitation and it is
+/// stated rather than hidden; when D3 lands and `compare` is populated, this is
+/// the one place that has to change.
+pub(crate) fn write_sorted<I: Iterator<Item = String>>(
+    out: &mut dyn fmt::Write,
+    open: &str,
+    entries: I,
+    close: &str,
+) {
+    let mut rendered: Vec<String> = entries.collect();
+    rendered.sort_unstable();
+    let _ = out.write_str(open);
+    for (i, entry) in rendered.iter().enumerate() {
+        if i > 0 {
+            let _ = out.write_str(", ");
+        }
+        let _ = out.write_str(entry);
+    }
+    let _ = out.write_str(close);
+}
 
 // ===========================================================================
 // Map[K, V]
@@ -59,18 +109,19 @@ unsafe fn map_format(payload: *const u8, out: &mut dyn fmt::Write) {
     // SAFETY: caller guarantees `payload` points at an initialized MapPayload.
     let p = unsafe { &*(payload as *const MapPayload) };
     let val_desc = p.value_descriptor;
-    let _ = out.write_str("{");
-    for (i, (k, v)) in p.entries.iter().enumerate() {
-        if i > 0 {
-            let _ = out.write_str(", ");
+    let entries = p.entries.iter().map(|(k, v)| {
+        let mut s = String::new();
+        // SAFETY: the key's payload matches the descriptor it carries, and
+        // every value matches the map's value descriptor (homogeneous per the
+        // type checker).
+        unsafe {
+            render_into(&mut s, k.descriptor(), k.value());
+            let _ = s.write_str(": ");
+            render_into(&mut s, val_desc, *v);
         }
-        let k_payload = k.value().payload::<u8>() as *const u8;
-        (k.descriptor().format)(k_payload, out);
-        let _ = out.write_str(": ");
-        let v_payload = v.payload::<u8>() as *const u8;
-        (val_desc.format)(v_payload, out);
-    }
-    let _ = out.write_str("}");
+        s
+    });
+    write_sorted(out, "{", entries, "}");
 }
 
 unsafe fn map_equals(a: *const u8, b: *const u8) -> bool {
@@ -191,15 +242,13 @@ unsafe fn set_drop(payload: *mut u8) {
 unsafe fn set_format(payload: *const u8, out: &mut dyn fmt::Write) {
     // SAFETY: caller guarantees `payload` points at an initialized SetPayload.
     let p = unsafe { &*(payload as *const SetPayload) };
-    let _ = out.write_str("{");
-    for (i, k) in p.entries.iter().enumerate() {
-        if i > 0 {
-            let _ = out.write_str(", ");
-        }
-        let k_payload = k.value().payload::<u8>() as *const u8;
-        (k.descriptor().format)(k_payload, out);
-    }
-    let _ = out.write_str("}");
+    let entries = p.entries.iter().map(|k| {
+        let mut s = String::new();
+        // SAFETY: the key's payload matches the descriptor it carries.
+        unsafe { render_into(&mut s, k.descriptor(), k.value()) };
+        s
+    });
+    write_sorted(out, "{", entries, "}");
 }
 
 unsafe fn set_equals(a: *const u8, b: *const u8) -> bool {
@@ -286,19 +335,18 @@ unsafe fn counter_drop(payload: *mut u8) {
 unsafe fn counter_format(payload: *const u8, out: &mut dyn fmt::Write) {
     // SAFETY: caller guarantees `payload` points at an initialized CounterPayload.
     let p = unsafe { &*(payload as *const CounterPayload) };
-    let _ = out.write_str("{");
-    for (i, (k, v)) in p.entries.iter().enumerate() {
-        if i > 0 {
-            let _ = out.write_str(", ");
+    let entries = p.entries.iter().map(|(k, v)| {
+        let mut s = String::new();
+        // SAFETY: the key's payload matches its descriptor; a Counter's values
+        // are always `Int` (§6.2).
+        unsafe {
+            render_into(&mut s, k.descriptor(), k.value());
+            let _ = s.write_str(": ");
+            render_into(&mut s, &crate::scalars::INT, *v);
         }
-        let k_payload = k.value().payload::<u8>() as *const u8;
-        (k.descriptor().format)(k_payload, out);
-        let _ = out.write_str(": ");
-        let v_payload = v.payload::<u8>() as *const u8;
-        // Counter values are always Int; format via INT.
-        (crate::scalars::INT.format)(v_payload, out);
-    }
-    let _ = out.write_str("}");
+        s
+    });
+    write_sorted(out, "{", entries, "}");
 }
 
 unsafe fn counter_equals(a: *const u8, b: *const u8) -> bool {
@@ -385,5 +433,79 @@ mod tests {
         assert_eq!(MAP.name, "Map");
         assert_eq!(SET.name, "Set");
         assert_eq!(COUNTER.name, "Counter");
+    }
+
+    /// Render a payload through its own `format` callback, without allocating a
+    /// GC object to hold it.
+    fn rendered<P>(format: unsafe fn(*const u8, &mut dyn fmt::Write), payload: &P) -> String {
+        let mut s = String::new();
+        // SAFETY: `payload` is an initialized value of the type `format` reads.
+        unsafe { format((payload as *const P).cast::<u8>(), &mut s) };
+        s
+    }
+
+    fn int_key(rt: &crate::Runtime, n: i64) -> DynamicKey {
+        DynamicKey::new(rt.alloc_int(n))
+    }
+
+    /// RT-16. Rust randomizes hash-table iteration order **per process**, so
+    /// the same program printing the same `Map` gave a different string on
+    /// every run. §19 promises deterministic formatting, and a program whose
+    /// expected output cannot be written down does not have one.
+    ///
+    /// Two maps built by inserting the same pairs in opposite orders is the
+    /// cheap in-process proxy: it does not reproduce the cross-run seed, but it
+    /// does catch "the output follows the table's internal layout".
+    #[test]
+    fn map_formatting_does_not_follow_hash_table_order() {
+        let rt = crate::Runtime::new();
+        let build = |order: [i64; 6]| MapPayload {
+            key_descriptor: &crate::scalars::INT,
+            value_descriptor: &crate::scalars::INT,
+            entries: order
+                .iter()
+                .map(|&n| (int_key(&rt, n), rt.alloc_int(n * 10)))
+                .collect(),
+        };
+
+        let forward = rendered(map_format, &build([1, 2, 3, 4, 5, 6]));
+        let backward = rendered(map_format, &build([6, 5, 4, 3, 2, 1]));
+        assert_eq!(forward, backward, "insertion order must not show through");
+        // Sorted by the *rendered* entry, which is the only total order
+        // available until D3 populates `TypeDescriptor::compare` — so `10:`
+        // would precede `2:`. Every key here is one digit, so this is also
+        // numeric order, and the test says which property it is relying on.
+        assert_eq!(forward, "{1: 10, 2: 20, 3: 30, 4: 40, 5: 50, 6: 60}");
+    }
+
+    #[test]
+    fn set_formatting_does_not_follow_hash_table_order() {
+        let rt = crate::Runtime::new();
+        let build = |order: [i64; 5]| SetPayload {
+            element_descriptor: &crate::scalars::INT,
+            entries: order.iter().map(|&n| int_key(&rt, n)).collect(),
+        };
+
+        let forward = rendered(set_format, &build([3, 1, 4, 5, 9]));
+        let backward = rendered(set_format, &build([9, 5, 4, 1, 3]));
+        assert_eq!(forward, backward);
+        assert_eq!(forward, "{1, 3, 4, 5, 9}");
+    }
+
+    #[test]
+    fn counter_formatting_does_not_follow_hash_table_order() {
+        let rt = crate::Runtime::new();
+        let build = |order: [i64; 4]| CounterPayload {
+            key_descriptor: &crate::scalars::INT,
+            entries: order
+                .iter()
+                .map(|&n| (int_key(&rt, n), rt.alloc_int(n)))
+                .collect(),
+        };
+
+        let forward = rendered(counter_format, &build([2, 7, 1, 8]));
+        let backward = rendered(counter_format, &build([8, 1, 7, 2]));
+        assert_eq!(forward, backward);
+        assert_eq!(forward, "{1: 1, 2: 2, 7: 7, 8: 8}");
     }
 }

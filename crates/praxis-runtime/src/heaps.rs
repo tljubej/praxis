@@ -17,6 +17,42 @@ use std::fmt;
 use crate::descriptor::{BuiltinTypeId, Tracer, TypeDescriptor};
 use crate::GcRef;
 
+/// Write a heap's elements in **pop order** — the order the program would see
+/// them if it drained the heap.
+///
+/// `BinaryHeap::iter` yields the backing array, which is heap-ordered only at
+/// the root: `[3, 1, 2]` and `[3, 2, 1]` are both valid layouts for the same
+/// contents, and which one exists depends on insertion history. So the same
+/// heap could print two ways (RT-16). Sorting descending by the heap's own
+/// `Ord` is pop order for a `BinaryHeap<T>` whatever `T` is — for `MinHeap`,
+/// whose `T` is `Reverse<HeapEntry>`, that comes out ascending by element,
+/// which is what `pop` gives.
+///
+/// This is the one collection whose deterministic order is also *meaningful*:
+/// heaps carry an ordering by construction, so nothing here waits on D3.
+///
+/// # Safety
+/// Every element must match `elem_desc`.
+unsafe fn write_in_pop_order<T: Ord, F: Fn(&T) -> GcRef>(
+    out: &mut dyn fmt::Write,
+    elem_desc: &TypeDescriptor,
+    items: &BinaryHeap<T>,
+    value_of: F,
+) {
+    let mut ordered: Vec<&T> = items.iter().collect();
+    ordered.sort_unstable_by(|a, b| b.cmp(a));
+    let _ = out.write_str("[");
+    for (i, entry) in ordered.iter().enumerate() {
+        if i > 0 {
+            let _ = out.write_str(", ");
+        }
+        let ep = value_of(entry).payload::<u8>() as *const u8;
+        // SAFETY: the caller guarantees every element matches `elem_desc`.
+        unsafe { (elem_desc.format)(ep, out) };
+    }
+    let _ = out.write_str("]");
+}
+
 /// A max-heap entry: the element `GcRef` plus its descriptor. `Ord` compares
 /// the element payloads as `i64` (the numeric case). `MaxHeap` uses this
 /// directly; `MinHeap` wraps it in `Reverse`.
@@ -100,16 +136,8 @@ unsafe fn max_heap_drop(payload: *mut u8) {
 
 unsafe fn max_heap_format(payload: *const u8, out: &mut dyn fmt::Write) {
     let p = unsafe { &*(payload as *const MaxHeapPayload) };
-    let elem_desc = p.element_descriptor;
-    let _ = out.write_str("[");
-    for (i, entry) in p.items.iter().enumerate() {
-        if i > 0 {
-            let _ = out.write_str(", ");
-        }
-        let ep = entry.value.payload::<u8>() as *const u8;
-        (elem_desc.format)(ep, out);
-    }
-    let _ = out.write_str("]");
+    // SAFETY: every element matches the heap's element descriptor.
+    unsafe { write_in_pop_order(out, p.element_descriptor, &p.items, |e| e.value) };
 }
 
 /// Descriptor for `MaxHeap[T]` (§11.2, TypeId 17).
@@ -163,16 +191,9 @@ unsafe fn min_heap_drop(payload: *mut u8) {
 
 unsafe fn min_heap_format(payload: *const u8, out: &mut dyn fmt::Write) {
     let p = unsafe { &*(payload as *const MinHeapPayload) };
-    let elem_desc = p.element_descriptor;
-    let _ = out.write_str("[");
-    for (i, entry) in p.items.iter().enumerate() {
-        if i > 0 {
-            let _ = out.write_str(", ");
-        }
-        let ep = entry.0.value.payload::<u8>() as *const u8;
-        (elem_desc.format)(ep, out);
-    }
-    let _ = out.write_str("]");
+    // SAFETY: every element matches the heap's element descriptor. The stored
+    // entry is `Reverse<HeapEntry>`, so pop order is ascending by element.
+    unsafe { write_in_pop_order(out, p.element_descriptor, &p.items, |e| e.0.value) };
 }
 
 /// Descriptor for `MinHeap[T]` (§11.2, TypeId 18).
@@ -233,5 +254,78 @@ mod tests {
             std::cmp::Ordering::Less,
             "orderable Float values must use IEEE numeric ordering, not signed bit-pattern order"
         );
+    }
+
+    /// Render a heap payload through its own `format` callback, without
+    /// allocating a GC object to hold it — the callback takes a payload
+    /// pointer, which is all a formatting test needs.
+    fn rendered<P>(format: unsafe fn(*const u8, &mut dyn fmt::Write), payload: &P) -> String {
+        let mut s = String::new();
+        // SAFETY: `payload` is an initialized value of the type `format` reads.
+        unsafe { format((payload as *const P).cast::<u8>(), &mut s) };
+        s
+    }
+
+    /// RT-16. `BinaryHeap::iter` walks the backing array, which is heap-ordered
+    /// only at the root — `[3, 1, 2]` and `[3, 2, 1]` are both valid layouts for
+    /// the same contents, and which one exists depends on insertion history. So
+    /// two heaps that are equal as values printed differently. Pop order is the
+    /// order the program would observe, and it is the same for both.
+    #[test]
+    fn heap_formatting_does_not_depend_on_insertion_order() {
+        let rt = crate::Runtime::new();
+        let build = |order: [i64; 5]| {
+            let mut items = BinaryHeap::new();
+            for n in order {
+                items.push(HeapEntry {
+                    value: rt.alloc_int(n),
+                    descriptor: &crate::scalars::INT,
+                });
+            }
+            MaxHeapPayload {
+                element_descriptor: &crate::scalars::INT,
+                items,
+            }
+        };
+
+        let ascending = build([1, 5, 3, 9, 2]);
+        let descending = build([2, 9, 3, 5, 1]);
+        assert_ne!(
+            ascending
+                .items
+                .iter()
+                .map(|e| e.int_key())
+                .collect::<Vec<_>>(),
+            descending
+                .items
+                .iter()
+                .map(|e| e.int_key())
+                .collect::<Vec<_>>(),
+            "the two backing arrays must actually differ, or this proves nothing"
+        );
+
+        let a = rendered(max_heap_format, &ascending);
+        let d = rendered(max_heap_format, &descending);
+        assert_eq!(a, d, "the same contents must render the same way");
+        assert_eq!(a, "[9, 5, 3, 2, 1]", "a max-heap renders in pop order");
+    }
+
+    /// A `MinHeap` stores `Reverse<HeapEntry>`, so "descending by the stored
+    /// `Ord`" comes out ascending by element — which is what `pop` gives.
+    #[test]
+    fn a_min_heap_renders_smallest_first() {
+        let rt = crate::Runtime::new();
+        let mut items = BinaryHeap::new();
+        for n in [4_i64, 1, 7, 2] {
+            items.push(Reverse(HeapEntry {
+                value: rt.alloc_int(n),
+                descriptor: &crate::scalars::INT,
+            }));
+        }
+        let payload = MinHeapPayload {
+            element_descriptor: &crate::scalars::INT,
+            items,
+        };
+        assert_eq!(rendered(min_heap_format, &payload), "[1, 2, 4, 7]");
     }
 }
