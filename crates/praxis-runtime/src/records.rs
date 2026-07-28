@@ -147,7 +147,20 @@ pub static RECORD: TypeDescriptor = TypeDescriptor::builtin::<RecordPayload>(
     Some(record_hash),
     // Ordering: see the ordering ADR; no built-in declares `compare` yet.
     None,
-);
+)
+.with_owned_bytes(record_owned_bytes);
+
+/// The heap bytes a record owns beyond its payload, for GC pacing (RT-04).
+/// `capacity`, not `len`: the buffer's real footprint is what the collector is
+/// paced against.
+///
+/// # Safety
+/// `payload` must point at an initialized `RecordPayload`.
+unsafe fn record_owned_bytes(payload: *const u8) -> usize {
+    // SAFETY: caller guarantees `payload` points at an initialized RecordPayload.
+    let p = unsafe { &*(payload as *const RecordPayload) };
+    p.items.capacity() * std::mem::size_of::<GcRef>()
+}
 
 #[cfg(test)]
 mod tests {

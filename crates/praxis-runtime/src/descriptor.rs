@@ -207,6 +207,23 @@ pub type EqualsFn = unsafe fn(a: *const u8, b: *const u8) -> bool;
 /// `payload` must point at a value of the descriptor's type.
 pub type HashFn = unsafe fn(payload: *const u8, hasher: &mut dyn DynamicHasher);
 
+/// `owned_bytes` callback shape: how many bytes *outside* the object's
+/// `[header|payload]` block this value owns — the `Box<str>` behind a `Text`,
+/// the `Vec`'s buffer behind a `Vec[T]`, the `HashMap`'s table behind a
+/// `Map[K,V]`.
+///
+/// `None` on the descriptor means "nothing beyond the payload", which is the
+/// truth for every scalar and the reason this is opt-in rather than a required
+/// constructor argument.
+///
+/// The collector's pacing counter reads it at allocation. Without it a 1 MiB
+/// `Text` charged the same 40 bytes as an `Int`, so a text-heavy program
+/// under-reported its own pressure by essentially its whole footprint (RT-04).
+///
+/// # Safety
+/// `payload` must point at a value of the descriptor's type.
+pub type OwnedBytesFn = unsafe fn(payload: *const u8) -> usize;
+
 /// `compare` callback shape: total ordering between two values of the same
 /// descriptor. `None` on the descriptor means the type is not orderable.
 ///
@@ -240,6 +257,10 @@ pub struct TypeDescriptor {
     pub equals: Option<EqualsFn>,
     pub hash: Option<HashFn>,
     pub compare: Option<CompareFn>,
+    /// Bytes this value owns outside its allocation block, for GC pacing.
+    /// `None` means none — the scalar case, and the default. Set with
+    /// [`TypeDescriptor::with_owned_bytes`].
+    pub owned_bytes: Option<OwnedBytesFn>,
 }
 
 impl TypeDescriptor {
@@ -271,6 +292,7 @@ impl TypeDescriptor {
             equals,
             hash,
             compare,
+            owned_bytes: None,
         }
     }
 
@@ -299,6 +321,45 @@ impl TypeDescriptor {
             equals,
             hash,
             compare,
+            owned_bytes: None,
+        }
+    }
+
+    /// Declare that this type owns memory outside its allocation block, and how
+    /// to measure it (RT-04).
+    ///
+    /// A builder rather than a constructor argument because the default —
+    /// "nothing beyond the payload" — is right for every scalar and for
+    /// `VarCell`, and a required argument would make twenty-one declarations
+    /// spell out the same `None`.
+    #[must_use]
+    pub const fn with_owned_bytes(self, owned_bytes: OwnedBytesFn) -> TypeDescriptor {
+        TypeDescriptor {
+            id: self.id,
+            name: self.name,
+            size: self.size,
+            align: self.align,
+            trace: self.trace,
+            drop_value: self.drop_value,
+            format: self.format,
+            equals: self.equals,
+            hash: self.hash,
+            compare: self.compare,
+            owned_bytes: Some(owned_bytes),
+        }
+    }
+
+    /// Bytes `payload` owns outside its allocation block, or 0 if this type
+    /// owns nothing beyond its payload.
+    ///
+    /// # Safety
+    /// `payload` must point at a value of this descriptor's type.
+    #[inline]
+    pub unsafe fn owned_bytes_of(&self, payload: *const u8) -> usize {
+        match self.owned_bytes {
+            // SAFETY: forwarded from this function's contract.
+            Some(f) => unsafe { f(payload) },
+            None => 0,
         }
     }
 

@@ -135,7 +135,20 @@ pub static TUPLE: TypeDescriptor = TypeDescriptor::builtin::<TuplePayload>(
     Some(tuple_hash),
     // Ordering: see the ordering ADR; no built-in declares `compare` yet.
     None,
-);
+)
+.with_owned_bytes(tuple_owned_bytes);
+
+/// The heap bytes a tuple owns beyond its payload, for GC pacing (RT-04).
+/// `capacity`, not `len`: the buffer's real footprint is what the collector is
+/// paced against.
+///
+/// # Safety
+/// `payload` must point at an initialized `TuplePayload`.
+unsafe fn tuple_owned_bytes(payload: *const u8) -> usize {
+    // SAFETY: caller guarantees `payload` points at an initialized TuplePayload.
+    let p = unsafe { &*(payload as *const TuplePayload) };
+    p.items.capacity() * std::mem::size_of::<GcRef>()
+}
 
 /// The cached `'static` schema for a `(Int, Int)` point tuple. Used by Grid
 /// methods that return `(x, y)` points (§6.4). Built once and leaked; the two

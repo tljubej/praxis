@@ -132,7 +132,20 @@ pub static BITSET: TypeDescriptor = TypeDescriptor::builtin::<BitSetPayload>(
     Some(bitset_hash),
     // Ordering: see the ordering ADR; no built-in declares `compare` yet.
     None,
-);
+)
+.with_owned_bytes(bitset_owned_bytes);
+
+/// The heap bytes `BitSet` owns beyond its payload, for GC pacing (RT-04).
+/// `capacity`, not `len`: the buffer's real footprint is what the collector is
+/// paced against.
+///
+/// # Safety
+/// `payload` must point at an initialized `BitSetPayload`.
+unsafe fn bitset_owned_bytes(payload: *const u8) -> usize {
+    // SAFETY: caller guarantees `payload` points at an initialized BitSetPayload.
+    let p = unsafe { &*(payload as *const BitSetPayload) };
+    p.words.capacity() * std::mem::size_of::<u64>()
+}
 
 #[cfg(test)]
 mod tests {

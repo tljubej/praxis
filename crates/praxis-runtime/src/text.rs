@@ -138,7 +138,25 @@ pub static TEXT: TypeDescriptor = TypeDescriptor::builtin::<TextPayload>(
     Some(text_hash),
     // Ordering: see the ordering ADR; no built-in declares `compare` yet.
     None,
-);
+)
+.with_owned_bytes(text_owned_bytes);
+
+/// The heap bytes a `Text` owns beyond its payload (RT-04).
+///
+/// An `Owned` text is a `Box<str>` whose length is the whole point: charging
+/// pacing 40 bytes for a megabyte of input is what made a text-heavy program
+/// invisible to the collector. A `Slice` owns nothing — it borrows its owner's
+/// buffer, and charging its length would count the same bytes once per slice.
+///
+/// # Safety
+/// `payload` must point at an initialized `TextPayload`.
+unsafe fn text_owned_bytes(payload: *const u8) -> usize {
+    // SAFETY: caller guarantees `payload` points at an initialized TextPayload.
+    match unsafe { &*(payload as *const TextPayload) } {
+        TextPayload::Owned(s) => s.len(),
+        TextPayload::Slice { .. } => 0,
+    }
+}
 
 #[cfg(test)]
 mod tests {

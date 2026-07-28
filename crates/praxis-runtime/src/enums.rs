@@ -110,7 +110,20 @@ pub static ENUM: TypeDescriptor = TypeDescriptor::builtin::<EnumPayload>(
     Some(enum_hash),
     // Ordering: see the ordering ADR; no built-in declares `compare` yet.
     None,
-);
+)
+.with_owned_bytes(enum_owned_bytes);
+
+/// The heap bytes an enum value owns beyond its payload, for GC pacing (RT-04).
+/// `capacity`, not `len`: the buffer's real footprint is what the collector is
+/// paced against.
+///
+/// # Safety
+/// `payload` must point at an initialized `EnumPayload`.
+unsafe fn enum_owned_bytes(payload: *const u8) -> usize {
+    // SAFETY: caller guarantees `payload` points at an initialized EnumPayload.
+    let p = unsafe { &*(payload as *const EnumPayload) };
+    p.items.capacity() * std::mem::size_of::<GcRef>()
+}
 
 #[cfg(test)]
 mod tests {

@@ -83,6 +83,17 @@ pub struct Heap {
     free: RefCell<std::collections::HashMap<BlockLayout, Vec<NonNull<u8>>>>,
 }
 
+/// What ran a collection. Only allocation pressure grows the pacing threshold:
+/// a host that collects on a schedule is not evidence the program needs a
+/// larger budget between collections (RT-04).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Trigger {
+    /// [`Heap::maybe_collect`] found the pacing counter at the threshold.
+    Paced,
+    /// A host called [`Heap::collect`] outright.
+    Explicit,
+}
+
 /// The size and alignment of one whole `[header|payload]` allocation — the
 /// free-list key. Not the payload's own layout: the payload's offset within the
 /// block is recomputed and re-recorded on every reuse, so two descriptors that
@@ -387,7 +398,18 @@ impl Heap {
         // Account for the allocation against the collection pacing counter.
         // Reused storage counts too: pacing measures the pressure a program is
         // putting on the collector, not the arena's high-water mark.
-        *self.bytes_since_collect.borrow_mut() += block.size;
+        //
+        // The block is only part of what the object costs. A `Text` is 40 bytes
+        // of block and a `Box<str>` of whatever length the program read; a
+        // freshly built `Vec` is 40 bytes and a buffer of `capacity` refs. The
+        // descriptor measures the rest, so a text-heavy program no longer
+        // under-reports its pressure by essentially its whole footprint
+        // (RT-04). Growth *after* this point — a `push` that reallocates — is
+        // still uncharged; its elements are themselves paced allocations, so
+        // the residual under-count is the spine, not the contents.
+        // SAFETY: `init` has run, so the payload is a valid value of `descriptor`.
+        let owned = unsafe { descriptor.owned_bytes_of(payload_ptr) };
+        *self.bytes_since_collect.borrow_mut() += block.size.saturating_add(owned);
         // SAFETY: `nn` points at the just-allocated, initialized header.
         unsafe { GcRef::from_non_null(nn) }
     }
@@ -398,7 +420,7 @@ impl Heap {
     /// reachable through descriptor `trace` callbacks) is marked black and
     /// survives; everything else is finalized via `drop_value` and reclaimed.
     pub fn collect(&self, roots: &RuntimeRoots<'_>) {
-        self.collect_inner(roots);
+        self.collect_inner(roots, Trigger::Explicit);
     }
 
     /// [`Heap::collect`] against an arbitrary root set.
@@ -410,35 +432,55 @@ impl Heap {
     /// the automatic collector root from the shadow chain alone (P0-06).
     #[cfg(test)]
     pub fn collect_with(&self, roots: &dyn RootSet) {
-        self.collect_inner(roots);
+        self.collect_inner(roots, Trigger::Explicit);
     }
 
-    fn collect_inner(&self, roots: &dyn RootSet) {
+    /// [`Heap::maybe_collect`] against an arbitrary root set. Test-only, and
+    /// the counterpart of [`Heap::collect_with`]: it is the only way an
+    /// in-crate test can exercise the *paced* path, which is the one that grows
+    /// the threshold.
+    #[cfg(test)]
+    pub fn maybe_collect_with(&self, roots: &dyn RootSet) -> bool {
+        let should = *self.bytes_since_collect.borrow() >= *self.collect_threshold.borrow();
+        if should {
+            self.collect_inner(roots, Trigger::Paced);
+        }
+        should
+    }
+
+    fn collect_inner(&self, roots: &dyn RootSet, trigger: Trigger) {
         self.mark(roots);
         self.sweep();
-        // Reset the pacing counter and grow the threshold geometrically.
         *self.bytes_since_collect.borrow_mut() = 0;
-        let mut threshold = self.collect_threshold.borrow_mut();
-        *threshold = (*threshold)
-            .saturating_mul(2)
-            .max(INITIAL_COLLECT_THRESHOLD);
+        // Grow the threshold geometrically, so allocations per collection are
+        // amortized O(1) — but only when *pacing* was what ran this collection.
+        //
+        // Doubling on an explicit collection too meant a host that collected on
+        // a schedule (the debugger between REPL commands, a test between
+        // phases) pushed the automatic threshold up without any allocation
+        // pressure having caused it, and after a few such calls the program was
+        // effectively running without a collector (RT-04).
+        if trigger == Trigger::Paced {
+            let mut threshold = self.collect_threshold.borrow_mut();
+            *threshold = (*threshold)
+                .saturating_mul(2)
+                .max(INITIAL_COLLECT_THRESHOLD);
+        }
     }
 
     /// Run a collection if allocation pressure has reached the threshold,
-    /// rooting from `roots`. Called by the `praxis_alloc_*` wrappers (§12.4)
-    /// so collection happens automatically inside JIT'd code — this is what
-    /// makes "nested vectors survive collection" (§19 M5 acceptance) testable
-    /// without the host forcing it.
+    /// rooting from `roots`. Reached from every allocation through
+    /// [`Heap::pace`] (§12.4), so collection happens automatically inside JIT'd
+    /// code — this is what makes "nested vectors survive collection" (§19 M5
+    /// acceptance) testable without the host forcing it.
     ///
     /// Returns `true` if a collection ran.
     pub fn maybe_collect(&self, roots: &RuntimeRoots<'_>) -> bool {
         let should = *self.bytes_since_collect.borrow() >= *self.collect_threshold.borrow();
         if should {
-            self.collect(roots);
-            true
-        } else {
-            false
+            self.collect_inner(roots, Trigger::Paced);
         }
+        should
     }
 
     /// Mark phase: color every reachable object black.
@@ -949,10 +991,23 @@ mod tests {
         );
     }
 
+    /// Allocate until the pacing counter runs a collection, and return whether
+    /// one happened within `limit` allocations.
+    fn allocate_until_paced(heap: &Heap, limit: usize) -> bool {
+        for i in 0..limit {
+            let _ = heap.alloc_unpaced(&INT, i as i64);
+            if heap.maybe_collect_with(&RootScope::new()) {
+                return true;
+            }
+        }
+        false
+    }
+
     #[test]
     fn reset_restores_collection_pacing() {
         let mut heap = Heap::new();
-        heap.collect_with(&RootScope::new());
+        // Only a *paced* collection grows the threshold, so drive one.
+        assert!(allocate_until_paced(&heap, 100_000));
         let _ = heap.alloc_unpaced(&INT, 1_i64);
         assert_ne!(*heap.bytes_since_collect.borrow(), 0);
         assert_ne!(*heap.collect_threshold.borrow(), INITIAL_COLLECT_THRESHOLD);
@@ -961,6 +1016,118 @@ mod tests {
 
         assert_eq!(*heap.bytes_since_collect.borrow(), 0);
         assert_eq!(*heap.collect_threshold.borrow(), INITIAL_COLLECT_THRESHOLD);
+    }
+
+    /// A host that collects on a schedule — the debugger between REPL commands,
+    /// a test between phases — is not evidence that the program needs a bigger
+    /// budget between automatic collections. Doubling on every explicit collect
+    /// meant a few such calls left the program effectively running without a
+    /// collector (RT-04).
+    #[test]
+    fn an_explicit_collection_does_not_grow_the_pacing_threshold() {
+        let heap = Heap::new();
+        for _ in 0..8 {
+            heap.collect_with(&RootScope::new());
+        }
+        assert_eq!(
+            *heap.collect_threshold.borrow(),
+            INITIAL_COLLECT_THRESHOLD,
+            "an explicit collection must leave the automatic threshold alone"
+        );
+
+        assert!(allocate_until_paced(&heap, 100_000));
+        assert_eq!(
+            *heap.collect_threshold.borrow(),
+            INITIAL_COLLECT_THRESHOLD * 2,
+            "a paced collection is what grows it"
+        );
+    }
+
+    /// Pacing counts what an object *costs*, not the size of its fixed block.
+    /// A `Text` is 40 bytes of block plus a `Box<str>` of whatever the program
+    /// read; charging only the block made a text-heavy program invisible to the
+    /// collector — it under-reported its footprint by essentially all of it
+    /// (RT-04).
+    #[test]
+    fn pacing_charges_the_bytes_a_payload_owns() {
+        use crate::text::{TextPayload, TEXT};
+
+        let alloc_text = |heap: &Heap, len: usize| {
+            let owned: Box<str> = "x".repeat(len).into_boxed_str();
+            // SAFETY: TextPayload matches TEXT's size/align and is initialized.
+            unsafe {
+                heap.alloc_with_unpaced(
+                    &TEXT,
+                    std::mem::size_of::<TextPayload>(),
+                    std::mem::align_of::<TextPayload>(),
+                    |p| (p as *mut TextPayload).write(TextPayload::Owned(owned)),
+                )
+            }
+        };
+
+        let small = Heap::new();
+        alloc_text(&small, 8);
+        let big = Heap::new();
+        alloc_text(&big, 64 * 1024);
+
+        let charged_small = *small.bytes_since_collect.borrow();
+        let charged_big = *big.bytes_since_collect.borrow();
+        assert_eq!(
+            charged_big - charged_small,
+            64 * 1024 - 8,
+            "the Box<str> must be charged at its real length"
+        );
+
+        // And the consequence that matters: one large Text is enough pressure
+        // to reach the threshold, where before it took thousands of them.
+        assert!(
+            big.maybe_collect_with(&RootScope::new()),
+            "a 64 KiB Text must reach the 64 KiB threshold on its own"
+        );
+    }
+
+    /// A source-slice `Text` borrows its owner's buffer. Charging its length
+    /// would count the same bytes once per slice — a parser that slices a
+    /// megabyte of input into a thousand fields would report a gigabyte.
+    #[test]
+    fn a_source_slice_text_is_charged_nothing_beyond_its_block() {
+        use crate::text::{TextPayload, TEXT};
+        let heap = Heap::new();
+
+        let owner: Box<str> = "x".repeat(4096).into_boxed_str();
+        // SAFETY: TextPayload matches TEXT's size/align and is initialized.
+        let owner_ref = unsafe {
+            heap.alloc_with_unpaced(
+                &TEXT,
+                std::mem::size_of::<TextPayload>(),
+                std::mem::align_of::<TextPayload>(),
+                |p| (p as *mut TextPayload).write(TextPayload::Owned(owner)),
+            )
+        };
+        let after_owner = *heap.bytes_since_collect.borrow();
+
+        // SAFETY: as above; the range lands inside the owner.
+        unsafe {
+            heap.alloc_with_unpaced(
+                &TEXT,
+                std::mem::size_of::<TextPayload>(),
+                std::mem::align_of::<TextPayload>(),
+                |p| {
+                    (p as *mut TextPayload).write(TextPayload::Slice {
+                        owner: owner_ref,
+                        start: 0,
+                        len: 4096,
+                    })
+                },
+            );
+        }
+
+        let (_, block) = BlockLayout::of(&TEXT);
+        assert_eq!(
+            *heap.bytes_since_collect.borrow() - after_owner,
+            block.size,
+            "a slice owns no bytes of its own"
+        );
     }
 
     #[test]

@@ -124,7 +124,20 @@ pub static MAX_HEAP: TypeDescriptor = TypeDescriptor::builtin::<MaxHeapPayload>(
     None,
     // Ordering: see the ordering ADR; no built-in declares `compare` yet.
     None,
-);
+)
+.with_owned_bytes(max_heap_owned_bytes);
+
+/// The heap bytes `MaxHeap[T]` owns beyond its payload, for GC pacing (RT-04).
+/// `capacity`, not `len`: the buffer's real footprint is what the collector is
+/// paced against.
+///
+/// # Safety
+/// `payload` must point at an initialized `MaxHeapPayload`.
+unsafe fn max_heap_owned_bytes(payload: *const u8) -> usize {
+    // SAFETY: caller guarantees `payload` points at an initialized MaxHeapPayload.
+    let p = unsafe { &*(payload as *const MaxHeapPayload) };
+    p.items.capacity() * std::mem::size_of::<HeapEntry>()
+}
 
 // --- MinHeap payload -------------------------------------------------------
 
@@ -173,7 +186,20 @@ pub static MIN_HEAP: TypeDescriptor = TypeDescriptor::builtin::<MinHeapPayload>(
     None,
     // Ordering: see the ordering ADR; no built-in declares `compare` yet.
     None,
-);
+)
+.with_owned_bytes(min_heap_owned_bytes);
+
+/// The heap bytes `MinHeap[T]` owns beyond its payload, for GC pacing (RT-04).
+/// `capacity`, not `len`: the buffer's real footprint is what the collector is
+/// paced against.
+///
+/// # Safety
+/// `payload` must point at an initialized `MinHeapPayload`.
+unsafe fn min_heap_owned_bytes(payload: *const u8) -> usize {
+    // SAFETY: caller guarantees `payload` points at an initialized MinHeapPayload.
+    let p = unsafe { &*(payload as *const MinHeapPayload) };
+    p.items.capacity() * std::mem::size_of::<Reverse<HeapEntry>>()
+}
 
 #[cfg(test)]
 mod tests {

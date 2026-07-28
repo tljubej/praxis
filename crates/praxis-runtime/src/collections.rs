@@ -120,7 +120,20 @@ pub static VEC: TypeDescriptor = TypeDescriptor::builtin::<VecPayload>(
     Some(vec_hash),
     // Ordering: see the ordering ADR; no built-in declares `compare` yet.
     None,
-);
+)
+.with_owned_bytes(vec_owned_bytes);
+
+/// The heap bytes `Vec[T]` owns beyond its payload, for GC pacing (RT-04).
+/// `capacity`, not `len`: the buffer's real footprint is what the collector is
+/// paced against.
+///
+/// # Safety
+/// `payload` must point at an initialized `VecPayload`.
+unsafe fn vec_owned_bytes(payload: *const u8) -> usize {
+    // SAFETY: caller guarantees `payload` points at an initialized VecPayload.
+    let p = unsafe { &*(payload as *const VecPayload) };
+    p.items.capacity() * std::mem::size_of::<GcRef>()
+}
 
 // ===========================================================================
 // Deque[T] (M8-WS2, §6.1). A double-ended queue backed by Rust's `VecDeque`.
@@ -215,7 +228,20 @@ pub static DEQUE: TypeDescriptor = TypeDescriptor::builtin::<DequePayload>(
     Some(deque_hash),
     // Ordering: see the ordering ADR; no built-in declares `compare` yet.
     None,
-);
+)
+.with_owned_bytes(deque_owned_bytes);
+
+/// The heap bytes `Deque[T]` owns beyond its payload, for GC pacing (RT-04).
+/// `capacity`, not `len`: the buffer's real footprint is what the collector is
+/// paced against.
+///
+/// # Safety
+/// `payload` must point at an initialized `DequePayload`.
+unsafe fn deque_owned_bytes(payload: *const u8) -> usize {
+    // SAFETY: caller guarantees `payload` points at an initialized DequePayload.
+    let p = unsafe { &*(payload as *const DequePayload) };
+    p.items.capacity() * std::mem::size_of::<GcRef>()
+}
 
 // ===========================================================================
 // Grid[T] (M6, §7.5 `grid`, §7.8 type derivation). M6 ships a minimal runtime
@@ -310,7 +336,20 @@ pub static GRID: TypeDescriptor = TypeDescriptor::builtin::<GridPayload>(
     Some(grid_hash),
     // Ordering: see the ordering ADR; no built-in declares `compare` yet.
     None,
-);
+)
+.with_owned_bytes(grid_owned_bytes);
+
+/// The heap bytes `Grid[T]` owns beyond its payload, for GC pacing (RT-04).
+/// `capacity`, not `len`: the buffer's real footprint is what the collector is
+/// paced against.
+///
+/// # Safety
+/// `payload` must point at an initialized `GridPayload`.
+unsafe fn grid_owned_bytes(payload: *const u8) -> usize {
+    // SAFETY: caller guarantees `payload` points at an initialized GridPayload.
+    let p = unsafe { &*(payload as *const GridPayload) };
+    p.items.capacity() * std::mem::size_of::<GcRef>()
+}
 
 #[cfg(test)]
 mod tests {

@@ -75,7 +75,20 @@ pub static CLOSURE: TypeDescriptor = TypeDescriptor::builtin::<ClosurePayload>(
     None,
     // Ordering: see the ordering ADR; no built-in declares `compare` yet.
     None,
-);
+)
+.with_owned_bytes(closure_owned_bytes);
+
+/// The heap bytes a closure owns beyond its payload, for GC pacing (RT-04).
+/// `capacity`, not `len`: the buffer's real footprint is what the collector is
+/// paced against.
+///
+/// # Safety
+/// `payload` must point at an initialized `ClosurePayload`.
+unsafe fn closure_owned_bytes(payload: *const u8) -> usize {
+    // SAFETY: caller guarantees `payload` points at an initialized ClosurePayload.
+    let p = unsafe { &*(payload as *const ClosurePayload) };
+    p.env.capacity() * std::mem::size_of::<GcRef>()
+}
 
 #[cfg(test)]
 mod tests {

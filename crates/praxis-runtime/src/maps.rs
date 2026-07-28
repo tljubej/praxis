@@ -146,7 +146,20 @@ pub static MAP: TypeDescriptor = TypeDescriptor::builtin::<MapPayload>(
     Some(map_hash),
     // Ordering: see the ordering ADR; no built-in declares `compare` yet.
     None,
-);
+)
+.with_owned_bytes(map_owned_bytes);
+
+/// The heap bytes `Map[K,V]` owns beyond its payload, for GC pacing (RT-04).
+/// `capacity`, not `len`: the buffer's real footprint is what the collector is
+/// paced against.
+///
+/// # Safety
+/// `payload` must point at an initialized `MapPayload`.
+unsafe fn map_owned_bytes(payload: *const u8) -> usize {
+    // SAFETY: caller guarantees `payload` points at an initialized MapPayload.
+    let p = unsafe { &*(payload as *const MapPayload) };
+    p.entries.capacity() * (std::mem::size_of::<DynamicKey>() + std::mem::size_of::<GcRef>())
+}
 
 // ===========================================================================
 // Set[T]
@@ -226,7 +239,20 @@ pub static SET: TypeDescriptor = TypeDescriptor::builtin::<SetPayload>(
     Some(set_hash),
     // Ordering: see the ordering ADR; no built-in declares `compare` yet.
     None,
-);
+)
+.with_owned_bytes(set_owned_bytes);
+
+/// The heap bytes `Set[T]` owns beyond its payload, for GC pacing (RT-04).
+/// `capacity`, not `len`: the buffer's real footprint is what the collector is
+/// paced against.
+///
+/// # Safety
+/// `payload` must point at an initialized `SetPayload`.
+unsafe fn set_owned_bytes(payload: *const u8) -> usize {
+    // SAFETY: caller guarantees `payload` points at an initialized SetPayload.
+    let p = unsafe { &*(payload as *const SetPayload) };
+    p.entries.capacity() * std::mem::size_of::<DynamicKey>()
+}
 
 // ===========================================================================
 // Counter[T]
@@ -330,7 +356,20 @@ pub static COUNTER: TypeDescriptor = TypeDescriptor::builtin::<CounterPayload>(
     Some(counter_hash),
     // Ordering: see the ordering ADR; no built-in declares `compare` yet.
     None,
-);
+)
+.with_owned_bytes(counter_owned_bytes);
+
+/// The heap bytes `Counter[K]` owns beyond its payload, for GC pacing (RT-04).
+/// `capacity`, not `len`: the buffer's real footprint is what the collector is
+/// paced against.
+///
+/// # Safety
+/// `payload` must point at an initialized `CounterPayload`.
+unsafe fn counter_owned_bytes(payload: *const u8) -> usize {
+    // SAFETY: caller guarantees `payload` points at an initialized CounterPayload.
+    let p = unsafe { &*(payload as *const CounterPayload) };
+    p.entries.capacity() * (std::mem::size_of::<DynamicKey>() + std::mem::size_of::<GcRef>())
+}
 
 #[cfg(test)]
 mod tests {
