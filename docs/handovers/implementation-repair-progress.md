@@ -19,15 +19,48 @@ Update this file at the end of every stage.
 | S6 — Allocation pacing, effect metadata, heap lifecycle | **done** | `7182d56`, `ce08ae3`, `b384df9`, `968af35`, `3b5bfb7` |
 | S7 — Descriptor totality, typed collections, fault representation | **done** | `d014067`, `c00aab7`, `6da6037`, `eda8c69` |
 | S8 — Generation arena for JIT and plan metadata | **done** | `1311132`, `b60da0a` |
-| S9 … S21 | not started | |
+| S9 — MIR root exactness, debug/root split, verifier | **done** | `ad9bbdf`, `d9521f9`, `e15a444` |
+| S10 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10. It fell out of S1. **DBG-02** is closed in part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1073 passed, 0 failed, 109 ignored**. `just ci` is green.
+Now: **1091 passed, 0 failed, 106 ignored**. `just ci` is green.
 
-Thirty-nine of the audit's ignored regressions are un-ignored and passing.
+Forty-two of the audit's ignored regressions are un-ignored and passing.
+The three added by S9:
+
+| Test | File | Finding |
+|---|---|---|
+| `local_dead_after_its_last_use_is_not_rooted_at_a_later_safepoint` | `liveness.rs` | MIR-02 |
+| `exact_roots_shrink_between_two_safepoints_in_one_block` | `liveness.rs` | MIR-02 |
+| `empty_element_returning_sinks_fault_instead_of_returning_uninitialized_gc_refs` | `adversarial_audit.rs` | MIR-09 |
+
+S9's fifteen new gates:
+
+| Test | File | Pins |
+|---|---|---|
+| `a_slot_spilled_at_one_safepoint_is_nulled_once_its_local_dies` | `liveness.rs` | MIR-01 — the `dead` set exists and is computed |
+| `the_live_and_dead_sets_of_a_safepoint_are_disjoint` | `liveness.rs` | a slot is spilled or nulled, never both |
+| `the_debug_set_still_shows_what_the_root_set_dropped` | `liveness.rs` | MIR-16 — H3's property, stated where it lives |
+| `check_fault_carries_an_annotated_debug_set` | `liveness.rs` | the debugger safepoint that is not a GC one |
+| `a_dead_local_stops_being_reachable_from_its_frame` | `adversarial_audit.rs` | MIR-01 end to end — 3000 elements that used to survive |
+| `an_unannotated_set_is_empty_and_says_so` | `annot.rs` | the seal |
+| `an_annotated_empty_set_is_not_an_unannotated_one` | `annot.rs` | "nothing is live" ≠ "the pass never ran" |
+| `a_scalar_local_in_the_root_set_is_rejected` | `verify.rs` | the plan's first named verifier gate |
+| `an_out_of_range_jump_target_is_rejected` | `verify.rs` | the plan's second (MIR-11's class) |
+| `a_move_gc_out_of_a_scalar_is_rejected` | `verify.rs` | P0-03, now enforced rather than documented |
+| `an_unannotated_safepoint_is_rejected` | `verify.rs` | what the seal buys the verifier |
+| `returning_a_scalar_is_rejected` | `verify.rs` | the ABI returns a `GcRef` |
+| `a_bounded_division_is_rejected` | `verify.rs` | `sdiv` traps; no bound rules out a zero divisor |
+| `an_out_of_range_operand_is_rejected` | `verify.rs` | the cheap builder-bug shape |
+| `an_annotated_function_verifies` | `verify.rs` | the rules are satisfiable |
+
+`adv_pipeline_empty_source_reduce` (`jit.rs`) was **rewritten**, not
+un-ignored: it asserted only that the host survived, because there was no
+contract to assert. There is one now.
+
 The one added by S8:
 
 | Test | File | Finding |
@@ -165,7 +198,8 @@ Partial foundations are the main trap for a fresh context.
 `BuiltinTypeId` is the registry; `TypeDescriptor::builtin::<P>` is the only
 constructor for a built-in. `compare: Option<CompareFn>` **exists on every
 descriptor and is `None` everywhere** — the field's shape is settled, its
-semantics are design decision D3 and are not. See ADR-038.
+semantics are design decision D3 and are not. See ADR-038. **This is what S10
+walks into: answer D3 before writing a single `compare`.**
 
 **F3 — identifier class: predicate half only.** `praxis-syntax/src/ident.rs`
 has `is_ident_start` / `is_ident_continue` / `is_ident`, and the lexer uses
@@ -192,6 +226,25 @@ whole.** `RuntimeRoots` is the only thing `Heap::collect`/`maybe_collect` takes,
 ADR-040 and §3. **Not done:** `ScopedVec` — no site needed it once the payload
 accessors took `Rooted`, and the parser interpreter (the one place the plan
 wants it) is S20.
+
+**F17 — `RootSlots`/`DebugSlots` and the `verify` pass: landed, minus two
+rules.** `praxis_mir::annot` holds both sets; neither has a public constructor
+taking ids, so a builder can only write `unannotated()` and
+`liveness::annotate` is the only filler. `Inst::CheckFault` carries **only** a
+`DebugSlots` — it allocates nothing, so it roots nothing. `praxis_mir::verify`
+runs after `annotate` at all four pipeline sites plus both codegen test
+harnesses. **Not done, deliberately:** `ScalarLiveAcrossSafepoint` (it fires on
+every `lower_seq_*` accumulator and is harmless there — a scalar is a copy and
+cannot dangle) and `OpaqueAtDescriptorSite` (H10, S15). See ADR-044 §5.
+**Effect-driven safepoints** — the other third of F17 — did not land: a
+safepoint is still decided by instruction shape, not by
+`CallTarget::Runtime(sym).allocates()`. Nothing needed it, and the shapes agree
+today.
+
+**F18 — `Option<GcRef>` debug values and the Unit epilogue: landed whole.**
+`DebugLocal.value` is an `Option<GcRef>`, niche-optimized to the same word;
+`is_real_ref` and `null_sentinel_ref` are deleted from all three copies. The
+fault-epilogue half (`emit_unit_return`) landed in S3.
 
 **F16 — MirType and raw-word elimination: landed, minus `TupleShape`.**
 `MirType::{Known, Opaque}` is `Local.ty`, `AllocKind::Tuple.ty` and
@@ -232,7 +285,65 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S8)
+### From this session (S9)
+
+**A safepoint carries two sets, and they are different types.**
+`Inst::{Alloc, Materialize, Call, CallIndirect, StructEq}` have
+`roots: RootSlots` **and** `debug: DebugSlots` where they had one
+`live_roots: Vec<LocalId>`. `Inst::CheckFault` has `debug` and **no roots
+field at all**. Adding a safepoint instruction means writing
+`RootSlots::unannotated()` / `DebugSlots::unannotated()` — there is no way to
+hand-write a set, which is the point: 61 literals in `build.rs` did, and
+`annotate` overwrote every one.
+
+**`emit_spill` is gone; there are `spill_roots`, `spill_debug` and
+`spill_safepoint`.** The first writes the shadow frame (and *nulls* the dead
+slots); the second writes the debug frame; the third is both, and is what a GC
+safepoint calls. `CheckFault` calls `spill_debug` only.
+
+**`loop_roots` is gone from the pipeline lowerings.** `invoke_closure`,
+`call_predicate`, `idx_ge_len`, `emit_bounds_check`, `emit_increment`,
+`idx_cmp_const`, `sink_alloc`, `emit_sink_body`, `emit_flat_map_inner`,
+`run_stage` and `alloc_empty_vec` all lost the parameter. If you add a helper,
+do not thread one back in.
+
+**Root sets shrink, and shadow slots get nulled.** Any test that assumed a
+value stays rooted after its last use is now wrong. Any reasoning that "the
+frame holds everything ever written" is now wrong: at each safepoint the frame
+holds exactly `RootSlots::live`, because `RootSlots::dead` was just zeroed.
+
+**`DebugLocal.value` is an `Option<GcRef>`.** A bare `.as_vec()` on one no
+longer compiles. `is_real_ref` is deleted from `crash_snapshot.rs`,
+`render.rs` and `evaluate.rs` — match on the `Option`.
+
+**`Inst::IntBinOp` has an `overflow: Overflow` field.** `Checked` is
+source-level arithmetic; `Bounded` is a site whose operands are bounded by a
+collection's length (loop index bumps, `count`, the `+ 0` scalar copy) and
+emits bare arithmetic with no overflow test. `Bounded` on `Div`/`Rem` is a
+verifier error.
+
+**`MethodEntry.can_fault` is a method, not a field.** Derived from the ABI
+manifest like `allocates()`. It corrected one row: `bitset.insert` declared it
+could not fault while `praxis_bitset_insert` raises `InvalidSize`.
+
+**Every host verifies.** `praxis_mir::verify(f)` runs after `annotate` in
+`praxis-cli/src/run.rs`, `praxis-debugger/src/session.rs`,
+`praxis-debugger/src/evaluate.rs`, and both codegen test harnesses. **If you
+add MIR that breaks an invariant, the whole 382-test JIT suite fails with a
+named block and instruction**, not with a mysterious segfault. Adding an
+instruction now touches five exhaustive matches, not four — `verify.rs`'s
+`operands` is the new one.
+
+**`praxis_raise_empty_collection` exists** and returns the **Unit sentinel**,
+not `Void`. A `Void` row would have put the context pointer in a rootable slot
+(`call_symbol` hands back `ctx` for a void wrapper).
+
+**`RUNTIME_ABI_VERSION` is 12.** Bumped for F18: the `DebugLocal` layout is
+unchanged, but "no value yet" moved from `NonNull::dangling()` to the all-zero
+`None`, and generated code now writes zero into a dead slot. **S9's bump is
+spent — S10 starts fresh.**
+
+### From S8
 
 **A `Jit` owns a `Generation`, and `lower_function` takes one.** Every piece of
 metadata the backend mints — record schemas, tuple schemas, field names,
@@ -618,35 +729,61 @@ re-deriving it.
 
 ## 4. Where to start
 
-**S9 — MIR root exactness, debug/root split, verifier** (MIR-01, MIR-09,
-MIR-02, MIR-16, MIR-10). S8 is closed; every finding it owned is fixed and
-gated. S9 can also run in parallel with S10.
+**S10 — Semantic comparison, nominal schema identity, debugger type recovery**
+(P0-12, DBG-01, DBG-02, RT-12, RT-16). S9 is closed; every finding it owned is
+fixed and gated.
 
-- **H3 is the whole difficulty, and the plan is emphatic about it.** MIR-16 (the
-  debug/root split) must land **before** MIR-01 and MIR-02. `emit_spill`
-  (`lower.rs`) writes the same root list into *both* the shadow-frame slot and
-  `debug_frame.locals[slot].value`, and `liveness.rs` deliberately includes
-  `CheckFault` as a debugger-only spill point. MIR-01's dead-slot clearing writes
-  `0` into those slots and MIR-02's shrinking omits them, so either landing first
-  turns the crash debugger's rendered values into nulls.
-- **The two tests that prove the ordering held** are
-  `m11_locals_split_users_and_temps_with_types` and
-  `m11_temp_provenance_shows_materializing_expression`
-  (`praxis-cli/tests/run.rs`). They are green now and must stay green.
-- **MIR-09 needs P0-04's Unit sentinel** (landed, S3) and MIR-14's single symbol
-  table (landed, S2). Both are in place.
-- **MIR-10's verifier has an open question S6 raised:** the two loop-increment
-  `Inst::IntBinOp` sites in `build.rs` are not followed by a `CheckFault`. A
-  "every faulting instruction is followed by a CheckFault" rule would flag them,
-  and the right answer is probably to mark the increment non-faulting rather
-  than to add a check. `MethodEntry.can_fault` is dead metadata — wire it to the
-  manifest's `Effect` here or delete it.
-- **`MirType::expect_known`/`MirTypeError` are still unwritten** (F16's
-  remainder); F17's verifier is their only consumer, so S9 is where they land.
-- **S9 starts with a fresh ABI bump budget** (H17). `RUNTIME_ABI_VERSION` is 11,
-  and the plan expects S9 to need one.
+- **D3 blocks P0-12 and nothing else in the stage can substitute for it.**
+  `TypeDescriptor::compare` exists on all 21 descriptors and is `None`
+  everywhere (F1, ADR-038). Populating one needs an answer to: NaN ordering, and
+  whether Text / tuples / records / collections are orderable at all. **Answer
+  D3 first** — the ordering tests the plan lists as exit criteria all assert a
+  semantics nobody has chosen. See §5.
+- **RT-12 is the one S9 made louder.** Records built in two generations compare
+  unequal, because `record_equals` compares schema *pointers* and each
+  generation has its own (S8, §3). The debugger works around it by sharing one
+  evaluation generation. RT-12 replaces allocational identity with nominal-or-
+  structural identity; the plan's new tests are "two anonymous schemas with the
+  same shape compare equal, two nominal records with different defs do not".
+- **Land the `compare` field before RT-13's `EnumSchema` work in S18**, or the
+  same 21 initializers conflict twice. That is the plan's own sequencing note.
+- **DBG-01 is already closed** (`3836b74`) and **DBG-02 is closed for values**
+  (S7's `type_for_value`). What remains of DBG-02 is the *value-less* half: a
+  record or enum object records no nominal type (F12) and a closure records no
+  signature. See §6.
+- **S10 starts with a fresh ABI bump budget** (H17). `RUNTIME_ABI_VERSION` is
+  12. Adding `compare` to `TypeDescriptor` needs **no** bump on its own —
+  generated code passes descriptors by pointer without reading their fields
+  (the same reasoning that made S6's second half and S8 free). Check what
+  generated code actually reads before spending it.
 
-**What S8 deliberately left:**
+**What S9 deliberately left:**
+
+- **`ScalarLiveAcrossSafepoint` is not a verifier rule**, and ADR-044 §5
+  records why: it fires on every `lower_seq_*` accumulator by construction and
+  is harmless there, since a scalar is a copy of a payload and cannot dangle.
+  Do not add it without moving those accumulators into `Gc` slots first.
+- **`OpaqueAtDescriptorSite` stays off until S15** (H10), and
+  **`MirType::expect_known`/`MirTypeError` are still unwritten** — the plan
+  puts them in S9 because F17's verifier is their only consumer, but that
+  consumer is the rule H10 defers. They land in S15, together.
+- **Effect-driven safepoints did not land.** F17's third part wanted
+  `CallTarget::Runtime(sym).allocates()` to decide what is a safepoint;
+  instruction shape still decides. The two agree today, and nothing needed the
+  change. A `Pure` runtime call still gets a root set it does not need.
+- **`v.sum()` overflow is still observed late.** The accumulator is
+  `Overflow::Checked`, but no `CheckFault` follows the loop, so the fault is
+  sticky and the host sees it after `main` returns instead of unwinding at the
+  sink. This is the residue of P0-08's open question; the verifier has no
+  "every faulting instruction is observed" rule because the codebase does not
+  satisfy one yet.
+- **`min`/`max` on an empty sequence still return `0`.** They share MIR-09's
+  empty case but not its defect — the accumulator is a scalar initialized to
+  `0`, so the answer is defined, if debatable. `adv_pipeline_empty_source_min_is_zero`
+  pins it. Whether `0` is right is **D1**'s question, and S18 is where it gets
+  settled alongside `Map.get` / `Grid.find`.
+
+**What S8 deliberately left** (still true):
 
 - **`tuples::POINT` is still a process-static leak.** One `TupleSchema` for every
   grid position, minted by the runtime rather than by a compile, so there is no
@@ -654,21 +791,20 @@ gated. S9 can also run in parallel with S10.
 - **Enum schemas have no generation home** because they do not exist yet
   (RT-13/F12, S18). When they do, they belong in `Generation` beside the record
   and tuple caches — the plan sketch already lists an `enum_schemas` field.
-- **Records built in two generations compare unequal.** See §3; it is RT-12 in
-  S10, and the debugger's shared evaluation generation is what keeps `p` sane
-  until then.
 - **A plan is registered per compile and never deduplicated.** A debugger session
   that reloads a thousand times registers a thousand plans; `MAX_PLANS` (2^20)
   catches a runaway, and `retire_parser_plans` reclaims at teardown, but there is
   no interning as there is for JIT metadata. Keying on the `ParserAst` would give
   it; nothing needs it yet.
 
-Re-read §6 of the plan first. The hazards that still bind: **H3**, **H17**, and
-**H10** in its long form (the MIR verifier's "no `Opaque` in a
-descriptor-producing position" rule stays off until S15). **H15 is discharged**
-— ADR-043 encodes the ordering in `HeapDrained` rather than documenting it, and
-`DebugSession::teardown` is the site the plan warned about (it destructures
-rather than relying on field order). **H1, H2, H4, H6, H7, H8, H9 and H16 remain
+Re-read §6 of the plan first. The hazards that still bind: **H17**, and **H10**
+in its long form (the MIR verifier's "no `Opaque` in a descriptor-producing
+position" rule stays off until S15). **H3 is discharged** — the debug/root
+split landed first, the two m11 tests are green, and
+`the_debug_set_still_shows_what_the_root_set_dropped` now states the property
+at the level it lives at rather than leaving it to a CLI snapshot three layers
+away. **H15 is discharged** — ADR-043 encodes the ordering in `HeapDrained`
+rather than documenting it. **H1, H2, H4, H6, H7, H8, H9 and H16 remain
 discharged.**
 
 ## 5. Design decisions still open
@@ -692,7 +828,15 @@ type that can have no object, and only the first is tolerated — see
 shipped is narrower than a policy: the two wrappers the audit named now fault
 instead of aborting. Other wrappers still reach Rust panics on malformed input.
 
-**D1, D3 and D5 still block their stages**; none has been answered.
+**D1, D3 and D5 still block their stages**; none has been answered. **D3 is the
+next one that binds — S10 cannot start P0-12 without it.**
+
+**D1 gained a second case.** It was scoped to `Map.get` / `Grid.find`; the same
+question is now also open for `min`/`max` on an empty sequence, which return
+`0` because their accumulator is a scalar seeded to `0`. MIR-09 gave the three
+*seeded* sinks (`reduce`, `min_by`, `max_by`) a fault, because their answer was
+genuinely undefined; `min`/`max` have a defined answer that may be the wrong
+one. Settle both together.
 
 | | Decision | Blocks |
 |---|---|---|
@@ -704,7 +848,7 @@ instead of aborting. Other wrappers still reach Rust panics on malformed input.
 | D4 | Hashability of mutable collections as Map keys | S17 |
 | D5 | The 15 phantom prelude names: implement or delete | S17 |
 | D6 | `CollectionCtor::Range`: delete or implement | S17 |
-| D1 | `Map.get` / `Grid.find` — `Option[V]` or V-with-Unit. Source-visible | S18 |
+| D1 | `Map.get` / `Grid.find` — `Option[V]` or V-with-Unit; and `min`/`max` on an empty sequence. Source-visible | S18 |
 | D10 | How much parser-expression grammar a template capture body may contain | S19 |
 | D11 | `grid(int)` granularity; greediness of `text`/`word` | S20 |
 | D12 | Panic-across-FFI policy — should precede RT-06, RT-07 and the parser findings | cross-cutting |
@@ -713,6 +857,62 @@ instead of aborting. Other wrappers still reach Rust panics on malformed input.
 
 Things the plan states that are no longer or were not quite true.
 
+- **F17's `RootSlots` sketch is one field short.** `unannotated()` / `iter()` /
+  `is_annotated()` / `set()` describe the *live* set only, but MIR-01 needs a
+  second one: which slots to **null**. Nulling every non-root slot at every
+  safepoint would cost `gc_count` stores per safepoint, so `RootSlots` carries
+  `live` and `dead`, and `dead` comes from a forward may-dataflow over "which
+  slots might still hold a value". The plan describes MIR-01 as "dead-slot
+  clearing" without saying where the list comes from; it is a third analysis,
+  not a filter on the second.
+- **F17's `verify` cannot have all the rules it lists, and two of the absences
+  are decisions.** `ScalarLiveAcrossSafepoint` fires on every `lower_seq_*`
+  accumulator — F17 predicts this and asks for an explicit decision, which is
+  ADR-044 §5: the rule is not implemented, because a scalar is a *copy* of a
+  payload and cannot dangle, so the invariant that matters is already stated by
+  `RootIsNotGc` + `MoveGcFromScalar`. `MissingTerminator` is unrepresentable —
+  `Block.term` is not an `Option` — so there is no rule rather than a heuristic
+  about placeholder self-jumps.
+- **F17's "effect-driven safepoints" did not land, and nothing needed them.**
+  The `Inst` shape still decides what is a safepoint;
+  `CallTarget::Runtime(sym).allocates()` is not consulted. The two agree at
+  every site today. `AllocatingCallNotASafepoint` therefore has no rule.
+- **`MirType::expect_known`/`MirTypeError` do not land in S9.** The plan puts
+  them here because F17's verifier is their only consumer — but that consumer
+  is `OpaqueAtDescriptorSite`, which H10 defers to S15. Writing the API without
+  its rule would be adding unused surface. They land in S15.
+- **The plan says "two loop-increment `IntBinOp` sites"; there are eight
+  compiler-written sites**, and they split three ways. Three loop index bumps,
+  two `count` accumulators and one `+ 0` scalar copy are bounded by a
+  collection's length and are now `Overflow::Bounded`. Two are `sum`/`product`
+  accumulators, which *can* genuinely overflow and are `Checked` — and are still
+  not followed by a `CheckFault`, so the fault is observed after `main` returns
+  rather than at the sink. That residue is why the verifier has no "every
+  faulting instruction is observed" rule.
+- **MIR-01 needed the accumulator initialization MIR-09 brought, not just the
+  clears.** `reduce`/`min_by`/`max_by` left a `Gc` slot unwritten on the empty
+  path, and liveness roots it at the loop header — so the backend spilled an
+  *undefined Cranelift value* into the shadow frame for the collector to
+  dereference, on every empty `reduce`, whether or not anyone read the result.
+  The audit describes MIR-09 as a bad return value; it was also a live rooting
+  bug.
+- **MIR-09's raise wrapper cannot be `Void`.** `call_symbol` hands back the
+  *context pointer* for a void wrapper (a deliberate simplification), so an
+  `Inst::Call` to one writes `ctx` into its `Gc` destination — the exact class
+  of bug this stage removes. `praxis_raise_empty_collection` is
+  `(Ctx) -> Gc, Faults` and returns the Unit sentinel. H16's "MIR-09 adds
+  `praxis_raise_empty_collection`" is otherwise right, and it really was two
+  edits.
+- **S9's ABI bump is for a layout that did not change.** `DebugLocal.value`
+  went from `GcRef` to `Option<GcRef>`, which is the same word at the same
+  offset. What changed is the *meaning*: "no value yet" moved from
+  `NonNull::dangling()` to the all-zero `None`, and generated code now writes
+  zero into a dead shadow slot. A previous-version runtime reads either zero as
+  a reference. The rule "check what generated code actually reads" cuts both
+  ways — a stable layout is not automatically a free stage.
+- **F18's `DebugLocalMeta` sketch is already what shipped**, in S6: the
+  `NO_STATIC_TYPE` half landed with `MirType::Opaque`, not here. Only the
+  `DebugLocal.value` half was S9's, and the fault-epilogue half was S3's.
 - **F13's `Generation::retire(self, HeapDrained)` signature could not be
   written as sketched.** A `Jit` holds the generation behind an `Rc` (the
   debugger shares one across every `p EXPR`), so it is

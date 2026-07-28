@@ -49,3 +49,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-041: A size the host cannot serve is a fault, not an abort](./041-bounded-extents-fault-instead-of-aborting.md)
 - [ADR-042: One total bridge between `Type` and `TypeDescriptor`; the JIT refuses rather than mislabels](./042-total-type-descriptor-bridge.md)
 - [ADR-043: JIT and parser metadata belongs to a reclaimable generation, gated by a teardown proof](./043-generation-arena-and-the-teardown-proof.md)
+- [ADR-044: Two slot sets — the collector's roots and the debugger's view — and the MIR verifier](./044-two-slot-sets-and-the-mir-verifier.md)
