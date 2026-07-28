@@ -3344,13 +3344,15 @@ pub unsafe extern "C" fn praxis_run_parser(
         return unsafe { unit_sentinel(ctx) };
     }
     let idx = unsafe { int_payload(plan_index_gc) };
-    // Delegate to the parser interpreter (WS7). It reads the plan from the HIR
-    // slab, runs it against the input bytes, and allocates the result.
-    match crate::parser::run_plan_by_index(ctx, idx as u32, input) {
+    // Delegate to the parser interpreter (WS7). It validates the id, reads the
+    // plan from the process-wide arena, runs it against the input bytes, and
+    // allocates the result.
+    match crate::parser::run_plan_by_id(ctx, idx, input) {
         Some(result) => result,
         None => {
-            // A `None` return means the plan index was out of range or the
-            // interpreter was not linked. Treat as a parse fault.
+            // A `None` return means the value named no registered plan (out of
+            // range, negative, or zero) or the interpreter was not linked.
+            // Treat as a parse fault.
             unsafe { set_fault(ctx, RaisedFault::PARSE_FAILED) };
             unsafe { unit_sentinel(ctx) }
         }

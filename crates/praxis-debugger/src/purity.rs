@@ -295,15 +295,20 @@ mod tests {
     #[test]
     fn rejects_read_and_parse() {
         let mut db = mk_db();
+        // Any real plan id will do — the gate rejects the *node*, not the plan.
+        // `0` is no longer spellable here (IP-12): `PlanId` is a `NonZeroU32`,
+        // which is what stopped the HIR's failure sentinel from naming the
+        // first plan any program registered.
+        let plan = praxis_hir::PlanId::from_raw(1).expect("1 is a plan id");
         let read = TypedExpr::Read {
-            plan_index: 0,
+            plan,
             ty: db.int(),
             span: (0, 0),
         };
         assert!(assert_read_only(&read).unwrap_err().contains("read"));
         let parse = TypedExpr::Parse {
             text: Box::new(lit_int(&mut db)),
-            plan_index: 0,
+            plan,
             ty: db.int(),
             span: (0, 0),
         };

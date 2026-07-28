@@ -14,18 +14,24 @@ use crate::text::{text_bytes, TextPayload};
 use crate::GcRef;
 use praxis_input_parser::{AtomicKind, ParserPlan, PlanNode};
 
-/// Run the parser plan identified by `index` against `input`, returning the
-/// parsed result or `None` on failure (out-of-range index → None; parse mismatch
-/// → sets `ParseFailed` fault + None).
+/// Run the parser plan named by `raw_id` against `input`, returning the parsed
+/// result or `None` on failure (a value that names no plan → `None`; parse
+/// mismatch → sets `ParseFailed` fault + `None`).
+///
+/// `raw_id` arrives as the payload of a boxed `Int` — an `i64` the ABI cannot
+/// constrain — so it is validated here rather than narrowed with an `as`. The
+/// predecessor wrote `idx as u32`, which silently folded `0x1_0000_0005` onto
+/// plan 5 and every negative onto a huge index (IP-12). Zero is rejected too:
+/// [`PlanId`](praxis_input_parser::PlanId) is non-zero precisely so the HIR's
+/// old failure sentinel cannot name a plan.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `input` must be a valid `Text` GcRef.
-pub unsafe fn run_plan_by_index(
-    ctx: *mut RuntimeContext,
-    index: u32,
-    input: GcRef,
-) -> Option<GcRef> {
-    let plan = praxis_input_parser::get_plan(index)?;
+pub unsafe fn run_plan_by_id(ctx: *mut RuntimeContext, raw_id: i64, input: GcRef) -> Option<GcRef> {
+    let id = u32::try_from(raw_id)
+        .ok()
+        .and_then(praxis_input_parser::PlanId::from_raw)?;
+    let plan = praxis_input_parser::get_plan(id)?;
     // SAFETY: caller guarantees ctx/input validity.
     Some(unsafe { run_plan(ctx, plan, input) })
 }
@@ -1085,7 +1091,7 @@ fn alloc_record(rt: &Rt, captures: &[(Option<&'static str>, u32, GcRef)]) -> GcR
             descriptor: value.descriptor(),
         })
         .collect();
-    let schema = leak_record_schema(fields);
+    let schema = record_schema_for(fields);
     let items: Vec<GcRef> = captures.iter().map(|(_, _, v)| *v).collect();
     let payload = crate::records::RecordPayload { schema, items };
     // SAFETY: ctx is valid; payload matches RECORD's layout.
@@ -1107,7 +1113,7 @@ fn alloc_tuple(rt: &Rt, elements: &[u32], plan: &ParserPlan, values: Vec<GcRef>)
         .iter()
         .map(|&e| child_descriptor(plan, e) as *const _)
         .collect();
-    let schema = leak_tuple_schema(descriptors);
+    let schema = tuple_schema_for(descriptors);
     let payload = crate::tuples::TuplePayload {
         schema,
         items: values,
@@ -1123,75 +1129,135 @@ fn alloc_tuple(rt: &Rt, elements: &[u32], plan: &ParserPlan, values: Vec<GcRef>)
     }
 }
 
-/// Leak a `RecordSchema` to `&'static`, caching by the (field-name, descriptor)
-/// sequence so repeated parses of the same template shape share one schema
-/// (mirrors the codegen's record/tuple schema caches). The descriptor half is
-/// load-bearing: two templates with the same field *names* but different capture
-/// types (e.g. `{x:int}` vs `{x:word}`) must NOT share a schema — `alloc_record`
-/// records each field's real descriptor, and `record_equals`/`record_format`/
-/// `record_hash` dispatch through the schema's per-field descriptor, so a
-/// name-only cache would hand the second template the first template's
-/// descriptor and recompare/reformat via the wrong callback (the same class of
-/// segfault the §6.1 `alloc_record` fix closed).
-fn leak_record_schema(
+// ---- parser-built schemas --------------------------------------------------
+//
+// A named-capture template produces an anonymous record, and an anonymous
+// multi-capture template produces a tuple. Both need a schema, and the
+// interpreter is the only thing that knows the field descriptors — it learns
+// them from the values the child plans produced. So the schemas are built here,
+// at runtime, and cached by shape so repeated parses of one template share one.
+//
+// **These entries own their storage** (IP-12). They used to be `Box::leak`ed,
+// which was not merely a leak: a `RecordField::name` is a `&'static str`
+// *borrowed from plan storage*, so a cache that outlives the plans holds
+// dangling names. Owning them lets `retire` drop the schemas in the same breath
+// as the plans, which is what makes reclaiming either one sound.
+
+/// One cached record schema and everything it points at.
+struct RecordSchemaEntry {
+    /// `(field name, descriptor address)` — the shape this schema serves.
+    key: Vec<(&'static str, usize)>,
+    /// The fields the schema borrows. Boxed so the address is stable across the
+    /// registry `Vec`'s reallocations. Never read directly.
+    #[allow(dead_code)]
+    fields: Box<[crate::records::RecordField]>,
+    schema: Box<crate::records::RecordSchema>,
+}
+
+/// One cached tuple schema and everything it points at.
+struct TupleSchemaEntry {
+    /// The descriptor-address sequence this schema serves.
+    key: Vec<usize>,
+    /// The descriptors the schema borrows. See [`RecordSchemaEntry::fields`].
+    #[allow(dead_code)]
+    descriptors: Box<[*const crate::TypeDescriptor]>,
+    schema: Box<crate::tuples::TupleSchema>,
+}
+
+/// The parser interpreter's schema cache.
+#[derive(Default)]
+struct ParserSchemas {
+    records: Vec<RecordSchemaEntry>,
+    tuples: Vec<TupleSchemaEntry>,
+}
+
+// SAFETY: the entries hold raw `*const TypeDescriptor`s into process-static
+// descriptor data and `&'static str`s into plan storage. Nothing is mutated
+// after construction, and every access goes through the mutex below.
+unsafe impl Send for ParserSchemas {}
+
+static SCHEMAS: std::sync::Mutex<Option<ParserSchemas>> = std::sync::Mutex::new(None);
+
+/// Drop every schema the parser interpreter has built.
+///
+/// # Safety
+/// Every schema pointer handed out must be dead — no live `RecordPayload` or
+/// `TuplePayload` may still name one. `retire_parser_plans` is the only
+/// intended caller and holds the [`HeapDrained`](crate::HeapDrained) proof of
+/// exactly that.
+pub(crate) unsafe fn retire_schemas() {
+    *SCHEMAS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
+/// The `RecordSchema` for a template shape, built once and shared afterwards.
+///
+/// Cached by the `(field-name, descriptor)` sequence. The descriptor half is
+/// load-bearing: two templates with the same field *names* but different
+/// capture types (e.g. `{x:int}` vs `{x:word}`) must NOT share a schema —
+/// `alloc_record` records each field's real descriptor, and
+/// `record_equals`/`record_format`/`record_hash` dispatch through the schema's
+/// per-field descriptor, so a name-only cache would hand the second template
+/// the first template's descriptor and recompare/reformat via the wrong
+/// callback (the same class of segfault the §6.1 `alloc_record` fix closed).
+fn record_schema_for(
     fields: Vec<crate::records::RecordField>,
 ) -> *const crate::records::RecordSchema {
-    use std::sync::Mutex;
-    // A `Send` wrapper for the leaked schema pointer (raw pointers inside the
-    // schema make it non-`Sync`; the wrapper just satisfies the Mutex's bounds.
-    // The schema is immutable `'static` data; the parser is single-threaded.)
-    struct SendSchema(*const crate::records::RecordSchema);
-    unsafe impl Send for SendSchema {}
-    type RecordCache = Mutex<Vec<(Vec<(&'static str, usize)>, SendSchema)>>;
-    static CACHE: std::sync::OnceLock<RecordCache> = std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
-    // Key on (name, descriptor-pointer-as-usize). Same field names with
-    // different descriptors → different key → distinct schema. This mirrors
-    // `leak_tuple_schema`'s descriptor-pointer key below.
+    let mut guard = SCHEMAS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cache = guard.get_or_insert_with(ParserSchemas::default);
     let key: Vec<(&'static str, usize)> = fields
         .iter()
         .map(|f| (f.name, f.descriptor as usize))
         .collect();
-    let mut guard = cache.lock().unwrap();
-    if let Some((_, s)) = guard.iter().find(|(k, _)| *k == key) {
-        return s.0;
+    if let Some(entry) = cache.records.iter().find(|e| e.key == key) {
+        return &*entry.schema as *const _;
     }
-    let leaked_fields: &'static [crate::records::RecordField] =
-        Box::leak(fields.into_boxed_slice());
-    let schema: &'static crate::records::RecordSchema =
-        Box::leak(Box::new(crate::records::RecordSchema {
-            fields: leaked_fields,
-        }));
-    guard.push((key, SendSchema(schema as *const _)));
-    schema as *const _
+    let fields: Box<[crate::records::RecordField]> = fields.into_boxed_slice();
+    // SAFETY (lifetime erasure): `RecordSchema::fields` declares `&'static`, and
+    // the slice lives in the boxed `fields` this entry owns. `retire_schemas`
+    // is what discharges the obligation.
+    let borrowed: &'static [crate::records::RecordField] =
+        unsafe { &*(&*fields as *const [crate::records::RecordField]) };
+    let schema = Box::new(crate::records::RecordSchema { fields: borrowed });
+    let raw: *const crate::records::RecordSchema = &*schema;
+    cache.records.push(RecordSchemaEntry {
+        key,
+        fields,
+        schema,
+    });
+    raw
 }
 
-/// Leak a `TupleSchema` to `&'static`, caching by the descriptor-pointer
-/// sequence so same-shaped tuples share one schema.
-fn leak_tuple_schema(
+/// The `TupleSchema` for a descriptor sequence, built once and shared
+/// afterwards, so same-shaped tuples compare structurally equal.
+fn tuple_schema_for(
     descriptors: Vec<*const crate::TypeDescriptor>,
 ) -> *const crate::tuples::TupleSchema {
-    use std::sync::Mutex;
-    // A `Send` wrapper for the leaked schema pointer (raw pointers are not
-    // `Sync`, but the schema is immutable `'static` data and the parser is
-    // single-threaded; the wrapper just satisfies the Mutex's bounds).
-    struct SendSchema(*const crate::tuples::TupleSchema);
-    unsafe impl Send for SendSchema {}
-    type TupleCache = Mutex<Vec<(Vec<usize>, SendSchema)>>;
-    static CACHE: std::sync::OnceLock<TupleCache> = std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    let mut guard = SCHEMAS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cache = guard.get_or_insert_with(ParserSchemas::default);
     let key: Vec<usize> = descriptors.iter().map(|p| *p as usize).collect();
-    let mut guard = cache.lock().unwrap();
-    if let Some((_, s)) = guard.iter().find(|(k, _)| *k == key) {
-        return s.0;
+    if let Some(entry) = cache.tuples.iter().find(|e| e.key == key) {
+        return &*entry.schema as *const _;
     }
-    let leaked: &'static [*const crate::TypeDescriptor] = Box::leak(descriptors.into_boxed_slice());
-    let schema: &'static crate::tuples::TupleSchema =
-        Box::leak(Box::new(crate::tuples::TupleSchema {
-            descriptors: leaked,
-        }));
-    guard.push((key, SendSchema(schema as *const _)));
-    schema as *const _
+    let descriptors: Box<[*const crate::TypeDescriptor]> = descriptors.into_boxed_slice();
+    // SAFETY (lifetime erasure): as `record_schema_for`.
+    let borrowed: &'static [*const crate::TypeDescriptor] =
+        unsafe { &*(&*descriptors as *const [*const crate::TypeDescriptor]) };
+    let schema = Box::new(crate::tuples::TupleSchema {
+        descriptors: borrowed,
+    });
+    let raw: *const crate::tuples::TupleSchema = &*schema;
+    cache.tuples.push(TupleSchemaEntry {
+        key,
+        descriptors,
+        schema,
+    });
+    raw
 }
 
 // ---- byte-splitting helpers -----------------------------------------------

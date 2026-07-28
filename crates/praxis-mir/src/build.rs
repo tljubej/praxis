@@ -1017,10 +1017,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             dst
         }
         // M6: `read`/`parse` lower to a runtime call against the parser plan.
-        TypedExpr::Read { plan_index, .. } => lower_read(b, *plan_index),
-        TypedExpr::Parse {
-            text, plan_index, ..
-        } => lower_parse(b, text, *plan_index),
+        TypedExpr::Read { plan, .. } => lower_read(b, *plan),
+        TypedExpr::Parse { text, plan, .. } => lower_parse(b, text, *plan),
         // M7: nominal record literal + field access.
         TypedExpr::RecordLit {
             record_def_id,
@@ -1075,7 +1073,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
 }
 
 /// Lower a `read parser_expr`: get the input buffer, then run the plan.
-fn lower_read(b: &mut Builder<'_>, plan_index: u32) -> LocalId {
+fn lower_read(b: &mut Builder<'_>, plan: praxis_hir::PlanId) -> LocalId {
     // 1. Get the input buffer from the runtime context.
     let input = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
@@ -1085,24 +1083,25 @@ fn lower_read(b: &mut Builder<'_>, plan_index: u32) -> LocalId {
         live_roots: Vec::new(),
     });
     // 2. Run the parser plan against it.
-    run_parser_plan(b, plan_index, input)
+    run_parser_plan(b, plan, input)
 }
 
 /// Lower a `parse(text, parser_expr)`: run the plan against the text argument.
-fn lower_parse(b: &mut Builder<'_>, text: &TypedExpr, plan_index: u32) -> LocalId {
+fn lower_parse(b: &mut Builder<'_>, text: &TypedExpr, plan: praxis_hir::PlanId) -> LocalId {
     let input = lower_expr_gc(b, text);
-    run_parser_plan(b, plan_index, input)
+    run_parser_plan(b, plan, input)
 }
 
-/// Emit the call to `praxis_run_parser(ctx, plan_index, input) -> GcRef`, then
-/// check for a parse fault. The plan_index is boxed as an Int GcRef to match the
-/// uniform ABI; the runtime wrapper reads its payload.
-fn run_parser_plan(b: &mut Builder<'_>, plan_index: u32, input: LocalId) -> LocalId {
-    // Box the plan index as an Int GcRef.
+/// Emit the call to `praxis_run_parser(ctx, plan_id, input) -> GcRef`, then
+/// check for a parse fault. The id is boxed as an Int GcRef to match the
+/// uniform ABI; the runtime wrapper reads its payload and validates it back
+/// into a `PlanId` (a value that names no plan becomes a parse fault).
+fn run_parser_plan(b: &mut Builder<'_>, plan: praxis_hir::PlanId, input: LocalId) -> LocalId {
+    // Box the plan id as an Int GcRef.
     let idx_scalar = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ConstInt {
         dst: idx_scalar,
-        value: plan_index as i64,
+        value: i64::from(plan.get()),
     });
     let idx_gc = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     b.push(Inst::Alloc {

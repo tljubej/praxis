@@ -132,7 +132,11 @@ impl DebugSession {
         } = self;
         let proof = runtime.teardown();
         jit.retire(proof.clone());
-        Generation::retire(eval_generation, proof);
+        Generation::retire(eval_generation, proof.clone());
+        // The parser plans are the third arena: a `read`/`parse` in the program
+        // registered one per compile, and every `reload` registered more
+        // (IP-12).
+        praxis_runtime::retire_parser_plans(&proof);
     }
 
     /// `reload` (§9.7): re-read the source from `source_path`, recompile, and

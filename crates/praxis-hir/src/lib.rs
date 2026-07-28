@@ -35,6 +35,10 @@ pub use lower::{
     TypedItem, TypedMatchArm, TypedModule, TypedParam, TypedPattern, TypedStmt, UnaryOp,
 };
 pub use name_table::NameTable;
+/// The identity of a compiled parser plan, re-exported so MIR can name the
+/// field on `TypedExpr::Read`/`Parse` without depending on the input-parser
+/// crate directly.
+pub use praxis_input_parser::PlanId;
 pub use resolve::{NameRef, NameResolution, ResolvedRef};
 pub use scope::{ScopeId, ScopeTree};
 pub use symbol::{Symbol, SymbolId, SymbolKind};

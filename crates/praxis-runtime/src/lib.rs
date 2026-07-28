@@ -63,6 +63,6 @@ pub use records::{RecordField, RecordPayload, RecordSchema};
 pub use repr::{instance_repr, InstanceArg, InstanceRepr};
 pub use roots::{NativeRootFrame, NativeScope, RootScope, RootSet, Rooted, RuntimeRoots};
 pub use shadow_frame::{ShadowFrame, MAX_SHADOW_SLOTS};
-pub use teardown::HeapDrained;
+pub use teardown::{retire_parser_plans, HeapDrained};
 pub use text::TextPayload;
 pub use tuples::{TuplePayload, TupleSchema};

@@ -276,9 +276,11 @@ pub fn run(
         println!("{out}");
     }
     // The run is over and `result` has been rendered: drop the heap, then
-    // reclaim the generation arena its objects pointed into (F13, hazard H15).
-    // `Runtime::teardown` mints the proof `retire` demands, so this cannot be
-    // written the other way round.
-    jit.retire(runtime.teardown());
+    // reclaim the arenas its objects pointed into — the JIT generation (F13)
+    // and the parser plans (IP-12). `Runtime::teardown` mints the proof both
+    // demand, so this cannot be written the other way round (hazard H15).
+    let proof = runtime.teardown();
+    praxis_runtime::retire_parser_plans(&proof);
+    jit.retire(proof);
     Ok(0)
 }

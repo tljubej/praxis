@@ -278,18 +278,19 @@ pub enum TypedExpr {
         ty: Type,
         span: (u32, u32),
     },
-    /// `read parser_expression` (§7.1, M6). `plan_index` identifies the compiled
-    /// [`ParserPlan`] in the global slab; the runtime interpreter looks it up.
+    /// `read parser_expression` (§7.1, M6). `plan` identifies the compiled
+    /// [`ParserPlan`] in the process-wide arena; the runtime interpreter looks
+    /// it up.
     Read {
-        plan_index: u32,
+        plan: praxis_input_parser::PlanId,
         ty: Type,
         span: (u32, u32),
     },
     /// `parse(text, parser_expression)` (§7.1, M6). The `text` arg is lowered as
-    /// an ordinary expression; `plan_index` identifies the parser plan.
+    /// an ordinary expression; `plan` identifies the parser plan.
     Parse {
         text: Box<TypedExpr>,
-        plan_index: u32,
+        plan: praxis_input_parser::PlanId,
         ty: Type,
         span: (u32, u32),
     },
@@ -1686,7 +1687,7 @@ impl<'a> Lowerer<'a> {
             &mut self.diagnostics,
         ) {
             Some(analysis) => TypedExpr::Read {
-                plan_index: analysis.plan_index,
+                plan: analysis.plan,
                 ty: analysis.result_type,
                 span,
             },
@@ -1715,24 +1716,25 @@ impl<'a> Lowerer<'a> {
                 ) {
                     Some(analysis) => TypedExpr::Parse {
                         text: Box::new(text_expr),
-                        plan_index: analysis.plan_index,
+                        plan: analysis.plan,
                         ty: analysis.result_type,
                         span,
                     },
-                    None => TypedExpr::Parse {
-                        text: Box::new(text_expr),
-                        plan_index: 0,
-                        ty,
-                        span,
-                    },
+                    // Analysis failed and has already pushed a diagnostic. This
+                    // used to emit `plan_index: 0`, which is a perfectly valid
+                    // index — the first plan any program registers — so a
+                    // broken `parse(...)` ran somebody else's parser. There is
+                    // no longer a `PlanId` that means "none"; an error
+                    // expression is the honest lowering (IP-12).
+                    None => self.error_expr(),
                 }
             }
-            None => TypedExpr::Parse {
-                text: Box::new(text_expr),
-                plan_index: 0,
-                ty,
-                span,
-            },
+            // No parser expression at all: the same "there is no plan" case as
+            // above, and the same answer.
+            None => {
+                let _ = ty;
+                self.error_expr()
+            }
         }
     }
 

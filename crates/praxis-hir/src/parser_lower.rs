@@ -9,7 +9,7 @@
 use praxis_ast::{AstNode, ParserExpr, ParserExprKind, ParserNamedArg};
 use praxis_input_parser::ast::{AtomicKind, Constructor, ParserAst, TemplatePart};
 use praxis_input_parser::{
-    lower_to_plan, register_plan, scan_template, synthesize, validate, ValidationError,
+    lower_to_plan, register_plan, scan_template, synthesize, validate, PlanId, ValidationError,
 };
 use praxis_source::{
     Diagnostic, DiagnosticCategory, DiagnosticCode, FileId, FileSpan, Severity, Span,
@@ -18,8 +18,8 @@ use praxis_types::{Type, TypeDb};
 
 /// The result of converting + validating + synthesizing a parser expression.
 pub struct ParserAnalysis {
-    /// The compiled plan index in the global slab (for MIR to pass as an i64).
-    pub plan_index: u32,
+    /// The compiled plan's id (for MIR to pass as an i64 immediate).
+    pub plan: PlanId,
     /// The synthesized result type (for inference / hover).
     pub result_type: Type,
 }
@@ -44,13 +44,17 @@ pub fn analyze_parser_expr(
     }
 
     let result_type = synthesize(&ast, db);
-    let plan = lower_to_plan(&ast);
-    let plan_index = register_plan(plan);
+    // Registration is bounded and can refuse (IP-12). A refusal is a
+    // diagnostic, not a wrapped index into somebody else's plan.
+    let plan = match register_plan(lower_to_plan(&ast)) {
+        Ok(id) => id,
+        Err(e) => {
+            diagnostics.push(err_diag(file, parser_expr.span(), "I001", e.to_string()));
+            return None;
+        }
+    };
 
-    Some(ParserAnalysis {
-        plan_index,
-        result_type,
-    })
+    Some(ParserAnalysis { plan, result_type })
 }
 
 /// Synthesize only the result type of a parser expression (no plan

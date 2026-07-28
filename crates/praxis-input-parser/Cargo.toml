@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Parser-expression lexer, template parser, type synthesis, and parser plans."
 
 [dependencies]
+bumpalo.workspace = true
 praxis-source.workspace = true
 praxis-syntax.workspace = true
 praxis-types.workspace = true
