@@ -48,3 +48,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-040: A `Safepoint` token gates allocation, with one named unpaced route](./040-safepoint-token-and-the-unpaced-back-door.md)
 - [ADR-041: A size the host cannot serve is a fault, not an abort](./041-bounded-extents-fault-instead-of-aborting.md)
 - [ADR-042: One total bridge between `Type` and `TypeDescriptor`; the JIT refuses rather than mislabels](./042-total-type-descriptor-bridge.md)
+- [ADR-043: JIT and parser metadata belongs to a reclaimable generation, gated by a teardown proof](./043-generation-arena-and-the-teardown-proof.md)

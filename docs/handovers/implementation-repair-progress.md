@@ -18,15 +18,42 @@ Update this file at the end of every stage.
 | S5 — Root-set completeness, native RAII roots | **done** | `7911337` |
 | S6 — Allocation pacing, effect metadata, heap lifecycle | **done** | `7182d56`, `ce08ae3`, `b384df9`, `968af35`, `3b5bfb7` |
 | S7 — Descriptor totality, typed collections, fault representation | **done** | `d014067`, `c00aab7`, `6da6037`, `eda8c69` |
-| S8 … S21 | not started | |
+| S8 — Generation arena for JIT and plan metadata | **done** | `1311132`, `b60da0a` |
+| S9 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10. It fell out of S1. **DBG-02** is closed in part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1055 passed, 0 failed, 110 ignored**. `just ci` is green.
+Now: **1073 passed, 0 failed, 109 ignored**. `just ci` is green.
 
-Thirty-eight of the audit's ignored regressions are un-ignored and passing.
+Thirty-nine of the audit's ignored regressions are un-ignored and passing.
+The one added by S8:
+
+| Test | File | Finding |
+|---|---|---|
+| `record_schema_cache_is_scoped_by_type_database_not_bare_def_id` | `adversarial_audit.rs` | MIR-12, DBG-06 |
+
+S8's fifteen new gates, for the four findings that had none:
+
+| Test | File | Pins |
+|---|---|---|
+| `the_same_def_id_in_two_generations_gets_two_schemas` | `generation.rs` | MIR-12/DBG-06 at the unit level |
+| `one_def_id_in_one_generation_is_one_schema` | `generation.rs` | the sharing the fix must *not* break |
+| `a_failed_schema_build_caches_nothing` | `generation.rs` | a D9 refusal leaves no half-schema |
+| `tuple_schemas_are_shared_by_shape` | `generation.rs` | structural keying survives the move |
+| `repeated_identical_metadata_stops_growing_the_arena` | `generation.rs` | DBG-05/MIR-13 — interning, not just reclaiming |
+| `a_retired_generation_releases_its_arena` | `generation.rs` | H15 — `retire` needs the proof to compile |
+| `a_shared_generation_survives_a_partial_retire` | `generation.rs` | a second handle keeps its pointers |
+| `generation_ids_are_distinct_and_nonzero` | `generation.rs` | the key half that is not the def id |
+| `repeated_evaluation_stops_growing_the_generation` | `evaluate.rs` | DBG-05 through the *real* `p` path |
+| `zero_is_not_a_plan_id` | `plan.rs` | IP-12 — the sentinel has no encoding |
+| `registered_plans_round_trip_through_their_raw_id` | `plan.rs` | IP-12 — the MIR immediate round-trips |
+| `an_unregistered_id_resolves_to_nothing` | `plan.rs` | IP-12 — out of range is `None`, not an index |
+| `a_compiled_plan_owns_its_interned_strings` | `plan.rs` | IP-12 — the arena really owns them |
+| `registration_past_the_bound_is_refused` | `plan.rs` | IP-12 — bounded, and refuses before pushing |
+| `retiring_parser_plans_empties_the_arena` | `teardown.rs` | IP-12 — plans and schemas go together |
+
 The thirteen added by S7's second half:
 
 | Test | File | Finding |
@@ -176,6 +203,18 @@ MIR-05 supplies one in S21, so they are `MirType::Opaque` and the backend keeps
 its degenerate empty-schema path. `MirType::expect_known`/`MirTypeError` are
 also not written: their only consumer is F17's verifier (S9).
 
+**F13 — the generation arena: landed whole, and the `Generation` is the only
+owner.** `praxis_codegen_cranelift::generation::Generation` is a `bumpalo::Bump`
+plus the record-schema, tuple-schema, string and debug-metadata caches; a `Jit`
+holds one behind an `Rc`, declared *after* `module`. Reclamation is
+`Generation::retire(rc, HeapDrained)`, and `Runtime::teardown(self)` is the only
+minter of a `HeapDrained`. Every allocator interns. `PlanId` is a `NonZeroU32`,
+`register_plan` is bounded and fallible, and `retire_parser_plans(&proof)` drops
+the plans and the interpreter's schema cache together. See ADR-043. **Not done:**
+the `Generation` does not yet own the *enum* schemas (F12/RT-13 has not created
+them), and `tuples::POINT` is still a process-static leak with no generation to
+hang it on.
+
 **F11 — the `praxis-repr` bridge: landed whole.** New crate, deps
 `praxis-types` + `praxis-runtime` + `praxis-stdlib`, no cycle.
 `descriptor_for_type` is exhaustive and fallible; `type_for_value` is its
@@ -193,7 +232,69 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S7's second half)
+### From this session (S8)
+
+**A `Jit` owns a `Generation`, and `lower_function` takes one.** Every piece of
+metadata the backend mints — record schemas, tuple schemas, field names,
+function names, debug-local arrays, embedded text literals — goes into
+`generation`, not into a `Box::leak`. `leak_static_str` is deleted. **Do not add
+a `Box::leak` to `lower.rs`**; add a `Generation` method, where the interning
+test sees it.
+
+**`build_debug_local_metas` returns `(*const DebugLocalMeta, usize)`, not a
+slice.** The array is interned by content, so two calls with identical metadata
+return the same pointer.
+
+**The record-schema cache is keyed `(GenerationId, RecordDefId)` and lives in
+the generation.** A bare `RecordDefId` is a per-`TypeDb` positional index; the
+process-global map it replaces is the MIR-12/DBG-06 bug. `tuple_schema_for` is
+keyed by the descriptor sequence, same as before, but per generation.
+
+**Records built in two generations no longer compare equal.** `record_equals`
+compares schema *pointers*, and each generation has its own. That is RT-12 (S10)
+— schema identity should be nominal or structural, not allocational. The
+debugger works around it by sharing one evaluation generation.
+
+**`Runtime::teardown(self) -> HeapDrained` exists, and it is the only proof
+minter.** `Generation::retire`, `Jit::retire`,
+`praxis_runtime::retire_parser_plans` and `DebugSession::teardown` all require
+one. **A generation that is merely dropped leaks its arena on purpose** —
+`Drop` does nothing and the `Bump` is `ManuallyDrop`. Forgetting to retire costs
+memory, never soundness (hazard H15, ADR-043).
+
+**The debugger shares one generation across every `p EXPR`.**
+`DebugSession.eval_generation` is a new public field (the CLI constructs it), and
+`Jit::in_generation(Rc<Generation>)` is how a throwaway module joins an existing
+arena. `evaluate` and `heap` take a `&Rc<Generation>`; `type_of` does not (it
+never JITs).
+
+**`Repl::into_session` exists** and drops the snapshot before handing the
+session back, which is H8's ordering made explicit rather than inherited from
+field declaration order.
+
+**A parser plan is a `PlanId`, not a `u32`, and there is no zero.**
+`TypedExpr::Read`/`Parse` carry `plan: PlanId` (re-exported from
+`praxis_hir::PlanId` so MIR need not depend on the input-parser crate).
+`lower_to_plan` returns an owning `CompiledPlan`; `register_plan` takes it and
+returns `Result<PlanId, TooManyPlans>`. The old `plan_index: 0` failure sentinel
+is gone — a failed analysis lowers to `error_expr()`.
+
+**`praxis_run_parser` validates the id it reads back.**
+`crate::parser::run_plan_by_index(ctx, idx as u32, …)` is now
+`run_plan_by_id(ctx, idx: i64, …)`, which does a checked `try_from` plus
+`PlanId::from_raw`. Anything naming no plan is a `ParseFailed` fault.
+
+**The runtime's parser schema caches own their storage.**
+`leak_record_schema`/`leak_tuple_schema` are `record_schema_for`/
+`tuple_schema_for` in `parser.rs`, backed by one `SCHEMAS` registry of boxed
+entries. They must be cleared with the plans (their field names point into plan
+storage), which is what `retire_parser_plans` does.
+
+**`RUNTIME_ABI_VERSION` is still 11.** S8 changed no `#[repr(C)]` type generated
+code reads: `RecordSchema`/`TupleSchema`/`DebugLocalMeta` keep their layouts, and
+only the *storage* moved. **S8's ABI bump budget is unspent — S9 starts fresh.**
+
+### From S7's second half
 
 **There is a new crate, `praxis-repr`, and it is where descriptor questions go.**
 `praxis_repr::descriptor_for_type(db, ty) -> Result<&'static TypeDescriptor,
@@ -517,55 +618,58 @@ re-deriving it.
 
 ## 4. Where to start
 
-**S8 — the generation arena** (DBG-05, DBG-06, IP-12, MIR-12, MIR-13). S7 is
-closed; every finding it owned is fixed and gated.
+**S9 — MIR root exactness, debug/root split, verifier** (MIR-01, MIR-09,
+MIR-02, MIR-16, MIR-10). S8 is closed; every finding it owned is fixed and
+gated. S9 can also run in parallel with S10.
 
-- **H15 is the whole difficulty and it is now unavoidable.** `Heap::drop` runs
-  finalizers, and record and tuple payloads hold `*const RecordSchema` /
-  `*const TupleSchema`. Those are safe today only because they are `Box::leak`ed
-  and never freed — which is precisely what S8 removes. The arena must be
-  dropped **after** heap teardown, and `DebugSession` declares `jit` *before*
-  `runtime`, so today's drop order is the wrong way round.
-- **The `Box::leak` sites S8 must reach** are, in `lower.rs`: `record_schema_for`
-  (a `OnceLock<Mutex<HashMap<u32, _>>>` keyed by a *bare* def id — that is
-  DBG-06's finding and `record_schema_cache_is_scoped_by_type_database_not_bare_def_id`
-  is its gate), `tuple_schema_for` (same shape, keyed by the descriptor
-  sequence), `embed_text`, `leak_static_str`, the field-name leaks inside
-  `record_schema_for`, and `build_debug_local_metas`. The
-  `praxis-repr` work did not add or remove any of them.
-- **S8 starts with a fresh ABI bump budget** (H17). `RUNTIME_ABI_VERSION` is 11.
-- Can run in parallel with S9 and S10.
+- **H3 is the whole difficulty, and the plan is emphatic about it.** MIR-16 (the
+  debug/root split) must land **before** MIR-01 and MIR-02. `emit_spill`
+  (`lower.rs`) writes the same root list into *both* the shadow-frame slot and
+  `debug_frame.locals[slot].value`, and `liveness.rs` deliberately includes
+  `CheckFault` as a debugger-only spill point. MIR-01's dead-slot clearing writes
+  `0` into those slots and MIR-02's shrinking omits them, so either landing first
+  turns the crash debugger's rendered values into nulls.
+- **The two tests that prove the ordering held** are
+  `m11_locals_split_users_and_temps_with_types` and
+  `m11_temp_provenance_shows_materializing_expression`
+  (`praxis-cli/tests/run.rs`). They are green now and must stay green.
+- **MIR-09 needs P0-04's Unit sentinel** (landed, S3) and MIR-14's single symbol
+  table (landed, S2). Both are in place.
+- **MIR-10's verifier has an open question S6 raised:** the two loop-increment
+  `Inst::IntBinOp` sites in `build.rs` are not followed by a `CheckFault`. A
+  "every faulting instruction is followed by a CheckFault" rule would flag them,
+  and the right answer is probably to mark the increment non-faulting rather
+  than to add a check. `MethodEntry.can_fault` is dead metadata — wire it to the
+  manifest's `Effect` here or delete it.
+- **`MirType::expect_known`/`MirTypeError` are still unwritten** (F16's
+  remainder); F17's verifier is their only consumer, so S9 is where they land.
+- **S9 starts with a fresh ABI bump budget** (H17). `RUNTIME_ABI_VERSION` is 11,
+  and the plan expects S9 to need one.
 
-**Two S7-adjacent items were deliberately left**, and both belong to their own
-stage rather than to S8:
+**What S8 deliberately left:**
 
-- **`chars(int)`** still advertises `Vec[Char]` while storing `Int` objects, and
-  a **single anonymous `{word}` template** still tags its Text values with `INT`.
-  Both are P0-11's *runtime* tail, both are gated
-  (`chars_result_descriptor_matches_the_values_it_contains`,
-  `anonymous_word_template_vec_uses_the_text_element_descriptor`, both in
-  `adversarial_audit.rs`), and both live in code S19/S20 rewrite wholesale. They
-  are now *visible* rather than silently right-looking: the element descriptor is
-  a real claim about the values, and `push` enforces it.
-- **Map/Set/Counter/heap payloads** still hold a non-null `&'static` element
-  descriptor and still rewrite a null argument to `INT`. With the forward map
-  fixed this only bites when inference leaves the element type unresolved (the
-  S15 gap), but it is the one place where "unknown" is still spelled `Int`.
+- **`tuples::POINT` is still a process-static leak.** One `TupleSchema` for every
+  grid position, minted by the runtime rather than by a compile, so there is no
+  generation to hang it on. Bounded at one.
+- **Enum schemas have no generation home** because they do not exist yet
+  (RT-13/F12, S18). When they do, they belong in `Generation` beside the record
+  and tuple caches — the plan sketch already lists an `enum_schemas` field.
+- **Records built in two generations compare unequal.** See §3; it is RT-12 in
+  S10, and the debugger's shared evaluation generation is what keeps `p` sane
+  until then.
+- **A plan is registered per compile and never deduplicated.** A debugger session
+  that reloads a thousand times registers a thousand plans; `MAX_PLANS` (2^20)
+  catches a runaway, and `retire_parser_plans` reclaims at teardown, but there is
+  no interning as there is for JIT metadata. Keying on the `ParserAst` would give
+  it; nothing needs it yet.
 
-Re-read §6 of the plan first. The hazards that still bind: **H3**, **H15**,
-**H17**, and **H10** in its long form (the MIR verifier's "no `Opaque` in a
-descriptor-producing position" rule stays off until S15). **H1, H2, H4, H6, H7,
-H8, H9 and H16 are discharged** — H9's declared cycle is resolved as it
-predicted: P0-02 landed the representation in S3 and P0-11 made the `Known` path
-exhaustive in S7.
-
-**H15 became live in S6.** `Heap::drop` now runs finalizers, and record and
-tuple payloads hold `*const RecordSchema` / `*const TupleSchema`. It is safe
-today only because those schemas are `Box::leak`ed and never freed. S8's
-generation-arena reclamation must not change that without also fixing drop
-order: `DebugSession` declares `jit` *before* `runtime`, so the arena would go
-first and heap teardown would dereference freed schemas.
-
+Re-read §6 of the plan first. The hazards that still bind: **H3**, **H17**, and
+**H10** in its long form (the MIR verifier's "no `Opaque` in a
+descriptor-producing position" rule stays off until S15). **H15 is discharged**
+— ADR-043 encodes the ordering in `HeapDrained` rather than documenting it, and
+`DebugSession::teardown` is the site the plan warned about (it destructures
+rather than relying on field order). **H1, H2, H4, H6, H7, H8, H9 and H16 remain
+discharged.**
 
 ## 5. Design decisions still open
 
@@ -609,6 +713,35 @@ instead of aborting. Other wrappers still reach Rust panics on malformed input.
 
 Things the plan states that are no longer or were not quite true.
 
+- **F13's `Generation::retire(self, HeapDrained)` signature could not be
+  written as sketched.** A `Jit` holds the generation behind an `Rc` (the
+  debugger shares one across every `p EXPR`), so it is
+  `Generation::retire(Rc<Generation>, HeapDrained)` and a still-shared
+  generation is left alone rather than freed. The plan's `#[must_use]` is also
+  not what landed: Rust has no linear types, so the enforcement is that
+  `Generation::drop` *leaks*. Reclaiming needs the proof; forgetting to reclaim
+  costs memory, not soundness.
+- **F13 says "every `Box::leak` becomes `gen.alloc*`". Reclaiming is not enough
+  on its own.** A debugger session never ends, so DBG-05's "must not grow
+  without bound" needs *interning*, and needs the `p` path to share one
+  generation rather than mint one per command. Both landed; the plan sketch
+  mentions neither.
+- **F13's `PlanArena` cannot live in the codegen generation.** Plans are
+  registered during HIR lowering, before a `Jit` exists. It is a process-wide
+  bounded arena in `praxis-input-parser` instead, retired through
+  `praxis_runtime::retire_parser_plans` — the proof has to be applied from
+  `praxis-runtime` because `praxis-input-parser` cannot depend on it (the
+  interpreter points the other way).
+- **F13's "39 workspace-wide" leak count included test helpers.** The production
+  sites S8 owed are all converted; what remains under `Box::leak` in non-test
+  code is `tuples::POINT` (one process-static schema, bounded at one) and the
+  `Box::leak(Box::new(rt.context()))` idiom in in-crate tests.
+- **S8's exit criterion "leak_static_str must no longer exist" is structural.**
+  It is deleted, and there is no test for it because there is nothing left to
+  test — its callers take a `&Generation`.
+- **S8 needed no ABI bump.** `RecordSchema`, `TupleSchema` and `DebugLocalMeta`
+  keep their `#[repr(C)]` layouts; only their storage moved. Check what
+  generated code actually reads before spending a stage's bump.
 - **DBG-01 is closed** (`3836b74`), not open in S10. **DBG-02 is closed for
   values**: the debugger reads a value's real type out of its payload through
   F11's `type_for_value`, and its gate
