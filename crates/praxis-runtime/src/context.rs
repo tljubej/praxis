@@ -252,6 +252,15 @@ pub struct RuntimeContext {
     /// appended at the end of the struct. It is the fifth arm of
     /// [`crate::roots::RuntimeRoots`].
     pub native_roots: *mut crate::roots::NativeRootFrame,
+    /// The cached immortal `true`, alongside [`Self::unit_ref`] (§4.3).
+    ///
+    /// `praxis_alloc_bool` used to mint a *fresh* immortal on every call, so a
+    /// program that evaluated a comparison in a loop consumed unregistered
+    /// arena storage that no collection could ever reclaim (RT-03). There are
+    /// exactly two `Bool` values; the runtime allocates them once.
+    pub true_ref: GcRef,
+    /// The cached immortal `false`. See [`Self::true_ref`].
+    pub false_ref: GcRef,
 }
 
 impl RuntimeContext {
@@ -277,6 +286,9 @@ impl RuntimeContext {
             parse_detail: std::ptr::null_mut(),
             crash_snapshot: std::ptr::null_mut(),
             native_roots: std::ptr::null_mut(),
+            // As for `unit_ref`: this constructor is not-yet-wired scaffolding.
+            true_ref: input_source,
+            false_ref: input_source,
         }
     }
 
@@ -357,12 +369,6 @@ impl Runtime {
         &self.heap
     }
 
-    /// Borrow the heap mutably.
-    #[inline]
-    pub fn heap_mut(&mut self) -> &mut Heap {
-        &mut self.heap
-    }
-
     /// The immortal singletons (§4.3).
     #[inline]
     pub fn immortals(&self) -> &Immortals {
@@ -417,6 +423,8 @@ impl Runtime {
             crash_snapshot: &mut self.crash_snapshot as *mut SnapshotSlot,
             // No native frame is on the Rust stack when the context is minted.
             native_roots: std::ptr::null_mut(),
+            true_ref: self.immortals.true_(),
+            false_ref: self.immortals.false_(),
         }
     }
 
@@ -774,6 +782,29 @@ impl GcRef {
 
 #[cfg(test)]
 mod tests {
+
+    /// RT-05: nothing can reset the heap a runtime's immortals live in.
+    ///
+    /// `Runtime::heap_mut()` handed out `&mut Heap`, and `Heap::reset` tears
+    /// down the arena and mints a fresh `HeapId` — so one safe call left
+    /// `Runtime.immortals` and every context's cached `unit_ref` / `true_ref` /
+    /// `false_ref` naming storage the arena was free to hand out again. The
+    /// accessor is deleted; `Runtime` exposes only `&Heap`. This pins the
+    /// invariant that made it dangerous.
+    #[test]
+    fn a_runtimes_immortals_belong_to_its_own_live_heap() {
+        let mut rt = Runtime::new();
+        let ctx = rt.context();
+        for cached in [ctx.unit_ref, ctx.true_ref, ctx.false_ref] {
+            assert!(
+                rt.heap().owns(cached),
+                "a cached immortal must be live storage in this runtime's heap"
+            );
+        }
+        assert_eq!(ctx.unit_ref.as_ptr(), rt.immortals().unit().as_ptr());
+        assert_eq!(ctx.true_ref.as_ptr(), rt.immortals().true_().as_ptr());
+        assert_eq!(ctx.false_ref.as_ptr(), rt.immortals().false_().as_ptr());
+    }
     use super::*;
     use crate::gc::GcHeader;
     use crate::roots::RootScope;

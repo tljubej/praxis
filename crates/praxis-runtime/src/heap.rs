@@ -380,6 +380,12 @@ impl Heap {
             header.poison();
         }
         self.arena.reset();
+        // Pacing is part of the heap's state, so a reset heap paces like a fresh
+        // one. Leaving the counter and the geometrically-grown threshold in
+        // place meant a reset heap could run for megabytes before its first
+        // collection, or collect on its very first allocation (RT-04).
+        *self.bytes_since_collect.borrow_mut() = 0;
+        *self.collect_threshold.borrow_mut() = INITIAL_COLLECT_THRESHOLD;
         // A reset heap is a different heap: the immortals it handed out are
         // gone, and every `GcRef` minted before this point names storage the
         // arena is free to hand out again. A fresh identity makes those refs
@@ -689,7 +695,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: reset leaves GC pacing counters unchanged"]
     fn reset_restores_collection_pacing() {
         let mut heap = Heap::new();
         heap.collect_with(&RootScope::new());

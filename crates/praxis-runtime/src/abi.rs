@@ -52,13 +52,17 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// independent copies of the calculation) and `heap_id` (allocation
 /// provenance). Generated code reads the header to reach an enum payload, so
 /// this is an incompatible layout change.
+/// v10 (repair S6): `RuntimeContext` gained `true_ref` and `false_ref`, the
+/// cached `Bool` immortals, so `praxis_alloc_bool` hands back a singleton
+/// instead of minting a fresh unreclaimable immortal per call. Appended after
+/// `native_roots`.
 /// v9 (repair S5): `RuntimeContext` gained `native_roots`, the head of the
 /// native root-frame chain, so the runtime's own Rust helpers can root what
 /// they hold across an allocation. Appended after `crash_snapshot`, so every
 /// generated-code-read offset is unchanged — but the struct's size changed and
 /// the automatic collector's root set is now the whole `RuntimeRoots`, which is
 /// a behavioural contract generated code depends on.
-pub const RUNTIME_ABI_VERSION: u32 = 9;
+pub const RUNTIME_ABI_VERSION: u32 = 10;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -80,7 +84,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 9;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 10;
 
 // ---------------------------------------------------------------------------
 // The runtime symbol table (F4).
@@ -335,10 +339,17 @@ pub unsafe extern "C" fn praxis_alloc_int(ctx: *mut RuntimeContext, value: i64) 
 /// `ctx` must point at a live, wired `RuntimeContext`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_bool(ctx: *mut RuntimeContext, value: i64) -> GcRef {
-    // Bool is an immortal: allocate it through the heap's immortal path so it is
-    // never reclaimed. `value != 0` is true; `0` is false.
+    // There are two `Bool` values, and the runtime allocated both at startup.
+    // This used to mint a *fresh* immortal per call — unregistered arena storage
+    // no collection can ever reclaim, one per comparison a program evaluates
+    // (RT-03). `value != 0` is true; `0` is false.
     // SAFETY: caller upholds ctx validity.
-    unsafe { heap(ctx).alloc_immortal(&scalars::BOOL, value != 0) }
+    let c = unsafe { &*ctx };
+    if value != 0 {
+        c.true_ref
+    } else {
+        c.false_ref
+    }
 }
 
 /// Allocate the `Unit` singleton (§4.3).
@@ -347,8 +358,11 @@ pub unsafe extern "C" fn praxis_alloc_bool(ctx: *mut RuntimeContext, value: i64)
 /// `ctx` must point at a live, wired `RuntimeContext`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_unit(ctx: *mut RuntimeContext) -> GcRef {
-    // SAFETY: Unit is an immortal; allocate through the immortal path.
-    unsafe { heap(ctx).alloc_immortal(&scalars::UNIT, ()) }
+    // The one `Unit` value, cached on the context since M6 for the fault path.
+    // As for `praxis_alloc_bool`, allocating a fresh immortal per call leaked
+    // arena storage permanently (RT-03).
+    // SAFETY: caller upholds ctx validity.
+    unsafe { (*ctx).unit_ref }
 }
 
 /// Allocate a boxed `Char` from a Unicode scalar value (§4.3, M6). The `value`
@@ -3196,8 +3210,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_nine_after_the_native_root_frame() {
-        assert_eq!(RUNTIME_ABI_VERSION, 9);
+    fn version_is_ten_after_the_cached_bool_immortals() {
+        assert_eq!(RUNTIME_ABI_VERSION, 10);
     }
 
     #[test]
@@ -3217,7 +3231,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: ABI allocates fresh untracked Bool/Unit objects"]
     fn bool_and_unit_abi_allocations_reuse_runtime_singletons() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
@@ -3238,6 +3251,26 @@ mod tests {
         assert_eq!(true_ref.as_ptr(), expected.0.as_ptr());
         assert_eq!(false_ref.as_ptr(), expected.1.as_ptr());
         assert_eq!(unit_ref.as_ptr(), expected.2.as_ptr());
+    }
+
+    #[test]
+    fn repeated_bool_allocation_mints_no_new_objects() {
+        // RT-03's actual harm: every `praxis_alloc_bool` call allocated a fresh
+        // *immortal*, which is unregistered storage no collection can reclaim.
+        // A program evaluating a comparison in a loop leaked one Bool per
+        // iteration. There are two Bools; a hundred calls must name two objects.
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let mut seen = std::collections::HashSet::new();
+        // SAFETY: ctx wired.
+        unsafe {
+            for i in 0..100_i64 {
+                seen.insert(praxis_alloc_bool(ctx, i % 2).as_ptr());
+                seen.insert(praxis_alloc_unit(ctx).as_ptr());
+            }
+        }
+        unsafe { drop_ctx(ctx) };
+        assert_eq!(seen.len(), 3, "true, false and unit — and nothing else");
     }
 
     #[test]
