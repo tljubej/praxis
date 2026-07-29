@@ -2362,6 +2362,35 @@ spent through `Y017`; the next free number is `Y018`.
 
 **D1 and D5 still block their stages**; neither has been answered.
 
+**S17 is the next stage, and three decisions gate it — D4, D5 and D6.** None is
+answered, and the plan says each "needs an answer from the repo owner". They are
+the first thing a fresh context should raise, because all three change what the
+language *is* rather than how it is built:
+
+- **D4 (hashability).** Mutable collections are accepted as `Map` keys today.
+  TY-32/RT-08 reject them, which breaks existing programs. The plan recommends
+  the rejection and asks for the diagnostic wording to be confirmed — §5.4 says
+  a capability failure must never name the capability.
+- **D5 (TY-33, the fifteen phantom prelude names).** The plan recommends
+  implementing `panic`/`assert`/`dbg`/`abs`/`sign`/`min`/`max`/`clamp`/`gcd`/
+  `lcm` and **deleting** the six graph helpers (`bfs`, `bfs_distance`, `dfs`,
+  `dijkstra`, `a_star`, `flood_fill`) until a milestone owns them. Deleting six
+  names from the prelude is a scope decision, not an implementation one.
+  `panic` must land first: it typechecks today and then fails to compile.
+- **D6 (TY-34, `Range`).** Delete `CollectionCtor::Range` (8 sites, mechanical)
+  or implement the full `..`/`..=` vertical slice (XL). The plan states both and
+  recommends **neither** — this one has no default to fall back on — but it is
+  explicit that the middle state must not survive the stage.
+
+**F10's constraint channel is S17's foundation and it is deliberately not
+started.** Landing it half-way would be the partial foundation §2 opens by
+naming as the main trap: its `Capability::HasMethod` arm is decided by the
+method catalog (TY-30's territory), its `Iterable` arm is the one place
+`iter_item` needs `&mut TypeDb`, and constraint *discharge ordering* is
+judgement the plan flags rather than specifies. It wants a session that starts
+with D4/D5/D6 answered, not a vocabulary commit with an arm that returns `Ok`
+because its decider is not wired yet.
+
 **D13's block has two fewer numbers than it did.** S11 spent `Y007` (a wrong
 type-argument count) and `Y008` (a duplicate field or variant): both are cases
 TY-07's fix made *detectable*, and leaving them undiagnosed would have meant
