@@ -32,7 +32,9 @@ use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
 use praxis_syntax::SyntaxKind;
 use rowan::{NodeOrToken, TextRange};
 
-use crate::diagnostics::{duplicate_declaration, nested_function, unknown_type, unresolved_name};
+use crate::diagnostics::{
+    duplicate_declaration, name_is_not_a_type, nested_function, unknown_type, unresolved_name,
+};
 use crate::name_table::NameTable;
 use crate::scope::{ScopeId, ScopeTree};
 use crate::symbol::{Symbol, SymbolId, SymbolKind};
@@ -220,7 +222,7 @@ impl Resolver {
     /// alongside without touching `seed_prelude`.
     fn seed_type_names(&mut self, root: ScopeId) {
         for ty in KNOWN_TYPE_NAMES {
-            let id = self.mint(SymbolKind::Builtin, (*ty).to_string(), None);
+            let id = self.mint(SymbolKind::BuiltinType, (*ty).to_string(), None);
             self.out.scopes.bind(root, (*ty).to_string(), id);
         }
     }
@@ -787,12 +789,22 @@ impl Resolver {
             if crate::decl::is_type_ctor_name(name) {
                 continue;
             }
-            match self.lookup(scope, name) {
-                Some(symbol) => {
+            let symbol = self.lookup(scope, name);
+            let kind = symbol.and_then(|s| self.out.names.get(s)).map(|s| s.kind);
+            let span = range_to_span(tok.text_range());
+            match (symbol, kind) {
+                // A type name: record which symbol it is, once, here.
+                (Some(symbol), Some(kind)) if kind.is_type() => {
                     self.out.type_refs.insert(tok.text_range(), symbol);
                 }
-                None => {
-                    let span = range_to_span(tok.text_range());
+                // A name that resolves to a *value* is not a type. Reporting it
+                // as unknown would be a lie — it is known, and it is the wrong
+                // sort of thing (TY-11).
+                (Some(_), _) => {
+                    let at = self.file_span(span);
+                    self.out.diagnostics.push(name_is_not_a_type(at, name));
+                }
+                (None, _) => {
                     self.out
                         .diagnostics
                         .push(unknown_type(self.file_span(span), name));

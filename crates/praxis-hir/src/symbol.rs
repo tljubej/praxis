@@ -34,14 +34,39 @@ pub enum SymbolKind {
     Fn,
     /// A function parameter `name: Type`.
     Param,
-    /// A prelude/builtin symbol (`out`, `panic`, …) seeded into the root scope.
+    /// A prelude/builtin *value* symbol (`out`, `panic`, `Vec`, …) seeded into
+    /// the root scope.
     Builtin,
+    /// A built-in scalar *type* name (`Int`, `Text`, …) seeded into the root
+    /// scope. Distinct from [`Builtin`](Self::Builtin) because the prelude holds
+    /// both, and only one of them may appear in type position: `out` is a name
+    /// that resolves, and `let x: out = 1` was accepted on exactly that basis
+    /// (TY-11).
+    BuiltinType,
     /// A `struct Name { … }` declaration (M7, §4.5). A type-name symbol; its
     /// scheme carries the record's [`Type`](praxis_types::Type) once registered.
     Struct,
     /// An `enum Name { … }` declaration (M7, §4.6). A type-name symbol; its
     /// scheme carries the enum's [`Type`](praxis_types::Type) once registered.
     Enum,
+}
+
+impl SymbolKind {
+    /// Whether a name bound to this kind denotes a **type**, and so may appear
+    /// in type position.
+    ///
+    /// The complement is every kind that denotes a *value*: `let`, `var`, a
+    /// parameter, a function, and the prelude's value builtins. Annotation
+    /// validation used to ask only whether the name resolved at all, so
+    /// `let Alias = 1` made `Alias` a legal annotation that silently named no
+    /// type (TY-11).
+    #[must_use]
+    pub fn is_type(self) -> bool {
+        matches!(
+            self,
+            SymbolKind::BuiltinType | SymbolKind::Struct | SymbolKind::Enum
+        )
+    }
 }
 
 /// One resolved declaration.

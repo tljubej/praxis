@@ -33,6 +33,22 @@ pub(crate) fn unknown_type(at: FileSpan, name: &str) -> Diagnostic {
     )
 }
 
+/// `N003` — a name in type position resolves to a value, not a type (TY-11).
+///
+/// Annotation validation asked only whether the name resolved *at all*, so
+/// `let Alias = 1` followed by `let value: Alias = "text"` was accepted:
+/// `Alias` was in scope, the annotation named no type, and inference quietly
+/// used a fresh variable. `N002` would be the wrong report — the name is
+/// known; it is the wrong sort of thing.
+pub(crate) fn name_is_not_a_type(at: FileSpan, name: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::NameIsNotAType,
+        format!("`{name}` is a value, not a type"),
+        at,
+    )
+}
+
 /// `N004` — a name is declared twice in one scope (TY-24).
 ///
 /// Two top-level `fn`s of one name used to bind two distinct symbols in the

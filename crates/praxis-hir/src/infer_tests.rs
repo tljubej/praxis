@@ -826,13 +826,65 @@ fn a_type_declaration_cycle_still_analyzes() {
 }
 
 #[test]
-#[ignore = "known bug: resolver accepts value symbols in type position"]
 fn value_binding_name_is_not_accepted_as_a_type() {
     let src = "let Alias = 1\nlet value: Alias = \"text\"";
     assert!(
         has_name_error(src),
         "ordinary value bindings are not type declarations"
     );
+}
+
+/// The exit test uses a `let`; every other value kind must be rejected the same
+/// way, and the report must be `N003` — the name *is* known, so `N002 unknown
+/// type` would be a lie about which mistake was made.
+#[test]
+fn a_value_in_type_position_is_reported_as_a_value() {
+    for src in [
+        "let Alias = 1\nlet value: Alias = 1",
+        "var Alias = 1\nlet value: Alias = 1",
+        "fn Alias() -> Int { 1 }\nlet value: Alias = 1",
+        // A prelude value builtin: `out` resolves, and used to be a legal
+        // annotation on that basis alone.
+        "let value: out = 1",
+        // …at any depth inside a structural annotation.
+        "let Alias = 1\nfn f(x: (Int, Alias)) -> Int { 0 }",
+        "let Alias = 1\nfn f(x: Vec[Alias]) -> Int { 0 }",
+    ] {
+        let codes: Vec<String> = analyze(src)
+            .diagnostics
+            .iter()
+            .map(|d| d.code().to_string())
+            .collect();
+        assert!(
+            codes.iter().any(|c| c == "N003"),
+            "expected N003 for `{src}`, got {codes:?}"
+        );
+    }
+}
+
+/// …and the type names that *are* types still are. A kind check that rejected
+/// too much would pass the test above and break every annotated program.
+#[test]
+fn every_kind_of_type_name_is_still_accepted_in_type_position() {
+    for src in [
+        "let value: Int = 1",
+        "let value: Text = \"a\"",
+        "struct Point { x: Int }\nlet value: Point = Point { x: 1 }",
+        "enum Tile { Empty }\nlet value: Tile = Empty",
+        "let value: Vec[Int] = Vec()",
+        "let value: Map[Text, Int] = Map()",
+        "let value: Option[Int] = Some(1)",
+    ] {
+        assert!(
+            !has_name_error(src),
+            "`{src}` names a type: {:?}",
+            analyze(src)
+                .diagnostics
+                .iter()
+                .map(|d| format!("{} {}", d.code(), d.message()))
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]
