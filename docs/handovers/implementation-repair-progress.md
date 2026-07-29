@@ -21,22 +21,45 @@ Update this file at the end of every stage.
 | S8 — Generation arena for JIT and plan metadata | **done** | `1311132`, `b60da0a` |
 | S9 — MIR root exactness, debug/root split, verifier | **done** | `ad9bbdf`, `d9521f9`, `e15a444` |
 | S10 — Semantic comparison, nominal schema identity | **done** | `29ff4f6`, `83de924`, `510ffc3`, `ff35f68` |
-| S11 — TypeDb core: levels, schemes, nominal identity | **F9 only** | `8aa9069` |
+| S11 — TypeDb core: levels, schemes, nominal identity | **TY-06 left** | `8aa9069`, `aa9deea`, `d69881e` |
 | S12 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10. It fell out of S1. **DBG-02** is closed in part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1126 passed, 0 failed, 97 ignored**. `just ci` is green.
+Now: **1133 passed, 0 failed, 94 ignored**. `just ci` is green.
 
-Forty-nine of the audit's ignored regressions are un-ignored and passing.
-The two added by S11's F9:
+**All five of S11's exit-criterion tests pass**, and the stage's one remaining
+finding is **TY-06** (F12, XL) — see §4.
+
+Fifty-two of the audit's ignored regressions are un-ignored and passing.
+The four added by S11:
 
 | Test | File | Finding |
 |---|---|---|
-| `instantiation_preserves_non_quantified_variable_identity` | `types_tests.rs` | TY-02 |
-| `deep_resolve_rewrites_record_field_links` | `types_tests.rs` | the `_ => t` half of F9 |
+| `instantiation_preserves_non_quantified_variable_identity` | `types_tests.rs` | TY-02 (F9) |
+| `deep_resolve_rewrites_record_field_links` | `types_tests.rs` | the `_ => t` half of F9 — and TY-04 with it |
+| `empty_enum_payload_and_no_payload_are_equivalent` | `types_tests.rs` | TY-05; **rewritten**, see below |
+| `linking_an_outer_var_to_an_inner_type_prevents_inner_generalization` | `types_tests.rs` | TY-01 |
+| `forward_call_is_checked_against_later_function_signature` | `infer_tests.rs` | TY-22 |
+
+`empty_enum_payload_and_no_payload_are_equivalent` had to be **rewritten**, not
+merely un-ignored: it compared `None` against `Some(vec![])`, and TY-05's fix is
+that only one of those spellings exists. It now asserts the property at both
+levels the bug lived at — the representation admits one payload-less spelling,
+and the two constructors that used to disagree produce defs that unify.
+
+S11's six new gates for the findings that had none:
+
+| Test | File | Pins |
+|---|---|---|
+| `a_wrong_arity_collection_is_unconstructible` | `types_tests.rs` | TY-07 — **rewritten** from `unify_vec_mismatched_arity_fails`, which built the type the fix makes unrepresentable |
+| `degenerate_tuples_and_duplicate_names_are_unconstructible` | `types_tests.rs` | TY-07's other two shapes |
+| `a_wrong_type_argument_count_is_reported_at_the_annotation` | `infer_tests.rs` | `Y007` — named where it was written, not as a downstream `Y001` |
+| `a_duplicate_field_or_variant_is_rejected` | `infer_tests.rs` | `Y008` — silently accepted before |
+| `a_scheme_owns_its_binders_and_generalization_mutates_nothing` | `types_tests.rs` | TY-03 — **rewritten** from `generalized_var_state_is_marked` (plan §8.2) |
+| `generalizing_one_scheme_does_not_change_another` | `types_tests.rs` | TY-03 stated directly: the invalid state a `Scheme` could encode |
 
 F9's six new gates:
 
@@ -255,6 +278,29 @@ test name — line numbers throughout the plan have all moved.)
 
 Partial foundations are the main trap for a fresh context.
 
+**F5 — sealed `Type` + validated constructors: landed whole.** `Type` and
+`VarId` have private fields; `TypeDb::intern` is `pub(crate)`; the four shaped
+constructors take `TupleElems` / `CollectionArgs` / `FieldSet` / `VariantSet`,
+and `TypeCtorError` is what refusing looks like. `TypeDb::type_from_raw` is the
+one checked route back from a stored `u32`. `EnumVariantDef.payload` is a
+`Vec<Type>` (TY-05, which is in F5's own sketch) and `EnumDef.name` is an
+`Option<String>` matching `RecordDef.name`, so `anon_record`/`anon_enum` are
+gone — `register_record(None, …)` is what they were. See ADR-046. **Not done:**
+nothing; F5's `Type(0)` half was already three sites after F16, and all three
+are converted.
+
+**F10 — scheme-owned binders + `Level`: landed in part, deliberately.**
+`VarState::Generalized` is deleted, `Scheme`'s fields are private
+(`binders()` / `body()`), `generalize` mutates nothing, `instantiate`
+substitutes by binder membership, and `instantiate_with_mapping` exists for
+MONO-01. `Level` is a newtype whose only mutator is `clamp_to`, so TY-01's
+reversed comparison is unwritable. **Not done, and it is the larger half:** the
+**constraint channel** — `praxis_stdlib::capability::CapKind`,
+`praxis_types::constraint::{Capability, Constraint}`,
+`TypeDb::take_dischargeable`, `TypeDb::substitute`, and the single exhaustive
+`praxis_hir::capability::check`. Its only consumers are S17's TY-25…TY-34 and
+RT-08; adding it now is unused surface. See ADR-047.
+
 **F9 — the one `TypeFolder`: landed whole.** `praxis_types::fold` is the only
 walk over `TypeData`, its match has no catch-all, and the five hand-written
 walks are five folders. It adds a cycle memo and identity preservation, neither
@@ -352,7 +398,90 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S11's F9)
+### From this session (S11's F5, F10, TY-01/03/05/07/22)
+
+**A `Type` cannot be written down; only the arena mints one.** `Type(0)` and
+`Type(id)` no longer compile. If you have a raw `u32` — the debugger's
+`DebugLocalMeta.type_id` is the only one — go through
+`TypeDb::type_from_raw(u32) -> Option<Type>`, against **the same `TypeDb`** that
+minted it. `VarId` is sealed the same way; `VarId::as_type()` is the total
+conversion out of it, and `Type::to_u32()` is still how you store one.
+
+**`TypeDb::intern` is `pub(crate)`.** Reach a composite through `tuple` /
+`collection` / `func` / `record` / `enum_`. Three crates were using `intern`
+directly to build collections and tuples the shaped constructors would have
+refused — `praxis-repr` was building a `Range[Int]`, and `Range` is nullary.
+
+**The shaped constructors take validated payloads.**
+`db.tuple(TupleElems)`, `db.collection(ctor, CollectionArgs) -> Result`,
+`db.record(Option<String>, FieldSet) -> Type`,
+`db.enum_(Option<String>, VariantSet) -> Type` (and
+`register_record`/`register_enum` for the def id alone). Convenience shortcuts
+that cannot fail: `db.pair(a, b)`, `db.vec(t)`, `db.map(k, v)`,
+`db.unary_collection(ctor, t)`. **`anon_record` and `anon_enum` are gone** —
+pass `None` for the name.
+
+**A tuple of fewer than two elements is not a tuple.** Both HIR sites that could
+produce one now have a `tuple_or_degenerate` helper: zero elements is `Unit`,
+one element is that element. If you add a site that builds a tuple from a
+possibly-short list, use it rather than `TupleElems::new(...).expect(...)`.
+
+**`EnumVariantDef.payload` is a `Vec<Type>`, and `EnumDef.name` is an
+`Option<String>`.** An empty payload *is* the payload-less variant (TY-05).
+`EnumVariantDef::new(name, payload)` and `EnumVariantDef::bare(name)` are the
+constructors. Every `.unwrap_or_default()` / `map_or(Vec::new(), …)` mirror is
+gone; do not add one back.
+
+**`Y007` and `Y008` are spent.** `Y007` is a wrong type-argument count named at
+the annotation; `Y008` is a duplicate field or variant in a declaration. **D13's
+block allocation for S13/S16 must treat both as taken.**
+
+**`praxis_input_parser::synthesize` returns `Result<Type, TypeCtorError>`**, and
+`praxis-hir`'s `parser_lower` turns a failure into an `I001` diagnostic. Its
+record and enum shapes take their names from user source, so a duplicate is user
+input.
+
+**A malformed method-catalog row panics.** `pattern_to_type`'s collection arm
+`expect`s, because the catalog is compiler-authored data. S18's RT-14/RT-15
+sweep is where that becomes a standing test.
+
+**There is no `VarState::Generalized`.** `VarState` is `Unbound { level } |
+Linked { target }`. A `match` over it is one arm shorter, and "is this variable
+quantified?" is a question only a `Scheme` can answer — ask
+`scheme.binders().contains(&v)`.
+
+**`Scheme`'s fields are private.** `scheme.body()` and `scheme.binders()`; there
+is no way to build a scheme with a binder list that disagrees with its body.
+`instantiate_with_mapping` returns the fresh variable per binder, in binder
+order, which is what MONO-01 wants.
+
+**`generalize` mutates nothing.** It reads levels and collects. If you were
+relying on generalization to make a variable un-unifiable, it does not any more
+— the level discipline is the guarantee.
+
+**A binding level is a `Level`, and it only goes down.** `Level::clamp_to` is
+the only mutator; `is_deeper_than` is the generalization test. `enter_level` /
+`exit_level` / `level()` all speak `Level` now. Writing the level-lowering rule
+backwards is a type error, which is the point.
+
+**`render` prints `?T` for every unbound variable.** Only `render_scheme` (and
+the new `render_in_scheme`) know which variables are bound, so only they print a
+bare `T`. A snapshot that showed `T` for a type rendered outside its scheme was
+reading the arena's global flag.
+
+**Top-level inference runs inside a declaration-group level.** `infer_with_tree`
+calls `infer_declaration_group`, which enters one level, mints a signature
+placeholder for **every** top-level `fn` before inferring any body, then infers
+the statements and exits. A `fn` generalizes at `self.decl_site` — the level the
+group was entered *from* — via `TypeDb::generalize_at`. Do not switch that back
+to `generalize`: the group's level is still open, and `self.level()` there
+quantifies nothing.
+
+**A forward call is checked.** `fn first() { later("wrong") }` above
+`fn later(value: Int)` is now a `Y001`. Any test that relied on a forward call
+being unchecked will start reporting.
+
+### From S11's F9
 
 **There is one walk over `TypeData`, and it is `praxis_types::fold`.** A new
 `TypeData` variant is now one compile error instead of five silent skips.
@@ -439,8 +568,9 @@ ids**, because everything `same_type` compares has to be in the hash.
 
 **`RUNTIME_ABI_VERSION` is still 12.** `RecordSchema` gained a field, but
 generated code never reads through the pointer it embeds — only the runtime
-does, and both are compiled together. **S10's bump is unspent; S11 starts
-fresh.**
+does, and both are compiled together. **S10's bump was unspent; S11's is still
+unspent — nothing in `praxis-types` is `#[repr(C)]`, so F5 and F10 needed none.
+F12 does, and it is the last thing S11 owns.**
 
 ### From S9, plus S10's RT-16
 
@@ -894,49 +1024,73 @@ re-deriving it.
 
 ## 4. Where to start
 
-**S11, continued** (TY-01, TY-03, TY-04, TY-05, TY-06, TY-07, TY-22 — **TY-02
-is done**). S10 is closed; every finding it owned is fixed and gated.
+**S11's last finding: TY-06, which is F12.** Everything else the stage owns is
+done and gated — TY-01, TY-02, TY-03, TY-04, TY-05, TY-07 and TY-22 — and **all
+five exit-criterion tests pass**. TY-04 needed no work of its own: F9's fold
+walks record fields and enum payloads, which is the whole finding, and
+`deep_resolve_rewrites_record_field_links` is green.
 
-**F9 has landed** (`8aa9069`), which is the stage's first foundation and closes
-TY-02 outright. Two of the five exit-criteria tests are already green. What is
-left, in the plan's order:
+**F12 is XL and is the one thing left.** Read plan §3.1's F12 block and plan
+§5's S11 ordering paragraph first. What matters for a fresh context:
 
-1. **F5** — sealed `Type` + fallible constructors + `TypeCtorError`. Much
-   cheaper than the plan's L estimate now: F16 already removed MIR's forty
-   `Type(0)` sites, so **three** forged handles remain workspace-wide —
-   `praxis-debugger/src/render.rs` and `evaluate.rs` (both rehydrating a stored
-   `type_id`, which needs a checked route in) and `praxis-hir/src/exhaustive.rs`
-   (`Type(0)` as a genuine sentinel). The rest of F5 — `FieldSet`/`VariantSet`/
-   `CollectionArgs`/`TupleElems`, and TY-05's `payload: Vec<Type>` — is the
-   real work.
-2. **TY-05** (`EnumVariantDef.payload: Option<Vec<Type>>` → `Vec<Type>`, empty
-   == payload-less) is F5's smallest piece and has an exit-criteria gate ready:
-   `empty_enum_payload_and_no_payload_are_equivalent`. `fold_enum_default` in
-   `fold.rs` is one of the sites that simplifies.
-3. **F10** (scheme-owned binders, the constraint channel, `Level`) — XL, and
-   the thing TY-03 and TY-22 need. Express the reshape as folders; that is what
-   F9 was landed for.
-4. **TY-01 + TY-22 together**, then **TY-06** (F12) → **TY-04**, **TY-07**.
+1. **It is one commit across codegen and runtime**, not two.
+   `RecordSchema`/`EnumSchema` are `#[repr(C)]` and their addresses are embedded
+   as JIT immediates, so a split leaves a tree that compiles and miscompiles.
+   `praxis_alloc_enum(ctx, tag, arity)` gains a schema parameter.
+2. **S11's ABI bump budget is unspent, and F12 needs it.** `EnumPayload` gains a
+   schema pointer and `EnumSchema` is new — bump `RUNTIME_ABI_VERSION` /
+   `COMPILER_EXPECTED_ABI_VERSION` from 12 to 13, exactly once (H17).
+3. **The four symptoms are one missing representation**: TY-06
+   (`instantiate_walk` mints a fresh nominal def per instantiation — that is
+   now `fold_record_default`/`fold_enum_default` in `fold.rs`, and the
+   specialization is *correct* there only because a def has no args yet),
+   MONO-03 (the mono cache key is a `db.render` display string, so
+   `id[Option[Int]]` and `id[Option[Text]]` collide — `mono.rs:148`), RT-13
+   (runtime enums carry no nominal identity at all), and DBG-02's value-less
+   half. Design `DefId + args` once and derive all four.
+4. **RT-12 already landed the runtime record half** with
+   `SchemaIdentity::Nominal(&'static str)`. F12 replaces the name with the real
+   key when nominal identity gains type arguments; nothing else about
+   `RecordSchema::same_type` changes. The plan's sketch says `Nominal(u64)`;
+   see §6.
+5. **F5 already put the constructors where F12 needs them.**
+   `register_record(Option<String>, FieldSet) -> RecordDefId` and
+   `register_enum(Option<String>, VariantSet) -> EnumDefId` are the def-only
+   forms F12's sketch asks for; `record_type`/`enum_type` are what wrap a def
+   into a `Type`, and `enum_type` is where the `args.len() == params.len()`
+   check goes.
+6. **The single canonical `Option` def.** `option_type(db, elem)` in
+   `praxis-hir/src/infer.rs` is now the *one* place that spells `Option`'s
+   variant list (three call sites used to). `synthesize.rs`'s `Optional` arm is
+   the second. Threading `TypeDb::option_def()` through the Inferer and the
+   parser lowerer replaces both.
+7. Expect **snapshot churn** wherever `pretty.rs` starts printing `Option[Int]`
+   instead of `Option`, and **wide insta churn** in `infer_tests.rs` and
+   `hover_tests.rs` from any scheme change.
 
-Read plan §5's S11 ordering paragraph before touching anything — it constrains
-the *order within* the stage, which no other stage does:
+**After S11 closes, S12** (parser grammar: `_` as `UNDERSCORE`, statement
+separators, struct-literal suppression) is next, and **D7 and D8 block it** —
+neither is answered. **D13 binds before S13**, and S11 has already spent `Y007`
+and `Y008` out of the block (§5).
 
-- **TY-01 and TY-22 are one edit.** Correcting `lower_levels` requires moving
-  the recursive placeholder to the declaration-group level; doing either alone
-  unsoundly generalizes every pre-declared signature.
-- **TY-02 before TY-03** (the substitution fold is what removes the `.expect` at
-  `generalize.rs`), **TY-05 before TY-06** (payload normalization first),
-  **TY-06 before TY-04 and TY-07**.
-- **F10 (scheme-owned binders) is the remaining foundation**, and plan §9 rule 2
-  says to land it first, as its own commit, with the suite green. F12 (nominal
-  `DefId + args`) is TY-06's own content and is XL.
-- Expect **wide insta churn** in `infer_tests.rs` and `hover_tests.rs` from any
-  scheme change.
-- `generalized_var_state_is_marked` (`types_tests.rs`) is **green today and
-  asserts the bug** TY-03 deletes (plan §8.2). Rewrite it to assert
-  scheme-owned binders in the same commit.
-- **S11's ABI bump budget is unspent**, and S11 almost certainly does not need
-  one: nothing in `praxis-types` is `#[repr(C)]`.
+**What S11 deliberately left:**
+
+- **F10's constraint channel did not land**, and §2 says why: its only consumers
+  are S17. What landed is the half TY-01/TY-03/TY-22 need.
+- **Mutual recursion is checked but not properly generalized.** Two functions
+  that call each other now unify against real placeholders — strictly better
+  than the previous silence — but the earlier one generalizes before the later
+  one's body has constrained the shared variables. Doing it right needs
+  dependency-ordered binding groups (SCCs over the call graph), which is
+  **F19's `DeclGroup` driver in S13**. `infer_declaration_group` is where that
+  lands; it already has the two-phase shape and the group level.
+- **`praxis_struct_eq`'s duplicate-name check is at the `TypeDb`, not at the
+  record literal.** `record_literal_rejects_duplicate_fields`
+  (`infer_tests.rs`) is still `#[ignore]`d: `Point { x: 1, x: 2 }` is a
+  *literal*, and F5 validates *definitions*. That is HIR-05's, in S16.
+- **A wrong-arity annotation resolves to no type**, so a `let` with one gets a
+  fresh variable after the `Y007`. That is the same shape as every other
+  unresolved annotation and is TY-08/TY-09's territory (S13).
 
 Two things S10 leaves for a later stage, both deliberate:
 
@@ -1011,7 +1165,8 @@ Two things S10 leaves for a later stage, both deliberate:
   no interning as there is for JIT metadata. Keying on the `ParserAst` would give
   it; nothing needs it yet.
 
-Re-read §6 of the plan first. The hazards that still bind: **H17**, and **H10**
+Re-read §6 of the plan first. The hazards that still bind: **H17** (F12 spends
+S11's one bump), and **H10**
 in its long form (the MIR verifier's "no `Opaque` in a descriptor-producing
 position" rule stays off until S15). **H3 is discharged** — the debug/root
 split landed first, the two m11 tests are green, and
@@ -1057,6 +1212,14 @@ what makes both dispatch sites *use* pointer identity.
 next one that binds** — the plan wants the whole diagnostic-code block allocated
 before S13 starts, and S11 is the stage before it.
 
+**D13's block has two fewer numbers than it did.** S11 spent `Y007` (a wrong
+type-argument count) and `Y008` (a duplicate field or variant): both are cases
+TY-07's fix made *detectable*, and leaving them undiagnosed would have meant
+either silently dropping a field or reporting a downstream `Y001` about a type
+the user never wrote. The allocation must start from `Y009`. The taken codes
+today are `N001`–`N002`, `Y001`–`Y008`, `Y120`–`Y121`, and `I001`/`I010` in the
+input-parser range.
+
 **D1 gained a second case.** It was scoped to `Map.get` / `Grid.find`; the same
 question is now also open for `min`/`max` on an empty sequence, which return
 `0` because their accumulator is a scalar seeded to `0`. MIR-09 gave the three
@@ -1082,6 +1245,63 @@ one. Settle both together.
 
 Things the plan states that are no longer or were not quite true.
 
+- **F5's `register_record`/`register_enum` could not keep taking a bare name.**
+  The plan's signature is `register_record(&mut self, name: Option<String>,
+  fields: FieldSet) -> RecordDefId`, which is what landed — and it makes
+  `anon_record`/`anon_enum` redundant, so the four constructors are two. The
+  knock-on the sketch does not mention: `EnumDef.name` had to become an
+  `Option<String>` too, because the synthetic `""` an anonymous enum carried was
+  the same absence spelled as a value, and `unify`'s same-name arm compares it.
+- **F5 needs two diagnostic codes, and the plan allocates none.** Validating in
+  the constructor makes two previously-invisible mistakes visible — a wrong
+  type-argument count and a duplicate member — and both are user input. They are
+  `Y007` and `Y008`; see §5 for what that costs D13.
+- **F5's `CollectionArgs` does not make `collection` infallible.** The plan
+  keeps the `Result` and it is right to: `CollectionArgs::Unary(t)` is legal to
+  write and `Map` does not take it, so the shape and the ctor can still
+  disagree. `CollectionArgs::new(ctor, args)` is the checked builder; the
+  constructor re-checks.
+- **`synthesize` genuinely needs the `Result` the plan asks for, and not only
+  for tidiness.** Its record and enum shapes take their *names from user source*
+  — `{x:int}` captures, `choice(...)` cases — so a duplicate is user input.
+  `validate` catches those cases today, which is why the plan hedges; threading
+  the `Result` is what keeps the two from drifting apart silently.
+- **F10 has two halves and only one belongs to S11.** The plan lists the
+  constraint channel, the `Level` newtype and scheme-owned binders as one
+  foundation. TY-01/TY-03/TY-22 need the second and third; the first
+  (`CapKind`, `Capability`, `Constraint`, `take_dischargeable`, the exhaustive
+  `capability::check`) has no consumer before S17, and the plan's own
+  finding-to-stage mapping puts every one of them there.
+- **F10's `Scheme` sketch has `binders` and `constraints` as struct fields with
+  accessors.** Only `binders`/`body` landed; `constraints()` arrives with the
+  channel. `instantiate_with_mapping` and `generalize_at` landed early because
+  the reshape made them one line each.
+- **TY-01 and TY-22 are one edit *because of the `Level` newtype*, not only
+  because of the placeholder.** The plan says correcting `lower_levels` requires
+  moving the recursive placeholder; the mechanism is that the placeholder was
+  minted at the *outer* level, so the corrected clamp pulls every parameter and
+  result out to level zero and no signature generalizes. `fn id(x) { x }` used
+  at two types is the shortest program that shows it.
+- **TY-22's fix does not need F19.** The plan routes forward declarations
+  through F19's `DeclGroup` driver (S13). Predeclaring a signature placeholder
+  per top-level `fn`, at a group level, closes the finding on its own — what
+  F19 adds is *dependency-ordered* groups, which is what mutual recursion needs
+  and forward checking does not.
+- **TY-04 needed no work of its own.** F9's fold walks record fields and enum
+  payloads, which is the entire finding; `deep_resolve_rewrites_record_field_links`
+  went green with F9. The plan orders it after TY-06 (F12), which is only
+  necessary if the fix has to know about nominal args — it does not.
+- **TY-05's gating test could not survive its own fix**, for the same reason
+  RT-17's could not: it compared the two spellings the fix collapses into one.
+  Rewritten to assert the collapse. This is the third time in the repair
+  (`setting_none_cannot_create_a_pending_fault`,
+  `heap_element_requires_a_runtime_compatible_ordering`) — when a fix makes an
+  invalid state unrepresentable, expect its gate to need rewriting rather than
+  un-ignoring, and expect plan §8.2's list of five to be an undercount.
+- **`unify_vec_mismatched_arity_fails` belongs on plan §8.2's list too.** It is
+  green today and its *setup* builds the type TY-07 makes unrepresentable, so
+  un-ignoring is not the issue — it stops compiling. Rewritten as
+  `a_wrong_arity_collection_is_unconstructible`.
 - **F9 landed before F5, not after it.** The plan orders F9 after F5 "because
   the folders must re-intern through the checked constructors". Nothing about
   the fold depends on that: the default arms rebuild through
