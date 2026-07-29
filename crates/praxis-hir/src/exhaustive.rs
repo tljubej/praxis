@@ -26,8 +26,12 @@ use praxis_types::{data::TypeData, ScalarType, Type, TypeDb};
 use crate::diagnostics::{non_exhaustive, unreachable_arm};
 use crate::lower::{TypedMatchArm, TypedPattern};
 
-/// A zero-length span at position 0 — used as a fallback when no real span is
-/// available (the checker doesn't track match spans through lowering yet).
+/// A zero-length span at position 0 — the last-resort fallback when a caller
+/// supplies no span at all.
+///
+/// It used to be where *every* `Y120` pointed: a non-exhaustive match was
+/// reported at byte 0 of the file, which for a program with two matches names
+/// neither of them (HIR-07). `check` takes the match's own span now.
 fn zero_span(file: FileId) -> FileSpan {
     FileSpan::new(
         file,
@@ -46,6 +50,9 @@ pub(crate) fn check(
     scrutinee_ty: Type,
     arms: &[TypedMatchArm],
     arm_spans: &[FileSpan],
+    // The whole `match` expression's span — where a `Y120` belongs, since the
+    // thing that is not exhaustive is the match and not any one arm.
+    match_span: FileSpan,
     out: &mut Vec<Diagnostic>,
 ) {
     let resolved = db.follow(scrutinee_ty);
@@ -55,7 +62,7 @@ pub(crate) fn check(
     // Y120 naming the missing constructors.
     let missing = uncovered_constructors(db, resolved, arms);
     if !missing.is_empty() {
-        out.push(non_exhaustive(zero_span(file), &missing));
+        out.push(non_exhaustive(match_span, &missing));
     }
 
     // --- Unreachable arms -------------------------------------------------
@@ -157,12 +164,14 @@ mod tests {
     fn check_counts(db: &TypeDb, scrutinee_ty: Type, arms: &[TypedMatchArm]) -> (usize, usize) {
         let mut diags = Vec::new();
         let spans = vec![zero_span(FileId::SYNTHETIC); arms.len()];
+        let match_span = zero_span(FileId::SYNTHETIC);
         check(
             db,
             FileId::SYNTHETIC,
             scrutinee_ty,
             arms,
             &spans,
+            match_span,
             &mut diags,
         );
         let y120 = diags.iter().filter(|d| d.code().number() == 120).count();

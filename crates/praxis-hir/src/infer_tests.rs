@@ -95,6 +95,20 @@ fn is_clean_with_lower(text: &str) -> bool {
     analysis.diagnostics.is_empty() && module.diagnostics.is_empty()
 }
 
+/// Every diagnostic `analyze` + `lower` produce, in source order.
+fn analyze_and_lower_diags(text: &str) -> Vec<praxis_source::Diagnostic> {
+    use praxis_ast::AstNode;
+    let map = SourceMap::new();
+    let id = map.intern("lower_diags_test.px", text);
+    let parsed = parse(id, text);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = crate::lower::lower(id, &root, &mut analysis);
+    let mut all = analysis.diagnostics.clone();
+    all.extend(module.diagnostics);
+    all
+}
+
 // --- §19-M2 criterion 1: infer non-recursive fn params and returns ---------
 
 #[test]
@@ -2019,7 +2033,6 @@ fn duplicate_enum_arm_is_unreachable() {
 }
 
 #[test]
-#[ignore = "known bug: unknown constructor patterns lower to catch-all wildcards"]
 fn unknown_enum_variant_pattern_is_rejected() {
     let src = "enum E { A }\n\
                fn main() -> Int { let value = A; match value { Typo(payload) => 1 } }";
@@ -2578,4 +2591,51 @@ fn a_local_holding_a_variant_is_not_a_constructor() {
     // The `let A = 7` must survive too — lowering the tail as a constructor
     // also discarded the binding's value.
     assert_eq!(main.body.stmts.len(), 1, "the binding is still there");
+}
+
+/// **HIR-07** as the rule. A misspelled constructor is `Y122`; a constructor
+/// pattern against a type that has no variants at all is `Y123`; and the
+/// arms that *are* right still work.
+#[test]
+fn a_pattern_that_names_no_variant_is_reported_not_widened() {
+    let typo = analyze_and_lower_diags(
+        "enum E { A, B }\nfn main() -> Int { match A { Typo(p) => 1, _ => 0 } }",
+    );
+    assert!(
+        typo.iter().any(|d| d.code().number() == 122),
+        "a typo is Y122, not a wildcard: {typo:?}"
+    );
+
+    let wrong_shape =
+        analyze_and_lower_diags("fn main() -> Int { match 1 { Some(n) => n, _ => 0 } }");
+    assert!(
+        wrong_shape.iter().any(|d| d.code().number() == 123),
+        "a constructor pattern on an Int is Y123: {wrong_shape:?}"
+    );
+
+    let good =
+        analyze_and_lower_diags("enum E { A, B }\nfn main() -> Int { match A { A => 1, B => 2 } }");
+    assert!(
+        good.is_empty(),
+        "the right constructors still work: {good:?}"
+    );
+}
+
+/// **HIR-07's second half.** A non-exhaustive `match` is reported at the
+/// `match`, not at byte 0 of the file — which for a program with two of them
+/// named neither.
+#[test]
+fn a_non_exhaustive_match_is_reported_where_it_is_written() {
+    let src = "enum E { A, B }\nfn main() -> Int {\n  let x = A\n  match x { A => 1 }\n}\n";
+    let diags = analyze_and_lower_diags(src);
+    let y120 = diags
+        .iter()
+        .find(|d| d.code().number() == 120)
+        .expect("a missing `B` arm");
+    let span = y120.primary().span;
+    let start = span.start().to_usize();
+    assert!(
+        src.replace("\\n", "\n")[start..].starts_with("match"),
+        "the span points at the `match`, not at byte 0 (start {start})"
+    );
 }

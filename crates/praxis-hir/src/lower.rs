@@ -1949,12 +1949,14 @@ impl<'a> Lowerer<'a> {
             arms.push(TypedMatchArm { pattern, body });
         }
         // Check exhaustiveness and unreachable arms (§4.6, the WS5 follow-up).
+        let match_span = self.file_span(m.syntax().text_range());
         crate::exhaustive::check(
             self.db,
             self.file,
             scrutinee_ty,
             &arms,
             &arm_spans,
+            match_span,
             &mut self.diagnostics,
         );
         // The match's type is inference's join of its arms — not the first
@@ -2039,12 +2041,38 @@ impl<'a> Lowerer<'a> {
                 TypedPattern::Wildcard
             }
             PatternKind::Variant(vname) => {
+                // A pattern that names nothing the scrutinee has is **not** a
+                // wildcard (HIR-07). Lowering it as one made a typo cover every
+                // remaining case, so the match came out exhaustive and the arm
+                // it should have been silently ran for every value.
+                let at = pat
+                    .name_token()
+                    .map(|t| t.text_range())
+                    .unwrap_or_else(|| pat.syntax().text_range());
                 let resolved = self.db.follow(scrutinee_ty);
                 let (enum_def_id, enum_args) = match self.db.data(resolved) {
                     praxis_types::TypeData::Enum { def, args } => (*def, args.clone()),
-                    _ => return TypedPattern::Wildcard,
+                    // An unconstrained scrutinee is one inference could not
+                    // pin, and it has already reported; anything else is a
+                    // pattern whose shape the type cannot take.
+                    praxis_types::TypeData::Var(_) => return TypedPattern::Wildcard,
+                    _ => {
+                        let rendered = self.db.render(resolved);
+                        self.diag(
+                            at,
+                            DiagCode::NotAPatternForType,
+                            format!("`{vname}(…)` is not a pattern for `{rendered}`"),
+                        );
+                        return TypedPattern::Wildcard;
+                    }
                 };
                 let Some(idx) = self.db.enum_def(enum_def_id).variant(&vname) else {
+                    let rendered = self.db.render(resolved);
+                    self.diag(
+                        at,
+                        DiagCode::UnknownEnumVariant,
+                        format!("`{rendered}` has no variant `{vname}`"),
+                    );
                     return TypedPattern::Wildcard;
                 };
                 // Recurse into sub-patterns against payload types — the WS5 bug
