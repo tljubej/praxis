@@ -27,7 +27,7 @@ Update this file at the end of every stage.
 | S14 — Control flow: bottom type, contexts, joins, loop values | **done** | `fd909a1`, `92a1b84`, `bf91879`, `9cffbe5`, `f93b25f`, `ea506a6` |
 | S15 — Per-use types into HIR and MIR, then monomorphization | **done** (one exit criterion deferred; see §4) | `93c05ec`, `f3c76a8`, `77b2ad6`, `b560e67` |
 | S16 — Records, patterns, exhaustiveness, enum constructors | **done** | `57e2e5b`, `06f3c44`, `b8e2c7b`, `e918741` |
-| S17 — Constraint channel and capabilities | **in progress** (7 of 11 findings + TY-33 unit 1) | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662` |
+| S17 — Constraint channel and capabilities | **in progress** (9 of 11 findings + TY-33 unit 1) | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c` |
 | S18 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
@@ -36,20 +36,24 @@ TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1305 passed, 0 failed, 40 ignored**. `just ci` is green.
+Now: **1320 passed, 0 failed, 38 ignored**. `just ci` is green.
 
-**S17 is open and is the largest stage in the repair.** Seven of its eleven
+**S17 is open and is the largest stage in the repair.** Nine of its eleven
 findings are done — **TY-25**, **TY-26**, **TY-27**, **TY-28**, **TY-29**,
-**TY-32** and **RT-08** — plus **TY-33's first unit** (`panic`/`assert`/`dbg`).
-**F10's constraint channel landed as its own commit** with the suite green, per
-plan §9 step 2. The ADRs are **056** (the control names) and **057** (the
-channel + D4); ADR-057 also supersedes **ADR-010's lapsed M7 deferral** of the
-§5.4 capability system, which the plan's F10 block asked for.
+**TY-30**, **TY-31**, **TY-32** and **RT-08** — plus **TY-33's first unit**
+(`panic`/`assert`/`dbg`). **F10's constraint channel landed as its own commit**
+with the suite green, per plan §9 step 2. The ADRs are **056** (the control
+names) and **057** (the channel + D4 + TY-30's pinning rule + TY-31's bounds);
+ADR-057 also supersedes **ADR-010's lapsed M7 deferral** of the §5.4 capability
+system, which the plan's F10 block asked for.
 
-**Four findings are left in the stage's first unit: TY-30, TY-31, TY-34, and
-TY-33's units 2–4.** §4 says what each needs and what is already in place.
+**The stage's first unit is done.** What is left is **TY-34** (D6's `..`/`..=`
+vertical slice) and **TY-33's units 2–4** (the numeric prelude helpers, then the
+six graph helpers). §4 says what each needs and what is already in place.
 
-Eleven exit-criterion tests were un-ignored by S17 so far:
+Thirteen exit-criterion tests were un-ignored by S17 so far, bringing the
+repair's running total to **ninety-seven** of the audit's ignored regressions
+un-ignored and passing:
 
 | Test | File | Finding |
 |---|---|---|
@@ -64,8 +68,33 @@ Eleven exit-criterion tests were un-ignored by S17 so far:
 | `unary_minus_accepts_float_typed_variables` | `infer_tests.rs` | TY-26 |
 | `float_remainder_is_rejected` | `infer_tests.rs` | TY-27 |
 | `integer_literal_overflow_is_diagnosed` | `infer_tests.rs` | TY-28 |
+| `collection_method_constrains_unannotated_receiver_parameter` | `infer_tests.rs` | TY-30 |
+| `sum_requires_int_elements` | `infer_tests.rs` | TY-31 |
 
-S17's new gates so far:
+TY-31's six new gates:
+
+| Test | File | Pins |
+|---|---|---|
+| `the_int_sinks_require_int_elements` | `infer_tests.rs` | the rule, not the exit test's one case — all four sinks, and `Float` as well as `Bool` and `Text` |
+| `a_sinks_element_bound_pins_an_unresolved_pipeline_stage` | `infer_tests.rs` | why the bound unifies rather than deferring: a pipeline stage's element is a variable at lookup time, and it is *pinned* |
+| `enumerate_and_zip_report_the_pairs_they_build` | `infer_tests.rs` | `Vec[(Int, T)]` and `Vec[(T, U)]`, plus that `zip` can now pair two different element types at all |
+| `a_compound_assignments_numeric_requirement_survives_generalization` | `infer_tests.rs` | `Y015`'s emitter — the deferred case reports at the call, and `Y010` still owns the immediate one |
+| `finish_rejects_two_bounds_on_one_variable` | `praxis-stdlib/src/catalog.rs` | one variable, one bound — and that the *same* bound restated is not a conflict |
+| `bounds_are_found_in_every_position` | `catalog.rs` | receiver, closure parameter, tuple-in-result; and that an unbounded variable declares nothing |
+
+TY-30's seven new gates:
+
+| Test | File | Pins |
+|---|---|---|
+| `a_method_on_an_unannotated_receiver_is_resolved_by_the_use_site` | `infer_tests.rs` | §5.2's own answer written down (`(Vec[Int]) -> Int`), a scalar receiver, and the resolution running in the *argument* direction |
+| `a_receiver_a_method_was_called_on_is_not_quantified` | `infer_tests.rs` | the pinning rule — two receivers at one call site is a signature disagreement — and that a parameter with no method call still generalizes |
+| `a_deferred_method_still_carries_its_receivers_own_requirements` | `infer_tests.rs` | D4 × D5: `fn store(m, k) { m.insert(k, 1) }` refuses a mutable key |
+| `a_method_the_receiver_does_not_have_is_reported_once` | `infer_tests.rs` | exactly one `Y110`, for both a pinned-but-wrong receiver and one nothing pinned |
+| `a_pinned_variable_is_not_quantified` | `types_tests.rs` | `pin_to_level` at the unit level, including that it reaches into a `Vec`'s element |
+| `a_method_on_an_unannotated_parameter_runs` | `jit.rs` | the half a type test cannot see — the deferred method has to *lower* |
+| `a_deferred_method_with_arguments_runs` | `jit.rs` | …and mutates the receiver the call site owns |
+
+S17's earlier new gates:
 
 | Test | File | Pins |
 |---|---|---|
@@ -699,8 +728,10 @@ lifecycle is emit → claim → re-emit → discharge, with `TypeDb::require`,
 verbs. **Not done:** `TypeDb::substitute`'s public `HashMap<Type,Type>` form —
 `generalize::substitute(db, t, vars, to)` is the shape both callers actually
 have (a binder list and a matching argument list), and it already existed for
-F12. **Nothing emits `HasMethod` yet** (TY-30) and **no catalog row declares a
-bound** (TY-31); `check` answers both, and the emitters are what is missing.
+F12. **`HasMethod` is emitted and resolved** (TY-30, ADR-057 D5) and **the
+catalog declares bounds** (TY-31, ADR-057 D6) — both emitters exist now. The one
+`Capability` arm with no emitter is none; the one `Bound` shape with no catalog
+row is a capability bound, and §4 says why.
 
 **F9 — the one `TypeFolder`: landed whole.** `praxis_types::fold` is the only
 walk over `TypeData`, its match has no catch-all, and the five hand-written
@@ -809,7 +840,66 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S17: the channel, TY-25…TY-29, TY-32, RT-08, TY-33 unit 1)
+### From this session (S17: TY-30 and TY-31)
+
+**`TypePattern::Var` is a struct variant.** `TypePattern::Var("T")` no longer
+compiles; write `TypePattern::var("T")` (or `TypePattern::is_scalar("T",
+ScalarType::Int)`). A *pattern match* on it is `TypePattern::Var { name, bound }`
+or `TypePattern::Var { .. }`. All 75 construction sites and the four match sites
+are converted; `praxis_stdlib::Bound` is the new type and it is re-exported at the
+crate root.
+
+**A catalog row can now say what its type variables must be, and
+`MethodEntry::bounds()` is the one reader.** It sweeps receiver, params and
+result, because a bound is a fact about the *variable* and not about the position
+it is written in. `MethodCatalogBuilder::finish` refuses an entry that bounds one
+name two different ways, so there is no "whichever the checker read first".
+
+**`Bound::Is(ScalarType)` is discharged by unification, not by the channel.**
+`Inferer::apply_bounds` is the site, called from `infer_method_call` *and* from
+`resolve_deferred_method`. This is deliberate and it matters: unifying **pins** an
+element type nothing has named yet, which is what `v.map(f).sum()` needs. A
+capability bound could not work this way and would have to go through
+`require_cap`; the match in `apply_bounds` is exhaustive so adding one halfway is
+a compile error.
+
+**`sum`, `product`, `min` and `max` require `Int` elements — not `Numeric`.**
+Each lowers to `ExtractScalar` at `ScalarKind::Int` plus an `IntBinOp`/`IntCmp`.
+`Vec[Float].sum()` used to return `9222246136947933184`; it is now `Y001` at the
+method name. **If you widen a sink, widen its lowering in the same commit.**
+
+**`enumerate` and `zip` have different result types now.** `Vec[(Int, T)]` and
+`Vec[(T, U)]`, and `zip`'s parameter is `Vec[U]` rather than `Vec[T]`. Anything
+that read a chain's result type off these rows was reading the receiver's element
+type. `alloc_empty_vec` still uses `MirType::Opaque` on purpose — see §4.
+
+**A compound assignment's numeric requirement rides the channel.** `Y010` is the
+*immediate* report (a target whose type is already known, reported at the
+operation) and `Y015` is the *deferred* one (the target was a variable, and the
+call that pinned it is where the report goes). `Inferer::require_cap_as` is where
+a caller chooses its own immediate wording; `require_cap` is that with `None`.
+`is_numeric` and `is_unconstrained` in `infer.rs` are **deleted** — the split they
+hand-rolled is the channel's.
+
+**A method call on a variable receiver emits `HasMethod`, and the variable is
+pinned.** `Inferer::require_method` is the emitter and
+`Inferer::resolve_deferred_method` is the discharge — the *only* capability whose
+discharge writes to `method_refs`. **`TypeDb::pin_to_level(t, site)` is new** and
+TY-30 is its only caller: a receiver a method was called on cannot be quantified,
+because there is one lowered body per source function. `fn total(values) {
+values.sum() }` is `(Vec[Int]) -> Int`, a monotype — **not** a scheme. Two call
+sites at two receiver types is a `Y001` about `total`'s signature.
+
+**`Y110` still has exactly one emitter, in lowering.** The channel resolves
+`HasMethod` or stays silent; it never vetoes. If you add a report there you will
+get two diagnostics for one mistake, and
+`a_method_the_receiver_does_not_have_is_reported_once` will say so.
+
+**`range_of(FileSpan) -> TextRange` is new** in `infer.rs`, the inverse of
+`Inferer::file_span`. A `Constraint`'s `at` is a `FileSpan` and `method_refs` is
+keyed by `TextRange`; the deferred resolution needs both.
+
+### From an earlier session (S17: the channel, TY-25…TY-29, TY-32, RT-08, TY-33 unit 1)
 
 **A capability question goes through `praxis_hir::capability::check`, and there
 are five kinds now.** `supports_eq`/`supports_ord`/`supports_hash`/`iter_item`
@@ -2009,53 +2099,86 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**S17 is open, and the next thing to do is TY-30 or TY-31.** Read the plan's §5
-S17 entry and §7's D4/D5/D6 first — they are all three answered, and D5 and D6
-went *against* the recommendation, which is what makes the stage several
+**S17's first unit is done. The next thing to do is TY-33's unit 2 — the numeric
+prelude helpers.** Read the plan's §5 S17 entry and §7's D5/D6 first; D5 and D6
+both went *against* the recommendation, which is what makes the stage several
 sessions rather than one.
 
-What is done, and what each remaining piece needs:
+What is done:
 
 - **F10's constraint channel landed whole** (ADR-057), as its own commit with
   the suite green. §2 and §3 say what it is and what the four verbs are. **If
   you add a capability check anywhere, go through `Inferer::require_cap`** —
   calling a predicate directly is TY-29 by another name.
-- **TY-25, TY-26, TY-27, TY-28, TY-29, TY-32 and RT-08 are done and gated.**
-- **TY-33's first unit is done** (`panic`, `assert`, `dbg` — ADR-056). Its
-  remaining units are D5's (2) the eight numeric helpers and (3) the six graph
-  helpers.
-- **TY-30 is the next natural step, and TY-31 already wants it.** A method call
-  on an unresolved receiver returns a fresh variable and constrains nothing:
-  `crate::catalog::lookup` needs a catalog-representable receiver, so
-  `fn total(values) { values.sum() }` gives up. `Capability::HasMethod` exists
-  and `capability::check` answers it — **nothing emits one**. The emitter goes
-  in `infer_method_call`'s `let Some(entry) = hits.first() else { … }` arm: when
-  the receiver follows to a variable, require `HasMethod { name, params,
-  result }` on it instead of returning a bare fresh var. Its exit test is
-  `collection_method_constrains_unannotated_receiver_parameter`, and note that
-  it asserts the program is **accepted** — the constraint has to *pin* the
-  receiver at the call site, not merely reject a bad one. That is more than a
-  check: discharging a `HasMethod` against a resolved receiver has to unify the
-  entry's params/result with the constraint's.
-- **TY-31 is the catalog bound migration**, and the plan sizes it as ONE commit
-  across 74 `TypePattern::Var("T")` sites. `CapKind` is the vocabulary to
-  declare with and `supports_numeric` is the predicate; `Y015`'s wording is
-  already written and has no emitter. `Vec[Bool].sum()` still typechecks. Its
-  exit test is `sum_requires_int_elements`. **Fix the `enumerate`/`zip` rows in
-  the same pass** — both declare `result: Vec[T]` and both are wrong, which is a
-  finding the register does not have and which H10 waits on (see the S15 entry
-  below).
+- **Nine of eleven findings are done and gated: TY-25…TY-32 and RT-08.** The
+  stage's first unit — F10's channel plus the eleven findings — is closed except
+  for TY-33 and TY-34, which are the units D5 and D6 made stage-sized.
+- **TY-33's first unit is done** (`panic`, `assert`, `dbg` — ADR-056).
+
+What is left, in the order to do it:
+
+- **TY-33 unit 2 — the numeric prelude helpers, and it is unblocked now.** The
+  plan calls them "the eight numeric helpers" and names seven: `abs`, `sign`,
+  `min`, `max`, `clamp`, `gcd`, `lcm`. `praxis-stdlib`'s `PRELUDE` also lists the
+  two constants `pi` and `e`, which are the same unit's work. Every one of them
+  is a **phantom today**: the name is in `PRELUDE`, so it resolves, and then it
+  gets a fresh type and lowers as a missing user function — the shape `panic` had
+  before ADR-056. What unit 1 built is the pattern to copy:
+  `Inferer::seed_builtin_schemes` gives the name a real scheme, and
+  `control_builtin_symbol` in `praxis-mir`'s `build.rs` is the one lookup from
+  name to runtime symbol, with the fault check driven by the ABI manifest's own
+  `Effect`. Read ADR-056 and follow it.
+  - **Half of them already have a runtime symbol**, because they exist as
+    *methods*: `abs`, `sign`, `sqrt`, `floor`, `ceil`, `round`, `to_float`,
+    `to_int`, `to_text` are catalog rows on `Int`/`Float` with
+    `MethodLowering::RuntimeSymbol`, and `Float.min`/`Float.max` take a second
+    `Float`. A free `abs(x)` can lower to the same wrapper.
+  - **What has no wrapper: `Int` min/max, `clamp`, `gcd`, `lcm`.** Decide
+    per name whether to add a `praxis_*` wrapper (ABI manifest row + address
+    table, which is two lines since F4) or to fold it in MIR. `RUNTIME_ABI_VERSION`
+    is **13** and S17's one bump (H17) is already spent — adding a *symbol* is
+    additive and changes no `#[repr(C)]` layout, so it needs no second bump;
+    check before assuming.
+  - **TY-31's bound is *not* what these want.** The plan says they "want TY-31's
+    numeric constraint", and TY-31 delivered `Bound::Is(ScalarType)` on catalog
+    rows instead, for the reason ADR-057 D6 gives. A prelude *function* is a
+    scheme, so a genuinely polymorphic `min`/`max`/`abs` would carry
+    `Capability::Kind(CapKind::Numeric)` on its own binder through the F10
+    channel — which works and has no emitter yet. **The simpler and more honest
+    option is a monomorphic `Int` signature**, matching what the sinks turned out
+    to need and what the lowerings actually support; `Float.min`/`Float.max`
+    already exist as methods for the float case. Pick one deliberately and record
+    it.
 - **TY-34 is D6's full `..`/`..=` vertical slice**, and D6 lists four
   sub-decisions it does *not* settle (half-openness, value-ness, descending
   behaviour, endpoint types), all owed before the slice starts. Two anchors
   exist: `CollectionCtor::Range` and `capability::iter_item`'s
   `(CollectionCtor::Range, _) => Int` arm.
-- **D5's graph helpers need a graph *representation* decision** that is not in
-  the plan and is owed before that unit starts. Do not interleave it with the
-  channel.
+- **D5's graph helpers (unit 3) need a graph *representation* decision** that is
+  not in the plan and is owed before that unit starts. Do not interleave it with
+  anything.
 
 Things this session found that the register does not have:
 
+- **`Bound::Cap` does not exist, and the reason is a finding of its own.** TY-31
+  was planned as a *capability* bound migration. It is not one: `sum`, `product`,
+  `min` and `max` lower to `ExtractScalar` at `ScalarKind::Int` plus an
+  `IntBinOp`/`IntCmp`, and `CapKind::Numeric` includes `Float`, so a `Numeric`
+  bound would have blessed `Vec[Float].sum()` — which returned
+  `9222246136947933184`, the float's bits added as an integer. The capabilities a
+  row would otherwise want are already enforced from the receiver's *type*
+  (`require_collection_invariants`), which is stronger. So `Bound` has one arm and
+  the match on it is exhaustive; the first row that genuinely needs a capability —
+  a registered `sorted`, a `unique`, a `Vec.contains` — adds the arm and the
+  `require_cap` route together. **Do not add the arm before its row.**
+- **`alloc_empty_vec` still writes `MirType::Opaque`, and the reason has changed.**
+  S15 could not read the chain's result type because `enumerate`/`zip` declared it
+  wrongly. TY-31 fixed the rows, so the type is now correct — but the *fused*
+  lowering still has no per-stage item type (MIR-05, S21), so the tuple a fused
+  `enumerate` builds is still `AllocKind::Tuple { ty: Opaque }`. **H10's verifier
+  rule is now blocked on MIR-05 alone.** The comment in `build.rs`'s
+  `alloc_empty_vec` still cites the catalog rows and should be updated when S21
+  gets there.
 - **The lexer does not support digit separators**, though `lower.rs` strips `_`
   from an `IntLit` before parsing it. `9_223_372_036_854_775_808` lexes as `9`
   followed by the identifier `_223_372_036_854_775_808`, so it is an `N001`.
@@ -2070,6 +2193,19 @@ Things this session found that the register does not have:
   caught. No finding asks for it and `iter_item` is a function of the receiver
   alone, but it is the one place the channel is weaker than its `Capability`
   shape suggests.
+- **A `HasMethod` constraint is never claimed by a scheme, and that is load
+  bearing.** `pin_to_level` is what guarantees it: the receiver stops being
+  quantifiable, so `claim_constraints` never sees it among a scheme's binders. If
+  a future stage removes the pin (by giving monomorphization its own method
+  resolution), `reemit_constraints` will start producing `HasMethod` constraints
+  with a `via` span, and `resolve_deferred_method` would then write a
+  `method_refs` entry per instantiation against one token. It guards with
+  `c.via.is_none()`; read that before lifting the pin.
+- **The corpus triage found nothing, for the ninth time.** Every `.px` under
+  `tests/` and every CLI fixture went through `praxis check`, and the corpus
+  through `praxis run` as well. Only the three fixtures that are *meant* to report
+  do, plus `tests/aoc-corpus/day02_grid_of_char.px`'s `Y110` — S15's pre-existing
+  `map.len()` on a `Grid[Char]`, still there, still not S17's.
 
 **S16 is closed.** All five findings are fixed and gated — HIR-03, HIR-04,
 HIR-05, HIR-06 and HIR-07 — and all eight exit-criterion tests pass. HIR-05
@@ -2079,55 +2215,46 @@ and declares nothing, and `a_wildcard_binder_is_legal_and_declares_nothing`
 already pins all three of D7's positions including the closure param. The
 stage's ADR is **055**.
 
-**Pick up at S17 — the constraint channel and capabilities.** Eleven findings,
-weight 66, the largest stage in the repair, and the one the plan gates on three
-design decisions. **All three are answered, in the plan itself — §7's D4, D5 and
-D6 each carry an ANSWERED paragraph now, and the plan's own §5 S17 entry splits
-the stage into four units.** D4 rejects mutable collections as keys (the
-recommendation); D5 implements all fifteen prelude names including the six graph
-helpers (against it); D6 implements `..`/`..=` in full (against it).
+**S17 — the constraint channel and capabilities.** Eleven findings, weight 66,
+the largest stage in the repair, and the one the plan gates on three design
+decisions. **All three are answered, in the plan itself — §7's D4, D5 and D6 each
+carry an ANSWERED paragraph, and the plan's own §5 S17 entry splits the stage
+into four units.** D4 rejects mutable collections as keys (the recommendation);
+D5 implements all fifteen prelude names including the six graph helpers (against
+it); D6 implements `..`/`..=` in full (against it).
 
-**Read the plan's §5 S17 entry and §7's D4/D5/D6 before anything else.** The
-stage as answered is several sessions, the eleven findings are the *smaller*
-part of it, `panic` is what must land first, and three of the four units have
-sub-decisions §7 records as still owed.
+**Read the plan's §5 S17 entry and §7's D5/D6 before continuing the stage.** Unit
+1 is done; units 2, 3 and 4 remain, and two of them have sub-decisions §7 records
+as still owed.
 
-What S17 will want from what is already here:
+The list S16 wrote of what S17 would want, with where each now stands:
 
-- **F10's constraint channel is the stage's foundation and it did not land in
-  S11**, deliberately — §2 says exactly what is missing:
-  `praxis_stdlib::capability::CapKind`,
-  `praxis_types::constraint::{Capability, Constraint}`,
-  `TypeDb::take_dischargeable`, `TypeDb::substitute`, and the single exhaustive
-  `praxis_hir::capability::check`. Land it as its own commit with the suite
-  green, per plan §9 step 2. What *did* land is the half TY-01/TY-03/TY-22
-  needed: `Scheme`'s private binders, `generalize` mutating nothing,
-  `instantiate_with_mapping`, and the `Level` newtype.
-- **TY-29 reshapes the same `Scheme` struct TY-03 did.** The plan says do it in
-  one reshape, not two, and to do TY-29 first because everything else in the
-  stage consumes its worklist.
-- **`descriptor_supports(d, cap)` is F11's unlanded half**, and S17 is its
-  consumer — §2 records it as the one thing `praxis-repr` still owes.
+- **F10's constraint channel — landed** (ADR-057), as its own commit with the
+  suite green. It is `praxis_stdlib::capability::CapKind`,
+  `praxis_types::constraint::{Capability, Constraint}`, `Scheme`-carried
+  constraints, the four `TypeDb` verbs, and the one exhaustive
+  `praxis_hir::capability::check`.
+- **TY-29's `Scheme` reshape — done in one reshape with TY-03**, as the plan
+  asked.
+- **`descriptor_supports(d, cap)` is F11's unlanded half, and it is *still*
+  unlanded.** S17 was named as its consumer and did not need it: the
+  capability/descriptor agreement is asserted by
+  `heap_element_orderability_agrees_with_the_runtime` (`infer_tests.rs`) and by
+  `praxis-repr`'s round-trip test rather than by a `descriptor_supports` call.
+  §2 still records it as the one thing `praxis-repr` owes.
 - **`TypeDescriptor::compare` is populated on five descriptors and `None` on the
-  other sixteen** (ADR-045). TY-32's heap-ordering half and RT-08 read it;
-  `heap_element_orderability_agrees_with_the_runtime` (`infer_tests.rs`) is the
-  gate that the capability and the descriptor agree, and it is green.
-- **`numeric_scalars_are_orderable` (`capability.rs`) is H18's last entry** — a
-  currently-*passing* test that asserts `Text`/`Char` orderability and changes
-  meaning in this stage. Rewrite it in the same commit, per plan §8.2.
-- **A compound assignment against an unconstrained target is still not
-  reported**, and S13 left it there on purpose: `fn f(a) { a += 1 }` leaves `a`
-  a variable, and pinning it to `Int` would silently change inference for every
-  unannotated numeric parameter. That is TY-31's `Y015`.
-- **`Y015` (`NotNumeric`), `Y014` (`NotHashable`), `Y016`
-  (`OperatorNotDefined`) and `Y013` (`IntLiteralOutOfRange`) are already
-  allocated and unused** — ADR-051 reserved them for exactly these findings.
-  Check ADR-051 before allocating anything new; the `Y12x` block is full through
-  `Y123`, so `Y124` is the next free match code.
-- **`praxis-stdlib`'s catalog rows for `enumerate` and `zip` are wrong**, and
-  S15 recorded it as a finding the register does not have. If S17 touches the
-  catalog's type variables (TY-31's bound migration crosses 74 sites), fix those
-  two rows in the same pass and tell H10 about it — see the S15 entry below.
+  other sixteen** (ADR-045). TY-32's heap-ordering half and RT-08 read it, and
+  the agreement gate is green.
+- **`numeric_scalars_are_orderable` — rewritten** as
+  `orderable_and_numeric_are_different_sets_of_scalars` (H18's last entry, plan
+  §8.2).
+- **A compound assignment against an unconstrained target — reported now**, as
+  `Y015`, deferred through the channel. `Y010` keeps the immediate case; see §3.
+- **`Y013`, `Y014`, `Y015`, `Y016` — all four spent.** Check ADR-051 before
+  allocating anything new; the `Y0xx` block is contiguous through 17 and the
+  `Y12x` block is full through `Y123`, so `Y124` is the next free match code.
+- **`enumerate` and `zip` — fixed**, in TY-31's pass, exactly as this entry
+  asked. H10 now waits on MIR-05 alone; see §4's finding list.
 
 What S16 leaves behind, all deliberate:
 
