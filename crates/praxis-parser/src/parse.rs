@@ -148,6 +148,27 @@ const UNEXPECTED: DiagnosticCode = DiagnosticCode::new(DiagnosticCategory::Parse
 /// `P002` — two statements ran together with nothing between them (FE-04).
 const MISSING_SEPARATOR: DiagnosticCode = DiagnosticCode::new(DiagnosticCategory::Parse, 2);
 
+/// Whether a bare `Name { … }` in expression position is a record literal
+/// (FE-06).
+///
+/// `if p { … }` is genuinely ambiguous: `p { … }` could be a record literal, or
+/// `p` could be the condition and `{ … }` the then-block. The four keyword heads
+/// — `if`, `while`, `for`'s iterator, `match`'s scrutinee — resolve it by
+/// suppressing the literal, and the suppression follows the operands of the
+/// expression they own.
+///
+/// It stops at the first bracket. Inside `(…)`, `[…]`, an argument list or a
+/// block, the `{` cannot be the body the keyword is looking for, so there is
+/// nothing left to disambiguate — which is why this is a parameter rather than
+/// the parser-wide flag it used to be. A flag leaked into every parenthesized
+/// subexpression and every match-arm body, making valid record literals
+/// unwritable there.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StructLit {
+    Allowed,
+    Suppressed,
+}
+
 /// What ended a statement.
 ///
 /// Returning this rather than a `bool` is the point: a statement loop cannot
@@ -179,11 +200,6 @@ struct Parser<'t> {
     cursor: usize,
     builder: GreenNodeBuilder<'static>,
     diagnostics: Vec<Diagnostic>,
-    /// When true, `Name { … }` is *not* parsed as a record literal. This is set
-    /// while parsing `if`/`while` conditions so the `{ then-block }` is not
-    /// consumed as a record body. Block-expression contexts (`({ … })`) are
-    /// unaffected because the block follows `(`, not a bare name.
-    no_struct_literal: bool,
 }
 
 impl<'t> Parser<'t> {
@@ -195,7 +211,6 @@ impl<'t> Parser<'t> {
             cursor: 0,
             builder: GreenNodeBuilder::new(),
             diagnostics: Vec::new(),
-            no_struct_literal: false,
         }
     }
 
@@ -673,17 +688,27 @@ impl<'t> Parser<'t> {
     // --- expressions (Pratt climbing) ---
 
     /// Entry into expression parsing at the lowest binding power.
+    ///
+    /// This is the *bracketed* entry: a record literal is legal here. Every
+    /// caller that is inside `(…)`, an argument list, a block or a record body
+    /// uses it. The four keyword heads use [`Parser::parse_expr_no_struct_lit`].
     fn parse_expr(&mut self) {
-        self.parse_expr_bp(0);
+        self.parse_expr_bp(0, StructLit::Allowed);
     }
 
-    fn parse_expr_bp(&mut self, min_bp: u8) {
+    /// Entry into an expression that a `{` will terminate: an `if`/`while`
+    /// condition, a `for` iterator, a `match` scrutinee (FE-06).
+    fn parse_expr_no_struct_lit(&mut self) {
+        self.parse_expr_bp(0, StructLit::Suppressed);
+    }
+
+    fn parse_expr_bp(&mut self, min_bp: u8, lit: StructLit) {
         // Capture the builder position *before* the left operand is emitted, so
         // a later infix operator can wrap (lhs op rhs) into a BIN_EXPR via
         // start_node_at. This is the standard rowan Pratt idiom.
         let cp = self.checkpoint_lhs();
         // Parse the left-hand side (prefix / atom).
-        self.parse_prefix();
+        self.parse_prefix(lit);
 
         // Fold infix operators while their binding power is high enough.
         loop {
@@ -701,7 +726,9 @@ impl<'t> Parser<'t> {
             // retroactively opening the node at the checkpoint taken before lhs.
             self.start_node_at(cp, SyntaxKind::BIN_EXPR);
             self.bump(); // operator
-            self.parse_expr_bp(bp.right);
+                         // The operands of a suppressed expression are suppressed too:
+                         // `if a == p { … }` has the same ambiguity `if p { … }` has.
+            self.parse_expr_bp(bp.right, lit);
             self.finish_node();
         }
     }
@@ -711,7 +738,7 @@ impl<'t> Parser<'t> {
     /// (M8, §4.10) — calling a closure retrieved from a collection
     /// (`fs.get(0)(100)`), the result of another call (`f(1)(2)`), a paren
     /// (`(|x| x*3)(14)`), etc.
-    fn parse_prefix(&mut self) {
+    fn parse_prefix(&mut self, lit: StructLit) {
         // Capture the builder position before the primary is emitted, so a
         // postfix `expr(args)` can wrap the whole primary as the call's callee
         // via start_node_at (same idiom as the method-call loop).
@@ -728,14 +755,14 @@ impl<'t> Parser<'t> {
             // `|params| expr` closure (M7, §4.10). Bare `PIPE` claims the `|`;
             // the lexer's max-munch keeps `||` as logical-or (`PIPE2`, handled
             // in the infix table), so the two never conflict.
-            self.parse_closure();
+            self.parse_closure(lit);
         } else if let Some(bp) = prefix_binding_power(op) {
             self.start_node(SyntaxKind::UNARY_EXPR);
             self.bump(); // unary operator
-            self.parse_expr_bp(bp);
+            self.parse_expr_bp(bp, lit);
             self.finish_node();
         } else {
-            self.parse_atom();
+            self.parse_atom(lit);
         }
         self.parse_postfix(cp);
     }
@@ -812,7 +839,11 @@ impl<'t> Parser<'t> {
     /// optionally annotated `: Type`, separated by commas, between two `|`. The
     /// body is a single expression (which may be a `{ block }`). Closures capture
     /// outer variables automatically (§4.10); the capture analysis is in HIR.
-    fn parse_closure(&mut self) {
+    ///
+    /// The body inherits the ambient suppression rather than resetting it: `|`
+    /// is not a bracket the grammar can close over, so a closure written
+    /// directly as an `if` condition has the same ambiguity a name does.
+    fn parse_closure(&mut self, lit: StructLit) {
         self.start_node(SyntaxKind::CLOSURE_EXPR);
         self.bump(); // `|`
                      // Zero or more `name` or `name: Type` params separated by commas.
@@ -833,13 +864,13 @@ impl<'t> Parser<'t> {
         }
         self.expect(SyntaxKind::PIPE, "`|` to close closure parameters");
         // Body: a single expression (which may be a `{ block }`).
-        self.parse_expr();
+        self.parse_expr_bp(0, lit);
         self.finish_node();
     }
 
     /// Smallest expression: literals, names, calls, parenthesized expressions,
     /// blocks, `if`, `while`.
-    fn parse_atom(&mut self) {
+    fn parse_atom(&mut self, lit: StructLit) {
         let kind = self.peek();
         match kind {
             SyntaxKind::IntLit
@@ -870,7 +901,7 @@ impl<'t> Parser<'t> {
             SyntaxKind::KW_CONTINUE => self.parse_continue(),
             SyntaxKind::KW_RETURN => self.parse_return(),
             SyntaxKind::KW_MATCH => self.parse_match(),
-            SyntaxKind::Ident => self.parse_name_or_call(),
+            SyntaxKind::Ident => self.parse_name_or_call(lit),
             _ => {
                 // Nothing recognizable. CRITICAL: we must make forward progress
                 // here — emitting a diagnostic without advancing the cursor
@@ -940,10 +971,7 @@ impl<'t> Parser<'t> {
                      // The condition is a parenthesized or bare expression; accept either.
                      // Suppress record-literal parsing so `if x { … }` doesn't read
                      // the then-block as `x { … }`.
-        let prev = self.no_struct_literal;
-        self.no_struct_literal = true;
-        self.parse_expr();
-        self.no_struct_literal = prev;
+        self.parse_expr_no_struct_lit();
         self.parse_block(); // then-branch
         if self.eat(SyntaxKind::KW_ELSE) {
             self.start_node(SyntaxKind::ELSE_BRANCH);
@@ -960,10 +988,7 @@ impl<'t> Parser<'t> {
     fn parse_while(&mut self) {
         self.start_node(SyntaxKind::WHILE_EXPR);
         self.bump(); // `while`
-        let prev = self.no_struct_literal;
-        self.no_struct_literal = true;
-        self.parse_expr();
-        self.no_struct_literal = prev;
+        self.parse_expr_no_struct_lit();
         self.parse_block();
         self.finish_node();
     }
@@ -975,10 +1000,7 @@ impl<'t> Parser<'t> {
         self.bump(); // `for`
         self.expect(SyntaxKind::Ident, "binding name after `for`");
         self.expect(SyntaxKind::KW_IN, "`in` after the for-loop binding");
-        let prev = self.no_struct_literal;
-        self.no_struct_literal = true;
-        self.parse_expr(); // iterator
-        self.no_struct_literal = prev;
+        self.parse_expr_no_struct_lit(); // iterator
         self.parse_block();
         self.finish_node();
     }
@@ -1027,10 +1049,7 @@ impl<'t> Parser<'t> {
         self.bump(); // `match`
                      // The scrutinee is an expression; suppress record literals so the `{`
                      // opening the arm list isn't consumed as a record body.
-        let prev = self.no_struct_literal;
-        self.no_struct_literal = true;
-        self.parse_expr();
-        self.no_struct_literal = prev;
+        self.parse_expr_no_struct_lit();
         self.expect(SyntaxKind::L_BRACE, "`{` to begin match arms");
         if !self.at(SyntaxKind::R_BRACE) {
             loop {
@@ -1038,12 +1057,11 @@ impl<'t> Parser<'t> {
                 self.start_node(SyntaxKind::MATCH_ARM);
                 self.parse_pattern();
                 self.expect(SyntaxKind::FAT_ARROW, "`=>` in match arm");
-                // Arm body: suppress record literals so a Name { ... } in the
-                // body isn't confused with the next arm's pattern.
-                let prev = self.no_struct_literal;
-                self.no_struct_literal = true;
+                // Arm body: a record literal is legal here (FE-06). The `{` that
+                // could be confused with a block belongs to the *match*, and it
+                // was consumed above — inside the arm list there is nothing left
+                // for a `Name { … }` to be mistaken for.
                 self.parse_expr();
-                self.no_struct_literal = prev;
                 self.finish_node(); // MATCH_ARM
                                     // Arms really are comma-OR-newline separated (§4.6) — the
                                     // newline half used to be a comment over a check that only
@@ -1222,7 +1240,7 @@ impl<'t> Parser<'t> {
 
     /// An identifier, possibly followed by a call `(args)` and/or `.method(args)`
     /// postfixes. Method calls chain left-associatively: `v.push(1).len()`.
-    fn parse_name_or_call(&mut self) {
+    fn parse_name_or_call(&mut self, lit: StructLit) {
         let cp = self.checkpoint_lhs();
         // Peek the identifier text to special-case `parse(text, parser_expr)`
         // (§7.1) before committing to an ordinary call.
@@ -1252,7 +1270,7 @@ impl<'t> Parser<'t> {
             // already-emitted PATH_EXPR, so the call's first child is the path.
             self.parse_arg_list();
             self.finish_node(); // CALL_EXPR
-        } else if self.at(SyntaxKind::L_BRACE) && !self.no_struct_literal {
+        } else if self.at(SyntaxKind::L_BRACE) && lit == StructLit::Allowed {
             // Record literal: `Name { field: expr, … }` or `Name { x, y }` (§4.5
             // punning). In expression position, a bare name followed by `{` is a
             // record construction (not a block — blocks only follow `if`/`while`
@@ -1768,7 +1786,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: the record-literal suppression flag leaks through parentheses"]
     fn regression_parenthesized_record_literal_is_valid_in_a_condition() {
         let out = parse_text("if (Point { x: 1 } == p) { 0 }");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
@@ -1779,7 +1796,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: record literals are unconditionally suppressed in match arm bodies"]
     fn regression_match_arm_may_return_a_record_literal() {
         let out = parse_text("match x { A => Point { x: 1 } }");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
@@ -1787,6 +1803,71 @@ mod tests {
             construct_names(&out.tree).contains(&SyntaxKind::RECORD_LIT_EXPR),
             "the arm body must contain a record literal"
         );
+    }
+
+    // --- FE-06: which brackets reset the suppression, and what it still buys --
+
+    /// Every bracketed context resets it, not only the parentheses the exit test
+    /// names: an argument list, a tuple, and a block are all places where the
+    /// `{` cannot be the body a keyword is waiting for.
+    #[test]
+    fn every_bracket_restores_record_literals_inside_a_condition() {
+        for src in [
+            "if f(Point { x: 1 }) { 0 }",
+            "if (Point { x: 1 }, 2) == t { 0 }",
+            "if { let p = Point { x: 1 }\n p.ok } { 0 }",
+            "while v.has(Point { x: 1 }) { 0 }",
+            "for q in near(Origin { x: 0 }) { 0 }",
+            "match f(Point { x: 1 }) { A => 1 }",
+        ] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            assert!(
+                construct_names(&out.tree).contains(&SyntaxKind::RECORD_LIT_EXPR),
+                "{src}: the bracketed record literal was suppressed"
+            );
+        }
+    }
+
+    /// A match arm body resets it at every depth, not just at the top — the
+    /// flag it replaces leaked into the arm's own blocks and closures too.
+    #[test]
+    fn a_match_arm_allows_a_record_literal_at_any_depth() {
+        for src in [
+            "match x { A => { Point { x: 1 } } }",
+            "match x { A => |q| Point { x: 1 } }",
+            "match x { A => if c { Point { x: 1 } } else { q } }",
+        ] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            assert!(
+                construct_names(&out.tree).contains(&SyntaxKind::RECORD_LIT_EXPR),
+                "{src}: the arm body suppressed its record literal"
+            );
+        }
+    }
+
+    /// …and the suppression still does the job it exists for, in all four heads
+    /// and through the operands of the expression they own.
+    #[test]
+    fn a_keyword_head_still_claims_its_brace_as_a_block() {
+        for (src, body) in [
+            ("if p { 0 }", SyntaxKind::IF_EXPR),
+            ("if a == p { 0 }", SyntaxKind::IF_EXPR),
+            ("if !p { 0 }", SyntaxKind::IF_EXPR),
+            ("while p { 0 }", SyntaxKind::WHILE_EXPR),
+            ("for q in ps { 0 }", SyntaxKind::FOR_EXPR),
+            ("match p { A => 1 }", SyntaxKind::MATCH_EXPR),
+        ] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            let kinds = construct_names(&out.tree);
+            assert!(kinds.contains(&body), "{src}: expected a {body:?}");
+            assert!(
+                !kinds.contains(&SyntaxKind::RECORD_LIT_EXPR),
+                "{src}: the head's brace was eaten as a record body"
+            );
+        }
     }
 
     // --- Pratt precedence ---
