@@ -369,6 +369,123 @@ pub enum TypedPattern {
     },
 }
 
+/// Every variant's children, written **once** (F20).
+///
+/// Each row is `Variant => exprs: [...], blocks: [...]`, and the macro expands
+/// it into the four accessors below. Adding a variant is a compile error here
+/// (the match is exhaustive) rather than a silent omission in a walk somewhere
+/// else — which is the failure mode this replaces: three hand-written ~29-arm
+/// walks over one enum, each independently forgettable. One of them *had*
+/// forgotten `Call.callee_expr`, and a mutable capture went unboxed for it
+/// (HIR-08).
+///
+/// `exprs`/`blocks` name fields by shape: a plain field is one child, `opt` is
+/// an `Option`, `each` is a sequence, and `field_each`/`arm_each` are the two
+/// sequences whose elements are not bare expressions.
+macro_rules! typed_expr_children {
+    (
+        $( $variant:ident { $( $field:ident $(: $shape:ident)? ),* $(,)? } ),* $(,)?
+    ) => {
+        impl TypedExpr {
+            /// This expression's immediate sub-expressions, in evaluation order.
+            /// Sub-*blocks* are [`TypedExpr::blocks`]; a walk usually wants both.
+            pub fn children(&self) -> impl Iterator<Item = &TypedExpr> {
+                let mut out: Vec<&TypedExpr> = Vec::new();
+                typed_expr_children!(@arms self, out, push, $( $variant { $( $field $(: $shape)? ),* } ),*);
+                out.into_iter()
+            }
+
+            /// [`TypedExpr::children`], mutably.
+            pub fn children_mut(&mut self) -> impl Iterator<Item = &mut TypedExpr> {
+                let mut out: Vec<&mut TypedExpr> = Vec::new();
+                typed_expr_children!(@arms self, out, push_mut, $( $variant { $( $field $(: $shape)? ),* } ),*);
+                out.into_iter()
+            }
+
+            /// This expression's immediate sub-blocks (an `if`'s branches, a
+            /// loop's body, a closure's body).
+            pub fn blocks(&self) -> impl Iterator<Item = &TypedBlock> {
+                let mut out: Vec<&TypedBlock> = Vec::new();
+                typed_expr_children!(@arms self, out, push_block, $( $variant { $( $field $(: $shape)? ),* } ),*);
+                out.into_iter()
+            }
+
+            /// [`TypedExpr::blocks`], mutably.
+            pub fn blocks_mut(&mut self) -> impl Iterator<Item = &mut TypedBlock> {
+                let mut out: Vec<&mut TypedBlock> = Vec::new();
+                typed_expr_children!(@arms self, out, push_block_mut, $( $variant { $( $field $(: $shape)? ),* } ),*);
+                out.into_iter()
+            }
+        }
+    };
+
+    // The shared body of all four accessors: one arm per variant, binding every
+    // child field and handing each to the collector `$how`.
+    (@arms $e:expr, $out:ident, $how:ident, $( $variant:ident { $( $field:ident $(: $shape:ident)? ),* } ),*) => {
+        match $e {
+            $( TypedExpr::$variant { $( $field, )* .. } => {
+                $( typed_expr_children!(@$how $out, $field $(, $shape)?); )*
+            } )*
+            // `Block` is a tuple variant and the only one; its child is the block.
+            TypedExpr::Block(b) => {
+                typed_expr_children!(@$how $out, b, block);
+            }
+        }
+    };
+
+    // --- the collectors: one per accessor × field shape --------------------
+    // Expression fields (`push`/`push_mut`) ignore block fields, and vice versa.
+    (@push $out:ident, $f:ident) => { $out.push(&**$f) };
+    (@push $out:ident, $f:ident, opt) => { if let Some(x) = $f { $out.push(&**x) } };
+    (@push $out:ident, $f:ident, each) => { $out.extend($f.iter()) };
+    (@push $out:ident, $f:ident, field_each) => { $out.extend($f.iter().map(|(_, x)| x)) };
+    (@push $out:ident, $f:ident, arm_each) => { $out.extend($f.iter().map(|a| &a.body)) };
+    (@push $out:ident, $f:ident, block) => { let _ = $f; };
+    (@push $out:ident, $f:ident, block_opt) => { let _ = $f; };
+
+    (@push_mut $out:ident, $f:ident) => { $out.push(&mut **$f) };
+    (@push_mut $out:ident, $f:ident, opt) => { if let Some(x) = $f { $out.push(&mut **x) } };
+    (@push_mut $out:ident, $f:ident, each) => { $out.extend($f.iter_mut()) };
+    (@push_mut $out:ident, $f:ident, field_each) => { $out.extend($f.iter_mut().map(|(_, x)| x)) };
+    (@push_mut $out:ident, $f:ident, arm_each) => { $out.extend($f.iter_mut().map(|a| &mut a.body)) };
+    (@push_mut $out:ident, $f:ident, block) => { let _ = $f; };
+    (@push_mut $out:ident, $f:ident, block_opt) => { let _ = $f; };
+
+    (@push_block $out:ident, $f:ident, block) => { $out.push(&**$f) };
+    (@push_block $out:ident, $f:ident, block_opt) => { if let Some(x) = $f { $out.push(&**x) } };
+    (@push_block $out:ident, $f:ident $(, $other:ident)?) => { let _ = $f; };
+
+    (@push_block_mut $out:ident, $f:ident, block) => { $out.push(&mut **$f) };
+    (@push_block_mut $out:ident, $f:ident, block_opt) => { if let Some(x) = $f { $out.push(&mut **x) } };
+    (@push_block_mut $out:ident, $f:ident $(, $other:ident)?) => { let _ = $f; };
+}
+
+typed_expr_children! {
+    Lit {},
+    Path {},
+    Read {},
+    Continue {},
+    Bin { lhs, rhs },
+    Unary { operand },
+    Paren { inner: opt },
+    If { cond, then_block: block, else_block: block_opt },
+    While { cond, body: block },
+    For { iter, body: block },
+    Loop { body: block },
+    Break { value: opt },
+    Return { value: opt },
+    // `callee_expr` is the field the escape walk forgot (HIR-08).
+    Call { args: each, callee_expr: opt },
+    MethodCall { receiver, args: each },
+    Tuple { elements: each },
+    Parse { text },
+    RecordLit { fields: field_each },
+    FieldGet { receiver },
+    EnumVariant { args: each },
+    Match { scrutinee, arms: arm_each },
+    Closure { body: block },
+}
+
 /// One arm of a lowered `match` expression (M7, §4.6). The pattern is recursive
 /// (see [`TypedPattern`]); the MIR lowering emits a decision tree over it.
 #[derive(Clone, Debug)]
@@ -483,6 +600,7 @@ pub fn lower(
         text,
         unit,
         closure_counter: 0,
+        escaping_vars: std::collections::HashSet::new(),
         loop_results: Vec::new(),
     };
     let mut items = Vec::new();
@@ -505,138 +623,27 @@ pub fn lower(
         // JITs `fn` items (the entry point is a `fn main` or similar). They are
         // still type-checked by `analyze`; they simply have no runtime lowering.
     }
-    // Escape analysis (M7-WS7b): collect every `var` symbol captured by some
-    // closure in the module. These are boxed into a `VarCell` at their binding
-    // site so the closure shares the cell.
-    let escaping_vars = collect_escaping_vars(&items);
     TypedModule {
         items,
         diagnostics: l.diagnostics,
-        escaping_vars,
+        // Escape analysis (M7-WS7b): every `var` captured by cell, recorded as
+        // each closure was lowered rather than re-derived by a walk afterwards
+        // (HIR-08). These are boxed into a `VarCell` at their binding site so
+        // the closure shares the cell.
+        escaping_vars: l.escaping_vars,
     }
 }
 
-/// Walk the module's fn bodies collecting every `var` symbol that appears as a
-/// `ByCell` capture in any closure. The result is the set of escaping `var`s
-/// the MIR builder must box into a `VarCell`.
-fn collect_escaping_vars(items: &[TypedItem]) -> std::collections::HashSet<SymbolId> {
-    let mut out = std::collections::HashSet::new();
-    for item in items {
-        let TypedItem::Fn(f) = item;
-        collect_escaping_block(&f.body, &mut out);
-    }
-    out
-}
-
-fn collect_escaping_block(block: &TypedBlock, out: &mut std::collections::HashSet<SymbolId>) {
-    for stmt in &block.stmts {
-        collect_escaping_stmt(stmt, out);
-    }
-    collect_escaping_expr(&block.tail, out);
-}
-
-fn collect_escaping_stmt(stmt: &TypedStmt, out: &mut std::collections::HashSet<SymbolId>) {
-    match stmt {
-        TypedStmt::Let { init, .. } | TypedStmt::Var { init, .. } => {
-            collect_escaping_expr(init, out)
-        }
-        TypedStmt::Assign { value, .. } => collect_escaping_expr(value, out),
-        TypedStmt::Expr(e) => collect_escaping_expr(e, out),
-    }
-}
-
-fn collect_escaping_expr(e: &TypedExpr, out: &mut std::collections::HashSet<SymbolId>) {
-    match e {
-        TypedExpr::Closure { captures, body, .. } => {
-            for cap in captures {
-                if matches!(cap.kind, crate::capture::CaptureKind::ByCell) {
-                    out.insert(cap.symbol);
-                }
-            }
-            collect_escaping_block(body, out);
-        }
-        TypedExpr::Bin { lhs, rhs, .. } => {
-            collect_escaping_expr(lhs, out);
-            collect_escaping_expr(rhs, out);
-        }
-        TypedExpr::Unary { operand, .. } => collect_escaping_expr(operand, out),
-        TypedExpr::Paren { inner, .. } => {
-            if let Some(inner) = inner {
-                collect_escaping_expr(inner, out);
-            }
-        }
-        TypedExpr::Block(b) => collect_escaping_block(b, out),
-        TypedExpr::If {
-            cond,
-            then_block,
-            else_block,
-            ..
-        } => {
-            collect_escaping_expr(cond, out);
-            collect_escaping_block(then_block, out);
-            if let Some(eb) = else_block.as_deref() {
-                collect_escaping_block(eb, out);
-            }
-        }
-        TypedExpr::While { cond, body, .. } => {
-            collect_escaping_expr(cond, out);
-            collect_escaping_block(body, out);
-        }
-        TypedExpr::For { iter, body, .. } => {
-            collect_escaping_expr(iter, out);
-            collect_escaping_block(body, out);
-        }
-        TypedExpr::Loop { body, .. } => collect_escaping_block(body, out),
-        TypedExpr::Break { value, .. } => {
-            if let Some(v) = value {
-                collect_escaping_expr(v, out);
-            }
-        }
-        TypedExpr::Continue { .. } => {}
-        TypedExpr::Return { value, .. } => {
-            if let Some(v) = value {
-                collect_escaping_expr(v, out);
-            }
-        }
-        TypedExpr::Call { args, .. } => {
-            for a in args {
-                collect_escaping_expr(a, out);
-            }
-        }
-        TypedExpr::MethodCall { receiver, args, .. } => {
-            collect_escaping_expr(receiver, out);
-            for a in args {
-                collect_escaping_expr(a, out);
-            }
-        }
-        TypedExpr::Tuple { elements, .. } => {
-            for el in elements {
-                collect_escaping_expr(el, out);
-            }
-        }
-        TypedExpr::Parse { text, .. } => collect_escaping_expr(text, out),
-        TypedExpr::RecordLit { fields, .. } => {
-            for (_, init) in fields {
-                collect_escaping_expr(init, out);
-            }
-        }
-        TypedExpr::FieldGet { receiver, .. } => collect_escaping_expr(receiver, out),
-        TypedExpr::EnumVariant { args, .. } => {
-            for a in args {
-                collect_escaping_expr(a, out);
-            }
-        }
-        TypedExpr::Match {
-            scrutinee, arms, ..
-        } => {
-            collect_escaping_expr(scrutinee, out);
-            for arm in arms {
-                collect_escaping_expr(&arm.body, out);
-            }
-        }
-        TypedExpr::Lit { .. } | TypedExpr::Path { .. } | TypedExpr::Read { .. } => {}
-    }
-}
+// The escape-analysis set (M7-WS7b) is accumulated by the lowerer itself, in
+// `Lowerer::lower_closure`, where every closure's capture list is already in
+// hand — see `Lowerer::escaping_vars`.
+//
+// It used to be a *fourth* walk over the typed tree, run after lowering, and it
+// omitted `TypedExpr::Call.callee_expr`: an immediately invoked closure
+// (`(|n| { count = count + n })(1)`) was never visited, so its `ByCell` capture
+// never reached the set and the mutation was written to a copy (HIR-08).
+// `CaptureKind::ByCell` and membership in `escaping_vars` are two
+// representations of one fact; only one of them is computed now.
 
 struct Lowerer<'a> {
     file: praxis_source::FileId,
@@ -669,6 +676,13 @@ struct Lowerer<'a> {
     /// function names (e.g. `__closure_0`). Each closure literal in the module
     /// gets a distinct name.
     closure_counter: u32,
+    /// Every `var` symbol some closure captures **by cell** (M7-WS7b, HIR-08).
+    /// Recorded in `lower_closure`, where the capture list is in hand, so the
+    /// set cannot disagree with the `CaptureKind::ByCell` decisions that produce
+    /// it. The MIR builder boxes each of these into a `VarCell` at its binding
+    /// site; a `var` missing here is one whose mutation a closure would write to
+    /// a copy.
+    escaping_vars: std::collections::HashSet<SymbolId>,
     /// The join of each enclosing loop's `break` values, innermost last (TY-21).
     /// A `loop` is the value its `break`s carry, and the typed tree has to say
     /// so — reading the body's type would answer what the loop *repeats*, not
@@ -1111,6 +1125,16 @@ impl<'a> Lowerer<'a> {
                 }
             })
             .collect();
+        // A `var` captured by cell escapes its frame, and this is where that is
+        // decided — so this is where it is recorded (HIR-08). Deriving the set
+        // from a later walk over the tree meant any expression position the walk
+        // forgot silently produced an unboxed capture.
+        self.escaping_vars.extend(
+            captures
+                .iter()
+                .filter(|c| matches!(c.kind, crate::capture::CaptureKind::ByCell))
+                .map(|c| c.symbol),
+        );
 
         let fn_name = self.fresh_closure_name();
         TypedExpr::Closure {

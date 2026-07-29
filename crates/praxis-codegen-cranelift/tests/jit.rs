@@ -1380,6 +1380,25 @@ fn for_loop_counts_iterations() {
     assert_eq!(result.as_int(), 4);
 }
 
+/// HIR-08 end to end: a closure that is *itself the callee* of a call captures
+/// its `var` by cell like any other, so the mutation outlives the call. Escape
+/// analysis never visited `Call.callee_expr`, so `count` was not boxed and each
+/// increment went to a copy — the program returned `0`.
+#[test]
+fn an_immediately_invoked_closure_mutates_the_var_it_captured() {
+    let src = concat!(
+        "fn main() -> Int {\n",
+        "  var count = 0\n",
+        "  let a = (|n| { count = count + n\n  count })(1)\n",
+        "  let b = (|n| { count = count + n\n  count })(10)\n",
+        "  count\n",
+        "}\n"
+    );
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 11, "both calls mutated the same cell");
+}
+
 #[test]
 fn loop_break_exits() {
     let src = "fn main() -> Int {\n  var i = 0\n  loop { if i >= 5 { break } i = i + 1 }\n  i\n}\n";

@@ -93,111 +93,32 @@ fn collect_closures_stmt(stmt: &TypedStmt, out: &mut Vec<LiftedClosure>) {
 }
 
 fn collect_closures_expr(e: &TypedExpr, out: &mut Vec<LiftedClosure>) {
-    match e {
-        TypedExpr::Closure {
-            fn_name,
-            params,
-            body,
-            captures,
-            ty,
-            ..
-        } => {
-            // Recurse into the closure's body first so inner closures are emitted
-            // before the outer (deterministic ordering for tests).
-            collect_closures_block(body, out);
-            out.push(LiftedClosure {
-                fn_name: fn_name.clone(),
-                params: params.clone(),
-                body: (**body).clone(),
-                captures: captures.clone(),
-                self_ty: *ty,
-            });
-        }
-        TypedExpr::Lit { .. } | TypedExpr::Path { .. } | TypedExpr::Read { .. } => {}
-        TypedExpr::Bin { lhs, rhs, .. } => {
-            collect_closures_expr(lhs, out);
-            collect_closures_expr(rhs, out);
-        }
-        TypedExpr::Unary { operand, .. } => collect_closures_expr(operand, out),
-        TypedExpr::Paren { inner, .. } => {
-            if let Some(inner) = inner {
-                collect_closures_expr(inner, out);
-            }
-        }
-        TypedExpr::Block(b) => collect_closures_block(b, out),
-        TypedExpr::If {
-            cond,
-            then_block,
-            else_block,
-            ..
-        } => {
-            collect_closures_expr(cond, out);
-            collect_closures_block(then_block, out);
-            if let Some(eb) = else_block.as_deref() {
-                collect_closures_block(eb, out);
-            }
-        }
-        TypedExpr::While { cond, body, .. } => {
-            collect_closures_expr(cond, out);
-            collect_closures_block(body, out);
-        }
-        TypedExpr::For { iter, body, .. } => {
-            collect_closures_expr(iter, out);
-            collect_closures_block(body, out);
-        }
-        TypedExpr::Loop { body, .. } => collect_closures_block(body, out),
-        TypedExpr::Break { value, .. } => {
-            if let Some(v) = value {
-                collect_closures_expr(v, out);
-            }
-        }
-        TypedExpr::Continue { .. } => {}
-        TypedExpr::Return { value, .. } => {
-            if let Some(v) = value {
-                collect_closures_expr(v, out);
-            }
-        }
-        TypedExpr::Call {
-            args, callee_expr, ..
-        } => {
-            for a in args {
-                collect_closures_expr(a, out);
-            }
-            if let Some(ce) = callee_expr {
-                collect_closures_expr(ce, out);
-            }
-        }
-        TypedExpr::MethodCall { receiver, args, .. } => {
-            collect_closures_expr(receiver, out);
-            for a in args {
-                collect_closures_expr(a, out);
-            }
-        }
-        TypedExpr::Tuple { elements, .. } => {
-            for el in elements {
-                collect_closures_expr(el, out);
-            }
-        }
-        TypedExpr::Parse { text, .. } => collect_closures_expr(text, out),
-        TypedExpr::RecordLit { fields, .. } => {
-            for (_, init) in fields {
-                collect_closures_expr(init, out);
-            }
-        }
-        TypedExpr::FieldGet { receiver, .. } => collect_closures_expr(receiver, out),
-        TypedExpr::EnumVariant { args, .. } => {
-            for a in args {
-                collect_closures_expr(a, out);
-            }
-        }
-        TypedExpr::Match {
-            scrutinee, arms, ..
-        } => {
-            collect_closures_expr(scrutinee, out);
-            for arm in arms {
-                collect_closures_expr(&arm.body, out);
-            }
-        }
+    // Recurse first, so an inner closure is emitted before the outer one
+    // (deterministic ordering for tests). The child list is F20's, written once
+    // in `praxis-hir`: this used to be a 29-arm match of its own, and a closure
+    // sitting in a field it forgot was a synthetic function never emitted.
+    for child in e.children() {
+        collect_closures_expr(child, out);
+    }
+    for block in e.blocks() {
+        collect_closures_block(block, out);
+    }
+    if let TypedExpr::Closure {
+        fn_name,
+        params,
+        body,
+        captures,
+        ty,
+        ..
+    } = e
+    {
+        out.push(LiftedClosure {
+            fn_name: fn_name.clone(),
+            params: params.clone(),
+            body: (**body).clone(),
+            captures: captures.clone(),
+            self_ty: *ty,
+        });
     }
 }
 

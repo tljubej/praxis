@@ -227,113 +227,31 @@ fn rewrite_stmt(stmt: &mut TypedStmt, pass: &mut MonoPass<'_>) {
 }
 
 fn rewrite_expr(e: &mut TypedExpr, pass: &mut MonoPass<'_>) {
-    match e {
-        TypedExpr::Call {
-            callee,
-            callee_name,
-            arg_types,
-            args,
-            callee_expr,
-            ..
-        } => {
-            // Recurse into args first (they may contain polymorphic calls).
-            for a in args.iter_mut() {
-                rewrite_expr(a, pass);
-            }
-            // A postfix call's callee expression (a closure value) may itself
-            // contain polymorphic calls in its body — recurse so they rewrite.
-            if let Some(ce) = callee_expr {
-                rewrite_expr(ce, pass);
-            }
-            // Is this callee a polymorphic user fn? (Closure-value callees have
-            // no scheme / are not in originals; their `arg_types` may be empty.)
-            let is_poly = scheme_of(pass.names, *callee).is_some_and(|s| s.is_polymorphic())
-                && pass.originals.contains_key(callee);
-            if is_poly && !arg_types.is_empty() {
-                let mangled = pass.instantiate(*callee, arg_types);
-                *callee_name = mangled;
-            }
+    // The one thing this pass does: retarget a polymorphic callee to its clone.
+    if let TypedExpr::Call {
+        callee,
+        callee_name,
+        arg_types,
+        ..
+    } = e
+    {
+        // Is this callee a polymorphic user fn? (Closure-value callees have no
+        // scheme / are not in originals; their `arg_types` may be empty.)
+        let is_poly = scheme_of(pass.names, *callee).is_some_and(|s| s.is_polymorphic())
+            && pass.originals.contains_key(callee);
+        if is_poly && !arg_types.is_empty() {
+            let mangled = pass.instantiate(*callee, arg_types);
+            *callee_name = mangled;
         }
-        TypedExpr::Closure { body, .. } => {
-            // A closure's body may contain polymorphic calls too.
-            rewrite_block(body, pass);
-        }
-        TypedExpr::Bin { lhs, rhs, .. } => {
-            rewrite_expr(lhs, pass);
-            rewrite_expr(rhs, pass);
-        }
-        TypedExpr::Unary { operand, .. } => rewrite_expr(operand, pass),
-        TypedExpr::Paren { inner, .. } => {
-            if let Some(inner) = inner {
-                rewrite_expr(inner, pass);
-            }
-        }
-        TypedExpr::Block(b) => rewrite_block(b, pass),
-        TypedExpr::If {
-            cond,
-            then_block,
-            else_block,
-            ..
-        } => {
-            rewrite_expr(cond, pass);
-            rewrite_block(then_block, pass);
-            if let Some(eb) = else_block.as_mut() {
-                rewrite_block(eb, pass);
-            }
-        }
-        TypedExpr::While { cond, body, .. } => {
-            rewrite_expr(cond, pass);
-            rewrite_block(body, pass);
-        }
-        TypedExpr::For { iter, body, .. } => {
-            rewrite_expr(iter, pass);
-            rewrite_block(body, pass);
-        }
-        TypedExpr::Loop { body, .. } => rewrite_block(body, pass),
-        TypedExpr::Break { value, .. } => {
-            if let Some(v) = value {
-                rewrite_expr(v, pass);
-            }
-        }
-        TypedExpr::Continue { .. } => {}
-        TypedExpr::Return { value, .. } => {
-            if let Some(v) = value {
-                rewrite_expr(v, pass);
-            }
-        }
-        TypedExpr::MethodCall { receiver, args, .. } => {
-            rewrite_expr(receiver, pass);
-            for a in args {
-                rewrite_expr(a, pass);
-            }
-        }
-        TypedExpr::Tuple { elements, .. } => {
-            for el in elements {
-                rewrite_expr(el, pass);
-            }
-        }
-        TypedExpr::Parse { text, .. } => rewrite_expr(text, pass),
-        TypedExpr::RecordLit { fields, .. } => {
-            for (_, init) in fields {
-                rewrite_expr(init, pass);
-            }
-        }
-        TypedExpr::FieldGet { receiver, .. } => rewrite_expr(receiver, pass),
-        TypedExpr::EnumVariant { args, .. } => {
-            for a in args {
-                rewrite_expr(a, pass);
-            }
-        }
-        TypedExpr::Match {
-            scrutinee, arms, ..
-        } => {
-            rewrite_expr(scrutinee, pass);
-            for arm in arms {
-                rewrite_expr(&mut arm.body, pass);
-            }
-        }
-        // Leaves: no calls to rewrite.
-        TypedExpr::Lit { .. } | TypedExpr::Path { .. } | TypedExpr::Read { .. } => {}
+    }
+    // …everywhere else, recurse. The child list is F20's, written once: this
+    // used to be its own 29-arm match, and a field missing from it was a call
+    // that never got retargeted.
+    for child in e.children_mut() {
+        rewrite_expr(child, pass);
+    }
+    for block in e.blocks_mut() {
+        rewrite_block(block, pass);
     }
 }
 

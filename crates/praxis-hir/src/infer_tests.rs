@@ -2080,7 +2080,6 @@ fn optional_rejects_extra_arguments() {
 // --- closure escape analysis ------------------------------------------------
 
 #[test]
-#[ignore = "known bug: escape analysis skips the callee expression of calls"]
 fn immediately_invoked_closure_boxes_its_mutable_capture() {
     use praxis_ast::AstNode;
 
@@ -2102,6 +2101,94 @@ fn immediately_invoked_closure_boxes_its_mutable_capture() {
         module.escaping_vars.contains(&count),
         "a closure in Call.callee_expr still requires its captured var to be boxed"
     );
+}
+
+/// F20: the one child walker really does cover the enum. A closure is placed in
+/// every expression *field* the macro lists, and the walk must find all of them
+/// — a field left out of a variant's row loses its subtree silently, which is
+/// exactly how HIR-08 hid for three walks and one release.
+///
+/// The program is deliberately not type-correct in every position (a closure is
+/// not an `Int`); lowering builds the nodes regardless, and it is the shape of
+/// the tree this asks about, not its types.
+#[test]
+fn the_child_walker_reaches_every_expression_position() {
+    use praxis_ast::AstNode;
+
+    // One closure per position, numbered so a failure names the missing one.
+    let src = concat!(
+        "struct R { f: Int }\n",
+        "enum E { V(Int) }\n",
+        "fn main(c: Bool, v: Vec[Int], k: Int) -> Int {\n",
+        "  let a = |n| 1\n",                // Let init
+        "  var b = |n| 2\n",                // Var init
+        "  b = |n| 3\n",                    // Assign value
+        "  let d = (|n| 4)(0)\n",           // Call.callee_expr (HIR-08)
+        "  out(|n| 5)\n",                   // Call.args
+        "  let w = v.map(|n| 6)\n",         // MethodCall.args
+        "  let y = v.map(|n| 7).len()\n",   // MethodCall.receiver
+        "  let t = (|n| 8, |n| 9)\n",       // Tuple.elements
+        "  let p = (|n| 10)\n",             // Paren.inner
+        "  let u = !(|n| 11)\n",            // Unary.operand
+        "  let z = (|n| 12) == (|n| 13)\n", // Bin.lhs / Bin.rhs
+        "  let g = R { f: |n| 14 }.f\n",    // RecordLit.fields, FieldGet.receiver
+        "  let e = V(|n| 15)\n",            // EnumVariant.args
+        "  if (|n| 16)(0) { let h = |n| 17 } else { let i = |n| 18 }\n", // If cond + branches
+        "  while c { let j = |n| 19 }\n",   // While.body
+        "  for x in v { let l = |n| 20 }\n", // For.body
+        "  let m = loop { let o = |n| 21\n  break |n| 22 }\n", // Loop.body, Break.value
+        "  let q = match (|n| 23)(0) { _ => |n| 24 }\n", // Match.scrutinee + arms
+        "  return |n| 25\n",                // Return.value
+        "}\n"
+    );
+    let map = SourceMap::new();
+    let id = map.intern("child_walk_test.px", src);
+    let parsed = parse(id, src);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = crate::lower::lower(id, &root, &mut analysis);
+
+    fn walk_expr(e: &crate::TypedExpr, found: &mut Vec<String>) {
+        if let crate::TypedExpr::Closure { fn_name, .. } = e {
+            found.push(fn_name.clone());
+        }
+        for child in e.children() {
+            walk_expr(child, found);
+        }
+        for block in e.blocks() {
+            walk_block(block, found);
+        }
+    }
+    fn walk_block(b: &crate::TypedBlock, found: &mut Vec<String>) {
+        for stmt in &b.stmts {
+            match stmt {
+                crate::TypedStmt::Let { init, .. } | crate::TypedStmt::Var { init, .. } => {
+                    walk_expr(init, found);
+                }
+                crate::TypedStmt::Assign { value, .. } => walk_expr(value, found),
+                crate::TypedStmt::Expr(e) => walk_expr(e, found),
+            }
+        }
+        walk_expr(&b.tail, found);
+    }
+
+    let mut found = Vec::new();
+    for item in &module.items {
+        let crate::TypedItem::Fn(f) = item;
+        walk_block(&f.body, &mut found);
+    }
+    // Every closure the lowerer minted has a distinct `__closure_N` name, so the
+    // walk finding all of them is the walk reaching every position.
+    let minted: usize = src.matches("|n|").count();
+    assert_eq!(
+        found.len(),
+        minted,
+        "the child walk found {} of {minted} closures: {found:?}",
+        found.len()
+    );
+    let unique: std::collections::HashSet<_> = found.iter().collect();
+    assert_eq!(unique.len(), found.len(), "a closure was visited twice");
 }
 
 // --- TY-07: type constructors validate their own arguments ------------------
