@@ -56,3 +56,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-048: A nominal type is one definition applied to arguments, and `TypeKey` is its identity](./048-nominal-identity-is-a-definition-applied-to-arguments.md)
 - [ADR-049: `_` is a wildcard that binds nothing, and a newline ends a statement but never an expression](./049-the-wildcard-binds-nothing-and-a-newline-ends-a-statement.md)
 - [ADR-050: A record literal is legal wherever the brace cannot be a block](./050-record-literals-are-legal-wherever-a-brace-cannot-be-a-block.md)
+- [ADR-051: The diagnostic-code allocation](./051-the-diagnostic-code-allocation.md)

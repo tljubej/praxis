@@ -1293,21 +1293,25 @@ was F12's static half; see ADR-048 and §3.
 exit-criterion tests pass, and the stage's two ADRs (049, 050) are written. It
 spent no ABI bump: nothing it touched is `#[repr(C)]`.
 
-**The next stage is S13 — and D13 binds before it starts.** The plan is explicit
-that the whole diagnostic-code block must be allocated by one owner before S13
-(§7 D13, §5's S13 paragraph). What is already spent, and what S12 changed:
+**The next stage is S13, and nothing blocks it.** D13 is answered — **ADR-051**
+allocates every code the repair still needs, and is the registry until F2 makes
+it a type. Start S13 by reading it: the codes S13 itself spends are `N003`
+(TY-11), `N004` (TY-24), `N005` (TY-23), `Y009` (TY-14) and `Y010` (TY-15), and
+TY-12 needs none — it is `Y007`, which S11 already extended to nominal defs.
 
-- Taken today: `T001`–`T005`, **`P001`–`P002`**, `N001`–`N002`, `Y001`–`Y008`,
-  `Y120`–`Y121`, `I001`/`I010`.
-- **FE-04's separator diagnostic did not come out of D13's block.** The plan
-  lists "statement separator (FE-04)" among the codes D13 must allocate, but the
-  parse category is numbered independently and had only `P001` in it. `P002` is
-  a parse code; the `Y0xx` allocation is untouched by S12 and must still start
-  from `Y009`.
-
-So D13's job is unchanged from what §5 records, minus that one line. Its
-consumers are TY-11, TY-12, TY-14, TY-15, TY-20, TY-23, TY-24, TY-28 (S13),
-HIR-04, HIR-07 (S16) and the `I0xx` block for IP-06/IP-07/IP-09/IP-10 (S19).
+**F2 is S13's first foundation commit.** ADR-051 fixes the numbers; F2 is what
+stops the *next* stage allocating locally again — `praxis_source::DiagCode`, an
+exhaustive enum whose `code()` is the one place a `(category, number)` pair is
+written, `DiagnosticCode::new` demoted to `pub(crate)`, and a `DiagCode::ALL`
+injectivity test. Plan §3.1's F2 block has the sketch; its variant *order* can no
+longer drive the numbers (the existing `Y110`/`Y112`/`Y120`/`Y121` are fixed
+points), so take the numbers from ADR-051 and the shape from the sketch. The
+conversion sites are: `praxis-hir/src/diagnostics.rs` (15), `lower.rs`'s
+`diag(at, number, msg)` (which is how `Y110`/`Y112` are spelled today),
+`lib.rs`'s `N000`, `parser_lower.rs`'s `code_number(&str)` — a *string* code
+parsed back into a number, which is the shape F2 exists to delete — plus
+`praxis-input-parser/src/validate.rs`'s `code: &'static str` field, and
+`praxis-parser`'s two consts.
 
 **S13's own shape** (plan §5): 10 findings, weight 26 — annotations reachable
 (TY-08, TY-09, TY-10), a sealed type environment (F19's `DeclGroup` driver),
@@ -1519,10 +1523,15 @@ binding position and introduces nothing (D7, FE-02); a newline terminates a
 statement and never a subexpression, consulted only between statements and at
 `break`/`return`'s optional-value decision (D8, F8/FE-04).
 
-**D1 and D5 still block their stages**; neither has been answered. **D13 is the
-next one that binds, and S12 is now behind us** — the plan wants the whole
-diagnostic-code block allocated before S13 starts. Nothing else stands between
-here and S13.
+**D13 is answered — see ADR-051.** The whole block is allocated: `N003`–`N005`,
+`Y009`–`Y016`, `Y099`, `Y113`–`Y115`, `Y122`–`Y123`, and `I011`–`I014`/`I023`/
+`I028`. Six findings the plan routes through D13 need no code at all, and TY-12
+turns out to be `Y007`. The plan's inventory of *taken* codes was incomplete —
+it missed `N000`, `Y110`, `Y112`, the whole `I0xx` validation block and both the
+`T0xx` and `P0xx` categories; ADR-051 opens with the corrected one. **Nothing
+now stands between here and S13.**
+
+**D1 and D5 still block their stages**; neither has been answered.
 
 **D13's block has two fewer numbers than it did.** S11 spent `Y007` (a wrong
 type-argument count) and `Y008` (a duplicate field or variant): both are cases
@@ -1549,7 +1558,6 @@ one. Settle both together.
 
 | | Decision | Blocks |
 |---|---|---|
-| D13 | Diagnostic-code allocation for the whole block, before S13 starts | S13/S16 |
 | D2 | Loop break-value semantics | S14 |
 | D4 | Hashability of mutable collections as Map keys | S17 |
 | D5 | The 15 phantom prelude names: implement or delete | S17 |
