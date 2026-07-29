@@ -22,7 +22,7 @@ Update this file at the end of every stage.
 | S9 — MIR root exactness, debug/root split, verifier | **done** | `ad9bbdf`, `d9521f9`, `e15a444` |
 | S10 — Semantic comparison, nominal schema identity | **done** | `29ff4f6`, `83de924`, `510ffc3`, `ff35f68` |
 | S11 — TypeDb core: levels, schemes, nominal identity | **done** | `8aa9069`, `aa9deea`, `d69881e`, `5efd0e2` |
-| S12 — Parser grammar: wildcard, separators, struct-literal suppression | **FE-02 done; FE-04, FE-06, DBG-03 left** | `4504a1d` |
+| S12 — Parser grammar: wildcard, separators, struct-literal suppression | **done** | `4504a1d`, `0c4b2ce`, `e49a803`, `13db789` |
 | S13 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
@@ -31,17 +31,66 @@ TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1145 passed, 0 failed, 91 ignored**. `just ci` is green.
+Now: **1166 passed, 0 failed, 86 ignored**. `just ci` is green.
 
 **S11 is closed.** All five exit-criterion tests pass and all eight findings the
 stage owns are fixed and gated — TY-01…TY-07 and TY-22.
 
-**S12 is open and D7/D8 are answered** — see ADR-049. **FE-02 has landed**
-(D7's half); FE-04, FE-06 and DBG-03 are what is left, and F8 is their
-foundation. §4 says where to pick it up.
+**S12 is closed.** All four findings are fixed — FE-02, FE-04, FE-06, DBG-03 —
+and all six exit-criterion tests pass. D7 and D8 are answered *and implemented*
+(ADR-049); FE-06's rule is ADR-050. The next stage is **S13**, and **D13 is the
+one thing that binds before it** (§5).
 
-Fifty-five of the audit's ignored regressions are un-ignored and passing.
-The three added since S11's first half:
+Sixty of the audit's ignored regressions are un-ignored and passing.
+The five added by S12's second half:
+
+| Test | File | Finding |
+|---|---|---|
+| `regression_same_line_statements_require_a_semicolon` | `parse.rs` | FE-04 |
+| `regression_semicolons_separate_top_level_statements` | `parse.rs` | FE-04 |
+| `regression_newline_terminates_a_bare_return` | `parse.rs` | FE-04 |
+| `regression_parenthesized_record_literal_is_valid_in_a_condition` | `parse.rs` | FE-06 |
+| `regression_match_arm_may_return_a_record_literal` | `parse.rs` | FE-06 |
+
+F8/FE-04's twelve new gates:
+
+| Test | File | Pins |
+|---|---|---|
+| `a_token_records_whether_a_line_break_precedes_it` | `praxis-syntax/src/lib.rs` | the fact rides on the token, not the trivia |
+| `only_the_first_token_on_a_line_is_preceded_by_a_newline` | `lex.rs` | the flag is consumed, not sticky |
+| `same_line_tokens_report_no_newline` | `lex.rs` | what the separator check has to be able to see |
+| `a_line_break_anywhere_in_the_trivia_run_counts` | `lex.rs` | a comment after the break must not hide it |
+| `a_line_comment_ends_the_line_it_is_on` | `lex.rs` | …including when EOF eats the `\n` |
+| `an_operator_continues_across_a_line_break` | `parse.rs` | D8's "never inside the Pratt loop", stated |
+| `a_method_chain_continues_across_a_line_break` | `parse.rs` | …and for postfix |
+| `a_newline_terminates_a_bare_break` | `parse.rs` | `break`'s half; the exit test covers `return` |
+| `a_semicolon_separates_two_statements_on_one_line_in_a_block` | `parse.rs` | the `;` still works where it already did |
+| `each_missing_separator_is_reported_once_and_parsing_continues` | `parse.rs` | one `P002` per run-on, no cascade |
+| `a_block_demands_a_separator_but_its_closing_brace_is_one` | `parse.rs` | the block loop, both ways |
+| `match_arms_on_one_line_need_a_comma` | `parse.rs` | the arm loop's comment made true |
+
+FE-06's three new gates:
+
+| Test | File | Pins |
+|---|---|---|
+| `every_bracket_restores_record_literals_inside_a_condition` | `parse.rs` | six bracket shapes, not just the exit test's parens |
+| `a_match_arm_allows_a_record_literal_at_any_depth` | `parse.rs` | block, closure and nested `if` inside an arm |
+| `a_keyword_head_still_claims_its_brace_as_a_block` | `parse.rs` | the property the flag existed to provide, in all four heads |
+
+DBG-03's one new gate:
+
+| Test | File | Pins |
+|---|---|---|
+| `two_unusable_names_do_not_collide_into_one_parameter` | `evaluate.rs` | the `_x` collision, through `collect_bindings` and `synthesize` |
+
+`sanitize_rejects_digit_leading_and_punct` is plan §8.2's second entry and had to
+be **rewritten**: it asserted the `_x` rewrite itself. It is now
+`an_unusable_local_name_is_rejected_rather_than_rewritten`, which states the
+property that replaced it — a name is usable as written or its local is dropped,
+and there is no third name. `token_carries_kind_and_span` (praxis-syntax) was
+**amended** for the new field.
+
+The three added by S12's first half:
 
 | Test | File | Finding |
 |---|---|---|
@@ -378,17 +427,23 @@ type; and `fold_record`/`fold_enum` take no `args`, because
 is populated on the five orderable descriptors and deliberately `None` on the
 other sixteen (S10, ADR-045); D3 is answered. See ADR-038.
 
-**F3 — identifier class: predicates, plus the wildcard split.**
-`praxis-syntax/src/ident.rs` has `is_ident_start` / `is_ident_continue` /
-`is_ident`, and the lexer uses them; a **lone** `_` now lexes as
-`SyntaxKind::UNDERSCORE` rather than `Ident` (FE-02, D7 — ADR-049), and
-`Parser::expect_binder` is the binding position that accepts either. **Not
-done:** the `Ident` newtype;
+**F3 — identifier class: predicates, the wildcard split, and the debugger's
+consumer.** `praxis-syntax/src/ident.rs` has `is_ident_start` /
+`is_ident_continue` / `is_ident`, and the lexer uses them; a **lone** `_` now
+lexes as `SyntaxKind::UNDERSCORE` rather than `Ident` (FE-02, D7 — ADR-049), and
+`Parser::expect_binder` is the binding position that accepts either.
+`praxis-debugger`'s `collect_bindings` asks `is_ident` and **drops** a local it
+cannot spell (DBG-03) — `sanitize_name` is deleted, and `praxis-syntax` is a new
+dependency of `praxis-debugger`. **Not done:** the `Ident` newtype, and
 `praxis-input-parser/src/scan.rs` `split_capture`'s independent ASCII rule
-(IP-04, S19); `praxis-debugger/src/evaluate.rs` `sanitize_name`, which still
-*rewrites* invalid names to `_x` non-injectively (DBG-03, S12) — its bug-pinning
-test `sanitize_rejects_digit_leading_and_punct` is still green and still needs
-rewriting, per §8.2.
+(IP-04, S19) — that is the last of F3's three rules still standing alone.
+
+**F8 — `Token::preceded_by_newline` + `StmtSeparator`: landed whole.** `Token`
+carries the flag, set for the whole trivia run in front of it; `StmtSeparator
+{ Semicolon, Newline, EndOfBlock }` is what both statement loops must produce;
+`Parser::newline_before` is the one reader and it is consulted in three places
+only (both statement loops and `starts_expr`). See ADR-049. **Not done:**
+nothing — but the plan's `Semicolon(Token)` carries no token (see §6).
 
 **F4 — ABI manifest: landed whole.** `praxis_stdlib::abi` is 137 rows, one per
 `praxis_*` wrapper: linker name, `AbiKind` params, `AbiRet`, and an `Effect`
@@ -465,7 +520,56 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S12's FE-02 — the wildcard token)
+### From this session (S12's F8/FE-04, FE-06 and DBG-03)
+
+**A `Token` has three fields, and `Token::new` takes three arguments.**
+`preceded_by_newline` is true iff the trivia run immediately before it contained
+a `\n`/`\r` or was a line comment. Three construction sites workspace-wide
+(`lex.rs`'s `push`, which is now also what emits EOF, and one crate test).
+Trivia *accumulates* the fact; a meaningful token *consumes* it, so only the
+first token on a line reports one.
+
+**Two statements need a separator, and `;` is no longer the only one.** Both
+statement loops end by calling `Parser::expect_stmt_separator`, which returns
+`Some(StmtSeparator)` or emits **`P002`** and returns `None`. The top-level loop
+consumes a `;` for the first time. A run-on is one diagnostic and parsing
+continues — it does not cascade.
+
+**A newline is consulted in exactly three places**, all of them
+`Parser::newline_before`: the two statement loops, and `starts_expr` (which is
+`break`/`return`'s optional-value decision). **Never inside the Pratt loop** —
+`1 +\n2` is one addition and a `.method()` chain crosses lines. If you add a
+grammar rule that wants a newline, ask whether it is a statement boundary; D8
+says nothing else is.
+
+**Match arms are separated by a comma or a line break.** The arm loop's
+`is_pattern_start` check is still there as the recovery guard, but two arms on
+one line with no comma is now a `P002`. `match x { A => 1 B => 2 }` used to
+parse.
+
+**`P002` is the stage's one new diagnostic code**, and it is in the *parse*
+block (`P0xx`), which D13 does not allocate. `P001` was the only one spent
+before; `Parser::error` is still `P001` and `Parser::error_with` takes a code.
+
+**`Parser` has no `no_struct_literal` field — suppression is a parameter.**
+`StructLit { Allowed, Suppressed }` threads through `parse_expr_bp` →
+`parse_prefix` → `parse_atom` → `parse_name_or_call`, which is the one reader.
+`parse_expr()` is the *bracketed* entry (Allowed) and
+`parse_expr_no_struct_lit()` is the four keyword heads'. Every bracketed context
+re-enters at Allowed; a closure body inherits. See ADR-050. **If you add an
+expression form that can contain a `{`, decide which it is** — the compiler will
+make you, because `parse_atom` takes the parameter.
+
+**A record literal is legal in a match arm body and inside any bracket.**
+`match x { A => Point { x: 1 } }` and `if (Point { x: 1 } == p) { 0 }` used to be
+`P001`. Any test that expected a parse error there is now wrong.
+
+**`sanitize_name` is gone.** `collect_bindings` filters on
+`is_bindable_name` (F3's `is_ident`) and drops a local whose name the language
+cannot spell, rather than binding it under a shared `_x`. A `LocalBinding.name`
+is now always the name as written, Unicode included.
+
+### From S12's FE-02 — the wildcard token
 
 **A lone `_` lexes as `SyntaxKind::UNDERSCORE`, not `Ident`.** Only the
 one-character run: `_x`, `__`, `x_`, `_1` and `snake_case` are all still
@@ -1167,9 +1271,13 @@ big-endian target at `Jit::new`.
 **`lower_for` emits an extra block.** The index increment has its own block and
 is `continue`'s target.
 
-**The formatter preserves comments.** When F8 adds
-`Token::preceded_by_newline`, `fmt::starts_new_line` should read that instead of
-re-deriving it.
+**The formatter preserves comments.** `fmt::starts_new_line` re-derives the
+newline fact by walking `prev_sibling_or_token`. An earlier note here said F8
+would let it read `Token::preceded_by_newline` instead; it cannot — F8's flag
+lives on `praxis_syntax::Token`, the *pre-tree* token, and the formatter holds a
+rowan `SyntaxToken`. The two rules are also not the same: `starts_new_line`
+stops at the first sibling *node*, where F8's looks through the whole trivia
+run. Leave it alone unless the flag is threaded into the green tree.
 
 **`praxis_float_sign` no longer uses `f64::signum`.** Both zeros give `0.0`.
 
@@ -1181,39 +1289,52 @@ work of its own: F9's fold walks record fields and enum payloads, which is the
 whole finding, and `deep_resolve_rewrites_record_field_links` is green. TY-06
 was F12's static half; see ADR-048 and §3.
 
-**S12 is open. D7 and D8 are answered (ADR-049) and FE-02 has landed.** What is
-left, in the plan's own internal order:
+**S12 is closed.** FE-02, FE-04, FE-06 and DBG-03 are all fixed, all six
+exit-criterion tests pass, and the stage's two ADRs (049, 050) are written. It
+spent no ABI bump: nothing it touched is `#[repr(C)]`.
 
-1. **F8 — `Token::preceded_by_newline` + `StmtSeparator`.** Read plan §3.1's F8
-   block; ADR-049 decision D8 is the rule it implements, already decided:
-   a newline terminates only (a) between statements in a block or at the top
-   level and (b) at `break`/`return`'s optional-value decision, and is consulted
-   **nowhere** inside the Pratt loop. `Token` is `Copy`; the bool touches two
-   construction sites (`lex.rs:89`, `:388`) plus test constructors.
-2. **FE-04**, on top of F8. Exit tests:
-   `regression_same_line_statements_require_a_semicolon` (parse.rs),
-   `regression_semicolons_separate_top_level_statements`,
-   `regression_newline_terminates_a_bare_return`.
-3. **FE-06** — struct-literal suppression as a parameter that brackets reset.
-   **Must follow FE-04**: passing `StructLit::Allowed` into match-arm bodies
-   before arm separation is newline-aware mis-parses
-   `match x { A => Point { x: 1 } B => … }`. Exit tests:
-   `regression_parenthesized_record_literal_is_valid_in_a_condition`,
-   `regression_match_arm_may_return_a_record_literal`.
-4. **DBG-03** — independent of all three, S-effort. `sanitize_name`
-   (`praxis-debugger/src/evaluate.rs`) still *rewrites* an invalid name to `_x`
-   non-injectively. Its bug-pinning test `sanitize_rejects_digit_leading_and_punct`
-   **must be rewritten, not extended** (plan §8.2 / H18). It consumes F3's
-   `praxis_syntax::ident` predicates, which landed in S2.
+**The next stage is S13 — and D13 binds before it starts.** The plan is explicit
+that the whole diagnostic-code block must be allocated by one owner before S13
+(§7 D13, §5's S13 paragraph). What is already spent, and what S12 changed:
 
-**Expect the highest test churn of any stage** from F8/FE-04: ~40 insta
-snapshots in `parse.rs` plus every `crates/praxis-cli/tests/fixtures/run/*.px`
-with same-line statements. FE-02 caused none of it — the wildcard change was
-clean apart from the two JIT tests named in §3.
+- Taken today: `T001`–`T005`, **`P001`–`P002`**, `N001`–`N002`, `Y001`–`Y008`,
+  `Y120`–`Y121`, `I001`/`I010`.
+- **FE-04's separator diagnostic did not come out of D13's block.** The plan
+  lists "statement separator (FE-04)" among the codes D13 must allocate, but the
+  parse category is numbered independently and had only `P001` in it. `P002` is
+  a parse code; the `Y0xx` allocation is untouched by S12 and must still start
+  from `Y009`.
 
-**D13 binds before S13**, and S11 has already spent `Y007` and `Y008` out of the
-block (§5); FE-04's "statement separator" diagnostic needs one more.
-**S12's ABI bump budget is fresh**: S11 spent none.
+So D13's job is unchanged from what §5 records, minus that one line. Its
+consumers are TY-11, TY-12, TY-14, TY-15, TY-20, TY-23, TY-24, TY-28 (S13),
+HIR-04, HIR-07 (S16) and the `I0xx` block for IP-06/IP-07/IP-09/IP-10 (S19).
+
+**S13's own shape** (plan §5): 10 findings, weight 26 — annotations reachable
+(TY-08, TY-09, TY-10), a sealed type environment (F19's `DeclGroup` driver),
+mutability and scope discipline. Two things already waiting for it:
+`empty_vec_float_has_the_float_element_descriptor_before_any_push` is blocked on
+TY-08 and says so in its `#[ignore]` reason (see §1), and
+`infer_declaration_group` already has the two-phase shape and the group level
+that F19 needs for dependency-ordered binding groups.
+
+**What S12 deliberately left:**
+
+- **The FE-04 trap is open, and D8's chosen rule does not close it.** `let x = 1`
+  followed by a line starting with `(` still parses as a *call* of the
+  parenthesized expression — the newline is a statement separator, but it does
+  not stop the postfix loop. ADR-049 records the two rejected alternatives and
+  the workaround (bind the tuple to a name). It is the reason
+  `tuple_schema_uses_the_unit_descriptor_for_unit_elements` was rewritten in S7,
+  and it will bite again the same way.
+- **`starts_expr` still asks two questions.** A newline says "no value", and so
+  does a token that cannot begin an expression (`;`, `}`, `)`, `,`, `else`,
+  `in`). The second list is unchanged and is still a hand-written set.
+- **FE-05 is not S12's.** F8's unblocks list names it, but the interleaved
+  postfix loop landed in S2 and `regression_postfix_forms_may_be_interleaved` is
+  green.
+- **A closure body inherits the ambient struct-literal suppression** rather than
+  resetting it, because `|` is not a bracket the grammar closes over. See
+  ADR-050; nothing in the corpus depends on either choice.
 
 **F12's runtime half is still owed, and it is S18's.** What did *not* land, on
 purpose:
@@ -1353,8 +1474,13 @@ split landed first, the two m11 tests are green, and
 `the_debug_set_still_shows_what_the_root_set_dropped` now states the property
 at the level it lives at rather than leaving it to a CLI snapshot three layers
 away. **H15 is discharged** — ADR-043 encodes the ordering in `HeapDrained`
-rather than documenting it. **H1, H2, H4, H6, H7, H8, H9 and H16 remain
-discharged.**
+rather than documenting it. **H13 is discharged** — FE-04 landed before FE-06
+(see §6 for what the hazard's own example actually does). **H18 has two entries
+left**: `mutable_capture_records_error` (S15) and `numeric_scalars_are_orderable`
+(S17). `sanitize_rejects_digit_leading_and_punct` was rewritten with DBG-03,
+`generalized_var_state_is_marked` with S11, and the vec-adopts-first-descriptor
+assertions turned out not to need rewriting at all (§6). **H1, H2, H4, H6, H7,
+H8, H9 and H16 remain discharged.**
 
 ## 5. Design decisions still open
 
@@ -1388,25 +1514,31 @@ two operations, not one. `f64::total_cmp` was rejected for splitting `-0.0` from
 already resolved by ADR-038 (descriptors are `static`); ADR-045 decision 3 is
 what makes both dispatch sites *use* pointer identity.
 
-**D7 and D8 are answered — see ADR-049.** `_` is legal in every binding
-position and introduces nothing (D7, **implemented** as FE-02); a newline
-terminates a statement and never a subexpression, consulted only between
-statements and at `break`/`return`'s optional-value decision (D8, **decided,
-not yet implemented** — it is F8/FE-04's specification).
+**D7 and D8 are answered and implemented — see ADR-049.** `_` is legal in every
+binding position and introduces nothing (D7, FE-02); a newline terminates a
+statement and never a subexpression, consulted only between statements and at
+`break`/`return`'s optional-value decision (D8, F8/FE-04).
 
 **D1 and D5 still block their stages**; neither has been answered. **D13 is the
-next one that binds** — the plan wants the whole diagnostic-code block allocated
-before S13 starts, and S12 is the stage before it.
+next one that binds, and S12 is now behind us** — the plan wants the whole
+diagnostic-code block allocated before S13 starts. Nothing else stands between
+here and S13.
 
 **D13's block has two fewer numbers than it did.** S11 spent `Y007` (a wrong
 type-argument count) and `Y008` (a duplicate field or variant): both are cases
 TY-07's fix made *detectable*, and leaving them undiagnosed would have meant
 either silently dropping a field or reporting a downstream `Y001` about a type
 the user never wrote. The allocation must start from `Y009`. The taken codes
-today are `N001`–`N002`, `Y001`–`Y008`, `Y120`–`Y121`, and `I001`/`I010` in the
-input-parser range. F12 spent no further code: a wrong type-argument count on a
-*nominal* def (`Option[Int, Text]`) is the same mistake as on a collection ctor
-and reuses `Y007`.
+today are `T001`–`T005`, `P001`–`P002`, `N001`–`N002`, `Y001`–`Y008`,
+`Y120`–`Y121`, and `I001`/`I010` in the input-parser range. F12 spent no further
+code: a wrong type-argument count on a *nominal* def (`Option[Int, Text]`) is
+the same mistake as on a collection ctor and reuses `Y007`.
+
+**S12 spent `P002`, and it is not out of D13's block.** The plan lists FE-04's
+"statement separator" among the diagnostics D13 must allocate, but categories
+are numbered independently and the parse category had only `P001` in it. The
+`Y0xx` allocation still starts at `Y009` and is otherwise exactly as the plan
+describes it.
 
 **D1 gained a second case.** It was scoped to `Map.get` / `Grid.find`; the same
 question is now also open for `min`/`max` on an empty sequence, which return
@@ -1431,6 +1563,45 @@ one. Settle both together.
 
 Things the plan states that are no longer or were not quite true.
 
+- **F8's "HIGHEST TEST CHURN of any foundation" did not happen — at all.** The
+  plan budgets "~40 insta snapshots in `parse.rs`, plus every
+  `crates/praxis-cli/tests/fixtures/run/*.px` with same-line statements", and
+  S12's own paragraph repeats it. The suite passed unchanged: every fixture,
+  every snapshot and every inline test source already separated its statements
+  with newlines, which is precisely what the new rule demands. This is the
+  **fourth** F-block to predict wide churn and deliver none (TY-02, F12's
+  `Option[Int]` rendering, FE-02, F8). Check before budgeting for it.
+- **`StmtSeparator::Semicolon` carries no `Token`.** The plan's sketch is
+  `Semicolon(Token)`; nothing reads it, and an unread enum field is a
+  `dead_code` error under `-D warnings`. The three variants are unit variants.
+  The property the plan wants from the type — that the loop cannot advance
+  without producing a separator or emitting a diagnostic — is unaffected.
+- **F8's `newline_before` reads the *token*, not the trivia.** The flag is set
+  on the token after the run, so the answer survives the trivia having already
+  been emitted into the green tree — which matters, because `current_span` and
+  `bump` both call `eat_trivia` and the separator check runs after them.
+- **The match-arm loop is F8's fifth replacement and the plan does not list it
+  as a finding.** F8's "Replaces" mentions `parse.rs:955-977`, but FE-04's own
+  description is only about statements. Arms now demand a comma or a line break;
+  `match x { A => 1 B => 2 }` used to parse and is now a `P002`.
+- **H13's example does not mis-parse the way it says.** The hazard claims that
+  allowing struct literals in arm bodies before arm separation is newline-aware
+  mis-parses `match x { A => Point { x: 1 } B => … }`. Traced against the real
+  grammar, the record literal parses correctly and `is_pattern_start(B)` finds
+  the next arm either way. What FE-04 actually buys is that the *missing comma*
+  is now reported instead of silently accepted. The ordering is still right —
+  FE-04 first — it is just cheaper than advertised.
+- **FE-06 is not "make the flag scoped"; the flag had to go.** A parser-wide
+  `bool` cannot express "until the ambiguity ends", only "until this call
+  returns" — which is why it leaked through parentheses *and* into arm bodies
+  from two different call sites. `StructLit` as a parameter is what makes "does
+  this leak?" answerable by reading one call chain. See ADR-050.
+- **DBG-03's fix is to reject, not to rename injectively.** The audit describes
+  the finding as "maps every invalid name to `_x`, creating collisions", which
+  reads as an argument for unique renaming. There is nothing to rename *to*: a
+  `p EXPR` cannot mention a name the language cannot spell, so a local with one
+  has no use as a parameter. Dropping it is what `collect_bindings` already does
+  for a local whose `type_id` this `TypeDb` never minted.
 - **F12 is two halves in two stages, and only the static one is S11's.** The
   plan's F12 block describes the `praxis-types` reshape and the runtime
   `EnumSchema` together, and its ORDER paragraph says codegen and runtime "MUST
