@@ -33,6 +33,35 @@ pub(crate) fn unknown_type(at: FileSpan, name: &str) -> Diagnostic {
     )
 }
 
+/// `N004` — a name is declared twice in one scope (TY-24).
+///
+/// Two top-level `fn`s of one name used to bind two distinct symbols in the
+/// same scope: the second overwrote the first in the scope map while both kept
+/// their `decls` entry, so both reached the backend and were emitted under one
+/// JIT symbol name.
+pub(crate) fn duplicate_declaration(at: FileSpan, name: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::DuplicateDeclaration,
+        format!("`{name}` is already declared in this scope"),
+        at,
+    )
+}
+
+/// `N005` — a function is declared inside a function (TY-23).
+///
+/// The grammar parses one and name resolution never declared it, so inference
+/// reached an `expect` on the missing declaration and panicked — which broke
+/// `analyze`'s contract that malformed input becomes diagnostics.
+pub(crate) fn nested_function(at: FileSpan, name: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::NestedFunction,
+        format!("`{name}` cannot be declared inside another function"),
+        at,
+    )
+}
+
 /// `Y001` — two types that could not be unified (expected vs found).
 pub(crate) fn type_mismatch(at: FileSpan, expected: &str, found: &str) -> Diagnostic {
     Diagnostic::new(

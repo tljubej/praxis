@@ -636,17 +636,24 @@ impl Inferer {
         let placeholder = named
             .and_then(|range| self.fn_placeholders.get(&range).copied())
             .unwrap_or_else(|| self.db.fresh_var());
-        let fn_symbol = if let Some(name_tok) = item.name() {
-            let id = *self
-                .decls
-                .get(&name_tok.text_range())
-                .expect("fn name was declared during resolution");
-            if let Some(sym) = self.names.get_mut(id) {
-                sym.scheme = Some(Scheme::monotype(placeholder));
-            }
-            Some(id)
-        } else {
-            None
+        let fn_symbol = match item.name() {
+            Some(name_tok) => match self.decls.get(&name_tok.text_range()).copied() {
+                Some(id) => {
+                    if let Some(sym) = self.names.get_mut(id) {
+                        sym.scheme = Some(Scheme::monotype(placeholder));
+                    }
+                    Some(id)
+                }
+                // Resolution declares every `fn` it accepts, so a name with no
+                // declaration is one it refused: a nested function, or the
+                // second of a duplicate pair. Both are already reported (N005 /
+                // N004) — inference used to `expect` here and panic, which broke
+                // `analyze`'s contract that malformed input becomes diagnostics
+                // (TY-23). The body is still inferred, so the rest of the file
+                // keeps reporting.
+                None => None,
+            },
+            None => None,
         };
 
         // Body scope at an inner level: params get fresh vars, body is inferred.

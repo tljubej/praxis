@@ -77,6 +77,17 @@ impl ScopeTree {
             .insert(name.into(), symbol);
     }
 
+    /// Whether `name` is bound in **this exact scope**, ignoring the parent
+    /// chain.
+    ///
+    /// [`ScopeTree::lookup`] cannot answer this: a top-level `fn` declared twice
+    /// and a `let` shadowing a prelude name both find a symbol, and only the
+    /// first is a mistake (TY-24).
+    #[must_use]
+    pub fn is_bound_here(&self, scope: ScopeId, name: &str) -> bool {
+        self.scopes[scope.0 as usize].bindings.contains_key(name)
+    }
+
     /// Look up `name` starting in `scope` and walking out to the root. Returns
     /// the innermost visible symbol, or `None` if unbound. This is the core of
     /// name resolution.

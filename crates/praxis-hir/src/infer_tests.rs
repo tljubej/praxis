@@ -1163,7 +1163,6 @@ fn forward_call_is_checked_against_later_function_signature() {
 }
 
 #[test]
-#[ignore = "known bug: duplicate top-level functions survive with the same runtime symbol"]
 fn duplicate_function_declarations_are_rejected() {
     let src = "fn duplicate() -> Int { 1 }\n\
                fn duplicate() -> Int { 2 }\n\
@@ -1175,7 +1174,6 @@ fn duplicate_function_declarations_are_rejected() {
 }
 
 #[test]
-#[ignore = "known bug: a parsed nested function trips an inference expect"]
 fn analyzing_nested_function_never_panics() {
     // Even if nested named functions are ultimately rejected, `analyze`'s
     // public contract says unsupported/malformed input becomes diagnostics.
@@ -1186,6 +1184,68 @@ fn analyzing_nested_function_never_panics() {
         result.is_ok(),
         "a parsed nested FnItem must not trip an internal `expect`"
     );
+}
+
+/// …and it is *reported*, not merely survived. The exit test only asks that
+/// `analyze` returns; `N005` is what tells the programmer why the function they
+/// wrote does not exist.
+#[test]
+fn a_nested_function_is_reported_as_one() {
+    let analysis = analyze("fn main() -> Int { fn local(x: Int) -> Int { x }\n local(1) }");
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|d| d.kind() == praxis_source::DiagCode::NestedFunction),
+        "{:?}",
+        analysis.diagnostics
+    );
+}
+
+/// The redeclaration is named where the second one is written, and the *first*
+/// definition survives — so the rest of the file resolves against something
+/// rather than cascading into `N001`s.
+#[test]
+fn a_duplicate_function_is_reported_once_and_the_first_one_survives() {
+    let src = "fn duplicate() -> Int { 1 }\n\
+               fn duplicate() -> Int { 2 }\n\
+               fn main() -> Int { duplicate() }";
+    let analysis = analyze(src);
+    let duplicates: Vec<_> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.kind() == praxis_source::DiagCode::DuplicateDeclaration)
+        .collect();
+    assert_eq!(duplicates.len(), 1, "{:?}", analysis.diagnostics);
+    assert!(
+        !analysis
+            .diagnostics
+            .iter()
+            .any(|d| d.kind() == praxis_source::DiagCode::UnknownName),
+        "the call must still resolve: {:?}",
+        analysis.diagnostics
+    );
+}
+
+/// A `fn` of one name in two *different* scopes is not a redeclaration, and a
+/// `let` shadowing a prelude name never was — `is_bound_here` is what keeps the
+/// check from firing on either.
+#[test]
+fn shadowing_an_outer_name_is_not_a_redeclaration() {
+    for src in [
+        "fn main() -> Int { let out = 1\n out }",
+        "fn f(duplicate: Int) -> Int { duplicate }\nfn duplicate() -> Int { 1 }\nfn main() -> Int { f(2) }",
+    ] {
+        let analysis = analyze(src);
+        assert!(
+            !analysis
+                .diagnostics
+                .iter()
+                .any(|d| d.kind() == praxis_source::DiagCode::DuplicateDeclaration),
+            "{src}: {:?}",
+            analysis.diagnostics
+        );
+    }
 }
 
 // --- records and match exhaustiveness ---------------------------------------

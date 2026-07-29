@@ -32,7 +32,7 @@ use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
 use praxis_syntax::SyntaxKind;
 use rowan::{NodeOrToken, TextRange};
 
-use crate::diagnostics::{unknown_type, unresolved_name};
+use crate::diagnostics::{duplicate_declaration, nested_function, unknown_type, unresolved_name};
 use crate::name_table::NameTable;
 use crate::scope::{ScopeId, ScopeTree};
 use crate::symbol::{Symbol, SymbolId, SymbolKind};
@@ -176,6 +176,16 @@ impl Resolver {
         );
     }
 
+    /// Whether `item` is a direct child of the source file, which is the only
+    /// place a `fn` may be declared. Asking the tree rather than "did pass 1
+    /// declare it?" keeps this answer independent of TY-24's duplicate case,
+    /// which also leaves a `fn` undeclared.
+    fn is_top_level(&self, item: &FnItem) -> bool {
+        item.syntax()
+            .parent()
+            .is_some_and(|p| p.kind() == SyntaxKind::SOURCE_FILE)
+    }
+
     /// Record an unresolved name reference and emit `N001`.
     fn unresolved(&mut self, range: TextRange, name: &str) {
         let span = range_to_span(range);
@@ -221,12 +231,24 @@ impl Resolver {
     fn register_top_level(&mut self, scope: ScopeId, node: &praxis_syntax::SyntaxNode) {
         if let Some(fn_) = FnItem::cast(node.clone()) {
             if let Some(name_tok) = fn_.name() {
-                self.bind(
-                    scope,
-                    SymbolKind::Fn,
-                    name_tok.text().to_string(),
-                    name_tok.text_range(),
-                );
+                // A second `fn` of the same name is a redeclaration, not a
+                // shadow: both would reach the backend and be emitted under one
+                // JIT symbol (TY-24). Report it and keep the first, so the rest
+                // of the file still resolves against something.
+                if self.out.scopes.is_bound_here(scope, name_tok.text()) {
+                    let span = range_to_span(name_tok.text_range());
+                    let at = self.file_span(span);
+                    self.out
+                        .diagnostics
+                        .push(duplicate_declaration(at, name_tok.text()));
+                } else {
+                    self.bind(
+                        scope,
+                        SymbolKind::Fn,
+                        name_tok.text().to_string(),
+                        name_tok.text_range(),
+                    );
+                }
             }
         }
         // M7-WS3: register struct type names so they're visible as type
@@ -352,6 +374,20 @@ impl Resolver {
     }
 
     fn resolve_fn(&mut self, scope: ScopeId, item: &FnItem) {
+        // Only a top-level `fn` was registered in pass 1. One inside a block was
+        // parsed but never declared, and inference then reached an `expect` on
+        // the missing declaration and panicked (TY-23). Report it here — where
+        // the nesting is visible — and carry on resolving the body, so the rest
+        // of the file still reports.
+        if !self.is_top_level(item) {
+            if let Some(name_tok) = item.name() {
+                let span = range_to_span(name_tok.text_range());
+                let at = self.file_span(span);
+                self.out
+                    .diagnostics
+                    .push(nested_function(at, name_tok.text()));
+            }
+        }
         // A function's name was registered in pass 1 (`register_top_level`) so
         // it is visible for forward references and mutual recursion. Reuse that
         // symbol rather than re-binding (which would create a duplicate).
