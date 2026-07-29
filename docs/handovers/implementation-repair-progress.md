@@ -22,7 +22,7 @@ Update this file at the end of every stage.
 | S9 — MIR root exactness, debug/root split, verifier | **done** | `ad9bbdf`, `d9521f9`, `e15a444` |
 | S10 — Semantic comparison, nominal schema identity | **done** | `29ff4f6`, `83de924`, `510ffc3`, `ff35f68` |
 | S11 — TypeDb core: levels, schemes, nominal identity | **done** | `8aa9069`, `aa9deea`, `d69881e`, `5efd0e2` |
-| S12 — Parser grammar: wildcard, separators, struct-literal suppression | **FE-02 done; FE-04, FE-06, DBG-03 left** | see §4 |
+| S12 — Parser grammar: wildcard, separators, struct-literal suppression | **FE-02 done; FE-04, FE-06, DBG-03 left** | `4504a1d` |
 | S13 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
@@ -378,9 +378,12 @@ type; and `fold_record`/`fold_enum` take no `args`, because
 is populated on the five orderable descriptors and deliberately `None` on the
 other sixteen (S10, ADR-045); D3 is answered. See ADR-038.
 
-**F3 — identifier class: predicate half only.** `praxis-syntax/src/ident.rs`
-has `is_ident_start` / `is_ident_continue` / `is_ident`, and the lexer uses
-them. **Not done:** the `Ident` newtype; `_` lexing as `UNDERSCORE` (D7 + S12);
+**F3 — identifier class: predicates, plus the wildcard split.**
+`praxis-syntax/src/ident.rs` has `is_ident_start` / `is_ident_continue` /
+`is_ident`, and the lexer uses them; a **lone** `_` now lexes as
+`SyntaxKind::UNDERSCORE` rather than `Ident` (FE-02, D7 — ADR-049), and
+`Parser::expect_binder` is the binding position that accepts either. **Not
+done:** the `Ident` newtype;
 `praxis-input-parser/src/scan.rs` `split_capture`'s independent ASCII rule
 (IP-04, S19); `praxis-debugger/src/evaluate.rs` `sanitize_name`, which still
 *rewrites* invalid names to `_x` non-injectively (DBG-03, S12) — its bug-pinning
