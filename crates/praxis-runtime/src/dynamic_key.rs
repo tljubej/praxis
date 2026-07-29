@@ -324,9 +324,19 @@ mod tests {
         assert_eq!(set.len(), 2);
     }
 
+    /// **Rewritten**, not un-ignored (plan §8.2). It asserted that a `Vec` key
+    /// stays findable after it is mutated, which no structural hash can
+    /// deliver — and named the alternative the language actually took: reject
+    /// the state. **D4 chose rejection**, so no Praxis program can build this
+    /// `HashSet` any more.
+    ///
+    /// What it pins now is the fact that makes the rejection necessary rather
+    /// than the impossible property it asked for: a `DynamicKey` hashes by the
+    /// value's *contents*, so mutating a stored key really does move its
+    /// bucket. `a_mutable_collection_is_not_a_key` (`infer_tests.rs`) is the
+    /// compile-time half; this is why that half has to exist.
     #[test]
-    #[ignore = "known bug: mutable structural keys invalidate Rust hash-table buckets"]
-    fn mutating_a_structural_key_does_not_break_lookup_by_the_same_value() {
+    fn a_structural_key_hashes_by_contents_so_mutating_it_moves_its_bucket() {
         use std::collections::HashSet;
 
         let rt = Runtime::new();
@@ -334,19 +344,23 @@ mod tests {
         let wrapped = DynamicKey::new(key);
         let mut set = HashSet::new();
         assert!(set.insert(wrapped));
+        assert!(set.contains(&wrapped), "found before anything changes");
 
-        for i in 0..4096_i64 {
-            let item = rt.alloc_int(i);
-            unsafe {
-                (*key.payload::<crate::collections::VecPayload>())
-                    .items
-                    .push(item);
-            }
-            assert!(
-                set.contains(&wrapped),
-                "mutating a key after insertion changed its bucket at length {}",
-                i + 1
-            );
+        // One push is enough: the hash is over the contents, and the contents
+        // are different.
+        let item = rt.alloc_int(1);
+        unsafe {
+            (*key.payload::<crate::collections::VecPayload>())
+                .items
+                .push(item);
         }
+        assert!(
+            !set.contains(&wrapped),
+            "a mutated key hashes to a different bucket — which is exactly why \
+             the type checker refuses one (D4, Y014)"
+        );
+        // …and the entry is still in the table, unreachable. That is the shape
+        // of the corruption: not a lost value, an unfindable one.
+        assert_eq!(set.len(), 1);
     }
 }

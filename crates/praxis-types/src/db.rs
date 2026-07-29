@@ -350,8 +350,20 @@ impl TypeDb {
         let mut claimed = Vec::new();
         let mut i = 0;
         while i < self.pending_constraints.len() {
-            if binders.contains(&self.pending_constraints[i].var) {
-                claimed.push(self.pending_constraints.remove(i));
+            // Through `follow`, and it matters: the constraint was made about
+            // the variable that existed *then*, and unification may since have
+            // linked it to another. `let m = Map(); m.insert(k, 1)` requires the
+            // map's own key variable, which `insert` then links to `k`'s — and
+            // `k`'s is what generalization quantifies. Comparing the unfollowed
+            // ids would leave the constraint pending forever.
+            let var_ty = self.pending_constraints[i].var_type();
+            let representative = self.var_id_of(self.follow(var_ty));
+            if representative.is_some_and(|v| binders.contains(&v)) {
+                let mut c = self.pending_constraints.remove(i);
+                // Re-point it at the representative so `reemit_constraints` can
+                // find it among the scheme's binders.
+                c.var = representative.expect("checked just above");
+                claimed.push(c);
             } else {
                 i += 1;
             }

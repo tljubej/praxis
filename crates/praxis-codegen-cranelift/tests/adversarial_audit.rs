@@ -355,21 +355,31 @@ fn record_schema_cache_is_scoped_by_type_database_not_bare_def_id() {
     );
 }
 
+/// **Rewritten**, not un-ignored (plan §8.2). It asserted that a `Vec` key
+/// stays retrievable after it is mutated, and named the two ways an
+/// implementation could deliver that: "reject that state or keep key hash
+/// identity stable". **D4 chose rejection**, so the program in the original
+/// body no longer compiles and the property it asserted has no subject.
+///
+/// What replaced it is stated where it now lives: the program is refused, with
+/// `Y014`, before it can run. `a_mutable_collection_is_not_a_key`
+/// (`infer_tests.rs`) is the rule; this is the end-to-end fact that a program
+/// which would have exposed Rust's mutated-key failure never reaches the JIT.
 #[test]
-#[ignore = "known bug: mutable structurally hashed keys can change their hash in place"]
-fn mutating_a_collection_key_does_not_break_map_lookup() {
-    // The type system currently admits mutable, structurally-hashed values as
-    // keys. A language implementation must reject that state or keep key hash
-    // identity stable; exposing Rust HashMap's "mutated key" failure is not a
-    // coherent source-language behavior.
-    let (runtime, result) = run_main(
-        "fn main() -> Int {\n  let key = Vec()\n  key.push(1)\n  let m = Map()\n  m.insert(key, 42)\n  key.push(2)\n  if m.contains(key) { 1 } else { 0 }\n}\n",
-    );
-    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
-    assert_eq!(
-        result.as_int(),
-        1,
-        "a key accepted by the type checker must remain retrievable"
+fn a_mutable_collection_key_is_refused_before_it_can_be_mutated() {
+    let src = "fn main() -> Int {\n  let key = Vec()\n  key.push(1)\n  let m = Map()\n  m.insert(key, 42)\n  key.push(2)\n  if m.contains(key) { 1 } else { 0 }\n}\n";
+    let map = SourceMap::new();
+    let file = map.intern("adversarial_audit.px", src);
+    let parsed = parse(file, src);
+    assert!(parsed.diagnostics.is_empty(), "the program parses");
+    let analysis = analyze_root(file, &parsed.tree);
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|d| d.code().to_string() == "Y014"),
+        "a mutable collection is refused as a key: {:?}",
+        analysis.diagnostics
     );
 }
 

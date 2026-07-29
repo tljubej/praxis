@@ -1682,7 +1682,6 @@ fn sum_requires_int_elements() {
 }
 
 #[test]
-#[ignore = "known bug: map operations do not enforce key hashability"]
 fn map_key_must_be_hashable() {
     let src = "fn id(x: Int) -> Int { x }\n\
                fn main() -> Unit { let map = Map(); map.insert(id, 1) }";
@@ -1693,7 +1692,6 @@ fn map_key_must_be_hashable() {
 }
 
 #[test]
-#[ignore = "known bug: mutable structural values are admitted as hash keys"]
 fn mutable_collection_cannot_be_used_as_a_map_key() {
     // Hashing a Vec by its current contents and then mutating it changes the
     // bucket it belongs to. Map lookup/removal can no longer find that entry,
@@ -1713,7 +1711,6 @@ fn mutable_collection_cannot_be_used_as_a_map_key() {
 }
 
 #[test]
-#[ignore = "known bug: mutable structural values are admitted as set keys"]
 fn mutable_collection_cannot_be_used_as_a_set_element() {
     // Set elements are hash keys too and have the same hash-stability
     // requirement as Map keys.
@@ -1731,7 +1728,6 @@ fn mutable_collection_cannot_be_used_as_a_set_element() {
 }
 
 #[test]
-#[ignore = "known bug: heap operations do not enforce element orderability"]
 fn heap_element_must_be_orderable() {
     let src = "fn id(x: Int) -> Int { x }\n\
                fn main() -> Unit { let heap = MinHeap(); heap.push(id) }";
@@ -2896,4 +2892,101 @@ fn a_bare_constructor_name_is_that_constructor_at_any_payload() {
             "`{arm}` alone leaves `None`: {diags:?}"
         );
     }
+}
+
+/// TY-32/D4 as the **rule**, not the four exit cases. The question a key has to
+/// answer is not "can this be hashed" — a `Vec` hashes fine — it is "can this
+/// still be found after the program changes it". The two used to be one
+/// predicate (`supports_hash` was literally `supports_eq`), and that is what
+/// admitted every mutable collection as a key.
+#[test]
+fn a_mutable_collection_is_not_a_key() {
+    // Every mutable collection, in a `Map` key position.
+    for ctor in ["Vec", "Set", "Deque", "MinHeap", "MaxHeap"] {
+        let src = format!(
+            "fn main() -> Unit {{\n  let key = {ctor}()\n  key.push(1)\n  let m = Map()\n  m.insert(key, 1)\n}}"
+        );
+        assert!(
+            has_type_error(&src),
+            "a {ctor} cannot be a Map key, but was accepted"
+        );
+    }
+    // A `Set` element is a key too, and so is a `Counter`'s.
+    assert!(has_type_error(
+        "fn main() -> Unit {\n  let key = Vec()\n  key.push(1)\n  let s = Set()\n  s.insert(key)\n}"
+    ));
+    assert!(has_type_error(
+        "fn main() -> Unit {\n  let key = Vec()\n  key.push(1)\n  let c = Counter()\n  c.inc(key)\n}"
+    ));
+}
+
+/// …and the rule is mutability, not container-ness. Every immutable shape is
+/// still a key, including a tuple of them — which is Python's `tuple` rule and
+/// the one a grid-coordinate program depends on.
+#[test]
+fn an_immutable_value_is_still_a_key() {
+    assert!(!has_type_error(
+        "fn main() -> Unit { let m = Map(); m.insert(1, 2) }"
+    ));
+    assert!(!has_type_error(
+        "fn main() -> Unit { let m = Map(); m.insert(\"k\", 2) }"
+    ));
+    // A tuple of scalars — the shape every grid-position map uses.
+    assert!(!has_type_error(
+        "fn main() -> Unit { let m = Map(); m.insert((1, 2), 3) }"
+    ));
+    // An enum, including the prelude's Option.
+    assert!(!has_type_error(
+        "enum Dir { N, S }\nfn main() -> Unit { let s = Set(); s.insert(N) }"
+    ));
+    // A tuple with a mutable component is not, though: one is enough.
+    assert!(has_type_error(
+        "fn main() -> Unit {\n  let v = Vec()\n  v.push(1)\n  let m = Map()\n  m.insert((1, v), 3)\n}"
+    ));
+}
+
+/// A heap orders what it holds, so its element type must have an order. This is
+/// the same channel as the key rule and a different capability — `Text` is
+/// orderable and is not a key requirement, a `Vec` is neither.
+#[test]
+fn a_heap_element_must_be_orderable() {
+    assert!(has_type_error(
+        "fn id(x: Int) -> Int { x }\nfn main() -> Unit { let h = MinHeap(); h.push(id) }"
+    ));
+    assert!(has_type_error(
+        "fn main() -> Unit { let h = MaxHeap(); h.push((1, 2)) }"
+    ));
+    // Int and Text both have a runtime `compare`, so both are legal elements.
+    assert!(!has_type_error(
+        "fn main() -> Unit { let h = MinHeap(); h.push(1) }"
+    ));
+    assert!(!has_type_error(
+        "fn main() -> Unit { let h = MinHeap(); h.push(\"a\") }"
+    ));
+}
+
+/// The requirement survives a generic function, which is the half a direct
+/// `insert` cannot show: `store`'s key parameter is unconstrained, the
+/// requirement is claimed by its scheme, and the *call site* is what chooses a
+/// type that cannot be a key.
+///
+/// The map is built inside `store`, not passed in: a `Map` *parameter* is an
+/// unresolved receiver, and constraining one of those is TY-30, which this
+/// stage's own exit test still covers separately.
+#[test]
+fn a_key_requirement_reaches_through_a_generic_function() {
+    let src = "fn store(k) -> Unit { let m = Map(); m.insert(k, 1) }\n\
+               fn main() -> Unit {\n\
+                 let key = Vec()\n\
+                 key.push(1)\n\
+                 store(key)\n\
+               }";
+    assert!(
+        has_type_error(src),
+        "the constraint must travel with `store`'s scheme to its call site"
+    );
+    // …and the same function is fine at a key type that is one.
+    let ok = "fn store(k) -> Unit { let m = Map(); m.insert(k, 1) }\n\
+              fn main() -> Unit { store(\"key\") }";
+    assert!(!has_type_error(ok));
 }

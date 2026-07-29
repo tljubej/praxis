@@ -250,6 +250,41 @@ impl Inferer {
         }
     }
 
+    /// Require what a collection type demands of its own arguments (TY-32,
+    /// RT-08, D4).
+    ///
+    /// Two rules, and neither was enforced anywhere:
+    ///
+    /// - A `Map` key, a `Set` element and a `Counter` key must be **findable
+    ///   after they are stored**. Hashing a `Vec` by its contents and then
+    ///   pushing to it moves the entry's bucket without moving the entry.
+    /// - A heap element must be **orderable**, because the heap orders it.
+    ///   `MinHeap[fn(Int) -> Int]` has no comparison to make.
+    ///
+    /// A still-unresolved argument goes on the channel and is checked when the
+    /// program pins it — which is the common shape, since `let m = Map()` mints
+    /// two variables and the first `insert` is what says what they are.
+    fn require_collection_invariants(&mut self, t: Type, at: TextRange) {
+        use praxis_types::{data::TypeData, CollectionCtor};
+        let resolved = self.db.follow(t);
+        let Some((ctor, args)) = (match self.db.data(resolved) {
+            TypeData::Collection { ctor, args } => Some((*ctor, args.to_vec())),
+            _ => None,
+        }) else {
+            return;
+        };
+        match (ctor, args.first().copied()) {
+            // The first argument is the key for all three.
+            (CollectionCtor::Map | CollectionCtor::Set | CollectionCtor::Counter, Some(key)) => {
+                self.require_cap(key, Capability::Kind(CapKind::HashStable), at);
+            }
+            (CollectionCtor::MinHeap | CollectionCtor::MaxHeap, Some(el)) => {
+                self.require_cap(el, Capability::Kind(CapKind::Ord), at);
+            }
+            _ => {}
+        }
+    }
+
     /// Check every constraint whose variable has resolved since it was made,
     /// and report the ones that fail.
     ///
@@ -1949,6 +1984,17 @@ impl Inferer {
             }
             arg_types.push(at);
         }
+        // A `Map`/`Set`/`Counter` key must be findable after it is stored, and a
+        // heap element must be orderable (TY-32, D4). Required at the method
+        // call because that is where a program actually puts a value into one —
+        // and required *after* the arguments have unified, so `m.insert(key, 1)`
+        // has pinned `K` to the key's type by now.
+        self.require_collection_invariants(
+            receiver_ty,
+            m.method_name()
+                .map(|t| t.text_range())
+                .unwrap_or_else(|| m.syntax().text_range()),
+        );
         // Record the resolved method at its name token (HIR-02). Lowering reads
         // the entry rather than repeating the catalog lookup against a receiver
         // type it derived itself, and hover reads the result.
