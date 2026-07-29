@@ -20,16 +20,47 @@ Update this file at the end of every stage.
 | S7 — Descriptor totality, typed collections, fault representation | **done** | `d014067`, `c00aab7`, `6da6037`, `eda8c69` |
 | S8 — Generation arena for JIT and plan metadata | **done** | `1311132`, `b60da0a` |
 | S9 — MIR root exactness, debug/root split, verifier | **done** | `ad9bbdf`, `d9521f9`, `e15a444` |
-| S10 — Semantic comparison, nominal schema identity | **RT-16 only** | `29ff4f6` |
+| S10 — Semantic comparison, nominal schema identity | **done** | `29ff4f6`, `83de924`, `510ffc3`, `ff35f68` |
 | S11 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10. It fell out of S1. **DBG-02** is closed in part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1096 passed, 0 failed, 106 ignored**. `just ci` is green.
+Now: **1118 passed, 0 failed, 99 ignored**. `just ci` is green.
 
-Forty-two of the audit's ignored regressions are un-ignored and passing.
+Forty-seven of the audit's ignored regressions are un-ignored and passing.
+The five added by S10's second half:
+
+| Test | File | Finding |
+|---|---|---|
+| `float_heap_entries_use_numeric_order` | `heaps.rs` | P0-12 |
+| `text_ordering_is_lexicographic_without_payload_reinterpretation` | `adversarial_audit.rs` | P0-12 |
+| `ordering_rejects_bool_operands` | `infer_tests.rs` | P0-12 |
+| `ordering_rejects_function_operands` | `infer_tests.rs` | P0-12 |
+| `ordering_rejects_composites_without_a_matching_runtime_lowering` | `infer_tests.rs` | P0-12 |
+
+S10's sixteen new gates:
+
+| Test | File | Pins |
+|---|---|---|
+| `float_compare_is_numeric_with_nan_last` | `scalars.rs` | ADR-045 D2 — NaN last, ±0.0 agreeing with `equals` |
+| `scalar_compare_reads_its_own_payload_width` | `scalars.rs` | the four-byte `Char`, the unsigned `Byte` |
+| `bool_and_unit_declare_no_ordering` | `scalars.rs` | ADR-045 D1's absence, stated |
+| `text_compares_lexicographically_whatever_its_representation` | `text.rs` | owned and slice `Text` order the same |
+| `char_heap_entries_order_by_unicode_scalar_value` | `heaps.rs` | the non-ASCII case the input parser cannot yet deliver |
+| `entries_of_different_types_do_not_dispatch_a_callback` | `heaps.rs` | ADR-045 D3 in the heap |
+| `an_unorderable_element_type_compares_equal_rather_than_reading_bytes` | `heaps.rs` | the degenerate-but-consistent order |
+| `a_text_heap_pops_in_lexicographic_order` | `heaps.rs` | the heap really uses the descriptor |
+| `text_equality_compares_bytes_not_the_payload_discriminant` | `adversarial_audit.rs` | P0-12's equality half (see §6) |
+| `text_comparison_never_extracts_a_scalar_from_the_payload` | `adversarial_audit.rs` | the lowering choice, not just the answer |
+| `small_scalars_are_extracted_at_their_own_width` | `adversarial_audit.rs` | no eight-byte read of a `Char`/`Bool` |
+| `records_from_two_generations_are_equal_when_their_type_is` | `adversarial_audit.rs` | RT-12 end to end, two generations one heap |
+| `anonymous_records_of_one_shape_are_equal_across_schema_allocations` | `records.rs` | RT-12 — the plan's first named gate |
+| `nominal_records_of_different_types_are_never_equal` | `records.rs` | RT-12 — the plan's second, plus nominal ≠ anonymous |
+| `one_nominal_name_over_two_shapes_is_two_types` | `records.rs` | why `same_type` checks the shape as well as the name |
+| `heap_element_orderability_agrees_with_the_runtime` | `infer_tests.rs` | rewritten; the capability and the descriptor agree |
+
 The three added by S9:
 
 | Test | File | Finding |
@@ -205,12 +236,10 @@ test name — line numbers throughout the plan have all moved.)
 
 Partial foundations are the main trap for a fresh context.
 
-**F1 — built-in type identity: landed, minus `compare` semantics.**
-`BuiltinTypeId` is the registry; `TypeDescriptor::builtin::<P>` is the only
-constructor for a built-in. `compare: Option<CompareFn>` **exists on every
-descriptor and is `None` everywhere** — the field's shape is settled, its
-semantics are design decision D3 and are not. See ADR-038. **This is what S10
-walks into: answer D3 before writing a single `compare`.**
+**F1 — built-in type identity: landed whole.** `BuiltinTypeId` is the registry;
+`TypeDescriptor::builtin::<P>` is the only constructor for a built-in. `compare`
+is populated on the five orderable descriptors and deliberately `None` on the
+other sixteen (S10, ADR-045); D3 is answered. See ADR-038.
 
 **F3 — identifier class: predicate half only.** `praxis-syntax/src/ident.rs`
 has `is_ident_start` / `is_ident_continue` / `is_ident`, and the lexer uses
@@ -296,7 +325,68 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S9, plus S10's RT-16)
+### From this session (S10's P0-12 and RT-12)
+
+**`TypeDescriptor::compare` is populated, and D3 is answered — ADR-045.** Only
+`Int`, `Byte`, `Char`, `Float` and `Text` declare one; the other sixteen
+descriptors are `None` and `is_orderable()` now means something. The callback is
+the **container** order: total, NaN last and equal to itself, `-0.0 == +0.0`.
+The source-level `<` on a `Float` is unchanged and still IEEE (`Inst::FloatCmp`,
+NaN unordered) — the two are different operations and the ADR keeps them apart.
+
+**`supports_ord` is narrower, and `infer` finally calls it.** Composites —
+tuples, collections, records, enums — are **not orderable**, so `(1, 2) < (1, 3)`
+is now `Y006` where it used to compile. The capability had never been called
+from anywhere, which is why `true < false` type-checked. If a stage needs
+composite ordering back, it needs a language decision *and* a recursive
+`praxis_value_cmp`, not a one-line `all`.
+
+**A comparison's lowering follows its operand type, and `Text` is a runtime
+call.** `compare_kind` in `build.rs` picks: `Float` → `FloatCmp`, `Int`/`UInt` →
+`IntCmp` on an `Int` extract, `Bool`/`Char` → `IntCmp` at *their own width*,
+everything else (`Text`, `Byte`, composites, unresolved vars, functions) →
+through the descriptor — `praxis_struct_eq` for `==`/`!=`, the new
+`Inst::ValueCmp` → `praxis_value_cmp` for an ordering. **There is no longer a
+"read eight bytes and compare" fallback**; do not add one back for a new type.
+
+**`praxis_value_cmp` is the 138th manifest row**, `(Ctx, Gc, Gc) -> RawI64,
+Faults`. It returns `-1`/`0`/`1` and raises `TypeMismatch` when the operands'
+descriptors differ or the type has no `compare`. `Inst::ValueCmp` carries **no
+root or debug set at all** (the wrapper allocates nothing, so it is not a
+safepoint) and is followed by a `CheckFault`. Adding an instruction still
+touches five exhaustive matches.
+
+**`praxis_struct_eq` and `praxis_value_cmp` both require descriptor pointer
+identity before dispatching a callback**, as `DynamicKey` has since S7. A
+miscompile is a fault or a `false`, not a callback run on a foreign layout.
+
+**Text equality changed answer.** It used to extract eight bytes, which for a
+`#[repr(C)] enum TextPayload` is the *discriminant* — so every pair of owned
+strings compared **equal** and an owned/slice pair never did. Any test that
+passed because two different strings were "equal" was passing for that reason.
+
+**`HeapEntry::cmp` dispatches through the element descriptor** and answers
+`Equal` — without calling anything — when the two entries' descriptors differ or
+the type has no order. `HeapEntry::int_key` is gone; its two test callers now
+render through `Debug`, which formats through the descriptor.
+
+**`RecordSchema` has an `identity` field, and `record_equals` no longer compares
+schema addresses.** `SchemaIdentity::{Anonymous, Nominal(&'static str)}`;
+`RecordSchema::same_type` compares the identity *and* the field shape (names +
+descriptor pointers). Three producers construct schemas — `generation.rs`,
+`parser.rs`, test fixtures — and all three must now say which they are. The
+codegen reads `RecordDef.name`: `Some` → `Nominal`, `None` → `Anonymous`.
+`Generation::record_schema` takes the identity as its second argument.
+
+**`record_hash` mixes the identity, the field names and the field descriptor
+ids**, because everything `same_type` compares has to be in the hash.
+
+**`RUNTIME_ABI_VERSION` is still 12.** `RecordSchema` gained a field, but
+generated code never reads through the pointer it embeds — only the runtime
+does, and both are compiled together. **S10's bump is unspent; S11 starts
+fresh.**
+
+### From S9, plus S10's RT-16
 
 **`Map`/`Set`/`Counter` formatting is sorted, and heaps render in pop order.**
 `maps::write_sorted` is the single place the hash collections' order is
@@ -748,42 +838,64 @@ re-deriving it.
 
 ## 4. Where to start
 
-**S10, continued** (P0-12, RT-12; DBG-01 and DBG-02 need nothing more here,
-**RT-16 is done**). S9 is closed; every finding it owned is fixed and gated.
+**S11 — TypeDb core** (TY-01, TY-02, TY-03, TY-04, TY-05, TY-06, TY-07, TY-22).
+S10 is closed; every finding it owned is fixed and gated.
 
-RT-16 was taken first because it is the one S10 finding that needs nothing from
-D3. What remains does.
+S11 is the plan's **hard barrier before S13, S14, S15 and S17**, and it is the
+largest stage in the plan by weight (54). Read plan §5's S11 ordering paragraph
+before touching anything — it constrains the *order within* the stage, which no
+other stage does:
 
-- **D3 blocks P0-12 and nothing else in the stage can substitute for it.**
-  `TypeDescriptor::compare` exists on all 21 descriptors and is `None`
-  everywhere (F1, ADR-038). Populating one needs an answer to: NaN ordering, and
-  whether Text / tuples / records / collections are orderable at all. **Answer
-  D3 first** — the ordering tests the plan lists as exit criteria all assert a
-  semantics nobody has chosen. See §5.
-- **RT-12 is the one S9 made louder.** Records built in two generations compare
-  unequal, because `record_equals` compares schema *pointers* and each
-  generation has its own (S8, §3). The debugger works around it by sharing one
-  evaluation generation. RT-12 replaces allocational identity with nominal-or-
-  structural identity; the plan's new tests are "two anonymous schemas with the
-  same shape compare equal, two nominal records with different defs do not".
-- **Land the `compare` field before RT-13's `EnumSchema` work in S18**, or the
-  same 21 initializers conflict twice. That is the plan's own sequencing note.
-- **DBG-01 is already closed** (`3836b74`) and **DBG-02 is closed for values**
-  (S7's `type_for_value`). What remains of DBG-02 is the *value-less* half: a
-  record or enum object records no nominal type (F12) and a closure records no
-  signature. See §6.
-- **S10's ABI bump budget is unspent** (H17). `RUNTIME_ABI_VERSION` is 12, and
-  RT-16 changed no `#[repr(C)]` type. Adding `compare` to `TypeDescriptor`
-  needs **no** bump on its own either — generated code passes descriptors by
-  pointer without reading their fields (the same reasoning that made S6's
-  second half and S8 free). Check what generated code actually reads before
-  spending it.
-- **RT-16 sorts by the *rendered* entry, and that is D3's debt.** `Map`/`Set`/
-  `Counter` formatting renders each entry, sorts the strings, and joins, because
-  a rendered string is the only total order available while
-  `TypeDescriptor::compare` is `None`. So `{10: a, 9: b}` prints `10` first.
-  `maps::write_sorted` is the one place that changes when D3 lands. Heaps did
-  not need it — they carry an ordering by construction and render in pop order.
+- **TY-01 and TY-22 are one edit.** Correcting `lower_levels` requires moving
+  the recursive placeholder to the declaration-group level; doing either alone
+  unsoundly generalizes every pre-declared signature.
+- **TY-02 before TY-03** (the substitution fold is what removes the `.expect` at
+  `generalize.rs`), **TY-05 before TY-06** (payload normalization first),
+  **TY-06 before TY-04 and TY-07**.
+- **F9 (the exhaustive `TypeFolder`) and F10 (scheme-owned binders) are the
+  foundations**, and plan §9 rule 2 says to land them first, as their own
+  commits, with the suite green. F12 (nominal `DefId + args`) is TY-06's own
+  content and is XL.
+- Expect **wide insta churn** in `infer_tests.rs` and `hover_tests.rs` from any
+  scheme change.
+- `generalized_var_state_is_marked` (`types_tests.rs`) is **green today and
+  asserts the bug** TY-03 deletes (plan §8.2). Rewrite it to assert
+  scheme-owned binders in the same commit.
+- **S11's ABI bump budget is unspent**, and S11 almost certainly does not need
+  one: nothing in `praxis-types` is `#[repr(C)]`.
+
+Two things S10 leaves for a later stage, both deliberate:
+
+- **`maps::write_sorted` still sorts *rendered* entries**, so `{10: a, 9: b}`
+  prints `10` first. `TypeDescriptor::compare` now exists for `Int`, so the
+  sort *could* be numeric — ADR-045 leaves it alone because changing what a
+  program prints is a user-visible change that belongs with the sort/`Ordered`
+  work, not with a bug-fix stage. One function, `maps.rs`.
+- **Composite ordering is a compile error**, not a lowering. `(1, 2) < (1, 3)`
+  is `Y006`. Bringing it back needs a language decision *and* a recursive
+  `praxis_value_cmp` — see ADR-045 decision 1.
+
+**What S10 deliberately left:**
+
+- **`Text.get` returns an `Int`**, so the language has no way to *write* a
+  non-ASCII `Char` and the input parser cannot *read* one: `grid(char)` scans
+  bytes, so `aβ` fails to parse. That is why
+  `char_ordering_uses_unicode_scalar_values_without_out_of_bounds_reads` was
+  rewritten to an ASCII grid, with the non-ASCII half covered at the runtime
+  level. The parser half belongs to S19/S20, beside IPR-06.
+- **`praxis_struct_eq` still answers `0` for a non-equatable type** rather than
+  faulting, which is the pre-existing defensive default. Only the
+  descriptor-*mismatch* case was tightened.
+- **The debugger still shares one evaluation generation across `p EXPR`.** RT-12
+  removed the correctness reason for it (records from two generations now
+  compare equal); it stays as the thing that bounds a long session (DBG-05).
+- **DBG-02's value-less half is still open**, and RT-12 moved it forward without
+  closing it: a record object now *does* record its nominal name, in
+  `SchemaIdentity::Nominal`. What the debugger cannot yet do is turn that name
+  back into a `Type` — that needs a name→`RecordDefId` lookup and field types
+  the schema does not carry (it has descriptors, not types). F12, with enums and
+  closures. `praxis_runtime::repr`'s `Unrecorded` reason for `Record` is now
+  half-true and should be reworded when that lands.
 
 **What S9 deliberately left:**
 
@@ -856,8 +968,20 @@ type that can have no object, and only the first is tolerated — see
 shipped is narrower than a policy: the two wrappers the audit named now fault
 instead of aborting. Other wrappers still reach Rust panics on malformed input.
 
-**D1, D3 and D5 still block their stages**; none has been answered. **D3 is the
-next one that binds — S10 cannot start P0-12 without it.**
+**D3 is answered** — see ADR-045. Only the scalars with a `compare` callback are
+orderable (`Int`, `Byte`, `Char`, `Float`, `Text`); composites are rejected at
+compile time rather than admitted with an unchosen semantics. NaN sorts last and
+equals itself **inside a container**, where a total order is mandatory; the
+source-level `<` on a `Float` stays IEEE, and the ADR's point is that these are
+two operations, not one. `f64::total_cmp` was rejected for splitting `-0.0` from
+`+0.0`, which would have disagreed with `equals` for ordinary values. The
+"compare by TypeId, not by pointer" contradiction the plan flags under D3 was
+already resolved by ADR-038 (descriptors are `static`); ADR-045 decision 3 is
+what makes both dispatch sites *use* pointer identity.
+
+**D1 and D5 still block their stages**; neither has been answered. **D13 is the
+next one that binds** — the plan wants the whole diagnostic-code block allocated
+before S13 starts, and S11 is the stage before it.
 
 **D1 gained a second case.** It was scoped to `Map.get` / `Grid.find`; the same
 question is now also open for `min`/`max` on an empty sequence, which return
@@ -868,7 +992,6 @@ one. Settle both together.
 
 | | Decision | Blocks |
 |---|---|---|
-| D3 | NaN ordering, and whether Text/tuples/records/collections are orderable at all. **This is what `TypeDescriptor::compare` is waiting for** | S10, blocking P0-12 |
 | D7 | After `_` lexes as `UNDERSCORE`, is it still legal in `let _ = f()`, `fn g(_)`, `\|_\| 0`? | S12 |
 | D8 | Exactly where a newline terminates an expression | S12 |
 | D13 | Diagnostic-code allocation for the whole block, before S13 starts | S13/S16 |
@@ -885,6 +1008,62 @@ one. Settle both together.
 
 Things the plan states that are no longer or were not quite true.
 
+- **P0-12 is an *equality* bug too, and the audit describes only the ordering
+  half.** "MIR sends every non-Float ordering operation through integer
+  extraction" is true of `==` as well, and for `Text` the consequence is worse
+  than a wrong order: `TextPayload` is a `#[repr(C)]` enum, so the eight-byte
+  load reads the *discriminant*, and every pair of owned strings compared equal.
+  `m9_option_text_payload` passes today and has always passed for that reason —
+  `s == "hi"` was true for any `s`. A stage that fixes only the ordering
+  operators leaves that in place.
+- **The plan's `praxis_struct_cmp` is `praxis_value_cmp`, and it is not
+  composite-only.** F4's sketch names it beside `StructEq` and P0-12's exit
+  criteria are all scalars; what the codebase needed is a *general* descriptor
+  dispatch, because the type that cannot be compared in the scalar channel is
+  `Text`. `Inst::ValueCmp` carries no root set — the wrapper is
+  `Effect::Faults`, so unlike `StructEq` it is not a safepoint.
+- **P0-12's fix is "restrict ordering" *and* "add compare callbacks", not
+  either/or.** The audit offers them as alternatives. The callbacks are what
+  `Text`/`Char`/`Float` need; the restriction is what tuples and records need,
+  because a callback for them is a language decision (ADR-045 decision 1). Doing
+  only the first leaves `(1, 2) < (1, 3)` comparing schema pointers; doing only
+  the second leaves `"a" < "b"` comparing addresses.
+- **The plan's D3 text says the pointer-vs-id contradiction must be resolved
+  "if duplicated consts are real".** It was resolved in S1: descriptors are
+  `static`, so pointer identity is authoritative (ADR-038). What D3 still had to
+  answer was NaN and composites.
+- **S10's exit criteria list one test the stage cannot pass as written.**
+  `char_ordering_uses_unicode_scalar_values_without_out_of_bounds_reads` feeds
+  `aβ\n` to `read grid(char)`, and the cell parser scans bytes — the input is a
+  parse error whatever the ordering does. `read grid(char)` is also the *only*
+  source of `Char` values (`Text.get` returns the scalar value as an `Int`, and
+  there is no char literal), so the non-ASCII half cannot be written in the
+  language at all. The test now uses `ab\n`, and the non-ASCII property is
+  pinned at the runtime level.
+- **Two of S10's exit-criteria tests were already un-ignored before the stage
+  started**: `regression_runtime_scalar_descriptors_recover_their_actual_types`
+  (S1) and `regression_runtime_vec_descriptor_recovers_its_real_element_type`
+  (S7's DBG-02 half).
+- **RT-12 needs no `TypeDb` work, and F12 is not its prerequisite.** The plan
+  routes RT-12 through F12's `DefId + args` key, which is XL and belongs to S11.
+  The runtime half stands on its own: `SchemaIdentity::Nominal(&'static str)`
+  holds the *declared name*, which is what distinguishes `Point` from `Vector`,
+  and comparing the field shape alongside it is what keeps one name over two
+  shapes (a generic instantiation, a reloaded definition) apart. F12 replaces the
+  name with the real key when nominal identity gains type arguments; nothing else
+  about `same_type` changes.
+- **F12's sketch has `SchemaIdentity::Nominal(u64)`, a generation-scoped def
+  key.** A `&'static str` is what landed: the schema already holds interned
+  `&'static str` field names, comparing by content cannot collide, and there is
+  no key registry to build. `#[repr(C)]` either way.
+- **`heap_element_requires_a_runtime_compatible_ordering` (`infer_tests.rs`)
+  belongs on plan §8.2's list of tests that assert the bug.** It is `#[ignore]`d
+  rather than green, so it does not fail as a regression — but its assertion
+  ("a `MinHeap[Text]` must be a type error") is *inverted* by the fix, and
+  un-ignoring it would be asserting the defect. Rewritten to assert the
+  agreement instead. Its sibling `heap_element_must_be_orderable` (a *function*
+  in a heap) stays ignored: nothing enforces element orderability at a method
+  call yet, which is S17's constraint channel.
 - **F17's `RootSlots` sketch is one field short.** `unannotated()` / `iter()` /
   `is_annotated()` / `set()` describe the *live* set only, but MIR-01 needs a
   second one: which slots to **null**. Nulling every non-root slot at every
