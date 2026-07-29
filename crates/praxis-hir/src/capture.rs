@@ -69,23 +69,16 @@ pub struct FreeVar {
     pub ref_range: TextRange,
 }
 
-/// The result of capture analysis: the ordered list of free-variable symbols
-/// plus any diagnostics (e.g. an unsupported `var` capture for WS7a).
+/// The result of capture analysis: the ordered list of free-variable symbols.
+///
+/// It used to carry a `CaptureError` list as well, whose only member was "this
+/// closure captures a `var`, which is unsupported" — a WS7a restriction WS7b
+/// lifted. Nothing read the list, `Y130` was never emitted, and the one test
+/// that mentioned it asserted the obsolete refusal (HIR-09). A mutable capture
+/// is now an ordinary `CaptureKind::ByCell`.
 #[derive(Debug, Default)]
 pub struct CaptureAnalysis {
     pub captures: Vec<FreeVar>,
-    pub errors: Vec<CaptureError>,
-}
-
-/// A capture-analysis diagnostic, with the symbol and the source range to report
-/// at.
-#[derive(Debug)]
-pub struct CaptureError {
-    pub symbol: SymbolId,
-    pub range: TextRange,
-    /// `true` for an unsupported mutable capture (WS7a); the diagnostic number
-    /// is `Y130`.
-    pub mutable_unsupported: bool,
 }
 
 /// Walk `body` collecting free-variable captures.
@@ -208,16 +201,6 @@ fn record_free_var<R, K>(
     }
     seen.push(rref.symbol);
     let kind = kind.unwrap_or(SymbolKind::Let);
-    if matches!(kind, SymbolKind::Var) {
-        // WS7a: mutable captures are not yet supported. Record the error so the
-        // lowerer can emit `Y130`; the capture is still recorded so downstream
-        // lowering (once WS7b lands) has the full set.
-        out.errors.push(CaptureError {
-            symbol: rref.symbol,
-            range: ref_range,
-            mutable_unsupported: true,
-        });
-    }
     out.captures.push(FreeVar {
         symbol: rref.symbol,
         kind,
@@ -341,15 +324,20 @@ mod tests {
         );
     }
 
+    /// **Inverted** from `mutable_capture_records_error`, which asserted the
+    /// WS7a refusal — "a closure may not capture a `var`" — that WS7b lifted
+    /// (HIR-09, plan §8.2). The property that replaced it: a captured `var` is
+    /// an ordinary capture, classified `Var` so the lowerer makes it `ByCell`.
     #[test]
-    fn mutable_capture_records_error() {
+    fn a_mutable_capture_is_an_ordinary_capture() {
         // Note: `|| c` would parse as `PIPE2` (logical or), so the closure takes
         // a dummy `_` param to be a real closure literal.
         let analysis = analyze_closures("fn main() { var c = 0; let f = |_| c; f(0) }");
-        assert_eq!(analysis.captures.len(), 1, "the var is still recorded");
-        assert!(
-            analysis.errors.iter().any(|e| e.mutable_unsupported),
-            "expected a mutable-capture error"
+        assert_eq!(analysis.captures.len(), 1, "the var is captured");
+        assert_eq!(
+            analysis.captures[0].kind,
+            SymbolKind::Var,
+            "and it is classified as the `var` it is, which is what selects ByCell"
         );
     }
 

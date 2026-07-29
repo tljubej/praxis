@@ -1107,11 +1107,25 @@ impl<'a> Lowerer<'a> {
                     .get(fv.symbol)
                     .map(|s| s.name.clone())
                     .unwrap_or_default();
-                let ty = self
-                    .ref_types
-                    .get(&fv.ref_range)
-                    .copied()
-                    .unwrap_or(self.db.fresh_var());
+                // The type at the reference that discovered the capture, when
+                // there is one. There is not always: inference records a type
+                // for a name it *reads*, and a capture first seen on an
+                // assignment target is a write — `|n| { total = n }` found
+                // `total` at a range with no recorded type and invented a fresh
+                // variable for it, losing the binding's type entirely (HIR-09).
+                // The binding's own scheme is the answer in that case; a
+                // polymorphic one is skipped, because a capture of a generic
+                // binding needs the *use site*'s instantiation, not the scheme.
+                let ty = match self.ref_types.get(&fv.ref_range).copied() {
+                    Some(t) => t,
+                    None => self
+                        .names
+                        .get(fv.symbol)
+                        .and_then(|s| s.scheme.as_ref())
+                        .filter(|s| !s.is_polymorphic())
+                        .map(praxis_types::Scheme::body)
+                        .unwrap_or_else(|| self.db.fresh_var()),
+                };
                 let kind = if matches!(fv.kind, crate::symbol::SymbolKind::Var) {
                     crate::capture::CaptureKind::ByCell
                 } else {

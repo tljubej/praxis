@@ -2103,6 +2103,68 @@ fn immediately_invoked_closure_boxes_its_mutable_capture() {
     );
 }
 
+/// HIR-09's other half: a capture whose first sighting is an assignment
+/// *target* keeps the type of the binding it names. Inference records a type at
+/// a name it reads; a write has no such record, so the capture fell back to a
+/// fresh variable and the env slot carried `?T` for a `var` every other pass
+/// knew was an `Int`.
+#[test]
+fn a_capture_first_seen_as_an_assignment_target_keeps_its_type() {
+    use praxis_ast::AstNode;
+
+    let src =
+        "fn main() -> Int { var total = 0\n  let add = |n| { total = n }\n  add(5)\n  total }";
+    let map = SourceMap::new();
+    let id = map.intern("capture_assign_test.px", src);
+    let parsed = parse(id, src);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    let module = crate::lower::lower(
+        id,
+        &praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap(),
+        &mut analysis,
+    );
+
+    fn find_closure(e: &crate::TypedExpr) -> Option<&crate::TypedExpr> {
+        if matches!(e, crate::TypedExpr::Closure { .. }) {
+            return Some(e);
+        }
+        e.children()
+            .find_map(find_closure)
+            .or_else(|| e.blocks().find_map(find_closure_in_block))
+    }
+    fn find_closure_in_block(b: &crate::TypedBlock) -> Option<&crate::TypedExpr> {
+        b.stmts
+            .iter()
+            .find_map(|s| match s {
+                crate::TypedStmt::Let { init, .. } | crate::TypedStmt::Var { init, .. } => {
+                    find_closure(init)
+                }
+                crate::TypedStmt::Assign { value, .. } => find_closure(value),
+                crate::TypedStmt::Expr(e) => find_closure(e),
+            })
+            .or_else(|| find_closure(&b.tail))
+    }
+
+    let crate::TypedItem::Fn(main) = &module.items[0];
+    let closure = find_closure_in_block(&main.body).expect("the closure");
+    let crate::TypedExpr::Closure { captures, .. } = closure else {
+        unreachable!("find_closure returns a closure")
+    };
+    let total = captures
+        .iter()
+        .find(|c| c.name == "total")
+        .expect("`total` is captured");
+    assert_eq!(
+        analysis.db.render(total.ty),
+        "Int",
+        "the capture carries the binding's type, not a fresh variable"
+    );
+    assert!(
+        matches!(total.kind, crate::capture::CaptureKind::ByCell),
+        "a captured `var` is shared through a cell"
+    );
+}
+
 /// F20: the one child walker really does cover the enum. A closure is placed in
 /// every expression *field* the macro lists, and the walk must find all of them
 /// — a field left out of a variant's row loses its subtree silently, which is
