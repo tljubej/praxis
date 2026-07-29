@@ -86,6 +86,7 @@ pub(crate) fn infer_with_tree(
         catalog: builtin_catalog(),
         decl_site: Level::OUTERMOST,
         fn_results: Vec::new(),
+        loop_depth: 0,
     };
     inferer.seed_builtin_schemes();
     inferer.infer_declaration_group(root);
@@ -145,8 +146,14 @@ struct Inferer {
     /// The result type of each function whose body is being inferred, innermost
     /// last. A `return` is checked against the top of this stack (TY-18); a
     /// closure pushes its own, because `return` inside one leaves the closure,
-    /// not the function that contains it.
+    /// not the function that contains it. Empty means "not inside a function",
+    /// which is what makes a top-level `return` reportable (TY-20).
     fn_results: Vec<Type>,
+    /// How many loops enclose the expression being inferred. A `break` or
+    /// `continue` with none is `Y012` (TY-20). A closure body clears it and
+    /// restores it afterwards: a closure is a function boundary, so a loop
+    /// outside it is not one a `break` inside it can leave.
+    loop_depth: usize,
 }
 
 /// The built-in method catalog, constructed once and cached for the process
@@ -721,7 +728,11 @@ impl Inferer {
     fn infer_closure_body(&mut self, c: &praxis_ast::ClosureExpr) -> Type {
         let result_ty = self.db.fresh_var();
         self.fn_results.push(result_ty);
+        // A closure is a function boundary, so a loop outside it is not one a
+        // `break` inside it can leave.
+        let enclosing_loops = std::mem::take(&mut self.loop_depth);
         let body_ty = c.body().map_or(self.db.unit(), |b| self.infer_expr(&b));
+        self.loop_depth = enclosing_loops;
         self.fn_results.pop();
         match self.db.join(result_ty, body_ty) {
             Ok(joined) => joined,
@@ -1314,7 +1325,9 @@ impl Inferer {
             }
         }
         if let Some(body) = w.body() {
+            self.loop_depth += 1;
             self.infer_block(&body);
+            self.loop_depth -= 1;
         }
         // `while` yields Unit.
         self.db.unit()
@@ -1347,7 +1360,9 @@ impl Inferer {
             }
         }
         if let Some(body) = f.body() {
+            self.loop_depth += 1;
             self.infer_block(&body);
+            self.loop_depth -= 1;
         }
         self.db.unit()
     }
@@ -1356,7 +1371,9 @@ impl Inferer {
     /// `break expr` refines this; the HIR conservatively reports Unit).
     fn infer_loop(&mut self, l: &LoopExpr) -> Type {
         if let Some(body) = l.body() {
+            self.loop_depth += 1;
             self.infer_block(&body);
+            self.loop_depth -= 1;
         }
         self.db.unit()
     }
@@ -1366,12 +1383,26 @@ impl Inferer {
         if let Some(v) = b.value() {
             self.infer_expr(&v);
         }
+        self.check_in_loop(b.syntax().text_range(), "break");
         self.db.never()
     }
 
     /// `continue` (M8, §4.11). Diverges; type `Never`.
-    fn infer_continue(&mut self, _c: &ContinueExpr) -> Type {
+    fn infer_continue(&mut self, c: &ContinueExpr) -> Type {
+        self.check_in_loop(c.syntax().text_range(), "continue");
         self.db.never()
+    }
+
+    /// `Y012` if there is no enclosing loop to leave (TY-20). MIR's builder
+    /// used to tolerate the absent loop context with an `if let`; the check
+    /// belongs here, where the source position is.
+    fn check_in_loop(&mut self, at: TextRange, keyword: &str) {
+        if self.loop_depth == 0 {
+            self.diagnostics.push(crate::diagnostics::outside_loop(
+                self.file_span(at),
+                keyword,
+            ));
+        }
     }
 
     /// `return [expr]` (M8, §4.11). Diverges; type `Never`.
@@ -1390,10 +1421,18 @@ impl Inferer {
             // then be declared to return.
             None => (self.db.unit(), r.syntax().text_range()),
         };
-        if let Some(&result) = self.fn_results.last() {
-            if let Err(e) = self.db.unify(result, value_ty) {
-                self.diag_unify_hinted(self.file_span(at), e, "the function's return type");
+        match self.fn_results.last() {
+            Some(&result) => {
+                if let Err(e) = self.db.unify(result, value_ty) {
+                    self.diag_unify_hinted(self.file_span(at), e, "the function's return type");
+                }
             }
+            // Nothing to return *from* (TY-20).
+            None => self
+                .diagnostics
+                .push(crate::diagnostics::return_outside_function(
+                    self.file_span(r.syntax().text_range()),
+                )),
         }
         self.db.never()
     }

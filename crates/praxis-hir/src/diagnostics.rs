@@ -255,3 +255,32 @@ pub(crate) fn compound_assign_non_numeric(at: FileSpan, ty: &str) -> Diagnostic 
         at,
     )
 }
+
+/// `Y011` — `return` with no function to return from (TY-20).
+///
+/// The analyzer tracked no function context, so a top-level `return` passed
+/// every check and reached MIR, whose builder tolerated the missing context
+/// with an `if let`. The mistake has a source position; this is where it is
+/// reported.
+pub(crate) fn return_outside_function(at: FileSpan) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::ReturnOutsideFunction,
+        "`return` outside a function",
+        at,
+    )
+}
+
+/// `Y012` — `break` or `continue` with no loop to leave (TY-20).
+///
+/// A closure is a function boundary, so a loop *outside* a closure is not one a
+/// `break` inside it can leave — which is why the depth is cleared and restored
+/// around a closure body rather than simply counted.
+pub(crate) fn outside_loop(at: FileSpan, keyword: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::BreakOutsideLoop,
+        format!("`{keyword}` outside a loop"),
+        at,
+    )
+}

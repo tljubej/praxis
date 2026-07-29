@@ -1192,7 +1192,6 @@ fn a_blocks_value_is_its_last_statement_and_only_if_it_is_an_expression() {
 }
 
 #[test]
-#[ignore = "known bug: resolver/inference do not track function and loop control-flow context"]
 fn control_flow_terminators_require_a_legal_enclosing_context() {
     for src in [
         "return 1",
@@ -1202,6 +1201,60 @@ fn control_flow_terminators_require_a_legal_enclosing_context() {
         assert!(
             !is_clean_with_lower(src),
             "out-of-context control flow must be rejected: {src}"
+        );
+    }
+}
+
+/// TY-20's two codes, and the boundaries that decide them. A closure is a
+/// *function* boundary: a `break` inside one cannot leave a loop outside it,
+/// and a `return` inside one leaves the closure rather than nothing at all.
+#[test]
+fn a_terminator_needs_the_right_enclosing_context() {
+    let codes = |src: &str| -> Vec<String> {
+        analyze(src)
+            .diagnostics
+            .iter()
+            .map(|d| d.code().to_string())
+            .collect()
+    };
+    // `return` needs a function.
+    assert!(codes("return 1").contains(&"Y011".to_string()));
+    assert!(codes("let x = 1\nreturn").contains(&"Y011".to_string()));
+    // `break`/`continue` need a loop, in every loop-less position.
+    for src in [
+        "fn f() -> Int { break\n  0 }",
+        "fn f() -> Int { continue\n  0 }",
+        "break",
+        "fn f(c: Bool) -> Int { if c { break }\n  0 }",
+    ] {
+        assert!(
+            codes(src).contains(&"Y012".to_string()),
+            "expected Y012 for `{src}`, got {:?}",
+            codes(src)
+        );
+    }
+    // A closure is a function boundary in both directions.
+    assert!(
+        codes("fn f(v: Vec[Int]) -> Int { for x in v { let g = |n| { break }\n  0 }\n  0 }")
+            .contains(&"Y012".to_string()),
+        "a `break` inside a closure cannot leave a loop outside it"
+    );
+    assert!(
+        !codes("fn f() -> Int { let g = |n| { return n }\n  g(1) }").contains(&"Y011".to_string()),
+        "a `return` inside a closure leaves the closure"
+    );
+    // …and every legal position is still legal.
+    for src in [
+        "fn f() -> Int { return 1 }",
+        "fn f(v: Vec[Int]) -> Int { for x in v { continue }\n  0 }",
+        "fn f(c: Bool) -> Int { while c { break }\n  0 }",
+        "fn f() -> Int { loop { break }\n  0 }",
+        "fn f(v: Vec[Int]) -> Int { for x in v { if x == 1 { continue } }\n  0 }",
+    ] {
+        let found = codes(src);
+        assert!(
+            !found.contains(&"Y011".to_string()) && !found.contains(&"Y012".to_string()),
+            "`{src}` is legal, got {found:?}"
         );
     }
 }
