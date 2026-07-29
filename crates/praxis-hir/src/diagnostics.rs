@@ -163,6 +163,55 @@ pub(crate) fn not_orderable(at: FileSpan, ty: &str) -> Diagnostic {
     )
 }
 
+/// `Y014` — a value is used as a `Map` key or a `Set` element but cannot be
+/// found again once it changes (D4, TY-32/RT-08).
+///
+/// The wording is the *reason*, not the rule (§5.4: never name the capability).
+/// A key is looked up by its contents; a `Vec` that is pushed to after it is
+/// stored hashes to a different bucket than the one holding it, so the entry
+/// becomes unreachable. Saying "not hashable" would be both jargon and a lie —
+/// a `Vec` hashes fine.
+pub(crate) fn not_hashable(at: FileSpan, ty: &str) -> Diagnostic {
+    Diagnostic::build(
+        Severity::Error,
+        DiagCode::NotHashable,
+        format!(
+            "a value of type `{ty}` can change after it is stored, so it cannot be used as a key"
+        ),
+        at,
+    )
+    .help(
+        at,
+        "use a value that cannot change — a number, `Text`, or a tuple of those",
+    )
+    .finish()
+}
+
+/// `Y015` — arithmetic on a type that has none (TY-31).
+///
+/// Concrete wording again: it names the operation the program wrote and the
+/// type it wrote it on, and never says "numeric constraint".
+pub(crate) fn not_numeric(at: FileSpan, ty: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::NotNumeric,
+        format!("values of type `{ty}` cannot be used in arithmetic"),
+        at,
+    )
+}
+
+/// `Y110` at a *use* site rather than at a method name: a generic function's
+/// body called a method on a parameter, and this call instantiated that
+/// parameter at a type with no such method (TY-30).
+pub(crate) fn unknown_method(at: FileSpan, name: &str, ty: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::NoMethodOnType,
+        format!("no method `{name}` on type `{ty}`"),
+        at,
+    )
+}
+
 /// `Y007` — a type constructor in an annotation was given the wrong number of
 /// type arguments, e.g. `Map[Int]` or `Vec[Int, Text]`.
 ///

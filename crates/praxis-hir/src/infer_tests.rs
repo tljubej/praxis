@@ -1632,7 +1632,6 @@ fn each_control_builtin_reaches_the_backend() {
 // --- capability constraints must survive polymorphism -----------------------
 
 #[test]
-#[ignore = "known bug: equality constraints are discarded at generalization"]
 fn polymorphic_equality_rejects_function_instantiation() {
     let src = "fn equal(a, b) { a == b }\n\
                fn f(x: Int) -> Int { x }\n\
@@ -1645,7 +1644,6 @@ fn polymorphic_equality_rejects_function_instantiation() {
 }
 
 #[test]
-#[ignore = "known bug: iterable constraints are discarded at generalization"]
 fn iterable_constraint_rejects_int_instantiation() {
     let src = "fn drain(values) -> Unit { for value in values { out(value) } }\n\
                fn main() -> Unit { drain(1) }";

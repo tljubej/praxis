@@ -25,11 +25,15 @@ use praxis_ast::{
 };
 use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
 use praxis_syntax::SyntaxKind;
-use praxis_types::{unify::UnifyError, CollectionArgs, Level, ScalarType, Scheme, Type, TypeDb};
+use praxis_types::{
+    unify::UnifyError, CapKind, Capability, CollectionArgs, Constraint, Level, ScalarType, Scheme,
+    Type, TypeDb,
+};
 use rowan::TextRange;
 
 use crate::diagnostics::{
-    infinite_type, not_equatable, not_orderable, type_mismatch, type_mismatch_with_help,
+    infinite_type, not_equatable, not_hashable, not_numeric, not_orderable, type_mismatch,
+    type_mismatch_with_help,
 };
 use crate::name_table::NameTable;
 use crate::resolve::{NameResolution, ResolvedRef};
@@ -220,6 +224,76 @@ impl Inferer {
 
     fn file_span(&self, range: TextRange) -> FileSpan {
         FileSpan::new(self.file, self.span(range))
+    }
+
+    // --- the constraint channel (F10, TY-29) --------------------------------
+
+    /// Require `t` to have `cap`, at `at`.
+    ///
+    /// Two cases, and the split is the whole design. A **concrete** type is
+    /// decided here and now — that is what every capability check did before,
+    /// and it is right. A **variable** cannot be: it may be generalized and then
+    /// instantiated at a type that does not have the capability at all, which is
+    /// what TY-29 is. That one is deferred onto the channel and discharged when
+    /// the variable resolves, or claimed by the scheme that quantifies it.
+    fn require_cap(&mut self, t: Type, cap: Capability, at: TextRange) {
+        let resolved = self.db.follow(t);
+        if let Some(var) = self.db.var_id_of(resolved) {
+            let span = self.file_span(at);
+            self.db.require(Constraint::new(var, cap, span));
+            return;
+        }
+        if let Err(offender) = crate::capability::check(&mut self.db, self.catalog, resolved, &cap)
+        {
+            let span = self.file_span(at);
+            self.report_cap_failure(&cap, offender, span, None);
+        }
+    }
+
+    /// Check every constraint whose variable has resolved since it was made,
+    /// and report the ones that fail.
+    ///
+    /// Called where a variable's fate is settled: after a function body (before
+    /// its scheme is generalized, so the requirements the scheme *owns* are
+    /// still pending and get claimed rather than reported) and once more when
+    /// the declaration group closes.
+    fn discharge_constraints(&mut self) {
+        for c in self.db.take_dischargeable() {
+            let ty = c.var_type();
+            if let Err(offender) = crate::capability::check(&mut self.db, self.catalog, ty, &c.cap)
+            {
+                self.report_cap_failure(&c.cap, offender, c.report_at(), c.origin_note());
+            }
+        }
+    }
+
+    /// Report a capability failure in concrete language (§5.4: never name the
+    /// capability, never say "trait").
+    ///
+    /// `origin` is the requirement's own span when it differs from the report
+    /// site — the `a == b` inside a generic function whose call is what failed.
+    fn report_cap_failure(
+        &mut self,
+        cap: &Capability,
+        offender: Type,
+        at: FileSpan,
+        origin: Option<FileSpan>,
+    ) {
+        let rendered = self.db.render(offender);
+        let mut diag = match cap {
+            Capability::Kind(CapKind::Eq | CapKind::Hash) => not_equatable(at, &rendered),
+            Capability::Kind(CapKind::Ord) => not_orderable(at, &rendered),
+            Capability::Kind(CapKind::HashStable) => not_hashable(at, &rendered),
+            Capability::Kind(CapKind::Numeric) => not_numeric(at, &rendered),
+            Capability::Iterable { .. } => crate::diagnostics::not_iterable(at, &rendered),
+            Capability::HasMethod { name, .. } => {
+                crate::diagnostics::unknown_method(at, name, &rendered)
+            }
+        };
+        if let Some(origin) = origin {
+            diag = diag.with_note(origin, "this is the operation that requires it");
+        }
+        self.diagnostics.push(diag);
     }
 
     fn diag_unify(&mut self, at: FileSpan, err: UnifyError) {
@@ -568,6 +642,11 @@ impl Inferer {
         for stmt in root.stmts() {
             self.infer_top_stmt(&stmt);
         }
+        // Whatever the per-function sweeps left: a requirement made at the top
+        // level, and any a later declaration resolved. What is still pending
+        // after this belongs to a variable nothing pinned, which inference has
+        // already reported as itself.
+        self.discharge_constraints();
         self.db.exit_level(group);
     }
 
@@ -643,6 +722,13 @@ impl Inferer {
             }
         }
         self.db.exit_level(prev);
+        // Check the requirements this body's own uses settled, *before*
+        // generalizing (F10). The ordering is the whole discipline: what is
+        // still unresolved here is about a variable the scheme is about to
+        // quantify, so generalization claims it and each call site checks it
+        // against its own types. Draining after would report a generic body's
+        // requirement against a variable nothing pinned.
+        self.discharge_constraints();
         // Generalize the fn after its body is checked (§5.3), at the level the
         // declaration group was entered *from* — the group's own level is still
         // open for the signatures declared after this one, and generalizing
@@ -1203,7 +1289,8 @@ impl Inferer {
                 .get(resolved.symbol)
                 .and_then(|s| s.scheme.clone());
             if let Some(scheme) = scheme {
-                let ty = self.db.instantiate(&scheme);
+                let site = self.file_span(range);
+                let ty = self.db.instantiate_at(&scheme, site);
                 self.ref_types.insert(range, ty);
                 return ty;
             }
@@ -1298,18 +1385,20 @@ impl Inferer {
                     // existed since M5 and was **never called**, so `true <
                     // false` and `(1, 2) < (1, 3)` compiled and compared two
                     // reinterpreted payload words (P0-12). Emit Y006.
+                    //
+                    // Both go through the constraint channel (F10, TY-29). A
+                    // concrete operand is decided on the spot, exactly as
+                    // before; an operand that is still a variable is *deferred*,
+                    // because it may be generalized and then instantiated at a
+                    // type with no such operation — which is what let
+                    // `fn equal(a, b) { a == b }` accept `equal(f, g)`.
                     let operand_ty = self.db.follow(l);
-                    if matches!(op_kind, Some(SyntaxKind::EQ2 | SyntaxKind::NEQ)) {
-                        if !crate::capability::supports_eq(&self.db, operand_ty) {
-                            let rendered = self.db.render(operand_ty);
-                            self.diagnostics
-                                .push(not_equatable(self.file_span(at), &rendered));
-                        }
-                    } else if !crate::capability::supports_ord(&self.db, operand_ty) {
-                        let rendered = self.db.render(operand_ty);
-                        self.diagnostics
-                            .push(not_orderable(self.file_span(at), &rendered));
-                    }
+                    let kind = if matches!(op_kind, Some(SyntaxKind::EQ2 | SyntaxKind::NEQ)) {
+                        CapKind::Eq
+                    } else {
+                        CapKind::Ord
+                    };
+                    self.require_cap(operand_ty, Capability::Kind(kind), at);
                 }
                 self.db.bool()
             }
@@ -1510,6 +1599,20 @@ impl Inferer {
         // (None → Y005 not_iterable). Record the element type on the binding's
         // reference range so the lowerer can read it.
         let item_ty = crate::capability::iter_item(&mut self.db, iter_ty);
+        // An unresolved iterator yields *itself* from `iter_item`, which is the
+        // optimism that let `fn drain(values) { for v in values { … } }` accept
+        // `drain(1)`: the requirement was answered against a variable and then
+        // discarded at generalization. Defer it instead (TY-29). A concrete
+        // iterator is decided here, exactly as before.
+        if let Some(item) = item_ty {
+            self.require_cap(
+                iter_ty,
+                Capability::Iterable { item },
+                f.iter()
+                    .map(|i| i.syntax().text_range())
+                    .unwrap_or_else(|| f.syntax().text_range()),
+            );
+        }
         if let Some(name_tok) = f.binding() {
             if let Some(item) = item_ty {
                 self.ref_types.insert(name_tok.text_range(), item);
@@ -1701,7 +1804,14 @@ impl Inferer {
                         .get(resolved.symbol)
                         .and_then(|s| s.scheme.clone());
                     if let Some(scheme) = scheme {
-                        let callee_ty = self.db.instantiate(&scheme);
+                        // Instantiating **at the call site** (F10): a
+                        // requirement the callee's scheme carries is re-emitted
+                        // against this call's types, and a failure is reported
+                        // here rather than inside the generic body — where the
+                        // very same expression is correct for every other
+                        // instantiation.
+                        let site = self.file_span(c.syntax().text_range());
+                        let callee_ty = self.db.instantiate_at(&scheme, site);
                         // The callee name is a `PATH_EXPR` that nothing
                         // evaluates, and this instantiation is its type. It is
                         // deliberately *not* also written to `ref_types`: hover

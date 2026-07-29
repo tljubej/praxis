@@ -87,21 +87,54 @@ pub struct Constraint {
     pub var: VarId,
     /// What is required.
     pub cap: Capability,
-    /// Where the program asked for it.
+    /// Where the program asked for it — the `==`, the `for`, the `insert`.
     pub at: FileSpan,
+    /// The **use site** that re-emitted this constraint, when it came from
+    /// instantiating a scheme rather than from an expression directly.
+    ///
+    /// Both spans matter and they are usually different places:
+    ///
+    /// ```text
+    /// fn equal(a, b) { a == b }          // `at`  — where the requirement is
+    /// fn main() -> Bool { equal(f, g) }  // `via` — where it is violated
+    /// ```
+    ///
+    /// The report goes to `via` when there is one: `a == b` is a perfectly
+    /// legal comparison, and pointing at it says the wrong thing. `at` becomes
+    /// the note that explains *why* the call is rejected.
+    pub via: Option<FileSpan>,
 }
 
 impl Constraint {
     /// A constraint on `var` requiring `cap`, written at `at`.
     #[must_use]
     pub fn new(var: VarId, cap: Capability, at: FileSpan) -> Constraint {
-        Constraint { var, cap, at }
+        Constraint {
+            var,
+            cap,
+            at,
+            via: None,
+        }
     }
 
     /// A constraint requiring the payload-free capability `kind`.
     #[must_use]
     pub fn of_kind(var: VarId, kind: CapKind, at: FileSpan) -> Constraint {
         Constraint::new(var, Capability::Kind(kind), at)
+    }
+
+    /// The span a failure should be reported at: the use site if this
+    /// constraint was re-emitted by an instantiation, else where it was written.
+    #[must_use]
+    pub fn report_at(&self) -> FileSpan {
+        self.via.unwrap_or(self.at)
+    }
+
+    /// The span a failure's explanatory note should point at, or `None` when the
+    /// requirement and the violation are the same place.
+    #[must_use]
+    pub fn origin_note(&self) -> Option<FileSpan> {
+        self.via.map(|_| self.at)
     }
 
     /// The type this constraint is about, as a handle.

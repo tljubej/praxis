@@ -301,6 +301,30 @@ impl TypeDb {
         ready
     }
 
+    /// Mark the constraints an instantiation just re-emitted as coming *via*
+    /// `site`, so a failure is reported where the use is rather than inside the
+    /// generic body that stated the requirement.
+    ///
+    /// Identifies them by the fresh variables the instantiation minted: a
+    /// pending constraint about one of `mapping`'s variables and with no `via`
+    /// yet is one this instantiation just pushed.
+    pub(crate) fn attribute_reemitted(
+        &mut self,
+        scheme: &crate::Scheme,
+        mapping: &[Type],
+        site: praxis_source::FileSpan,
+    ) {
+        if scheme.constraints().is_empty() {
+            return;
+        }
+        let fresh: Vec<VarId> = mapping.iter().filter_map(|t| self.var_id_of(*t)).collect();
+        for c in &mut self.pending_constraints {
+            if c.via.is_none() && fresh.contains(&c.var) {
+                c.via = Some(site);
+            }
+        }
+    }
+
     /// Every pending constraint, for a caller that has to see the ones nothing
     /// resolved (a final sweep at the end of a declaration group).
     #[inline]

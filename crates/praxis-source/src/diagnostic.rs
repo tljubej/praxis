@@ -537,6 +537,21 @@ impl Diagnostic {
     pub fn suggestions(&self) -> &[Suggestion] {
         &self.suggestions
     }
+
+    /// Attach a secondary span with a message to an already-built diagnostic.
+    ///
+    /// The same operation [`DiagnosticBuilder::note`] performs, for a caller
+    /// that received a finished `Diagnostic` from a wording helper and knows one
+    /// thing the helper did not: where the requirement it violated was written
+    /// (§8.2 "related spans when inference connects distant expressions").
+    #[must_use]
+    pub fn with_note(mut self, span: FileSpan, message: impl Into<String>) -> Diagnostic {
+        self.notes.push(DiagnosticNote {
+            span,
+            message: message.into(),
+        });
+        self
+    }
 }
 
 /// Fluent builder for the optional parts of a [`Diagnostic`].

@@ -155,6 +155,20 @@ impl TypeDb {
         self.instantiate_with_mapping(scheme).0
     }
 
+    /// [`instantiate`](Self::instantiate), attributing any constraint the
+    /// scheme re-emits to `site` — the expression that made this use.
+    ///
+    /// A constraint carried through generalization was written inside the
+    /// generic body, and reporting a failure there points at code that is
+    /// perfectly correct for every *other* instantiation. `site` is where the
+    /// program chose the type that failed.
+    #[must_use]
+    pub fn instantiate_at(&mut self, scheme: &Scheme, site: praxis_source::FileSpan) -> Type {
+        let (ty, mapping) = self.instantiate_with_mapping(scheme);
+        self.attribute_reemitted(scheme, &mapping, site);
+        ty
+    }
+
     /// [`instantiate`](Self::instantiate), also returning the fresh variable
     /// each binder was replaced by, in binder order.
     ///
