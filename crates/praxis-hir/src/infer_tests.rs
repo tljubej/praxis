@@ -1513,7 +1513,6 @@ fn two_ordinary_branches_still_have_to_agree() {
 }
 
 #[test]
-#[ignore = "known bug: parse does not constrain its input expression to Text"]
 fn parse_requires_text_input() {
     let src = "fn main() -> Int { parse(1, int) }";
     assert!(
@@ -1523,7 +1522,6 @@ fn parse_requires_text_input() {
 }
 
 #[test]
-#[ignore = "known bug: unary minus chooses Float only for literal syntax"]
 fn unary_minus_accepts_float_typed_variables() {
     let src = "fn negate(x: Float) -> Float { -x }";
     assert!(
@@ -1533,7 +1531,6 @@ fn unary_minus_accepts_float_typed_variables() {
 }
 
 #[test]
-#[ignore = "known bug: numeric inference admits the undefined Float remainder operation"]
 fn float_remainder_is_rejected() {
     let src = "fn bad() -> Float { 5.0 % 2.0 }";
     assert!(
@@ -1543,7 +1540,6 @@ fn float_remainder_is_rejected() {
 }
 
 #[test]
-#[ignore = "known bug: lowering silently saturates out-of-range Int literals"]
 fn integer_literal_overflow_is_diagnosed() {
     let src = "fn main() -> Int { 9223372036854775808 }";
     assert!(
@@ -2989,4 +2985,90 @@ fn a_key_requirement_reaches_through_a_generic_function() {
     let ok = "fn store(k) -> Unit { let m = Map(); m.insert(k, 1) }\n\
               fn main() -> Unit { store(\"key\") }";
     assert!(!has_type_error(ok));
+}
+
+/// TY-25's other half, and the reason the finding looked like an inference bug:
+/// `parse` is **syntax**, not a call of a binding. It used to be lexed into a
+/// `PATH_EXPR` inside its own `PARSE_EXPR`, which made every use an `N001` — and
+/// made `ParseExpr::text_expr` ("the first `Expr` child") answer with the
+/// keyword's own path rather than the argument, so the text argument's type was
+/// never looked at.
+#[test]
+fn parse_is_syntax_and_its_text_argument_is_the_one_checked() {
+    // The name is not a binding, so a well-formed `parse` reports nothing.
+    assert!(is_clean_with_lower(
+        "fn main() -> Int { parse(\"12\", int) }"
+    ));
+    // …and the argument that is checked is the *first* one.
+    let diags = analyze_and_lower_diags("fn main() -> Int { parse(1, int) }");
+    assert_eq!(
+        diags.len(),
+        1,
+        "one report, not a name error too: {diags:?}"
+    );
+    assert_eq!(diags[0].code().to_string(), "Y001");
+    // A `Text`-typed expression, not only a literal, is accepted.
+    assert!(is_clean_with_lower(
+        "fn main() -> Int {\n  let s = \"12\"\n  parse(s, int)\n}"
+    ));
+}
+
+/// TY-26 as the rule: negation follows the operand's **type**, and the
+/// per-literal shortcut was only ever an approximation of it. A `Float`-typed
+/// variable was negated as an `Int` and then failed to unify with itself.
+#[test]
+fn negation_follows_the_operands_type_not_its_spelling() {
+    assert!(!has_type_error("fn negate(x: Float) -> Float { -x }"));
+    assert!(!has_type_error("fn negate(x: Int) -> Int { -x }"));
+    // The literal cases still work, in both directions.
+    assert!(!has_type_error("fn f() -> Float { -3.5 }"));
+    assert!(!has_type_error("fn f() -> Int { -3 }"));
+    // …and negation still has a type: an Int operand does not produce a Float.
+    assert!(has_type_error("fn f(x: Int) -> Float { -x }"));
+    // A Float expression that is not a literal — the shape the old rule missed.
+    assert!(!has_type_error("fn f(x: Float) -> Float { -(x + 1.0) }"));
+}
+
+/// TY-27: `%` has no `Float` lowering, and MIR's unsupported-operator fallback
+/// mapped it to **addition** — so `5.0 % 2.0` computed `7.0`. There is no
+/// operation to lower, so there is nothing to accept.
+#[test]
+fn float_remainder_has_no_operation_to_lower() {
+    assert!(has_type_error("fn bad() -> Float { 5.0 % 2.0 }"));
+    assert!(has_type_error(
+        "fn bad(a: Float, b: Float) -> Float { a % b }"
+    ));
+    // The Int remainder is untouched, and so is every other Float operator.
+    assert!(!has_type_error("fn ok() -> Int { 5 % 2 }"));
+    for op in ["+", "-", "*", "/"] {
+        let src = format!("fn ok() -> Float {{ 5.0 {op} 2.0 }}");
+        assert!(!has_type_error(&src), "Float {op} is defined");
+    }
+}
+
+/// TY-28: an `Int` is signed 64-bit (§4.3), so a literal outside that range
+/// names a value the language cannot represent. It became `i64::MAX` silently,
+/// on the theory that the arithmetic would fault — but a saturated literal is a
+/// perfectly good `Int` and the program runs with a number nobody wrote.
+#[test]
+fn an_out_of_range_int_literal_is_reported_rather_than_saturated() {
+    for src in [
+        "fn main() -> Int { 9223372036854775808 }",
+        "fn main() -> Int { 99999999999999999999999 }",
+    ] {
+        let diags = analyze_and_lower_diags(src);
+        assert!(
+            diags.iter().any(|d| d.code().to_string() == "Y013"),
+            "{src} must report Y013, got {diags:?}"
+        );
+    }
+    // The boundary itself is in range and reports nothing.
+    assert!(is_clean_with_lower(
+        "fn main() -> Int { 9223372036854775807 }"
+    ));
+    // A pattern is the same rule at another position.
+    let diags = analyze_and_lower_diags(
+        "fn f(n: Int) -> Int { match n { 99999999999999999999 => 1, _ => 0 } }",
+    );
+    assert!(diags.iter().any(|d| d.code().to_string() == "Y013"));
 }

@@ -1239,25 +1239,30 @@ impl<'t> Parser<'t> {
         // Peek the identifier text to special-case `parse(text, parser_expr)`
         // (§7.1) before committing to an ordinary call.
         let name_text = self.peek_text();
-        let is_parse_call = name_text == Some("parse");
+        // `parse(text, parser_expression)` (§7.1) is *syntax*, not a call of a
+        // binding named `parse` — so the keyword must not become a `PATH_EXPR`.
+        // It used to, and two things followed from it: name resolution reported
+        // `` `parse` is not defined `` on every use, and `ParseExpr::text_expr`
+        // — "the first `Expr` child" — answered with the keyword's own path
+        // instead of the argument, so the type of the text argument was never
+        // looked at (TY-25). Decided before the node is opened, which needs one
+        // token of lookahead.
+        if name_text == Some("parse") && self.nth_kind(1) == SyntaxKind::L_PAREN {
+            self.start_node_at(cp, SyntaxKind::PARSE_EXPR);
+            self.bump(); // `parse`
+            self.bump(); // `(`
+            self.parse_expr(); // first arg: the Text
+            if self.eat(SyntaxKind::COMMA) {
+                self.parse_parser_expr();
+            }
+            self.expect(SyntaxKind::R_PAREN, "`)` to close parse()");
+            self.finish_node(); // PARSE_EXPR
+            return;
+        }
         self.start_node(SyntaxKind::PATH_EXPR);
         self.bump(); // name
         self.finish_node();
         if self.at(SyntaxKind::L_PAREN) {
-            if is_parse_call {
-                // `parse(text, parser_expression)` (§7.1). The first arg is an
-                // ordinary expression (the Text to parse); the second is a
-                // parser-expression.
-                self.start_node_at(cp, SyntaxKind::PARSE_EXPR);
-                self.bump(); // `(`
-                self.parse_expr(); // first arg: the Text
-                if self.eat(SyntaxKind::COMMA) {
-                    self.parse_parser_expr();
-                }
-                self.expect(SyntaxKind::R_PAREN, "`)` to close parse()");
-                self.finish_node(); // PARSE_EXPR
-                return;
-            }
             self.bump(); // `(`
             self.start_node_at(cp, SyntaxKind::CALL_EXPR);
             // Re-open the path as the callee: rowan's checkpoint wraps the

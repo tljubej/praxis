@@ -400,3 +400,15 @@ pub(crate) fn value_break_outside_loop_expression(at: FileSpan, keyword: &str) -
         at,
     )
 }
+
+/// `Y016` — an operator the language does not define for this operand type
+/// (TY-27). Not a *mismatch*: both operands agree, and the operation still has
+/// no meaning.
+pub(crate) fn operator_not_defined(at: FileSpan, op: &str, ty: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::OperatorNotDefined,
+        format!("`{op}` is not defined for `{ty}`"),
+        at,
+    )
+}

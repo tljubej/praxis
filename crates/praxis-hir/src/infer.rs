@@ -1278,9 +1278,18 @@ impl Inferer {
 
     /// Synthesize the result type of a `parse(text, parser_expression)` (§7.1, M6).
     fn infer_parse(&mut self, p: &praxis_ast::ParseExpr) -> Type {
-        // The text argument is an ordinary expression; resolve it.
+        // The text argument is an ordinary expression; resolve it — and it has
+        // to be `Text`. `parse(text, parser)` runs a parser plan over a byte
+        // buffer, so `parse(1, int)` reaches the runtime with an `Int` where a
+        // `Text` payload is expected. Its type was inferred and then discarded
+        // (TY-25).
         if let Some(text_expr) = p.text_expr() {
-            self.infer_expr(&text_expr);
+            let arg_ty = self.infer_expr(&text_expr);
+            let text = self.db.text();
+            if let Err(e) = self.db.unify(arg_ty, text) {
+                let at = text_expr.syntax().text_range();
+                self.diag_unify(self.file_span(at), e);
+            }
         }
         match p.parser_expr() {
             Some(pe) => crate::parser_lower::synthesize_parser_type(
@@ -1389,6 +1398,19 @@ impl Inferer {
                         self.diag_unify(self.file_span(rhs_at), e);
                     }
                 }
+                // `%` is defined for integers only (§4.12). MIR has no Float
+                // remainder: its `lower_bin` fell through to *addition*, so
+                // `5.0 % 2.0` computed `7.0` (TY-27). There is no operation to
+                // lower, so there is nothing to accept.
+                if op_kind == Some(SyntaxKind::PERCENT) && is_float_scalar(&self.db, target) {
+                    let at = b.syntax().text_range();
+                    self.diagnostics
+                        .push(crate::diagnostics::operator_not_defined(
+                            self.file_span(at),
+                            "%",
+                            "Float",
+                        ));
+                }
                 target
             }
             // Comparisons: operands must match; result is Bool.
@@ -1464,7 +1486,15 @@ impl Inferer {
             // Negation follows the operand's literal kind under the strict
             // per-literal model (§4.12): `-3.5` is Float, `-3` is Int.
             Some(SyntaxKind::MINUS) => {
-                if operand_is_float_literal(&operand_node) {
+                // Follow the operand's **type**, not only its literal syntax.
+                // `-x` where `x: Float` used to come out `Int` and then fail to
+                // unify with its own operand, so `fn negate(x: Float) -> Float
+                // { -x }` was rejected — the one shape a per-literal rule cannot
+                // see (TY-26). Binary arithmetic already asked both questions;
+                // negation asked only the first.
+                let is_float = operand_is_float_literal(&operand_node)
+                    || operand.is_some_and(|t| is_float_scalar(&self.db, t));
+                if is_float {
                     self.db.float()
                 } else {
                     self.db.int()

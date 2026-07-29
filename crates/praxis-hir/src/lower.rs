@@ -1236,11 +1236,25 @@ impl<'a> Lowerer<'a> {
         match tok.kind() {
             SyntaxKind::IntLit => {
                 let text = tok.text();
-                // Strip any `_` digit separators; parse as i64. On overflow we
-                // leave the literal at i64::MAX/MIN — the backend will fault on
-                // the actual arithmetic anyway.
+                // Strip any `_` digit separators; parse as i64. An `Int` is
+                // signed 64-bit (§4.3), so a literal outside that range names a
+                // value the language cannot represent — it used to become
+                // `i64::MAX` silently, on the theory that "the backend will
+                // fault on the actual arithmetic anyway". It does not: the
+                // saturated value is a perfectly good `Int` and the program runs
+                // with a number nobody wrote (TY-28).
                 let cleaned: String = text.chars().filter(|c| *c != '_').collect();
-                let value = cleaned.parse::<i64>().unwrap_or(i64::MAX);
+                let value = match cleaned.parse::<i64>() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        self.diag(
+                            tok.text_range(),
+                            DiagCode::IntLiteralOutOfRange,
+                            format!("`{text}` is outside the range of `Int`"),
+                        );
+                        0
+                    }
+                };
                 TypedExpr::Lit {
                     value: Lit::Int(value),
                     ty,
@@ -1991,7 +2005,21 @@ impl<'a> Lowerer<'a> {
                 let value = match tok.kind() {
                     SyntaxKind::IntLit => {
                         let cleaned: String = tok.text().chars().filter(|c| *c != '_').collect();
-                        Lit::Int(cleaned.parse::<i64>().unwrap_or(i64::MAX))
+                        // Out of range in a *pattern* is the same mistake as in
+                        // an expression (TY-28): a saturated literal would match
+                        // a value the program never named.
+                        match cleaned.parse::<i64>() {
+                            Ok(v) => Lit::Int(v),
+                            Err(_) => {
+                                let text = tok.text().to_string();
+                                self.diag(
+                                    tok.text_range(),
+                                    DiagCode::IntLiteralOutOfRange,
+                                    format!("`{text}` is outside the range of `Int`"),
+                                );
+                                Lit::Int(0)
+                            }
+                        }
                     }
                     SyntaxKind::FloatLit => Lit::Float(tok.text().parse::<f64>().unwrap_or(0.0)),
                     SyntaxKind::TextLit => Lit::Text(unquote_text(tok.text())),
