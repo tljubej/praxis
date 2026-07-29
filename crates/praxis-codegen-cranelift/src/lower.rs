@@ -1744,7 +1744,7 @@ fn build_debug_local_metas(
             // The full static `Type` id (M10-WS1b): `Type(u32)`. Lets the
             // debugger reconstruct the exact local type (incl. collection
             // element types / record shapes) the runtime `descriptor` loses.
-            type_id: resolved_ty.map_or(praxis_runtime::debug::NO_STATIC_TYPE, |t| t.0),
+            type_id: resolved_ty.map_or(praxis_runtime::debug::NO_STATIC_TYPE, |t| t.to_u32()),
             kind,
             span_start,
             span_end,
@@ -2004,7 +2004,11 @@ mod tests {
             !metas[0].descriptor.is_null(),
             "a Known local keeps its descriptor"
         );
-        assert_eq!(metas[0].type_id, int.0, "a Known local keeps its type id");
+        assert_eq!(
+            metas[0].type_id,
+            int.to_u32(),
+            "a Known local keeps its type id"
+        );
         assert!(
             metas[1].descriptor.is_null(),
             "an Opaque local has no descriptor to thread"
@@ -2047,11 +2051,12 @@ mod tests {
     #[test]
     fn a_known_element_type_with_no_descriptor_fails_the_compile() {
         let mut db = praxis_types::TypeDb::new();
-        let int = db.int();
-        let range = db.intern(praxis_types::data::TypeData::Collection {
-            ctor: praxis_types::CollectionCtor::Range,
-            args: vec![int],
-        });
+        let range = db
+            .collection(
+                praxis_types::CollectionCtor::Range,
+                praxis_types::CollectionArgs::Nullary,
+            )
+            .expect("Range is nullary");
         let err = collection_element_descriptor_for(&db, &[MirType::Known(range)], 0)
             .expect_err("Range has no runtime object");
         assert!(

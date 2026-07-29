@@ -25,7 +25,10 @@ use praxis_ast::{
 };
 use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
 use praxis_syntax::SyntaxKind;
-use praxis_types::{unify::UnifyError, ScalarType, Scheme, Type, TypeDb};
+use praxis_types::{
+    unify::UnifyError, CollectionArgs, EnumVariantDef, FieldSet, ScalarType, Scheme, Type, TypeDb,
+    VariantSet,
+};
 use rowan::TextRange;
 
 use crate::diagnostics::{
@@ -260,20 +263,22 @@ impl Inferer {
                 "Vec" | "Deque" | "Set" | "Counter" | "MinHeap" | "MaxHeap" | "Grid" => {
                     let v = db.fresh_var();
                     let ctor = Self::collection_ctor_for(&name).expect("ctor name");
-                    let coll = db.collection(ctor, vec![v]);
+                    let coll = db.unary_collection(ctor, v);
                     db.func(vec![], coll)
                 }
                 "Map" => {
                     // forall K V. () -> Map[K, V]
                     let k = db.fresh_var();
                     let v = db.fresh_var();
-                    let coll = db.collection(praxis_types::CollectionCtor::Map, vec![k, v]);
+                    let coll = db.map(k, v);
                     db.func(vec![], coll)
                 }
                 // BitSet and Range are nullary: () -> BitSet / () -> Range.
                 "BitSet" | "Range" => {
                     let ctor = Self::collection_ctor_for(&name).expect("ctor name");
-                    let coll = db.collection(ctor, vec![]);
+                    let coll = db
+                        .collection(ctor, CollectionArgs::Nullary)
+                        .expect("BitSet and Range are nullary");
                     db.func(vec![], coll)
                 }
                 // Optionality (M9). `Some : forall T. (T) -> Option[T]` and
@@ -287,18 +292,12 @@ impl Inferer {
                 // Option[T] copies merge into one type.
                 "Some" => {
                     let t = db.fresh_var();
-                    let opt = db.register_enum(
-                        "Option",
-                        vec![("Some".into(), Some(vec![t])), ("None".into(), None)],
-                    );
+                    let opt = option_type(db, t);
                     db.func(vec![t], opt)
                 }
                 "None" => {
                     let t = db.fresh_var();
-                    db.register_enum(
-                        "Option",
-                        vec![("Some".into(), Some(vec![t])), ("None".into(), None)],
-                    )
+                    option_type(db, t)
                 }
                 // Float constants (§4.12). Both are nullary `() -> Float`,
                 // monomorphic — no quantified vars. Lowered to a direct runtime
@@ -369,7 +368,19 @@ impl Inferer {
                 fields.push((fname, fty));
             }
         }
-        let ty = self.db.register_record(name, fields);
+        let fields = match FieldSet::from_pairs(fields) {
+            Ok(fields) => fields,
+            Err(praxis_types::TypeCtorError::DuplicateField(dup)) => {
+                self.diagnostics.push(crate::diagnostics::duplicate_member(
+                    self.file_span(range),
+                    "field",
+                    &dup,
+                ));
+                return;
+            }
+            Err(_) => return,
+        };
+        let ty = self.db.record(Some(name), fields);
         if let Some(sym) = self.names.get_mut(symbol) {
             sym.scheme = Some(Scheme::monotype(ty));
         }
@@ -413,17 +424,26 @@ impl Inferer {
                 .into_iter()
                 .map(|t| self.resolve_type(&t).unwrap_or_else(|| self.db.fresh_var()))
                 .collect();
-            let payload = if payload_types.is_empty() {
-                None
-            } else {
-                Some(payload_types.clone())
-            };
-            variants.push((vname.clone(), payload));
+            // TY-05: one payload representation. The `is_empty` normalization
+            // this replaces was the manual half of the same equivalence.
+            variants.push(EnumVariantDef::new(vname.clone(), payload_types.clone()));
             if let Some(vtok) = v.name() {
                 variant_info.push((vname, payload_types, vtok.text_range()));
             }
         }
-        let enum_ty = self.db.register_enum(name, variants);
+        let variants = match VariantSet::new(variants) {
+            Ok(variants) => variants,
+            Err(praxis_types::TypeCtorError::DuplicateVariant(dup)) => {
+                self.diagnostics.push(crate::diagnostics::duplicate_member(
+                    self.file_span(range),
+                    "variant",
+                    &dup,
+                ));
+                return;
+            }
+            Err(_) => return,
+        };
+        let enum_ty = self.db.enum_(Some(name), variants);
         if let Some(sym) = self.names.get_mut(enum_symbol) {
             sym.scheme = Some(Scheme::monotype(enum_ty));
         }
@@ -485,7 +505,7 @@ impl Inferer {
         };
         let edef = self.db.enum_def(def_id);
         let idx = edef.variant(name)?;
-        let payload = edef.variants[idx].payload.clone().unwrap_or_default();
+        let payload = edef.variants[idx].payload.clone();
         Some((def_id, idx, payload))
     }
 
@@ -686,7 +706,7 @@ impl Inferer {
                 .unwrap_or_else(|| self.db.fresh_var()),
             Expr::Tuple(t) => {
                 let els: Vec<Type> = t.elements().map(|e| self.infer_expr(scope, &e)).collect();
-                self.db.tuple(els)
+                self.tuple_or_degenerate(els)
             }
             Expr::Block(b) => self.infer_block(scope, b),
             Expr::If(i) => self.infer_if(scope, i),
@@ -1572,7 +1592,7 @@ impl Inferer {
                                 .unwrap_or_else(|| self.db.fresh_var())
                         })
                         .collect();
-                    return self.collection_from_name(&name, type_args);
+                    return self.collection_from_name(&name, type_args, node.text_range());
                 }
                 // Scalar: the name is a direct Ident token of this node.
                 let name = node.children_with_tokens().find_map(|e| match e {
@@ -1597,7 +1617,7 @@ impl Inferer {
                             .unwrap_or_else(|| self.db.fresh_var())
                     })
                     .collect();
-                Some(self.db.tuple(els))
+                Some(self.tuple_or_degenerate(els))
             }
             SyntaxKind::FN_TYPE => {
                 // An FN_TYPE node has a param-type group (TYPE_REF or TUPLE_TYPE)
@@ -1633,9 +1653,32 @@ impl Inferer {
     /// types. `(A, B)` (a tuple type) flattens to `[A, B]`; a single type stays
     /// `[itself]`.
     fn flatten_param_group(&mut self, ty: Type) -> Vec<Type> {
-        match self.db.data(self.db.follow(ty)).clone() {
-            praxis_types::TypeData::Tuple(els) => els,
-            other => vec![self.db.intern(other)],
+        let rep = self.db.follow(ty);
+        match self.db.data(rep) {
+            praxis_types::TypeData::Tuple(els) => els.clone(),
+            // A single param: the type itself, not a re-interned copy of its
+            // shape. `intern` is `pub(crate)` since F5, and this was the one
+            // site outside the arena that needed it — for no reason, since the
+            // representative handle was already in hand.
+            _ => vec![rep],
+        }
+    }
+
+    /// A tuple type from `els`, honouring the arity invariant (F5).
+    ///
+    /// The parser can hand us fewer than two elements, and `TupleElems` refuses
+    /// to represent either degenerate case as a tuple — correctly, because
+    /// neither *is* one: `()` is `Unit`, and a lone parenthesized element is
+    /// that element. Interning a one-element `Tuple` was how the old
+    /// `db.tuple(els)` produced a type that could never unify with anything.
+    fn tuple_or_degenerate(&mut self, mut els: Vec<Type>) -> Type {
+        match els.len() {
+            0 => self.db.unit(),
+            1 => els.remove(0),
+            _ => {
+                let elems = praxis_types::TupleElems::new(els).expect("two or more elements");
+                self.db.tuple(elems)
+            }
         }
     }
 
@@ -1685,32 +1728,63 @@ impl Inferer {
     /// unknown type. Construction (`Vec[T]()`) is wired per workstream as each
     /// collection's runtime payload lands; the *type* resolves for all ctors so
     /// annotations and signatures can name them ahead of construction support.
-    fn collection_from_name(&mut self, name: &str, args: Vec<Type>) -> Option<Type> {
+    fn collection_from_name(
+        &mut self,
+        name: &str,
+        args: Vec<Type>,
+        range: TextRange,
+    ) -> Option<Type> {
         // `Seq` is compiler-internal (§6.3, M8 WS8); never user-named.
         if name == "Seq" {
             return None;
         }
         // `Option[T]` (M9): a type-arg application of the prelude `Option`
         // resolves to a fresh Option def carrying the element type. Registered
-        // here (not via `register_enum` in the prelude) so each annotation site
-        // gets its own def, which then unifies with any other Option[T] by name
+        // here (not via the prelude's own def) so each annotation site gets its
+        // own def, which then unifies with any other Option[T] by name
         // (unify.rs M9 arm) and with `Some`/`None`-constructed values.
         if name == "Option" {
             let elem = args
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| self.db.fresh_var());
-            return Some(self.db.register_enum(
-                "Option",
-                vec![("Some".into(), Some(vec![elem])), ("None".into(), None)],
-            ));
+            return Some(option_type(&mut self.db, elem));
         }
         let ctor = Self::collection_ctor_for(name)?;
-        // Arity check: the ctor declares how many type args it takes. A wrong
-        // arity is a type error surfaced as a unification failure downstream
-        // (the args vec length won't match), so just pass them through here.
-        Some(self.db.collection(ctor, args))
+        // The ctor declares how many type args it takes, and F5 is what finally
+        // consults it (TY-07). A wrong arity used to intern a type nothing could
+        // unify with, so the user saw a `Y001` about a type they never wrote.
+        let want = ctor.arity();
+        let got = args.len();
+        match CollectionArgs::new(ctor, args) {
+            Ok(args) => self.db.collection(ctor, args).ok(),
+            Err(_) => {
+                self.diagnostics
+                    .push(crate::diagnostics::wrong_type_argument_count(
+                        self.file_span(range),
+                        ctor.name(),
+                        got,
+                        want,
+                    ));
+                None
+            }
+        }
     }
+}
+
+/// A fresh `Option[elem]` def (M9, §7.5).
+///
+/// Registered per site on purpose: each annotation and each `Some`/`None` use
+/// gets its own def, and the same-named-enum arm in `unify` merges them. The
+/// three call sites used to spell the variant list out, which is three places
+/// for `Some`'s payload and `None`'s absence to drift.
+fn option_type(db: &mut TypeDb, elem: Type) -> Type {
+    let variants = VariantSet::new(vec![
+        EnumVariantDef::new("Some", vec![elem]),
+        EnumVariantDef::bare("None"),
+    ])
+    .expect("Some and None are distinct");
+    db.enum_(Some("Option".into()), variants)
 }
 
 /// Whether an expression is a *syntactic value* for the HM value restriction

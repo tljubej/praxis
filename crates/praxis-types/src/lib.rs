@@ -12,18 +12,22 @@
 //! let-generalization. Collections, records, enums, closures, and the internal
 //! capability system arrive with their own milestones (M5/M7).
 
+pub mod ctor;
 pub mod data;
 pub mod db;
+pub mod error;
 pub mod fold;
 pub mod generalize;
 pub mod pretty;
 pub mod type_id;
 pub mod unify;
 
+pub use ctor::{CollectionArgs, FieldSet, TupleElems, VariantSet};
 pub use data::{
     EnumDef, EnumDefId, EnumVariantDef, RecordDef, RecordDefId, RecordFieldDef, TypeData, VarState,
 };
 pub use db::{Slot, TypeDb};
+pub use error::TypeCtorError;
 pub use fold::{fold, FoldMemo, TypeFolder};
 pub use generalize::Scheme;
 pub use type_id::{Type, VarId};
@@ -81,23 +85,41 @@ impl TypeDb {
         self.intern(TypeData::Func { params, result })
     }
 
-    /// A tuple type from the given elements (two or more).
+    /// A pair type `(a, b)` — the tuple arity that is always legal, so no
+    /// [`TupleElems`](crate::TupleElems) validation is needed at the call site.
     #[must_use]
-    pub fn tuple(&mut self, elements: Vec<Type>) -> Type {
-        self.intern(TypeData::Tuple(elements))
+    pub fn pair(&mut self, a: Type, b: Type) -> Type {
+        self.tuple(crate::TupleElems::pair(a, b))
     }
 
-    /// A collection type `Ctor[args]`, e.g. `Vec[elem]` (§4.4, §11.2, M5).
+    /// A unary collection type `Ctor[elem]` — `Vec`, `Set`, `Deque`, `Counter`,
+    /// `MinHeap`, `MaxHeap`, `Grid`, `Seq`. Infallible because the shape is
+    /// fixed at the call site; a nullary or binary ctor here is a caller bug and
+    /// panics rather than returning a wrong-arity type.
+    ///
+    /// # Panics
+    /// If `ctor` is not unary.
     #[must_use]
-    pub fn collection(&mut self, ctor: CollectionCtor, args: Vec<Type>) -> Type {
-        self.intern(TypeData::Collection { ctor, args })
+    pub fn unary_collection(&mut self, ctor: CollectionCtor, elem: Type) -> Type {
+        self.collection(ctor, crate::CollectionArgs::Unary(elem))
+            .expect("unary collection ctor")
     }
 
     /// The `Vec[T]` collection type (§4.4, §11.2). Convenience for
     /// [`collection`](Self::collection) with the `Vec` ctor.
     #[must_use]
     pub fn vec(&mut self, elem: Type) -> Type {
-        self.collection(CollectionCtor::Vec, vec![elem])
+        self.unary_collection(CollectionCtor::Vec, elem)
+    }
+
+    /// The `Map[K, V]` collection type.
+    #[must_use]
+    pub fn map(&mut self, key: Type, value: Type) -> Type {
+        self.collection(
+            CollectionCtor::Map,
+            crate::CollectionArgs::Binary(key, value),
+        )
+        .expect("Map is binary")
     }
 }
 

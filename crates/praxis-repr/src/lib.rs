@@ -31,7 +31,7 @@ use praxis_runtime::repr::{instance_repr, InstanceArg, InstanceRepr};
 use praxis_runtime::GcRef;
 use praxis_stdlib::type_pattern::CollectionCtor;
 use praxis_types::data::TypeData;
-use praxis_types::{ScalarType, Type, TypeDb};
+use praxis_types::{CollectionArgs, ScalarType, TupleElems, Type, TypeDb};
 
 /// Why a type has no runtime descriptor. The two cases have different owners
 /// and different correct handling, so they are not one string.
@@ -285,10 +285,9 @@ pub fn type_for_descriptor(
         BuiltinTypeId::Float => Ok(db.float()),
         BuiltinTypeId::Text => Ok(db.text()),
         // Nullary: the descriptor is the whole type.
-        BuiltinTypeId::BitSet => Ok(db.intern(TypeData::Collection {
-            ctor: CollectionCtor::BitSet,
-            args: Vec::new(),
-        })),
+        BuiltinTypeId::BitSet => db
+            .collection(CollectionCtor::BitSet, CollectionArgs::Nullary)
+            .map_err(|_| NoRuntimeRepr::value("BitSet takes no type arguments")),
         BuiltinTypeId::Vec
         | BuiltinTypeId::Deque
         | BuiltinTypeId::Grid
@@ -332,7 +331,15 @@ fn compose(
         BuiltinTypeId::MinHeap => CollectionCtor::MinHeap,
         BuiltinTypeId::MaxHeap => CollectionCtor::MaxHeap,
         // A tuple's arguments are its elements, not a collection's.
-        BuiltinTypeId::Tuple => return Ok(db.intern(TypeData::Tuple(args))),
+        // A tuple's arguments are its elements, not a collection's. Fewer than
+        // two is the backend's degenerate empty-schema tuple (MIR-05), which is
+        // not a tuple type — say so rather than interning one (F5).
+        BuiltinTypeId::Tuple => {
+            let elems = TupleElems::new(args).map_err(|_| {
+                NoRuntimeRepr::value("a tuple payload with fewer than two elements names no type")
+            })?;
+            return Ok(db.tuple(elems));
+        }
         // Every other built-in reported `Complete` or `Unrecorded`, so it never
         // reaches composition.
         _ => {
@@ -341,7 +348,16 @@ fn compose(
             ))
         }
     };
-    Ok(db.intern(TypeData::Collection { ctor, args }))
+    let args = CollectionArgs::new(ctor, args).map_err(|_| {
+        NoRuntimeRepr::value(
+            "the payload recovered a different number of arguments than the ctor takes",
+        )
+    })?;
+    db.collection(ctor, args).map_err(|_| {
+        NoRuntimeRepr::value(
+            "the payload recovered a different number of arguments than the ctor takes",
+        )
+    })
 }
 
 #[cfg(test)]

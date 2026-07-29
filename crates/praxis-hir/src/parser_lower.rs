@@ -43,7 +43,13 @@ pub fn analyze_parser_expr(
         return None;
     }
 
-    let result_type = synthesize(&ast, db);
+    let result_type = match synthesize(&ast, db) {
+        Ok(ty) => ty,
+        Err(e) => {
+            diagnostics.push(err_diag(file, parser_expr.span(), "I001", e.to_string()));
+            return None;
+        }
+    };
     // Registration is bounded and can refuse (IP-12). A refusal is a
     // diagnostic, not a wrapped index into somebody else's plan.
     let plan = match register_plan(lower_to_plan(&ast)) {
@@ -73,7 +79,13 @@ pub fn synthesize_parser_type(
         }
         return None;
     }
-    Some(synthesize(&ast, db))
+    match synthesize(&ast, db) {
+        Ok(ty) => Some(ty),
+        Err(e) => {
+            diagnostics.push(err_diag(file, parser_expr.span(), "I001", e.to_string()));
+            None
+        }
+    }
 }
 
 /// Convert a rowan `ParserExpr` into a `ParserAst`.

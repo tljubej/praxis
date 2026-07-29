@@ -9,22 +9,58 @@
 use praxis_stdlib::type_pattern::{CollectionCtor, ScalarType};
 
 use crate::data::{RecordDefId, TypeData, VarState};
-use crate::TypeDb;
+use crate::{CollectionArgs, FieldSet, TupleElems, Type, TypeDb, VariantSet};
 
 fn is_int(db: &TypeDb, t: crate::Type) -> bool {
     matches!(db.data(db.follow(t)), TypeData::Scalar(ScalarType::Int))
 }
 
 /// Build a 2-tuple without chaining borrows. The arena methods each take
-/// `&mut self`, so `db.tuple(vec![db.int(), db.text()])` would alias; this helper
+/// `&mut self`, so `db.pair(db.int(), db.text())` would alias; this helper
 /// is the ergonomic shape real callers (the inferer) use.
 fn tup2(db: &mut TypeDb, a: crate::Type, b: crate::Type) -> crate::Type {
-    db.tuple(vec![a, b])
+    db.pair(a, b)
 }
 
 /// Build `(a) -> r` without aliasing.
 fn func1(db: &mut TypeDb, a: crate::Type, r: crate::Type) -> crate::Type {
     db.func(vec![a], r)
+}
+
+/// A tuple of arbitrary (valid) arity.
+fn tup(db: &mut TypeDb, elements: Vec<Type>) -> Type {
+    db.tuple(TupleElems::new(elements).expect("at least two elements"))
+}
+
+/// A collection whose arity matches its ctor.
+fn coll(db: &mut TypeDb, ctor: CollectionCtor, args: Vec<Type>) -> Type {
+    let args = CollectionArgs::new(ctor, args).expect("arity matches the ctor");
+    db.collection(ctor, args).expect("arity matches the ctor")
+}
+
+/// A nominal record from `(name, type)` pairs.
+fn record(db: &mut TypeDb, name: &str, fields: Vec<(String, Type)>) -> Type {
+    let fields = FieldSet::from_pairs(fields).expect("distinct field names");
+    db.record(Some(name.to_string()), fields)
+}
+
+/// An anonymous structural record (§5.6).
+fn anon_record(db: &mut TypeDb, fields: Vec<(String, Type)>) -> Type {
+    let fields = FieldSet::from_pairs(fields).expect("distinct field names");
+    db.record(None, fields)
+}
+
+/// A nominal enum from `(name, payload)` pairs. An empty payload is a
+/// payload-less variant (TY-05).
+fn enum_ty(db: &mut TypeDb, name: &str, variants: Vec<(String, Vec<Type>)>) -> Type {
+    let variants = VariantSet::from_pairs(variants).expect("distinct variant names");
+    db.enum_(Some(name.to_string()), variants)
+}
+
+/// An anonymous enum (`choice(...)`, §7.5).
+fn anon_enum(db: &mut TypeDb, variants: Vec<(String, Vec<Type>)>) -> Type {
+    let variants = VariantSet::from_pairs(variants).expect("distinct variant names");
+    db.enum_(None, variants)
 }
 
 #[test]
@@ -117,7 +153,7 @@ fn unify_tuples_elementwise() {
     let b3 = db.bool();
     let i3 = db.int();
     let t3 = db.text();
-    let three = db.tuple(vec![i3, t3, b3]);
+    let three = tup(&mut db, vec![i3, t3, b3]);
     let err = db.unify(t1, three).unwrap_err();
     assert!(matches!(err, crate::unify::UnifyError::Mismatch { .. }));
     let _ = b3;
@@ -307,7 +343,7 @@ fn generalized_var_state_is_marked() {
     let scheme = db.generalize(body);
     let var = scheme.quantified[0];
     assert!(matches!(
-        db.data(crate::Type(var.0)),
+        db.data(var.as_type()),
         TypeData::Var(VarState::Generalized)
     ));
 }
@@ -343,17 +379,69 @@ fn unify_vec_mismatched_element_fails() {
     );
 }
 
+/// TY-07. A wrong-arity collection used to be one `db.collection` call away,
+/// and the only thing that noticed was a *unification* against a correctly
+/// shaped one — which is the wrong place to notice, because a `Vec[Int, Text]`
+/// that is never unified against anything simply flows on. This asserted that
+/// mismatch; it now asserts that the type cannot be built at all.
 #[test]
-fn unify_vec_mismatched_arity_fails() {
-    // `Vec[Int]` (one arg) vs a collection with two args — different arg counts
-    // must mismatch even when the ctor matches.
+fn a_wrong_arity_collection_is_unconstructible() {
     let mut db = TypeDb::new();
     let i = db.int();
-    let a = db.vec(i);
     let t = db.text();
-    let b = db.collection(CollectionCtor::Vec, vec![i, t]);
-    let err = db.unify(a, b).unwrap_err();
-    assert!(matches!(err, crate::unify::UnifyError::Mismatch { .. }));
+
+    // Two arguments for a unary ctor: rejected while shaping the arguments…
+    assert_eq!(
+        CollectionArgs::new(CollectionCtor::Vec, vec![i, t]),
+        Err(crate::TypeCtorError::CollectionArity {
+            ctor: CollectionCtor::Vec,
+            got: 2,
+            want: 1,
+        })
+    );
+    // …and again by the constructor, for a shape built without `new`.
+    assert!(db
+        .collection(CollectionCtor::Vec, CollectionArgs::Binary(i, t))
+        .is_err());
+    // Both ends of the range, on the ctors that make them tempting.
+    assert!(CollectionArgs::new(CollectionCtor::Map, vec![i]).is_err());
+    assert!(CollectionArgs::new(CollectionCtor::BitSet, vec![i]).is_err());
+    // The right shape still builds.
+    assert!(db
+        .collection(CollectionCtor::Map, CollectionArgs::Binary(t, i))
+        .is_ok());
+}
+
+/// TY-07's other two shapes: a one-element tuple, and a def with a repeated
+/// name. All three were representable, and the duplicate cases were checked
+/// only at whichever syntax caller remembered to.
+#[test]
+fn degenerate_tuples_and_duplicate_names_are_unconstructible() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let t = db.text();
+
+    assert_eq!(
+        TupleElems::new(vec![i]),
+        Err(crate::TypeCtorError::TupleArity(1))
+    );
+    assert_eq!(
+        TupleElems::new(Vec::new()),
+        Err(crate::TypeCtorError::TupleArity(0))
+    );
+    assert!(TupleElems::new(vec![i, t]).is_ok());
+
+    assert!(matches!(
+        FieldSet::from_pairs(vec![("x".into(), i), ("x".into(), t)]),
+        Err(crate::TypeCtorError::DuplicateField(name)) if name == "x"
+    ));
+    assert!(FieldSet::from_pairs(vec![("x".into(), i), ("y".into(), t)]).is_ok());
+
+    assert!(matches!(
+        VariantSet::from_pairs(vec![("A".into(), vec![i]), ("A".into(), vec![])]),
+        Err(crate::TypeCtorError::DuplicateVariant(name)) if name == "A"
+    ));
+    assert!(VariantSet::from_pairs(vec![("A".into(), vec![i]), ("B".into(), vec![])]).is_ok());
 }
 
 #[test]
@@ -363,7 +451,7 @@ fn unify_vec_with_different_ctor_fails() {
     let mut db = TypeDb::new();
     let i = db.int();
     let a = db.vec(i);
-    let b = db.collection(CollectionCtor::Deque, vec![i]);
+    let b = coll(&mut db, CollectionCtor::Deque, vec![i]);
     assert!(db.unify(a, b).is_err());
 }
 
@@ -389,7 +477,7 @@ fn render_collection_types() {
     assert_eq!(db.render(vec_int), "Vec[Int]");
     // Map[K, V] exercises the multi-arg collection rendering.
     let t = db.text();
-    let m = db.collection(CollectionCtor::Map, vec![t, i]);
+    let m = coll(&mut db, CollectionCtor::Map, vec![t, i]);
     assert_eq!(db.render(m), "Map[Text, Int]");
     // Nested: Vec[Map[Text, Int]].
     let nested = db.vec(m);
@@ -409,7 +497,7 @@ fn nominal_record_renders_by_name() {
     let mut db = TypeDb::new();
     let i = db.int();
     let t = db.text();
-    let point = db.register_record("Point", vec![("x".into(), i), ("y".into(), t)]);
+    let point = record(&mut db, "Point", vec![("x".into(), i), ("y".into(), t)]);
     assert_eq!(db.render(point), "Point");
 }
 
@@ -418,7 +506,7 @@ fn anonymous_record_renders_structurally() {
     let mut db = TypeDb::new();
     let i = db.int();
     let t = db.text();
-    let rec = db.anon_record(vec![("x".into(), i), ("y".into(), t)]);
+    let rec = anon_record(&mut db, vec![("x".into(), i), ("y".into(), t)]);
     assert_eq!(db.render(rec), "{ x: Int, y: Text }");
 }
 
@@ -426,12 +514,12 @@ fn anonymous_record_renders_structurally() {
 fn nominal_records_with_same_name_but_distinct_def_ids_do_not_unify() {
     let mut db = TypeDb::new();
     let i = db.int();
-    let a = db.register_record("Point", vec![("x".into(), i)]);
+    let a = record(&mut db, "Point", vec![("x".into(), i)]);
     // Same name, same fields → fresh def-id but... nominal records are distinct
     // by def-id (each register_record call mints a new one). So two separately
     // registered Points do NOT unify unless they share the def-id.
     let i2 = db.int();
-    let b = db.register_record("Point", vec![("x".into(), i2)]);
+    let b = record(&mut db, "Point", vec![("x".into(), i2)]);
     // Different def-ids: nominal records don't unify across registrations.
     assert!(
         db.unify(a, b).is_err(),
@@ -445,7 +533,7 @@ fn nominal_records_with_same_name_but_distinct_def_ids_do_not_unify() {
 fn nominal_record_unifies_with_same_def_id() {
     let mut db = TypeDb::new();
     let i = db.int();
-    let point = db.register_record("Point", vec![("x".into(), i), ("y".into(), i)]);
+    let point = record(&mut db, "Point", vec![("x".into(), i), ("y".into(), i)]);
     // Re-intern the same def-id — these unify.
     let def = match db.data(db.follow(point)) {
         TypeData::Record { def } => *def,
@@ -459,9 +547,9 @@ fn nominal_record_unifies_with_same_def_id() {
 fn anonymous_records_same_fields_unify() {
     let mut db = TypeDb::new();
     let i = db.int();
-    let a = db.anon_record(vec![("x".into(), i), ("y".into(), i)]);
+    let a = anon_record(&mut db, vec![("x".into(), i), ("y".into(), i)]);
     let i2 = db.int();
-    let b = db.anon_record(vec![("x".into(), i2), ("y".into(), i2)]);
+    let b = anon_record(&mut db, vec![("x".into(), i2), ("y".into(), i2)]);
     // Same field-name set → shared def-id → unify.
     db.unify(a, b).expect("anon records with same names unify");
 }
@@ -474,10 +562,10 @@ fn anonymous_records_order_independent_identity() {
     let mut db = TypeDb::new();
     let i = db.int();
     let j = db.int();
-    let a = db.anon_record(vec![("x".into(), i), ("y".into(), j)]);
+    let a = anon_record(&mut db, vec![("x".into(), i), ("y".into(), j)]);
     let i2 = db.int();
     let j2 = db.int();
-    let b = db.anon_record(vec![("y".into(), j2), ("x".into(), i2)]);
+    let b = anon_record(&mut db, vec![("y".into(), j2), ("x".into(), i2)]);
     db.unify(a, b).expect("order-independent identity unifies");
 }
 
@@ -485,8 +573,8 @@ fn anonymous_records_order_independent_identity() {
 fn anonymous_records_different_names_do_not_unify() {
     let mut db = TypeDb::new();
     let i = db.int();
-    let a = db.anon_record(vec![("x".into(), i), ("y".into(), i)]);
-    let b = db.anon_record(vec![("x".into(), i), ("z".into(), i)]);
+    let a = anon_record(&mut db, vec![("x".into(), i), ("y".into(), i)]);
+    let b = anon_record(&mut db, vec![("x".into(), i), ("z".into(), i)]);
     assert!(
         db.unify(a, b).is_err(),
         "{{x,y}} and {{x,z}} have different field sets"
@@ -498,9 +586,9 @@ fn record_field_var_unifies() {
     // A record field containing a type var: { x: ?T } ~ { x: Int } constrains ?T.
     let mut db = TypeDb::new();
     let v = db.fresh_var();
-    let a = db.anon_record(vec![("x".into(), v)]);
+    let a = anon_record(&mut db, vec![("x".into(), v)]);
     let i = db.int();
-    let b = db.anon_record(vec![("x".into(), i)]);
+    let b = anon_record(&mut db, vec![("x".into(), i)]);
     db.unify(a, b).expect("{x:?T} ~ {x:Int}");
     assert!(is_int(&db, v));
 }
@@ -509,9 +597,10 @@ fn record_field_var_unifies() {
 fn enum_same_def_id_unifies() {
     let mut db = TypeDb::new();
     let i = db.int();
-    let tile = db.register_enum(
+    let tile = enum_ty(
+        &mut db,
         "Tile",
-        vec![("Empty".into(), None), ("Number".into(), Some(vec![i]))],
+        vec![("Empty".into(), vec![]), ("Number".into(), vec![i])],
     );
     db.unify(tile, tile).expect("enum ~ itself");
     let def = match db.data(db.follow(tile)) {
@@ -526,8 +615,8 @@ fn enum_same_def_id_unifies() {
 fn different_enums_do_not_unify() {
     let mut db = TypeDb::new();
     let i = db.int();
-    let a = db.register_enum("A", vec![("X".into(), Some(vec![i]))]);
-    let b = db.register_enum("B", vec![("X".into(), Some(vec![i]))]);
+    let a = enum_ty(&mut db, "A", vec![("X".into(), vec![i])]);
+    let b = enum_ty(&mut db, "B", vec![("X".into(), vec![i])]);
     assert!(db.unify(a, b).is_err(), "different enum names don't unify");
 }
 
@@ -536,7 +625,7 @@ fn record_def_lookups() {
     let mut db = TypeDb::new();
     let i = db.int();
     let t = db.text();
-    let _ = db.register_record("Point", vec![("x".into(), i), ("y".into(), t)]);
+    let _ = record(&mut db, "Point", vec![("x".into(), i), ("y".into(), t)]);
     // Fetch the def via the last registered type.
     let defs = &db.record_defs;
     let def = &defs[0];
@@ -552,12 +641,13 @@ fn record_def_lookups() {
 fn enum_def_variant_lookup() {
     let mut db = TypeDb::new();
     let i = db.int();
-    let _ = db.register_enum(
+    let _ = enum_ty(
+        &mut db,
         "Tile",
-        vec![("Empty".into(), None), ("Number".into(), Some(vec![i]))],
+        vec![("Empty".into(), vec![]), ("Number".into(), vec![i])],
     );
     let def = &db.enum_defs[0];
-    assert_eq!(def.name, "Tile");
+    assert_eq!(def.name.as_deref(), Some("Tile"));
     assert_eq!(def.arity(), 2);
     assert_eq!(def.variant("Number"), Some(1));
     assert_eq!(def.variant("Empty"), Some(0));
@@ -572,7 +662,7 @@ fn record_generalizes_inner_vars() {
     let mut db = TypeDb::new();
     let body = db.scoped_return(|db| {
         let v = db.fresh_var();
-        db.anon_record(vec![("x".into(), v)])
+        anon_record(db, vec![("x".into(), v)])
     });
     let scheme = db.generalize(body);
     assert_eq!(scheme.quantified.len(), 1);
@@ -585,18 +675,18 @@ fn record_instantiates_to_fresh_vars() {
     let mut db = TypeDb::new();
     let body = db.scoped_return(|db| {
         let v = db.fresh_var();
-        db.anon_record(vec![("x".into(), v)])
+        anon_record(db, vec![("x".into(), v)])
     });
     let scheme = db.generalize(body);
     let inst1 = db.instantiate(&scheme);
     let inst2 = db.instantiate(&scheme);
     // Constrain inst1's x to Int, inst2's x stays free.
     let i = db.int();
-    let int_rec = db.anon_record(vec![("x".into(), i)]);
+    let int_rec = anon_record(&mut db, vec![("x".into(), i)]);
     db.unify(inst1, int_rec).expect("inst1 ~ {x:Int}");
     // inst2 should still be instantiable to Text.
     let t = db.text();
-    let text_rec = db.anon_record(vec![("x".into(), t)]);
+    let text_rec = anon_record(&mut db, vec![("x".into(), t)]);
     db.unify(inst2, text_rec).expect("inst2 ~ {x:Text}");
 }
 
@@ -606,7 +696,7 @@ fn enum_instantiates_payloads() {
     let mut db = TypeDb::new();
     let body = db.scoped_return(|db| {
         let v = db.fresh_var();
-        db.register_enum("E", vec![("Some".into(), Some(vec![v]))])
+        enum_ty(db, "E", vec![("Some".into(), vec![v])])
     });
     let scheme = db.generalize(body);
     assert!(scheme.is_polymorphic());
@@ -617,7 +707,7 @@ fn occurs_check_works_through_record_fields() {
     // Unifying ?T with { x: ?T } must fail the occurs check (infinite type).
     let mut db = TypeDb::new();
     let v = db.fresh_var();
-    let rec = db.anon_record(vec![("x".into(), v)]);
+    let rec = anon_record(&mut db, vec![("x".into(), v)]);
     let err = db.unify(v, rec).unwrap_err();
     assert!(
         matches!(err, crate::unify::UnifyError::Occurs { .. }),
@@ -629,7 +719,7 @@ fn occurs_check_works_through_record_fields() {
 fn vec_of_record_renders() {
     let mut db = TypeDb::new();
     let i = db.int();
-    let rec = db.anon_record(vec![("x".into(), i), ("y".into(), i)]);
+    let rec = anon_record(&mut db, vec![("x".into(), i), ("y".into(), i)]);
     let vec_rec = db.vec(rec);
     assert_eq!(db.render(vec_rec), "Vec[{ x: Int, y: Int }]");
 }
@@ -645,11 +735,11 @@ fn anon_record_display_preserves_source_order() {
     let mut db = TypeDb::new();
     let i = db.int();
     let j = db.int();
-    let xy = db.anon_record(vec![("x".into(), i), ("y".into(), j)]);
+    let xy = anon_record(&mut db, vec![("x".into(), i), ("y".into(), j)]);
     assert_eq!(db.render(xy), "{ x: Int, y: Int }");
     let k = db.int();
     let l = db.int();
-    let yx = db.anon_record(vec![("y".into(), l), ("x".into(), k)]);
+    let yx = anon_record(&mut db, vec![("y".into(), l), ("x".into(), k)]);
     assert_eq!(db.render(yx), "{ y: Int, x: Int }");
     let _ = RecordDefId(0); // exercise the debug impl / keep the import used
 }
@@ -666,13 +756,15 @@ fn same_named_enums_unify_structurally() {
     let int = db.int();
     // Two independently-stamped `Option` defs (simulating two instantiation
     // sites of a polymorphic Option scheme).
-    let opt_a = db.register_enum(
+    let opt_a = enum_ty(
+        &mut db,
         "Option",
-        vec![("Some".into(), Some(vec![int])), ("None".into(), None)],
+        vec![("Some".into(), vec![int]), ("None".into(), vec![])],
     );
-    let opt_b = db.register_enum(
+    let opt_b = enum_ty(
+        &mut db,
         "Option",
-        vec![("Some".into(), Some(vec![int])), ("None".into(), None)],
+        vec![("Some".into(), vec![int]), ("None".into(), vec![])],
     );
     db.unify(opt_a, opt_b).expect("Option[Int] ~ Option[Int]");
 }
@@ -685,14 +777,16 @@ fn same_named_enums_unify_payloads_pairwise() {
     let t = db.fresh_var();
     let int = db.int();
     // Option[?T]
-    let opt_var = db.register_enum(
+    let opt_var = enum_ty(
+        &mut db,
         "Option",
-        vec![("Some".into(), Some(vec![t])), ("None".into(), None)],
+        vec![("Some".into(), vec![t]), ("None".into(), vec![])],
     );
     // Option[Int]
-    let opt_int = db.register_enum(
+    let opt_int = enum_ty(
+        &mut db,
         "Option",
-        vec![("Some".into(), Some(vec![int])), ("None".into(), None)],
+        vec![("Some".into(), vec![int]), ("None".into(), vec![])],
     );
     db.unify(opt_var, opt_int)
         .expect("Option[?T] ~ Option[Int]");
@@ -704,8 +798,16 @@ fn same_named_enums_unify_payloads_pairwise() {
 #[test]
 fn differently_named_enums_do_not_unify() {
     let mut db = TypeDb::new();
-    let color = db.register_enum("Color", vec![("Red".into(), None), ("Green".into(), None)]);
-    let signal = db.register_enum("Signal", vec![("Red".into(), None), ("Green".into(), None)]);
+    let color = enum_ty(
+        &mut db,
+        "Color",
+        vec![("Red".into(), vec![]), ("Green".into(), vec![])],
+    );
+    let signal = enum_ty(
+        &mut db,
+        "Signal",
+        vec![("Red".into(), vec![]), ("Green".into(), vec![])],
+    );
     let err = db.unify(color, signal).unwrap_err();
     assert!(matches!(err, crate::unify::UnifyError::Mismatch { .. }));
 }
@@ -714,8 +816,16 @@ fn differently_named_enums_do_not_unify() {
 #[test]
 fn same_name_different_variants_do_not_unify() {
     let mut db = TypeDb::new();
-    let a = db.register_enum("E", vec![("A".into(), None), ("B".into(), None)]);
-    let b = db.register_enum("E", vec![("A".into(), None), ("C".into(), None)]);
+    let a = enum_ty(
+        &mut db,
+        "E",
+        vec![("A".into(), vec![]), ("B".into(), vec![])],
+    );
+    let b = enum_ty(
+        &mut db,
+        "E",
+        vec![("A".into(), vec![]), ("C".into(), vec![])],
+    );
     let err = db.unify(a, b).unwrap_err();
     assert!(matches!(err, crate::unify::UnifyError::Mismatch { .. }));
 }
@@ -729,14 +839,14 @@ fn anonymous_enums_unify_by_variant_signature() {
     let i1 = db.int();
     let i2 = db.int();
     let i3 = db.int();
-    let choice_a = db.anon_enum(vec![
-        ("Multiply".into(), Some(vec![i0, i1])),
-        ("Enable".into(), None),
-    ]);
-    let choice_b = db.anon_enum(vec![
-        ("Multiply".into(), Some(vec![i2, i3])),
-        ("Enable".into(), None),
-    ]);
+    let choice_a = anon_enum(
+        &mut db,
+        vec![("Multiply".into(), vec![i0, i1]), ("Enable".into(), vec![])],
+    );
+    let choice_b = anon_enum(
+        &mut db,
+        vec![("Multiply".into(), vec![i2, i3]), ("Enable".into(), vec![])],
+    );
     db.unify(choice_a, choice_b)
         .expect("anon enums same shape unify");
 }
@@ -746,8 +856,8 @@ fn anonymous_enums_unify_by_variant_signature() {
 #[test]
 fn anonymous_enums_different_shape_do_not_unify() {
     let mut db = TypeDb::new();
-    let a = db.anon_enum(vec![("Foo".into(), None)]);
-    let b = db.anon_enum(vec![("Bar".into(), None)]);
+    let a = anon_enum(&mut db, vec![("Foo".into(), vec![])]);
+    let b = anon_enum(&mut db, vec![("Bar".into(), vec![])]);
     assert!(db.unify(a, b).is_err());
 }
 
@@ -764,7 +874,7 @@ fn linking_an_outer_var_to_an_inner_type_prevents_inner_generalization() {
     let outer = db.fresh_var(); // level 0
     let body = db.scoped_return(|db| {
         let inner = db.fresh_var(); // level 1
-        let pair = db.tuple(vec![inner, inner]);
+        let pair = tup(db, vec![inner, inner]);
         db.unify(outer, pair).expect("outer var accepts inner pair");
         outer
     });
@@ -813,7 +923,7 @@ fn deep_resolve_rewrites_record_field_links() {
     // that recursive resolution just like tuple/collection elements.
     let mut db = TypeDb::new();
     let field_var = db.fresh_var();
-    let record = db.anon_record(vec![("value".into(), field_var)]);
+    let record = anon_record(&mut db, vec![("value".into(), field_var)]);
     let int = db.int();
     db.unify(field_var, int).expect("field var ~ Int");
 
@@ -830,14 +940,30 @@ fn deep_resolve_rewrites_record_field_links() {
     );
 }
 
+/// TY-05. `EnumVariantDef` documented `Some(vec![])` as equivalent to `None`
+/// and `unify` then rejected the pair, because the two spellings fell through
+/// its three-way payload match to a catch-all.
+///
+/// There is now one spelling, so the test says so at both levels the bug lived
+/// at: the *representation* admits only the empty vector, and the two
+/// constructors that used to disagree produce defs that unify.
 #[test]
-#[ignore = "known bug: enum unification distinguishes None from an empty payload"]
 fn empty_enum_payload_and_no_payload_are_equivalent() {
-    // EnumVariantDef documents `Some(vec![])` as equivalent to `None`.
-    // Unification must therefore not distinguish the two representations.
     let mut db = TypeDb::new();
-    let no_payload = db.register_enum("E", vec![("Only".into(), None)]);
-    let empty_payload = db.register_enum("E", vec![("Only".into(), Some(Vec::new()))]);
+    let bare = crate::EnumVariantDef::bare("Only");
+    let empty = crate::EnumVariantDef::new("Only", Vec::new());
+    assert!(!bare.has_payload());
+    assert!(!empty.has_payload());
+    assert_eq!(bare.payload, empty.payload, "one payload-less spelling");
+
+    let no_payload = db.enum_(
+        Some("E".into()),
+        VariantSet::new(vec![bare]).expect("one variant"),
+    );
+    let empty_payload = db.enum_(
+        Some("E".into()),
+        VariantSet::new(vec![empty]).expect("one variant"),
+    );
     db.unify(no_payload, empty_payload)
-        .expect("None and Some(empty) payloads are semantically identical");
+        .expect("a payload-less variant unifies with itself however it was built");
 }

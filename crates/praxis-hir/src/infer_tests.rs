@@ -1346,3 +1346,51 @@ fn immediately_invoked_closure_boxes_its_mutable_capture() {
         "a closure in Call.callee_expr still requires its captured var to be boxed"
     );
 }
+
+// --- TY-07: type constructors validate their own arguments ------------------
+
+/// A wrong number of type arguments in an annotation is named where it was
+/// written (`Y007`), not as a downstream `Y001` about a type the user never
+/// wrote. Before F5 the annotation interned a `Map[Text]` that could not unify
+/// with anything, so the only report came from the first use.
+#[test]
+fn a_wrong_type_argument_count_is_reported_at_the_annotation() {
+    for src in [
+        "fn main() -> Int { let m: Map[Text] = Map(); 0 }",
+        "fn main() -> Int { let v: Vec[Int, Text] = Vec(); 0 }",
+    ] {
+        let codes: Vec<u32> = analyze(src)
+            .diagnostics
+            .iter()
+            .filter(|d| d.code().category() == DiagnosticCategory::Type)
+            .map(|d| d.code().number())
+            .collect();
+        assert!(
+            codes.contains(&7),
+            "`{src}` must report Y007, got {codes:?}"
+        );
+    }
+    // The right count still type-checks clean.
+    assert!(!has_type_error(
+        "fn main() -> Int { let m: Map[Text, Int] = Map(); 0 }"
+    ));
+}
+
+/// A declaration that names one member twice is rejected (`Y008`). It used to
+/// register a def holding both, and every lookup answered the first — so the
+/// second field was silently unreachable rather than diagnosed.
+#[test]
+fn a_duplicate_field_or_variant_is_rejected() {
+    assert!(
+        has_type_error("struct Point { x: Int, x: Text }\nfn main() -> Int { 0 }"),
+        "a struct may not declare the same field twice"
+    );
+    assert!(
+        has_type_error("enum Tile { Empty, Empty }\nfn main() -> Int { 0 }"),
+        "an enum may not declare the same variant twice"
+    );
+    assert!(
+        !has_type_error("struct Point { x: Int, y: Text }\nfn main() -> Int { 0 }"),
+        "distinct field names are fine"
+    );
+}

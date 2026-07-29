@@ -80,10 +80,9 @@ impl TypeDb {
             return scheme.body;
         }
         // Map each quantified var id → a fresh var created at the current level.
-        let mut mapping = vec![Type(0); scheme.quantified.len()];
-        for slot in &mut mapping {
-            *slot = self.fresh_var();
-        }
+        let mapping: Vec<Type> = (0..scheme.quantified.len())
+            .map(|_| self.fresh_var())
+            .collect();
         self.instantiate_walk(scheme.body, &scheme.quantified, &mapping)
     }
 

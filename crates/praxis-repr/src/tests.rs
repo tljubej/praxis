@@ -234,7 +234,7 @@ fn the_types_that_used_to_fall_back_to_int_resolve_to_themselves() {
     let float = db.float();
     let unit = db.unit();
     let int = db.int();
-    let tuple = db.intern(TypeData::Tuple(vec![int, int]));
+    let tuple = db.pair(int, int);
 
     let cases: [(Type, &'static TypeDescriptor); 3] = [
         (float, &praxis_runtime::scalars::FLOAT),
@@ -264,10 +264,7 @@ fn the_types_that_used_to_fall_back_to_int_resolve_to_themselves() {
 fn a_function_type_resolves_to_the_closure_descriptor() {
     let mut db = TypeDb::new();
     let int = db.int();
-    let f = db.intern(TypeData::Func {
-        params: vec![int],
-        result: int,
-    });
+    let f = db.func(vec![int], int);
     assert!(std::ptr::eq(
         descriptor_for_type(&db, f).expect("closures have a descriptor"),
         &praxis_runtime::closures::CLOSURE
@@ -283,14 +280,12 @@ fn a_type_with_no_runtime_object_has_no_descriptor() {
     let never = db.scalar(ScalarType::Never);
     let uint = db.scalar(ScalarType::UInt);
     let int = db.int();
-    let range = db.intern(TypeData::Collection {
-        ctor: CollectionCtor::Range,
-        args: vec![int],
-    });
-    let seq = db.intern(TypeData::Collection {
-        ctor: CollectionCtor::Seq,
-        args: vec![int],
-    });
+    // `Range` is nullary (F5 is what makes the old `args: vec![int]` here
+    // unrepresentable); `Seq` is the compiler-internal unary sequence.
+    let range = db
+        .collection(CollectionCtor::Range, praxis_types::CollectionArgs::Nullary)
+        .expect("Range is nullary");
+    let seq = db.unary_collection(CollectionCtor::Seq, int);
     let var = db.fresh_var();
 
     for (ty, what) in [
@@ -318,42 +313,32 @@ fn element_descriptors_follow_the_collection_arity() {
     let int = db.int();
     let text = db.text();
 
-    let vec_text = db.intern(TypeData::Collection {
-        ctor: CollectionCtor::Vec,
-        args: vec![text],
-    });
+    let vec_text = db.vec(text);
     let got = element_descriptors_for(&db, vec_text).expect("Vec[Text]");
     assert_eq!(got.len(), 1);
     assert!(std::ptr::eq(got[0], &praxis_runtime::text::TEXT));
 
-    let map = db.intern(TypeData::Collection {
-        ctor: CollectionCtor::Map,
-        args: vec![text, int],
-    });
+    let map = db.map(text, int);
     let got = element_descriptors_for(&db, map).expect("Map[Text, Int]");
     assert_eq!(got.len(), 2, "Map reports key and value");
     assert!(std::ptr::eq(got[0], &praxis_runtime::text::TEXT));
     assert!(std::ptr::eq(got[1], &praxis_runtime::scalars::INT));
 
     // `Counter[T]` is unary: its values are always Int and are not an argument.
-    let counter = db.intern(TypeData::Collection {
-        ctor: CollectionCtor::Counter,
-        args: vec![text],
-    });
+    let counter = db.unary_collection(CollectionCtor::Counter, text);
     assert_eq!(element_descriptors_for(&db, counter).unwrap().len(), 1);
 
     // BitSet is nullary.
-    let bitset = db.intern(TypeData::Collection {
-        ctor: CollectionCtor::BitSet,
-        args: Vec::new(),
-    });
+    let bitset = db
+        .collection(
+            CollectionCtor::BitSet,
+            praxis_types::CollectionArgs::Nullary,
+        )
+        .expect("BitSet is nullary");
     assert!(element_descriptors_for(&db, bitset).unwrap().is_empty());
 
     // A collection of an unrepresentable element is not constructible.
     let never = db.scalar(ScalarType::Never);
-    let vec_never = db.intern(TypeData::Collection {
-        ctor: CollectionCtor::Vec,
-        args: vec![never],
-    });
+    let vec_never = db.vec(never);
     assert!(element_descriptors_for(&db, vec_never).is_err());
 }

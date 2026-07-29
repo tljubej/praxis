@@ -50,11 +50,11 @@ pub fn supports_eq(db: &TypeDb, t: Type) -> bool {
             .all(|f| supports_eq(db, f.ty)),
         // An enum is equatable iff every variant's payload types are (a variant
         // with no payload is trivially equatable).
-        TypeData::Enum { def } => db.enum_def(*def).variants.iter().all(|v| {
-            v.payload
-                .as_ref()
-                .map_or(true, |ts| ts.iter().all(|t| supports_eq(db, *t)))
-        }),
+        TypeData::Enum { def } => db
+            .enum_def(*def)
+            .variants
+            .iter()
+            .all(|v| v.payload.iter().all(|t| supports_eq(db, *t))),
         // An unresolved var is optimistically equatable (see module docs).
         TypeData::Var(_) => true,
     }
@@ -148,11 +148,11 @@ pub fn iter_item(db: &mut TypeDb, t: Type) -> Option<Type> {
         // BitSet and Range are nullary collections of non-negative Ints.
         (CollectionCtor::BitSet, _) | (CollectionCtor::Range, _) => db.scalar(ScalarType::Int),
         // A map yields its (key, value) pairs as a tuple.
-        (CollectionCtor::Map, [k, v]) => db.tuple(vec![*k, *v]),
+        (CollectionCtor::Map, [k, v]) => db.pair(*k, *v),
         // A counter yields its (key, value=Int) pairs.
         (CollectionCtor::Counter, [k]) => {
             let int_ty = db.scalar(ScalarType::Int);
-            db.tuple(vec![*k, int_ty])
+            db.pair(*k, int_ty)
         }
         // `Seq[T]` is the compiler-internal pipeline source (M8 WS8); it
         // threads its single element type through the pipeline.
@@ -182,7 +182,7 @@ mod tests {
     fn vec_yields_its_element_type() {
         let mut db = TypeDb::new();
         let int = db.int();
-        let vec_int = db.collection(CollectionCtor::Vec, vec![int]);
+        let vec_int = db.vec(int);
         let item = iter_item(&mut db, vec_int).expect("Vec[Int] is iterable");
         assert!(is_int(&db, item));
     }
@@ -191,7 +191,7 @@ mod tests {
     fn map_yields_key_value_tuple() {
         let mut db = TypeDb::new();
         let (text, int) = (db.text(), db.int());
-        let map = db.collection(CollectionCtor::Map, vec![text, int]);
+        let map = db.map(text, int);
         let item = iter_item(&mut db, map).expect("Map[Text,Int] is iterable");
         match db.data(db.follow(item)) {
             TypeData::Tuple(els) => {
@@ -207,7 +207,7 @@ mod tests {
     fn counter_yields_key_and_int_value() {
         let mut db = TypeDb::new();
         let text = db.text();
-        let counter = db.collection(CollectionCtor::Counter, vec![text]);
+        let counter = db.unary_collection(CollectionCtor::Counter, text);
         let item = iter_item(&mut db, counter).expect("Counter[Text] is iterable");
         match db.data(db.follow(item)) {
             TypeData::Tuple(els) => {
@@ -222,7 +222,12 @@ mod tests {
     #[test]
     fn bitset_yields_int() {
         let mut db = TypeDb::new();
-        let bitset = db.collection(CollectionCtor::BitSet, vec![]);
+        let bitset = db
+            .collection(
+                CollectionCtor::BitSet,
+                praxis_types::CollectionArgs::Nullary,
+            )
+            .expect("BitSet is nullary");
         let item = iter_item(&mut db, bitset).expect("BitSet is iterable");
         assert!(is_int(&db, item));
     }
@@ -231,7 +236,7 @@ mod tests {
     fn grid_yields_its_cell_type() {
         let mut db = TypeDb::new();
         let int = db.int();
-        let grid = db.collection(CollectionCtor::Grid, vec![int]);
+        let grid = db.unary_collection(CollectionCtor::Grid, int);
         let item = iter_item(&mut db, grid).expect("Grid[Int] is iterable");
         assert!(is_int(&db, item));
     }
@@ -293,15 +298,17 @@ mod tests {
     fn composites_are_not_orderable_even_when_their_elements_are() {
         let mut db = TypeDb::new();
         let (a, b) = (db.int(), db.int());
-        let tup = db.tuple(vec![a, b]);
+        let tup = db.pair(a, b);
         assert!(!supports_ord(&db, tup));
 
         let el = db.int();
-        let vec_of_int = db.collection(praxis_types::CollectionCtor::Vec, vec![el]);
+        let vec_of_int = db.vec(el);
         assert!(!supports_ord(&db, vec_of_int));
 
         let (fx, fy) = (db.int(), db.int());
-        let rec = db.register_record("P", vec![("x".into(), fx), ("y".into(), fy)]);
+        let fields = praxis_types::FieldSet::from_pairs(vec![("x".into(), fx), ("y".into(), fy)])
+            .expect("distinct field names");
+        let rec = db.record(Some("P".into()), fields);
         assert!(!supports_ord(&db, rec));
 
         // Equality is unchanged: it *does* recurse, and it has a lowering.

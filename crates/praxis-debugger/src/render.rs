@@ -259,11 +259,13 @@ fn type_str(local: &DebugLocal, ctx: &RenderCtx<'_>) -> String {
     if local.descriptor.is_null() {
         return String::new();
     }
-    let id = local.type_id;
-    if id as usize >= db.len() {
-        return String::new();
+    // F5: the stored id comes back through the arena's own checked route, so
+    // an id this `TypeDb` never minted is `None` rather than a forged handle
+    // that indexes whatever slot happens to be there.
+    match db.type_from_raw(local.type_id) {
+        Some(ty) => db.render(ty),
+        None => String::new(),
     }
-    db.render(praxis_types::Type(id))
 }
 
 /// The temp's materializing source expression, when the ctx carries source text
@@ -624,7 +626,7 @@ mod tests {
                 0,
                 praxis_runtime::LOCAL_KIND_TEMP,
                 Some((0, 1)),
-                int_ty.0,
+                int_ty.to_u32(),
             )],
         );
         let ctx = RenderCtx {

@@ -173,15 +173,18 @@ mod tests {
     #[test]
     fn exhaustive_enum_with_wildcard_is_ok() {
         let mut db = TypeDb::new();
-        let et = db.register_enum("Tile", vec![("Empty".into(), None), ("Wall".into(), None)]);
+        let et = tile_enum(&mut db);
         let arms = vec![
-            arm(TypedPattern::Wildcard),
-            arm(TypedPattern::EnumVariant {
-                enum_def_id: praxis_types::data::EnumDefId(0),
-                variant_idx: 0,
-                subpatterns: vec![],
-                ty: et,
-            }),
+            arm(TypedPattern::Wildcard, et),
+            arm(
+                TypedPattern::EnumVariant {
+                    enum_def_id: praxis_types::data::EnumDefId(0),
+                    variant_idx: 0,
+                    subpatterns: vec![],
+                    ty: et,
+                },
+                et,
+            ),
         ];
         let (y120, y121) = check_counts(&db, et, &arms);
         assert_eq!(y120, 0, "wildcard makes it exhaustive");
@@ -191,14 +194,17 @@ mod tests {
     #[test]
     fn non_exhaustive_enum_reports_y120() {
         let mut db = TypeDb::new();
-        let et = db.register_enum("Tile", vec![("Empty".into(), None), ("Wall".into(), None)]);
+        let et = tile_enum(&mut db);
         // Only Empty is covered; Wall is missing.
-        let arms = vec![arm(TypedPattern::EnumVariant {
-            enum_def_id: praxis_types::data::EnumDefId(0),
-            variant_idx: 0,
-            subpatterns: vec![],
-            ty: et,
-        })];
+        let arms = vec![arm(
+            TypedPattern::EnumVariant {
+                enum_def_id: praxis_types::data::EnumDefId(0),
+                variant_idx: 0,
+                subpatterns: vec![],
+                ty: et,
+            },
+            et,
+        )];
         let (y120, y121) = check_counts(&db, et, &arms);
         assert_eq!(y120, 1, "missing Wall variant");
         assert_eq!(y121, 0);
@@ -209,26 +215,46 @@ mod tests {
         let mut db = TypeDb::new();
         let int = db.int();
         let arms = vec![
-            arm(TypedPattern::Lit {
-                value: crate::lower::Lit::Int(1),
-                ty: int,
-            }),
-            arm(TypedPattern::Lit {
-                value: crate::lower::Lit::Int(2),
-                ty: int,
-            }),
+            arm(
+                TypedPattern::Lit {
+                    value: crate::lower::Lit::Int(1),
+                    ty: int,
+                },
+                int,
+            ),
+            arm(
+                TypedPattern::Lit {
+                    value: crate::lower::Lit::Int(2),
+                    ty: int,
+                },
+                int,
+            ),
         ];
         let (y120, _) = check_counts(&db, int, &arms);
         assert_eq!(y120, 1, "Int match needs a wildcard");
     }
 
+    /// The two-variant `Tile` enum every enum test here matches on.
+    fn tile_enum(db: &mut TypeDb) -> praxis_types::Type {
+        let variants = praxis_types::VariantSet::from_pairs(vec![
+            ("Empty".into(), Vec::new()),
+            ("Wall".into(), Vec::new()),
+        ])
+        .expect("distinct variant names");
+        db.enum_(Some("Tile".into()), variants)
+    }
+
     /// Build a trivial arm with the given pattern (body is an Int-0 lit).
-    fn arm(pattern: TypedPattern) -> TypedMatchArm {
+    ///
+    /// `body_ty` used to be a forged `Type(0)`, which named whatever sat in
+    /// slot zero of whichever arena the test built. F5 seals the handle, so the
+    /// caller passes a real one.
+    fn arm(pattern: TypedPattern, body_ty: praxis_types::Type) -> TypedMatchArm {
         TypedMatchArm {
             pattern,
             body: crate::lower::TypedExpr::Lit {
                 value: crate::lower::Lit::Int(0),
-                ty: praxis_types::Type(0),
+                ty: body_ty,
                 span: (0, 0),
             },
         }

@@ -41,7 +41,8 @@
 
 use std::collections::HashMap;
 
-use crate::data::{TypeData, VarState};
+use crate::ctor::{FieldSet, VariantSet};
+use crate::data::{EnumVariantDef, RecordFieldDef, TypeData, VarState};
 use crate::db::TypeDb;
 use crate::type_id::{Type, VarId};
 use crate::{CollectionCtor, EnumDefId, RecordDefId, ScalarType};
@@ -149,7 +150,7 @@ pub fn fold<F: TypeFolder + ?Sized>(folder: &mut F, t: Type) -> Type {
         TypeData::Collection { ctor, args } => folder.fold_collection(t, ctor, &args),
         TypeData::Record { def } => folder.fold_record(t, def),
         TypeData::Enum { def } => folder.fold_enum(t, def),
-        TypeData::Var(state) => folder.fold_var(t, VarId(t.to_u32()), &state),
+        TypeData::Var(state) => folder.fold_var(t, VarId::from_raw(t.to_u32()), &state),
     };
 
     folder.memo().seen.insert(t, folded);
@@ -179,6 +180,8 @@ pub fn fold_tuple_default<F: TypeFolder + ?Sized>(
 ) -> Type {
     let (folded, changed) = fold_all(folder, elements);
     if changed {
+        // Arity is preserved by construction, so the original tuple's validity
+        // carries over — no `TupleElems::new` round trip.
         folder.db().intern(TypeData::Tuple(folded))
     } else {
         t
@@ -233,15 +236,16 @@ pub fn fold_record_default<F: TypeFolder + ?Sized>(
     for field in &rdef.fields {
         let ty = fold(folder, field.ty);
         changed |= ty != field.ty;
-        fields.push((field.name.clone(), ty));
+        fields.push(RecordFieldDef {
+            name: field.name.clone(),
+            ty,
+        });
     }
     if !changed {
         return t;
     }
-    match rdef.name.clone() {
-        Some(name) => folder.db().register_record(name, fields),
-        None => folder.db().anon_record(fields),
-    }
+    let name = rdef.name.clone();
+    folder.db().record(name, FieldSet::preserving(fields))
 }
 
 /// Fold every type in `types` for effect, discarding the results.
@@ -273,7 +277,7 @@ pub fn visit_enum_payloads<F: TypeFolder + ?Sized>(folder: &mut F, def: EnumDefI
         .enum_def(def)
         .variants
         .iter()
-        .flat_map(|v| v.payload.iter().flatten().copied())
+        .flat_map(|v| v.payload.iter().copied())
         .collect();
     visit_all(folder, &payloads);
 }
@@ -330,25 +334,38 @@ pub fn fold_enum_default<F: TypeFolder + ?Sized>(folder: &mut F, t: Type, def: E
     let mut changed = false;
     let mut variants = Vec::with_capacity(edef.variants.len());
     for variant in &edef.variants {
-        let payload = match &variant.payload {
-            Some(types) => {
-                let (folded, any) = fold_all(folder, types);
-                changed |= any;
-                Some(folded)
-            }
-            None => None,
-        };
-        variants.push((variant.name.clone(), payload));
+        // TY-05: one payload representation, so one arm. This was a two-arm
+        // match over `Option<Vec<Type>>` whose `None` case existed only to say
+        // "the empty payload, spelled the other way".
+        let (payload, any) = fold_all(folder, &variant.payload);
+        changed |= any;
+        variants.push(EnumVariantDef {
+            name: variant.name.clone(),
+            payload,
+        });
     }
     if !changed {
         return t;
     }
-    folder.db().register_enum(edef.name.clone(), variants)
+    let name = edef.name.clone();
+    folder.db().enum_(name, VariantSet::preserving(variants))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A nominal record from `(name, type)` pairs.
+    fn record(db: &mut TypeDb, name: &str, fields: Vec<(String, Type)>) -> Type {
+        let fields = FieldSet::from_pairs(fields).expect("distinct field names");
+        db.record(Some(name.to_string()), fields)
+    }
+
+    /// A nominal enum from `(name, payload)` pairs.
+    fn enum_ty(db: &mut TypeDb, name: &str, variants: Vec<(String, Vec<Type>)>) -> Type {
+        let variants = VariantSet::from_pairs(variants).expect("distinct variant names");
+        db.enum_(Some(name.to_string()), variants)
+    }
 
     /// The identity fold: overrides nothing.
     struct Identity<'a> {
@@ -399,8 +416,8 @@ mod tests {
     fn an_identity_fold_returns_the_same_handles_and_interns_nothing() {
         let mut db = TypeDb::new();
         let (int, text) = (db.int(), db.text());
-        let tuple = db.tuple(vec![int, text]);
-        let vec_of_tuple = db.collection(CollectionCtor::Vec, vec![tuple]);
+        let tuple = db.pair(int, text);
+        let vec_of_tuple = db.vec(tuple);
         let func = db.func(vec![vec_of_tuple], int);
         let before = db.len();
 
@@ -418,8 +435,8 @@ mod tests {
     fn a_changed_leaf_rebuilds_the_types_that_contain_it() {
         let mut db = TypeDb::new();
         let (int, bool_ty) = (db.int(), db.bool());
-        let tuple = db.tuple(vec![int, bool_ty]);
-        let vec_of_tuple = db.collection(CollectionCtor::Vec, vec![tuple]);
+        let tuple = db.pair(int, bool_ty);
+        let vec_of_tuple = db.vec(tuple);
 
         let mut folder = IntToText {
             db: &mut db,
@@ -436,19 +453,19 @@ mod tests {
     fn records_and_enums_are_folded_through_their_defs() {
         let mut db = TypeDb::new();
         let int = db.int();
-        let record = db.register_record("P", vec![("x".into(), int)]);
+        let rec = record(&mut db, "P", vec![("x".into(), int)]);
         let int2 = db.int();
-        let enum_ty = db.register_enum("E", vec![("Some".into(), Some(vec![int2]))]);
+        let en = enum_ty(&mut db, "E", vec![("Some".into(), vec![int2])]);
 
         let mut folder = IntToText {
             db: &mut db,
             memo: FoldMemo::new(),
             vars_seen: 0,
         };
-        let folded_record = fold(&mut folder, record);
-        let folded_enum = fold(&mut folder, enum_ty);
-        assert_ne!(folded_record, record, "a record's fields are folded");
-        assert_ne!(folded_enum, enum_ty, "an enum's payloads are folded");
+        let folded_record = fold(&mut folder, rec);
+        let folded_enum = fold(&mut folder, en);
+        assert_ne!(folded_record, rec, "a record's fields are folded");
+        assert_ne!(folded_enum, en, "an enum's payloads are folded");
         assert_eq!(db.render(folded_record), "P");
 
         // The specialized def is a *new* def, and the original is untouched.
@@ -465,7 +482,7 @@ mod tests {
     fn an_unchanged_record_keeps_its_def() {
         let mut db = TypeDb::new();
         let text = db.text();
-        let record = db.register_record("P", vec![("name".into(), text)]);
+        let rec = record(&mut db, "P", vec![("name".into(), text)]);
         let defs_before = db.record_defs.len();
 
         let mut folder = IntToText {
@@ -473,7 +490,7 @@ mod tests {
             memo: FoldMemo::new(),
             vars_seen: 0,
         };
-        assert_eq!(fold(&mut folder, record), record);
+        assert_eq!(fold(&mut folder, rec), rec);
         assert_eq!(
             db.record_defs.len(),
             defs_before,
@@ -488,8 +505,8 @@ mod tests {
     fn a_shared_child_is_folded_once() {
         let mut db = TypeDb::new();
         let var = db.fresh_var();
-        let pair = db.tuple(vec![var, var]);
-        let nested = db.tuple(vec![pair, pair]);
+        let pair = db.pair(var, var);
+        let nested = db.pair(pair, pair);
 
         let mut folder = IntToText {
             db: &mut db,
@@ -509,9 +526,9 @@ mod tests {
     fn a_record_that_contains_itself_terminates() {
         let mut db = TypeDb::new();
         let placeholder = db.fresh_var();
-        let node = db.register_record("Node", vec![("next".into(), placeholder)]);
+        let node = record(&mut db, "Node", vec![("next".into(), placeholder)]);
         // Tie the knot: the field type *is* the record.
-        db.link(VarId(placeholder.to_u32()), node);
+        db.link(VarId::from_raw(placeholder.to_u32()), node);
 
         let mut folder = Identity {
             db: &mut db,

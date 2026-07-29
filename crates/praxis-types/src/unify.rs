@@ -52,10 +52,11 @@ impl TypeDb {
             TypeData::Var(VarState::Unbound { level }) => *level,
             _ => unreachable!("link_var called on non-unbound var"),
         };
+        let var_id = VarId::from_raw(var.to_u32());
         // Occurs check: `var` must not appear inside `target`.
-        if self.occurs(VarId(var.0), target) {
+        if self.occurs(var_id, target) {
             return Err(UnifyError::Occurs {
-                var: VarId(var.0),
+                var: var_id,
                 within: target,
             });
         }
@@ -63,7 +64,7 @@ impl TypeDb {
         // than `var` is pulled down to `var`'s level, so it cannot be generalized
         // out from under this binding.
         self.lower_levels(target, var_level);
-        self.link(VarId(var.0), target);
+        self.link(var_id, target);
         Ok(())
     }
 
@@ -146,8 +147,8 @@ impl TypeDb {
                 if d_a == d_b {
                     return Ok(());
                 }
-                let ra = self.record_defs[d_a.0 as usize].clone();
-                let rb = self.record_defs[d_b.0 as usize].clone();
+                let ra = self.record_def(d_a).clone();
+                let rb = self.record_def(d_b).clone();
                 // Both must be anonymous to consider structural unification.
                 if ra.name.is_some() || rb.name.is_some() {
                     return Err(UnifyError::Mismatch {
@@ -203,8 +204,8 @@ impl TypeDb {
                 if d_a == d_b {
                     return Ok(());
                 }
-                let ea = self.enum_defs[d_a.0 as usize].clone();
-                let eb = self.enum_defs[d_b.0 as usize].clone();
+                let ea = self.enum_def(d_a).clone();
+                let eb = self.enum_def(d_b).clone();
                 // Same name + same variant-name signature is the precondition.
                 let same_shape = ea.name == eb.name
                     && ea.variants.len() == eb.variants.len()
@@ -221,29 +222,23 @@ impl TypeDb {
                 }
                 // Unify each variant's payload pairwise (zip by declaration
                 // order, which the name check above already aligned).
+                //
+                // TY-05: one representation, so one comparison. The three-way
+                // match this replaces had a catch-all that rejected
+                // `(None, Some([]))` — the very pair `EnumVariantDef`'s own doc
+                // comment called equivalent.
                 for (va, vb) in ea.variants.iter().zip(&eb.variants) {
-                    match (&va.payload, &vb.payload) {
-                        (None, None) => {}
-                        (Some(ps_a), Some(ps_b)) => {
-                            if ps_a.len() != ps_b.len() {
-                                return Err(UnifyError::Mismatch {
-                                    expected: a,
-                                    found: b,
-                                });
-                            }
-                            for (pa, pb) in ps_a.iter().zip(ps_b) {
-                                self.unify(*pa, *pb).map_err(|_| UnifyError::Mismatch {
-                                    expected: a,
-                                    found: b,
-                                })?;
-                            }
-                        }
-                        _ => {
-                            return Err(UnifyError::Mismatch {
-                                expected: a,
-                                found: b,
-                            });
-                        }
+                    if va.payload.len() != vb.payload.len() {
+                        return Err(UnifyError::Mismatch {
+                            expected: a,
+                            found: b,
+                        });
+                    }
+                    for (pa, pb) in va.payload.iter().zip(&vb.payload) {
+                        self.unify(*pa, *pb).map_err(|_| UnifyError::Mismatch {
+                            expected: a,
+                            found: b,
+                        })?;
                     }
                 }
                 // Adopt the earlier def-id (d_a) as canonical: rewrite b's slot
@@ -284,7 +279,7 @@ impl TypeDb {
     // --- small internal helper kept private to this module ------------------
 
     fn slots_set(&mut self, t: Type, data: TypeData) {
-        self.slots[t.0 as usize].data = data;
+        self.slots[t.to_u32() as usize].data = data;
     }
 }
 

@@ -11,8 +11,11 @@
 
 use praxis_stdlib::type_pattern::ScalarType;
 
+use crate::ctor::{CollectionArgs, FieldSet, TupleElems, VariantSet};
 use crate::data::{EnumDef, EnumDefId, RecordDef, RecordDefId, TypeData, VarState};
+use crate::error::TypeCtorError;
 use crate::type_id::{Type, VarId};
+use crate::CollectionCtor;
 
 /// One arena entry. A slot is either a concrete type shape ([`TypeData`]) or — for
 /// the historical reason that `Type` and `VarId` share an index space — a variable
@@ -124,11 +127,59 @@ impl TypeDb {
     // --- construction -------------------------------------------------------
 
     /// Intern an arbitrary type shape, returning its handle.
+    ///
+    /// `pub(crate)` since F5: an arbitrary [`TypeData`] is exactly the shape the
+    /// validated constructors exist to check, so the back door had to close with
+    /// them. Reach a composite through [`tuple`](Self::tuple) /
+    /// [`collection`](Self::collection) / [`func`](Self::func) /
+    /// [`register_record`](Self::register_record) / [`register_enum`](Self::register_enum).
     #[must_use]
-    pub fn intern(&mut self, data: TypeData) -> Type {
-        let id = Type(self.slots.len() as u32);
+    pub(crate) fn intern(&mut self, data: TypeData) -> Type {
+        let id = Type::from_raw(self.slots.len() as u32);
         self.slots.push(Slot { data });
         id
+    }
+
+    /// A tuple type from already-validated elements (F5).
+    #[must_use]
+    pub fn tuple(&mut self, elements: TupleElems) -> Type {
+        self.intern(TypeData::Tuple(elements.into_vec()))
+    }
+
+    /// A collection type `Ctor[args]`, e.g. `Vec[elem]` (§4.4, §11.2, M5).
+    ///
+    /// # Errors
+    /// [`TypeCtorError::CollectionArity`] if `args`'s shape is not the arity
+    /// `ctor` declares — `Map[T]`, `Vec[K, V]`, `BitSet[T]`. The check existed
+    /// as [`CollectionCtor::arity`] and had no caller.
+    pub fn collection(
+        &mut self,
+        ctor: CollectionCtor,
+        args: CollectionArgs,
+    ) -> Result<Type, TypeCtorError> {
+        if args.arity() != ctor.arity() {
+            return Err(TypeCtorError::CollectionArity {
+                ctor,
+                got: args.arity(),
+                want: ctor.arity(),
+            });
+        }
+        Ok(self.intern(TypeData::Collection {
+            ctor,
+            args: args.to_vec(),
+        }))
+    }
+
+    /// Recover a handle from a raw arena index, if it names a real slot.
+    ///
+    /// The one checked route back in for a caller that stored a
+    /// [`Type::to_u32`] outside the arena — the debugger's `DebugLocalMeta`
+    /// does, and used to rehydrate it as a bare `Type(id)` whether or not this
+    /// `TypeDb` had ever minted that many slots.
+    #[inline]
+    #[must_use]
+    pub fn type_from_raw(&self, raw: u32) -> Option<Type> {
+        ((raw as usize) < self.slots.len()).then(|| Type::from_raw(raw))
     }
 
     /// Intern a scalar type — the overwhelmingly common case.
@@ -146,21 +197,19 @@ impl TypeDb {
     /// A fresh unbound variable at the *current* binding level.
     #[must_use]
     pub fn fresh_var(&mut self) -> Type {
-        let var = VarId(self.slots.len() as u32);
-        let id = Type(var.0);
+        // The slot's own index *is* the var id.
+        let var = VarId::from_raw(self.slots.len() as u32);
         self.slots.push(Slot {
             data: TypeData::Var(VarState::Unbound { level: self.level }),
         });
-        // `var` is recorded implicitly: the slot's own index *is* the var id.
-        let _ = var;
-        id
+        var.as_type()
     }
 
     /// The variable identity of a type slot, if it is a variable.
     #[must_use]
     pub fn var_id_of(&self, t: Type) -> Option<VarId> {
-        match &self.slots[t.0 as usize].data {
-            TypeData::Var(_) => Some(VarId(t.0)),
+        match &self.slots[t.to_u32() as usize].data {
+            TypeData::Var(_) => Some(VarId::from_raw(t.to_u32())),
             _ => None,
         }
     }
@@ -174,13 +223,13 @@ impl TypeDb {
     /// The returned type is always either a concrete shape or an unbound/generalized
     /// variable; never a `Linked` var.
     pub fn prune(&mut self, t: Type) -> Type {
-        match &self.slots[t.0 as usize].data {
+        match &self.slots[t.to_u32() as usize].data {
             TypeData::Var(VarState::Linked { target }) => {
                 let target = *target;
                 let root = self.prune(target);
                 // Path compression: point straight at the root.
                 if root != target {
-                    self.slots[t.0 as usize].data =
+                    self.slots[t.to_u32() as usize].data =
                         TypeData::Var(VarState::Linked { target: root });
                 }
                 root
@@ -193,7 +242,7 @@ impl TypeDb {
     /// (read-only). Returns the representative of `t`.
     #[must_use]
     pub fn follow(&self, t: Type) -> Type {
-        match &self.slots[t.0 as usize].data {
+        match &self.slots[t.to_u32() as usize].data {
             TypeData::Var(VarState::Linked { target }) => self.follow(*target),
             _ => t,
         }
@@ -222,18 +271,18 @@ impl TypeDb {
     /// first and then index the returned handle.
     #[must_use]
     pub fn data(&self, t: Type) -> &TypeData {
-        &self.slots[t.0 as usize].data
+        &self.slots[t.to_u32() as usize].data
     }
 
     /// Link variable `v` to `target`, recording `target`'s representative. Used by
     /// [`unify`](crate::unify); not meant for ad-hoc callers.
     pub(crate) fn link(&mut self, v: VarId, target: Type) {
-        self.slots[v.0 as usize].data = TypeData::Var(VarState::Linked { target });
+        self.slots[v.to_u32() as usize].data = TypeData::Var(VarState::Linked { target });
     }
 
     /// Mark variable `v` as generalized (quantified by a [`Scheme`](crate::Scheme)).
     pub(crate) fn generalize_var(&mut self, v: VarId) {
-        self.slots[v.0 as usize].data = TypeData::Var(VarState::Generalized);
+        self.slots[v.to_u32() as usize].data = TypeData::Var(VarState::Generalized);
     }
 
     // --- record / enum definitions (M7, ADR-025) ----------------------------
@@ -241,98 +290,62 @@ impl TypeDb {
     /// Borrow a record definition by id (read-only).
     #[must_use]
     pub fn record_def(&self, def: RecordDefId) -> &RecordDef {
-        &self.record_defs[def.0 as usize]
+        &self.record_defs[def.to_u32() as usize]
     }
 
     /// Borrow an enum definition by id (read-only).
     #[must_use]
     pub fn enum_def(&self, def: EnumDefId) -> &EnumDef {
-        &self.enum_defs[def.0 as usize]
+        &self.enum_defs[def.to_u32() as usize]
     }
 
-    /// Register a *nominal* record definition (§4.5) and return its type. Each
-    /// call mints a fresh def — nominal records are distinct by name even with
-    /// identical fields, so there is no deduplication here.
-    #[must_use]
-    pub fn register_record(
-        &mut self,
-        name: impl Into<String>,
-        fields: Vec<(String, Type)>,
-    ) -> Type {
+    /// Register a record definition (§4.5 nominal, §5.6 anonymous structural).
+    ///
+    /// `name` is `Some` for a source-declared record and `None` for an anonymous
+    /// structural one (a parser template, ADR-024). Each call mints a fresh def:
+    /// nominal records are distinct by name even with identical fields, and
+    /// anonymous ones establish identity through unification (two with the same
+    /// field-name set unify and get linked), mirroring how tuples and functions
+    /// work. Field display order follows the order given here.
+    ///
+    /// Takes a validated [`FieldSet`] — the one place a duplicate field name is
+    /// rejected, rather than at whichever syntax caller happened to remember.
+    pub fn register_record(&mut self, name: Option<String>, fields: FieldSet) -> RecordDefId {
         let def = RecordDef {
-            name: Some(name.into()),
-            fields: fields
-                .into_iter()
-                .map(|(n, t)| crate::data::RecordFieldDef { name: n, ty: t })
-                .collect(),
+            name,
+            fields: fields.into_vec(),
         };
         let id = RecordDefId(self.record_defs.len() as u32);
         self.record_defs.push(def);
-        self.intern(TypeData::Record { def: id })
+        id
     }
 
-    /// Register an enum definition (§4.6) and return its type.
-    #[must_use]
-    pub fn register_enum(
-        &mut self,
-        name: impl Into<String>,
-        variants: Vec<(String, Option<Vec<Type>>)>,
-    ) -> Type {
+    /// Register an enum definition (§4.6), nominal (`Some(name)`) or anonymous
+    /// (`None`, a `choice(...)` template — §7.5).
+    ///
+    /// As [`register_record`](Self::register_record): a validated [`VariantSet`]
+    /// is the only way in, so a duplicate variant name is rejected here.
+    pub fn register_enum(&mut self, name: Option<String>, variants: VariantSet) -> EnumDefId {
         let def = EnumDef {
-            name: name.into(),
-            variants: variants
-                .into_iter()
-                .map(|(n, p)| crate::data::EnumVariantDef {
-                    name: n,
-                    payload: p,
-                })
-                .collect(),
+            name,
+            variants: variants.into_vec(),
         };
         let id = EnumDefId(self.enum_defs.len() as u32);
         self.enum_defs.push(def);
-        self.intern(TypeData::Enum { def: id })
+        id
     }
 
-    /// Create an *anonymous* structural record type (§5.6). Each call mints a
-    /// fresh def — identity is established through unification (two anon records
-    /// with the same field-name set unify and get linked), mirroring how tuples
-    /// and functions work. Field display order follows the order given here.
-    #[must_use]
-    pub fn anon_record(&mut self, fields: Vec<(String, Type)>) -> Type {
-        let def = RecordDef {
-            name: None,
-            fields: fields
-                .into_iter()
-                .map(|(n, t)| crate::data::RecordFieldDef { name: n, ty: t })
-                .collect(),
-        };
-        let id = RecordDefId(self.record_defs.len() as u32);
-        self.record_defs.push(def);
-        self.intern(TypeData::Record { def: id })
+    /// Register a record definition and intern its type in one step — what
+    /// almost every caller wants.
+    pub fn record(&mut self, name: Option<String>, fields: FieldSet) -> Type {
+        let def = self.register_record(name, fields);
+        self.record_type(def)
     }
 
-    /// Create an *anonymous* enum type (M9). Mirrors [`anon_record`](Self::anon_record):
-    /// each call mints a fresh def whose identity is established through unification
-    /// (two anonymous enums with the same synthetic name `""` and the same
-    /// variant-name signature unify and get linked, per `unify.rs`). Used by
-    /// `choice(...)` (§7.5) and as the fallback representation for `optional` when
-    /// it cannot share the nominal `Option` def. Variant display order follows the
-    /// order given here.
-    #[must_use]
-    pub fn anon_enum(&mut self, variants: Vec<(String, Option<Vec<Type>>)>) -> Type {
-        let def = EnumDef {
-            name: String::new(),
-            variants: variants
-                .into_iter()
-                .map(|(n, p)| crate::data::EnumVariantDef {
-                    name: n,
-                    payload: p,
-                })
-                .collect(),
-        };
-        let id = EnumDefId(self.enum_defs.len() as u32);
-        self.enum_defs.push(def);
-        self.intern(TypeData::Enum { def: id })
+    /// Register an enum definition and intern its type in one step.
+    pub fn enum_(&mut self, name: Option<String>, variants: VariantSet) -> Type {
+        let def = self.register_enum(name, variants);
+        self.enum_type(def)
     }
 
     /// Wrap an existing [`RecordDefId`] into a `Type` (e.g. for use after

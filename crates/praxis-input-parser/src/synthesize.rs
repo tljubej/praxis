@@ -9,31 +9,37 @@
 //! displays (acceptance criterion 4).
 
 use crate::ast::{AtomicKind, ParserAst, TemplatePart};
-use praxis_types::{CollectionCtor, Type, TypeDb};
+use praxis_types::{
+    CollectionCtor, EnumVariantDef, FieldSet, TupleElems, Type, TypeCtorError, TypeDb, VariantSet,
+};
 
 /// Synthesize the result type of a parser expression (§7.8).
 ///
-/// Assumes the AST has already passed [`validate`](crate::validate::validate).
-/// Panics only on an internal inconsistency (a shape validation should have
-/// rejected), never on user input alone.
-pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Type {
-    match ast {
+/// Normally called on an AST that has already passed
+/// [`validate`](crate::validate::validate), but the error channel is real
+/// rather than an `expect` (F5): the shapes this builds — an anonymous record
+/// per named-capture template, an anonymous enum per `choice` — are exactly the
+/// ones whose *names come from user source*, so a duplicate is user input, not
+/// an internal inconsistency. `validate` catches those cases today; threading
+/// the `Result` is what keeps the two from drifting apart silently.
+pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Result<Type, TypeCtorError> {
+    Ok(match ast {
         ParserAst::Atomic { kind, .. } => atomic_type(*kind, db),
-        ParserAst::Template { parts, .. } => template_type(parts, db),
+        ParserAst::Template { parts, .. } => template_type(parts, db)?,
         ParserAst::Lines { child, .. }
         | ParserAst::Sections { child, .. }
         | ParserAst::Csv { child, .. }
         | ParserAst::Ws { child, .. } => {
-            let elem = synthesize(child, db);
+            let elem = synthesize(child, db)?;
             db.vec(elem)
         }
         ParserAst::Sep { child, .. } => {
-            let elem = synthesize(child, db);
+            let elem = synthesize(child, db)?;
             db.vec(elem)
         }
         ParserAst::Grid { child, .. } => {
-            let elem = synthesize(child, db);
-            db.collection(CollectionCtor::Grid, vec![elem])
+            let elem = synthesize(child, db)?;
+            db.unary_collection(CollectionCtor::Grid, elem)
         }
         ParserAst::SectionsNamed {
             fields,
@@ -42,15 +48,15 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Type {
         } => {
             // Anonymous record: one field per named section, plus a final
             // `Vec[result(P)]` field for the `repeated` tail (if any).
-            let mut rec_fields: Vec<(String, Type)> = fields
-                .iter()
-                .map(|(name, p)| (name.clone(), synthesize(p, db)))
-                .collect();
+            let mut rec_fields: Vec<(String, Type)> = Vec::with_capacity(fields.len());
+            for (name, p) in fields {
+                rec_fields.push((name.clone(), synthesize(p, db)?));
+            }
             if let Some((name, tail)) = repeated_tail {
-                let elem = synthesize(tail, db);
+                let elem = synthesize(tail, db)?;
                 rec_fields.push((name.clone(), db.vec(elem)));
             }
-            db.anon_record(rec_fields)
+            db.record(None, FieldSet::from_pairs(rec_fields)?)
         }
         ParserAst::Block { items, .. } => {
             // Flattened anonymous record (§7.5): positional named-capture
@@ -67,45 +73,44 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Type {
                                     parser,
                                 } = part
                                 {
-                                    rec_fields.push((n.clone(), synthesize(parser, db)));
+                                    rec_fields.push((n.clone(), synthesize(parser, db)?));
                                 }
                             }
                         }
                     }
                     crate::ast::BlockItem::Named { name, parser } => {
-                        rec_fields.push((name.clone(), synthesize(parser, db)));
+                        rec_fields.push((name.clone(), synthesize(parser, db)?));
                     }
                 }
             }
-            db.anon_record(rec_fields)
+            db.record(None, FieldSet::from_pairs(rec_fields)?)
         }
         ParserAst::Choice { cases, .. } => {
             // Anonymous enum (§7.5): one variant per case, each carrying the
             // case's result type as a single-element payload (so the parsed
             // value is recoverable via match). Identity is name+signature-based
-            // via the M9 unify arm + anon_enum's synthetic name.
-            let variants: Vec<(String, Option<Vec<Type>>)> = cases
-                .iter()
-                .map(|(name, p)| {
-                    let payload_ty = synthesize(p, db);
-                    (name.clone(), Some(vec![payload_ty]))
-                })
-                .collect();
-            db.anon_enum(variants)
+            // via the M9 unify arm and the absent name.
+            let mut variants: Vec<EnumVariantDef> = Vec::with_capacity(cases.len());
+            for (name, p) in cases {
+                let payload_ty = synthesize(p, db)?;
+                variants.push(EnumVariantDef::new(name.clone(), vec![payload_ty]));
+            }
+            db.enum_(None, VariantSet::new(variants)?)
         }
         ParserAst::Optional { child, .. } => {
             // `Option[result(P)]` (§7.5/§7.8): a nominal Option enum (Some(T),
             // None) carrying the child's result type. Registered fresh per site;
             // unifies with other Option[T] values via the M9 same-named-enum arm.
-            let elem = synthesize(child, db);
-            db.register_enum(
-                "Option",
-                vec![("Some".into(), Some(vec![elem])), ("None".into(), None)],
-            )
+            let elem = synthesize(child, db)?;
+            let variants = VariantSet::new(vec![
+                EnumVariantDef::new("Some", vec![elem]),
+                EnumVariantDef::bare("None"),
+            ])?;
+            db.enum_(Some("Option".into()), variants)
         }
         ParserAst::Scan { child, .. } => {
             // `scan(P)` → `Vec[result(P)]` (§7.5): matches in source order.
-            let elem = synthesize(child, db);
+            let elem = synthesize(child, db)?;
             db.vec(elem)
         }
         ParserAst::OneOf { .. } => {
@@ -119,10 +124,10 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Type {
         }
         ParserAst::Matrix { child, .. } | ParserAst::GridRagged { child, .. } => {
             // `matrix(P)` / ragged `grid(P)` → Grid[result(P)] (§7.5, ADR-030).
-            let elem = synthesize(child, db);
-            db.collection(CollectionCtor::Grid, vec![elem])
+            let elem = synthesize(child, db)?;
+            db.unary_collection(CollectionCtor::Grid, elem)
         }
-    }
+    })
 }
 
 /// The result type of an atomic parser (§7.4).
@@ -139,7 +144,7 @@ fn atomic_type(kind: AtomicKind, db: &mut TypeDb) -> Type {
 /// - A single anonymous capture → the scalar type.
 /// - Multiple anonymous captures → a tuple.
 /// - Any named capture → an anonymous record (§5.6; formalized in M7).
-fn template_type(parts: &[TemplatePart], db: &mut TypeDb) -> Type {
+fn template_type(parts: &[TemplatePart], db: &mut TypeDb) -> Result<Type, TypeCtorError> {
     let captures: Vec<&TemplatePart> = parts
         .iter()
         .filter(|p| matches!(p, TemplatePart::Capture { .. }))
@@ -147,7 +152,7 @@ fn template_type(parts: &[TemplatePart], db: &mut TypeDb) -> Type {
 
     if captures.is_empty() {
         // A template with no captures matches literally and produces Unit.
-        return db.unit();
+        return Ok(db.unit());
     }
 
     let any_named = captures
@@ -156,21 +161,21 @@ fn template_type(parts: &[TemplatePart], db: &mut TypeDb) -> Type {
 
     if any_named {
         // Named captures → anonymous structural record (§5.6, M7 ADR-025).
-        record_type(&captures, db)
+        return record_type(&captures, db);
+    }
+
+    // All anonymous: scalar if one, tuple if many (§7.3).
+    let mut elem_types: Vec<Type> = Vec::with_capacity(captures.len());
+    for p in &captures {
+        let TemplatePart::Capture { parser, .. } = p else {
+            unreachable!("filtered to captures")
+        };
+        elem_types.push(synthesize(parser, db)?);
+    }
+    if elem_types.len() == 1 {
+        Ok(elem_types[0])
     } else {
-        // All anonymous: scalar if one, tuple if many (§7.3).
-        let elem_types: Vec<Type> = captures
-            .iter()
-            .map(|p| match p {
-                TemplatePart::Capture { parser, .. } => synthesize(parser, db),
-                _ => unreachable!("filtered to captures"),
-            })
-            .collect();
-        if elem_types.len() == 1 {
-            elem_types[0]
-        } else {
-            db.tuple(elem_types)
-        }
+        Ok(db.tuple(TupleElems::new(elem_types)?))
     }
 }
 
@@ -180,21 +185,20 @@ fn template_type(parts: &[TemplatePart], db: &mut TypeDb) -> Type {
 /// record type is a proper `TypeData::Record` variant (M7, ADR-025), with fields
 /// keyed by name. Two records with the same field names (in any order) and
 /// structurally-equal types share one type.
-fn record_type(captures: &[&TemplatePart], db: &mut TypeDb) -> Type {
+fn record_type(captures: &[&TemplatePart], db: &mut TypeDb) -> Result<Type, TypeCtorError> {
     // Collect (name, type) pairs in source order. Display preserves this order;
-    // identity is name-set-based (§5.6), handled by db.anon_record's
-    // canonicalization.
+    // identity is name-set-based (§5.6), established through unification.
     let mut fields = Vec::with_capacity(captures.len());
     for part in captures {
         match part {
             TemplatePart::Capture { name, parser } => {
                 let name_str = name.clone().unwrap_or_default();
-                fields.push((name_str, synthesize(parser, db)));
+                fields.push((name_str, synthesize(parser, db)?));
             }
             _ => unreachable!("filtered to captures"),
         }
     }
-    db.anon_record(fields)
+    Ok(db.record(None, FieldSet::from_pairs(fields)?))
 }
 
 #[cfg(test)]
@@ -213,7 +217,7 @@ mod tests {
     #[test]
     fn atomic_int_synthesizes_int() {
         let mut db = TypeDb::new();
-        let t = synthesize(&atom(AtomicKind::Int), &mut db);
+        let t = synthesize(&atom(AtomicKind::Int), &mut db).expect("int synthesizes");
         // TypeDb does not deduplicate handles; compare by data shape.
         assert!(matches!(
             db.data(t),
@@ -228,7 +232,7 @@ mod tests {
             child: Box::new(atom(AtomicKind::Int)),
             span: Span::at(0),
         };
-        let t = synthesize(&ast, &mut db);
+        let t = synthesize(&ast, &mut db).expect("a valid AST synthesizes");
         match db.data(t) {
             praxis_types::TypeData::Collection { ctor, args } => {
                 assert_eq!(*ctor, CollectionCtor::Vec);
@@ -253,7 +257,7 @@ mod tests {
             child: Box::new(atom(AtomicKind::Char)),
             span: Span::at(0),
         };
-        let t = synthesize(&ast, &mut db);
+        let t = synthesize(&ast, &mut db).expect("a valid AST synthesizes");
         match db.data(t) {
             praxis_types::TypeData::Collection { ctor, args } => {
                 assert_eq!(*ctor, CollectionCtor::Grid);
@@ -285,7 +289,7 @@ mod tests {
             }),
             span: Span::at(0),
         };
-        let t = synthesize(&ast, &mut db);
+        let t = synthesize(&ast, &mut db).expect("a valid AST synthesizes");
         // Walk three Vec levels.
         let mut current = t;
         for level in 1..=3 {
@@ -316,7 +320,7 @@ mod tests {
             }],
             span: Span::at(0),
         };
-        let t = synthesize(&ast, &mut db);
+        let t = synthesize(&ast, &mut db).expect("a valid AST synthesizes");
         // Single anonymous capture → scalar Int.
         assert!(matches!(
             db.data(t),
@@ -340,7 +344,7 @@ mod tests {
             ],
             span: Span::at(0),
         };
-        let t = synthesize(&ast, &mut db);
+        let t = synthesize(&ast, &mut db).expect("a valid AST synthesizes");
         assert!(matches!(db.data(t), praxis_types::TypeData::Tuple(_)));
     }
 
@@ -361,7 +365,7 @@ mod tests {
             ],
             span: Span::at(0),
         };
-        let t = synthesize(&ast, &mut db);
+        let t = synthesize(&ast, &mut db).expect("a valid AST synthesizes");
         let praxis_types::TypeData::Record { def } = db.data(t) else {
             panic!("expected Record, got {:?}", db.data(t));
         };
@@ -394,7 +398,7 @@ mod tests {
             }),
             span: Span::at(0),
         };
-        let t = synthesize(&ast, &mut db);
+        let t = synthesize(&ast, &mut db).expect("a valid AST synthesizes");
         match db.data(t) {
             praxis_types::TypeData::Collection { ctor, args } => {
                 assert_eq!(*ctor, CollectionCtor::Vec);

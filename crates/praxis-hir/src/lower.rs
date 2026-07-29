@@ -1590,7 +1590,7 @@ impl<'a> Lowerer<'a> {
         };
         let edef = self.db.enum_def(def_id);
         let idx = edef.variant(name)?;
-        let payload = edef.variants[idx].payload.clone().unwrap_or_default();
+        let payload = edef.variants[idx].payload.clone();
         Some((def_id, idx, payload))
     }
 
@@ -1668,7 +1668,7 @@ impl<'a> Lowerer<'a> {
         let span = self.node_span(t.syntax());
         let elements: Vec<TypedExpr> = t.elements().map(|e| self.lower_expr(&e)).collect();
         let tys: Vec<Type> = elements.iter().map(expr_ty).collect();
-        let ty = self.db.tuple(tys);
+        let ty = tuple_or_degenerate(self.db, tys);
         TypedExpr::Tuple { elements, ty, span }
     }
 
@@ -1970,8 +1970,7 @@ impl<'a> Lowerer<'a> {
                 // was that only flat Name sub-patterns were collected and nested
                 // variant patterns were silently dropped.
                 let variant = &edef.variants[idx];
-                let payload_types: Vec<Type> =
-                    variant.payload.as_ref().map_or(Vec::new(), |ts| ts.clone());
+                let payload_types: Vec<Type> = variant.payload.clone();
                 let sub_pats: Vec<_> = pat.sub_patterns().collect();
                 let mut subpatterns = Vec::new();
                 for (i, sub) in sub_pats.iter().enumerate() {
@@ -2138,7 +2137,7 @@ fn pattern_to_type(db: &mut TypeDb, p: &TypePattern) -> Type {
         TypePattern::Var(_) => db.fresh_var(),
         TypePattern::Collection { ctor, args } => {
             let arg_tys: Vec<Type> = args.iter().map(|a| pattern_to_type(db, a)).collect();
-            db.collection(*ctor, arg_tys)
+            collection_from_pattern(db, *ctor, arg_tys)
         }
         TypePattern::Function { params, result } => {
             let ps: Vec<Type> = params.iter().map(|p| pattern_to_type(db, p)).collect();
@@ -2147,7 +2146,7 @@ fn pattern_to_type(db: &mut TypeDb, p: &TypePattern) -> Type {
         }
         TypePattern::Tuple(els) => {
             let tys: Vec<Type> = els.iter().map(|e| pattern_to_type(db, e)).collect();
-            db.tuple(tys)
+            tuple_or_degenerate(db, tys)
         }
         TypePattern::Opaque => db.fresh_var(),
     }
@@ -2183,7 +2182,7 @@ fn pattern_to_type_named_impl(
                 .iter()
                 .map(|a| pattern_to_type_named_impl(db, a, names))
                 .collect();
-            db.collection(*ctor, arg_tys)
+            collection_from_pattern(db, *ctor, arg_tys)
         }
         TypePattern::Function { params, result } => {
             let ps: Vec<Type> = params
@@ -2198,9 +2197,41 @@ fn pattern_to_type_named_impl(
                 .iter()
                 .map(|e| pattern_to_type_named_impl(db, e, names))
                 .collect();
-            db.tuple(tys)
+            tuple_or_degenerate(db, tys)
         }
         TypePattern::Opaque => db.fresh_var(),
+    }
+}
+
+/// A collection type from a *catalog* [`TypePattern`], whose arity is
+/// compiler-authored data rather than user input.
+///
+/// A row whose argument count disagrees with `ctor.arity()` is a bug in the
+/// method catalog, not a program error, and F5 is the first thing that would
+/// notice one — so it fails loudly here rather than interning a type nothing
+/// can unify with. The standing sweep over the catalog's invariants is S18's
+/// (RT-14/RT-15).
+fn collection_from_pattern(
+    db: &mut TypeDb,
+    ctor: praxis_types::CollectionCtor,
+    args: Vec<Type>,
+) -> Type {
+    let args = praxis_types::CollectionArgs::new(ctor, args)
+        .unwrap_or_else(|e| panic!("method catalog row: {e}"));
+    db.collection(ctor, args)
+        .unwrap_or_else(|e| panic!("method catalog row: {e}"))
+}
+
+/// A tuple type, honouring F5's arity invariant: `()` is `Unit` and a lone
+/// element is that element, because neither is a tuple.
+fn tuple_or_degenerate(db: &mut TypeDb, mut els: Vec<Type>) -> Type {
+    match els.len() {
+        0 => db.unit(),
+        1 => els.remove(0),
+        _ => {
+            let elems = praxis_types::TupleElems::new(els).expect("two or more elements");
+            db.tuple(elems)
+        }
     }
 }
 

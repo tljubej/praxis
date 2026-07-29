@@ -166,32 +166,55 @@ impl RecordDef {
     }
 }
 
-/// One variant of an enum definition (§4.6). A variant carries an optional
-/// payload — a tuple of types for the variant's data. `Empty`/`Wall` are
-/// payload-less; `Number(Int)` has a one-element payload; `Pair(Int, Text)` has
-/// two.
+/// One variant of an enum definition (§4.6). A variant carries a payload — a
+/// tuple of types for the variant's data. `Empty`/`Wall` are payload-less;
+/// `Number(Int)` has a one-element payload; `Pair(Int, Text)` has two.
+///
+/// The payload is a plain `Vec` (TY-05): an **empty** one *is* the payload-less
+/// case. It used to be an `Option<Vec<Type>>` whose two "no payload" spellings
+/// this very file documented as equivalent — and which `unify` then rejected as
+/// a mismatch, because `(None, Some([]))` fell through to its catch-all arm.
 #[derive(Clone, Debug)]
 pub struct EnumVariantDef {
     pub name: String,
-    /// `None` for a payload-less variant (`Empty`); `Some(vec)` for a variant
-    /// carrying data. An empty payload vec is equivalent to `None`.
-    pub payload: Option<Vec<Type>>,
+    /// The variant's payload types, empty for a payload-less variant.
+    pub payload: Vec<Type>,
 }
 
 impl EnumVariantDef {
+    /// A variant with a payload.
+    #[must_use]
+    pub fn new(name: impl Into<String>, payload: Vec<Type>) -> EnumVariantDef {
+        EnumVariantDef {
+            name: name.into(),
+            payload,
+        }
+    }
+
+    /// A payload-less variant (`Empty`, `None`, `Wall`).
+    #[must_use]
+    pub fn bare(name: impl Into<String>) -> EnumVariantDef {
+        EnumVariantDef::new(name, Vec::new())
+    }
+
     /// Whether this variant carries a payload.
     #[must_use]
     pub fn has_payload(&self) -> bool {
-        self.payload.as_ref().is_some_and(|p| !p.is_empty())
+        !self.payload.is_empty()
     }
 }
 
 /// The full definition of an enum type (§4.6). Lives in the
 /// [`TypeDb::enum_defs`](crate::db::TypeDb) side-table, referenced from
 /// [`TypeData::Enum`] via an [`EnumDefId`].
+///
+/// `name` is `None` for an anonymous enum (a `choice(...)` template, §7.5),
+/// mirroring [`RecordDef::name`]. Two anonymous enums are the same type when
+/// their variant signatures match; a nominal one is distinct by name.
 #[derive(Clone, Debug)]
 pub struct EnumDef {
-    pub name: String,
+    /// `None` for anonymous enums; the declared name for nominal.
+    pub name: Option<String>,
     pub variants: Vec<EnumVariantDef>,
 }
 

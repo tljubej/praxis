@@ -27,7 +27,7 @@ impl TypeDb {
     pub fn render_scheme(&self, scheme: &Scheme) -> String {
         let mut names = NameAssigner::default();
         for q in &scheme.quantified {
-            names.assign(q.0);
+            names.assign(q.to_u32());
         }
         let mut body = String::new();
         self.write_type(scheme.body, &mut body, &mut names);
@@ -37,7 +37,7 @@ impl TypeDb {
             let qs: String = scheme
                 .quantified
                 .iter()
-                .map(|q| names.name_for(q.0).to_string())
+                .map(|q| names.name_for(q.to_u32()).to_string())
                 .collect::<Vec<_>>()
                 .join(" ");
             format!("forall {qs}. {body}")
@@ -46,7 +46,7 @@ impl TypeDb {
 
     fn write_type(&self, t: Type, out: &mut String, names: &mut NameAssigner) {
         let t = self.follow(t);
-        match &self.slots[t.0 as usize].data {
+        match self.data(t) {
             TypeData::Scalar(s) => {
                 let _ = out.write_str(s.name());
             }
@@ -86,7 +86,7 @@ impl TypeDb {
                 out.push(']');
             }
             TypeData::Record { def } => {
-                let rdef = &self.record_defs[def.0 as usize];
+                let rdef = self.record_def(*def);
                 match &rdef.name {
                     Some(n) => {
                         let _ = out.write_str(n);
@@ -109,16 +109,19 @@ impl TypeDb {
                 }
             }
             TypeData::Enum { def } => {
-                let edef = &self.enum_defs[def.0 as usize];
-                let _ = out.write_str(&edef.name);
+                // An anonymous enum (`choice(...)`) has no name to write, which
+                // is what the synthetic `""` name meant before it became `None`.
+                if let Some(name) = &self.enum_def(*def).name {
+                    let _ = out.write_str(name);
+                }
             }
             TypeData::Var(state) => match state {
                 VarState::Generalized => {
-                    let _ = out.write_str(names.name_for(t.0));
+                    let _ = out.write_str(names.name_for(t.to_u32()));
                 }
                 VarState::Unbound { .. } => {
                     // A leaking unbound var is a diagnostic smell; prefix `?`.
-                    let _ = write!(out, "?{}", names.name_for(t.0));
+                    let _ = write!(out, "?{}", names.name_for(t.to_u32()));
                 }
                 VarState::Linked { .. } => unreachable!("follow resolves Linked"),
             },

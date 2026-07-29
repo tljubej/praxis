@@ -162,17 +162,31 @@ pub fn heap(
 /// descriptor, so a `Vec[Text]` is now a `Vec[Text]` here and not the `Vec[Int]`
 /// the hand-written map answered for every vector (DBG-02, bounded by P0-11).
 fn collect_bindings(frame: &SnapshotFrame, db: &mut TypeDb) -> Vec<LocalBinding> {
-    frame
+    let candidates: Vec<(u32, String, praxis_runtime::GcRef)> = frame
         .locals
         .iter()
         .filter(|l| l.is_user() && !l.name().is_empty())
-        .filter_map(|l| l.value.map(|value| (l, value)))
-        .map(|(l, value)| LocalBinding {
-            name: sanitize_name(&l.name()),
+        .filter_map(|l| {
+            l.value
+                .map(|value| (l.type_id, l.name().to_string(), value))
+        })
+        .collect();
+    candidates
+        .into_iter()
+        .filter_map(|(type_id, name, value)| {
             // SAFETY: a `Some` value was spilled by generated code, and a
             // snapshot local's `GcRef` is rooted by the snapshot (ADR-033).
-            ty: unsafe { praxis_repr::type_for_value(value, db) }.unwrap_or(Type(l.type_id)),
-            value,
+            let recovered = unsafe { praxis_repr::type_for_value(value, db) }.ok();
+            // F5: the fallback id is rehydrated through the arena's checked
+            // route. A frame whose `type_id` this `TypeDb` never minted has no
+            // type to bind, so the local is dropped rather than bound to
+            // whatever slot the raw index named.
+            let ty = recovered.or_else(|| db.type_from_raw(type_id))?;
+            Some(LocalBinding {
+                name: sanitize_name(&name),
+                ty,
+                value,
+            })
         })
         .collect()
 }
@@ -606,7 +620,7 @@ mod tests {
             symbol_id: 0,
             descriptor: &praxis_runtime::collections::VEC as *const _,
             value: Some(value),
-            type_id: ty.0,
+            type_id: ty.to_u32(),
             kind,
             span_start: 0,
             span_end: 0,
