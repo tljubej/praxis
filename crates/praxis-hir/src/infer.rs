@@ -614,17 +614,17 @@ impl Inferer {
 
     // --- builtin schemes ---------------------------------------------------
 
-    /// Assign polymorphic schemes to the prelude builtins that need them. `out`
-    /// is `forall T. (T) -> Unit`; `panic` is `forall T. (T) -> Never`. The rest
-    /// of the prelude (numeric helpers, collections) gets no scheme in M2 and
-    /// references to them infer a fresh var (their dispatch lands in M5).
+    /// Assign each prelude builtin the scheme its contract needs. `out` is
+    /// `forall T. (T) -> Unit`; `panic` is `forall T. (T) -> Never`; the numeric
+    /// helpers are monomorphic on `Int` (ADR-058); every §6.1 collection ctor is
+    /// `forall T. () -> Ctor[T]`.
+    ///
+    /// A name that is **not** seeded here gets a fresh type variable, which
+    /// unifies with anything and then lowers as a call to a function nobody
+    /// defined — the whole of TY-33. The six graph helpers are the last names in
+    /// that state (D5's unit 3).
     fn seed_builtin_schemes(&mut self) {
         // Collect the ids first to avoid borrowing `self.names` while mutating it.
-        // Only builtins whose call form needs a polymorphic scheme are seeded:
-        // `out`/`panic` (forall T. (T) -> ...) and every §6.1 collection
-        // constructor name (forall T. () -> Ctor[T], nullary for BitSet/Range).
-        // Other prelude builtins (dbg/assert/abs/min/...) are handled as free
-        // functions at lower time and are intentionally left scheme-less here.
         let to_seed: Vec<(SymbolId, String)> = self
             .names
             .all()
@@ -643,6 +643,7 @@ impl Inferer {
                         || s.name == "None"
                         || s.name == "pi"
                         || s.name == "e"
+                        || praxis_stdlib::numeric_helper(&s.name).is_some()
                         || crate::decl::collection_ctor_for(&s.name).is_some())
             })
             .map(|s| (s.id, s.name.clone()))
@@ -728,6 +729,23 @@ impl Inferer {
                 "pi" | "e" => {
                     let float_ty = db.float();
                     db.func(vec![], float_ty)
+                }
+                // The §16.1 numeric helpers, all monomorphic on `Int`
+                // (ADR-058). A polymorphic `min`/`max`/`abs` would have to
+                // carry `Capability::Kind(CapKind::Numeric)` on its own binder
+                // and then choose a lowering per instantiation; `Float` already
+                // has `abs`/`sign`/`min`/`max` as *methods* (§4.12), so the
+                // free functions are the `Int` ones and say so. Before this
+                // every one of them got a fresh variable, which unified with
+                // anything and then lowered as a call to a function nobody
+                // defined (TY-33).
+                name if praxis_stdlib::numeric_helper(name).is_some() => {
+                    let helper = praxis_stdlib::numeric_helper(name).expect("just matched");
+                    let int_ty = db.int();
+                    // The arity comes from the wrapper the helper lowers to, so
+                    // the scheme and the call it becomes cannot disagree.
+                    let params = vec![int_ty; helper.arity()];
+                    db.func(params, int_ty)
                 }
                 other => panic!("unexpected builtin `{other}` seeded"),
             });

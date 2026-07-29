@@ -194,18 +194,25 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::GridSet => praxis_grid_set as *const (),
         RuntimeSymbol::GridTranspose => praxis_grid_transpose as *const (),
         RuntimeSymbol::GridWidth => praxis_grid_width as *const (),
+        RuntimeSymbol::IntAbs => praxis_int_abs as *const (),
         RuntimeSymbol::IntAdd => praxis_int_add as *const (),
+        RuntimeSymbol::IntClamp => praxis_int_clamp as *const (),
         RuntimeSymbol::IntDiv => praxis_int_div as *const (),
         RuntimeSymbol::IntEq => praxis_int_eq as *const (),
+        RuntimeSymbol::IntGcd => praxis_int_gcd as *const (),
         RuntimeSymbol::IntGe => praxis_int_ge as *const (),
         RuntimeSymbol::IntGt => praxis_int_gt as *const (),
+        RuntimeSymbol::IntLcm => praxis_int_lcm as *const (),
         RuntimeSymbol::IntLe => praxis_int_le as *const (),
         RuntimeSymbol::IntLoad => praxis_int_load as *const (),
         RuntimeSymbol::IntLt => praxis_int_lt as *const (),
+        RuntimeSymbol::IntMax => praxis_int_max as *const (),
+        RuntimeSymbol::IntMin => praxis_int_min as *const (),
         RuntimeSymbol::IntMul => praxis_int_mul as *const (),
         RuntimeSymbol::IntNe => praxis_int_ne as *const (),
         RuntimeSymbol::IntNeg => praxis_int_neg as *const (),
         RuntimeSymbol::IntRem => praxis_int_rem as *const (),
+        RuntimeSymbol::IntSign => praxis_int_sign as *const (),
         RuntimeSymbol::IntSub => praxis_int_sub as *const (),
         RuntimeSymbol::IntToFloat => praxis_int_to_float as *const (),
         RuntimeSymbol::MapContains => praxis_map_contains as *const (),
@@ -945,6 +952,193 @@ pub unsafe extern "C" fn praxis_int_rem(ctx: *mut RuntimeContext, lhs: GcRef, rh
 pub unsafe extern "C" fn praxis_int_neg(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     let a = unsafe { int_payload(r) };
     match a.checked_neg() {
+        Some(result) => unsafe { gc_alloc(ctx, &scalars::INT, result) },
+        None => {
+            unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
+            unsafe { unit_sentinel(ctx) }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The §16.1 numeric prelude helpers: `abs`, `sign`, `min`, `max`, `clamp`,
+// `gcd`, `lcm`.
+//
+// All seven are monomorphic on `Int` (ADR-058), so every payload read here is
+// an `Int` payload and no descriptor check is needed. `min`/`max`/`clamp` hand
+// back one of the references they were given rather than allocating a copy:
+// an `Int` object is immutable, so sharing it is what "the smaller of the two"
+// means. The four that compute a *new* number allocate one, and the three that
+// can leave the `Int` range fault rather than wrapping — `abs(Int::MIN)` has no
+// positive counterpart, and `gcd`/`lcm` reach the same edge through it.
+// ---------------------------------------------------------------------------
+
+/// `abs(n)` (§16.1). Faults on overflow: `Int::MIN` has no positive
+/// counterpart, exactly as `praxis_int_neg` faults on it.
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Int` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_abs(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    let a = unsafe { int_payload(r) };
+    match a.checked_abs() {
+        Some(result) => unsafe { gc_alloc(ctx, &scalars::INT, result) },
+        None => {
+            unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
+            unsafe { unit_sentinel(ctx) }
+        }
+    }
+}
+
+/// `sign(n)` (§16.1): `-1`, `0` or `1`. Total — every `Int`, `Int::MIN`
+/// included, has a sign in range.
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Int` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_sign(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    let a = unsafe { int_payload(r) };
+    unsafe { gc_alloc(ctx, &scalars::INT, a.signum()) }
+}
+
+/// `min(a, b)` (§16.1): the smaller operand, returned as **the reference that
+/// was passed in**. Allocates nothing.
+///
+/// # Safety
+/// `ctx` must be live and wired; both operands must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_min(
+    _ctx: *mut RuntimeContext,
+    lhs: GcRef,
+    rhs: GcRef,
+) -> GcRef {
+    let a = unsafe { int_payload(lhs) };
+    let b = unsafe { int_payload(rhs) };
+    if b < a {
+        rhs
+    } else {
+        lhs
+    }
+}
+
+/// `max(a, b)` (§16.1): the larger operand, returned as **the reference that
+/// was passed in**. Allocates nothing.
+///
+/// # Safety
+/// `ctx` must be live and wired; both operands must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_max(
+    _ctx: *mut RuntimeContext,
+    lhs: GcRef,
+    rhs: GcRef,
+) -> GcRef {
+    let a = unsafe { int_payload(lhs) };
+    let b = unsafe { int_payload(rhs) };
+    if b > a {
+        rhs
+    } else {
+        lhs
+    }
+}
+
+/// `clamp(value, low, high)` (§16.1): `value` confined to the inclusive range
+/// `low..=high`, returned as one of the three references passed in.
+///
+/// **Faults when `low > high`.** The range is empty, so there is no value to
+/// return and no answer that is not a guess — clamping to an empty range is a
+/// mistake in the program, not in the data, and TY-28 already settled that the
+/// repair reports those rather than inventing a number. (Rust's `Ord::clamp`
+/// panics on the same input; a panic across `extern "C"` is what §10.4 forbids,
+/// so it is a fault.) The kind is `InvalidSize` — an argument the runtime cannot
+/// honour — because S17's one ABI bump is spent (H17); ADR-058 says why, and a
+/// dedicated kind is owed to whichever stage next spends one.
+///
+/// # Safety
+/// `ctx` must be live and wired; all three operands must be valid `Int`
+/// `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_clamp(
+    ctx: *mut RuntimeContext,
+    value: GcRef,
+    low: GcRef,
+    high: GcRef,
+) -> GcRef {
+    let v = unsafe { int_payload(value) };
+    let lo = unsafe { int_payload(low) };
+    let hi = unsafe { int_payload(high) };
+    if lo > hi {
+        unsafe { set_fault(ctx, RaisedFault::INVALID_SIZE) };
+        return unsafe { unit_sentinel(ctx) };
+    }
+    if v < lo {
+        low
+    } else if v > hi {
+        high
+    } else {
+        value
+    }
+}
+
+/// The non-negative greatest common divisor of two `i64`s, computed by
+/// Euclid's algorithm **in `i128`** so that `Int::MIN`'s absolute value needs no
+/// special case. Returns `None` only when the mathematical result is outside the
+/// `Int` range, which happens for exactly one input pair:
+/// `gcd(Int::MIN, Int::MIN)` is `2^63`.
+///
+/// `gcd(0, 0)` is `0` — the conventional answer, and the identity `gcd(n, 0) ==
+/// abs(n)` extended to `n == 0`.
+fn checked_gcd(a: i64, b: i64) -> Option<i64> {
+    let mut x = (a as i128).abs();
+    let mut y = (b as i128).abs();
+    while y != 0 {
+        let t = x % y;
+        x = y;
+        y = t;
+    }
+    i64::try_from(x).ok()
+}
+
+/// `gcd(a, b)` (§16.1): the non-negative greatest common divisor. Faults on the
+/// one pair whose result is out of range (`gcd(Int::MIN, Int::MIN)`).
+///
+/// # Safety
+/// `ctx` must be live and wired; both operands must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_gcd(ctx: *mut RuntimeContext, lhs: GcRef, rhs: GcRef) -> GcRef {
+    let a = unsafe { int_payload(lhs) };
+    let b = unsafe { int_payload(rhs) };
+    match checked_gcd(a, b) {
+        Some(result) => unsafe { gc_alloc(ctx, &scalars::INT, result) },
+        None => {
+            unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
+            unsafe { unit_sentinel(ctx) }
+        }
+    }
+}
+
+/// `lcm(a, b)` (§16.1): the non-negative least common multiple, `0` when either
+/// operand is `0`. Faults when the result does not fit an `Int` — which it
+/// often does not, since the product of two large operands overflows long
+/// before their multiple does.
+///
+/// # Safety
+/// `ctx` must be live and wired; both operands must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_lcm(ctx: *mut RuntimeContext, lhs: GcRef, rhs: GcRef) -> GcRef {
+    let a = unsafe { int_payload(lhs) };
+    let b = unsafe { int_payload(rhs) };
+    // `lcm(n, 0)` is 0 for every n: 0 is a multiple of everything, and dividing
+    // by the gcd below would divide by zero when both are 0.
+    if a == 0 || b == 0 {
+        return unsafe { gc_alloc(ctx, &scalars::INT, 0i64) };
+    }
+    // |a / gcd * b| in i128, which cannot overflow: both operands fit i64, so
+    // the product fits i128 with room to spare. The range check is the only
+    // thing that can refuse.
+    let result = checked_gcd(a, b)
+        .map(|g| ((a as i128) / (g as i128) * (b as i128)).abs())
+        .and_then(|m| i64::try_from(m).ok());
+    match result {
         Some(result) => unsafe { gc_alloc(ctx, &scalars::INT, result) },
         None => {
             unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
@@ -3780,6 +3974,148 @@ mod tests {
         unsafe { drop_ctx(ctx) };
 
         assert!(signed.is_nan());
+    }
+
+    /// `min`/`max`/`clamp` hand back **the reference they were given**, not an
+    /// equal copy (ADR-058). That is what makes them `Effect::Pure` — no
+    /// allocation, so their call site is not a safepoint — and a version that
+    /// allocated would pass every value test while quietly making three of the
+    /// seven helpers collect.
+    #[test]
+    fn the_selecting_helpers_return_an_operand_and_allocate_nothing() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; every operand is a valid Int.
+        unsafe {
+            let lo = praxis_alloc_int(ctx, 3);
+            let hi = praxis_alloc_int(ctx, 7);
+            assert_eq!(praxis_int_min(ctx, lo, hi).as_ptr(), lo.as_ptr());
+            assert_eq!(praxis_int_min(ctx, hi, lo).as_ptr(), lo.as_ptr());
+            assert_eq!(praxis_int_max(ctx, lo, hi).as_ptr(), hi.as_ptr());
+            assert_eq!(praxis_int_max(ctx, hi, lo).as_ptr(), hi.as_ptr());
+            // Equal operands pick the left one — arbitrary but fixed, so the
+            // choice is a decision and not a coin flip.
+            let three = praxis_alloc_int(ctx, 3);
+            assert_eq!(praxis_int_min(ctx, lo, three).as_ptr(), lo.as_ptr());
+            assert_eq!(praxis_int_max(ctx, lo, three).as_ptr(), lo.as_ptr());
+            // `clamp` returns whichever of its three operands is the answer.
+            let v = praxis_alloc_int(ctx, 5);
+            assert_eq!(praxis_int_clamp(ctx, v, lo, hi).as_ptr(), v.as_ptr());
+            let below = praxis_alloc_int(ctx, 1);
+            assert_eq!(praxis_int_clamp(ctx, below, lo, hi).as_ptr(), lo.as_ptr());
+            let above = praxis_alloc_int(ctx, 9);
+            assert_eq!(praxis_int_clamp(ctx, above, lo, hi).as_ptr(), hi.as_ptr());
+            assert!(!rt.has_pending_fault());
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// An inverted `clamp` range is empty, so there is no operand to return and
+    /// no answer that is not invented. It faults (ADR-058) and returns the Unit
+    /// sentinel, like every other faulting wrapper.
+    #[test]
+    fn an_inverted_clamp_range_faults_rather_than_guessing() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; every operand is a valid Int.
+        unsafe {
+            let v = praxis_alloc_int(ctx, 5);
+            let lo = praxis_alloc_int(ctx, 10);
+            let hi = praxis_alloc_int(ctx, 0);
+            let r = praxis_int_clamp(ctx, v, lo, hi);
+            assert!(rt.has_pending_fault());
+            assert_eq!(rt.fault(), FaultKind::InvalidSize);
+            assert_eq!(r.as_ptr(), rt.immortals().unit().as_ptr());
+        }
+        let _ = rt.take_fault();
+        // A degenerate but *legal* range — one value wide — is not inverted.
+        // SAFETY: ctx wired; every operand is a valid Int.
+        unsafe {
+            let v = praxis_alloc_int(ctx, 5);
+            let same = praxis_alloc_int(ctx, 4);
+            let r = praxis_int_clamp(ctx, v, same, same);
+            assert!(!rt.has_pending_fault());
+            assert_eq!(r.as_ptr(), same.as_ptr());
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// `gcd` and `lcm` at the edges of what an `Int` can hold. Both are computed
+    /// in `i128` and range-checked on the way out, so the only refusal is a
+    /// result that genuinely has no `Int` — and `gcd`'s is exactly one input
+    /// pair, which a naive `i64` implementation would have wrapped instead.
+    #[test]
+    fn gcd_and_lcm_are_non_negative_and_refuse_only_what_has_no_int() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; every operand is a valid Int.
+        unsafe {
+            let load = |r: GcRef| praxis_int_load(ctx, r);
+            // `Int::MIN`'s divisors: |Int::MIN| is out of range, but every gcd
+            // *with* it that is not itself is in range.
+            let min = praxis_alloc_int(ctx, i64::MIN);
+            let two = praxis_alloc_int(ctx, 2);
+            assert_eq!(load(praxis_int_gcd(ctx, min, two)), 2);
+            assert!(!rt.has_pending_fault());
+            // …and the one pair whose answer is 2^63 faults.
+            let min2 = praxis_alloc_int(ctx, i64::MIN);
+            let _ = praxis_int_gcd(ctx, min, min2);
+            assert!(rt.has_pending_fault());
+            assert_eq!(rt.fault(), FaultKind::IntOverflow);
+        }
+        let _ = rt.take_fault();
+        // SAFETY: ctx wired; every operand is a valid Int.
+        unsafe {
+            let load = |r: GcRef| praxis_int_load(ctx, r);
+            // Both signs, one answer: the lcm is non-negative.
+            let neg = praxis_alloc_int(ctx, -4);
+            let six = praxis_alloc_int(ctx, 6);
+            assert_eq!(load(praxis_int_lcm(ctx, neg, six)), 12);
+            let neg6 = praxis_alloc_int(ctx, -6);
+            assert_eq!(load(praxis_int_lcm(ctx, neg, neg6)), 12);
+            // `lcm(n, 0)` is 0, and the pair `(0, 0)` does not divide by zero.
+            let zero = praxis_alloc_int(ctx, 0);
+            assert_eq!(load(praxis_int_lcm(ctx, six, zero)), 0);
+            assert_eq!(load(praxis_int_lcm(ctx, zero, zero)), 0);
+            assert_eq!(load(praxis_int_gcd(ctx, zero, zero)), 0);
+            assert!(!rt.has_pending_fault());
+            // An lcm that does not fit: two coprime halves of the range.
+            let big = praxis_alloc_int(ctx, i64::MAX);
+            let three = praxis_alloc_int(ctx, 3);
+            let _ = praxis_int_lcm(ctx, big, three);
+            assert!(rt.has_pending_fault());
+            assert_eq!(rt.fault(), FaultKind::IntOverflow);
+        }
+        let _ = rt.take_fault();
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// `abs` faults on the one input with no positive counterpart, and `sign` is
+    /// total on the same input — the distinction the manifest records as
+    /// `AllocatesAndFaults` versus `Allocates`.
+    #[test]
+    fn abs_faults_on_the_value_with_no_positive_and_sign_does_not() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; every operand is a valid Int.
+        unsafe {
+            let min = praxis_alloc_int(ctx, i64::MIN);
+            let r = praxis_int_abs(ctx, min);
+            assert!(rt.has_pending_fault());
+            assert_eq!(rt.fault(), FaultKind::IntOverflow);
+            assert_eq!(r.as_ptr(), rt.immortals().unit().as_ptr());
+        }
+        let _ = rt.take_fault();
+        // SAFETY: ctx wired; every operand is a valid Int.
+        unsafe {
+            let min = praxis_alloc_int(ctx, i64::MIN);
+            assert_eq!(praxis_int_load(ctx, praxis_int_sign(ctx, min)), -1);
+            let max = praxis_alloc_int(ctx, i64::MAX);
+            assert_eq!(praxis_int_load(ctx, praxis_int_abs(ctx, max)), i64::MAX);
+            assert_eq!(praxis_int_load(ctx, praxis_int_sign(ctx, max)), 1);
+            assert!(!rt.has_pending_fault());
+        }
+        unsafe { drop_ctx(ctx) };
     }
 
     #[test]

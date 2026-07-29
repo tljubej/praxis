@@ -1625,6 +1625,98 @@ fn each_control_builtin_reaches_the_backend() {
     assert!(is_clean_with_lower("fn main() -> Int { dbg(7) }"));
 }
 
+/// TY-33's second unit as the rule: each of §16.1's seven numeric helpers is
+/// `(Int, …) -> Int` (ADR-058), which means each of the three things a phantom
+/// name could not do — reject a wrong operand type, reject a wrong operand
+/// count, and be used where an `Int` is required.
+///
+/// Before this every one of them got a fresh type variable, so `abs("x") + 1`
+/// was accepted and `min(1)` was accepted, and then the program failed the
+/// compile.
+#[test]
+fn each_numeric_helper_has_the_int_type_its_contract_needs() {
+    // The result is `Int`, in each arity.
+    assert!(!has_type_error("fn main() -> Int { abs(-5) }"));
+    assert!(!has_type_error("fn main() -> Int { sign(-9) }"));
+    assert!(!has_type_error("fn main() -> Int { min(3, 7) }"));
+    assert!(!has_type_error("fn main() -> Int { max(3, 7) }"));
+    assert!(!has_type_error("fn main() -> Int { clamp(11, 0, 10) }"));
+    assert!(!has_type_error("fn main() -> Int { gcd(12, 18) }"));
+    assert!(!has_type_error("fn main() -> Int { lcm(4, 6) }"));
+    // …and it is `Int`, not "whatever the caller wanted".
+    assert!(has_type_error("fn main() -> Text { abs(-5) }"));
+    assert!(has_type_error("fn main() -> Bool { min(3, 7) }"));
+    assert!(has_type_error("fn main() -> Float { gcd(12, 18) }"));
+
+    // The operands are `Int`. A `Text` or a `Float` in any position is refused —
+    // the whole difference between a scheme and a fresh variable.
+    assert!(has_type_error("fn main() -> Int { abs(\"x\") }"));
+    assert!(has_type_error("fn main() -> Int { sign(1.5) }"));
+    assert!(has_type_error("fn main() -> Int { min(3, \"7\") }"));
+    assert!(has_type_error("fn main() -> Int { max(true, 7) }"));
+    assert!(has_type_error("fn main() -> Int { clamp(11, 0, 1.0) }"));
+    assert!(has_type_error("fn main() -> Int { lcm(4.0, 6.0) }"));
+
+    // The arity is the wrapper's, and inference is what enforces it: `min` takes
+    // two operands and `clamp` takes three, so neither a short nor a long call
+    // typechecks.
+    assert!(has_type_error("fn main() -> Int { min(3) }"));
+    assert!(has_type_error("fn main() -> Int { min(3, 4, 5) }"));
+    assert!(has_type_error("fn main() -> Int { abs(1, 2) }"));
+    assert!(has_type_error("fn main() -> Int { clamp(11, 0) }"));
+
+    // The `Float` counterparts are methods (§4.12), not these names — which is
+    // why the free functions can be monomorphic on `Int` at all.
+    assert!(!has_type_error("fn main() -> Float { (0.0 - 1.5).abs() }"));
+    assert!(!has_type_error("fn main() -> Float { 1.5.min(2.5) }"));
+}
+
+/// A helper composes: it is an ordinary `Int`-valued expression, so it nests
+/// inside arithmetic, inside another helper, and inside a call whose parameter
+/// is annotated. This is the shape §3.3's representative program writes
+/// (`max(abs(dx), abs(dy))`), and a fresh variable would have accepted it
+/// without checking anything.
+#[test]
+fn a_numeric_helper_composes_like_any_int_expression() {
+    assert!(!has_type_error(
+        "fn manhattan(ax: Int, ay: Int, bx: Int, by: Int) -> Int {\n\
+         \x20   abs(ax - bx) + abs(ay - by)\n\
+         }"
+    ));
+    assert!(!has_type_error(
+        "fn spread(dx: Int, dy: Int) -> Int { max(abs(dx), abs(dy)) }"
+    ));
+    assert!(!has_type_error(
+        "fn take(n: Int) -> Int { n }\n\
+         fn main() -> Int { take(clamp(gcd(12, 18), 0, 10)) }"
+    ));
+    // …and the nesting is checked, not waved through: `sign` yields an `Int`, so
+    // handing it to a `Text` parameter is still a mismatch.
+    assert!(has_type_error(
+        "fn take(t: Text) -> Text { t }\n\
+         fn main() -> Text { take(sign(-1)) }"
+    ));
+}
+
+/// The half a type test cannot see: each of the seven lowers to its own runtime
+/// call. Before this they reached the backend as `CallTarget::User("abs")` and
+/// the compile failed with "unresolved user function `abs`" — `panic`'s symptom,
+/// on seven more names (TY-33).
+#[test]
+fn each_numeric_helper_reaches_the_backend() {
+    for src in [
+        "fn main() -> Int { abs(-5) }",
+        "fn main() -> Int { sign(-9) }",
+        "fn main() -> Int { min(3, 7) }",
+        "fn main() -> Int { max(3, 7) }",
+        "fn main() -> Int { clamp(11, 0, 10) }",
+        "fn main() -> Int { gcd(12, 18) }",
+        "fn main() -> Int { lcm(4, 6) }",
+    ] {
+        assert!(is_clean_with_lower(src), "did not lower: {src}");
+    }
+}
+
 // --- capability constraints must survive polymorphism -----------------------
 
 #[test]

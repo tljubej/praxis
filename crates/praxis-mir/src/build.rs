@@ -870,6 +870,28 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 }
                 return dst;
             }
+            // The §16.1 numeric helpers: `abs`, `sign`, `min`, `max`, `clamp`,
+            // `gcd`, `lcm`. Each is one runtime call taking the operands the
+            // program wrote — the arity is the wrapper's, and inference already
+            // rejected a call that does not match it, so the argument list is
+            // passed through as it stands. Before this they fell through to
+            // `CallTarget::User` and failed the compile with "unresolved user
+            // function `abs`" (TY-33, ADR-058).
+            if let Some(helper) = praxis_stdlib::numeric_helper(callee_name) {
+                let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
+                let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
+                b.push(Inst::Call {
+                    dst,
+                    callee: CallTarget::Runtime(helper.symbol),
+                    args: arg_locals,
+                    roots: RootSlots::unannotated(),
+                    debug: DebugSlots::unannotated(),
+                });
+                if helper.symbol.faults() {
+                    b.check_fault();
+                }
+                return dst;
+            }
             // Float constants `pi()`/`e()` (§4.12): direct runtime calls that
             // allocate a Float. No arguments; no fault.
             if callee_name == "pi" || callee_name == "e" {

@@ -73,13 +73,16 @@ pub enum FaultKind {
     /// than panicking across the ABI — but the recovery is a fault, not a
     /// silent success, and now says so.
     InvalidText = 9,
-    /// A size or extent the runtime cannot honour: a negative `Grid` width or
-    /// height, a `width * height` that overflows or exceeds
-    /// [`GridExtent::MAX_CELLS`](crate::collections::GridExtent::MAX_CELLS), or
-    /// a `BitSet` member outside [`BitIndex`](crate::bitset::BitIndex)'s range
-    /// (§9.2). These reached Rust as a `usize` cast and became an OOM abort or
-    /// a capacity-overflow panic *across* `extern "C"`; they are now faults
-    /// (RT-07).
+    /// A size, extent or range the runtime cannot honour: a negative `Grid`
+    /// width or height, a `width * height` that overflows or exceeds
+    /// [`GridExtent::MAX_CELLS`](crate::collections::GridExtent::MAX_CELLS), a
+    /// `BitSet` member outside [`BitIndex`](crate::bitset::BitIndex)'s range
+    /// (§9.2), or a `clamp(v, low, high)` whose `low` exceeds its `high`
+    /// (ADR-058). The first three reached Rust as a `usize` cast and became an
+    /// OOM abort or a capacity-overflow panic *across* `extern "C"`; they are now
+    /// faults (RT-07). The last has no kind of its own because S17's one ABI
+    /// bump is spent; a dedicated empty-range kind is owed to the next stage
+    /// that spends one.
     InvalidSize = 10,
     /// A value did not have the type its destination declared: pushing a
     /// `Float` into a `Vec[Int]`, or constructing a `Grid[T]` whose cell type

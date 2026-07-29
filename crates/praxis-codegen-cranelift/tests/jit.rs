@@ -4605,6 +4605,115 @@ fn dbg_hands_back_the_value_it_was_given() {
     assert_eq!(result.as_int(), 2);
 }
 
+/// TY-33's second unit end to end: each of the seven numeric helpers computes
+/// the number it names. Inference can only say the type is `Int` — that the
+/// wrapper behind the name is the *right* wrapper is a fact only a run can
+/// establish, and a table that named the wrong symbol would typecheck
+/// identically (which is why `each_helper_has_its_own_wrapper` exists too).
+#[test]
+fn each_numeric_helper_computes_what_it_names() {
+    for (src, want) in [
+        ("abs(-5)", 5),
+        ("abs(5)", 5),
+        ("abs(0)", 0),
+        ("sign(-9)", -1),
+        ("sign(0)", 0),
+        ("sign(9)", 1),
+        ("min(3, 7)", 3),
+        ("min(7, 3)", 3),
+        ("min(-2, -2)", -2),
+        ("max(3, 7)", 7),
+        ("max(7, 3)", 7),
+        ("clamp(11, 0, 10)", 10),
+        ("clamp(0 - 4, 0, 10)", 0),
+        ("clamp(5, 0, 10)", 5),
+        // The bounds are inclusive, so an at-the-edge value is its own answer.
+        ("clamp(10, 0, 10)", 10),
+        ("gcd(12, 18)", 6),
+        ("gcd(17, 5)", 1),
+        // gcd's sign convention: the result is non-negative whatever the
+        // operands' signs, and `gcd(n, 0)` is `abs(n)`.
+        ("gcd(0 - 12, 18)", 6),
+        ("gcd(7, 0)", 7),
+        ("gcd(0, 0)", 0),
+        ("lcm(4, 6)", 12),
+        ("lcm(21, 6)", 42),
+        ("lcm(0, 5)", 0),
+        ("lcm(0 - 4, 6)", 12),
+    ] {
+        let program = format!("fn main() -> Int {{ {src} }}");
+        let (rt, result) = run_main(&program);
+        assert!(!rt.has_pending_fault(), "{src} faulted");
+        assert_eq!(result.as_int(), want, "{src}");
+    }
+}
+
+/// The three helpers that can leave the `Int` range **fault** rather than
+/// wrapping, which is the same answer `+`/`-`/`*` already give (§4.12) and the
+/// same answer TY-28 gave for a literal: a number nobody wrote is worse than a
+/// stop. `sign`, `min` and `max` are total and are here to show the fault is not
+/// blanket caution.
+#[test]
+fn a_numeric_helper_faults_rather_than_wrapping() {
+    // `abs(Int::MIN)` has no positive counterpart — `praxis_int_neg`'s edge.
+    let (rt, _r) = run_main("fn main() -> Int { abs(0 - 9223372036854775807 - 1) }");
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
+
+    // `lcm` overflows long before its operands do: 2^62 and 3 have no common
+    // multiple in range.
+    let (rt, _r) = run_main("fn main() -> Int { lcm(4611686018427387904, 3) }");
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
+
+    // An inverted `clamp` range is empty, so there is no value to return.
+    // ADR-058: the kind is `InvalidSize` until a stage spends an ABI bump on one
+    // of its own.
+    let (rt, _r) = run_main("fn main() -> Int { clamp(5, 10, 0) }");
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::InvalidSize);
+
+    // …and the total three are total at the same edges.
+    let (rt, result) = run_main("fn main() -> Int { sign(0 - 9223372036854775807 - 1) }");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), -1);
+    let (rt, result) = run_main("fn main() -> Int { min(0 - 9223372036854775807 - 1, 0) }");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), i64::MIN);
+    let (rt, result) = run_main("fn main() -> Int { max(9223372036854775807, 0) }");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), i64::MAX);
+}
+
+/// §3.3's representative program computes `sign` and `abs` on values it read,
+/// and `max(abs(dx), abs(dy))` over them. A helper has to survive being nested
+/// in an expression, called with computed operands, and used as another
+/// function's argument — the shapes a fresh type variable accepted and then
+/// could not compile.
+#[test]
+fn numeric_helpers_nest_and_carry_computed_operands() {
+    let (rt, result) = run_main(
+        "fn spread(x1: Int, y1: Int, x2: Int, y2: Int) -> Int {\n\
+         \x20 max(abs(x2 - x1), abs(y2 - y1))\n\
+         }\n\
+         fn main() -> Int { spread(1, 1, 4, 9) }\n",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 8);
+
+    // A helper's result feeds a loop bound and a mutable accumulator, so the
+    // call's temp has to survive the allocations around it.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n\
+         \x20 var total = 0\n\
+         \x20 for n in Vec() { total = total + n }\n\
+         \x20 total + clamp(gcd(48, 18), 0, 4) + lcm(2, 3)\n\
+         }\n",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 10);
+}
+
 /// TY-30 end to end: the §5.2 program the design doc promises needs no
 /// annotations. `total`'s parameter has no type until `main` calls it, and the
 /// `.sum()` inside it had no catalog entry when inference walked past it — the
