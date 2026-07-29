@@ -94,7 +94,10 @@ unsafe fn sample(rt: &Runtime, ctx: *mut RuntimeContext, builtin: BuiltinTypeId)
                         descriptor: &praxis_runtime::scalars::INT,
                     }]));
                 let schema: &'static praxis_runtime::RecordSchema =
-                    Box::leak(Box::new(praxis_runtime::RecordSchema { fields }));
+                    Box::leak(Box::new(praxis_runtime::RecordSchema {
+                        identity: praxis_runtime::SchemaIdentity::Anonymous,
+                        fields,
+                    }));
                 praxis_alloc_record(ctx, schema as *const _)
             }
             B::Enum => praxis_alloc_enum(ctx, 0, 0),

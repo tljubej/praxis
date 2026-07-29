@@ -803,6 +803,50 @@ fn runtime_symbols_emitted_for(src: &str) -> std::collections::BTreeSet<&'static
         .collect()
 }
 
+/// RT-12, end to end. Each JIT generation interns its own schemas, so two
+/// compiles of one program produce two `RecordSchema` allocations for one
+/// record type. Equality compared those *addresses*, so a `Point { x: 1, y: 2 }`
+/// from one compile was not equal to the identical value from the next — which
+/// is what the debugger hits every time it evaluates `p` in its own module, and
+/// why it works around the problem by sharing one evaluation generation.
+///
+/// Both records live on one heap here, so this is the comparison a program
+/// could actually perform.
+#[test]
+fn records_from_two_generations_are_equal_when_their_type_is() {
+    const NOMINAL: &str =
+        "struct Point { x: Int, y: Int }\nfn main() -> Point { Point { x: 1, y: 2 } }\n";
+
+    let (jit_a, ids_a) = compile(NOMINAL);
+    let (jit_b, ids_b) = compile(NOMINAL);
+    let mut runtime = Runtime::new();
+    let mut context = runtime.context();
+    context.input_source = runtime.alloc_text("");
+    type ZeroArgMain = unsafe extern "C" fn(*mut RuntimeContext) -> GcRef;
+
+    let entry_a: ZeroArgMain =
+        unsafe { std::mem::transmute(jit_a.entry(*ids_a.get("main").expect("main"))) };
+    let entry_b: ZeroArgMain =
+        unsafe { std::mem::transmute(jit_b.entry(*ids_b.get("main").expect("main"))) };
+    let a = unsafe { entry_a(&mut context as *mut RuntimeContext) };
+    let b = unsafe { entry_b(&mut context as *mut RuntimeContext) };
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+
+    // The two schemas really are distinct allocations, or this proves nothing.
+    let schema_of = |r: GcRef| unsafe { (*r.payload::<praxis_runtime::RecordPayload>()).schema };
+    assert!(
+        !std::ptr::eq(schema_of(a), schema_of(b)),
+        "two generations must have interned two schemas"
+    );
+
+    let equal =
+        unsafe { praxis_runtime::abi::praxis_struct_eq(&mut context as *mut RuntimeContext, a, b) };
+    assert_eq!(equal, 1, "one record type, two generations, one value");
+
+    drop(jit_a);
+    drop(jit_b);
+}
+
 /// The comparison lowerings a program emits, as a set of tags: which scalar
 /// widths were extracted, and which of the four compare instructions ran.
 ///

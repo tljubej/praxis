@@ -51,7 +51,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use bumpalo::Bump;
 use praxis_runtime::descriptor::TypeDescriptor;
-use praxis_runtime::records::{RecordField, RecordSchema};
+use praxis_runtime::records::{RecordField, RecordSchema, SchemaIdentity};
 use praxis_runtime::tuples::TupleSchema;
 use praxis_runtime::{DebugLocalMeta, HeapDrained};
 
@@ -239,6 +239,7 @@ impl Generation {
     pub fn record_schema<E>(
         &self,
         def_id: u32,
+        identity: SchemaIdentity,
         fields: impl FnOnce() -> Result<Vec<RecordField>, E>,
     ) -> Result<*const RecordSchema, E> {
         let key = RecordKey(self.id, def_id);
@@ -250,7 +251,10 @@ impl Generation {
         // SAFETY (lifetime erasure): `RecordSchema::fields` declares `&'static`
         // and the slice lives in this generation's arena; see `alloc_str`.
         let stored: &'static [RecordField] = unsafe { &*(stored as *const [RecordField]) };
-        let schema: &RecordSchema = self.arena.alloc(RecordSchema { fields: stored });
+        let schema: &RecordSchema = self.arena.alloc(RecordSchema {
+            identity,
+            fields: stored,
+        });
         let raw: *const RecordSchema = schema;
         self.record_schemas.borrow_mut().insert(key, raw);
         Ok(raw)
@@ -358,8 +362,12 @@ mod tests {
                 descriptor: &praxis_runtime::scalars::INT,
             }])
         };
-        let from_a = a.record_schema(0, build).unwrap();
-        let from_b = b.record_schema(0, build).unwrap();
+        let from_a = a
+            .record_schema(0, SchemaIdentity::Nominal("P"), build)
+            .unwrap();
+        let from_b = b
+            .record_schema(0, SchemaIdentity::Nominal("P"), build)
+            .unwrap();
         assert!(
             !std::ptr::eq(from_a, from_b),
             "a bare def id must not name one schema across type databases"
@@ -379,8 +387,12 @@ mod tests {
                 descriptor: &praxis_runtime::scalars::INT,
             }])
         };
-        let first = gen.record_schema(7, &mut build).unwrap();
-        let second = gen.record_schema(7, &mut build).unwrap();
+        let first = gen
+            .record_schema(7, SchemaIdentity::Anonymous, &mut build)
+            .unwrap();
+        let second = gen
+            .record_schema(7, SchemaIdentity::Anonymous, &mut build)
+            .unwrap();
         assert!(std::ptr::eq(first, second));
         assert_eq!(built, 1, "a cache hit must not rebuild the schema");
     }
@@ -391,7 +403,9 @@ mod tests {
     fn a_failed_schema_build_caches_nothing() {
         let gen = Generation::new();
         let failed: Result<*const RecordSchema, &str> =
-            gen.record_schema(3, || Err("no runtime object for `Range`"));
+            gen.record_schema(3, SchemaIdentity::Anonymous, || {
+                Err("no runtime object for `Range`")
+            });
         assert_eq!(failed.unwrap_err(), "no runtime object for `Range`");
         assert_eq!(gen.stats().record_schemas, 0);
     }
@@ -431,7 +445,7 @@ mod tests {
             let name = gen.alloc_str("main");
             gen.debug_local_metas(vec![meta(name)]);
             gen.tuple_schema(&[&praxis_runtime::scalars::INT]);
-            gen.record_schema(0, || {
+            gen.record_schema(0, SchemaIdentity::Anonymous, || {
                 Ok::<_, ()>(vec![RecordField {
                     name: gen.alloc_str("value"),
                     descriptor: &praxis_runtime::scalars::INT,
@@ -444,7 +458,7 @@ mod tests {
             let name = gen.alloc_str("main");
             gen.debug_local_metas(vec![meta(name)]);
             gen.tuple_schema(&[&praxis_runtime::scalars::INT]);
-            gen.record_schema(0, || {
+            gen.record_schema(0, SchemaIdentity::Anonymous, || {
                 Ok::<_, ()>(vec![RecordField {
                     name: gen.alloc_str("value"),
                     descriptor: &praxis_runtime::scalars::INT,

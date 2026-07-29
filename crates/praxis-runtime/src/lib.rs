@@ -59,7 +59,7 @@ pub use gc::{GcHeader, GcRef, HeapId};
 pub use heap::{Heap, HeapStats};
 pub use immortal::Immortals;
 pub use parse_detail::{ParseDetail, ParseFail};
-pub use records::{RecordField, RecordPayload, RecordSchema};
+pub use records::{RecordField, RecordPayload, RecordSchema, SchemaIdentity};
 pub use repr::{instance_repr, InstanceArg, InstanceRepr};
 pub use roots::{NativeRootFrame, NativeScope, RootScope, RootSet, Rooted, RuntimeRoots};
 pub use shadow_frame::{ShadowFrame, MAX_SHADOW_SLOTS};

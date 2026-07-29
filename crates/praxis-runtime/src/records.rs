@@ -29,10 +29,35 @@ pub struct RecordField {
     pub descriptor: *const TypeDescriptor,
 }
 
-/// The static shape of an anonymous record: an ordered list of named fields,
-/// each with its value descriptor. Leaked to `&'static` per parser plan.
+/// Which *type* a record schema describes — the half of a record's identity
+/// that its field list cannot express (RT-12).
+///
+/// `struct Point { x: Int, y: Int }` and `struct Vector { x: Int, y: Int }` are
+/// different types with one shape, and §5.6's anonymous records are the
+/// opposite case: the same shape *is* the same type, however many times it is
+/// built. One enum distinguishes them.
+///
+/// F12 will replace the name with a `DefId + args` key once nominal identity
+/// carries type arguments; until then the declared name is the identity, and it
+/// is compared alongside the shape (see [`RecordSchema::same_type`]) so a
+/// generic record's two instantiations do not collide.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(C)]
+pub enum SchemaIdentity {
+    /// A structural record (§5.6): identity is the field shape alone. What the
+    /// input parser's named-capture templates produce.
+    Anonymous,
+    /// A declared record type. Two schemas are the same type only if they name
+    /// the same one.
+    Nominal(&'static str),
+}
+
+/// The static shape of a record: what type it is, plus an ordered list of named
+/// fields, each with its value descriptor. Allocated in the JIT generation that
+/// built it (or, for parser templates, in the runtime's schema registry).
 #[repr(C)]
 pub struct RecordSchema {
+    pub identity: SchemaIdentity,
     pub fields: &'static [RecordField],
 }
 
@@ -40,6 +65,36 @@ impl RecordSchema {
     /// The number of fields in this record shape.
     pub fn arity(&self) -> usize {
         self.fields.len()
+    }
+
+    /// Whether two schemas describe the *same record type* — the same identity
+    /// and the same field shape.
+    ///
+    /// Type identity, not allocation identity (RT-12). Schemas are interned per
+    /// def *within a generation*, and there are three producers — every JIT
+    /// generation, the runtime's parser registry, and test fixtures — so
+    /// `pa.schema != pb.schema` made two records of one type compare unequal
+    /// as soon as they came from different compiles. The debugger hit this
+    /// directly: `p` evaluates in its own module, and comparing its result to a
+    /// program value was always false.
+    ///
+    /// The shape is compared even for a `Nominal` pair, which the name alone
+    /// would settle. It costs an arity check and a slice walk, and it is what
+    /// keeps two instantiations of a generic record (one name, different field
+    /// descriptors) apart, and what stops a debugger session that reloaded a
+    /// *changed* definition from comparing old values field-wise through new
+    /// descriptors.
+    #[must_use]
+    pub fn same_type(&self, other: &RecordSchema) -> bool {
+        if self.identity != other.identity {
+            return false;
+        }
+        self.fields.len() == other.fields.len()
+            && self
+                .fields
+                .iter()
+                .zip(other.fields.iter())
+                .all(|(a, b)| a.name == b.name && std::ptr::eq(a.descriptor, b.descriptor))
     }
 }
 
@@ -90,10 +145,14 @@ unsafe fn record_equals(a: *const u8, b: *const u8) -> bool {
     // with compatible schemas.
     let pa = unsafe { &*(a as *const RecordPayload) };
     let pb = unsafe { &*(b as *const RecordPayload) };
-    // Structural equality is shape + field-wise equality (§5.5). The schemas are
-    // interned by shape, so distinct shapes are distinct pointers; if the
-    // schemas disagree the records are different shapes and never equal.
-    if pa.schema != pb.schema {
+    // Equality is same-type + field-wise equality (§5.5). "Same type" is the
+    // schema's identity and shape, not its *address* (RT-12): each JIT
+    // generation interns its own schemas, so comparing pointers made two
+    // `Point { x: 1, y: 2 }`s from different compiles unequal.
+    if pa.schema.is_null() || pb.schema.is_null() {
+        return false;
+    }
+    if !unsafe { (*pa.schema).same_type(&*pb.schema) } {
         return false;
     }
     if pa.items.len() != pb.items.len() {
@@ -120,11 +179,25 @@ unsafe fn record_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     // SAFETY: caller guarantees `payload` points at an initialized RecordPayload.
     let p = unsafe { &*(payload as *const RecordPayload) };
     let schema = unsafe { &*p.schema };
+    // Everything `same_type` compares is hashed, so `Eq` and `Hash` still agree
+    // now that equality is type identity rather than a schema address: two
+    // records that differ only in which type they are must be free to land in
+    // different buckets.
+    match schema.identity {
+        SchemaIdentity::Anonymous => hasher.write_bytes(b"anon"),
+        SchemaIdentity::Nominal(name) => {
+            hasher.write_bytes(b"nom");
+            hasher.write_bytes(name.as_bytes());
+        }
+    }
     // Arity first to distinguish records of different field counts.
     hasher.write_bytes(&(p.items.len() as u64).to_le_bytes());
     for (i, item) in p.items.iter().enumerate() {
+        hasher.write_bytes(schema.fields[i].name.as_bytes());
+        let field_desc = unsafe { &*schema.fields[i].descriptor };
+        hasher.write_bytes(&field_desc.id().to_u32().to_le_bytes());
         // If the field type is not hashable, the record is not hashable (§5.5).
-        let Some(hash_field) = unsafe { &*schema.fields[i].descriptor }.hash else {
+        let Some(hash_field) = field_desc.hash else {
             return;
         };
         let elem_payload = item.payload::<u8>() as *const u8;
@@ -187,6 +260,119 @@ mod tests {
         );
     }
 
+    /// A leaked schema of `(name, Int)` fields, standing in for one a JIT
+    /// generation or the parser registry would build. Each call leaks its own,
+    /// which is the point wherever two are compared: same shape, different
+    /// address.
+    fn leak_schema(identity: SchemaIdentity, names: &[&'static str]) -> &'static RecordSchema {
+        let fields: Vec<RecordField> = names
+            .iter()
+            .map(|name| RecordField {
+                name,
+                descriptor: &crate::scalars::INT,
+            })
+            .collect();
+        Box::leak(Box::new(RecordSchema {
+            identity,
+            fields: Box::leak(fields.into_boxed_slice()),
+        }))
+    }
+
+    /// Allocate a record of `schema` and fill it with `values` as `Int`s.
+    fn record_of(
+        ctx: &mut crate::RuntimeContext,
+        schema: &'static RecordSchema,
+        values: &[i64],
+    ) -> GcRef {
+        let r = unsafe { crate::abi::praxis_alloc_record(ctx, schema) };
+        for (i, v) in values.iter().enumerate() {
+            let boxed = unsafe { crate::abi::praxis_alloc_int(ctx, *v) };
+            unsafe { crate::abi::praxis_record_set_field(ctx, r, i as u32, boxed) };
+        }
+        r
+    }
+
+    fn equal(a: GcRef, b: GcRef) -> bool {
+        unsafe {
+            record_equals(
+                a.payload::<u8>() as *const u8,
+                b.payload::<u8>() as *const u8,
+            )
+        }
+    }
+
+    fn hash_of(r: GcRef) -> u64 {
+        let mut h = crate::descriptor::StructHasher::new();
+        unsafe { record_hash(r.payload::<u8>() as *const u8, &mut h) };
+        h.finish()
+    }
+
+    /// RT-12. Two schemas of one anonymous shape, separately allocated — what
+    /// two JIT generations, or a generation and the parser registry, produce
+    /// for the same `{x: Int, y: Int}`. Records built through them are the same
+    /// value, and `record_equals` compared schema *addresses*, so they were not.
+    #[test]
+    fn anonymous_records_of_one_shape_are_equal_across_schema_allocations() {
+        let mut rt = crate::Runtime::new();
+        let mut ctx = rt.context();
+        let first = leak_schema(SchemaIdentity::Anonymous, &["x", "y"]);
+        let second = leak_schema(SchemaIdentity::Anonymous, &["x", "y"]);
+        assert!(
+            !std::ptr::eq(first, second),
+            "the two schemas must really be distinct allocations"
+        );
+
+        let a = record_of(&mut ctx, first, &[1, 2]);
+        let b = record_of(&mut ctx, second, &[1, 2]);
+        assert!(equal(a, b));
+        assert_eq!(hash_of(a), hash_of(b), "equal records must hash equally");
+
+        // Same shape, different values: still not equal.
+        let c = record_of(&mut ctx, second, &[1, 3]);
+        assert!(!equal(a, c));
+    }
+
+    /// RT-12's other half: a *nominal* record is its declared type, so two
+    /// records with identical fields and different type names are not equal —
+    /// and a nominal record is never equal to a structural one of the same
+    /// shape (§5.6).
+    #[test]
+    fn nominal_records_of_different_types_are_never_equal() {
+        let mut rt = crate::Runtime::new();
+        let mut ctx = rt.context();
+        let point = leak_schema(SchemaIdentity::Nominal("Point"), &["x", "y"]);
+        let vector = leak_schema(SchemaIdentity::Nominal("Vector"), &["x", "y"]);
+        let anon = leak_schema(SchemaIdentity::Anonymous, &["x", "y"]);
+
+        let p = record_of(&mut ctx, point, &[1, 2]);
+        let v = record_of(&mut ctx, vector, &[1, 2]);
+        let a = record_of(&mut ctx, anon, &[1, 2]);
+        assert!(!equal(p, v), "two record types are not one type");
+        assert!(!equal(p, a), "a declared type is not a structural shape");
+
+        // And the same nominal type from two generations *is* one type.
+        let point_again = leak_schema(SchemaIdentity::Nominal("Point"), &["x", "y"]);
+        let p2 = record_of(&mut ctx, point_again, &[1, 2]);
+        assert!(equal(p, p2));
+        assert_eq!(hash_of(p), hash_of(p2));
+    }
+
+    /// A shape check rides along with the name, so one nominal name over two
+    /// different field shapes — a generic record's instantiations, or a
+    /// debugger session that reloaded a changed definition — does not compare
+    /// field-wise through the wrong descriptors.
+    #[test]
+    fn one_nominal_name_over_two_shapes_is_two_types() {
+        let mut rt = crate::Runtime::new();
+        let mut ctx = rt.context();
+        let two_fields = leak_schema(SchemaIdentity::Nominal("P"), &["x", "y"]);
+        let renamed = leak_schema(SchemaIdentity::Nominal("P"), &["x", "z"]);
+
+        let a = record_of(&mut ctx, two_fields, &[1, 2]);
+        let b = record_of(&mut ctx, renamed, &[1, 2]);
+        assert!(!equal(a, b));
+    }
+
     #[test]
     fn record_equals_identical_int_fields() {
         // Build two records with the same schema and equal Int fields; their
@@ -196,6 +382,7 @@ mod tests {
         let descriptors: &'static [*const TypeDescriptor] =
             Box::leak(vec![&crate::scalars::INT as *const TypeDescriptor; 2].into_boxed_slice());
         let schema = Box::leak(Box::new(RecordSchema {
+            identity: SchemaIdentity::Anonymous,
             fields: Box::leak(
                 vec![
                     RecordField {

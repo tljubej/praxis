@@ -1221,7 +1221,13 @@ fn record_schema_for(
     // is what discharges the obligation.
     let borrowed: &'static [crate::records::RecordField] =
         unsafe { &*(&*fields as *const [crate::records::RecordField]) };
-    let schema = Box::new(crate::records::RecordSchema { fields: borrowed });
+    // A named-capture template produces an *anonymous* structural record
+    // (§5.6): its identity is its shape, so two templates with the same fields
+    // yield records that compare equal (RT-12).
+    let schema = Box::new(crate::records::RecordSchema {
+        identity: crate::records::SchemaIdentity::Anonymous,
+        fields: borrowed,
+    });
     let raw: *const crate::records::RecordSchema = &*schema;
     cache.records.push(RecordSchemaEntry {
         key,

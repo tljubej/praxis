@@ -1619,10 +1619,17 @@ fn record_schema_for(
     id: u32,
     generation: &Generation,
 ) -> Result<*const praxis_runtime::records::RecordSchema> {
-    use praxis_runtime::records::RecordField;
+    use praxis_runtime::records::{RecordField, SchemaIdentity};
     use praxis_types::data::RecordDefId;
-    generation.record_schema(id, || {
-        let def = db.record_def(RecordDefId(id));
+    let def = db.record_def(RecordDefId(id));
+    // A declared record is its name; a structural one (§5.6) is its shape
+    // (RT-12). The name is copied into the generation so the schema outlives
+    // this `TypeDb` — the debugger's does not survive the command.
+    let identity = match &def.name {
+        Some(name) => SchemaIdentity::Nominal(generation.alloc_str(name)),
+        None => SchemaIdentity::Anonymous,
+    };
+    generation.record_schema(id, identity, || {
         def.fields
             .iter()
             .map(|f| {
