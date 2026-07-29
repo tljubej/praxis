@@ -24,7 +24,8 @@ pub mod unify;
 
 pub use ctor::{CollectionArgs, FieldSet, TupleElems, VariantSet};
 pub use data::{
-    EnumDef, EnumDefId, EnumVariantDef, RecordDef, RecordDefId, RecordFieldDef, TypeData, VarState,
+    EnumDef, EnumDefId, EnumVariantDef, Level, RecordDef, RecordDefId, RecordFieldDef, TypeData,
+    VarState,
 };
 pub use db::{Slot, TypeDb};
 pub use error::TypeCtorError;

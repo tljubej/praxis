@@ -2,14 +2,14 @@
 //!
 //! [`unify`] makes two types equal by linking type variables to types. It enforces
 //! the occurs check (reject infinite types) and applies Pottier's level-lowering
-//! rule: when a variable at a deep level is linked to a type containing variables
-//! at a shallower level, the shallower variables are *lowered* to the variable's
-//! level — otherwise a later outer binding could constrain them after they have
-//! been generalized (soundness bug).
+//! rule: when a variable is linked to a type containing variables at a *deeper*
+//! level, those deeper variables are lowered to the linked variable's level —
+//! otherwise generalizing at the inner level would quantify a variable the outer
+//! environment can still reach (soundness bug; TY-01).
 //!
 //! All failures are returned as [`UnifyError`]; unification never panics.
 
-use crate::data::{TypeData, VarState};
+use crate::data::{Level, TypeData, VarState};
 use crate::db::TypeDb;
 use crate::fold::{fold, visit_only_composites, FoldMemo, TypeFolder};
 use crate::type_id::{Type, VarId};
@@ -60,21 +60,21 @@ impl TypeDb {
                 within: target,
             });
         }
-        // Level lowering: any unbound var inside `target` at a shallower level
-        // than `var` is pulled down to `var`'s level, so it cannot be generalized
-        // out from under this binding.
+        // Level lowering: any unbound var inside `target` *deeper* than `var` is
+        // pulled out to `var`'s level, so an inner generalization cannot quantify
+        // something this binding still reaches.
         self.lower_levels(target, var_level);
         self.link(var_id, target);
         Ok(())
     }
 
-    /// Recurse over `t`, lowering the level of any unbound var whose level is
-    /// shallower than `min_level` down to `min_level`.
-    fn lower_levels(&mut self, t: Type, min_level: u32) {
+    /// Recurse over `t`, lowering every unbound var deeper than `outer` to
+    /// `outer` (ADR-008, Pottier's rule `level(w) := min(level(w), level(v))`).
+    fn lower_levels(&mut self, t: Type, outer: Level) {
         let mut folder = LevelLowerer {
             db: self,
             memo: FoldMemo::new(),
-            min_level,
+            outer,
         };
         fold(&mut folder, t);
     }
@@ -283,9 +283,22 @@ impl TypeDb {
     }
 }
 
-/// Pottier's level-lowering rule as a folder (F9): any unbound variable inside
-/// the type being linked, at a level shallower than the variable it is linked
-/// to, is pulled down so a later outer binding cannot generalize it away.
+/// Pottier's level-lowering rule as a folder (F9): every unbound variable
+/// inside the type being linked is pulled *out* to the level of the variable it
+/// is linked to, so a later generalization at an inner level cannot quantify a
+/// variable the outer environment can still reach.
+///
+/// # TY-01
+///
+/// The comparison used to run the other way — `if level < min_level`, writing
+/// `min_level` back — which **raised** older variables into the inner scope
+/// instead of lowering inner ones out of it. The effect is the soundness bug
+/// the rule exists to prevent: linking an outer variable to a type containing
+/// an inner one left the inner one deep, so generalizing the result quantified
+/// a variable still reachable from the environment.
+///
+/// [`Level::clamp_to`] is the whole fix, and it is why `Level` is a newtype:
+/// the rule is monotone-decreasing, so the reversed form is now unwritable.
 ///
 /// Inspection only — it rewrites variable *states*, never the types that
 /// contain them, so it uses [`visit_only_composites`] rather than the rebuilding
@@ -293,7 +306,7 @@ impl TypeDb {
 struct LevelLowerer<'a> {
     db: &'a mut TypeDb,
     memo: FoldMemo,
-    min_level: u32,
+    outer: Level,
 }
 
 impl TypeFolder for LevelLowerer<'_> {
@@ -305,8 +318,9 @@ impl TypeFolder for LevelLowerer<'_> {
     }
     fn fold_var(&mut self, t: Type, _var: VarId, state: &VarState) -> Type {
         if let VarState::Unbound { level } = *state {
-            if level < self.min_level {
-                let lowered = self.min_level;
+            let mut lowered = level;
+            lowered.clamp_to(self.outer);
+            if lowered != level {
                 self.db
                     .slots_set(t, TypeData::Var(VarState::Unbound { level: lowered }));
             }

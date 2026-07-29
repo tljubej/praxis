@@ -9,105 +9,154 @@
 //! The level discipline (§5.3, ADR-008) keeps this sound in the presence of `var`
 //! and partial inference: a var that will be constrained by a *later* binding
 //! never gets quantified, because it was created at the outer level.
+//!
+//! # A scheme owns its binders (F10, TY-03)
+//!
+//! Quantification used to be recorded twice: in the scheme's `quantified` list
+//! *and* as a `VarState::Generalized` flag on the arena slot. The two could
+//! disagree, and did — `Scheme::monotype(t)` has no binders by construction, but
+//! a later `generalize` of a *different* binding could flip a variable inside
+//! `t` to `Generalized`, leaving a monotype whose body contained a variable
+//! nothing would ever substitute and unification would refuse to link.
+//!
+//! There is one record now, and it belongs to the scheme. `generalize` mutates
+//! nothing; `instantiate` substitutes by binder membership.
 
 use crate::data::VarState;
 use crate::db::TypeDb;
 use crate::fold::{fold, visit_only_composites, FoldMemo, TypeFolder};
 use crate::type_id::{Type, VarId};
 
-/// A type scheme: `forall <quantified>. body`. A bare monomorphic type is a scheme
-/// with an empty `quantified` set.
+/// A type scheme: `forall <binders>. body`. A bare monomorphic type is a scheme
+/// with no binders.
 #[derive(Clone, Debug)]
 pub struct Scheme {
-    /// The generalized variables, in the order they were discovered. Order is
+    /// The quantified variables, in the order they were discovered. Order is
     /// cosmetic (it only affects pretty-printed names) but kept stable for
     /// reproducible diagnostics and snapshots.
-    pub quantified: Vec<VarId>,
-    /// The scheme body. Quantified vars appear in it as [`VarState::Generalized`]
-    /// slots; instantiating replaces them.
-    pub body: Type,
+    ///
+    /// Private: a scheme's binders and its body are one fact, and letting a
+    /// caller set one without the other is how the arena flag and the list came
+    /// apart in the first place.
+    binders: Vec<VarId>,
+    /// The scheme body. Binders appear in it as ordinary unbound variables;
+    /// instantiating replaces them.
+    body: Type,
 }
 
 impl Scheme {
-    /// A monomorphic scheme (no quantified variables). Equivalent to just `body`.
+    /// A monomorphic scheme (no binders). Equivalent to just `body`.
     #[must_use]
     pub fn monotype(body: Type) -> Scheme {
         Scheme {
-            quantified: Vec::new(),
+            binders: Vec::new(),
             body,
         }
+    }
+
+    /// The quantified variables.
+    #[inline]
+    #[must_use]
+    pub fn binders(&self) -> &[VarId] {
+        &self.binders
+    }
+
+    /// The scheme body — the type, with its binders still in it.
+    #[inline]
+    #[must_use]
+    pub fn body(&self) -> Type {
+        self.body
     }
 
     /// Whether this scheme is actually polymorphic.
     #[must_use]
     pub fn is_polymorphic(&self) -> bool {
-        !self.quantified.is_empty()
+        !self.binders.is_empty()
     }
 }
 
 impl TypeDb {
     /// Generalize `body` at the *current* binding level: quantify over every
-    /// unbound variable in `body` whose level is strictly greater than the current
-    /// level, marking those slots [`Generalized`](VarState::Generalized).
+    /// unbound variable in `body` whose level is strictly deeper than the
+    /// current level.
     ///
     /// Must be called at the level of the *binding site* (i.e. after the inner
     /// scope has been exited), so vars introduced by later/outer bindings are not
     /// stolen.
+    ///
+    /// Mutates nothing (F10). It used to rewrite each quantified variable's
+    /// arena slot, which is what let one scheme's generalization corrupt
+    /// another's body.
     #[must_use]
     pub fn generalize(&mut self, body: Type) -> Scheme {
-        let level = self.level();
-        let mut quantified = Vec::new();
-        self.generalize_walk(body, level, &mut quantified);
-        Scheme { quantified, body }
+        self.generalize_at(body, self.level())
     }
 
-    fn generalize_walk(&mut self, t: Type, at_level: u32, out: &mut Vec<VarId>) {
+    /// [`generalize`](Self::generalize) at an explicit binding site, for a
+    /// caller that holds a level open around several bindings.
+    ///
+    /// A declaration group does: one level for the group's mutually-visible
+    /// signature placeholders, each declaration's own body a level deeper, and
+    /// generalization back at the level the group was entered *from*. Reading
+    /// `self.level()` there would answer the group's level and quantify
+    /// nothing.
+    #[must_use]
+    pub fn generalize_at(&mut self, body: Type, site: crate::data::Level) -> Scheme {
+        let mut binders = Vec::new();
         let mut folder = Generalizer {
             db: self,
             memo: FoldMemo::new(),
-            at_level,
-            quantified: out,
+            site,
+            binders: &mut binders,
         };
-        fold(&mut folder, t);
+        fold(&mut folder, body);
+        Scheme { binders, body }
     }
 
     /// Instantiate `scheme` at the current level: copy its body, replacing each
-    /// quantified variable with a fresh unbound var. Monomorphic schemes are
-    /// returned with the body as-is (no allocation).
+    /// binder with a fresh unbound var. Monomorphic schemes are returned with
+    /// the body as-is (no allocation).
     #[must_use]
     pub fn instantiate(&mut self, scheme: &Scheme) -> Type {
-        if scheme.quantified.is_empty() {
-            return scheme.body;
-        }
-        // Map each quantified var id → a fresh var created at the current level.
-        let mapping: Vec<Type> = (0..scheme.quantified.len())
-            .map(|_| self.fresh_var())
-            .collect();
-        self.instantiate_walk(scheme.body, &scheme.quantified, &mapping)
+        self.instantiate_with_mapping(scheme).0
     }
 
-    fn instantiate_walk(&mut self, t: Type, quantified: &[VarId], mapping: &[Type]) -> Type {
+    /// [`instantiate`](Self::instantiate), also returning the fresh variable
+    /// each binder was replaced by, in binder order.
+    ///
+    /// The mapping is what a caller needs to say *which* type a use site chose
+    /// for each quantified variable — monomorphization's key (MONO-01).
+    #[must_use]
+    pub fn instantiate_with_mapping(&mut self, scheme: &Scheme) -> (Type, Vec<Type>) {
+        if scheme.binders.is_empty() {
+            return (scheme.body, Vec::new());
+        }
+        // Map each binder → a fresh var created at the current level.
+        let mapping: Vec<Type> = (0..scheme.binders.len())
+            .map(|_| self.fresh_var())
+            .collect();
         let mut folder = Instantiator {
             db: self,
             memo: FoldMemo::new(),
-            quantified,
-            mapping,
+            binders: &scheme.binders,
+            mapping: &mapping,
         };
-        fold(&mut folder, t)
+        let body = fold(&mut folder, scheme.body);
+        (body, mapping)
     }
 }
 
 /// Generalization as a folder (F9): every unbound variable deeper than the
-/// current level becomes a binder of the scheme being built.
+/// binding site becomes a binder of the scheme being built.
 ///
-/// Inspection only — it rewrites variable *states* and collects binders, and
-/// rebuilds no type, so the scheme body stays the very type that was
-/// generalized.
+/// Inspection only — it collects binders and rebuilds no type, so the scheme
+/// body stays the very type that was generalized. Since F10 it does not write
+/// to the arena at all.
 struct Generalizer<'a, 'q> {
     db: &'a mut TypeDb,
     memo: FoldMemo,
-    at_level: u32,
-    quantified: &'q mut Vec<VarId>,
+    site: crate::data::Level,
+    binders: &'q mut Vec<VarId>,
 }
 
 impl TypeFolder for Generalizer<'_, '_> {
@@ -119,9 +168,8 @@ impl TypeFolder for Generalizer<'_, '_> {
     }
     fn fold_var(&mut self, t: Type, var: VarId, state: &VarState) -> Type {
         if let VarState::Unbound { level } = *state {
-            if level > self.at_level {
-                self.db.generalize_var(var);
-                self.quantified.push(var);
+            if level.is_deeper_than(self.site) && !self.binders.contains(&var) {
+                self.binders.push(var);
             }
         }
         t
@@ -129,19 +177,19 @@ impl TypeFolder for Generalizer<'_, '_> {
     visit_only_composites!();
 }
 
-/// Instantiation as a folder (F9): each quantified variable is replaced by its
-/// fresh counterpart, and everything else is rebuilt only where that
-/// substitution reached.
+/// Instantiation as a folder (F9): each binder is replaced by its fresh
+/// counterpart, and everything else is rebuilt only where that substitution
+/// reached.
 ///
 /// TY-02 is the identity preservation the fold gives for free: a body with no
-/// applicable binder now comes back as the *same* handle instead of a fresh
-/// copy of the whole tree, so instantiating a monomorphic-in-practice scheme
-/// stops growing the arena — and stops minting a specialized record or enum def
-/// per use site when no field type needed substituting.
+/// applicable binder comes back as the *same* handle instead of a fresh copy of
+/// the whole tree, so instantiating a monomorphic-in-practice scheme stops
+/// growing the arena — and stops minting a specialized record or enum def per
+/// use site when no field type needed substituting.
 struct Instantiator<'a, 'q> {
     db: &'a mut TypeDb,
     memo: FoldMemo,
-    quantified: &'q [VarId],
+    binders: &'q [VarId],
     mapping: &'q [Type],
 }
 
@@ -152,19 +200,14 @@ impl TypeFolder for Instantiator<'_, '_> {
     fn memo(&mut self) -> &mut FoldMemo {
         &mut self.memo
     }
-    fn fold_var(&mut self, t: Type, var: VarId, state: &VarState) -> Type {
-        // Only a *generalized* var is a binder. An unbound one belongs to the
-        // enclosing scope and must survive instantiation unchanged (TY-02's
-        // "instantiation preserves non-quantified variable identity").
-        if !matches!(state, VarState::Generalized) {
-            return t;
-        }
-        match self.quantified.iter().position(|q| *q == var) {
+    fn fold_var(&mut self, t: Type, var: VarId, _state: &VarState) -> Type {
+        // Binder membership is the whole test (F10). It used to also require
+        // the arena to say `Generalized`, which is a fact about *some* scheme
+        // rather than this one — so a variable this scheme binds could be
+        // skipped because another scheme had not marked it, and a variable it
+        // does not bind could be substituted because another scheme had.
+        match self.binders.iter().position(|q| *q == var) {
             Some(idx) => self.mapping[idx],
-            // A generalized var the scheme does not bind. The hand-written walk
-            // panicked here; leaving it alone is the conservative answer, and
-            // TY-03's scheme-owned binders are what make the case
-            // unrepresentable rather than merely survivable.
             None => t,
         }
     }

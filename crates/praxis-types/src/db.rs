@@ -12,7 +12,7 @@
 use praxis_stdlib::type_pattern::ScalarType;
 
 use crate::ctor::{CollectionArgs, FieldSet, TupleElems, VariantSet};
-use crate::data::{EnumDef, EnumDefId, RecordDef, RecordDefId, TypeData, VarState};
+use crate::data::{EnumDef, EnumDefId, Level, RecordDef, RecordDefId, TypeData, VarState};
 use crate::error::TypeCtorError;
 use crate::type_id::{Type, VarId};
 use crate::CollectionCtor;
@@ -42,7 +42,7 @@ pub struct TypeDb {
     pub(crate) slots: Vec<Slot>,
     /// The current binding level, raised on each `let`/`fn` and lowered on exit.
     /// See ADR-008.
-    level: u32,
+    level: Level,
     /// Record definitions, indexed by [`RecordDefId`] (M7, ADR-025). Each
     /// `register_record`/`anon_record` call mints a fresh def; identity for
     /// anonymous records is established through unification (not construction),
@@ -62,7 +62,7 @@ impl TypeDb {
     /// The current binding level.
     #[inline]
     #[must_use]
-    pub fn level(&self) -> u32 {
+    pub fn level(&self) -> Level {
         self.level
     }
 
@@ -86,9 +86,9 @@ impl TypeDb {
     /// Push the binding level one deeper. Returns the previous level so the caller
     /// can restore it (`db.set_level(prev)`) when the scope ends.
     #[must_use]
-    pub fn enter_level(&mut self) -> u32 {
+    pub fn enter_level(&mut self) -> Level {
         let prev = self.level;
-        self.level += 1;
+        self.level = self.level.deeper();
         prev
     }
 
@@ -100,7 +100,7 @@ impl TypeDb {
     /// younger variable is linked to a type containing older variables. Lowering
     /// everything on scope exit would defeat generalization (it would pull inner
     /// vars down to the outer level, so `generalize` could never quantify them).
-    pub fn exit_level(&mut self, prev: u32) {
+    pub fn exit_level(&mut self, prev: Level) {
         self.level = prev;
     }
 
@@ -278,11 +278,6 @@ impl TypeDb {
     /// [`unify`](crate::unify); not meant for ad-hoc callers.
     pub(crate) fn link(&mut self, v: VarId, target: Type) {
         self.slots[v.to_u32() as usize].data = TypeData::Var(VarState::Linked { target });
-    }
-
-    /// Mark variable `v` as generalized (quantified by a [`Scheme`](crate::Scheme)).
-    pub(crate) fn generalize_var(&mut self, v: VarId) {
-        self.slots[v.to_u32() as usize].data = TypeData::Var(VarState::Generalized);
     }
 
     // --- record / enum definitions (M7, ADR-025) ----------------------------

@@ -26,8 +26,8 @@ use praxis_ast::{
 use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
 use praxis_syntax::SyntaxKind;
 use praxis_types::{
-    unify::UnifyError, CollectionArgs, EnumVariantDef, FieldSet, ScalarType, Scheme, Type, TypeDb,
-    VariantSet,
+    unify::UnifyError, CollectionArgs, EnumVariantDef, FieldSet, Level, ScalarType, Scheme, Type,
+    TypeDb, VariantSet,
 };
 use rowan::TextRange;
 
@@ -82,12 +82,12 @@ pub(crate) fn infer_with_tree(
         call_sites: HashMap::new(),
         diagnostics: Vec::new(),
         catalog: builtin_catalog(),
+        fn_placeholders: HashMap::new(),
+        decl_site: Level::OUTERMOST,
     };
     inferer.seed_builtin_schemes();
     let root_scope = inferer.scopes.root();
-    for stmt in root.stmts() {
-        inferer.infer_top_stmt(root_scope, &stmt);
-    }
+    inferer.infer_declaration_group(root_scope, root);
     // Merge name-resolution diagnostics with type diagnostics, sorted by span.
     diagnostics.append(&mut inferer.diagnostics);
     diagnostics.sort_by_key(|d| {
@@ -123,6 +123,13 @@ struct Inferer {
     /// The built-in method catalog (§16.2), for resolving `receiver.method()`.
     /// Immutable; shared via a process-wide `OnceLock`.
     catalog: &'static praxis_stdlib::MethodCatalog,
+    /// Signature placeholders for the functions of the declaration group being
+    /// inferred, keyed by the name token's range (TY-22). A forward call
+    /// unifies against the same variable the later declaration resolves.
+    fn_placeholders: HashMap<TextRange, Type>,
+    /// The level the declaration group was entered from — where a function's
+    /// signature generalizes (TY-01).
+    decl_site: Level,
 }
 
 /// The built-in method catalog, constructed once and cached for the process
@@ -396,7 +403,7 @@ impl Inferer {
             return None;
         }
         let scheme = sym.scheme.as_ref()?;
-        Some(scheme.body)
+        Some(scheme.body())
     }
 
     /// Register an enum declaration's type (M7, §4.6). Builds the `EnumDef`,
@@ -476,7 +483,7 @@ impl Inferer {
             return None;
         }
         let scheme = sym.scheme.as_ref()?;
-        Some(scheme.body)
+        Some(scheme.body())
     }
 
     /// Look up an enum variant by constructor name. Returns the variant's enum
@@ -494,9 +501,9 @@ impl Inferer {
         let scheme = sym.scheme.as_ref()?;
         // The scheme body is either a Func returning the enum type (payload
         // variant) or the enum type itself (zero-payload variant).
-        let result_ty = match self.db.data(self.db.follow(scheme.body)) {
+        let result_ty = match self.db.data(self.db.follow(scheme.body())) {
             praxis_types::TypeData::Func { result, .. } => *result,
-            praxis_types::TypeData::Enum { .. } => scheme.body,
+            praxis_types::TypeData::Enum { .. } => scheme.body(),
             _ => return None,
         };
         let def_id = match self.db.data(self.db.follow(result_ty)) {
@@ -575,9 +582,58 @@ impl Inferer {
         self.attach_scheme(stmt.name(), scheme);
     }
 
+    /// Infer one declaration group: every top-level statement in `root`.
+    ///
+    /// # Two phases (TY-22)
+    ///
+    /// Every `fn` in the group gets a monomorphic **signature placeholder**
+    /// before any body is inferred, so a call to a function declared *later*
+    /// unifies against the same variable that declaration will resolve — and a
+    /// disagreement is a diagnostic instead of silence. Name resolution has
+    /// been two-pass since M2; inference was not, so a forward call was
+    /// resolved and then unchecked.
+    ///
+    /// The placeholders live one level deeper than the group's binding site
+    /// (TY-01): unifying a placeholder with the derived function type lowers
+    /// that type's variables to the placeholder's level, so a placeholder at
+    /// the *outer* level would clamp every parameter and result out to level
+    /// zero and no signature could ever generalize. That coupling is why the
+    /// two are one change.
+    fn infer_declaration_group(&mut self, scope: ScopeId, root: &SourceFile) {
+        self.decl_site = self.db.level();
+        let group = self.db.enter_level();
+        for stmt in root.stmts() {
+            let Some(item) = FnItem::cast(stmt.clone()) else {
+                continue;
+            };
+            let Some(name_tok) = item.name() else {
+                continue;
+            };
+            let Some(&id) = self.decls.get(&name_tok.text_range()) else {
+                continue;
+            };
+            let placeholder = self.db.fresh_var();
+            self.fn_placeholders
+                .insert(name_tok.text_range(), placeholder);
+            if let Some(sym) = self.names.get_mut(id) {
+                sym.scheme = Some(Scheme::monotype(placeholder));
+            }
+        }
+        for stmt in root.stmts() {
+            self.infer_top_stmt(scope, &stmt);
+        }
+        self.db.exit_level(group);
+    }
+
     fn infer_fn(&mut self, scope: ScopeId, item: &FnItem) {
-        // Bind the fn name to a monomorphic placeholder var first (for recursion).
-        let placeholder = self.db.fresh_var();
+        // The fn name is bound to a monomorphic placeholder var, so recursive
+        // *and* forward uses unify against one variable. `infer_declaration_group`
+        // minted it for a top-level fn; anything else (a nested fn, or a name
+        // resolution did not record) gets one here, at the current level.
+        let named = item.name().map(|t| t.text_range());
+        let placeholder = named
+            .and_then(|range| self.fn_placeholders.get(&range).copied())
+            .unwrap_or_else(|| self.db.fresh_var());
         let fn_symbol = if let Some(name_tok) = item.name() {
             let id = *self
                 .decls
@@ -635,8 +691,11 @@ impl Inferer {
             self.diag_unify(self.file_span(at), e);
         }
         self.db.exit_level(prev);
-        // Generalize the fn after its body is checked (§5.3).
-        let scheme = self.db.generalize(placeholder);
+        // Generalize the fn after its body is checked (§5.3), at the level the
+        // declaration group was entered *from* — the group's own level is still
+        // open for the signatures declared after this one, and generalizing
+        // against it would quantify nothing.
+        let scheme = self.db.generalize_at(placeholder, self.decl_site);
         if let Some(id) = fn_symbol {
             if let Some(sym) = self.names.get_mut(id) {
                 sym.scheme = Some(scheme);

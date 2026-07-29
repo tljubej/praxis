@@ -1153,7 +1153,6 @@ fn lowering_respects_a_local_that_shadows_an_enum_variant() {
 // --- declaration ordering and analyzer robustness ---------------------------
 
 #[test]
-#[ignore = "known bug: inference does not predeclare later function signatures"]
 fn forward_call_is_checked_against_later_function_signature() {
     let src = "fn first() -> Int { later(\"wrong\") }\n\
                fn later(value: Int) -> Int { value }";

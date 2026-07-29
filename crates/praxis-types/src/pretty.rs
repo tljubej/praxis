@@ -10,32 +10,37 @@ use std::fmt::Write;
 use crate::data::{TypeData, VarState};
 use crate::db::TypeDb;
 use crate::generalize::Scheme;
-use crate::type_id::Type;
+use crate::type_id::{Type, VarId};
 
 impl TypeDb {
     /// Render `t` to a string.
+    ///
+    /// Every unbound variable renders `?T`, because outside a scheme there is
+    /// nothing that binds it — a leaking variable is a diagnostic smell and the
+    /// `?` is how it shows. Inside a scheme, use [`render_scheme`](Self::render_scheme),
+    /// which knows which variables the scheme quantifies.
     #[must_use]
     pub fn render(&self, t: Type) -> String {
         let mut out = String::new();
         let mut names = NameAssigner::default();
-        self.write_type(t, &mut out, &mut names);
+        self.write_type(t, &mut out, &mut names, &[]);
         out
     }
 
     /// Render `scheme` as `forall A B. body` (or just `body` if monomorphic).
     #[must_use]
     pub fn render_scheme(&self, scheme: &Scheme) -> String {
+        let binders = scheme.binders();
         let mut names = NameAssigner::default();
-        for q in &scheme.quantified {
+        for q in binders {
             names.assign(q.to_u32());
         }
         let mut body = String::new();
-        self.write_type(scheme.body, &mut body, &mut names);
-        if scheme.quantified.is_empty() {
+        self.write_type(scheme.body(), &mut body, &mut names, binders);
+        if binders.is_empty() {
             body
         } else {
-            let qs: String = scheme
-                .quantified
+            let qs: String = binders
                 .iter()
                 .map(|q| names.name_for(q.to_u32()).to_string())
                 .collect::<Vec<_>>()
@@ -44,7 +49,21 @@ impl TypeDb {
         }
     }
 
-    fn write_type(&self, t: Type, out: &mut String, names: &mut NameAssigner) {
+    /// Render `t` as it appears *inside* `scheme` — a variable the scheme binds
+    /// prints as `T`, one it does not prints as `?T`.
+    #[must_use]
+    pub fn render_in_scheme(&self, t: Type, scheme: &Scheme) -> String {
+        let binders = scheme.binders();
+        let mut out = String::new();
+        let mut names = NameAssigner::default();
+        for q in binders {
+            names.assign(q.to_u32());
+        }
+        self.write_type(t, &mut out, &mut names, binders);
+        out
+    }
+
+    fn write_type(&self, t: Type, out: &mut String, names: &mut NameAssigner, binders: &[VarId]) {
         let t = self.follow(t);
         match self.data(t) {
             TypeData::Scalar(s) => {
@@ -59,7 +78,7 @@ impl TypeDb {
                     if i > 0 {
                         out.write_str(", ").ok();
                     }
-                    self.write_type(*el, out, names);
+                    self.write_type(*el, out, names, binders);
                 }
                 out.push(')');
             }
@@ -69,10 +88,10 @@ impl TypeDb {
                     if i > 0 {
                         out.write_str(", ").ok();
                     }
-                    self.write_type(*p, out, names);
+                    self.write_type(*p, out, names, binders);
                 }
                 out.write_str(") -> ").ok();
-                self.write_type(*result, out, names);
+                self.write_type(*result, out, names, binders);
             }
             TypeData::Collection { ctor, args } => {
                 let _ = out.write_str(ctor.name());
@@ -81,7 +100,7 @@ impl TypeDb {
                     if i > 0 {
                         out.write_str(", ").ok();
                     }
-                    self.write_type(*a, out, names);
+                    self.write_type(*a, out, names, binders);
                 }
                 out.push(']');
             }
@@ -102,7 +121,7 @@ impl TypeDb {
                             }
                             let _ = out.write_str(&f.name);
                             out.write_str(": ").ok();
-                            self.write_type(f.ty, out, names);
+                            self.write_type(f.ty, out, names, binders);
                         }
                         out.write_str(" }").ok();
                     }
@@ -116,12 +135,16 @@ impl TypeDb {
                 }
             }
             TypeData::Var(state) => match state {
-                VarState::Generalized => {
-                    let _ = out.write_str(names.name_for(t.to_u32()));
-                }
+                // A variable the enclosing scheme quantifies prints bare; one it
+                // does not is leaking, and the `?` is how that shows. The state
+                // used to answer this (`Generalized` vs `Unbound`), which is
+                // why the arena had to carry a flag about schemes at all (F10).
                 VarState::Unbound { .. } => {
-                    // A leaking unbound var is a diagnostic smell; prefix `?`.
-                    let _ = write!(out, "?{}", names.name_for(t.to_u32()));
+                    if binders.contains(&VarId::from_raw(t.to_u32())) {
+                        let _ = out.write_str(names.name_for(t.to_u32()));
+                    } else {
+                        let _ = write!(out, "?{}", names.name_for(t.to_u32()));
+                    }
                 }
                 VarState::Linked { .. } => unreachable!("follow resolves Linked"),
             },

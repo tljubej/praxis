@@ -1579,9 +1579,9 @@ impl<'a> Lowerer<'a> {
         let symbol = self.scopes.lookup(root, name)?;
         let sym = self.names.get(symbol)?;
         let scheme = sym.scheme.as_ref()?;
-        let result_ty = match self.db.data(self.db.follow(scheme.body)) {
+        let result_ty = match self.db.data(self.db.follow(scheme.body())) {
             praxis_types::TypeData::Func { result, .. } => *result,
-            praxis_types::TypeData::Enum { .. } => scheme.body,
+            praxis_types::TypeData::Enum { .. } => scheme.body(),
             _ => return None,
         };
         let def_id = match self.db.data(self.db.follow(result_ty)) {

@@ -93,29 +93,74 @@ pub enum TypeData {
     Var(VarState),
 }
 
+/// A binding level (§5.3, ADR-008). Raised on entering a `let`/`fn` scope,
+/// restored on leaving it; a variable records the level it was created at, and
+/// generalization quantifies exactly the variables deeper than the binding site.
+///
+/// # Why a newtype (F10)
+///
+/// The level was a bare `u32` compared by hand at each of its three uses, and
+/// one of those comparisons was **backwards** (TY-01). ADR-008's rule is
+/// `level(w) := min(level(w), level(v))` — a level only ever *decreases* — so
+/// [`clamp_to`](Self::clamp_to) is the only mutator and it cannot be written to
+/// raise one.
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Level(u32);
+
+impl Level {
+    /// The outermost (top-level) binding level.
+    pub const OUTERMOST: Level = Level(0);
+
+    /// One level deeper — what entering a `let`/`fn` scope produces.
+    #[inline]
+    #[must_use]
+    pub const fn deeper(self) -> Level {
+        Level(self.0 + 1)
+    }
+
+    /// Lower this level to `outer` if `outer` is shallower. The **only**
+    /// mutator: Pottier's level-lowering rule is monotone-decreasing, and
+    /// spelling it as `min` here is what makes the reversed comparison
+    /// unwritable at the call site.
+    #[inline]
+    pub fn clamp_to(&mut self, outer: Level) {
+        self.0 = self.0.min(outer.0);
+    }
+
+    /// Whether this level is strictly deeper (more nested) than `site` — the
+    /// generalization test: a variable created inside the binding being
+    /// generalized is quantifiable, one from an enclosing scope is not.
+    #[inline]
+    #[must_use]
+    pub const fn is_deeper_than(self, site: Level) -> bool {
+        self.0 > site.0
+    }
+}
+
 /// The lifecycle of a type variable, as an explicit enum so each phase is
 /// representable rather than signaled by convention.
 ///
-/// - Fresh vars start [`Unbound`](VarState::Unbound) at a binding level.
+/// - Fresh vars start [`Unbound`](VarState::Unbound) at a binding [`Level`].
 /// - [`unify`](crate::unify)ing one [`Link`](VarState::Linked)s it to a concrete
 ///   type (or another var), resolving via [`TypeDb::prune`](crate::TypeDb::prune).
-/// - [`generalize`](crate::generalize) promotes qualifying unbound vars to
-///   [`Generalized`](VarState::Generalized) so a [`Scheme`](crate::Scheme) can
-///   quantify over them and [`instantiate`](crate::generalize) can replace them
-///   with fresh vars at each use site.
+///
+/// There is no third state. A `Generalized` variant used to record "this
+/// variable is quantified by *some* scheme" as a flag **on the arena** — global
+/// state that a later `generalize` could set under a scheme that had already
+/// been built as a monotype, leaving a `Scheme` whose body pointed at variables
+/// it did not list (TY-03). Quantification is now recorded by the
+/// [`Scheme`](crate::Scheme) that does the quantifying, which is the only thing
+/// that knows it.
 #[derive(Clone, Debug)]
 pub enum VarState {
     /// Not yet constrained. `level` is the binding level at which the var was
     /// created — used by generalization (only vars whose level is *deeper* than
     /// the generalization site are quantifiable) and by Pottier's level-lowering
     /// rule on unification.
-    Unbound { level: u32 },
+    Unbound { level: Level },
     /// Unified to `target`. Follow the link via [`TypeDb::prune`](crate::TypeDb::prune);
     /// never inspect `target` without pruning first.
     Linked { target: Type },
-    /// Promoted into a [`Scheme`](crate::Scheme)'s quantified set. Never unified
-    /// directly — instantiate the scheme to get fresh vars in its place.
-    Generalized,
 }
 
 /// One field of a record definition: its source name and its type (§4.5).

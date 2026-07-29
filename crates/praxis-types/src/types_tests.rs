@@ -9,7 +9,7 @@
 use praxis_stdlib::type_pattern::{CollectionCtor, ScalarType};
 
 use crate::data::{RecordDefId, TypeData, VarState};
-use crate::{CollectionArgs, FieldSet, TupleElems, Type, TypeDb, VariantSet};
+use crate::{CollectionArgs, FieldSet, Scheme, TupleElems, Type, TypeDb, VariantSet};
 
 fn is_int(db: &TypeDb, t: crate::Type) -> bool {
     matches!(db.data(db.follow(t)), TypeData::Scalar(ScalarType::Int))
@@ -203,7 +203,7 @@ fn generalize_quantifies_inner_level_vars() {
     });
     let scheme = db.generalize(body);
     assert!(scheme.is_polymorphic(), "identity should generalize");
-    assert_eq!(scheme.quantified.len(), 1);
+    assert_eq!(scheme.binders().len(), 1);
 }
 
 #[test]
@@ -219,7 +219,7 @@ fn generalize_does_not_steal_outer_vars() {
     let scheme = db.generalize(body);
     // The outer var is at level 0 == generalization level, so not quantified.
     assert!(
-        scheme.quantified.is_empty(),
+        scheme.binders().is_empty(),
         "outer-level var must not be generalized"
     );
 }
@@ -264,7 +264,7 @@ fn var_binding_is_not_generalized_in_place() {
     let v = db.fresh_var();
     let scheme = db.generalize(v);
     // `v` is at level 0; generalization at level 0 quantifies nothing.
-    assert!(scheme.quantified.is_empty());
+    assert!(scheme.binders().is_empty());
 }
 
 // --- pretty printing --------------------------------------------------------
@@ -328,24 +328,76 @@ fn generalize_walks_into_tuples_and_functions() {
         tup2(db, v, f)
     });
     let scheme = db.generalize(body);
-    assert_eq!(scheme.quantified.len(), 2);
+    assert_eq!(scheme.binders().len(), 2);
     let rendered = db.render_scheme(&scheme);
     assert_eq!(rendered, "forall T U. (T, (T) -> U)");
 }
 
+/// **Rewritten** for TY-03/F10. It asserted that `generalize` sets a
+/// `VarState::Generalized` flag on the arena slot — global state recording that
+/// *some* scheme quantifies this variable, which is a fact no arena can hold:
+/// a monotype built before the flag was set has a body containing a variable it
+/// does not bind, and unification refuses to link one.
+///
+/// The scheme owns its binders now, so the property is stated where it lives:
+/// generalization *collects* and mutates nothing, and the variable it collected
+/// is still an ordinary unbound variable in the arena.
 #[test]
-fn generalized_var_state_is_marked() {
+fn a_scheme_owns_its_binders_and_generalization_mutates_nothing() {
     let mut db = TypeDb::new();
     let body = db.scoped_return(|db| {
         let v = db.fresh_var();
         db.func(vec![v], v)
     });
+    let before = db.len();
     let scheme = db.generalize(body);
-    let var = scheme.quantified[0];
-    assert!(matches!(
-        db.data(var.as_type()),
-        TypeData::Var(VarState::Generalized)
-    ));
+
+    assert_eq!(
+        scheme.binders().len(),
+        1,
+        "the identity's var is quantified"
+    );
+    assert_eq!(scheme.body(), body, "the body is the type it was given");
+    assert_eq!(db.len(), before, "generalization interns nothing");
+
+    let var = scheme.binders()[0];
+    assert!(
+        matches!(
+            db.data(var.as_type()),
+            TypeData::Var(VarState::Unbound { .. })
+        ),
+        "a binder is an ordinary unbound variable; only the scheme knows it is bound"
+    );
+
+    // And it renders as a binder only because the scheme says so.
+    assert_eq!(db.render_scheme(&scheme), "forall T. (T) -> T");
+    assert_eq!(db.render(body), "(?T) -> ?T");
+}
+
+/// TY-03 directly: the state a `Scheme` could encode and cannot any more.
+///
+/// A monotype built from a type containing `v`, followed by generalization of a
+/// *different* binding that also reaches `v`, used to leave the monotype's body
+/// pointing at a `Generalized` slot — a variable it does not list, and one
+/// `unify` has no arm for. The monotype silently stopped unifying with
+/// anything.
+#[test]
+fn generalizing_one_scheme_does_not_change_another() {
+    let mut db = TypeDb::new();
+    let shared = db.scoped_return(|db| db.fresh_var());
+    let mono = Scheme::monotype(shared);
+
+    // A second binding reaches the same variable and generalizes it.
+    let other = db.func(vec![shared], shared);
+    let poly = db.generalize(other);
+    assert_eq!(poly.binders(), &[db.var_id_of(shared).expect("a var")]);
+
+    // The monotype is unaffected: it binds nothing, and its body still unifies.
+    assert!(mono.binders().is_empty());
+    let int = db.int();
+    let instantiated = db.instantiate(&mono);
+    db.unify(instantiated, int)
+        .expect("a monotype's body is still an ordinary unbound variable");
 }
 
 // --- collection types (M5 foundation: §4.4, §11.2) -------------------------
@@ -665,7 +717,7 @@ fn record_generalizes_inner_vars() {
         anon_record(db, vec![("x".into(), v)])
     });
     let scheme = db.generalize(body);
-    assert_eq!(scheme.quantified.len(), 1);
+    assert_eq!(scheme.binders().len(), 1);
     // The generalized record still renders structurally.
     assert_eq!(db.render_scheme(&scheme), "forall T. { x: T }");
 }
@@ -864,7 +916,6 @@ fn anonymous_enums_different_shape_do_not_unify() {
 // ---- adversarial level/generalization coverage -----------------------------
 
 #[test]
-#[ignore = "known bug: level lowering raises older variables instead of lowering inner ones"]
 fn linking_an_outer_var_to_an_inner_type_prevents_inner_generalization() {
     // The outer variable is part of the environment. Once it is unified with a
     // type containing an inner variable, that inner variable must be lowered to
@@ -881,7 +932,7 @@ fn linking_an_outer_var_to_an_inner_type_prevents_inner_generalization() {
 
     let scheme = db.generalize(body);
     assert!(
-        scheme.quantified.is_empty(),
+        scheme.binders().is_empty(),
         "a type reachable through an outer variable must stay monomorphic, got {}",
         db.render_scheme(&scheme)
     );
@@ -900,7 +951,7 @@ fn instantiation_preserves_non_quantified_variable_identity() {
         db.func(vec![outer, quantified], outer)
     });
     let scheme = db.generalize(body);
-    assert_eq!(scheme.quantified.len(), 1);
+    assert_eq!(scheme.binders().len(), 1);
 
     let instantiated = db.instantiate(&scheme);
     let (params, result) = match db.data(db.follow(instantiated)).clone() {
