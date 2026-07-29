@@ -24,7 +24,7 @@ Update this file at the end of every stage.
 | S11 — TypeDb core: levels, schemes, nominal identity | **done** | `8aa9069`, `aa9deea`, `d69881e`, `5efd0e2` |
 | S12 — Parser grammar: wildcard, separators, struct-literal suppression | **done** | `4504a1d`, `0c4b2ce`, `e49a803`, `13db789` |
 | S13 — Annotations honored, declaration passes, mutability and scope | **done** | `6037662`, `9129f76`, `4f45455`, `9c6b48a`, `6fd5e46`, `de6b0e2` |
-| S14 — Control flow: bottom type, contexts, joins, loop values | **TY-19, TY-16, TY-17, TY-18, TY-20 done; TY-21 left** | `fd909a1`, `92a1b84`, `bf91879`, `9cffbe5`, `f93b25f` |
+| S14 — Control flow: bottom type, contexts, joins, loop values | **done** | `fd909a1`, `92a1b84`, `bf91879`, `9cffbe5`, `f93b25f`, `ea506a6` |
 | S15 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
@@ -33,7 +33,7 @@ TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1214 passed, 0 failed, 67 ignored**. `just ci` is green.
+Now: **1221 passed, 0 failed, 66 ignored**. `just ci` is green.
 
 **S11 is closed.** All five exit-criterion tests pass and all eight findings the
 stage owns are fixed and gated — TY-01…TY-07 and TY-22.
@@ -48,11 +48,13 @@ opened (ADR-051); the stage's own decisions are ADR-052. TY-12 needed no code:
 it is S11's `Y007`. The corpus triage pass the plan mandates found **nothing**
 newly rejected — see §4.
 
-**S14 is open. D2 is answered** (see §5), and five of its six findings have
-landed. **TY-21 is the only one left**; §4 says exactly what it needs.
+**S14 is closed.** All six findings are fixed and gated — TY-16…TY-21 — and all
+six exit-criterion tests pass, plus the fourth criterion that is a MIR change
+rather than a test. **D2 is answered *and implemented*** (ADR-053); the stage
+also amended ADR-051 for `Y017`.
 
-Seventy of the audit's ignored regressions are un-ignored and passing.
-The five added by S14 so far:
+Seventy-one of the audit's ignored regressions are un-ignored and passing.
+The six added by S14:
 
 | Test | File | Finding |
 |---|---|---|
@@ -61,8 +63,9 @@ The five added by S14 so far:
 | `if_without_else_cannot_produce_the_then_value_type` | `infer_tests.rs` | TY-17 |
 | `early_return_value_must_match_the_function_result` | `infer_tests.rs` | TY-18 |
 | `control_flow_terminators_require_a_legal_enclosing_context` | `infer_tests.rs` | TY-20 |
+| `expression_loop_uses_its_break_value_type` | `infer_tests.rs` | TY-21 |
 
-S14's ten new gates so far:
+S14's sixteen new gates:
 
 | Test | File | Pins |
 |---|---|---|
@@ -77,6 +80,12 @@ S14's ten new gates so far:
 | `a_return_is_checked_against_the_function_it_leaves` | `infer_tests.rs` | TY-18 in the shapes the exit test misses — a bare `return`, an unannotated result the returns pin, nesting, and a closure's `return` |
 | `a_function_whose_body_diverges_matches_any_declared_result` | `infer_tests.rs` | TY-19 at the function result, which no finding names separately |
 | `a_terminator_needs_the_right_enclosing_context` | `infer_tests.rs` | TY-20's two codes, both closure directions, and that five legal positions stay legal |
+| `a_loop_is_the_join_of_the_values_its_breaks_carry` | `infer_tests.rs` | TY-21 as the rule — what the type *is*, the bare-`break`-is-`Unit` half, and which loop a `break` belongs to |
+| `a_loop_no_break_leaves_is_never` | `infer_tests.rs` | D2's first half, including a loop exited only by `return` |
+| `only_a_loop_may_break_with_a_value` | `infer_tests.rs` | D2's second half as `Y017`, that it is *not* `Y012`, and that a bare `break` in a `while`/`for` is untouched |
+| `expression_loop_returns_the_value_its_break_carried` | `jit.rs` | TY-21 end to end — the half inference cannot see |
+| `a_loop_that_never_breaks_compiles_as_a_diverging_branch` | `jit.rs` | why a `Never`-valued loop gets no result slot (D9) |
+| `every_break_writes_the_loop_result` | `jit.rs` | two exits, one slot |
 
 The twelve added by S13's second half:
 
@@ -615,7 +624,47 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S14's TY-19, TY-16, TY-17, TY-18 and TY-20)
+### From this session (S14's TY-21)
+
+**`Inferer::loop_depth` is now `Inferer::loops`, a stack of `LoopCtx`.** Each
+frame carries a `LoopFlavour` — `Expression` for a `loop`, `Statement(keyword)`
+for a `while`/`for` — and the **join of every `break` value seen so far**, seeded
+with `Never`. `infer_break` joins its value into the top frame; `infer_loop` pops
+the frame and answers with what it accumulated. `Inferer::in_loop(flavour, body)`
+is the push/infer/pop helper, so a new loop form cannot forget the pop.
+
+**A `loop` is `Never` when nothing `break`s out of it, and `Unit` when a bare
+`break` does.** `loop { }` and a loop exited only by `return` produce no value;
+`break` with no expression leaves with nothing, which is `Unit`. Mixing `break`
+and `break 1` in one loop is therefore a `Y001`, not a coincidence. See ADR-053.
+
+**A value `break` in a `while`/`for` is `Y017`**, a new code (ADR-051 amended).
+It is *not* `Y012`: the loop exists, and it is the kind of loop that is wrong.
+Only a `loop` is an expression loop, because only it has no non-`break` exit.
+
+**The HIR lowerer keeps the same stack** (`Lowerer::loop_results`), for the same
+reason `lower_if` had to join: reading the loop body's type answers what the loop
+*repeats*, not what it produces. `lower_closure` clears and restores it, as
+inference does. **If you add a loop form, push a frame in both passes.**
+
+**MIR: `LoopCtx` carries `result: Option<LocalId>`.** A `loop` whose type is
+neither `Unit` nor `Never` gets a result slot each `break` writes before jumping,
+exactly as `lower_if` gives an `if` one. `Unit` keeps the literal it always had;
+`Never` deliberately gets **no** slot — it has no runtime representation, so the
+local would fail the compile at its descriptor site (D9), and the exit block is
+unreachable anyway. `while`/`for` and the two fused-pipeline loops pass `None`.
+
+**The MIR builder no longer tolerates a missing loop context.** `lower_break`,
+`lower_continue`, `break_loop` and `continue_loop` read the stack with an
+`expect`. The first two are justified by TY-20 (a `break` with no loop is `Y012`,
+and no MIR is built for a program that reports); the last two by the fusion
+pushing its own frame before it emits a stage. This was the plan's fourth S14
+exit criterion.
+
+**`Y017` is the block's ninth spent code**, so the next free number is `Y018`.
+ADR-051's "findings that need no code" list no longer contains TY-21.
+
+### From an earlier session (S14's TY-19, TY-16, TY-17, TY-18 and TY-20)
 
 **`Never` is `TypeData::Never`, not `ScalarType::Never`.** The variant is gone
 from `praxis_stdlib::type_pattern::ScalarType` — so `PatternScalar::Never` is
@@ -665,7 +714,9 @@ a top-level `return` a `Y011`.
 **`Inferer::loop_depth` is the loop-context counter**, and `Y012` is a
 `break`/`continue` with it at zero. **Both boundaries are function boundaries,
 not lexical ones:** `infer_closure_body` clears the depth and restores it, so a
-`break` inside a closure cannot leave a loop outside it.
+`break` inside a closure cannot leave a loop outside it. (TY-21 replaced the
+counter with a stack of frames — `Inferer::loops` — and `Y012` is now
+`loops.is_empty()`. The rule is unchanged; see this session's entry above.)
 
 **A function body *joins* with its declared result.**
 `fn f() -> Int { panic("x") }` used to be a `Y001`; every path diverges, so
@@ -1596,73 +1647,82 @@ TY-23, TY-24 — and all fourteen exit-criterion tests pass. The stage's ADR is
   `var` holding an `Int`. This is the **fifth** prediction of wide churn in the
   repair that delivered none.
 
-**S14 is open; only TY-21 is left.** TY-19, TY-16, TY-17, TY-18 and TY-20 have
-landed. **D2 is answered** (§5), so nothing blocks it.
+**S14 is closed.** All six findings are fixed and gated — TY-16…TY-21 — all six
+exit-criterion tests pass, and the fourth exit criterion (a MIR change, not a
+test) is done: `lower_break`, `lower_continue`, `break_loop` and `continue_loop`
+read the loop stack with an `expect`. The stage's ADR is **053**, and it amended
+**051** for `Y017`. Notes worth carrying:
 
-**TY-21 (L) — `loop { break value }` is still `Unit`.** What it needs, in order:
+- **The corpus triage found nothing, for the sixth time.** Every `.px` under
+  `tests/` and every CLI fixture was re-run through `praxis check` after TY-21;
+  only the three files that are *meant* to report do. `Y017` was the risk —
+  nothing in the corpus breaks with a value out of a `while`/`for`.
+- **F20 was not needed and did not land.** The plan wants the one derived
+  `TypedExpr` child walker before TY-21 "reshapes `Loop`". TY-21 reshaped
+  nothing: `TypedExpr::Loop` already had a `ty`, and the fix was to compute it.
+  F20's consumers are now entirely S15's (HIR-08, MONO-01, MONO-02, HIR-09).
+- **TY-21 is three passes computing one join**, and each has to. See §3.
 
-1. **Turn `Inferer::loop_depth` into a stack of contexts.** It is a `usize`
-   today because that is all TY-20 needed. TY-21 needs each entry to carry two
-   things:
-   - a **flavour** — `loop` is the only expression loop, so a value `break`
-     inside a `while`/`for` is a type error (D2, second half);
-   - the **join of every `break` value** seen so far, which is
-     `TypeDb::join`/`join_all` (already written and gated, from TY-19).
-   The plan calls this "split LoopCtx flavours". Push in `infer_loop`,
-   `infer_while` and `infer_for`; read in `infer_break`; pop and return in
-   `infer_loop`.
-2. **Seed a `loop`'s value with `Never`, not `Unit`.** D2's first half: a `loop`
-   with no reachable `break` produces nothing, so it is the bottom type, and
-   `if c { 1 } else { loop { } }` is an `Int`. `join_all`'s seed is already
-   `Never`, so this falls out.
-3. **A new diagnostic code is needed and ADR-051 does not have one.** "a value
-   `break` in a `while`/`for`" is not `Y012` (that is *no loop at all*). The
-   `Y0xx` user block is spent through `Y016`, so `Y017` is the next free number.
-   **Amend ADR-051 first** — that is its own stated rule — then add the
-   `DiagCode` variant, its `code()` arm, its `ALL` entry, and bump
-   `all_lists_every_variant`'s count.
-4. **`lower_loop` and MIR.** Inference giving `loop` a value is not enough — the
-   typed tree and MIR have to carry it. `lower_if` needed the same treatment in
-   TY-19 and it is the shape to copy. Expect `TypedExpr::Loop` to gain a `ty`
-   that is no longer always `Unit`, and the MIR loop to need a result slot the
-   `break` writes.
-5. **F20 first if `TypedExpr` gains a variant.** The plan wants the one derived
-   child walker landed before TY-21 reshapes `Loop`, because three hand-written
-   ~29-arm walks otherwise each need the new shape by hand. If TY-21 only adds a
-   *field* to an existing variant, F20 is not urgent.
-6. **The plan's fourth exit criterion is a MIR change, not a test.** MIR
-   `build.rs` must change its `if let Some(ctx)` loop-context reads to an
-   `expect` justified by inference — TY-20 now guarantees a `break`/`continue`
-   has a loop. Search by the surrounding code; the plan's line numbers have
-   moved.
+**S15 is next, and it is the stage the plan says the audit's ordering
+understates.** Seven findings — HIR-01, HIR-08, MONO-01, MONO-02, HIR-02,
+HIR-09, and MONO-03 which is **already closed** (F12's `TypeKey` was its fix, in
+S11). Before starting:
 
-Exit test: `expression_loop_uses_its_break_value_type`.
+1. **Land F15 first — it is the stage.** `praxis_hir::NodeKey` +
+   `Analysis::expr_types` (every inferred expression's type) + `method_refs`, one
+   insertion at the tail of `Inferer::infer_expr`. Then lowering becomes a *pure
+   reader*: the plan names what to delete — `symbol_type`, `call_result_type`,
+   `param_type`, the five `db.instantiate` re-instantiations and **all 19
+   `db.fresh_var()` fallbacks**, a miss becoming `Y099`
+   (`DiagCode::InternalMissingType`, already allocated and still unused) rather
+   than a fresh variable. Its judgement calls are the nodes lowering *constructs*
+   and inference never saw: `Paren` transparency, `Expr::Error`, synthesized
+   `Unit` tails.
+2. **F20 is cheap and unblocks four of the seven.** One `macro_rules!`-derived
+   child walker replacing `collect_escaping_expr`, `mono::rewrite_expr` and
+   `build.rs`'s `collect_closures_expr` — ~75 hand-written arms over one enum.
+   HIR-08 *is* that drift: `collect_escaping_expr` omits `Call.callee_expr`.
+3. **Then MONO-01 and the descriptor rule.** `lower_call` re-instantiating the
+   callee's scheme is what makes `let values: Vec[Float] = Vec()` carry
+   `Vec[?T]`; F15 supplies the call site's type. With it, turn **on** the MIR
+   verifier's no-`Opaque`-at-a-descriptor-site rule (H10) and convert the ~35
+   sites P0-02 left `Opaque` in S3 — `MirType::expect_known`/`MirTypeError` are
+   still unwritten and land here, as §2's F17 note says.
+4. **One currently-*passing* test asserts a bug and must be inverted:**
+   `mutable_capture_records_error` (`capture.rs`) — plan §8.2 and H18. The other
+   H18 entry left is `numeric_scalars_are_orderable` (S17).
 
-**Then run the corpus triage and close the stage.** TY-17, TY-18 and TY-20 each
-changed what is rejected, and each was re-checked against every `.px` in
-`tests/` and every CLI fixture with nothing newly reported. Do it once more
-after TY-21, and write the D2 ADR with it.
+Exit tests: `lowered_polymorphic_call_result_uses_the_callsite_instantiation`,
+`lowered_generic_method_result_uses_the_receiver_instantiation`,
+`immediately_invoked_closure_boxes_its_mutable_capture` (`infer_tests.rs`),
+`specialized_clone_carries_concrete_types_throughout`,
+`zero_argument_generic_result_is_specialized_from_use_context` (`mono.rs`), and
+`empty_vec_float_has_the_float_element_descriptor_before_any_push`, whose
+`#[ignore]` reason S13 corrected to name F15/MONO-01.
 
-**What S14 has deliberately left so far:**
+**What S14 deliberately left:**
 
-- **`join` is used at five sites; a loop's breaks are the missing one.**
-  `infer_if`, `infer_match`, `lower_if`, the function result in `infer_fn`, and
-  a closure's result in `infer_closure_body`. TY-21 adds the loop. If you add a
-  branch point, join it.
+- **`join` is used at six sites.** `infer_if`, `infer_match`, `lower_if`, the
+  function result in `infer_fn`, a closure's result in `infer_closure_body`, and
+  now a loop's breaks in `infer_break`/`lower_break`. **If you add a branch
+  point, join it.**
 - **A divergent statement does not make the rest of a block unreachable.**
   `{ panic("x"); 1 }` still infers `Int` for the block, because the tail is the
   last statement whatever precedes it. Nothing in the audit asks for
   reachability analysis, and `Never`'s absorption is about *branches meeting*,
-  not about dead code.
-- **`while` and `for` are still `Unit` unconditionally**, which is right, and
-  their bodies' types are discarded, which is also right — but nothing yet
-  *rejects* `while c { break 1 }`. That is D2's second half and TY-21's.
-- **F20 (the one derived `TypedExpr` child walker) did not land.** The plan says
-  it is "worth landing BEFORE TY-17/TY-21 add `TypedExpr` variants". TY-17 added
-  none — it changed one `ty` computation. See §4's TY-21 item 5.
-- **The MIR builder still tolerates a missing loop context.** TY-20 makes that
-  unreachable; converting the `if let Some(ctx)` reads to an `expect` is the
-  plan's fourth S14 exit criterion and is TY-21's to finish.
+  not about dead code. The same goes for a `loop`: `loop { }` is `Never`, but the
+  statements after it are still inferred.
+- **`while` and `for` are `Unit` unconditionally**, and a value `break` in one is
+  now `Y017` rather than a silently discarded value. Nothing gives them a value
+  form; D2 says nothing should.
+- **A `loop` whose `break` value type is still a variable gets a `Known` MIR
+  local holding it**, which is the ordinary unresolved-annotation shape and the
+  D9 carve-out already tolerates it (a null descriptor). F15 is what makes such a
+  type resolve at all.
+- **No reachability analysis decides whether a `break` is *reachable*.**
+  `loop { if false { break 1 } }` is `Int`, not `Never`: the join is over the
+  `break`s that are *written*, not the ones that can run. Making it otherwise is
+  a dataflow pass no finding asks for.
 
 **What S13 deliberately left:**
 
@@ -1907,10 +1967,8 @@ work raised and settled locally. Two of them *touch* language design — recursi
 data types, and pinning an unconstrained numeric — and ADR-052 explicitly leaves
 both open.
 
-**D2 now blocks the next stage.** It has not been answered, and S14 cannot be
-finished without it.
-
-**D2 is answered** (2026-07-29, by the repo owner, both halves):
+**D2 is answered *and implemented* — see ADR-053.** Both halves landed with
+TY-21; the answer as the repo owner gave it (2026-07-29) was:
 
 - **A `loop` with no reachable `break` is `Never`**, not `Unit`. It is the
   bottom type's whole job — `loop {}` produces no value — and it makes
@@ -1921,8 +1979,14 @@ finished without it.
   expression loop. This is the plan's own recommendation, and it needs the
   loop-context stack to carry a *flavour*.
 
-Neither half is implemented yet — TY-21 is where they land, and the ADR is owed
-with it.
+What implementing it added that the answer does not say: a **bare** `break`
+contributes `Unit`, so `loop { break }` is `Unit` and mixing the two spellings is
+a `Y001` — the alternative (a bare `break` contributing nothing) would have made
+`loop { if c { break }\n break 1 }` quietly an `Int`.
+
+**S14 spent one new code, `Y017`**, and ADR-051 is amended for it — the amendment
+path that ADR's own last consequence describes. The `Y0xx` user block is now
+spent through `Y017`; the next free number is `Y018`.
 
 **D1 and D5 still block their stages**; neither has been answered.
 
@@ -1963,10 +2027,30 @@ one. Settle both together.
 
 Things the plan states that are no longer or were not quite true.
 
+- **TY-21 needed a diagnostic code, and ADR-051 said it needed none.** That was
+  right for the finding as the audit wrote it — "a `loop`'s value is not its
+  `break` value" is a missing computation — and wrong the moment **D2** answered
+  that a `while`/`for` may not carry a value out, which is a mistake that has to
+  be named. The ADR is amended; the pattern to expect is that a *decision* can
+  turn a structural fix into a report, and the "needs no code" list is only as
+  good as the decisions behind it.
+- **TY-21 reshaped no `TypedExpr` variant, so F20 was not a prerequisite.** The
+  plan wants F20 landed "BEFORE TY-17/TY-21 add `TypedExpr` variants". Neither
+  did: TY-17 changed one `ty` computation and TY-21 changed another. F20's
+  consumers are all S15's now.
+- **TY-21 is three passes, and only one of them is inference.** The plan's
+  sketch is the loop stack; the effort is that the answer has to survive into the
+  typed tree (`lower_loop`) and into MIR (a result slot every `break` writes).
+  This is the *second* time in S14 that a fix described as an inference bug was
+  half a lowering bug — `lower_if` was the first — and the shape is the same: the
+  backend reads the typed tree, not the inference state.
 - **TY-18 and TY-20 are one stack, and the plan says so.** "TY-18 and TY-20
   share the same fn_stack — build each once" is exactly right: TY-20's `Y011`
   is `fn_results.is_empty()`, one line on top of TY-18's stack. The loop half is
-  separate and is a plain counter until TY-21 needs more.
+  separate and was a plain counter until TY-21 turned it into the stack of
+  flavoured frames the plan describes — which is also what the plan says
+  ("TY-20 and TY-21 share the same loop_stack — build each once"; building it
+  twice cost one small refactor and no rework).
 - **The context boundaries are *function* boundaries, and no finding says so.**
   A closure clears the loop depth (a `break` inside one cannot leave a loop
   outside it) and pushes its own result (a `return` inside one leaves the
