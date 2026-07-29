@@ -13,6 +13,7 @@ praxis-runtime.workspace = true
 praxis-types.workspace = true
 praxis-stdlib.workspace = true
 praxis-ast.workspace = true
+praxis-syntax.workspace = true
 praxis-parser.workspace = true
 praxis-hir.workspace = true
 praxis-mir.workspace = true

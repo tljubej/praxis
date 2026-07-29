@@ -165,7 +165,7 @@ fn collect_bindings(frame: &SnapshotFrame, db: &mut TypeDb) -> Vec<LocalBinding>
     let candidates: Vec<(u32, String, praxis_runtime::GcRef)> = frame
         .locals
         .iter()
-        .filter(|l| l.is_user() && !l.name().is_empty())
+        .filter(|l| l.is_user() && is_bindable_name(&l.name()))
         .filter_map(|l| {
             l.value
                 .map(|value| (l.type_id, l.name().to_string(), value))
@@ -182,11 +182,7 @@ fn collect_bindings(frame: &SnapshotFrame, db: &mut TypeDb) -> Vec<LocalBinding>
             // type to bind, so the local is dropped rather than bound to
             // whatever slot the raw index named.
             let ty = recovered.or_else(|| db.type_from_raw(type_id))?;
-            Some(LocalBinding {
-                name: sanitize_name(&name),
-                ty,
-                value,
-            })
+            Some(LocalBinding { name, ty, value })
         })
         .collect()
 }
@@ -397,18 +393,23 @@ unsafe fn call_with_arity(entry: *const u8, ctx: *mut RuntimeContext, vals: &[Gc
     }
 }
 
-/// Make a snapshot local name safe as a Praxis identifier. Snapshot source
-/// names are already valid identifiers (they came from the parser); this is a
-/// defensive guard for any synthetic temp that slipped past the `<tmp>` filter.
-fn sanitize_name(name: &str) -> String {
-    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && !name.is_empty()
-        && !name.chars().next().unwrap().is_ascii_digit()
-    {
-        name.to_string()
-    } else {
-        "_x".to_string()
-    }
+/// Whether a snapshot local's name can be a `__p_expr` parameter (DBG-03).
+///
+/// Snapshot source names are already valid identifiers — they came from the
+/// parser — so this is the guard for a synthetic name that slipped past the
+/// temp filter. It **rejects** rather than rewrites, for two reasons. Rewriting
+/// mapped every unusable name to the single name `_x`, which is not injective:
+/// two such locals became two parameters both called `_x`, and a synthetic
+/// function with a duplicate parameter is a worse failure than the one being
+/// papered over. And the question it asked was ASCII-only, so §4.1's Unicode
+/// identifiers — which the lexer accepts and which are therefore real local
+/// names — were "sanitized" into `_x` as if they were malformed.
+///
+/// A rejected local is dropped, exactly as one whose `type_id` this `TypeDb`
+/// never minted is: `p EXPR` cannot mention a name the language cannot spell,
+/// so there is nothing lost by not binding it.
+fn is_bindable_name(name: &str) -> bool {
+    praxis_syntax::ident::is_ident(name)
 }
 
 /// Render an `EvalResult` to the REPL output stream (value, or `error: …`).
@@ -447,12 +448,59 @@ mod tests {
         assert_eq!(src, "fn __p_expr(n: Int) { n + 1 }");
     }
 
+    /// DBG-03. This test **asserted the defect** it now rules out (plan §8.2):
+    /// it pinned `sanitize_name`'s rewrite of every unusable name to `_x`, and
+    /// with it the ASCII-only rule that treated a Unicode identifier as damage
+    /// to be repaired. A name is now either usable as written or its local is
+    /// dropped; there is no third name, so nothing can collide with anything.
     #[test]
-    fn sanitize_rejects_digit_leading_and_punct() {
-        assert_eq!(sanitize_name("1abc"), "_x");
-        assert_eq!(sanitize_name("a-b"), "_x");
-        assert_eq!(sanitize_name("ok_name"), "ok_name");
-        assert_eq!(sanitize_name("x9"), "x9");
+    fn an_unusable_local_name_is_rejected_rather_than_rewritten() {
+        assert!(!is_bindable_name("1abc"));
+        assert!(!is_bindable_name("a-b"));
+        assert!(!is_bindable_name(""));
+        assert!(is_bindable_name("ok_name"));
+        assert!(is_bindable_name("x9"));
+        // §4.1 allows Unicode identifiers, so these are names the lexer really
+        // produces — the old rule rewrote all three to `_x`.
+        assert!(is_bindable_name("δx"));
+        assert!(is_bindable_name("Ünicode"));
+        assert!(is_bindable_name("日本語"));
+    }
+
+    /// …and the collision the rewrite created is what `collect_bindings` must
+    /// not be able to build: two unspellable locals used to become two
+    /// parameters both called `_x`, so the synthetic
+    /// `fn __p_expr(_x: Int, _x: Int)` failed to compile — and `p` reported a
+    /// duplicate-declaration error about a name the program never contained.
+    #[test]
+    fn two_unusable_names_do_not_collide_into_one_parameter() {
+        let runtime = Runtime::new();
+        let mut db = TypeDb::new();
+        let int = db.int();
+        let user = praxis_runtime::LOCAL_KIND_USER;
+        let frame = SnapshotFrame {
+            parent: 0,
+            func_name: "main".as_ptr(),
+            func_name_len: 4,
+            locals: vec![
+                snapshot_local("1abc", runtime.alloc_int(1), int, user),
+                snapshot_local("a-b", runtime.alloc_int(2), int, user),
+                snapshot_local("δx", runtime.alloc_int(3), int, user),
+            ],
+            source_span: (0, 0),
+        };
+
+        let bindings = collect_bindings(&frame, &mut db);
+        let names: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["δx"],
+            "only the name the language can spell is bound, and it is bound as written"
+        );
+        assert_eq!(
+            synthesize(&db, &bindings, "δx"),
+            "fn __p_expr(δx: Int) { δx }"
+        );
     }
 
     /// DBG-04: the values the `p` evaluator holds must be in the collector's

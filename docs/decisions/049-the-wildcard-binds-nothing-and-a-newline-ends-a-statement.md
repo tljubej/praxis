@@ -1,8 +1,8 @@
 # ADR-049: `_` is a wildcard that binds nothing, and a newline ends a statement but never an expression
 
 **Date:** 2026-07-29
-**Status:** Accepted — D7 implemented, D8 decided and **not yet implemented**
-**Milestone:** Repair (stage S12 — FE-02 landed; FE-04/FE-06 outstanding)
+**Status:** Accepted — D7 and D8 both implemented
+**Milestone:** Repair (stage S12 — FE-02 and FE-04 landed)
 **Answers:** the plan's D7 and D8
 
 ## Context
@@ -43,9 +43,6 @@ expression`) at the token itself, which is a better report than the
 
 ## Decision D8: a newline terminates a statement, never a subexpression
 
-**Not yet implemented** — this is F8/FE-04, and it is recorded here so the
-stage does not have to re-ask.
-
 A newline is consulted in exactly two places:
 
 1. **Between statements in a block, and at the top level.** The statement loop
@@ -75,10 +72,23 @@ explicit `;` everywhere rewrites the entire corpus.
 - **HIR-05 (S16) needs no HIR change.** The plan says FE-02 is the entirety of
   its fix, and a `_` field name in a record literal is now a parse-level
   impossibility rather than a silently-accepted duplicate.
-- **DBG-03 is unaffected by this.** `sanitize_name` still rewrites invalid
-  debugger names non-injectively; it is S12's fourth finding and independent.
+- **DBG-03 is unaffected by this.** It is S12's fourth finding and independent;
+  it landed separately, by rejecting an unusable debugger local name rather than
+  rewriting it.
+- **The newline fact rides on the token, not on the trivia.** `Token` gained
+  `preceded_by_newline`, set for the whole trivia run in front of it, so the
+  answer survives the trivia having already been folded into the green tree.
+- **Match arms are separated for real now.** The arm loop's "comma-OR-newline
+  separated" comment sat above a check that only asked whether a pattern could
+  start here; it demands a comma or a line break, and `P002` is the one new
+  diagnostic code the stage spends (the parse block, not D13's).
 - **The FE-04 trap is still open.** `let x = 1` followed by a line starting with
   `(` still parses as a call — the progress doc records it as the reason
   `tuple_schema_uses_the_unit_descriptor_for_unit_elements` needed rewriting.
-  D8's rule as chosen does not close it; the workaround stands until S12
-  finishes and someone decides whether to revisit.
+  D8's rule as chosen does not close it; the workaround stands (bind the tuple
+  to a name) until someone decides whether to revisit.
+- **The predicted churn did not arrive.** F8 is annotated "HIGHEST TEST CHURN of
+  any foundation: ~40 insta snapshots in `parse.rs` plus every `.px` fixture";
+  the whole suite passed unchanged. Every fixture and every snapshot already
+  separated its statements with newlines, which is what the rule now requires.
+  This is the third F-block to predict wide churn and deliver none.

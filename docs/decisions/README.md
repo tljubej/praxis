@@ -55,3 +55,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-047: A scheme owns its binders, a level can only be lowered, and a declaration group predeclares its signatures](./047-scheme-owned-binders-and-the-level-newtype.md)
 - [ADR-048: A nominal type is one definition applied to arguments, and `TypeKey` is its identity](./048-nominal-identity-is-a-definition-applied-to-arguments.md)
 - [ADR-049: `_` is a wildcard that binds nothing, and a newline ends a statement but never an expression](./049-the-wildcard-binds-nothing-and-a-newline-ends-a-statement.md)
+- [ADR-050: A record literal is legal wherever the brace cannot be a block](./050-record-literals-are-legal-wherever-a-brace-cannot-be-a-block.md)
