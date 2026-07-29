@@ -1878,9 +1878,12 @@ stage's ADR is **055**.
 
 **Pick up at S17 — the constraint channel and capabilities.** Eleven findings,
 weight 66, the largest stage in the repair, and the one the plan gates on three
-design decisions. Read the plan's S17 paragraph and §7's D-entries for TY-32
-(hashability), TY-33 (remove-or-implement) and TY-34 (`Range`) **before**
-starting: the plan says all three gate the stage.
+design decisions. **§5 has the answers: D5 and D6 are answered, both against the
+plan's recommendation and both in the direction of more work — `..`/`..=` lands
+in full, and all fifteen prelude names get implemented including the six graph
+helpers. D4 is still open and blocks TY-32 and RT-08.** Read §5's S17 paragraph
+before anything else; the stage as answered is several sessions of work, and
+`panic` is the piece that must land first.
 
 What S17 will want from what is already here:
 
@@ -2362,25 +2365,39 @@ spent through `Y017`; the next free number is `Y018`.
 
 **D1 and D5 still block their stages**; neither has been answered.
 
-**S17 is the next stage, and three decisions gate it — D4, D5 and D6.** None is
-answered, and the plan says each "needs an answer from the repo owner". They are
-the first thing a fresh context should raise, because all three change what the
-language *is* rather than how it is built:
+**S17 is the next stage, and three decisions gate it — D4, D5 and D6.** Two are
+now answered by the repo owner, **and both were answered against the plan's
+recommendation, in the direction of more language rather than less**. A fresh
+context must size the stage accordingly: S17 was already the largest in the
+repair at 11 findings and weight 66, and these two answers add a syntax-to-
+runtime vertical slice and a graph library on top of it.
 
-- **D4 (hashability).** Mutable collections are accepted as `Map` keys today.
-  TY-32/RT-08 reject them, which breaks existing programs. The plan recommends
-  the rejection and asks for the diagnostic wording to be confirmed — §5.4 says
-  a capability failure must never name the capability.
-- **D5 (TY-33, the fifteen phantom prelude names).** The plan recommends
-  implementing `panic`/`assert`/`dbg`/`abs`/`sign`/`min`/`max`/`clamp`/`gcd`/
-  `lcm` and **deleting** the six graph helpers (`bfs`, `bfs_distance`, `dfs`,
-  `dijkstra`, `a_star`, `flood_fill`) until a milestone owns them. Deleting six
-  names from the prelude is a scope decision, not an implementation one.
-  `panic` must land first: it typechecks today and then fails to compile.
-- **D6 (TY-34, `Range`).** Delete `CollectionCtor::Range` (8 sites, mechanical)
-  or implement the full `..`/`..=` vertical slice (XL). The plan states both and
-  recommends **neither** — this one has no default to fall back on — but it is
-  explicit that the middle state must not survive the stage.
+- **D6 (TY-34, `Range`) — answered: implement `..`/`..=` in full.** *Not* the
+  8-site deletion. That is a lexer, parser, AST, type-rule, MIR-lowering and
+  runtime-iteration slice; the plan rates it XL on its own. `CollectionCtor::Range`
+  and `capability::iter_item`'s `Range => Int` arm are the two places the type
+  system already assumes it exists. Land it as its own sequence of commits, not
+  inside another finding.
+- **D5 (TY-33, the fifteen phantom prelude names) — answered: implement all
+  fifteen.** *Not* the plan's ten-and-delete-six split. That includes the six
+  graph helpers — `bfs`, `bfs_distance`, `dfs`, `dijkstra`, `a_star`,
+  `flood_fill` — which are a graph library and are, by the plan's own sizing,
+  more work than the rest of S17 combined. **`panic` must still land first**: it
+  typechecks today and then fails to compile, so every other prelude name is
+  built on a hole until it is filled. Suggested order: `panic`, `assert`, `dbg`,
+  then the eight numeric helpers, then the six graph helpers as their own stage-
+  sized unit.
+- **D4 (hashability) — still open.** The question asked was what other languages
+  do. **Python rejects mutable containers as keys**: `list`/`dict`/`set` set
+  `__hash__ = None`, so `{[1,2]: "x"}` is a `TypeError`, and a `tuple` is
+  hashable only if every element is. Ruby and most dynamic languages agree;
+  Java allows it and documents the result as unspecified once a key mutates.
+  **Rust is the counterexample that does not apply here**: `HashMap<Vec<i32>, V>`
+  is legal because the borrow checker makes mutating a live key impossible.
+  Praxis has `var` mutation and no borrow checker, so it has Python's problem
+  without Rust's guardrail — which is why the plan, and this note, recommend
+  confirming the rejection (`Y014`, worded per §5.4 so it never names the
+  capability). **Do not start TY-32 or RT-08 until this is confirmed.**
 
 **F10's constraint channel is S17's foundation and it is deliberately not
 started.** Landing it half-way would be the partial foundation §2 opens by
