@@ -26,7 +26,8 @@ Update this file at the end of every stage.
 | S13 — Annotations honored, declaration passes, mutability and scope | **done** | `6037662`, `9129f76`, `4f45455`, `9c6b48a`, `6fd5e46`, `de6b0e2` |
 | S14 — Control flow: bottom type, contexts, joins, loop values | **done** | `fd909a1`, `92a1b84`, `bf91879`, `9cffbe5`, `f93b25f`, `ea506a6` |
 | S15 — Per-use types into HIR and MIR, then monomorphization | **done** (one exit criterion deferred; see §4) | `93c05ec`, `f3c76a8`, `77b2ad6`, `b560e67` |
-| S16 … S21 | **S16 next** — see §4 | |
+| S16 — Records, patterns, exhaustiveness, enum constructors | **HIR-03, HIR-05, HIR-07 done; HIR-04, HIR-06 left** | `57e2e5b`, `06f3c44` |
+| S17 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
@@ -34,7 +35,7 @@ TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1241 passed, 0 failed, 60 ignored**. `just ci` is green.
+Now: **1247 passed, 0 failed, 58 ignored**. `just ci` is green.
 
 **S11 is closed.** All five exit-criterion tests pass and all eight findings the
 stage owns are fixed and gated — TY-01…TY-07 and TY-22.
@@ -53,6 +54,26 @@ newly rejected — see §4.
 six exit-criterion tests pass, plus the fourth criterion that is a MIR change
 rather than a test. **D2 is answered *and implemented*** (ADR-053); the stage
 also amended ADR-051 for `Y017`.
+
+**S16 is open.** **HIR-03**, **HIR-05** and **HIR-07** are done; **HIR-04** and
+**HIR-06** are left. HIR-05 needed no code — the plan predicted that, and it was
+right. §4 says where to pick up.
+
+The two un-ignored by S16 so far:
+
+| Test | File | Finding |
+|---|---|---|
+| `lowering_respects_a_local_that_shadows_an_enum_variant` | `infer_tests.rs` | HIR-03 |
+| `unknown_enum_variant_pattern_is_rejected` | `infer_tests.rs` | HIR-07 |
+
+S16's four new gates so far:
+
+| Test | File | Pins |
+|---|---|---|
+| `a_constructor_is_a_symbol_kind_not_a_spelling` | `infer_tests.rs` | HIR-03's rule — every variant, including the prelude's `Some`/`None`, is `SymbolKind::EnumVariant` |
+| `a_local_holding_a_variant_is_not_a_constructor` | `infer_tests.rs` | why the *kind* and not the scheme: `let A = Empty` has the enum's type too — and that the binding survives |
+| `a_pattern_that_names_no_variant_is_reported_not_widened` | `infer_tests.rs` | HIR-07 — `Y122` for a typo, `Y123` for a wrong shape, and the right constructors still work |
+| `a_non_exhaustive_match_is_reported_where_it_is_written` | `infer_tests.rs` | HIR-07's second half — `Y120` at the `match`, not at byte 0 |
 
 **S15 is closed**, with one exit criterion deferred for a reason that is new
 information — §4 has it. All seven findings the stage owns are fixed and gated:
@@ -695,7 +716,27 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S15's F15 — read this first)
+### From this session (S16's HIR-03 and HIR-07)
+
+**`SymbolKind::EnumVariant` is what a constructor is.** Not `Fn`, which is what
+variants used to be bound as, and not a spelling. `Lowerer::enum_variant_of`
+takes a `SymbolId` and checks the kind *first* — the scheme cannot answer the
+question, because `let A = Empty` has the enum's type too.
+
+**The prelude declares `Option`'s variants**, so `PreludeEntry` carries
+`is_variant_ctor` and `seed_prelude` binds `Some`/`None` with the variant kind.
+`Inferer::seed_builtin_schemes` filters on `Builtin | EnumVariant`; **if you
+narrow that filter, every `Option` program fails with "unresolved user function
+`Some`"** — the constructors lose their schemes and lower as ordinary calls.
+
+**`Y122` and `Y123` are spent** — a pattern naming a variant the scrutinee has
+not, and a constructor pattern against a type with no variants. Both come from
+`lower_pattern`, at the constructor token's range.
+
+**`exhaustive::check` takes the `match`'s span.** `Y120` used to be reported at
+byte 0 of the file, for every match in it.
+
+### From an earlier session (S15's F15 — read this if you touch HIR)
 
 **`TypedExpr.ty` is what inference recorded, deep-resolved.** Not a
 re-derivation, not an instantiation, not a fresh variable. If you need a
@@ -1762,19 +1803,45 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**S16 is next** — records, patterns, exhaustiveness, enum constructors (HIR-03
-… HIR-07). Read plan §5's S16 paragraph and §6's hazards first; the plan's own
-ordering note matters here (HIR-03's `SymbolKind::EnumVariant` before HIR-07 and
-HIR-06). Two things S15 leaves on its doorstep:
+**S16 is open, and three of its five findings are done.** **HIR-03** and
+**HIR-07** are fixed and gated; **HIR-05** needed no code, exactly as the plan
+predicted ("discharged entirely by FE-02 in S12 plus a wildcard-param
+representation for `|_|`") — `|_| 0` compiles clean and declares nothing, and
+`a_wildcard_binder_is_legal_and_declares_nothing` already pins all three of D7's
+positions including the closure param. **HIR-04 and HIR-06 are left.**
 
-- **`lowering_respects_a_local_that_shadows_an_enum_variant` is S16's first exit
-  test, and F15 has already moved it.** `lower_path`/`lower_call` still look a
-  constructor up by *text* (`lookup_enum_variant_by_name`), which is HIR-03 —
-  but the type they attach to the resulting `TypedExpr::EnumVariant` is now the
-  use-site type from `expr_types`, not the def's own. Only the symbol lookup is
-  left.
-- **`wildcard_pattern_does_not_bind_a_value_named_underscore` is already
-  un-ignored** (S12 rewrote it for FE-02); the plan lists it under S16.
+**Pick up at HIR-04** (record literals accept missing, unknown and duplicate
+fields) or **HIR-06** (exhaustiveness misses nested payload gaps and duplicate
+constructor arms). They are independent of each other. Their exit tests:
+
+| Test | File | Finding |
+|---|---|---|
+| `record_literal_requires_every_declared_field` | `infer_tests.rs` | HIR-04 |
+| `record_literal_rejects_unknown_fields` | `infer_tests.rs` | HIR-04 |
+| `record_literal_rejects_duplicate_fields` | `infer_tests.rs` | HIR-04 |
+| `nested_enum_pattern_must_cover_payload_constructors` | `infer_tests.rs` | HIR-06 |
+| `duplicate_enum_arm_is_unreachable` | `infer_tests.rs` | HIR-06 |
+
+What S16 has established that both will want:
+
+- **`SymbolKind::EnumVariant` exists**, and it is how "is this name a
+  constructor" is answered. The kind is load-bearing on its own: a scheme cannot
+  tell a constructor from a binding that *holds* one, because `let A = Empty`
+  has the enum's type too. `PreludeEntry::is_variant_ctor` marks `Some`/`None`,
+  which no `enum` item declares; `seed_builtin_schemes` filters on the kind
+  *pair* now, and forgetting that is what makes every `Option` test fail with
+  "unresolved user function `Some`".
+- **`Lowerer::enum_variant_of(symbol)` replaced `lookup_enum_variant_by_name`.**
+  There is no root-scope text lookup left in lowering.
+- **`Y122` and `Y123` are spent** (`UnknownEnumVariant`, `NotAPatternForType`),
+  both emitted from `lower_pattern`'s `Variant` arm. The next free code in the
+  `Y1xx` block is what ADR-051 says; check it before allocating.
+- **`exhaustive::check` takes the `match`'s own span**, so `Y120` no longer
+  points at byte 0. HIR-06's new diagnostics should take a span the same way —
+  `arm_spans` already carries one per arm.
+- **An unconstrained scrutinee stays silent** in `lower_pattern`. Inference has
+  already reported it, and a type variable is not a wrong *shape*. HIR-06's
+  usefulness matrix will meet the same case.
 
 **S11 is closed.** All eight findings the stage owns are fixed and gated —
 TY-01…TY-07 and TY-22 — and all five exit-criterion tests pass. TY-04 needed no
