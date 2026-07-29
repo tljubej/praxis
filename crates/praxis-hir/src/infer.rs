@@ -85,6 +85,7 @@ pub(crate) fn infer_with_tree(
         diagnostics: Vec::new(),
         catalog: builtin_catalog(),
         decl_site: Level::OUTERMOST,
+        fn_results: Vec::new(),
     };
     inferer.seed_builtin_schemes();
     inferer.infer_declaration_group(root);
@@ -141,6 +142,11 @@ struct Inferer {
     /// The level the declaration group was entered from — where a function's
     /// signature generalizes (TY-01).
     decl_site: Level,
+    /// The result type of each function whose body is being inferred, innermost
+    /// last. A `return` is checked against the top of this stack (TY-18); a
+    /// closure pushes its own, because `return` inside one leaves the closure,
+    /// not the function that contains it.
+    fn_results: Vec<Type>,
 }
 
 /// The built-in method catalog, constructed once and cached for the process
@@ -520,8 +526,13 @@ impl Inferer {
                 param_types.push(pty);
             }
         }
-        // The declared return type, if any; else a fresh var inferred from body.
+        // The declared return type, if any; else a fresh var the body and any
+        // `return` both constrain. The result has to exist *before* the body is
+        // inferred, because a `return` inside it has to be checked against
+        // something (TY-18) — that is what the context stack carries.
         let ret_annot = item.return_type().and_then(|t| self.resolve_type(&t));
+        let result_ty = ret_annot.unwrap_or_else(|| self.db.fresh_var());
+        self.fn_results.push(result_ty);
         let (body_ty, tail_range) = match item.body() {
             Some(b) => {
                 let (ty, range) = self.infer_block_with_tail(&b);
@@ -529,22 +540,19 @@ impl Inferer {
             }
             None => (None, None),
         };
-        // Unify declared return with the body's type (if both present). Point the
-        // mismatch at the offending tail expression (e.g. the trailing
-        // `out(...)`) rather than the whole `fn`, falling back to the block's
-        // range, then the whole item, so precision never regresses.
-        let result_ty = match (ret_annot, body_ty) {
-            (Some(a), Some(b)) => {
-                if let Err(e) = self.db.unify(a, b) {
-                    let at = tail_range.unwrap_or_else(|| item.syntax().text_range());
-                    self.diag_unify_hinted(self.file_span(at), e, "the function body");
-                }
-                a
+        self.fn_results.pop();
+        // The body **joins** with the declared result rather than unifying with
+        // it (TY-19): `fn f() -> Int { panic("x") }` has a `Never` body and is
+        // fine — every path that reaches the end diverges, so there is no value
+        // to disagree. Point a real mismatch at the offending tail expression
+        // (e.g. the trailing `out(...)`) rather than the whole `fn`, falling
+        // back to the block's range, then the whole item.
+        if let Some(b) = body_ty {
+            if let Err(e) = self.db.join(result_ty, b) {
+                let at = tail_range.unwrap_or_else(|| item.syntax().text_range());
+                self.diag_unify_hinted(self.file_span(at), e, "the function body");
             }
-            (Some(a), None) => a,
-            (None, Some(b)) => b,
-            (None, None) => self.db.fresh_var(),
-        };
+        }
         let fn_ty = self.db.func(param_types, result_ty);
         // Unify the placeholder with the derived function type.
         if let Err(e) = self.db.unify(placeholder, fn_ty) {
@@ -700,8 +708,32 @@ impl Inferer {
         for p in c.params() {
             param_types.push(self.infer_param(&p));
         }
-        let result_ty = c.body().map_or(self.db.unit(), |b| self.infer_expr(&b));
+        let result_ty = self.infer_closure_body(c);
         self.db.func(param_types, result_ty)
+    }
+
+    /// Infer a closure's body with its own result on the function-context stack,
+    /// so a `return` inside it is checked against *the closure* rather than
+    /// against whatever function encloses it (TY-18).
+    ///
+    /// The result is the join of the placeholder the `return`s pinned and the
+    /// body's own type: a closure whose body diverges contributes nothing.
+    fn infer_closure_body(&mut self, c: &praxis_ast::ClosureExpr) -> Type {
+        let result_ty = self.db.fresh_var();
+        self.fn_results.push(result_ty);
+        let body_ty = c.body().map_or(self.db.unit(), |b| self.infer_expr(&b));
+        self.fn_results.pop();
+        match self.db.join(result_ty, body_ty) {
+            Ok(joined) => joined,
+            Err(e) => {
+                let at = c
+                    .body()
+                    .map(|b| b.syntax().text_range())
+                    .unwrap_or_else(|| c.syntax().text_range());
+                self.diag_unify_hinted(self.file_span(at), e, "the closure's return type");
+                result_ty
+            }
+        }
     }
 
     /// Bidirectional closure inference (M8, §3): infer a closure argument with
@@ -740,7 +772,7 @@ impl Inferer {
         // push `exp_result` into block tails too, but Praxis closure bodies here
         // are single expressions or push from their own tail.)
         let _ = exp_result;
-        let result_ty = c.body().map_or(self.db.unit(), |b| self.infer_expr(&b));
+        let result_ty = self.infer_closure_body(c);
         self.db.func(param_types, result_ty)
     }
 
@@ -1343,9 +1375,25 @@ impl Inferer {
     }
 
     /// `return [expr]` (M8, §4.11). Diverges; type `Never`.
+    /// `return e` — the value must be what the enclosing function produces
+    /// (TY-18). It used to be inferred and thrown away, so
+    /// `fn bad() -> Int { return "wrong"; 1 }` type-checked: the tail had the
+    /// declared type and nothing else was asked.
+    ///
+    /// The expression itself is `Never`: it diverges, so it contributes nothing
+    /// to whatever branch it sits in.
     fn infer_return(&mut self, r: &ReturnExpr) -> Type {
-        if let Some(v) = r.value() {
-            self.infer_expr(&v);
+        let value = r.value();
+        let (value_ty, at) = match &value {
+            Some(v) => (self.infer_expr(v), v.syntax().text_range()),
+            // A bare `return` produces `Unit`, which is what the function must
+            // then be declared to return.
+            None => (self.db.unit(), r.syntax().text_range()),
+        };
+        if let Some(&result) = self.fn_results.last() {
+            if let Err(e) = self.db.unify(result, value_ty) {
+                self.diag_unify_hinted(self.file_span(at), e, "the function's return type");
+            }
         }
         self.db.never()
     }

@@ -1071,13 +1071,72 @@ fn an_else_less_if_is_unit_unless_its_branch_diverges() {
 }
 
 #[test]
-#[ignore = "known bug: explicit return values are not unified with function results"]
 fn early_return_value_must_match_the_function_result() {
     let src = "fn bad() -> Int { return \"wrong\"; 1 }";
     assert!(
         has_type_error(src),
         "an early return must be checked even when the block tail has the declared type"
     );
+}
+
+/// TY-18 in the shapes the exit test does not reach: a bare `return` is `Unit`,
+/// an unannotated function has its result *pinned* by its returns, a `return`
+/// nested in control flow is still checked, and a `return` inside a closure
+/// means the closure.
+#[test]
+fn a_return_is_checked_against_the_function_it_leaves() {
+    // A bare `return` produces Unit.
+    assert!(has_type_error("fn f() -> Int { return\n  1 }"));
+    assert!(!has_type_error("fn f() -> Unit { return\n  out(1) }"));
+    // With no annotation, the returns pin the result.
+    assert_eq!(
+        scheme_of("fn f(c: Bool) { if c { return 1 }\n  2 }", "f").as_deref(),
+        Some("(Bool) -> Int")
+    );
+    assert!(
+        has_type_error("fn f(c: Bool) { if c { return 1 }\n  \"two\" }"),
+        "a return and the tail must agree even with no annotation"
+    );
+    // Nested inside control flow, and inside a match arm.
+    assert!(has_type_error(
+        "fn f(c: Bool) -> Int { if c { return \"x\" }\n  1 }"
+    ));
+    assert!(has_type_error(
+        "enum E { A }\nfn f(e: E) -> Int { match e { A => { return \"x\" } }\n  1 }"
+    ));
+    // A `return` inside a closure leaves the *closure*: `|n| { return n }` is
+    // Int -> Int inside a function returning Text, and that is not an error.
+    assert!(
+        !has_type_error("fn f() -> Text { let g = |n| { return n }\n  g(\"a\") }"),
+        "a closure's return is checked against the closure"
+    );
+    assert!(
+        has_type_error("fn f() -> Text { let g = |n| { if true { return 1 }\n  \"t\" }\n  \"a\" }"),
+        "…and it is still checked there"
+    );
+}
+
+/// TY-19 applied at the function result, which no finding names separately: a
+/// body that diverges cannot disagree with the declared type, because it
+/// produces no value. This was a `Y001` before the join.
+#[test]
+fn a_function_whose_body_diverges_matches_any_declared_result() {
+    for src in [
+        "fn f() -> Int { panic(\"x\") }",
+        "fn f() -> Text { panic(\"x\") }",
+        "fn f(c: Bool) -> Int { if c { return 1 } else { panic(\"x\") } }",
+        "fn f() -> Int { return 1 }",
+    ] {
+        assert!(
+            !has_type_error(src),
+            "`{src}` reported {:?}",
+            analyze(src)
+                .diagnostics
+                .iter()
+                .map(|d| format!("{} {}", d.code(), d.message()))
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]
