@@ -21,8 +21,144 @@
 //! **Per §5.4, capability failures surfaced to the user must be translated into
 //! concrete language terms and must never mention "trait" or "capability".** The
 //! diagnostic wording lives in [`crate::diagnostics`].
+//!
+//! # One door, five questions (F10)
+//!
+//! [`check`] is the entry point, and every capability question routes through
+//! it. The predicates below it are the rules; `check` is what makes them one
+//! decision with one failure shape (`Err(offending inner type)`), so a caller
+//! cannot ask half the question or answer it with the wrong predicate.
+//!
+//! Two of the five are new here and are the point of the stage:
+//!
+//! - [`supports_hash_stable`] is what a `Map` key must answer. [`supports_hash`]
+//!   really is [`supports_eq`] — the descriptor's `hash` and `equals` callbacks
+//!   are one fact — and that is exactly why it is the wrong question for a key
+//!   (TY-32, D4).
+//! - [`supports_numeric`] is what arithmetic and the numeric sinks require, and
+//!   it is a *different* set from [`supports_ord`]: `Text` is orderable and is
+//!   not a number (TY-31).
+//!
+//! A requirement about a type that is still a variable is not answered here. It
+//! is deferred, on `praxis_types::constraint`'s channel, and discharged when the
+//! variable resolves.
 
-use praxis_types::{data::TypeData, Type, TypeDb};
+use praxis_stdlib::{CapKind, MethodCatalog};
+use praxis_types::{data::TypeData, Capability, Type, TypeDb};
+
+/// **The** decision function: does `t` have `cap`?
+///
+/// `Err(inner)` names the type that failed. For a scalar that is simply the
+/// type itself; for a composite it is the *component* that failed, because
+/// "`Vec[fn(Int) -> Int]` cannot be a key" is a worse message than "a function
+/// value cannot be a key" — the program wrote the function, not the `Vec`.
+///
+/// Every other capability question in the compiler routes through here. Before
+/// F10 there were four free predicates with no shared shape, two of which had
+/// zero non-test callers and one of which (`supports_hash`) was *literally*
+/// `supports_eq` — which is what admitted mutable collections as `Map` keys
+/// (TY-32, RT-08).
+///
+/// An unresolved variable answers **yes** to everything. That is right here and
+/// wrong nowhere: this function is asked about a specific type, and a variable
+/// is not a type yet. Deferring the question is the constraint channel's job
+/// (`praxis_types::constraint`), not this function's.
+///
+/// Takes `&mut TypeDb` because [`iter_item`] mints the `(K, V)` tuple a `Map`
+/// yields, and `catalog` because [`Capability::HasMethod`] is a question only
+/// the method catalog can answer.
+pub fn check(
+    db: &mut TypeDb,
+    catalog: &MethodCatalog,
+    t: Type,
+    cap: &Capability,
+) -> Result<(), Type> {
+    match cap {
+        Capability::Kind(CapKind::Eq) => fail_unless(supports_eq(db, t), db, t, CapKind::Eq),
+        Capability::Kind(CapKind::Ord) => fail_unless(supports_ord(db, t), db, t, CapKind::Ord),
+        Capability::Kind(CapKind::Hash) => fail_unless(supports_hash(db, t), db, t, CapKind::Hash),
+        Capability::Kind(CapKind::HashStable) => {
+            fail_unless(supports_hash_stable(db, t), db, t, CapKind::HashStable)
+        }
+        Capability::Kind(CapKind::Numeric) => {
+            fail_unless(supports_numeric(db, t), db, t, CapKind::Numeric)
+        }
+        // Iterability is a yes/no about the receiver; *which* item it yields is
+        // established by unification at the discharge site, not here.
+        Capability::Iterable { .. } => match iter_item(db, t) {
+            Some(_) => Ok(()),
+            None => Err(db.follow(t)),
+        },
+        Capability::HasMethod { name, params, .. } => {
+            if db.var_id_of(db.follow(t)).is_some() {
+                // Still a variable: optimistically yes, as everywhere else.
+                return Ok(());
+            }
+            if crate::catalog::lookup(db, catalog, t, name, params.len()).is_empty() {
+                Err(db.follow(t))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+/// `Ok(())`, or the innermost type that failed `kind`.
+fn fail_unless(held: bool, db: &TypeDb, t: Type, kind: CapKind) -> Result<(), Type> {
+    if held {
+        Ok(())
+    } else {
+        Err(offender(db, t, kind))
+    }
+}
+
+/// The component of `t` that fails `kind` — the type a diagnostic should name.
+///
+/// Recurses into the same shapes the predicates do and stops at the first
+/// component that fails, so a `Vec[Vec[fn]]` reports the function rather than
+/// the outer `Vec`. Falls back to `t` itself when the failure *is* `t` (a
+/// mutable collection under `HashStable`, a `Bool` under `Ord`).
+fn offender(db: &TypeDb, t: Type, kind: CapKind) -> Type {
+    let resolved = db.follow(t);
+    let components: Vec<Type> = match db.data(resolved) {
+        TypeData::Tuple(els) => els.to_vec(),
+        TypeData::Collection { args, .. } => args.to_vec(),
+        TypeData::Record { def, args } => {
+            let mut v = args.to_vec();
+            v.extend(db.record_def(*def).fields.iter().map(|f| f.ty));
+            v
+        }
+        TypeData::Enum { def, args } => {
+            let mut v = args.to_vec();
+            v.extend(
+                db.enum_def(*def)
+                    .variants
+                    .iter()
+                    .flat_map(|va| va.payload.iter().copied()),
+            );
+            v
+        }
+        _ => Vec::new(),
+    };
+    for c in components {
+        if !holds(db, c, kind) {
+            return offender(db, c, kind);
+        }
+    }
+    resolved
+}
+
+/// The predicate for `kind`, as one dispatch. Structural recursion lives in the
+/// individual predicates; this is only the mapping from name to question.
+fn holds(db: &TypeDb, t: Type, kind: CapKind) -> bool {
+    match kind {
+        CapKind::Eq => supports_eq(db, t),
+        CapKind::Ord => supports_ord(db, t),
+        CapKind::Hash => supports_hash(db, t),
+        CapKind::HashStable => supports_hash_stable(db, t),
+        CapKind::Numeric => supports_numeric(db, t),
+    }
+}
 
 /// True iff values of type `t` may be compared with `==` / `!=` (§5.5).
 ///
@@ -70,12 +206,100 @@ pub fn supports_eq(db: &TypeDb, t: Type) -> bool {
     }
 }
 
-/// True iff values of type `t` may be used as a map/set key (§5.5). A type is
-/// hashable under the same structural rules as equatability (the runtime's hash
-/// and equals callbacks are defined together per descriptor).
+/// True iff the runtime can compute a structural hash of a value of type `t`
+/// (§5.5).
+///
+/// This really *is* [`supports_eq`]: the descriptor's `hash` and `equals`
+/// callbacks are defined together and populated together, so "can be hashed"
+/// and "can be compared" are one question about the representation.
+///
+/// It is **not** the question a `Map` key has to answer. That is
+/// [`supports_hash_stable`], and conflating the two is TY-32: a `Vec` hashes
+/// fine and stops being findable the moment it changes.
 #[must_use]
 pub fn supports_hash(db: &TypeDb, t: Type) -> bool {
     supports_eq(db, t)
+}
+
+/// True iff a value of type `t` may be a `Map` key or a `Set` element (D4,
+/// TY-32/RT-08).
+///
+/// Hashable **and immutable**. The rule is mutability, not container-ness:
+///
+/// - The eight mutable collections — `Vec`, `Map`, `Set`, `Deque`, `Grid`,
+///   `Counter`, `MinHeap`/`MaxHeap`, `BitSet` — are out. Hashing one by its
+///   current contents and then mutating it moves the entry's bucket without
+///   moving the entry, so the value can never be found again.
+/// - Scalars, `Text`, tuples, records and enums are in **structurally**: a
+///   tuple or record is a key iff every component is. That is Python's `tuple`
+///   rule, and it is already how [`supports_eq`] recurses.
+///
+/// Python rejects `list`/`dict`/`set` outright for this reason. Rust permits
+/// `HashMap<Vec<i32>, V>`, but only because the borrow checker makes mutating a
+/// key the map still holds impossible; Praxis has `var` mutation and no borrow
+/// checker, so it has Python's exposure without Rust's guardrail.
+///
+/// `Seq` is a compiler-internal pipeline source, never a value a program holds,
+/// so it never reaches a key position; it is excluded with the rest.
+#[must_use]
+pub fn supports_hash_stable(db: &TypeDb, t: Type) -> bool {
+    match db.data(db.follow(t)) {
+        // Every mutable collection is out — including `BitSet`, whose members
+        // change, and the heaps, whose contents do.
+        TypeData::Collection { .. } => false,
+        // A tuple is a key iff every element is.
+        TypeData::Tuple(els) => els.iter().all(|e| supports_hash_stable(db, *e)),
+        // A record/enum is one iff every argument and every contained type is.
+        // Praxis records and enums are immutable in the sense that matters: a
+        // field is set at construction and `praxis_record_set_field` exists for
+        // `var` bindings of the *binding*, not of a shared object. If that ever
+        // changes, this is the arm that changes with it.
+        TypeData::Record { def, args } => {
+            args.iter().all(|a| supports_hash_stable(db, *a))
+                && db
+                    .record_def(*def)
+                    .fields
+                    .iter()
+                    .all(|f| supports_hash_stable(db, f.ty))
+        }
+        TypeData::Enum { def, args } => {
+            args.iter().all(|a| supports_hash_stable(db, *a))
+                && db
+                    .enum_def(*def)
+                    .variants
+                    .iter()
+                    .all(|v| v.payload.iter().all(|ty| supports_hash_stable(db, *ty)))
+        }
+        // Everything else answers as hashability does: scalars and `Unit` yes,
+        // functions no, `Never` vacuously yes, an unresolved var optimistically.
+        _ => supports_eq(db, t),
+    }
+}
+
+/// True iff `t` admits arithmetic — `+`, `-`, `*`, `/`, unary minus, and the
+/// numeric sinks (§4.12, TY-31).
+///
+/// `Int`, `UInt`, `Byte` and `Float`, and nothing else. `Bool` is not a number
+/// however it is represented, `Char` is a scalar value and not an arithmetic
+/// one, and `Text` has `+` only as concatenation, which is a different rule at
+/// a different site.
+///
+/// `%` is narrower still — it is undefined for `Float` (TY-27) — so it is not
+/// this capability.
+#[must_use]
+pub fn supports_numeric(db: &TypeDb, t: Type) -> bool {
+    use praxis_stdlib::type_pattern::ScalarType;
+    match db.data(db.follow(t)) {
+        TypeData::Scalar(
+            ScalarType::Int | ScalarType::UInt | ScalarType::Byte | ScalarType::Float,
+        ) => true,
+        // No values, so every capability holds vacuously — a divergent branch
+        // must not be what makes an addition illegal.
+        TypeData::Never => true,
+        // An unresolved var is optimistically numeric; the channel defers it.
+        TypeData::Var(_) => true,
+        _ => false,
+    }
 }
 
 /// True iff values of type `t` are orderable (§5.4 `SupportsOrd`, ADR-045):
@@ -274,13 +498,295 @@ mod tests {
         assert!(iter_item(&mut db, v).is_some());
     }
 
+    /// **Rewritten** from `numeric_scalars_are_orderable` (plan §8.2, H18's last
+    /// entry). The assertions it made are still true — `Int`, `Text` and `Char`
+    /// are all orderable, and ADR-045 is what made that honest by giving the
+    /// runtime a `compare` for each. What changed is that its *name* is now a
+    /// claim about two different capabilities: this stage introduces
+    /// `CapKind::Numeric`, and "numeric" and "orderable" are exactly the two
+    /// things TY-31 and TY-32 separate. `Text` is orderable and is not a number.
+    ///
+    /// So it states the rule instead: the orderable set is the six scalars whose
+    /// descriptors carry a `compare` callback, and it is neither a subset nor a
+    /// superset of the numeric one.
     #[test]
-    fn numeric_scalars_are_orderable() {
+    fn orderable_and_numeric_are_different_sets_of_scalars() {
         let mut db = TypeDb::new();
-        let (i, t, c) = (db.int(), db.text(), db.char());
-        assert!(supports_ord(&db, i));
-        assert!(supports_ord(&db, t));
-        assert!(supports_ord(&db, c));
+        let (i, t, c, f, b) = (db.int(), db.text(), db.char(), db.float(), db.bool());
+
+        // Orderable: every scalar with a runtime `compare`.
+        for ty in [i, t, c, f] {
+            assert!(supports_ord(&db, ty), "{} is orderable", db.render(ty));
+        }
+        assert!(!supports_ord(&db, b), "Bool declares no order (ADR-045)");
+
+        // Numeric: the arithmetic scalars, which is a *different* set.
+        assert!(supports_numeric(&db, i));
+        assert!(supports_numeric(&db, f));
+        assert!(
+            !supports_numeric(&db, t),
+            "Text is orderable and is not a number — the distinction the old \
+             name denied"
+        );
+        assert!(
+            !supports_numeric(&db, c),
+            "a Char is a scalar value, not an arithmetic one"
+        );
+        assert!(!supports_numeric(&db, b));
+    }
+
+    // --- D4: a key is hashable AND immutable --------------------------------
+
+    /// TY-32 stated as the distinction it is. `supports_hash` was *literally*
+    /// `supports_eq`, so every collection that could be hashed was admitted as a
+    /// key — and hashing a `Vec` by its contents and then pushing to it moves
+    /// the entry's bucket without moving the entry. D4 confirms the rejection.
+    #[test]
+    fn a_mutable_collection_is_hashable_but_is_not_a_key() {
+        let mut db = TypeDb::new();
+        let int = db.int();
+        for ctor in [
+            CollectionCtor::Vec,
+            CollectionCtor::Set,
+            CollectionCtor::Deque,
+            CollectionCtor::Grid,
+            CollectionCtor::Counter,
+            CollectionCtor::MinHeap,
+            CollectionCtor::MaxHeap,
+        ] {
+            let coll = db.unary_collection(ctor, int);
+            assert!(
+                supports_hash(&db, coll),
+                "{ctor:?} of Int can be hashed — that was never the problem"
+            );
+            assert!(
+                !supports_hash_stable(&db, coll),
+                "{ctor:?} can change after it is stored, so it cannot be found again"
+            );
+        }
+        // A Map and a BitSet are the same rule at their own arities.
+        let map = db.map(int, int);
+        assert!(!supports_hash_stable(&db, map));
+        let bitset = db
+            .collection(
+                CollectionCtor::BitSet,
+                praxis_types::CollectionArgs::Nullary,
+            )
+            .expect("BitSet is nullary");
+        assert!(!supports_hash_stable(&db, bitset));
+    }
+
+    /// …and the rule is mutability, not container-ness. A tuple or record is a
+    /// key iff every component is — Python's `tuple` rule, which is already how
+    /// `supports_eq` recurses.
+    #[test]
+    fn a_tuple_or_record_is_a_key_exactly_when_its_components_are() {
+        let mut db = TypeDb::new();
+        let (a, b) = (db.int(), db.text());
+        let plain = db.pair(a, b);
+        assert!(supports_hash_stable(&db, plain), "(Int, Text) is a key");
+
+        let (c, int_el) = (db.int(), db.int());
+        let vec_of_int = db.vec(int_el);
+        let with_a_vec = db.pair(c, vec_of_int);
+        assert!(
+            !supports_hash_stable(&db, with_a_vec),
+            "one mutable component is enough to disqualify the whole tuple"
+        );
+
+        let (fx, fy) = (db.int(), db.int());
+        let fields = praxis_types::FieldSet::from_pairs(vec![("x".into(), fx), ("y".into(), fy)])
+            .expect("distinct field names");
+        let point = db.record(Some("P".into()), fields);
+        assert!(
+            supports_hash_stable(&db, point),
+            "a record of Ints is a key"
+        );
+
+        // A scalar, Text and Unit are keys; a function never is.
+        let (i, t, u) = (db.int(), db.text(), db.unit());
+        for ty in [i, t, u] {
+            assert!(supports_hash_stable(&db, ty));
+        }
+        let (p, r) = (db.int(), db.int());
+        let func = db.func(vec![p], r);
+        assert!(!supports_hash_stable(&db, func));
+    }
+
+    // --- the one decision function (F10) ------------------------------------
+
+    /// `check` is the only route to a capability answer, and it routes each of
+    /// the five kinds to its own predicate. A kind wired to the wrong predicate
+    /// is what `supports_hash = supports_eq` was.
+    #[test]
+    fn check_answers_each_capability_with_its_own_rule() {
+        let mut db = TypeDb::new();
+        let catalog = praxis_stdlib::builtin_catalog();
+        let int = db.int();
+        let vec_of_int = db.vec(int);
+        let (p, r) = (db.int(), db.int());
+        let func = db.func(vec![p], r);
+        let text = db.text();
+
+        // Int has all five.
+        for kind in CapKind::ALL {
+            assert!(
+                check(&mut db, &catalog, int, &Capability::Kind(*kind)).is_ok(),
+                "Int has {kind:?}"
+            );
+        }
+        // A Vec is equatable and hashable, is not a key, is not ordered, is not
+        // a number — five different answers about one type.
+        assert!(check(
+            &mut db,
+            &catalog,
+            vec_of_int,
+            &Capability::Kind(CapKind::Eq)
+        )
+        .is_ok());
+        assert!(check(
+            &mut db,
+            &catalog,
+            vec_of_int,
+            &Capability::Kind(CapKind::Hash)
+        )
+        .is_ok());
+        assert!(check(
+            &mut db,
+            &catalog,
+            vec_of_int,
+            &Capability::Kind(CapKind::HashStable)
+        )
+        .is_err());
+        assert!(check(
+            &mut db,
+            &catalog,
+            vec_of_int,
+            &Capability::Kind(CapKind::Ord)
+        )
+        .is_err());
+        assert!(check(
+            &mut db,
+            &catalog,
+            vec_of_int,
+            &Capability::Kind(CapKind::Numeric)
+        )
+        .is_err());
+        // A function has none of them.
+        for kind in CapKind::ALL {
+            assert!(
+                check(&mut db, &catalog, func, &Capability::Kind(*kind)).is_err(),
+                "a function value has no {kind:?}"
+            );
+        }
+        // Text is ordered and is not a number.
+        assert!(check(&mut db, &catalog, text, &Capability::Kind(CapKind::Ord)).is_ok());
+        assert!(check(&mut db, &catalog, text, &Capability::Kind(CapKind::Numeric)).is_err());
+    }
+
+    /// The failure names the *component*, not the container. "a function value
+    /// cannot be compared" is a message about what the program wrote; "`Vec[(Int,
+    /// fn(Int) -> Int)]` cannot be compared" is a message about a type it never
+    /// spelled.
+    #[test]
+    fn a_failure_names_the_component_that_failed() {
+        let mut db = TypeDb::new();
+        let catalog = praxis_stdlib::builtin_catalog();
+        let (p, r) = (db.int(), db.int());
+        let func = db.func(vec![p], r);
+        let int = db.int();
+        let inner = db.pair(int, func);
+        let outer = db.vec(inner);
+
+        let offender = check(&mut db, &catalog, outer, &Capability::Kind(CapKind::Eq))
+            .expect_err("a function inside is not equatable");
+        assert_eq!(
+            db.follow(offender),
+            db.follow(func),
+            "the function, two levels down, not the Vec"
+        );
+
+        // …and when the container itself is the problem, it is the answer.
+        let vec_of_int = db.vec(int);
+        let offender = check(
+            &mut db,
+            &catalog,
+            vec_of_int,
+            &Capability::Kind(CapKind::HashStable),
+        )
+        .expect_err("a Vec is not a key");
+        assert_eq!(db.follow(offender), db.follow(vec_of_int));
+    }
+
+    /// An unresolved variable answers yes to everything. That is right here —
+    /// the question is about a specific type and a variable is not one yet — and
+    /// it is why the constraint channel exists: deferring is its job, not this
+    /// function's.
+    #[test]
+    fn an_unresolved_variable_satisfies_every_capability() {
+        let mut db = TypeDb::new();
+        let catalog = praxis_stdlib::builtin_catalog();
+        let v = db.fresh_var();
+        for kind in CapKind::ALL {
+            assert!(check(&mut db, &catalog, v, &Capability::Kind(*kind)).is_ok());
+        }
+        assert!(check(&mut db, &catalog, v, &Capability::Iterable { item: v }).is_ok());
+        assert!(check(
+            &mut db,
+            &catalog,
+            v,
+            &Capability::HasMethod {
+                name: "len".into(),
+                params: vec![],
+                result: v,
+            }
+        )
+        .is_ok());
+    }
+
+    /// `HasMethod` is the catalog's question, asked through the same door.
+    /// `Vec[Int]` has `len`; an `Int` does not, and neither does a `Vec` asked
+    /// for a name nothing declares.
+    #[test]
+    fn has_method_is_answered_by_the_catalog() {
+        let mut db = TypeDb::new();
+        let catalog = praxis_stdlib::builtin_catalog();
+        let int = db.int();
+        let vec_of_int = db.vec(int);
+        let result = db.fresh_var();
+        let len = Capability::HasMethod {
+            name: "len".into(),
+            params: vec![],
+            result,
+        };
+        assert!(check(&mut db, &catalog, vec_of_int, &len).is_ok());
+        assert!(check(&mut db, &catalog, int, &len).is_err());
+
+        let nope = Capability::HasMethod {
+            name: "no_such_method".into(),
+            params: vec![],
+            result,
+        };
+        assert!(check(&mut db, &catalog, vec_of_int, &nope).is_err());
+    }
+
+    /// `Iterable` routes to `iter_item`, which is the one answer about what a
+    /// `for` may range over.
+    #[test]
+    fn iterable_is_answered_by_iter_item() {
+        let mut db = TypeDb::new();
+        let catalog = praxis_stdlib::builtin_catalog();
+        let int = db.int();
+        let vec_of_int = db.vec(int);
+        let item = db.fresh_var();
+        assert!(check(
+            &mut db,
+            &catalog,
+            vec_of_int,
+            &Capability::Iterable { item }
+        )
+        .is_ok());
+        assert!(check(&mut db, &catalog, int, &Capability::Iterable { item }).is_err());
     }
 
     #[test]

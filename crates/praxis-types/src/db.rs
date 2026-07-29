@@ -11,6 +11,7 @@
 
 use praxis_stdlib::type_pattern::ScalarType;
 
+use crate::constraint::Constraint;
 use crate::ctor::{CollectionArgs, FieldSet, TupleElems, VariantSet};
 use crate::data::{
     EnumDef, EnumDefId, EnumVariantDef, Level, RecordDef, RecordDefId, RecordFieldDef, TypeData,
@@ -56,6 +57,15 @@ pub struct TypeDb {
     /// The prelude `Option`'s def (F12), seeded at construction so there is
     /// exactly one and every `Option[T]` in the program names it.
     option_def: EnumDefId,
+    /// Capability requirements that could not be decided when they were
+    /// discovered, because the type they are about is still a variable (F10).
+    ///
+    /// Inference pushes one per use it cannot answer, drains the *dischargeable*
+    /// ones — those whose variable has since resolved — after each unification,
+    /// and generalization claims whatever is left about the variables it
+    /// quantifies. What survives all three belongs to a variable nothing pinned,
+    /// which inference has already reported as itself.
+    pending_constraints: Vec<Constraint>,
 }
 
 impl Default for TypeDb {
@@ -82,6 +92,7 @@ impl TypeDb {
             enum_defs: Vec::new(),
             // Overwritten below; `register_enum` needs the arena to exist.
             option_def: EnumDefId(0),
+            pending_constraints: Vec::new(),
         };
         // `forall T. Option[T]`, as one def with one parameter. `T` is created
         // at the outermost level on purpose: nothing generalizes it (only
@@ -251,6 +262,146 @@ impl TypeDb {
         match &self.slots[t.to_u32() as usize].data {
             TypeData::Var(_) => Some(VarId::from_raw(t.to_u32())),
             _ => None,
+        }
+    }
+
+    // --- the constraint channel (F10) ---------------------------------------
+
+    /// Record a capability requirement that cannot be decided yet.
+    ///
+    /// The caller has already established that `constraint.var` is unresolved —
+    /// a requirement on a concrete type is answered on the spot and never
+    /// becomes a pending constraint. Duplicates are dropped: the same
+    /// requirement written twice at the same place is one requirement, and a
+    /// loop body that emits per iteration would otherwise grow without bound.
+    pub fn require(&mut self, constraint: Constraint) {
+        if !self.pending_constraints.contains(&constraint) {
+            self.pending_constraints.push(constraint);
+        }
+    }
+
+    /// Take every pending constraint whose variable has since been **resolved**
+    /// to something concrete, leaving the still-undecidable ones behind.
+    ///
+    /// Inference calls this after unification and checks what comes back. A
+    /// constraint whose variable is still unbound stays: it is not wrong yet,
+    /// and answering it now is the optimism TY-29 is about.
+    #[must_use]
+    pub fn take_dischargeable(&mut self) -> Vec<Constraint> {
+        let mut ready = Vec::new();
+        let mut i = 0;
+        while i < self.pending_constraints.len() {
+            let var_ty = self.pending_constraints[i].var_type();
+            if self.var_id_of(self.follow(var_ty)).is_none() {
+                ready.push(self.pending_constraints.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        ready
+    }
+
+    /// Every pending constraint, for a caller that has to see the ones nothing
+    /// resolved (a final sweep at the end of a declaration group).
+    #[inline]
+    #[must_use]
+    pub fn pending_constraints(&self) -> &[Constraint] {
+        &self.pending_constraints
+    }
+
+    /// Forget every pending constraint. For a caller that abandons an inference
+    /// attempt — the debugger's `p EXPR` evaluator re-checks a fragment against
+    /// a live db and must not leave its requirements behind.
+    pub fn clear_pending_constraints(&mut self) {
+        self.pending_constraints.clear();
+    }
+
+    /// Take the pending constraints that are about one of `binders`, leaving
+    /// the rest. Generalization's half of the channel: a scheme owns the
+    /// requirements on the variables it quantifies, and only those.
+    pub(crate) fn claim_constraints(&mut self, binders: &[VarId]) -> Vec<Constraint> {
+        if binders.is_empty() {
+            return Vec::new();
+        }
+        let mut claimed = Vec::new();
+        let mut i = 0;
+        while i < self.pending_constraints.len() {
+            if binders.contains(&self.pending_constraints[i].var) {
+                claimed.push(self.pending_constraints.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        claimed
+    }
+
+    /// Re-emit `scheme`'s constraints against the fresh variables an
+    /// instantiation chose, one per binder in `mapping`.
+    ///
+    /// A constraint about a binder becomes a constraint about the variable that
+    /// replaced it. When that variable is *already* concrete — the common case,
+    /// because unifying the call's arguments happens after instantiation — the
+    /// constraint is still pushed, and the next `take_dischargeable` picks it
+    /// up. Deciding here would need the answer before the arguments are known.
+    pub(crate) fn reemit_constraints(
+        &mut self,
+        scheme: &crate::Scheme,
+        mapping: &[Type],
+    ) -> Vec<Constraint> {
+        let binders: Vec<VarId> = scheme.binders().to_vec();
+        let mut emitted = Vec::new();
+        for c in scheme.constraints() {
+            let Some(idx) = binders.iter().position(|b| *b == c.var) else {
+                // A constraint on a variable the scheme does not bind cannot be
+                // re-pointed, and carrying it forward unchanged would constrain
+                // the *generic* variable rather than this use's. `generalize_at`
+                // only claims constraints on its own binders, so this is
+                // unreachable for a scheme it built.
+                continue;
+            };
+            // The fresh variable this use put in the binder's place. If the use
+            // site has already linked it to a concrete type, the constraint
+            // still names the variable — `follow` at discharge time reaches the
+            // type it stands for.
+            let Some(var) = self.var_id_of(mapping[idx]) else {
+                continue;
+            };
+            let cap = self.substitute_capability(&c.cap, &binders, mapping);
+            let fresh = Constraint::new(var, cap, c.at);
+            self.require(fresh.clone());
+            emitted.push(fresh);
+        }
+        emitted
+    }
+
+    /// Rewrite the types a capability carries through the same binder→fresh
+    /// mapping the body went through. `Iterable { item }`'s item and
+    /// `HasMethod`'s params/result are types in the generic body's terms; left
+    /// alone they would constrain the scheme's own variables at every use.
+    fn substitute_capability(
+        &mut self,
+        cap: &crate::Capability,
+        binders: &[VarId],
+        mapping: &[Type],
+    ) -> crate::Capability {
+        use crate::Capability;
+        match cap {
+            Capability::Kind(k) => Capability::Kind(*k),
+            Capability::Iterable { item } => Capability::Iterable {
+                item: crate::generalize::substitute(self, *item, binders, mapping),
+            },
+            Capability::HasMethod {
+                name,
+                params,
+                result,
+            } => Capability::HasMethod {
+                name: name.clone(),
+                params: params
+                    .iter()
+                    .map(|p| crate::generalize::substitute(self, *p, binders, mapping))
+                    .collect(),
+                result: crate::generalize::substitute(self, *result, binders, mapping),
+            },
         }
     }
 

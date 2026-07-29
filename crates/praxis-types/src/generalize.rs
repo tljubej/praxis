@@ -22,6 +22,7 @@
 //! There is one record now, and it belongs to the scheme. `generalize` mutates
 //! nothing; `instantiate` substitutes by binder membership.
 
+use crate::constraint::Constraint;
 use crate::data::VarState;
 use crate::db::TypeDb;
 use crate::fold::{fold, visit_only_composites, FoldMemo, TypeFolder};
@@ -39,6 +40,18 @@ pub struct Scheme {
     /// caller set one without the other is how the arena flag and the list came
     /// apart in the first place.
     binders: Vec<VarId>,
+    /// The capability requirements on those binders (F10, TY-29).
+    ///
+    /// A requirement inference discovered while checking the body — `a == b`
+    /// needs `Eq(?a)` — used to be *decided against the unresolved variable*
+    /// (optimistically: yes) and then thrown away, so `equal(f, g)` at a
+    /// function type compiled. It rides here instead, and every instantiation
+    /// re-emits it against the fresh variables the use site chose.
+    ///
+    /// Only constraints on this scheme's own binders are kept. One on a
+    /// variable the enclosing scope still owns is not this scheme's to carry —
+    /// it stays pending, and the outer binding discharges or generalizes it.
+    constraints: Vec<Constraint>,
     /// The scheme body. Binders appear in it as ordinary unbound variables;
     /// instantiating replaces them.
     body: Type,
@@ -46,10 +59,14 @@ pub struct Scheme {
 
 impl Scheme {
     /// A monomorphic scheme (no binders). Equivalent to just `body`.
+    ///
+    /// Binders **and constraints** are empty by construction: a scheme with no
+    /// quantified variables has nothing a constraint could be about.
     #[must_use]
     pub fn monotype(body: Type) -> Scheme {
         Scheme {
             binders: Vec::new(),
+            constraints: Vec::new(),
             body,
         }
     }
@@ -59,6 +76,13 @@ impl Scheme {
     #[must_use]
     pub fn binders(&self) -> &[VarId] {
         &self.binders
+    }
+
+    /// The capability requirements this scheme carries on its binders.
+    #[inline]
+    #[must_use]
+    pub fn constraints(&self) -> &[Constraint] {
+        &self.constraints
     }
 
     /// The scheme body — the type, with its binders still in it.
@@ -110,7 +134,17 @@ impl TypeDb {
             binders: &mut binders,
         };
         fold(&mut folder, body);
-        Scheme { binders, body }
+        // The pending constraints this scheme *owns*: the ones whose variable
+        // it just quantified. The rest stay pending for the enclosing binding,
+        // which either discharges them or generalizes them itself. Taking all
+        // of them would steal a requirement on an outer variable; taking none
+        // is the discard TY-29 is about.
+        let constraints = self.claim_constraints(&binders);
+        Scheme {
+            binders,
+            constraints,
+            body,
+        }
     }
 
     /// Instantiate `scheme` at the current level: copy its body, replacing each
@@ -142,6 +176,11 @@ impl TypeDb {
             mapping: &mapping,
         };
         let body = fold(&mut folder, scheme.body);
+        // Re-emit the scheme's constraints against *this* use's variables
+        // (F10). This is the whole point of carrying them: the requirement was
+        // written about `?a` inside a generic body, and what has to satisfy it
+        // is whatever this call site puts in `?a`'s place.
+        self.reemit_constraints(scheme, &mapping);
         (body, mapping)
     }
 }

@@ -14,12 +14,14 @@
 
 pub mod abi;
 pub mod builtins;
+pub mod capability;
 pub mod catalog;
 pub mod completion;
 pub mod prelude;
 pub mod type_pattern;
 
 pub use builtins::builtin_catalog;
+pub use capability::CapKind;
 pub use catalog::{
     MethodCatalog, MethodCatalogError, MethodEntry, MethodLowering, Purity, Stability,
 };

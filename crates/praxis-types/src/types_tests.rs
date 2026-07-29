@@ -1262,3 +1262,228 @@ fn join_all_seeds_with_never_and_reports_which_element_failed() {
         .expect_err("Int and Text disagree");
     assert_eq!(index, 2, "the failure names the element that disagreed");
 }
+
+// --- the constraint channel (F10, TY-29) -----------------------------------
+
+/// A `FileSpan` for a constraint that has to have one. The channel does not
+/// read it; the diagnostic that reports a failure does.
+fn nowhere() -> praxis_source::FileSpan {
+    praxis_source::FileSpan::new(
+        praxis_source::SourceMap::new().intern("constraint_test.px", ""),
+        praxis_source::Span::new(0, 0),
+    )
+}
+
+/// The requirement a use discovers survives generalization by riding on the
+/// scheme — and only the requirements about the scheme's *own* binders do. One
+/// on a variable the enclosing scope still owns is not this scheme's to carry.
+#[test]
+fn a_scheme_claims_the_constraints_on_the_variables_it_quantifies() {
+    let mut db = TypeDb::new();
+    // An outer variable, created before the binding's scope: nothing here
+    // quantifies it.
+    let outer = db.fresh_var();
+    let outer_id = db.var_id_of(outer).expect("a fresh var is a var");
+
+    let body = db.scoped_return(|db| {
+        let v = db.fresh_var();
+        let inner_id = db.var_id_of(v).expect("a fresh var is a var");
+        db.require(crate::Constraint::of_kind(
+            inner_id,
+            praxis_stdlib::CapKind::Eq,
+            nowhere(),
+        ));
+        db.func(vec![v], v)
+    });
+    db.require(crate::Constraint::of_kind(
+        outer_id,
+        praxis_stdlib::CapKind::Ord,
+        nowhere(),
+    ));
+
+    let scheme = db.generalize(body);
+    assert_eq!(scheme.binders().len(), 1);
+    assert_eq!(
+        scheme.constraints().len(),
+        1,
+        "exactly the requirement on the binder"
+    );
+    assert_eq!(
+        scheme.constraints()[0].cap.kind(),
+        Some(praxis_stdlib::CapKind::Eq)
+    );
+    assert_eq!(
+        db.pending_constraints().len(),
+        1,
+        "the outer variable's requirement is still the outer scope's"
+    );
+    assert_eq!(
+        db.pending_constraints()[0].var,
+        outer_id,
+        "and it is the outer one that stayed"
+    );
+}
+
+/// A monotype has no binders, so it has nothing a constraint could be about —
+/// and `Scheme::monotype` says so by construction rather than by convention.
+#[test]
+fn a_monotype_carries_no_constraints_and_claims_none() {
+    let mut db = TypeDb::new();
+    let v = db.fresh_var();
+    let id = db.var_id_of(v).expect("var");
+    db.require(crate::Constraint::of_kind(
+        id,
+        praxis_stdlib::CapKind::Eq,
+        nowhere(),
+    ));
+
+    let scheme = Scheme::monotype(v);
+    assert!(scheme.constraints().is_empty());
+    // Generalizing at a level that quantifies nothing claims nothing either.
+    let generalized = db.generalize(v);
+    assert!(generalized.binders().is_empty());
+    assert!(generalized.constraints().is_empty());
+    assert_eq!(
+        db.pending_constraints().len(),
+        1,
+        "the requirement is still pending, not silently consumed"
+    );
+}
+
+/// Instantiation re-emits: the requirement was written about the generic body's
+/// variable, and what has to satisfy it is whatever *this* use puts in its
+/// place. Two uses are two constraints, each about its own fresh variable.
+#[test]
+fn instantiating_re_emits_each_constraint_against_the_use_sites_variable() {
+    let mut db = TypeDb::new();
+    let body = db.scoped_return(|db| {
+        let v = db.fresh_var();
+        let id = db.var_id_of(v).expect("var");
+        db.require(crate::Constraint::of_kind(
+            id,
+            praxis_stdlib::CapKind::Eq,
+            nowhere(),
+        ));
+        db.func(vec![v, v], v)
+    });
+    let scheme = db.generalize(body);
+    assert!(db.pending_constraints().is_empty(), "the scheme took it");
+
+    let (_ty_a, map_a) = db.instantiate_with_mapping(&scheme);
+    let (_ty_b, map_b) = db.instantiate_with_mapping(&scheme);
+    let pending = db.pending_constraints();
+    assert_eq!(pending.len(), 2, "one per use");
+    let a = db.var_id_of(map_a[0]).expect("fresh var");
+    let b = db.var_id_of(map_b[0]).expect("fresh var");
+    assert_ne!(a, b, "two uses, two variables");
+    assert!(pending.iter().any(|c| c.var == a));
+    assert!(pending.iter().any(|c| c.var == b));
+    assert!(
+        pending.iter().all(|c| c.var != scheme.binders()[0]),
+        "and neither is about the scheme's own binder"
+    );
+}
+
+/// A capability that carries types is re-pointed too. `Iterable { item }`'s
+/// item is written in the generic body's terms; left alone, every use would
+/// constrain the scheme's own variable and the item type would be shared
+/// between unrelated call sites.
+#[test]
+fn a_type_carrying_capability_is_substituted_at_the_use_site() {
+    let mut db = TypeDb::new();
+    let body = db.scoped_return(|db| {
+        let v = db.fresh_var();
+        let item = db.fresh_var();
+        let id = db.var_id_of(v).expect("var");
+        db.require(crate::Constraint::new(
+            id,
+            crate::Capability::Iterable { item },
+            nowhere(),
+        ));
+        db.func(vec![v], item)
+    });
+    let scheme = db.generalize(body);
+    assert_eq!(scheme.binders().len(), 2, "the receiver and the item");
+
+    let (_ty, mapping) = db.instantiate_with_mapping(&scheme);
+    let emitted = db.pending_constraints();
+    assert_eq!(emitted.len(), 1);
+    match &emitted[0].cap {
+        crate::Capability::Iterable { item } => {
+            assert!(
+                mapping.contains(item),
+                "the item names one of this use's fresh variables, not the scheme's"
+            );
+        }
+        other => panic!("expected Iterable, got {other:?}"),
+    }
+}
+
+/// Discharge is by *resolution*, not by age: a constraint whose variable has
+/// been linked to a concrete type is ready to check; one that is still a
+/// variable is not wrong yet, and answering it now is the optimism TY-29 is
+/// about.
+#[test]
+fn only_a_resolved_constraint_is_dischargeable() {
+    let mut db = TypeDb::new();
+    let (resolved, unresolved) = (db.fresh_var(), db.fresh_var());
+    let (r_id, u_id) = (
+        db.var_id_of(resolved).expect("var"),
+        db.var_id_of(unresolved).expect("var"),
+    );
+    db.require(crate::Constraint::of_kind(
+        r_id,
+        praxis_stdlib::CapKind::Eq,
+        nowhere(),
+    ));
+    db.require(crate::Constraint::of_kind(
+        u_id,
+        praxis_stdlib::CapKind::Ord,
+        nowhere(),
+    ));
+
+    assert!(
+        db.take_dischargeable().is_empty(),
+        "nothing is resolved yet"
+    );
+
+    let int = db.int();
+    db.unify(resolved, int).expect("a fresh var unifies");
+    let ready = db.take_dischargeable();
+    assert_eq!(ready.len(), 1, "exactly the one that resolved");
+    assert_eq!(ready[0].var, r_id);
+    assert_eq!(
+        db.pending_constraints().len(),
+        1,
+        "and the unresolved one is still waiting"
+    );
+    assert!(
+        db.take_dischargeable().is_empty(),
+        "draining takes; it does not copy"
+    );
+}
+
+/// The same requirement discovered twice is one requirement. A `for` inside a
+/// loop body would otherwise push one per pass over the tree.
+#[test]
+fn an_identical_requirement_is_recorded_once() {
+    let mut db = TypeDb::new();
+    let v = db.fresh_var();
+    let id = db.var_id_of(v).expect("var");
+    for _ in 0..3 {
+        db.require(crate::Constraint::of_kind(
+            id,
+            praxis_stdlib::CapKind::Eq,
+            nowhere(),
+        ));
+    }
+    assert_eq!(db.pending_constraints().len(), 1);
+    // …but a *different* capability on the same variable is a different
+    // requirement, and both have to be checked.
+    db.require(crate::Constraint::of_kind(
+        id,
+        praxis_stdlib::CapKind::Ord,
+        nowhere(),
+    ));
+    assert_eq!(db.pending_constraints().len(), 2);
+}

@@ -12,6 +12,7 @@
 //! let-generalization. Collections, records, enums, closures, and the internal
 //! capability system arrive with their own milestones (M5/M7).
 
+pub mod constraint;
 pub mod ctor;
 pub mod data;
 pub mod db;
@@ -23,6 +24,7 @@ pub mod pretty;
 pub mod type_id;
 pub mod unify;
 
+pub use constraint::{Capability, Constraint};
 pub use ctor::{CollectionArgs, FieldSet, TupleElems, VariantSet};
 pub use data::{
     EnumDef, EnumDefId, EnumVariantDef, Level, RecordDef, RecordDefId, RecordFieldDef, TypeData,
@@ -38,7 +40,7 @@ pub use type_id::{Type, VarId};
 // without depending on `praxis-stdlib` themselves. `ScalarType`/`CollectionCtor`
 // live in `praxis-stdlib`'s `type_pattern` module; surface them from our root.
 pub use praxis_stdlib::type_pattern::{CollectionCtor, ScalarType};
-pub use praxis_stdlib::TypePattern;
+pub use praxis_stdlib::{CapKind, TypePattern};
 
 use praxis_stdlib::type_pattern::ScalarType as Scalar;
 
