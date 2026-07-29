@@ -24,7 +24,7 @@ use praxis_ast::{
     LoopExpr, MethodCallExpr, Param, ParamList, PathExpr, RecordLitExpr, ReturnExpr, SourceFile,
     StructItem, TupleExpr, UnaryExpr, VarStmt, WhileExpr,
 };
-use praxis_source::{Diagnostic, DiagnosticCategory, DiagnosticCode, FileSpan, Severity, Span};
+use praxis_source::{DiagCode, Diagnostic, FileSpan, Severity, Span};
 use praxis_stdlib::type_pattern::ScalarType as PatternScalar;
 use praxis_stdlib::TypePattern;
 use praxis_syntax::{SyntaxKind, SyntaxNode};
@@ -697,10 +697,10 @@ impl<'a> Lowerer<'a> {
         (u32::from(r.start()), u32::from(r.end()))
     }
 
-    fn diag(&mut self, at: TextRange, number: u32, msg: impl Into<String>) {
+    fn diag(&mut self, at: TextRange, code: DiagCode, msg: impl Into<String>) {
         self.diagnostics.push(Diagnostic::new(
             Severity::Error,
-            DiagnosticCode::new(DiagnosticCategory::Type, number),
+            code,
             msg.into(),
             self.file_span(at),
         ));
@@ -1678,7 +1678,7 @@ impl<'a> Lowerer<'a> {
             if let Some(name_tok) = m.method_name() {
                 self.diag(
                     name_tok.text_range(),
-                    110,
+                    DiagCode::NoMethodOnType,
                     format!("no method `{name}` on this type taking {arity} argument(s)"),
                 );
             }
@@ -1854,7 +1854,7 @@ impl<'a> Lowerer<'a> {
             if let Some(tok) = f.field_name() {
                 self.diag(
                     tok.text_range(),
-                    112,
+                    DiagCode::NoFieldOnType,
                     format!("no field `{}` on this type", tok.text()),
                 );
             }

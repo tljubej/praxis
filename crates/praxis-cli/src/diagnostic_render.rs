@@ -77,7 +77,7 @@ pub fn write_to(writer: &mut impl Write, rendered: &RenderedDiagnostics) -> std:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use praxis_source::{DiagnosticCategory, DiagnosticCode, FileSpan, Severity, Span};
+    use praxis_source::{DiagCode, FileSpan, Severity, Span};
     use praxis_test_support::single_file;
 
     #[test]
@@ -85,13 +85,13 @@ mod tests {
         let (map, id) = single_file("f.px", "ab\ncd\n");
         let e = Diagnostic::new(
             Severity::Error,
-            DiagnosticCode::new(DiagnosticCategory::Lex, 3),
+            DiagCode::UnexpectedCharacter,
             "boom",
             FileSpan::new(id, Span::new(0, 1)),
         );
         let w = Diagnostic::new(
             Severity::Warning,
-            DiagnosticCode::new(DiagnosticCategory::Lex, 4),
+            DiagCode::UnterminatedTextLiteral,
             "careful",
             FileSpan::new(id, Span::new(3, 4)),
         );

@@ -17,8 +17,8 @@ pub mod span;
 pub mod style;
 
 pub use diagnostic::{
-    render_one, Diagnostic, DiagnosticCategory, DiagnosticCode, DiagnosticNote, Renderer, Severity,
-    Suggestion,
+    render_one, DiagCode, Diagnostic, DiagnosticCategory, DiagnosticCode, DiagnosticNote, Renderer,
+    Severity, Suggestion,
 };
 pub use file::{FileId, SourceFile, SourceMap};
 pub use line_map::{LineCol, LineMap};

@@ -96,8 +96,14 @@ pub struct DiagnosticCode {
 impl DiagnosticCode {
     /// Create a code. The number is per-category: `Lex`/1 and `Parse`/1 are two
     /// distinct codes and both are valid.
+    ///
+    /// `pub(crate)` on purpose: the only way to reach a code from outside is
+    /// [`DiagCode::code`], so a number nobody registered in [`DiagCode`] has no
+    /// way into a diagnostic. Before that, five crates wrote
+    /// `DiagnosticCode::new(Type, 110)` at the site, and there was no place to
+    /// look up which numbers were spent.
     #[inline]
-    pub const fn new(category: DiagnosticCategory, number: u32) -> DiagnosticCode {
+    pub(crate) const fn new(category: DiagnosticCategory, number: u32) -> DiagnosticCode {
         DiagnosticCode { category, number }
     }
 
@@ -120,6 +126,298 @@ impl std::fmt::Display for DiagnosticCode {
         } else {
             write!(f, "{}{}", self.category.prefix(), n)
         }
+    }
+}
+
+/// The closed set of diagnostics the compiler can emit.
+///
+/// Every `(category, number)` pair is written in exactly one place —
+/// [`DiagCode::code`]'s exhaustive match — so allocating a code is a
+/// compile-time act with a name rather than an integer literal at a call site.
+/// [`DiagnosticCode::new`] is `pub(crate)` for the same reason: an unregistered
+/// number has no route into a [`Diagnostic`].
+///
+/// **The allocation is ADR-051.** Adding a variant means amending it first;
+/// `every_code_is_distinct` is what catches a collision if you do not.
+///
+/// The numbers are not contiguous and are not meant to be. `Y09x` is internal
+/// errors, `Y11x` member errors, `Y12x` match errors — a split the codes that
+/// shipped before this registry already implied, and renumbering them would
+/// change identifiers users have already seen.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum DiagCode {
+    // --- Lex (`T0xx`) ---
+    /// `T001` — a `/*` with no matching `*/`.
+    UnterminatedBlockComment,
+    /// `T002` — a backtick template with no closing backtick.
+    UnterminatedTemplate,
+    /// `T003` — a character the lexer cannot classify.
+    UnexpectedCharacter,
+    /// `T004` — a text literal with no closing quote.
+    UnterminatedTextLiteral,
+    /// `T005` — a `\` escape the lexer does not recognize.
+    InvalidEscape,
+
+    // --- Parse (`P0xx`) ---
+    /// `P001` — a token that cannot appear here.
+    UnexpectedToken,
+    /// `P002` — two statements with no `;` and no line break between them
+    /// (FE-04).
+    ExpectedStatementSeparator,
+
+    // --- Name (`N0xx`) ---
+    /// `N000` — internal: the parse tree's root is not a `SOURCE_FILE`.
+    InternalNotASourceFile,
+    /// `N001` — a name that is not in scope.
+    UnknownName,
+    /// `N002` — a type annotation naming a type that does not exist.
+    UnknownType,
+    /// `N003` — a name used in type position that names a value (TY-11).
+    NameIsNotAType,
+    /// `N004` — one name declared twice in one scope (TY-24).
+    DuplicateDeclaration,
+    /// `N005` — a function declared inside a function (TY-23).
+    NestedFunction,
+
+    // --- Type (`Y0xx`), the user block ---
+    /// `Y001` — two types that could not be unified.
+    TypeMismatch,
+    /// `Y002` — an occurs-check failure.
+    InfiniteType,
+    /// `Y003` — an annotation that conflicts with what inference derived.
+    AnnotationConflict,
+    /// `Y004` — a type whose values cannot be compared with `==`.
+    NotEquatable,
+    /// `Y005` — a type that cannot be iterated.
+    NotIterable,
+    /// `Y006` — a type that has no ordering.
+    NotOrderable,
+    /// `Y007` — a type constructor given the wrong number of type arguments.
+    /// Also TY-12's `Option[Int, Text]`, which is the same mistake.
+    WrongTypeArgumentCount,
+    /// `Y008` — a `struct`/`enum` declaring one field or variant twice.
+    DuplicateMember,
+    /// `Y009` — assignment to something that is not a `var` (TY-14).
+    AssignToImmutable,
+    /// `Y010` — a compound assignment whose operands are not numeric (TY-15).
+    CompoundAssignNonNumeric,
+    /// `Y011` — `return` outside a function (TY-20).
+    ReturnOutsideFunction,
+    /// `Y012` — `break`/`continue` outside a loop (TY-20).
+    BreakOutsideLoop,
+    /// `Y013` — an integer literal outside the representable range (TY-28).
+    IntLiteralOutOfRange,
+    /// `Y014` — a `Map`/`Set` key type that cannot be hashed (TY-32).
+    NotHashable,
+    /// `Y015` — a non-numeric type where a numeric one is required (TY-31).
+    NotNumeric,
+    /// `Y016` — an operator not defined for these operand types (TY-26, TY-27).
+    OperatorNotDefined,
+
+    // --- Type (`Y09x`), internal ---
+    /// `Y099` — internal: a type the compiler expected was absent.
+    InternalMissingType,
+
+    // --- Type (`Y11x`), member errors ---
+    /// `Y110` — no such method on this type at this arity.
+    NoMethodOnType,
+    /// `Y112` — no such field on this type.
+    NoFieldOnType,
+    /// `Y113` — a record literal missing one or more fields (HIR-04).
+    MissingRecordFields,
+    /// `Y114` — a record literal naming a field the type does not have (HIR-04).
+    UnknownRecordField,
+    /// `Y115` — a record literal naming one field twice (HIR-04).
+    DuplicateRecordField,
+
+    // --- Type (`Y12x`), match errors ---
+    /// `Y120` — a `match` that does not cover every value.
+    NonExhaustiveMatch,
+    /// `Y121` — a `match` arm an earlier arm already covers.
+    UnreachableArm,
+    /// `Y122` — a pattern naming a variant the scrutinee's type has not
+    /// (HIR-07).
+    UnknownEnumVariant,
+    /// `Y123` — a pattern whose shape cannot match the scrutinee (HIR-06).
+    NotAPatternForType,
+
+    // --- Input (`I0xx`) ---
+    /// `I000` — a parser expression the lowerer cannot read at all.
+    MalformedParserExpression,
+    /// `I001` — a parser AST that could not be converted to a type or plan.
+    ParserConversion,
+    /// `I010` — an atomic parser name that does not exist.
+    UnknownAtomic,
+    /// `I011` — an invalid capture name in a template (IP-04).
+    InvalidCaptureName,
+    /// `I012` — a capture kind that does not exist (IP-06).
+    UnknownCaptureKind,
+    /// `I013` — a parser constructor that does not exist (IP-07).
+    UnknownConstructor,
+    /// `I014` — a constructor argument that is invalid or in excess (IP-07).
+    InvalidConstructorArgument,
+    /// `I020` — named and anonymous captures mixed in one template (§7.3).
+    MixedCaptureNaming,
+    /// `I021` — one capture name used twice in a template.
+    DuplicateCaptureName,
+    /// `I022` — a constructor called with the wrong number of arguments.
+    ConstructorArity,
+    /// `I023` — an empty separator, which cannot advance a cursor (IP-10).
+    EmptySeparator,
+    /// `I024` — a section or block field declared twice.
+    DuplicateSectionField,
+    /// `I025` — a `sections`/`choice` with no field or case at all.
+    EmptyFieldList,
+    /// `I026` — a positional `block` item returning a scalar with no name.
+    UnnamedScalarBlockItem,
+    /// `I027` — a `choice` case declared twice.
+    DuplicateChoiceCase,
+    /// `I028` — a misplaced or repeated `repeated(...)` tail (IP-09).
+    MisplacedRepeatedTail,
+    /// `I030` — a backtick template the scanner could not read.
+    TemplateScan,
+}
+
+impl DiagCode {
+    /// The rendered code. **The one place a `(category, number)` pair exists.**
+    #[must_use]
+    pub const fn code(self) -> DiagnosticCode {
+        use DiagCode::*;
+        use DiagnosticCategory::{Input, Lex, Name, Parse, Type};
+        match self {
+            UnterminatedBlockComment => DiagnosticCode::new(Lex, 1),
+            UnterminatedTemplate => DiagnosticCode::new(Lex, 2),
+            UnexpectedCharacter => DiagnosticCode::new(Lex, 3),
+            UnterminatedTextLiteral => DiagnosticCode::new(Lex, 4),
+            InvalidEscape => DiagnosticCode::new(Lex, 5),
+
+            UnexpectedToken => DiagnosticCode::new(Parse, 1),
+            ExpectedStatementSeparator => DiagnosticCode::new(Parse, 2),
+
+            InternalNotASourceFile => DiagnosticCode::new(Name, 0),
+            UnknownName => DiagnosticCode::new(Name, 1),
+            UnknownType => DiagnosticCode::new(Name, 2),
+            NameIsNotAType => DiagnosticCode::new(Name, 3),
+            DuplicateDeclaration => DiagnosticCode::new(Name, 4),
+            NestedFunction => DiagnosticCode::new(Name, 5),
+
+            TypeMismatch => DiagnosticCode::new(Type, 1),
+            InfiniteType => DiagnosticCode::new(Type, 2),
+            AnnotationConflict => DiagnosticCode::new(Type, 3),
+            NotEquatable => DiagnosticCode::new(Type, 4),
+            NotIterable => DiagnosticCode::new(Type, 5),
+            NotOrderable => DiagnosticCode::new(Type, 6),
+            WrongTypeArgumentCount => DiagnosticCode::new(Type, 7),
+            DuplicateMember => DiagnosticCode::new(Type, 8),
+            AssignToImmutable => DiagnosticCode::new(Type, 9),
+            CompoundAssignNonNumeric => DiagnosticCode::new(Type, 10),
+            ReturnOutsideFunction => DiagnosticCode::new(Type, 11),
+            BreakOutsideLoop => DiagnosticCode::new(Type, 12),
+            IntLiteralOutOfRange => DiagnosticCode::new(Type, 13),
+            NotHashable => DiagnosticCode::new(Type, 14),
+            NotNumeric => DiagnosticCode::new(Type, 15),
+            OperatorNotDefined => DiagnosticCode::new(Type, 16),
+
+            InternalMissingType => DiagnosticCode::new(Type, 99),
+
+            NoMethodOnType => DiagnosticCode::new(Type, 110),
+            NoFieldOnType => DiagnosticCode::new(Type, 112),
+            MissingRecordFields => DiagnosticCode::new(Type, 113),
+            UnknownRecordField => DiagnosticCode::new(Type, 114),
+            DuplicateRecordField => DiagnosticCode::new(Type, 115),
+
+            NonExhaustiveMatch => DiagnosticCode::new(Type, 120),
+            UnreachableArm => DiagnosticCode::new(Type, 121),
+            UnknownEnumVariant => DiagnosticCode::new(Type, 122),
+            NotAPatternForType => DiagnosticCode::new(Type, 123),
+
+            MalformedParserExpression => DiagnosticCode::new(Input, 0),
+            ParserConversion => DiagnosticCode::new(Input, 1),
+            UnknownAtomic => DiagnosticCode::new(Input, 10),
+            InvalidCaptureName => DiagnosticCode::new(Input, 11),
+            UnknownCaptureKind => DiagnosticCode::new(Input, 12),
+            UnknownConstructor => DiagnosticCode::new(Input, 13),
+            InvalidConstructorArgument => DiagnosticCode::new(Input, 14),
+            MixedCaptureNaming => DiagnosticCode::new(Input, 20),
+            DuplicateCaptureName => DiagnosticCode::new(Input, 21),
+            ConstructorArity => DiagnosticCode::new(Input, 22),
+            EmptySeparator => DiagnosticCode::new(Input, 23),
+            DuplicateSectionField => DiagnosticCode::new(Input, 24),
+            EmptyFieldList => DiagnosticCode::new(Input, 25),
+            UnnamedScalarBlockItem => DiagnosticCode::new(Input, 26),
+            DuplicateChoiceCase => DiagnosticCode::new(Input, 27),
+            MisplacedRepeatedTail => DiagnosticCode::new(Input, 28),
+            TemplateScan => DiagnosticCode::new(Input, 30),
+        }
+    }
+
+    /// Every code, so a test can assert the allocation is injective.
+    pub const ALL: &'static [DiagCode] = {
+        use DiagCode::*;
+        &[
+            UnterminatedBlockComment,
+            UnterminatedTemplate,
+            UnexpectedCharacter,
+            UnterminatedTextLiteral,
+            InvalidEscape,
+            UnexpectedToken,
+            ExpectedStatementSeparator,
+            InternalNotASourceFile,
+            UnknownName,
+            UnknownType,
+            NameIsNotAType,
+            DuplicateDeclaration,
+            NestedFunction,
+            TypeMismatch,
+            InfiniteType,
+            AnnotationConflict,
+            NotEquatable,
+            NotIterable,
+            NotOrderable,
+            WrongTypeArgumentCount,
+            DuplicateMember,
+            AssignToImmutable,
+            CompoundAssignNonNumeric,
+            ReturnOutsideFunction,
+            BreakOutsideLoop,
+            IntLiteralOutOfRange,
+            NotHashable,
+            NotNumeric,
+            OperatorNotDefined,
+            InternalMissingType,
+            NoMethodOnType,
+            NoFieldOnType,
+            MissingRecordFields,
+            UnknownRecordField,
+            DuplicateRecordField,
+            NonExhaustiveMatch,
+            UnreachableArm,
+            UnknownEnumVariant,
+            NotAPatternForType,
+            MalformedParserExpression,
+            ParserConversion,
+            UnknownAtomic,
+            InvalidCaptureName,
+            UnknownCaptureKind,
+            UnknownConstructor,
+            InvalidConstructorArgument,
+            MixedCaptureNaming,
+            DuplicateCaptureName,
+            ConstructorArity,
+            EmptySeparator,
+            DuplicateSectionField,
+            EmptyFieldList,
+            UnnamedScalarBlockItem,
+            DuplicateChoiceCase,
+            MisplacedRepeatedTail,
+            TemplateScan,
+        ]
+    };
+}
+
+impl std::fmt::Display for DiagCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.code().fmt(f)
     }
 }
 
@@ -157,7 +455,10 @@ pub struct Suggestion {
 #[derive(Clone, Debug)]
 pub struct Diagnostic {
     severity: Severity,
-    code: DiagnosticCode,
+    /// The registered code. Stored as a [`DiagCode`] rather than a rendered
+    /// pair so that a diagnostic cannot exist for a number nobody allocated;
+    /// [`Diagnostic::code`] renders it on demand.
+    code: DiagCode,
     message: String,
     primary: FileSpan,
     notes: Vec<DiagnosticNote>,
@@ -169,7 +470,7 @@ impl Diagnostic {
     #[inline]
     pub fn new(
         severity: Severity,
-        code: DiagnosticCode,
+        code: DiagCode,
         message: impl Into<String>,
         primary: FileSpan,
     ) -> Diagnostic {
@@ -187,7 +488,7 @@ impl Diagnostic {
     #[inline]
     pub fn build(
         severity: Severity,
-        code: DiagnosticCode,
+        code: DiagCode,
         message: impl Into<String>,
         primary: FileSpan,
     ) -> DiagnosticBuilder {
@@ -201,8 +502,15 @@ impl Diagnostic {
         self.severity
     }
 
+    /// The rendered `T012`-style code.
     #[inline]
     pub fn code(&self) -> DiagnosticCode {
+        self.code.code()
+    }
+
+    /// Which diagnostic this is, as the registered name.
+    #[inline]
+    pub fn kind(&self) -> DiagCode {
         self.code
     }
 
@@ -427,6 +735,35 @@ mod tests {
         assert_eq!(code.to_string(), "T012");
     }
 
+    /// F2's whole point: two diagnostics must never render the same code. The
+    /// numbers used to be integer literals at five crates' call sites, with no
+    /// place to look up what was spent — so this could not be asked.
+    #[test]
+    fn every_code_is_distinct() {
+        let mut seen = std::collections::HashMap::new();
+        for &code in DiagCode::ALL {
+            if let Some(other) = seen.insert(code.to_string(), code) {
+                panic!("{other:?} and {code:?} both render {code}");
+            }
+        }
+    }
+
+    /// …and `ALL` really is all of them. A variant left out of the list is a
+    /// variant the injectivity test never checks.
+    #[test]
+    fn all_lists_every_variant() {
+        // `ALL` holds each variant once, so its length is the variant count.
+        // Update both together; the exhaustive match in `code()` is what makes
+        // adding a variant a compile error in the first place.
+        assert_eq!(DiagCode::ALL.len(), 56);
+        let unique: std::collections::HashSet<_> = DiagCode::ALL.iter().collect();
+        assert_eq!(
+            unique.len(),
+            DiagCode::ALL.len(),
+            "a variant is listed twice"
+        );
+    }
+
     #[test]
     fn code_distinguishes_categories() {
         let lex = DiagnosticCode::new(DiagnosticCategory::Lex, 3);
@@ -446,13 +783,14 @@ mod tests {
     fn diagnostic_carries_required_fields() {
         let d = Diagnostic::new(
             Severity::Error,
-            DiagnosticCode::new(DiagnosticCategory::Type, 12),
+            DiagCode::BreakOutsideLoop,
             "expected Int, found Text",
             span(FileId::SYNTHETIC, 0, 1),
         );
         assert_eq!(d.severity(), Severity::Error);
         // `Type` category renders as `Y`, matching the prefix table.
         assert_eq!(d.code().to_string(), "Y012");
+        assert_eq!(d.kind(), DiagCode::BreakOutsideLoop);
         assert_eq!(d.message(), "expected Int, found Text");
         assert!(d.notes().is_empty());
         assert!(d.suggestions().is_empty());
@@ -462,7 +800,7 @@ mod tests {
     fn builder_adds_notes_and_suggestions() {
         let d = Diagnostic::build(
             Severity::Error,
-            DiagnosticCode::new(DiagnosticCategory::Name, 1),
+            DiagCode::UnknownName,
             "undefined name",
             span(FileId::SYNTHETIC, 0, 1),
         )
@@ -481,7 +819,7 @@ mod tests {
         // "line" starts at byte 9, length 4.
         let d = Diagnostic::build(
             Severity::Error,
-            DiagnosticCode::new(DiagnosticCategory::Type, 12),
+            DiagCode::BreakOutsideLoop,
             "expected Int, found Text",
             span(id, 9, 13),
         )
@@ -512,7 +850,7 @@ help: parse it with the input parser
         let primary = span(id, 8, 13);
         let d = Diagnostic::build(
             Severity::Error,
-            DiagnosticCode::new(DiagnosticCategory::Name, 1),
+            DiagCode::UnknownName,
             "undefined name `value`",
             primary,
         )
@@ -542,7 +880,7 @@ note: the name `a` is defined here
         let id = map.intern("f.px", "x = 1\n");
         let d = Diagnostic::build(
             Severity::Error,
-            DiagnosticCode::new(DiagnosticCategory::Type, 1),
+            DiagCode::TypeMismatch,
             "expected Int, found Text",
             span(id, 0, 1),
         )

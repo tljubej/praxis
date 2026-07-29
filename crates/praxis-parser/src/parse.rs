@@ -13,7 +13,7 @@
 //! Other constructs are not parsed; they recover with a diagnostic.
 
 use praxis_source::{BytePos, Span};
-use praxis_source::{Diagnostic, DiagnosticCategory, DiagnosticCode, FileId, FileSpan, Severity};
+use praxis_source::{DiagCode, Diagnostic, FileId, FileSpan, Severity};
 use praxis_syntax::{PraxisLanguage, SyntaxKind, SyntaxNode, Token};
 use rowan::{GreenNodeBuilder, Language};
 
@@ -141,12 +141,6 @@ const fn bp(left: u8, right: u8) -> BindingPower {
 // ---------------------------------------------------------------------------
 // Statement separation (F8 / FE-04; D8, ADR-049).
 // ---------------------------------------------------------------------------
-
-/// `P001` — the general "this token cannot go here" parse error.
-const UNEXPECTED: DiagnosticCode = DiagnosticCode::new(DiagnosticCategory::Parse, 1);
-
-/// `P002` — two statements ran together with nothing between them (FE-04).
-const MISSING_SEPARATOR: DiagnosticCode = DiagnosticCode::new(DiagnosticCategory::Parse, 2);
 
 /// Whether a bare `Name { … }` in expression position is a record literal
 /// (FE-06).
@@ -333,7 +327,7 @@ impl<'t> Parser<'t> {
         }
         let span = self.current_span();
         self.error_with(
-            MISSING_SEPARATOR,
+            DiagCode::ExpectedStatementSeparator,
             span,
             "expected `;` or a line break between statements",
         );
@@ -470,10 +464,10 @@ impl<'t> Parser<'t> {
     // --- diagnostics ---
 
     fn error(&mut self, span: Span, message: impl Into<String>) {
-        self.error_with(UNEXPECTED, span, message);
+        self.error_with(DiagCode::UnexpectedToken, span, message);
     }
 
-    fn error_with(&mut self, code: DiagnosticCode, span: Span, message: impl Into<String>) {
+    fn error_with(&mut self, code: DiagCode, span: Span, message: impl Into<String>) {
         self.diagnostics.push(Diagnostic::new(
             Severity::Error,
             code,
@@ -1074,7 +1068,7 @@ impl<'t> Parser<'t> {
                 if !comma && !self.newline_before() {
                     let span = self.current_span();
                     self.error_with(
-                        MISSING_SEPARATOR,
+                        DiagCode::ExpectedStatementSeparator,
                         span,
                         "expected `,` or a line break between match arms",
                     );
@@ -1508,7 +1502,7 @@ impl<'t> Parser<'t> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use praxis_source::SourceMap;
+    use praxis_source::{DiagnosticCategory, SourceMap};
 
     fn parse_text(text: &str) -> ParseOutput {
         let map = SourceMap::new();
@@ -1730,7 +1724,7 @@ mod tests {
         let separator_errors = out
             .diagnostics
             .iter()
-            .filter(|d| d.code() == MISSING_SEPARATOR)
+            .filter(|d| d.kind() == DiagCode::ExpectedStatementSeparator)
             .count();
         assert_eq!(separator_errors, 2, "{:?}", out.diagnostics);
         assert_eq!(
@@ -1754,7 +1748,7 @@ mod tests {
             run_on
                 .diagnostics
                 .iter()
-                .any(|d| d.code() == MISSING_SEPARATOR),
+                .any(|d| d.kind() == DiagCode::ExpectedStatementSeparator),
             "{:?}",
             run_on.diagnostics
         );
@@ -1779,7 +1773,7 @@ mod tests {
             run_on
                 .diagnostics
                 .iter()
-                .any(|d| d.code() == MISSING_SEPARATOR),
+                .any(|d| d.kind() == DiagCode::ExpectedStatementSeparator),
             "{:?}",
             run_on.diagnostics
         );

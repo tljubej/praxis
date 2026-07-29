@@ -26,7 +26,7 @@
 //! - `T004` — unterminated text literal.
 //! - `T005` — invalid escape in text literal.
 
-use praxis_source::{Diagnostic, DiagnosticCategory, DiagnosticCode, FileId, Severity, Span};
+use praxis_source::{DiagCode, Diagnostic, FileId, Severity, Span};
 use praxis_syntax::{SyntaxKind, Token};
 
 /// The result of lexing one source file: the token stream and any diagnostics.
@@ -183,7 +183,7 @@ impl<'a> Lexer<'a> {
             // rest of the file can be processed.
             self.diagnostic(
                 Span::new(start as u32, self.pos as u32),
-                DiagnosticCode::new(DiagnosticCategory::Lex, 1),
+                DiagCode::UnterminatedBlockComment,
                 "unterminated block comment",
             );
         }
@@ -319,7 +319,7 @@ impl<'a> Lexer<'a> {
                         self.pos += 2;
                         self.diagnostic(
                             Span::new(bad_at as u32, self.pos as u32),
-                            DiagnosticCode::new(DiagnosticCategory::Lex, 5),
+                            DiagCode::InvalidEscape,
                             "invalid escape in text literal",
                         );
                     } else {
@@ -337,7 +337,7 @@ impl<'a> Lexer<'a> {
         // Reached EOF (or a newline) without a closing quote.
         self.diagnostic(
             Span::new(start as u32, self.pos as u32),
-            DiagnosticCode::new(DiagnosticCategory::Lex, 4),
+            DiagCode::UnterminatedTextLiteral,
             "unterminated text literal",
         );
         self.push(SyntaxKind::TextLit, start);
@@ -409,7 +409,7 @@ impl<'a> Lexer<'a> {
         } else {
             self.diagnostic(
                 Span::new(start as u32, self.pos as u32),
-                DiagnosticCode::new(DiagnosticCategory::Lex, 2),
+                DiagCode::UnterminatedTemplate,
                 "unterminated backtick template",
             );
         }
@@ -427,7 +427,7 @@ impl<'a> Lexer<'a> {
         let span = Span::new(start as u32, self.pos as u32);
         self.diagnostic(
             span,
-            DiagnosticCode::new(DiagnosticCategory::Lex, 3),
+            DiagCode::UnexpectedCharacter,
             "unexpected character in source",
         );
     }
@@ -458,7 +458,7 @@ impl<'a> Lexer<'a> {
         ));
     }
 
-    fn diagnostic(&mut self, span: Span, code: DiagnosticCode, message: &str) {
+    fn diagnostic(&mut self, span: Span, code: DiagCode, message: &str) {
         self.diagnostics.push(Diagnostic::new(
             Severity::Error,
             code,
@@ -557,10 +557,7 @@ mod tests {
     fn unknown_byte_emits_one_diagnostic() {
         let (kinds, diags) = lex_text("let @ = 1");
         assert_eq!(diags.len(), 1);
-        assert_eq!(
-            diags[0].code(),
-            DiagnosticCode::new(DiagnosticCategory::Lex, 3)
-        );
+        assert_eq!(diags[0].kind(), DiagCode::UnexpectedCharacter);
         // The `@` becomes an ERROR token and lexing continues. It must not be
         // dropped: the tree is lossless (ADR-003), so every byte of the source
         // has to be reachable through some token — this test previously
@@ -601,10 +598,7 @@ mod tests {
     fn unterminated_block_comment_faults() {
         let (_, diags) = lex_text("/* never ends");
         assert_eq!(diags.len(), 1);
-        assert_eq!(
-            diags[0].code(),
-            DiagnosticCode::new(DiagnosticCategory::Lex, 1)
-        );
+        assert_eq!(diags[0].kind(), DiagCode::UnterminatedBlockComment);
     }
 
     #[test]
@@ -618,10 +612,7 @@ mod tests {
     fn unterminated_template_faults() {
         let (_, diags) = lex_text("let p = `never closes");
         assert_eq!(diags.len(), 1);
-        assert_eq!(
-            diags[0].code(),
-            DiagnosticCode::new(DiagnosticCategory::Lex, 2)
-        );
+        assert_eq!(diags[0].kind(), DiagCode::UnterminatedTemplate);
     }
 
     #[test]
@@ -879,20 +870,14 @@ error[T003]: unexpected character in source
     fn unterminated_text_literal_faults() {
         let (_, diags) = lex_text("\"never closes");
         assert_eq!(diags.len(), 1);
-        assert_eq!(
-            diags[0].code(),
-            DiagnosticCode::new(DiagnosticCategory::Lex, 4)
-        );
+        assert_eq!(diags[0].kind(), DiagCode::UnterminatedTextLiteral);
     }
 
     #[test]
     fn invalid_escape_faults() {
         let (_, diags) = lex_text("\"bad \\q escape\"");
         assert_eq!(diags.len(), 1);
-        assert_eq!(
-            diags[0].code(),
-            DiagnosticCode::new(DiagnosticCategory::Lex, 5)
-        );
+        assert_eq!(diags[0].kind(), DiagCode::InvalidEscape);
     }
 
     #[test]

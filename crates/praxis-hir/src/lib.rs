@@ -136,7 +136,7 @@ pub fn analyze_root(file: FileId, root: &praxis_syntax::SyntaxNode) -> Analysis 
             // is an internal error, surfaced as a single diagnostic.
             diagnostics: vec![praxis_source::Diagnostic::new(
                 praxis_source::Severity::Error,
-                praxis_source::DiagnosticCode::new(praxis_source::DiagnosticCategory::Name, 0),
+                praxis_source::DiagCode::InternalNotASourceFile,
                 "internal: parse tree root is not a SOURCE_FILE",
                 praxis_source::FileSpan::new(file, praxis_source::Span::EMPTY),
             )],

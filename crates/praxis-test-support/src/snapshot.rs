@@ -29,7 +29,7 @@ pub fn render_diagnostics(diags: &[Diagnostic], source: &SourceMap) -> String {
 mod tests {
     use super::*;
     use crate::single_file;
-    use praxis_source::{DiagnosticCategory, DiagnosticCode, FileSpan, Severity, Span};
+    use praxis_source::{DiagCode, FileSpan, Severity, Span};
 
     #[test]
     fn snapshot_smoke_test() {
@@ -42,13 +42,13 @@ mod tests {
         let (map, id) = single_file("f.px", "ab\ncd\n");
         let d1 = Diagnostic::new(
             Severity::Error,
-            DiagnosticCode::new(DiagnosticCategory::Lex, 3),
+            DiagCode::UnexpectedCharacter,
             "first problem",
             FileSpan::new(id, Span::new(0, 1)),
         );
         let d2 = Diagnostic::new(
             Severity::Warning,
-            DiagnosticCode::new(DiagnosticCategory::Lex, 4),
+            DiagCode::UnterminatedTextLiteral,
             "second problem",
             FileSpan::new(id, Span::new(3, 4)),
         );

@@ -11,9 +11,7 @@ use praxis_input_parser::ast::{AtomicKind, Constructor, ParserAst, TemplatePart}
 use praxis_input_parser::{
     lower_to_plan, register_plan, scan_template, synthesize, validate, PlanId, ValidationError,
 };
-use praxis_source::{
-    Diagnostic, DiagnosticCategory, DiagnosticCode, FileId, FileSpan, Severity, Span,
-};
+use praxis_source::{DiagCode, Diagnostic, FileId, FileSpan, Severity, Span};
 use praxis_types::{Type, TypeDb};
 
 /// The result of converting + validating + synthesizing a parser expression.
@@ -46,7 +44,12 @@ pub fn analyze_parser_expr(
     let result_type = match synthesize(&ast, db) {
         Ok(ty) => ty,
         Err(e) => {
-            diagnostics.push(err_diag(file, parser_expr.span(), "I001", e.to_string()));
+            diagnostics.push(err_diag(
+                file,
+                parser_expr.span(),
+                DiagCode::ParserConversion,
+                e.to_string(),
+            ));
             return None;
         }
     };
@@ -55,7 +58,12 @@ pub fn analyze_parser_expr(
     let plan = match register_plan(lower_to_plan(&ast)) {
         Ok(id) => id,
         Err(e) => {
-            diagnostics.push(err_diag(file, parser_expr.span(), "I001", e.to_string()));
+            diagnostics.push(err_diag(
+                file,
+                parser_expr.span(),
+                DiagCode::ParserConversion,
+                e.to_string(),
+            ));
             return None;
         }
     };
@@ -82,7 +90,12 @@ pub fn synthesize_parser_type(
     match synthesize(&ast, db) {
         Ok(ty) => Some(ty),
         Err(e) => {
-            diagnostics.push(err_diag(file, parser_expr.span(), "I001", e.to_string()));
+            diagnostics.push(err_diag(
+                file,
+                parser_expr.span(),
+                DiagCode::ParserConversion,
+                e.to_string(),
+            ));
             None
         }
     }
@@ -104,7 +117,7 @@ fn convert_parser_expr(
                     diagnostics.push(err_diag(
                         file,
                         span,
-                        "I010",
+                        DiagCode::UnknownAtomic,
                         format!("unknown atomic parser `{text}`"),
                     ));
                     None
@@ -120,7 +133,7 @@ fn convert_parser_expr(
             diagnostics.push(err_diag(
                 file,
                 span,
-                "I000",
+                DiagCode::MalformedParserExpression,
                 "malformed parser expression".to_string(),
             ));
             None
@@ -168,7 +181,7 @@ fn convert_template(
             diagnostics.push(err_diag(
                 file,
                 span,
-                "I030",
+                DiagCode::TemplateScan,
                 format!("template scan error: {e}"),
             ));
             Vec::new()
@@ -657,20 +670,8 @@ fn build_choice(args: Vec<CallArg>, span: Span) -> ParserAst {
 
 // ---- diagnostic helpers ----------------------------------------------------
 
-fn err_diag(file: FileId, span: Span, code: &str, msg: String) -> Diagnostic {
-    Diagnostic::new(
-        Severity::Error,
-        DiagnosticCode::new(DiagnosticCategory::Input, code_number(code)),
-        msg,
-        FileSpan { file, span },
-    )
-}
-
-/// Parse the numeric portion of a code like "I010" into a u32.
-fn code_number(code: &str) -> u32 {
-    code.trim_start_matches(|c: char| !c.is_ascii_digit())
-        .parse()
-        .unwrap_or(0)
+fn err_diag(file: FileId, span: Span, code: DiagCode, msg: String) -> Diagnostic {
+    Diagnostic::new(Severity::Error, code, msg, FileSpan { file, span })
 }
 
 /// Convert a [`ValidationError`] into a [`Diagnostic`] (free function, avoids the
@@ -678,7 +679,7 @@ fn code_number(code: &str) -> u32 {
 fn validation_error_to_diagnostic(err: &ValidationError, file: FileId) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
-        DiagnosticCode::new(DiagnosticCategory::Input, code_number(err.code)),
+        err.code,
         err.message.clone(),
         FileSpan {
             file,

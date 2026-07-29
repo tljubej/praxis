@@ -9,15 +9,18 @@
 //! [`Diagnostic`]s with the `I0xx` (input-parser) category.
 
 use crate::ast::{Constructor, ParserAst, TemplatePart};
-use praxis_source::Span;
+use praxis_source::{DiagCode, Span};
 
 /// A structural error found while validating a parser AST.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidationError {
     /// The byte span of the offending node.
     pub span: Span,
-    /// A machine-readable code (e.g. `"I020"`).
-    pub code: &'static str,
+    /// Which diagnostic this is. A registered [`DiagCode`] rather than the
+    /// `&'static str` it used to be: the string was parsed back into a number
+    /// by `praxis-hir` to build the real code, so a typo in it was a silent
+    /// `I000` (F2).
+    pub code: DiagCode,
     /// A human-readable explanation.
     pub message: String,
 }
@@ -55,7 +58,7 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
             if fields.is_empty() {
                 errs.push(ValidationError {
                     span: *span,
-                    code: "I025",
+                    code: DiagCode::EmptyFieldList,
                     message: "named `sections` requires at least one field".to_string(),
                 });
             }
@@ -65,7 +68,7 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
                 if seen.contains(name) {
                     errs.push(ValidationError {
                         span: *span,
-                        code: "I024",
+                        code: DiagCode::DuplicateSectionField,
                         message: format!("duplicate section field `{name}`"),
                     });
                 }
@@ -97,7 +100,7 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
                         if contributed.is_empty() && !is_template {
                             errs.push(ValidationError {
                                 span: *span,
-                                code: "I026",
+                                code: DiagCode::UnnamedScalarBlockItem,
                                 message:
                                     "a positional `block` item returning a scalar must be named"
                                         .to_string(),
@@ -107,7 +110,7 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
                             if seen.contains(n) {
                                 errs.push(ValidationError {
                                     span: *span,
-                                    code: "I024",
+                                    code: DiagCode::DuplicateSectionField,
                                     message: format!("duplicate block field `{n}`"),
                                 });
                             }
@@ -119,7 +122,7 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
                         if seen.contains(name) {
                             errs.push(ValidationError {
                                 span: *span,
-                                code: "I024",
+                                code: DiagCode::DuplicateSectionField,
                                 message: format!("duplicate block field `{name}`"),
                             });
                         }
@@ -134,7 +137,7 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
             if cases.is_empty() {
                 errs.push(ValidationError {
                     span: *span,
-                    code: "I025",
+                    code: DiagCode::EmptyFieldList,
                     message: "`choice` requires at least one case".to_string(),
                 });
             }
@@ -143,7 +146,7 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
                 if seen.contains(name) {
                     errs.push(ValidationError {
                         span: *span,
-                        code: "I027",
+                        code: DiagCode::DuplicateChoiceCase,
                         message: format!("duplicate choice case `{name}`"),
                     });
                 }
@@ -195,7 +198,7 @@ fn validate_template(parts: &[TemplatePart], span: Span, errs: &mut Vec<Validati
     if has_named && has_anonymous {
         errs.push(ValidationError {
             span,
-            code: "I020",
+            code: DiagCode::MixedCaptureNaming,
             message: "named and anonymous captures may not be mixed in one template (§7.3)"
                 .to_string(),
         });
@@ -208,7 +211,7 @@ fn validate_template(parts: &[TemplatePart], span: Span, errs: &mut Vec<Validati
             if seen_names.contains(n) {
                 errs.push(ValidationError {
                     span,
-                    code: "I021",
+                    code: DiagCode::DuplicateCaptureName,
                     message: format!("duplicate capture name `{n}` in template"),
                 });
             }
@@ -228,7 +231,7 @@ pub fn check_constructor_arity(
     if actual != expected {
         Some(ValidationError {
             span,
-            code: "I022",
+            code: DiagCode::ConstructorArity,
             message: format!(
                 "`{}` expects {} argument{}, got {}",
                 ctor_name(ctor),
@@ -257,7 +260,7 @@ fn ctor_name(c: Constructor) -> &'static str {
 mod tests {
     use super::*;
     use crate::ast::AtomicKind;
-    use praxis_source::Span;
+    use praxis_source::{DiagCode, Span};
 
     fn atom() -> ParserAst {
         ParserAst::Atomic {
@@ -292,7 +295,7 @@ mod tests {
         };
         let errs = validate(&ast);
         assert_eq!(errs.len(), 1);
-        assert_eq!(errs[0].code, "I020");
+        assert_eq!(errs[0].code, DiagCode::MixedCaptureNaming);
     }
 
     #[test]
@@ -312,14 +315,14 @@ mod tests {
         };
         let errs = validate(&ast);
         assert_eq!(errs.len(), 1);
-        assert_eq!(errs[0].code, "I021");
+        assert_eq!(errs[0].code, DiagCode::DuplicateCaptureName);
     }
 
     #[test]
     fn arity_mismatch_reported() {
         let err = check_constructor_arity(Constructor::Sep, 1, Span::at(0));
         assert!(err.is_some());
-        assert_eq!(err.unwrap().code, "I022");
+        assert_eq!(err.unwrap().code, DiagCode::ConstructorArity);
     }
 
     #[test]
@@ -348,7 +351,9 @@ mod tests {
 
         let errors = validate(&ast);
         assert!(
-            errors.iter().any(|error| error.code == "I024"),
+            errors
+                .iter()
+                .any(|error| error.code == DiagCode::DuplicateSectionField),
             "the generated record cannot contain two fields named `items`"
         );
     }

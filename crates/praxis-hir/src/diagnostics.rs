@@ -9,13 +9,13 @@
 
 #![allow(dead_code)] // Y0xx constructors are exercised in Slice 5.
 
-use praxis_source::{Diagnostic, DiagnosticCategory, DiagnosticCode, FileSpan, Severity};
+use praxis_source::{DiagCode, Diagnostic, FileSpan, Severity};
 
 /// `N001` — a name was used that is not in scope.
 pub(crate) fn unresolved_name(at: FileSpan, name: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
-        DiagnosticCode::new(DiagnosticCategory::Name, 1),
+        DiagCode::UnknownName,
         format!("`{name}` is not defined"),
         at,
     )
@@ -27,7 +27,7 @@ pub(crate) fn unresolved_name(at: FileSpan, name: &str) -> Diagnostic {
 pub(crate) fn unknown_type(at: FileSpan, name: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
-        DiagnosticCode::new(DiagnosticCategory::Name, 2),
+        DiagCode::UnknownType,
         format!("unknown type `{name}`"),
         at,
     )
@@ -37,7 +37,7 @@ pub(crate) fn unknown_type(at: FileSpan, name: &str) -> Diagnostic {
 pub(crate) fn type_mismatch(at: FileSpan, expected: &str, found: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
-        DiagnosticCode::new(DiagnosticCategory::Type, 1),
+        DiagCode::TypeMismatch,
         format!("expected {expected}, found {found}"),
         at,
     )
@@ -54,7 +54,7 @@ pub(crate) fn type_mismatch_with_help(
 ) -> Diagnostic {
     Diagnostic::build(
         Severity::Error,
-        DiagnosticCode::new(DiagnosticCategory::Type, 1),
+        DiagCode::TypeMismatch,
         format!("expected {expected}, found {found}"),
         at,
     )
@@ -67,7 +67,7 @@ pub(crate) fn type_mismatch_with_help(
 pub(crate) fn infinite_type(at: FileSpan) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
-        DiagnosticCode::new(DiagnosticCategory::Type, 2),
+        DiagCode::InfiniteType,
         "an infinite type would be required here",
         at,
     )
@@ -77,7 +77,7 @@ pub(crate) fn infinite_type(at: FileSpan) -> Diagnostic {
 pub(crate) fn annotation_conflict(at: FileSpan, annotated: &str, derived: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
-        DiagnosticCode::new(DiagnosticCategory::Type, 3),
+        DiagCode::AnnotationConflict,
         format!("annotation says {annotated}, but use implies {derived}"),
         at,
     )
@@ -89,7 +89,7 @@ pub(crate) fn annotation_conflict(at: FileSpan, annotated: &str, derived: &str) 
 pub(crate) fn not_equatable(at: FileSpan, ty: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
-        DiagnosticCode::new(DiagnosticCategory::Type, 4),
+        DiagCode::NotEquatable,
         format!("values of type `{ty}` cannot be compared with `==`"),
         at,
     )
@@ -100,7 +100,7 @@ pub(crate) fn not_equatable(at: FileSpan, ty: &str) -> Diagnostic {
 pub(crate) fn not_iterable(at: FileSpan, ty: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
-        DiagnosticCode::new(DiagnosticCategory::Type, 5),
+        DiagCode::NotIterable,
         format!("values of type `{ty}` cannot be iterated"),
         at,
     )
@@ -112,7 +112,7 @@ pub(crate) fn not_iterable(at: FileSpan, ty: &str) -> Diagnostic {
 pub(crate) fn not_orderable(at: FileSpan, ty: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
-        DiagnosticCode::new(DiagnosticCategory::Type, 6),
+        DiagCode::NotOrderable,
         format!("values of type `{ty}` cannot be ordered"),
         at,
     )
@@ -134,7 +134,7 @@ pub(crate) fn wrong_type_argument_count(
 ) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
-        DiagnosticCode::new(DiagnosticCategory::Type, 7),
+        DiagCode::WrongTypeArgumentCount,
         format!("`{ctor}` takes {want} type argument(s), but {got} were given"),
         at,
     )
@@ -149,7 +149,7 @@ pub(crate) fn wrong_type_argument_count(
 pub(crate) fn duplicate_member(at: FileSpan, what: &str, name: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
-        DiagnosticCode::new(DiagnosticCategory::Type, 8),
+        DiagCode::DuplicateMember,
         format!("duplicate {what} `{name}`"),
         at,
     )
@@ -160,7 +160,7 @@ pub(crate) fn duplicate_member(at: FileSpan, what: &str, name: &str) -> Diagnost
 pub(crate) fn non_exhaustive(at: FileSpan, missing: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
-        DiagnosticCode::new(DiagnosticCategory::Type, 120),
+        DiagCode::NonExhaustiveMatch,
         format!("non-exhaustive match: missing {missing}"),
         at,
     )
@@ -171,7 +171,7 @@ pub(crate) fn non_exhaustive(at: FileSpan, missing: &str) -> Diagnostic {
 pub(crate) fn unreachable_arm(at: FileSpan) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
-        DiagnosticCode::new(DiagnosticCategory::Type, 121),
+        DiagCode::UnreachableArm,
         "unreachable match arm",
         at,
     )
