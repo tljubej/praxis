@@ -26,7 +26,7 @@ Update this file at the end of every stage.
 | S13 — Annotations honored, declaration passes, mutability and scope | **done** | `6037662`, `9129f76`, `4f45455`, `9c6b48a`, `6fd5e46`, `de6b0e2` |
 | S14 — Control flow: bottom type, contexts, joins, loop values | **done** | `fd909a1`, `92a1b84`, `bf91879`, `9cffbe5`, `f93b25f`, `ea506a6` |
 | S15 — Per-use types into HIR and MIR, then monomorphization | **done** (one exit criterion deferred; see §4) | `93c05ec`, `f3c76a8`, `77b2ad6`, `b560e67` |
-| S16 — Records, patterns, exhaustiveness, enum constructors | **HIR-03, HIR-04, HIR-05, HIR-07 done; HIR-06 left** | `57e2e5b`, `06f3c44`, `b8e2c7b` |
+| S16 — Records, patterns, exhaustiveness, enum constructors | **done** | `57e2e5b`, `06f3c44`, `b8e2c7b`, `e918741` |
 | S17 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
@@ -35,7 +35,7 @@ TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1252 passed, 0 failed, 55 ignored**. `just ci` is green.
+Now: **1264 passed, 0 failed, 53 ignored**. `just ci` is green.
 
 **S11 is closed.** All five exit-criterion tests pass and all eight findings the
 stage owns are fixed and gated — TY-01…TY-07 and TY-22.
@@ -55,11 +55,13 @@ six exit-criterion tests pass, plus the fourth criterion that is a MIR change
 rather than a test. **D2 is answered *and implemented*** (ADR-053); the stage
 also amended ADR-051 for `Y017`.
 
-**S16 is open.** **HIR-03**, **HIR-04**, **HIR-05** and **HIR-07** are done;
-**HIR-06** is the only one left. HIR-05 needed no code — the plan predicted
-that, and it was right. §4 says where to pick up.
+**S16 is closed.** All five findings are done — **HIR-03**, **HIR-04**,
+**HIR-05**, **HIR-06** and **HIR-07** — and all eight exit-criterion tests pass.
+HIR-05 needed no code; the plan predicted that, and it was right. The stage's
+ADR is **055**.
 
-The five un-ignored by S16 so far:
+Eighty-four of the audit's ignored regressions are un-ignored and passing.
+The seven added by S16:
 
 | Test | File | Finding |
 |---|---|---|
@@ -67,9 +69,26 @@ The five un-ignored by S16 so far:
 | `record_literal_requires_every_declared_field` | `infer_tests.rs` | HIR-04 |
 | `record_literal_rejects_unknown_fields` | `infer_tests.rs` | HIR-04 |
 | `record_literal_rejects_duplicate_fields` | `infer_tests.rs` | HIR-04 |
+| `nested_enum_pattern_must_cover_payload_constructors` | `infer_tests.rs` | HIR-06 |
+| `duplicate_enum_arm_is_unreachable` | `infer_tests.rs` | HIR-06 |
 | `unknown_enum_variant_pattern_is_rejected` | `infer_tests.rs` | HIR-07 |
 
-S16's six new gates so far:
+HIR-06's ten new gates:
+
+| Test | File | Pins |
+|---|---|---|
+| `a_match_covers_every_payload_position_not_just_the_outer_constructor` | `infer_tests.rs` | HIR-06's first half as the *rule* — a one-variant enum, a wildcard payload, a binding payload, and a gap two payloads deep |
+| `an_arm_is_unreachable_exactly_when_it_adds_no_coverage` | `infer_tests.rs` | HIR-06's second half as the rule — a repeated constructor, the old scan's own case, a subsumed payload, an exhausted `Bool`, and that two distinct payload constructors are two *live* arms |
+| `a_missing_case_is_named_by_the_value_that_is_missing` | `infer_tests.rs` | the witness is the shape (`Wrap(Off)`), and an open signature still asks for an arm |
+| `a_bare_constructor_name_is_that_constructor_at_any_payload` | `infer_tests.rs` | the padding rule — `Some`, `Some(_)` and `Some(n)` are one test (see §4: this one does **not** fail against the unfixed tree) |
+| `a_padded_payload_wildcard_selects_its_arm_at_runtime` | `jit.rs` | the plan's explicit warning — MIR's decision tree on a source-reachable wildcard *in a payload slot*, both spellings and both directions |
+| `a_covered_constructor_with_an_uncovered_payload_is_not_exhaustive` | `exhaustive.rs` | the same rule at the unit level, plus the message |
+| `a_repeated_constructor_adds_no_coverage` | `exhaustive.rs` | unreachability without a catch-all in sight |
+| `a_binding_payload_covers_every_constructor_under_it` | `exhaustive.rs` | why `Wrap(_)` then `Wrap(On)` is one dead arm and not one missing case |
+| `bool_is_covered_by_its_two_literals` | `exhaustive.rs` | `Bool`'s signature is closed — no `_` needed, and a third arm is dead |
+| `an_unreachable_arm_still_counts_as_covered` | `exhaustive.rs` | an arm the checker rejects still enters the matrix |
+
+S16's six earlier gates:
 
 | Test | File | Pins |
 |---|---|---|
@@ -721,7 +740,42 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S16's HIR-03, HIR-04 and HIR-07)
+### From this session (S16's HIR-06)
+
+**`exhaustive.rs` is a usefulness matrix, and it takes `&mut TypeDb`.** The two
+ad-hoc walks (`uncovered_constructors`, `pattern_catches_all`) are gone. `Y120`
+and `Y121` are two calls to one `useful(matrix, q, types)`: an arm is
+unreachable when it is not useful against the arms above it, and a match is
+non-exhaustive when a bare `_` still is. The `&mut` is because a payload's type
+under the scrutinee's arguments comes from `variant_payload_of`, which interns.
+See ADR-055.
+
+**A variant pattern now carries exactly one sub-pattern per payload slot.**
+`lower_pattern` pads with `TypedPattern::Wildcard` and truncates extras (after
+lowering them, so anything wrong *inside* an extra still reports). **If you read
+`TypedPattern::EnumVariant.subpatterns`, its length is the variant's arity** —
+it used to be however many the source wrote, which is what let
+`emit_subpattern_tests` read a payload index the object does not have.
+
+**A `TypedPattern::Wildcard` now reaches MIR in a payload slot from source.**
+Before, the decision tree only ever saw one from a synthesized top-level
+fallback. It emits an `EnumPayloadGet` it then discards, which is correct and is
+gated end to end by `a_padded_payload_wildcard_selects_its_arm_at_runtime`.
+**A bare `Some` therefore reads a payload it never used to.**
+
+**`Y120`'s message changed shape.** It names the missing *value*
+(``missing `Wrap(Off)` ``), capped at three witnesses, and falls back to
+``missing a `_` catch-all arm`` only when the type has no signature to
+enumerate. Nothing asserted the old text; if you add a snapshot over it, note
+that the witness order is signature order.
+
+**Only enums and `Bool` have a closed signature.** Everything else — including
+`Unit`, records and tuples — requires a `_`, which is what the old `_ =>` arm
+did for all of them. **Do not add a `Closed` arm for a type without pattern
+syntax to enumerate it**: a `_`-less match on it would come out exhaustive with
+no arm that can run.
+
+### From an earlier session (S16's HIR-03, HIR-04 and HIR-07)
 
 **A record literal is exact, and `infer_record_lit` is what says so.** Every
 declared field exactly once and nothing else — `Y113` missing, `Y114` unknown,
@@ -1814,56 +1868,88 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**S16 is open, and four of its five findings are done.** **HIR-03**, **HIR-04**
-and **HIR-07** are fixed and gated; **HIR-05** needed no code, exactly as the
-plan predicted ("discharged entirely by FE-02 in S12 plus a wildcard-param
-representation for `|_|`") — `|_| 0` compiles clean and declares nothing, and
-`a_wildcard_binder_is_legal_and_declares_nothing` already pins all three of D7's
-positions including the closure param.
+**S16 is closed.** All five findings are fixed and gated — HIR-03, HIR-04,
+HIR-05, HIR-06 and HIR-07 — and all eight exit-criterion tests pass. HIR-05
+needed no code, exactly as the plan predicted ("discharged entirely by FE-02 in
+S12 plus a wildcard-param representation for `|_|`") — `|_| 0` compiles clean
+and declares nothing, and `a_wildcard_binder_is_legal_and_declares_nothing`
+already pins all three of D7's positions including the closure param. The
+stage's ADR is **055**.
 
-**Pick up at HIR-06, which closes the stage.** Exhaustiveness checks only
-top-level variants and catch-all position: a nested payload gap and a duplicate
-constructor arm are both missed. Its exit tests:
+**Pick up at S17 — the constraint channel and capabilities.** Eleven findings,
+weight 66, the largest stage in the repair, and the one the plan gates on three
+design decisions. Read the plan's S17 paragraph and §7's D-entries for TY-32
+(hashability), TY-33 (remove-or-implement) and TY-34 (`Range`) **before**
+starting: the plan says all three gate the stage.
 
-| Test | File | Finding |
-|---|---|---|
-| `nested_enum_pattern_must_cover_payload_constructors` | `infer_tests.rs` | HIR-06 |
-| `duplicate_enum_arm_is_unreachable` | `infer_tests.rs` | HIR-06 |
+What S17 will want from what is already here:
 
-The plan wants a **usefulness matrix** replacing `exhaustive.rs`'s two ad-hoc
-walks (`uncovered_constructors` and the `pattern_catches_all` scan), and warns
-that HIR-06 "makes `TypedPattern::Wildcard` reachable from source for the first
-time — verify MIR's `lower_match` decision tree on a path it has only ever seen
-from synthesized fallbacks." Expect `Y120`/`Y121` to fire on existing corpora;
-they did not this time, but nothing in the corpus nests a payload pattern.
+- **F10's constraint channel is the stage's foundation and it did not land in
+  S11**, deliberately — §2 says exactly what is missing:
+  `praxis_stdlib::capability::CapKind`,
+  `praxis_types::constraint::{Capability, Constraint}`,
+  `TypeDb::take_dischargeable`, `TypeDb::substitute`, and the single exhaustive
+  `praxis_hir::capability::check`. Land it as its own commit with the suite
+  green, per plan §9 step 2. What *did* land is the half TY-01/TY-03/TY-22
+  needed: `Scheme`'s private binders, `generalize` mutating nothing,
+  `instantiate_with_mapping`, and the `Level` newtype.
+- **TY-29 reshapes the same `Scheme` struct TY-03 did.** The plan says do it in
+  one reshape, not two, and to do TY-29 first because everything else in the
+  stage consumes its worklist.
+- **`descriptor_supports(d, cap)` is F11's unlanded half**, and S17 is its
+  consumer — §2 records it as the one thing `praxis-repr` still owes.
+- **`TypeDescriptor::compare` is populated on five descriptors and `None` on the
+  other sixteen** (ADR-045). TY-32's heap-ordering half and RT-08 read it;
+  `heap_element_orderability_agrees_with_the_runtime` (`infer_tests.rs`) is the
+  gate that the capability and the descriptor agree, and it is green.
+- **`numeric_scalars_are_orderable` (`capability.rs`) is H18's last entry** — a
+  currently-*passing* test that asserts `Text`/`Char` orderability and changes
+  meaning in this stage. Rewrite it in the same commit, per plan §8.2.
+- **A compound assignment against an unconstrained target is still not
+  reported**, and S13 left it there on purpose: `fn f(a) { a += 1 }` leaves `a`
+  a variable, and pinning it to `Int` would silently change inference for every
+  unannotated numeric parameter. That is TY-31's `Y015`.
+- **`Y015` (`NotNumeric`), `Y014` (`NotHashable`), `Y016`
+  (`OperatorNotDefined`) and `Y013` (`IntLiteralOutOfRange`) are already
+  allocated and unused** — ADR-051 reserved them for exactly these findings.
+  Check ADR-051 before allocating anything new; the `Y12x` block is full through
+  `Y123`, so `Y124` is the next free match code.
+- **`praxis-stdlib`'s catalog rows for `enumerate` and `zip` are wrong**, and
+  S15 recorded it as a finding the register does not have. If S17 touches the
+  catalog's type variables (TY-31's bound migration crosses 74 sites), fix those
+  two rows in the same pass and tell H10 about it — see the S15 entry below.
 
-What HIR-06 will want from what S16 has established:
+What S16 leaves behind, all deliberate:
 
-- **`SymbolKind::EnumVariant` exists**, and it is how "is this name a
-  constructor" is answered. The kind is load-bearing on its own: a scheme cannot
-  tell a constructor from a binding that *holds* one, because `let A = Empty`
-  has the enum's type too. `PreludeEntry::is_variant_ctor` marks `Some`/`None`,
-  which no `enum` item declares; `seed_builtin_schemes` filters on the kind
-  *pair* now, and forgetting that is what makes every `Option` test fail with
-  "unresolved user function `Some`".
-- **`Lowerer::enum_variant_of(symbol)` replaced `lookup_enum_variant_by_name`.**
-  There is no root-scope text lookup left in lowering.
-- **`Y122` and `Y123` are spent** (`UnknownEnumVariant`, `NotAPatternForType`),
-  both emitted from `lower_pattern`'s `Variant` arm. The next free code in the
-  `Y1xx` block is what ADR-051 says; check it before allocating.
-- **`exhaustive::check` takes the `match`'s own span**, so `Y120` no longer
-  points at byte 0. HIR-06's new diagnostics should take a span the same way —
-  `arm_spans` already carries one per arm.
-- **An unconstrained scrutinee stays silent** in `lower_pattern`. Inference has
-  already reported it, and a type variable is not a wrong *shape*. HIR-06's
-  usefulness matrix will meet the same case.
-- **`Y113`/`Y114`/`Y115` are spent** on HIR-04, in `infer_record_lit` — which is
-  where they belong: a record literal's exactness is a *typing* rule, and
-  lowering already sorts the fields it is given into declaration order.
+- **A wrong sub-pattern count is not diagnosed.** `Wrap(a, b)` against a
+  one-slot variant lowers `b` (so anything wrong inside it still reports) and
+  then drops it. The register has no finding for it, `Y122`/`Y123` cover the two
+  neighbouring mistakes, and truncating is strictly safer than the payload
+  read past the end that it replaces. It is the natural companion to whatever
+  stage next allocates a `Y12x`.
+- **Records and tuples have no pattern syntax**, so their signature is `Open`
+  and a match on one needs a `_`. When the grammar grows one, they become
+  `Closed` with a single constructor and the matrix already handles that shape.
+- **`a_bare_constructor_name_is_that_constructor_at_any_payload` passes against
+  the unfixed tree.** It pins the padding *rule*, not the bug — the matrix reads
+  sub-patterns through `get(i).unwrap_or(&WILDCARD)`, so it is defensive against
+  an unpadded row on its own. Its runtime half (`jit.rs`) is where the padding's
+  new behaviour is observed. The other four new gates and both exit tests were
+  verified failing against `22f9132`.
 - **`lower_record_lit` still silently skips a field it cannot place.** It is
-  unreachable for a clean program now (inference reports first), so it is a
-  defensive `continue` rather than a hole. If HIR-06 makes lowering report on
-  patterns the way inference reports on literals, mirror that shape.
+  unreachable for a clean program (inference reports first), so it is a
+  defensive `continue` rather than a hole.
+- **An unconstrained scrutinee stays silent** in `lower_pattern`, and the matrix
+  meets the same case: a type variable has an `Open` signature, so a `_`-less
+  match on one is `Y120` exactly as every other unenumerable type is. Inference
+  has already reported the variable itself.
+- **`SymbolKind::EnumVariant` is how "is this name a constructor" is answered**,
+  and the kind is load-bearing on its own: a scheme cannot tell a constructor
+  from a binding that *holds* one, because `let A = Empty` has the enum's type
+  too. `PreludeEntry::is_variant_ctor` marks `Some`/`None`, which no `enum` item
+  declares; `seed_builtin_schemes` filters on the kind *pair*, and forgetting
+  that is what makes every `Option` test fail with "unresolved user function
+  `Some`".
 
 **S11 is closed.** All eight findings the stage owns are fixed and gated —
 TY-01…TY-07 and TY-22 — and all five exit-criterion tests pass. TY-04 needed no
