@@ -1049,7 +1049,6 @@ fn early_return_value_must_match_the_function_result() {
 }
 
 #[test]
-#[ignore = "known bug: inference retains a non-trailing block expression as the value"]
 fn expression_before_trailing_statement_is_not_the_block_value() {
     // Lowering correctly demotes `1` to an effect statement and gives this
     // block a Unit tail. Inference must make the same choice.
@@ -1058,6 +1057,47 @@ fn expression_before_trailing_statement_is_not_the_block_value() {
         has_type_error(src),
         "inference and lowering must agree on the actual trailing expression"
     );
+}
+
+/// TY-16's rule, stated as the shape rather than as one rejection: the block's
+/// value is the *last* statement, and only if that statement is an expression.
+/// A pending tail is demoted by anything that follows it, whatever kind it is.
+#[test]
+fn a_blocks_value_is_its_last_statement_and_only_if_it_is_an_expression() {
+    // A trailing expression is the value.
+    assert_eq!(scheme_of("let b = { 1 }", "b").as_deref(), Some("Int"));
+    assert_eq!(
+        scheme_of("let b = { let x = 1; 2 }", "b").as_deref(),
+        Some("Int")
+    );
+    // Every non-expression kind demotes a pending tail.
+    for src in [
+        "let b = { 1; let x = 2 }",
+        "let b = { 1; var x = 2 }",
+        "fn f() -> Unit { var x = 0; { 1; x = 2 } }",
+    ] {
+        assert!(
+            !has_type_error(src),
+            "`{src}` should be clean: {:?}",
+            analyze(src)
+                .diagnostics
+                .iter()
+                .map(|d| format!("{} {}", d.code(), d.message()))
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        scheme_of("let b = { 1; let x = 2 }", "b").as_deref(),
+        Some("Unit"),
+        "a `let` after the expression makes the block Unit"
+    );
+    // Two expression statements: only the second is the value.
+    assert_eq!(
+        scheme_of("let b = { 1; \"two\" }", "b").as_deref(),
+        Some("Text")
+    );
+    // An empty block is Unit.
+    assert_eq!(scheme_of("let b = { }", "b").as_deref(), Some("Unit"));
 }
 
 #[test]

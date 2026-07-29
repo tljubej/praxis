@@ -1178,19 +1178,30 @@ impl Inferer {
     /// the range that produced it (the trailing expression, or the block itself
     /// when the value is the implicit trailing `Unit`).
     fn infer_block_inner(&mut self, block: &BlockExpr) -> (Type, Option<TextRange>) {
-        let mut last = self.db.unit();
-        let mut tail_range: Option<TextRange> = None;
+        // Only the **last** statement can be the block's value, and only if it
+        // is an expression statement. Every expression statement used to
+        // overwrite `last`, so `{ 1; let x = 2 }` was inferred `Int` while
+        // lowering demoted the `1` to an effect and gave the block a `Unit`
+        // tail — inference and execution disagreed about the result type
+        // (TY-16). `lower_block` is the shape this mirrors: a *pending* tail
+        // that any following statement, of any kind, demotes.
+        let unit = self.db.unit();
+        let mut pending: Option<(Type, TextRange)> = None;
         for child in block.stmts() {
-            // A trailing expression statement is the block's value.
             if let Some(expr_stmt) = ExprStmt::cast(child.clone()) {
                 if let Some(e) = expr_stmt.expr() {
-                    last = self.infer_expr(&e);
-                    tail_range = Some(e.syntax().text_range());
+                    let ty = self.infer_expr(&e);
+                    pending = Some((ty, e.syntax().text_range()));
                     continue;
                 }
             }
             self.infer_top_stmt(&child);
+            pending = None;
         }
+        let (last, tail_range) = match pending {
+            Some((ty, range)) => (ty, Some(range)),
+            None => (unit, None),
+        };
         // No trailing expression: the value is Unit; point at the whole block so
         // the reader still sees where the implicit Unit comes from.
         let tail_range = tail_range.or_else(|| Some(block.syntax().text_range()));
