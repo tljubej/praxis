@@ -26,7 +26,7 @@ Update this file at the end of every stage.
 | S13 — Annotations honored, declaration passes, mutability and scope | **done** | `6037662`, `9129f76`, `4f45455`, `9c6b48a`, `6fd5e46`, `de6b0e2` |
 | S14 — Control flow: bottom type, contexts, joins, loop values | **done** | `fd909a1`, `92a1b84`, `bf91879`, `9cffbe5`, `f93b25f`, `ea506a6` |
 | S15 — Per-use types into HIR and MIR, then monomorphization | **done** (one exit criterion deferred; see §4) | `93c05ec`, `f3c76a8`, `77b2ad6`, `b560e67` |
-| S16 — Records, patterns, exhaustiveness, enum constructors | **HIR-03, HIR-05, HIR-07 done; HIR-04, HIR-06 left** | `57e2e5b`, `06f3c44` |
+| S16 — Records, patterns, exhaustiveness, enum constructors | **HIR-03, HIR-04, HIR-05, HIR-07 done; HIR-06 left** | `57e2e5b`, `06f3c44`, `b8e2c7b` |
 | S17 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
@@ -35,7 +35,7 @@ TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1247 passed, 0 failed, 58 ignored**. `just ci` is green.
+Now: **1252 passed, 0 failed, 55 ignored**. `just ci` is green.
 
 **S11 is closed.** All five exit-criterion tests pass and all eight findings the
 stage owns are fixed and gated — TY-01…TY-07 and TY-22.
@@ -55,23 +55,28 @@ six exit-criterion tests pass, plus the fourth criterion that is a MIR change
 rather than a test. **D2 is answered *and implemented*** (ADR-053); the stage
 also amended ADR-051 for `Y017`.
 
-**S16 is open.** **HIR-03**, **HIR-05** and **HIR-07** are done; **HIR-04** and
-**HIR-06** are left. HIR-05 needed no code — the plan predicted that, and it was
-right. §4 says where to pick up.
+**S16 is open.** **HIR-03**, **HIR-04**, **HIR-05** and **HIR-07** are done;
+**HIR-06** is the only one left. HIR-05 needed no code — the plan predicted
+that, and it was right. §4 says where to pick up.
 
-The two un-ignored by S16 so far:
+The five un-ignored by S16 so far:
 
 | Test | File | Finding |
 |---|---|---|
 | `lowering_respects_a_local_that_shadows_an_enum_variant` | `infer_tests.rs` | HIR-03 |
+| `record_literal_requires_every_declared_field` | `infer_tests.rs` | HIR-04 |
+| `record_literal_rejects_unknown_fields` | `infer_tests.rs` | HIR-04 |
+| `record_literal_rejects_duplicate_fields` | `infer_tests.rs` | HIR-04 |
 | `unknown_enum_variant_pattern_is_rejected` | `infer_tests.rs` | HIR-07 |
 
-S16's four new gates so far:
+S16's six new gates so far:
 
 | Test | File | Pins |
 |---|---|---|
 | `a_constructor_is_a_symbol_kind_not_a_spelling` | `infer_tests.rs` | HIR-03's rule — every variant, including the prelude's `Some`/`None`, is `SymbolKind::EnumVariant` |
 | `a_local_holding_a_variant_is_not_a_constructor` | `infer_tests.rs` | why the *kind* and not the scheme: `let A = Empty` has the enum's type too — and that the binding survives |
+| `a_record_literal_names_every_field_exactly_once` | `infer_tests.rs` | HIR-04's three halves as three codes, and that field *order* is not the rule |
+| `an_unknown_fields_initializer_is_still_checked` | `infer_tests.rs` | why the initializer is inferred anyway — skipping it is what deleted the side effect |
 | `a_pattern_that_names_no_variant_is_reported_not_widened` | `infer_tests.rs` | HIR-07 — `Y122` for a typo, `Y123` for a wrong shape, and the right constructors still work |
 | `a_non_exhaustive_match_is_reported_where_it_is_written` | `infer_tests.rs` | HIR-07's second half — `Y120` at the `match`, not at byte 0 |
 
@@ -716,7 +721,13 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S16's HIR-03 and HIR-07)
+### From this session (S16's HIR-03, HIR-04 and HIR-07)
+
+**A record literal is exact, and `infer_record_lit` is what says so.** Every
+declared field exactly once and nothing else — `Y113` missing, `Y114` unknown,
+`Y115` duplicate. **An unknown field's initializer is still inferred**, because
+it is an expression the program wrote; skipping it is what deleted
+`Point { x: 1, typo: side_effect() }`'s call.
 
 **`SymbolKind::EnumVariant` is what a constructor is.** Not `Fn`, which is what
 variants used to be bound as, and not a spelling. `Lowerer::enum_variant_of`
@@ -1803,26 +1814,30 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**S16 is open, and three of its five findings are done.** **HIR-03** and
-**HIR-07** are fixed and gated; **HIR-05** needed no code, exactly as the plan
-predicted ("discharged entirely by FE-02 in S12 plus a wildcard-param
+**S16 is open, and four of its five findings are done.** **HIR-03**, **HIR-04**
+and **HIR-07** are fixed and gated; **HIR-05** needed no code, exactly as the
+plan predicted ("discharged entirely by FE-02 in S12 plus a wildcard-param
 representation for `|_|`") — `|_| 0` compiles clean and declares nothing, and
 `a_wildcard_binder_is_legal_and_declares_nothing` already pins all three of D7's
-positions including the closure param. **HIR-04 and HIR-06 are left.**
+positions including the closure param.
 
-**Pick up at HIR-04** (record literals accept missing, unknown and duplicate
-fields) or **HIR-06** (exhaustiveness misses nested payload gaps and duplicate
-constructor arms). They are independent of each other. Their exit tests:
+**Pick up at HIR-06, which closes the stage.** Exhaustiveness checks only
+top-level variants and catch-all position: a nested payload gap and a duplicate
+constructor arm are both missed. Its exit tests:
 
 | Test | File | Finding |
 |---|---|---|
-| `record_literal_requires_every_declared_field` | `infer_tests.rs` | HIR-04 |
-| `record_literal_rejects_unknown_fields` | `infer_tests.rs` | HIR-04 |
-| `record_literal_rejects_duplicate_fields` | `infer_tests.rs` | HIR-04 |
 | `nested_enum_pattern_must_cover_payload_constructors` | `infer_tests.rs` | HIR-06 |
 | `duplicate_enum_arm_is_unreachable` | `infer_tests.rs` | HIR-06 |
 
-What S16 has established that both will want:
+The plan wants a **usefulness matrix** replacing `exhaustive.rs`'s two ad-hoc
+walks (`uncovered_constructors` and the `pattern_catches_all` scan), and warns
+that HIR-06 "makes `TypedPattern::Wildcard` reachable from source for the first
+time — verify MIR's `lower_match` decision tree on a path it has only ever seen
+from synthesized fallbacks." Expect `Y120`/`Y121` to fire on existing corpora;
+they did not this time, but nothing in the corpus nests a payload pattern.
+
+What HIR-06 will want from what S16 has established:
 
 - **`SymbolKind::EnumVariant` exists**, and it is how "is this name a
   constructor" is answered. The kind is load-bearing on its own: a scheme cannot
@@ -1842,6 +1857,13 @@ What S16 has established that both will want:
 - **An unconstrained scrutinee stays silent** in `lower_pattern`. Inference has
   already reported it, and a type variable is not a wrong *shape*. HIR-06's
   usefulness matrix will meet the same case.
+- **`Y113`/`Y114`/`Y115` are spent** on HIR-04, in `infer_record_lit` — which is
+  where they belong: a record literal's exactness is a *typing* rule, and
+  lowering already sorts the fields it is given into declaration order.
+- **`lower_record_lit` still silently skips a field it cannot place.** It is
+  unreachable for a clean program now (inference reports first), so it is a
+  defensive `continue` rather than a hole. If HIR-06 makes lowering report on
+  patterns the way inference reports on literals, mirror that shape.
 
 **S11 is closed.** All eight findings the stage owns are fixed and gated —
 TY-01…TY-07 and TY-22 — and all five exit-criterion tests pass. TY-04 needed no
