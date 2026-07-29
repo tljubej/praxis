@@ -1784,7 +1784,6 @@ fn lowered_generic_method_result_uses_the_receiver_instantiation() {
 }
 
 #[test]
-#[ignore = "known bug: HIR enum lowering looks up constructor text instead of the resolved symbol"]
 fn lowering_respects_a_local_that_shadows_an_enum_variant() {
     use praxis_ast::AstNode;
 
@@ -2522,4 +2521,61 @@ fn a_method_name_is_not_a_name_reference() {
         "Vec[Int]"
     );
     assert_eq!(analysis.db.render(analysis.db.follow(m.result)), "Int");
+}
+
+/// **HIR-03** as the rule, not one shadowing case. A constructor is a *symbol*
+/// with `SymbolKind::EnumVariant`, so every question about "is this name a
+/// constructor" has one answer — including for the prelude's `Some`/`None`,
+/// which no `enum` item declares.
+#[test]
+fn a_constructor_is_a_symbol_kind_not_a_spelling() {
+    let a = analyze("enum E { A, B(Int) }\nfn main() -> Int { 0 }\n");
+    let kinds: Vec<(String, SymbolKind)> = a
+        .names
+        .all()
+        .iter()
+        .filter(|s| ["A", "B", "Some", "None", "E", "main"].contains(&s.name.as_str()))
+        .map(|s| (s.name.clone(), s.kind))
+        .collect();
+    for (name, kind) in &kinds {
+        let expected = match name.as_str() {
+            "A" | "B" | "Some" | "None" => SymbolKind::EnumVariant,
+            "E" => SymbolKind::Enum,
+            _ => SymbolKind::Fn,
+        };
+        assert_eq!(kind, &expected, "`{name}` is {kind:?}");
+    }
+    assert_eq!(kinds.len(), 6, "every name accounted for: {kinds:?}");
+}
+
+/// …and the half a kind check alone would not give: a local that *holds* a
+/// variant has the enum's type too, so the scheme cannot tell a constructor
+/// from a binding. Only the kind can.
+#[test]
+fn a_local_holding_a_variant_is_not_a_constructor() {
+    use praxis_ast::AstNode;
+
+    let src = "enum E { A }\nfn main() -> Int {\n  let A = 7\n  A\n}\n";
+    let map = SourceMap::new();
+    let id = map.intern("variant_value.px", src);
+    let parsed = parse(id, src);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = crate::lower::lower(id, &root, &mut analysis);
+    let main = module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::TypedItem::Fn(f) if f.name == "main" => Some(f),
+            _ => None,
+        })
+        .expect("main");
+    assert!(
+        matches!(main.body.tail, crate::TypedExpr::Path { .. }),
+        "the local shadows the constructor: {:?}",
+        main.body.tail
+    );
+    // The `let A = 7` must survive too — lowering the tail as a constructor
+    // also discarded the binding's value.
+    assert_eq!(main.body.stmts.len(), 1, "the binding is still there");
 }

@@ -211,7 +211,16 @@ impl Resolver {
     /// can validate them through scope lookup rather than a closed constant.
     fn seed_prelude(&mut self, root: ScopeId) {
         for entry in praxis_stdlib::PRELUDE {
-            let id = self.mint(SymbolKind::Builtin, entry.name, None);
+            // `Some`/`None` are `Option`'s variants, declared here rather than
+            // by an `enum` item. They get the same kind a user-declared variant
+            // does, so lowering's "is this a constructor" question has one
+            // answer for both (HIR-03).
+            let kind = if entry.is_variant_ctor {
+                SymbolKind::EnumVariant
+            } else {
+                SymbolKind::Builtin
+            };
+            let id = self.mint(kind, entry.name, None);
             self.out.scopes.bind(root, entry.name, id);
         }
         self.seed_type_names(root);
@@ -288,7 +297,7 @@ impl Resolver {
                 if let Some(vname_tok) = v.name() {
                     self.bind(
                         scope,
-                        SymbolKind::Fn, // variant constructors behave like fns
+                        SymbolKind::EnumVariant,
                         vname_tok.text().to_string(),
                         vname_tok.text_range(),
                     );

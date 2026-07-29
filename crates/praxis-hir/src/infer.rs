@@ -305,7 +305,11 @@ impl Inferer {
             .all()
             .iter()
             .filter(|s| {
-                s.kind == SymbolKind::Builtin
+                // `Some`/`None` are `SymbolKind::EnumVariant`, not `Builtin`
+                // (HIR-03): the prelude declares `Option`'s two variants, and
+                // they get the kind a user-declared variant gets. They still
+                // need their constructor schemes seeded here.
+                matches!(s.kind, SymbolKind::Builtin | SymbolKind::EnumVariant)
                     && (s.name == "out"
                         || s.name == "panic"
                         || s.name == "Some"
@@ -1905,5 +1909,6 @@ fn describe_binding(kind: SymbolKind) -> &'static str {
         SymbolKind::Builtin | SymbolKind::BuiltinType => "a built-in name",
         SymbolKind::Struct => "a struct type",
         SymbolKind::Enum => "an enum type",
+        SymbolKind::EnumVariant => "an enum variant",
     }
 }

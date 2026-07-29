@@ -1306,10 +1306,13 @@ impl<'a> Lowerer<'a> {
         // scheme, or the enum def's own type below — is a second instantiation
         // whose variables nothing else pinned.
         let ty = self.node_ty(p.syntax());
-        // M7-WS4: detect a zero-payload enum variant used as a bare path (`Empty`).
-        if let Some(tok) = p.name() {
-            let name = tok.text().to_string();
-            if let Some((_, enum_def_id, variant_idx)) = self.lookup_enum_variant_by_name(&name) {
+        // M7-WS4: a zero-payload enum variant used as a bare path (`Empty`) —
+        // decided by the symbol this name resolves to, not by its text.
+        if let Some(symbol) = p
+            .name()
+            .and_then(|tok| self.resolve_symbol_at(tok.text_range()))
+        {
+            if let Some((enum_def_id, variant_idx)) = self.enum_variant_of(symbol) {
                 // Only treat as a variant if the payload is empty (a zero-payload
                 // variant). Payload variants are handled in lower_call.
                 let edef = self.db.enum_def(enum_def_id);
@@ -1588,18 +1591,17 @@ impl<'a> Lowerer<'a> {
         // Vec()` reached codegen with no element type — the annotation had
         // arrived, at the call site inference recorded and lowering ignored.
         let ty = self.node_ty(c.syntax());
-        // M7-WS4: detect enum variant construction. If the callee's scheme is a
-        // Func returning an enum type, this is a payload variant like `Number(5)`.
-        if let Some(name) = callee_tok.as_ref().map(|t| t.text().to_string()) {
-            if let Some((_, enum_def_id, variant_idx)) = self.lookup_enum_variant_by_name(&name) {
-                return TypedExpr::EnumVariant {
-                    enum_def_id,
-                    variant_idx: variant_idx as u32,
-                    args,
-                    ty,
-                    span,
-                };
-            }
+        // M7-WS4: enum variant construction — `Number(5)`. Decided by the symbol
+        // the callee name resolves to, so a local shadowing a constructor is a
+        // call of that local (HIR-03).
+        if let Some((enum_def_id, variant_idx)) = self.enum_variant_of(callee) {
+            return TypedExpr::EnumVariant {
+                enum_def_id,
+                variant_idx: variant_idx as u32,
+                args,
+                ty,
+                span,
+            };
         }
         // The concrete arg types at this call site (WS8, §13.6). Recorded by
         // inference in `analysis.call_sites`, keyed by the callee name token's
@@ -1626,41 +1628,43 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Look up an enum variant by constructor name (for lowering). Returns the
-    /// enum type the constructor's scheme names, its def-id, and the variant
-    /// index.
+    /// The enum variant a **symbol** constructs: its def-id and variant index,
+    /// or `None` when the symbol is not a variant constructor (HIR-03).
+    ///
+    /// It used to look the *text* up in the root scope, before consulting the
+    /// symbol resolution had already bound the name to — so `enum E { A }`
+    /// followed by `let A = 7` lowered the local `A` as the constructor, and
+    /// the binding's value was discarded. Resolution answers which `A` a
+    /// reference means; this asks it.
+    ///
+    /// The kind check is load-bearing on its own: the scheme cannot distinguish
+    /// a constructor from a binding that *holds* one, because `let A = Empty`
+    /// has the enum type too.
     ///
     /// Unlike inference's counterpart this does **not** instantiate: lowering
-    /// runs after inference and reports the shape of the declaration, not a
-    /// fresh use. The type it hands back is therefore the scheme's own — the
-    /// same thing the pre-F12 `enum_type(def_id)` produced, since the def
-    /// carried its element type directly.
-    ///
-    /// It does not hand back the payload either, and that is deliberate: a
-    /// generic def's payload is written in terms of its *parameters* (F12), so
-    /// reading it off the def would answer `T` rather than the element type. The
-    /// substituted form is [`TypeDb::variant_payload_of`], which needs the
-    /// instance's arguments and a `&mut TypeDb`.
-    fn lookup_enum_variant_by_name(
-        &self,
-        name: &str,
-    ) -> Option<(Type, praxis_types::EnumDefId, usize)> {
-        let root = self.scopes.root();
-        let symbol = self.scopes.lookup(root, name)?;
+    /// takes the use-site type from `expr_types` (F15) and needs only the
+    /// variant's identity from here. It does not hand back the payload either —
+    /// a generic def's payload is written in terms of its *parameters* (F12),
+    /// so reading it off the def would answer `T` rather than the element type.
+    fn enum_variant_of(&self, symbol: SymbolId) -> Option<(praxis_types::EnumDefId, usize)> {
         let sym = self.names.get(symbol)?;
+        if sym.kind != crate::SymbolKind::EnumVariant {
+            return None;
+        }
         let scheme = sym.scheme.as_ref()?;
+        // A payload variant's scheme is a `Func` returning the enum; a
+        // payload-less one's is the enum type itself.
         let result_ty = match self.db.data(self.db.follow(scheme.body())) {
             praxis_types::TypeData::Func { result, .. } => *result,
             praxis_types::TypeData::Enum { .. } => scheme.body(),
             _ => return None,
         };
-        let enum_ty = self.db.follow(result_ty);
-        let def_id = match self.db.data(enum_ty) {
+        let def_id = match self.db.data(self.db.follow(result_ty)) {
             praxis_types::TypeData::Enum { def, .. } => *def,
             _ => return None,
         };
-        let idx = self.db.enum_def(def_id).variant(name)?;
-        Some((enum_ty, def_id, idx))
+        let idx = self.db.enum_def(def_id).variant(&sym.name)?;
+        Some((def_id, idx))
     }
 
     fn lower_args(&mut self, args: &ArgList) -> Vec<TypedExpr> {

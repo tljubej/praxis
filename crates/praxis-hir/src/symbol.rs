@@ -49,6 +49,17 @@ pub enum SymbolKind {
     /// An `enum Name { … }` declaration (M7, §4.6). A type-name symbol; its
     /// scheme carries the enum's [`Type`](praxis_types::Type) once registered.
     Enum,
+    /// One variant of an `enum` declaration, as a *constructor* name in scope
+    /// (§4.6): `Empty`, `Number(5)`. Its scheme is the constructor's — a `Func`
+    /// returning the enum type for a payload variant, the enum type itself for
+    /// a payload-less one.
+    ///
+    /// Distinct from [`Fn`](Self::Fn), which is what it used to be bound as,
+    /// because "is this name a constructor" is otherwise only answerable by
+    /// looking the *text* up in the root scope — and a local shadowing a
+    /// variant answers yes (HIR-03). It is also not answerable from the scheme
+    /// alone: `let A = Empty` has the enum type too.
+    EnumVariant,
 }
 
 impl SymbolKind {

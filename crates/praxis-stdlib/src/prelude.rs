@@ -48,8 +48,8 @@ pub const PRELUDE: &[PreludeEntry] = &[
     // value, None marks absence. Returned by the `optional(P)` parser and by
     // `find`/`position` on a miss.
     PreludeEntry::new("Option", "Optional value: Some(T) or None."),
-    PreludeEntry::new("Some", "Wrap a value in an Option."),
-    PreludeEntry::new("None", "The absent Option value."),
+    PreludeEntry::variant("Some", "Wrap a value in an Option."),
+    PreludeEntry::variant("None", "The absent Option value."),
     // Graph algorithms
     PreludeEntry::new("bfs", "Breadth-first traversal."),
     PreludeEntry::new("bfs_distance", "Breadth-first shortest distance."),
@@ -64,11 +64,31 @@ pub const PRELUDE: &[PreludeEntry] = &[
 pub struct PreludeEntry {
     pub name: &'static str,
     pub doc: &'static str,
+    /// Whether this name is an **enum variant constructor** rather than an
+    /// ordinary value. `Some` and `None` are `Option`'s two variants, declared
+    /// by the prelude rather than by an `enum` item — and a consumer that has
+    /// to tell a constructor from a binding cannot do it from the type
+    /// (`let A = None` has `Option`'s type too), so the declaration says
+    /// (HIR-03).
+    pub is_variant_ctor: bool,
 }
 
 impl PreludeEntry {
     pub const fn new(name: &'static str, doc: &'static str) -> PreludeEntry {
-        PreludeEntry { name, doc }
+        PreludeEntry {
+            name,
+            doc,
+            is_variant_ctor: false,
+        }
+    }
+
+    /// An entry that constructs an enum variant.
+    pub const fn variant(name: &'static str, doc: &'static str) -> PreludeEntry {
+        PreludeEntry {
+            name,
+            doc,
+            is_variant_ctor: true,
+        }
     }
 }
 
