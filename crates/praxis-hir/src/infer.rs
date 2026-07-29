@@ -1610,102 +1610,26 @@ impl Inferer {
     /// annotation names an unknown type (already reported as N002 by resolution);
     /// the caller then falls back to inference.
     fn resolve_type(&mut self, ty: &praxis_ast::TypeRef) -> Option<Type> {
-        let syntax = ty.syntax();
-        // Dispatch on the underlying node kind: TYPE_REF, TUPLE_TYPE, or FN_TYPE.
-        // The TypeRef wrapper's own kind is TYPE_REF; for tuple/fn we must look at
-        // whether the node *contains* the structural children. Simplest: walk the
-        // node and reconstruct. Type resolution is scope-independent (it reads
-        // only the written type names, which are all built-in scalars).
-        self.resolve_type_node(syntax)
+        // The wrapper accepts all three annotation node kinds (TY-08), so its
+        // node is already the thing to dispatch on.
+        self.resolve_type_node(ty.syntax())
     }
 
+    /// Resolve one annotation node. Total over the three node kinds
+    /// [`SyntaxKind::is_type_node`] admits; anything else is `None`.
     fn resolve_type_node(&mut self, node: &praxis_syntax::SyntaxNode) -> Option<Type> {
         match node.kind() {
-            SyntaxKind::TYPE_REF => {
-                // A scalar name, unless it wraps a tuple/fn (parser may nest).
-                // If it has child type nodes, recurse; else it is a scalar.
-                let has_struct_child = node
-                    .children()
-                    .any(|c| matches!(c.kind(), SyntaxKind::TUPLE_TYPE | SyntaxKind::FN_TYPE));
-                if has_struct_child {
-                    return node.children().find_map(|c| self.resolve_type_node(&c));
-                }
-                // Collection type: `Vec[T]`, `Map[K, V]`, … The parser emits the
-                // ctor name as its own nested TYPE_REF child (the `start_node` +
-                // `finish_node` for the name, before the `start_node_at(cp)` wrap
-                // reopens to cover the bracketed args), with the bracket args as
-                // further TYPE_REF siblings. So the *first* TYPE_REF child is the
-                // ctor name; the rest are the type arguments.
-                let type_ref_children: Vec<_> = node
-                    .children()
-                    .filter(|c| c.kind() == SyntaxKind::TYPE_REF)
-                    .collect();
-                if type_ref_children.len() >= 2 {
-                    // The ctor name is the first TYPE_REF child's Ident token;
-                    // the remaining TYPE_REF children are the type args.
-                    let name =
-                        type_ref_children[0]
-                            .children_with_tokens()
-                            .find_map(|e| match e {
-                                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::Ident => {
-                                    Some(t.text().to_string())
-                                }
-                                _ => None,
-                            })?;
-                    let type_args: Vec<Type> = type_ref_children[1..]
-                        .iter()
-                        .map(|c| {
-                            self.resolve_type_node(c)
-                                .unwrap_or_else(|| self.db.fresh_var())
-                        })
-                        .collect();
-                    return self.collection_from_name(&name, type_args, node.text_range());
-                }
-                // Scalar: the name is a direct Ident token of this node.
-                let name = node.children_with_tokens().find_map(|e| match e {
-                    rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::Ident => {
-                        Some(t.text().to_string())
-                    }
-                    _ => None,
-                })?;
-                self.scalar_from_name(&name)
-            }
+            SyntaxKind::TYPE_REF => self.resolve_named_or_grouped(node),
             SyntaxKind::TUPLE_TYPE => {
-                let els: Vec<Type> = node
-                    .children()
-                    .filter(|c| {
-                        matches!(
-                            c.kind(),
-                            SyntaxKind::TYPE_REF | SyntaxKind::TUPLE_TYPE | SyntaxKind::FN_TYPE
-                        )
-                    })
-                    .map(|c| {
-                        self.resolve_type_node(&c)
-                            .unwrap_or_else(|| self.db.fresh_var())
-                    })
-                    .collect();
+                let els: Vec<Type> = self.resolve_type_children(node);
                 Some(self.tuple_or_degenerate(els))
             }
             SyntaxKind::FN_TYPE => {
-                // An FN_TYPE node has a param-type group (TYPE_REF or TUPLE_TYPE)
-                // and a result type, separated by `->`.
-                let mut parts: Vec<Type> = node
-                    .children()
-                    .filter(|c| {
-                        matches!(
-                            c.kind(),
-                            SyntaxKind::TYPE_REF | SyntaxKind::TUPLE_TYPE | SyntaxKind::FN_TYPE
-                        )
-                    })
-                    .map(|c| {
-                        self.resolve_type_node(&c)
-                            .unwrap_or_else(|| self.db.fresh_var())
-                    })
-                    .collect();
+                // An FN_TYPE node has a param-type group (a TYPE_REF group or a
+                // TUPLE_TYPE) and a result type, separated by `->`.
+                let mut parts: Vec<Type> = self.resolve_type_children(node);
                 if parts.len() >= 2 {
                     let result = parts.pop().expect(">=2 elements");
-                    // The first element is the param group: if it is a TUPLE_TYPE,
-                    // its elements are the params; else it is a single param.
                     let params = self.flatten_param_group(parts.pop().expect(">=2 elements"));
                     Some(self.db.func(params, result))
                 } else {
@@ -1716,13 +1640,65 @@ impl Inferer {
         }
     }
 
+    /// The three shapes that wear the `TYPE_REF` kind, told apart by what the
+    /// node holds rather than by where it was found:
+    ///
+    /// - `Int` — a bare name: an `Ident` token of this node itself.
+    /// - `Vec[Int]` — a collection: no `Ident` of its own; the *first* type-node
+    ///   child holds the constructor name and the rest are its arguments (the
+    ///   parser emits the name as its own `TYPE_REF`, then reopens at a
+    ///   checkpoint to wrap the brackets).
+    /// - `(T)` — a parenthesized group: exactly one type-node child and no name.
+    ///   `()` is the degenerate case and is [`Unit`](praxis_types::TypeData::Unit),
+    ///   which is what makes `() -> Int` a nullary function type rather than one
+    ///   taking an invented variable.
+    fn resolve_named_or_grouped(&mut self, node: &praxis_syntax::SyntaxNode) -> Option<Type> {
+        if let Some(name) = direct_ident(node) {
+            return self.scalar_from_name(&name);
+        }
+        let children: Vec<_> = node
+            .children()
+            .filter(|c| c.kind().is_type_node())
+            .collect();
+        match children.split_first() {
+            None => Some(self.db.unit()),
+            Some((only, [])) => self.resolve_type_node(only),
+            Some((ctor, args)) => {
+                let name = direct_ident(ctor)?;
+                let type_args: Vec<Type> = args
+                    .iter()
+                    .map(|c| {
+                        self.resolve_type_node(c)
+                            .unwrap_or_else(|| self.db.fresh_var())
+                    })
+                    .collect();
+                self.collection_from_name(&name, type_args, node.text_range())
+            }
+        }
+    }
+
+    /// Resolve every type-node child of `node`, in order. An unresolvable child
+    /// becomes a fresh variable so one bad element does not discard the shape.
+    fn resolve_type_children(&mut self, node: &praxis_syntax::SyntaxNode) -> Vec<Type> {
+        node.children()
+            .filter(|c| c.kind().is_type_node())
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|c| {
+                self.resolve_type_node(c)
+                    .unwrap_or_else(|| self.db.fresh_var())
+            })
+            .collect()
+    }
+
     /// Given a type that represents a parameter group, return the parameter
-    /// types. `(A, B)` (a tuple type) flattens to `[A, B]`; a single type stays
-    /// `[itself]`.
+    /// types. `(A, B)` (a tuple type) flattens to `[A, B]`, `()` to no
+    /// parameters at all, and anything else stays `[itself]`.
     fn flatten_param_group(&mut self, ty: Type) -> Vec<Type> {
         let rep = self.db.follow(ty);
         match self.db.data(rep) {
             praxis_types::TypeData::Tuple(els) => els.clone(),
+            praxis_types::TypeData::Unit => Vec::new(),
             // A single param: the type itself, not a re-interned copy of its
             // shape. `intern` is `pub(crate)` since F5, and this was the one
             // site outside the arena that needed it — for no reason, since the
@@ -1848,6 +1824,17 @@ impl Inferer {
             }
         }
     }
+}
+
+/// The `Ident` token belonging to `node` **itself**, not to a descendant. A
+/// type node names a type iff it has one: `Int` does, the group `(Int)` does
+/// not (its `Ident` sits inside a nested `TYPE_REF`), and neither does the
+/// bracket-wrapping `TYPE_REF` of `Vec[Int]`.
+fn direct_ident(node: &praxis_syntax::SyntaxNode) -> Option<String> {
+    node.children_with_tokens().find_map(|e| match e {
+        rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::Ident => Some(t.text().to_string()),
+        _ => None,
+    })
 }
 
 /// Whether an expression is a *syntactic value* for the HM value restriction

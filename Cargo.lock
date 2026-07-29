@@ -633,6 +633,7 @@ dependencies = [
  "praxis-runtime",
  "praxis-source",
  "praxis-stdlib",
+ "praxis-syntax",
  "praxis-types",
 ]
 

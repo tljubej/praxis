@@ -133,3 +133,108 @@ fn span_round_trips_via_bridge() {
         Span::new(BytePos::from(0), BytePos::from(9))
     );
 }
+
+/// TY-08, at the level it lived at: every position that can carry a written
+/// type must *see* one, whichever of the three node kinds the parser chose.
+///
+/// `TypeRef::cast` used to accept only `TYPE_REF`, so a direct `TUPLE_TYPE` or
+/// `FN_TYPE` — which is what `(Int, Text)` and `(Int) -> Int` produce — made
+/// the accessor answer `None`. The annotation was not rejected; it was
+/// invisible, and inference invented a fresh variable in its place.
+#[test]
+fn every_annotation_position_sees_a_tuple_or_function_type() {
+    let src = "struct Boxed { f: (Int) -> Int }\n\
+               enum Wrapped { Fn((Int) -> Int), Pair((Int, Text)) }\n\
+               fn takes(x: (Int, Text), g: (Int) -> Int) -> (Int, Text) { x }\n\
+               let pair: (Int, Text) = (1, \"a\")\n\
+               var f: (Int) -> Int = |n| n";
+    let file = SourceFile::cast(root(src)).unwrap();
+    let mut stmts = file.stmts();
+
+    let struct_item = crate::StructItem::cast(stmts.next().unwrap()).unwrap();
+    let field = struct_item.field_list().unwrap().fields().next().unwrap();
+    assert_eq!(
+        field.ty().map(|t| t.syntax().kind()),
+        Some(SyntaxKind::FN_TYPE),
+        "a function-typed struct field"
+    );
+    // …and the field's *value* accessor must not mistake that type for one.
+    assert!(field.expr().is_none(), "a declaration field has no value");
+
+    let enum_item = crate::EnumItem::cast(stmts.next().unwrap()).unwrap();
+    let payload_kinds: Vec<_> = enum_item
+        .variants()
+        .map(|v| {
+            v.payload_types()
+                .and_then(|ts| ts.first().map(|t| t.syntax().kind()))
+        })
+        .collect();
+    assert_eq!(
+        payload_kinds,
+        vec![Some(SyntaxKind::FN_TYPE), Some(SyntaxKind::TUPLE_TYPE)],
+        "function- and tuple-typed enum payloads"
+    );
+
+    let fn_item = crate::FnItem::cast(stmts.next().unwrap()).unwrap();
+    let param_kinds: Vec<_> = fn_item
+        .param_list()
+        .unwrap()
+        .params()
+        .map(|p| p.ty().map(|t| t.syntax().kind()))
+        .collect();
+    assert_eq!(
+        param_kinds,
+        vec![Some(SyntaxKind::TUPLE_TYPE), Some(SyntaxKind::FN_TYPE)],
+        "tuple- and function-typed parameters"
+    );
+    assert_eq!(
+        fn_item.return_type().map(|t| t.syntax().kind()),
+        Some(SyntaxKind::TUPLE_TYPE),
+        "a tuple return type"
+    );
+
+    let let_stmt = crate::LetStmt::cast(stmts.next().unwrap()).unwrap();
+    assert_eq!(
+        let_stmt.ty().map(|t| t.syntax().kind()),
+        Some(SyntaxKind::TUPLE_TYPE),
+        "a tuple-annotated `let`"
+    );
+    assert!(let_stmt.init().is_some(), "…and its initializer survives");
+
+    let var_stmt = crate::VarStmt::cast(stmts.next().unwrap()).unwrap();
+    assert_eq!(
+        var_stmt.ty().map(|t| t.syntax().kind()),
+        Some(SyntaxKind::FN_TYPE),
+        "a function-annotated `var`"
+    );
+    assert!(var_stmt.init().is_some(), "…and its initializer survives");
+}
+
+/// The kind set is one predicate, and it is the same one the wrapper uses. A
+/// node kind that is not a type node must not become a `TypeRef`.
+#[test]
+fn only_the_three_type_node_kinds_are_annotations() {
+    for kind in [
+        SyntaxKind::TYPE_REF,
+        SyntaxKind::TUPLE_TYPE,
+        SyntaxKind::FN_TYPE,
+    ] {
+        assert!(kind.is_type_node(), "{kind:?} is a type node");
+    }
+    for kind in [
+        SyntaxKind::TUPLE_EXPR,
+        SyntaxKind::PAREN_EXPR,
+        SyntaxKind::PARAM,
+        SyntaxKind::SOURCE_FILE,
+    ] {
+        assert!(!kind.is_type_node(), "{kind:?} is not a type node");
+    }
+    // The expression `(1, 2)` is a TUPLE_EXPR, and casting it as an annotation
+    // must fail — the wrapper is kind-checked, not shape-guessed.
+    let file = SourceFile::cast(root("let x = (1, 2)")).unwrap();
+    let let_stmt = crate::LetStmt::cast(file.stmts().next().unwrap()).unwrap();
+    assert!(
+        let_stmt.ty().is_none(),
+        "an initializer is not an annotation"
+    );
+}

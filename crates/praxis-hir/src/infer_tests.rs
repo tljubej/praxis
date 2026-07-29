@@ -604,7 +604,6 @@ fn mismatch_carries_a_help_hint_when_found_is_unit() {
 // --- annotation preservation ------------------------------------------------
 
 #[test]
-#[ignore = "known bug: direct tuple annotations are dropped by AST accessors"]
 fn tuple_parameter_annotation_is_enforced() {
     // A direct TUPLE_TYPE child must not disappear merely because Param::ty()
     // only recognizes TYPE_REF nodes.
@@ -616,7 +615,6 @@ fn tuple_parameter_annotation_is_enforced() {
 }
 
 #[test]
-#[ignore = "known bug: direct function annotations are dropped by AST accessors"]
 fn function_parameter_annotation_is_enforced() {
     // The annotation says the argument to `f` is Int, so calling it with Text
     // is invalid even though bottom-up inference could otherwise choose Text.
@@ -628,7 +626,6 @@ fn function_parameter_annotation_is_enforced() {
 }
 
 #[test]
-#[ignore = "known bug: direct tuple return annotations are dropped by AST accessors"]
 fn tuple_return_annotation_is_enforced() {
     let src = "fn bad() -> (Int, Text) { (1, true) }";
     assert!(
@@ -650,7 +647,6 @@ fn user_enum_annotation_is_enforced() {
 }
 
 #[test]
-#[ignore = "known bug: direct function field annotations are dropped by AST accessors"]
 fn function_typed_record_field_annotation_is_enforced() {
     // The older equality test initializes this field with a function, which
     // accidentally pins the dropped annotation and therefore cannot detect the
@@ -664,13 +660,69 @@ fn function_typed_record_field_annotation_is_enforced() {
 }
 
 #[test]
-#[ignore = "known bug: direct function enum payload annotations are dropped by AST accessors"]
 fn function_typed_enum_payload_annotation_is_enforced() {
     let src = "enum Boxed { Box((Int) -> Int) }\n\
                fn main() -> Boxed { Box(1) }";
     assert!(
         has_type_error(src),
         "a function-typed enum payload cannot be constructed from Int"
+    );
+}
+
+/// The exit tests all ask that a wrong use is *rejected*; this asks that the
+/// right one is accepted and carries the shape the annotation wrote. A fresh
+/// variable would satisfy every rejection test by never rejecting, so both
+/// halves are needed to say the annotation arrived.
+#[test]
+fn a_tuple_or_function_annotation_is_the_type_it_writes() {
+    assert_eq!(
+        scheme_of("fn pair(x: (Int, Text)) -> Int { 0 }", "x").as_deref(),
+        Some("(Int, Text)"),
+        "a tuple-annotated parameter"
+    );
+    assert_eq!(
+        scheme_of("fn apply(g: (Int) -> Text) -> Int { 0 }", "g").as_deref(),
+        Some("(Int) -> Text"),
+        "a function-annotated parameter"
+    );
+    assert_eq!(
+        scheme_of("let p: (Int, Text) = (1, \"a\")", "p").as_deref(),
+        Some("(Int, Text)"),
+        "a tuple-annotated `let`"
+    );
+    assert!(
+        !has_type_error("fn apply(g: (Int) -> Text) -> Text { g(1) }"),
+        "…and a call that agrees with the annotation is fine"
+    );
+}
+
+/// A parenthesized single type is that type, not a one-element tuple and not a
+/// fresh variable — the grouping `TYPE_REF` holds its name in a nested node, so
+/// the "the `Ident` is a direct token" reading is what tells the two apart.
+#[test]
+fn a_parenthesized_annotation_is_the_type_it_groups() {
+    assert_eq!(
+        scheme_of("fn only(x: (Int)) -> Int { x }", "x").as_deref(),
+        Some("Int")
+    );
+    assert!(
+        has_type_error("fn only(x: (Int)) -> Text { x }"),
+        "…and it constrains the body like a bare `Int` would"
+    );
+}
+
+/// `()` in a parameter group is *no* parameters. It used to resolve to nothing
+/// at all, so `() -> Int` described a function of one invented argument and
+/// accepted a call with anything in it.
+#[test]
+fn a_nullary_function_annotation_takes_no_arguments() {
+    assert_eq!(
+        scheme_of("fn run(g: () -> Int) -> Int { 0 }", "g").as_deref(),
+        Some("() -> Int")
+    );
+    assert!(
+        has_type_error("fn run(g: () -> Int) -> Int { g(1) }"),
+        "a nullary function cannot be called with an argument"
     );
 }
 

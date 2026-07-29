@@ -310,6 +310,21 @@ impl SyntaxKind {
         self.keyword_text().is_some()
     }
 
+    /// Whether this kind is one of the three shapes a written type annotation
+    /// can take: a name (with or without bracketed arguments), a tuple, or a
+    /// function type.
+    ///
+    /// The set lives here, once, because everything that looks at an annotation
+    /// needs the same answer: `praxis_ast::TypeRef::cast` accepts exactly these
+    /// kinds, and type resolution recurses through exactly these children. Each
+    /// site used to spell the list out for itself, and the one that only
+    /// listed `TYPE_REF` — the AST accessors — silently dropped every direct
+    /// tuple and function annotation (TY-08).
+    #[must_use]
+    pub fn is_type_node(self) -> bool {
+        matches!(self, Self::TYPE_REF | Self::TUPLE_TYPE | Self::FN_TYPE)
+    }
+
     /// The largest discriminant. Sound because the enum declares no explicit
     /// discriminants, so its values are consecutive from zero — which
     /// [`SyntaxKind::from_raw_u16`] relies on and

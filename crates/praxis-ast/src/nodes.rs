@@ -388,12 +388,27 @@ impl ExprStmt {
 // ---------------------------------------------------------------------------
 
 /// A type written in source: a scalar name, a tuple, or a function type.
+///
+/// The parser emits one of three node kinds for an annotation — [`K::TYPE_REF`]
+/// for a name (with or without bracketed arguments), [`K::TUPLE_TYPE`] for
+/// `(T, U)`, [`K::FN_TYPE`] for `(P) -> R` — and this wrapper accepts all
+/// three. It used to accept only `TYPE_REF`, so `fn f(x: (Int, Text))` had *no*
+/// annotation as far as `Param::ty` was concerned, and the same held for `let`,
+/// `var`, return types, struct fields and enum payloads: six positions where a
+/// written type was silently discarded and inference invented a fresh variable
+/// instead (TY-08).
 #[derive(Clone, Debug)]
 pub struct TypeRef {
     syntax: SyntaxNode,
 }
 impl AstNode for TypeRef {
+    /// The kind a *name* annotation has. `cast` accepts the other two type node
+    /// kinds as well — see [`SyntaxKind::is_type_node`](praxis_syntax::SyntaxKind::is_type_node).
     const KIND: K = K::TYPE_REF;
+    /// Accepts every node kind an annotation can be, not just [`Self::KIND`].
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        syntax.kind().is_type_node().then(|| Self { syntax })
+    }
     fn from_syntax(syntax: SyntaxNode) -> Self {
         Self { syntax }
     }
