@@ -4547,3 +4547,60 @@ fn m10b_ws1_snapshot_locals_carry_distinct_type_ids() {
         "Int and Vec locals must have distinct type ids"
     );
 }
+
+/// TY-33's first unit end to end. `panic` typechecked before this stage and
+/// then failed the *compile* — "unresolved user function `panic`" — so the one
+/// thing that could not be observed about it was what it does. It raises its
+/// own fault kind, carries the words the program wrote, and stops the program
+/// where it stands.
+#[test]
+fn a_panic_stops_the_program_with_the_message_it_was_given() {
+    let (rt, _result) = run_main("fn main() -> Int {\n  panic(\"no route\")\n  1\n}\n");
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::Panic);
+    assert_eq!(rt.fault_message(), Some("no route"));
+}
+
+/// …and the message is the *value*, not a literal: `panic` is `(T) -> Never`,
+/// so it renders whatever it was handed through that value's descriptor,
+/// exactly as `out` does.
+#[test]
+fn a_panic_renders_a_non_text_argument_through_its_descriptor() {
+    let (rt, _result) = run_main("fn main() -> Int { panic(7) }");
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::Panic);
+    assert_eq!(rt.fault_message(), Some("7"));
+}
+
+/// `assert` is the fault that has a *condition*: false stops the program, true
+/// is not a fault at all — and the statement after it still runs, which is the
+/// half a "does it fault" test alone would miss.
+#[test]
+fn an_assert_faults_on_false_and_is_invisible_on_true() {
+    let (rt, _result) = run_main("fn main() -> Int {\n  assert(1 == 2)\n  3\n}\n");
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::AssertFailed);
+    // `assert` takes no message, so it sets none (the kind is the whole report).
+    assert_eq!(rt.fault_message(), None);
+
+    let (rt, result) = run_main("fn main() -> Int {\n  assert(1 == 1)\n  3\n}\n");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+/// `dbg` is the identity on values, not just on types: the reference that comes
+/// back is the one that went in, so `dbg(x)` in an expression computes exactly
+/// what `x` does.
+#[test]
+fn dbg_hands_back_the_value_it_was_given() {
+    let (rt, result) = run_main("fn main() -> Int { dbg(20) + dbg(22) }");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 42);
+
+    // The same reference, not an equal copy: a collection round-trips its
+    // identity, so a push through the result is visible in the original.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let xs = Vec()\n  xs.push(1)\n  dbg(xs).push(2)\n  xs.len()\n}\n",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 2);
+}

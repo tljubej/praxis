@@ -76,7 +76,12 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// generated code now writes zero into a shadow slot whose local has died
 /// (MIR-01). A runtime of the previous version would read either of those zeros
 /// as a real reference (F18, MIR-16).
-pub const RUNTIME_ABI_VERSION: u32 = 12;
+/// v13 (repair S17): `FaultKind` gained `Panic` and `AssertFailed`, the two
+/// kinds §9.1 lists that had no encoding, and `RuntimeContext` gained
+/// `fault_message` — the slot `praxis_panic`/`praxis_assert` write the
+/// program's message into. Appended after `false_ref`, so every
+/// generated-code-read offset is unchanged; the struct's size is not.
+pub const RUNTIME_ABI_VERSION: u32 = 13;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -98,7 +103,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 12;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 13;
 
 // ---------------------------------------------------------------------------
 // The runtime symbol table (F4).
@@ -126,6 +131,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::AllocTuple => praxis_alloc_tuple as *const (),
         RuntimeSymbol::AllocUnit => praxis_alloc_unit as *const (),
         RuntimeSymbol::AllocVarCell => praxis_alloc_var_cell as *const (),
+        RuntimeSymbol::Assert => praxis_assert as *const (),
         RuntimeSymbol::BitsetContains => praxis_bitset_contains as *const (),
         RuntimeSymbol::BitsetInsert => praxis_bitset_insert as *const (),
         RuntimeSymbol::BitsetIsEmpty => praxis_bitset_is_empty as *const (),
@@ -151,6 +157,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::DequePopFront => praxis_deque_pop_front as *const (),
         RuntimeSymbol::DequePushBack => praxis_deque_push_back as *const (),
         RuntimeSymbol::DequePushFront => praxis_deque_push_front as *const (),
+        RuntimeSymbol::Dbg => praxis_dbg as *const (),
         RuntimeSymbol::EnumPayload => praxis_enum_payload as *const (),
         RuntimeSymbol::EnumSetPayload => praxis_enum_set_payload as *const (),
         RuntimeSymbol::EnumTag => praxis_enum_tag as *const (),
@@ -222,6 +229,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::MinHeapPeek => praxis_min_heap_peek as *const (),
         RuntimeSymbol::MinHeapPop => praxis_min_heap_pop as *const (),
         RuntimeSymbol::MinHeapPush => praxis_min_heap_push as *const (),
+        RuntimeSymbol::Panic => praxis_panic as *const (),
         RuntimeSymbol::PopDebugFrame => crate::debug::praxis_pop_debug_frame as *const (),
         RuntimeSymbol::PopShadowFrame => crate::shadow_frame::praxis_pop_shadow_frame as *const (),
         RuntimeSymbol::PushDebugFrame => crate::debug::praxis_push_debug_frame as *const (),
@@ -279,6 +287,15 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
 unsafe fn set_fault(ctx: *mut RuntimeContext, fault: RaisedFault) {
     if let Some(slot) = unsafe { (*ctx).pending_fault.as_mut() } {
         slot.set(fault);
+    }
+}
+
+/// Record `text` as the message the fault about to be raised carries (§9.1).
+/// Does nothing if the context's message slot is null (a host that wired no
+/// runtime), so a `panic` still faults even where nothing can render its words.
+unsafe fn set_fault_message(ctx: *mut RuntimeContext, text: String) {
+    if let Some(slot) = unsafe { (*ctx).fault_message.as_mut() } {
+        slot.set(text);
     }
 }
 
@@ -3380,6 +3397,70 @@ pub unsafe extern "C" fn praxis_write_stdout(ctx: *mut RuntimeContext, value: Gc
 }
 
 // ---------------------------------------------------------------------------
+// `dbg(...)`, `panic(...)`, `assert(...)` — the rest of §16.1's control names.
+// ---------------------------------------------------------------------------
+
+/// Format `value` through its descriptor, write it to stderr followed by a
+/// newline, and hand **the same reference back** (§8.1). `dbg` is `forall T.
+/// (T) -> T`, so it can be wrapped around any subexpression without changing
+/// what the program computes. Never faults, never allocates.
+///
+/// # Safety
+/// `ctx` must be live and wired; `value` must be a valid `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_dbg(_ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
+    use std::io::Write;
+    let mut rendered = String::new();
+    value.format(&mut rendered);
+    let _ = std::io::stderr().write_all(rendered.as_bytes());
+    let _ = std::io::stderr().write_all(b"\n");
+    value
+}
+
+/// Record `value` as the fault message and raise [`FaultKind::Panic`] (§9.1).
+///
+/// The message is rendered **here**, through the value's descriptor, exactly as
+/// `out` renders its argument. It has to be: the host reads the message after
+/// the heap the `GcRef` points into has been torn down, so a stored reference
+/// would outlive what it names.
+///
+/// Returns the Unit sentinel. `panic` is `forall T. (T) -> Never`, so no caller
+/// can use the result — but the ABI returns a `GcRef` on every path, and a
+/// fault epilogue needs a defined value to carry out (§10.4).
+///
+/// # Safety
+/// `ctx` must be live and wired; `value` must be a valid `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_panic(ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
+    let mut message = String::new();
+    value.format(&mut message);
+    unsafe { set_fault_message(ctx, message) };
+    unsafe { set_fault(ctx, RaisedFault::PANIC) };
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// Raise [`FaultKind::AssertFailed`] when `condition` is false (§9.1), and do
+/// nothing at all when it is true.
+///
+/// `assert` is `(Bool) -> Unit`, so the argument is one of the two `Bool`
+/// immortals and reading its payload needs no descriptor check.
+///
+/// It sets **no** message: `assert` takes a condition and nothing else, so the
+/// only text available would restate the fault kind. `panic` is the name that
+/// carries words.
+///
+/// # Safety
+/// `ctx` must be live and wired; `condition` must be a valid `Bool` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_assert(ctx: *mut RuntimeContext, condition: GcRef) -> GcRef {
+    // SAFETY: `assert`'s scheme is `(Bool) -> Unit`, so the argument is a Bool.
+    if !unsafe { crate::immortal::read_bool(condition) } {
+        unsafe { set_fault(ctx, RaisedFault::ASSERT_FAILED) };
+    }
+    unsafe { unit_sentinel(ctx) }
+}
+
+// ---------------------------------------------------------------------------
 // Input parser (§7, M6).
 //
 // `read` / `parse` lower to runtime calls that fetch the input buffer and run
@@ -3479,8 +3560,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_eleven_after_the_fault_repack() {
-        assert_eq!(RUNTIME_ABI_VERSION, 12);
+    fn version_is_thirteen_after_the_panic_message_slot() {
+        assert_eq!(RUNTIME_ABI_VERSION, 13);
     }
 
     #[test]

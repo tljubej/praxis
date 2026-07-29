@@ -46,8 +46,8 @@ pub use abi::{assert_abi_version, RUNTIME_ABI_VERSION};
 pub use closures::ClosurePayload;
 pub use collections::{DequePayload, GridPayload, VecPayload};
 pub use context::{
-    current_fault_kind, DebugFrame, DebugLocal, Fault, FaultKind, Runtime, RuntimeContext,
-    MAX_RECURSION_DEPTH,
+    current_fault_kind, DebugFrame, DebugLocal, Fault, FaultKind, FaultMessage, Runtime,
+    RuntimeContext, MAX_RECURSION_DEPTH,
 };
 pub use crash_snapshot::{CrashSnapshot, SnapshotFrame, SnapshotSlot};
 pub use debug::{DebugLocalMeta, LOCAL_KIND_TEMP, LOCAL_KIND_USER};

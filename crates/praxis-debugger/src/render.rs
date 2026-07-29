@@ -62,10 +62,14 @@ const FRAME_NUM_WIDTH: usize = 3;
 /// Prints the fault line, the backtrace, and the top frame's locals. A missing
 /// snapshot (e.g. a host-side fault before any debug frame was pushed) degrades
 /// to just the fault line. The `parse_detail` is consulted only for
-/// `FaultKind::ParseFailed` to append the §7.11 input/expected/actual detail.
+/// `FaultKind::ParseFailed` to append the §7.11 input/expected/actual detail;
+/// `message` is what a `panic`/`assert` fault carried (§9.1) and is appended to
+/// the fault line itself, because for those two kinds the message *is* the
+/// diagnosis — "panic" on its own says nothing the program did not already say.
 pub fn render_noninteractive<W: Write>(
     out: &mut W,
     kind: FaultKind,
+    message: Option<&str>,
     snapshot: Option<&CrashSnapshot>,
     parse_detail: Option<&ParseDetail>,
     palette: praxis_source::style::Palette,
@@ -74,7 +78,10 @@ pub fn render_noninteractive<W: Write>(
     use praxis_source::style::{Severity as StyleSeverity, Style};
     // 1. The fault line — a runtime error, colored like a compiler error.
     let label = palette.paint(Style::Severity(StyleSeverity::Error), "error:");
-    writeln!(out, "{label} program faulted: {kind}")?;
+    match message {
+        Some(text) => writeln!(out, "{label} program faulted: {kind}: {text}")?,
+        None => writeln!(out, "{label} program faulted: {kind}")?,
+    }
 
     // ParseFailed appends the §7.11 detail (input span, expected, actual preview).
     if kind == FaultKind::ParseFailed {
@@ -522,6 +529,7 @@ mod tests {
         render_noninteractive(
             &mut out,
             snap.fault_kind,
+            None,
             Some(&snap),
             None,
             praxis_source::style::Palette::plain(),
@@ -540,6 +548,7 @@ mod tests {
         render_noninteractive(
             &mut out,
             FaultKind::DivByZero,
+            None,
             None,
             None,
             praxis_source::style::Palette::plain(),
@@ -561,6 +570,7 @@ mod tests {
         render_noninteractive(
             &mut out,
             FaultKind::ParseFailed,
+            None,
             None,
             Some(&detail),
             praxis_source::style::Palette::plain(),

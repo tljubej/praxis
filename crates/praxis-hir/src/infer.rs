@@ -312,6 +312,8 @@ impl Inferer {
                 matches!(s.kind, SymbolKind::Builtin | SymbolKind::EnumVariant)
                     && (s.name == "out"
                         || s.name == "panic"
+                        || s.name == "dbg"
+                        || s.name == "assert"
                         || s.name == "Some"
                         || s.name == "None"
                         || s.name == "pi"
@@ -338,6 +340,21 @@ impl Inferer {
                         db.unit()
                     };
                     db.func(vec![v], result)
+                }
+                // `dbg` prints to stderr and hands the value straight back
+                // (§8.1), so it is `forall T. (T) -> T` — the identity on
+                // types, which is what lets it wrap any subexpression.
+                "dbg" => {
+                    let v = db.fresh_var();
+                    db.func(vec![v], v)
+                }
+                // `assert` takes a condition, not a value: `(Bool) -> Unit`,
+                // monomorphic. This is what makes `assert(1)` a type error
+                // rather than a fresh variable that accepts anything (TY-33).
+                "assert" => {
+                    let bool_ty = db.bool();
+                    let unit_ty = db.unit();
+                    db.func(vec![bool_ty], unit_ty)
                 }
                 // Collection constructors (§6.1). Each yields an empty
                 // collection of its ctor type; the element type is a

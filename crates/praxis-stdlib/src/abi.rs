@@ -193,6 +193,7 @@ runtime_symbols! {
     AllocTuple = "praxis_alloc_tuple": (Ctx, Ptr) -> Gc, Allocates;
     AllocUnit = "praxis_alloc_unit": (Ctx) -> Gc, Pure;
     AllocVarCell = "praxis_alloc_var_cell": (Ctx, Gc) -> Gc, Allocates;
+    Assert = "praxis_assert": (Ctx, Gc) -> Gc, Faults;
     BitsetContains = "praxis_bitset_contains": (Ctx, Gc, Gc) -> Gc, Pure;
     BitsetInsert = "praxis_bitset_insert": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     BitsetIsEmpty = "praxis_bitset_is_empty": (Ctx, Gc) -> Gc, Pure;
@@ -218,6 +219,7 @@ runtime_symbols! {
     DequePopFront = "praxis_deque_pop_front": (Ctx, Gc) -> Gc, Faults;
     DequePushBack = "praxis_deque_push_back": (Ctx, Gc, Gc) -> Gc, Allocates;
     DequePushFront = "praxis_deque_push_front": (Ctx, Gc, Gc) -> Gc, Allocates;
+    Dbg = "praxis_dbg": (Ctx, Gc) -> Gc, Pure;
     EnumPayload = "praxis_enum_payload": (Ctx, Gc, RawI64) -> Gc, Pure;
     EnumSetPayload = "praxis_enum_set_payload": (Ctx, Gc, RawI64, Gc) -> Gc, Pure;
     EnumTag = "praxis_enum_tag": (Ctx, Gc) -> Gc, Allocates;
@@ -289,6 +291,7 @@ runtime_symbols! {
     MinHeapPeek = "praxis_min_heap_peek": (Ctx, Gc) -> Gc, Faults;
     MinHeapPop = "praxis_min_heap_pop": (Ctx, Gc) -> Gc, Faults;
     MinHeapPush = "praxis_min_heap_push": (Ctx, Gc, Gc) -> Gc, Allocates;
+    Panic = "praxis_panic": (Ctx, Gc) -> Gc, Faults;
     PopDebugFrame = "praxis_pop_debug_frame": (Ctx, Ptr) -> Void, Pure;
     PopShadowFrame = "praxis_pop_shadow_frame": (Ctx, Ptr) -> Void, Pure;
     PushDebugFrame = "praxis_push_debug_frame": (Ctx, Ptr, RawU32, RawU32, Ptr) -> Ptr, Pure;

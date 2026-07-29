@@ -61,3 +61,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-053: A `loop` is the value its `break`s carry, and it is the only loop that has one](./053-a-loop-is-the-value-its-breaks-carry.md)
 - [ADR-054: Lowering reads the type inference recorded, and a specialization substitutes the scheme's own binders](./054-lowering-reads-the-type-inference-recorded.md)
 - [ADR-055: Exhaustiveness and reachability are one usefulness question, asked at every position a value has](./055-exhaustiveness-and-reachability-are-one-usefulness-question.md)
+- [ADR-056: `panic`, `assert` and `dbg` are real functions with real types and a real fault](./056-the-prelude-control-names-are-real-functions.md)

@@ -189,6 +189,10 @@ pub fn run(
 
     if runtime.has_pending_fault() {
         let kind = runtime.fault();
+        // The message a `panic`/`assert` carried (§9.1). Copied out now: the
+        // interactive path moves `runtime` into the `DebugSession` below, and
+        // the message has to survive that move to be rendered.
+        let message = runtime.fault_message().map(str::to_string);
         // Decide whether to enter the interactive crash REPL (§9.4, §9.6).
         // `always` or TTY `auto` enters the REPL; `never` or non-TTY `auto`
         // prints the noninteractive diagnostic and exits nonzero.
@@ -205,6 +209,7 @@ pub fn run(
                 praxis_debugger::render::render_noninteractive(
                     &mut std::io::stderr(),
                     kind,
+                    message.as_deref(),
                     Some(&snapshot),
                     Some(runtime.parse_detail()),
                     color.palette(),
@@ -246,6 +251,7 @@ pub fn run(
                 praxis_debugger::render::render_noninteractive(
                     &mut std::io::stderr(),
                     kind,
+                    message.as_deref(),
                     None,
                     Some(runtime.parse_detail()),
                     color.palette(),
@@ -258,6 +264,7 @@ pub fn run(
             praxis_debugger::render::render_noninteractive(
                 &mut std::io::stderr(),
                 kind,
+                message.as_deref(),
                 runtime.crash_snapshot(),
                 Some(runtime.parse_detail()),
                 color.palette(),

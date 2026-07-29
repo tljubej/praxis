@@ -846,6 +846,30 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 // out does not fault; no check_fault needed.
                 return dst;
             }
+            // `dbg(x)`, `panic(x)` and `assert(c)` — the rest of §16.1's
+            // output/control group. Each is one runtime call with the argument
+            // the program wrote; `panic`/`assert` raise a fault, so each is
+            // followed by the usual fault check. Before this they fell through
+            // to `CallTarget::User`, which typechecked and then failed the
+            // compile with "unresolved user function `panic`" (TY-33).
+            if let Some(sym) = control_builtin_symbol(callee_name) {
+                let arg_local = args
+                    .first()
+                    .map(|a| lower_expr_gc(b, a))
+                    .unwrap_or_else(|| lower_lit_gc(b, &Lit::Unit, espan));
+                let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
+                b.push(Inst::Call {
+                    dst,
+                    callee: CallTarget::Runtime(sym),
+                    args: vec![arg_local],
+                    roots: RootSlots::unannotated(),
+                    debug: DebugSlots::unannotated(),
+                });
+                if sym.faults() {
+                    b.check_fault();
+                }
+                return dst;
+            }
             // Float constants `pi()`/`e()` (§4.12): direct runtime calls that
             // allocate a Float. No arguments; no fault.
             if callee_name == "pi" || callee_name == "e" {
@@ -3595,6 +3619,22 @@ fn expr_static_type(e: &TypedExpr) -> Type {
         | TypedExpr::Match { ty, .. }
         | TypedExpr::Closure { ty, .. } => *ty,
         TypedExpr::Block(blk) => blk.ty,
+    }
+}
+
+/// The runtime symbol a §16.1 output/control builtin lowers to, or `None` for
+/// any other callee name.
+///
+/// `out` is not here: it has its own path above because it returns the Unit
+/// sentinel rather than its argument, and its result type is the call's. The
+/// three that are here share one shape — one `GcRef` in, one `GcRef` out —
+/// which is why they are one row rather than three branches.
+fn control_builtin_symbol(callee_name: &str) -> Option<RuntimeSymbol> {
+    match callee_name {
+        "dbg" => Some(RuntimeSymbol::Dbg),
+        "panic" => Some(RuntimeSymbol::Panic),
+        "assert" => Some(RuntimeSymbol::Assert),
+        _ => None,
     }
 }
 

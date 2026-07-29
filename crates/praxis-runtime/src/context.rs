@@ -87,6 +87,57 @@ pub enum FaultKind {
     /// itself to the intruder's type, so every element already stored was then
     /// read through the wrong layout (P0-11).
     TypeMismatch = 11,
+    /// The program called `panic(value)` (§9.1). The value it passed is
+    /// rendered through its descriptor into the runtime's [`FaultMessage`]
+    /// slot, so the fault says *what* the program stopped for.
+    Panic = 12,
+    /// An `assert(condition)` found its condition false (§9.1). Carries no
+    /// message: `assert` takes a condition and nothing else, so any text would
+    /// only restate the kind. `panic` is the name that carries words.
+    AssertFailed = 13,
+}
+
+/// The message a [`FaultKind::Panic`] or [`FaultKind::AssertFailed`] carries.
+///
+/// A fault kind alone cannot say what the program stopped *for*, and `panic`'s
+/// whole contract is an explicit message (§9.1). The wrapper renders the value
+/// the program passed — through its descriptor, exactly as `out` would — and
+/// leaves the text here; the host reads it when it renders the fault.
+///
+/// Rendering happens in the wrapper rather than at report time on purpose: the
+/// argument is a `GcRef` into a heap that the host tears down, so keeping the
+/// reference would make the message outlive what it points at. A `String` does
+/// not.
+///
+/// Host-managed, like [`crate::ParseDetail`]: generated code never reads or
+/// writes it.
+#[derive(Debug, Default)]
+pub struct FaultMessage {
+    text: Option<String>,
+}
+
+impl FaultMessage {
+    /// An empty slot.
+    #[must_use]
+    pub fn new() -> FaultMessage {
+        FaultMessage { text: None }
+    }
+
+    /// Record `text` as the message for the fault being raised.
+    pub fn set(&mut self, text: String) {
+        self.text = Some(text);
+    }
+
+    /// The recorded message, or `None` when the pending fault carries none.
+    #[must_use]
+    pub fn get(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+
+    /// Forget any recorded message.
+    pub fn clear(&mut self) {
+        self.text = None;
+    }
 }
 
 /// A [`FaultKind`] that is actually a fault.
@@ -126,6 +177,10 @@ impl RaisedFault {
     pub const INVALID_SIZE: RaisedFault = RaisedFault(FaultKind::InvalidSize);
     /// A value did not have the type its destination declared (§9.2).
     pub const TYPE_MISMATCH: RaisedFault = RaisedFault(FaultKind::TypeMismatch);
+    /// The program called `panic(value)` (§9.1).
+    pub const PANIC: RaisedFault = RaisedFault(FaultKind::Panic);
+    /// An `assert(condition)` found its condition false (§9.1).
+    pub const ASSERT_FAILED: RaisedFault = RaisedFault(FaultKind::AssertFailed);
 
     /// The raisable fault `kind` names, or `None` for [`FaultKind::None`] —
     /// which is the *absence* of a fault and cannot be raised.
@@ -160,6 +215,8 @@ impl std::fmt::Display for FaultKind {
             FaultKind::InvalidText => write!(f, "invalid UTF-8 in Text"),
             FaultKind::InvalidSize => write!(f, "size or extent out of range"),
             FaultKind::TypeMismatch => write!(f, "value does not have the declared type"),
+            FaultKind::Panic => write!(f, "panic"),
+            FaultKind::AssertFailed => write!(f, "assertion failed"),
         }
     }
 }
@@ -369,6 +426,13 @@ pub struct RuntimeContext {
     pub true_ref: GcRef,
     /// The cached immortal `false`. See [`Self::true_ref`].
     pub false_ref: GcRef,
+    /// Host-managed pointer to the runtime's [`FaultMessage`] slot (§9.1).
+    /// `praxis_panic` and `praxis_assert` write the message the program gave;
+    /// the host reads it when it renders the fault. Like `parse_detail` and
+    /// `crash_snapshot`, generated code never touches it — it is appended at
+    /// the end of the struct so every generated-code-read offset above is
+    /// unchanged (§11.6 ABI stability).
+    pub fault_message: *mut FaultMessage,
 }
 
 impl RuntimeContext {
@@ -397,6 +461,7 @@ impl RuntimeContext {
             // As for `unit_ref`: this constructor is not-yet-wired scaffolding.
             true_ref: input_source,
             false_ref: input_source,
+            fault_message: std::ptr::null_mut(),
         }
     }
 
@@ -454,6 +519,9 @@ pub struct Runtime {
     /// it before unwinding. The host reads it (and roots it for GC) after a
     /// fault.
     crash_snapshot: SnapshotSlot,
+    /// The message slot a `panic`/`assert` fault carries (§9.1). Owned here so
+    /// its address is stable; `Runtime::context` installs it on every context.
+    fault_message: FaultMessage,
 }
 
 impl Runtime {
@@ -468,6 +536,7 @@ impl Runtime {
             fault: Fault::clear(),
             parse_detail: ParseDetail::new(),
             crash_snapshot: SnapshotSlot::new(),
+            fault_message: FaultMessage::new(),
         }
     }
 
@@ -533,6 +602,7 @@ impl Runtime {
             native_roots: std::ptr::null_mut(),
             true_ref: self.immortals.true_(),
             false_ref: self.immortals.false_(),
+            fault_message: &mut self.fault_message as *mut FaultMessage,
         }
     }
 
@@ -551,10 +621,18 @@ impl Runtime {
         let kind = self.fault.kind();
         if self.fault.is_pending() {
             self.fault = Fault::clear();
+            self.fault_message.clear();
             Some(kind)
         } else {
             None
         }
+    }
+
+    /// The message a `panic`/`assert` fault carried (§9.1), or `None` for a
+    /// fault kind that carries none. The host renders it beside the fault line.
+    #[must_use]
+    pub fn fault_message(&self) -> Option<&str> {
+        self.fault_message.get()
     }
 
     /// Borrow the rich parse-failure detail slot (§7.11, M10-WS1). The host
@@ -596,6 +674,7 @@ impl Runtime {
         self.fault = Fault::clear();
         self.crash_snapshot.clear();
         self.parse_detail.clear();
+        self.fault_message.clear();
     }
 
     /// Consume the runtime, drop the heap, and return the proof that no live

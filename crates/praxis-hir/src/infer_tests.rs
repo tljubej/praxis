@@ -1580,13 +1580,53 @@ fn ordering_rejects_composites_without_a_matching_runtime_lowering() {
 }
 
 #[test]
-#[ignore = "known bug: assert has no prelude type scheme"]
 fn prelude_assert_requires_bool() {
     let src = "fn main() -> Unit { assert(1) }";
     assert!(
         has_type_error(src),
         "prelude calls need real schemes instead of unconstrained fresh types"
     );
+}
+
+/// TY-33's first unit as a rule, not one rejection: each of the three
+/// output/control names has the type §8.1/§9.1 gives it, and the type is what
+/// makes each usable. `assert` refuses a non-`Bool`; `dbg` is the identity, so
+/// it can wrap any subexpression without changing what the program computes;
+/// `panic` is `Never`, so it satisfies any declared result.
+#[test]
+fn each_control_builtin_has_the_type_its_contract_needs() {
+    // `assert` takes a Bool and gives back Unit.
+    assert!(!has_type_error("fn main() -> Unit { assert(true) }"));
+    assert!(has_type_error("fn main() -> Unit { assert(1) }"));
+    assert!(has_type_error("fn main() -> Unit { assert(\"yes\") }"));
+    // …and it is Unit, not the condition: an Int result does not match.
+    assert!(has_type_error("fn main() -> Int { assert(true) }"));
+
+    // `dbg` returns exactly what it was given, at each of two element types.
+    assert!(!has_type_error("fn main() -> Int { dbg(1) }"));
+    assert!(!has_type_error("fn main() -> Text { dbg(\"x\") }"));
+    assert!(has_type_error("fn main() -> Text { dbg(1) }"));
+    // The identity holds inside an expression, which is the point of `dbg`.
+    assert!(!has_type_error("fn main() -> Int { dbg(1) + 2 }"));
+
+    // `panic` diverges, so it matches any declared result — and it accepts any
+    // value, as `out` does.
+    assert!(!has_type_error("fn main() -> Int { panic(\"stop\") }"));
+    assert!(!has_type_error("fn main() -> Unit { panic(1) }"));
+    assert!(!has_type_error(
+        "fn f(c: Bool) -> Int { if c { 1 } else { panic(\"stop\") } }"
+    ));
+}
+
+/// The half a type test cannot see: each of the three lowers to a runtime call
+/// rather than to a user function that does not exist. `panic` **typechecked**
+/// before this stage and then failed the compile with "unresolved user function
+/// `panic`" — a clean program that could not run (TY-33).
+#[test]
+fn each_control_builtin_reaches_the_backend() {
+    assert!(is_clean_with_lower("fn main() -> Unit { panic(\"stop\") }"));
+    assert!(is_clean_with_lower("fn main() -> Unit { assert(true) }"));
+    assert!(is_clean_with_lower("fn main() -> Int { dbg(7) }"));
 }
 
 // --- capability constraints must survive polymorphism -----------------------
