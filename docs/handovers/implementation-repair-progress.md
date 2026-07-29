@@ -24,7 +24,7 @@ Update this file at the end of every stage.
 | S11 — TypeDb core: levels, schemes, nominal identity | **done** | `8aa9069`, `aa9deea`, `d69881e`, `5efd0e2` |
 | S12 — Parser grammar: wildcard, separators, struct-literal suppression | **done** | `4504a1d`, `0c4b2ce`, `e49a803`, `13db789` |
 | S13 — Annotations honored, declaration passes, mutability and scope | **done** | `6037662`, `9129f76`, `4f45455`, `9c6b48a`, `6fd5e46`, `de6b0e2` |
-| S14 — Control flow: bottom type, contexts, joins, loop values | **TY-19, TY-16, TY-17 done; 3 findings left** | `fd909a1`, `92a1b84`, `bf91879` |
+| S14 — Control flow: bottom type, contexts, joins, loop values | **TY-19, TY-16, TY-17, TY-18, TY-20 done; TY-21 left** | `fd909a1`, `92a1b84`, `bf91879`, `9cffbe5`, `f93b25f` |
 | S15 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
@@ -33,7 +33,7 @@ TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1209 passed, 0 failed, 69 ignored**. `just ci` is green.
+Now: **1214 passed, 0 failed, 67 ignored**. `just ci` is green.
 
 **S11 is closed.** All five exit-criterion tests pass and all eight findings the
 stage owns are fixed and gated — TY-01…TY-07 and TY-22.
@@ -48,20 +48,21 @@ opened (ADR-051); the stage's own decisions are ADR-052. TY-12 needed no code:
 it is S11's `Y007`. The corpus triage pass the plan mandates found **nothing**
 newly rejected — see §4.
 
-**S14 is open. D2 is answered** (see §5), and **TY-19, TY-16 and TY-17 have
-landed**. Three findings are left — TY-18, TY-20, TY-21 — and §4 says where to
-pick up.
+**S14 is open. D2 is answered** (see §5), and five of its six findings have
+landed. **TY-21 is the only one left**; §4 says exactly what it needs.
 
-Sixty-eight of the audit's ignored regressions are un-ignored and passing.
-The three added by S14 so far:
+Seventy of the audit's ignored regressions are un-ignored and passing.
+The five added by S14 so far:
 
 | Test | File | Finding |
 |---|---|---|
 | `never_branch_coerces_to_the_other_branch_type` | `infer_tests.rs` | TY-19 |
 | `expression_before_trailing_statement_is_not_the_block_value` | `infer_tests.rs` | TY-16 |
 | `if_without_else_cannot_produce_the_then_value_type` | `infer_tests.rs` | TY-17 |
+| `early_return_value_must_match_the_function_result` | `infer_tests.rs` | TY-18 |
+| `control_flow_terminators_require_a_legal_enclosing_context` | `infer_tests.rs` | TY-20 |
 
-S14's seven new gates so far:
+S14's ten new gates so far:
 
 | Test | File | Pins |
 |---|---|---|
@@ -73,6 +74,9 @@ S14's seven new gates so far:
 | `two_ordinary_branches_still_have_to_agree` | `infer_tests.rs` | the half a widening bug would break |
 | `a_blocks_value_is_its_last_statement_and_only_if_it_is_an_expression` | `infer_tests.rs` | TY-16 as the rule, not one rejection |
 | `an_else_less_if_is_unit_unless_its_branch_diverges` | `infer_tests.rs` | TY-17's ordinary case, its divergent carve-out, and that a real value with no `else` still mismatches |
+| `a_return_is_checked_against_the_function_it_leaves` | `infer_tests.rs` | TY-18 in the shapes the exit test misses — a bare `return`, an unannotated result the returns pin, nesting, and a closure's `return` |
+| `a_function_whose_body_diverges_matches_any_declared_result` | `infer_tests.rs` | TY-19 at the function result, which no finding names separately |
+| `a_terminator_needs_the_right_enclosing_context` | `infer_tests.rs` | TY-20's two codes, both closure directions, and that five legal positions stay legal |
 
 The twelve added by S13's second half:
 
@@ -611,7 +615,7 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S14's TY-19, TY-16 and TY-17)
+### From this session (S14's TY-19, TY-16, TY-17, TY-18 and TY-20)
 
 **`Never` is `TypeData::Never`, not `ScalarType::Never`.** The variant is gone
 from `praxis_stdlib::type_pattern::ScalarType` — so `PatternScalar::Never` is
@@ -648,6 +652,30 @@ TY-17 — and it is load-bearing, not stylistic.
 expression.** `infer_block_inner` keeps a *pending* tail that any following
 statement demotes, which is `lower_block`'s shape. `{ 1; let x = 2 }` used to
 infer `Int` while lowering gave it a `Unit` tail.
+
+**`Inferer::fn_results` is the function-context stack**, innermost last: the
+result type of each function whose body is being inferred. `infer_fn` pushes the
+declared return type, or a fresh variable that the `return`s and the tail both
+constrain when there is no annotation — the result has to exist *before* the
+body is inferred, which is why it is a stack rather than a check afterwards. A
+closure pushes its own (`infer_closure_body`), because `return` inside one
+leaves the closure. **Empty means "not inside a function"**, which is what makes
+a top-level `return` a `Y011`.
+
+**`Inferer::loop_depth` is the loop-context counter**, and `Y012` is a
+`break`/`continue` with it at zero. **Both boundaries are function boundaries,
+not lexical ones:** `infer_closure_body` clears the depth and restores it, so a
+`break` inside a closure cannot leave a loop outside it.
+
+**A function body *joins* with its declared result.**
+`fn f() -> Int { panic("x") }` used to be a `Y001`; every path diverges, so
+there is no value to disagree. If you add a site where a body meets a declared
+type, join it.
+
+**`|| expr` does not parse.** `||` lexes as the logical-or token, so a
+zero-parameter closure is a `P001`. Pre-existing, unrelated to S14 — but it
+bites when writing a test that wants a closure and does not care about its
+parameter. Use `|n| …`.
 
 ### From an earlier session (S13's TY-08…TY-15)
 
@@ -1568,62 +1596,73 @@ TY-23, TY-24 — and all fourteen exit-criterion tests pass. The stage's ADR is
   `var` holding an `Int`. This is the **fifth** prediction of wide churn in the
   repair that delivered none.
 
-**S14 is open; TY-19, TY-16 and TY-17 have landed.** Three findings are left.
-D2 is answered (§5), so nothing blocks the rest. The plan's internal order, with
-what each one needs:
+**S14 is open; only TY-21 is left.** TY-19, TY-16, TY-17, TY-18 and TY-20 have
+landed. **D2 is answered** (§5), so nothing blocks it.
 
-1. **TY-18 (M)** — an explicit `return`'s value is never unified with the
-   function's result, so `fn f() -> Int { return "x" }` type-checks. Needs a
-   **function context stack** on the `Inferer`: the result type of the `fn`
-   currently being inferred, pushed in `infer_fn` around the body. `infer_return`
-   is where it is read; today it infers the value and throws the type away.
-   `return` itself is `Never` (it diverges), which TY-19 now makes expressible —
-   so `fn f() -> Int { if c { return 1 }\n  2 }` joins correctly. Exit test:
-   `early_return_value_must_match_the_function_result`.
-2. **TY-20 (M)** — `return` at top level and `break`/`continue` outside a loop
-   pass analysis. Needs the *same* fn stack (build it once, in TY-18) plus a
-   **loop stack**. Codes are allocated: `Y011` (`ReturnOutsideFunction`),
-   `Y012` (`BreakOutsideLoop`); the `DiagCode` variants already exist, so this
-   is wording in `praxis-hir/src/diagnostics.rs` plus the two checks. Exit test:
-   `control_flow_terminators_require_a_legal_enclosing_context`.
-3. **TY-21 (L)** — `loop { break value }` is still `Unit`. Needs `join_all` over
-   the loop's `break` values and the loop stack from TY-20 (a `break` has to find
-   the loop it belongs to in order to contribute its type). **D2 is answered:**
-   a `loop` with no reachable `break` is `Never`, and a value `break` in
-   `while`/`for` is a **type error** — so the loop stack's entries need a
-   *flavour* (`Loop` vs `While`/`For`), which is the plan's "split LoopCtx
-   flavours". Exit test: `expression_loop_uses_its_break_value_type`.
+**TY-21 (L) — `loop { break value }` is still `Unit`.** What it needs, in order:
 
-**The plan's fourth exit criterion for S14 is not a test.** It says MIR
-`build.rs:1620/1629/2877/2888` must change from `if let Some(ctx)` to an
-`expect` justified by inference — i.e. once TY-20 guarantees a `break`/`continue`
-has a loop, the MIR builder no longer needs to tolerate one that does not.
-Search by the surrounding code, not the line numbers; they have moved.
+1. **Turn `Inferer::loop_depth` into a stack of contexts.** It is a `usize`
+   today because that is all TY-20 needed. TY-21 needs each entry to carry two
+   things:
+   - a **flavour** — `loop` is the only expression loop, so a value `break`
+     inside a `while`/`for` is a type error (D2, second half);
+   - the **join of every `break` value** seen so far, which is
+     `TypeDb::join`/`join_all` (already written and gated, from TY-19).
+   The plan calls this "split LoopCtx flavours". Push in `infer_loop`,
+   `infer_while` and `infer_for`; read in `infer_break`; pop and return in
+   `infer_loop`.
+2. **Seed a `loop`'s value with `Never`, not `Unit`.** D2's first half: a `loop`
+   with no reachable `break` produces nothing, so it is the bottom type, and
+   `if c { 1 } else { loop { } }` is an `Int`. `join_all`'s seed is already
+   `Never`, so this falls out.
+3. **A new diagnostic code is needed and ADR-051 does not have one.** "a value
+   `break` in a `while`/`for`" is not `Y012` (that is *no loop at all*). The
+   `Y0xx` user block is spent through `Y016`, so `Y017` is the next free number.
+   **Amend ADR-051 first** — that is its own stated rule — then add the
+   `DiagCode` variant, its `code()` arm, its `ALL` entry, and bump
+   `all_lists_every_variant`'s count.
+4. **`lower_loop` and MIR.** Inference giving `loop` a value is not enough — the
+   typed tree and MIR have to carry it. `lower_if` needed the same treatment in
+   TY-19 and it is the shape to copy. Expect `TypedExpr::Loop` to gain a `ty`
+   that is no longer always `Unit`, and the MIR loop to need a result slot the
+   `break` writes.
+5. **F20 first if `TypedExpr` gains a variant.** The plan wants the one derived
+   child walker landed before TY-21 reshapes `Loop`, because three hand-written
+   ~29-arm walks otherwise each need the new shape by hand. If TY-21 only adds a
+   *field* to an existing variant, F20 is not urgent.
+6. **The plan's fourth exit criterion is a MIR change, not a test.** MIR
+   `build.rs` must change its `if let Some(ctx)` loop-context reads to an
+   `expect` justified by inference — TY-20 now guarantees a `break`/`continue`
+   has a loop. Search by the surrounding code; the plan's line numbers have
+   moved.
 
-**Schedule the corpus triage at the end of S14 too.** TY-17 already changed what
-is rejected (`if c { <value> }` with no `else`) and TY-20 will change more.
-TY-17's check found nothing; do it again after TY-20 and TY-21.
+Exit test: `expression_loop_uses_its_break_value_type`.
+
+**Then run the corpus triage and close the stage.** TY-17, TY-18 and TY-20 each
+changed what is rejected, and each was re-checked against every `.px` in
+`tests/` and every CLI fixture with nothing newly reported. Do it once more
+after TY-21, and write the D2 ADR with it.
 
 **What S14 has deliberately left so far:**
 
-- **`join` is used at three sites, and there are more branch points.** `infer_if`,
-  `infer_match` and `lower_if`. A `while`/`for` body, a loop's breaks, and a
-  block tail after a divergent statement all still work the old way — TY-20 and
-  TY-21 are where the rest arrive. If you add one, join it.
+- **`join` is used at five sites; a loop's breaks are the missing one.**
+  `infer_if`, `infer_match`, `lower_if`, the function result in `infer_fn`, and
+  a closure's result in `infer_closure_body`. TY-21 adds the loop. If you add a
+  branch point, join it.
 - **A divergent statement does not make the rest of a block unreachable.**
   `{ panic("x"); 1 }` still infers `Int` for the block, because the tail is the
   last statement whatever precedes it. Nothing in the audit asks for
   reachability analysis, and `Never`'s absorption is about *branches meeting*,
   not about dead code.
-- **`return`, `break` and `continue` are not yet `Never`.** They diverge, so
-  they should be — that is TY-18/TY-20/TY-21's, and it is why those three come
-  after this one. Today `infer_return` answers a fresh variable.
-- **F20 (the one derived `TypedExpr` child walker) did not land**, and the plan
-  says it is "worth landing BEFORE TY-17/TY-21 add `TypedExpr` variants". TY-17
-  added none — it changed one `ty` computation. **TY-21 may**, and if it does,
-  land F20 first: three hand-written ~29-arm walks (`collect_escaping_expr`,
-  `mono.rs::rewrite_expr`, `praxis-mir::build::collect_closures_expr`) each have
-  to learn every new variant by hand.
+- **`while` and `for` are still `Unit` unconditionally**, which is right, and
+  their bodies' types are discarded, which is also right — but nothing yet
+  *rejects* `while c { break 1 }`. That is D2's second half and TY-21's.
+- **F20 (the one derived `TypedExpr` child walker) did not land.** The plan says
+  it is "worth landing BEFORE TY-17/TY-21 add `TypedExpr` variants". TY-17 added
+  none — it changed one `ty` computation. See §4's TY-21 item 5.
+- **The MIR builder still tolerates a missing loop context.** TY-20 makes that
+  unreachable; converting the `if let Some(ctx)` reads to an `expect` is the
+  plan's fourth S14 exit criterion and is TY-21's to finish.
 
 **What S13 deliberately left:**
 
@@ -1924,6 +1963,19 @@ one. Settle both together.
 
 Things the plan states that are no longer or were not quite true.
 
+- **TY-18 and TY-20 are one stack, and the plan says so.** "TY-18 and TY-20
+  share the same fn_stack — build each once" is exactly right: TY-20's `Y011`
+  is `fn_results.is_empty()`, one line on top of TY-18's stack. The loop half is
+  separate and is a plain counter until TY-21 needs more.
+- **The context boundaries are *function* boundaries, and no finding says so.**
+  A closure clears the loop depth (a `break` inside one cannot leave a loop
+  outside it) and pushes its own result (a `return` inside one leaves the
+  closure). Both fall out of treating a closure as a function, and both are
+  wrong if the stacks are treated as lexical nesting.
+- **`fn f() -> Int { panic("x") }` was a `Y001` and no finding names it.** It is
+  TY-19's rule at a site TY-19's own description does not mention — the function
+  result. TY-18 is where it got fixed, because that is where `infer_fn`'s result
+  computation was already being rewritten.
 - **TY-19's fix is a `join`, and `unify` is untouched.** The audit's wording —
   "`Never` is not a bottom type in unification" — reads as an instruction to
   make `unify` absorb it. Doing that would make `fn f() -> Never { 1 }` type-
