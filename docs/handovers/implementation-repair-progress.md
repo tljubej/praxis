@@ -23,7 +23,7 @@ Update this file at the end of every stage.
 | S10 — Semantic comparison, nominal schema identity | **done** | `29ff4f6`, `83de924`, `510ffc3`, `ff35f68` |
 | S11 — TypeDb core: levels, schemes, nominal identity | **done** | `8aa9069`, `aa9deea`, `d69881e`, `5efd0e2` |
 | S12 — Parser grammar: wildcard, separators, struct-literal suppression | **done** | `4504a1d`, `0c4b2ce`, `e49a803`, `13db789` |
-| S13 — Annotations honored, declaration passes, mutability and scope | **F2, TY-23, TY-24 done; 8 findings left** | `6037662`, `9129f76` |
+| S13 — Annotations honored, declaration passes, mutability and scope | **done** | `6037662`, `9129f76`, `4f45455`, `9c6b48a`, `6fd5e46`, `de6b0e2` |
 | S14 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
@@ -32,7 +32,7 @@ TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1173 passed, 0 failed, 84 ignored**. `just ci` is green.
+Now: **1198 passed, 0 failed, 72 ignored**. `just ci` is green.
 
 **S11 is closed.** All five exit-criterion tests pass and all eight findings the
 stage owns are fixed and gated — TY-01…TY-07 and TY-22.
@@ -41,11 +41,52 @@ stage owns are fixed and gated — TY-01…TY-07 and TY-22.
 and all six exit-criterion tests pass. D7 and D8 are answered *and implemented*
 (ADR-049); FE-06's rule is ADR-050.
 
-**S13 is open.** D13 is answered (ADR-051), **F2** — the `DiagCode` registry
-that enforces the allocation — is in, and **TY-23 and TY-24** are fixed. Eight
-findings are left; §4 says where to pick it up and in what order.
+**S13 is closed.** All ten findings are fixed — F2, TY-08…TY-15, TY-23, TY-24 —
+and all fourteen exit-criterion tests pass. D13 was answered before the stage
+opened (ADR-051); the stage's own decisions are ADR-052. TY-12 needed no code:
+it is S11's `Y007`. The corpus triage pass the plan mandates found **nothing**
+newly rejected — see §4.
 
-Sixty of the audit's ignored regressions are un-ignored and passing.
+**S14 is next.** It is the first stage of the repair with an *unanswered*
+blocking decision in front of it: **D2** (loop break-value semantics). Read
+plan §5's S14 paragraph and §7's D2 before starting.
+
+Sixty-five of the audit's ignored regressions are un-ignored and passing.
+The twelve added by S13's second half:
+
+| Test | File | Finding |
+|---|---|---|
+| `tuple_parameter_annotation_is_enforced` | `infer_tests.rs` | TY-08 |
+| `function_parameter_annotation_is_enforced` | `infer_tests.rs` | TY-08 |
+| `tuple_return_annotation_is_enforced` | `infer_tests.rs` | TY-08 |
+| `function_typed_record_field_annotation_is_enforced` | `infer_tests.rs` | TY-08 |
+| `function_typed_enum_payload_annotation_is_enforced` | `infer_tests.rs` | TY-08 |
+| `user_enum_annotation_is_enforced` | `infer_tests.rs` | TY-09 |
+| `forward_struct_annotation_is_enforced` | `infer_tests.rs` | TY-10 |
+| `value_binding_name_is_not_accepted_as_a_type` | `infer_tests.rs` | TY-11 |
+| `malformed_collection_type_arity_is_rejected` | `infer_tests.rs` | TY-12 (no code; `Y007`) |
+| `local_var_reassignment_preserves_its_type` | `infer_tests.rs` | TY-13 |
+| `reassignment_to_let_is_rejected` | `infer_tests.rs` | TY-14 |
+| `compound_assignment_requires_a_numeric_target` | `infer_tests.rs` | TY-15 |
+
+S13's eleven new gates:
+
+| Test | File | Pins |
+|---|---|---|
+| `every_annotation_position_sees_a_tuple_or_function_type` | `ast_tests.rs` | TY-08 at the level it lived at — six positions, both invisible kinds |
+| `only_the_three_type_node_kinds_are_annotations` | `ast_tests.rs` | the kind set is one predicate, and a `TUPLE_EXPR` is not in it |
+| `a_tuple_or_function_annotation_is_the_type_it_writes` | `infer_tests.rs` | the half the exit tests cannot see — a fresh variable rejects nothing, so "is rejected" is not "arrived" |
+| `a_parenthesized_annotation_is_the_type_it_groups` | `infer_tests.rs` | `(Int)`, whose `Ident` is in a nested node |
+| `a_nullary_function_annotation_takes_no_arguments` | `infer_tests.rs` | `()` is `Unit`, so `() -> Int` is nullary |
+| `a_user_type_annotation_is_the_type_it_names` | `infer_tests.rs` | TY-09 stated positively, and nested inside a collection |
+| `a_type_declaration_is_registered_after_the_types_it_names` | `infer_tests.rs` | TY-10 is *dependency* order, not "types first" |
+| `a_type_declaration_cycle_still_analyzes` | `infer_tests.rs` | the rounds terminate |
+| `a_value_in_type_position_is_reported_as_a_value` | `infer_tests.rs` | TY-11 — every value kind, at any depth, as `N003` |
+| `every_kind_of_type_name_is_still_accepted_in_type_position` | `infer_tests.rs` | …and the half a kind check breaks silently |
+| `an_assignment_constrains_the_local_it_names_and_no_other` | `infer_tests.rs` | TY-13's other half: the wrong symbol, not just a missing one |
+| `only_a_var_may_be_assigned` | `infer_tests.rs` | TY-14 across four immutable binding kinds, as `Y009` |
+| `a_compound_assignment_needs_a_numeric_target` | `infer_tests.rs` | TY-15's rule is "numeric", not "not `Bool`" |
+
 The five added by S12's second half:
 
 | Test | File | Finding |
@@ -321,12 +362,14 @@ puts a parenthesized expression at the start of the line after a `let` hits
 this — bind the tuple to a name and return the name.
 
 **One exit-criterion test could not be un-ignored.**
-`empty_vec_float_has_the_float_element_descriptor_before_any_push` is blocked on
-**TY-08 (S13)**, not on P0-11: `let values: Vec[Float] = Vec()` never applies
-its annotation to the initializer, so the element type is still a variable at
-the construction site and the descriptor is legitimately null. Its `#[ignore]`
-reason now says so, and it no longer *aborts the test process* on a null deref —
-it reads the descriptor as an `Option`.
+`empty_vec_float_has_the_float_element_descriptor_before_any_push` is not
+blocked on P0-11: `let values: Vec[Float] = Vec()` reaches codegen with the
+element type still a variable, so the descriptor is legitimately null. It no
+longer *aborts the test process* on a null deref — it reads the descriptor as
+an `Option`. S7 read the cause as TY-08 and S13 disproved that: inference does
+apply the annotation (pushing an `Int` is a `Y001`); `lower_call`
+re-instantiates the callee's scheme instead of using the call site's inferred
+type. It is **F15/MONO-01 in S15**, and the `#[ignore]` reason now says so.
 
 The eight new gates for the findings that had none:
 
@@ -546,7 +589,77 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S13's TY-23 and TY-24)
+### From this session (S13's TY-08…TY-15)
+
+**`praxis_hir::decl` is new, and it runs before any expression is inferred.**
+`declare(...)` registers every top-level `struct`/`enum` in *dependency order*
+and mints every top-level `fn`'s signature placeholder, then seals both into a
+`TypeEnv` that has no mutator outside the module. `infer_top_stmt` **no longer
+dispatches `struct`/`enum`** — if you add a type-declaration form, declare it in
+the pass or it will silently have no type. See ADR-052.
+
+**A `TypeRef` is any of three node kinds.** `SyntaxKind::is_type_node` is
+`TYPE_REF | TUPLE_TYPE | FN_TYPE`, and `TypeRef::cast` accepts all three
+(TY-08). Every accessor — `Param::ty`, `LetStmt::ty`, `VarStmt::ty`,
+`FnItem::return_type`, `Field::ty`, `EnumVariant::payload_types` — therefore
+*sees* a written tuple or function type where it saw nothing before. **Any test
+whose source has one of those annotations now checks it.**
+
+**A parenthesized type is the type it groups, and `()` is `Unit`.** `(Int)` used
+to be a fresh variable (its `Ident` lives in a nested `TYPE_REF`, and the reader
+only looked at direct tokens), and `() -> Int` used to be a function of one
+invented argument. `flatten_param_group` maps `Unit` to no parameters.
+
+**Resolving an annotation lives in `decl::Annotations`, not in `Inferer`.**
+`Inferer::resolve_type` delegates. `scalar_from_name`, `collection_from_name`,
+`collection_ctor_for`, `tuple_or_degenerate` and `flatten_param_group` all moved
+there; `resolve::is_collection_ctor_name` is gone in favour of
+`decl::is_type_ctor_name`, which is the same list plus `Option`, written once.
+
+**`NameResolution::type_refs` is new: a name in type position → its symbol.**
+Deliberately *not* in `refs` — an annotation name is not a value reference, and
+everything that walks `refs` would have had to learn to skip it. Inference reads
+`type_refs`; it does not look a type name up itself.
+
+**`lookup_struct_type` and `lookup_enum_type` are gone**, and with them the
+`SymbolKind::Struct`-only fallback that made a user `enum` annotation resolve to
+nothing (TY-09). A user type in an annotation is `type_env.ty(type_refs[range])`;
+a record literal's head is `type_env.ty(refs[range].symbol)`.
+
+**`SymbolKind::BuiltinType` is new**, and `SymbolKind::is_type()` —
+`BuiltinType | Struct | Enum` — is the one place the set is written. The prelude
+holds `out` *and* `Int`, and only one of them may appear in type position. A
+value name there is **`N003`**, not `N002`: the name is known, so calling it
+unknown would be a lie (TY-11).
+
+**A variant pattern's constructor is a recorded reference.**
+`resolve_pattern_bindings` records it (non-diagnosing — an unknown variant is
+`Y122` in S16, not `N001`), and `infer_pattern` reads the symbol out of `refs`.
+
+**Closure parameter annotations are checked.** They never were; `|x: Nope| x`
+was silent.
+
+**The `Inferer` has no `ScopeTree` and no `scope: ScopeId` parameter** (TY-13).
+It pushed empty child scopes that mirrored nothing, and `infer_assign` was the
+only reader — so a local assignment either went unchecked or constrained a
+same-named top-level binding instead. Every binding question is answered by
+`refs` / `decls` / `type_refs`. `Inference.scopes` still carries the resolver's
+tree through to `Analysis`, untouched.
+
+**Only a `var` may be assigned (`Y009`), and a compound assignment needs a
+numeric target (`Y010`).** A `let`, a parameter, a `for` binding and a pattern
+binding are all immutable. `Y010` fires only when the target's type *resolves*
+— an unbound variable is one a later use may still pin, so `fn f(a) { a += 1 }`
+is not an error.
+
+**`empty_vec_float_has_the_float_element_descriptor_before_any_push` was not
+TY-08's.** Its `#[ignore]` reason said the annotation never reaches the
+initializer; it does — pushing an `Int` into `let values: Vec[Float] = Vec()` is
+a `Y001`. `lower_call` re-instantiates the callee's scheme instead of using the
+call site's inferred type, so the typed tree carries `Vec[?T]`. That is
+F15/MONO-01 in **S15**, and the reason now says so.
+
+### From an earlier session (S13's TY-23 and TY-24)
 
 **A nested `fn` is `N005` and a redeclared one is `N004`.** Both used to be
 accepted in their own way — the first by panicking in `infer_fn`, the second by
@@ -570,7 +683,7 @@ its symbol** — the `expect` that used to catch that is gone on purpose.
 existing binding and skips the second, so calls still resolve. A stage that
 changes this to "keep the last" will turn one `N004` into a cascade.
 
-### From this session (S13's F2 — the diagnostic-code registry)
+### From an earlier session (S13's F2 — the diagnostic-code registry)
 
 **`DiagnosticCode::new` is `pub(crate)` to `praxis-source`.** You cannot write a
 code at a call site any more. `praxis_source::DiagCode` is the closed set;
@@ -1369,51 +1482,61 @@ was F12's static half; see ADR-048 and §3.
 exit-criterion tests pass, and the stage's two ADRs (049, 050) are written. It
 spent no ABI bump: nothing it touched is `#[repr(C)]`.
 
-**S13 is open; F2, TY-23 and TY-24 have landed.** Eight findings are left. The
-plan's internal order, with what each one needs:
+**S13 is closed.** All ten findings are fixed and gated — F2, TY-08…TY-15,
+TY-23, TY-24 — and all fourteen exit-criterion tests pass. The stage's ADR is
+**052**. Notes worth carrying:
 
-1. **TY-10 (M) then TY-09 (S).** The sealed `TypeEnv` comes first — it is what
-   makes the collapsed annotation lookup total, and TY-09 depends on that. Read
-   plan §5's S13 paragraph.
-2. **TY-08 (L)** — annotations must reach the initializer. This is the big one
-   and it unblocks
-   `empty_vec_float_has_the_float_element_descriptor_before_any_push`
-   (`abi.rs`), whose `#[ignore]` reason already names TY-08. Exit tests:
-   `tuple_parameter_annotation_is_enforced`,
-   `function_parameter_annotation_is_enforced`,
-   `tuple_return_annotation_is_enforced`, `user_enum_annotation_is_enforced`,
-   `function_typed_record_field_annotation_is_enforced`,
-   `function_typed_enum_payload_annotation_is_enforced`,
-   `forward_struct_annotation_is_enforced` (all `infer_tests.rs`).
-3. **TY-11 (S)** — a value's name in type position is `N003`, not a silently
-   accepted annotation. Exit test: `value_binding_name_is_not_accepted_as_a_type`.
-   `Resolver::check_type_annotation` is where a type annotation is validated
-   today, and it resolves through the scope tree, so the symbol's `SymbolKind`
-   is right there.
-4. **TY-12 (S)** — exit test `malformed_collection_type_arity_is_rejected`. It
-   may already pass: S11's `Y007` covers a wrong type-argument count on both
-   collection ctors and nominal defs. **Check before writing anything.**
-5. **TY-13 (L) before TY-14 (S) and TY-15 (S).** Both need `infer_assign` to
-   resolve the correct symbol through `refs` rather than the inferer's own
-   disconnected scope tree. TY-14 is `Y009`, TY-15 is `Y010`. Exit tests:
-   `local_var_reassignment_preserves_its_type`, `reassignment_to_let_is_rejected`,
-   `compound_assignment_requires_a_numeric_target`.
+- **TY-12 needed no code at all.** S11's `Y007` already covered a wrong
+  type-argument count on collection ctors *and* on `Option`, so
+  `malformed_collection_type_arity_is_rejected` was green before the stage
+  touched it. The progress note that predicted this was right; check before
+  writing, as it said.
+- **TY-08 is not what blocks the empty-`Vec[Float]` descriptor.** Its
+  `#[ignore]` reason claimed the annotation never reaches the initializer. It
+  does — `let values: Vec[Float] = Vec(); values.push(1)` is a `Y001`. What
+  loses the element type is `lower_call`, which re-instantiates the callee's
+  scheme rather than using the type inferred at the call site, so the typed tree
+  carries `Vec[?T]`. That is **F15/MONO-01 in S15**, the same finding
+  `lowered_polymorphic_call_result_uses_the_callsite_instantiation` gates, and
+  the reason now says so.
+- **The corpus triage pass found nothing.** Every `.px` under `tests/` (all
+  thirteen, including the twelve `aoc-corpus` programs) and every fixture under
+  `crates/praxis-cli/tests/fixtures` was run through `praxis check`; the only
+  files that report are the three that are *meant* to
+  (`bad_byte.px`, `parse_error.px`, `type_error.px`). `Y009` was the risk — every
+  compound assignment and reassignment in the corpus and in `jit.rs` targets a
+  `var` holding an `Int`. This is the **fifth** prediction of wide churn in the
+  repair that delivered none.
 
-**Schedule ONE corpus triage pass at the end of the stage**, not per finding —
-the plan is explicit that S13 is the audit's biggest source of newly-*rejected*
-valid-looking programs. The three places to re-check are
-`crates/praxis-cli/tests/fixtures`, `crates/praxis-codegen-cranelift/tests/jit.rs`
-and `tests/aoc-corpus`.
+**S14 is next, and it is the first stage with an unanswered blocking decision in
+front of it.** **D2** — loop break-value semantics — is not answered, and plan
+§7 lists it as blocking S14. Read plan §5's S14 paragraph and §7's D2 before
+starting; the stage cannot be finished without settling what
+`loop { break 1 }` produces and what an `if` with no `else` is worth.
 
-**F19's `DeclGroup` driver is S13's other foundation and has not landed.**
-`infer_declaration_group` already has the two-phase shape and the group level;
-what it lacks is *dependency-ordered* binding groups (SCCs over the call graph),
-which is what mutual recursion needs — see "What S11 deliberately left" below.
+**What S13 deliberately left:**
 
-**Codes for the stage are already allocated (ADR-051)**, and `DiagCode` is now
-the only way to spell one: `N003` (TY-11), `Y009` (TY-14), `Y010` (TY-15).
-`N004`/`N005` are spent. Add the wording to `praxis-hir/src/diagnostics.rs`,
-never at the site.
+- **F19's SCC-ordered binding groups did not land**, and no S13 finding needs
+  them. What landed is the *type* environment and the fn signature placeholders.
+  Dependency-ordered binding groups over the **call graph** are what mutual
+  recursion needs to generalize correctly — see "What S11 deliberately left"
+  below, which is still exactly true. `infer_declaration_group` is where they go.
+- **A type-declaration cycle registers rather than reports.** `struct A { b: B }`
+  / `struct B { a: A }` and `struct Node { next: Node }` come out of the pass
+  with a fresh variable where the recursive member should be. Making that work is
+  equirecursive (or iso-recursive) types — a language feature; making it an
+  *error* is a language decision. ADR-052 records both as out of scope.
+- **A compound assignment against an unconstrained target is not reported.**
+  `fn f(a) { a += 1 }` leaves `a` a variable. Pinning it to `Int` would make the
+  check total and would silently change inference for every unannotated numeric
+  parameter; S17's TY-31 (`Y015`) is where numeric constraints get a channel.
+- **A nested `struct`/`enum` is still ignored, silently.** `register_top_level`
+  never declared one and the declaration pass only walks top-level statements, so
+  a `struct` inside a block has no symbol and no type. It was equally ignored
+  before; F19's dispatcher split (`resolve_top_stmt` vs `resolve_block_stmt`) is
+  what would make it an `N005`-shaped report, and no finding asks for it.
+- **`Analysis.scopes` is still public and still populated.** Inference no longer
+  reads it, but it is resolution's output and the LSP is its notional consumer.
 
 **What S12 deliberately left:**
 
@@ -1622,8 +1745,20 @@ statement and never a subexpression, consulted only between statements and at
 `I028`. Six findings the plan routes through D13 need no code at all, and TY-12
 turns out to be `Y007`. The plan's inventory of *taken* codes was incomplete —
 it missed `N000`, `Y110`, `Y112`, the whole `I0xx` validation block and both the
-`T0xx` and `P0xx` categories; ADR-051 opens with the corrected one. **Nothing
-now stands between here and S13.**
+`T0xx` and `P0xx` categories; ADR-051 opens with the corrected one. All five
+codes it allocated to S13 — `N003`–`N005`, `Y009`, `Y010` — are now spent, and
+the stage needed no number the ADR did not anticipate.
+
+**S13 raised no new decision, and answered none.** Its choices are recorded as
+ADR-052 rather than as answers to plan decisions, because the plan does not list
+any: what to do with a type-declaration cycle, whether an annotation name goes
+in `refs`, and when a compound assignment is reportable are all questions the
+work raised and settled locally. Two of them *touch* language design — recursive
+data types, and pinning an unconstrained numeric — and ADR-052 explicitly leaves
+both open.
+
+**D2 now blocks the next stage.** It has not been answered, and S14 cannot be
+finished without it.
 
 **D1 and D5 still block their stages**; neither has been answered.
 
@@ -1665,6 +1800,44 @@ one. Settle both together.
 
 Things the plan states that are no longer or were not quite true.
 
+- **TY-08 is an AST-accessor bug, not an inference one, and its scope is the
+  `cast`.** The audit's wording — "AST type accessors cast only `TYPE_REF`" — is
+  exactly right, and the fix is eleven lines. The plan sizes it **L** and §4 of
+  this file called it "the big one"; it was the smallest of the eight. What made
+  it look large is that it *gates* five exit tests. Two adjacent gaps surfaced
+  only once the nodes arrived (a parenthesized group resolved to nothing, and
+  `()` in a parameter group resolved to nothing), and both are two lines.
+- **TY-08 does not unblock `empty_vec_float_…`.** §4 said its `#[ignore]` reason
+  "already names TY-08". The reason was wrong: inference applies the annotation
+  (pushing an `Int` into `let values: Vec[Float] = Vec()` is a `Y001`), and what
+  loses the element type is `lower_call` re-instantiating the callee's scheme.
+  F15/MONO-01, S15.
+- **F19 is two independent halves, and S13 needs one.** The plan's F19 block
+  describes a sealed `TypeEnv` *and* a `DeclGroup` with SCC-ordered binding
+  groups, and lists seven findings under "SEVEN FINDINGS, ONE PASS". Only the
+  environment is load-bearing for S13: TY-09 needs it total, TY-10 needs the
+  type declarations ordered, TY-13 needs `ScopeTree` out of the `Inferer`. The
+  SCCs are over the **call graph** and exist to generalize mutual recursion
+  correctly — a residue S11 recorded and no S13 finding names. TY-01 and TY-22
+  were already closed in S11 without them.
+- **F19's `ScopeTree::bind` returning the displaced symbol was not needed.**
+  The sketch has `bind` answer `Option<SymbolId>` so `register_top_level` can
+  diagnose a displaced `Fn`. S13's earlier half used `is_bound_here` instead,
+  which asks the question directly rather than inferring it from a return value
+  nobody else wants; `bind` still returns `()`.
+- **The plan's `check_type_annotation` note assumes the scope is the answer.**
+  §4 said "it resolves through the scope tree, so the symbol's `SymbolKind` is
+  right there". True — but the *inferer* also needs that symbol, and it has no
+  scope tree after TY-13. So resolution records the answer
+  (`NameResolution::type_refs`) rather than each pass computing it.
+- **S13's "biggest source of newly-rejected valid-looking programs" did not
+  materialize.** The plan mandates one corpus triage pass at the end of the
+  stage for exactly this; it found nothing. Every `.px` in `tests/` and every CLI
+  fixture still checks clean, and the only new rejection class — `Y009`,
+  assignment to a non-`var` — has no instance anywhere in the corpus or in
+  `jit.rs`. That is the **fifth** F-block or stage to predict wide churn and
+  deliver none (TY-02, F12's `Option[Int]` rendering, FE-02, F8, S13). Budget
+  accordingly.
 - **The plan's list of taken diagnostic codes was incomplete.** D13's text and
   §5 of this file both said "`N001`-`N002`, `Y001`-`Y008`, `Y120`-`Y121`, and
   `I001`/`I010`". The tree also had `N000`, `Y110`, `Y112`, `I000`, `I020`-`I027`
@@ -2018,9 +2191,12 @@ Things the plan states that are no longer or were not quite true.
   records no signature. Both report why rather than guessing.
 - **S7's exit criteria list one test that S7 cannot pass.**
   `empty_vec_float_has_the_float_element_descriptor_before_any_push` needs the
-  `let values: Vec[Float] = Vec()` annotation to reach the initializer, which is
-  TY-08 in **S13**. P0-11 makes the descriptor honestly *null* instead of
-  wrongly `Int`; it cannot make it `Float`.
+  `let values: Vec[Float] = Vec()` annotation to reach the *construction site*.
+  P0-11 makes the descriptor honestly *null* instead of wrongly `Int`; it cannot
+  make it `Float`. S7 attributed the gap to TY-08 and S13 disproved that —
+  inference applies the annotation fine. `lower_call` re-instantiates the
+  callee's scheme instead of using the type inferred at the call site, so it is
+  **F15/MONO-01 in S15**.
 - **P0-11's "expect passing tests to flip" was half right.**
   `vec_float_push_adopts_float_descriptor_and_preserves_signed_zero_semantics`
   (adversarial_audit.rs, the test H18 names) **still passes unchanged**, because
