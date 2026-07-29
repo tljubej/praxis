@@ -1224,14 +1224,50 @@ fn record_literal_rejects_duplicate_fields() {
     );
 }
 
+/// FE-02/D7. A wildcard binds nothing, so `_` is not readable as a value.
+///
+/// **Rewritten**, not merely un-ignored: the assertion was `has_name_error`,
+/// which was the only failure available while `_` lexed as an `Ident` — the arm
+/// body was a *reference* to an undeclared name. Now `_` is its own token and
+/// has no expression form at all, so the parser rejects it where it stands.
+/// The property is the same one; the category it is reported under is not.
 #[test]
-#[ignore = "known bug: underscore lexes and resolves as an ordinary binding"]
 fn wildcard_pattern_does_not_bind_a_value_named_underscore() {
     let src = "fn main() -> Int { match 1 { _ => _ } }";
+    let map = SourceMap::new();
+    let id = map.intern("wildcard_test.px", src);
+    let parsed = parse(id, src);
     assert!(
-        has_name_error(src),
-        "the wildcard is not a binding visible in the arm body"
+        parsed
+            .diagnostics
+            .iter()
+            .any(|d| d.code().category() == DiagnosticCategory::Parse),
+        "the wildcard is not a binding visible in the arm body: {:?}",
+        parsed.diagnostics
     );
+    // …and the pattern position is still fine.
+    assert!(is_clean_with_lower(
+        "fn main() -> Int { match 1 { _ => 0 } }"
+    ));
+}
+
+/// D7's other three positions: a binding a program deliberately does not name
+/// is legal, introduces nothing, and still *runs* its initializer.
+#[test]
+fn a_wildcard_binder_is_legal_and_declares_nothing() {
+    for src in [
+        "fn main() -> Int { let _ = 1; 0 }",
+        "fn g(_) -> Int { 0 }\nfn main() -> Int { g(1) }",
+        "fn main() -> Int { let f = |_| 0; f(1) }",
+    ] {
+        assert!(is_clean_with_lower(src), "`{src}` should compile clean");
+        let analysis = analyze(src);
+        assert!(
+            !analysis.names.all().iter().any(|s| s.name == "_"),
+            "`{src}` declared a symbol named `_`: {:?}",
+            analysis.names.all().len()
+        );
+    }
 }
 
 #[test]

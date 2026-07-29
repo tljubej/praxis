@@ -200,8 +200,20 @@ impl<'a> Lexer<'a> {
         // Look up the keyword table: `let`/`if`/… become their own kinds; the
         // rest stay identifiers. Builtins (`out`, `panic`, type names) are
         // intentionally not keywords.
+        //
+        // A **lone** `_` is neither (FE-02). `is_ident_start` accepts it — and
+        // must, because `_x` and `snake_case` are identifiers — so a bare
+        // underscore used to arrive downstream as an ordinary `Ident`, which
+        // made every wildcard a *binding* named `_`: two `_` arms of one match
+        // were a duplicate declaration, and `Point { x: 1, _: 2 }` named a
+        // field. `_` followed by anything ident-continue is still an
+        // identifier; only the one-character run is the wildcard.
         let text = &self.src[start..self.pos];
-        let kind = SyntaxKind::from_keyword(text).unwrap_or(SyntaxKind::Ident);
+        let kind = if text == "_" {
+            SyntaxKind::UNDERSCORE
+        } else {
+            SyntaxKind::from_keyword(text).unwrap_or(SyntaxKind::Ident)
+        };
         self.push(kind, start);
     }
 
@@ -688,7 +700,6 @@ error[T003]: unexpected character in source
     }
 
     #[test]
-    #[ignore = "known bug: a lone `_` is emitted as Ident, making wildcard patterns bindings"]
     fn regression_lone_underscore_has_its_dedicated_token_kind() {
         let (kinds, diags) = lex_text("_");
         assert!(diags.is_empty(), "underscore should lex cleanly: {diags:?}");
@@ -697,6 +708,19 @@ error[T003]: unexpected character in source
             .filter(|kind| !kind.is_trivia() && *kind != SyntaxKind::EOF)
             .collect();
         assert_eq!(meaningful, vec![SyntaxKind::UNDERSCORE]);
+    }
+
+    /// …and only the lone one. An underscore is a legal identifier *character*
+    /// (§4.1), so the split has to be on the whole run, not on the first byte.
+    #[test]
+    fn an_underscore_inside_a_name_is_still_an_identifier() {
+        let (kinds, diags) = lex_text("_x __ x_ _1 snake_case");
+        assert!(diags.is_empty(), "clean lex: {diags:?}");
+        let meaningful: Vec<_> = kinds
+            .into_iter()
+            .filter(|kind| !kind.is_trivia() && *kind != SyntaxKind::EOF)
+            .collect();
+        assert_eq!(meaningful, vec![SyntaxKind::Ident; 5]);
     }
 
     #[test]

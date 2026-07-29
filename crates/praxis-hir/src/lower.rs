@@ -868,7 +868,9 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_let(&mut self, stmt: &LetStmt) -> Option<TypedStmt> {
-        let name_tok = stmt.name()?;
+        let Some(name_tok) = stmt.name() else {
+            return self.lower_discarding_binding(stmt.init());
+        };
         let name = name_tok.text().to_string();
         let range = name_tok.text_range();
         let symbol = self.resolve_decl_at(range)?;
@@ -884,8 +886,20 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    /// A binding with no name — `let _ = f()` (D7) — still runs its
+    /// initializer; it just keeps nothing. Lowering it to a statement
+    /// expression is what makes the discard idiom a *discard* rather than a
+    /// deletion: dropping the whole statement (which is what returning `None`
+    /// here does) silently removed the call.
+    fn lower_discarding_binding(&mut self, init: Option<Expr>) -> Option<TypedStmt> {
+        let init = init?;
+        Some(TypedStmt::Expr(self.lower_expr(&init)))
+    }
+
     fn lower_var(&mut self, stmt: &VarStmt) -> Option<TypedStmt> {
-        let name_tok = stmt.name()?;
+        let Some(name_tok) = stmt.name() else {
+            return self.lower_discarding_binding(stmt.init());
+        };
         let name = name_tok.text().to_string();
         let range = name_tok.text_range();
         let symbol = self.resolve_decl_at(range)?;

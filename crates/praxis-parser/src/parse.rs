@@ -414,7 +414,7 @@ impl<'t> Parser<'t> {
     fn parse_let_or_var(&mut self, kind: SyntaxKind) -> bool {
         self.start_node(kind);
         self.bump(); // `let`/`var`
-        self.expect(SyntaxKind::Ident, "binding name");
+        self.expect_binder("binding name");
         // Optional type annotation `: Type` (M2: real type grammar — scalar,
         // tuple, or function type).
         if self.eat(SyntaxKind::COLON) {
@@ -450,7 +450,7 @@ impl<'t> Parser<'t> {
                 loop {
                     let before = self.meaningful_index();
                     self.start_node(SyntaxKind::PARAM);
-                    self.expect(SyntaxKind::Ident, "parameter name");
+                    self.expect_binder("parameter name");
                     // The `: Type` annotation is OPTIONAL (§4.9, criterion 1):
                     // `fn manhattan(a, b) { … }` infers param types from use.
                     if self.eat(SyntaxKind::COLON) {
@@ -738,7 +738,7 @@ impl<'t> Parser<'t> {
             loop {
                 let before = self.meaningful_index();
                 self.start_node(SyntaxKind::PARAM);
-                self.expect(SyntaxKind::Ident, "closure parameter name");
+                self.expect_binder("closure parameter name");
                 if self.eat(SyntaxKind::COLON) {
                     self.parse_type();
                 }
@@ -1320,6 +1320,20 @@ impl<'t> Parser<'t> {
     // -----------------------------------------------------------------------
 
     /// Consume `kind`; if it is absent, emit a diagnostic at the current token.
+    /// Expect a **binding position**: a name, or `_` for one the program is
+    /// deliberately not naming (D7, ADR-049).
+    ///
+    /// `let _ = f()`, `fn g(_)` and `|_| 0` are legal and introduce nothing —
+    /// the AST's name accessors look for an `Ident`, so a wildcard binder is an
+    /// absent name all the way down rather than a symbol called `_`.
+    fn expect_binder(&mut self, what: &str) -> bool {
+        if self.at(SyntaxKind::UNDERSCORE) {
+            self.bump();
+            return true;
+        }
+        self.expect(SyntaxKind::Ident, what)
+    }
+
     fn expect(&mut self, kind: SyntaxKind, what: &str) -> bool {
         if self.at(kind) {
             self.bump();

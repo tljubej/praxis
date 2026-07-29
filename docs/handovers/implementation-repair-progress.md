@@ -21,8 +21,9 @@ Update this file at the end of every stage.
 | S8 — Generation arena for JIT and plan metadata | **done** | `1311132`, `b60da0a` |
 | S9 — MIR root exactness, debug/root split, verifier | **done** | `ad9bbdf`, `d9521f9`, `e15a444` |
 | S10 — Semantic comparison, nominal schema identity | **done** | `29ff4f6`, `83de924`, `510ffc3`, `ff35f68` |
-| S11 — TypeDb core: levels, schemes, nominal identity | **done** | `8aa9069`, `aa9deea`, `d69881e`, `HEAD` |
-| S12 … S21 | not started | |
+| S11 — TypeDb core: levels, schemes, nominal identity | **done** | `8aa9069`, `aa9deea`, `d69881e`, `5efd0e2` |
+| S12 — Parser grammar: wildcard, separators, struct-literal suppression | **FE-02 done; FE-04, FE-06, DBG-03 left** | see §4 |
+| S13 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
@@ -30,18 +31,37 @@ TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1141 passed, 0 failed, 93 ignored**. `just ci` is green.
+Now: **1145 passed, 0 failed, 91 ignored**. `just ci` is green.
 
 **S11 is closed.** All five exit-criterion tests pass and all eight findings the
-stage owns are fixed and gated — TY-01…TY-07 and TY-22. **S12 is next, and D7
-and D8 block it** (§4).
+stage owns are fixed and gated — TY-01…TY-07 and TY-22.
 
-Fifty-three of the audit's ignored regressions are un-ignored and passing.
-The one added by S11's F12:
+**S12 is open and D7/D8 are answered** — see ADR-049. **FE-02 has landed**
+(D7's half); FE-04, FE-06 and DBG-03 are what is left, and F8 is their
+foundation. §4 says where to pick it up.
+
+Fifty-five of the audit's ignored regressions are un-ignored and passing.
+The three added since S11's first half:
 
 | Test | File | Finding |
 |---|---|---|
-| `enum_payload_types_participate_in_monomorphization_cache_key` | `mono.rs` | MONO-03 |
+| `enum_payload_types_participate_in_monomorphization_cache_key` | `mono.rs` | MONO-03 (F12) |
+| `regression_lone_underscore_has_its_dedicated_token_kind` | `lex.rs` | FE-02 |
+| `wildcard_pattern_does_not_bind_a_value_named_underscore` | `infer_tests.rs` | FE-02; **rewritten**, see below |
+
+FE-02's two new gates:
+
+| Test | File | Pins |
+|---|---|---|
+| `an_underscore_inside_a_name_is_still_an_identifier` | `lex.rs` | the split is on the whole run, not the first byte |
+| `a_wildcard_binder_is_legal_and_declares_nothing` | `infer_tests.rs` | D7's three positions — legal, silent, and the initializer still runs |
+
+`wildcard_pattern_does_not_bind_a_value_named_underscore` had to be
+**rewritten**: it asserted `has_name_error`, which was the only failure
+available while `_` lexed as an `Ident` (the arm body was a reference to an
+undeclared name). `_` now has no expression form at all, so the parser rejects
+it where it stands — same property, different category. This is the fourth time
+in the repair a fix has changed *which* check catches a mistake; expect it.
 
 F12's seven new gates:
 
@@ -442,7 +462,31 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S11's F12 — TY-06, and MONO-03)
+### From this session (S12's FE-02 — the wildcard token)
+
+**A lone `_` lexes as `SyntaxKind::UNDERSCORE`, not `Ident`.** Only the
+one-character run: `_x`, `__`, `x_`, `_1` and `snake_case` are all still
+identifiers. Every AST name accessor looks for an `Ident`, so a wildcard binder
+is an **absent name** all the way down — `LetStmt::name()` answers `None` and
+the resolver declares nothing. See ADR-049.
+
+**`Parser::expect_binder(what)` is the binding position**, and it accepts
+`Ident` or `UNDERSCORE`. Three call sites: `let`/`var`, a `fn` parameter, a
+closure parameter. If you add a fourth binding position, use it — `expect(Ident,
+…)` there would make `_` a parse error.
+
+**A nameless binding lowers to a statement expression.** `lower_let`/`lower_var`
+returned `None` when there was no name, which dropped the statement *and its
+initializer's effects*; `let _ = d.pop_front()` stopped popping. They now fall
+through to `lower_discarding_binding`, which evaluates and discards. Two JIT
+tests (`deque_drained_is_empty`, `grid_get_out_of_bounds_faults`) are what
+caught it.
+
+**`_` has no expression form.** Reading one is `P001: expected an expression` at
+the token. Any test that expected an *unresolved name* for `_` in value position
+is now looking at the wrong category.
+
+### From S11's F12 — TY-06, and MONO-03
 
 **`TypeData::Record` and `TypeData::Enum` carry `args`.** A pattern that matches
 one needs `{ def, .. }` at minimum; a site that reads field or payload *types*
@@ -1134,10 +1178,39 @@ work of its own: F9's fold walks record fields and enum payloads, which is the
 whole finding, and `deep_resolve_rewrites_record_field_links` is green. TY-06
 was F12's static half; see ADR-048 and §3.
 
-**S12 is next** (parser grammar: `_` as `UNDERSCORE`, statement separators,
-struct-literal suppression) and **D7 and D8 block it** — neither is answered.
+**S12 is open. D7 and D8 are answered (ADR-049) and FE-02 has landed.** What is
+left, in the plan's own internal order:
+
+1. **F8 — `Token::preceded_by_newline` + `StmtSeparator`.** Read plan §3.1's F8
+   block; ADR-049 decision D8 is the rule it implements, already decided:
+   a newline terminates only (a) between statements in a block or at the top
+   level and (b) at `break`/`return`'s optional-value decision, and is consulted
+   **nowhere** inside the Pratt loop. `Token` is `Copy`; the bool touches two
+   construction sites (`lex.rs:89`, `:388`) plus test constructors.
+2. **FE-04**, on top of F8. Exit tests:
+   `regression_same_line_statements_require_a_semicolon` (parse.rs),
+   `regression_semicolons_separate_top_level_statements`,
+   `regression_newline_terminates_a_bare_return`.
+3. **FE-06** — struct-literal suppression as a parameter that brackets reset.
+   **Must follow FE-04**: passing `StructLit::Allowed` into match-arm bodies
+   before arm separation is newline-aware mis-parses
+   `match x { A => Point { x: 1 } B => … }`. Exit tests:
+   `regression_parenthesized_record_literal_is_valid_in_a_condition`,
+   `regression_match_arm_may_return_a_record_literal`.
+4. **DBG-03** — independent of all three, S-effort. `sanitize_name`
+   (`praxis-debugger/src/evaluate.rs`) still *rewrites* an invalid name to `_x`
+   non-injectively. Its bug-pinning test `sanitize_rejects_digit_leading_and_punct`
+   **must be rewritten, not extended** (plan §8.2 / H18). It consumes F3's
+   `praxis_syntax::ident` predicates, which landed in S2.
+
+**Expect the highest test churn of any stage** from F8/FE-04: ~40 insta
+snapshots in `parse.rs` plus every `crates/praxis-cli/tests/fixtures/run/*.px`
+with same-line statements. FE-02 caused none of it — the wildcard change was
+clean apart from the two JIT tests named in §3.
+
 **D13 binds before S13**, and S11 has already spent `Y007` and `Y008` out of the
-block (§5). **S12's ABI bump budget is fresh**: S11 spent none.
+block (§5); FE-04's "statement separator" diagnostic needs one more.
+**S12's ABI bump budget is fresh**: S11 spent none.
 
 **F12's runtime half is still owed, and it is S18's.** What did *not* land, on
 purpose:
@@ -1312,9 +1385,15 @@ two operations, not one. `f64::total_cmp` was rejected for splitting `-0.0` from
 already resolved by ADR-038 (descriptors are `static`); ADR-045 decision 3 is
 what makes both dispatch sites *use* pointer identity.
 
+**D7 and D8 are answered — see ADR-049.** `_` is legal in every binding
+position and introduces nothing (D7, **implemented** as FE-02); a newline
+terminates a statement and never a subexpression, consulted only between
+statements and at `break`/`return`'s optional-value decision (D8, **decided,
+not yet implemented** — it is F8/FE-04's specification).
+
 **D1 and D5 still block their stages**; neither has been answered. **D13 is the
 next one that binds** — the plan wants the whole diagnostic-code block allocated
-before S13 starts, and S11 is the stage before it.
+before S13 starts, and S12 is the stage before it.
 
 **D13's block has two fewer numbers than it did.** S11 spent `Y007` (a wrong
 type-argument count) and `Y008` (a duplicate field or variant): both are cases
@@ -1335,8 +1414,6 @@ one. Settle both together.
 
 | | Decision | Blocks |
 |---|---|---|
-| D7 | After `_` lexes as `UNDERSCORE`, is it still legal in `let _ = f()`, `fn g(_)`, `\|_\| 0`? | S12 |
-| D8 | Exactly where a newline terminates an expression | S12 |
 | D13 | Diagnostic-code allocation for the whole block, before S13 starts | S13/S16 |
 | D2 | Loop break-value semantics | S14 |
 | D4 | Hashability of mutable collections as Map keys | S17 |
