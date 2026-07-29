@@ -927,32 +927,73 @@ impl Inferer {
             praxis_types::TypeData::Record { def, args } => (*def, args.clone()),
             _ => return struct_ty,
         };
+        // A record literal is **exact**: every declared field exactly once, and
+        // nothing else (HIR-04). None of that was checked. A missing field was
+        // allocated as `Unit` under its declared type; a duplicate pushed a
+        // second payload into an object whose schema had one slot for it; and
+        // an unknown field's initializer was not lowered at all, so its side
+        // effects disappeared.
+        let type_name = self.db.render(self.db.follow(struct_ty));
+        let declared: Vec<String> = self
+            .db
+            .record_def(def_id)
+            .fields
+            .iter()
+            .map(|f| f.name.clone())
+            .collect();
+        let mut seen: Vec<String> = Vec::new();
         if let Some(fl) = r.field_list() {
             for f in fl.fields() {
                 let Some(fname_tok) = f.name() else { continue };
                 let fname = fname_tok.text().to_string();
-                if let Some((_, declared_ty)) = self.db.record_field_of(def_id, &def_args, &fname) {
-                    let init_ty = match &f.expr() {
-                        Some(e) => self.infer_expr(e),
-                        // Punned field `{ x }` — x must be a binding of the field's type.
-                        None => {
-                            // Look up the name as a path reference.
-                            let range = fname_tok.text_range();
-                            self.refs
-                                .get(&range)
-                                .and_then(|rf| {
-                                    self.names.get(rf.symbol).and_then(|s| {
-                                        s.scheme.as_ref().map(|sc| self.db.instantiate(sc))
-                                    })
-                                })
-                                .unwrap_or_else(|| self.db.fresh_var())
-                        }
-                    };
-                    if let Err(e) = self.db.unify(declared_ty, init_ty) {
-                        self.diag_unify(self.file_span(fname_tok.text_range()), e);
+                let at = self.file_span(fname_tok.text_range());
+                // The initializer is inferred whatever the name turns out to
+                // be: it is an expression the program wrote, and dropping it
+                // drops whatever it does.
+                let init_ty = match &f.expr() {
+                    Some(e) => Some(self.infer_expr(e)),
+                    // Punned field `{ x }` — x must be a binding of the field's type.
+                    None => {
+                        // Look up the name as a path reference.
+                        let range = fname_tok.text_range();
+                        self.refs.get(&range).and_then(|rf| {
+                            self.names
+                                .get(rf.symbol)
+                                .and_then(|s| s.scheme.as_ref().map(|sc| self.db.instantiate(sc)))
+                        })
                     }
+                };
+                if seen.contains(&fname) {
+                    self.diagnostics
+                        .push(crate::diagnostics::duplicate_record_field(at, &fname));
+                    continue;
+                }
+                seen.push(fname.clone());
+                let Some((_, declared_ty)) = self.db.record_field_of(def_id, &def_args, &fname)
+                else {
+                    self.diagnostics
+                        .push(crate::diagnostics::unknown_record_field(
+                            at, &type_name, &fname,
+                        ));
+                    continue;
+                };
+                let init_ty = init_ty.unwrap_or_else(|| self.db.fresh_var());
+                if let Err(e) = self.db.unify(declared_ty, init_ty) {
+                    self.diag_unify(at, e);
                 }
             }
+        }
+        let missing: Vec<String> = declared
+            .iter()
+            .filter(|d| !seen.contains(d))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            let at = self.file_span(r.syntax().text_range());
+            self.diagnostics
+                .push(crate::diagnostics::missing_record_fields(
+                    at, &type_name, &missing,
+                ));
         }
         struct_ty
     }

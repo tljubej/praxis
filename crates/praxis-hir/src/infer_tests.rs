@@ -1924,7 +1924,6 @@ fn shadowing_an_outer_name_is_not_a_redeclaration() {
 // --- records and match exhaustiveness ---------------------------------------
 
 #[test]
-#[ignore = "known bug: record literals do not validate missing fields"]
 fn record_literal_requires_every_declared_field() {
     let src = "struct Pair { left: Int, right: Int }\n\
                fn main() -> Int { let pair = Pair { left: 1 }; pair.right }";
@@ -1935,7 +1934,6 @@ fn record_literal_requires_every_declared_field() {
 }
 
 #[test]
-#[ignore = "known bug: record literals silently drop unknown fields and their initializers"]
 fn record_literal_rejects_unknown_fields() {
     let src = "struct Point { x: Int }\n\
                fn side_effect() -> Int { out(\"must not disappear\"); 2 }\n\
@@ -1947,7 +1945,6 @@ fn record_literal_rejects_unknown_fields() {
 }
 
 #[test]
-#[ignore = "known bug: record literals accept duplicate field payloads"]
 fn record_literal_rejects_duplicate_fields() {
     let src = "struct Point { x: Int }\n\
                fn main() -> Int { let point = Point { x: 1, x: 2 }; point.x }";
@@ -2637,5 +2634,62 @@ fn a_non_exhaustive_match_is_reported_where_it_is_written() {
     assert!(
         src.replace("\\n", "\n")[start..].starts_with("match"),
         "the span points at the `match`, not at byte 0 (start {start})"
+    );
+}
+
+/// **HIR-04** as the rule: a record literal names every declared field exactly
+/// once and nothing else. Each half has its own code, so a program with two
+/// mistakes reports two things.
+#[test]
+fn a_record_literal_names_every_field_exactly_once() {
+    let missing = analyze_and_lower_diags(
+        "struct P { x: Int, y: Int }\nfn main() -> Int { let p = P { x: 1 }\n  p.x }",
+    );
+    assert!(
+        missing.iter().any(|d| d.code().number() == 113),
+        "a missing field is Y113: {missing:?}"
+    );
+
+    let unknown = analyze_and_lower_diags(
+        "struct P { x: Int }\nfn main() -> Int { let p = P { x: 1, typo: 2 }\n  p.x }",
+    );
+    assert!(
+        unknown.iter().any(|d| d.code().number() == 114),
+        "an unknown field is Y114: {unknown:?}"
+    );
+
+    let duplicate = analyze_and_lower_diags(
+        "struct P { x: Int }\nfn main() -> Int { let p = P { x: 1, x: 2 }\n  p.x }",
+    );
+    assert!(
+        duplicate.iter().any(|d| d.code().number() == 115),
+        "a duplicate field is Y115: {duplicate:?}"
+    );
+
+    let good = analyze_and_lower_diags(
+        "struct P { x: Int, y: Int }\nfn main() -> Int { let p = P { y: 2, x: 1 }\n  p.x }",
+    );
+    assert!(
+        good.is_empty(),
+        "order is not the rule — every field, once: {good:?}"
+    );
+}
+
+/// …and an unknown field's initializer is still *type-checked*, because it is
+/// an expression the program wrote. It used to be skipped entirely, which is
+/// how `Point { x: 1, typo: side_effect() }` deleted the call.
+#[test]
+fn an_unknown_fields_initializer_is_still_checked() {
+    let diags = analyze_and_lower_diags(
+        "struct P { x: Int }\n\
+         fn main() -> Int { let p = P { x: 1, typo: \"text\" + 1 }\n  p.x }",
+    );
+    assert!(
+        diags.iter().any(|d| d.code().number() == 114),
+        "the unknown field itself: {diags:?}"
+    );
+    assert!(
+        diags.len() > 1,
+        "its initializer is inferred too, so its own error is reported: {diags:?}"
     );
 }

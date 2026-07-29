@@ -222,6 +222,58 @@ pub(crate) fn unreachable_arm(at: FileSpan) -> Diagnostic {
     )
 }
 
+/// `Y113` — a record literal that does not initialize every declared field
+/// (HIR-04).
+///
+/// A missing field was allocated as `Unit` under the field's declared type, so
+/// the object's schema and its payloads disagreed and every later read of that
+/// field got a `Unit` the type system said was an `Int`.
+pub(crate) fn missing_record_fields(
+    at: FileSpan,
+    type_name: &str,
+    missing: &[String],
+) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::MissingRecordFields,
+        format!(
+            "`{type_name}` literal is missing {}: {}",
+            if missing.len() == 1 {
+                "a field"
+            } else {
+                "fields"
+            },
+            missing.join(", ")
+        ),
+        at,
+    )
+}
+
+/// `Y114` — a record literal naming a field the type does not have (HIR-04).
+///
+/// The initializer was not lowered at all, so its side effects disappeared.
+pub(crate) fn unknown_record_field(at: FileSpan, type_name: &str, field: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::UnknownRecordField,
+        format!("`{type_name}` has no field `{field}`"),
+        at,
+    )
+}
+
+/// `Y115` — a record literal naming one field twice (HIR-04).
+///
+/// Both payloads were pushed, so the object had more values than its schema had
+/// slots and every field after the duplicate read the wrong one.
+pub(crate) fn duplicate_record_field(at: FileSpan, field: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::DuplicateRecordField,
+        format!("field `{field}` is initialized more than once"),
+        at,
+    )
+}
+
 /// `Y009` — assignment to a binding that is not a `var` (TY-14).
 ///
 /// Assignment never asked what kind of binding it was writing to, so `let x = 1;
