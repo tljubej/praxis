@@ -64,6 +64,10 @@ struct Lexer<'a> {
     pos: usize,
     tokens: Vec<Token>,
     diagnostics: Vec<Diagnostic>,
+    /// Whether the trivia seen since the last meaningful token contained a line
+    /// break. Consumed (and cleared) by the next meaningful token, which is
+    /// where the parser reads it from (F8/D8, ADR-049).
+    pending_newline: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -74,6 +78,7 @@ impl<'a> Lexer<'a> {
             pos: 0,
             tokens: Vec::new(),
             diagnostics: Vec::new(),
+            pending_newline: false,
         }
     }
 
@@ -93,8 +98,7 @@ impl<'a> Lexer<'a> {
                 CharClass::Unknown => self.diagnose_unknown(start, len),
             }
         }
-        self.tokens
-            .push(Token::new(SyntaxKind::EOF, Span::at(self.pos as u32)));
+        self.push(SyntaxKind::EOF, self.pos);
     }
 
     /// The scalar beginning at `at` and its UTF-8 length. `at` is always a char
@@ -430,9 +434,28 @@ impl<'a> Lexer<'a> {
 
     // --- helpers ---
 
+    /// Emit a token covering `start..pos`, threading the newline fact through
+    /// it (F8/D8, ADR-049).
+    ///
+    /// Trivia *accumulates* the fact — a line break anywhere in the run before a
+    /// meaningful token counts, so `1 /* \n */ + 2` and `1\n+ 2` agree. A
+    /// meaningful token *consumes* it: it carries the flag and clears the
+    /// pending state, so only the first token on a line reports one.
     fn push(&mut self, kind: SyntaxKind, start: usize) {
-        self.tokens
-            .push(Token::new(kind, Span::new(start as u32, self.pos as u32)));
+        let preceded_by_newline = if kind.is_trivia() {
+            // A line comment runs to the end of its line, so reaching its end is
+            // reaching a line break even when EOF eats the `\n` itself.
+            self.pending_newline |=
+                kind == SyntaxKind::LineComment || self.src[start..self.pos].contains(['\n', '\r']);
+            self.pending_newline
+        } else {
+            std::mem::take(&mut self.pending_newline)
+        };
+        self.tokens.push(Token::new(
+            kind,
+            Span::new(start as u32, self.pos as u32),
+            preceded_by_newline,
+        ));
     }
 
     fn diagnostic(&mut self, span: Span, code: DiagnosticCode, message: &str) {
@@ -721,6 +744,63 @@ error[T003]: unexpected character in source
             .filter(|kind| !kind.is_trivia() && *kind != SyntaxKind::EOF)
             .collect();
         assert_eq!(meaningful, vec![SyntaxKind::Ident; 5]);
+    }
+
+    // --- F8: the newline fact the parser needs (D8, ADR-049) ----------------
+
+    /// `(kind, preceded_by_newline)` for the meaningful tokens, EOF included.
+    fn newline_flags(text: &str) -> Vec<(SyntaxKind, bool)> {
+        let map = SourceMap::new();
+        let id = map.intern("test.px", text);
+        lex(id, text)
+            .tokens
+            .into_iter()
+            .filter(|t| !t.kind.is_trivia())
+            .map(|t| (t.kind, t.preceded_by_newline))
+            .collect()
+    }
+
+    #[test]
+    fn only_the_first_token_on_a_line_is_preceded_by_a_newline() {
+        use SyntaxKind::*;
+        assert_eq!(
+            newline_flags("let a\nlet b"),
+            vec![
+                (KW_LET, false),
+                (Ident, false),
+                (KW_LET, true),
+                (Ident, false),
+                (EOF, false),
+            ]
+        );
+    }
+
+    /// Two statements on one line report no line break anywhere — which is
+    /// exactly what FE-04's separator check has to be able to see.
+    #[test]
+    fn same_line_tokens_report_no_newline() {
+        assert!(newline_flags("let a = 1 let b = 2")
+            .iter()
+            .all(|(_, newline)| !newline));
+    }
+
+    /// The fact belongs to the whole trivia run, not to its last token: a
+    /// comment after the break must not hide it.
+    #[test]
+    fn a_line_break_anywhere_in_the_trivia_run_counts() {
+        let flags = newline_flags("let a\n  // why\n  let b");
+        assert_eq!(flags[2], (SyntaxKind::KW_LET, true));
+
+        let commented = newline_flags("1 /* over\ntwo lines */ + 2");
+        assert_eq!(commented[1], (SyntaxKind::PLUS, true));
+    }
+
+    /// A line comment ends its line by construction, so it reads as a break even
+    /// when EOF eats the `\n` that would otherwise follow.
+    #[test]
+    fn a_line_comment_ends_the_line_it_is_on() {
+        let flags = newline_flags("let a // trailing");
+        assert_eq!(flags.last().copied(), Some((SyntaxKind::EOF, true)));
     }
 
     #[test]

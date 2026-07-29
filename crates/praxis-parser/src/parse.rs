@@ -139,6 +139,33 @@ const fn bp(left: u8, right: u8) -> BindingPower {
 }
 
 // ---------------------------------------------------------------------------
+// Statement separation (F8 / FE-04; D8, ADR-049).
+// ---------------------------------------------------------------------------
+
+/// `P001` — the general "this token cannot go here" parse error.
+const UNEXPECTED: DiagnosticCode = DiagnosticCode::new(DiagnosticCategory::Parse, 1);
+
+/// `P002` — two statements ran together with nothing between them (FE-04).
+const MISSING_SEPARATOR: DiagnosticCode = DiagnosticCode::new(DiagnosticCategory::Parse, 2);
+
+/// What ended a statement.
+///
+/// Returning this rather than a `bool` is the point: a statement loop cannot
+/// advance without either producing a separator value or emitting a diagnostic,
+/// so "two statements adjacent with no separator" has no accepted
+/// representation (D8, ADR-049).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StmtSeparator {
+    /// An explicit `;`, consumed.
+    Semicolon,
+    /// A line break before the next token. The newline itself is trivia and
+    /// stays trivia — the fact that it existed rides on the token after it.
+    Newline,
+    /// `}` or end of file: there is no next statement to separate from.
+    EndOfBlock,
+}
+
+// ---------------------------------------------------------------------------
 // Parser state.
 // ---------------------------------------------------------------------------
 
@@ -183,7 +210,11 @@ impl<'t> Parser<'t> {
                 break;
             }
             let before = self.meaningful_index();
-            if !self.parse_stmt() {
+            if self.parse_stmt() {
+                // A statement is separated from the next by `;`, a newline, or
+                // the end of the file — and by nothing else (FE-04).
+                self.expect_stmt_separator();
+            } else {
                 // Recovery: skip to the next statement boundary.
                 self.recover_to_stmt_boundary();
             }
@@ -227,11 +258,31 @@ impl<'t> Parser<'t> {
         self.peek() == SyntaxKind::EOF
     }
 
-    /// True iff the current meaningful token can begin an expression. Used by
-    /// `break`/`return` to decide whether a value follows (vs. a bare
-    /// `break`/`return` with no value). A `;`, `}`, EOF, or `else` cannot start
-    /// an expression, so `break }` parses as a value-less break.
+    /// True iff a line break sits between the previous meaningful token and the
+    /// current one (D8, ADR-049).
+    ///
+    /// The flag lives on the token *after* the break, so this answer does not
+    /// depend on whether the intervening trivia has already been emitted into
+    /// the tree.
+    fn newline_before(&self) -> bool {
+        self.tokens[self.cursor..]
+            .iter()
+            .find(|token| !token.kind.is_trivia())
+            .is_some_and(|token| token.preceded_by_newline)
+    }
+
+    /// True iff a value follows `break`/`return` on the same line.
+    ///
+    /// Two questions, both of which must say yes: the next token has to be able
+    /// to begin an expression at all (a `;`, `}`, `)`, `,`, `else` or `in`
+    /// cannot), and it has to be on *this* line — `return\n1` is a value-less
+    /// return followed by a separate statement, which is the second half of
+    /// D8's rule and the only place outside a statement loop that consults a
+    /// newline.
     fn starts_expr(&mut self) -> bool {
+        if self.newline_before() {
+            return false;
+        }
         // Consume trivia so the cursor lands on the meaningful token, then check
         // whether that token can begin an expression. `eat_trivia` returns ();
         // we only need its side effect of advancing past trivia.
@@ -246,6 +297,32 @@ impl<'t> Parser<'t> {
             k,
             EOF | SEMICOLON | R_BRACE | R_PAREN | COMMA | KW_ELSE | KW_IN
         )
+    }
+
+    /// Demand the separator that must follow a statement, and report which one
+    /// it was — `;`, a line break, or the end of the enclosing block/file.
+    ///
+    /// `None` means there was none: two statements ran together on one line, and
+    /// a `P002` has been emitted at the second one. The caller keeps parsing
+    /// (one diagnostic per run-on, not a cascade), because the statement itself
+    /// was well-formed and the next one usually is too.
+    fn expect_stmt_separator(&mut self) -> Option<StmtSeparator> {
+        if self.eat(SyntaxKind::SEMICOLON) {
+            return Some(StmtSeparator::Semicolon);
+        }
+        if self.at_end() || self.at(SyntaxKind::R_BRACE) {
+            return Some(StmtSeparator::EndOfBlock);
+        }
+        if self.newline_before() {
+            return Some(StmtSeparator::Newline);
+        }
+        let span = self.current_span();
+        self.error_with(
+            MISSING_SEPARATOR,
+            span,
+            "expected `;` or a line break between statements",
+        );
+        None
     }
 
     /// The source text of the current meaningful token (trivia skipped). Used to
@@ -378,9 +455,13 @@ impl<'t> Parser<'t> {
     // --- diagnostics ---
 
     fn error(&mut self, span: Span, message: impl Into<String>) {
+        self.error_with(UNEXPECTED, span, message);
+    }
+
+    fn error_with(&mut self, code: DiagnosticCode, span: Span, message: impl Into<String>) {
         self.diagnostics.push(Diagnostic::new(
             Severity::Error,
-            DiagnosticCode::new(DiagnosticCategory::Parse, 1),
+            code,
             message,
             FileSpan::new(self.file, span),
         ));
@@ -579,8 +660,9 @@ impl<'t> Parser<'t> {
             // expression statement (which may be the trailing expression). The
             // dispatch in parse_stmt covers all of these.
             self.parse_stmt();
-            // Semicolons are optional; consume one if present (§4.1).
-            self.eat(SyntaxKind::SEMICOLON);
+            // A `;` is optional only because a newline separates just as well;
+            // one of the two (or the closing `}`) has to be there (FE-04).
+            self.expect_stmt_separator();
             // Guarantee termination on any input.
             self.ensure_progress(before);
         }
@@ -963,12 +1045,21 @@ impl<'t> Parser<'t> {
                 self.parse_expr();
                 self.no_struct_literal = prev;
                 self.finish_node(); // MATCH_ARM
-                                    // Arms are comma-OR-newline separated (§4.6). Eat an optional
-                                    // comma, then check if more arms follow.
-                self.eat(SyntaxKind::COMMA);
+                                    // Arms really are comma-OR-newline separated (§4.6) — the
+                                    // newline half used to be a comment over a check that only
+                                    // asked whether a pattern could start here (FE-04).
+                let comma = self.eat(SyntaxKind::COMMA);
                 // Stop if we hit `}` or something that can't start a pattern.
                 if self.at(SyntaxKind::R_BRACE) || !is_pattern_start(self.peek()) {
                     break;
+                }
+                if !comma && !self.newline_before() {
+                    let span = self.current_span();
+                    self.error_with(
+                        MISSING_SEPARATOR,
+                        span,
+                        "expected `,` or a line break between match arms",
+                    );
                 }
                 self.ensure_progress(before);
             }
@@ -1498,7 +1589,6 @@ mod tests {
     // --- 2026-07 adversarial audit regressions -----------------------------
 
     #[test]
-    #[ignore = "known bug: trivia is discarded without checking for a newline"]
     fn regression_same_line_statements_require_a_semicolon() {
         let out = parse_text("let a = 1 let b = 2");
         assert!(
@@ -1508,7 +1598,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: parse_source_file does not consume semicolon separators"]
     fn regression_semicolons_separate_top_level_statements() {
         let out = parse_text("let a = 1; let b = 2");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
@@ -1522,7 +1611,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: optional return values ignore newline statement boundaries"]
     fn regression_newline_terminates_a_bare_return() {
         let out = parse_text("fn f() { return\n1 }");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
@@ -1555,6 +1643,127 @@ mod tests {
             out.tree.children().count(),
             1,
             "the postfix call must remain part of the same expression statement"
+        );
+    }
+
+    // --- FE-04: where a newline ends a statement, and where it does not -----
+
+    /// D8's second half, stated for the operator it is most likely to break.
+    /// A newline is consulted between statements and at `break`/`return`'s
+    /// optional-value decision — never inside the Pratt loop.
+    #[test]
+    fn an_operator_continues_across_a_line_break() {
+        let out = parse_text("let a = 1 +\n2");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::LET_STMT)
+                .count(),
+            1,
+            "`1 +` and `2` are one addition, not two statements"
+        );
+        assert!(kinds.contains(&SyntaxKind::BIN_EXPR));
+    }
+
+    /// …and so does a postfix chain: the line break before `.len()` is inside an
+    /// expression, so it terminates nothing.
+    #[test]
+    fn a_method_chain_continues_across_a_line_break() {
+        let out = parse_text("let n = v\n  .len()");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(construct_names(&out.tree).contains(&SyntaxKind::METHOD_CALL_EXPR));
+    }
+
+    /// `break`'s half of the optional-value rule; the exit test covers `return`.
+    #[test]
+    fn a_newline_terminates_a_bare_break() {
+        let out = parse_text("loop { break\n1 }");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let break_expr = out
+            .tree
+            .descendants()
+            .find(|node| node.kind() == SyntaxKind::BREAK_EXPR)
+            .expect("break expression");
+        assert_eq!(break_expr.children().count(), 0);
+    }
+
+    /// A `;` still separates statements *inside* a block, where it was already
+    /// consumed — the change is that it is no longer the only thing that can be.
+    #[test]
+    fn a_semicolon_separates_two_statements_on_one_line_in_a_block() {
+        let out = parse_text("fn f() { let a = 1; let b = 2 }");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert_eq!(
+            construct_names(&out.tree)
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::LET_STMT)
+                .count(),
+            2
+        );
+    }
+
+    /// A run-on is reported where it happens and parsing continues: three
+    /// statements, two missing separators, three `LET_STMT`s and no cascade.
+    #[test]
+    fn each_missing_separator_is_reported_once_and_parsing_continues() {
+        let out = parse_text("let a = 1 let b = 2 let c = 3");
+        let separator_errors = out
+            .diagnostics
+            .iter()
+            .filter(|d| d.code() == MISSING_SEPARATOR)
+            .count();
+        assert_eq!(separator_errors, 2, "{:?}", out.diagnostics);
+        assert_eq!(
+            construct_names(&out.tree)
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::LET_STMT)
+                .count(),
+            3
+        );
+    }
+
+    /// The block loop demands one too, and the closing `}` is a separator in its
+    /// own right — a trailing expression needs nothing after it.
+    #[test]
+    fn a_block_demands_a_separator_but_its_closing_brace_is_one() {
+        let clean = parse_text("fn f() { let a = 1\n a }");
+        assert!(clean.diagnostics.is_empty(), "{:?}", clean.diagnostics);
+
+        let run_on = parse_text("fn f() { let a = 1 a }");
+        assert!(
+            run_on
+                .diagnostics
+                .iter()
+                .any(|d| d.code() == MISSING_SEPARATOR),
+            "{:?}",
+            run_on.diagnostics
+        );
+    }
+
+    /// Match arms are comma-OR-newline separated, which until FE-04 was a
+    /// comment above a check that only asked whether a pattern could start.
+    #[test]
+    fn match_arms_on_one_line_need_a_comma() {
+        let commas = parse_text("fn f() { match x { A => 1, B => 2 } }");
+        assert!(commas.diagnostics.is_empty(), "{:?}", commas.diagnostics);
+
+        let newlines = parse_text("fn f() { match x {\n A => 1\n B => 2\n } }");
+        assert!(
+            newlines.diagnostics.is_empty(),
+            "{:?}",
+            newlines.diagnostics
+        );
+
+        let run_on = parse_text("fn f() { match x { A => 1 B => 2 } }");
+        assert!(
+            run_on
+                .diagnostics
+                .iter()
+                .any(|d| d.code() == MISSING_SEPARATOR),
+            "{:?}",
+            run_on.diagnostics
         );
     }
 
