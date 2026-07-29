@@ -2020,10 +2020,16 @@ impl<'a> Lowerer<'a> {
                 if let praxis_types::TypeData::Enum { def, .. } = self.db.data(resolved) {
                     let edef = self.db.enum_def(*def);
                     if let Some(idx) = edef.variant(&name) {
+                        // A bare name naming a variant *with* a payload means
+                        // "any payload", so it is padded to the variant's arity
+                        // (HIR-06). The usefulness matrix pairs each column
+                        // with a type, and a row narrower than the payload
+                        // would pair them off by one.
+                        let arity = edef.variants[idx].payload.len();
                         return TypedPattern::EnumVariant {
                             enum_def_id: *def,
                             variant_idx: idx as u32,
-                            subpatterns: Vec::new(),
+                            subpatterns: vec![TypedPattern::Wildcard; arity],
                             ty: scrutinee_ty,
                         };
                     }
@@ -2089,6 +2095,13 @@ impl<'a> Lowerer<'a> {
                     let sub_ty = payload_types.get(i).copied().unwrap_or(scrutinee_ty);
                     subpatterns.push(self.lower_pattern(sub, sub_ty));
                 }
+                // Exactly one sub-pattern per payload slot (HIR-06). A pattern
+                // that names fewer is padded with wildcards — `Some` and
+                // `Some(_)` are the same test — and one that names *more* is
+                // truncated: the extras are lowered above so anything wrong
+                // inside them still reports, but a slot the variant does not
+                // have would make MIR read a payload index past the object.
+                subpatterns.resize(payload_types.len(), TypedPattern::Wildcard);
                 TypedPattern::EnumVariant {
                     enum_def_id,
                     variant_idx: idx as u32,

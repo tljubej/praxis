@@ -2857,6 +2857,49 @@ fn match_nested_variant_none_branch() {
     assert_eq!(result.as_int(), 0);
 }
 
+/// **HIR-06's runtime half.** The usefulness matrix pairs each pattern column
+/// with a type, so lowering pads a variant pattern to its payload arity — which
+/// puts a `TypedPattern::Wildcard` in a *payload slot* from source for the first
+/// time. Before, one only ever reached MIR's decision tree from a synthesized
+/// fallback at the top level.
+///
+/// Each spelling below selects the same arm and must read the same value: a
+/// padded slot is extracted and discarded, not skipped and not read off the end.
+#[test]
+fn a_padded_payload_wildcard_selects_its_arm_at_runtime() {
+    let enums = "enum Inner { Nil, Val(Int) }\nenum Outer { Wrapped(Inner), Bare }\n";
+    for arm in ["Wrapped(_)", "Wrapped(i)"] {
+        let src = format!(
+            "{enums}fn main() -> Int {{\n  let v = Wrapped(Val(7))\n  \
+             match v {{\n    {arm} => 5\n    Bare => 1\n  }}\n}}\n"
+        );
+        let (rt, result) = run_main(&src);
+        assert!(!rt.has_pending_fault(), "`{arm}` faulted: {:?}", rt.fault());
+        assert_eq!(result.as_int(), 5, "`{arm}` must take the first arm");
+    }
+
+    // A *bare* constructor name for a variant that has a payload is padded to
+    // `Val(_)`, so it emits a payload read it never used to. The value it
+    // selects must be unchanged, and the discarded slot must not fault.
+    let src = format!(
+        "{enums}fn main() -> Int {{\n  let v = Wrapped(Val(7))\n  \
+         match v {{\n    Wrapped(Nil) => 1\n    Wrapped(Val) => 2\n    Bare => 3\n  }}\n}}\n"
+    );
+    let (rt, result) = run_main(&src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2, "a bare `Val` is `Val(_)`");
+
+    // …and the padded arm is still a *test*: the other payload constructor
+    // takes its own arm rather than falling into the padded one.
+    let src = format!(
+        "{enums}fn main() -> Int {{\n  let v = Wrapped(Nil)\n  \
+         match v {{\n    Wrapped(Val) => 2\n    Wrapped(Nil) => 1\n    Bare => 3\n  }}\n}}\n"
+    );
+    let (rt, result) = run_main(&src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1, "`Nil` is not caught by `Val(_)`");
+}
+
 #[test]
 fn match_multi_payload_binding() {
     // A variant with multiple payload fields, all bound.

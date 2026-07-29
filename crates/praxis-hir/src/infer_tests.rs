@@ -2001,7 +2001,6 @@ fn a_wildcard_binder_is_legal_and_declares_nothing() {
 }
 
 #[test]
-#[ignore = "known bug: exhaustiveness does not recursively inspect variant payloads"]
 fn nested_enum_pattern_must_cover_payload_constructors() {
     let src = "enum Flag { On, Off }\n\
                enum Wrapped { Wrap(Flag) }\n\
@@ -2016,7 +2015,6 @@ fn nested_enum_pattern_must_cover_payload_constructors() {
 }
 
 #[test]
-#[ignore = "known bug: exhaustiveness does not flag duplicate constructor arms"]
 fn duplicate_enum_arm_is_unreachable() {
     let src = "enum E { A, B }\n\
                fn main() -> Int {\n\
@@ -2692,4 +2690,172 @@ fn an_unknown_fields_initializer_is_still_checked() {
         diags.len() > 1,
         "its initializer is inferred too, so its own error is reported: {diags:?}"
     );
+}
+
+/// **HIR-06's first half as the rule.** Exhaustiveness is a question about
+/// *values*, so it is asked at every position a value has — not only at the
+/// top. The old check compared top-level variant indices, which made a
+/// one-variant enum exhaustive no matter what its payload said.
+#[test]
+fn a_match_covers_every_payload_position_not_just_the_outer_constructor() {
+    let enums = "enum Flag { On, Off }\nenum Wrapped { Wrap(Flag) }\n";
+
+    // `Wrap` is the *only* variant of `Wrapped`, so a top-level check calls
+    // this exhaustive. `Wrap(Off)` is a value it does not match.
+    let one = analyze_and_lower_diags(&format!(
+        "{enums}fn main() -> Int {{ let v = Wrap(On)\n  match v {{ Wrap(On) => 1 }} }}"
+    ));
+    assert!(
+        one.iter().any(|d| d.code().number() == 120),
+        "an uncovered payload constructor is Y120: {one:?}"
+    );
+
+    // …and covering both closes it, which is the half a blanket rejection of
+    // nested patterns would also satisfy.
+    let both = analyze_and_lower_diags(&format!(
+        "{enums}fn main() -> Int {{ let v = Wrap(On)\n  \
+         match v {{ Wrap(On) => 1, Wrap(Off) => 2 }} }}"
+    ));
+    assert!(both.is_empty(), "both payload cases are covered: {both:?}");
+
+    // A wildcard payload covers every constructor under it, at any depth.
+    let wild = analyze_and_lower_diags(&format!(
+        "{enums}fn main() -> Int {{ let v = Wrap(On)\n  match v {{ Wrap(_) => 1 }} }}"
+    ));
+    assert!(wild.is_empty(), "`Wrap(_)` is all of Wrapped: {wild:?}");
+
+    // …and so does a binding, which is the same constructor set by a different
+    // pattern form.
+    let bound = analyze_and_lower_diags(&format!(
+        "{enums}fn main() -> Int {{ let v = Wrap(On)\n  match v {{ Wrap(f) => 1 }} }}"
+    ));
+    assert!(bound.is_empty(), "`Wrap(f)` is all of Wrapped: {bound:?}");
+
+    // Two levels down, to show the recursion is not one special case.
+    let deep = "enum Flag { On, Off }\nenum Inner { In(Flag) }\nenum Outer { Out(Inner) }\n";
+    let nested = analyze_and_lower_diags(&format!(
+        "{deep}fn main() -> Int {{ let v = Out(In(On))\n  match v {{ Out(In(On)) => 1 }} }}"
+    ));
+    assert!(
+        nested.iter().any(|d| d.code().number() == 120),
+        "the gap is two payloads deep: {nested:?}"
+    );
+}
+
+/// **HIR-06's second half as the rule.** An arm is unreachable when it matches
+/// no value the arms above it leave — which is a coverage question, not the
+/// syntactic "is there a `_` above me" the old scan asked.
+#[test]
+fn an_arm_is_unreachable_exactly_when_it_adds_no_coverage() {
+    let y121 = |src: &str| {
+        analyze_and_lower_diags(src)
+            .iter()
+            .filter(|d| d.code().number() == 121)
+            .count()
+    };
+
+    // A repeated constructor: the old scan saw no catch-all and said nothing.
+    assert_eq!(
+        y121(
+            "enum E { A, B }\nfn main() -> Int { let v = A\n  match v { A => 1, A => 2, B => 3 } }"
+        ),
+        1,
+        "the second `A` is dead, and only it"
+    );
+
+    // The case the old scan *did* catch still works.
+    assert_eq!(
+        y121("enum E { A, B }\nfn main() -> Int { let v = A\n  match v { _ => 1, A => 2 } }"),
+        1,
+        "an arm after a catch-all"
+    );
+
+    // A payload an earlier arm already covered — invisible to a top-level scan,
+    // because both arms name the same single variant.
+    assert_eq!(
+        y121(
+            "enum Flag { On, Off }\nenum Wrapped { Wrap(Flag) }\n\
+             fn main() -> Int { let v = Wrap(On)\n  match v { Wrap(_) => 1, Wrap(On) => 2 } }"
+        ),
+        1,
+        "`Wrap(On)` is inside `Wrap(_)`"
+    );
+
+    // …and the half a coverage check gets wrong in the other direction: arms
+    // that each add something are all reachable.
+    assert_eq!(
+        y121(
+            "enum Flag { On, Off }\nenum Wrapped { Wrap(Flag) }\n\
+             fn main() -> Int { let v = Wrap(On)\n  match v { Wrap(On) => 1, Wrap(Off) => 2 } }"
+        ),
+        0,
+        "two distinct payload constructors are two live arms"
+    );
+
+    // An exhaustive pair of `Bool` literals leaves nothing for a third arm,
+    // with no `_` anywhere in sight.
+    assert_eq!(
+        y121("fn main() -> Int { match true { true => 1, false => 2, true => 3 } }"),
+        1,
+        "`true` and `false` are all of Bool"
+    );
+}
+
+/// The witness a `Y120` names is the **shape** that is missing, so a nested gap
+/// says which one. Naming only the outer constructor — the most a top-level
+/// check could say — is the message that sends you looking in the wrong place.
+#[test]
+fn a_missing_case_is_named_by_the_value_that_is_missing() {
+    let diags = analyze_and_lower_diags(
+        "enum Flag { On, Off }\nenum Wrapped { Wrap(Flag) }\n\
+         fn main() -> Int { let v = Wrap(On)\n  match v { Wrap(On) => 1 } }",
+    );
+    let y120 = diags
+        .iter()
+        .find(|d| d.code().number() == 120)
+        .expect("a missing `Wrap(Off)`");
+    assert!(
+        y120.message().contains("Wrap(Off)"),
+        "the witness is the whole shape: {}",
+        y120.message()
+    );
+
+    // A type with no signature to enumerate asks for an arm instead of naming
+    // a value, because there is no finite set of values to name.
+    let open = analyze_and_lower_diags("fn main() -> Int { match 1 { 1 => 1, 2 => 2 } }");
+    let y120 = open
+        .iter()
+        .find(|d| d.code().number() == 120)
+        .expect("an Int match needs a catch-all");
+    assert!(
+        y120.message().contains("catch-all"),
+        "an open signature names no value: {}",
+        y120.message()
+    );
+}
+
+/// A bare constructor name and that constructor at every-wildcard are the same
+/// test, because lowering pads a variant pattern to its payload arity (HIR-06).
+/// The matrix pairs each column with a type; a row narrower than the payload
+/// would pair them off by one.
+#[test]
+fn a_bare_constructor_name_is_that_constructor_at_any_payload() {
+    for arm in ["Some", "Some(_)", "Some(n)"] {
+        let src = format!(
+            "fn main() -> Int {{ let o = Some(1)\n  match o {{ {arm} => 1, None => 0 }} }}"
+        );
+        assert!(
+            is_clean_with_lower(&src),
+            "`{arm}` plus `None` is all of Option[Int]"
+        );
+    }
+    // …and without the `None` arm none of them is.
+    for arm in ["Some", "Some(_)", "Some(n)"] {
+        let src = format!("fn main() -> Int {{ let o = Some(1)\n  match o {{ {arm} => 1 }} }}");
+        let diags = analyze_and_lower_diags(&src);
+        assert!(
+            diags.iter().any(|d| d.code().number() == 120),
+            "`{arm}` alone leaves `None`: {diags:?}"
+        );
+    }
 }
