@@ -80,6 +80,13 @@ pub struct NameResolution {
     /// the exact symbol even when the same name is shadowed (where a scope lookup
     /// would resolve to the wrong/latest binding).
     pub decls: HashMap<TextRange, SymbolId>,
+    /// Each name written in *type position*, keyed by its source range → the
+    /// type symbol it resolved to. Kept apart from [`refs`](Self::refs) because
+    /// it is not a value reference: nothing instantiates a scheme for it and
+    /// hover has nothing to say about it. Inference reads it so an annotation
+    /// resolves through the symbol resolution chose, rather than through a
+    /// second scope lookup that could choose a different one.
+    pub type_refs: HashMap<TextRange, SymbolId>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -526,6 +533,12 @@ impl Resolver {
     fn resolve_closure(&mut self, scope: ScopeId, c: &praxis_ast::ClosureExpr) {
         let body_scope = self.out.scopes.push_child(scope);
         for p in c.params() {
+            // A closure parameter may be annotated (`|x: Int| …`), and the
+            // annotation is checked in the *enclosing* scope — the parameter
+            // names are not visible to each other's types.
+            if let Some(ty) = p.ty() {
+                self.check_type_annotation(scope, &ty);
+            }
             self.bind_param(body_scope, &p);
         }
         if let Some(body) = c.body() {
@@ -562,7 +575,18 @@ impl Resolver {
                     self.bind(scope, SymbolKind::Let, name, tok.text_range());
                 }
             }
-            praxis_ast::PatternKind::Variant(_) => {
+            praxis_ast::PatternKind::Variant(name) => {
+                // The constructor is a *reference*, not a binding. Record it
+                // when it resolves so inference can reach the variant through
+                // its symbol rather than by looking the text up again. A name
+                // that resolves to nothing is left alone here: naming a variant
+                // the scrutinee's type does not have is a type error (`Y122`),
+                // not an unresolved name.
+                if let Some(tok) = pat.name_token() {
+                    if let Some(symbol) = self.lookup(scope, &name) {
+                        self.record_ref(scope, symbol, tok.text_range());
+                    }
+                }
                 for sub in pat.sub_patterns() {
                     self.resolve_pattern_bindings(scope, &sub);
                 }
@@ -743,11 +767,14 @@ impl Resolver {
 
     // --- type annotations --------------------------------------------------
 
-    /// Walk a type annotation and emit `N002` for any name that is not a known
-    /// type. M7: known types are resolved through the scope tree (built-in
-    /// scalars are seeded as `Builtin` symbols; user `struct`/`enum` names will
-    /// be registered in WS3/WS4). Structural type nodes (tuples, function types)
-    /// are recursed into; the leaves are the `Ident` names.
+    /// Walk a type annotation, record which type symbol each name denotes, and
+    /// emit `N002` for a name that is not a known type. Structural type nodes
+    /// (tuples, function types) are recursed into; the leaves are the `Ident`
+    /// names.
+    ///
+    /// Recording is the point: the symbol is decided *here*, once, and
+    /// inference reads the answer out of `type_refs` rather than repeating the
+    /// lookup against a scope of its own.
     fn check_type_annotation(&mut self, scope: ScopeId, ty: &praxis_ast::TypeRef) {
         let syntax = ty.syntax();
         for tok in syntax.descendants_with_tokens().filter_map(|e| match e {
@@ -755,14 +782,21 @@ impl Resolver {
             _ => None,
         }) {
             let name = tok.text();
-            // A type name is valid if it resolves in scope (built-in or
-            // user-declared). Collection constructors (Vec, Map, …) are also
-            // valid type names — they're handled in inference's resolve_type.
-            if self.lookup(scope, name).is_none() && !is_collection_ctor_name(name) {
-                let span = range_to_span(tok.text_range());
-                self.out
-                    .diagnostics
-                    .push(unknown_type(self.file_span(span), name));
+            // Collection constructors and `Option` are compiler-owned type
+            // names with no scope symbol; inference turns them into types.
+            if crate::decl::is_type_ctor_name(name) {
+                continue;
+            }
+            match self.lookup(scope, name) {
+                Some(symbol) => {
+                    self.out.type_refs.insert(tok.text_range(), symbol);
+                }
+                None => {
+                    let span = range_to_span(tok.text_range());
+                    self.out
+                        .diagnostics
+                        .push(unknown_type(self.file_span(span), name));
+                }
             }
         }
     }
@@ -774,26 +808,5 @@ fn range_to_span(range: TextRange) -> Span {
     Span::new(
         BytePos::from(u32::from(range.start())),
         BytePos::from(u32::from(range.end())),
-    )
-}
-
-/// Whether `name` is a built-in collection constructor (§4.4: `Vec`, `Map`,
-/// `Set`, …). These are valid type-annotation names that are *not* seeded as
-/// scope symbols (they're handled specially in inference's `resolve_type`),
-/// so `check_type_annotation` must accept them directly.
-fn is_collection_ctor_name(name: &str) -> bool {
-    matches!(
-        name,
-        "Vec"
-            | "Deque"
-            | "Map"
-            | "Set"
-            | "Counter"
-            | "MinHeap"
-            | "MaxHeap"
-            | "BitSet"
-            | "Grid"
-            | "Range"
-            | "Option"
     )
 }

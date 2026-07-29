@@ -18,6 +18,7 @@
 pub mod capability;
 pub mod capture;
 pub mod catalog;
+pub(crate) mod decl;
 pub mod diagnostics;
 pub mod exhaustive;
 pub mod hover;

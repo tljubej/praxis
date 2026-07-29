@@ -635,7 +635,6 @@ fn tuple_return_annotation_is_enforced() {
 }
 
 #[test]
-#[ignore = "known bug: user-enum annotations are not converted to inference types"]
 fn user_enum_annotation_is_enforced() {
     // User enum names resolve, but inference must also turn the annotation into
     // that enum type (not fall back to a fresh variable).
@@ -727,13 +726,102 @@ fn a_nullary_function_annotation_takes_no_arguments() {
 }
 
 #[test]
-#[ignore = "known bug: type definitions are inferred sequentially despite two-pass resolution"]
 fn forward_struct_annotation_is_enforced() {
     let src = "fn bad(point: Point) -> Int { point + 1 }\n\
                struct Point { x: Int }";
     assert!(
         has_type_error(src),
         "a forward-resolved Point annotation cannot degrade to a fresh variable"
+    );
+}
+
+/// TY-09 stated positively: the exit test only asks that a `Tile` parameter is
+/// not an `Int`, which a fresh variable also satisfies once *something* pins
+/// it. This asks that the annotation *is* the enum — the thing
+/// `lookup_enum_type` was written to do and never did, because nothing called
+/// it and `scalar_from_name` asked only for a `struct`.
+#[test]
+fn a_user_type_annotation_is_the_type_it_names() {
+    assert_eq!(
+        scheme_of("enum Tile { Empty }\nfn f(t: Tile) -> Int { 0 }", "t").as_deref(),
+        Some("Tile"),
+        "an enum annotation"
+    );
+    assert_eq!(
+        scheme_of("struct Point { x: Int }\nfn f(p: Point) -> Int { 0 }", "p").as_deref(),
+        Some("Point"),
+        "a struct annotation"
+    );
+    assert_eq!(
+        scheme_of(
+            "enum Tile { Empty }\nfn f(ts: Vec[Tile]) -> Int { 0 }",
+            "ts"
+        )
+        .as_deref(),
+        Some("Vec[Tile]"),
+        "…and nested inside a collection"
+    );
+    assert!(
+        !has_type_error("enum Tile { Empty, Wall }\nfn f(t: Tile) -> Tile { t }"),
+        "an enum annotation that agrees with the body is fine"
+    );
+}
+
+/// TY-10's ordering property, past the one case the exit test names: it is
+/// *dependency* order, not "types first". A struct whose field names a struct
+/// declared below it needs the second registered before the first, and neither
+/// is a `fn`.
+#[test]
+fn a_type_declaration_is_registered_after_the_types_it_names() {
+    assert_eq!(
+        scheme_of(
+            "struct Outer { inner: Inner }\n\
+             struct Inner { n: Int }\n\
+             fn f(o: Outer) -> Int { o.inner.n }",
+            "o"
+        )
+        .as_deref(),
+        Some("Outer"),
+    );
+    assert!(
+        has_type_error(
+            "struct Outer { inner: Inner }\n\
+             struct Inner { n: Int }\n\
+             fn f(o: Outer) -> Text { o.inner.n }"
+        ),
+        "the forward field type is a real Int, not a fresh variable"
+    );
+    // An enum payload naming a struct declared later, and back again.
+    assert!(
+        has_type_error(
+            "enum Shape { Round(Circle) }\n\
+             struct Circle { r: Int }\n\
+             fn f() -> Shape { Round(1) }"
+        ),
+        "a forward enum payload type is enforced"
+    );
+}
+
+/// A declaration cycle has no fixpoint in a type system without equirecursive
+/// types, so the pass must not loop looking for one. It registers what is left
+/// in source order, exactly as an unresolvable annotation has always been
+/// handled — the point of the gate is that `analyze` returns.
+#[test]
+fn a_type_declaration_cycle_still_analyzes() {
+    let analysis = analyze(
+        "struct A { b: B }\n\
+         struct B { a: A }\n\
+         struct SelfRef { next: SelfRef }\n\
+         fn f(x: Int) -> Int { x }",
+    );
+    // The acyclic declaration below the cycle is still registered.
+    assert!(
+        analysis
+            .names
+            .all()
+            .iter()
+            .any(|s| s.name == "f" && s.scheme.is_some()),
+        "the rest of the file is still inferred"
     );
 }
 
@@ -748,7 +836,6 @@ fn value_binding_name_is_not_accepted_as_a_type() {
 }
 
 #[test]
-#[ignore = "known bug: collection annotation arity is never validated"]
 fn malformed_collection_type_arity_is_rejected() {
     let src = "fn identity(value: Map[Int]) -> Map[Int] { value }";
     assert!(

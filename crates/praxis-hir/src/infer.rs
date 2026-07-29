@@ -19,16 +19,13 @@ use std::collections::HashMap;
 
 use praxis_ast::{
     ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, BreakExpr, CallExpr, ContinueExpr,
-    ElseBranch, EnumItem, Expr, ExprStmt, FieldExpr, FnItem, ForExpr, IfExpr, LetStmt, Literal,
-    LoopExpr, MethodCallExpr, Param, PathExpr, RecordLitExpr, ReturnExpr, SourceFile, StructItem,
-    UnaryExpr, VarStmt, WhileExpr,
+    ElseBranch, Expr, ExprStmt, FieldExpr, FnItem, ForExpr, IfExpr, LetStmt, Literal, LoopExpr,
+    MethodCallExpr, Param, PathExpr, RecordLitExpr, ReturnExpr, SourceFile, UnaryExpr, VarStmt,
+    WhileExpr,
 };
 use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
 use praxis_syntax::SyntaxKind;
-use praxis_types::{
-    unify::UnifyError, CollectionArgs, EnumVariantDef, FieldSet, Level, ScalarType, Scheme, Type,
-    TypeDb, VariantSet,
-};
+use praxis_types::{unify::UnifyError, CollectionArgs, Level, ScalarType, Scheme, Type, TypeDb};
 use rowan::TextRange;
 
 use crate::diagnostics::{
@@ -68,6 +65,7 @@ pub(crate) fn infer_with_tree(
         scopes,
         refs,
         decls,
+        type_refs,
         mut diagnostics,
     } = resolution;
 
@@ -78,11 +76,12 @@ pub(crate) fn infer_with_tree(
         scopes,
         refs,
         decls,
+        type_refs,
+        type_env: crate::decl::TypeEnv::default(),
         ref_types: HashMap::new(),
         call_sites: HashMap::new(),
         diagnostics: Vec::new(),
         catalog: builtin_catalog(),
-        fn_placeholders: HashMap::new(),
         decl_site: Level::OUTERMOST,
     };
     inferer.seed_builtin_schemes();
@@ -115,6 +114,13 @@ struct Inferer {
     /// Declaration sites → SymbolId (resolution's map). Used to attach schemes
     /// to the exact symbol, surviving shadowing.
     decls: HashMap<TextRange, SymbolId>,
+    /// Names written in type position → the type symbol they resolved to
+    /// (resolution's map). An annotation is turned into a [`Type`] through this,
+    /// never through a scope lookup of the inferer's own.
+    type_refs: HashMap<TextRange, SymbolId>,
+    /// Every type name's [`Type`] and every function's signature placeholder,
+    /// sealed by the declaration pass before any expression is inferred (F19).
+    type_env: crate::decl::TypeEnv,
     ref_types: HashMap<TextRange, Type>,
     /// Call sites keyed by the callee name token's range. Populated in
     /// `infer_call`; consumed by the monomorphization pass (WS8, §13.6).
@@ -123,10 +129,6 @@ struct Inferer {
     /// The built-in method catalog (§16.2), for resolving `receiver.method()`.
     /// Immutable; shared via a process-wide `OnceLock`.
     catalog: &'static praxis_stdlib::MethodCatalog,
-    /// Signature placeholders for the functions of the declaration group being
-    /// inferred, keyed by the name token's range (TY-22). A forward call
-    /// unifies against the same variable the later declaration resolves.
-    fn_placeholders: HashMap<TextRange, Type>,
     /// The level the declaration group was entered from — where a function's
     /// signature generalizes (TY-01).
     decl_site: Level,
@@ -241,7 +243,7 @@ impl Inferer {
                         || s.name == "None"
                         || s.name == "pi"
                         || s.name == "e"
-                        || Self::collection_ctor_for(&s.name).is_some())
+                        || crate::decl::collection_ctor_for(&s.name).is_some())
             })
             .map(|s| (s.id, s.name.clone()))
             .collect();
@@ -269,7 +271,7 @@ impl Inferer {
                 // quantified variable pinned by usage (push/insert/etc.).
                 "Vec" | "Deque" | "Set" | "Counter" | "MinHeap" | "MaxHeap" | "Grid" => {
                     let v = db.fresh_var();
-                    let ctor = Self::collection_ctor_for(&name).expect("ctor name");
+                    let ctor = crate::decl::collection_ctor_for(&name).expect("ctor name");
                     let coll = db.unary_collection(ctor, v);
                     db.func(vec![], coll)
                 }
@@ -282,7 +284,7 @@ impl Inferer {
                 }
                 // BitSet and Range are nullary: () -> BitSet / () -> Range.
                 "BitSet" | "Range" => {
-                    let ctor = Self::collection_ctor_for(&name).expect("ctor name");
+                    let ctor = crate::decl::collection_ctor_for(&name).expect("ctor name");
                     let coll = db
                         .collection(ctor, CollectionArgs::Nullary)
                         .expect("BitSet and Range are nullary");
@@ -328,6 +330,9 @@ impl Inferer {
 
     // --- top-level statements ----------------------------------------------
 
+    /// Infer one statement. `struct` and `enum` are deliberately absent: their
+    /// types were registered by the declaration pass, before any expression was
+    /// inferred, which is the whole of TY-10.
     fn infer_top_stmt(&mut self, scope: ScopeId, node: &praxis_syntax::SyntaxNode) {
         if let Some(let_) = LetStmt::cast(node.clone()) {
             self.infer_let(scope, &let_);
@@ -335,10 +340,6 @@ impl Inferer {
             self.infer_var(scope, &var_);
         } else if let Some(fn_) = FnItem::cast(node.clone()) {
             self.infer_fn(scope, &fn_);
-        } else if let Some(struct_) = StructItem::cast(node.clone()) {
-            self.infer_struct(scope, &struct_);
-        } else if let Some(enum_) = EnumItem::cast(node.clone()) {
-            self.infer_enum(scope, &enum_);
         } else if let Some(assign) = AssignStmt::cast(node.clone()) {
             self.infer_assign(scope, &assign);
         } else if let Some(expr) = ExprStmt::cast(node.clone()) {
@@ -346,143 +347,6 @@ impl Inferer {
                 self.infer_expr(scope, &e);
             }
         }
-    }
-
-    /// Register a struct declaration's type (M7, §4.5). Resolves each field's
-    /// type annotation, builds a `RecordDef`, and stores the resulting `Type` on
-    /// the struct's symbol (as a monomorphic scheme) so type annotations and
-    /// record literals can look it up.
-    fn infer_struct(&mut self, _scope: ScopeId, item: &StructItem) {
-        let Some(name_tok) = item.name() else {
-            return;
-        };
-        let name = name_tok.text().to_string();
-        let range = name_tok.text_range();
-        let Some(symbol) = self.resolve_decl(range) else {
-            return;
-        };
-        // Resolve each field's type. Unknown types (already reported N002 by the
-        // resolver) become fresh vars.
-        let mut fields = Vec::new();
-        if let Some(fl) = item.field_list() {
-            for f in fl.fields() {
-                let fname = f.name().map(|t| t.text().to_string()).unwrap_or_default();
-                let fty = f
-                    .ty()
-                    .and_then(|t| self.resolve_type(&t))
-                    .unwrap_or_else(|| self.db.fresh_var());
-                fields.push((fname, fty));
-            }
-        }
-        let fields = match FieldSet::from_pairs(fields) {
-            Ok(fields) => fields,
-            Err(praxis_types::TypeCtorError::DuplicateField(dup)) => {
-                self.diagnostics.push(crate::diagnostics::duplicate_member(
-                    self.file_span(range),
-                    "field",
-                    &dup,
-                ));
-                return;
-            }
-            Err(_) => return,
-        };
-        let ty = self.db.record(Some(name), fields);
-        if let Some(sym) = self.names.get_mut(symbol) {
-            sym.scheme = Some(Scheme::monotype(ty));
-        }
-    }
-
-    /// Look up a registered struct type by name, returning its `Type` if the
-    /// name resolves to a `SymbolKind::Struct` symbol with an attached scheme.
-    fn lookup_struct_type(&self, name: &str) -> Option<Type> {
-        let root = self.scopes.root();
-        let symbol = self.scopes.lookup(root, name)?;
-        let sym = self.names.get(symbol)?;
-        if sym.kind != SymbolKind::Struct {
-            return None;
-        }
-        let scheme = sym.scheme.as_ref()?;
-        Some(scheme.body())
-    }
-
-    /// Register an enum declaration's type (M7, §4.6). Builds the `EnumDef`,
-    /// stores the resulting `Type` on the enum symbol, and gives each variant
-    /// constructor a function type `(payload…) -> EnumType` (or `() -> EnumType`
-    /// for payload-less variants).
-    fn infer_enum(&mut self, _scope: ScopeId, item: &EnumItem) {
-        let Some(name_tok) = item.name() else {
-            return;
-        };
-        let name = name_tok.text().to_string();
-        let range = name_tok.text_range();
-        let Some(enum_symbol) = self.resolve_decl(range) else {
-            return;
-        };
-        // Resolve each variant's payload types and build the EnumDef.
-        let mut variants = Vec::new();
-        // Collect (variant-name, payload-types, declaration-range) for ctor setup.
-        let mut variant_info: Vec<(String, Vec<Type>, TextRange)> = Vec::new();
-        for v in item.variants() {
-            let vname = v.name().map(|t| t.text().to_string()).unwrap_or_default();
-            let payload_types: Vec<Type> = v
-                .payload_types()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|t| self.resolve_type(&t).unwrap_or_else(|| self.db.fresh_var()))
-                .collect();
-            // TY-05: one payload representation. The `is_empty` normalization
-            // this replaces was the manual half of the same equivalence.
-            variants.push(EnumVariantDef::new(vname.clone(), payload_types.clone()));
-            if let Some(vtok) = v.name() {
-                variant_info.push((vname, payload_types, vtok.text_range()));
-            }
-        }
-        let variants = match VariantSet::new(variants) {
-            Ok(variants) => variants,
-            Err(praxis_types::TypeCtorError::DuplicateVariant(dup)) => {
-                self.diagnostics.push(crate::diagnostics::duplicate_member(
-                    self.file_span(range),
-                    "variant",
-                    &dup,
-                ));
-                return;
-            }
-            Err(_) => return,
-        };
-        let enum_ty = self.db.enum_(Some(name), variants);
-        if let Some(sym) = self.names.get_mut(enum_symbol) {
-            sym.scheme = Some(Scheme::monotype(enum_ty));
-        }
-        // Give each variant constructor a type.
-        for (vname, payload_types, vrange) in &variant_info {
-            if let Some(vsymbol) = self.resolve_decl(*vrange) {
-                // The constructor type. A zero-payload variant (`Empty`) is a
-                // bare value of the enum type (used as a path, not a call). A
-                // payload variant (`Number(Int)`) is a function `(Int) -> Enum`.
-                let ctor_ty = if payload_types.is_empty() {
-                    enum_ty
-                } else {
-                    self.db.func(payload_types.clone(), enum_ty)
-                };
-                if let Some(sym) = self.names.get_mut(vsymbol) {
-                    sym.scheme = Some(Scheme::monotype(ctor_ty));
-                }
-            }
-            let _ = vname;
-        }
-    }
-
-    /// Look up a registered enum type by name.
-    #[allow(dead_code)] // used by WS5 pattern matching
-    fn lookup_enum_type(&self, name: &str) -> Option<Type> {
-        let root = self.scopes.root();
-        let symbol = self.scopes.lookup(root, name)?;
-        let sym = self.names.get(symbol)?;
-        if sym.kind != SymbolKind::Enum {
-            return None;
-        }
-        let scheme = sym.scheme.as_ref()?;
-        Some(scheme.body())
     }
 
     /// Look up an enum variant by constructor name, **instantiated fresh**.
@@ -495,10 +359,11 @@ impl Inferer {
     /// scrutinee's element type: `Option`'s payload is its def's parameter (F12),
     /// so the payload of a *use* is only known once the use has its own
     /// arguments and the scrutinee has unified against them.
-    #[allow(dead_code)] // used by WS5 pattern matching
-    fn lookup_enum_variant(&mut self, name: &str) -> Option<(Type, usize, Vec<Type>)> {
-        let root = self.scopes.root();
-        let symbol = self.scopes.lookup(root, name)?;
+    fn lookup_enum_variant(
+        &mut self,
+        symbol: SymbolId,
+        name: &str,
+    ) -> Option<(Type, usize, Vec<Type>)> {
         let scheme = self.names.get(symbol)?.scheme.as_ref()?.clone();
         let body = self.db.instantiate(&scheme);
         // The scheme body is either a Func returning the enum type (payload
@@ -516,11 +381,6 @@ impl Inferer {
         let idx = self.db.enum_def(def_id).variant(name)?;
         let payload = self.db.variant_payload_of(def_id, &args, idx);
         Some((enum_ty, idx, payload))
-    }
-
-    /// Resolve the symbol declared at `range` (from the resolution `decls` map).
-    fn resolve_decl(&self, range: TextRange) -> Option<SymbolId> {
-        self.decls.get(&range).copied()
     }
 
     fn infer_let(&mut self, scope: ScopeId, stmt: &LetStmt) {
@@ -586,41 +446,35 @@ impl Inferer {
 
     /// Infer one declaration group: every top-level statement in `root`.
     ///
-    /// # Two phases (TY-22)
+    /// # Two phases (F19)
     ///
-    /// Every `fn` in the group gets a monomorphic **signature placeholder**
-    /// before any body is inferred, so a call to a function declared *later*
-    /// unifies against the same variable that declaration will resolve — and a
-    /// disagreement is a diagnostic instead of silence. Name resolution has
-    /// been two-pass since M2; inference was not, so a forward call was
-    /// resolved and then unchecked.
+    /// The [declaration pass](crate::decl) runs first and seals a
+    /// [`TypeEnv`](crate::decl::TypeEnv): every `struct`/`enum` is registered
+    /// in dependency order (TY-10), and every `fn` gets a monomorphic
+    /// **signature placeholder** so a call to a function declared *later*
+    /// unifies against the same variable that declaration will resolve, and a
+    /// disagreement is a diagnostic instead of silence (TY-22). Name resolution
+    /// has been two-pass since M2; inference was not, so a forward reference
+    /// resolved and was then unchecked.
     ///
-    /// The placeholders live one level deeper than the group's binding site
-    /// (TY-01): unifying a placeholder with the derived function type lowers
-    /// that type's variables to the placeholder's level, so a placeholder at
-    /// the *outer* level would clamp every parameter and result out to level
-    /// zero and no signature could ever generalize. That coupling is why the
-    /// two are one change.
+    /// The pass runs *inside* the group level, which is one deeper than the
+    /// group's binding site (TY-01): unifying a placeholder with the derived
+    /// function type lowers that type's variables to the placeholder's level,
+    /// so a placeholder at the *outer* level would clamp every parameter and
+    /// result out to level zero and no signature could ever generalize. That
+    /// coupling is why the two are one change.
     fn infer_declaration_group(&mut self, scope: ScopeId, root: &SourceFile) {
         self.decl_site = self.db.level();
         let group = self.db.enter_level();
-        for stmt in root.stmts() {
-            let Some(item) = FnItem::cast(stmt.clone()) else {
-                continue;
-            };
-            let Some(name_tok) = item.name() else {
-                continue;
-            };
-            let Some(&id) = self.decls.get(&name_tok.text_range()) else {
-                continue;
-            };
-            let placeholder = self.db.fresh_var();
-            self.fn_placeholders
-                .insert(name_tok.text_range(), placeholder);
-            if let Some(sym) = self.names.get_mut(id) {
-                sym.scheme = Some(Scheme::monotype(placeholder));
-            }
-        }
+        self.type_env = crate::decl::declare(
+            self.file,
+            root,
+            &self.decls,
+            &self.type_refs,
+            &mut self.db,
+            &mut self.names,
+            &mut self.diagnostics,
+        );
         for stmt in root.stmts() {
             self.infer_top_stmt(scope, &stmt);
         }
@@ -629,32 +483,22 @@ impl Inferer {
 
     fn infer_fn(&mut self, scope: ScopeId, item: &FnItem) {
         // The fn name is bound to a monomorphic placeholder var, so recursive
-        // *and* forward uses unify against one variable. `infer_declaration_group`
-        // minted it for a top-level fn; anything else (a nested fn, or a name
-        // resolution did not record) gets one here, at the current level.
-        let named = item.name().map(|t| t.text_range());
-        let placeholder = named
-            .and_then(|range| self.fn_placeholders.get(&range).copied())
+        // *and* forward uses unify against one variable. The declaration pass
+        // minted it for a top-level fn.
+        //
+        // Resolution declares every `fn` it accepts, so a name with no
+        // declaration is one it refused: a nested function, or the second of a
+        // duplicate pair. Both are already reported (N005 / N004) and neither
+        // has a signature — inference used to `expect` here and panic, which
+        // broke `analyze`'s contract that malformed input becomes diagnostics
+        // (TY-23). The body is still inferred, so the rest of the file keeps
+        // reporting.
+        let fn_symbol = item
+            .name()
+            .and_then(|name_tok| self.decls.get(&name_tok.text_range()).copied());
+        let placeholder = fn_symbol
+            .and_then(|id| self.type_env.signature(id))
             .unwrap_or_else(|| self.db.fresh_var());
-        let fn_symbol = match item.name() {
-            Some(name_tok) => match self.decls.get(&name_tok.text_range()).copied() {
-                Some(id) => {
-                    if let Some(sym) = self.names.get_mut(id) {
-                        sym.scheme = Some(Scheme::monotype(placeholder));
-                    }
-                    Some(id)
-                }
-                // Resolution declares every `fn` it accepts, so a name with no
-                // declaration is one it refused: a nested function, or the
-                // second of a duplicate pair. Both are already reported (N005 /
-                // N004) — inference used to `expect` here and panic, which broke
-                // `analyze`'s contract that malformed input becomes diagnostics
-                // (TY-23). The body is still inferred, so the rest of the file
-                // keeps reporting.
-                None => None,
-            },
-            None => None,
-        };
 
         // Body scope at an inner level: params get fresh vars, body is inferred.
         let body_scope = self.scopes.push_child(scope);
@@ -774,7 +618,7 @@ impl Inferer {
                 .unwrap_or_else(|| self.db.fresh_var()),
             Expr::Tuple(t) => {
                 let els: Vec<Type> = t.elements().map(|e| self.infer_expr(scope, &e)).collect();
-                self.tuple_or_degenerate(els)
+                crate::decl::tuple_or_degenerate(&mut self.db, els)
             }
             Expr::Block(b) => self.infer_block(scope, b),
             Expr::If(i) => self.infer_if(scope, i),
@@ -876,10 +720,14 @@ impl Inferer {
     /// Looks up the struct type, unifies each field initializer with the declared
     /// field type, and returns the struct type.
     fn infer_record_lit(&mut self, scope: ScopeId, r: &RecordLitExpr) -> Type {
-        let struct_ty = r.name().and_then(|p| p.name()).and_then(|tok| {
-            let name = tok.text().to_string();
-            self.lookup_struct_type(&name)
-        });
+        // The literal's head is an ordinary name reference, so resolution
+        // already decided which symbol it names — including under shadowing,
+        // where a scope lookup here would answer differently.
+        let struct_ty = r
+            .name()
+            .and_then(|p| p.name())
+            .and_then(|tok| self.refs.get(&tok.text_range()).copied())
+            .and_then(|resolved| self.type_env.ty(resolved.symbol));
         let Some(struct_ty) = struct_ty else {
             // Unknown struct: infer each field for diagnostics, return a fresh var.
             if let Some(fl) = r.field_list() {
@@ -1019,9 +867,14 @@ impl Inferer {
                 let _ = name;
             }
             PatternKind::Variant(vname) => {
-                // An enum variant pattern. Look up the variant to get payload types.
+                // An enum variant pattern. The constructor is a name reference
+                // resolution already resolved; read the variant off its symbol.
+                let ctor = pat
+                    .name_token()
+                    .and_then(|t| self.refs.get(&t.text_range()).copied())
+                    .map(|r| r.symbol);
                 if let Some((enum_ty, variant_idx, payload_types)) =
-                    self.lookup_enum_variant(&vname)
+                    ctor.and_then(|symbol| self.lookup_enum_variant(symbol, &vname))
                 {
                     if let Err(e) = self.db.unify(expected, enum_ty) {
                         if let Some(tok) = pat.name_token() {
@@ -1607,234 +1460,22 @@ impl Inferer {
     // --- type resolution ---------------------------------------------------
 
     /// Resolve a written type annotation to a [`Type`]. Returns `None` if the
-    /// annotation names an unknown type (already reported as N002 by resolution);
-    /// the caller then falls back to inference.
+    /// annotation names something with no type (already reported by resolution
+    /// as `N002`/`N003`); the caller then falls back to inference.
+    ///
+    /// The work lives in [`crate::decl::Annotations`], which the declaration
+    /// pass uses too — one answer to "what type is this written down as", for
+    /// the pass that builds the environment and the pass that reads it.
     fn resolve_type(&mut self, ty: &praxis_ast::TypeRef) -> Option<Type> {
-        // The wrapper accepts all three annotation node kinds (TY-08), so its
-        // node is already the thing to dispatch on.
-        self.resolve_type_node(ty.syntax())
+        crate::decl::Annotations::new(
+            self.file,
+            &mut self.db,
+            &self.type_env,
+            &self.type_refs,
+            &mut self.diagnostics,
+        )
+        .resolve(ty)
     }
-
-    /// Resolve one annotation node. Total over the three node kinds
-    /// [`SyntaxKind::is_type_node`] admits; anything else is `None`.
-    fn resolve_type_node(&mut self, node: &praxis_syntax::SyntaxNode) -> Option<Type> {
-        match node.kind() {
-            SyntaxKind::TYPE_REF => self.resolve_named_or_grouped(node),
-            SyntaxKind::TUPLE_TYPE => {
-                let els: Vec<Type> = self.resolve_type_children(node);
-                Some(self.tuple_or_degenerate(els))
-            }
-            SyntaxKind::FN_TYPE => {
-                // An FN_TYPE node has a param-type group (a TYPE_REF group or a
-                // TUPLE_TYPE) and a result type, separated by `->`.
-                let mut parts: Vec<Type> = self.resolve_type_children(node);
-                if parts.len() >= 2 {
-                    let result = parts.pop().expect(">=2 elements");
-                    let params = self.flatten_param_group(parts.pop().expect(">=2 elements"));
-                    Some(self.db.func(params, result))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    /// The three shapes that wear the `TYPE_REF` kind, told apart by what the
-    /// node holds rather than by where it was found:
-    ///
-    /// - `Int` — a bare name: an `Ident` token of this node itself.
-    /// - `Vec[Int]` — a collection: no `Ident` of its own; the *first* type-node
-    ///   child holds the constructor name and the rest are its arguments (the
-    ///   parser emits the name as its own `TYPE_REF`, then reopens at a
-    ///   checkpoint to wrap the brackets).
-    /// - `(T)` — a parenthesized group: exactly one type-node child and no name.
-    ///   `()` is the degenerate case and is [`Unit`](praxis_types::TypeData::Unit),
-    ///   which is what makes `() -> Int` a nullary function type rather than one
-    ///   taking an invented variable.
-    fn resolve_named_or_grouped(&mut self, node: &praxis_syntax::SyntaxNode) -> Option<Type> {
-        if let Some(name) = direct_ident(node) {
-            return self.scalar_from_name(&name);
-        }
-        let children: Vec<_> = node
-            .children()
-            .filter(|c| c.kind().is_type_node())
-            .collect();
-        match children.split_first() {
-            None => Some(self.db.unit()),
-            Some((only, [])) => self.resolve_type_node(only),
-            Some((ctor, args)) => {
-                let name = direct_ident(ctor)?;
-                let type_args: Vec<Type> = args
-                    .iter()
-                    .map(|c| {
-                        self.resolve_type_node(c)
-                            .unwrap_or_else(|| self.db.fresh_var())
-                    })
-                    .collect();
-                self.collection_from_name(&name, type_args, node.text_range())
-            }
-        }
-    }
-
-    /// Resolve every type-node child of `node`, in order. An unresolvable child
-    /// becomes a fresh variable so one bad element does not discard the shape.
-    fn resolve_type_children(&mut self, node: &praxis_syntax::SyntaxNode) -> Vec<Type> {
-        node.children()
-            .filter(|c| c.kind().is_type_node())
-            .collect::<Vec<_>>()
-            .iter()
-            .map(|c| {
-                self.resolve_type_node(c)
-                    .unwrap_or_else(|| self.db.fresh_var())
-            })
-            .collect()
-    }
-
-    /// Given a type that represents a parameter group, return the parameter
-    /// types. `(A, B)` (a tuple type) flattens to `[A, B]`, `()` to no
-    /// parameters at all, and anything else stays `[itself]`.
-    fn flatten_param_group(&mut self, ty: Type) -> Vec<Type> {
-        let rep = self.db.follow(ty);
-        match self.db.data(rep) {
-            praxis_types::TypeData::Tuple(els) => els.clone(),
-            praxis_types::TypeData::Unit => Vec::new(),
-            // A single param: the type itself, not a re-interned copy of its
-            // shape. `intern` is `pub(crate)` since F5, and this was the one
-            // site outside the arena that needed it — for no reason, since the
-            // representative handle was already in hand.
-            _ => vec![rep],
-        }
-    }
-
-    /// A tuple type from `els`, honouring the arity invariant (F5).
-    ///
-    /// The parser can hand us fewer than two elements, and `TupleElems` refuses
-    /// to represent either degenerate case as a tuple — correctly, because
-    /// neither *is* one: `()` is `Unit`, and a lone parenthesized element is
-    /// that element. Interning a one-element `Tuple` was how the old
-    /// `db.tuple(els)` produced a type that could never unify with anything.
-    fn tuple_or_degenerate(&mut self, mut els: Vec<Type>) -> Type {
-        match els.len() {
-            0 => self.db.unit(),
-            1 => els.remove(0),
-            _ => {
-                let elems = praxis_types::TupleElems::new(els).expect("two or more elements");
-                self.db.tuple(elems)
-            }
-        }
-    }
-
-    fn scalar_from_name(&mut self, name: &str) -> Option<Type> {
-        let scalar = match name {
-            "Int" => ScalarType::Int,
-            "Text" => ScalarType::Text,
-            "Bool" => ScalarType::Bool,
-            "Char" => ScalarType::Char,
-            "Float" => ScalarType::Float,
-            "Never" => ScalarType::Never,
-            "Unit" => return Some(self.db.unit()),
-            _ => {
-                // M7: user-declared struct types. If `name` is a registered
-                // struct, return its type.
-                return self.lookup_struct_type(name);
-            }
-        };
-        Some(self.db.scalar(scalar))
-    }
-
-    /// Resolve a collection ctor name (e.g. `"Deque"`) to its [`CollectionCtor`].
-    /// Used by builtin scheme seeding so each constructor name is callable as
-    /// `Name()`. Returns `None` for non-collection names (including `Seq`, which
-    /// is compiler-internal and never user-named).
-    fn collection_ctor_for(name: &str) -> Option<praxis_types::CollectionCtor> {
-        use praxis_types::CollectionCtor;
-        Some(match name {
-            "Vec" => CollectionCtor::Vec,
-            "Deque" => CollectionCtor::Deque,
-            "Map" => CollectionCtor::Map,
-            "Set" => CollectionCtor::Set,
-            "Counter" => CollectionCtor::Counter,
-            "MinHeap" => CollectionCtor::MinHeap,
-            "MaxHeap" => CollectionCtor::MaxHeap,
-            "BitSet" => CollectionCtor::BitSet,
-            "Grid" => CollectionCtor::Grid,
-            "Range" => CollectionCtor::Range,
-            _ => return None,
-        })
-    }
-
-    /// Resolve a collection type name + args to a [`Type`] (§4.4, §11.2). M8
-    /// opens the full collection set: every §6.1 ctor resolves to its
-    /// [`CollectionCtor`]. `Seq` is compiler-internal (M8 WS8, §6.3) and is never
-    /// user-named — it is rejected here so `Seq[T]` in source surfaces as an
-    /// unknown type. Construction (`Vec[T]()`) is wired per workstream as each
-    /// collection's runtime payload lands; the *type* resolves for all ctors so
-    /// annotations and signatures can name them ahead of construction support.
-    fn collection_from_name(
-        &mut self,
-        name: &str,
-        args: Vec<Type>,
-        range: TextRange,
-    ) -> Option<Type> {
-        // `Seq` is compiler-internal (§6.3, M8 WS8); never user-named.
-        if name == "Seq" {
-            return None;
-        }
-        // `Option[T]` (M9): an application of the prelude's *one* `Option` def
-        // (F12). It used to register a fresh def per annotation site, so the
-        // annotation and the `Some`/`None` value it described were two nominal
-        // types that only a relaxed unification arm put back together (TY-06).
-        if name == "Option" {
-            let want = 1;
-            let got = args.len();
-            if got > want {
-                self.diagnostics
-                    .push(crate::diagnostics::wrong_type_argument_count(
-                        self.file_span(range),
-                        "Option",
-                        got,
-                        want,
-                    ));
-                return None;
-            }
-            let elem = args
-                .into_iter()
-                .next()
-                .unwrap_or_else(|| self.db.fresh_var());
-            return Some(self.db.option_of(elem));
-        }
-        let ctor = Self::collection_ctor_for(name)?;
-        // The ctor declares how many type args it takes, and F5 is what finally
-        // consults it (TY-07). A wrong arity used to intern a type nothing could
-        // unify with, so the user saw a `Y001` about a type they never wrote.
-        let want = ctor.arity();
-        let got = args.len();
-        match CollectionArgs::new(ctor, args) {
-            Ok(args) => self.db.collection(ctor, args).ok(),
-            Err(_) => {
-                self.diagnostics
-                    .push(crate::diagnostics::wrong_type_argument_count(
-                        self.file_span(range),
-                        ctor.name(),
-                        got,
-                        want,
-                    ));
-                None
-            }
-        }
-    }
-}
-
-/// The `Ident` token belonging to `node` **itself**, not to a descendant. A
-/// type node names a type iff it has one: `Int` does, the group `(Int)` does
-/// not (its `Ident` sits inside a nested `TYPE_REF`), and neither does the
-/// bracket-wrapping `TYPE_REF` of `Vec[Int]`.
-fn direct_ident(node: &praxis_syntax::SyntaxNode) -> Option<String> {
-    node.children_with_tokens().find_map(|e| match e {
-        rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::Ident => Some(t.text().to_string()),
-        _ => None,
-    })
 }
 
 /// Whether an expression is a *syntactic value* for the HM value restriction
