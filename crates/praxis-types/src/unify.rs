@@ -11,6 +11,7 @@
 
 use crate::data::{TypeData, VarState};
 use crate::db::TypeDb;
+use crate::fold::{fold, visit_only_composites, FoldMemo, TypeFolder};
 use crate::type_id::{Type, VarId};
 
 /// Why two types could not be unified.
@@ -69,76 +70,24 @@ impl TypeDb {
     /// Recurse over `t`, lowering the level of any unbound var whose level is
     /// shallower than `min_level` down to `min_level`.
     fn lower_levels(&mut self, t: Type, min_level: u32) {
-        let t = self.prune(t);
-        let data = self.data(t).clone();
-        match data {
-            TypeData::Var(VarState::Unbound { level }) => {
-                if level < min_level {
-                    self.slots_set(t, TypeData::Var(VarState::Unbound { level: min_level }));
-                }
-            }
-            TypeData::Tuple(els) => {
-                for el in els {
-                    self.lower_levels(el, min_level);
-                }
-            }
-            TypeData::Func { params, result } => {
-                for p in params {
-                    self.lower_levels(p, min_level);
-                }
-                self.lower_levels(result, min_level);
-            }
-            TypeData::Collection { args, .. } => {
-                for a in args {
-                    self.lower_levels(a, min_level);
-                }
-            }
-            TypeData::Record { def } => {
-                let def = self.record_defs[def.0 as usize].clone();
-                for f in def.fields {
-                    self.lower_levels(f.ty, min_level);
-                }
-            }
-            TypeData::Enum { def } => {
-                let def = self.enum_defs[def.0 as usize].clone();
-                for v in def.variants {
-                    if let Some(payload) = v.payload {
-                        for p in payload {
-                            self.lower_levels(p, min_level);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
+        let mut folder = LevelLowerer {
+            db: self,
+            memo: FoldMemo::new(),
+            min_level,
+        };
+        fold(&mut folder, t);
     }
 
     /// `true` if `var` occurs (transitively, after pruning) inside `t`.
     fn occurs(&mut self, var: VarId, t: Type) -> bool {
-        let t = self.prune(t);
-        if t.0 == var.0 {
-            return true;
-        }
-        match self.data(t).clone() {
-            TypeData::Tuple(els) => els.into_iter().any(|el| self.occurs(var, el)),
-            TypeData::Func { params, result } => {
-                params.into_iter().any(|p| self.occurs(var, p)) || self.occurs(var, result)
-            }
-            TypeData::Collection { args, .. } => args.into_iter().any(|a| self.occurs(var, a)),
-            TypeData::Record { def } => {
-                let def = self.record_defs[def.0 as usize].clone();
-                def.fields.into_iter().any(|f| self.occurs(var, f.ty))
-            }
-            TypeData::Enum { def } => {
-                let def = self.enum_defs[def.0 as usize].clone();
-                def.variants.into_iter().any(|v| {
-                    v.payload
-                        .map(|ps| ps.into_iter().any(|p| self.occurs(var, p)))
-                        .unwrap_or(false)
-                })
-            }
-            _ => false,
-        }
+        let mut folder = OccursCheck {
+            db: self,
+            memo: FoldMemo::new(),
+            var,
+            found: false,
+        };
+        fold(&mut folder, t);
+        folder.found
     }
 
     fn unify_concrete(
@@ -337,4 +286,67 @@ impl TypeDb {
     fn slots_set(&mut self, t: Type, data: TypeData) {
         self.slots[t.0 as usize].data = data;
     }
+}
+
+/// Pottier's level-lowering rule as a folder (F9): any unbound variable inside
+/// the type being linked, at a level shallower than the variable it is linked
+/// to, is pulled down so a later outer binding cannot generalize it away.
+///
+/// Inspection only — it rewrites variable *states*, never the types that
+/// contain them, so it uses [`visit_only_composites`] rather than the rebuilding
+/// defaults.
+struct LevelLowerer<'a> {
+    db: &'a mut TypeDb,
+    memo: FoldMemo,
+    min_level: u32,
+}
+
+impl TypeFolder for LevelLowerer<'_> {
+    fn db(&mut self) -> &mut TypeDb {
+        self.db
+    }
+    fn memo(&mut self) -> &mut FoldMemo {
+        &mut self.memo
+    }
+    fn fold_var(&mut self, t: Type, _var: VarId, state: &VarState) -> Type {
+        if let VarState::Unbound { level } = *state {
+            if level < self.min_level {
+                let lowered = self.min_level;
+                self.db
+                    .slots_set(t, TypeData::Var(VarState::Unbound { level: lowered }));
+            }
+        }
+        t
+    }
+    visit_only_composites!();
+}
+
+/// The occurs check as a folder (F9): does `var` appear anywhere inside the
+/// type it is about to be linked to?
+///
+/// The fold visits every reachable type once rather than short-circuiting on
+/// the first hit, which is what the memo buys — the hand-written version had no
+/// memo and would recurse forever on a type that reaches itself through a
+/// record def.
+struct OccursCheck<'a> {
+    db: &'a mut TypeDb,
+    memo: FoldMemo,
+    var: VarId,
+    found: bool,
+}
+
+impl TypeFolder for OccursCheck<'_> {
+    fn db(&mut self) -> &mut TypeDb {
+        self.db
+    }
+    fn memo(&mut self) -> &mut FoldMemo {
+        &mut self.memo
+    }
+    fn fold_var(&mut self, t: Type, var: VarId, _state: &VarState) -> Type {
+        if var == self.var {
+            self.found = true;
+        }
+        t
+    }
+    visit_only_composites!();
 }

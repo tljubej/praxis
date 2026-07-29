@@ -10,8 +10,9 @@
 //! and partial inference: a var that will be constrained by a *later* binding
 //! never gets quantified, because it was created at the outer level.
 
-use crate::data::{TypeData, VarState};
+use crate::data::VarState;
 use crate::db::TypeDb;
+use crate::fold::{fold, visit_only_composites, FoldMemo, TypeFolder};
 use crate::type_id::{Type, VarId};
 
 /// A type scheme: `forall <quantified>. body`. A bare monomorphic type is a scheme
@@ -61,52 +62,13 @@ impl TypeDb {
     }
 
     fn generalize_walk(&mut self, t: Type, at_level: u32, out: &mut Vec<VarId>) {
-        let t = self.prune(t);
-        // Read the data into a local first so the immutable borrow ends before any
-        // mutation (generalize_var) below.
-        match self.data(t).clone() {
-            TypeData::Var(VarState::Unbound { level }) => {
-                if level > at_level {
-                    let var = VarId(t.0);
-                    self.generalize_var(var);
-                    out.push(var);
-                }
-            }
-            TypeData::Tuple(els) => {
-                for el in els {
-                    self.generalize_walk(el, at_level, out);
-                }
-            }
-            TypeData::Func { params, result } => {
-                for p in params {
-                    self.generalize_walk(p, at_level, out);
-                }
-                self.generalize_walk(result, at_level, out);
-            }
-            TypeData::Collection { args, .. } => {
-                for a in args {
-                    self.generalize_walk(a, at_level, out);
-                }
-            }
-            TypeData::Record { def } => {
-                let def = self.record_defs[def.0 as usize].clone();
-                for f in def.fields {
-                    self.generalize_walk(f.ty, at_level, out);
-                }
-            }
-            TypeData::Enum { def } => {
-                let def = self.enum_defs[def.0 as usize].clone();
-                for v in def.variants {
-                    if let Some(payload) = v.payload {
-                        for p in payload {
-                            self.generalize_walk(p, at_level, out);
-                        }
-                    }
-                }
-            }
-            // Scalars, Unit, Linked, and already-Generalized vars are left alone.
-            _ => {}
-        }
+        let mut folder = Generalizer {
+            db: self,
+            memo: FoldMemo::new(),
+            at_level,
+            quantified: out,
+        };
+        fold(&mut folder, t);
     }
 
     /// Instantiate `scheme` at the current level: copy its body, replacing each
@@ -126,70 +88,85 @@ impl TypeDb {
     }
 
     fn instantiate_walk(&mut self, t: Type, quantified: &[VarId], mapping: &[Type]) -> Type {
-        let t = self.prune(t);
-        match self.data(t).clone() {
-            TypeData::Var(VarState::Generalized) => {
-                let idx = quantified
-                    .iter()
-                    .position(|q| q.0 == t.0)
-                    .expect("a Generalized var in a scheme body must be listed in `quantified`");
-                mapping[idx]
+        let mut folder = Instantiator {
+            db: self,
+            memo: FoldMemo::new(),
+            quantified,
+            mapping,
+        };
+        fold(&mut folder, t)
+    }
+}
+
+/// Generalization as a folder (F9): every unbound variable deeper than the
+/// current level becomes a binder of the scheme being built.
+///
+/// Inspection only — it rewrites variable *states* and collects binders, and
+/// rebuilds no type, so the scheme body stays the very type that was
+/// generalized.
+struct Generalizer<'a, 'q> {
+    db: &'a mut TypeDb,
+    memo: FoldMemo,
+    at_level: u32,
+    quantified: &'q mut Vec<VarId>,
+}
+
+impl TypeFolder for Generalizer<'_, '_> {
+    fn db(&mut self) -> &mut TypeDb {
+        self.db
+    }
+    fn memo(&mut self) -> &mut FoldMemo {
+        &mut self.memo
+    }
+    fn fold_var(&mut self, t: Type, var: VarId, state: &VarState) -> Type {
+        if let VarState::Unbound { level } = *state {
+            if level > self.at_level {
+                self.db.generalize_var(var);
+                self.quantified.push(var);
             }
-            TypeData::Tuple(els) => {
-                let new: Vec<_> = els
-                    .into_iter()
-                    .map(|el| self.instantiate_walk(el, quantified, mapping))
-                    .collect();
-                self.intern(TypeData::Tuple(new))
-            }
-            TypeData::Func { params, result } => {
-                let params: Vec<_> = params
-                    .into_iter()
-                    .map(|p| self.instantiate_walk(p, quantified, mapping))
-                    .collect();
-                let result = self.instantiate_walk(result, quantified, mapping);
-                self.intern(TypeData::Func { params, result })
-            }
-            TypeData::Collection { ctor, args } => {
-                let args: Vec<_> = args
-                    .into_iter()
-                    .map(|a| self.instantiate_walk(a, quantified, mapping))
-                    .collect();
-                self.intern(TypeData::Collection { ctor, args })
-            }
-            TypeData::Record { def } => {
-                // A record def is shared; instantiation clones it with fresh
-                // field types so the polymorphic record gets its own specialized
-                // shape per use site.
-                let rdef = self.record_defs[def.0 as usize].clone();
-                let fields: Vec<_> = rdef
-                    .fields
-                    .into_iter()
-                    .map(|f| (f.name, self.instantiate_walk(f.ty, quantified, mapping)))
-                    .collect();
-                match rdef.name {
-                    Some(name) => self.register_record(name, fields),
-                    None => self.anon_record(fields),
-                }
-            }
-            TypeData::Enum { def } => {
-                let edef = self.enum_defs[def.0 as usize].clone();
-                let variants: Vec<_> = edef
-                    .variants
-                    .into_iter()
-                    .map(|v| {
-                        let payload = v.payload.map(|ps| {
-                            ps.into_iter()
-                                .map(|p| self.instantiate_walk(p, quantified, mapping))
-                                .collect::<Vec<_>>()
-                        });
-                        (v.name, payload)
-                    })
-                    .collect();
-                self.register_enum(edef.name, variants)
-            }
-            // Anything else (scalar, unit, unbound/linked var) is structural identity.
-            other => self.intern(other),
+        }
+        t
+    }
+    visit_only_composites!();
+}
+
+/// Instantiation as a folder (F9): each quantified variable is replaced by its
+/// fresh counterpart, and everything else is rebuilt only where that
+/// substitution reached.
+///
+/// TY-02 is the identity preservation the fold gives for free: a body with no
+/// applicable binder now comes back as the *same* handle instead of a fresh
+/// copy of the whole tree, so instantiating a monomorphic-in-practice scheme
+/// stops growing the arena — and stops minting a specialized record or enum def
+/// per use site when no field type needed substituting.
+struct Instantiator<'a, 'q> {
+    db: &'a mut TypeDb,
+    memo: FoldMemo,
+    quantified: &'q [VarId],
+    mapping: &'q [Type],
+}
+
+impl TypeFolder for Instantiator<'_, '_> {
+    fn db(&mut self) -> &mut TypeDb {
+        self.db
+    }
+    fn memo(&mut self) -> &mut FoldMemo {
+        &mut self.memo
+    }
+    fn fold_var(&mut self, t: Type, var: VarId, state: &VarState) -> Type {
+        // Only a *generalized* var is a binder. An unbound one belongs to the
+        // enclosing scope and must survive instantiation unchanged (TY-02's
+        // "instantiation preserves non-quantified variable identity").
+        if !matches!(state, VarState::Generalized) {
+            return t;
+        }
+        match self.quantified.iter().position(|q| *q == var) {
+            Some(idx) => self.mapping[idx],
+            // A generalized var the scheme does not bind. The hand-written walk
+            // panicked here; leaving it alone is the conservative answer, and
+            // TY-03's scheme-owned binders are what make the case
+            // unrepresentable rather than merely survivable.
+            None => t,
         }
     }
 }

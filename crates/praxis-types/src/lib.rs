@@ -14,6 +14,7 @@
 
 pub mod data;
 pub mod db;
+pub mod fold;
 pub mod generalize;
 pub mod pretty;
 pub mod type_id;
@@ -23,6 +24,7 @@ pub use data::{
     EnumDef, EnumDefId, EnumVariantDef, RecordDef, RecordDefId, RecordFieldDef, TypeData, VarState,
 };
 pub use db::{Slot, TypeDb};
+pub use fold::{fold, FoldMemo, TypeFolder};
 pub use generalize::Scheme;
 pub use type_id::{Type, VarId};
 // Re-export the shared vocabulary so consumers reach it through `praxis_types`

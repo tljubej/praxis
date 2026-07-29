@@ -778,7 +778,6 @@ fn linking_an_outer_var_to_an_inner_type_prevents_inner_generalization() {
 }
 
 #[test]
-#[ignore = "known bug: instantiation clones free variables instead of preserving identity"]
 fn instantiation_preserves_non_quantified_variable_identity() {
     // A scheme may contain both a quantified variable and a free (environment)
     // variable. Instantiation replaces only the quantified variable. Repeated
@@ -808,7 +807,6 @@ fn instantiation_preserves_non_quantified_variable_identity() {
 }
 
 #[test]
-#[ignore = "known bug: deep_resolve does not recurse through record definitions"]
 fn deep_resolve_rewrites_record_field_links() {
     // `deep_resolve` promises a type whose composite leaves are concrete, not
     // merely linked. Record fields live in a side table and must participate in

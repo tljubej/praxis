@@ -210,24 +210,11 @@ impl TypeDb {
     /// linked to `Int`) into `Vec[Int]` so `p EXPR` can type-check against it.
     #[must_use]
     pub fn deep_resolve(&mut self, t: Type) -> Type {
-        let t = self.follow(t);
-        match &self.slots[t.0 as usize].data.clone() {
-            TypeData::Collection { ctor, args } => {
-                let args: Vec<Type> = args.iter().map(|a| self.deep_resolve(*a)).collect();
-                self.intern(TypeData::Collection { ctor: *ctor, args })
-            }
-            TypeData::Tuple(els) => {
-                let els: Vec<Type> = els.iter().map(|a| self.deep_resolve(*a)).collect();
-                self.intern(TypeData::Tuple(els))
-            }
-            TypeData::Func { params, result } => {
-                let params: Vec<Type> = params.iter().map(|a| self.deep_resolve(*a)).collect();
-                let result = self.deep_resolve(*result);
-                self.intern(TypeData::Func { params, result })
-            }
-            // Leaves (Scalar/Unit/Record/Enum/Var) need no recursion.
-            _ => t,
-        }
+        let mut folder = DeepResolver {
+            db: self,
+            memo: crate::fold::FoldMemo::new(),
+        };
+        crate::fold::fold(&mut folder, t)
     }
 
     /// Borrow the data of `t`'s representative **without** pruning links. Callers
@@ -359,5 +346,27 @@ impl TypeDb {
     #[must_use]
     pub fn enum_type(&mut self, def: EnumDefId) -> Type {
         self.intern(TypeData::Enum { def })
+    }
+}
+
+/// Deep resolution as a folder (F9): the identity fold, whose only effect is
+/// that [`fold`](crate::fold::fold) prunes every type it visits, so a composite
+/// whose child was linked comes back rebuilt around the child's representative.
+///
+/// The hand-written version ended in `_ => t`, which skipped `Record` and
+/// `Enum` — the crash debugger's static-type capture (ADR-035) therefore
+/// reported a record whose fields were still variables. It also had no cycle
+/// guard; the fold's memo is what supplies one.
+struct DeepResolver<'a> {
+    db: &'a mut TypeDb,
+    memo: crate::fold::FoldMemo,
+}
+
+impl crate::fold::TypeFolder for DeepResolver<'_> {
+    fn db(&mut self) -> &mut TypeDb {
+        self.db
+    }
+    fn memo(&mut self) -> &mut crate::fold::FoldMemo {
+        &mut self.memo
     }
 }
