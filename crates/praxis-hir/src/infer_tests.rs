@@ -1027,7 +1027,6 @@ fn a_compound_assignment_needs_a_numeric_target() {
 }
 
 #[test]
-#[ignore = "known bug: if-without-else is inferred as its then-branch type"]
 fn if_without_else_cannot_produce_the_then_value_type() {
     // MIR materializes Unit on the false path, so the expression cannot have
     // type Int just because its then branch does.
@@ -1036,6 +1035,39 @@ fn if_without_else_cannot_produce_the_then_value_type() {
         has_type_error(src),
         "the absent else path produces Unit, not Int"
     );
+}
+
+/// The half TY-17 must not break, and the reason it had to wait for TY-19: an
+/// `if` with no `else` whose then branch *diverges* is still legal, because
+/// there is no value to have nowhere to come from.
+#[test]
+fn an_else_less_if_is_unit_unless_its_branch_diverges() {
+    // The ordinary case: no `else`, so the value is Unit.
+    assert_eq!(
+        scheme_of("fn f(c: Bool) -> Unit { if c { out(1) } }", "f").as_deref(),
+        Some("(Bool) -> Unit")
+    );
+    // A divergent branch is absorbed, so these keep type-checking.
+    for src in [
+        "fn f(c: Bool) -> Int { if c { panic(\"x\") }\n  1 }",
+        "enum E { A }\nfn f(c: Bool, e: E) -> Int { if c { match e { A => panic(\"x\") } }\n  1 }",
+    ] {
+        assert!(
+            !has_type_error(src),
+            "`{src}` reported {:?}",
+            analyze(src)
+                .diagnostics
+                .iter()
+                .map(|d| format!("{} {}", d.code(), d.message()))
+                .collect::<Vec<_>>()
+        );
+    }
+    // …and a real value with no else is still the mismatch the exit test names,
+    // whatever the value's type.
+    assert!(has_type_error(
+        "fn f(c: Bool) -> Unit { if c { \"text\" } }"
+    ));
+    assert!(has_type_error("fn f(c: Bool) -> Unit { if c { (1, 2) } }"));
 }
 
 #[test]

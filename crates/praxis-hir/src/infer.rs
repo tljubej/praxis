@@ -1239,7 +1239,26 @@ impl Inferer {
                     t
                 }
             },
-            (Some(t), None) => t,
+            // No `else`: MIR materializes `Unit` on the false path, so the
+            // expression's value is the join of the then branch and `Unit`
+            // (TY-17). `if c { 1 }` is therefore a mismatch — the value the
+            // then branch produces has nowhere to come from when the condition
+            // is false — while `if c { return 1 }` and `if c { panic("x") }`
+            // stay legal, because a divergent branch is absorbed.
+            (Some(t), None) => {
+                let unit = self.db.unit();
+                match self.db.join(t, unit) {
+                    Ok(joined) => joined,
+                    Err(err) => {
+                        let at = i
+                            .then_branch()
+                            .map(|b| b.syntax().text_range())
+                            .unwrap_or_else(|| i.syntax().text_range());
+                        self.diag_unify_hinted(self.file_span(at), err, "an `if` with no `else`");
+                        unit
+                    }
+                }
+            }
             (None, Some(e)) => e,
             (None, None) => self.db.fresh_var(),
         }
