@@ -23,7 +23,8 @@ Update this file at the end of every stage.
 | S10 — Semantic comparison, nominal schema identity | **done** | `29ff4f6`, `83de924`, `510ffc3`, `ff35f68` |
 | S11 — TypeDb core: levels, schemes, nominal identity | **done** | `8aa9069`, `aa9deea`, `d69881e`, `5efd0e2` |
 | S12 — Parser grammar: wildcard, separators, struct-literal suppression | **done** | `4504a1d`, `0c4b2ce`, `e49a803`, `13db789` |
-| S13 … S21 | not started | |
+| S13 — Annotations honored, declaration passes, mutability and scope | **F2, TY-23, TY-24 done; 8 findings left** | `6037662`, `9129f76` |
+| S14 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
@@ -31,15 +32,18 @@ TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1166 passed, 0 failed, 86 ignored**. `just ci` is green.
+Now: **1173 passed, 0 failed, 84 ignored**. `just ci` is green.
 
 **S11 is closed.** All five exit-criterion tests pass and all eight findings the
 stage owns are fixed and gated — TY-01…TY-07 and TY-22.
 
 **S12 is closed.** All four findings are fixed — FE-02, FE-04, FE-06, DBG-03 —
 and all six exit-criterion tests pass. D7 and D8 are answered *and implemented*
-(ADR-049); FE-06's rule is ADR-050. The next stage is **S13**, and **D13 is the
-one thing that binds before it** (§5).
+(ADR-049); FE-06's rule is ADR-050.
+
+**S13 is open.** D13 is answered (ADR-051), **F2** — the `DiagCode` registry
+that enforces the allocation — is in, and **TY-23 and TY-24** are fixed. Eight
+findings are left; §4 says where to pick it up and in what order.
 
 Sixty of the audit's ignored regressions are un-ignored and passing.
 The five added by S12's second half:
@@ -82,6 +86,28 @@ DBG-03's one new gate:
 | Test | File | Pins |
 |---|---|---|
 | `two_unusable_names_do_not_collide_into_one_parameter` | `evaluate.rs` | the `_x` collision, through `collect_bindings` and `synthesize` |
+
+F2's two new gates:
+
+| Test | File | Pins |
+|---|---|---|
+| `every_code_is_distinct` | `praxis-source/src/diagnostic.rs` | the question the old scheme could not ask |
+| `all_lists_every_variant` | `praxis-source/src/diagnostic.rs` | a variant missing from `ALL` is one the first test never checks |
+
+The two un-ignored by S13's first half:
+
+| Test | File | Finding |
+|---|---|---|
+| `analyzing_nested_function_never_panics` | `infer_tests.rs` | TY-23 |
+| `duplicate_function_declarations_are_rejected` | `infer_tests.rs` | TY-24 |
+
+TY-23/TY-24's three new gates:
+
+| Test | File | Pins |
+|---|---|---|
+| `a_nested_function_is_reported_as_one` | `infer_tests.rs` | the exit test only asks that `analyze` returns; `N005` is the report |
+| `a_duplicate_function_is_reported_once_and_the_first_one_survives` | `infer_tests.rs` | one `N004`, no cascade of `N001`s |
+| `shadowing_an_outer_name_is_not_a_redeclaration` | `infer_tests.rs` | why the check is `is_bound_here` and not `lookup` |
 
 `sanitize_rejects_digit_leading_and_punct` is plan §8.2's second entry and had to
 be **rewritten**: it asserted the `_x` rewrite itself. It is now
@@ -520,7 +546,57 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S12's F8/FE-04, FE-06 and DBG-03)
+### From this session (S13's TY-23 and TY-24)
+
+**A nested `fn` is `N005` and a redeclared one is `N004`.** Both used to be
+accepted in their own way — the first by panicking in `infer_fn`, the second by
+emitting two functions under one JIT symbol. `resolve_fn` reports the nesting
+(it asks `Resolver::is_top_level`, i.e. the *tree*, so TY-24's undeclared second
+`fn` is not mistaken for a nested one) and `register_top_level` reports the
+duplicate.
+
+**`ScopeTree::is_bound_here(scope, name)` is new.** `lookup` walks the parent
+chain, so it cannot tell a redeclaration from a shadow — a `let out = 1` finds
+the prelude's `out`. Use `is_bound_here` for any "is this already declared
+*here*?" question.
+
+**`infer_fn` no longer assumes a `fn` was declared.** A name with no `decls`
+entry yields `fn_symbol = None` and the body is still inferred, so a file with a
+nested or duplicated function keeps reporting everything else. **If you add a
+declaration form, resolution must declare it or inference will silently skip
+its symbol** — the `expect` that used to catch that is gone on purpose.
+
+**The first of two duplicate `fn`s survives.** `register_top_level` keeps the
+existing binding and skips the second, so calls still resolve. A stage that
+changes this to "keep the last" will turn one `N004` into a cascade.
+
+### From this session (S13's F2 — the diagnostic-code registry)
+
+**`DiagnosticCode::new` is `pub(crate)` to `praxis-source`.** You cannot write a
+code at a call site any more. `praxis_source::DiagCode` is the closed set;
+`DiagCode::X.code()` is the only route to a rendered pair, and adding a
+diagnostic means adding a variant **and amending ADR-051**.
+
+**`Diagnostic::new`/`build` take a `DiagCode`.** `Diagnostic` stores it and
+renders on demand, so **`d.code()` is unchanged** for every reader (it still
+answers a `DiagnosticCode`, with `.category()` and `.number()`). `d.kind()` is
+the new accessor and is what to compare against — `d.kind() ==
+DiagCode::ExpectedStatementSeparator` beats `d.code().number() == 2`.
+
+**`ValidationError.code` is a `DiagCode`, not a `&'static str`.**
+`praxis-input-parser` tagged its errors `"I024"` and `praxis-hir` parsed the
+number back out with `unwrap_or(0)`, so a typo in the string was a silent
+`I000`. `code_number` is deleted.
+
+**`Inferer::diag(at, number, msg)` is `diag(at, code, msg)`** in
+`praxis-hir/src/lower.rs`. Its two callers were the only places `Y110` and
+`Y112` existed.
+
+**`praxis-hir/src/diagnostics.rs` is still where the wording lives**, and its
+constructors are unchanged apart from the code argument. A new diagnostic goes
+there, not at the site.
+
+### From S12's F8/FE-04, FE-06 and DBG-03
 
 **A `Token` has three fields, and `Token::new` takes three arguments.**
 `preceded_by_newline` is true iff the trivia run immediately before it contained
@@ -1293,33 +1369,51 @@ was F12's static half; see ADR-048 and §3.
 exit-criterion tests pass, and the stage's two ADRs (049, 050) are written. It
 spent no ABI bump: nothing it touched is `#[repr(C)]`.
 
-**The next stage is S13, and nothing blocks it.** D13 is answered — **ADR-051**
-allocates every code the repair still needs, and is the registry until F2 makes
-it a type. Start S13 by reading it: the codes S13 itself spends are `N003`
-(TY-11), `N004` (TY-24), `N005` (TY-23), `Y009` (TY-14) and `Y010` (TY-15), and
-TY-12 needs none — it is `Y007`, which S11 already extended to nominal defs.
+**S13 is open; F2, TY-23 and TY-24 have landed.** Eight findings are left. The
+plan's internal order, with what each one needs:
 
-**F2 is S13's first foundation commit.** ADR-051 fixes the numbers; F2 is what
-stops the *next* stage allocating locally again — `praxis_source::DiagCode`, an
-exhaustive enum whose `code()` is the one place a `(category, number)` pair is
-written, `DiagnosticCode::new` demoted to `pub(crate)`, and a `DiagCode::ALL`
-injectivity test. Plan §3.1's F2 block has the sketch; its variant *order* can no
-longer drive the numbers (the existing `Y110`/`Y112`/`Y120`/`Y121` are fixed
-points), so take the numbers from ADR-051 and the shape from the sketch. The
-conversion sites are: `praxis-hir/src/diagnostics.rs` (15), `lower.rs`'s
-`diag(at, number, msg)` (which is how `Y110`/`Y112` are spelled today),
-`lib.rs`'s `N000`, `parser_lower.rs`'s `code_number(&str)` — a *string* code
-parsed back into a number, which is the shape F2 exists to delete — plus
-`praxis-input-parser/src/validate.rs`'s `code: &'static str` field, and
-`praxis-parser`'s two consts.
+1. **TY-10 (M) then TY-09 (S).** The sealed `TypeEnv` comes first — it is what
+   makes the collapsed annotation lookup total, and TY-09 depends on that. Read
+   plan §5's S13 paragraph.
+2. **TY-08 (L)** — annotations must reach the initializer. This is the big one
+   and it unblocks
+   `empty_vec_float_has_the_float_element_descriptor_before_any_push`
+   (`abi.rs`), whose `#[ignore]` reason already names TY-08. Exit tests:
+   `tuple_parameter_annotation_is_enforced`,
+   `function_parameter_annotation_is_enforced`,
+   `tuple_return_annotation_is_enforced`, `user_enum_annotation_is_enforced`,
+   `function_typed_record_field_annotation_is_enforced`,
+   `function_typed_enum_payload_annotation_is_enforced`,
+   `forward_struct_annotation_is_enforced` (all `infer_tests.rs`).
+3. **TY-11 (S)** — a value's name in type position is `N003`, not a silently
+   accepted annotation. Exit test: `value_binding_name_is_not_accepted_as_a_type`.
+   `Resolver::check_type_annotation` is where a type annotation is validated
+   today, and it resolves through the scope tree, so the symbol's `SymbolKind`
+   is right there.
+4. **TY-12 (S)** — exit test `malformed_collection_type_arity_is_rejected`. It
+   may already pass: S11's `Y007` covers a wrong type-argument count on both
+   collection ctors and nominal defs. **Check before writing anything.**
+5. **TY-13 (L) before TY-14 (S) and TY-15 (S).** Both need `infer_assign` to
+   resolve the correct symbol through `refs` rather than the inferer's own
+   disconnected scope tree. TY-14 is `Y009`, TY-15 is `Y010`. Exit tests:
+   `local_var_reassignment_preserves_its_type`, `reassignment_to_let_is_rejected`,
+   `compound_assignment_requires_a_numeric_target`.
 
-**S13's own shape** (plan §5): 10 findings, weight 26 — annotations reachable
-(TY-08, TY-09, TY-10), a sealed type environment (F19's `DeclGroup` driver),
-mutability and scope discipline. Two things already waiting for it:
-`empty_vec_float_has_the_float_element_descriptor_before_any_push` is blocked on
-TY-08 and says so in its `#[ignore]` reason (see §1), and
-`infer_declaration_group` already has the two-phase shape and the group level
-that F19 needs for dependency-ordered binding groups.
+**Schedule ONE corpus triage pass at the end of the stage**, not per finding —
+the plan is explicit that S13 is the audit's biggest source of newly-*rejected*
+valid-looking programs. The three places to re-check are
+`crates/praxis-cli/tests/fixtures`, `crates/praxis-codegen-cranelift/tests/jit.rs`
+and `tests/aoc-corpus`.
+
+**F19's `DeclGroup` driver is S13's other foundation and has not landed.**
+`infer_declaration_group` already has the two-phase shape and the group level;
+what it lacks is *dependency-ordered* binding groups (SCCs over the call graph),
+which is what mutual recursion needs — see "What S11 deliberately left" below.
+
+**Codes for the stage are already allocated (ADR-051)**, and `DiagCode` is now
+the only way to spell one: `N003` (TY-11), `Y009` (TY-14), `Y010` (TY-15).
+`N004`/`N005` are spent. Add the wording to `praxis-hir/src/diagnostics.rs`,
+never at the site.
 
 **What S12 deliberately left:**
 
@@ -1571,6 +1665,30 @@ one. Settle both together.
 
 Things the plan states that are no longer or were not quite true.
 
+- **The plan's list of taken diagnostic codes was incomplete.** D13's text and
+  §5 of this file both said "`N001`-`N002`, `Y001`-`Y008`, `Y120`-`Y121`, and
+  `I001`/`I010`". The tree also had `N000`, `Y110`, `Y112`, `I000`, `I020`-`I027`
+  and `I030`, plus the whole `T0xx` and `P0xx` categories. ADR-051 opens with the
+  corrected inventory; F2's `every_code_is_distinct` is what keeps it honest from
+  here.
+- **F2's `DiagCode` variant *order* cannot drive the numbers.** The plan's sketch
+  lists the variants in a natural reading order and implies the numbers follow;
+  `Y110`/`Y112`/`Y120`/`Y121` shipped years earlier and are fixed points, so the
+  numbers come from ADR-051 and only the shape comes from the sketch.
+- **F2 is bigger than "S · praxis-source"** by one crate the sketch does not
+  name: `praxis-input-parser`'s `ValidationError.code` was a `&'static str` that
+  `praxis-hir` parsed back into a number with `unwrap_or(0)`. A typo in it was a
+  silent `I000`, and the plan describes F2 as touching `praxis-hir`,
+  `praxis-input-parser`, `praxis-parser` — but as *consumers*, not as a crate
+  with its own parallel code representation to delete.
+- **TY-23's fix is in resolution, not inference.** The audit says "a nested
+  function item reaches `expect` and panics", which reads as an inference bug.
+  Inference panicked because *resolution* never declared the function and never
+  said why. Removing the `expect` alone would have made a nested `fn` silently
+  vanish; the report has to come from where the nesting is visible.
+- **TY-24 cannot be checked with `ScopeTree::lookup`.** A redeclaration and a
+  shadow both find a symbol — `let out = 1` finds the prelude's `out`. The check
+  needs "bound in *this* scope", which did not exist; `is_bound_here` is new.
 - **F8's "HIGHEST TEST CHURN of any foundation" did not happen — at all.** The
   plan budgets "~40 insta snapshots in `parse.rs`, plus every
   `crates/praxis-cli/tests/fixtures/run/*.px` with same-line statements", and
