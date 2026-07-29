@@ -221,3 +221,37 @@ pub(crate) fn unreachable_arm(at: FileSpan) -> Diagnostic {
         at,
     )
 }
+
+/// `Y009` — assignment to a binding that is not a `var` (TY-14).
+///
+/// Assignment never asked what kind of binding it was writing to, so `let x = 1;
+/// x = 2` type-checked and lowering emitted the store. Naming the kind is what
+/// makes the fix obvious: the answer is almost always to write `var`.
+pub(crate) fn assign_to_immutable(at: FileSpan, name: &str, kind: &str) -> Diagnostic {
+    Diagnostic::build(
+        Severity::Error,
+        DiagCode::AssignToImmutable,
+        format!("cannot assign to `{name}`, which is {kind}"),
+        at,
+    )
+    .help(
+        at,
+        format!("declare it with `var {name}` to allow assignment"),
+    )
+    .finish()
+}
+
+/// `Y010` — a compound assignment whose target is not numeric (TY-15).
+///
+/// `x += e` is arithmetic, and arithmetic is defined on `Int` and `Float`
+/// (§4.12). The check was that the two operand types *matched*, which
+/// `var flag = true; flag += false` satisfies. Wording is concrete and never
+/// names the capability (§5.4).
+pub(crate) fn compound_assign_non_numeric(at: FileSpan, ty: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::CompoundAssignNonNumeric,
+        format!("values of type `{ty}` do not support this operation"),
+        at,
+    )
+}

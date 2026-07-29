@@ -33,13 +33,16 @@ use crate::diagnostics::{
 };
 use crate::name_table::NameTable;
 use crate::resolve::{NameResolution, ResolvedRef};
-use crate::scope::{ScopeId, ScopeTree};
+use crate::scope::ScopeTree;
 use crate::symbol::{SymbolId, SymbolKind};
 
 /// The output of inference.
 pub struct Inference {
     pub db: TypeDb,
     pub names: NameTable,
+    /// The resolver's scope tree, carried through untouched. Inference does not
+    /// read it: every binding question it has is answered by the range-keyed
+    /// `refs`/`decls`/`type_refs` maps, which is the whole of TY-13.
     pub scopes: ScopeTree,
     pub refs: HashMap<TextRange, ResolvedRef>,
     pub ref_types: HashMap<TextRange, Type>,
@@ -73,7 +76,6 @@ pub(crate) fn infer_with_tree(
         file,
         db: TypeDb::new(),
         names,
-        scopes,
         refs,
         decls,
         type_refs,
@@ -85,8 +87,7 @@ pub(crate) fn infer_with_tree(
         decl_site: Level::OUTERMOST,
     };
     inferer.seed_builtin_schemes();
-    let root_scope = inferer.scopes.root();
-    inferer.infer_declaration_group(root_scope, root);
+    inferer.infer_declaration_group(root);
     // Merge name-resolution diagnostics with type diagnostics, sorted by span.
     diagnostics.append(&mut inferer.diagnostics);
     diagnostics.sort_by_key(|d| {
@@ -96,7 +97,7 @@ pub(crate) fn infer_with_tree(
     Inference {
         db: inferer.db,
         names: inferer.names,
-        scopes: inferer.scopes,
+        scopes,
         refs: inferer.refs,
         ref_types: inferer.ref_types,
         decls: inferer.decls,
@@ -105,11 +106,19 @@ pub(crate) fn infer_with_tree(
     }
 }
 
+/// The inference state.
+///
+/// There is **no scope tree here**. Inference used to own one — the resolver's,
+/// moved in — and then push empty child scopes onto it that mirrored nothing:
+/// no binding was ever added, so a lookup through them walked straight out to
+/// the root. `infer_assign` was the only caller, and it therefore either found
+/// nothing (a local, so the assignment went unchecked) or a same-named
+/// top-level binding (whose type it constrained instead). Every binding
+/// question is answered by the range-keyed maps resolution produced (TY-13).
 struct Inferer {
     file: FileId,
     db: TypeDb,
     names: NameTable,
-    scopes: ScopeTree,
     refs: HashMap<TextRange, ResolvedRef>,
     /// Declaration sites → SymbolId (resolution's map). Used to attach schemes
     /// to the exact symbol, surviving shadowing.
@@ -333,18 +342,18 @@ impl Inferer {
     /// Infer one statement. `struct` and `enum` are deliberately absent: their
     /// types were registered by the declaration pass, before any expression was
     /// inferred, which is the whole of TY-10.
-    fn infer_top_stmt(&mut self, scope: ScopeId, node: &praxis_syntax::SyntaxNode) {
+    fn infer_top_stmt(&mut self, node: &praxis_syntax::SyntaxNode) {
         if let Some(let_) = LetStmt::cast(node.clone()) {
-            self.infer_let(scope, &let_);
+            self.infer_let(&let_);
         } else if let Some(var_) = VarStmt::cast(node.clone()) {
-            self.infer_var(scope, &var_);
+            self.infer_var(&var_);
         } else if let Some(fn_) = FnItem::cast(node.clone()) {
-            self.infer_fn(scope, &fn_);
+            self.infer_fn(&fn_);
         } else if let Some(assign) = AssignStmt::cast(node.clone()) {
-            self.infer_assign(scope, &assign);
+            self.infer_assign(&assign);
         } else if let Some(expr) = ExprStmt::cast(node.clone()) {
             if let Some(e) = expr.expr() {
-                self.infer_expr(scope, &e);
+                self.infer_expr(&e);
             }
         }
     }
@@ -383,13 +392,13 @@ impl Inferer {
         Some((enum_ty, idx, payload))
     }
 
-    fn infer_let(&mut self, scope: ScopeId, stmt: &LetStmt) {
+    fn infer_let(&mut self, stmt: &LetStmt) {
         // Infer the RHS at an inner level so its vars can be generalized. Manage
         // the level explicitly (not via db.scoped) because the inference borrows
         // `self` mutably alongside `self.db`.
         let prev = self.db.enter_level();
         let rhs = stmt.init();
-        let rhs_ty = rhs.as_ref().map(|e| self.infer_expr(scope, e));
+        let rhs_ty = rhs.as_ref().map(|e| self.infer_expr(e));
         let annot = stmt.ty().and_then(|t| self.resolve_type(&t));
         // Unify annotation with the inferred RHS, if both are present. Point the
         // mismatch at the RHS initializer (the value with the wrong type),
@@ -422,10 +431,10 @@ impl Inferer {
         self.attach_scheme(stmt.name(), scheme);
     }
 
-    fn infer_var(&mut self, scope: ScopeId, stmt: &VarStmt) {
+    fn infer_var(&mut self, stmt: &VarStmt) {
         // `var` RHS is inferred but NOT generalized (§5.3).
         let prev = self.db.enter_level();
-        let rhs_ty = stmt.init().map(|e| self.infer_expr(scope, &e));
+        let rhs_ty = stmt.init().map(|e| self.infer_expr(&e));
         let annot = stmt.ty().and_then(|t| self.resolve_type(&t));
         if let (Some(a), Some(r)) = (annot, rhs_ty) {
             // Point at the RHS initializer, not the whole `var` statement.
@@ -463,7 +472,7 @@ impl Inferer {
     /// so a placeholder at the *outer* level would clamp every parameter and
     /// result out to level zero and no signature could ever generalize. That
     /// coupling is why the two are one change.
-    fn infer_declaration_group(&mut self, scope: ScopeId, root: &SourceFile) {
+    fn infer_declaration_group(&mut self, root: &SourceFile) {
         self.decl_site = self.db.level();
         let group = self.db.enter_level();
         self.type_env = crate::decl::declare(
@@ -476,12 +485,12 @@ impl Inferer {
             &mut self.diagnostics,
         );
         for stmt in root.stmts() {
-            self.infer_top_stmt(scope, &stmt);
+            self.infer_top_stmt(&stmt);
         }
         self.db.exit_level(group);
     }
 
-    fn infer_fn(&mut self, scope: ScopeId, item: &FnItem) {
+    fn infer_fn(&mut self, item: &FnItem) {
         // The fn name is bound to a monomorphic placeholder var, so recursive
         // *and* forward uses unify against one variable. The declaration pass
         // minted it for a top-level fn.
@@ -500,15 +509,14 @@ impl Inferer {
             .and_then(|id| self.type_env.signature(id))
             .unwrap_or_else(|| self.db.fresh_var());
 
-        // Body scope at an inner level: params get fresh vars, body is inferred.
-        let body_scope = self.scopes.push_child(scope);
+        // An inner level: params get fresh vars, body is inferred.
         let prev = self.db.enter_level();
 
         // Bind each param's symbol to its type (annotated, or a fresh var).
         let mut param_types: Vec<Type> = Vec::new();
         if let Some(pl) = item.param_list() {
             for p in pl.params() {
-                let pty = self.infer_param(body_scope, &p);
+                let pty = self.infer_param(&p);
                 param_types.push(pty);
             }
         }
@@ -516,7 +524,7 @@ impl Inferer {
         let ret_annot = item.return_type().and_then(|t| self.resolve_type(&t));
         let (body_ty, tail_range) = match item.body() {
             Some(b) => {
-                let (ty, range) = self.infer_block_with_tail(body_scope, &b);
+                let (ty, range) = self.infer_block_with_tail(&b);
                 (Some(ty), range)
             }
             None => (None, None),
@@ -556,7 +564,7 @@ impl Inferer {
         }
     }
 
-    fn infer_param(&mut self, _scope: ScopeId, p: &Param) -> Type {
+    fn infer_param(&mut self, p: &Param) -> Type {
         let ty = p
             .ty()
             .and_then(|t| self.resolve_type(&t))
@@ -572,20 +580,62 @@ impl Inferer {
         ty
     }
 
-    fn infer_assign(&mut self, scope: ScopeId, stmt: &AssignStmt) {
-        // `x = e`: unify e's type with the var's established (monomorphic) type.
-        let rhs_ty = stmt.value().map(|e| self.infer_expr(scope, &e));
-        if let (Some(name_tok), Some(rhs)) = (stmt.name(), rhs_ty) {
-            if let Some(id) = self.scopes.lookup(scope, name_tok.text().as_ref()) {
-                if let Some(sym) = self.names.get(id) {
-                    if let Some(scheme) = &sym.scheme {
-                        let existing = self.db.instantiate(scheme);
-                        if let Err(e) = self.db.unify(existing, rhs) {
-                            let at = name_tok.text_range();
-                            self.diag_unify(self.file_span(at), e);
-                        }
-                    }
-                }
+    /// Infer `x = e` / `x += e`.
+    ///
+    /// The target is the symbol **resolution** bound the name to (TY-13). This
+    /// was the one place inference looked a name up itself, through a scope
+    /// tree it had pushed empty children onto and never bound anything in — so
+    /// the walk fell out to the root and found either nothing (a local: the
+    /// assignment was unchecked) or a same-named top-level binding (whose type
+    /// it then constrained instead).
+    fn infer_assign(&mut self, stmt: &AssignStmt) {
+        let rhs_ty = stmt.value().map(|e| self.infer_expr(&e));
+        let (Some(name_tok), Some(rhs)) = (stmt.name(), rhs_ty) else {
+            return;
+        };
+        let at = name_tok.text_range();
+        let Some(target) = self.refs.get(&at).copied() else {
+            return;
+        };
+        let Some(sym) = self.names.get(target.symbol) else {
+            return;
+        };
+        // Only a `var` may be reassigned (§4.2). A `let`, a parameter, a `for`
+        // binding and a pattern binding are all immutable, and nothing checked
+        // (TY-14) — `let x = 1; x = 2` compiled and the backend wrote the slot.
+        if sym.kind != SymbolKind::Var {
+            let kind = describe_binding(sym.kind);
+            self.diagnostics
+                .push(crate::diagnostics::assign_to_immutable(
+                    self.file_span(at),
+                    &sym.name,
+                    kind,
+                ));
+        }
+        let Some(scheme) = sym.scheme.as_ref() else {
+            return;
+        };
+        let existing = self.db.instantiate(scheme);
+        if let Err(e) = self.db.unify(existing, rhs) {
+            self.diag_unify(self.file_span(at), e);
+        }
+        // A compound assignment is an arithmetic operation, so its target must
+        // be numeric. Matching operand types alone said nothing: `var flag =
+        // true; flag += false` unified `Bool` with `Bool` and was accepted
+        // (TY-15). Reported only for a target whose type is *known* — an
+        // unconstrained one is a variable that a later use may still pin.
+        let compound = stmt
+            .op()
+            .is_some_and(|t| !matches!(t.kind(), SyntaxKind::EQ));
+        if compound {
+            let resolved = self.db.follow(existing);
+            if !is_numeric(&self.db, resolved) && !is_unconstrained(&self.db, resolved) {
+                let rendered = self.db.render(resolved);
+                self.diagnostics
+                    .push(crate::diagnostics::compound_assign_non_numeric(
+                        self.file_span(at),
+                        &rendered,
+                    ));
             }
         }
     }
@@ -606,37 +656,37 @@ impl Inferer {
 
     // --- expressions -------------------------------------------------------
 
-    fn infer_expr(&mut self, scope: ScopeId, expr: &Expr) -> Type {
+    fn infer_expr(&mut self, expr: &Expr) -> Type {
         match expr {
             Expr::Literal(l) => self.infer_literal(l),
-            Expr::Path(p) => self.infer_path(scope, p),
-            Expr::Bin(b) => self.infer_bin(scope, b),
-            Expr::Unary(u) => self.infer_unary(scope, u),
+            Expr::Path(p) => self.infer_path(p),
+            Expr::Bin(b) => self.infer_bin(b),
+            Expr::Unary(u) => self.infer_unary(u),
             Expr::Paren(p) => p
                 .expr()
-                .map(|e| self.infer_expr(scope, &e))
+                .map(|e| self.infer_expr(&e))
                 .unwrap_or_else(|| self.db.fresh_var()),
             Expr::Tuple(t) => {
-                let els: Vec<Type> = t.elements().map(|e| self.infer_expr(scope, &e)).collect();
+                let els: Vec<Type> = t.elements().map(|e| self.infer_expr(&e)).collect();
                 crate::decl::tuple_or_degenerate(&mut self.db, els)
             }
-            Expr::Block(b) => self.infer_block(scope, b),
-            Expr::If(i) => self.infer_if(scope, i),
-            Expr::While(w) => self.infer_while(scope, w),
-            Expr::For(f) => self.infer_for(scope, f),
-            Expr::Loop(l) => self.infer_loop(scope, l),
-            Expr::Break(b) => self.infer_break(scope, b),
-            Expr::Continue(c) => self.infer_continue(scope, c),
-            Expr::Return(r) => self.infer_return(scope, r),
-            Expr::Call(c) => self.infer_call(scope, c),
-            Expr::MethodCall(m) => self.infer_method_call(scope, m),
+            Expr::Block(b) => self.infer_block(b),
+            Expr::If(i) => self.infer_if(i),
+            Expr::While(w) => self.infer_while(w),
+            Expr::For(f) => self.infer_for(f),
+            Expr::Loop(l) => self.infer_loop(l),
+            Expr::Break(b) => self.infer_break(b),
+            Expr::Continue(c) => self.infer_continue(c),
+            Expr::Return(r) => self.infer_return(r),
+            Expr::Call(c) => self.infer_call(c),
+            Expr::MethodCall(m) => self.infer_method_call(m),
             Expr::Read(r) => self.infer_read(r),
-            Expr::Parse(p) => self.infer_parse(scope, p),
-            Expr::RecordLit(r) => self.infer_record_lit(scope, r),
-            Expr::FieldGet(f) => self.infer_field_get(scope, f),
-            Expr::Match(m) => self.infer_match(scope, m),
+            Expr::Parse(p) => self.infer_parse(p),
+            Expr::RecordLit(r) => self.infer_record_lit(r),
+            Expr::FieldGet(f) => self.infer_field_get(f),
+            Expr::Match(m) => self.infer_match(m),
             // M7-WS7: closure — type is `Func`; params bind in a child scope.
-            Expr::Closure(c) => self.infer_closure(scope, c),
+            Expr::Closure(c) => self.infer_closure(c),
             Expr::Error(_) => self.db.fresh_var(),
         }
     }
@@ -645,15 +695,12 @@ impl Inferer {
     /// `Func` type `(P0, …) -> R` built from the param and body types. Free
     /// variables in the body resolve to outer-scope bindings (captures); the
     /// capture environment is a runtime concern, not a type-system one (§4.10).
-    fn infer_closure(&mut self, scope: ScopeId, c: &praxis_ast::ClosureExpr) -> Type {
-        let body_scope = self.scopes.push_child(scope);
+    fn infer_closure(&mut self, c: &praxis_ast::ClosureExpr) -> Type {
         let mut param_types = Vec::new();
         for p in c.params() {
-            param_types.push(self.infer_param(body_scope, &p));
+            param_types.push(self.infer_param(&p));
         }
-        let result_ty = c
-            .body()
-            .map_or(self.db.unit(), |b| self.infer_expr(body_scope, &b));
+        let result_ty = c.body().map_or(self.db.unit(), |b| self.infer_expr(&b));
         self.db.func(param_types, result_ty)
     }
 
@@ -668,26 +715,20 @@ impl Inferer {
     /// [`infer_closure`](Self::infer_closure) when the expected type is not a
     /// Func (or the arity differs) — unification with a fresh var is a no-op, so
     /// this is purely additive and cannot change currently-passing inference.
-    fn infer_closure_expected(
-        &mut self,
-        scope: ScopeId,
-        c: &praxis_ast::ClosureExpr,
-        expected: Type,
-    ) -> Type {
+    fn infer_closure_expected(&mut self, c: &praxis_ast::ClosureExpr, expected: Type) -> Type {
         // Read the expected Func's params/result (after following). If it is not
         // a Func, or the param count differs, defer to the bottom-up path.
         let (exp_params, exp_result) = match self.db.data(self.db.follow(expected)) {
             praxis_types::TypeData::Func { params, result } => (params.clone(), *result),
-            _ => return self.infer_closure(scope, c),
+            _ => return self.infer_closure(c),
         };
         let closure_params: Vec<_> = c.params().collect();
         if exp_params.len() != closure_params.len() {
-            return self.infer_closure(scope, c);
+            return self.infer_closure(c);
         }
-        let body_scope = self.scopes.push_child(scope);
         let mut param_types = Vec::new();
         for (p, exp_pt) in closure_params.into_iter().zip(exp_params.iter()) {
-            let pt = self.infer_param(body_scope, &p);
+            let pt = self.infer_param(&p);
             // Pin the param to the expected type before the body sees it. This is
             // the load-bearing step: the body's method calls on this param now
             // resolve against a concrete type.
@@ -699,9 +740,7 @@ impl Inferer {
         // push `exp_result` into block tails too, but Praxis closure bodies here
         // are single expressions or push from their own tail.)
         let _ = exp_result;
-        let result_ty = c
-            .body()
-            .map_or(self.db.unit(), |b| self.infer_expr(body_scope, &b));
+        let result_ty = c.body().map_or(self.db.unit(), |b| self.infer_expr(&b));
         self.db.func(param_types, result_ty)
     }
 
@@ -709,17 +748,17 @@ impl Inferer {
     /// (bidirectional inference, M8 §3). Currently only closures take the hint;
     /// every other expression ignores `expected` and infers bottom-up (a fresh
     /// var unifies no-op, so this is safe).
-    fn infer_expr_expected(&mut self, scope: ScopeId, expr: &Expr, expected: Type) -> Type {
+    fn infer_expr_expected(&mut self, expr: &Expr, expected: Type) -> Type {
         match expr {
-            Expr::Closure(c) => self.infer_closure_expected(scope, c, expected),
-            _ => self.infer_expr(scope, expr),
+            Expr::Closure(c) => self.infer_closure_expected(c, expected),
+            _ => self.infer_expr(expr),
         }
     }
 
     /// Infer the type of a record literal `Name { field: expr, … }` (M7, §4.5).
     /// Looks up the struct type, unifies each field initializer with the declared
     /// field type, and returns the struct type.
-    fn infer_record_lit(&mut self, scope: ScopeId, r: &RecordLitExpr) -> Type {
+    fn infer_record_lit(&mut self, r: &RecordLitExpr) -> Type {
         // The literal's head is an ordinary name reference, so resolution
         // already decided which symbol it names — including under shadowing,
         // where a scope lookup here would answer differently.
@@ -733,7 +772,7 @@ impl Inferer {
             if let Some(fl) = r.field_list() {
                 for f in fl.fields() {
                     if let Some(e) = f.expr() {
-                        self.infer_expr(scope, &e);
+                        self.infer_expr(&e);
                     }
                 }
             }
@@ -750,7 +789,7 @@ impl Inferer {
                 let fname = fname_tok.text().to_string();
                 if let Some((_, declared_ty)) = self.db.record_field_of(def_id, &def_args, &fname) {
                     let init_ty = match &f.expr() {
-                        Some(e) => self.infer_expr(scope, e),
+                        Some(e) => self.infer_expr(e),
                         // Punned field `{ x }` — x must be a binding of the field's type.
                         None => {
                             // Look up the name as a path reference.
@@ -776,10 +815,10 @@ impl Inferer {
 
     /// Infer the type of a field access `receiver.field` (M7, §4.5). Returns the
     /// field's declared type.
-    fn infer_field_get(&mut self, scope: ScopeId, f: &FieldExpr) -> Type {
+    fn infer_field_get(&mut self, f: &FieldExpr) -> Type {
         let receiver_ty = f
             .receiver()
-            .map(|r| self.infer_expr(scope, &r))
+            .map(|r| self.infer_expr(&r))
             .unwrap_or_else(|| self.db.fresh_var());
         let Some(field_tok) = f.field_name() else {
             return receiver_ty;
@@ -801,20 +840,19 @@ impl Inferer {
     /// Infer the type of a `match scrutinee { pattern => body, … }` expression
     /// (M7, §4.6). Unifies the scrutinee with each pattern, then unifies all
     /// arm body types to determine the match's result type.
-    fn infer_match(&mut self, scope: ScopeId, m: &praxis_ast::MatchExpr) -> Type {
+    fn infer_match(&mut self, m: &praxis_ast::MatchExpr) -> Type {
         let scrutinee_ty = m
             .scrutinee()
-            .map(|s| self.infer_expr(scope, &s))
+            .map(|s| self.infer_expr(&s))
             .unwrap_or_else(|| self.db.fresh_var());
         let arms: Vec<_> = m.arms().collect();
         let result = self.db.fresh_var();
         for arm in &arms {
-            let arm_scope = self.scopes.push_child(scope);
             if let Some(pat) = arm.pattern() {
-                self.infer_pattern(arm_scope, &pat, scrutinee_ty);
+                self.infer_pattern(&pat, scrutinee_ty);
             }
             if let Some(body) = arm.body() {
-                let body_ty = self.infer_expr(arm_scope, &body);
+                let body_ty = self.infer_expr(&body);
                 if let Err(e) = self.db.unify(result, body_ty) {
                     let at = self.file_span(arm.syntax().text_range());
                     self.diag_unify(at, e);
@@ -827,7 +865,7 @@ impl Inferer {
     /// Infer a pattern against an expected type (M7, §4.6). Binds pattern
     /// variables and unifies variant payloads.
     #[allow(clippy::only_used_in_recursion)]
-    fn infer_pattern(&mut self, scope: ScopeId, pat: &praxis_ast::Pattern, expected: Type) {
+    fn infer_pattern(&mut self, pat: &praxis_ast::Pattern, expected: Type) {
         use praxis_ast::PatternKind;
         match pat.kind() {
             PatternKind::Wildcard => {
@@ -885,7 +923,7 @@ impl Inferer {
                     let sub_pats: Vec<_> = pat.sub_patterns().collect();
                     for (i, sub) in sub_pats.iter().enumerate() {
                         if let Some(&payload_ty) = payload_types.get(i) {
-                            self.infer_pattern(scope, sub, payload_ty);
+                            self.infer_pattern(sub, payload_ty);
                         }
                     }
                     let _ = variant_idx;
@@ -909,10 +947,10 @@ impl Inferer {
     }
 
     /// Synthesize the result type of a `parse(text, parser_expression)` (§7.1, M6).
-    fn infer_parse(&mut self, scope: ScopeId, p: &praxis_ast::ParseExpr) -> Type {
+    fn infer_parse(&mut self, p: &praxis_ast::ParseExpr) -> Type {
         // The text argument is an ordinary expression; resolve it.
         if let Some(text_expr) = p.text_expr() {
-            self.infer_expr(scope, &text_expr);
+            self.infer_expr(&text_expr);
         }
         match p.parser_expr() {
             Some(pe) => crate::parser_lower::synthesize_parser_type(
@@ -943,7 +981,7 @@ impl Inferer {
         }
     }
 
-    fn infer_path(&mut self, scope: ScopeId, p: &PathExpr) -> Type {
+    fn infer_path(&mut self, p: &PathExpr) -> Type {
         let tok = match p.name() {
             Some(t) => t,
             None => return self.db.fresh_var(),
@@ -961,13 +999,12 @@ impl Inferer {
                 return ty;
             }
         }
-        let _ = scope;
         // Unresolved names were already reported by resolution; return a fresh var
         // so downstream inference does not cascade spurious errors.
         self.db.fresh_var()
     }
 
-    fn infer_bin(&mut self, scope: ScopeId, b: &BinExpr) -> Type {
+    fn infer_bin(&mut self, b: &BinExpr) -> Type {
         let (lhs, rhs) = b.operands();
         // Keep each operand's node so a type mismatch can point at the specific
         // bad operand rather than the whole binary expression (the earlier
@@ -978,8 +1015,8 @@ impl Inferer {
         // arithmetic inference uses this to pick Float vs Int under the strict
         // per-literal model (§4.12).
         let any_float_operand = operand_is_float_literal(&lhs) || operand_is_float_literal(&rhs);
-        let lt = lhs.map(|e| self.infer_expr(scope, &e));
-        let rt = rhs.map(|e| self.infer_expr(scope, &e));
+        let lt = lhs.map(|e| self.infer_expr(&e));
+        let rt = rhs.map(|e| self.infer_expr(&e));
         let op_kind = b.op().map(|t| t.kind());
         match op_kind {
             // Arithmetic (§4.12). The result type follows the operand literal
@@ -1087,9 +1124,9 @@ impl Inferer {
         }
     }
 
-    fn infer_unary(&mut self, scope: ScopeId, u: &UnaryExpr) -> Type {
+    fn infer_unary(&mut self, u: &UnaryExpr) -> Type {
         let operand_node = u.operand();
-        let operand = operand_node.as_ref().map(|e| self.infer_expr(scope, e));
+        let operand = operand_node.as_ref().map(|e| self.infer_expr(e));
         let result = match u.op().map(|t| t.kind()) {
             // Negation follows the operand's literal kind under the strict
             // per-literal model (§4.12): `-3.5` is Float, `-3` is Int.
@@ -1116,8 +1153,8 @@ impl Inferer {
         result
     }
 
-    fn infer_block(&mut self, scope: ScopeId, block: &BlockExpr) -> Type {
-        self.infer_block_inner(scope, block).0
+    fn infer_block(&mut self, block: &BlockExpr) -> Type {
+        self.infer_block_inner(block).0
     }
 
     /// Like [`infer_block`](Self::infer_block), but also returns the source
@@ -1126,35 +1163,26 @@ impl Inferer {
     /// expression (the block's value is then `Unit`). Used by `infer_fn` so a
     /// return-type mismatch can point at the offending tail expression rather
     /// than the whole `fn`.
-    fn infer_block_with_tail(
-        &mut self,
-        scope: ScopeId,
-        block: &BlockExpr,
-    ) -> (Type, Option<TextRange>) {
-        self.infer_block_inner(scope, block)
+    fn infer_block_with_tail(&mut self, block: &BlockExpr) -> (Type, Option<TextRange>) {
+        self.infer_block_inner(block)
     }
 
     /// Shared body: infer every statement, returning the block's value type and
     /// the range that produced it (the trailing expression, or the block itself
     /// when the value is the implicit trailing `Unit`).
-    fn infer_block_inner(
-        &mut self,
-        scope: ScopeId,
-        block: &BlockExpr,
-    ) -> (Type, Option<TextRange>) {
-        let inner = self.scopes.push_child(scope);
+    fn infer_block_inner(&mut self, block: &BlockExpr) -> (Type, Option<TextRange>) {
         let mut last = self.db.unit();
         let mut tail_range: Option<TextRange> = None;
         for child in block.stmts() {
             // A trailing expression statement is the block's value.
             if let Some(expr_stmt) = ExprStmt::cast(child.clone()) {
                 if let Some(e) = expr_stmt.expr() {
-                    last = self.infer_expr(inner, &e);
+                    last = self.infer_expr(&e);
                     tail_range = Some(e.syntax().text_range());
                     continue;
                 }
             }
-            self.infer_top_stmt(inner, &child);
+            self.infer_top_stmt(&child);
         }
         // No trailing expression: the value is Unit; point at the whole block so
         // the reader still sees where the implicit Unit comes from.
@@ -1162,9 +1190,9 @@ impl Inferer {
         (last, tail_range)
     }
 
-    fn infer_if(&mut self, scope: ScopeId, i: &IfExpr) -> Type {
+    fn infer_if(&mut self, i: &IfExpr) -> Type {
         if let Some(cond) = i.cond() {
-            let ct = self.infer_expr(scope, &cond);
+            let ct = self.infer_expr(&cond);
             let bool = self.db.bool();
             // Condition must be Bool: point at the condition, not the whole `if`.
             let at = cond.syntax().text_range();
@@ -1172,8 +1200,8 @@ impl Inferer {
                 self.diag_unify(self.file_span(at), e);
             }
         }
-        let then_ty = i.then_branch().map(|b| self.infer_block(scope, &b));
-        let else_ty = i.else_branch().and_then(|e| self.infer_else(scope, &e));
+        let then_ty = i.then_branch().map(|b| self.infer_block(&b));
+        let else_ty = i.else_branch().and_then(|e| self.infer_else(&e));
         match (then_ty, else_ty) {
             (Some(t), Some(e)) => {
                 if let Err(err) = self.db.unify(t, e) {
@@ -1194,19 +1222,16 @@ impl Inferer {
         }
     }
 
-    fn infer_else(&mut self, scope: ScopeId, e: &ElseBranch) -> Option<Type> {
+    fn infer_else(&mut self, e: &ElseBranch) -> Option<Type> {
         e.body().map(|body| match body {
-            Expr::Block(b) => self.infer_block(scope, &b),
-            other => {
-                let inner = self.scopes.push_child(scope);
-                self.infer_expr(inner, &other)
-            }
+            Expr::Block(b) => self.infer_block(&b),
+            other => self.infer_expr(&other),
         })
     }
 
-    fn infer_while(&mut self, scope: ScopeId, w: &WhileExpr) -> Type {
+    fn infer_while(&mut self, w: &WhileExpr) -> Type {
         if let Some(cond) = w.cond() {
-            let ct = self.infer_expr(scope, &cond);
+            let ct = self.infer_expr(&cond);
             let bool = self.db.bool();
             // Condition must be Bool: point at the condition, not the whole `while`.
             let at = cond.syntax().text_range();
@@ -1215,7 +1240,7 @@ impl Inferer {
             }
         }
         if let Some(body) = w.body() {
-            self.infer_block(scope, &body);
+            self.infer_block(&body);
         }
         // `while` yields Unit.
         self.db.unit()
@@ -1223,10 +1248,10 @@ impl Inferer {
 
     /// `for binding in iter { body }` (M8, §4.11). The iterator must be iterable
     /// (§5.4); the binding gets the element type. `for` yields Unit.
-    fn infer_for(&mut self, scope: ScopeId, f: &ForExpr) -> Type {
+    fn infer_for(&mut self, f: &ForExpr) -> Type {
         let iter_ty = f
             .iter()
-            .map(|i| self.infer_expr(scope, &i))
+            .map(|i| self.infer_expr(&i))
             .unwrap_or_else(|| self.db.fresh_var());
         // The iterator must be iterable; `iter_item` returns the element type
         // (None → Y005 not_iterable). Record the element type on the binding's
@@ -1248,46 +1273,46 @@ impl Inferer {
             }
         }
         if let Some(body) = f.body() {
-            self.infer_block(scope, &body);
+            self.infer_block(&body);
         }
         self.db.unit()
     }
 
     /// `loop { body }` (M8, §4.11). Yields Unit (a value-producing loop via
     /// `break expr` refines this; the HIR conservatively reports Unit).
-    fn infer_loop(&mut self, scope: ScopeId, l: &LoopExpr) -> Type {
+    fn infer_loop(&mut self, l: &LoopExpr) -> Type {
         if let Some(body) = l.body() {
-            self.infer_block(scope, &body);
+            self.infer_block(&body);
         }
         self.db.unit()
     }
 
     /// `break [expr]` (M8, §4.11). Diverges; type `Never`.
-    fn infer_break(&mut self, scope: ScopeId, b: &BreakExpr) -> Type {
+    fn infer_break(&mut self, b: &BreakExpr) -> Type {
         if let Some(v) = b.value() {
-            self.infer_expr(scope, &v);
+            self.infer_expr(&v);
         }
         self.db.never()
     }
 
     /// `continue` (M8, §4.11). Diverges; type `Never`.
-    fn infer_continue(&mut self, _scope: ScopeId, _c: &ContinueExpr) -> Type {
+    fn infer_continue(&mut self, _c: &ContinueExpr) -> Type {
         self.db.never()
     }
 
     /// `return [expr]` (M8, §4.11). Diverges; type `Never`.
-    fn infer_return(&mut self, scope: ScopeId, r: &ReturnExpr) -> Type {
+    fn infer_return(&mut self, r: &ReturnExpr) -> Type {
         if let Some(v) = r.value() {
-            self.infer_expr(scope, &v);
+            self.infer_expr(&v);
         }
         self.db.never()
     }
 
-    fn infer_call(&mut self, scope: ScopeId, c: &CallExpr) -> Type {
+    fn infer_call(&mut self, c: &CallExpr) -> Type {
         // Collect argument types.
         let arg_types: Vec<Type> = c
             .arg_list()
-            .map(|a| self.collect_args(scope, &a))
+            .map(|a| self.collect_args(&a))
             .unwrap_or_default();
         // Postfix call on an arbitrary expression (`expr(args)`, M8 §4.10):
         // when there is no named callee, the callee is an expression (e.g.
@@ -1297,7 +1322,7 @@ impl Inferer {
         // HIR lowerer reads its result type for the call's type.
         if c.callee().is_none() {
             if let Some(callee_expr) = c.callee_expr() {
-                let callee_ty = self.infer_expr(scope, &callee_expr);
+                let callee_ty = self.infer_expr(&callee_expr);
                 let result = self.db.fresh_var();
                 let expected = self.db.func(arg_types, result);
                 if let Err(e) = self.db.unify(callee_ty, expected) {
@@ -1358,8 +1383,8 @@ impl Inferer {
         self.db.fresh_var()
     }
 
-    fn collect_args(&mut self, scope: ScopeId, args: &ArgList) -> Vec<Type> {
-        args.args().map(|a| self.infer_expr(scope, &a)).collect()
+    fn collect_args(&mut self, args: &ArgList) -> Vec<Type> {
+        args.args().map(|a| self.infer_expr(&a)).collect()
     }
 
     /// Infer `receiver.method(args)` (M5, §16.2). Resolves the method against
@@ -1367,10 +1392,10 @@ impl Inferer {
     /// element-type variable with the receiver's element type, checks arg types,
     /// and returns the result type. Records the method-name range in
     /// `ref_types` for hover.
-    fn infer_method_call(&mut self, scope: ScopeId, m: &MethodCallExpr) -> Type {
+    fn infer_method_call(&mut self, m: &MethodCallExpr) -> Type {
         // Infer the receiver's type.
         let receiver_ty = match m.receiver() {
-            Some(r) => self.infer_expr(scope, &r),
+            Some(r) => self.infer_expr(&r),
             None => self.db.fresh_var(),
         };
         let name = m
@@ -1396,7 +1421,7 @@ impl Inferer {
             // then leave the result as a fresh var; the HIR lowerer emits the
             // Y110 diagnostic (it has the method-name span).
             for arg in &arg_exprs {
-                self.infer_expr(scope, arg);
+                self.infer_expr(arg);
             }
             return self.db.fresh_var();
         };
@@ -1436,8 +1461,8 @@ impl Inferer {
         for (i, arg) in arg_exprs.iter().enumerate() {
             let expected = param_tys.get(i).copied();
             let at = match expected {
-                Some(et) => self.infer_expr_expected(scope, arg, et),
-                None => self.infer_expr(scope, arg),
+                Some(et) => self.infer_expr_expected(arg, et),
+                None => self.infer_expr(arg),
             };
             // Unify now (not deferred) so shared vars pin before the next arg.
             if let Some(pt) = param_tys.get(i) {
@@ -1536,4 +1561,32 @@ fn is_float_scalar(db: &TypeDb, t: Type) -> bool {
         db.data(db.follow(t)),
         praxis_types::TypeData::Scalar(ScalarType::Float)
     )
+}
+
+/// Whether `t` is a type arithmetic is defined on: `Int` or `Float` (§4.12).
+/// There is no other numeric scalar, and no composite is numeric.
+fn is_numeric(db: &TypeDb, t: Type) -> bool {
+    matches!(
+        db.data(db.follow(t)),
+        praxis_types::TypeData::Scalar(ScalarType::Int | ScalarType::Float)
+    )
+}
+
+/// Whether `t` is still an unbound variable — a type nothing has pinned yet, so
+/// there is no answer to give about it and no mistake to report.
+fn is_unconstrained(db: &TypeDb, t: Type) -> bool {
+    matches!(db.data(db.follow(t)), praxis_types::TypeData::Var(_))
+}
+
+/// How to name a binding kind in a diagnostic, in the words the source uses.
+fn describe_binding(kind: SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::Let => "a `let` binding",
+        SymbolKind::Var => "a `var` binding",
+        SymbolKind::Fn => "a function",
+        SymbolKind::Param => "a parameter",
+        SymbolKind::Builtin | SymbolKind::BuiltinType => "a built-in name",
+        SymbolKind::Struct => "a struct type",
+        SymbolKind::Enum => "an enum type",
+    }
 }

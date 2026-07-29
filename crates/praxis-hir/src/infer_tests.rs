@@ -899,7 +899,6 @@ fn malformed_collection_type_arity_is_rejected() {
 // --- mutation and control-flow typing ---------------------------------------
 
 #[test]
-#[ignore = "known bug: assignment lookup uses disconnected inference scopes"]
 fn local_var_reassignment_preserves_its_type() {
     let src = "fn main() -> Int { var x = 0; x = \"bad\"; 0 }";
     assert!(
@@ -909,7 +908,6 @@ fn local_var_reassignment_preserves_its_type() {
 }
 
 #[test]
-#[ignore = "known bug: assignment does not require a mutable var binding"]
 fn reassignment_to_let_is_rejected() {
     let src = "fn main() -> Int { let x = 1; x = 2; x }";
     assert!(
@@ -919,12 +917,112 @@ fn reassignment_to_let_is_rejected() {
 }
 
 #[test]
-#[ignore = "known bug: compound assignment checks equality but not numeric support"]
 fn compound_assignment_requires_a_numeric_target() {
     let src = "var flag = true\nflag += false";
     assert!(
         has_type_error(src),
         "matching operand types alone do not make Bool addition valid"
+    );
+}
+
+/// TY-13's other half: the disconnected lookup did not merely *miss* a local,
+/// it could find the wrong symbol. A local named like a top-level binding
+/// resolved out to the top-level one, and the assignment constrained *its*
+/// type.
+#[test]
+fn an_assignment_constrains_the_local_it_names_and_no_other() {
+    // `count` exists at both levels. Assigning the local Text must not make
+    // the top-level `count` a Text.
+    let src = "var count = 0\n               fn f() -> Int { var count = \"a\"; count = \"b\"; 0 }";
+    assert!(!has_type_error(src), "the local assignment is well-typed");
+    let schemes: Vec<String> = {
+        let analysis = analyze(src);
+        analysis
+            .names
+            .all()
+            .iter()
+            .filter(|s| s.name == "count" && s.kind == SymbolKind::Var)
+            .filter_map(|s| s.scheme.as_ref())
+            .map(|sc| analysis.db.render_scheme(sc))
+            .collect()
+    };
+    assert_eq!(
+        schemes,
+        vec!["Int", "Text"],
+        "each `count` keeps its own type"
+    );
+    // …and the local really is checked, rather than skipped for lack of a
+    // binding to find.
+    assert!(
+        has_type_error("fn f() -> Int { var local = 0; local = \"bad\"; 0 }"),
+        "a local with no top-level namesake is still checked"
+    );
+    // A captured `var` is assignable through the closure, and checked there.
+    assert!(
+        !has_type_error(
+            "fn f() -> Int { var total = 0; let add = |n| { total += n }; add(1); total }"
+        ),
+        "a captured var may be assigned"
+    );
+    assert!(
+        has_type_error("fn f() -> Int { var total = 0; let add = |n| { total = \"x\" }; 0 }"),
+        "…and the capture is checked"
+    );
+}
+
+/// TY-14 past the exit test's `let`: every immutable binding kind, and the
+/// report is `Y009` rather than a type mismatch about the value.
+#[test]
+fn only_a_var_may_be_assigned() {
+    for src in [
+        "fn f() -> Int { let x = 1; x = 2; x }",
+        "fn f(p: Int) -> Int { p = 2; p }",
+        "fn f(v: Vec[Int]) -> Int { for x in v { x = 1 }; 0 }",
+        "enum E { N(Int) }\nfn f(e: E) -> Int { match e { N(n) => { n = 1; n } } }",
+    ] {
+        let codes: Vec<String> = analyze(src)
+            .diagnostics
+            .iter()
+            .map(|d| d.code().to_string())
+            .collect();
+        assert!(
+            codes.iter().any(|c| c == "Y009"),
+            "expected Y009 for `{src}`, got {codes:?}"
+        );
+    }
+    assert!(
+        !has_type_error("fn f() -> Int { var x = 1; x = 2; x }"),
+        "a `var` is still assignable"
+    );
+}
+
+/// TY-15 past the exit test's `Bool`: the rule is "numeric", not "not Bool",
+/// and an unconstrained target is not yet a mistake.
+#[test]
+fn a_compound_assignment_needs_a_numeric_target() {
+    for src in [
+        "var flag = true\nflag += false",
+        "var name = \"a\"\nname += \"b\"",
+        "fn f() -> Int { var pair = (1, 2); pair += (3, 4); 0 }",
+    ] {
+        let codes: Vec<String> = analyze(src)
+            .diagnostics
+            .iter()
+            .map(|d| d.code().to_string())
+            .collect();
+        assert!(
+            codes.iter().any(|c| c == "Y010"),
+            "expected Y010 for `{src}`, got {codes:?}"
+        );
+    }
+    assert!(
+        !has_type_error("var n = 0\nn += 1\nn -= 1\nn *= 2\nn /= 2\nn %= 2"),
+        "every compound operator is fine on Int"
+    );
+    assert!(!has_type_error("var x = 1.5\nx += 0.5"), "…and on Float");
+    assert!(
+        !has_type_error("var n = 0\nn = 1"),
+        "a plain `=` is not arithmetic and needs no numeric target"
     );
 }
 
