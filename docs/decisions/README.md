@@ -58,3 +58,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-050: A record literal is legal wherever the brace cannot be a block](./050-record-literals-are-legal-wherever-a-brace-cannot-be-a-block.md)
 - [ADR-051: The diagnostic-code allocation](./051-the-diagnostic-code-allocation.md)
 - [ADR-052: A declaration pass seals what a name in type position means](./052-a-declaration-pass-seals-what-a-name-in-type-position-means.md)
+- [ADR-053: A `loop` is the value its `break`s carry, and it is the only loop that has one](./053-a-loop-is-the-value-its-breaks-carry.md)

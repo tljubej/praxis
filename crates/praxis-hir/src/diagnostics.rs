@@ -284,3 +284,18 @@ pub(crate) fn outside_loop(at: FileSpan, keyword: &str) -> Diagnostic {
         at,
     )
 }
+
+/// `Y017` — a `break` carrying a value out of a `while`/`for` (TY-21, D2).
+///
+/// Only `loop` is an expression loop. A `while` or `for` leaves by its condition
+/// failing as well as by a `break`, and there is no value the compiler could
+/// supply on that path — so a `break` there cannot carry one. This is not
+/// `Y012`: the loop exists, and it is the *kind* of loop that is wrong.
+pub(crate) fn value_break_outside_loop_expression(at: FileSpan, keyword: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::ValueBreakOutsideLoopExpression,
+        format!("a `break` carrying a value needs a `loop`; a `{keyword}` produces `Unit`"),
+        at,
+    )
+}

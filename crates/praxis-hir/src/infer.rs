@@ -86,7 +86,7 @@ pub(crate) fn infer_with_tree(
         catalog: builtin_catalog(),
         decl_site: Level::OUTERMOST,
         fn_results: Vec::new(),
-        loop_depth: 0,
+        loops: Vec::new(),
     };
     inferer.seed_builtin_schemes();
     inferer.infer_declaration_group(root);
@@ -149,11 +149,40 @@ struct Inferer {
     /// not the function that contains it. Empty means "not inside a function",
     /// which is what makes a top-level `return` reportable (TY-20).
     fn_results: Vec<Type>,
-    /// How many loops enclose the expression being inferred. A `break` or
-    /// `continue` with none is `Y012` (TY-20). A closure body clears it and
-    /// restores it afterwards: a closure is a function boundary, so a loop
-    /// outside it is not one a `break` inside it can leave.
-    loop_depth: usize,
+    /// The loops enclosing the expression being inferred, innermost last. A
+    /// `break` or `continue` with none is `Y012` (TY-20); a `break` reads the
+    /// top to learn which loop it leaves and what that loop has produced so far
+    /// (TY-21). A closure body clears it and restores it afterwards: a closure
+    /// is a function boundary, so a loop outside it is not one a `break` inside
+    /// it can leave.
+    loops: Vec<LoopCtx>,
+}
+
+/// One enclosing loop, while its body is being inferred (TY-21).
+#[derive(Clone, Copy)]
+struct LoopCtx {
+    /// Which loop form this is — only a `loop` may produce a value.
+    flavour: LoopFlavour,
+    /// The join of every `break` value seen in this loop so far, seeded with
+    /// `Never`: a loop no `break` leaves produces no value (D2). A bare `break`
+    /// contributes `Unit`, so `loop { break }` is `Unit` and
+    /// `loop { if c { break }\n break 1 }` is the `Y001` it should be.
+    result: Type,
+}
+
+/// Which loop form a [`LoopCtx`] describes (D2, ADR-053).
+///
+/// `loop` is the only expression loop. A `while`/`for` also leaves by its
+/// condition failing or its sequence running out, and the compiler has no value
+/// to supply on that path — so a `break` there may not carry one, and the two
+/// cases are distinguished here rather than by a check on the keyword text.
+#[derive(Clone, Copy)]
+enum LoopFlavour {
+    /// `loop` — a `break` may carry a value, and the loop is that value's type.
+    Expression,
+    /// `while` / `for` — always `Unit`; a value `break` is `Y017`. Carries the
+    /// keyword so the report can name the loop the `break` is actually in.
+    Statement(&'static str),
 }
 
 /// The built-in method catalog, constructed once and cached for the process
@@ -730,9 +759,9 @@ impl Inferer {
         self.fn_results.push(result_ty);
         // A closure is a function boundary, so a loop outside it is not one a
         // `break` inside it can leave.
-        let enclosing_loops = std::mem::take(&mut self.loop_depth);
+        let enclosing_loops = std::mem::take(&mut self.loops);
         let body_ty = c.body().map_or(self.db.unit(), |b| self.infer_expr(&b));
-        self.loop_depth = enclosing_loops;
+        self.loops = enclosing_loops;
         self.fn_results.pop();
         match self.db.join(result_ty, body_ty) {
             Ok(joined) => joined,
@@ -1325,9 +1354,9 @@ impl Inferer {
             }
         }
         if let Some(body) = w.body() {
-            self.loop_depth += 1;
-            self.infer_block(&body);
-            self.loop_depth -= 1;
+            self.in_loop(LoopFlavour::Statement("while"), |me| {
+                me.infer_block(&body);
+            });
         }
         // `while` yields Unit.
         self.db.unit()
@@ -1360,31 +1389,93 @@ impl Inferer {
             }
         }
         if let Some(body) = f.body() {
-            self.loop_depth += 1;
-            self.infer_block(&body);
-            self.loop_depth -= 1;
+            self.in_loop(LoopFlavour::Statement("for"), |me| {
+                me.infer_block(&body);
+            });
         }
         self.db.unit()
     }
 
-    /// `loop { body }` (M8, §4.11). Yields Unit (a value-producing loop via
-    /// `break expr` refines this; the HIR conservatively reports Unit).
+    /// `loop { body }` (M8, §4.11). The **only** expression loop: its type is
+    /// the join of every `break` value (TY-21, D2).
+    ///
+    /// A `loop` no `break` leaves — `loop { }`, or one exited only by `return` —
+    /// produces no value, so it is `Never` and not `Unit`: that is what makes
+    /// `if c { 1 } else { loop { } }` an `Int`. The body's own type is
+    /// discarded; a loop repeats it rather than producing it.
     fn infer_loop(&mut self, l: &LoopExpr) -> Type {
-        if let Some(body) = l.body() {
-            self.loop_depth += 1;
-            self.infer_block(&body);
-            self.loop_depth -= 1;
-        }
-        self.db.unit()
+        let Some(body) = l.body() else {
+            return self.db.never();
+        };
+        self.in_loop(LoopFlavour::Expression, |me| {
+            me.infer_block(&body);
+        })
+    }
+
+    /// Infer `body` with one more enclosing loop, and answer with what that
+    /// loop's `break`s produced (seeded with `Never`, so an unbroken loop is
+    /// `Never` and a `while`/`for` frame is simply discarded by its caller).
+    fn in_loop(&mut self, flavour: LoopFlavour, body: impl FnOnce(&mut Self)) -> Type {
+        let never = self.db.never();
+        self.loops.push(LoopCtx {
+            flavour,
+            result: never,
+        });
+        body(self);
+        self.loops
+            .pop()
+            .expect("the loop frame pushed above is the one popped here")
+            .result
     }
 
     /// `break [expr]` (M8, §4.11). Diverges; type `Never`.
+    ///
+    /// The *value* is what the enclosing loop produces, so it is joined into
+    /// that loop's running result (TY-21). A bare `break` contributes `Unit` —
+    /// it leaves the loop with nothing — which is why `loop { break }` is `Unit`
+    /// and why mixing the two spellings is a mismatch rather than a coincidence.
     fn infer_break(&mut self, b: &BreakExpr) -> Type {
-        if let Some(v) = b.value() {
-            self.infer_expr(&v);
+        let value = b.value();
+        let (value_ty, at) = match &value {
+            Some(v) => (self.infer_expr(v), v.syntax().text_range()),
+            None => (self.db.unit(), b.syntax().text_range()),
+        };
+        if self.check_in_loop(b.syntax().text_range(), "break") {
+            self.record_break_value(value.is_some(), value_ty, at);
         }
-        self.check_in_loop(b.syntax().text_range(), "break");
         self.db.never()
+    }
+
+    /// Join a `break`'s value into the loop it leaves, or report why it cannot
+    /// (TY-21). `carries_value` distinguishes a written `break e` from the bare
+    /// `break` whose contribution is `Unit`: only the first is `Y017` in a
+    /// `while`/`for`.
+    fn record_break_value(&mut self, carries_value: bool, value_ty: Type, at: TextRange) {
+        let Some(&LoopCtx {
+            flavour,
+            result: so_far,
+        }) = self.loops.last()
+        else {
+            return;
+        };
+        if let LoopFlavour::Statement(keyword) = flavour {
+            if carries_value {
+                self.diagnostics
+                    .push(crate::diagnostics::value_break_outside_loop_expression(
+                        self.file_span(at),
+                        keyword,
+                    ));
+            }
+            return;
+        }
+        match self.db.join(so_far, value_ty) {
+            Ok(joined) => {
+                if let Some(ctx) = self.loops.last_mut() {
+                    ctx.result = joined;
+                }
+            }
+            Err(e) => self.diag_unify_hinted(self.file_span(at), e, "this `loop`"),
+        }
     }
 
     /// `continue` (M8, §4.11). Diverges; type `Never`.
@@ -1393,16 +1484,18 @@ impl Inferer {
         self.db.never()
     }
 
-    /// `Y012` if there is no enclosing loop to leave (TY-20). MIR's builder
-    /// used to tolerate the absent loop context with an `if let`; the check
-    /// belongs here, where the source position is.
-    fn check_in_loop(&mut self, at: TextRange, keyword: &str) {
-        if self.loop_depth == 0 {
+    /// Whether there is an enclosing loop to leave; `Y012` when there is not
+    /// (TY-20). MIR's builder used to tolerate the absent loop context with an
+    /// `if let`; the check belongs here, where the source position is.
+    fn check_in_loop(&mut self, at: TextRange, keyword: &str) -> bool {
+        if self.loops.is_empty() {
             self.diagnostics.push(crate::diagnostics::outside_loop(
                 self.file_span(at),
                 keyword,
             ));
+            return false;
         }
+        true
     }
 
     /// `return [expr]` (M8, §4.11). Diverges; type `Never`.

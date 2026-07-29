@@ -1,7 +1,8 @@
 # ADR-051: The diagnostic-code allocation
 
 **Date:** 2026-07-29
-**Status:** Accepted
+**Status:** Accepted — amended 2026-07-29 for `Y017` (S14/TY-21; see the
+amendment note under the `Y0xx` table)
 **Milestone:** Repair (answers the plan's **D13**, which binds before S13)
 
 ## Context
@@ -54,10 +55,21 @@ the **Name** category, following F2's own sketch, which puts `NameIsNotAType`,
 | `Y014` | TY-32 | S17 | a type used as a `Map`/`Set` key that cannot be hashed |
 | `Y015` | TY-31 | S17 | a type used where a numeric one is required |
 | `Y016` | TY-26, TY-27 | S17 | an operator that is not defined for these operand types |
+| `Y017` | TY-21 | S14 | a `break` carrying a value out of a `while`/`for` (**amendment**) |
 
 `TY-20` gets two codes rather than the one the plan lists: "`return` with no
 function" and "`break` with no loop" are different mistakes with different fixes,
 and a shared code makes the message do the discriminating.
+
+**Amendment (2026-07-29, S14).** `Y017` was not in the original allocation, and
+the list below still said TY-21 needed no code. That was right for the finding as
+the audit wrote it — "a `loop`'s value is not its `break` value" is a missing
+computation, not a missing report — and wrong once **D2** was answered: only a
+`loop` is an expression loop, so `while c { break 1 }` is a mistake that has to
+be *named*. It is not `Y012`, which is `break` with no loop **at all**: here the
+loop exists and it is the kind of loop that is wrong, so a shared code would
+again make the message do the discriminating. This is the amendment path the last
+consequence below describes, taken rather than argued around.
 
 ### Type — `Y09x`, internal
 
@@ -109,8 +121,10 @@ validation family the `I02x` block already holds.
   because the audit found the `Option` case separately.
 - **TY-16, TY-17, TY-18, TY-19, TY-25** report through `Y001`. Each is a
   unification bug — the check is missing, not the message.
-- **TY-13, TY-21, TY-30, HIR-03, HIR-05, IP-11** are structural or semantic
-  fixes with no new report. HIR-05's is a parse error now (FE-02).
+- **TY-13, TY-30, HIR-03, HIR-05, IP-11** are structural or semantic fixes with
+  no new report. HIR-05's is a parse error now (FE-02). **TY-21 was on this list
+  and is not any more** — see the amendment above: D2's answer turned half of it
+  into a report.
 - **TY-33, TY-34, RT-14** are blocked on D5, D6 and D1. If D5 deletes the phantom
   prelude names they become `N001`; the others are type changes, not diagnostics.
 

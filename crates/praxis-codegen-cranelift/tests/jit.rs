@@ -1388,6 +1388,64 @@ fn loop_break_exits() {
     assert_eq!(result.as_int(), 5);
 }
 
+/// TY-21 end to end: a `loop`'s value is the one its `break` carried, and it
+/// has to survive HIR lowering, MIR and codegen — inference agreeing is not
+/// enough. Before the fix the MIR builder discarded the `break` value and
+/// yielded a `Unit` literal, so this returned `Unit` where an `Int` was
+/// declared.
+#[test]
+fn expression_loop_returns_the_value_its_break_carried() {
+    // The loop is the function's tail: nothing else can supply the answer.
+    let src =
+        "fn main() -> Int {\n  var i = 0\n  loop { i = i + 1 if i == 5 { break i * 2 } }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 10);
+
+    // …and the value flows onward like any other: bound, then used.
+    let src = "fn main() -> Int {\n  var i = 0\n  let found = loop { i = i + 1 if i * i > 30 { break i } }\n  found + 100\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 106, "6 * 6 = 36 is the first over 30");
+}
+
+/// A `loop` no `break` leaves is `Never` (D2), and `Never` has no runtime
+/// representation — so such a loop must not ask for a result slot, whose
+/// descriptor site would fail the compile (D9). Compiling and running the other
+/// branch is the assertion; the loop itself is never entered.
+#[test]
+fn a_loop_that_never_breaks_compiles_as_a_diverging_branch() {
+    let src = "fn choose(c: Bool) -> Int { if c { 1 } else { loop { } } }\nfn main() -> Int {\n  choose(true)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+/// Two `break`s, two exits, one slot: whichever runs is what the loop produces.
+/// A result slot written on only one path would return the other's stale (or
+/// unwritten) value.
+#[test]
+fn every_break_writes_the_loop_result() {
+    let src = concat!(
+        "fn search(limit: Int) -> Int {\n",
+        "  var i = 0\n",
+        "  loop {\n",
+        "    if i == limit { break 0 - 1 }\n",
+        "    if i * i == 49 { break i }\n",
+        "    i = i + 1\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> Int {\n  search(100) * 1000 + search(3)\n}\n"
+    );
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        7 * 1000 - 1,
+        "the found exit, then the limit exit"
+    );
+}
+
 #[test]
 fn while_break_exits_early() {
     let src = "fn main() -> Int {\n  var i = 0\n  while i < 100 { if i == 7 { break } i = i + 1 }\n  i\n}\n";

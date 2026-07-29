@@ -1260,12 +1260,153 @@ fn a_terminator_needs_the_right_enclosing_context() {
 }
 
 #[test]
-#[ignore = "known bug: break values do not determine expression-loop type"]
 fn expression_loop_uses_its_break_value_type() {
     let src = "fn main() -> Int { loop { break 42 } }";
     assert!(
         !has_type_error(src),
         "an expression loop with `break Int` has type Int"
+    );
+}
+
+/// TY-21's rule, stated rather than demonstrated once: a `loop` **is** the join
+/// of the values its `break`s carry. The exit test only asks that one such
+/// program is accepted, which a `loop` that stayed a fresh variable would also
+/// satisfy — these ask what the type actually *is*, and what belongs to which
+/// loop.
+#[test]
+fn a_loop_is_the_join_of_the_values_its_breaks_carry() {
+    // The value is the break's, not the body's: the body here is `Unit`.
+    assert_eq!(
+        scheme_of("let x = loop { break 42 }", "x").as_deref(),
+        Some("Int")
+    );
+    assert_eq!(
+        scheme_of("let x = loop { break \"done\" }", "x").as_deref(),
+        Some("Text")
+    );
+    // Two `break`s that agree; and a `break` nested inside the body still counts.
+    assert_eq!(
+        scheme_of(
+            "fn f(c: Bool) -> Int { let x = loop { if c { break 1 } else { break 2 } }\n  x }",
+            "x"
+        )
+        .as_deref(),
+        Some("Int")
+    );
+    // A bare `break` leaves the loop with nothing, so the loop is `Unit`…
+    assert_eq!(
+        scheme_of("let x = loop { break }", "x").as_deref(),
+        Some("Unit")
+    );
+    // …and mixing the two spellings is a mismatch, not a coincidence.
+    assert!(
+        has_type_error("fn f(c: Bool) -> Int { let x = loop { if c { break }\n  break 1 }\n  0 }"),
+        "a bare `break` contributes Unit and cannot agree with `break 1`"
+    );
+    assert!(
+        has_type_error(
+            "fn f(c: Bool) -> Int { let x = loop { if c { break 1 }\n  break \"two\" }\n  0 }"
+        ),
+        "two `break`s carrying different types disagree"
+    );
+    // A `break` belongs to the innermost loop: the inner one is `Int`, and the
+    // outer one is `Text` rather than a join across both.
+    assert_eq!(
+        scheme_of(
+            "let x = loop { let inner = loop { break 1 }\n  break \"outer\" }",
+            "x"
+        )
+        .as_deref(),
+        Some("Text")
+    );
+    assert_eq!(
+        scheme_of(
+            "let x = loop { let inner = loop { break 1 }\n  break \"outer\" }",
+            "inner"
+        )
+        .as_deref(),
+        Some("Int")
+    );
+}
+
+/// D2's first half: a `loop` no `break` leaves produces nothing, so it is
+/// `Never` — the bottom type, absorbed wherever branches meet (TY-19). It used
+/// to be `Unit`, which made every one of these a `Y001`.
+#[test]
+fn a_loop_no_break_leaves_is_never() {
+    for src in [
+        "fn f(c: Bool) -> Int { if c { 1 } else { loop { } } }",
+        "fn f() -> Int { loop { } }",
+        "fn f() -> Text { loop { } }",
+        // Exited only by `return`: still no `break`, still `Never`.
+        "fn f(c: Bool) -> Int { loop { if c { return 1 } } }",
+    ] {
+        assert!(
+            !has_type_error(src),
+            "`{src}` should be clean: {:?}",
+            analyze(src)
+                .diagnostics
+                .iter()
+                .map(|d| format!("{} {}", d.code(), d.message()))
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        scheme_of(
+            "fn f(c: Bool) -> Int { let x = loop { if c { return 1 } }\n  x }",
+            "x"
+        )
+        .as_deref(),
+        Some("Never"),
+        "the bottom type, not Unit and not a fresh variable"
+    );
+}
+
+/// D2's second half, as `Y017`: only a `loop` is an expression loop. A `while`
+/// or `for` also leaves by its condition failing, and there is no value the
+/// compiler could supply on that path.
+#[test]
+fn only_a_loop_may_break_with_a_value() {
+    let codes = |src: &str| -> Vec<String> {
+        analyze(src)
+            .diagnostics
+            .iter()
+            .map(|d| d.code().to_string())
+            .collect()
+    };
+    for src in [
+        "fn f(c: Bool) -> Int { while c { break 1 }\n  0 }",
+        "fn f(v: Vec[Int]) -> Int { for x in v { break x }\n  0 }",
+    ] {
+        let found = codes(src);
+        assert!(
+            found.contains(&"Y017".to_string()),
+            "expected Y017 for `{src}`, got {found:?}"
+        );
+        assert!(
+            !found.contains(&"Y012".to_string()),
+            "the loop exists — it is the kind of loop that is wrong: {found:?}"
+        );
+    }
+    // A bare `break` is what those two loops are for, and is untouched.
+    for src in [
+        "fn f(c: Bool) -> Int { while c { break }\n  0 }",
+        "fn f(v: Vec[Int]) -> Int { for x in v { break }\n  0 }",
+        "fn f() -> Int { loop { break }\n  0 }",
+        "fn f() -> Int { loop { break 1 } }",
+    ] {
+        assert!(
+            !codes(src).contains(&"Y017".to_string()),
+            "`{src}` is legal, got {:?}",
+            codes(src)
+        );
+    }
+    // The nearest loop decides: a value `break` in a `while` nested inside a
+    // `loop` is still `Y017`.
+    assert!(
+        codes("fn f(c: Bool) -> Int { loop { while c { break 1 } }\n  0 }")
+            .contains(&"Y017".to_string()),
+        "the `break` leaves the `while`, not the `loop` around it"
     );
 }
 

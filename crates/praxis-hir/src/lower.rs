@@ -483,6 +483,7 @@ pub fn lower(
         text,
         unit,
         closure_counter: 0,
+        loop_results: Vec::new(),
     };
     let mut items = Vec::new();
     for node in root.stmts() {
@@ -668,6 +669,12 @@ struct Lowerer<'a> {
     /// function names (e.g. `__closure_0`). Each closure literal in the module
     /// gets a distinct name.
     closure_counter: u32,
+    /// The join of each enclosing loop's `break` values, innermost last (TY-21).
+    /// A `loop` is the value its `break`s carry, and the typed tree has to say
+    /// so — reading the body's type would answer what the loop *repeats*, not
+    /// what it produces. Seeded with `Never`; a bare `break` contributes `Unit`.
+    /// Cleared and restored around a closure body, which is a function boundary.
+    loop_results: Vec<Type>,
 }
 
 /// The built-in method catalog, constructed once and cached for the process
@@ -1011,6 +1018,9 @@ impl<'a> Lowerer<'a> {
         let params: Vec<TypedParam> = c.params().filter_map(|p| self.lower_param(&p)).collect();
         // The body is an expression. If it is a block, lower it as one; otherwise
         // wrap the single expression as a block whose tail is that expression.
+        // A closure is a function boundary (TY-20): a `break` inside it belongs
+        // to no loop outside it, so the enclosing loops' frames are set aside.
+        let enclosing_loops = std::mem::take(&mut self.loop_results);
         let body = match c.body() {
             Some(praxis_ast::Expr::Block(b)) => {
                 self.lower_block(&b).unwrap_or_else(|| TypedBlock {
@@ -1042,6 +1052,7 @@ impl<'a> Lowerer<'a> {
                 ty: self.unit,
             },
         };
+        self.loop_results = enclosing_loops;
         let result_ty = body.ty;
         let param_types: Vec<Type> = params.iter().map(|p| p.ty).collect();
         let fn_type = self.db.func(param_types, result_ty);
@@ -1407,7 +1418,10 @@ impl<'a> Lowerer<'a> {
     fn lower_while(&mut self, w: &WhileExpr) -> TypedExpr {
         let span = self.node_span(w.syntax());
         let cond = w.cond().map(|c| Box::new(self.lower_expr(&c)));
-        let body = w.body().and_then(|b| self.lower_block(&b)).map(Box::new);
+        // A `while` still gets a frame, and still discards it: it is `Unit`
+        // whatever its `break`s say (a value one is `Y017`), but a `break`
+        // inside it must not be attributed to a `loop` further out.
+        let (body, _) = self.in_loop(|me| w.body().and_then(|b| me.lower_block(&b)).map(Box::new));
         TypedExpr::While {
             cond: cond.unwrap_or_else(|| Box::new(unit_lit(self.db))),
             body: body.unwrap_or_else(|| {
@@ -1429,17 +1443,18 @@ impl<'a> Lowerer<'a> {
             .iter()
             .map(|i| Box::new(self.lower_expr(&i)))
             .unwrap_or_else(|| Box::new(unit_lit(self.db)));
-        let body = f
-            .body()
-            .and_then(|b| self.lower_block(&b))
-            .map(Box::new)
-            .unwrap_or_else(|| {
-                Box::new(TypedBlock {
-                    stmts: Vec::new(),
-                    tail: unit_lit(self.db),
-                    ty: self.unit,
+        let (body, _) = self.in_loop(|me| {
+            f.body()
+                .and_then(|b| me.lower_block(&b))
+                .map(Box::new)
+                .unwrap_or_else(|| {
+                    Box::new(TypedBlock {
+                        stmts: Vec::new(),
+                        tail: unit_lit(me.db),
+                        ty: me.unit,
+                    })
                 })
-            });
+        });
         // Resolve the binding symbol from the name token's declaration site
         // (`decls`, not `refs` — the binding token is a declaration, and the
         // body's references to it resolve to this same symbol via `refs`).
@@ -1464,34 +1479,58 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// `loop { body }` (M8, §4.11). The type is Unit for now (value-producing
-    /// loops via `break expr` refine this in the MIR; the HIR conservatively
-    /// reports Unit so a `loop` used as a value still type-checks broadly).
+    /// `loop { body }` (M8, §4.11). The type is what its `break`s carry (TY-21):
+    /// the join collected in [`Lowerer::loop_results`], which is `Never` when no
+    /// `break` leaves the loop and `Unit` when they leave it with nothing.
+    ///
+    /// Inference performs the same join and has already reported any
+    /// disagreement, so this cannot be where a user error surfaces — but the
+    /// typed tree has to carry the answer, exactly as `lower_if` has to join its
+    /// branches rather than read the then-block alone.
     fn lower_loop(&mut self, l: &LoopExpr) -> TypedExpr {
         let span = self.node_span(l.syntax());
-        let body = l
-            .body()
-            .and_then(|b| self.lower_block(&b))
-            .map(Box::new)
-            .unwrap_or_else(|| {
-                Box::new(TypedBlock {
-                    stmts: Vec::new(),
-                    tail: unit_lit(self.db),
-                    ty: self.unit,
+        let (body, ty) = self.in_loop(|me| {
+            l.body()
+                .and_then(|b| me.lower_block(&b))
+                .map(Box::new)
+                .unwrap_or_else(|| {
+                    Box::new(TypedBlock {
+                        stmts: Vec::new(),
+                        tail: unit_lit(me.db),
+                        ty: me.unit,
+                    })
                 })
-            });
-        TypedExpr::Loop {
-            body,
-            ty: self.unit,
-            span,
-        }
+        });
+        TypedExpr::Loop { body, ty, span }
     }
 
-    /// `break [expr]` (M8, §4.11). Diverges; the optional value is lowered but
-    /// the expression's type is `Never`.
+    /// Lower `body` with one more enclosing loop frame, and answer with it: the
+    /// join of the `break` values that registered against that frame.
+    fn in_loop<T>(&mut self, body: impl FnOnce(&mut Self) -> T) -> (T, Type) {
+        let never = self.db.never();
+        self.loop_results.push(never);
+        let lowered = body(self);
+        let result = self
+            .loop_results
+            .pop()
+            .expect("the loop frame pushed above is the one popped here");
+        (lowered, result)
+    }
+
+    /// `break [expr]` (M8, §4.11). Diverges; the expression's type is `Never`,
+    /// and its *value* is joined into the enclosing loop's result (TY-21). A
+    /// bare `break` leaves the loop with nothing, so it contributes `Unit`.
     fn lower_break(&mut self, b: &BreakExpr) -> TypedExpr {
         let span = self.node_span(b.syntax());
         let value = b.value().map(|v| Box::new(self.lower_expr(&v)));
+        let carried = value.as_deref().map_or(self.unit, expr_ty);
+        if let Some(&so_far) = self.loop_results.last() {
+            // Inference reported a disagreement already; keep what we had.
+            let joined = self.db.join(so_far, carried).unwrap_or(so_far);
+            if let Some(slot) = self.loop_results.last_mut() {
+                *slot = joined;
+            }
+        }
         TypedExpr::Break {
             value,
             ty: self.db.never(),

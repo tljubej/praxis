@@ -238,6 +238,11 @@ struct LoopCtx {
     continue_target: BlockId,
     /// The block `break` jumps to (the loop exit).
     break_target: BlockId,
+    /// The slot holding the loop's value, for a `loop` that produces one
+    /// (TY-21): every `break` writes it before jumping, and the exit block
+    /// reads it. `None` for a `while`/`for` and for the fused pipeline loops,
+    /// which are `Unit`-valued and whose `break`s therefore carry nothing.
+    result: Option<LocalId>,
 }
 
 fn lower_fn(
@@ -838,10 +843,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             lower_for(b, *binding, iter, body);
             lower_lit_gc(b, &Lit::Unit, espan) // for yields Unit
         }
-        TypedExpr::Loop { body, .. } => {
-            lower_loop(b, body);
-            lower_lit_gc(b, &Lit::Unit, espan) // loop yields Unit (break-value is a refinement)
-        }
+        // A `loop` yields what its `break`s carry (TY-21).
+        TypedExpr::Loop { body, ty, .. } => lower_loop(b, body, *ty, espan),
         TypedExpr::Break { value, .. } => {
             lower_break(b, value);
             lower_lit_gc(b, &Lit::Unit, espan) // unreachable in a well-typed program
@@ -1585,6 +1588,7 @@ fn lower_while(b: &mut Builder<'_>, cond: &TypedExpr, body: &praxis_hir::TypedBl
     b.loop_stack.push(LoopCtx {
         continue_target: header,
         break_target: exit,
+        result: None, // a `while` is Unit; a value `break` in one is Y017
     });
     b.cur = body_blk;
     let _ = lower_block_body(b, body);
@@ -1675,6 +1679,7 @@ fn lower_for(
     b.loop_stack.push(LoopCtx {
         continue_target: incr,
         break_target: exit,
+        result: None, // a `for` is Unit; a value `break` in one is Y017
     });
     b.cur = body_blk;
     // Bind the loop variable: `binding = iter.get(idx_gc)`.
@@ -1741,46 +1746,88 @@ fn lower_for(
 }
 
 /// `loop { body }` (M8-WS6, §4.11). An infinite loop; `break` is the only exit.
-fn lower_loop(b: &mut Builder<'_>, body: &praxis_hir::TypedBlock) {
+///
+/// Returns the slot holding the loop's value (TY-21). A `loop` whose `break`s
+/// carry a value gets a result slot each of them writes before jumping, exactly
+/// as an `if`'s branches write theirs; a `Unit`-valued loop keeps the literal it
+/// always had, and a `Never`-valued one (no reachable `break`) has an
+/// unreachable exit, so its "value" is a placeholder no execution reads.
+fn lower_loop(
+    b: &mut Builder<'_>,
+    body: &praxis_hir::TypedBlock,
+    ty: Type,
+    espan: Option<(u32, u32)>,
+) -> LocalId {
     let header = b.func.new_block();
     let exit = b.func.new_block();
+    // A loop that produces a value needs somewhere to put it. `Unit` and `Never`
+    // do not: the first is the literal every exit already yields, and the second
+    // has no representation at all (a `Never` local would fail the compile at
+    // its descriptor site).
+    let result = match b.db.data(b.db.follow(ty)) {
+        praxis_types::TypeData::Unit | praxis_types::TypeData::Never => None,
+        _ => Some(b.alloc_gc(MirType::Known(ty), None, LocalDebugKind::Temp, None)),
+    };
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
     b.cur = header;
     b.loop_stack.push(LoopCtx {
         continue_target: header,
         break_target: exit,
+        result,
     });
     let _ = lower_block_body(b, body);
     b.loop_stack.pop();
     // Fall through the body → jump back to the header (infinite loop).
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
     b.cur = exit;
+    result.unwrap_or_else(|| lower_lit_gc(b, &Lit::Unit, espan))
 }
 
-/// `break [expr]` (M8-WS6, §4.11). Jump to the enclosing loop's break target.
-/// The optional value is lowered for effect (value-producing loops are a
-/// refinement; for now `break` exits with the loop's Unit value).
+/// `break [expr]` (M8-WS6, §4.11). Jump to the enclosing loop's break target,
+/// writing the loop's result slot on the way out when it has one (TY-21).
+///
+/// The enclosing loop is guaranteed: a `break` with none is `Y012`, reported by
+/// inference (TY-20), and no MIR is built for a program that has one.
 fn lower_break(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
-    if let Some(v) = value {
-        let _ = lower_expr_gc(b, v);
+    let ctx = *b
+        .loop_stack
+        .last()
+        .expect("`break` outside a loop is Y012, reported before MIR");
+    match (ctx.result, value) {
+        // A value-producing loop: every exit writes the slot, including a bare
+        // `break` — which cannot happen in a well-typed program (its `Unit`
+        // would not join), but leaves no unwritten slot if it does.
+        (Some(result), _) => {
+            let src = match value {
+                Some(v) => lower_expr_gc(b, v),
+                None => lower_lit_gc(b, &Lit::Unit, None),
+            };
+            b.push(Inst::MoveGc { dst: result, src });
+        }
+        // A `Unit`- or `Never`-valued loop: the value is lowered for effect.
+        (None, Some(v)) => {
+            let _ = lower_expr_gc(b, v);
+        }
+        (None, None) => {}
     }
-    if let Some(ctx) = b.loop_stack.last().copied() {
-        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
-            target: ctx.break_target,
-        };
-        // A fresh unreachable block so subsequent lowering has somewhere to go.
-        b.cur = b.func.new_block();
-    }
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
+        target: ctx.break_target,
+    };
+    // A fresh unreachable block so subsequent lowering has somewhere to go.
+    b.cur = b.func.new_block();
 }
 
 /// `continue` (M8-WS6, §4.11). Jump to the enclosing loop's continue target.
+/// As for `break`, the enclosing loop is guaranteed by TY-20's `Y012`.
 fn lower_continue(b: &mut Builder<'_>) {
-    if let Some(ctx) = b.loop_stack.last().copied() {
-        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
-            target: ctx.continue_target,
-        };
-        b.cur = b.func.new_block();
-    }
+    let ctx = *b
+        .loop_stack
+        .last()
+        .expect("`continue` outside a loop is Y012, reported before MIR");
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
+        target: ctx.continue_target,
+    };
+    b.cur = b.func.new_block();
 }
 
 /// `return [expr]` (M8-WS6, §4.11). Write the value (or Unit) into the function
@@ -2114,6 +2161,7 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     b.loop_stack.push(LoopCtx {
         continue_target: incr_blk, // filter-skip / flat-map-tail → increment
         break_target: exit,        // take / take_while / any / all / find → exit
+        result: None,              // a fused pipeline loop yields through its sink
     });
     let item = b.alloc_gc(source_item_ty, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
@@ -2960,6 +3008,7 @@ fn emit_flat_map_inner(
     b.loop_stack.push(LoopCtx {
         continue_target: inner_incr,
         break_target: inner_exit,
+        result: None, // a fused pipeline loop yields through its sink
     });
     let inner_item = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
@@ -3052,23 +3101,27 @@ fn invert_bool(b: &mut Builder<'_>, x: LocalId) -> LocalId {
 /// Jump to the enclosing loop's break target and leave `b.cur` on a fresh dead
 /// block so subsequent lowering has somewhere to append.
 fn break_loop(b: &mut Builder<'_>) {
-    if let Some(ctx) = b.loop_stack.last().copied() {
-        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
-            target: ctx.break_target,
-        };
-        b.cur = b.func.new_block();
-    }
+    let ctx = *b
+        .loop_stack
+        .last()
+        .expect("a pipeline stage runs inside the loop context the fusion pushed");
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
+        target: ctx.break_target,
+    };
+    b.cur = b.func.new_block();
 }
 
 /// Jump to the enclosing loop's continue target and leave `b.cur` on a fresh
 /// dead block.
 fn continue_loop(b: &mut Builder<'_>) {
-    if let Some(ctx) = b.loop_stack.last().copied() {
-        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
-            target: ctx.continue_target,
-        };
-        b.cur = b.func.new_block();
-    }
+    let ctx = *b
+        .loop_stack
+        .last()
+        .expect("a pipeline stage runs inside the loop context the fusion pushed");
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
+        target: ctx.continue_target,
+    };
+    b.cur = b.func.new_block();
 }
 
 /// Materialize the sink's final result out of its accumulator(s).
