@@ -25,8 +25,8 @@ Update this file at the end of every stage.
 | S12 — Parser grammar: wildcard, separators, struct-literal suppression | **done** | `4504a1d`, `0c4b2ce`, `e49a803`, `13db789` |
 | S13 — Annotations honored, declaration passes, mutability and scope | **done** | `6037662`, `9129f76`, `4f45455`, `9c6b48a`, `6fd5e46`, `de6b0e2` |
 | S14 — Control flow: bottom type, contexts, joins, loop values | **done** | `fd909a1`, `92a1b84`, `bf91879`, `9cffbe5`, `f93b25f`, `ea506a6` |
-| S15 — Per-use types into HIR and MIR, then monomorphization | **F20, HIR-08, HIR-09 done; HIR-01, MONO-01, MONO-02, HIR-02 left** | `93c05ec`, `f3c76a8` |
-| S16 … S21 | not started | |
+| S15 — Per-use types into HIR and MIR, then monomorphization | **done** (one exit criterion deferred; see §4) | `93c05ec`, `f3c76a8`, `77b2ad6`, `b560e67` |
+| S16 … S21 | **S16 next** — see §4 | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
@@ -34,7 +34,7 @@ TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1225 passed, 0 failed, 65 ignored**. `just ci` is green.
+Now: **1241 passed, 0 failed, 60 ignored**. `just ci` is green.
 
 **S11 is closed.** All five exit-criterion tests pass and all eight findings the
 stage owns are fixed and gated — TY-01…TY-07 and TY-22.
@@ -54,25 +54,42 @@ six exit-criterion tests pass, plus the fourth criterion that is a MIR change
 rather than a test. **D2 is answered *and implemented*** (ADR-053); the stage
 also amended ADR-051 for `Y017`.
 
-**S15 is open.** F20 landed as its first foundation; **HIR-08** and **HIR-09**
-are fixed and gated, and **MONO-03** was already closed in S11. Four findings
-are left — **HIR-01, MONO-01, MONO-02, HIR-02** — and all four want **F15**
-first; §4 says what that is.
+**S15 is closed**, with one exit criterion deferred for a reason that is new
+information — §4 has it. All seven findings the stage owns are fixed and gated:
+**F20**, **HIR-08** and **HIR-09** landed first, **MONO-03** closed in S11, and
+**HIR-01, HIR-02, MONO-01, MONO-02** are **F15**, which *is* the stage. The
+ADR is **054**.
 
-Seventy-two of the audit's ignored regressions are un-ignored and passing.
-The one added by S15 so far:
+Seventy-seven of the audit's ignored regressions are un-ignored and passing.
+The six added by S15:
 
 | Test | File | Finding |
 |---|---|---|
 | `immediately_invoked_closure_boxes_its_mutable_capture` | `infer_tests.rs` | HIR-08 |
+| `lowered_polymorphic_call_result_uses_the_callsite_instantiation` | `infer_tests.rs` | HIR-01/MONO-01 |
+| `lowered_generic_method_result_uses_the_receiver_instantiation` | `infer_tests.rs` | HIR-01 |
+| `specialized_clone_carries_concrete_types_throughout` | `mono.rs` | MONO-01 |
+| `zero_argument_generic_result_is_specialized_from_use_context` | `mono.rs` | MONO-02 |
+| `empty_vec_float_has_the_float_element_descriptor_before_any_push` | `adversarial_audit.rs` | **S7's** last exit criterion, blocked on F15 |
 
-S15's three new gates so far:
+S15's fourteen new gates:
 
 | Test | File | Pins |
 |---|---|---|
 | `the_child_walker_reaches_every_expression_position` | `infer_tests.rs` | F20 — a closure in all twenty-five expression field positions, all found |
 | `an_immediately_invoked_closure_mutates_the_var_it_captured` | `jit.rs` | HIR-08 end to end; the program returned `0` |
 | `a_capture_first_seen_as_an_assignment_target_keeps_its_type` | `infer_tests.rs` | HIR-09's second half — `?T` before, `Int` after |
+| `every_expression_node_has_a_recorded_type` | `infer_tests.rs` | F15's totality, over a tree with all twenty-five positions in it |
+| `lowering_invents_no_type_for_any_expression_position` | `infer_tests.rs` | the same statement where it matters — no `Y099` out of the pass that had nineteen fresh-variable fallbacks |
+| `a_node_key_separates_an_expression_from_the_name_inside_it` | `infer_tests.rs` | why the key is not a `TextRange`: a `PATH_EXPR` and its `Ident` share one |
+| `a_lowered_branch_carries_the_join_not_its_first_arm` | `infer_tests.rs` | HIR-01 at the branch points, where lowering answered `Never` for a divergent first arm |
+| `a_method_name_is_not_a_name_reference` | `infer_tests.rs` | HIR-02 — absent from `refs`, present in `method_refs`, and the entry is the *result* |
+| `hover_over_a_method_name_reports_its_result_type` | `hover_tests.rs` | HIR-02 as the query it broke |
+| `hover_over_a_receiver_still_reports_the_binding` | `hover_tests.rs` | …and a same-ranged name is still a name |
+| `two_instantiations_of_one_generic_are_two_concrete_functions` | `mono.rs` | MONO-01 as the rule — each clone's *own* type, not just its name |
+| `a_zero_argument_generic_is_specialized_per_result_type` | `mono.rs` | MONO-02 — two clones, and the generic original dropped |
+| `a_for_bindings_slot_carries_the_iterators_element_type` | `build.rs` | P0-02's half that F15 unblocked |
+| `a_closure_and_its_indirect_call_carry_their_types` | `build.rs` | …and the closure value's own `Func` |
 
 `mutable_capture_records_error` (`capture.rs`) is plan §8.2's fourth entry and
 was **inverted** rather than deleted: it asserted the WS7a refusal of a mutable
@@ -508,6 +525,20 @@ test name — line numbers throughout the plan have all moved.)
 
 Partial foundations are the main trap for a fresh context.
 
+**F15 — the per-node inferred-type map + `MethodRef`: landed whole.**
+`praxis_hir::NodeKey` is `(TextRange, SyntaxKind)` and a distinct *type* from a
+token range, so the `PATH_EXPR`-node-vs-`Ident`-token collision with `ref_types`
+is unrepresentable. `Analysis::expr_types` holds **every** inferred expression's
+type; `Analysis::method_refs` holds each method call's catalog entry, receiver
+and result, keyed by the method-name token. `CallSite` gained a `result` field.
+Lowering is a pure reader: `symbol_type`, `call_result_type` and `param_type`
+are gone with the five `db.instantiate` re-instantiations and **all nineteen**
+`db.fresh_var()` fallbacks — a miss is `Y099` and never a variable. Every type
+lowering reads is **deep-resolved** (memoized), so the typed tree is concrete to
+its leaves. `mono::specialize` substitutes the scheme's own binders. See
+ADR-054. **Not done:** nothing F15 itself sketches — but note the two *extra*
+insertion points §3 records, and that a `TypedStmt` walker is still not needed.
+
 **F20 — the one derived `TypedExpr` child walker: landed whole.**
 `TypedExpr::{children, children_mut, blocks, blocks_mut}` are generated by one
 `macro_rules!` whose rows list each variant's child fields exactly once; the
@@ -613,7 +644,8 @@ taking ids, so a builder can only write `unannotated()` and
 runs after `annotate` at all four pipeline sites plus both codegen test
 harnesses. **Not done, deliberately:** `ScalarLiveAcrossSafepoint` (it fires on
 every `lower_seq_*` accumulator and is harmless there — a scalar is a copy and
-cannot dangle) and `OpaqueAtDescriptorSite` (H10, S15). See ADR-044 §5.
+cannot dangle) and `OpaqueAtDescriptorSite` (H10 — S15 tried; see §4 for what it
+now waits on). See ADR-044 §5.
 **Effect-driven safepoints** — the other third of F17 — did not land: a
 safepoint is still decided by instruction shape, not by
 `CallTarget::Runtime(sym).allocates()`. Nothing needed it, and the shapes agree
@@ -663,7 +695,63 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S15's F20, HIR-08 and HIR-09)
+### From this session (S15's F15 — read this first)
+
+**`TypedExpr.ty` is what inference recorded, deep-resolved.** Not a
+re-derivation, not an instantiation, not a fresh variable. If you need a
+lowered node's type, read it; if you are *writing* a lowering, take it from
+`Lowerer::node_ty(node.syntax())` and nothing else.
+
+**A lowering that asks for a type inference never recorded emits `Y099`.**
+`DiagCode::InternalMissingType` was allocated in ADR-051 and unused; it is used
+now. If you add an expression form, inference must visit it or lowering will
+report — which is the point, and is why the two totality gates exist.
+
+**Inference records at three places, not one.** `infer_expr` is the entry the
+plan names; the other two are `infer_block_inner` (a branch body, a loop body
+and a function body are `infer_block` calls, never `infer_expr` calls) and the
+two `PATH_EXPR` nodes nothing evaluates — a call's callee name and a record
+literal's head. The callee's entry is deliberately **not** also written to
+`ref_types`: hover over a callee shows the binding's generalized scheme, which
+`hover_over_out_shows_polymorphic_scheme` pins.
+
+**A `TypedFn`'s `fn_type` is its scheme's *body*, binders and all.** It used to
+be a fresh instantiation, whose variables nothing else in the tree mentioned.
+Its parameters, its body's expressions and its own type are now one variable
+set — which is the whole of MONO-01, because `mono::specialize` rewrites that
+set by `substitute_params(t, scheme.binders(), chosen)`. **If you mint a
+`TypedFn` anywhere else, use the scheme body.**
+
+**A generic function's `TypedFn` therefore renders with type variables in it.**
+That is correct and was true before; they were merely a *different* set from
+the ones its own parameters used.
+
+**`infer_fn` unifies the signature placeholder with `(params) -> result`
+*before* the body is inferred.** A recursive call used to unify a bare variable,
+so `let v = build(n-1); v.push(n)` could not resolve `push` — and lowering hid
+it by re-resolving the method later. This is strictly more checking: a recursive
+call's arguments are checked where they are written.
+
+**A method call's entry and result come from `Analysis::method_refs`.**
+Lowering does not call `catalog::lookup`. If inference could not resolve the
+method there is no entry, and lowering reports `Y110` — keeping the receiver and
+argument subtrees, which it used to discard along with every closure in them.
+
+**`Lowerer::loop_results` is deleted**, and so is `lower_bin`'s Int-or-Float
+heuristic, `lower_if`'s join, `lower_match`'s first-arm read and
+`lower_tuple`'s reconstruction. All were recomputations of an answer inference
+had. **If you add a branch point, inference joins it; lowering reads it.**
+
+**The method catalog's `enumerate` and `zip` rows are wrong**, and F15 makes it
+matter. Both declare `result: Vec[T]` — the receiver's own element type — so
+`v.enumerate()` on a `Vec[Int]` types as `Vec[Int]` rather than
+`Vec[(Int, Int)]`. Lowering used to re-derive a harmless fresh variable from
+that row and now believes it. Nothing reads the wrong type today (the fused
+pipeline keeps its result Vec's element `Opaque` on purpose), but **do not
+derive a descriptor from a pipeline's result type** until the rows are fixed.
+See §4.
+
+### From an earlier session (S15's F20, HIR-08 and HIR-09)
 
 **`TypedExpr::children()` / `blocks()` (and their `_mut` twins) are the walk.**
 If you need to recurse over the typed tree, fold over them; do not write a
@@ -1674,6 +1762,20 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
+**S16 is next** — records, patterns, exhaustiveness, enum constructors (HIR-03
+… HIR-07). Read plan §5's S16 paragraph and §6's hazards first; the plan's own
+ordering note matters here (HIR-03's `SymbolKind::EnumVariant` before HIR-07 and
+HIR-06). Two things S15 leaves on its doorstep:
+
+- **`lowering_respects_a_local_that_shadows_an_enum_variant` is S16's first exit
+  test, and F15 has already moved it.** `lower_path`/`lower_call` still look a
+  constructor up by *text* (`lookup_enum_variant_by_name`), which is HIR-03 —
+  but the type they attach to the resulting `TypedExpr::EnumVariant` is now the
+  use-site type from `expr_types`, not the def's own. Only the symbol lookup is
+  left.
+- **`wildcard_pattern_does_not_bind_a_value_named_underscore` is already
+  un-ignored** (S12 rewrote it for FE-02); the plan lists it under S16.
+
 **S11 is closed.** All eight findings the stage owns are fixed and gated —
 TY-01…TY-07 and TY-22 — and all five exit-criterion tests pass. TY-04 needed no
 work of its own: F9's fold walks record fields and enum payloads, which is the
@@ -1726,69 +1828,72 @@ read the loop stack with an `expect`. The stage's ADR is **053**, and it amended
   F20's consumers are now entirely S15's (HIR-08, MONO-01, MONO-02, HIR-09).
 - **TY-21 is three passes computing one join**, and each has to. See §3.
 
-**S15 is open, and it is the stage the plan says the audit's ordering
-understates.** Three of its seven findings are closed: **MONO-03** in S11 (F12's
-`TypeKey` was its fix), and **HIR-08** and **HIR-09** here. **F20 landed** as the
-stage's cheap foundation — see §2 and §3.
+**S15 is closed.** All seven findings are fixed and gated — F20, HIR-01,
+HIR-02, HIR-08, HIR-09, MONO-01 and MONO-02, with MONO-03 already closed in S11
+— and five of the six exit-criterion tests pass and are un-ignored, plus S7's
+`empty_vec_float_has_the_float_element_descriptor_before_any_push`, which was
+blocked on this stage. The ADR is **054**. Notes worth carrying:
 
-**F15 is what the four remaining findings all want, and it is the stage.**
-`praxis_hir::NodeKey` (a `(TextRange, SyntaxKind)` newtype, so the existing
-PATH_EXPR-node vs `Ident`-token collision with `ref_types` is unrepresentable) +
-`Analysis::expr_types` — *every* inferred expression's type — + `method_refs`,
-filled by **one** insertion at the tail of `Inferer::infer_expr`. Then:
+- **F15 is the stage, and §2/§3 say what landed.** Read §3's first block before
+  touching HIR — the typed tree's types come from one map now, and several
+  things a lowering used to compute for itself are gone.
+- **The sixth exit criterion is deferred, and the reason is new information.**
+  The plan asks S15 to turn on the MIR verifier's no-`Opaque`-at-a-
+  descriptor-site rule (**H10**) on the grounds that F15 supplies the missing
+  types. F15 does supply them: the `for`-loop item and its binding slot, the
+  parser result, the closure value, the indirect call result, `out(x)`'s result
+  and a pipeline's *source* item are all `MirType::Known` now, and every
+  `AllocKind::Collection` a program writes carries real type arguments. Two
+  descriptor sites are left, both `AllocKind::Tuple { ty: Opaque }`: the tuple a
+  fused `enumerate` or `zip` builds. They need **two** things:
+  1. **MIR-05's per-stage item types (S21).** A fused chain knows what its
+     source yields; what stage *n* yields is a fact no stage carries.
+  2. **A method catalog that describes `enumerate` and `zip`.** Both rows
+     declare `result: Vec[T]`. Verified, not read off the rows:
+     `fn main(v: Vec[Int])` with `let e = v.enumerate()` gives `e :: Vec[Int]`.
+     This is **a finding the register does not have**, and F15 sharpens it —
+     lowering believes the catalog now. It belongs with S21's MIR-05, or with
+     whatever stage next touches `praxis-stdlib`'s sequence rows. Until then,
+     `alloc_empty_vec` deliberately does **not** read its element type from the
+     chain's result type, though that type is `Known` at every call site: it
+     would swap an honest null descriptor — which the runtime repairs on the
+     first push — for a wrong one.
+- **`MirType::expect_known`/`MirTypeError` are still unwritten**, for the same
+  reason they were in S9: their only consumer is the rule above.
+- **The corpus triage found nothing, for the seventh time.** Every `.px` under
+  `tests/` and every CLI fixture went through `praxis check`, and the corpus
+  went through `praxis run` as well (which is what exercises lowering and mono;
+  `check` stops at `analyze`). Only the three files that are *meant* to report
+  do. **One pre-existing breakage surfaced and is not S15's:**
+  `tests/aoc-corpus/day02_grid_of_char.px` calls `map.len()` on a `Grid[Char]`,
+  and the catalog has no `Grid.len` — it has `width`/`height`. Confirmed
+  against the tree before this stage's first commit. No Rust test covers the
+  corpus directory, which is why nothing had caught it.
 
-1. **Lowering becomes a pure reader.** The plan names what to delete:
-   `symbol_type`, `call_result_type`, `param_type`, the five `db.instantiate`
-   re-instantiations, and **all 19 `db.fresh_var()` fallbacks** — a miss becomes
-   `Y099` (`DiagCode::InternalMissingType`, allocated in ADR-051 and **still
-   unused**, so it is free), never a fresh variable, because a fresh variable is
-   the silent lie the whole audit is tracking. The judgement calls are the nodes
-   lowering *constructs* and inference never saw: `Paren` transparency,
-   `Expr::Error`, and synthesized `Unit` tails.
-2. **Three subtrees are dropped by lowering today, and F15 is where that
-   surfaces.** Writing F20's coverage gate found them: `(|n| 1).len()` and
-   `(|n| 2).parse()` lose their *receiver* — `lower_method_call` reports `Y110`
-   and returns a placeholder, discarding the tree it was given — and a
-   statement-position `v.map(|n| 3)` followed by a line starting with `(` is
-   eaten by the FE-04 trap (ADR-049) into a postfix call. The first is exactly
-   the "lowering re-infers and disagrees" behaviour F15 exists to remove; the
-   gate works around both rather than pinning them, and says so.
-3. **Then MONO-01 and MONO-02.** `lower_call` re-instantiating the callee's
-   scheme is what makes `let values: Vec[Float] = Vec()` carry `Vec[?T]`; F15
-   supplies the call site's type. `instantiate_with_mapping` and
-   `TypeDb::substitute` (F10's landed half) are what `specialize` should use
-   instead of following an unrelated original.
-4. **Then turn the verifier rule on.** The MIR verifier's
-   no-`Opaque`-at-a-descriptor-site rule (H10) and the ~35 sites P0-02 left
-   `Opaque` in S3. `MirType::expect_known`/`MirTypeError` are still unwritten
-   and land here — §2's F17 note says why they waited.
-5. **HIR-02 is F15's `method_refs`, not its own change.** A method's inferred
-   result is recorded at the method-name token in `ref_types`, which is not a
-   name reference, so `hover` — which looks the range up in `refs` first — can
-   never see it. Giving methods their own map is the fix and the plan's sketch.
+**What S15 deliberately left:**
 
-Exit tests: `lowered_polymorphic_call_result_uses_the_callsite_instantiation`,
-`lowered_generic_method_result_uses_the_receiver_instantiation`
-(`infer_tests.rs`), `specialized_clone_carries_concrete_types_throughout`,
-`zero_argument_generic_result_is_specialized_from_use_context` (`mono.rs`), and
-`empty_vec_float_has_the_float_element_descriptor_before_any_push`, whose
-`#[ignore]` reason S13 corrected to name F15/MONO-01.
-`immediately_invoked_closure_boxes_its_mutable_capture` is **already
-un-ignored** (HIR-08).
+- **`TypedStmt` still has no derived walker**, and F15 added no statement form.
+- **`lower_block` derives its type from its tail rather than reading the block
+  node.** An `else if` body has no `BLOCK_EXPR` node at all — lowering
+  synthesizes the block — so the tail is the only answer available for every
+  block, and TY-16 already made the two rules identical.
+- **A `VarCell` local and the parser's input buffer stay `Opaque`.** Neither
+  holds a value of a language type: one is a cell object wrapping the value, the
+  other is a runtime-owned buffer.
+- **`mono` still keys its cache on the call site's types, not on a use-site
+  substitution witness.** `instantiate_with_mapping` returns the mapping and
+  `specialize` uses it, but the *cache key* is `(callee, arg keys, result key)`.
+  Two call sites that agree on arguments and result share a clone, which is
+  correct; a callee with a phantom binder that neither mentions would collapse
+  them, and no such callee exists.
+- **Nothing checks that a `TypedModule` has no unbound `TypedExpr.ty`.** F15's
+  sketch proposes a debug walk asserting it. The two totality gates state the
+  property one level up — inference records every node, lowering reports rather
+  than inventing — and an unbound *variable* is legitimate in a generic
+  function's clone-source, so the walk would need to know which functions are
+  about to be specialized.
 
-**H18 has one entry left**: `numeric_scalars_are_orderable` (S17).
-`mutable_capture_records_error` was inverted with HIR-09.
-
-**What S15 has deliberately left so far:**
-
-- **`TypedStmt` has no derived walker.** F20 covers `TypedExpr` only; the three
-  statement walks are four lines each and their shape has not drifted. If F15
-  adds a statement form, revisit.
-- **A polymorphic capture still falls back to a fresh variable.** HIR-09's fix
-  reads the binding's scheme only when it is *not* polymorphic — a generic
-  binding's capture needs the use site's instantiation, which is F15's map.
-
-**What S14 deliberately left:**
+**What S14 deliberately left:****What S14 deliberately left:**
 
 - **`join` is used at six sites.** `infer_if`, `infer_match`, `lower_if`, the
   function result in `infer_fn`, a closure's result in `infer_closure_body`, and
@@ -1950,10 +2055,11 @@ Two things S10 leaves for a later stage, both deliberate:
   records why: it fires on every `lower_seq_*` accumulator by construction and
   is harmless there, since a scalar is a copy of a payload and cannot dangle.
   Do not add it without moving those accumulators into `Gc` slots first.
-- **`OpaqueAtDescriptorSite` stays off until S15** (H10), and
+- **`OpaqueAtDescriptorSite` stays off** (H10), and
   **`MirType::expect_known`/`MirTypeError` are still unwritten** — the plan
   puts them in S9 because F17's verifier is their only consumer, but that
-  consumer is the rule H10 defers. They land in S15, together.
+  consumer is the rule H10 defers. (S9 expected them in S15; S15 could not turn
+  the rule on, and §4's S15 entry says what it now waits for.)
 - **Effect-driven safepoints did not land.** F17's third part wanted
   `CallTarget::Runtime(sym).allocates()` to decide what is a safepoint;
   instruction shape still decides. The two agree today, and nothing needed the
@@ -1986,9 +2092,11 @@ Two things S10 leaves for a later stage, both deliberate:
 
 Re-read §6 of the plan first. The hazards that still bind: **H17** (RT-13 spends
 S18's one bump — S11's went unspent, because the runtime half did not land), and
-**H10**
-in its long form (the MIR verifier's "no `Opaque` in a descriptor-producing
-position" rule stays off until S15). **H3 is discharged** — the debug/root
+**H10** in its long form — the MIR verifier's "no `Opaque` in a
+descriptor-producing position" rule, which S15 could **not** turn on. It now
+waits on **S21** (MIR-05's per-stage item types) *and* on a catalog fix for
+`enumerate`/`zip`; §4's S15 entry says why, and it is a finding the register does
+not have. **H3 is discharged** — the debug/root
 split landed first, the two m11 tests are green, and
 `the_debug_set_still_shows_what_the_root_set_dropped` now states the property
 at the level it lives at rather than leaving it to a CLI snapshot three layers
@@ -2507,8 +2615,9 @@ Things the plan states that are no longer or were not quite true.
   every site today. `AllocatingCallNotASafepoint` therefore has no rule.
 - **`MirType::expect_known`/`MirTypeError` do not land in S9.** The plan puts
   them here because F17's verifier is their only consumer — but that consumer
-  is `OpaqueAtDescriptorSite`, which H10 defers to S15. Writing the API without
-  its rule would be adding unused surface. They land in S15.
+  is `OpaqueAtDescriptorSite`, which H10 defers. Writing the API without its rule
+  would be adding unused surface. (S9 said "they land in S15"; S15 could not turn
+  the rule on — §4's S15 entry says why.)
 - **The plan says "two loop-increment `IntBinOp` sites"; there are eight
   compiler-written sites**, and they split three ways. Three loop index bumps,
   two `count` accumulators and one `+ 0` scalar copy are bounded by a
