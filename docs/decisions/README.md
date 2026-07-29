@@ -62,3 +62,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-054: Lowering reads the type inference recorded, and a specialization substitutes the scheme's own binders](./054-lowering-reads-the-type-inference-recorded.md)
 - [ADR-055: Exhaustiveness and reachability are one usefulness question, asked at every position a value has](./055-exhaustiveness-and-reachability-are-one-usefulness-question.md)
 - [ADR-056: `panic`, `assert` and `dbg` are real functions with real types and a real fault](./056-the-prelude-control-names-are-real-functions.md)
+- [ADR-057: A capability requirement rides on the scheme that quantified it, and a key is hashable *and* immutable](./057-a-capability-requirement-rides-on-the-scheme-that-quantified-it.md)

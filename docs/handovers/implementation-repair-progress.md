@@ -27,7 +27,8 @@ Update this file at the end of every stage.
 | S14 — Control flow: bottom type, contexts, joins, loop values | **done** | `fd909a1`, `92a1b84`, `bf91879`, `9cffbe5`, `f93b25f`, `ea506a6` |
 | S15 — Per-use types into HIR and MIR, then monomorphization | **done** (one exit criterion deferred; see §4) | `93c05ec`, `f3c76a8`, `77b2ad6`, `b560e67` |
 | S16 — Records, patterns, exhaustiveness, enum constructors | **done** | `57e2e5b`, `06f3c44`, `b8e2c7b`, `e918741` |
-| S17 … S21 | not started | |
+| S17 — Constraint channel and capabilities | **in progress** (7 of 11 findings + TY-33 unit 1) | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662` |
+| S18 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
@@ -35,7 +36,70 @@ TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1264 passed, 0 failed, 53 ignored**. `just ci` is green.
+Now: **1305 passed, 0 failed, 40 ignored**. `just ci` is green.
+
+**S17 is open and is the largest stage in the repair.** Seven of its eleven
+findings are done — **TY-25**, **TY-26**, **TY-27**, **TY-28**, **TY-29**,
+**TY-32** and **RT-08** — plus **TY-33's first unit** (`panic`/`assert`/`dbg`).
+**F10's constraint channel landed as its own commit** with the suite green, per
+plan §9 step 2. The ADRs are **056** (the control names) and **057** (the
+channel + D4); ADR-057 also supersedes **ADR-010's lapsed M7 deferral** of the
+§5.4 capability system, which the plan's F10 block asked for.
+
+**Four findings are left in the stage's first unit: TY-30, TY-31, TY-34, and
+TY-33's units 2–4.** §4 says what each needs and what is already in place.
+
+Eleven exit-criterion tests were un-ignored by S17 so far:
+
+| Test | File | Finding |
+|---|---|---|
+| `prelude_assert_requires_bool` | `infer_tests.rs` | TY-33 (unit 1) |
+| `polymorphic_equality_rejects_function_instantiation` | `infer_tests.rs` | TY-29 |
+| `iterable_constraint_rejects_int_instantiation` | `infer_tests.rs` | TY-29 |
+| `map_key_must_be_hashable` | `infer_tests.rs` | TY-32 |
+| `mutable_collection_cannot_be_used_as_a_map_key` | `infer_tests.rs` | TY-32/RT-08 |
+| `mutable_collection_cannot_be_used_as_a_set_element` | `infer_tests.rs` | TY-32/RT-08 |
+| `heap_element_must_be_orderable` | `infer_tests.rs` | TY-32 |
+| `parse_requires_text_input` | `infer_tests.rs` | TY-25 |
+| `unary_minus_accepts_float_typed_variables` | `infer_tests.rs` | TY-26 |
+| `float_remainder_is_rejected` | `infer_tests.rs` | TY-27 |
+| `integer_literal_overflow_is_diagnosed` | `infer_tests.rs` | TY-28 |
+
+S17's new gates so far:
+
+| Test | File | Pins |
+|---|---|---|
+| `each_control_builtin_has_the_type_its_contract_needs` | `infer_tests.rs` | TY-33 unit 1 as the rule — `assert` refuses a non-`Bool`, `dbg` is the identity, `panic` satisfies any result |
+| `each_control_builtin_reaches_the_backend` | `infer_tests.rs` | …and the half a type test cannot see: each lowers to a runtime call, not to a user function nobody defined |
+| `a_panic_stops_the_program_with_the_message_it_was_given` | `jit.rs` | `panic` end to end — its own fault kind, and the words the program wrote |
+| `a_panic_renders_a_non_text_argument_through_its_descriptor` | `jit.rs` | the message is the *value*, rendered as `out` renders one |
+| `an_assert_faults_on_false_and_is_invisible_on_true` | `jit.rs` | both directions, including that the next statement still runs |
+| `dbg_hands_back_the_value_it_was_given` | `jit.rs` | the identity on *values*, not just on types — a collection round-trips its identity |
+| `a_scheme_claims_the_constraints_on_the_variables_it_quantifies` | `types_tests.rs` | F10 — and that an outer variable's requirement stays the outer scope's |
+| `a_monotype_carries_no_constraints_and_claims_none` | `types_tests.rs` | `Scheme::monotype` by construction, and that nothing is silently consumed |
+| `instantiating_re_emits_each_constraint_against_the_use_sites_variable` | `types_tests.rs` | two uses, two variables, neither the scheme's own binder |
+| `a_type_carrying_capability_is_substituted_at_the_use_site` | `types_tests.rs` | `Iterable { item }`'s item is re-pointed too |
+| `only_a_resolved_constraint_is_dischargeable` | `types_tests.rs` | discharge is by resolution, and draining takes rather than copies |
+| `an_identical_requirement_is_recorded_once` | `types_tests.rs` | …and a different capability on one variable is a different requirement |
+| `all_lists_every_capability` | `praxis-stdlib/src/capability.rs` | `CapKind::ALL` is what every sweep iterates |
+| `check_answers_each_capability_with_its_own_rule` | `capability.rs` | five different answers about one `Vec` — a kind wired to the wrong predicate is what `supports_hash = supports_eq` was |
+| `a_failure_names_the_component_that_failed` | `capability.rs` | the function two levels down, not the outer `Vec` |
+| `an_unresolved_variable_satisfies_every_capability` | `capability.rs` | the optimism, stated — and why the channel exists |
+| `has_method_is_answered_by_the_catalog` | `capability.rs` | `HasMethod` routes through the same door |
+| `iterable_is_answered_by_iter_item` | `capability.rs` | …and so does `Iterable` |
+| `a_mutable_collection_is_hashable_but_is_not_a_key` | `capability.rs` | TY-32 as the *distinction*: hashing was never the problem |
+| `a_tuple_or_record_is_a_key_exactly_when_its_components_are` | `capability.rs` | the rule is mutability, not container-ness |
+| `orderable_and_numeric_are_different_sets_of_scalars` | `capability.rs` | **rewritten** from `numeric_scalars_are_orderable` (H18's last entry) |
+| `a_mutable_collection_is_not_a_key` | `infer_tests.rs` | D4 across every mutable collection and all three key positions |
+| `an_immutable_value_is_still_a_key` | `infer_tests.rs` | …including a tuple of scalars, which every grid-position map uses |
+| `a_heap_element_must_be_orderable` | `infer_tests.rs` | the same channel, a different capability |
+| `a_key_requirement_reaches_through_a_generic_function` | `infer_tests.rs` | the requirement is claimed by a scheme and checked at the call |
+| `parse_is_syntax_and_its_text_argument_is_the_one_checked` | `infer_tests.rs` | TY-25's real cause — `parse` was a `PATH_EXPR` and `text_expr` answered with it |
+| `negation_follows_the_operands_type_not_its_spelling` | `infer_tests.rs` | TY-26 as the rule, in both directions |
+| `float_remainder_has_no_operation_to_lower` | `infer_tests.rs` | TY-27, and that every other `Float` operator is untouched |
+| `an_out_of_range_int_literal_is_reported_rather_than_saturated` | `infer_tests.rs` | TY-28 in expression *and* pattern position |
+| `a_mutable_collection_key_is_refused_before_it_can_be_mutated` | `adversarial_audit.rs` | **rewritten** — D4 chose rejection, so the program never reaches the JIT |
+| `a_structural_key_hashes_by_contents_so_mutating_it_moves_its_bucket` | `dynamic_key.rs` | **rewritten** — why the compile-time half has to exist |
 
 **S11 is closed.** All five exit-criterion tests pass and all eight findings the
 stage owns are fixed and gated — TY-01…TY-07 and TY-22.
@@ -621,17 +685,22 @@ explicitly, and says RT-13 needs TY-06's canonical `Option` first). `SchemaIdent
 is untouched; nothing in `praxis-types` is `#[repr(C)]`, so **S11 spent no ABI
 bump and S12 starts fresh**.
 
-**F10 — scheme-owned binders + `Level`: landed in part, deliberately.**
-`VarState::Generalized` is deleted, `Scheme`'s fields are private
-(`binders()` / `body()`), `generalize` mutates nothing, `instantiate`
-substitutes by binder membership, and `instantiate_with_mapping` exists for
-MONO-01. `Level` is a newtype whose only mutator is `clamp_to`, so TY-01's
-reversed comparison is unwritable. **Not done, and it is the larger half:** the
-**constraint channel** — `praxis_stdlib::capability::CapKind`,
-`praxis_types::constraint::{Capability, Constraint}`,
-`TypeDb::take_dischargeable`, `TypeDb::substitute`, and the single exhaustive
-`praxis_hir::capability::check`. Its only consumers are S17's TY-25…TY-34 and
-RT-08; adding it now is unused surface. See ADR-047.
+**F10 — scheme-owned binders + `Level` + the constraint channel: landed
+whole.** The first half landed in S11: `VarState::Generalized` is deleted,
+`Scheme`'s fields are private, `generalize` mutates nothing, `instantiate`
+substitutes by binder membership, `instantiate_with_mapping` exists for MONO-01,
+and `Level`'s only mutator is `clamp_to` (ADR-047). **S17 landed the channel**
+(ADR-057): `praxis_stdlib::capability::CapKind` is the payload-free vocabulary,
+`praxis_types::constraint::{Capability, Constraint}` adds the two type-carrying
+arms, `Scheme` carries the constraints on its own binders, and
+`praxis_hir::capability::check` is the one exhaustive decision function. The
+lifecycle is emit → claim → re-emit → discharge, with `TypeDb::require`,
+`claim_constraints`, `reemit_constraints` and `take_dischargeable` as the four
+verbs. **Not done:** `TypeDb::substitute`'s public `HashMap<Type,Type>` form —
+`generalize::substitute(db, t, vars, to)` is the shape both callers actually
+have (a binder list and a matching argument list), and it already existed for
+F12. **Nothing emits `HasMethod` yet** (TY-30) and **no catalog row declares a
+bound** (TY-31); `check` answers both, and the emitters are what is missing.
 
 **F9 — the one `TypeFolder`: landed whole.** `praxis_types::fold` is the only
 walk over `TypeData`, its match has no catch-all, and the five hand-written
@@ -740,7 +809,79 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S16's HIR-06)
+### From this session (S17: the channel, TY-25…TY-29, TY-32, RT-08, TY-33 unit 1)
+
+**A capability question goes through `praxis_hir::capability::check`, and there
+are five kinds now.** `supports_eq`/`supports_ord`/`supports_hash`/`iter_item`
+still exist as the *rules*; `check` is the one door, and it takes `&mut TypeDb`
+**and the method catalog** (`HasMethod` is a catalog question). Two predicates
+are new: `supports_hash_stable` (a key is hashable AND immutable) and
+`supports_numeric` (a *different* set from orderable — `Text` is ordered and is
+not a number).
+
+**A requirement about a type variable is deferred, not answered.**
+`Inferer::require_cap(t, cap, at)` is the emitter: concrete decides now, a
+variable goes on `TypeDb`'s pending list. **If you add a capability check, call
+it — do not call the predicate directly**, or the requirement is discarded at
+generalization exactly as TY-29 was.
+
+**Discharge happens at two points and the ordering is load-bearing.**
+`Inferer::discharge_constraints` runs after a function body and *before* that
+function generalizes — so what is still pending is precisely what the scheme is
+about to claim — and once more when the declaration group closes. Draining
+anywhere else reports a generic body's requirement against a variable nothing
+pinned.
+
+**`claim_constraints` follows before comparing against binders.** The map's own
+key variable is what a `Map` requirement names; `insert` links it to the
+parameter's, and *that* is the one generalization quantifies. This is why the
+constraint is re-pointed at the representative when it is claimed.
+
+**A diagnostic can carry a second span now.** `Constraint` has `at` (where the
+requirement is written) and `via` (the instantiation that violated it);
+`report_at()`/`origin_note()` are the two readers, `TypeDb::instantiate_at` is
+what fills `via`, and `Diagnostic::with_note` is new on the *finished*
+diagnostic rather than only on the builder.
+
+**`Y013`, `Y014`, `Y015` and `Y016` are spent.** ADR-051 reserved all four for
+exactly these findings and they had no emitter until now — `Y013`
+(`IntLiteralOutOfRange`, TY-28), `Y014` (`NotHashable`, TY-32/D4), `Y015`
+(`NotNumeric`, TY-31's channel — the *wording* exists, the emitter does not
+yet), `Y016` (`OperatorNotDefined`, TY-27). With `Y017` (D2, S14) the `Y0xx`
+block is contiguous through 17; the `Y12x` block is still full through `Y123`.
+Check ADR-051 before allocating.
+
+**`parse` is no longer a `PATH_EXPR`.** `parse(text, parser)` is syntax; the
+keyword used to be wrapped in a path node inside its own `PARSE_EXPR`, which made
+every use an `N001` **and** made `ParseExpr::text_expr` — "the first `Expr`
+child" — answer with the keyword rather than the argument. If you read a
+`PARSE_EXPR`'s children, the first `Expr` is now the text argument.
+
+**An out-of-range `Int` literal is `Y013` and lowers as `0`.** It used to
+saturate to `i64::MAX` silently. Both the expression and the pattern site
+report.
+
+**`%` on `Float` is `Y016`.** MIR's unsupported-operator fallback mapped it to
+*addition*, so `5.0 % 2.0` computed `7.0`. There is no operation to lower.
+
+**Negation reads the operand's type.** `-x` where `x: Float` used to come out
+`Int` and then fail to unify with its own operand.
+
+**`FaultKind` has `Panic` and `AssertFailed`, and `RuntimeContext` has a
+`fault_message` pointer.** `RUNTIME_ABI_VERSION` is **13** — S17's one bump
+(H17), already spent. `Runtime::fault_message()` is what a host reads; the
+message is a `String` rendered at the raise, because the host reads it after the
+heap is gone.
+
+**`render_noninteractive` takes seven parameters.** The new one is
+`message: Option<&str>`, third, between `kind` and `snapshot`.
+
+**`dbg`, `panic` and `assert` lower to runtime symbols.**
+`control_builtin_symbol` in `praxis-mir`'s `build.rs` is the one lookup, and the
+fault check after the call is driven by the manifest's own `Effect`. `out` keeps
+its own path — it returns the Unit sentinel rather than its argument.
+
+### From an earlier session (S16's HIR-06)
 
 **`exhaustive.rs` is a usefulness matrix, and it takes `&mut TypeDb`.** The two
 ad-hoc walks (`uncovered_constructors`, `pattern_catches_all`) are gone. `Y120`
@@ -1868,6 +2009,68 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
+**S17 is open, and the next thing to do is TY-30 or TY-31.** Read the plan's §5
+S17 entry and §7's D4/D5/D6 first — they are all three answered, and D5 and D6
+went *against* the recommendation, which is what makes the stage several
+sessions rather than one.
+
+What is done, and what each remaining piece needs:
+
+- **F10's constraint channel landed whole** (ADR-057), as its own commit with
+  the suite green. §2 and §3 say what it is and what the four verbs are. **If
+  you add a capability check anywhere, go through `Inferer::require_cap`** —
+  calling a predicate directly is TY-29 by another name.
+- **TY-25, TY-26, TY-27, TY-28, TY-29, TY-32 and RT-08 are done and gated.**
+- **TY-33's first unit is done** (`panic`, `assert`, `dbg` — ADR-056). Its
+  remaining units are D5's (2) the eight numeric helpers and (3) the six graph
+  helpers.
+- **TY-30 is the next natural step, and TY-31 already wants it.** A method call
+  on an unresolved receiver returns a fresh variable and constrains nothing:
+  `crate::catalog::lookup` needs a catalog-representable receiver, so
+  `fn total(values) { values.sum() }` gives up. `Capability::HasMethod` exists
+  and `capability::check` answers it — **nothing emits one**. The emitter goes
+  in `infer_method_call`'s `let Some(entry) = hits.first() else { … }` arm: when
+  the receiver follows to a variable, require `HasMethod { name, params,
+  result }` on it instead of returning a bare fresh var. Its exit test is
+  `collection_method_constrains_unannotated_receiver_parameter`, and note that
+  it asserts the program is **accepted** — the constraint has to *pin* the
+  receiver at the call site, not merely reject a bad one. That is more than a
+  check: discharging a `HasMethod` against a resolved receiver has to unify the
+  entry's params/result with the constraint's.
+- **TY-31 is the catalog bound migration**, and the plan sizes it as ONE commit
+  across 74 `TypePattern::Var("T")` sites. `CapKind` is the vocabulary to
+  declare with and `supports_numeric` is the predicate; `Y015`'s wording is
+  already written and has no emitter. `Vec[Bool].sum()` still typechecks. Its
+  exit test is `sum_requires_int_elements`. **Fix the `enumerate`/`zip` rows in
+  the same pass** — both declare `result: Vec[T]` and both are wrong, which is a
+  finding the register does not have and which H10 waits on (see the S15 entry
+  below).
+- **TY-34 is D6's full `..`/`..=` vertical slice**, and D6 lists four
+  sub-decisions it does *not* settle (half-openness, value-ness, descending
+  behaviour, endpoint types), all owed before the slice starts. Two anchors
+  exist: `CollectionCtor::Range` and `capability::iter_item`'s
+  `(CollectionCtor::Range, _) => Int` arm.
+- **D5's graph helpers need a graph *representation* decision** that is not in
+  the plan and is owed before that unit starts. Do not interleave it with the
+  channel.
+
+Things this session found that the register does not have:
+
+- **The lexer does not support digit separators**, though `lower.rs` strips `_`
+  from an `IntLit` before parsing it. `9_223_372_036_854_775_808` lexes as `9`
+  followed by the identifier `_223_372_036_854_775_808`, so it is an `N001`.
+  Either the lexer should accept them or the strip should go; one of the two is
+  dead code. Found while gating TY-28.
+- **`assert` takes one argument and cannot take a message.** A name has one
+  scheme and the type system has no arity-based overloading, so
+  `assert(cond, "why")` has no spelling. ADR-056 records it; giving it one is a
+  language decision.
+- **`Iterable`'s `item` is not unified at discharge.** `check` answers the
+  yes/no; a constraint that resolves to a *differently*-itemed iterable is not
+  caught. No finding asks for it and `iter_item` is a function of the receiver
+  alone, but it is the one place the channel is weaker than its `Capability`
+  shape suggests.
+
 **S16 is closed.** All five findings are fixed and gated — HIR-03, HIR-04,
 HIR-05, HIR-06 and HIR-07 — and all eight exit-criterion tests pass. HIR-05
 needed no code, exactly as the plan predicted ("discharged entirely by FE-02 in
@@ -2294,6 +2497,14 @@ H8, H9 and H16 remain discharged.**
 
 ## 5. Design decisions still open
 
+**D4, D5 and D6 are answered *and partly implemented*.** D4 is ADR-057 (a
+mutable collection is not a key — the recommendation, confirmed). D5's first
+unit is ADR-056 (`panic`/`assert`/`dbg`); its other two units — the eight
+numeric helpers and the six graph helpers — are not started, and the graph unit
+still owes a **graph representation** decision that is not in the plan. D6
+(`..`/`..=` in full) is not started and owes four sub-decisions §7 lists:
+half-openness, value-ness, descending behaviour, endpoint types.
+
 **D14 is answered** — see ADR-040. The `Safepoint` token shipped with a named,
 `pub(crate)` `Heap::alloc_unpaced` back door for the host helpers and the
 parser interpreter (the plan's option 2), rather than landing IPR-14 out of
@@ -2463,6 +2674,43 @@ one. Settle both together.
 ## 6. Corrections to the plan
 
 Things the plan states that are no longer or were not quite true.
+
+- **`numeric_scalars_are_orderable` did not invert.** Plan §8.2 lists it as a
+  passing test whose "meaning inverts" in S17, because TY-32 was expected to
+  take `Text`/`Char` orderability away. **ADR-045 (S10) had already settled it
+  the other way**: the runtime got real `compare` callbacks for both, so the
+  assertions were all still true. What was wrong was the *name* — this stage
+  introduces `CapKind::Numeric`, and "numeric" and "orderable" are exactly the
+  two sets TY-31 and TY-32 separate. It is rewritten as
+  `orderable_and_numeric_are_different_sets_of_scalars`, which states the rule.
+  H18 has **no entries left**.
+- **TY-25 is a parser bug, not an inference one.** The audit says "`parse(text,
+  parser)` does not constrain its first argument to Text", which reads as a
+  missing `unify`. Adding one changes nothing: `parse` was wrapped in a
+  `PATH_EXPR` inside its own `PARSE_EXPR`, so `ParseExpr::text_expr` — "the
+  first `Expr` child" — answered with *the keyword's own path*, and the unify
+  constrained the wrong node. Every `parse` in the language was also an `N001`
+  for the same reason, which no finding names. The fix is two lines of lookahead
+  in `parse_name_or_call`.
+- **RT-08's two tests could not be un-ignored.** Both assert that a mutated key
+  stays findable, and no structural hash can deliver that — the audit's own
+  comment names the alternative ("reject that state **or** keep key hash
+  identity stable"), and D4 chose rejection. Both are **rewritten**, one to the
+  compile-time refusal and one to the runtime fact that makes the refusal
+  necessary. This is the fifth time in the repair a fix has changed *which*
+  check catches a mistake, and the second time it moved a runtime property to a
+  compile-time one.
+- **F10's `TypeDb::substitute(t, &HashMap<Type,Type>)` is not the shape either
+  caller has.** Both a scheme's instantiation and a generic def's arguments hold
+  a *binder list and a matching argument list*, which is
+  `generalize::substitute(db, t, vars, to)` — already written for F12. The map
+  form would need building at every call from data the caller already has
+  positionally.
+- **A constraint needs *two* spans, and the plan's sketch has one.**
+  `Constraint { var, cap, at }` cannot report a violation usefully: `at` is
+  inside the generic body, where the expression is correct for every other
+  instantiation. `via` — the instantiation site — is what the primary span has
+  to be, with `at` as the note.
 
 - **HIR-08's minimal fix and its real fix are in different files.** The plan
   warns against shipping the one-line version (add `callee_expr` to the

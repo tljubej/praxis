@@ -41,3 +41,13 @@ map `Vec[Int]` → `Vec[T]`.
   syntax parse but structured dispatch is M5+.
 - The internal capability system (§5.4: `Numeric(T)`, `Iterable(T, Item)`, …) is
   likewise deferred to M7, where records/structural operations first need it.
+
+## Superseded (2026-07-29, ADR-057)
+
+The last consequence — "the internal capability system (§5.4) is likewise
+deferred to M7" — has lapsed. M8 pipelines, M9 `Option` and ADR-037 floats all
+landed against it, and ADR-026 assumes hashability is *enforced*. The deferral
+is superseded by [ADR-057](./057-a-capability-requirement-rides-on-the-scheme-that-quantified-it.md),
+which lands the constraint channel: capabilities are a `CapKind` vocabulary in
+`praxis-stdlib`, a `Constraint` carried by the `Scheme` that quantified the
+variable, and one exhaustive `praxis_hir::capability::check`.
