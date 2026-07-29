@@ -21,15 +21,34 @@ Update this file at the end of every stage.
 | S8 — Generation arena for JIT and plan metadata | **done** | `1311132`, `b60da0a` |
 | S9 — MIR root exactness, debug/root split, verifier | **done** | `ad9bbdf`, `d9521f9`, `e15a444` |
 | S10 — Semantic comparison, nominal schema identity | **done** | `29ff4f6`, `83de924`, `510ffc3`, `ff35f68` |
-| S11 … S21 | not started | |
+| S11 — TypeDb core: levels, schemes, nominal identity | **F9 only** | `8aa9069` |
+| S12 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10. It fell out of S1. **DBG-02** is closed in part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1118 passed, 0 failed, 99 ignored**. `just ci` is green.
+Now: **1126 passed, 0 failed, 97 ignored**. `just ci` is green.
 
-Forty-seven of the audit's ignored regressions are un-ignored and passing.
+Forty-nine of the audit's ignored regressions are un-ignored and passing.
+The two added by S11's F9:
+
+| Test | File | Finding |
+|---|---|---|
+| `instantiation_preserves_non_quantified_variable_identity` | `types_tests.rs` | TY-02 |
+| `deep_resolve_rewrites_record_field_links` | `types_tests.rs` | the `_ => t` half of F9 |
+
+F9's six new gates:
+
+| Test | File | Pins |
+|---|---|---|
+| `an_identity_fold_returns_the_same_handles_and_interns_nothing` | `fold.rs` | TY-02's identity preservation |
+| `a_changed_leaf_rebuilds_the_types_that_contain_it` | `fold.rs` | …and that it still rebuilds when it must |
+| `records_and_enums_are_folded_through_their_defs` | `fold.rs` | the two arms every walk skipped |
+| `an_unchanged_record_keeps_its_def` | `fold.rs` | no specialized def when nothing specialized |
+| `a_shared_child_is_folded_once` | `fold.rs` | the memo, on the sharing case |
+| `a_record_that_contains_itself_terminates` | `fold.rs` | the memo, on the cycle case |
+
 The five added by S10's second half:
 
 | Test | File | Finding |
@@ -236,6 +255,14 @@ test name — line numbers throughout the plan have all moved.)
 
 Partial foundations are the main trap for a fresh context.
 
+**F9 — the one `TypeFolder`: landed whole.** `praxis_types::fold` is the only
+walk over `TypeData`, its match has no catch-all, and the five hand-written
+walks are five folders. It adds a cycle memo and identity preservation, neither
+of which any walk had. **Not done:** the plan's `Folded { Unchanged, Rebuilt }`
+enum — the change flag is internal to the default arms and needs no public
+type; and `fold_record`/`fold_enum` take no `args`, because
+`TypeData::Record { def }` has none until F12.
+
 **F1 — built-in type identity: landed whole.** `BuiltinTypeId` is the registry;
 `TypeDescriptor::builtin::<P>` is the only constructor for a built-in. `compare`
 is populated on the five orderable descriptors and deliberately `None` on the
@@ -325,7 +352,36 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S10's P0-12 and RT-12)
+### From this session (S11's F9)
+
+**There is one walk over `TypeData`, and it is `praxis_types::fold`.** A new
+`TypeData` variant is now one compile error instead of five silent skips.
+`lower_levels`, `occurs`, `generalize_walk`, `instantiate_walk` and
+`deep_resolve` are five folders; none of them matches on `TypeData` any more.
+**Do not write a sixth hand-rolled walk.**
+
+**A folder owns its memo.** `TypeFolder` requires `db()` and `memo()`; the memo
+is per traversal and is what terminates recursion through a record def and what
+makes a shared subterm cost one visit. Creating a folder means holding
+`&mut TypeDb`, a `FoldMemo`, and the walk's own state.
+
+**Pruning counts as a change.** The default composite arms rebuild when a child
+folds to something different — *including* when the difference is only that a
+link was followed. That is what `deep_resolve` is; it is **not** what a
+visitor wants, so an inspection-only folder writes `visit_only_composites!()`
+and rebuilds nothing. A visitor that uses the rebuilding defaults will intern
+fresh composites in the middle of unification.
+
+**`instantiate` returns the same handle when nothing was substituted** (TY-02).
+A monomorphic-in-practice scheme no longer copies its whole body, and a record
+or enum no longer gets a specialized def per use site unless a field type
+actually changed. No snapshot moved, which the plan half-expected to.
+
+**`instantiate_walk`'s `.expect` is gone.** A `Generalized` var the scheme does
+not list is left alone rather than panicked on; TY-03's scheme-owned binders
+are what make it unrepresentable.
+
+### From S10's P0-12 and RT-12
 
 **`TypeDescriptor::compare` is populated, and D3 is answered — ADR-045.** Only
 `Int`, `Byte`, `Char`, `Float` and `Text` declare one; the other sixteen
@@ -838,13 +894,32 @@ re-deriving it.
 
 ## 4. Where to start
 
-**S11 — TypeDb core** (TY-01, TY-02, TY-03, TY-04, TY-05, TY-06, TY-07, TY-22).
-S10 is closed; every finding it owned is fixed and gated.
+**S11, continued** (TY-01, TY-03, TY-04, TY-05, TY-06, TY-07, TY-22 — **TY-02
+is done**). S10 is closed; every finding it owned is fixed and gated.
 
-S11 is the plan's **hard barrier before S13, S14, S15 and S17**, and it is the
-largest stage in the plan by weight (54). Read plan §5's S11 ordering paragraph
-before touching anything — it constrains the *order within* the stage, which no
-other stage does:
+**F9 has landed** (`8aa9069`), which is the stage's first foundation and closes
+TY-02 outright. Two of the five exit-criteria tests are already green. What is
+left, in the plan's order:
+
+1. **F5** — sealed `Type` + fallible constructors + `TypeCtorError`. Much
+   cheaper than the plan's L estimate now: F16 already removed MIR's forty
+   `Type(0)` sites, so **three** forged handles remain workspace-wide —
+   `praxis-debugger/src/render.rs` and `evaluate.rs` (both rehydrating a stored
+   `type_id`, which needs a checked route in) and `praxis-hir/src/exhaustive.rs`
+   (`Type(0)` as a genuine sentinel). The rest of F5 — `FieldSet`/`VariantSet`/
+   `CollectionArgs`/`TupleElems`, and TY-05's `payload: Vec<Type>` — is the
+   real work.
+2. **TY-05** (`EnumVariantDef.payload: Option<Vec<Type>>` → `Vec<Type>`, empty
+   == payload-less) is F5's smallest piece and has an exit-criteria gate ready:
+   `empty_enum_payload_and_no_payload_are_equivalent`. `fold_enum_default` in
+   `fold.rs` is one of the sites that simplifies.
+3. **F10** (scheme-owned binders, the constraint channel, `Level`) — XL, and
+   the thing TY-03 and TY-22 need. Express the reshape as folders; that is what
+   F9 was landed for.
+4. **TY-01 + TY-22 together**, then **TY-06** (F12) → **TY-04**, **TY-07**.
+
+Read plan §5's S11 ordering paragraph before touching anything — it constrains
+the *order within* the stage, which no other stage does:
 
 - **TY-01 and TY-22 are one edit.** Correcting `lower_levels` requires moving
   the recursive placeholder to the declaration-group level; doing either alone
@@ -852,10 +927,9 @@ other stage does:
 - **TY-02 before TY-03** (the substitution fold is what removes the `.expect` at
   `generalize.rs`), **TY-05 before TY-06** (payload normalization first),
   **TY-06 before TY-04 and TY-07**.
-- **F9 (the exhaustive `TypeFolder`) and F10 (scheme-owned binders) are the
-  foundations**, and plan §9 rule 2 says to land them first, as their own
-  commits, with the suite green. F12 (nominal `DefId + args`) is TY-06's own
-  content and is XL.
+- **F10 (scheme-owned binders) is the remaining foundation**, and plan §9 rule 2
+  says to land it first, as its own commit, with the suite green. F12 (nominal
+  `DefId + args`) is TY-06's own content and is XL.
 - Expect **wide insta churn** in `infer_tests.rs` and `hover_tests.rs` from any
   scheme change.
 - `generalized_var_state_is_marked` (`types_tests.rs`) is **green today and
@@ -1008,6 +1082,32 @@ one. Settle both together.
 
 Things the plan states that are no longer or were not quite true.
 
+- **F9 landed before F5, not after it.** The plan orders F9 after F5 "because
+  the folders must re-intern through the checked constructors". Nothing about
+  the fold depends on that: the default arms rebuild through
+  `intern`/`register_record`/`anon_record`/`register_enum`, and F5 changes those
+  signatures in one place each when it lands. Landing F9 first bought TY-02 and
+  `deep_resolve`'s missing arms immediately, and gave F10/F12 a fold to be
+  expressed as.
+- **F9's sketch has one folder shape; two are needed.** The rebuilding defaults
+  are right for `instantiate` and `deep_resolve` and *wrong* for the three
+  inspection-only walks, because pruning a linked child counts as a change — so
+  a level-lowering walk over `Vec[?a→Int]` would intern a fresh `Vec[Int]`
+  during unification. `visit_only_composites!()` is the second shape: descend
+  for effect, rebuild nothing.
+- **F9's `Folded { Unchanged, Rebuilt(Type) }` is not public API.** The change
+  flag lives inside the default arms; nothing outside needs to name it.
+- **F9's `fold_record`/`fold_enum` take no `args`.** The plan's signatures are
+  post-F12; `TypeData::Record { def }` has no arguments today.
+- **The plan expects snapshot churn from TY-02's identity preservation
+  ("programs that currently depend on spurious var freshness will infer
+  differently"). None appeared** — the whole suite passed unchanged. Worth
+  knowing before assuming a later identity change is safe for the same reason:
+  this one was, and it was checked rather than assumed.
+- **F5's sealing half is much smaller than the plan's L estimate.** F16 already
+  converted MIR's forty `Type(0)` sites to `MirType::Opaque`, so three forged
+  handles remain workspace-wide (`render.rs`, `evaluate.rs`, `exhaustive.rs`).
+  The validated-constructor half is the work that is left.
 - **P0-12 is an *equality* bug too, and the audit describes only the ordering
   half.** "MIR sends every non-Float ordering operation through integer
   extraction" is true of `==` as well, and for `Text` the consequence is worse
