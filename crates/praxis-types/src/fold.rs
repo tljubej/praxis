@@ -89,6 +89,11 @@ pub trait TypeFolder {
         t
     }
 
+    /// The `Never` type. No children.
+    fn fold_never(&mut self, t: Type) -> Type {
+        t
+    }
+
     /// A type variable, in whatever state pruning left it: `Unbound` or
     /// `Generalized` (a `Linked` var is followed before the folder sees it).
     fn fold_var(&mut self, t: Type, _var: VarId, _state: &VarState) -> Type {
@@ -146,6 +151,7 @@ pub fn fold<F: TypeFolder + ?Sized>(folder: &mut F, t: Type) -> Type {
     let folded = match data {
         TypeData::Scalar(scalar) => folder.fold_scalar(t, scalar),
         TypeData::Unit => folder.fold_unit(t),
+        TypeData::Never => folder.fold_never(t),
         TypeData::Tuple(elements) => folder.fold_tuple(t, &elements),
         TypeData::Func { params, result } => folder.fold_func(t, &params, result),
         TypeData::Collection { ctor, args } => folder.fold_collection(t, ctor, &args),

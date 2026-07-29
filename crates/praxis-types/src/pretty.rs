@@ -72,6 +72,9 @@ impl TypeDb {
             TypeData::Unit => {
                 let _ = out.write_str("Unit");
             }
+            TypeData::Never => {
+                let _ = out.write_str("Never");
+            }
             TypeData::Tuple(els) => {
                 out.push('(');
                 for (i, el) in els.iter().enumerate() {

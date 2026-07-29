@@ -496,8 +496,8 @@ impl<'a> Annotations<'a> {
             "Bool" => ScalarType::Bool,
             "Char" => ScalarType::Char,
             "Float" => ScalarType::Float,
-            "Never" => ScalarType::Never,
             "Unit" => return Some(self.db.unit()),
+            "Never" => return Some(self.db.never()),
             _ => {
                 let symbol = self.type_refs.get(&name.text_range()).copied()?;
                 return self.env.ty(symbol);

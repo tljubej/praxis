@@ -1173,3 +1173,92 @@ fn empty_enum_payload_and_no_payload_are_equivalent() {
     db.unify(no_payload, empty_payload)
         .expect("a payload-less variant unifies with itself however it was built");
 }
+
+// --- TY-19: Never is the bottom type, and a branch point joins ---------------
+
+/// `Never` is not a scalar. A scalar is a type with a runtime representation —
+/// a descriptor, a payload width, a value you can hold — and no value ever has
+/// type `Never`. Sitting in `ScalarType` made every "is this a scalar?"
+/// question answer yes for it.
+#[test]
+fn never_is_its_own_type_and_not_a_scalar() {
+    let mut db = TypeDb::new();
+    let never = db.never();
+    assert!(matches!(db.data(never), crate::TypeData::Never));
+    assert!(!matches!(db.data(never), crate::TypeData::Scalar(_)));
+    // Two `Never`s are two arena slots (the arena does not deduplicate) and
+    // one type: identity is the canonical key, and it is distinct from `Unit`'s.
+    let again = db.never();
+    let unit = db.unit();
+    assert_eq!(db.canonical_key(never), db.canonical_key(again));
+    assert_ne!(db.canonical_key(never), db.canonical_key(unit));
+    assert!(
+        db.unify(never, again).is_ok(),
+        "one Never unifies with another"
+    );
+    assert_eq!(db.render(never), "Never");
+}
+
+/// The absorbing law, in both directions and at every shape. This is the whole
+/// of what a branch point needs: a path that produces no value contributes no
+/// constraint.
+#[test]
+fn join_absorbs_never_from_either_side() {
+    let mut db = TypeDb::new();
+    let never = db.never();
+    let int = db.int();
+    let vec_text = {
+        let text = db.text();
+        db.vec(text)
+    };
+    for other in [int, vec_text, db.unit()] {
+        let left = db.join(never, other).expect("Never joins with anything");
+        assert_eq!(db.canonical_key(left), db.canonical_key(other));
+        let right = db.join(other, never).expect("…from either side");
+        assert_eq!(db.canonical_key(right), db.canonical_key(other));
+    }
+    // Never with Never is Never, not an error.
+    let both = db.join(never, never).expect("Never joins with Never");
+    assert!(matches!(db.data(both), crate::TypeData::Never));
+}
+
+/// A join is **not** general subtyping. Two ordinary types still have to unify,
+/// so inference stays principal and a real mismatch is still a mismatch.
+#[test]
+fn join_of_two_ordinary_types_is_still_unification() {
+    let mut db = TypeDb::new();
+    let int = db.int();
+    let text = db.text();
+    assert!(db.join(int, text).is_err(), "Int and Text do not join");
+
+    // A variable joined with a concrete type is *linked*, exactly as unify
+    // would link it — the join is not a fresh third type.
+    let var = db.fresh_var();
+    let joined = db.join(var, int).expect("a variable joins");
+    assert_eq!(db.canonical_key(joined), db.canonical_key(int));
+    assert_eq!(db.canonical_key(var), db.canonical_key(int));
+}
+
+/// `join_all` is the arm/break-list form. Empty is `Never` — no path produces a
+/// value — and a divergent element drops out rather than pinning the answer.
+#[test]
+fn join_all_seeds_with_never_and_reports_which_element_failed() {
+    let mut db = TypeDb::new();
+    let never = db.never();
+    let int = db.int();
+    let text = db.text();
+
+    let empty = db.join_all([]).expect("an empty join is Never");
+    assert!(matches!(db.data(empty), crate::TypeData::Never));
+
+    let all_divergent = db.join_all([never, never]).expect("all divergent");
+    assert!(matches!(db.data(all_divergent), crate::TypeData::Never));
+
+    let mixed = db.join_all([never, int, never]).expect("one real branch");
+    assert_eq!(db.canonical_key(mixed), db.canonical_key(int));
+
+    let (index, _) = db
+        .join_all([never, int, text])
+        .expect_err("Int and Text disagree");
+    assert_eq!(index, 2, "the failure names the element that disagreed");
+}

@@ -59,10 +59,20 @@ impl EnumDefId {
 /// `Record` variant; anonymous records are keyed by a canonicalized field set.
 #[derive(Clone, Debug)]
 pub enum TypeData {
-    /// A built-in scalar: `Int`, `Text`, `Bool`, `Never`, …
+    /// A built-in scalar: `Int`, `Text`, `Bool`, `Char`, …
     Scalar(ScalarType),
     /// The unit type, with no payload (§4.3). Mirrors `TypePattern::Unit`.
     Unit,
+    /// `Never` — the bottom type for diverging control flow (§4.3).
+    ///
+    /// Its own variant, not a [`Scalar`](Self::Scalar). A scalar is a type with
+    /// a runtime representation — a descriptor, a payload width, a value you
+    /// can hold — and `Never` has none of those *by definition*: no value ever
+    /// has this type. Sitting in `ScalarType` made every "is this a scalar?"
+    /// question answer yes for it, and made [`join`](crate::db::TypeDb::join)'s
+    /// absorbing case a special case *inside* the scalar arm rather than an
+    /// arm of its own (TY-19).
+    Never,
     /// A tuple `(T, U, …)`. A one-element "tuple" never exists as data — the
     /// parser keeps single parenthesized types as the inner type, so this variant
     /// always carries at least two elements.

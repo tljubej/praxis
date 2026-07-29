@@ -29,6 +29,9 @@ pub fn type_to_pattern(db: &TypeDb, t: Type) -> Option<TypePattern> {
         )),
         TypeData::Func { .. } => None, // function-as-receiver not in catalog
         TypeData::Unit => Some(TypePattern::Unit),
+        // `Never` has no values, so nothing can be a receiver of this type and
+        // the catalog models no shape for it.
+        TypeData::Never => None,
         TypeData::Collection { ctor, args } => {
             // Bridge each type arg to a pattern (recursing); unresolved element
             // vars become `TypePattern::Var("T")` so the catalog's `Vec[T]`
@@ -110,7 +113,6 @@ fn map_scalar(s: praxis_types::ScalarType) -> PatternScalar {
         praxis_types::ScalarType::Byte => PatternScalar::Byte,
         praxis_types::ScalarType::Char => PatternScalar::Char,
         praxis_types::ScalarType::Text => PatternScalar::Text,
-        praxis_types::ScalarType::Never => PatternScalar::Never,
     }
 }
 

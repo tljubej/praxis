@@ -55,8 +55,6 @@ pub enum ScalarType {
     Byte,
     Char,
     Text,
-    /// The bottom type for diverging control flow (§4.3).
-    Never,
 }
 
 /// Built-in collection constructors (§6.1). `Range` and `BitSet` take no type
@@ -122,7 +120,6 @@ impl ScalarType {
             ScalarType::Byte => "Byte",
             ScalarType::Char => "Char",
             ScalarType::Text => "Text",
-            ScalarType::Never => "Never",
         }
     }
 }
@@ -190,7 +187,6 @@ mod tests {
     fn scalar_names_match_user_syntax() {
         assert_eq!(ScalarType::Int.name(), "Int");
         assert_eq!(ScalarType::Text.name(), "Text");
-        assert_eq!(ScalarType::Never.name(), "Never");
     }
 
     #[test]

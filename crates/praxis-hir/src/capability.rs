@@ -32,10 +32,11 @@ use praxis_types::{data::TypeData, Type, TypeDb};
 #[must_use]
 pub fn supports_eq(db: &TypeDb, t: Type) -> bool {
     match db.data(db.follow(t)) {
-        // Scalars: every implemented scalar is equatable. (`Never`, the bottom
-        // type, has no values and so is vacuously equatable.)
+        // Scalars: every implemented scalar is equatable.
         TypeData::Scalar(_) => true,
         TypeData::Unit => true,
+        // `Never` has no values, so every capability holds vacuously.
+        TypeData::Never => true,
         // A tuple is equatable iff every element is.
         TypeData::Tuple(els) => els.iter().all(|e| supports_eq(db, *e)),
         // Functions are never equatable (§5.5).
@@ -109,7 +110,10 @@ pub fn supports_ord(db: &TypeDb, t: Type) -> bool {
             | ScalarType::Text,
         ) => true,
         // Bool and Unit have no defined total order.
-        TypeData::Scalar(ScalarType::Bool | ScalarType::Never) | TypeData::Unit => false,
+        TypeData::Scalar(ScalarType::Bool) | TypeData::Unit => false,
+        // `Never` has no values to order, so ordering it is vacuously fine —
+        // and a divergent branch must not be what makes a sort illegal.
+        TypeData::Never => true,
         // Composites have no ordering lowering (ADR-045 decision 1).
         TypeData::Tuple(_)
         | TypeData::Func { .. }

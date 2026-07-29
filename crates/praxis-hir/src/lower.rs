@@ -1359,11 +1359,19 @@ impl<'a> Lowerer<'a> {
             .and_then(|b| self.lower_block(&b))
             .map(Box::new);
         let else_block = i.else_branch().and_then(|e| self.lower_else(&e));
-        // The if's type is the then-block's type (unified with else by M2).
-        let ty = then_block
-            .as_ref()
-            .map(|b| b.ty)
-            .unwrap_or_else(|| self.unit);
+        // The if's type is the **join** of its branches, not the then-block's
+        // type (TY-19). Inference already joined them and reported any
+        // disagreement, so a failure here cannot be a user error — but reading
+        // the then-block alone made `if flag { panic("x") } else { 1 }` a
+        // `Never`, which is the branch that produces no value.
+        let then_ty = then_block.as_ref().map(|b| b.ty);
+        let else_ty = else_block.as_ref().map(|b| b.ty);
+        let ty = match (then_ty, else_ty) {
+            (Some(t), Some(e)) => self.db.join(t, e).unwrap_or(t),
+            (Some(t), None) => t,
+            (None, Some(e)) => e,
+            (None, None) => self.unit,
+        };
         TypedExpr::If {
             cond: cond.unwrap_or_else(|| Box::new(unit_lit(self.db))),
             then_block: then_block.unwrap_or_else(|| {

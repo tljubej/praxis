@@ -77,9 +77,13 @@ impl TypeDb {
     }
 
     /// The `Never` type — the bottom type for diverging control flow (§4.3).
+    ///
+    /// Not a scalar: no value has this type, so there is no representation to
+    /// describe. See [`TypeData::Never`](crate::TypeData::Never) and
+    /// [`TypeDb::join`](crate::TypeDb::join).
     #[must_use]
     pub fn never(&mut self) -> Type {
-        self.scalar(Scalar::Never)
+        self.intern(TypeData::Never)
     }
 
     /// A function type `(params) -> result`.

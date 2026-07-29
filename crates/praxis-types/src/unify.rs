@@ -46,6 +46,51 @@ impl TypeDb {
         }
     }
 
+    /// The **join** of `a` and `b`: the one type both control-flow paths can be
+    /// said to produce.
+    ///
+    /// This is what a branch point needs, and it is not the same question as
+    /// [`unify`](Self::unify). `if c { 1 } else { panic("x") }` is an `Int`:
+    /// the else branch has type `Never`, it produces no value, and asking the
+    /// two branches to be *equal* rejects a program that is fine. `Never` is
+    /// the bottom type, so it is absorbed — `join(Never, T)` and `join(T, Never)`
+    /// are both `T` — and every other pair still has to unify (TY-19).
+    ///
+    /// Returns the joined type, or the reason the two are incompatible.
+    ///
+    /// Note that this is deliberately *not* a subtyping relation in general:
+    /// `Never` is the only type absorbed, because it is the only type with no
+    /// values. Everything else joins by unification, so inference stays
+    /// principal.
+    pub fn join(&mut self, a: Type, b: Type) -> Result<Type, UnifyError> {
+        let a = self.prune(a);
+        let b = self.prune(b);
+        if matches!(self.data(a), TypeData::Never) {
+            return Ok(b);
+        }
+        if matches!(self.data(b), TypeData::Never) {
+            return Ok(a);
+        }
+        self.unify(a, b)?;
+        Ok(a)
+    }
+
+    /// The join of a whole sequence of branch types — a `match`'s arms, or a
+    /// loop's `break` values. Empty joins to `Never`: no path produces a value.
+    ///
+    /// The error carries the *index* of the element that disagreed, so a caller
+    /// can point at the arm that failed rather than at the whole expression.
+    pub fn join_all(
+        &mut self,
+        types: impl IntoIterator<Item = Type>,
+    ) -> Result<Type, (usize, UnifyError)> {
+        let mut acc = self.never();
+        for (i, t) in types.into_iter().enumerate() {
+            acc = self.join(acc, t).map_err(|e| (i, e))?;
+        }
+        Ok(acc)
+    }
+
     /// Link unbound var `v` to `target`. Applies the occurs check and level lowering.
     fn link_var(&mut self, var: Type, target: Type) -> Result<(), UnifyError> {
         let var_level = match self.data(var) {
@@ -101,6 +146,7 @@ impl TypeDb {
         match (da, db) {
             (TypeData::Scalar(x), TypeData::Scalar(y)) if x == y => Ok(()),
             (TypeData::Unit, TypeData::Unit) => Ok(()),
+            (TypeData::Never, TypeData::Never) => Ok(()),
             (TypeData::Tuple(xs), TypeData::Tuple(ys)) => self.unify_seqs(a, b, xs, ys, "tuple"),
             (
                 TypeData::Func {

@@ -277,7 +277,7 @@ fn a_function_type_resolves_to_the_closure_descriptor() {
 #[test]
 fn a_type_with_no_runtime_object_has_no_descriptor() {
     let mut db = TypeDb::new();
-    let never = db.scalar(ScalarType::Never);
+    let never = db.never();
     let uint = db.scalar(ScalarType::UInt);
     let int = db.int();
     // `Range` is nullary (F5 is what makes the old `args: vec![int]` here
@@ -338,7 +338,7 @@ fn element_descriptors_follow_the_collection_arity() {
     assert!(element_descriptors_for(&db, bitset).unwrap().is_empty());
 
     // A collection of an unrepresentable element is not constructible.
-    let never = db.scalar(ScalarType::Never);
+    let never = db.never();
     let vec_never = db.vec(never);
     assert!(element_descriptors_for(&db, vec_never).is_err());
 }

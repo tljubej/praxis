@@ -846,16 +846,23 @@ impl Inferer {
             .map(|s| self.infer_expr(&s))
             .unwrap_or_else(|| self.db.fresh_var());
         let arms: Vec<_> = m.arms().collect();
-        let result = self.db.fresh_var();
+        // The arms **join** (TY-19). Seeded with `Never` rather than a fresh
+        // variable, so an arm that diverges contributes nothing and a match
+        // whose every arm diverges is itself `Never` — a fresh variable would
+        // silently make it "whatever the first non-divergent use wants".
+        let mut result = self.db.never();
         for arm in &arms {
             if let Some(pat) = arm.pattern() {
                 self.infer_pattern(&pat, scrutinee_ty);
             }
             if let Some(body) = arm.body() {
                 let body_ty = self.infer_expr(&body);
-                if let Err(e) = self.db.unify(result, body_ty) {
-                    let at = self.file_span(arm.syntax().text_range());
-                    self.diag_unify(at, e);
+                match self.db.join(result, body_ty) {
+                    Ok(joined) => result = joined,
+                    Err(e) => {
+                        let at = self.file_span(arm.syntax().text_range());
+                        self.diag_unify(at, e);
+                    }
                 }
             }
         }
@@ -1203,8 +1210,13 @@ impl Inferer {
         let then_ty = i.then_branch().map(|b| self.infer_block(&b));
         let else_ty = i.else_branch().and_then(|e| self.infer_else(&e));
         match (then_ty, else_ty) {
-            (Some(t), Some(e)) => {
-                if let Err(err) = self.db.unify(t, e) {
+            // The two branches **join**, they do not unify (TY-19). A branch
+            // that diverges — `if flag { panic("stop") } else { 1 }` — has type
+            // `Never` and produces no value, so asking the two to be equal
+            // rejects a program that is fine.
+            (Some(t), Some(e)) => match self.db.join(t, e) {
+                Ok(joined) => joined,
+                Err(err) => {
                     // Branches disagree: point at the `else` branch (the one that
                     // diverges from the `then` branch's established type).
                     let at = i
@@ -1213,9 +1225,9 @@ impl Inferer {
                         .map(|body| body.syntax().text_range())
                         .unwrap_or_else(|| i.syntax().text_range());
                     self.diag_unify(self.file_span(at), err);
+                    t
                 }
-                t
-            }
+            },
             (Some(t), None) => t,
             (None, Some(e)) => e,
             (None, None) => self.db.fresh_var(),

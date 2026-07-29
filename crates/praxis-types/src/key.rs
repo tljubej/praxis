@@ -26,6 +26,7 @@ use crate::{CollectionCtor, ScalarType};
 pub enum TypeKey {
     Scalar(ScalarType),
     Unit,
+    Never,
     Tuple(Vec<TypeKey>),
     Func {
         params: Vec<TypeKey>,
@@ -60,6 +61,7 @@ impl TypeDb {
         match self.data(t) {
             TypeData::Scalar(s) => TypeKey::Scalar(*s),
             TypeData::Unit => TypeKey::Unit,
+            TypeData::Never => TypeKey::Never,
             TypeData::Tuple(elements) => TypeKey::Tuple(self.keys(elements)),
             TypeData::Func { params, result } => TypeKey::Func {
                 params: self.keys(params),

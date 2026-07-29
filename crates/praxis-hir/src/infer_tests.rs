@@ -1086,7 +1086,6 @@ fn expression_loop_uses_its_break_value_type() {
 }
 
 #[test]
-#[ignore = "known bug: Never is not treated as the bottom type during unification"]
 fn never_branch_coerces_to_the_other_branch_type() {
     let src = "fn choose(flag: Bool) -> Int { if flag { panic(\"stop\") } else { 1 } }";
     use praxis_ast::AstNode;
@@ -1124,6 +1123,55 @@ fn never_branch_coerces_to_the_other_branch_type() {
 }
 
 // --- scalar and builtin operation constraints -------------------------------
+
+/// TY-19 past the exit test's one shape: a divergent branch is absorbed
+/// wherever branches meet, in either position, and a `match` whose every arm
+/// diverges is itself `Never` rather than "whatever the first use wants".
+#[test]
+fn a_divergent_branch_is_absorbed_wherever_branches_meet() {
+    for src in [
+        // Either side of an `if`.
+        "fn f(c: Bool) -> Int { if c { panic(\"x\") } else { 1 } }",
+        "fn f(c: Bool) -> Int { if c { 1 } else { panic(\"x\") } }",
+        // Nested, so the join has to happen at both levels.
+        "fn f(c: Bool) -> Int { if c { if c { panic(\"x\") } else { 1 } } else { 2 } }",
+        // Match arms.
+        "enum E { A, B }\nfn f(e: E) -> Int { match e { A => 1, B => panic(\"x\") } }",
+        "enum E { A, B }\nfn f(e: E) -> Int { match e { A => panic(\"x\"), B => 2 } }",
+    ] {
+        assert!(
+            !has_type_error(src),
+            "a divergent branch constrains nothing: `{src}` reported {:?}",
+            analyze(src)
+                .diagnostics
+                .iter()
+                .map(|d| format!("{} {}", d.code(), d.message()))
+                .collect::<Vec<_>>()
+        );
+    }
+    // Every arm diverges: the match produces no value, so it is Never — and a
+    // fresh variable would have made it silently agree with any use.
+    assert_eq!(
+        scheme_of(
+            "enum E { A, B }\nfn f(e: E) -> Int { let m = match e { A => panic(\"x\"), B => panic(\"y\") }; 0 }",
+            "m"
+        )
+        .as_deref(),
+        Some("Never")
+    );
+}
+
+/// …and the join is not a licence to mix. Two ordinary branches still have to
+/// agree, so the absorbing rule cannot be reached by widening everything.
+#[test]
+fn two_ordinary_branches_still_have_to_agree() {
+    assert!(has_type_error(
+        "fn f(c: Bool) -> Int { if c { 1 } else { \"two\" } }"
+    ));
+    assert!(has_type_error(
+        "enum E { A, B }\nfn f(e: E) -> Int { match e { A => 1, B => \"two\" } }"
+    ));
+}
 
 #[test]
 #[ignore = "known bug: parse does not constrain its input expression to Text"]

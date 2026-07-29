@@ -144,12 +144,12 @@ fn builtin_for_type(db: &TypeDb, ty: Type) -> Result<BuiltinTypeId, NoRuntimeRep
                 resolved,
                 "UInt is reserved and has no runtime representation",
             )),
-            ScalarType::Never => Err(NoRuntimeRepr::of(
-                resolved,
-                "Never is the bottom type: no value of it exists",
-            )),
         },
         TypeData::Unit => Ok(BuiltinTypeId::Unit),
+        TypeData::Never => Err(NoRuntimeRepr::of(
+            resolved,
+            "Never is the bottom type: no value of it exists",
+        )),
         TypeData::Tuple(_) => Ok(BuiltinTypeId::Tuple),
         // A function value is a closure object at runtime (ADR-027), including
         // a bare top-level `fn` used as a value.
