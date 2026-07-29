@@ -759,9 +759,10 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             binding,
             iter,
             body,
+            item_ty,
             ..
         } => {
-            lower_for(b, *binding, iter, body);
+            lower_for(b, *binding, iter, body, *item_ty);
             lower_lit_gc(b, &Lit::Unit, espan) // for yields Unit
         }
         // A `loop` yields what its `break`s carry (TY-21).
@@ -831,8 +832,10 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     .first()
                     .map(|a| lower_expr_gc(b, a))
                     .unwrap_or_else(|| lower_lit_gc(b, &Lit::Unit, espan));
-                // The call's result temp materializes `e` (the whole call expr).
-                let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, espan);
+                // The call's result temp materializes `e` (the whole call expr),
+                // so its type is the call's — which F15 now records at the call
+                // site rather than re-instantiating from the callee's scheme.
+                let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
                 b.push(Inst::Call {
                     dst,
                     callee: CallTarget::Runtime(RuntimeSymbol::WriteStdout),
@@ -868,7 +871,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // Top-level `fn`s are never in `b.locals`, so this distinguishes the
             // two soundly.
             if let Some(callee_local) = b.locals.get(callee).copied() {
-                let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+                let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
                 b.push(Inst::CallIndirect {
                     dst,
                     callee: callee_local,
@@ -924,7 +927,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     ty: *ty,
                     span: praxis_hir::expr_span(e),
                 };
-                if let Some(plan) = recognize_pipeline(&call) {
+                if let Some(plan) = recognize_pipeline(b.db, &call) {
                     return lower_pipeline(b, plan);
                 }
                 return lower_pipeline_combinator(b, receiver, name, args, *ty);
@@ -980,8 +983,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             dst
         }
         // M6: `read`/`parse` lower to a runtime call against the parser plan.
-        TypedExpr::Read { plan, .. } => lower_read(b, *plan),
-        TypedExpr::Parse { text, plan, .. } => lower_parse(b, text, *plan),
+        TypedExpr::Read { plan, ty, .. } => lower_read(b, *plan, *ty),
+        TypedExpr::Parse { text, plan, ty, .. } => lower_parse(b, text, *plan, *ty),
         // M7: nominal record literal + field access.
         TypedExpr::RecordLit {
             record_def_id,
@@ -1008,7 +1011,10 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
         // current value is the captured binding's local; the synthetic function
         // (emitted separately by `lower_module`) is named by `fn_name`.
         TypedExpr::Closure {
-            fn_name, captures, ..
+            fn_name,
+            captures,
+            ty,
+            ..
         } => {
             let cap_locals: Vec<LocalId> = captures
                 .iter()
@@ -1019,8 +1025,9 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                         .unwrap_or_else(|| lower_lit_gc(b, &Lit::Unit, espan))
                 })
                 .collect();
-            // The closure value temp materializes `e` (the whole closure expr).
-            let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, espan);
+            // The closure value temp materializes `e` (the whole closure expr),
+            // whose type is its `Func`.
+            let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
             b.push(Inst::Alloc {
                 dst,
                 alloc: AllocKind::Closure {
@@ -1037,7 +1044,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
 }
 
 /// Lower a `read parser_expr`: get the input buffer, then run the plan.
-fn lower_read(b: &mut Builder<'_>, plan: praxis_hir::PlanId) -> LocalId {
+fn lower_read(b: &mut Builder<'_>, plan: praxis_hir::PlanId, result_ty: Type) -> LocalId {
     // 1. Get the input buffer from the runtime context.
     let input = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
@@ -1048,20 +1055,30 @@ fn lower_read(b: &mut Builder<'_>, plan: praxis_hir::PlanId) -> LocalId {
         debug: DebugSlots::unannotated(),
     });
     // 2. Run the parser plan against it.
-    run_parser_plan(b, plan, input)
+    run_parser_plan(b, plan, input, result_ty)
 }
 
 /// Lower a `parse(text, parser_expr)`: run the plan against the text argument.
-fn lower_parse(b: &mut Builder<'_>, text: &TypedExpr, plan: praxis_hir::PlanId) -> LocalId {
+fn lower_parse(
+    b: &mut Builder<'_>,
+    text: &TypedExpr,
+    plan: praxis_hir::PlanId,
+    result_ty: Type,
+) -> LocalId {
     let input = lower_expr_gc(b, text);
-    run_parser_plan(b, plan, input)
+    run_parser_plan(b, plan, input, result_ty)
 }
 
 /// Emit the call to `praxis_run_parser(ctx, plan_id, input) -> GcRef`, then
 /// check for a parse fault. The id is boxed as an Int GcRef to match the
 /// uniform ABI; the runtime wrapper reads its payload and validates it back
 /// into a `PlanId` (a value that names no plan becomes a parse fault).
-fn run_parser_plan(b: &mut Builder<'_>, plan: praxis_hir::PlanId, input: LocalId) -> LocalId {
+fn run_parser_plan(
+    b: &mut Builder<'_>,
+    plan: praxis_hir::PlanId,
+    input: LocalId,
+    result_ty: Type,
+) -> LocalId {
     // Box the plan id as an Int GcRef.
     let idx_scalar = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ConstInt {
@@ -1075,8 +1092,9 @@ fn run_parser_plan(b: &mut Builder<'_>, plan: praxis_hir::PlanId, input: LocalId
         roots: RootSlots::unannotated(),
         debug: DebugSlots::unannotated(),
     });
-    // Call praxis_run_parser(ctx, idx, input) -> result.
-    let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+    // Call praxis_run_parser(ctx, idx, input) -> result. The result's type is
+    // the one the parser plan synthesizes, which the typed tree carries.
+    let dst = b.alloc_gc(MirType::Known(result_ty), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst,
         callee: CallTarget::Runtime(RuntimeSymbol::RunParser),
@@ -1529,6 +1547,7 @@ fn lower_for(
     binding: praxis_hir::SymbolId,
     iter: &TypedExpr,
     body: &praxis_hir::TypedBlock,
+    item_ty: Type,
 ) {
     // Lower the iterator once; it lives in a Gc slot for the loop's duration.
     let iter_local = lower_expr_gc(b, iter);
@@ -1605,7 +1624,10 @@ fn lower_for(
     b.cur = body_blk;
     // Bind the loop variable: `binding = iter.get(idx_gc)`.
     let get_sym = get_symbol_for(b.db, iter);
-    let item_gc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+    // The item and the loop variable are the iterator's element type, which the
+    // typed tree carries on the `For` node (`item_ty`). Both slots used to be
+    // `Opaque`, so the debugger showed a `for` binding with no type at all.
+    let item_gc = b.alloc_gc(MirType::Known(item_ty), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: item_gc,
         callee: CallTarget::Runtime(get_sym),
@@ -1617,11 +1639,10 @@ fn lower_for(
     // The loop variable's slot: allocate one if the `for` binding has no slot
     // yet (it is introduced by the loop, not a `let` statement). Reads of the
     // binding inside the body resolve to this slot via `b.locals`.
-    let slot = b
-        .locals
-        .get(&binding)
-        .copied()
-        .unwrap_or_else(|| b.alloc_gc(MirType::Opaque, None, LocalDebugKind::User, None));
+    let slot =
+        b.locals.get(&binding).copied().unwrap_or_else(|| {
+            b.alloc_gc(MirType::Known(item_ty), None, LocalDebugKind::User, None)
+        });
     b.locals.insert(binding, slot);
     b.push(Inst::MoveGc {
         dst: slot,
@@ -1928,7 +1949,7 @@ fn classify_sink(name: &str, args: &[TypedExpr]) -> Option<Sink> {
 /// non-pipeline `MethodCall` receiver (e.g. `.len()`, `.push(x)`) terminates the
 /// walk — that inner call lowers eagerly via the existing path, and *its* result
 /// becomes this chain's source (recursively fusing if it too is a pipeline).
-fn recognize_pipeline(expr: &TypedExpr) -> Option<PipelinePlan> {
+fn recognize_pipeline(db: &praxis_types::TypeDb, expr: &TypedExpr) -> Option<PipelinePlan> {
     let TypedExpr::MethodCall {
         receiver,
         name,
@@ -1974,15 +1995,31 @@ fn recognize_pipeline(expr: &TypedExpr) -> Option<PipelinePlan> {
     // Stages were collected outermost-first; reverse so the source-side stage
     // runs first inside the loop body.
     stages.reverse();
+    // The item flowing *out of the source* is the source collection's element
+    // type, which the typed tree now carries (F15) — the chain's later stages
+    // are what still have no item type until MIR-05 (S21).
+    let source_item_ty = match b_db_element_of(db, praxis_hir::expr_ty(cur)) {
+        Some(t) => MirType::Known(t),
+        None => MirType::Opaque,
+    };
     Some(PipelinePlan {
         source: Box::new(cur.clone()),
-        // The item type is only a slot-allocation hint, and a fused chain has
-        // no per-stage item type until MIR-05 supplies one.
-        source_item_ty: MirType::Opaque,
+        source_item_ty,
         stages,
         sink,
         result_ty: *result_ty,
     })
+}
+
+/// A collection type's single element type, or `None` for anything else (a
+/// `Map`/`Counter`, whose payload is a pair, or a type that is not a collection
+/// at all). Used only to type the source item of a fused pipeline.
+fn b_db_element_of(db: &praxis_types::TypeDb, t: Type) -> Option<Type> {
+    use praxis_types::data::TypeData;
+    match db.data(db.follow(t)) {
+        TypeData::Collection { args, .. } if args.len() == 1 => Some(args[0]),
+        _ => None,
+    }
 }
 
 /// Lower a recognized pipeline as a single fused loop (M8-WS11, §6.3). Emits the
@@ -3216,10 +3253,17 @@ fn lower_seq_count(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -
 /// construction. Before P0-03 it hand-rolled a `praxis_vec_new` call whose
 /// element-descriptor argument was the integer `0` moved into a `Gc` slot — the
 /// second and last site where a raw non-pointer word inhabited a rootable slot.
-/// The element type stays [`MirType::Opaque`] here (a fused pipeline does not
-/// carry its item type until MIR-05), which the backend turns into the same
-/// null descriptor the wrapper already expects: the result Vec adopts each
-/// pushed value's descriptor on first push.
+/// The element type stays [`MirType::Opaque`] here, which the backend turns
+/// into the same null descriptor the wrapper already expects: the result Vec
+/// adopts each pushed value's descriptor on first push.
+///
+/// It is *not* derived from `result_ty`, though `result_ty` is `Known` at every
+/// call site now. A chain ending in `enumerate` or `zip` has a result type the
+/// method catalog gets wrong — both rows declare `result: Vec[T]`, the
+/// receiver's own element type, so `v.enumerate()` on a `Vec[Int]` is
+/// `Vec[Int]` rather than `Vec[(Int, Int)]`. Reading it would swap an honest
+/// null descriptor for a wrong one, which is strictly worse: the runtime knows
+/// what to do with absence. See `praxis_mir::verify`'s note on H10.
 fn alloc_empty_vec(b: &mut Builder<'_>, result_ty: MirType) -> LocalId {
     let result = b.alloc_gc(result_ty, None, LocalDebugKind::Temp, None);
     b.push(Inst::Alloc {
@@ -3899,6 +3943,54 @@ mod tests {
         );
         let funcs = lower_module(&module, &mut analysis.db);
         (funcs, analysis)
+    }
+
+    /// **P0-02, the half F15 unblocked.** A `for` binding's slot and the item
+    /// it holds are the iterator's element type. Both were `MirType::Opaque` —
+    /// the honest answer while lowering had no per-use type to give them, and a
+    /// `for` binding the debugger showed with no type at all.
+    #[test]
+    fn a_for_bindings_slot_carries_the_iterators_element_type() {
+        let (funcs, analysis) = lower_src_to_mir(
+            "fn f(v: Vec[Int]) -> Int {\n  var s = 0\n  for x in v { s = s + x }\n  s\n}",
+        );
+        let f = &funcs[0];
+        let named: Vec<String> = f
+            .locals
+            .iter()
+            .filter(|l| matches!(l.kind, LocalKind::Gc))
+            .filter_map(|l| l.ty.known())
+            .map(|t| analysis.db.render(t))
+            .collect();
+        assert!(
+            named.iter().any(|t| t == "Int"),
+            "the item and the binding slot are `Int`: {named:?}"
+        );
+        // The binding's own slot is one of them: `x` reads as `Int` in the
+        // debugger, where it used to have no type column at all.
+        let ints = named.iter().filter(|t| *t == "Int").count();
+        assert!(
+            ints >= 2,
+            "the item temp and the binding slot both: {named:?}"
+        );
+    }
+
+    /// **P0-02.** A closure value's local is its `Func` type, and an indirect
+    /// call's result is the call's. Neither had a type before F15 recorded one.
+    #[test]
+    fn a_closure_and_its_indirect_call_carry_their_types() {
+        let (funcs, analysis) =
+            lower_src_to_mir("fn f() -> Int {\n  let g = |n| n + 1\n  g(41)\n}");
+        let rendered: Vec<String> = funcs[0]
+            .locals
+            .iter()
+            .filter_map(|l| l.ty.known())
+            .map(|t| analysis.db.render(t))
+            .collect();
+        assert!(
+            rendered.iter().any(|t| t == "(Int) -> Int"),
+            "the closure value's own type: {rendered:?}"
+        );
     }
 
     #[test]

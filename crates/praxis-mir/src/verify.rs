@@ -38,11 +38,30 @@
 //! accumulator into a `Gc` slot (an allocation per iteration) or weakening the
 //! rule until it says nothing.
 //!
-//! **`OpaqueAtDescriptorSite` stays off until S15** (hazard H10). Pipeline
-//! accumulators and fused-loop items have no correct type available until HIR
-//! carries inferred per-use types; marking them [`MirType::Opaque`] is the
-//! honest answer today, and rejecting it would refuse to compile working
-//! programs. `MirType::expect_known` lands with the rule that needs it.
+//! **`OpaqueAtDescriptorSite` is still off, and S15 found out why** (hazard
+//! H10). The plan schedules it here, on the grounds that lowering could not
+//! supply per-use types until F15. F15 landed, and it supplied them: the
+//! `for`-loop item, the parser result, the closure value, the indirect call
+//! result and a pipeline's *source* item are all `MirType::Known` now, and
+//! every `AllocKind::Collection` a program writes carries real type arguments.
+//!
+//! Two descriptor sites are left, both in the fused pipeline, and both are
+//! `AllocKind::Tuple { ty: Opaque }` — the tuple a fused `enumerate` or `zip`
+//! builds. Turning the rule on would refuse to compile every program that uses
+//! either. They need **two** things, not one:
+//!
+//! 1. **MIR-05's per-stage item types** (S21). A fused chain knows what its
+//!    source yields; what stage *n* yields is a fact no stage carries.
+//! 2. **A method catalog that describes `enumerate` and `zip`.** Their rows
+//!    declare `result: Vec[T]` — the receiver's own element type — so
+//!    `v.enumerate()` on a `Vec[Int]` types as `Vec[Int]` rather than
+//!    `Vec[(Int, Int)]`. F15 makes lowering *believe* the catalog, where it
+//!    used to re-derive a harmless fresh variable from the same row, so
+//!    deriving the tuple's type from the chain's result type today would
+//!    replace an honest null descriptor with a wrong one. See the S15 entry in
+//!    the repair progress note; this is a finding the register does not have.
+//!
+//! `MirType::expect_known` lands with the rule that needs it.
 
 use std::collections::BTreeSet;
 
