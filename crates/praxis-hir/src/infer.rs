@@ -214,6 +214,17 @@ fn builtin_catalog() -> &'static praxis_stdlib::MethodCatalog {
     CATALOG.get_or_init(praxis_stdlib::builtin_catalog)
 }
 
+/// The tree range a [`FileSpan`] covers — the inverse of
+/// [`Inferer::file_span`].
+///
+/// A [`Constraint`]'s `at` is a `FileSpan`, and the map lowering reads
+/// (`method_refs`) is keyed by the method-name token's `TextRange`. A deferred
+/// method resolution has to get from one to the other: the span it recorded *is*
+/// that token, so this is a change of vocabulary and not a lookup.
+fn range_of(at: FileSpan) -> TextRange {
+    TextRange::new(at.span.start().0.into(), at.span.end().0.into())
+}
+
 impl Inferer {
     fn span(&self, range: TextRange) -> Span {
         Span::new(
@@ -248,6 +259,123 @@ impl Inferer {
             let span = self.file_span(at);
             self.report_cap_failure(&cap, offender, span, None);
         }
+    }
+
+    /// Require `receiver` to have a method `name` taking `params` and returning
+    /// `result` — the deferred half of method resolution (TY-30).
+    ///
+    /// A method call whose receiver is still a variable used to constrain
+    /// nothing at all: `crate::catalog::lookup` needs a catalog-representable
+    /// receiver, so `fn total(values) { values.sum() }` gave up, returned a
+    /// fresh variable, and lowering later reported a method it could not find on
+    /// a type nobody had named. The requirement goes on the channel instead, and
+    /// [`Inferer::resolve_deferred_method`] answers it when the program says what
+    /// the receiver is.
+    ///
+    /// **The receiver is pinned to the declaration group's level**, so
+    /// generalization cannot quantify it. That is not an optimization, it is the
+    /// contract: there is one lowered body per source function — monomorphization
+    /// clones a tree lowering has already resolved — so one method call site
+    /// carries one catalog entry and one receiver type. A quantified receiver
+    /// would be N receiver types at one call site and no way to lower any of
+    /// them. §5.2 states the same answer from the other end: `total` is
+    /// `Vec[Int] -> Int`, not a scheme.
+    ///
+    /// The capability's own types are pinned with it. The result variable in
+    /// particular: quantifying it would let a call site instantiate a *fresh*
+    /// result while discharge unified the original, and the call would come out
+    /// unconstrained.
+    fn require_method(
+        &mut self,
+        receiver: Type,
+        name: String,
+        params: Vec<Type>,
+        result: Type,
+        at: TextRange,
+    ) {
+        let site = self.decl_site;
+        self.db.pin_to_level(receiver, site);
+        for p in &params {
+            self.db.pin_to_level(*p, site);
+        }
+        self.db.pin_to_level(result, site);
+        self.require_cap(
+            receiver,
+            Capability::HasMethod {
+                name,
+                params,
+                result,
+            },
+            at,
+        );
+    }
+
+    /// Answer a `HasMethod` requirement whose receiver has since resolved: look
+    /// the method up, unify the entry's signature with the types the call site
+    /// holds, and record the [`crate::MethodRef`] lowering reads (TY-30).
+    ///
+    /// This is why `HasMethod` is a *resolution* rather than a veto. The other
+    /// capabilities answer yes or no and are done; this one has to hand back the
+    /// entry, because the call site it came from produced no `method_refs` entry
+    /// when it was made — the receiver had no type yet — and lowering reads that
+    /// map and nothing else (F15/HIR-02).
+    ///
+    /// A receiver that turns out **not** to have the method is left alone here:
+    /// lowering owns `Y110`, it has the method-name span, and it will report the
+    /// same call. Reporting here as well is the same mistake twice.
+    fn resolve_deferred_method(&mut self, c: &Constraint) {
+        let Capability::HasMethod {
+            name,
+            params,
+            result,
+        } = &c.cap
+        else {
+            return;
+        };
+        let (name, params, result) = (name.clone(), params.clone(), *result);
+        let receiver_ty = self.db.follow(c.var_type());
+        let hits = crate::catalog::lookup(&self.db, self.catalog, receiver_ty, &name, params.len());
+        let Some(entry) = hits.first().copied() else {
+            return;
+        };
+        // The entry's patterns, instantiated through one shared name map so a
+        // `Var("T")` repeated across receiver, params and result is one variable
+        // — the same discipline `infer_method_call` uses when it can resolve at
+        // the call site.
+        let mut names = HashMap::new();
+        let receiver_param =
+            crate::lower::pattern_to_type_named(&mut self.db, &entry.receiver, &mut names);
+        let param_tys: Vec<Type> = entry
+            .params
+            .iter()
+            .map(|p| crate::lower::pattern_to_type_named(&mut self.db, p, &mut names))
+            .collect();
+        let result_ty =
+            crate::lower::pattern_to_type_named(&mut self.db, &entry.result, &mut names);
+        let at = c.report_at();
+        let _ = self.db.unify(receiver_param, receiver_ty);
+        for (pattern_ty, arg_ty) in param_tys.iter().zip(params.iter()) {
+            if let Err(e) = self.db.unify(*pattern_ty, *arg_ty) {
+                self.diag_unify(at, e);
+            }
+        }
+        // Unifying the result is what *pins the call*: the deferred call site
+        // returned a bare variable, and this is the only thing that ever says
+        // what it holds.
+        if let Err(e) = self.db.unify(result_ty, result) {
+            self.diag_unify(at, e);
+        }
+        // Now that the receiver is known, its own invariants apply: a deferred
+        // `m.insert(k, v)` on an unannotated parameter is still an insert.
+        self.require_collection_invariants(receiver_ty, range_of(c.at));
+        self.method_refs.insert(
+            range_of(c.at),
+            crate::MethodRef {
+                entry,
+                receiver: receiver_ty,
+                result: result_ty,
+            },
+        );
     }
 
     /// Require what a collection type demands of its own arguments (TY-32,
@@ -294,6 +422,15 @@ impl Inferer {
     /// the declaration group closes.
     fn discharge_constraints(&mut self) {
         for c in self.db.take_dischargeable() {
+            // `HasMethod` is the one requirement that *produces* something when
+            // it holds — the catalog entry the deferred call site could not
+            // select — so it is discharged by resolving it rather than by
+            // checking it. See [`Inferer::resolve_deferred_method`], including
+            // why a failure is lowering's to report and not this pass's.
+            if matches!(c.cap, Capability::HasMethod { .. }) {
+                self.resolve_deferred_method(&c);
+                continue;
+            }
             let ty = c.var_type();
             if let Err(offender) = crate::capability::check(&mut self.db, self.catalog, ty, &c.cap)
             {
@@ -321,6 +458,13 @@ impl Inferer {
             Capability::Kind(CapKind::HashStable) => not_hashable(at, &rendered),
             Capability::Kind(CapKind::Numeric) => not_numeric(at, &rendered),
             Capability::Iterable { .. } => crate::diagnostics::not_iterable(at, &rendered),
+            // Reached only by a `HasMethod` required against a receiver that was
+            // already concrete, which `require_method` never does — a concrete
+            // receiver is resolved at the call site. The deferred ones are
+            // discharged by [`Inferer::resolve_deferred_method`], which leaves a
+            // failure to lowering (it owns `Y110` and has the name span). The arm
+            // is the honest translation of the capability all the same, and the
+            // match is what keeps it honest if a second emitter appears.
             Capability::HasMethod { name, .. } => {
                 crate::diagnostics::unknown_method(at, name, &rendered)
             }
@@ -1958,13 +2102,27 @@ impl Inferer {
         // Look up the method in the catalog via the ADR-010 bridge.
         let hits = crate::catalog::lookup(&self.db, self.catalog, receiver_ty, &name, arity);
         let Some(entry) = hits.first().copied() else {
-            // Unknown method: infer the args anyway (for nested diagnostics),
-            // then leave the result as a fresh var; the HIR lowerer emits the
-            // Y110 diagnostic (it has the method-name span).
-            for arg in &arg_exprs {
-                self.infer_expr(arg);
+            // Infer the args anyway (for nested diagnostics), and the result is
+            // a fresh var either way.
+            let arg_types: Vec<Type> = arg_exprs.iter().map(|a| self.infer_expr(a)).collect();
+            let result = self.db.fresh_var();
+            // Two different situations arrive here and only one of them is a
+            // mistake. A **concrete** receiver with no matching entry has no such
+            // method, and the HIR lowerer reports it (`Y110`; it has the
+            // method-name span). A receiver that is still a **variable** has not
+            // failed anything: nothing has said what it is yet, and
+            // `catalog::lookup` cannot answer about a type that does not exist.
+            // That one becomes a requirement on the channel, answered when the
+            // program pins the receiver — which is the whole of TY-30, and what
+            // makes §5.2's `fn total(values) { values.sum() }` infer.
+            if self.db.var_id_of(self.db.follow(receiver_ty)).is_some() {
+                let at = m
+                    .method_name()
+                    .map(|t| t.text_range())
+                    .unwrap_or_else(|| m.syntax().text_range());
+                self.require_method(receiver_ty, name, arg_types, result, at);
             }
-            return self.db.fresh_var();
+            return result;
         };
 
         // Bidirectional inference (M8, §3): instantiate the method's full

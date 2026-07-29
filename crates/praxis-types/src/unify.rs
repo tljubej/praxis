@@ -115,7 +115,7 @@ impl TypeDb {
 
     /// Recurse over `t`, lowering every unbound var deeper than `outer` to
     /// `outer` (ADR-008, Pottier's rule `level(w) := min(level(w), level(v))`).
-    fn lower_levels(&mut self, t: Type, outer: Level) {
+    pub(crate) fn lower_levels(&mut self, t: Type, outer: Level) {
         let mut folder = LevelLowerer {
             db: self,
             memo: FoldMemo::new(),

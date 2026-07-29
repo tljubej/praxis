@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-29
 **Status:** Accepted — implemented
-**Milestone:** Repair (stage S17 — F10's constraint channel, TY-25…TY-29, TY-32, RT-08)
+**Milestone:** Repair (stage S17 — F10's constraint channel, TY-25…TY-30, TY-32, RT-08)
 
 ## Context
 
@@ -135,10 +135,59 @@ entry). Its assertions were still true — ADR-045 gave `Text` and `Char` real
 runtime `compare` callbacks — but its *name* claims the two sets are one, and
 this stage is where they stop being.
 
+## Decision 5: a receiver a method was called on is pinned, not quantified (TY-30)
+
+`HasMethod` is the one requirement that *produces* something when it holds, and
+that is what makes it different from the other five.
+
+A method call whose receiver is still a variable used to constrain nothing at
+all. `catalog::lookup` needs a catalog-representable receiver, and a variable is
+not one, so `fn total(values) { values.sum() }` gave up: the result was a fresh
+variable, no `method_refs` entry was recorded, and lowering later reported a
+method it could not find on a type nobody had named. §5.2 promises this exact
+program needs no annotations and infers `total: Vec[Int] -> Int`.
+
+The requirement goes on the channel — `HasMethod { name, params, result }` on the
+receiver's variable — and discharge **resolves** it: look the method up against
+the receiver the program pinned, unify the entry's receiver, parameters and result
+with the ones the call site holds, and record the `MethodRef` lowering reads. The
+result unification is what pins the call; the parameter unifications are what
+give `fn add(v, x) { v.push(x) }` its `(Vec[Int], Int) -> Unit`.
+
+**The receiver is pinned to the declaration group's level, so generalization
+cannot quantify it.** `TypeDb::pin_to_level` is Pottier's level-lowering rule
+applied deliberately rather than as a consequence of a link, and the reason is not
+inference at all — it is lowering. There is **one lowered body per source
+function**: monomorphization clones a tree lowering has already resolved. So one
+method call site carries one catalog entry and one receiver type. A quantified
+receiver would be N receiver types at one call site with no way to lower any of
+them, which is why `total(vec_of_int)` and `total(vec_of_float)` in one program is
+a disagreement about `total`'s signature and not two instantiations. §5.2 states
+the same answer from the other end: `total` is `Vec[Int] -> Int`, a monotype.
+
+The capability's own types are pinned with it. The result variable in particular:
+quantifying it would let a call site instantiate a *fresh* result while discharge
+unified the original, and the call would come out unconstrained.
+
+**A failure is lowering's to report, not the channel's.** `Y110` has one emitter,
+it has the method-name span, and it fires for both shapes that reach it — a
+receiver the program pinned to a type without the method, and a receiver nothing
+ever pinned. Reporting from the channel as well would be the same mistake twice.
+So `HasMethod` resolves or stays silent; it never vetoes.
+
 ## Consequences
 
 - **`Y013`, `Y014`, `Y015` and `Y016` are spent.** ADR-051 reserved all four for
   exactly these findings and they were unused.
+- **Generalization has a second rule now**, and it is a rule about lowering:
+  level and *pinning*. `pin_to_level` is the only way to state it, and TY-30 is
+  its only caller. A future stage that gives mono its own method resolution could
+  lift the pin; nothing else can.
+- **A requirement the receiver's own type carries reaches through a deferred
+  method.** `resolve_deferred_method` calls `require_collection_invariants` on the
+  receiver it just learned, so `fn store(m, k) { m.insert(k, 1) }` refuses a
+  mutable key (`Y014`) even though `m` was never annotated. Decision 3 and
+  Decision 5 compose without either knowing about the other.
 - **`Diagnostic::with_note` is new** on the finished diagnostic, not only on the
   builder. §8.2 asks for "related spans when inference connects distant
   expressions", and this is the first inference that connects two.
@@ -150,10 +199,10 @@ this stage is where they stop being.
 - **A duplicate requirement is recorded once.** The same `(var, cap, span)`
   discovered twice is one requirement; a loop body would otherwise push one per
   pass over the tree.
-- **`HasMethod` has the shape and one consumer short of a fix.** `check` answers
-  it through the method catalog, but nothing *emits* one yet: a method call on an
-  unresolved receiver still returns a fresh variable. That is **TY-30**, and it
-  is what `collection_method_constrains_unannotated_receiver_parameter` gates.
+- **`HasMethod` is emitted and resolved (Decision 5, TY-30)**, and it is the one
+  capability whose discharge writes to `method_refs` rather than answering a
+  yes/no. Its gate is
+  `collection_method_constrains_unannotated_receiver_parameter`.
 - **`Iterable`'s `item` is not unified at discharge.** `check` answers the
   yes/no; which item type a receiver yields is established where the `for` is
   inferred. A constraint that resolves to a *differently*-itemed iterable would

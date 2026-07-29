@@ -1350,6 +1350,55 @@ fn a_monotype_carries_no_constraints_and_claims_none() {
     );
 }
 
+/// A pinned variable is one generalization will not quantify — that is the whole
+/// of `pin_to_level`, and it is what TY-30 needs: a receiver a method was called
+/// on has to stay one type, because there is one lowered body per function.
+///
+/// Both halves matter. The pin reaches *into* a composite (a receiver is usually
+/// `Vec[?e]`, not a bare variable, and the element is what would otherwise be
+/// quantified), and it is the only thing that changed — an unpinned variable at
+/// the same depth still generalizes, so the rule is the pin and not the level.
+#[test]
+fn a_pinned_variable_is_not_quantified() {
+    let mut db = TypeDb::new();
+    let site = db.level();
+    let (pinned, free) = {
+        let prev = db.enter_level();
+        let pinned = db.fresh_var();
+        let free = db.fresh_var();
+        db.pin_to_level(pinned, site);
+        db.exit_level(prev);
+        (pinned, free)
+    };
+
+    let body = db.func(vec![pinned], free);
+    let scheme = db.generalize_at(body, site);
+    let free_id = db.var_id_of(free).expect("a fresh var is a var");
+    assert_eq!(
+        scheme.binders(),
+        &[free_id],
+        "the pinned variable stays monomorphic; its neighbour at the same level does not"
+    );
+
+    // The pin follows structure: `Vec[?e]`'s element is what generalization
+    // would otherwise reach, and pinning the collection pins it.
+    let mut db = TypeDb::new();
+    let site = db.level();
+    let vec_of_var = {
+        let prev = db.enter_level();
+        let el = db.fresh_var();
+        let v = db.vec(el);
+        db.pin_to_level(v, site);
+        db.exit_level(prev);
+        v
+    };
+    let scheme = db.generalize_at(vec_of_var, site);
+    assert!(
+        scheme.binders().is_empty(),
+        "a pinned Vec's element type is pinned with it"
+    );
+}
+
 /// Instantiation re-emits: the requirement was written about the generic body's
 /// variable, and what has to satisfy it is whatever *this* use puts in its
 /// place. Two uses are two constraints, each about its own fresh variable.

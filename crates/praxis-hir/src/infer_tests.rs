@@ -1650,7 +1650,6 @@ fn iterable_constraint_rejects_int_instantiation() {
 }
 
 #[test]
-#[ignore = "known bug: method lookup cannot constrain an unresolved receiver"]
 fn collection_method_constrains_unannotated_receiver_parameter() {
     // This is the §5.2 inference example: use of `.sum()` should constrain the
     // unannotated parameter to a numeric iterable shape, then the call site
@@ -1661,6 +1660,151 @@ fn collection_method_constrains_unannotated_receiver_parameter() {
         !has_type_error_with_lower(src),
         "method use plus the call site should infer a concrete collection receiver"
     );
+}
+
+/// TY-30 as the *rule*, not one accepted program: a method called on a receiver
+/// nothing has typed yet is a **requirement**, and the use site answers it.
+///
+/// The exit test only asks that §5.2's program is accepted. What it cannot see is
+/// the answer — §5.2 states it exactly, `total: Vec[Int] -> Int` — and that the
+/// resolution runs in both directions: the entry's *result* pins the call, and
+/// the entry's *parameters* pin the arguments the deferred call passed.
+#[test]
+fn a_method_on_an_unannotated_receiver_is_resolved_by_the_use_site() {
+    // §5.2's own answer, written down.
+    let sum = "fn total(values) { values.sum() }\n\
+               fn main() -> Int { let values = Vec(); values.push(1); total(values) }";
+    assert_eq!(
+        scheme_of(sum, "total").as_deref(),
+        Some("(Vec[Int]) -> Int")
+    );
+
+    // Not a special case of `sum`: any catalog entry, on any receiver shape the
+    // catalog models — including a scalar one.
+    let len = "fn size(v) { v.len() }\n\
+               fn main() -> Int { let v = Vec(); v.push(1); size(v) }";
+    assert_eq!(scheme_of(len, "size").as_deref(), Some("(Vec[Int]) -> Int"));
+    let text = "fn size(t) { t.len() }\nfn main() -> Int { size(\"abc\") }";
+    assert_eq!(scheme_of(text, "size").as_deref(), Some("(Text) -> Int"));
+
+    // The deferred entry pins the *arguments* too. `x` has no annotation and no
+    // use of its own; `push`'s parameter is what says it is an `Int`.
+    let arg = "fn add(v, x) { v.push(x) }\n\
+               fn main() -> Unit { let v = Vec(); v.push(1); add(v, 2) }";
+    assert_eq!(
+        scheme_of(arg, "add").as_deref(),
+        Some("(Vec[Int], Int) -> Unit")
+    );
+    assert!(!has_type_error_with_lower(arg));
+
+    // …so an argument that disagrees with it is reported, which is the half a
+    // "the program is accepted" test cannot reach.
+    let bad = "fn add(v, x) { v.push(x) }\n\
+               fn main() -> Unit { let v = Vec(); v.push(1); add(v, \"s\") }";
+    assert!(has_type_error_with_lower(bad));
+
+    // And the result is checked against the annotation the deferred function
+    // wrote, rather than being whatever the annotation says.
+    let wrong = "fn total(values) -> Text { values.sum() }\n\
+                 fn main() -> Text { let v = Vec(); v.push(1); total(v) }";
+    assert!(has_type_error_with_lower(wrong));
+}
+
+/// The receiver a method was called on is **pinned**, not quantified (TY-30).
+///
+/// This is the contract, and it is why `pin_to_level` exists. There is one
+/// lowered body per source function — monomorphization clones a tree lowering
+/// already resolved — so one method call site carries one catalog entry and one
+/// receiver type. Two receivers at one call site is not a shape the compiler can
+/// lower, so it is a disagreement about `total`'s signature instead.
+///
+/// The second half is what keeps the rule from being "nothing generalizes": a
+/// parameter no method was called on is quantified exactly as before.
+#[test]
+fn a_receiver_a_method_was_called_on_is_not_quantified() {
+    let two = "fn total(values) { values.sum() }\n\
+               fn main() -> Int {\n\
+                 let a = Vec()\n\
+                 a.push(1)\n\
+                 let b = Vec()\n\
+                 b.push(1.0)\n\
+                 total(b)\n\
+                 total(a)\n\
+               }";
+    assert!(
+        has_type_error_with_lower(two),
+        "one method call site cannot carry two receiver types"
+    );
+
+    // A parameter with no method call on it still generalizes — `id` is used at
+    // two types in one program and neither pins the other.
+    let generic = "fn id(x) { x }\n\
+                   fn main() -> Int { let t = id(\"s\"); id(1) }";
+    assert_eq!(
+        scheme_of(generic, "id").as_deref(),
+        Some("forall T. (T) -> T")
+    );
+    assert!(!has_type_error_with_lower(generic));
+}
+
+/// A requirement the receiver's *type* carries is checked once the receiver
+/// resolves, and a deferred method call is no exception (TY-30 × TY-32/D4).
+///
+/// `store` never says what `m` is. The `insert` inside it is what makes it a
+/// `Map`, and the key rule then applies to the key the call site chose — so the
+/// mutable-collection-as-key refusal reaches through a function whose signature
+/// was inferred entirely from a deferred method.
+#[test]
+fn a_deferred_method_still_carries_its_receivers_own_requirements() {
+    let src = "fn store(m, k) -> Unit { m.insert(k, 1) }\n\
+               fn main() -> Unit {\n\
+                 let m = Map()\n\
+                 let key = Vec()\n\
+                 key.push(1)\n\
+                 store(m, key)\n\
+               }";
+    let diags = analyze_and_lower_diags(src);
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y014"),
+        "a Vec key must be refused through a deferred insert, got {:?}",
+        diags
+            .iter()
+            .map(|d| d.code().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // The same shape with an immutable key is accepted, so the refusal is the
+    // key rule and not "a deferred insert cannot resolve".
+    let ok = "fn store(m, k) -> Unit { m.insert(k, 1) }\n\
+              fn main() -> Unit { let m = Map(); store(m, \"k\") }";
+    assert!(!has_type_error_with_lower(ok));
+}
+
+/// A method the receiver does not have is reported **once**, by lowering.
+///
+/// TY-30 adds a second place that knows about the call, and a capability channel
+/// that reports as well as resolves would say the same thing twice. It resolves
+/// only: `Y110` has one emitter, it has the method-name span, and both shapes
+/// that reach it — a receiver the program pinned, and a receiver nothing ever
+/// pinned — produce exactly one diagnostic.
+#[test]
+fn a_method_the_receiver_does_not_have_is_reported_once() {
+    for src in [
+        // Pinned by the call site, and `Int` has no `nope`.
+        "fn f(x) { x.nope() }\nfn main() -> Unit { f(1) }",
+        // Never pinned at all: nothing resolves, and lowering still reports.
+        "fn f(x) { x.nope() }\nfn main() -> Unit { }",
+    ] {
+        let codes: Vec<String> = analyze_and_lower_diags(src)
+            .iter()
+            .map(|d| d.code().to_string())
+            .collect();
+        assert_eq!(
+            codes,
+            vec!["Y110".to_string()],
+            "one report per missing method, got {codes:?} for {src:?}"
+        );
+    }
 }
 
 #[test]

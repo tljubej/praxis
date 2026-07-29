@@ -4604,3 +4604,45 @@ fn dbg_hands_back_the_value_it_was_given() {
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 2);
 }
+
+/// TY-30 end to end: the §5.2 program the design doc promises needs no
+/// annotations. `total`'s parameter has no type until `main` calls it, and the
+/// `.sum()` inside it had no catalog entry when inference walked past it — the
+/// entry is selected later, when the receiver resolves, and this is where that
+/// shows: the method has to *lower*, which is the half a type test cannot see.
+///
+/// Before this, the program typechecked and then failed the compile with "no
+/// method `sum` on this type" — a clean program that could not run.
+#[test]
+fn a_method_on_an_unannotated_parameter_runs() {
+    let (rt, result) = run_main(
+        "fn total(values) { values.sum() }\n\
+         fn main() -> Int {\n  \
+           let values = Vec()\n  \
+           values.push(1)\n  \
+           values.push(2)\n  \
+           total(values)\n\
+         }\n",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+/// …and a deferred method with *arguments* runs, mutating the receiver the call
+/// site owns. `add` learns both of its parameter types from `push`'s catalog
+/// row, so this is the resolution running in the argument direction as well as
+/// the result one.
+#[test]
+fn a_deferred_method_with_arguments_runs() {
+    let (rt, result) = run_main(
+        "fn add(v, x) { v.push(x) }\n\
+         fn main() -> Int {\n  \
+           let values = Vec()\n  \
+           values.push(1)\n  \
+           add(values, 41)\n  \
+           values.sum()\n\
+         }\n",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 42);
+}

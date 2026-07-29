@@ -325,6 +325,25 @@ impl TypeDb {
         }
     }
 
+    /// Pull every unbound variable inside `t` out to `site`, so a
+    /// generalization at `site` cannot quantify it.
+    ///
+    /// This is Pottier's level-lowering rule, applied deliberately rather than
+    /// as a consequence of a link. Unification already does it whenever a
+    /// younger variable is bound to a type holding older ones; a caller reaches
+    /// for it directly when it has learned something about a variable that makes
+    /// quantifying it *wrong* even though no link says so.
+    ///
+    /// The one caller today is TY-30: a variable a method was called on cannot
+    /// be quantified, because there is one lowered body per source function and
+    /// a method call in it lowers to exactly one catalog entry. Pinning the
+    /// receiver is what makes `fn total(values) { values.sum() }` come out
+    /// `Vec[Int] -> Int` — the answer §5.2 states — rather than a scheme whose
+    /// body no call site can lower.
+    pub fn pin_to_level(&mut self, t: Type, site: Level) {
+        self.lower_levels(t, site);
+    }
+
     /// Every pending constraint, for a caller that has to see the ones nothing
     /// resolved (a final sweep at the end of a declaration group).
     #[inline]
