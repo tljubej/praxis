@@ -21,7 +21,7 @@ use crate::{MethodEntry, MethodLowering, Purity, Stability, TypePattern};
 fn vec_of_t() -> TypePattern {
     TypePattern::Collection {
         ctor: CollectionCtor::Vec,
-        args: vec![TypePattern::Var("T")],
+        args: vec![TypePattern::var("T")],
     }
 }
 
@@ -397,7 +397,7 @@ fn vec_push() -> MethodEntry {
     MethodEntry {
         receiver: vec_of_t(),
         name: "push",
-        params: vec![TypePattern::Var("T")],
+        params: vec![TypePattern::var("T")],
         result: TypePattern::Unit,
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecPush),
@@ -424,7 +424,7 @@ fn vec_get() -> MethodEntry {
         receiver: vec_of_t(),
         name: "get",
         params: vec![TypePattern::Scalar(ScalarType::Int)],
-        result: TypePattern::Var("T"),
+        result: TypePattern::var("T"),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecGet),
         doc: "The element at `index`; faults `IndexOutOfBounds` if out of range.",
@@ -451,7 +451,7 @@ fn vec_is_empty() -> MethodEntry {
 fn deque_of_t() -> TypePattern {
     TypePattern::Collection {
         ctor: CollectionCtor::Deque,
-        args: vec![TypePattern::Var("T")],
+        args: vec![TypePattern::var("T")],
     }
 }
 
@@ -459,7 +459,7 @@ fn deque_push_front() -> MethodEntry {
     MethodEntry {
         receiver: deque_of_t(),
         name: "push_front",
-        params: vec![TypePattern::Var("T")],
+        params: vec![TypePattern::var("T")],
         result: TypePattern::Unit,
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequePushFront),
@@ -472,7 +472,7 @@ fn deque_push_back() -> MethodEntry {
     MethodEntry {
         receiver: deque_of_t(),
         name: "push_back",
-        params: vec![TypePattern::Var("T")],
+        params: vec![TypePattern::var("T")],
         result: TypePattern::Unit,
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequePushBack),
@@ -486,7 +486,7 @@ fn deque_pop_front() -> MethodEntry {
         receiver: deque_of_t(),
         name: "pop_front",
         params: vec![],
-        result: TypePattern::Var("T"),
+        result: TypePattern::var("T"),
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequePopFront),
         doc: "Remove and return the front element; faults if empty.",
@@ -499,7 +499,7 @@ fn deque_pop_back() -> MethodEntry {
         receiver: deque_of_t(),
         name: "pop_back",
         params: vec![],
-        result: TypePattern::Var("T"),
+        result: TypePattern::var("T"),
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequePopBack),
         doc: "Remove and return the back element; faults if empty.",
@@ -525,7 +525,7 @@ fn deque_get() -> MethodEntry {
         receiver: deque_of_t(),
         name: "get",
         params: vec![TypePattern::Scalar(ScalarType::Int)],
-        result: TypePattern::Var("T"),
+        result: TypePattern::var("T"),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequeGet),
         doc: "The element at `index` (0-based from the front); faults if out of range.",
@@ -552,7 +552,7 @@ fn deque_is_empty() -> MethodEntry {
 fn map_of_k_v() -> TypePattern {
     TypePattern::Collection {
         ctor: CollectionCtor::Map,
-        args: vec![TypePattern::Var("K"), TypePattern::Var("V")],
+        args: vec![TypePattern::var("K"), TypePattern::var("V")],
     }
 }
 
@@ -560,7 +560,7 @@ fn map_of_k_v() -> TypePattern {
 fn set_of_t() -> TypePattern {
     TypePattern::Collection {
         ctor: CollectionCtor::Set,
-        args: vec![TypePattern::Var("T")],
+        args: vec![TypePattern::var("T")],
     }
 }
 
@@ -568,7 +568,7 @@ fn set_of_t() -> TypePattern {
 fn counter_of_t() -> TypePattern {
     TypePattern::Collection {
         ctor: CollectionCtor::Counter,
-        args: vec![TypePattern::Var("T")],
+        args: vec![TypePattern::var("T")],
     }
 }
 
@@ -576,7 +576,7 @@ fn map_insert() -> MethodEntry {
     MethodEntry {
         receiver: map_of_k_v(),
         name: "insert",
-        params: vec![TypePattern::Var("K"), TypePattern::Var("V")],
+        params: vec![TypePattern::var("K"), TypePattern::var("V")],
         result: TypePattern::Unit,
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapInsert),
@@ -589,10 +589,10 @@ fn map_get() -> MethodEntry {
     MethodEntry {
         receiver: map_of_k_v(),
         name: "get",
-        params: vec![TypePattern::Var("K")],
+        params: vec![TypePattern::var("K")],
         // For now the result is V (Unit if absent); a real Option[V] is a
         // follow-up once Option lands more broadly.
-        result: TypePattern::Var("V"),
+        result: TypePattern::var("V"),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapGet),
         doc: "The value for `key`, or Unit if absent (use `contains` to distinguish).",
@@ -604,7 +604,7 @@ fn map_contains() -> MethodEntry {
     MethodEntry {
         receiver: map_of_k_v(),
         name: "contains",
-        params: vec![TypePattern::Var("K")],
+        params: vec![TypePattern::var("K")],
         result: TypePattern::Scalar(ScalarType::Bool),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapContains),
@@ -617,7 +617,7 @@ fn map_remove() -> MethodEntry {
     MethodEntry {
         receiver: map_of_k_v(),
         name: "remove",
-        params: vec![TypePattern::Var("K")],
+        params: vec![TypePattern::var("K")],
         result: TypePattern::Unit,
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapRemove),
@@ -656,7 +656,7 @@ fn set_insert() -> MethodEntry {
     MethodEntry {
         receiver: set_of_t(),
         name: "insert",
-        params: vec![TypePattern::Var("T")],
+        params: vec![TypePattern::var("T")],
         result: TypePattern::Unit,
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::SetInsert),
@@ -669,7 +669,7 @@ fn set_remove() -> MethodEntry {
     MethodEntry {
         receiver: set_of_t(),
         name: "remove",
-        params: vec![TypePattern::Var("T")],
+        params: vec![TypePattern::var("T")],
         result: TypePattern::Unit,
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::SetRemove),
@@ -682,7 +682,7 @@ fn set_contains() -> MethodEntry {
     MethodEntry {
         receiver: set_of_t(),
         name: "contains",
-        params: vec![TypePattern::Var("T")],
+        params: vec![TypePattern::var("T")],
         result: TypePattern::Scalar(ScalarType::Bool),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::SetContains),
@@ -721,7 +721,7 @@ fn counter_get() -> MethodEntry {
     MethodEntry {
         receiver: counter_of_t(),
         name: "get",
-        params: vec![TypePattern::Var("T")],
+        params: vec![TypePattern::var("T")],
         result: TypePattern::Scalar(ScalarType::Int),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CounterGet),
@@ -734,7 +734,7 @@ fn counter_inc() -> MethodEntry {
     MethodEntry {
         receiver: counter_of_t(),
         name: "inc",
-        params: vec![TypePattern::Var("T")],
+        params: vec![TypePattern::var("T")],
         result: TypePattern::Unit,
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CounterInc),
@@ -774,14 +774,14 @@ fn counter_is_empty() -> MethodEntry {
 fn min_heap_of_t() -> TypePattern {
     TypePattern::Collection {
         ctor: CollectionCtor::MinHeap,
-        args: vec![TypePattern::Var("T")],
+        args: vec![TypePattern::var("T")],
     }
 }
 
 fn max_heap_of_t() -> TypePattern {
     TypePattern::Collection {
         ctor: CollectionCtor::MaxHeap,
-        args: vec![TypePattern::Var("T")],
+        args: vec![TypePattern::var("T")],
     }
 }
 
@@ -789,7 +789,7 @@ fn max_heap_push() -> MethodEntry {
     MethodEntry {
         receiver: max_heap_of_t(),
         name: "push",
-        params: vec![TypePattern::Var("T")],
+        params: vec![TypePattern::var("T")],
         result: TypePattern::Unit,
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MaxHeapPush),
@@ -803,7 +803,7 @@ fn max_heap_pop() -> MethodEntry {
         receiver: max_heap_of_t(),
         name: "pop",
         params: vec![],
-        result: TypePattern::Var("T"),
+        result: TypePattern::var("T"),
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MaxHeapPop),
         doc: "Remove and return the largest element; faults if empty.",
@@ -816,7 +816,7 @@ fn max_heap_peek() -> MethodEntry {
         receiver: max_heap_of_t(),
         name: "peek",
         params: vec![],
-        result: TypePattern::Var("T"),
+        result: TypePattern::var("T"),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MaxHeapPeek),
         doc: "The largest element without removing it; faults if empty.",
@@ -854,7 +854,7 @@ fn min_heap_push() -> MethodEntry {
     MethodEntry {
         receiver: min_heap_of_t(),
         name: "push",
-        params: vec![TypePattern::Var("T")],
+        params: vec![TypePattern::var("T")],
         result: TypePattern::Unit,
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MinHeapPush),
@@ -868,7 +868,7 @@ fn min_heap_pop() -> MethodEntry {
         receiver: min_heap_of_t(),
         name: "pop",
         params: vec![],
-        result: TypePattern::Var("T"),
+        result: TypePattern::var("T"),
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MinHeapPop),
         doc: "Remove and return the smallest element; faults if empty.",
@@ -881,7 +881,7 @@ fn min_heap_peek() -> MethodEntry {
         receiver: min_heap_of_t(),
         name: "peek",
         params: vec![],
-        result: TypePattern::Var("T"),
+        result: TypePattern::var("T"),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MinHeapPeek),
         doc: "The smallest element without removing it; faults if empty.",
@@ -996,7 +996,7 @@ fn bitset_is_empty() -> MethodEntry {
 fn grid_of_t() -> TypePattern {
     TypePattern::Collection {
         ctor: CollectionCtor::Grid,
-        args: vec![TypePattern::Var("T")],
+        args: vec![TypePattern::var("T")],
     }
 }
 
@@ -1042,7 +1042,7 @@ fn grid_get() -> MethodEntry {
             TypePattern::Scalar(ScalarType::Int),
             TypePattern::Scalar(ScalarType::Int),
         ],
-        result: TypePattern::Var("T"),
+        result: TypePattern::var("T"),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridGet),
         doc: "The cell at (x, y); faults if out of range.",
@@ -1057,7 +1057,7 @@ fn grid_set() -> MethodEntry {
         params: vec![
             TypePattern::Scalar(ScalarType::Int),
             TypePattern::Scalar(ScalarType::Int),
-            TypePattern::Var("T"),
+            TypePattern::var("T"),
         ],
         result: TypePattern::Unit,
         purity: Purity::Impure,
@@ -1138,7 +1138,7 @@ fn grid_cells() -> MethodEntry {
         params: vec![],
         result: TypePattern::Collection {
             ctor: CollectionCtor::Vec,
-            args: vec![TypePattern::Var("T")],
+            args: vec![TypePattern::var("T")],
         },
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridCells),
@@ -1154,7 +1154,7 @@ fn grid_row() -> MethodEntry {
         params: vec![TypePattern::Scalar(ScalarType::Int)],
         result: TypePattern::Collection {
             ctor: CollectionCtor::Vec,
-            args: vec![TypePattern::Var("T")],
+            args: vec![TypePattern::var("T")],
         },
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridRow),
@@ -1170,7 +1170,7 @@ fn grid_column() -> MethodEntry {
         params: vec![TypePattern::Scalar(ScalarType::Int)],
         result: TypePattern::Collection {
             ctor: CollectionCtor::Vec,
-            args: vec![TypePattern::Var("T")],
+            args: vec![TypePattern::var("T")],
         },
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridColumn),
@@ -1183,7 +1183,7 @@ fn grid_find() -> MethodEntry {
     MethodEntry {
         receiver: grid_of_t(),
         name: "find",
-        params: vec![TypePattern::Var("T")],
+        params: vec![TypePattern::var("T")],
         result: point_pattern(),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridFind),
@@ -1196,7 +1196,7 @@ fn grid_find_all() -> MethodEntry {
     MethodEntry {
         receiver: grid_of_t(),
         name: "find_all",
-        params: vec![TypePattern::Var("T")],
+        params: vec![TypePattern::var("T")],
         result: TypePattern::Collection {
             ctor: CollectionCtor::Vec,
             args: vec![point_pattern()],
@@ -1258,22 +1258,22 @@ fn grid_rotate_right() -> MethodEntry {
 fn seq_of_t() -> TypePattern {
     TypePattern::Collection {
         ctor: CollectionCtor::Seq,
-        args: vec![TypePattern::Var("T")],
+        args: vec![TypePattern::var("T")],
     }
 }
 
 /// `(T) -> U` — the shape of `map`'s closure argument.
 fn t_to_u() -> TypePattern {
     TypePattern::Function {
-        params: vec![TypePattern::Var("T")],
-        result: Box::new(TypePattern::Var("U")),
+        params: vec![TypePattern::var("T")],
+        result: Box::new(TypePattern::var("U")),
     }
 }
 
 /// `(T) -> Bool` — the shape of `filter`'s predicate.
 fn t_to_bool() -> TypePattern {
     TypePattern::Function {
-        params: vec![TypePattern::Var("T")],
+        params: vec![TypePattern::var("T")],
         result: Box::new(TypePattern::Scalar(ScalarType::Bool)),
     }
 }
@@ -1281,8 +1281,8 @@ fn t_to_bool() -> TypePattern {
 /// `(Acc, T) -> Acc` — the shape of `fold`'s combining closure.
 fn acc_t_to_acc() -> TypePattern {
     TypePattern::Function {
-        params: vec![TypePattern::Var("Acc"), TypePattern::Var("T")],
-        result: Box::new(TypePattern::Var("Acc")),
+        params: vec![TypePattern::var("Acc"), TypePattern::var("T")],
+        result: Box::new(TypePattern::var("Acc")),
     }
 }
 
@@ -1318,7 +1318,7 @@ fn seq_map_on_seq() -> MethodEntry {
 fn vec_of_u() -> TypePattern {
     TypePattern::Collection {
         ctor: CollectionCtor::Vec,
-        args: vec![TypePattern::Var("U")],
+        args: vec![TypePattern::var("U")],
     }
 }
 
@@ -1352,8 +1352,8 @@ fn seq_fold_on_vec() -> MethodEntry {
     MethodEntry {
         receiver: vec_of_t(),
         name: "fold",
-        params: vec![TypePattern::Var("Acc"), acc_t_to_acc()],
-        result: TypePattern::Var("Acc"),
+        params: vec![TypePattern::var("Acc"), acc_t_to_acc()],
+        result: TypePattern::var("Acc"),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_fold"),
         doc: "Reduce elements left-to-right with an accumulator and combining closure.",
@@ -1365,8 +1365,8 @@ fn seq_fold_on_seq() -> MethodEntry {
     MethodEntry {
         receiver: seq_of_t(),
         name: "fold",
-        params: vec![TypePattern::Var("Acc"), acc_t_to_acc()],
-        result: TypePattern::Var("Acc"),
+        params: vec![TypePattern::var("Acc"), acc_t_to_acc()],
+        result: TypePattern::var("Acc"),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_fold"),
         doc: "Reduce elements left-to-right with an accumulator and combining closure.",
@@ -1376,7 +1376,7 @@ fn seq_fold_on_seq() -> MethodEntry {
 
 fn seq_sum_on_vec() -> MethodEntry {
     MethodEntry {
-        receiver: vec_of_t(),
+        receiver: vec_of_int_elem(),
         name: "sum",
         params: vec![],
         result: TypePattern::Scalar(ScalarType::Int),
@@ -1389,7 +1389,7 @@ fn seq_sum_on_vec() -> MethodEntry {
 
 fn seq_sum_on_seq() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_t(),
+        receiver: seq_of_int_elem(),
         name: "sum",
         params: vec![],
         result: TypePattern::Scalar(ScalarType::Int),
@@ -1463,7 +1463,7 @@ fn seq_collect_on_seq() -> MethodEntry {
 /// `(T, T) -> Bool` — the shape of `min_by`/`max_by`'s comparator ("less-than").
 fn t_t_to_bool() -> TypePattern {
     TypePattern::Function {
-        params: vec![TypePattern::Var("T"), TypePattern::Var("T")],
+        params: vec![TypePattern::var("T"), TypePattern::var("T")],
         result: Box::new(TypePattern::Scalar(ScalarType::Bool)),
     }
 }
@@ -1471,7 +1471,7 @@ fn t_t_to_bool() -> TypePattern {
 /// `(T) -> Vec<U>` — the shape of `flat_map`'s closure.
 fn t_to_vec_u() -> TypePattern {
     TypePattern::Function {
-        params: vec![TypePattern::Var("T")],
+        params: vec![TypePattern::var("T")],
         result: Box::new(vec_of_u()),
     }
 }
@@ -1556,12 +1556,46 @@ fn seq_take_while_on_seq() -> MethodEntry {
     }
 }
 
+/// `Vec[(Int, T)]` — what `enumerate` actually yields.
+///
+/// The row used to declare `Vec[T]`, the receiver's own element type, so
+/// `v.enumerate()` on a `Vec[Int]` came out `Vec[Int]` and the tuple the fused
+/// loop really builds was invisible to the type system. Found by S15 and
+/// recorded there as a finding the register does not have; this stage is the one
+/// that touches the sequence rows, so it is fixed here.
+fn vec_of_index_and_t() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::Vec,
+        args: vec![TypePattern::Tuple(vec![
+            TypePattern::Scalar(ScalarType::Int),
+            TypePattern::var("T"),
+        ])],
+    }
+}
+
+/// `Vec[(T, U)]` — what `zip` yields, pairing the receiver's element with the
+/// argument sequence's.
+///
+/// The row used to declare both the parameter and the result as `Vec[T]`, which
+/// said two wrong things at once: that the other sequence must have the *same*
+/// element type as the receiver, and that the result is a sequence of that type
+/// rather than of pairs.
+fn vec_of_t_and_u() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::Vec,
+        args: vec![TypePattern::Tuple(vec![
+            TypePattern::var("T"),
+            TypePattern::var("U"),
+        ])],
+    }
+}
+
 fn seq_enumerate_on_vec() -> MethodEntry {
     MethodEntry {
         receiver: vec_of_t(),
         name: "enumerate",
         params: vec![],
-        result: vec_of_t(),
+        result: vec_of_index_and_t(),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_enumerate"),
         doc: "Pair each element with its index.",
@@ -1574,7 +1608,7 @@ fn seq_enumerate_on_seq() -> MethodEntry {
         receiver: seq_of_t(),
         name: "enumerate",
         params: vec![],
-        result: vec_of_t(),
+        result: vec_of_index_and_t(),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_enumerate"),
         doc: "Pair each element with its index.",
@@ -1586,8 +1620,8 @@ fn seq_zip_on_vec() -> MethodEntry {
     MethodEntry {
         receiver: vec_of_t(),
         name: "zip",
-        params: vec![vec_of_t()],
-        result: vec_of_t(),
+        params: vec![vec_of_u()],
+        result: vec_of_t_and_u(),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_zip"),
         doc: "Pair elements with another sequence, stopping at the shorter length.",
@@ -1599,8 +1633,8 @@ fn seq_zip_on_seq() -> MethodEntry {
     MethodEntry {
         receiver: seq_of_t(),
         name: "zip",
-        params: vec![vec_of_t()],
-        result: vec_of_t(),
+        params: vec![vec_of_u()],
+        result: vec_of_t_and_u(),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_zip"),
         doc: "Pair elements with another sequence, stopping at the shorter length.",
@@ -1661,10 +1695,40 @@ fn seq_filter_map_on_seq() -> MethodEntry {
 }
 
 // Aggregating sinks (scalar result) ---------------------------------------
+//
+// `sum`, `product`, `min` and `max` are **Int** operations (TY-31). Each one
+// lowers to an `ExtractScalar` at `ScalarKind::Int` followed by an `IntBinOp` or
+// an `IntCmp`, and the row's own result says `Int`. The element bound therefore
+// has to be `Int` and not `Numeric`: a `Numeric` bound would bless `Float`, and
+// `Vec[Float].sum()` reinterprets each float's bits as an integer and returns
+// nonsense — the P0-12 class of bug, in a sink. `Bool` was accepted for the same
+// reason, which is the finding.
+//
+// The bound is discharged by unification, so an element type that is *not yet
+// known* is pinned to `Int` rather than merely allowed: `v.map(f).sum()` pins the
+// closure's result.
+
+/// `Vec[Int]`, spelled as a bounded variable so the entry still *matches* a
+/// receiver whose element is `Bool` or `Float` and rejects it with
+/// `expected Int, found …` instead of "no method `sum` on this type".
+fn vec_of_int_elem() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::Vec,
+        args: vec![TypePattern::is_scalar("T", ScalarType::Int)],
+    }
+}
+
+/// The `Seq` half of [`vec_of_int_elem`].
+fn seq_of_int_elem() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::Seq,
+        args: vec![TypePattern::is_scalar("T", ScalarType::Int)],
+    }
+}
 
 fn seq_product_on_vec() -> MethodEntry {
     MethodEntry {
-        receiver: vec_of_t(),
+        receiver: vec_of_int_elem(),
         name: "product",
         params: vec![],
         result: TypePattern::Scalar(ScalarType::Int),
@@ -1677,7 +1741,7 @@ fn seq_product_on_vec() -> MethodEntry {
 
 fn seq_product_on_seq() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_t(),
+        receiver: seq_of_int_elem(),
         name: "product",
         params: vec![],
         result: TypePattern::Scalar(ScalarType::Int),
@@ -1690,7 +1754,7 @@ fn seq_product_on_seq() -> MethodEntry {
 
 fn seq_min_on_vec() -> MethodEntry {
     MethodEntry {
-        receiver: vec_of_t(),
+        receiver: vec_of_int_elem(),
         name: "min",
         params: vec![],
         result: TypePattern::Scalar(ScalarType::Int),
@@ -1703,7 +1767,7 @@ fn seq_min_on_vec() -> MethodEntry {
 
 fn seq_min_on_seq() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_t(),
+        receiver: seq_of_int_elem(),
         name: "min",
         params: vec![],
         result: TypePattern::Scalar(ScalarType::Int),
@@ -1716,7 +1780,7 @@ fn seq_min_on_seq() -> MethodEntry {
 
 fn seq_max_on_vec() -> MethodEntry {
     MethodEntry {
-        receiver: vec_of_t(),
+        receiver: vec_of_int_elem(),
         name: "max",
         params: vec![],
         result: TypePattern::Scalar(ScalarType::Int),
@@ -1729,7 +1793,7 @@ fn seq_max_on_vec() -> MethodEntry {
 
 fn seq_max_on_seq() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_t(),
+        receiver: seq_of_int_elem(),
         name: "max",
         params: vec![],
         result: TypePattern::Scalar(ScalarType::Int),
@@ -1745,7 +1809,7 @@ fn seq_min_by_on_vec() -> MethodEntry {
         receiver: vec_of_t(),
         name: "min_by",
         params: vec![t_t_to_bool()],
-        result: TypePattern::Var("T"),
+        result: TypePattern::var("T"),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_min_by"),
         doc: "Smallest element per a (T,T)->Bool \"less-than\" comparator.",
@@ -1758,7 +1822,7 @@ fn seq_min_by_on_seq() -> MethodEntry {
         receiver: seq_of_t(),
         name: "min_by",
         params: vec![t_t_to_bool()],
-        result: TypePattern::Var("T"),
+        result: TypePattern::var("T"),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_min_by"),
         doc: "Smallest element per a (T,T)->Bool \"less-than\" comparator.",
@@ -1771,7 +1835,7 @@ fn seq_max_by_on_vec() -> MethodEntry {
         receiver: vec_of_t(),
         name: "max_by",
         params: vec![t_t_to_bool()],
-        result: TypePattern::Var("T"),
+        result: TypePattern::var("T"),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_max_by"),
         doc: "Largest element per a (T,T)->Bool \"less-than\" comparator.",
@@ -1784,7 +1848,7 @@ fn seq_max_by_on_seq() -> MethodEntry {
         receiver: seq_of_t(),
         name: "max_by",
         params: vec![t_t_to_bool()],
-        result: TypePattern::Var("T"),
+        result: TypePattern::var("T"),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_max_by"),
         doc: "Largest element per a (T,T)->Bool \"less-than\" comparator.",
@@ -1901,7 +1965,7 @@ fn seq_reduce_on_vec() -> MethodEntry {
         receiver: vec_of_t(),
         name: "reduce",
         params: vec![acc_t_to_acc()],
-        result: TypePattern::Var("T"),
+        result: TypePattern::var("T"),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_reduce"),
         doc: "Reduce left-to-right, seeded with the first element.",
@@ -1914,7 +1978,7 @@ fn seq_reduce_on_seq() -> MethodEntry {
         receiver: seq_of_t(),
         name: "reduce",
         params: vec![acc_t_to_acc()],
-        result: TypePattern::Var("T"),
+        result: TypePattern::var("T"),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_reduce"),
         doc: "Reduce left-to-right, seeded with the first element.",
@@ -1979,7 +2043,7 @@ mod tests {
         ] {
             let args: Vec<TypePattern> = match ctor.arity() {
                 0 => Vec::new(),
-                n => (0..n).map(|_| TypePattern::Var("T")).collect(),
+                n => (0..n).map(|_| TypePattern::var("T")).collect(),
             };
             let pat = TypePattern::Collection { ctor, args };
             let len = cat.by_receiver_and_name(&pat, "len").count();
@@ -1990,14 +2054,14 @@ mod tests {
         // Map has two type args with distinct var names (K, V).
         let map_pat = TypePattern::Collection {
             ctor: CollectionCtor::Map,
-            args: vec![TypePattern::Var("K"), TypePattern::Var("V")],
+            args: vec![TypePattern::var("K"), TypePattern::var("V")],
         };
         assert!(cat.by_receiver_and_name(&map_pat, "len").count() >= 1);
         assert!(cat.by_receiver_and_name(&map_pat, "is_empty").count() >= 1);
         // Grid has width/height (its dimension methods).
         let grid_pat = TypePattern::Collection {
             ctor: CollectionCtor::Grid,
-            args: vec![TypePattern::Var("T")],
+            args: vec![TypePattern::var("T")],
         };
         assert!(cat.by_receiver_and_name(&grid_pat, "width").count() >= 1);
         assert!(cat.by_receiver_and_name(&grid_pat, "neighbors4").count() >= 1);

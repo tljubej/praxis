@@ -24,7 +24,7 @@ pub fn type_to_pattern(db: &TypeDb, t: Type) -> Option<TypePattern> {
         // the catalog's `Tuple[Int, Int]` param/result patterns).
         TypeData::Tuple(els) => Some(TypePattern::Tuple(
             els.iter()
-                .map(|e| type_to_pattern(db, *e).unwrap_or(TypePattern::Var("T")))
+                .map(|e| type_to_pattern(db, *e).unwrap_or(TypePattern::var("T")))
                 .collect(),
         )),
         TypeData::Func { .. } => None, // function-as-receiver not in catalog
@@ -34,11 +34,11 @@ pub fn type_to_pattern(db: &TypeDb, t: Type) -> Option<TypePattern> {
         TypeData::Never => None,
         TypeData::Collection { ctor, args } => {
             // Bridge each type arg to a pattern (recursing); unresolved element
-            // vars become `TypePattern::Var("T")` so the catalog's `Vec[T]`
+            // vars become `TypePattern::var("T")` so the catalog's `Vec[T]`
             // entry matches. A concrete `Vec[Int]` maps element-wise.
             let pat_args: Vec<TypePattern> = args
                 .iter()
-                .map(|a| type_to_pattern(db, *a).unwrap_or(TypePattern::Var("T")))
+                .map(|a| type_to_pattern(db, *a).unwrap_or(TypePattern::var("T")))
                 .collect();
             Some(TypePattern::Collection {
                 ctor: *ctor,
@@ -86,7 +86,7 @@ pub fn lookup<'a>(
 /// variants require exact equality.
 fn pattern_matches(catalog_pat: &TypePattern, concrete_pat: &TypePattern) -> bool {
     match (catalog_pat, concrete_pat) {
-        (TypePattern::Var(_), _) => true,
+        (TypePattern::Var { .. }, _) => true,
         (
             TypePattern::Collection { ctor: c1, args: a1 },
             TypePattern::Collection { ctor: c2, args: a2 },
@@ -127,10 +127,10 @@ mod tests {
             .entry(MethodEntry {
                 receiver: TypePattern::Collection {
                     ctor: CollectionCtor::Vec,
-                    args: vec![TypePattern::Var("T")],
+                    args: vec![TypePattern::var("T")],
                 },
                 name: "push",
-                params: vec![TypePattern::Var("T")],
+                params: vec![TypePattern::var("T")],
                 result: TypePattern::Unit,
                 purity: Purity::Impure,
                 lowering: MethodLowering::RuntimeSymbol(praxis_stdlib::abi::RuntimeSymbol::VecPush),

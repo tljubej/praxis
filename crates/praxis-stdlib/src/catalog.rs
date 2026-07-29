@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-use crate::type_pattern::TypePattern;
+use crate::type_pattern::{Bound, TypePattern};
 
 /// Whether a method is pure or has side effects.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -101,6 +101,34 @@ impl MethodEntry {
             MethodLowering::Intrinsic(_) => false,
         }
     }
+
+    /// What each of this entry's type variables must be (TY-31), by name.
+    ///
+    /// A bound is a fact about the *variable*, not about the position it is
+    /// written in, so this sweeps the receiver, the parameters and the result and
+    /// reports each name once. That is why `Vec[T].sum()` can declare its `Int`
+    /// requirement on the receiver's element and have it apply — there is nowhere
+    /// else in the row for it to live.
+    ///
+    /// A name that declares the *same* bound twice is one requirement.
+    /// [`MethodCatalogBuilder::finish`] refuses two *different* ones, so the
+    /// dedup here cannot hide a contradiction.
+    #[must_use]
+    pub fn bounds(&self) -> Vec<(&'static str, Bound)> {
+        let mut all = Vec::new();
+        self.receiver.collect_bounds(&mut all);
+        for p in &self.params {
+            p.collect_bounds(&mut all);
+        }
+        self.result.collect_bounds(&mut all);
+        let mut seen: Vec<(&'static str, Bound)> = Vec::new();
+        for entry in all {
+            if !seen.contains(&entry) {
+                seen.push(entry);
+            }
+        }
+        seen
+    }
 }
 
 /// Errors that can occur while building a [`MethodCatalog`].
@@ -112,6 +140,16 @@ pub enum MethodCatalogError {
         receiver: TypePattern,
         name: &'static str,
         arity: usize,
+    },
+    /// One entry declares two *different* bounds for the same type variable
+    /// (TY-31). A bound is a fact about the variable, so the row is asking for
+    /// two incompatible things and whichever the checker happened to read first
+    /// would win silently.
+    ConflictingBound {
+        method: &'static str,
+        var: &'static str,
+        first: Bound,
+        second: Bound,
     },
 }
 
@@ -125,6 +163,15 @@ impl fmt::Display for MethodCatalogError {
             } => write!(
                 f,
                 "duplicate catalog entry: {receiver}.{name}/{arity} already defined"
+            ),
+            MethodCatalogError::ConflictingBound {
+                method,
+                var,
+                first,
+                second,
+            } => write!(
+                f,
+                "catalog entry `{method}` bounds `{var}` as both {first:?} and {second:?}"
             ),
         }
     }
@@ -188,7 +235,8 @@ impl MethodCatalogBuilder {
     }
 
     /// Finalize the catalog, returning an error if any two entries share a
-    /// `(receiver, name, arity)` triple.
+    /// `(receiver, name, arity)` triple, or if any single entry bounds one type
+    /// variable two different ways (TY-31).
     pub fn finish(self) -> Result<MethodCatalog, MethodCatalogError> {
         for (i, a) in self.entries.iter().enumerate() {
             for b in self.entries.iter().skip(i + 1) {
@@ -197,6 +245,19 @@ impl MethodCatalogBuilder {
                         receiver: a.receiver.clone(),
                         name: a.name,
                         arity: a.arity(),
+                    });
+                }
+            }
+            // `bounds()` dedups equal declarations, so anything left twice under
+            // one name is a contradiction the checker would resolve by accident.
+            let bounds = a.bounds();
+            for (j, (var, first)) in bounds.iter().enumerate() {
+                if let Some((_, second)) = bounds.iter().skip(j + 1).find(|(v, _)| v == var) {
+                    return Err(MethodCatalogError::ConflictingBound {
+                        method: a.name,
+                        var,
+                        first: *first,
+                        second: *second,
                     });
                 }
             }
@@ -215,7 +276,7 @@ mod tests {
     fn vec_of_t() -> TypePattern {
         TypePattern::Collection {
             ctor: CollectionCtor::Vec,
-            args: vec![TypePattern::Var("T")],
+            args: vec![TypePattern::var("T")],
         }
     }
 
@@ -223,7 +284,7 @@ mod tests {
         MethodEntry {
             receiver: vec_of_t(),
             name: "push",
-            params: vec![TypePattern::Var("T")],
+            params: vec![TypePattern::var("T")],
             result: TypePattern::Unit,
             purity: Purity::Impure,
             lowering: MethodLowering::RuntimeSymbol(crate::abi::RuntimeSymbol::VecPush),
@@ -277,7 +338,99 @@ mod tests {
                 assert_eq!(name, "push");
                 assert_eq!(arity, 1);
             }
+            other => panic!("expected a duplicate, got {other}"),
         }
+    }
+
+    /// A bound is a fact about the *variable* (TY-31), so one entry cannot
+    /// declare two of them for one name: whichever the checker read first would
+    /// win, silently, and the row's other claim would simply not happen.
+    ///
+    /// The same bound written twice is *not* a conflict — an entry that names `T`
+    /// in three positions may restate it — which is the half a "reject
+    /// duplicates" rule would get wrong.
+    #[test]
+    fn finish_rejects_two_bounds_on_one_variable() {
+        let conflicted = MethodEntry {
+            receiver: TypePattern::Collection {
+                ctor: CollectionCtor::Vec,
+                args: vec![TypePattern::is_scalar("T", ScalarType::Int)],
+            },
+            params: vec![TypePattern::is_scalar("T", ScalarType::Text)],
+            ..vec_push()
+        };
+        let err = MethodCatalog::build()
+            .entry(conflicted)
+            .finish()
+            .unwrap_err();
+        match err {
+            MethodCatalogError::ConflictingBound { method, var, .. } => {
+                assert_eq!(method, "push");
+                assert_eq!(var, "T");
+            }
+            other => panic!("expected a conflicting bound, got {other}"),
+        }
+
+        // Restating the *same* bound is one requirement, not a conflict.
+        let restated = MethodEntry {
+            receiver: TypePattern::Collection {
+                ctor: CollectionCtor::Vec,
+                args: vec![TypePattern::is_scalar("T", ScalarType::Int)],
+            },
+            params: vec![TypePattern::is_scalar("T", ScalarType::Int)],
+            ..vec_push()
+        };
+        let bounds = restated.bounds();
+        assert_eq!(bounds, vec![("T", Bound::Is(ScalarType::Int))]);
+        assert!(MethodCatalog::build().entry(restated).finish().is_ok());
+    }
+
+    /// `bounds()` finds a declaration wherever it is written — the whole point of
+    /// keying on the variable rather than the position. `sum` declares its `Int`
+    /// requirement on the receiver's element, and `min_by`-shaped rows would
+    /// declare one inside a closure parameter.
+    #[test]
+    fn bounds_are_found_in_every_position() {
+        let on_receiver = MethodEntry {
+            receiver: TypePattern::Collection {
+                ctor: CollectionCtor::Vec,
+                args: vec![TypePattern::is_scalar("T", ScalarType::Int)],
+            },
+            ..vec_len()
+        };
+        assert_eq!(
+            on_receiver.bounds(),
+            vec![("T", Bound::Is(ScalarType::Int))]
+        );
+
+        // Inside a closure parameter, two levels down.
+        let in_a_closure = MethodEntry {
+            params: vec![TypePattern::Function {
+                params: vec![TypePattern::is_scalar("U", ScalarType::Char)],
+                result: Box::new(TypePattern::Unit),
+            }],
+            ..vec_len()
+        };
+        assert_eq!(
+            in_a_closure.bounds(),
+            vec![("U", Bound::Is(ScalarType::Char))]
+        );
+
+        // In the result, and inside a tuple in it.
+        let in_the_result = MethodEntry {
+            result: TypePattern::Tuple(vec![
+                TypePattern::Scalar(ScalarType::Int),
+                TypePattern::is_scalar("V", ScalarType::Byte),
+            ]),
+            ..vec_len()
+        };
+        assert_eq!(
+            in_the_result.bounds(),
+            vec![("V", Bound::Is(ScalarType::Byte))]
+        );
+
+        // An unbounded variable declares nothing, which is the common case.
+        assert!(vec_push().bounds().is_empty());
     }
 
     #[test]

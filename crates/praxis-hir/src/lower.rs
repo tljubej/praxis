@@ -2285,7 +2285,7 @@ fn pattern_to_type(db: &mut TypeDb, p: &TypePattern) -> Type {
     match p {
         TypePattern::Scalar(s) => db.scalar(map_pattern_scalar(*s)),
         TypePattern::Unit => db.unit(),
-        TypePattern::Var(_) => db.fresh_var(),
+        TypePattern::Var { .. } => db.fresh_var(),
         TypePattern::Collection { ctor, args } => {
             let arg_tys: Vec<Type> = args.iter().map(|a| pattern_to_type(db, a)).collect();
             collection_from_pattern(db, *ctor, arg_tys)
@@ -2319,7 +2319,7 @@ fn pattern_to_type_named_impl(
     match p {
         TypePattern::Scalar(s) => db.scalar(map_pattern_scalar(*s)),
         TypePattern::Unit => db.unit(),
-        TypePattern::Var(n) => {
+        TypePattern::Var { name: n, .. } => {
             if let Some(&t) = names.get(*n) {
                 t
             } else {

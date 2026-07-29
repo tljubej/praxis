@@ -248,6 +248,27 @@ impl Inferer {
     /// what TY-29 is. That one is deferred onto the channel and discharged when
     /// the variable resolves, or claimed by the scheme that quantifies it.
     fn require_cap(&mut self, t: Type, cap: Capability, at: TextRange) {
+        self.require_cap_as(t, cap, at, None);
+    }
+
+    /// [`require_cap`](Self::require_cap) with the caller's own wording for a
+    /// failure it can decide **immediately**.
+    ///
+    /// One requirement, two codes, and the split is not arbitrary. A compound
+    /// assignment against a `Bool` is reported *at the operation* and says so —
+    /// `Y010`, "values of type `Bool` do not support this operation". The same
+    /// requirement discharged *later*, because the target was a variable when the
+    /// `+=` was checked and some other use pinned it afterwards, has left that
+    /// operation behind: it reports the channel's own wording (`Y015`) at
+    /// whatever pinned it, with the operation as the note. Both are `Numeric`;
+    /// what differs is how much the report can still see.
+    fn require_cap_as(
+        &mut self,
+        t: Type,
+        cap: Capability,
+        at: TextRange,
+        immediate: Option<fn(FileSpan, &str) -> Diagnostic>,
+    ) {
         let resolved = self.db.follow(t);
         if let Some(var) = self.db.var_id_of(resolved) {
             let span = self.file_span(at);
@@ -257,7 +278,13 @@ impl Inferer {
         if let Err(offender) = crate::capability::check(&mut self.db, self.catalog, resolved, &cap)
         {
             let span = self.file_span(at);
-            self.report_cap_failure(&cap, offender, span, None);
+            match immediate {
+                Some(make) => {
+                    let rendered = self.db.render(offender);
+                    self.diagnostics.push(make(span, &rendered));
+                }
+                None => self.report_cap_failure(&cap, offender, span, None),
+            }
         }
     }
 
@@ -365,9 +392,13 @@ impl Inferer {
         if let Err(e) = self.db.unify(result_ty, result) {
             self.diag_unify(at, e);
         }
-        // Now that the receiver is known, its own invariants apply: a deferred
-        // `m.insert(k, v)` on an unannotated parameter is still an insert.
-        self.require_collection_invariants(receiver_ty, range_of(c.at));
+        // Now that the receiver is known, everything the entry and the receiver
+        // demand applies: a deferred `m.insert(k, v)` on an unannotated parameter
+        // is still an insert, and a deferred `values.sum()` still needs `Int`
+        // elements (TY-31).
+        let at = range_of(c.at);
+        self.apply_bounds(entry, &names, at);
+        self.require_collection_invariants(receiver_ty, at);
         self.method_refs.insert(
             range_of(c.at),
             crate::MethodRef {
@@ -376,6 +407,47 @@ impl Inferer {
                 result: result_ty,
             },
         );
+    }
+
+    /// Enforce what a catalog entry declares about its own type variables
+    /// (TY-31).
+    ///
+    /// `names` is the map [`crate::lower::pattern_to_type_named`] filled while
+    /// instantiating the entry's patterns, so a bound on `"T"` is a requirement
+    /// on the very type variable the receiver's element was unified with. A name
+    /// the entry declares a bound for but never instantiates cannot happen —
+    /// `bounds()` reads the same patterns — but a missing entry is skipped rather
+    /// than asserted, because a catalog bug should not panic the compiler.
+    ///
+    /// A [`Bound::Is`](praxis_stdlib::Bound::Is) is enforced by **unification**,
+    /// not by the constraint channel, and that is deliberate: it rejects a wrong
+    /// element with `expected Int, found Bool` *and* pins an element nothing has
+    /// named yet, which is what `v.map(f).sum()` needs. A capability bound could
+    /// not be enforced this way — it would have to go through
+    /// [`require_cap`](Self::require_cap) so an unresolved variable is deferred —
+    /// and the exhaustive match below is what makes adding one a compile error
+    /// rather than a silent omission.
+    fn apply_bounds(
+        &mut self,
+        entry: &praxis_stdlib::MethodEntry,
+        names: &HashMap<String, Type>,
+        at: TextRange,
+    ) {
+        for (var, bound) in entry.bounds() {
+            let Some(ty) = names.get(var).copied() else {
+                continue;
+            };
+            match bound {
+                praxis_stdlib::Bound::Is(scalar) => {
+                    // `praxis_types::ScalarType` *is* the pattern language's
+                    // scalar (re-exported), so there is nothing to translate.
+                    let want = self.db.scalar(scalar);
+                    if let Err(e) = self.db.unify(want, ty) {
+                        self.diag_unify(self.file_span(at), e);
+                    }
+                }
+            }
+        }
     }
 
     /// Require what a collection type demands of its own arguments (TY-32,
@@ -978,21 +1050,25 @@ impl Inferer {
         // A compound assignment is an arithmetic operation, so its target must
         // be numeric. Matching operand types alone said nothing: `var flag =
         // true; flag += false` unified `Bool` with `Bool` and was accepted
-        // (TY-15). Reported only for a target whose type is *known* — an
-        // unconstrained one is a variable that a later use may still pin.
+        // (TY-15).
+        //
+        // It goes through the channel now (TY-31). S13 reported it only for a
+        // target whose type was already *known*, deliberately: `fn f(a) { a += 1
+        // }` leaves `a` a variable, and answering "not numeric" about a variable
+        // is wrong while pinning it to `Int` would silently narrow every
+        // unannotated numeric parameter. Deferring is the third option and the
+        // right one — the requirement is recorded, generalization carries it, and
+        // whatever a call site puts in `a`'s place is what has to be a number.
         let compound = stmt
             .op()
             .is_some_and(|t| !matches!(t.kind(), SyntaxKind::EQ));
         if compound {
-            let resolved = self.db.follow(existing);
-            if !is_numeric(&self.db, resolved) && !is_unconstrained(&self.db, resolved) {
-                let rendered = self.db.render(resolved);
-                self.diagnostics
-                    .push(crate::diagnostics::compound_assign_non_numeric(
-                        self.file_span(at),
-                        &rendered,
-                    ));
-            }
+            self.require_cap_as(
+                existing,
+                Capability::Kind(CapKind::Numeric),
+                at,
+                Some(crate::diagnostics::compound_assign_non_numeric),
+            );
         }
     }
 
@@ -2172,17 +2248,20 @@ impl Inferer {
             }
             arg_types.push(at);
         }
+        let name_range = m
+            .method_name()
+            .map(|t| t.text_range())
+            .unwrap_or_else(|| m.syntax().text_range());
+        // What the entry declares about its own type variables (TY-31). Applied
+        // after the receiver and the arguments have unified, so a bound on `T`
+        // is asked about the type the call site actually chose.
+        self.apply_bounds(entry, &names, name_range);
         // A `Map`/`Set`/`Counter` key must be findable after it is stored, and a
         // heap element must be orderable (TY-32, D4). Required at the method
         // call because that is where a program actually puts a value into one —
         // and required *after* the arguments have unified, so `m.insert(key, 1)`
         // has pinned `K` to the key's type by now.
-        self.require_collection_invariants(
-            receiver_ty,
-            m.method_name()
-                .map(|t| t.text_range())
-                .unwrap_or_else(|| m.syntax().text_range()),
-        );
+        self.require_collection_invariants(receiver_ty, name_range);
         // Record the resolved method at its name token (HIR-02). Lowering reads
         // the entry rather than repeating the catalog lookup against a receiver
         // type it derived itself, and hover reads the result.
@@ -2284,21 +2363,6 @@ fn is_float_scalar(db: &TypeDb, t: Type) -> bool {
         db.data(db.follow(t)),
         praxis_types::TypeData::Scalar(ScalarType::Float)
     )
-}
-
-/// Whether `t` is a type arithmetic is defined on: `Int` or `Float` (§4.12).
-/// There is no other numeric scalar, and no composite is numeric.
-fn is_numeric(db: &TypeDb, t: Type) -> bool {
-    matches!(
-        db.data(db.follow(t)),
-        praxis_types::TypeData::Scalar(ScalarType::Int | ScalarType::Float)
-    )
-}
-
-/// Whether `t` is still an unbound variable — a type nothing has pinned yet, so
-/// there is no answer to give about it and no mistake to report.
-fn is_unconstrained(db: &TypeDb, t: Type) -> bool {
-    matches!(db.data(db.follow(t)), praxis_types::TypeData::Var(_))
 }
 
 /// How to name a binding kind in a diagnostic, in the words the source uses.

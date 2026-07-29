@@ -27,4 +27,4 @@ pub use catalog::{
 };
 pub use completion::{completion_data, CompletionItem};
 pub use prelude::PRELUDE;
-pub use type_pattern::TypePattern;
+pub use type_pattern::{Bound, TypePattern};

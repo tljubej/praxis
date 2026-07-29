@@ -1808,7 +1808,6 @@ fn a_method_the_receiver_does_not_have_is_reported_once() {
 }
 
 #[test]
-#[ignore = "known bug: numeric collection sinks do not constrain their element type"]
 fn sum_requires_int_elements() {
     let src = "fn main() -> Int {\n\
                  let values = Vec()\n\
@@ -1818,6 +1817,142 @@ fn sum_requires_int_elements() {
     assert!(
         has_type_error_with_lower(src),
         "sum/product/min/max lower as Int operations and must reject Bool elements"
+    );
+}
+
+/// TY-31 as the *rule*: the four aggregating sinks are **Int** operations, and
+/// the catalog says so now.
+///
+/// The exit test only asks about `Bool` on `sum`. `Float` is the case that
+/// mattered more and that no test asked for: `Vec[Float].sum()` typechecked and
+/// returned `9222246136947933184` — the float's bits, added as an integer. That
+/// is why the bound is `Int` and not `Numeric`, which is what the finding's
+/// wording ("numeric element types") would have given: `CapKind::Numeric`
+/// includes `Float`, and the lowering does not.
+#[test]
+fn the_int_sinks_require_int_elements() {
+    for sink in ["sum", "product", "min", "max"] {
+        for (elem, push) in [("Bool", "true"), ("Float", "1.5"), ("Text", "\"a\"")] {
+            let src = format!("fn main() -> Int {{ let v = Vec(); v.push({push}); v.{sink}() }}");
+            assert!(
+                has_type_error_with_lower(&src),
+                "`{sink}` on a Vec[{elem}] must be rejected"
+            );
+        }
+        // …and Int is accepted, so the bound is the element type and not the
+        // sink.
+        let ok = format!("fn main() -> Int {{ let v = Vec(); v.push(1); v.{sink}() }}");
+        assert!(!has_type_error_with_lower(&ok), "`{sink}` on Vec[Int]");
+    }
+}
+
+/// A bound **pins** an element nothing has named yet — it does not merely permit
+/// one (TY-31).
+///
+/// That is why [`Bound::Is`] is discharged by unification rather than by the
+/// constraint channel. A pipeline's intermediate element type is a fresh variable
+/// at the moment the sink is looked up, and a deferred yes/no would answer
+/// "optimistically capable" and let the closure return whatever it liked.
+#[test]
+fn a_sinks_element_bound_pins_an_unresolved_pipeline_stage() {
+    // `map`'s result element is a variable when `.sum()` is resolved; the bound
+    // pins it, so the closure's own body is what fails.
+    assert!(has_type_error_with_lower(
+        "fn main() -> Int { let v = Vec(); v.push(1); v.map(|x| \"s\").sum() }"
+    ));
+    // The same chain with an Int-returning closure is clean, so the rejection is
+    // the element type and not the fusion.
+    assert!(!has_type_error_with_lower(
+        "fn main() -> Int { let v = Vec(); v.push(1); v.map(|x| x * 2).sum() }"
+    ));
+    // And through TY-30's deferred resolution, where the receiver itself was a
+    // variable when the method was written.
+    assert!(has_type_error_with_lower(
+        "fn total(values) { values.sum() }\n\
+         fn main() -> Int { let v = Vec(); v.push(true); total(v) }"
+    ));
+}
+
+/// `enumerate` and `zip` say what they build (TY-31).
+///
+/// Both rows declared `result: Vec[T]` — the *receiver's* element type — so
+/// `v.enumerate()` on a `Vec[Int]` came out `Vec[Int]` and the tuple the fused
+/// loop really builds was invisible. `zip` was wrong twice over: the same row
+/// also required the other sequence to have the receiver's element type.
+///
+/// Found by S15 while it was deciding whether `alloc_empty_vec` could read its
+/// element type from the chain's result (it could not, because of this), and
+/// recorded there as a finding the register does not have.
+#[test]
+fn enumerate_and_zip_report_the_pairs_they_build() {
+    let e = "fn main() -> Unit { let v = Vec(); v.push(1); let pairs = v.enumerate(); out(pairs) }";
+    assert_eq!(scheme_of(e, "pairs").as_deref(), Some("Vec[(Int, Int)]"));
+
+    // A non-Int element, so "the index is an Int" is visible as a *separate*
+    // fact from the element type.
+    let text =
+        "fn main() -> Unit { let v = Vec(); v.push(\"a\"); let pairs = v.enumerate(); out(pairs) }";
+    assert_eq!(
+        scheme_of(text, "pairs").as_deref(),
+        Some("Vec[(Int, Text)]")
+    );
+
+    // `zip` pairs two *different* element types — which the old row made
+    // impossible to write.
+    let z = "fn main() -> Unit {\n\
+               let a = Vec()\n\
+               a.push(1)\n\
+               let b = Vec()\n\
+               b.push(\"s\")\n\
+               let pairs = a.zip(b)\n\
+               out(pairs)\n\
+             }";
+    assert_eq!(scheme_of(z, "pairs").as_deref(), Some("Vec[(Int, Text)]"));
+    assert!(!has_type_error_with_lower(z));
+}
+
+/// A compound assignment's numeric requirement survives generalization (TY-31,
+/// `Y015`).
+///
+/// S13 left this reported only for a target whose type was already known, and
+/// said why: `a += 1` inside a generic function says nothing about `a` yet, and
+/// pinning it to `Int` would silently narrow every unannotated numeric binding.
+/// Deferring is the third option — the requirement rides on the scheme, and the
+/// call site is where it is answered.
+///
+/// The two codes are the two situations. `Y010` is reported *at the operation*
+/// and can name it; `Y015` is reported at the use that pinned the target, which
+/// is somewhere else entirely.
+#[test]
+fn a_compound_assignments_numeric_requirement_survives_generalization() {
+    // A `var` whose type is still a variable when the `+=` is checked: both
+    // sides are the function's own parameter, so nothing has pinned it.
+    let bad = "fn twice(a) -> Unit { var acc = a\n  acc += a }\n\
+               fn main() -> Unit { twice(true) }";
+    let codes: Vec<String> = analyze_and_lower_diags(bad)
+        .iter()
+        .map(|d| d.code().to_string())
+        .collect();
+    assert!(
+        codes.iter().any(|c| c == "Y015"),
+        "expected Y015 at the call that chose Bool, got {codes:?}"
+    );
+
+    // The same function called at a number is clean — so the requirement is
+    // about the instantiation and not about the `+=`.
+    let ok = "fn twice(a) -> Unit { var acc = a\n  acc += a }\n\
+              fn main() -> Unit { twice(2) }";
+    assert!(!has_type_error_with_lower(ok));
+
+    // A target that is *already* known still reports at the operation, with the
+    // operation's own code.
+    let concrete: Vec<String> = analyze_and_lower_diags("var flag = true\nflag += false")
+        .iter()
+        .map(|d| d.code().to_string())
+        .collect();
+    assert!(
+        concrete.iter().any(|c| c == "Y010"),
+        "a known target keeps Y010, got {concrete:?}"
     );
 }
 

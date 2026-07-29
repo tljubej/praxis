@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-29
 **Status:** Accepted — implemented
-**Milestone:** Repair (stage S17 — F10's constraint channel, TY-25…TY-30, TY-32, RT-08)
+**Milestone:** Repair (stage S17 — F10's constraint channel, TY-25…TY-32, RT-08)
 
 ## Context
 
@@ -175,10 +175,66 @@ receiver the program pinned to a type without the method, and a receiver nothing
 ever pinned. Reporting from the channel as well would be the same mistake twice.
 So `HasMethod` resolves or stays silent; it never vetoes.
 
+## Decision 6: a catalog type variable may be bounded, and the bound is a scalar identity, not a capability (TY-31)
+
+`Vec[Bool].sum()` typechecked. So did `Vec[Float].sum()`, which returned
+`9222246136947933184` — the float's bits, added as an integer. The catalog had no
+way to say what a method requires of its own type variables:
+`TypePattern::Var("T")` was unconstrained at all 75 occurrences.
+
+`TypePattern::Var` carries an optional `Bound` now.
+`MethodEntry::bounds()` sweeps the receiver, the parameters and the result and
+reports each name once, because a bound is a fact about the *variable* and not
+about the position it is written in — `sum` declares its requirement on the
+receiver's element because there is nowhere else in the row for it to live.
+`MethodCatalogBuilder::finish` refuses an entry that bounds one name two
+different ways, so "whichever the checker read first" is not a thing that can
+happen.
+
+**The bound is `Bound::Is(ScalarType)`, and that is against expectation.** The
+plan asked for `CapKind` bounds and the finding is worded that way ("numeric or
+orderable element types"). Writing it found the opposite: `sum`, `product`, `min`
+and `max` each lower to an `ExtractScalar` at `ScalarKind::Int` followed by an
+`IntBinOp` or an `IntCmp`. `CapKind::Numeric` is `Int`, `UInt`, `Byte` **and**
+`Float`, so a `Numeric` bound would have documented a width the lowering does not
+have and blessed the `Float` case — the same shape of mistake as declaring `Text`
+orderable while no `Text` comparison was lowered (P0-12). A capability is the
+wrong *width* for an Int-only operation.
+
+It is discharged by **unification**, not through the constraint channel, and that
+is what makes it more than a check: a pipeline's intermediate element type is a
+fresh variable when the sink is looked up, so unifying *pins* it. `v.map(|x|
+"s").sum()` is rejected at the closure, and `v.map(|x| x * 2).sum()` is clean.
+A deferred yes/no would have answered "optimistically capable" for both.
+
+There is one `Bound` arm. The capabilities a row might otherwise want are already
+enforced from the receiver's **type** rather than per row, which is strictly
+stronger — a `Map` key must be hash-stable wherever the map is built, not only
+when `insert` is called (Decision 3). The match on `Bound` in `apply_bounds` is
+exhaustive, so a capability arm — which would have to route through `require_cap`,
+because a capability about an unresolved variable must be deferred and not
+unified — is a compile error to add halfway.
+
 ## Consequences
 
 - **`Y013`, `Y014`, `Y015` and `Y016` are spent.** ADR-051 reserved all four for
-  exactly these findings and they were unused.
+  exactly these findings and they were unused. `Y015` is the *deferred* numeric
+  failure and `Y010` is the immediate one: a compound assignment against a known
+  `Bool` is reported at the operation and can name it, while the same requirement
+  discharged after some later use pinned the target has left that operation
+  behind. `Inferer::require_cap_as` is where the caller chooses.
+- **A compound assignment's numeric requirement survives generalization.** S13
+  reported it only for a target whose type was already known, deliberately: `a +=
+  1` inside a generic function says nothing about `a`, and pinning it to `Int`
+  would narrow every unannotated numeric binding. Deferring is the third option.
+- **`enumerate` and `zip` say what they build.** Both rows declared `result:
+  Vec[T]` — the receiver's element type — so `v.enumerate()` on a `Vec[Int]` came
+  out `Vec[Int]`; `zip` additionally required the other sequence to have the
+  receiver's element type. They are `Vec[(Int, T)]` and `Vec[(T, U)]` now. S15
+  found this and recorded it as a finding the register does not have; this is the
+  stage that touches the sequence rows. **`alloc_empty_vec` still does not read
+  its element type from the chain's result** — that needs MIR-05's per-stage item
+  types (S21), and H10's verifier rule still waits on it.
 - **Generalization has a second rule now**, and it is a rule about lowering:
   level and *pinning*. `pin_to_level` is the only way to state it, and TY-30 is
   its only caller. A future stage that gives mono its own method resolution could
@@ -208,6 +264,8 @@ So `HasMethod` resolves or stays silent; it never vetoes.
   inferred. A constraint that resolves to a *differently*-itemed iterable would
   not be caught — no finding asks for it, and `iter_item` is a function of the
   receiver alone.
-- **Catalog rows still declare no bounds.** `TypePattern::Var("T")` is
-  unconstrained at all 74 sites, so `Vec[Bool].sum()` still typechecks. That is
-  **TY-31**, whose fix the plan sizes as one commit across those sites.
+- **A `Bound::Cap` arm has no catalog row (Decision 6).** Nothing in the
+  catalog needs one, because the receiver's type already answers those
+  questions. The next row that genuinely does — a registered `sorted`, a
+  `unique`, a `Vec.contains` — adds the arm and the `require_cap` route
+  together.
