@@ -575,6 +575,8 @@ pub fn lower(
         decls,
         ref_types,
         call_sites,
+        expr_types,
+        method_refs,
         diagnostics: _,
     } = analysis;
     // Cache the scalar/unit handles once (these methods need &mut db).
@@ -592,6 +594,9 @@ pub fn lower(
         decls,
         ref_types,
         call_sites,
+        expr_types,
+        method_refs,
+        resolved: HashMap::new(),
         diagnostics: Vec::new(),
         catalog: builtin_catalog(),
         int,
@@ -601,7 +606,6 @@ pub fn lower(
         unit,
         closure_counter: 0,
         escaping_vars: std::collections::HashSet::new(),
-        loop_results: Vec::new(),
     };
     let mut items = Vec::new();
     for node in root.stmts() {
@@ -660,6 +664,20 @@ struct Lowerer<'a> {
     /// callee name token's range. Read in `lower_call` to attach concrete arg
     /// types to each `TypedExpr::Call`.
     call_sites: &'a HashMap<TextRange, crate::CallSite>,
+    /// Every inferred expression's type, keyed by its node (F15). **This is
+    /// where a lowered node's type comes from.** Lowering used to derive one of
+    /// its own — instantiating schemes a second time, re-resolving methods, and
+    /// falling back to a fresh variable nineteen times over — which is why
+    /// `id(1.5)` could lower as `?a` and `values.get(0)` as `?T`. It reads now.
+    expr_types: &'a HashMap<crate::NodeKey, Type>,
+    /// Each method call's resolved catalog entry and inferred result, keyed by
+    /// the method-name token's range (F15). Lowering reads the entry rather than
+    /// repeating the catalog lookup against a receiver type of its own.
+    method_refs: &'a HashMap<TextRange, crate::MethodRef>,
+    /// Memo for [`Lowerer::deep`]: a recorded type, fully resolved to its
+    /// leaves. `follow` only resolves the top level, so a `Vec[?T]` whose `?T` a
+    /// later `push` pinned would reach codegen with no element descriptor.
+    resolved: HashMap<Type, Type>,
     diagnostics: Vec<Diagnostic>,
     /// The built-in method catalog (§16.2), used to resolve `receiver.method()`
     /// calls to their runtime lowering symbol. Immutable; built once.
@@ -683,12 +701,6 @@ struct Lowerer<'a> {
     /// site; a `var` missing here is one whose mutation a closure would write to
     /// a copy.
     escaping_vars: std::collections::HashSet<SymbolId>,
-    /// The join of each enclosing loop's `break` values, innermost last (TY-21).
-    /// A `loop` is the value its `break`s carry, and the typed tree has to say
-    /// so — reading the body's type would answer what the loop *repeats*, not
-    /// what it produces. Seeded with `Never`; a bare `break` contributes `Unit`.
-    /// Cleared and restored around a closure body, which is a function boundary.
-    loop_results: Vec<Type>,
 }
 
 /// The built-in method catalog, constructed once and cached for the process
@@ -727,6 +739,48 @@ impl<'a> Lowerer<'a> {
         ));
     }
 
+    // --- reading what inference decided (F15) --------------------------------
+
+    /// The type inference recorded for `node`.
+    ///
+    /// A miss is `Y099`, never a fresh variable: inference visits every
+    /// expression through one recording entry point, so a node it lowered and
+    /// inference did not see is a compiler bug, and a fresh variable is exactly
+    /// the silent lie this whole repair is tracking — it agrees with whatever
+    /// the next use wants and the mistake surfaces as a missing descriptor
+    /// three passes later.
+    fn node_ty(&mut self, node: &SyntaxNode) -> Type {
+        match self.expr_types.get(&crate::NodeKey::of(node)).copied() {
+            Some(t) => self.deep(t),
+            None => {
+                self.diag(
+                    node.text_range(),
+                    DiagCode::InternalMissingType,
+                    format!(
+                        "internal: inference recorded no type for this {:?} expression",
+                        node.kind()
+                    ),
+                );
+                self.unit
+            }
+        }
+    }
+
+    /// `t` with links followed at **every** level, memoized.
+    ///
+    /// `follow` answers the top-level representative only, so a `Vec[?T]` whose
+    /// element a later `push` pinned stays `Vec[?T]` — and the backend, asked
+    /// for an element descriptor, finds a variable. Lowering runs after every
+    /// link is final, so resolving here is safe and the typed tree is concrete.
+    fn deep(&mut self, t: Type) -> Type {
+        if let Some(&hit) = self.resolved.get(&t) {
+            return hit;
+        }
+        let r = self.db.deep_resolve(t);
+        self.resolved.insert(t, r);
+        r
+    }
+
     // --- items -------------------------------------------------------------
 
     fn lower_fn(&mut self, item: &FnItem) -> Option<TypedFn> {
@@ -737,13 +791,20 @@ impl<'a> Lowerer<'a> {
         // shadowing). Anonymous/builtin decls have no symbol and are skipped.
         let symbol = self.resolve_decl_at(name_range)?;
 
-        // Determine the function's scheme and instantiate it once to read the
-        // concrete shape (params/result). For a monomorphic function the
-        // instantiation equals the body; for a polymorphic function the mono
-        // pass (WS8, §13.6) clones and specializes this TypedFn per call site.
+        // The function's type is its scheme's **body** — the type inference
+        // arrived at, binders and all. It used to be a fresh *instantiation* of
+        // that scheme, which is a set of variables nothing else in this tree
+        // mentions: the params below read their own monotypes and the body read
+        // the inferred ones, so a generic fn's `fn_type` disagreed with its own
+        // parameters, and `mono::specialize` — which unified against yet a third
+        // instantiation and then followed the original — pinned variables that
+        // appeared nowhere in the clone it was specializing (MONO-01).
         let scheme = self.names.get(symbol).and_then(|s| s.scheme.clone());
         let fn_type = match &scheme {
-            Some(s) => self.db.instantiate(s),
+            Some(s) => {
+                let body = s.body();
+                self.deep(body)
+            }
             None => {
                 // No scheme inferred (errored in M2); skip — don't cascade.
                 return None;
@@ -812,23 +873,13 @@ impl<'a> Lowerer<'a> {
         let name = name_tok.text().to_string();
         let range = name_tok.text_range();
         let symbol = self.resolve_decl_at(range)?;
-        // The param's type is the declared annotation; read it from the symbol's
-        // instantiated scheme slot. Params are positions in the Func params vec.
-        let ty = self
-            .param_type(symbol)
-            .unwrap_or_else(|| self.db.fresh_var());
+        // A parameter is not an expression, so it has no entry in `expr_types`;
+        // its type is the monotype inference attached to its symbol. That is a
+        // read, not a re-derivation — `infer_param` writes `Scheme::monotype`,
+        // which has no binders, so the `instantiate` this used to do was a
+        // no-op with a fresh-variable fallback hiding behind it.
+        let ty = self.symbol_type(symbol);
         Some(TypedParam { symbol, name, ty })
-    }
-
-    /// Read a parameter's type from its function's scheme. Falls back to a fresh
-    /// var if the shape is unexpected (defensive).
-    fn param_type(&mut self, symbol: SymbolId) -> Option<Type> {
-        let sym = self.names.get(symbol)?;
-        // Params don't carry their own scheme; we find them via the enclosing fn.
-        // Simpler: re-derive from the fn_type isn't possible per-param here, so
-        // we rely on the param symbol being a `Param` whose scheme is its type.
-        let scheme = sym.scheme.as_ref()?;
-        Some(self.db.instantiate(scheme))
     }
 
     // --- statements --------------------------------------------------------
@@ -973,7 +1024,7 @@ impl<'a> Lowerer<'a> {
                 Some(inner) => self.lower_expr(&inner),
                 None => TypedExpr::Paren {
                     inner: None,
-                    ty: self.db.fresh_var(),
+                    ty: self.node_ty(p.syntax()),
                     span,
                 },
             },
@@ -1005,9 +1056,11 @@ impl<'a> Lowerer<'a> {
             // indirect call) is the remaining WS7 work. For now the lowerer
             // produces a placeholder so type-checking works end-to-end.
             Expr::Closure(c) => self.lower_closure(c),
-            Expr::Error(_) => TypedExpr::Lit {
+            // An error node has no shape of its own; inference recorded a
+            // variable for it and the program is already reported.
+            Expr::Error(n) => TypedExpr::Lit {
                 value: Lit::Int(0),
-                ty: self.db.fresh_var(),
+                ty: self.node_ty(n),
                 span,
             },
         }
@@ -1032,9 +1085,6 @@ impl<'a> Lowerer<'a> {
         let params: Vec<TypedParam> = c.params().filter_map(|p| self.lower_param(&p)).collect();
         // The body is an expression. If it is a block, lower it as one; otherwise
         // wrap the single expression as a block whose tail is that expression.
-        // A closure is a function boundary (TY-20): a `break` inside it belongs
-        // to no loop outside it, so the enclosing loops' frames are set aside.
-        let enclosing_loops = std::mem::take(&mut self.loop_results);
         let body = match c.body() {
             Some(praxis_ast::Expr::Block(b)) => {
                 self.lower_block(&b).unwrap_or_else(|| TypedBlock {
@@ -1066,10 +1116,11 @@ impl<'a> Lowerer<'a> {
                 ty: self.unit,
             },
         };
-        self.loop_results = enclosing_loops;
-        let result_ty = body.ty;
-        let param_types: Vec<Type> = params.iter().map(|p| p.ty).collect();
-        let fn_type = self.db.func(param_types, result_ty);
+        // The closure's `Func` type is inference's, not one rebuilt from the
+        // lowered params and body: a closure whose body diverges has a `Never`
+        // block tail, and inference joins that with the result the `return`s
+        // pinned rather than taking it literally.
+        let fn_type = self.node_ty(c.syntax());
 
         // Capture analysis: walk the closure body for free variables. The
         // "inside the closure" boundary is the whole closure node (params + body)
@@ -1116,16 +1167,16 @@ impl<'a> Lowerer<'a> {
                 // The binding's own scheme is the answer in that case; a
                 // polymorphic one is skipped, because a capture of a generic
                 // binding needs the *use site*'s instantiation, not the scheme.
-                let ty = match self.ref_types.get(&fv.ref_range).copied() {
+                let recorded = match self.ref_types.get(&fv.ref_range).copied() {
                     Some(t) => t,
                     None => self
                         .names
                         .get(fv.symbol)
                         .and_then(|s| s.scheme.as_ref())
-                        .filter(|s| !s.is_polymorphic())
                         .map(praxis_types::Scheme::body)
-                        .unwrap_or_else(|| self.db.fresh_var()),
+                        .unwrap_or(self.unit),
                 };
+                let ty = self.deep(recorded);
                 let kind = if matches!(fv.kind, crate::symbol::SymbolKind::Var) {
                     crate::capture::CaptureKind::ByCell
                 } else {
@@ -1171,10 +1222,14 @@ impl<'a> Lowerer<'a> {
 
     fn lower_literal(&mut self, lit: &Literal) -> TypedExpr {
         let span = self.node_span(lit.syntax());
+        // The *value* is read off the token; the *type* is what inference gave
+        // this node. They agree for every well-formed literal — the point of
+        // reading is the malformed ones, which used to become a fresh variable.
+        let ty = self.node_ty(lit.syntax());
         let Some(tok) = lit.token() else {
             return TypedExpr::Lit {
                 value: Lit::Int(0),
-                ty: self.db.fresh_var(),
+                ty,
                 span,
             };
         };
@@ -1188,7 +1243,7 @@ impl<'a> Lowerer<'a> {
                 let value = cleaned.parse::<i64>().unwrap_or(i64::MAX);
                 TypedExpr::Lit {
                     value: Lit::Int(value),
-                    ty: self.int,
+                    ty,
                     span,
                 }
             }
@@ -1200,7 +1255,7 @@ impl<'a> Lowerer<'a> {
                 let value = text.parse::<f64>().unwrap_or(0.0);
                 TypedExpr::Lit {
                     value: Lit::Float(value),
-                    ty: self.float,
+                    ty,
                     span,
                 }
             }
@@ -1209,7 +1264,7 @@ impl<'a> Lowerer<'a> {
                 let unquoted = unquote_text(raw);
                 TypedExpr::Lit {
                     value: Lit::Text(unquoted),
-                    ty: self.text,
+                    ty,
                     span,
                 }
             }
@@ -1222,23 +1277,23 @@ impl<'a> Lowerer<'a> {
                     .to_string();
                 TypedExpr::Lit {
                     value: Lit::Text(inner),
-                    ty: self.text,
+                    ty,
                     span,
                 }
             }
             SyntaxKind::KW_TRUE => TypedExpr::Lit {
                 value: Lit::Bool(true),
-                ty: self.bool_,
+                ty,
                 span,
             },
             SyntaxKind::KW_FALSE => TypedExpr::Lit {
                 value: Lit::Bool(false),
-                ty: self.bool_,
+                ty,
                 span,
             },
             _ => TypedExpr::Lit {
                 value: Lit::Int(0),
-                ty: self.db.fresh_var(),
+                ty,
                 span,
             },
         }
@@ -1246,12 +1301,15 @@ impl<'a> Lowerer<'a> {
 
     fn lower_path(&mut self, p: &PathExpr) -> TypedExpr {
         let span = self.node_span(p.syntax());
+        // The type is the one inference instantiated *at this reference*. Every
+        // other answer this used to compute — re-instantiating the symbol's
+        // scheme, or the enum def's own type below — is a second instantiation
+        // whose variables nothing else pinned.
+        let ty = self.node_ty(p.syntax());
         // M7-WS4: detect a zero-payload enum variant used as a bare path (`Empty`).
         if let Some(tok) = p.name() {
             let name = tok.text().to_string();
-            if let Some((enum_ty, enum_def_id, variant_idx)) =
-                self.lookup_enum_variant_by_name(&name)
-            {
+            if let Some((_, enum_def_id, variant_idx)) = self.lookup_enum_variant_by_name(&name) {
                 // Only treat as a variant if the payload is empty (a zero-payload
                 // variant). Payload variants are handled in lower_call.
                 let edef = self.db.enum_def(enum_def_id);
@@ -1260,24 +1318,12 @@ impl<'a> Lowerer<'a> {
                         enum_def_id,
                         variant_idx: variant_idx as u32,
                         args: Vec::new(),
-                        ty: enum_ty,
+                        ty,
                         span,
                     };
                 }
             }
         }
-        let ty = match p.name() {
-            Some(tok) => {
-                let range = tok.text_range();
-                // The inferred type for this reference (filled by inference).
-                // We re-instantiate the symbol's scheme to be safe.
-                match self.resolve_symbol_at(range) {
-                    Some(symbol) => self.symbol_type(symbol),
-                    None => self.db.fresh_var(),
-                }
-            }
-            None => self.db.fresh_var(),
-        };
         let symbol = p
             .name()
             .and_then(|t| self.resolve_symbol_at(t.text_range()))
@@ -1290,58 +1336,26 @@ impl<'a> Lowerer<'a> {
         let (lhs, rhs) = b.operands();
         let lhs = lhs.map(|e| Box::new(self.lower_expr(&e)));
         let rhs = rhs.map(|e| Box::new(self.lower_expr(&e)));
+        // The *operator* is read off the token; the *type* is inference's. The
+        // Int-or-Float heuristic this replaces re-decided a question inference
+        // had already answered, from a strictly narrower view of the operands.
+        let ty = self.node_ty(b.syntax());
         let op_tok = b.op().map(|t| t.kind());
-        let (op, ty) = match op_tok {
+        let op = match op_tok {
             Some(
                 SyntaxKind::PLUS
                 | SyntaxKind::MINUS
                 | SyntaxKind::STAR
                 | SyntaxKind::SLASH
                 | SyntaxKind::PERCENT,
-            ) => {
-                let op = match op_tok.unwrap() {
-                    SyntaxKind::PLUS => BinOp::Add,
-                    SyntaxKind::MINUS => BinOp::Sub,
-                    SyntaxKind::STAR => BinOp::Mul,
-                    SyntaxKind::SLASH => BinOp::Div,
-                    SyntaxKind::PERCENT => BinOp::Rem,
-                    _ => unreachable!(),
-                };
-                // The result type follows the operands under the strict
-                // per-literal model (§4.12): Float if either operand is a float
-                // literal or has a Float-typed lowering (e.g. a method call
-                // result); Int otherwise. This mirrors the inference-time check.
-                let lhs_is_float = matches!(
-                    lhs.as_deref(),
-                    Some(TypedExpr::Lit {
-                        value: Lit::Float(_),
-                        ..
-                    })
-                );
-                let rhs_is_float = matches!(
-                    rhs.as_deref(),
-                    Some(TypedExpr::Lit {
-                        value: Lit::Float(_),
-                        ..
-                    })
-                );
-                // Determine float-ness from the operands' resolved TypeData, not
-                // by Type-index equality: two independently-interned `Scalar(Float)`
-                // types are structurally equal but may have distinct indices, so a
-                // `Type == Type` check is unreliable. Match on the followed data.
-                let is_float_scalar = |e: &TypedExpr| {
-                    matches!(
-                        self.db.data(self.db.follow(expr_ty(e))),
-                        praxis_types::TypeData::Scalar(praxis_types::ScalarType::Float)
-                    )
-                };
-                let any_float_ty = [lhs.as_deref(), rhs.as_deref()]
-                    .into_iter()
-                    .flatten()
-                    .any(is_float_scalar);
-                let is_float = lhs_is_float || rhs_is_float || any_float_ty;
-                (op, if is_float { self.float } else { self.int })
-            }
+            ) => match op_tok.unwrap() {
+                SyntaxKind::PLUS => BinOp::Add,
+                SyntaxKind::MINUS => BinOp::Sub,
+                SyntaxKind::STAR => BinOp::Mul,
+                SyntaxKind::SLASH => BinOp::Div,
+                SyntaxKind::PERCENT => BinOp::Rem,
+                _ => unreachable!(),
+            },
             Some(
                 SyntaxKind::EQ2
                 | SyntaxKind::NEQ
@@ -1349,20 +1363,17 @@ impl<'a> Lowerer<'a> {
                 | SyntaxKind::GT
                 | SyntaxKind::LTEQ
                 | SyntaxKind::GTEQ,
-            ) => {
-                let op = match op_tok.unwrap() {
-                    SyntaxKind::EQ2 => BinOp::Eq,
-                    SyntaxKind::NEQ => BinOp::Neq,
-                    SyntaxKind::LT => BinOp::Lt,
-                    SyntaxKind::GT => BinOp::Gt,
-                    SyntaxKind::LTEQ => BinOp::Le,
-                    SyntaxKind::GTEQ => BinOp::Ge,
-                    _ => unreachable!(),
-                };
-                (op, self.bool_)
-            }
-            Some(SyntaxKind::PIPE2) => (BinOp::LogicalOr, self.bool_),
-            _ => (BinOp::Add, self.db.fresh_var()),
+            ) => match op_tok.unwrap() {
+                SyntaxKind::EQ2 => BinOp::Eq,
+                SyntaxKind::NEQ => BinOp::Neq,
+                SyntaxKind::LT => BinOp::Lt,
+                SyntaxKind::GT => BinOp::Gt,
+                SyntaxKind::LTEQ => BinOp::Le,
+                SyntaxKind::GTEQ => BinOp::Ge,
+                _ => unreachable!(),
+            },
+            Some(SyntaxKind::PIPE2) => BinOp::LogicalOr,
+            _ => BinOp::Add,
         };
         TypedExpr::Bin {
             op,
@@ -1376,21 +1387,10 @@ impl<'a> Lowerer<'a> {
     fn lower_unary(&mut self, u: &UnaryExpr) -> TypedExpr {
         let span = self.node_span(u.syntax());
         let operand = u.operand().map(|e| Box::new(self.lower_expr(&e)));
-        let (op, ty) = match u.op().map(|t| t.kind()) {
-            // Negation follows the operand's literal kind (§4.12): `-3.5` is
-            // Float, `-3` is Int. A float literal lowers to `Lit::Float`.
-            Some(SyntaxKind::MINUS) => {
-                let is_float = matches!(
-                    operand.as_deref(),
-                    Some(TypedExpr::Lit {
-                        value: Lit::Float(_),
-                        ..
-                    })
-                );
-                (UnaryOp::Neg, if is_float { self.float } else { self.int })
-            }
-            Some(SyntaxKind::BANG) => (UnaryOp::Not, self.bool_),
-            _ => (UnaryOp::Neg, self.db.fresh_var()),
+        let ty = self.node_ty(u.syntax());
+        let op = match u.op().map(|t| t.kind()) {
+            Some(SyntaxKind::BANG) => UnaryOp::Not,
+            _ => UnaryOp::Neg,
         };
         TypedExpr::Unary {
             op,
@@ -1408,19 +1408,11 @@ impl<'a> Lowerer<'a> {
             .and_then(|b| self.lower_block(&b))
             .map(Box::new);
         let else_block = i.else_branch().and_then(|e| self.lower_else(&e));
-        // The if's type is the **join** of its branches, not the then-block's
-        // type (TY-19). Inference already joined them and reported any
-        // disagreement, so a failure here cannot be a user error — but reading
-        // the then-block alone made `if flag { panic("x") } else { 1 }` a
-        // `Never`, which is the branch that produces no value.
-        let then_ty = then_block.as_ref().map(|b| b.ty);
-        let else_ty = else_block.as_ref().map(|b| b.ty);
-        let ty = match (then_ty, else_ty) {
-            (Some(t), Some(e)) => self.db.join(t, e).unwrap_or(t),
-            (Some(t), None) => t,
-            (None, Some(e)) => e,
-            (None, None) => self.unit,
-        };
+        // The `if`'s type is inference's join of its branches (TY-19), read
+        // rather than recomputed. Repeating the join here was a third pass
+        // computing one answer; reading the then-block alone, which is what it
+        // replaced, made `if flag { panic("x") } else { 1 }` a `Never`.
+        let ty = self.node_ty(i.syntax());
         TypedExpr::If {
             cond: cond.unwrap_or_else(|| Box::new(unit_lit(self.db))),
             then_block: then_block.unwrap_or_else(|| {
@@ -1456,10 +1448,8 @@ impl<'a> Lowerer<'a> {
     fn lower_while(&mut self, w: &WhileExpr) -> TypedExpr {
         let span = self.node_span(w.syntax());
         let cond = w.cond().map(|c| Box::new(self.lower_expr(&c)));
-        // A `while` still gets a frame, and still discards it: it is `Unit`
-        // whatever its `break`s say (a value one is `Y017`), but a `break`
-        // inside it must not be attributed to a `loop` further out.
-        let (body, _) = self.in_loop(|me| w.body().and_then(|b| me.lower_block(&b)).map(Box::new));
+        let body = w.body().and_then(|b| self.lower_block(&b)).map(Box::new);
+        let ty = self.node_ty(w.syntax());
         TypedExpr::While {
             cond: cond.unwrap_or_else(|| Box::new(unit_lit(self.db))),
             body: body.unwrap_or_else(|| {
@@ -1469,7 +1459,7 @@ impl<'a> Lowerer<'a> {
                     ty: self.unit,
                 })
             }),
-            ty: self.unit,
+            ty,
             span,
         }
     }
@@ -1481,18 +1471,17 @@ impl<'a> Lowerer<'a> {
             .iter()
             .map(|i| Box::new(self.lower_expr(&i)))
             .unwrap_or_else(|| Box::new(unit_lit(self.db)));
-        let (body, _) = self.in_loop(|me| {
-            f.body()
-                .and_then(|b| me.lower_block(&b))
-                .map(Box::new)
-                .unwrap_or_else(|| {
-                    Box::new(TypedBlock {
-                        stmts: Vec::new(),
-                        tail: unit_lit(me.db),
-                        ty: me.unit,
-                    })
+        let body = f
+            .body()
+            .and_then(|b| self.lower_block(&b))
+            .map(Box::new)
+            .unwrap_or_else(|| {
+                Box::new(TypedBlock {
+                    stmts: Vec::new(),
+                    tail: unit_lit(self.db),
+                    ty: self.unit,
                 })
-        });
+            });
         // Resolve the binding symbol from the name token's declaration site
         // (`decls`, not `refs` — the binding token is a declaration, and the
         // body's references to it resolve to this same symbol via `refs`).
@@ -1501,85 +1490,62 @@ impl<'a> Lowerer<'a> {
             .and_then(|t| self.decls.get(&t.text_range()).copied())
             .unwrap_or(SymbolId(0));
         // The item type is read from the iterator's inferred element type; the
-        // inference pass records it on the binding's declaration range. Fall
-        // back to a fresh var if unavailable (malformed tree).
+        // inference pass records it on the binding's declaration range. A
+        // `for` binding is not an expression, so this is a `ref_types` read, not
+        // an `expr_types` one.
         let item_ty = f
             .binding()
             .and_then(|t| self.ref_types.get(&t.text_range()).copied())
-            .unwrap_or_else(|| self.db.fresh_var());
+            .map(|t| self.deep(t))
+            .unwrap_or(self.unit);
+        let ty = self.node_ty(f.syntax());
         TypedExpr::For {
             binding,
             iter,
             body,
             item_ty,
-            ty: self.unit,
+            ty,
             span,
         }
     }
 
-    /// `loop { body }` (M8, §4.11). The type is what its `break`s carry (TY-21):
-    /// the join collected in [`Lowerer::loop_results`], which is `Never` when no
-    /// `break` leaves the loop and `Unit` when they leave it with nothing.
-    ///
-    /// Inference performs the same join and has already reported any
-    /// disagreement, so this cannot be where a user error surfaces — but the
-    /// typed tree has to carry the answer, exactly as `lower_if` has to join its
-    /// branches rather than read the then-block alone.
+    /// `loop { body }` (M8, §4.11). The type is what its `break`s carry (TY-21)
+    /// — `Never` when no `break` leaves the loop, `Unit` when they leave it with
+    /// nothing. Inference computed that join; lowering reads it. Keeping a
+    /// second stack of loop frames here to recompute it was the third pass over
+    /// one answer, and F15 is what retires it.
     fn lower_loop(&mut self, l: &LoopExpr) -> TypedExpr {
         let span = self.node_span(l.syntax());
-        let (body, ty) = self.in_loop(|me| {
-            l.body()
-                .and_then(|b| me.lower_block(&b))
-                .map(Box::new)
-                .unwrap_or_else(|| {
-                    Box::new(TypedBlock {
-                        stmts: Vec::new(),
-                        tail: unit_lit(me.db),
-                        ty: me.unit,
-                    })
+        let body = l
+            .body()
+            .and_then(|b| self.lower_block(&b))
+            .map(Box::new)
+            .unwrap_or_else(|| {
+                Box::new(TypedBlock {
+                    stmts: Vec::new(),
+                    tail: unit_lit(self.db),
+                    ty: self.unit,
                 })
-        });
+            });
+        let ty = self.node_ty(l.syntax());
         TypedExpr::Loop { body, ty, span }
     }
 
-    /// Lower `body` with one more enclosing loop frame, and answer with it: the
-    /// join of the `break` values that registered against that frame.
-    fn in_loop<T>(&mut self, body: impl FnOnce(&mut Self) -> T) -> (T, Type) {
-        let never = self.db.never();
-        self.loop_results.push(never);
-        let lowered = body(self);
-        let result = self
-            .loop_results
-            .pop()
-            .expect("the loop frame pushed above is the one popped here");
-        (lowered, result)
-    }
-
-    /// `break [expr]` (M8, §4.11). Diverges; the expression's type is `Never`,
-    /// and its *value* is joined into the enclosing loop's result (TY-21). A
-    /// bare `break` leaves the loop with nothing, so it contributes `Unit`.
+    /// `break [expr]` (M8, §4.11). Diverges; the expression's type is `Never`.
+    /// The *value* it carries reaches the loop through inference's join, which
+    /// [`lower_loop`](Self::lower_loop) reads.
     fn lower_break(&mut self, b: &BreakExpr) -> TypedExpr {
         let span = self.node_span(b.syntax());
         let value = b.value().map(|v| Box::new(self.lower_expr(&v)));
-        let carried = value.as_deref().map_or(self.unit, expr_ty);
-        if let Some(&so_far) = self.loop_results.last() {
-            // Inference reported a disagreement already; keep what we had.
-            let joined = self.db.join(so_far, carried).unwrap_or(so_far);
-            if let Some(slot) = self.loop_results.last_mut() {
-                *slot = joined;
-            }
-        }
-        TypedExpr::Break {
-            value,
-            ty: self.db.never(),
-            span,
-        }
+        let ty = self.node_ty(b.syntax());
+        TypedExpr::Break { value, ty, span }
     }
 
     /// `continue` (M8, §4.11). Diverges; type `Never`.
     fn lower_continue(&mut self, c: &ContinueExpr) -> TypedExpr {
+        let ty = self.node_ty(c.syntax());
         TypedExpr::Continue {
-            ty: self.db.never(),
+            ty,
             span: self.node_span(c.syntax()),
         }
     }
@@ -1588,11 +1554,8 @@ impl<'a> Lowerer<'a> {
     fn lower_return(&mut self, r: &ReturnExpr) -> TypedExpr {
         let span = self.node_span(r.syntax());
         let value = r.value().map(|v| Box::new(self.lower_expr(&v)));
-        TypedExpr::Return {
-            value,
-            ty: self.db.never(),
-            span,
-        }
+        let ty = self.node_ty(r.syntax());
+        TypedExpr::Return { value, ty, span }
     }
 
     fn lower_call(&mut self, c: &CallExpr) -> TypedExpr {
@@ -1619,44 +1582,39 @@ impl<'a> Lowerer<'a> {
             .arg_list()
             .map(|a| self.lower_args(&a))
             .unwrap_or_default();
+        // The call's result type is the one inference gave **this call site**
+        // (MONO-01). It used to be a fresh instantiation of the callee's scheme,
+        // so `id(1.5)` lowered as an unbound variable and `let v: Vec[Float] =
+        // Vec()` reached codegen with no element type — the annotation had
+        // arrived, at the call site inference recorded and lowering ignored.
+        let ty = self.node_ty(c.syntax());
         // M7-WS4: detect enum variant construction. If the callee's scheme is a
         // Func returning an enum type, this is a payload variant like `Number(5)`.
         if let Some(name) = callee_tok.as_ref().map(|t| t.text().to_string()) {
-            if let Some((enum_ty, enum_def_id, variant_idx)) =
-                self.lookup_enum_variant_by_name(&name)
-            {
+            if let Some((_, enum_def_id, variant_idx)) = self.lookup_enum_variant_by_name(&name) {
                 return TypedExpr::EnumVariant {
                     enum_def_id,
                     variant_idx: variant_idx as u32,
                     args,
-                    ty: enum_ty,
+                    ty,
                     span,
                 };
             }
         }
-        // The call's result type comes from the callee's instantiated scheme.
-        // For a postfix (expression) callee, the result type is the Func type's
-        // result, inferred and recorded on the callee_expr by inference.
-        let ty = if let Some(ce) = callee_expr.as_deref() {
-            // The callee expression's inferred type is a Func (params) -> result;
-            // follow it to read the result. If it is not yet a Func (inference
-            // could not pin it), fall back to a fresh var.
-            func_result_type(self.db, expr_ty(ce)).unwrap_or_else(|| self.db.fresh_var())
-        } else {
-            self.call_result_type(callee)
-                .unwrap_or_else(|| self.db.fresh_var())
-        };
         // The concrete arg types at this call site (WS8, §13.6). Recorded by
         // inference in `analysis.call_sites`, keyed by the callee name token's
         // range. The mono pass reads these off the typed tree to instantiate a
         // polymorphic callee. Empty if the call site wasn't recorded (e.g. an
         // unresolved callee, or a postfix expression callee) — the mono pass
         // treats an empty vec as monomorphic.
-        let arg_types = callee_tok
+        let arg_types: Vec<Type> = callee_tok
             .as_ref()
             .and_then(|t| self.call_sites.get(&t.text_range()))
             .map(|cs| cs.arg_types.clone())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| self.deep(t))
+            .collect();
         TypedExpr::Call {
             callee,
             callee_name,
@@ -1734,32 +1692,21 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_default();
         let arity = args.len();
 
-        // Resolve the method against the catalog, keyed by the receiver's
-        // inferred type + name + arity (ADR-010 bridge).
-        // Resolve the method against the catalog, keyed by the receiver's
-        // inferred type + name + arity (ADR-010 bridge).
-        let receiver_ty = expr_ty(&receiver);
-        let hits = crate::catalog::lookup(self.db, self.catalog, receiver_ty, &name, arity);
-        if let Some(entry) = hits.first() {
-            let ty = pattern_to_type(self.db, &entry.result);
-            let lowering_symbol = match &entry.lowering {
-                praxis_stdlib::MethodLowering::RuntimeSymbol(sym) => Some(*sym),
-                // An intrinsic has no runtime symbol: the MIR builder lowers it
-                // (the M8 pipeline combinators) rather than emitting a call.
-                praxis_stdlib::MethodLowering::Intrinsic(_) => None,
-            };
-            TypedExpr::MethodCall {
-                receiver: Box::new(receiver),
-                name,
-                lowering_symbol,
-                args,
-                purity: entry.purity,
-                ty,
-                span,
-            }
-        } else {
-            // Unknown method: emit a Y110 diagnostic and lower to Unit so the
-            // rest of the tree is still well-formed.
+        // The catalog entry and the result type are what **inference** resolved
+        // at this call site (HIR-02/F15). Repeating the lookup here re-derived
+        // the entry from a receiver type of lowering's own and then read the
+        // result off the entry's *pattern* — a fresh `?T` for every `Var("T")`
+        // in it — so `values.get(0)` on a `Vec[Float]` lowered as `?T` however
+        // firmly inference had pinned it to `Float`.
+        let resolved = m
+            .method_name()
+            .and_then(|t| self.method_refs.get(&t.text_range()).copied());
+        let Some(resolved) = resolved else {
+            // Inference could not resolve the method: report it (this is the
+            // one diagnostic lowering owns here, because it has the name span)
+            // and keep the receiver and arguments, which are well-formed trees
+            // in their own right — discarding them lost every closure and
+            // capture inside them.
             if let Some(name_tok) = m.method_name() {
                 self.diag(
                     name_tok.text_range(),
@@ -1767,19 +1714,39 @@ impl<'a> Lowerer<'a> {
                     format!("no method `{name}` on this type taking {arity} argument(s)"),
                 );
             }
-            TypedExpr::Lit {
-                value: Lit::Unit,
-                ty: self.unit,
+            let ty = self.node_ty(m.syntax());
+            return TypedExpr::MethodCall {
+                receiver: Box::new(receiver),
+                name,
+                lowering_symbol: None,
+                args,
+                purity: praxis_stdlib::Purity::Impure,
+                ty,
                 span,
-            }
+            };
+        };
+        let ty = self.deep(resolved.result);
+        let lowering_symbol = match &resolved.entry.lowering {
+            praxis_stdlib::MethodLowering::RuntimeSymbol(sym) => Some(*sym),
+            // An intrinsic has no runtime symbol: the MIR builder lowers it
+            // (the M8 pipeline combinators) rather than emitting a call.
+            praxis_stdlib::MethodLowering::Intrinsic(_) => None,
+        };
+        TypedExpr::MethodCall {
+            receiver: Box::new(receiver),
+            name,
+            lowering_symbol,
+            args,
+            purity: resolved.entry.purity,
+            ty,
+            span,
         }
     }
 
     fn lower_tuple(&mut self, t: &TupleExpr) -> TypedExpr {
         let span = self.node_span(t.syntax());
         let elements: Vec<TypedExpr> = t.elements().map(|e| self.lower_expr(&e)).collect();
-        let tys: Vec<Type> = elements.iter().map(expr_ty).collect();
-        let ty = tuple_or_degenerate(self.db, tys);
+        let ty = self.node_ty(t.syntax());
         TypedExpr::Tuple { elements, ty, span }
     }
 
@@ -1797,11 +1764,18 @@ impl<'a> Lowerer<'a> {
             self.db,
             &mut self.diagnostics,
         ) {
-            Some(analysis) => TypedExpr::Read {
-                plan: analysis.plan,
-                ty: analysis.result_type,
-                span,
-            },
+            // The *plan* is lowering's own product; the type is inference's.
+            // Both are synthesized from the same parser expression, so they
+            // agree — reading keeps them one answer rather than two.
+            Some(analysis) => {
+                let ty = self.node_ty(r.syntax());
+                let _ = analysis.result_type;
+                TypedExpr::Read {
+                    plan: analysis.plan,
+                    ty,
+                    span,
+                }
+            }
             None => self.error_expr(),
         }
     }
@@ -1813,10 +1787,6 @@ impl<'a> Lowerer<'a> {
             .text_expr()
             .map(|e| self.lower_expr(&e))
             .unwrap_or_else(|| self.error_expr());
-        let ty = match &text_expr {
-            TypedExpr::Lit { ty, .. } => *ty,
-            _ => self.db.fresh_var(),
-        };
         match p.parser_expr() {
             Some(parser_expr) => {
                 match crate::parser_lower::analyze_parser_expr(
@@ -1825,12 +1795,16 @@ impl<'a> Lowerer<'a> {
                     self.db,
                     &mut self.diagnostics,
                 ) {
-                    Some(analysis) => TypedExpr::Parse {
-                        text: Box::new(text_expr),
-                        plan: analysis.plan,
-                        ty: analysis.result_type,
-                        span,
-                    },
+                    Some(analysis) => {
+                        let ty = self.node_ty(p.syntax());
+                        let _ = analysis.result_type;
+                        TypedExpr::Parse {
+                            text: Box::new(text_expr),
+                            plan: analysis.plan,
+                            ty,
+                            span,
+                        }
+                    }
                     // Analysis failed and has already pushed a diagnostic. This
                     // used to emit `plan_index: 0`, which is a perfectly valid
                     // index — the first plan any program registers — so a
@@ -1842,10 +1816,7 @@ impl<'a> Lowerer<'a> {
             }
             // No parser expression at all: the same "there is no plan" case as
             // above, and the same answer.
-            None => {
-                let _ = ty;
-                self.error_expr()
-            }
+            None => self.error_expr(),
         }
     }
 
@@ -1864,15 +1835,7 @@ impl<'a> Lowerer<'a> {
     /// index, and produces a `TypedExpr::RecordLit`.
     fn lower_record_lit(&mut self, r: &RecordLitExpr) -> TypedExpr {
         let span = self.node_span(r.syntax());
-        let struct_ty = r
-            .name()
-            .and_then(|p| p.name())
-            .and_then(|tok| self.resolve_symbol_at(tok.text_range()))
-            .and_then(|sym| self.names.get(sym))
-            .and_then(|s| s.scheme.as_ref().map(|sc| self.db.instantiate(sc)));
-        let Some(struct_ty) = struct_ty else {
-            return self.error_expr();
-        };
+        let struct_ty = self.node_ty(r.syntax());
         let record_def_id = match self.db.data(self.db.follow(struct_ty)) {
             praxis_types::TypeData::Record { def, .. } => *def,
             _ => return self.error_expr(),
@@ -1931,7 +1894,7 @@ impl<'a> Lowerer<'a> {
             praxis_types::TypeData::Record { def, args } => Some((*def, args.clone())),
             _ => None,
         };
-        let Some((field_idx, field_ty)) = record.and_then(|(def, args)| {
+        let Some((field_idx, _)) = record.and_then(|(def, args)| {
             let name = f.field_name()?;
             self.db.record_field_of(def, &args, name.text())
         }) else {
@@ -1945,10 +1908,13 @@ impl<'a> Lowerer<'a> {
             }
             return self.error_expr();
         };
+        // The *index* comes from the record definition; the *type* from
+        // inference, which already substituted the instance's arguments.
+        let ty = self.node_ty(f.syntax());
         TypedExpr::FieldGet {
             receiver: Box::new(receiver),
             field_idx: field_idx as u32,
-            ty: field_ty,
+            ty,
             span,
         }
     }
@@ -1987,9 +1953,9 @@ impl<'a> Lowerer<'a> {
             &arm_spans,
             &mut self.diagnostics,
         );
-        // The match's type is the unified body type (inference already unified
-        // them); use the first arm's body type.
-        let ty = arms.first().map(|a| expr_ty(&a.body)).unwrap_or(self.unit);
+        // The match's type is inference's join of its arms — not the first
+        // arm's, which is `Never` whenever that arm happens to diverge.
+        let ty = self.node_ty(m.syntax());
         TypedExpr::Match {
             scrutinee: Box::new(scrutinee),
             arms,
@@ -2115,24 +2081,22 @@ impl<'a> Lowerer<'a> {
         self.refs.get(&range).map(|r| r.symbol)
     }
 
-    /// The instantiated type of a symbol's scheme (a fresh var if unknown).
+    /// The type of a symbol's binding, resolved to its leaves.
+    ///
+    /// The scheme's **body**, not an instantiation of it: this is asked only
+    /// where there is no expression node to read (a parameter, a punned record
+    /// field), and in both cases the binding's own type is the answer. A
+    /// polymorphic binding's binders survive into the typed tree, which is what
+    /// `mono::specialize` substitutes.
     fn symbol_type(&mut self, symbol: SymbolId) -> Type {
-        self.names
-            .get(symbol)
-            .and_then(|s| s.scheme.clone())
-            .map(|s| self.db.instantiate(&s))
-            .unwrap_or_else(|| self.db.fresh_var())
-    }
-
-    /// The result type of calling `callee`, from its function scheme.
-    fn call_result_type(&mut self, callee: SymbolId) -> Option<Type> {
-        let sym = self.names.get(callee)?;
-        let scheme = sym.scheme.as_ref()?;
-        let inst = self.db.instantiate(scheme);
-        let inst = self.db.follow(inst);
-        match self.db.data(inst) {
-            praxis_types::TypeData::Func { result, .. } => Some(*result),
-            _ => None,
+        match self.names.get(symbol).and_then(|s| s.scheme.as_ref()) {
+            Some(s) => {
+                let body = s.body();
+                self.deep(body)
+            }
+            // A symbol with no scheme errored during inference; it is already
+            // reported, and `Unit` cascades nothing.
+            None => self.unit,
         }
     }
 }

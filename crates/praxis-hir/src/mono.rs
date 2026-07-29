@@ -29,7 +29,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use praxis_types::{Scheme, Type, TypeDb, TypeKey};
+use praxis_types::{Scheme, Type, TypeDb, TypeKey, VarId};
 
 use crate::name_table::NameTable;
 use crate::symbol::SymbolId;
@@ -105,7 +105,12 @@ struct MonoPass<'a> {
     /// not identity. `Option` printed as a bare name whatever it held, so
     /// `id(Some(1))` and `id(Some("a"))` hashed to one key and the second call
     /// silently reused the first's `Int` specialization.
-    cache: HashMap<(SymbolId, Vec<TypeKey>), String>,
+    ///
+    /// **MONO-02**: the key carries the call's *result* as well as its
+    /// arguments. A callee whose quantified variable appears only in its result
+    /// — `fn empty() { Vec() }` is `forall T. () -> Vec[T]` — has no argument to
+    /// tell two instantiations apart, and used not to be specialized at all.
+    cache: HashMap<(SymbolId, Vec<TypeKey>, TypeKey), String>,
     /// The mangled names handed out so far. The name is still built from the
     /// rendered types (it has to be readable), so two distinct keys that render
     /// alike must be pulled apart here rather than in the cache.
@@ -122,15 +127,20 @@ impl<'a> MonoPass<'a> {
         rewrite_block(&mut fn_.body, self);
     }
 
-    /// Instantiate `callee` at the given concrete `arg_types`, returning the
-    /// mangled clone name (cached). Emits the clone into `self.clones` on first
-    /// use; rewrites the clone's own body (transitive instantiation).
-    fn instantiate(&mut self, callee: SymbolId, arg_types: &[Type]) -> String {
-        let key = (callee, canonical_keys(self.db, arg_types));
+    /// Instantiate `callee` at the given concrete `arg_types` and `result`,
+    /// returning the mangled clone name (cached). Emits the clone into
+    /// `self.clones` on first use; rewrites the clone's own body (transitive
+    /// instantiation).
+    fn instantiate(&mut self, callee: SymbolId, arg_types: &[Type], result: Type) -> String {
+        let key = (
+            callee,
+            canonical_keys(self.db, arg_types),
+            self.db.canonical_key(result),
+        );
         if let Some(name) = self.cache.get(&key) {
             return name.clone();
         }
-        let name = self.fresh_mangled_name(callee, arg_types);
+        let name = self.fresh_mangled_name(callee, arg_types, result);
         self.cache.insert(key, name.clone());
         // Clone the original and specialize it. Borrow dance: take the original
         // out of the map temporarily so we can mutate `self` (db) while cloning.
@@ -141,7 +151,7 @@ impl<'a> MonoPass<'a> {
         let Some(scheme) = scheme_of(self.names, callee) else {
             return name;
         };
-        let mut clone = specialize(self.db, &original, &scheme, arg_types, &name);
+        let mut clone = specialize(self.db, &original, &scheme, arg_types, result, &name);
         // Rewrite the clone's body for any *further* polymorphic calls it makes
         // (transitive instantiation). This may append more clones.
         rewrite_block(&mut clone.body, self);
@@ -155,11 +165,19 @@ impl<'a> MonoPass<'a> {
     /// specializations render the same — which the cache key no longer lets
     /// pass for one specialization — the second gets a numeric suffix rather
     /// than the first one's symbol.
-    fn fresh_mangled_name(&mut self, callee: SymbolId, arg_types: &[Type]) -> String {
-        let rendered: Vec<String> = arg_types
-            .iter()
-            .map(|t| self.db.render(self.db.follow(*t)))
-            .collect();
+    fn fresh_mangled_name(&mut self, callee: SymbolId, arg_types: &[Type], result: Type) -> String {
+        // A zero-argument generic callee has nothing to render but its result;
+        // naming every instantiation of `empty()` `empty__mono` would collide
+        // them into one readable name (the numeric suffix would then pull them
+        // apart, but `empty__Vec_Int_` says which is which).
+        let rendered: Vec<String> = if arg_types.is_empty() {
+            vec![self.db.render(self.db.follow(result))]
+        } else {
+            arg_types
+                .iter()
+                .map(|t| self.db.render(self.db.follow(*t)))
+                .collect()
+        };
         let base = mangled_name(callee, &rendered, self.names);
         let mut name = base.clone();
         let mut n = 1;
@@ -232,15 +250,20 @@ fn rewrite_expr(e: &mut TypedExpr, pass: &mut MonoPass<'_>) {
         callee,
         callee_name,
         arg_types,
+        ty,
         ..
     } = e
     {
         // Is this callee a polymorphic user fn? (Closure-value callees have no
-        // scheme / are not in originals; their `arg_types` may be empty.)
+        // scheme / are not in originals.)
         let is_poly = scheme_of(pass.names, *callee).is_some_and(|s| s.is_polymorphic())
             && pass.originals.contains_key(callee);
-        if is_poly && !arg_types.is_empty() {
-            let mangled = pass.instantiate(*callee, arg_types);
+        if is_poly {
+            // An empty argument list is still a real generic call site: the
+            // guard that skipped it dropped `fn empty() { Vec() }`'s original
+            // without ever emitting a clone, so the call had no target at all
+            // (MONO-02). The call's own type is what pins such a callee.
+            let mangled = pass.instantiate(*callee, arg_types, *ty);
             *callee_name = mangled;
         }
     }
@@ -255,60 +278,77 @@ fn rewrite_expr(e: &mut TypedExpr, pass: &mut MonoPass<'_>) {
     }
 }
 
-/// Specialize `original` (a generic fn) for the concrete `arg_types`. Instantiates
-/// the scheme, unifies the param types with the arg types (pinning the quantified
-/// vars), clones the body, and substitutes every `Type` by its resolved form.
-/// Renames the clone to `name`.
+/// Specialize `original` (a generic fn) for the concrete `arg_types` and
+/// `result`, and rename the clone to `name`.
+///
+/// **MONO-01.** This used to instantiate the scheme, unify *that* copy's params
+/// with the argument types, and then `follow` every type in the clone. The copy
+/// and the clone shared no variables: the fresh instantiation's variables were
+/// the ones unification pinned, and the clone's were the ones the typed tree
+/// carried — so `follow` found them exactly as unbound as it left them and the
+/// "specialized" clone was the generic original with a new name.
+///
+/// The two are one set now. Lowering writes the scheme's own variables into the
+/// typed tree (see `lower_fn`), so what a use site chooses for each **binder**
+/// is a substitution the clone can be rewritten by. `instantiate_with_mapping`
+/// is what says which variable stands for which binder; unifying that copy
+/// against the call site is what decides them.
 fn specialize(
     db: &mut TypeDb,
     original: &TypedFn,
     scheme: &Scheme,
     arg_types: &[Type],
+    result: Type,
     name: &str,
 ) -> TypedFn {
-    // Instantiate the scheme fresh, then unify the instantiated Func's param
-    // types with the concrete arg types. This pins the quantified vars to the
-    // concrete types.
-    let instantiated = db.instantiate(scheme);
-    let (param_types, _result_ty) = func_shape(db, instantiated);
+    // One fresh variable per binder, in binder order. Unifying this copy against
+    // the call site pins each of them.
+    let (instantiated, mapping) = db.instantiate_with_mapping(scheme);
+    let (param_types, result_ty) = func_shape(db, instantiated);
     for (pt, at) in param_types.iter().zip(arg_types.iter()) {
         let _ = db.unify(*pt, *at);
     }
-    // Clone the original and substitute every Type by its resolved (followed)
-    // form. After unification, generic vars are linked to concrete types, so
-    // `follow` resolves them.
+    // The result is a witness too, and for a zero-argument generic callee it is
+    // the only one (MONO-02).
+    let _ = db.unify(result_ty, result);
+    let binders: Vec<VarId> = scheme.binders().to_vec();
+    let args: Vec<Type> = mapping.iter().map(|m| db.deep_resolve(*m)).collect();
+
     let mut clone = original.clone();
     clone.name = name.to_string();
-    clone.fn_type = resolve_type(db, clone.fn_type);
-    clone.return_type = resolve_type(db, clone.return_type);
+    clone.fn_type = specialize_type(db, &binders, &args, clone.fn_type);
+    clone.return_type = specialize_type(db, &binders, &args, clone.return_type);
     for p in &mut clone.params {
-        p.ty = resolve_type(db, p.ty);
+        p.ty = specialize_type(db, &binders, &args, p.ty);
     }
-    resolve_block(db, &mut clone.body);
+    resolve_block(db, &binders, &args, &mut clone.body);
     clone
 }
 
-/// Walk a typed block substituting every `Type` by its resolved form.
-fn resolve_block(db: &TypeDb, block: &mut TypedBlock) {
+/// Walk a typed block, rewriting every `Type` in it by the specialization.
+fn resolve_block(db: &mut TypeDb, binders: &[VarId], args: &[Type], block: &mut TypedBlock) {
     for stmt in &mut block.stmts {
-        resolve_stmt(db, stmt);
+        resolve_stmt(db, binders, args, stmt);
     }
-    resolve_expr(db, &mut block.tail);
-    block.ty = resolve_type(db, block.ty);
+    resolve_expr(db, binders, args, &mut block.tail);
+    block.ty = specialize_type(db, binders, args, block.ty);
 }
 
-fn resolve_stmt(db: &TypeDb, stmt: &mut TypedStmt) {
+fn resolve_stmt(db: &mut TypeDb, binders: &[VarId], args: &[Type], stmt: &mut TypedStmt) {
     match stmt {
         TypedStmt::Let { ty, init, .. } | TypedStmt::Var { ty, init, .. } => {
-            *ty = resolve_type(db, *ty);
-            resolve_expr(db, init);
+            *ty = specialize_type(db, binders, args, *ty);
+            resolve_expr(db, binders, args, init);
         }
-        TypedStmt::Assign { value, .. } => resolve_expr(db, value),
-        TypedStmt::Expr(e) => resolve_expr(db, e),
+        TypedStmt::Assign { value, .. } => resolve_expr(db, binders, args, value),
+        TypedStmt::Expr(e) => resolve_expr(db, binders, args, e),
     }
 }
 
-fn resolve_expr(db: &TypeDb, e: &mut TypedExpr) {
+fn resolve_expr(db: &mut TypeDb, binders: &[VarId], args: &[Type], e: &mut TypedExpr) {
+    // The types this expression carries *itself*. Exhaustive on purpose: a new
+    // variant, or a new type-bearing field on an existing one, is a compile
+    // error here rather than a slot the specialization silently skips.
     match e {
         TypedExpr::Lit { ty, .. }
         | TypedExpr::Path { ty, .. }
@@ -317,138 +357,100 @@ fn resolve_expr(db: &TypeDb, e: &mut TypedExpr) {
         | TypedExpr::Paren { ty, .. }
         | TypedExpr::If { ty, .. }
         | TypedExpr::While { ty, .. }
-        | TypedExpr::For { ty, .. }
         | TypedExpr::Loop { ty, .. }
         | TypedExpr::Break { ty, .. }
         | TypedExpr::Continue { ty, .. }
         | TypedExpr::Return { ty, .. }
-        | TypedExpr::Call { ty, .. }
         | TypedExpr::MethodCall { ty, .. }
         | TypedExpr::Tuple { ty, .. }
         | TypedExpr::Read { ty, .. }
         | TypedExpr::Parse { ty, .. }
         | TypedExpr::RecordLit { ty, .. }
         | TypedExpr::FieldGet { ty, .. }
-        | TypedExpr::EnumVariant { ty, .. }
-        | TypedExpr::Match { ty, .. } => *ty = resolve_type(db, *ty),
-        TypedExpr::Block(b) => resolve_block(db, b),
+        | TypedExpr::EnumVariant { ty, .. } => *ty = specialize_type(db, binders, args, *ty),
+        TypedExpr::For { ty, item_ty, .. } => {
+            *ty = specialize_type(db, binders, args, *ty);
+            *item_ty = specialize_type(db, binders, args, *item_ty);
+        }
+        TypedExpr::Call { ty, arg_types, .. } => {
+            *ty = specialize_type(db, binders, args, *ty);
+            for at in arg_types {
+                *at = specialize_type(db, binders, args, *at);
+            }
+        }
+        TypedExpr::Match { ty, arms, .. } => {
+            *ty = specialize_type(db, binders, args, *ty);
+            for arm in arms {
+                resolve_pattern(db, binders, args, &mut arm.pattern);
+            }
+        }
         TypedExpr::Closure {
             params,
-            body,
             fn_type,
             ty,
             captures,
             ..
         } => {
             for p in params {
-                p.ty = resolve_type(db, p.ty);
+                p.ty = specialize_type(db, binders, args, p.ty);
             }
-            resolve_block(db, body);
-            *fn_type = resolve_type(db, *fn_type);
-            *ty = resolve_type(db, *ty);
+            *fn_type = specialize_type(db, binders, args, *fn_type);
+            *ty = specialize_type(db, binders, args, *ty);
             for c in captures {
-                c.ty = resolve_type(db, c.ty);
+                c.ty = specialize_type(db, binders, args, c.ty);
             }
         }
+        // A block carries its type on the `TypedBlock` below, which the block
+        // walk reaches.
+        TypedExpr::Block(_) => {}
     }
-    // Recurse into children to resolve their types too.
-    match e {
-        TypedExpr::Bin { lhs, rhs, .. } => {
-            resolve_expr(db, lhs);
-            resolve_expr(db, rhs);
-        }
-        TypedExpr::Unary { operand, .. } => resolve_expr(db, operand),
-        TypedExpr::Paren {
-            inner: Some(inner), ..
-        } => resolve_expr(db, inner),
-        TypedExpr::Paren { inner: None, .. } => {}
-        TypedExpr::If {
-            cond,
-            then_block,
-            else_block,
-            ..
-        } => {
-            resolve_expr(db, cond);
-            resolve_block(db, then_block);
-            if let Some(eb) = else_block.as_mut() {
-                resolve_block(db, eb);
-            }
-        }
-        TypedExpr::While { cond, body, .. } => {
-            resolve_expr(db, cond);
-            resolve_block(db, body);
-        }
-        TypedExpr::For {
-            iter,
-            body,
-            item_ty,
-            ..
-        } => {
-            resolve_expr(db, iter);
-            *item_ty = resolve_type(db, *item_ty);
-            resolve_block(db, body);
-        }
-        TypedExpr::Loop { body, .. } => resolve_block(db, body),
-        TypedExpr::Break { value: Some(v), .. } => resolve_expr(db, v),
-        TypedExpr::Continue { .. }
-        | TypedExpr::Break { value: None, .. }
-        | TypedExpr::Return { value: None, .. } => {}
-        TypedExpr::Return { value: Some(v), .. } => resolve_expr(db, v),
-        TypedExpr::Call {
-            args,
-            arg_types,
-            callee_expr,
-            ..
-        } => {
-            for a in args {
-                resolve_expr(db, a);
-            }
-            for at in arg_types {
-                *at = resolve_type(db, *at);
-            }
-            if let Some(ce) = callee_expr {
-                resolve_expr(db, ce);
-            }
-        }
-        TypedExpr::MethodCall { receiver, args, .. } => {
-            resolve_expr(db, receiver);
-            for a in args {
-                resolve_expr(db, a);
-            }
-        }
-        TypedExpr::Tuple { elements, .. } => {
-            for el in elements {
-                resolve_expr(db, el);
-            }
-        }
-        TypedExpr::Parse { text, .. } => resolve_expr(db, text),
-        TypedExpr::RecordLit { fields, .. } => {
-            for (_, init) in fields {
-                resolve_expr(db, init);
-            }
-        }
-        TypedExpr::FieldGet { receiver, .. } => resolve_expr(db, receiver),
-        TypedExpr::EnumVariant { args, .. } => {
-            for a in args {
-                resolve_expr(db, a);
-            }
-        }
-        TypedExpr::Match {
-            scrutinee, arms, ..
-        } => {
-            resolve_expr(db, scrutinee);
-            for arm in arms {
-                resolve_expr(db, &mut arm.body);
-            }
-        }
-        _ => {}
+    // The recursion is F20's child walker, written once. This used to be its own
+    // 29-arm match — the second of the three the audit found, each independently
+    // forgettable and each already having forgotten something.
+    for child in e.children_mut() {
+        resolve_expr(db, binders, args, child);
+    }
+    for block in e.blocks_mut() {
+        resolve_block(db, binders, args, block);
     }
 }
 
-/// Resolve a type to its followed (link-free) form. After mono unification,
-/// generic vars are linked to concrete types; `follow` chases the chain.
-fn resolve_type(db: &TypeDb, t: Type) -> Type {
-    db.follow(t)
+/// A pattern's types, rewritten by the specialization. A generic function that
+/// matches on a payload binds it at the def's type parameter, so the binding's
+/// type is one of the variables the clone is substituting.
+fn resolve_pattern(
+    db: &mut TypeDb,
+    binders: &[VarId],
+    args: &[Type],
+    pat: &mut crate::TypedPattern,
+) {
+    use crate::TypedPattern as P;
+    match pat {
+        P::Wildcard => {}
+        P::Lit { ty, .. } | P::Bind { ty, .. } => *ty = specialize_type(db, binders, args, *ty),
+        P::EnumVariant {
+            ty, subpatterns, ..
+        } => {
+            *ty = specialize_type(db, binders, args, *ty);
+            for sub in subpatterns {
+                resolve_pattern(db, binders, args, sub);
+            }
+        }
+    }
+}
+
+/// `t` under the specialization: each of the scheme's `binders` replaced by the
+/// type the use site chose for it.
+///
+/// A clone with no binders is a monomorphic original passing through; it still
+/// gets resolved, because a type inference left as a link is one the backend
+/// would have to follow itself.
+fn specialize_type(db: &mut TypeDb, binders: &[VarId], args: &[Type], t: Type) -> Type {
+    if binders.is_empty() {
+        db.deep_resolve(t)
+    } else {
+        db.substitute_params(t, binders, args)
+    }
 }
 
 /// The (param_types, result) of a Func type, or (empty, t) if not a Func.
@@ -529,7 +531,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: specialization renames clones without substituting their types"]
     fn specialized_clone_carries_concrete_types_throughout() {
         // Checking only the clone's mangled name does not prove
         // monomorphization happened: every Type in the cloned function must be
@@ -570,7 +571,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: zero-argument generic call sites are skipped"]
     fn zero_argument_generic_result_is_specialized_from_use_context() {
         // `empty` is `forall T. () -> Vec[T]`; the subsequent push pins T to
         // Int. An empty arg list is still a real generic call site and must not
@@ -582,6 +582,68 @@ mod tests {
         assert!(
             names.iter().any(|n| n.starts_with("empty__")),
             "expected a specialized zero-arg clone, got {names:?}"
+        );
+    }
+
+    /// **MONO-01.** Two instantiations of one generic are two *concrete*
+    /// functions, not two names for the same unresolved one. The clone used to
+    /// be renamed and nothing else: specialization unified a fresh
+    /// instantiation of the scheme, then `follow`ed the clone's own types —
+    /// which mentioned different variables entirely — so both clones came out
+    /// carrying the binder as unbound as it started.
+    #[test]
+    fn two_instantiations_of_one_generic_are_two_concrete_functions() {
+        let src = "fn id(x) { x }\n\
+                   fn main() -> Unit { out(id(1)); out(id(\"t\")) }";
+        let map = SourceMap::new();
+        let file = map.intern("mono_two_concrete.px", src);
+        let parsed = parse(file, src);
+        let mut analysis = analyze_root(file, &parsed.tree);
+        let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+        let module = lower(file, &root, &mut analysis);
+        let mono = monomorphize(module, &analysis.names, &mut analysis.db);
+        let mut shapes: Vec<String> = mono
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                TypedItem::Fn(f) if f.name.starts_with("id__") => {
+                    Some(analysis.db.render(f.fn_type))
+                }
+                _ => None,
+            })
+            .collect();
+        shapes.sort();
+        assert_eq!(
+            shapes,
+            vec!["(Int) -> Int".to_string(), "(Text) -> Text".to_string()],
+            "each clone's own type must be the one its call site chose"
+        );
+    }
+
+    /// **MONO-02.** A zero-argument generic is specialized *per result type*.
+    /// `empty` is `forall T. () -> Vec[T]`; nothing in its argument list says
+    /// which `T`, so keying on arguments alone made two uses one clone — after
+    /// the guard that skipped zero-argument sites entirely stopped dropping the
+    /// original without emitting any clone at all.
+    #[test]
+    fn a_zero_argument_generic_is_specialized_per_result_type() {
+        let names = mono_names(
+            "fn empty() { Vec() }\n\
+             fn main() -> Int {\n\
+               let ints = empty(); ints.push(1)\n\
+               let texts = empty(); texts.push(\"t\")\n\
+               ints.len() + texts.len()\n\
+             }",
+        );
+        let clones: Vec<&String> = names.iter().filter(|n| n.starts_with("empty__")).collect();
+        assert_eq!(
+            clones.len(),
+            2,
+            "`Vec[Int]` and `Vec[Text]` are two instantiations: {names:?}"
+        );
+        assert!(
+            !names.contains(&"empty".to_string()),
+            "the generic original is dropped: {names:?}"
         );
     }
 

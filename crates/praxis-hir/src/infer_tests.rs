@@ -1724,7 +1724,6 @@ fn map_get_returns_option() {
 }
 
 #[test]
-#[ignore = "known bug: HIR lowering re-instantiates polymorphic call results without arguments"]
 fn lowered_polymorphic_call_result_uses_the_callsite_instantiation() {
     use praxis_ast::AstNode;
 
@@ -1755,7 +1754,6 @@ fn lowered_polymorphic_call_result_uses_the_callsite_instantiation() {
 }
 
 #[test]
-#[ignore = "known bug: HIR lowering instantiates method results without receiver substitutions"]
 fn lowered_generic_method_result_uses_the_receiver_instantiation() {
     use praxis_ast::AstNode;
 
@@ -2302,4 +2300,226 @@ fn a_duplicate_field_or_variant_is_rejected() {
         !has_type_error("struct Point { x: Int, y: Text }\nfn main() -> Int { 0 }"),
         "distinct field names are fine"
     );
+}
+
+// ---------------------------------------------------------------------------
+// F15 — the per-node inferred-type map, and lowering as its reader.
+// ---------------------------------------------------------------------------
+
+/// A program with a closure in each of the twenty-five expression positions
+/// F20's walker gate enumerates, plus the shapes inference reaches without
+/// going through `infer_expr` (branch, loop and function bodies).
+///
+/// Shared by the F15 gates below: "every expression node has a type" is only
+/// worth asserting over a tree that has every expression node in it.
+const EVERY_EXPRESSION_POSITION: &str = concat!(
+    "struct R { f: Int }\n",
+    "enum E { V(Int) }\n",
+    "fn main(c: Bool, v: Vec[Int], k: Int) -> Int {\n",
+    "  let a = |n| 1\n",
+    "  var b = |n| 2\n",
+    "  b = |n| 3\n",
+    "  let d = (|n| 4)(0)\n",
+    "  out(|n| 5)\n",
+    "  let w = v.map(|n| 6)\n",
+    "  let y = v.map(|n| 7).len()\n",
+    "  let t = (|n| 8, |n| 9)\n",
+    "  let p = (|n| 10)\n",
+    "  let u = !(|n| 11)\n",
+    "  let z = (|n| 12) == (|n| 13)\n",
+    "  let g = R { f: |n| 14 }.f\n",
+    "  let e = V(|n| 15)\n",
+    "  if (|n| 16)(0) { let h = |n| 17 } else { let i = |n| 18 }\n",
+    "  while c { let j = |n| 19 }\n",
+    "  for x in v { let l = |n| 20 }\n",
+    "  let m = loop { let o = |n| 21\n  break |n| 22 }\n",
+    "  let q = match (|n| 23)(0) { _ => |n| 24 }\n",
+    "  return |n| 25\n",
+    "}\n"
+);
+
+/// **F15.** Inference records a type for *every* expression node it visits, and
+/// it visits every expression node. The map is what lets lowering read instead
+/// of re-deriving; a map with holes in it would just move the fresh-variable
+/// fallback from lowering into whoever consumes the map.
+#[test]
+fn every_expression_node_has_a_recorded_type() {
+    let map = SourceMap::new();
+    let id = map.intern("expr_types_total.px", EVERY_EXPRESSION_POSITION);
+    let parsed = parse(id, EVERY_EXPRESSION_POSITION);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let analysis = analyze_root(id, &parsed.tree);
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut seen = 0usize;
+    for node in parsed.tree.descendants() {
+        // A parser expression (`read grid(char)`'s argument) is its own grammar
+        // and has no `Type`; `Expr::cast` already refuses it.
+        let Some(expr) = praxis_ast::Expr::cast(node.clone()) else {
+            continue;
+        };
+        seen += 1;
+        if !analysis
+            .expr_types
+            .contains_key(&crate::NodeKey::of(expr.syntax()))
+        {
+            missing.push(format!("{:?} at {:?}", node.kind(), node.text_range()));
+        }
+    }
+    assert!(
+        seen > 60,
+        "the fixture should have many expressions: {seen}"
+    );
+    assert!(
+        missing.is_empty(),
+        "{} expression node(s) inference visited with no recorded type: {missing:?}",
+        missing.len()
+    );
+}
+
+/// **F15.** Lowering never invents a type. `Y099` is what a miss looks like now,
+/// and a program covering every expression position produces none — which is
+/// the same statement as the test above, made where it matters: the pass that
+/// used to fall back to a fresh variable nineteen times over.
+#[test]
+fn lowering_invents_no_type_for_any_expression_position() {
+    use praxis_ast::AstNode;
+
+    let map = SourceMap::new();
+    let id = map.intern("no_invented_types.px", EVERY_EXPRESSION_POSITION);
+    let parsed = parse(id, EVERY_EXPRESSION_POSITION);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = crate::lower::lower(id, &root, &mut analysis);
+    let invented: Vec<_> = module
+        .diagnostics
+        .iter()
+        .filter(|d| d.code() == praxis_source::DiagCode::InternalMissingType.code())
+        .collect();
+    assert!(
+        invented.is_empty(),
+        "lowering asked for a type inference never recorded: {invented:?}"
+    );
+}
+
+/// **F15.** A `NodeKey` is not a `TextRange`. A `PATH_EXPR` and the `Ident`
+/// token inside it occupy the *same* range, which is why the per-node map could
+/// not have been keyed by range beside `ref_types` — one would have overwritten
+/// the other, silently, exactly where a name reference and its expression meet.
+#[test]
+fn a_node_key_separates_an_expression_from_the_name_inside_it() {
+    use praxis_ast::AstNode;
+
+    let src = "fn main() -> Int { let x = 1\n  x }\n";
+    let map = SourceMap::new();
+    let id = map.intern("node_key.px", src);
+    let parsed = parse(id, src);
+    let analysis = analyze_root(id, &parsed.tree);
+
+    let path = parsed
+        .tree
+        .descendants()
+        .find(|n| n.kind() == praxis_syntax::SyntaxKind::PATH_EXPR)
+        .expect("the `x` reference");
+    let name_tok = praxis_ast::PathExpr::from_syntax(path.clone())
+        .name()
+        .expect("the `x` token");
+    assert_eq!(
+        path.text_range(),
+        name_tok.text_range(),
+        "the collision this key exists to make unrepresentable"
+    );
+    // One range, two maps, two answers — and neither can displace the other.
+    assert!(analysis.ref_types.contains_key(&name_tok.text_range()));
+    assert!(analysis.expr_types.contains_key(&crate::NodeKey::of(&path)));
+    // …and a key carries the kind, so a same-range node of another kind is a
+    // different key rather than the same one.
+    assert_ne!(
+        crate::NodeKey::of(&path),
+        crate::NodeKey::of(&path.parent().expect("a parent node")),
+    );
+}
+
+/// **HIR-01.** The two exit tests pin a call and a method call; this pins the
+/// shapes lowering used to answer with something *other* than a second
+/// instantiation — the branch points, where it recomputed a join it had no need
+/// to, and got a different answer whenever one branch diverged.
+#[test]
+fn a_lowered_branch_carries_the_join_not_its_first_arm() {
+    use praxis_ast::AstNode;
+
+    let src = concat!(
+        "fn main(c: Bool, n: Int) -> Int {\n",
+        "  let a = if c { panic(\"x\") } else { 1 }\n",
+        "  let b = match n { 0 => panic(\"y\"), _ => 2 }\n",
+        "  a + b\n",
+        "}\n"
+    );
+    let map = SourceMap::new();
+    let id = map.intern("lowered_join.px", src);
+    let parsed = parse(id, src);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:?}",
+        analysis.diagnostics
+    );
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = crate::lower::lower(id, &root, &mut analysis);
+    let main = module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::TypedItem::Fn(f) if f.name == "main" => Some(f),
+            _ => None,
+        })
+        .expect("main");
+    let mut rendered = Vec::new();
+    for stmt in &main.body.stmts {
+        if let crate::TypedStmt::Let { name, init, .. } = stmt {
+            rendered.push((name.clone(), analysis.db.render(crate::expr_ty(init))));
+        }
+    }
+    assert_eq!(
+        rendered,
+        vec![
+            ("a".to_string(), "Int".to_string()),
+            ("b".to_string(), "Int".to_string()),
+        ],
+        "a divergent arm is absorbed; reading the first one answers `Never`"
+    );
+}
+
+/// **HIR-02.** A method name is not a name reference. It has no entry in
+/// `refs` — so hover, which asks `refs` first, could never see anything about
+/// it — and its result used to be written into `ref_types` at the same range,
+/// a map only reference consumers read.
+#[test]
+fn a_method_name_is_not_a_name_reference() {
+    let src = "fn main(v: Vec[Int]) -> Int { v.len() }\n";
+    let map = SourceMap::new();
+    let id = map.intern("method_ref.px", src);
+    let parsed = parse(id, src);
+    let analysis = analyze_root(id, &parsed.tree);
+    let name_tok = parsed
+        .tree
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| t.text() == "len")
+        .expect("the `len` token");
+    let range = name_tok.text_range();
+    assert!(
+        !analysis.refs.contains_key(&range),
+        "a method resolves to a catalog entry, not a symbol"
+    );
+    let m = analysis
+        .method_refs
+        .get(&range)
+        .expect("the method's own map is where it lives");
+    assert_eq!(m.entry.name, "len");
+    assert_eq!(
+        analysis.db.render(analysis.db.follow(m.receiver)),
+        "Vec[Int]"
+    );
+    assert_eq!(analysis.db.render(analysis.db.follow(m.result)), "Int");
 }

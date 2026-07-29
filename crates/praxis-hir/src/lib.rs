@@ -48,6 +48,53 @@ use praxis_ast::{AstNode, SourceFile};
 use praxis_source::{Diagnostic, FileId};
 use praxis_types::{Type, TypeDb};
 
+/// The identity of one syntax **node**.
+///
+/// Deliberately a distinct type from a token's [`rowan::TextRange`]: a
+/// `PATH_EXPR` node and the `Ident` token inside it have the *same* range, so a
+/// range-keyed map cannot hold both "the type of this expression" and "the type
+/// of this name reference" without one silently overwriting the other. Carrying
+/// the node's [`SyntaxKind`](praxis_syntax::SyntaxKind) alongside the range
+/// makes that collision unrepresentable (F15).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct NodeKey(rowan::TextRange, praxis_syntax::SyntaxKind);
+
+impl NodeKey {
+    /// The key of `node`.
+    #[must_use]
+    pub fn of(node: &praxis_syntax::SyntaxNode) -> NodeKey {
+        NodeKey(node.text_range(), node.kind())
+    }
+
+    /// The node's source range.
+    #[must_use]
+    pub fn range(self) -> rowan::TextRange {
+        self.0
+    }
+
+    /// The node's syntax kind.
+    #[must_use]
+    pub fn kind(self) -> praxis_syntax::SyntaxKind {
+        self.1
+    }
+}
+
+/// One resolved method call: the catalog entry it selected and the types
+/// inference gave its receiver and result.
+///
+/// A method-name token is **not** a name reference, so smuggling this through
+/// `ref_types` put it in a map every reference consumer walks — and hover, which
+/// looks a range up in `refs` first, could never see it (HIR-02).
+#[derive(Clone, Copy, Debug)]
+pub struct MethodRef {
+    /// The catalog entry the receiver/name/arity selected.
+    pub entry: &'static praxis_stdlib::MethodEntry,
+    /// The receiver's inferred type at this call site.
+    pub receiver: Type,
+    /// The result type inference gave this call.
+    pub result: Type,
+}
+
 /// The full result of analyzing one file: resolution + inference + diagnostics.
 ///
 /// Built by [`analyze`]; consumed by the CLI (for diagnostics) and the LSP (for
@@ -74,6 +121,13 @@ pub struct Analysis {
     /// with (the instantiation witness). Consumed by monomorphization (WS8) to
     /// instantiate polymorphic callees per call site.
     pub call_sites: std::collections::HashMap<rowan::TextRange, CallSite>,
+    /// **Every** inferred expression's type, keyed by its node (F15). Filled at
+    /// one insertion point, so "an expression inference visited that has no
+    /// recorded type" cannot arise — which is what lets lowering *read* a type
+    /// instead of re-deriving one at a second, independent instantiation.
+    pub expr_types: std::collections::HashMap<NodeKey, Type>,
+    /// Each method call, keyed by the method-name token's range.
+    pub method_refs: std::collections::HashMap<rowan::TextRange, MethodRef>,
     /// All `N0xx` (name) and `Y0xx` (type) diagnostics, in source order.
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -89,6 +143,11 @@ pub struct CallSite {
     pub callee: SymbolId,
     /// The concrete argument types, in call order.
     pub arg_types: Vec<Type>,
+    /// The call's result type at this site — the instantiation witness for a
+    /// callee whose result mentions a quantified variable no *argument* does
+    /// (`fn empty() { Vec() }`, MONO-02). Without it a zero-argument generic
+    /// call site carries nothing to specialize from.
+    pub result: Type,
 }
 
 impl Analysis {
@@ -115,6 +174,8 @@ pub fn analyze(file: FileId, root: &SourceFile) -> Analysis {
         ref_types: inference.ref_types,
         decls: inference.decls,
         call_sites: inference.call_sites,
+        expr_types: inference.expr_types,
+        method_refs: inference.method_refs,
         diagnostics: inference.diagnostics,
     }
 }
@@ -133,6 +194,8 @@ pub fn analyze_root(file: FileId, root: &praxis_syntax::SyntaxNode) -> Analysis 
             ref_types: std::collections::HashMap::new(),
             decls: std::collections::HashMap::new(),
             call_sites: std::collections::HashMap::new(),
+            expr_types: std::collections::HashMap::new(),
+            method_refs: std::collections::HashMap::new(),
             // The parser should always produce a SOURCE_FILE root; if not, this
             // is an internal error, surfaced as a single diagnostic.
             diagnostics: vec![praxis_source::Diagnostic::new(

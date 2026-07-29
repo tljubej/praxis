@@ -53,6 +53,10 @@ pub struct Inference {
     /// Each call site, keyed by the callee name token's range → the callee
     /// symbol and concrete arg types (the monomorphization witness, WS8 §13.6).
     pub call_sites: HashMap<TextRange, crate::CallSite>,
+    /// Every inferred expression's type, keyed by its node (F15).
+    pub expr_types: HashMap<crate::NodeKey, Type>,
+    /// Each method call, keyed by the method-name token's range (F15/HIR-02).
+    pub method_refs: HashMap<TextRange, crate::MethodRef>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -82,6 +86,8 @@ pub(crate) fn infer_with_tree(
         type_env: crate::decl::TypeEnv::default(),
         ref_types: HashMap::new(),
         call_sites: HashMap::new(),
+        expr_types: HashMap::new(),
+        method_refs: HashMap::new(),
         diagnostics: Vec::new(),
         catalog: builtin_catalog(),
         decl_site: Level::OUTERMOST,
@@ -104,6 +110,8 @@ pub(crate) fn infer_with_tree(
         ref_types: inferer.ref_types,
         decls: inferer.decls,
         call_sites: inferer.call_sites,
+        expr_types: inferer.expr_types,
+        method_refs: inferer.method_refs,
         diagnostics,
     }
 }
@@ -136,6 +144,16 @@ struct Inferer {
     /// Call sites keyed by the callee name token's range. Populated in
     /// `infer_call`; consumed by the monomorphization pass (WS8, §13.6).
     call_sites: HashMap<TextRange, crate::CallSite>,
+    /// Every inferred expression's type, keyed by its node (F15). There is
+    /// exactly one insertion point — [`Inferer::infer_expr`] — so a visited
+    /// expression with no recorded type is unrepresentable, and lowering can
+    /// *read* what inference decided rather than deriving its own answer.
+    expr_types: HashMap<crate::NodeKey, Type>,
+    /// Each method call, keyed by the method-name token's range (HIR-02). A
+    /// method name is not a name reference, so it does not belong in
+    /// `ref_types` — everything that walks references had to know to skip it,
+    /// and hover, which asks `refs` first, never saw it at all.
+    method_refs: HashMap<TextRange, crate::MethodRef>,
     diagnostics: Vec<Diagnostic>,
     /// The built-in method catalog (§16.2), for resolving `receiver.method()`.
     /// Immutable; shared via a process-wide `OnceLock`.
@@ -568,6 +586,20 @@ impl Inferer {
         // something (TY-18) — that is what the context stack carries.
         let ret_annot = item.return_type().and_then(|t| self.resolve_type(&t));
         let result_ty = ret_annot.unwrap_or_else(|| self.db.fresh_var());
+        // Pin the placeholder to the signature **before** the body is inferred.
+        // It used to happen afterwards, so a recursive call inside the body
+        // unified a bare variable with `(args) -> ?r` and the result stayed
+        // unknown until the whole function was done: `fn build(n: Int) ->
+        // Vec[Int] { … let v = build(n - 1); v.push(n) … }` could not resolve
+        // `push`, because at that point `v` had no type but a variable. Lowering
+        // hid this by re-resolving the method later, against types inference had
+        // since pinned — the re-derivation F15 removes, so the ordering has to
+        // be right here instead.
+        let signature = self.db.func(param_types.clone(), result_ty);
+        if let Err(e) = self.db.unify(placeholder, signature) {
+            let at = item.syntax().text_range();
+            self.diag_unify(self.file_span(at), e);
+        }
         self.fn_results.push(result_ty);
         let (body_ty, tail_range) = match item.body() {
             Some(b) => {
@@ -588,12 +620,6 @@ impl Inferer {
                 let at = tail_range.unwrap_or_else(|| item.syntax().text_range());
                 self.diag_unify_hinted(self.file_span(at), e, "the function body");
             }
-        }
-        let fn_ty = self.db.func(param_types, result_ty);
-        // Unify the placeholder with the derived function type.
-        if let Err(e) = self.db.unify(placeholder, fn_ty) {
-            let at = item.syntax().text_range();
-            self.diag_unify(self.file_span(at), e);
         }
         self.db.exit_level(prev);
         // Generalize the fn after its body is checked (§5.3), at the level the
@@ -700,7 +726,38 @@ impl Inferer {
 
     // --- expressions -------------------------------------------------------
 
+    /// Infer `expr`'s type **and record it** (F15).
+    ///
+    /// This is the one insertion into [`Inferer::expr_types`]. Every path that
+    /// infers an expression goes through here or through
+    /// [`infer_expr_expected`](Self::infer_expr_expected), which records too —
+    /// so "inference visited this node" and "there is a recorded type for this
+    /// node" are the same statement, and lowering may treat a miss as an
+    /// internal error rather than inventing a fresh variable.
     fn infer_expr(&mut self, expr: &Expr) -> Type {
+        let ty = self.infer_expr_uncached(expr);
+        self.record_expr_type(expr, ty);
+        ty
+    }
+
+    /// Record `ty` as `expr`'s inferred type. Called from the two entry points
+    /// above and nowhere else.
+    fn record_expr_type(&mut self, expr: &Expr, ty: Type) {
+        self.record_node_type(expr.syntax(), ty);
+    }
+
+    /// Record `ty` at a syntax node.
+    ///
+    /// Two expression nodes are never *evaluated*, so they never reach
+    /// [`infer_expr`](Self::infer_expr): a call's callee name and a record
+    /// literal's head. Each is a name resolved through `refs`, not a value — but
+    /// each is still a `PATH_EXPR`, and a map that claims to hold every
+    /// expression's type has to hold theirs.
+    fn record_node_type(&mut self, node: &praxis_syntax::SyntaxNode, ty: Type) {
+        self.expr_types.insert(crate::NodeKey::of(node), ty);
+    }
+
+    fn infer_expr_uncached(&mut self, expr: &Expr) -> Type {
         match expr {
             Expr::Literal(l) => self.infer_literal(l),
             Expr::Path(p) => self.infer_path(p),
@@ -822,7 +879,11 @@ impl Inferer {
     /// var unifies no-op, so this is safe).
     fn infer_expr_expected(&mut self, expr: &Expr, expected: Type) -> Type {
         match expr {
-            Expr::Closure(c) => self.infer_closure_expected(c, expected),
+            Expr::Closure(c) => {
+                let ty = self.infer_closure_expected(c, expected);
+                self.record_expr_type(expr, ty);
+                ty
+            }
             _ => self.infer_expr(expr),
         }
     }
@@ -839,6 +900,13 @@ impl Inferer {
             .and_then(|p| p.name())
             .and_then(|tok| self.refs.get(&tok.text_range()).copied())
             .and_then(|resolved| self.type_env.ty(resolved.symbol));
+        // The head is a `PATH_EXPR` nothing evaluates; the type it names is its
+        // type, and a head that names nothing is a fresh variable like any other
+        // unresolved expression.
+        if let Some(head) = r.name() {
+            let head_ty = struct_ty.unwrap_or_else(|| self.db.fresh_var());
+            self.record_node_type(head.syntax(), head_ty);
+        }
         let Some(struct_ty) = struct_ty else {
             // Unknown struct: infer each field for diagnostics, return a fresh var.
             if let Some(fl) = r.field_list() {
@@ -1274,6 +1342,13 @@ impl Inferer {
             Some((ty, range)) => (ty, Some(range)),
             None => (unit, None),
         };
+        // A block is the one expression inference can reach *without* going
+        // through `infer_expr`: a branch body, a loop body and a function body
+        // are all `infer_block` calls. Recording here as well is what makes
+        // "every expression node has a type" true of the whole tree rather than
+        // of the subset that happened to sit in an expression position (F15).
+        self.expr_types
+            .insert(crate::NodeKey::of(block.syntax()), last);
         // No trailing expression: the value is Unit; point at the whole block so
         // the reader still sees where the implicit Unit comes from.
         let tail_range = tail_range.or_else(|| Some(block.syntax().text_range()));
@@ -1565,6 +1640,13 @@ impl Inferer {
                         .and_then(|s| s.scheme.clone());
                     if let Some(scheme) = scheme {
                         let callee_ty = self.db.instantiate(&scheme);
+                        // The callee name is a `PATH_EXPR` that nothing
+                        // evaluates, and this instantiation is its type. It is
+                        // deliberately *not* also written to `ref_types`: hover
+                        // over a callee shows the binding's generalized scheme,
+                        // which is what `hover_over_out_shows_polymorphic_scheme`
+                        // pins, and a per-use entry would displace it.
+                        self.record_node_type(callee.syntax(), callee_ty);
                         let result = self.db.fresh_var();
                         // Snapshot the concrete arg types before they are moved
                         // into the expected Func type — this is the call site's
@@ -1585,6 +1667,11 @@ impl Inferer {
                             crate::CallSite {
                                 callee: resolved.symbol,
                                 arg_types: arg_types_snapshot,
+                                // The result is a witness too: a callee whose
+                                // quantified variable appears only in its result
+                                // (`fn empty() { Vec() }`) has nothing to
+                                // specialize from otherwise (MONO-02).
+                                result,
                             },
                         );
                         // For the common builtin `out(x)`, the scheme is
@@ -1630,11 +1717,6 @@ impl Inferer {
         // pinned). Arity is the arg count.
         let arg_exprs: Vec<Expr> = m.arg_list().map(|a| a.args().collect()).unwrap_or_default();
         let arity = arg_exprs.len();
-
-        // Record the method-name range for hover (the result type).
-        if let Some(tok) = m.method_name() {
-            self.ref_types.insert(tok.text_range(), receiver_ty);
-        }
 
         // Look up the method in the catalog via the ADR-010 bridge.
         let hits = crate::catalog::lookup(&self.db, self.catalog, receiver_ty, &name, arity);
@@ -1694,6 +1776,19 @@ impl Inferer {
                 }
             }
             arg_types.push(at);
+        }
+        // Record the resolved method at its name token (HIR-02). Lowering reads
+        // the entry rather than repeating the catalog lookup against a receiver
+        // type it derived itself, and hover reads the result.
+        if let Some(tok) = m.method_name() {
+            self.method_refs.insert(
+                tok.text_range(),
+                crate::MethodRef {
+                    entry,
+                    receiver: receiver_ty,
+                    result: result_ty,
+                },
+            );
         }
         result_ty
     }

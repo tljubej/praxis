@@ -298,7 +298,6 @@ fn vec_float_push_adopts_float_descriptor_and_preserves_signed_zero_semantics() 
 }
 
 #[test]
-#[ignore = "blocked on F15/MONO-01 (S15): inference does pin the element type to Float (pushing an Int is a Y001), but `lower_call` re-instantiates the callee's scheme instead of using the type inferred at this call site, so the typed tree carries `Vec[?T]` and codegen has no element descriptor. Same finding as `lowered_polymorphic_call_result_uses_the_callsite_instantiation`."]
 fn empty_vec_float_has_the_float_element_descriptor_before_any_push() {
     let (runtime, result) =
         run_main("fn main() -> Vec[Float] {\n  let values: Vec[Float] = Vec()\n  values\n}\n");

@@ -29,6 +29,22 @@ impl Analysis {
     /// occurrence of a name returns a distinct `(symbol, type)`.
     #[must_use]
     pub fn hover(&self, range: TextRange) -> Option<HoverInfo> {
+        // A method name is not a name reference (HIR-02): it resolves to a
+        // catalog entry, not a `SymbolId`, so it has no entry in `refs` and
+        // hover used to return nothing at all for `v.len()`'s `len`. Its result
+        // type used to be smuggled into `ref_types` at the same range, where the
+        // `refs` lookup above meant nothing could ever read it.
+        if let Some(m) = self.method_refs.get(&range) {
+            return Some(HoverInfo {
+                symbol: SymbolId(u32::MAX),
+                name: format!(
+                    "{}.{}",
+                    self.db.render(self.db.follow(m.receiver)),
+                    m.entry.name
+                ),
+                scheme: self.db.render(self.db.follow(m.result)),
+            });
+        }
         let resolved = self.refs.get(&range)?;
         let symbol = self.names.get(resolved.symbol)?;
         let ty = self.ref_types.get(&range);

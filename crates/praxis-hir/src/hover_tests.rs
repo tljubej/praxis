@@ -107,3 +107,51 @@ fn hover_at_empty_range_returns_none() {
         .hover(TextRange::new(100u32.into(), 101u32.into()))
         .is_none());
 }
+
+/// **HIR-02.** Hover over a method name reports what the method call produces.
+///
+/// It used to report nothing at all: [`Analysis::hover`] looks the range up in
+/// `refs` first, and a method name resolves to a catalog entry rather than to a
+/// symbol, so it is not in `refs` and never will be. The result inference had
+/// computed was written into `ref_types` at that same range — a map only
+/// reference consumers read, and one whose entry was the *receiver*'s type
+/// rather than the result's.
+#[test]
+fn hover_over_a_method_name_reports_its_result_type() {
+    let src = "fn main(v: Vec[Int]) -> Int { v.len() }\n";
+    let map = SourceMap::new();
+    let id = map.intern("hover_method.px", src);
+    let parsed = praxis_parser::parse(id, src);
+    let analysis = analyze_root(id, &parsed.tree);
+    let len_tok = parsed
+        .tree
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| t.text() == "len")
+        .expect("the `len` token");
+    let info = analysis
+        .hover(len_tok.text_range())
+        .expect("a method name is hoverable");
+    assert_eq!(info.scheme, "Int", "`Vec[Int].len()` produces an Int");
+    assert_eq!(info.name, "Vec[Int].len");
+}
+
+/// …and hovering a *name* still answers about the name. Giving methods their
+/// own map must not turn a same-ranged reference into a method.
+#[test]
+fn hover_over_a_receiver_still_reports_the_binding() {
+    let src = "fn main(v: Vec[Int]) -> Int { v.len() }\n";
+    let map = SourceMap::new();
+    let id = map.intern("hover_receiver.px", src);
+    let parsed = praxis_parser::parse(id, src);
+    let analysis = analyze_root(id, &parsed.tree);
+    let v_use = analysis
+        .refs
+        .keys()
+        .find_map(|r| {
+            let h = analysis.hover(*r)?;
+            (h.name == "v").then_some(h)
+        })
+        .expect("the `v` reference");
+    assert_eq!(v_use.scheme, "Vec[Int]");
+}
