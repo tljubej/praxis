@@ -18,6 +18,7 @@ pub mod db;
 pub mod error;
 pub mod fold;
 pub mod generalize;
+pub mod key;
 pub mod pretty;
 pub mod type_id;
 pub mod unify;
@@ -31,6 +32,7 @@ pub use db::{Slot, TypeDb};
 pub use error::TypeCtorError;
 pub use fold::{fold, FoldMemo, TypeFolder};
 pub use generalize::Scheme;
+pub use key::TypeKey;
 pub use type_id::{Type, VarId};
 // Re-export the shared vocabulary so consumers reach it through `praxis_types`
 // without depending on `praxis-stdlib` themselves. `ScalarType`/`CollectionCtor`

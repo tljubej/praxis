@@ -42,19 +42,28 @@ pub fn supports_eq(db: &TypeDb, t: Type) -> bool {
         TypeData::Func { .. } => false,
         // A collection is equatable iff its element type is.
         TypeData::Collection { args, .. } => args.iter().all(|a| supports_eq(db, *a)),
-        // A record is equatable iff every field type is.
-        TypeData::Record { def } => db
-            .record_def(*def)
-            .fields
-            .iter()
-            .all(|f| supports_eq(db, f.ty)),
+        // A record is equatable iff every field type is, and iff every type
+        // argument is: a generic def's field types mention its parameters,
+        // which are unresolved variables and answer optimistically, so the
+        // arguments are where the real answer lives (F12).
+        TypeData::Record { def, args } => {
+            args.iter().all(|a| supports_eq(db, *a))
+                && db
+                    .record_def(*def)
+                    .fields
+                    .iter()
+                    .all(|f| supports_eq(db, f.ty))
+        }
         // An enum is equatable iff every variant's payload types are (a variant
-        // with no payload is trivially equatable).
-        TypeData::Enum { def } => db
-            .enum_def(*def)
-            .variants
-            .iter()
-            .all(|v| v.payload.iter().all(|t| supports_eq(db, *t))),
+        // with no payload is trivially equatable) and every type argument is.
+        TypeData::Enum { def, args } => {
+            args.iter().all(|a| supports_eq(db, *a))
+                && db
+                    .enum_def(*def)
+                    .variants
+                    .iter()
+                    .all(|v| v.payload.iter().all(|t| supports_eq(db, *t)))
+        }
         // An unresolved var is optimistically equatable (see module docs).
         TypeData::Var(_) => true,
     }

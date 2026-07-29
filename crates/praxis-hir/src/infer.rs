@@ -292,19 +292,18 @@ impl Inferer {
                 // `None : forall T. Option[T]`. `None` is a zero-payload variant,
                 // so its scheme is the enum type directly (mirroring how
                 // user-declared zero-payload variants get a monotype scheme in
-                // `infer_enum`, not a `() -> ...` function). The Option def is
-                // registered fresh inside the inner scope; instantiation
-                // re-registers a fresh def per use, and same-named enums unify
-                // structurally (unify.rs M9 arm) so independently-stamped
-                // Option[T] copies merge into one type.
+                // `infer_enum`, not a `() -> ...` function). Both name the *one*
+                // `Option` def (F12) and differ only in their type argument;
+                // they used to register a fresh nominal def each, which is what
+                // made `unify` need a same-name-and-signature arm (TY-06).
                 "Some" => {
                     let t = db.fresh_var();
-                    let opt = option_type(db, t);
+                    let opt = db.option_of(t);
                     db.func(vec![t], opt)
                 }
                 "None" => {
                     let t = db.fresh_var();
-                    option_type(db, t)
+                    db.option_of(t)
                 }
                 // Float constants (§4.12). Both are nullary `() -> Float`,
                 // monomorphic — no quantified vars. Lowered to a direct runtime
@@ -486,34 +485,37 @@ impl Inferer {
         Some(scheme.body())
     }
 
-    /// Look up an enum variant by constructor name. Returns the variant's enum
-    /// def-id, index, and payload types (empty for payload-less). Works for both
-    /// payload variants (scheme is `Func -> Enum`) and zero-payload variants
-    /// (scheme is the enum type directly).
+    /// Look up an enum variant by constructor name, **instantiated fresh**.
+    /// Returns the enum type this use denotes, the variant's index, and the
+    /// variant's payload types under that instance's type arguments (empty for
+    /// payload-less). Works for both payload variants (scheme is `Func -> Enum`)
+    /// and zero-payload variants (scheme is the enum type directly).
+    ///
+    /// Instantiating is what makes `Some(x)` in a pattern bind `x` at the
+    /// scrutinee's element type: `Option`'s payload is its def's parameter (F12),
+    /// so the payload of a *use* is only known once the use has its own
+    /// arguments and the scrutinee has unified against them.
     #[allow(dead_code)] // used by WS5 pattern matching
-    fn lookup_enum_variant(
-        &self,
-        name: &str,
-    ) -> Option<(praxis_types::EnumDefId, usize, Vec<Type>)> {
+    fn lookup_enum_variant(&mut self, name: &str) -> Option<(Type, usize, Vec<Type>)> {
         let root = self.scopes.root();
         let symbol = self.scopes.lookup(root, name)?;
-        let sym = self.names.get(symbol)?;
-        let scheme = sym.scheme.as_ref()?;
+        let scheme = self.names.get(symbol)?.scheme.as_ref()?.clone();
+        let body = self.db.instantiate(&scheme);
         // The scheme body is either a Func returning the enum type (payload
         // variant) or the enum type itself (zero-payload variant).
-        let result_ty = match self.db.data(self.db.follow(scheme.body())) {
+        let result_ty = match self.db.data(self.db.follow(body)) {
             praxis_types::TypeData::Func { result, .. } => *result,
-            praxis_types::TypeData::Enum { .. } => scheme.body(),
+            praxis_types::TypeData::Enum { .. } => body,
             _ => return None,
         };
-        let def_id = match self.db.data(self.db.follow(result_ty)) {
-            praxis_types::TypeData::Enum { def } => *def,
+        let enum_ty = self.db.follow(result_ty);
+        let (def_id, args) = match self.db.data(enum_ty) {
+            praxis_types::TypeData::Enum { def, args } => (*def, args.clone()),
             _ => return None,
         };
-        let edef = self.db.enum_def(def_id);
-        let idx = edef.variant(name)?;
-        let payload = edef.variants[idx].payload.clone();
-        Some((def_id, idx, payload))
+        let idx = self.db.enum_def(def_id).variant(name)?;
+        let payload = self.db.variant_payload_of(def_id, &args, idx);
+        Some((enum_ty, idx, payload))
     }
 
     /// Resolve the symbol declared at `range` (from the resolution `decls` map).
@@ -883,16 +885,15 @@ impl Inferer {
             return self.db.fresh_var();
         };
         // Get the record def to look up declared field types.
-        let def_id = match self.db.data(self.db.follow(struct_ty)) {
-            praxis_types::TypeData::Record { def } => *def,
+        let (def_id, def_args) = match self.db.data(self.db.follow(struct_ty)) {
+            praxis_types::TypeData::Record { def, args } => (*def, args.clone()),
             _ => return struct_ty,
         };
         if let Some(fl) = r.field_list() {
             for f in fl.fields() {
                 let Some(fname_tok) = f.name() else { continue };
                 let fname = fname_tok.text().to_string();
-                let rdef = self.db.record_def(def_id);
-                if let Some((_, declared_ty)) = rdef.field(&fname) {
+                if let Some((_, declared_ty)) = self.db.record_field_of(def_id, &def_args, &fname) {
                     let init_ty = match &f.expr() {
                         Some(e) => self.infer_expr(scope, e),
                         // Punned field `{ x }` — x must be a binding of the field's type.
@@ -931,9 +932,10 @@ impl Inferer {
         let fname = field_tok.text().to_string();
         let resolved = self.db.follow(receiver_ty);
         match self.db.data(resolved) {
-            praxis_types::TypeData::Record { def } => {
-                let rdef = self.db.record_def(*def);
-                rdef.field(&fname)
+            praxis_types::TypeData::Record { def, args } => {
+                let (def, args) = (*def, args.clone());
+                self.db
+                    .record_field_of(def, &args, &fname)
                     .map(|(_, t)| t)
                     .unwrap_or_else(|| self.db.fresh_var())
             }
@@ -1011,10 +1013,9 @@ impl Inferer {
             }
             PatternKind::Variant(vname) => {
                 // An enum variant pattern. Look up the variant to get payload types.
-                if let Some((enum_def_id, variant_idx, payload_types)) =
+                if let Some((enum_ty, variant_idx, payload_types)) =
                     self.lookup_enum_variant(&vname)
                 {
-                    let enum_ty = self.db.enum_type(enum_def_id);
                     if let Err(e) = self.db.unify(expected, enum_ty) {
                         if let Some(tok) = pat.name_token() {
                             self.diag_unify(self.file_span(tok.text_range()), e);
@@ -1797,17 +1798,28 @@ impl Inferer {
         if name == "Seq" {
             return None;
         }
-        // `Option[T]` (M9): a type-arg application of the prelude `Option`
-        // resolves to a fresh Option def carrying the element type. Registered
-        // here (not via the prelude's own def) so each annotation site gets its
-        // own def, which then unifies with any other Option[T] by name
-        // (unify.rs M9 arm) and with `Some`/`None`-constructed values.
+        // `Option[T]` (M9): an application of the prelude's *one* `Option` def
+        // (F12). It used to register a fresh def per annotation site, so the
+        // annotation and the `Some`/`None` value it described were two nominal
+        // types that only a relaxed unification arm put back together (TY-06).
         if name == "Option" {
+            let want = 1;
+            let got = args.len();
+            if got > want {
+                self.diagnostics
+                    .push(crate::diagnostics::wrong_type_argument_count(
+                        self.file_span(range),
+                        "Option",
+                        got,
+                        want,
+                    ));
+                return None;
+            }
             let elem = args
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| self.db.fresh_var());
-            return Some(option_type(&mut self.db, elem));
+            return Some(self.db.option_of(elem));
         }
         let ctor = Self::collection_ctor_for(name)?;
         // The ctor declares how many type args it takes, and F5 is what finally
@@ -1829,21 +1841,6 @@ impl Inferer {
             }
         }
     }
-}
-
-/// A fresh `Option[elem]` def (M9, §7.5).
-///
-/// Registered per site on purpose: each annotation and each `Some`/`None` use
-/// gets its own def, and the same-named-enum arm in `unify` merges them. The
-/// three call sites used to spell the variant list out, which is three places
-/// for `Some`'s payload and `None`'s absence to drift.
-fn option_type(db: &mut TypeDb, elem: Type) -> Type {
-    let variants = VariantSet::new(vec![
-        EnumVariantDef::new("Some", vec![elem]),
-        EnumVariantDef::bare("None"),
-    ])
-    .expect("Some and None are distinct");
-    db.enum_(Some("Option".into()), variants)
 }
 
 /// Whether an expression is a *syntactic value* for the HM value restriction

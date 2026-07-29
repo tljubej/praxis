@@ -21,20 +21,50 @@ Update this file at the end of every stage.
 | S8 — Generation arena for JIT and plan metadata | **done** | `1311132`, `b60da0a` |
 | S9 — MIR root exactness, debug/root split, verifier | **done** | `ad9bbdf`, `d9521f9`, `e15a444` |
 | S10 — Semantic comparison, nominal schema identity | **done** | `29ff4f6`, `83de924`, `510ffc3`, `ff35f68` |
-| S11 — TypeDb core: levels, schemes, nominal identity | **TY-06 left** | `8aa9069`, `aa9deea`, `d69881e` |
+| S11 — TypeDb core: levels, schemes, nominal identity | **done** | `8aa9069`, `aa9deea`, `d69881e`, `HEAD` |
 | S12 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
-S10. It fell out of S1. **DBG-02** is closed in part (see §6).
+S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
+TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
+part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1133 passed, 0 failed, 94 ignored**. `just ci` is green.
+Now: **1141 passed, 0 failed, 93 ignored**. `just ci` is green.
 
-**All five of S11's exit-criterion tests pass**, and the stage's one remaining
-finding is **TY-06** (F12, XL) — see §4.
+**S11 is closed.** All five exit-criterion tests pass and all eight findings the
+stage owns are fixed and gated — TY-01…TY-07 and TY-22. **S12 is next, and D7
+and D8 block it** (§4).
 
-Fifty-two of the audit's ignored regressions are un-ignored and passing.
-The four added by S11:
+Fifty-three of the audit's ignored regressions are un-ignored and passing.
+The one added by S11's F12:
+
+| Test | File | Finding |
+|---|---|---|
+| `enum_payload_types_participate_in_monomorphization_cache_key` | `mono.rs` | MONO-03 |
+
+F12's seven new gates:
+
+| Test | File | Pins |
+|---|---|---|
+| `instantiating_a_scheme_does_not_mint_a_nominal_definition` | `types_tests.rs` | **TY-06**, stated at the level it lived at |
+| `an_instantiated_option_is_the_canonical_def_at_a_fresh_argument` | `types_tests.rs` | …and that the instance is still usable |
+| `every_option_names_the_one_option_def` | `types_tests.rs` | TY-06 — **rewritten** from `same_named_enums_unify_structurally`, which asserted the workaround |
+| `option_instances_unify_through_their_arguments` | `types_tests.rs` | **rewritten** from `same_named_enums_unify_payloads_pairwise` |
+| `option_at_two_element_types_is_two_types` | `types_tests.rs` | the distinction `render` could not make |
+| `a_variant_payload_is_read_through_the_instances_arguments` | `types_tests.rs` | the def holds `T`; the use holds the argument |
+| `a_canonical_key_groups_by_structure_and_by_definition` | `types_tests.rs` | `TypeKey` is identity where `render` was display |
+| `a_wrong_type_argument_count_is_unconstructible` | `types_tests.rs` | TY-07's rule, extended to nominal defs |
+| `monomorphization_distinguishes_option_element_types` | `jit.rs` | MONO-03 end to end — two clones, one program |
+
+`empty_enum_payload_and_no_payload_are_equivalent` and `enum_def_variant_lookup`
+were **amended**: the first built two same-named nominal enums (F12 makes them
+two types — it now uses anonymous ones, which is the arm that survives), the
+second read `db.enum_defs[0]` positionally (index 0 is now the prelude
+`Option`). `a_wrong_type_argument_count_is_reported_at_the_annotation` gained
+an `Option[Int, Text]` case.
+
+The four added by S11's first half:
 
 | Test | File | Finding |
 |---|---|---|
@@ -289,6 +319,20 @@ gone — `register_record(None, …)` is what they were. See ADR-046. **Not done
 nothing; F5's `Type(0)` half was already three sites after F16, and all three
 are converted.
 
+**F12 — nominal identity (`DefId + args`) + `TypeKey`: the static half landed
+whole; the runtime half is S18's.** `TypeData::Record`/`Enum` carry `args`,
+`RecordDef`/`EnumDef` carry `params`, `record_type`/`enum_type` take arguments
+and are fallible, `TypeDb::option_def()`/`option_of()` are the one canonical
+`Option`, and `praxis_types::key::TypeKey` + `canonical_key` are the structural
+identity the monomorphizer now keys on. `fold_record`/`fold_enum` branch on
+whether the def is generic — arguments for a generic one, field types for a
+non-generic one — which is the whole of TY-06. See ADR-048. **Not done,
+deliberately:** the runtime half — `EnumSchema`, `EnumPayload`'s schema pointer,
+`praxis_alloc_enum`'s new parameter — which is **RT-13 in S18** (plan §5 says so
+explicitly, and says RT-13 needs TY-06's canonical `Option` first). `SchemaIdentity`
+is untouched; nothing in `praxis-types` is `#[repr(C)]`, so **S11 spent no ABI
+bump and S12 starts fresh**.
+
 **F10 — scheme-owned binders + `Level`: landed in part, deliberately.**
 `VarState::Generalized` is deleted, `Scheme`'s fields are private
 (`binders()` / `body()`), `generalize` mutates nothing, `instantiate`
@@ -398,7 +442,67 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S11's F5, F10, TY-01/03/05/07/22)
+### From this session (S11's F12 — TY-06, and MONO-03)
+
+**`TypeData::Record` and `TypeData::Enum` carry `args`.** A pattern that matches
+one needs `{ def, .. }` at minimum; a site that reads field or payload *types*
+needs the arguments. `RecordDef` and `EnumDef` carry `params: Vec<VarId>` — the
+def's own type parameters, empty for everything except the prelude `Option`.
+
+**`record_type`/`enum_type` take arguments and return a `Result`.**
+`db.record_type(def, args)` / `db.enum_type(def, args)`; a count that disagrees
+with the def's `params` is `TypeCtorError::TypeArgCount`. `db.record(name,
+fields)` and `db.enum_(name, variants)` are unchanged and still infallible —
+they register a **non-generic** def and instantiate it at no arguments, which is
+what every caller wants. `register_record`/`register_enum` gained a `params`
+argument between the name and the member set.
+
+**There is one `Option`, and `TypeDb::new` seeds it.** `db.option_def()` is the
+def, `db.option_of(elem)` is `Option[elem]`. **Do not spell the variant list
+out** — the three sites that did (the `Some`/`None` prelude schemes, the
+`Option[T]` annotation arm, the input parser's `Optional`) are all `option_of`
+now, and `option_type` in `infer.rs` is deleted. A consequence worth knowing:
+**slot 0 of every `TypeDb` is `Option`'s parameter `T`**, and `enum_defs[0]` is
+`Option` — a test that indexed a def table positionally is now off by one.
+
+**A def's field/payload types are in terms of its `params`; a *use* reads them
+through its `args`.** `db.record_fields_of(def, args)`,
+`db.record_field_of(def, args, name)` and `db.variant_payload_of(def, args, idx)`
+substitute; they are identity and free when `params` is empty.
+`db.enum_def(def).variants[i].payload` answers the **definition's** `T`, not the
+element type — which is why `lower.rs`'s `lookup_enum_variant_by_name` no longer
+returns a payload at all.
+
+**`unify` merges two enum defs only when both are anonymous.** The
+same-*name*-and-signature arm existed to reassemble the copies TY-06 made; with
+one `Option` def there are no copies. Two named enums with different def-ids now
+mismatch, as two named records always have. Same def-id unifies **pairwise on
+arguments** — that is where `Option[?T] ~ Option[Int]` pins `?T`.
+
+**`render` prints `Option[Int]`.** A nominal type with arguments prints them.
+No snapshot moved (none held a rendered `Option`), which the plan half-expected
+— but a *new* snapshot will show them.
+
+**`TypeKey` is the identity; `db.render` is display.**
+`db.canonical_key(t) -> TypeKey` is read-only and interns nothing. **Do not key
+a cache on a rendered type.** The monomorphizer was, which is MONO-03; its cache
+key is a `Vec<TypeKey>` now, and the mangled clone *name* — still built from the
+rendered types, because a symbol has to be readable — is disambiguated with a
+counter through `MonoPass::fresh_mangled_name`.
+
+**`ScalarType` and `CollectionCtor` derive `Hash`**, so `TypeKey` can.
+
+**A generic record fails the compile.** `record_schema_for` (codegen) builds a
+schema from the def's field types, so a def with parameters would resolve
+descriptors for its parameters. The language cannot declare one, and
+`TypedExpr::RecordLit` carries no arguments to substitute — so it bails with a
+named diagnostic rather than emitting a wrong layout.
+
+**`RUNTIME_ABI_VERSION` is still 12.** Nothing in `praxis-types` is `#[repr(C)]`,
+and the runtime half of F12 (RT-13) is S18's. **S11 spent no bump — S12 starts
+fresh.**
+
+### From S11's F5, F10, TY-01/03/05/07/22
 
 **A `Type` cannot be written down; only the arena mints one.** `Type(0)` and
 `Type(id)` no longer compile. If you have a raw `u32` — the debugger's
@@ -1024,54 +1128,38 @@ re-deriving it.
 
 ## 4. Where to start
 
-**S11's last finding: TY-06, which is F12.** Everything else the stage owns is
-done and gated — TY-01, TY-02, TY-03, TY-04, TY-05, TY-07 and TY-22 — and **all
-five exit-criterion tests pass**. TY-04 needed no work of its own: F9's fold
-walks record fields and enum payloads, which is the whole finding, and
-`deep_resolve_rewrites_record_field_links` is green.
+**S11 is closed.** All eight findings the stage owns are fixed and gated —
+TY-01…TY-07 and TY-22 — and all five exit-criterion tests pass. TY-04 needed no
+work of its own: F9's fold walks record fields and enum payloads, which is the
+whole finding, and `deep_resolve_rewrites_record_field_links` is green. TY-06
+was F12's static half; see ADR-048 and §3.
 
-**F12 is XL and is the one thing left.** Read plan §3.1's F12 block and plan
-§5's S11 ordering paragraph first. What matters for a fresh context:
+**S12 is next** (parser grammar: `_` as `UNDERSCORE`, statement separators,
+struct-literal suppression) and **D7 and D8 block it** — neither is answered.
+**D13 binds before S13**, and S11 has already spent `Y007` and `Y008` out of the
+block (§5). **S12's ABI bump budget is fresh**: S11 spent none.
 
-1. **It is one commit across codegen and runtime**, not two.
-   `RecordSchema`/`EnumSchema` are `#[repr(C)]` and their addresses are embedded
-   as JIT immediates, so a split leaves a tree that compiles and miscompiles.
-   `praxis_alloc_enum(ctx, tag, arity)` gains a schema parameter.
-2. **S11's ABI bump budget is unspent, and F12 needs it.** `EnumPayload` gains a
-   schema pointer and `EnumSchema` is new — bump `RUNTIME_ABI_VERSION` /
-   `COMPILER_EXPECTED_ABI_VERSION` from 12 to 13, exactly once (H17).
-3. **The four symptoms are one missing representation**: TY-06
-   (`instantiate_walk` mints a fresh nominal def per instantiation — that is
-   now `fold_record_default`/`fold_enum_default` in `fold.rs`, and the
-   specialization is *correct* there only because a def has no args yet),
-   MONO-03 (the mono cache key is a `db.render` display string, so
-   `id[Option[Int]]` and `id[Option[Text]]` collide — `mono.rs:148`), RT-13
-   (runtime enums carry no nominal identity at all), and DBG-02's value-less
-   half. Design `DefId + args` once and derive all four.
-4. **RT-12 already landed the runtime record half** with
-   `SchemaIdentity::Nominal(&'static str)`. F12 replaces the name with the real
-   key when nominal identity gains type arguments; nothing else about
-   `RecordSchema::same_type` changes. The plan's sketch says `Nominal(u64)`;
-   see §6.
-5. **F5 already put the constructors where F12 needs them.**
-   `register_record(Option<String>, FieldSet) -> RecordDefId` and
-   `register_enum(Option<String>, VariantSet) -> EnumDefId` are the def-only
-   forms F12's sketch asks for; `record_type`/`enum_type` are what wrap a def
-   into a `Type`, and `enum_type` is where the `args.len() == params.len()`
-   check goes.
-6. **The single canonical `Option` def.** `option_type(db, elem)` in
-   `praxis-hir/src/infer.rs` is now the *one* place that spells `Option`'s
-   variant list (three call sites used to). `synthesize.rs`'s `Optional` arm is
-   the second. Threading `TypeDb::option_def()` through the Inferer and the
-   parser lowerer replaces both.
-7. Expect **snapshot churn** wherever `pretty.rs` starts printing `Option[Int]`
-   instead of `Option`, and **wide insta churn** in `infer_tests.rs` and
-   `hover_tests.rs` from any scheme change.
+**F12's runtime half is still owed, and it is S18's.** What did *not* land, on
+purpose:
 
-**After S11 closes, S12** (parser grammar: `_` as `UNDERSCORE`, statement
-separators, struct-literal suppression) is next, and **D7 and D8 block it** —
-neither is answered. **D13 binds before S13**, and S11 has already spent `Y007`
-and `Y008` out of the block (§5).
+1. **`EnumSchema`, `EnumPayload`'s schema pointer, and
+   `praxis_alloc_enum(ctx, tag, arity)`'s new schema parameter** — that is
+   **RT-13**, which the plan's finding register and §5's S18 paragraph both
+   place in S18, and which S18 says must land "in ONE commit with codegen"
+   because the `#[repr(C)]` layout crosses the JIT boundary. It also needs its
+   own `RUNTIME_ABI_VERSION` / `COMPILER_EXPECTED_ABI_VERSION` bump (12 → 13),
+   exactly once (H17). §4's earlier reading of F12 as "one commit across codegen
+   and runtime" merged the two halves; the plan does not, and RT-13's own entry
+   says it depends on TY-06's canonical `Option` — which now exists.
+2. **`SchemaIdentity` is untouched.** RT-12 landed
+   `Nominal(&'static str)` in S10 and nothing about `RecordSchema::same_type`
+   changed here. When S18 gives a runtime enum an identity, the *record*
+   identity can carry arguments alongside the name at the same time — see
+   ADR-048's last alternative for why the name, not the plan's `Nominal(u64)`.
+3. **DBG-02's value-less half is still open.** A record object records its
+   nominal name; turning that name back into a `Type` needs a
+   name→`RecordDefId` lookup *and* field types the schema does not carry (it has
+   descriptors). That is F15's per-node type map, in S15.
 
 **What S11 deliberately left:**
 
@@ -1091,6 +1179,21 @@ and `Y008` out of the block (§5).
 - **A wrong-arity annotation resolves to no type**, so a `let` with one gets a
   fresh variable after the `Y007`. That is the same shape as every other
   unresolved annotation and is TY-08/TY-09's territory (S13).
+- **A record cannot be generic and nothing enforces that in `praxis-types`.**
+  `register_record` takes a `params` list because the shape is one with
+  `register_enum`, but no caller passes a non-empty one and the language has no
+  `struct P[T]` syntax. The two places that would silently do the wrong thing
+  refuse instead: codegen's `record_schema_for` bails, and `unify` will not
+  merge two generic defs structurally. If S16 gives records parameters, those
+  are the two sites to fix first, plus `TypedExpr::RecordLit`, which carries a
+  `RecordDefId` and no arguments.
+- **`TypedExpr::EnumVariant.ty` is the constructor scheme's own type**, not a
+  per-use instantiation, so it is `Option[?T]` with an unresolved argument. That
+  was equally true before F12 (the def held the scheme's `T`); it is the same
+  looseness F15 fixes with a per-node type map in S15. Inference *does*
+  instantiate — `infer.rs`'s `lookup_enum_variant` mints a fresh use and unifies
+  it against the scrutinee — so the type a *program* sees is right; it is the
+  typed tree that carries the loose one.
 
 Two things S10 leaves for a later stage, both deliberate:
 
@@ -1165,8 +1268,9 @@ Two things S10 leaves for a later stage, both deliberate:
   no interning as there is for JIT metadata. Keying on the `ParserAst` would give
   it; nothing needs it yet.
 
-Re-read §6 of the plan first. The hazards that still bind: **H17** (F12 spends
-S11's one bump), and **H10**
+Re-read §6 of the plan first. The hazards that still bind: **H17** (RT-13 spends
+S18's one bump — S11's went unspent, because the runtime half did not land), and
+**H10**
 in its long form (the MIR verifier's "no `Opaque` in a descriptor-producing
 position" rule stays off until S15). **H3 is discharged** — the debug/root
 split landed first, the two m11 tests are green, and
@@ -1218,7 +1322,9 @@ TY-07's fix made *detectable*, and leaving them undiagnosed would have meant
 either silently dropping a field or reporting a downstream `Y001` about a type
 the user never wrote. The allocation must start from `Y009`. The taken codes
 today are `N001`–`N002`, `Y001`–`Y008`, `Y120`–`Y121`, and `I001`/`I010` in the
-input-parser range.
+input-parser range. F12 spent no further code: a wrong type-argument count on a
+*nominal* def (`Option[Int, Text]`) is the same mistake as on a collection ctor
+and reuses `Y007`.
 
 **D1 gained a second case.** It was scoped to `Map.get` / `Grid.find`; the same
 question is now also open for `min`/`max` on an empty sequence, which return
@@ -1244,6 +1350,63 @@ one. Settle both together.
 ## 6. Corrections to the plan
 
 Things the plan states that are no longer or were not quite true.
+
+- **F12 is two halves in two stages, and only the static one is S11's.** The
+  plan's F12 block describes the `praxis-types` reshape and the runtime
+  `EnumSchema` together, and its ORDER paragraph says codegen and runtime "MUST
+  land in one commit". Both are true of the *runtime* half — but that half is
+  **RT-13**, which the finding register puts in **S18**, and which S18's own
+  ordering paragraph says depends on TY-06's canonical `Option` def from S11.
+  Landing it in S11 would have been landing S18 out of stage order. What S11
+  owes is TY-06, and TY-06 is entirely in `praxis-types` and its consumers.
+- **F12's `params` belong on `RecordDef` as well as `EnumDef`, and nothing uses
+  them.** The plan's sketch gives both defs a `params: Vec<VarId>`, which is
+  right for symmetry — but the language has no generic record syntax, so every
+  record def has an empty list and every record instance has no arguments. The
+  cost of the symmetry is two sites that must refuse a shape they cannot handle
+  (see §4); the benefit is that `fold`, `unify` and the substitution helpers are
+  written once for both.
+- **F12's `TypeKey` needs no cycle memo, and `canonical_key` is not a fold.**
+  The plan annotates it "a `fold`", but `fold` returns a `Type` and needs
+  `&mut TypeDb`; a key describes a type without creating one, so it is a plain
+  recursion over `&self`. It terminates because a nominal type's key holds its
+  *def id* rather than its fields — the side tables are never walked — which is
+  also what makes it cheap.
+- **F12's canonical `Option` has to be seeded by `TypeDb::new`, not threaded
+  from `seed_builtin_schemes`.** The plan's judgement note proposes threading a
+  def-id "from `seed_builtin_schemes` through the Inferer and the parser
+  lowerer". The parser lowerer's `synthesize` has no Inferer to thread from —
+  it takes a bare `&mut TypeDb` — so the def has to belong to the arena. Two
+  consequences a fresh context will hit: `TypeDb` needs a hand-written
+  `Default`, and **`enum_defs[0]` and slot 0 are now the prelude's**, so a test
+  that indexed either positionally moves.
+- **MONO-03 closed with TY-06, three stages before the one that owns it.** The
+  plan schedules it in S15 with the rest of monomorphization. Its cause is
+  entirely F12's — a display string standing in for identity — so once `TypeKey`
+  exists the fix is one type substitution in `mono.rs`. Its `#[ignore]`d gate
+  `enum_payload_types_participate_in_monomorphization_cache_key` went green
+  unmodified. What is left for S15 is the other two ignored mono tests
+  (`specialized_clone_carries_concrete_types_throughout`,
+  `zero_argument_generic_result_is_specialized_from_use_context`), which are
+  MONO-01/MONO-02 and are about *substituting* the clone, not about keying it.
+- **The plan expects snapshot churn from `pretty.rs` printing `Option[Int]`.
+  None appeared** — no snapshot in the tree held a rendered `Option`, and none
+  of `infer_tests.rs`/`hover_tests.rs`'s insta assertions did either. This is
+  the second time an F-block predicted wide churn and delivered none (TY-02 was
+  the first); check before budgeting for it.
+- **F12's fix for TY-06 is not "stop calling `register_enum` from
+  `instantiate_walk`".** The plan's Replaces list reads that way. The call is
+  correct *as a specialization* for a def whose field types are its own
+  children, and the anonymous structural records `deep_resolve` walks need it.
+  What makes it wrong for `Option` is that `Option`'s payload is a *parameter*.
+  So the fold branches on `params`, and both behaviours survive — which is also
+  why `an_unchanged_record_keeps_its_def` and
+  `records_and_enums_are_folded_through_their_defs` still pass unchanged.
+- **The M9 same-named-enum unification arm was load-bearing for anonymous
+  enums too.** The plan treats it as pure workaround. `choice(...)` templates
+  (§7.5) still mint one anonymous def per synthesis, and they merge by variant
+  signature exactly as anonymous records merge by field-name set — so the arm
+  narrows to `name.is_none()` rather than disappearing.
 
 - **F5's `register_record`/`register_enum` could not keep taking a bare name.**
   The plan's signature is `register_record(&mut self, name: Option<String>,

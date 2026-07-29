@@ -146,6 +146,27 @@ impl TypeDb {
     }
 }
 
+/// Replace each variable in `vars` by the type at the same index in `to`.
+///
+/// The same substitution [`instantiate`](TypeDb::instantiate) performs, exposed
+/// for the other caller that has a binder list and a matching argument list: a
+/// generic def's `params` against an instance's `args` (F12). Identity
+/// preservation carries over — substituting into a type that mentions none of
+/// `vars` returns the handle it was given.
+pub(crate) fn substitute(db: &mut TypeDb, t: Type, vars: &[VarId], to: &[Type]) -> Type {
+    debug_assert_eq!(vars.len(), to.len(), "one replacement per variable");
+    if vars.is_empty() {
+        return t;
+    }
+    let mut folder = Instantiator {
+        db,
+        memo: FoldMemo::new(),
+        binders: vars,
+        mapping: to,
+    };
+    fold(&mut folder, t)
+}
+
 /// Generalization as a folder (F9): every unbound variable deeper than the
 /// binding site becomes a binder of the scheme being built.
 ///

@@ -139,18 +139,36 @@ impl TypeDb {
                     args: args_b,
                 },
             ) if c_a == c_b => self.unify_seqs(a, b, args_a, args_b, "collection"),
-            // Records unify iff same def-id, OR both anonymous with matching
-            // field-name sets (in which case we unify field types pairwise by
-            // name). Nominal records with different def-ids never unify even
-            // with identical fields (§4.5: nominal).
-            (TypeData::Record { def: d_a }, TypeData::Record { def: d_b }) => {
+            // Records unify iff same def-id (and then pairwise on their type
+            // arguments), OR both anonymous with matching field-name sets (in
+            // which case we unify field types pairwise by name). Nominal records
+            // with different def-ids never unify even with identical fields
+            // (§4.5: nominal).
+            (
+                TypeData::Record {
+                    def: d_a,
+                    args: args_a,
+                },
+                TypeData::Record {
+                    def: d_b,
+                    args: args_b,
+                },
+            ) => {
                 if d_a == d_b {
-                    return Ok(());
+                    return self.unify_seqs(a, b, args_a, args_b, "record");
                 }
                 let ra = self.record_def(d_a).clone();
                 let rb = self.record_def(d_b).clone();
-                // Both must be anonymous to consider structural unification.
-                if ra.name.is_some() || rb.name.is_some() {
+                // Both must be anonymous *and* non-generic to consider
+                // structural unification: unifying two generic defs' field
+                // types would link one def's parameters to the other's, which
+                // is a fact about the definitions rather than about these two
+                // instances.
+                if ra.name.is_some()
+                    || rb.name.is_some()
+                    || !ra.params.is_empty()
+                    || !rb.params.is_empty()
+                {
                     return Err(UnifyError::Mismatch {
                         expected: a,
                         found: b,
@@ -178,36 +196,56 @@ impl TypeDb {
                 }
                 // Link the two defs so subsequent uses resolve to one. We adopt
                 // the earlier def-id (d_a) as the canonical one by rewriting b's
-                // slot to point at d_a.
-                self.slots_set(b, TypeData::Record { def: d_a });
+                // slot to point at d_a. Both defs are non-generic here, so
+                // there are no arguments to carry over.
+                self.slots_set(
+                    b,
+                    TypeData::Record {
+                        def: d_a,
+                        args: Vec::new(),
+                    },
+                );
                 Ok(())
             }
-            // Enums unify iff same def-id, OR (M9) the two defs share the same
-            // name and the same variant-name signature — in which case their
-            // payloads unify pairwise by variant position and the later def-id
-            // is rewritten to point at the canonical (earlier) one.
+            // Enums unify iff same def-id — and then pairwise on their type
+            // arguments, which is how `Option[Int]` and `Option[Text]` are told
+            // apart — OR the two defs are *anonymous* (`choice(...)`, §7.5) with
+            // the same variant-name signature, in which case their payloads
+            // unify pairwise by variant position and the later def-id is
+            // rewritten to point at the canonical (earlier) one.
             //
-            // Why the second clause: a polymorphic enum scheme such as the
-            // prelude `forall T. Option[T]` is *instantiate*d into a fresh
-            // `EnumDef` per use site (generalize.rs), so `Some(5)` and an
-            // `Option[Int]` annotation carry different def-ids despite being
-            // structurally the same named enum. Pure identity-only comparison
-            // would reject them. Two user-declared enums can never share a name
-            // in one scope (the resolver binds the name once), so this relaxed
-            // arm can only fire for compiler-stamped copies of a polymorphic
-            // enum — it never collapses two genuinely-distinct nominal types.
-            // Anonymous enums from `choice(...)` share the synthetic name "" and
-            // a variant-name signature, so two independently-stamped copies of
-            // the same `choice` also unify here. This mirrors the anonymous
-            // record arm above (structural identity by field-name set + link).
-            (TypeData::Enum { def: d_a }, TypeData::Enum { def: d_b }) => {
+            // The second clause used to also cover *named* enums, because the
+            // prelude `Option` was registered as a fresh nominal def per
+            // annotation site and per instantiation (TY-06) — so `Some(5)` and
+            // an `Option[Int]` annotation carried different def-ids for what is
+            // one type, and unification had to put the copies back together by
+            // name. F12 gives `Option` a single def with a type parameter, so
+            // the copies do not exist and the relaxed arm is not needed for
+            // them. Two user-declared enums can never share a name in one scope
+            // (the resolver binds the name once), so nothing else reached it.
+            // What remains is the anonymous case, mirroring the anonymous
+            // record arm above: structural identity by variant signature, then
+            // link.
+            (
+                TypeData::Enum {
+                    def: d_a,
+                    args: args_a,
+                },
+                TypeData::Enum {
+                    def: d_b,
+                    args: args_b,
+                },
+            ) => {
                 if d_a == d_b {
-                    return Ok(());
+                    return self.unify_seqs(a, b, args_a, args_b, "enum");
                 }
                 let ea = self.enum_def(d_a).clone();
                 let eb = self.enum_def(d_b).clone();
-                // Same name + same variant-name signature is the precondition.
-                let same_shape = ea.name == eb.name
+                // Both anonymous, non-generic, same variant-name signature.
+                let same_shape = ea.name.is_none()
+                    && eb.name.is_none()
+                    && ea.params.is_empty()
+                    && eb.params.is_empty()
                     && ea.variants.len() == eb.variants.len()
                     && ea
                         .variants
@@ -242,8 +280,15 @@ impl TypeDb {
                     }
                 }
                 // Adopt the earlier def-id (d_a) as canonical: rewrite b's slot
-                // to point at d_a so subsequent uses resolve to one def.
-                self.slots_set(b, TypeData::Enum { def: d_a });
+                // to point at d_a so subsequent uses resolve to one def. Both
+                // defs are non-generic here, so there are no arguments.
+                self.slots_set(
+                    b,
+                    TypeData::Enum {
+                        def: d_a,
+                        args: Vec::new(),
+                    },
+                );
                 Ok(())
             }
             _ => Err(UnifyError::Mismatch {

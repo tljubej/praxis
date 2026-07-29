@@ -112,17 +112,18 @@ pub trait TypeFolder {
         fold_collection_default(self, t, ctor, args)
     }
 
-    /// A record. Its field types live in the `TypeDb`'s def side table, so the
-    /// default folds them there and registers a **specialized def** only if one
-    /// changed — preserving the def id, and the nominal identity that hangs off
-    /// it, whenever nothing did.
-    fn fold_record(&mut self, t: Type, def: RecordDefId) -> Type {
-        fold_record_default(self, t, def)
+    /// A record. A **generic** def's children are the instance's `args`; a
+    /// non-generic def's are its field types, which live in the `TypeDb`'s side
+    /// table, so the default folds them there and registers a **specialized
+    /// def** only if one changed — preserving the def id, and the nominal
+    /// identity that hangs off it, whenever nothing did.
+    fn fold_record(&mut self, t: Type, def: RecordDefId, args: &[Type]) -> Type {
+        fold_record_default(self, t, def, args)
     }
 
     /// An enum. As [`fold_record`](Self::fold_record), over variant payloads.
-    fn fold_enum(&mut self, t: Type, def: EnumDefId) -> Type {
-        fold_enum_default(self, t, def)
+    fn fold_enum(&mut self, t: Type, def: EnumDefId, args: &[Type]) -> Type {
+        fold_enum_default(self, t, def, args)
     }
 }
 
@@ -148,8 +149,8 @@ pub fn fold<F: TypeFolder + ?Sized>(folder: &mut F, t: Type) -> Type {
         TypeData::Tuple(elements) => folder.fold_tuple(t, &elements),
         TypeData::Func { params, result } => folder.fold_func(t, &params, result),
         TypeData::Collection { ctor, args } => folder.fold_collection(t, ctor, &args),
-        TypeData::Record { def } => folder.fold_record(t, def),
-        TypeData::Enum { def } => folder.fold_enum(t, def),
+        TypeData::Record { def, args } => folder.fold_record(t, def, &args),
+        TypeData::Enum { def, args } => folder.fold_enum(t, def, &args),
         TypeData::Var(state) => folder.fold_var(t, VarId::from_raw(t.to_u32()), &state),
     };
 
@@ -225,12 +226,36 @@ pub fn fold_collection_default<F: TypeFolder + ?Sized>(
 }
 
 /// The default [`TypeFolder::fold_record`].
+///
+/// # Two shapes, one arm (F12)
+///
+/// A **generic** def is a definition, not a type: its field types are written
+/// in terms of its own parameters, and the instance's `args` are the whole
+/// substitution. Folding it means folding the arguments and keeping the def —
+/// which is what preserves nominal identity across instantiation (TY-06).
+///
+/// A **non-generic** def has no arguments, so its field types *are* the type's
+/// children. Folding one that changed registers a specialized def, as it always
+/// has: the anonymous structural records the input parser synthesizes are the
+/// case that needs it.
 pub fn fold_record_default<F: TypeFolder + ?Sized>(
     folder: &mut F,
     t: Type,
     def: RecordDefId,
+    args: &[Type],
 ) -> Type {
     let rdef = folder.db().record_def(def).clone();
+    if !rdef.params.is_empty() {
+        let (folded, changed) = fold_all(folder, args);
+        return if changed {
+            folder
+                .db()
+                .record_type(def, folded)
+                .expect("folding preserves argument count")
+        } else {
+            t
+        };
+    }
     let mut changed = false;
     let mut fields = Vec::with_capacity(rdef.fields.len());
     for field in &rdef.fields {
@@ -258,8 +283,13 @@ pub fn visit_all<F: TypeFolder + ?Sized>(folder: &mut F, types: &[Type]) {
     }
 }
 
-/// Fold a record def's field types for effect.
-pub fn visit_record_fields<F: TypeFolder + ?Sized>(folder: &mut F, def: RecordDefId) {
+/// Fold a record instance's arguments and its def's field types for effect.
+pub fn visit_record_fields<F: TypeFolder + ?Sized>(
+    folder: &mut F,
+    def: RecordDefId,
+    args: &[Type],
+) {
+    visit_all(folder, args);
     let field_types: Vec<Type> = folder
         .db()
         .record_def(def)
@@ -270,8 +300,10 @@ pub fn visit_record_fields<F: TypeFolder + ?Sized>(folder: &mut F, def: RecordDe
     visit_all(folder, &field_types);
 }
 
-/// Fold an enum def's variant payload types for effect.
-pub fn visit_enum_payloads<F: TypeFolder + ?Sized>(folder: &mut F, def: EnumDefId) {
+/// Fold an enum instance's arguments and its def's variant payload types for
+/// effect.
+pub fn visit_enum_payloads<F: TypeFolder + ?Sized>(folder: &mut F, def: EnumDefId, args: &[Type]) {
+    visit_all(folder, args);
     let payloads: Vec<Type> = folder
         .db()
         .enum_def(def)
@@ -315,12 +347,22 @@ macro_rules! visit_only_composites {
             $crate::fold::visit_all(self, args);
             t
         }
-        fn fold_record(&mut self, t: $crate::Type, def: $crate::RecordDefId) -> $crate::Type {
-            $crate::fold::visit_record_fields(self, def);
+        fn fold_record(
+            &mut self,
+            t: $crate::Type,
+            def: $crate::RecordDefId,
+            args: &[$crate::Type],
+        ) -> $crate::Type {
+            $crate::fold::visit_record_fields(self, def, args);
             t
         }
-        fn fold_enum(&mut self, t: $crate::Type, def: $crate::EnumDefId) -> $crate::Type {
-            $crate::fold::visit_enum_payloads(self, def);
+        fn fold_enum(
+            &mut self,
+            t: $crate::Type,
+            def: $crate::EnumDefId,
+            args: &[$crate::Type],
+        ) -> $crate::Type {
+            $crate::fold::visit_enum_payloads(self, def, args);
             t
         }
     };
@@ -328,9 +370,27 @@ macro_rules! visit_only_composites {
 
 pub(crate) use visit_only_composites;
 
-/// The default [`TypeFolder::fold_enum`].
-pub fn fold_enum_default<F: TypeFolder + ?Sized>(folder: &mut F, t: Type, def: EnumDefId) -> Type {
+/// The default [`TypeFolder::fold_enum`]. See
+/// [`fold_record_default`] for why a generic def folds its arguments and a
+/// non-generic one folds its payloads.
+pub fn fold_enum_default<F: TypeFolder + ?Sized>(
+    folder: &mut F,
+    t: Type,
+    def: EnumDefId,
+    args: &[Type],
+) -> Type {
     let edef = folder.db().enum_def(def).clone();
+    if !edef.params.is_empty() {
+        let (folded, changed) = fold_all(folder, args);
+        return if changed {
+            folder
+                .db()
+                .enum_type(def, folded)
+                .expect("folding preserves argument count")
+        } else {
+            t
+        };
+    }
     let mut changed = false;
     let mut variants = Vec::with_capacity(edef.variants.len());
     for variant in &edef.variants {
@@ -469,7 +529,7 @@ mod tests {
         assert_eq!(db.render(folded_record), "P");
 
         // The specialized def is a *new* def, and the original is untouched.
-        let TypeData::Record { def } = *db.data(folded_record) else {
+        let TypeData::Record { def, .. } = *db.data(folded_record) else {
             panic!("still a record");
         };
         let field = db.record_def(def).fields[0].ty;
@@ -537,7 +597,7 @@ mod tests {
         let folded = fold(&mut folder, node);
         // Resolving the field's link *is* a change, so the fold specializes the
         // def — and the specialized one is still a record that reaches itself.
-        let TypeData::Record { def } = *db.data(folded) else {
+        let TypeData::Record { def, .. } = *db.data(folded) else {
             panic!("still a record");
         };
         let field = db.record_def(def).fields[0].ty;

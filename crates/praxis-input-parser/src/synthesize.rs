@@ -98,15 +98,12 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Result<Type, TypeCtorErro
             db.enum_(None, VariantSet::new(variants)?)
         }
         ParserAst::Optional { child, .. } => {
-            // `Option[result(P)]` (§7.5/§7.8): a nominal Option enum (Some(T),
-            // None) carrying the child's result type. Registered fresh per site;
-            // unifies with other Option[T] values via the M9 same-named-enum arm.
+            // `Option[result(P)]` (§7.5/§7.8): the prelude's one `Option` def
+            // (F12), applied to the child's result type. This used to spell the
+            // variant list out and register a *fresh nominal def* per site,
+            // which is one of TY-06's three copies of `Option`.
             let elem = synthesize(child, db)?;
-            let variants = VariantSet::new(vec![
-                EnumVariantDef::new("Some", vec![elem]),
-                EnumVariantDef::bare("None"),
-            ])?;
-            db.enum_(Some("Option".into()), variants)
+            db.option_of(elem)
         }
         ParserAst::Scan { child, .. } => {
             // `scan(P)` → `Vec[result(P)]` (§7.5): matches in source order.
@@ -366,7 +363,7 @@ mod tests {
             span: Span::at(0),
         };
         let t = synthesize(&ast, &mut db).expect("a valid AST synthesizes");
-        let praxis_types::TypeData::Record { def } = db.data(t) else {
+        let praxis_types::TypeData::Record { def, .. } = db.data(t) else {
             panic!("expected Record, got {:?}", db.data(t));
         };
         let rdef = db.record_def(*def);

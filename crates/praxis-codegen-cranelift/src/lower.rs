@@ -1622,6 +1622,17 @@ fn record_schema_for(
     use praxis_runtime::records::{RecordField, SchemaIdentity};
     use praxis_types::data::RecordDefId;
     let def = db.record_def(RecordDefId(id));
+    // A schema is built from the def's *field* types, so a def with parameters
+    // would resolve descriptors for its parameters rather than for whatever an
+    // instance supplies (F12). The language cannot declare one — there is no
+    // `struct P[T]` syntax — and a `TypedExpr::RecordLit` carries no arguments
+    // to substitute, so this refuses rather than emitting a wrong layout.
+    if !def.params.is_empty() {
+        anyhow::bail!(
+            "record `{}` is generic; a monomorphized instance is required before codegen",
+            def.name.as_deref().unwrap_or("<anonymous>")
+        );
+    }
     // A declared record is its name; a structural one (§5.6) is its shape
     // (RT-12). The name is copied into the generation so the schema outlives
     // this `TypeDb` — the debugger's does not survive the command.

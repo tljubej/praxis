@@ -27,9 +27,9 @@
 //! `lower_module` then runs unchanged on the expanded module (it is a clean 1:1
 //! map of `TypedItem::Fn → Function`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use praxis_types::{Scheme, Type, TypeDb};
+use praxis_types::{Scheme, Type, TypeDb, TypeKey};
 
 use crate::name_table::NameTable;
 use crate::symbol::SymbolId;
@@ -56,6 +56,7 @@ pub fn monomorphize(module: TypedModule, names: &NameTable, db: &mut TypeDb) -> 
             .collect(),
         // (symbol, canonical arg types) → mangled clone name.
         cache: HashMap::new(),
+        used_names: HashSet::new(),
         // The clones emitted so far (appended after the monomorphic originals).
         clones: Vec::new(),
         // symbol → is the original polymorphic? (to drop it from output)
@@ -96,10 +97,19 @@ struct MonoPass<'a> {
     db: &'a mut TypeDb,
     names: &'a NameTable,
     originals: HashMap<SymbolId, TypedFn>,
-    /// Cache key: (callee symbol, rendered-structural arg types). Rendered (not
+    /// Cache key: (callee symbol, the arg types' [`TypeKey`]s). Structural (not
     /// type-id) so two call sites with the same concrete type share a clone even
     /// when inference gave them distinct arena slots.
-    cache: HashMap<(SymbolId, Vec<String>), String>,
+    ///
+    /// **MONO-03**: this used to be the *rendered* type, which is display and
+    /// not identity. `Option` printed as a bare name whatever it held, so
+    /// `id(Some(1))` and `id(Some("a"))` hashed to one key and the second call
+    /// silently reused the first's `Int` specialization.
+    cache: HashMap<(SymbolId, Vec<TypeKey>), String>,
+    /// The mangled names handed out so far. The name is still built from the
+    /// rendered types (it has to be readable), so two distinct keys that render
+    /// alike must be pulled apart here rather than in the cache.
+    used_names: HashSet<String>,
     clones: Vec<TypedItem>,
     polymorphic: HashMap<SymbolId, bool>,
 }
@@ -116,12 +126,11 @@ impl<'a> MonoPass<'a> {
     /// mangled clone name (cached). Emits the clone into `self.clones` on first
     /// use; rewrites the clone's own body (transitive instantiation).
     fn instantiate(&mut self, callee: SymbolId, arg_types: &[Type]) -> String {
-        let canon = canonicalize(self.db, arg_types);
-        let key = (callee, canon.clone());
+        let key = (callee, canonical_keys(self.db, arg_types));
         if let Some(name) = self.cache.get(&key) {
             return name.clone();
         }
-        let name = mangled_name(callee, &canon, self.names);
+        let name = self.fresh_mangled_name(callee, arg_types);
         self.cache.insert(key, name.clone());
         // Clone the original and specialize it. Borrow dance: take the original
         // out of the map temporarily so we can mutate `self` (db) while cloning.
@@ -139,14 +148,35 @@ impl<'a> MonoPass<'a> {
         self.clones.push(TypedItem::Fn(clone));
         name
     }
+
+    /// A mangled clone name that no other specialization has taken.
+    ///
+    /// The readable form comes from the rendered argument types; if two
+    /// specializations render the same — which the cache key no longer lets
+    /// pass for one specialization — the second gets a numeric suffix rather
+    /// than the first one's symbol.
+    fn fresh_mangled_name(&mut self, callee: SymbolId, arg_types: &[Type]) -> String {
+        let rendered: Vec<String> = arg_types
+            .iter()
+            .map(|t| self.db.render(self.db.follow(*t)))
+            .collect();
+        let base = mangled_name(callee, &rendered, self.names);
+        let mut name = base.clone();
+        let mut n = 1;
+        while !self.used_names.insert(name.clone()) {
+            name = format!("{base}__{n}");
+            n += 1;
+        }
+        name
+    }
 }
 
-/// Canonicalize a slice of types into stable structural strings for the cache
-/// key. Uses the type pretty-printer so two call sites with the same concrete
-/// type (e.g. two `Int` args with distinct arena slots from inference) share one
-/// monomorphized clone.
-fn canonicalize(db: &TypeDb, types: &[Type]) -> Vec<String> {
-    types.iter().map(|t| db.render(db.follow(*t))).collect()
+/// The cache key's type half: each argument's structural identity, so two call
+/// sites with the same concrete type (e.g. two `Int` args with distinct arena
+/// slots from inference) share one monomorphized clone — and two with different
+/// concrete types never do.
+fn canonical_keys(db: &TypeDb, types: &[Type]) -> Vec<TypeKey> {
+    types.iter().map(|t| db.canonical_key(*t)).collect()
 }
 
 /// Build a mangled clone name from the callee symbol and its canonical
@@ -637,12 +667,13 @@ mod tests {
         );
     }
 
+    /// MONO-03. The cache key is a [`TypeKey`], and an enum's key carries its
+    /// def **and its arguments** — so `Option[Int]` and `Option[Text]` are two
+    /// keys. The rendered string it replaces was one: `render` emitted the
+    /// nominal name alone, because before F12 the element type lived in a fresh
+    /// def rather than in the type.
     #[test]
-    #[ignore = "known bug: rendered enum names omit payload types in the cache key"]
     fn enum_payload_types_participate_in_monomorphization_cache_key() {
-        // TypeDb::render(Enum) currently emits only the nominal name. Using that
-        // string as a cache key must not merge Option[Int] and Option[Text]
-        // specializations.
         let names = mono_names(
             "fn id(x) { x }\n\
              fn main() -> Unit { out(id(Some(1))); out(id(Some(\"text\"))) }",

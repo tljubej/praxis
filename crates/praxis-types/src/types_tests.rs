@@ -588,10 +588,10 @@ fn nominal_record_unifies_with_same_def_id() {
     let point = record(&mut db, "Point", vec![("x".into(), i), ("y".into(), i)]);
     // Re-intern the same def-id — these unify.
     let def = match db.data(db.follow(point)) {
-        TypeData::Record { def } => *def,
+        TypeData::Record { def, .. } => *def,
         _ => unreachable!(),
     };
-    let point2 = db.record_type(def);
+    let point2 = db.record_type(def, Vec::new()).expect("no params");
     db.unify(point, point2).expect("same def-id unifies");
 }
 
@@ -656,10 +656,10 @@ fn enum_same_def_id_unifies() {
     );
     db.unify(tile, tile).expect("enum ~ itself");
     let def = match db.data(db.follow(tile)) {
-        TypeData::Enum { def } => *def,
+        TypeData::Enum { def, .. } => *def,
         _ => unreachable!(),
     };
-    let tile2 = db.enum_type(def);
+    let tile2 = db.enum_type(def, Vec::new()).expect("no params");
     db.unify(tile, tile2).expect("same def-id unifies");
 }
 
@@ -693,12 +693,15 @@ fn record_def_lookups() {
 fn enum_def_variant_lookup() {
     let mut db = TypeDb::new();
     let i = db.int();
-    let _ = enum_ty(
+    let _tile = enum_ty(
         &mut db,
         "Tile",
         vec![("Empty".into(), vec![]), ("Number".into(), vec![i])],
     );
-    let def = &db.enum_defs[0];
+    let TypeData::Enum { def, .. } = *db.data(_tile) else {
+        panic!("expected an enum");
+    };
+    let def = db.enum_def(def);
     assert_eq!(def.name.as_deref(), Some("Tile"));
     assert_eq!(def.arity(), 2);
     assert_eq!(def.variant("Number"), Some(1));
@@ -798,51 +801,207 @@ fn anon_record_display_preserves_source_order() {
 
 // ---- M9: enum unification for polymorphic / anonymous enums ----------------
 
-/// Two nominal enums with the same name and variant signature unify and link to
-/// one canonical def-id. This is the soundness fix that lets a polymorphic
-/// `forall T. Option[T]` scheme work: each instantiation mints a fresh def, but
-/// they unify by name+shape.
+/// TY-06. There is one `Option` def, so two uses of it are the *same nominal
+/// type* applied to arguments — not two definitions a relaxed unification arm
+/// has to put back together.
+///
+/// Rewritten from `same_named_enums_unify_structurally`, which stamped two
+/// `Option` defs by hand and asserted they merged. That was the workaround, and
+/// asserting it would be asserting the defect: two same-named nominal enums are
+/// two types, exactly as two same-named records are.
 #[test]
-fn same_named_enums_unify_structurally() {
+fn every_option_names_the_one_option_def() {
     let mut db = TypeDb::new();
     let int = db.int();
-    // Two independently-stamped `Option` defs (simulating two instantiation
-    // sites of a polymorphic Option scheme).
-    let opt_a = enum_ty(
-        &mut db,
-        "Option",
-        vec![("Some".into(), vec![int]), ("None".into(), vec![])],
-    );
-    let opt_b = enum_ty(
-        &mut db,
-        "Option",
-        vec![("Some".into(), vec![int]), ("None".into(), vec![])],
-    );
+    let opt_a = db.option_of(int);
+    let int2 = db.int();
+    let opt_b = db.option_of(int2);
     db.unify(opt_a, opt_b).expect("Option[Int] ~ Option[Int]");
+    for opt in [opt_a, opt_b] {
+        let TypeData::Enum { def, args } = db.data(db.follow(opt)).clone() else {
+            panic!("expected an enum");
+        };
+        assert_eq!(def, db.option_def(), "one def, not one per use site");
+        assert_eq!(args.len(), 1, "the element type is an argument");
+    }
+    assert_eq!(db.render(opt_a), "Option[Int]");
 }
 
-/// Unifying fixes the element type across the two sites: `Option[?T]` unified
-/// with `Option[Int]` pins `?T = Int` in both.
+/// Unifying two instances fixes the element type: `Option[?T]` unified with
+/// `Option[Int]` pins `?T = Int`. The work happens in the *arguments* now; it
+/// used to happen in a pairwise walk over two defs' variant payloads.
 #[test]
-fn same_named_enums_unify_payloads_pairwise() {
+fn option_instances_unify_through_their_arguments() {
     let mut db = TypeDb::new();
     let t = db.fresh_var();
+    let opt_var = db.option_of(t);
     let int = db.int();
-    // Option[?T]
-    let opt_var = enum_ty(
-        &mut db,
-        "Option",
-        vec![("Some".into(), vec![t]), ("None".into(), vec![])],
-    );
-    // Option[Int]
-    let opt_int = enum_ty(
-        &mut db,
-        "Option",
-        vec![("Some".into(), vec![int]), ("None".into(), vec![])],
-    );
+    let opt_int = db.option_of(int);
     db.unify(opt_var, opt_int)
         .expect("Option[?T] ~ Option[Int]");
-    assert!(is_int(&db, t), "Some's payload ?T should be pinned to Int");
+    assert!(
+        is_int(&db, t),
+        "the element type ?T should be pinned to Int"
+    );
+}
+
+/// …and two instances at *different* arguments do not. `Option` printed as a
+/// bare name and carried its element type in a fresh def, so nothing about the
+/// type told `Option[Int]` from `Option[Text]` (MONO-03's collision).
+#[test]
+fn option_at_two_element_types_is_two_types() {
+    let mut db = TypeDb::new();
+    let int = db.int();
+    let opt_int = db.option_of(int);
+    let text = db.text();
+    let opt_text = db.option_of(text);
+    assert!(
+        db.unify(opt_int, opt_text).is_err(),
+        "Option[Int] is not Option[Text]"
+    );
+    assert_ne!(db.canonical_key(opt_int), db.canonical_key(opt_text));
+    assert_eq!(db.render(opt_text), "Option[Text]");
+}
+
+/// A wrong type-argument count is refused rather than interned (TY-07's rule,
+/// now applying to nominal defs too).
+#[test]
+fn a_wrong_type_argument_count_is_unconstructible() {
+    let mut db = TypeDb::new();
+    let (int, text) = (db.int(), db.text());
+    let def = db.option_def();
+    assert!(matches!(
+        db.enum_type(def, vec![int, text]),
+        Err(crate::TypeCtorError::TypeArgCount {
+            want: 1,
+            got: 2,
+            ..
+        })
+    ));
+    assert!(matches!(
+        db.enum_type(def, Vec::new()),
+        Err(crate::TypeCtorError::TypeArgCount {
+            want: 1,
+            got: 0,
+            ..
+        })
+    ));
+}
+
+/// **TY-06.** Instantiating a polymorphic scheme whose body names a nominal
+/// type must not mint a *new definition* of that type.
+///
+/// This is the finding stated at the level it lived at. `instantiate` walked
+/// the body and, reaching an enum, rebuilt it — which meant `register_enum`,
+/// which meant a fresh `EnumDefId`. Every `Some(x)` in a program therefore
+/// produced a nominally distinct `Option`, and the only thing holding the
+/// program together was a unification arm that merged two enums when their
+/// names and variant names matched.
+#[test]
+fn instantiating_a_scheme_does_not_mint_a_nominal_definition() {
+    let mut db = TypeDb::new();
+    // `forall T. (T) -> Option[T]` — the shape of `Some`'s prelude scheme.
+    let some = db.scoped_return(|db| {
+        let t = db.fresh_var();
+        let opt = db.option_of(t);
+        db.func(vec![t], opt)
+    });
+    let scheme = db.generalize(some);
+    assert!(scheme.is_polymorphic(), "Some is polymorphic in T");
+
+    let defs_before = db.enum_defs.len();
+    for _ in 0..8 {
+        let _ = db.instantiate(&scheme);
+    }
+    assert_eq!(
+        db.enum_defs.len(),
+        defs_before,
+        "instantiation mints uses of a definition, never definitions"
+    );
+}
+
+/// …and the instantiated body is a *usable* `Option`: the def is still the
+/// canonical one, and the fresh element variable landed in the arguments where
+/// unification can reach it.
+#[test]
+fn an_instantiated_option_is_the_canonical_def_at_a_fresh_argument() {
+    let mut db = TypeDb::new();
+    let none = db.scoped_return(|db| {
+        let t = db.fresh_var();
+        db.option_of(t)
+    });
+    let scheme = db.generalize(none);
+
+    let first = db.instantiate(&scheme);
+    let second = db.instantiate(&scheme);
+    let arg_of = |db: &TypeDb, t: Type| match db.data(db.follow(t)) {
+        TypeData::Enum { def, args } => {
+            assert_eq!(*def, db.option_def());
+            assert_eq!(args.len(), 1);
+            args[0]
+        }
+        other => panic!("expected an Option, got {other:?}"),
+    };
+    let (a, b) = (arg_of(&db, first), arg_of(&db, second));
+    assert_ne!(a, b, "each use gets its own element variable");
+
+    let int = db.int();
+    db.unify(a, int).expect("the first use may be Option[Int]");
+    let text = db.text();
+    db.unify(b, text).expect("the second may be Option[Text]");
+    assert_eq!(db.render(first), "Option[Int]");
+    assert_eq!(db.render(second), "Option[Text]");
+}
+
+/// The payload a *use* sees is the use's argument, not the definition's
+/// parameter. Reading a variant payload straight off the def is what a caller
+/// did when the def was per-site; now it has to go through the instance.
+#[test]
+fn a_variant_payload_is_read_through_the_instances_arguments() {
+    let mut db = TypeDb::new();
+    let text = db.text();
+    let opt_text = db.option_of(text);
+    let TypeData::Enum { def, args } = db.data(opt_text).clone() else {
+        panic!("expected an enum");
+    };
+    let some = db.enum_def(def).variant("Some").expect("Some");
+    let payload = db.variant_payload_of(def, &args, some);
+    assert_eq!(payload.len(), 1);
+    assert!(matches!(
+        db.data(db.follow(payload[0])),
+        TypeData::Scalar(ScalarType::Text)
+    ));
+
+    let none = db.enum_def(def).variant("None").expect("None");
+    assert!(
+        db.variant_payload_of(def, &args, none).is_empty(),
+        "None carries nothing whatever the argument is"
+    );
+}
+
+/// `canonical_key` is identity, where `render` was display (MONO-03). Two
+/// separately-interned `Vec[Int]`s are one key; a nominal type keys by its def.
+#[test]
+fn a_canonical_key_groups_by_structure_and_by_definition() {
+    let mut db = TypeDb::new();
+    let (i1, i2) = (db.int(), db.int());
+    let (v1, v2) = (db.vec(i1), db.vec(i2));
+    assert_ne!(v1, v2, "two handles");
+    assert_eq!(db.canonical_key(v1), db.canonical_key(v2), "one type");
+
+    // Two same-named nominal records are two types, and their keys say so —
+    // which a rendered string does not.
+    let a = record(&mut db, "Point", vec![("x".into(), i1)]);
+    let b = record(&mut db, "Point", vec![("x".into(), i1)]);
+    assert_eq!(db.render(a), db.render(b));
+    assert_ne!(db.canonical_key(a), db.canonical_key(b));
+
+    // An unresolved variable is its own key, and following a link is what makes
+    // a resolved one agree with what it resolved to.
+    let var = db.fresh_var();
+    assert_ne!(db.canonical_key(var), db.canonical_key(i1));
+    db.unify(var, i1).expect("?a ~ Int");
+    assert_eq!(db.canonical_key(var), db.canonical_key(i1));
 }
 
 /// Different names never unify, even with identical variant signatures —
@@ -980,7 +1139,7 @@ fn deep_resolve_rewrites_record_field_links() {
 
     let resolved = db.deep_resolve(record);
     let def = match db.data(db.follow(resolved)) {
-        TypeData::Record { def } => *def,
+        TypeData::Record { def, .. } => *def,
         other => panic!("expected record, got {other:?}"),
     };
     let field_ty = db.record_def(def).field("value").expect("value field").1;
@@ -1007,14 +1166,10 @@ fn empty_enum_payload_and_no_payload_are_equivalent() {
     assert!(!empty.has_payload());
     assert_eq!(bare.payload, empty.payload, "one payload-less spelling");
 
-    let no_payload = db.enum_(
-        Some("E".into()),
-        VariantSet::new(vec![bare]).expect("one variant"),
-    );
-    let empty_payload = db.enum_(
-        Some("E".into()),
-        VariantSet::new(vec![empty]).expect("one variant"),
-    );
+    // Two independently-stamped anonymous defs, which is the arm that still
+    // merges by signature — a *nominal* pair would be two types (F12).
+    let no_payload = db.enum_(None, VariantSet::new(vec![bare]).expect("one variant"));
+    let empty_payload = db.enum_(None, VariantSet::new(vec![empty]).expect("one variant"));
     db.unify(no_payload, empty_payload)
         .expect("a payload-less variant unifies with itself however it was built");
 }

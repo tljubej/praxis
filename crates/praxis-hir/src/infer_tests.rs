@@ -1357,6 +1357,9 @@ fn a_wrong_type_argument_count_is_reported_at_the_annotation() {
     for src in [
         "fn main() -> Int { let m: Map[Text] = Map(); 0 }",
         "fn main() -> Int { let v: Vec[Int, Text] = Vec(); 0 }",
+        // A nominal def has a parameter count too, since F12 — `Option` is one
+        // definition applied to arguments rather than a name stamped per site.
+        "fn main() -> Int { let o: Option[Int, Text] = None; 0 }",
     ] {
         let codes: Vec<u32> = analyze(src)
             .diagnostics

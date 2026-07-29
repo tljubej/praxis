@@ -53,3 +53,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-045: Ordering is scalar, total in containers, and IEEE in the source language](./045-ordering-semantics-and-the-compare-callback.md)
 - [ADR-046: A `Type` is minted by the arena, and a type constructor validates its own arguments](./046-sealed-type-handles-and-validated-constructors.md)
 - [ADR-047: A scheme owns its binders, a level can only be lowered, and a declaration group predeclares its signatures](./047-scheme-owned-binders-and-the-level-newtype.md)
+- [ADR-048: A nominal type is one definition applied to arguments, and `TypeKey` is its identity](./048-nominal-identity-is-a-definition-applied-to-arguments.md)

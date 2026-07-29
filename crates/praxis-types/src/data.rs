@@ -7,7 +7,7 @@
 
 use praxis_stdlib::type_pattern::{CollectionCtor, ScalarType};
 
-use crate::type_id::Type;
+use crate::type_id::{Type, VarId};
 
 /// An opaque index into [`TypeDb::record_defs`](crate::db::TypeDb), identifying
 /// one record definition (nominal or anonymous structural). Two `Record` types
@@ -79,16 +79,18 @@ pub enum TypeData {
     },
     /// A record type (§4.5 nominal, §5.6 anonymous structural). `def` is an
     /// index into [`TypeDb::record_defs`](crate::db::TypeDb) holding the
-    /// [`RecordDef`] (name + ordered fields). Two records are the same type iff
-    /// their def-ids are equal; for anonymous records the def is keyed by a
-    /// canonicalized (source-order-preserving for display, name-set-equal for
-    /// identity per §5.6) field set.
-    Record { def: RecordDefId },
-    /// An enum type (§4.6). `def` is an index into
-    /// [`TypeDb::enum_defs`](crate::db::TypeDb) holding the [`EnumDef`]
-    /// (name + ordered variants). Two enums are the same type iff their def-ids
-    /// are equal.
-    Enum { def: EnumDefId },
+    /// [`RecordDef`] (name + params + ordered fields), and `args` is what this
+    /// *instance* supplies for the def's [`params`](RecordDef::params). Two
+    /// records are the same type iff their def-ids **and** their arguments
+    /// agree; for anonymous records the def is keyed by a canonicalized
+    /// (source-order-preserving for display, name-set-equal for identity per
+    /// §5.6) field set.
+    Record { def: RecordDefId, args: Vec<Type> },
+    /// An enum type (§4.6). `def` indexes
+    /// [`TypeDb::enum_defs`](crate::db::TypeDb); `args` instantiates the def's
+    /// [`params`](EnumDef::params), so `Option[Int]` and `Option[Text]` are one
+    /// def with two argument lists rather than two nominal definitions (TY-06).
+    Enum { def: EnumDefId, args: Vec<Type> },
     /// A type variable, in one of its lifecycle states (see [`VarState`]).
     Var(VarState),
 }
@@ -185,6 +187,12 @@ pub struct RecordFieldDef {
 pub struct RecordDef {
     /// `None` for anonymous structural records; the declared name for nominal.
     pub name: Option<String>,
+    /// The def's own type parameters (F12). Empty for every record the language
+    /// can declare today — there is no `struct P[T]` syntax — so a record's
+    /// field types *are* its children. When it is non-empty, the field types are
+    /// written in terms of these variables and an instance's
+    /// [`args`](TypeData::Record::args) is what substitutes for them.
+    pub params: Vec<VarId>,
     pub fields: Vec<RecordFieldDef>,
 }
 
@@ -260,6 +268,13 @@ impl EnumVariantDef {
 pub struct EnumDef {
     /// `None` for anonymous enums; the declared name for nominal.
     pub name: Option<String>,
+    /// The def's own type parameters (F12). The prelude `Option` is the one
+    /// generic def today: `params = [T]`, `variants = [Some(T), None]`, and
+    /// every `Option[X]` is that def with `args = [X]`. It used to be a *fresh
+    /// nominal def per annotation site and per instantiation* (TY-06), which is
+    /// why `unify` needed a name-and-signature arm to put the copies back
+    /// together and why the monomorphizer's display-string cache key collided.
+    pub params: Vec<VarId>,
     pub variants: Vec<EnumVariantDef>,
 }
 

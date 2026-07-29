@@ -12,7 +12,10 @@
 use praxis_stdlib::type_pattern::ScalarType;
 
 use crate::ctor::{CollectionArgs, FieldSet, TupleElems, VariantSet};
-use crate::data::{EnumDef, EnumDefId, Level, RecordDef, RecordDefId, TypeData, VarState};
+use crate::data::{
+    EnumDef, EnumDefId, EnumVariantDef, Level, RecordDef, RecordDefId, RecordFieldDef, TypeData,
+    VarState,
+};
 use crate::error::TypeCtorError;
 use crate::type_id::{Type, VarId};
 use crate::CollectionCtor;
@@ -35,7 +38,7 @@ pub struct Slot {
 /// field/variant data lives here rather than inline in [`TypeData`] (which would
 /// make `Type` recursive and expensive). A [`TypeData::Record`] /
 /// [`TypeData::Enum`] variant carries only a def-id index into these tables.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct TypeDb {
     /// `pub(crate)` so the `unify`/`generalize` modules can mutate slots in place
     /// (link vars, lower levels). External callers go through the methods below.
@@ -44,19 +47,56 @@ pub struct TypeDb {
     /// See ADR-008.
     level: Level,
     /// Record definitions, indexed by [`RecordDefId`] (M7, ADR-025). Each
-    /// `register_record`/`anon_record` call mints a fresh def; identity for
-    /// anonymous records is established through unification (not construction),
-    /// mirroring how tuples/funcs work.
+    /// `register_record` call mints a fresh def; identity for anonymous records
+    /// is established through unification (not construction), mirroring how
+    /// tuples/funcs work.
     pub(crate) record_defs: Vec<RecordDef>,
     /// Enum definitions, indexed by [`EnumDefId`] (M7, ADR-025).
     pub(crate) enum_defs: Vec<EnumDef>,
+    /// The prelude `Option`'s def (F12), seeded at construction so there is
+    /// exactly one and every `Option[T]` in the program names it.
+    option_def: EnumDefId,
+}
+
+impl Default for TypeDb {
+    fn default() -> Self {
+        TypeDb::new()
+    }
 }
 
 impl TypeDb {
-    /// A fresh, empty arena.
+    /// A fresh arena, holding only the prelude's own definitions.
+    ///
+    /// The single canonical `Option` def is registered here (F12). Registering
+    /// it per annotation site and per instantiation is what TY-06 was: each use
+    /// minted a *fresh nominal def*, so `unify` needed a same-name-and-signature
+    /// arm to put the copies back together, the monomorphizer's display-string
+    /// cache key could not tell `Option[Int]` from `Option[Text]`, and a runtime
+    /// enum had no stable identity to record.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        let mut db = TypeDb {
+            slots: Vec::new(),
+            level: Level::OUTERMOST,
+            record_defs: Vec::new(),
+            enum_defs: Vec::new(),
+            // Overwritten below; `register_enum` needs the arena to exist.
+            option_def: EnumDefId(0),
+        };
+        // `forall T. Option[T]`, as one def with one parameter. `T` is created
+        // at the outermost level on purpose: nothing generalizes it (only
+        // variables *deeper* than a binding site are quantifiable) and nothing
+        // lowers it further, so the def's payload variable is inert until an
+        // instance's argument substitutes for it.
+        let param_ty = db.fresh_var();
+        let param = VarId::from_raw(param_ty.to_u32());
+        let variants = VariantSet::new(vec![
+            EnumVariantDef::new("Some", vec![param_ty]),
+            EnumVariantDef::bare("None"),
+        ])
+        .expect("Some and None are distinct");
+        db.option_def = db.register_enum(Some("Option".into()), vec![param], variants);
+        db
     }
 
     /// The current binding level.
@@ -305,9 +345,19 @@ impl TypeDb {
     ///
     /// Takes a validated [`FieldSet`] — the one place a duplicate field name is
     /// rejected, rather than at whichever syntax caller happened to remember.
-    pub fn register_record(&mut self, name: Option<String>, fields: FieldSet) -> RecordDefId {
+    ///
+    /// `params` are the def's own type parameters (F12); field types written in
+    /// terms of them are substituted at each instance. Every caller passes an
+    /// empty list today — the language has no `struct P[T]` syntax.
+    pub fn register_record(
+        &mut self,
+        name: Option<String>,
+        params: Vec<VarId>,
+        fields: FieldSet,
+    ) -> RecordDefId {
         let def = RecordDef {
             name,
+            params,
             fields: fields.into_vec(),
         };
         let id = RecordDefId(self.record_defs.len() as u32);
@@ -319,10 +369,17 @@ impl TypeDb {
     /// (`None`, a `choice(...)` template — §7.5).
     ///
     /// As [`register_record`](Self::register_record): a validated [`VariantSet`]
-    /// is the only way in, so a duplicate variant name is rejected here.
-    pub fn register_enum(&mut self, name: Option<String>, variants: VariantSet) -> EnumDefId {
+    /// is the only way in, so a duplicate variant name is rejected here, and
+    /// `params` are the def's own type parameters.
+    pub fn register_enum(
+        &mut self,
+        name: Option<String>,
+        params: Vec<VarId>,
+        variants: VariantSet,
+    ) -> EnumDefId {
         let def = EnumDef {
             name,
+            params,
             variants: variants.into_vec(),
         };
         let id = EnumDefId(self.enum_defs.len() as u32);
@@ -330,30 +387,141 @@ impl TypeDb {
         id
     }
 
-    /// Register a record definition and intern its type in one step — what
-    /// almost every caller wants.
+    /// Register a **non-generic** record definition and intern its type in one
+    /// step — what almost every caller wants.
     pub fn record(&mut self, name: Option<String>, fields: FieldSet) -> Type {
-        let def = self.register_record(name, fields);
-        self.record_type(def)
+        let def = self.register_record(name, Vec::new(), fields);
+        self.record_type(def, Vec::new())
+            .expect("a def with no params takes no args")
     }
 
-    /// Register an enum definition and intern its type in one step.
+    /// Register a **non-generic** enum definition and intern its type in one
+    /// step.
     pub fn enum_(&mut self, name: Option<String>, variants: VariantSet) -> Type {
-        let def = self.register_enum(name, variants);
-        self.enum_type(def)
+        let def = self.register_enum(name, Vec::new(), variants);
+        self.enum_type(def, Vec::new())
+            .expect("a def with no params takes no args")
     }
 
-    /// Wrap an existing [`RecordDefId`] into a `Type` (e.g. for use after
-    /// fetching a shared def-id).
-    #[must_use]
-    pub fn record_type(&mut self, def: RecordDefId) -> Type {
-        self.intern(TypeData::Record { def })
+    /// Instantiate an existing [`RecordDefId`] at `args`.
+    ///
+    /// # Errors
+    /// [`TypeCtorError::TypeArgCount`] if `args` does not match the def's
+    /// parameter count.
+    pub fn record_type(
+        &mut self,
+        def: RecordDefId,
+        args: Vec<Type>,
+    ) -> Result<Type, TypeCtorError> {
+        let rdef = self.record_def(def);
+        if args.len() != rdef.params.len() {
+            return Err(TypeCtorError::TypeArgCount {
+                name: rdef.name.clone().unwrap_or_else(|| "record".to_string()),
+                got: args.len(),
+                want: rdef.params.len(),
+            });
+        }
+        Ok(self.intern(TypeData::Record { def, args }))
     }
 
-    /// Wrap an existing [`EnumDefId`] into a `Type`.
+    /// Instantiate an existing [`EnumDefId`] at `args`.
+    ///
+    /// # Errors
+    /// [`TypeCtorError::TypeArgCount`] if `args` does not match the def's
+    /// parameter count — `Option[Int, Text]` is the user-reachable case.
+    pub fn enum_type(&mut self, def: EnumDefId, args: Vec<Type>) -> Result<Type, TypeCtorError> {
+        let edef = self.enum_def(def);
+        if args.len() != edef.params.len() {
+            return Err(TypeCtorError::TypeArgCount {
+                name: edef.name.clone().unwrap_or_else(|| "enum".to_string()),
+                got: args.len(),
+                want: edef.params.len(),
+            });
+        }
+        Ok(self.intern(TypeData::Enum { def, args }))
+    }
+
+    // --- the prelude `Option` (F12) -----------------------------------------
+
+    /// The one `Option` def. Every `Option[T]` in a program instantiates it.
+    #[inline]
     #[must_use]
-    pub fn enum_type(&mut self, def: EnumDefId) -> Type {
-        self.intern(TypeData::Enum { def })
+    pub fn option_def(&self) -> EnumDefId {
+        self.option_def
+    }
+
+    /// `Option[elem]`.
+    #[must_use]
+    pub fn option_of(&mut self, elem: Type) -> Type {
+        let def = self.option_def;
+        self.enum_type(def, vec![elem])
+            .expect("Option takes one type argument")
+    }
+
+    // --- reading a def through an instance's arguments (F12) -----------------
+
+    /// Substitute a def's `params` by an instance's `args` in `t`.
+    ///
+    /// Identity — and free — when the def is not generic, which is every record
+    /// and every user-declared enum today.
+    pub fn substitute_params(&mut self, t: Type, params: &[VarId], args: &[Type]) -> Type {
+        if params.is_empty() {
+            return t;
+        }
+        crate::generalize::substitute(self, t, params, args)
+    }
+
+    /// A record instance's fields, with the def's parameters substituted by
+    /// `args`. Field *names* never depend on the arguments, only the types do.
+    #[must_use]
+    pub fn record_fields_of(&mut self, def: RecordDefId, args: &[Type]) -> Vec<RecordFieldDef> {
+        let rdef = self.record_def(def).clone();
+        rdef.fields
+            .iter()
+            .map(|f| RecordFieldDef {
+                name: f.name.clone(),
+                ty: self.substitute_params(f.ty, &rdef.params, args),
+            })
+            .collect()
+    }
+
+    /// A record instance's field by name: its index in declaration order and its
+    /// type under `args`.
+    #[must_use]
+    pub fn record_field_of(
+        &mut self,
+        def: RecordDefId,
+        args: &[Type],
+        name: &str,
+    ) -> Option<(usize, Type)> {
+        let rdef = self.record_def(def).clone();
+        let (idx, field) = rdef
+            .fields
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name == name)?;
+        Some((idx, self.substitute_params(field.ty, &rdef.params, args)))
+    }
+
+    /// An enum instance's variant payload types under `args` — for
+    /// `Option[Int]`, `Some`'s payload is `[Int]`, not `[T]`.
+    #[must_use]
+    pub fn variant_payload_of(
+        &mut self,
+        def: EnumDefId,
+        args: &[Type],
+        variant_idx: usize,
+    ) -> Vec<Type> {
+        let edef = self.enum_def(def).clone();
+        let Some(variant) = edef.variants.get(variant_idx) else {
+            return Vec::new();
+        };
+        variant
+            .payload
+            .clone()
+            .into_iter()
+            .map(|t| self.substitute_params(t, &edef.params, args))
+            .collect()
     }
 }
 

@@ -86,7 +86,7 @@ fn pattern_catches_all(pat: &TypedPattern) -> bool {
 fn uncovered_constructors(db: &TypeDb, scrutinee_ty: Type, arms: &[TypedMatchArm]) -> String {
     match db.data(scrutinee_ty) {
         // An enum: every variant must be covered (directly or by a catch-all).
-        TypeData::Enum { def } => {
+        TypeData::Enum { def, .. } => {
             let edef = db.enum_def(*def);
             // If any arm is a catch-all, everything is covered.
             if arms.iter().any(|a| pattern_catches_all(&a.pattern)) {

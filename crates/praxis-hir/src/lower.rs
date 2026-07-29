@@ -1186,12 +1186,13 @@ impl<'a> Lowerer<'a> {
         // M7-WS4: detect a zero-payload enum variant used as a bare path (`Empty`).
         if let Some(tok) = p.name() {
             let name = tok.text().to_string();
-            if let Some((enum_def_id, variant_idx, _)) = self.lookup_enum_variant_by_name(&name) {
+            if let Some((enum_ty, enum_def_id, variant_idx)) =
+                self.lookup_enum_variant_by_name(&name)
+            {
                 // Only treat as a variant if the payload is empty (a zero-payload
                 // variant). Payload variants are handled in lower_call.
                 let edef = self.db.enum_def(enum_def_id);
                 if !edef.variants[variant_idx].has_payload() {
-                    let enum_ty = self.db.enum_type(enum_def_id);
                     return TypedExpr::EnumVariant {
                         enum_def_id,
                         variant_idx: variant_idx as u32,
@@ -1522,10 +1523,9 @@ impl<'a> Lowerer<'a> {
         // M7-WS4: detect enum variant construction. If the callee's scheme is a
         // Func returning an enum type, this is a payload variant like `Number(5)`.
         if let Some(name) = callee_tok.as_ref().map(|t| t.text().to_string()) {
-            if let Some((enum_def_id, variant_idx, _payload)) =
+            if let Some((enum_ty, enum_def_id, variant_idx)) =
                 self.lookup_enum_variant_by_name(&name)
             {
-                let enum_ty = self.db.enum_type(enum_def_id);
                 return TypedExpr::EnumVariant {
                     enum_def_id,
                     variant_idx: variant_idx as u32,
@@ -1570,11 +1570,24 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Look up an enum variant by constructor name (for lowering). Returns the
-    /// enum def-id, variant index, and payload types.
+    /// enum type the constructor's scheme names, its def-id, and the variant
+    /// index.
+    ///
+    /// Unlike inference's counterpart this does **not** instantiate: lowering
+    /// runs after inference and reports the shape of the declaration, not a
+    /// fresh use. The type it hands back is therefore the scheme's own — the
+    /// same thing the pre-F12 `enum_type(def_id)` produced, since the def
+    /// carried its element type directly.
+    ///
+    /// It does not hand back the payload either, and that is deliberate: a
+    /// generic def's payload is written in terms of its *parameters* (F12), so
+    /// reading it off the def would answer `T` rather than the element type. The
+    /// substituted form is [`TypeDb::variant_payload_of`], which needs the
+    /// instance's arguments and a `&mut TypeDb`.
     fn lookup_enum_variant_by_name(
         &self,
         name: &str,
-    ) -> Option<(praxis_types::EnumDefId, usize, Vec<Type>)> {
+    ) -> Option<(Type, praxis_types::EnumDefId, usize)> {
         let root = self.scopes.root();
         let symbol = self.scopes.lookup(root, name)?;
         let sym = self.names.get(symbol)?;
@@ -1584,14 +1597,13 @@ impl<'a> Lowerer<'a> {
             praxis_types::TypeData::Enum { .. } => scheme.body(),
             _ => return None,
         };
-        let def_id = match self.db.data(self.db.follow(result_ty)) {
-            praxis_types::TypeData::Enum { def } => *def,
+        let enum_ty = self.db.follow(result_ty);
+        let def_id = match self.db.data(enum_ty) {
+            praxis_types::TypeData::Enum { def, .. } => *def,
             _ => return None,
         };
-        let edef = self.db.enum_def(def_id);
-        let idx = edef.variant(name)?;
-        let payload = edef.variants[idx].payload.clone();
-        Some((def_id, idx, payload))
+        let idx = self.db.enum_def(def_id).variant(name)?;
+        Some((enum_ty, def_id, idx))
     }
 
     fn lower_args(&mut self, args: &ArgList) -> Vec<TypedExpr> {
@@ -1763,7 +1775,7 @@ impl<'a> Lowerer<'a> {
             return self.error_expr();
         };
         let record_def_id = match self.db.data(self.db.follow(struct_ty)) {
-            praxis_types::TypeData::Record { def } => *def,
+            praxis_types::TypeData::Record { def, .. } => *def,
             _ => return self.error_expr(),
         };
         let rdef = self.db.record_def(record_def_id).clone();
@@ -1816,12 +1828,13 @@ impl<'a> Lowerer<'a> {
         };
         let receiver_ty = expr_ty(&receiver);
         let resolved = self.db.follow(receiver_ty);
-        let Some((field_idx, field_ty)) = (match self.db.data(resolved) {
-            praxis_types::TypeData::Record { def } => {
-                let rdef = self.db.record_def(*def);
-                f.field_name().and_then(|tok| rdef.field(tok.text()))
-            }
+        let record = match self.db.data(resolved) {
+            praxis_types::TypeData::Record { def, args } => Some((*def, args.clone())),
             _ => None,
+        };
+        let Some((field_idx, field_ty)) = record.and_then(|(def, args)| {
+            let name = f.field_name()?;
+            self.db.record_field_of(def, &args, name.text())
         }) else {
             // Not a record type, or unknown field — emit a Y1xx diagnostic.
             if let Some(tok) = f.field_name() {
@@ -1933,7 +1946,7 @@ impl<'a> Lowerer<'a> {
                 // Disambiguate payload-less variant from variable bind by checking
                 // the scrutinee's enum type (the WS5 fix).
                 let resolved = self.db.follow(scrutinee_ty);
-                if let praxis_types::TypeData::Enum { def } = self.db.data(resolved) {
+                if let praxis_types::TypeData::Enum { def, .. } = self.db.data(resolved) {
                     let edef = self.db.enum_def(*def);
                     if let Some(idx) = edef.variant(&name) {
                         return TypedPattern::EnumVariant {
@@ -1958,19 +1971,21 @@ impl<'a> Lowerer<'a> {
             }
             PatternKind::Variant(vname) => {
                 let resolved = self.db.follow(scrutinee_ty);
-                let enum_def_id = match self.db.data(resolved) {
-                    praxis_types::TypeData::Enum { def } => *def,
+                let (enum_def_id, enum_args) = match self.db.data(resolved) {
+                    praxis_types::TypeData::Enum { def, args } => (*def, args.clone()),
                     _ => return TypedPattern::Wildcard,
                 };
-                let edef = self.db.enum_def(enum_def_id);
-                let Some(idx) = edef.variant(&vname) else {
+                let Some(idx) = self.db.enum_def(enum_def_id).variant(&vname) else {
                     return TypedPattern::Wildcard;
                 };
                 // Recurse into sub-patterns against payload types — the WS5 bug
                 // was that only flat Name sub-patterns were collected and nested
-                // variant patterns were silently dropped.
-                let variant = &edef.variants[idx];
-                let payload_types: Vec<Type> = variant.payload.clone();
+                // variant patterns were silently dropped. The payload comes from
+                // the scrutinee's *arguments*, so `Some(n)` against an
+                // `Option[Int]` binds `n` at `Int` rather than at the def's own
+                // parameter (F12).
+                let payload_types: Vec<Type> =
+                    self.db.variant_payload_of(enum_def_id, &enum_args, idx);
                 let sub_pats: Vec<_> = pat.sub_patterns().collect();
                 let mut subpatterns = Vec::new();
                 for (i, sub) in sub_pats.iter().enumerate() {

@@ -104,11 +104,12 @@ impl TypeDb {
                 }
                 out.push(']');
             }
-            TypeData::Record { def } => {
+            TypeData::Record { def, args } => {
                 let rdef = self.record_def(*def);
                 match &rdef.name {
                     Some(n) => {
                         let _ = out.write_str(n);
+                        self.write_type_args(args, out, names, binders);
                     }
                     None => {
                         // Anonymous structural record: render as `{ x: T, y: U }`
@@ -127,11 +128,12 @@ impl TypeDb {
                     }
                 }
             }
-            TypeData::Enum { def } => {
+            TypeData::Enum { def, args } => {
                 // An anonymous enum (`choice(...)`) has no name to write, which
                 // is what the synthetic `""` name meant before it became `None`.
                 if let Some(name) = &self.enum_def(*def).name {
                     let _ = out.write_str(name);
+                    self.write_type_args(args, out, names, binders);
                 }
             }
             TypeData::Var(state) => match state {
@@ -149,6 +151,32 @@ impl TypeDb {
                 VarState::Linked { .. } => unreachable!("follow resolves Linked"),
             },
         }
+    }
+
+    /// Write a nominal type's arguments, `[A, B]`, or nothing when it has none.
+    ///
+    /// `Option` used to print as a bare name whatever it held, because the
+    /// element type lived in a *fresh def per site* rather than in the type
+    /// (TY-06) — which is also why the monomorphizer's `db.render` cache key
+    /// could not tell `Option[Int]` from `Option[Text]` (MONO-03).
+    fn write_type_args(
+        &self,
+        args: &[Type],
+        out: &mut String,
+        names: &mut NameAssigner,
+        binders: &[VarId],
+    ) {
+        if args.is_empty() {
+            return;
+        }
+        out.push('[');
+        for (i, a) in args.iter().enumerate() {
+            if i > 0 {
+                out.write_str(", ").ok();
+            }
+            self.write_type(*a, out, names, binders);
+        }
+        out.push(']');
     }
 }
 

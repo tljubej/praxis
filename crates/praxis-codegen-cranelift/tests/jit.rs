@@ -2931,6 +2931,28 @@ fn monomorphization_two_clones_of_same_generic_fn() {
     assert_eq!(result.as_int(), 42);
 }
 
+/// MONO-03, end to end. One generic function applied to `Option[Int]` and to
+/// `Option[Text]` needs **two** specializations.
+///
+/// The mono cache keyed on `db.render`, and `Option` rendered as a bare name
+/// because its element type lived in a fresh nominal def rather than in the
+/// type (TY-06). Both call sites therefore hashed to `id__Option`, and the
+/// second one ran the first's `Int` clone over a `Text` payload.
+#[test]
+fn monomorphization_distinguishes_option_element_types() {
+    let src = "fn id(x) { x }\n\
+               fn main() -> Int {\n  \
+                 let a = id(Some(7))\n  \
+                 let b = id(Some(\"hi\"))\n  \
+                 let n = match a {\n    Some(v) => v\n    None => 0\n  }\n  \
+                 let s = match b {\n    Some(v) => v\n    None => \"\"\n  }\n  \
+                 if s == \"hi\" { n } else { 0 }\n\
+               }\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
+}
+
 #[test]
 fn monomorphization_generic_fn_with_two_params() {
     // `fn first(a, b) { a }` is `forall a b. (a, b) -> a`; instantiated at

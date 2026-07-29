@@ -31,6 +31,15 @@ pub enum TypeCtorError {
     DuplicateField(String),
     /// Two variants of one enum definition share a name.
     DuplicateVariant(String),
+    /// A record or enum def was instantiated with the wrong number of type
+    /// arguments for its declared parameters (F12). `Option[Int, Text]` is the
+    /// user-reachable case; a compiler-built instance that disagrees with its
+    /// def is a builder bug.
+    TypeArgCount {
+        name: String,
+        got: usize,
+        want: usize,
+    },
 }
 
 impl fmt::Display for TypeCtorError {
@@ -49,6 +58,9 @@ impl fmt::Display for TypeCtorError {
             }
             TypeCtorError::DuplicateVariant(name) => {
                 write!(f, "duplicate enum variant `{name}`")
+            }
+            TypeCtorError::TypeArgCount { name, got, want } => {
+                write!(f, "`{name}` takes {want} type argument(s), got {got}")
             }
         }
     }

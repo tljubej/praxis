@@ -46,7 +46,7 @@ pub enum TypePattern {
 /// Built-in scalar types (§4.3). The full set is reserved here even though the
 /// first implementation may omit `UInt` and `Float` until the integer pipeline
 /// is stable (§4.3) — their names must not be reused for anything else.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ScalarType {
     Bool,
     Int,
@@ -64,7 +64,7 @@ pub enum ScalarType {
 /// the compiler-internal pipeline source (M8 WS8, §6.3): it is never user-named
 /// and has no runtime representation, but it threads the element type through
 /// lazy pipelines.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum CollectionCtor {
     Vec,
     Deque,
