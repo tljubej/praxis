@@ -2581,6 +2581,30 @@ DECISIONS gate this stage — TY-32 hashability, TY-33 remove-or-implement, TY-3
 Range. Record that ADR-010's M7 deferral of the §5.4 capability system has
 lapsed and supersede its consequence.
 
+**All three gating decisions are ANSWERED (§7), and two went against the
+recommendation. Re-size the stage before starting.** D4 confirms the rejection
+of mutable collections as keys, as recommended. D5 implements all fifteen
+prelude names rather than ten — the six graph helpers get built. D6 implements
+`..`/`..=` in full rather than deleting `CollectionCtor::Range`.
+
+The eleven findings above are now the *smaller* part of S17. As answered it is
+four units, and only the first is what the finding table describes:
+
+1. **F10's constraint channel + the eleven findings** — the stage as planned,
+   in the internal order above.
+2. **`panic`, `assert`, `dbg`** — before everything, because `panic` typechecks
+   today and then fails to compile.
+3. **The eight numeric prelude helpers** — after TY-31, whose numeric constraint
+   they want.
+4. **The six graph helpers and the `..`/`..=` slice** — each its own
+   stage-sized unit with its own exit criteria, and each with sub-decisions §7
+   lists as still owed (graph representation; range half-openness, value-ness,
+   descending behaviour, endpoint types).
+
+Do not interleave (4) with (1). A graph helper's signature is the hardest test
+of the channel's `HasMethod`/`Iterable` constraints, and debugging both at once
+is what staging exists to prevent.
+
 **Exit criteria**
 
 Un-ignore and pass polymorphic_equality_rejects_function_instantiation
@@ -2973,6 +2997,15 @@ which programs compile, or what an ADR says. Every one needs an answer from the
 repo owner, and each should produce an ADR. **D1, D3 and D5 block their stage
 outright**; the rest can be decided while earlier stages are in flight.
 
+> **Answers, added as they arrive.** The numbered text below each heading is the
+> original question and is left exactly as written; an **ANSWERED** paragraph
+> under it is the repo owner's decision. An answer here is a decision, not an
+> ADR — the ADR is written by the session that *lands* it, which is why
+> `docs/decisions/` has one per implemented decision and not one per answer.
+> Answered so far: **D2** (ADR-053), **D3** (ADR-045), **D4**, **D5**, **D6**,
+> **D7**/**D8** (ADR-049), **D9** (ADR-042), **D13** (ADR-051), **D14**
+> (ADR-040). Still open: **D1** (blocking S18), **D10**, **D11**, **D12**.
+
 **D1 (Stage 18, blocking)**
 
 Map.get and Grid.find contract: Option[V] per §5.7/§4.7, or keep V-with-Unit?
@@ -3002,6 +3035,32 @@ Hashability: mutable collections as Map keys are accepted today. Rejecting them
 (TY-32/RT-08) breaks existing programs. Confirm the rejection and its
 diagnostic wording (§5.4: never name the capability).
 
+**ANSWERED — reject them.** A mutable collection used as a `Map` key or a `Set`
+element is `Y014`. This is the recommendation, confirmed.
+
+The precedent the answer turned on: **Python rejects mutable containers as keys
+outright** — `list`, `dict` and `set` set `__hash__ = None`, so `{[1,2]: "x"}`
+is a `TypeError`, and a `tuple` is hashable only if every element is. Ruby and
+most dynamic languages agree; Java permits it and documents the result as
+unspecified once a key mutates. **Rust is the counterexample that does not
+transfer**: `HashMap<Vec<i32>, V>` is legal only because the borrow checker
+makes mutating a key the map still holds impossible. Praxis has `var` mutation
+and no borrow checker, so it has Python's exposure without Rust's guardrail.
+
+Which types: the rule is **mutability**, not container-ness. `Vec`, `Map`, `Set`,
+`Deque`, `Grid`, `Counter`, `MinHeap`/`MaxHeap` and `BitSet` are out; scalars,
+`Text`, tuples, records and enums stay in **structurally** — a tuple or record is
+a key iff every component is, which is Python's `tuple` rule and is already how
+`supports_eq` recurses. `HashStable` in F10's `CapKind` is the name for this
+narrower capability; `Hash` alone is what `supports_hash` answers today, and the
+two are not the same predicate. That distinction is the finding: `supports_hash`
+is *literally* `supports_eq` right now.
+
+Wording, per §5.4 (never name the capability): say what the program did and why
+it cannot work — a value that can change after it is stored cannot be found
+again — and name the concrete type. Never "not hashable", never "capability",
+never "trait".
+
 **D5 (Stage 17)**
 
 TY-33 remove-or-implement for 15 phantom prelude names. Recommend implementing
@@ -3010,10 +3069,57 @@ helpers (bfs, bfs_distance, dfs, dijkstra, a_star, flood_fill) until a
 milestone owns them. `panic` must land first — it typechecks today and then
 fails to compile.
 
+**ANSWERED — implement all fifteen.** Against the recommendation: the six graph
+helpers are *not* deleted, they are built. `panic` still lands first, for the
+reason the question gives.
+
+**This makes S17 several sessions, not one.** The six graph helpers are a graph
+library — BFS, weighted shortest path, A\* with a heuristic, and flood fill —
+and by this plan's own weights that is more work than the other ten findings of
+S17 combined. Sequence it as four units, each returning the suite to green:
+
+1. `panic`, then `assert`, then `dbg`. `panic` is the hole every other name is
+   built over; it typechecks today and fails at compile.
+2. The eight numeric helpers — `abs`, `sign`, `min`, `max`, `clamp`, `gcd`,
+   `lcm`. These want TY-31's numeric constraint, so they follow the constraint
+   channel rather than preceding it.
+3. The six graph helpers, as their own stage-sized unit with its own exit
+   criteria. They need a graph *representation* decision first — what a caller
+   passes as the neighbour function, and whether `dijkstra`/`a_star` take edge
+   weights as a closure or a `Map`. **That decision is not in this plan and is
+   owed before the unit starts.**
+4. Everything else S17 owns.
+
+Do not interleave (3) with the constraint channel: a graph helper's signature is
+where the channel's `HasMethod`/`Iterable` constraints get their hardest test,
+and debugging both at once is what the staging exists to prevent.
+
 **D6 (Stage 17)**
 
 TY-34 Range: delete CollectionCtor::Range (8 sites, mechanical) or implement
 the full `..`/`..=` vertical slice (XL). Do not leave the middle state.
+
+**ANSWERED — implement the full slice.** Against the 8-site deletion: `..`/`..=`
+becomes real syntax.
+
+It is a vertical slice and every layer is a separate commit: lexer tokens, the
+Pratt-loop precedence for a binary `..` (below comparison, above the statement
+separator — and it interacts with FE-04's newline rule, so `1 ..\n5` needs a
+decision of its own), an AST node, the type rule, MIR lowering, and runtime
+iteration. Two things already exist and are the anchors: `CollectionCtor::Range`
+in `praxis-stdlib`'s type patterns, and `capability::iter_item`'s
+`(CollectionCtor::BitSet, _) | (CollectionCtor::Range, _) => Int` arm, which
+already says a range yields `Int`.
+
+Sub-decisions this answer does **not** settle, all owed before the slice starts:
+whether `a..b` is half-open (recommend yes, with `..=` inclusive — it is what
+`iter_item`'s `Int` element already implies and what every neighbouring language
+does); whether a range is a first-class *value* or only a `for`-header form
+(recommend value, since `CollectionCtor::Range` already makes it a type);
+whether a descending range is empty or counts down (recommend empty, matching
+Python and Rust, since counting down silently is the bug half the time); and
+whether the endpoints may be any numeric type or `Int` only (recommend `Int`
+only until TY-31's numeric constraint lands).
 
 **D7 (Stage 12)**
 

@@ -1878,12 +1878,16 @@ stage's ADR is **055**.
 
 **Pick up at S17 — the constraint channel and capabilities.** Eleven findings,
 weight 66, the largest stage in the repair, and the one the plan gates on three
-design decisions. **§5 has the answers: D5 and D6 are answered, both against the
-plan's recommendation and both in the direction of more work — `..`/`..=` lands
-in full, and all fifteen prelude names get implemented including the six graph
-helpers. D4 is still open and blocks TY-32 and RT-08.** Read §5's S17 paragraph
-before anything else; the stage as answered is several sessions of work, and
-`panic` is the piece that must land first.
+design decisions. **All three are answered, in the plan itself — §7's D4, D5 and
+D6 each carry an ANSWERED paragraph now, and the plan's own §5 S17 entry splits
+the stage into four units.** D4 rejects mutable collections as keys (the
+recommendation); D5 implements all fifteen prelude names including the six graph
+helpers (against it); D6 implements `..`/`..=` in full (against it).
+
+**Read the plan's §5 S17 entry and §7's D4/D5/D6 before anything else.** The
+stage as answered is several sessions, the eleven findings are the *smaller*
+part of it, `panic` is what must land first, and three of the four units have
+sub-decisions §7 records as still owed.
 
 What S17 will want from what is already here:
 
@@ -2365,12 +2369,18 @@ spent through `Y017`; the next free number is `Y018`.
 
 **D1 and D5 still block their stages**; neither has been answered.
 
-**S17 is the next stage, and three decisions gate it — D4, D5 and D6.** Two are
-now answered by the repo owner, **and both were answered against the plan's
-recommendation, in the direction of more language rather than less**. A fresh
-context must size the stage accordingly: S17 was already the largest in the
-repair at 11 findings and weight 66, and these two answers add a syntax-to-
-runtime vertical slice and a graph library on top of it.
+**S17 is the next stage, and its three gating decisions — D4, D5 and D6 — are
+all answered.** The answers are written into the *plan* as well, under §7's
+original questions and in §5's S17 "Ordering" paragraph; that is the first time
+the plan has been annotated, and the convention is recorded at the top of §7 —
+the question text stays as written, an **ANSWERED** paragraph goes under it, and
+the ADR is still written by the session that lands the decision.
+
+**Two of the three went against the plan's recommendation, both toward more
+language.** A fresh context must size the stage accordingly: S17 was already the
+largest in the repair at 11 findings and weight 66, and D5 and D6 add a graph
+library and a syntax-to-runtime vertical slice on top of it. §5 of the plan now
+splits it into four units and says not to interleave the last with the first.
 
 - **D6 (TY-34, `Range`) — answered: implement `..`/`..=` in full.** *Not* the
   8-site deletion. That is a lexer, parser, AST, type-rule, MIR-lowering and
@@ -2387,17 +2397,26 @@ runtime vertical slice and a graph library on top of it.
   built on a hole until it is filled. Suggested order: `panic`, `assert`, `dbg`,
   then the eight numeric helpers, then the six graph helpers as their own stage-
   sized unit.
-- **D4 (hashability) — still open.** The question asked was what other languages
-  do. **Python rejects mutable containers as keys**: `list`/`dict`/`set` set
-  `__hash__ = None`, so `{[1,2]: "x"}` is a `TypeError`, and a `tuple` is
-  hashable only if every element is. Ruby and most dynamic languages agree;
-  Java allows it and documents the result as unspecified once a key mutates.
-  **Rust is the counterexample that does not apply here**: `HashMap<Vec<i32>, V>`
-  is legal because the borrow checker makes mutating a live key impossible.
-  Praxis has `var` mutation and no borrow checker, so it has Python's problem
-  without Rust's guardrail — which is why the plan, and this note, recommend
-  confirming the rejection (`Y014`, worded per §5.4 so it never names the
-  capability). **Do not start TY-32 or RT-08 until this is confirmed.**
+- **D4 (hashability) — answered: reject them.** This one *is* the plan's
+  recommendation. A mutable collection used as a `Map` key or a `Set` element is
+  `Y014`. The precedent it turned on: **Python rejects mutable containers as
+  keys** — `list`/`dict`/`set` set `__hash__ = None`, so `{[1,2]: "x"}` is a
+  `TypeError`, and a `tuple` is hashable only if every element is. Ruby and most
+  dynamic languages agree; Java allows it and documents the result as
+  unspecified once a key mutates. **Rust is the counterexample that does not
+  transfer**: `HashMap<Vec<i32>, V>` is legal only because the borrow checker
+  makes mutating a key the map still holds impossible, and Praxis has `var`
+  mutation with no such guardrail.
+
+  The rule is **mutability, not container-ness**. `Vec`, `Map`, `Set`, `Deque`,
+  `Grid`, `Counter`, `MinHeap`/`MaxHeap` and `BitSet` are out; scalars, `Text`,
+  tuples, records and enums stay in **structurally** — a tuple or record is a key
+  iff every component is, which is Python's `tuple` rule and is already the shape
+  `supports_eq` recurses with. This is why F10's `CapKind` has both `Hash` and
+  `HashStable`: they are different predicates, and the finding is that
+  `supports_hash` is *literally* `supports_eq` today. Wording per §5.4 — say that
+  a value which can change after it is stored cannot be found again, name the
+  concrete type, and never say "hashable", "capability" or "trait".
 
 **F10's constraint channel is S17's foundation and it is deliberately not
 started.** Landing it half-way would be the partial foundation §2 opens by
