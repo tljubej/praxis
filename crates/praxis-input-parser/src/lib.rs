@@ -17,7 +17,10 @@ pub mod scan;
 pub mod synthesize;
 pub mod validate;
 
-pub use ast::{AtomicKind, BlockItem, Constructor, ParserAst, SkipPolicy, TemplatePart, WsPolicy};
+pub use ast::{
+    AtomicKind, BlockItem, Constructor, EmptySeparator, ParserAst, Separator, SkipPolicy,
+    TemplatePart, WsPolicy,
+};
 pub use plan::{
     get_plan, lower_to_plan, plan_count, register_plan, retire_all_plans, BlockItemNode,
     CompiledPlan, ParserPlan, PlanId, PlanNode, TemplatePartNode, TooManyPlans, MAX_PLANS,

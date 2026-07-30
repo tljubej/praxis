@@ -120,9 +120,10 @@ pub enum ParserAst {
     Csv { child: Box<ParserAst>, span: Span },
     /// `ws(P)` → `Vec[result(P)]` (whitespace-separated).
     Ws { child: Box<ParserAst>, span: Span },
-    /// `sep(separator, P)` → `Vec[result(P)]`.
+    /// `sep(separator, P)` → `Vec[result(P)]`. The separator is a
+    /// [`Separator`], which cannot be empty (IP-10).
     Sep {
-        separator: String,
+        separator: Separator,
         child: Box<ParserAst>,
         span: Span,
     },
@@ -174,6 +175,60 @@ pub enum ParserAst {
         fill: String,
         span: Span,
     },
+}
+
+/// The separator of a `sep(separator, P)` call — **non-empty by construction**
+/// (IP-10).
+///
+/// An empty separator is not a parser that matches nothing: it is a cursor that
+/// never advances. `walk_sep` in `praxis-runtime` asks
+/// `region[pos..].starts_with(sep_bytes)`, which is *unconditionally true* for
+/// an empty needle, so `pos += sep_bytes.len()` is `pos += 0` and the loop
+/// pushes a freshly allocated value forever — an infinite loop that also grows
+/// the heap without bound.
+///
+/// A `validate` check would have caught the value only where someone remembered
+/// to call it; the type catches it at every construction site there will ever
+/// be, which is the house maxim (`AGENTS.md`: make illegal states
+/// unrepresentable).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Separator(Box<str>);
+
+/// The one way [`Separator::new`] fails: the text was empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EmptySeparator;
+
+impl std::fmt::Display for EmptySeparator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a `sep` separator may not be empty: it could never advance")
+    }
+}
+
+impl std::error::Error for EmptySeparator {}
+
+impl Separator {
+    /// The **only** constructor. Refuses the empty string.
+    ///
+    /// # Errors
+    /// [`EmptySeparator`] when `text` is empty.
+    pub fn new(text: &str) -> Result<Self, EmptySeparator> {
+        if text.is_empty() {
+            return Err(EmptySeparator);
+        }
+        Ok(Separator(text.into()))
+    }
+
+    /// The separator text. Never empty.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Separator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// How `chars(P, skip:)` trims between matches (§7.5).

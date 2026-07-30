@@ -4,8 +4,13 @@
 //! `Text` value), allocating GC results (`Int`, `Char`, source-slice `Text`,
 //! `Vec`, `Grid`, `Record`) and raising `FaultKind::ParseFailed` on mismatch.
 //!
-//! The plan type and global slab live in `praxis-input-parser`; this interpreter
-//! looks up plans by index and walks their `#[repr(C)]` node arena.
+//! The plan type and global arena live in `praxis-input-parser`; this
+//! interpreter looks up a plan by its [`PlanId`] and walks its node arena.
+//!
+//! **The arena is not `#[repr(C)]`.** It is ordinary Rust enums and slices, and
+//! nothing here crosses an FFI boundary — only the plan *id* is a JIT immediate.
+//! `praxis_input_parser::plan`'s own doc is the authority; this line claimed a C
+//! layout the types never had.
 
 use crate::context::RuntimeContext;
 use crate::parse_detail::ParseFail;
@@ -812,6 +817,15 @@ fn walk_sep(
     let region = &bytes[offset..];
     let region_str = std::str::from_utf8(region).unwrap_or("");
     let sep_bytes = sep.as_bytes();
+    // The loop below advances by `sep_bytes.len()` on a match, and
+    // `starts_with(&[])` is unconditionally true — so an empty separator is an
+    // infinite loop that allocates a value per iteration. The compiler makes
+    // that unrepresentable (`praxis_input_parser::Separator`, IP-10); this
+    // records what the loop is relying on.
+    debug_assert!(
+        !sep_bytes.is_empty(),
+        "Separator::new refuses an empty separator (IP-10): the loop below cannot advance past one"
+    );
     let mut items = Vec::new();
     let mut token_start = 0usize;
     let mut pos = 0usize;

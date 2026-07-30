@@ -484,7 +484,7 @@ fn lower_node(b: &mut PlanBuilder<'_>, ast: &ParserAst) -> u32 {
         ParserAst::Sep {
             separator, child, ..
         } => {
-            let sep_static: &'static str = b.alloc_str(separator);
+            let sep_static: &'static str = b.alloc_str(separator.as_str());
             let sep_idx = b.intern_literal(sep_static);
             let c = lower_node(b, child);
             b.push_node(PlanNode::Sep {
@@ -644,7 +644,7 @@ fn lower_template_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{AtomicKind, TemplatePart, WsPolicy};
+    use crate::ast::{AtomicKind, Separator, TemplatePart, WsPolicy};
     use praxis_source::Span;
 
     #[test]
@@ -691,7 +691,7 @@ mod tests {
     #[test]
     fn sep_lower_interns_separator() {
         let ast = ParserAst::Sep {
-            separator: " -> ".to_string(),
+            separator: Separator::new(" -> ").expect("a non-empty separator"),
             child: Box::new(ParserAst::Atomic {
                 kind: AtomicKind::Word,
                 span: Span::at(0),
@@ -781,7 +781,7 @@ mod tests {
     #[test]
     fn a_compiled_plan_owns_its_interned_strings() {
         let compiled = lower_to_plan(&ParserAst::Sep {
-            separator: " -> ".to_string(),
+            separator: Separator::new(" -> ").expect("a non-empty separator"),
             child: Box::new(ParserAst::Atomic {
                 kind: AtomicKind::Word,
                 span: Span::at(0),

@@ -9,7 +9,8 @@
 use praxis_ast::{AstNode, ParserExpr, ParserExprKind, ParserNamedArg};
 use praxis_input_parser::ast::{AtomicKind, Constructor, ParserAst, TemplatePart};
 use praxis_input_parser::{
-    lower_to_plan, register_plan, scan_template, synthesize, validate, PlanId, ValidationError,
+    lower_to_plan, register_plan, scan_template, synthesize, validate, PlanId, Separator,
+    ValidationError,
 };
 use praxis_source::{DiagCode, Diagnostic, FileId, FileSpan, Severity, Span};
 use praxis_types::{Type, TypeDb};
@@ -443,9 +444,32 @@ fn convert_constructor_call(
         }
         Constructor::Sep => {
             let mut iter = args.into_iter();
+            // A missing separator used to be laundered into `String::new()`,
+            // which is the one separator that can never advance a cursor
+            // (IP-10). It is now a diagnostic and the call does not build.
             let separator = match iter.next() {
-                Some(CallArg::String(s)) => s,
-                _ => String::new(),
+                Some(CallArg::String(s)) => match Separator::new(&s) {
+                    Ok(sep) => sep,
+                    Err(_) => {
+                        diagnostics.push(err_diag(
+                            file,
+                            span,
+                            DiagCode::EmptySeparator,
+                            "`sep` needs a non-empty separator: an empty one never advances"
+                                .to_string(),
+                        ));
+                        return None;
+                    }
+                },
+                _ => {
+                    diagnostics.push(err_diag(
+                        file,
+                        span,
+                        DiagCode::EmptySeparator,
+                        "`sep` needs a string-literal separator as its first argument".to_string(),
+                    ));
+                    return None;
+                }
             };
             match iter.next() {
                 Some(CallArg::Parser(child)) => Some(ParserAst::Sep {

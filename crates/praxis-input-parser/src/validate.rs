@@ -259,7 +259,7 @@ fn ctor_name(c: Constructor) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::AtomicKind;
+    use crate::ast::{AtomicKind, EmptySeparator, Separator};
     use praxis_source::{DiagCode, Span};
 
     fn atom() -> ParserAst {
@@ -325,19 +325,39 @@ mod tests {
         assert_eq!(err.unwrap().code, DiagCode::ConstructorArity);
     }
 
+    /// **The assertion is inverted on purpose (IP-10).**
+    ///
+    /// This test used to build `ParserAst::Sep { separator: String::new(), … }`
+    /// and ask whether `validate` reported it. That question presumes the value
+    /// exists — and the value is the hazard: an empty separator drives
+    /// `walk_sep`'s `region[pos..].starts_with(sep_bytes)` loop, which is
+    /// unconditionally true for an empty needle, so the cursor never advances
+    /// and the loop allocates forever. A check `validate` performs is one the
+    /// *next* construction site can forget.
+    ///
+    /// So the rule the name states is now enforced by the type: `Separator` has
+    /// exactly one constructor and it refuses `""`. The empty separator is not
+    /// rejected before plan construction — it is not constructible at all, and
+    /// the `String::new()` this test used to write no longer compiles.
     #[test]
-    #[ignore = "known bug: an empty separator reaches a non-advancing runtime loop"]
     fn empty_separator_is_rejected_before_plan_construction() {
+        assert_eq!(
+            Separator::new(""),
+            Err(EmptySeparator),
+            "the one constructor refuses the separator that cannot advance"
+        );
+
+        let comma = Separator::new(",").expect("a one-character separator is fine");
+        assert_eq!(comma.as_str(), ",");
+
+        // The AST field is the newtype, not a `String`: this is what stops the
+        // empty value from being reintroduced by a future construction site.
         let ast = ParserAst::Sep {
-            separator: String::new(),
+            separator: comma,
             child: Box::new(atom()),
             span: Span::at(0),
         };
-
-        assert!(
-            !validate(&ast).is_empty(),
-            "sep(\"\", P) must be rejected because it can never advance"
-        );
+        assert!(validate(&ast).is_empty(), "a real separator validates");
     }
 
     #[test]
