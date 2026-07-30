@@ -20,3 +20,9 @@ praxis-mir.workspace = true
 praxis-codegen-cranelift.workspace = true
 cranelift-module.workspace = true
 anyhow.workspace = true
+
+# Doctests are not run (see the justfile and README): rustdoc has to analyze the
+# whole crate before it can find out there are none, and the result is never
+# cached, so `cargo test` paid ~6s per crate for it on every run.
+[lib]
+doctest = false

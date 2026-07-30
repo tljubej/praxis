@@ -8,3 +8,9 @@ description = "Source files, spans, line maps, and diagnostics for the Praxis co
 
 [dev-dependencies]
 insta.workspace = true
+
+# Doctests are not run (see the justfile and README): rustdoc has to analyze the
+# whole crate before it can find out there are none, and the result is never
+# cached, so `cargo test` paid ~6s per crate for it on every run.
+[lib]
+doctest = false

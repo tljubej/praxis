@@ -21,6 +21,14 @@ clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
 # Run the whole test suite.
+#
+# Doctests are NOT part of this, and not part of `ci`: every library crate sets
+# `doctest = false`. `cargo test` runs `rustdoc --test` per crate, rustdoc must
+# analyze the whole crate before it can find out how many doctests are in it,
+# and the result is never cached — so finding zero cost ~6s per crate on every
+# run, 95s of the suite to execute the one doctest the workspace had. A `///`
+# example is still compiled by `cargo doc`; it is never executed, so assertions
+# belong in unit tests. See the README.
 test:
     cargo test --workspace
 

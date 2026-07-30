@@ -33,3 +33,23 @@ versa).
 - Developers run `cargo install just` once.
 - The hosted workflow stays ~20 lines; all quality policy lives in the
   `justfile`, `rustfmt.toml`, and `clippy.toml`.
+
+## Amendment (2026-07-31): doctests are disabled, so `just test` is the whole gate
+
+`cargo test --workspace` ran a doctest target per library crate, and that is
+**not** free when a crate has no doctests: `cargo test` invokes `rustdoc --test`,
+and rustdoc has to analyze the whole crate — parse, expand, resolve, typeck —
+before it can discover how many doctests are in it. Finding zero costs what
+finding some costs. None of that work is shared with the compilation cargo just
+did, and none of it is cached, so it re-ran on every invocation: ~6s per crate
+warm (12s for `praxis-hir`), **95s of the suite** to execute the one doctest the
+workspace contained.
+
+Every library crate now sets `doctest = false`. The consequence worth knowing is
+that a `///` example is still *compiled* by `cargo doc` and is **never executed**
+— so an assertion in one proves nothing, and belongs in a unit test. That is the
+cost of the decision, and it is stated in the README and the `justfile` rather
+than left for someone to discover from a doctest that silently never ran.
+
+This does not change the "one command is the gate" rule: `just ci` still runs
+everything CI runs. It runs less, on purpose.

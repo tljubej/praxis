@@ -53,6 +53,18 @@ just test      # run the whole test suite
 just build     # build every crate
 ```
 
+**Doctests are disabled and CI does not run them** (`doctest = false` in every
+library crate). A doctest in a `///` comment will still be *compiled* by
+`cargo doc`, but it is never executed — so do not rely on one to check anything.
+Put the assertion in a unit test instead.
+
+The reason is cost, not principle: `cargo test` runs `rustdoc --test` per crate,
+and rustdoc has to analyze the whole crate before it can discover how many
+doctests are in it. Finding none takes as long as finding some, the work is not
+shared with the compilation cargo just did, and nothing about it is cached — so
+it re-ran on every invocation. That was **95 seconds of the suite** to run the
+one doctest the workspace had.
+
 ## Layout
 
 See `praxis_technical_design.md` §14 for the crate responsibilities. The
