@@ -6326,3 +6326,64 @@ fn an_updating_store_keeps_the_better_value_and_accepts_the_first() {
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
 }
+
+/// **REP-25.** A destructuring `for` binding reads the components it names, once
+/// per step — the half no type test can see.
+#[test]
+fn a_destructuring_for_binding_reads_each_item_apart() {
+    // `for (k, v) in m` — §6.2's shape for walking a map, weighted so a swapped
+    // pair or a dropped half is a different answer.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map()\n  m[1] = 20\n  m[3] = 40\n  \
+         var t = 0\n  for (k, v) in m { t = t + k * 100 + v }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 460, "(1,20) + (3,40), weighted");
+
+    // …over a `Vec` of pairs, which is the in-place plan rather than the paired
+    // snapshot — the two lowerings meet the same binding.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push((1, 20))\n  v.push((3, 40))\n  \
+         var t = 0\n  for (a, b) in v { t = t + a * 100 + b }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 460);
+
+    // A record pattern in the header, and a field the pattern does not name.
+    let (rt, result) = run_main(
+        "struct P { x: Int, y: Int, z: Int }\n\
+         fn main() -> Int {\n  let ps = Vec()\n  ps.push(P { x: 1, y: 2, z: 3 })\n  \
+         ps.push(P { x: 4, y: 5, z: 6 })\n  var t = 0\n  \
+         for P { z, x } in ps { t = t + x * 10 + z }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 13 + 46);
+
+    // Nested, and mutated: the binding is a fresh read each step, so a name bound
+    // in one step does not leak into the next.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push((1, (2, 3)))\n  v.push((4, (5, 6)))\n  \
+         var t = 0\n  for (a, (b, c)) in v { t = t * 10 + a + b + c }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 6 * 10 + 15);
+
+    // A bare name still binds the whole item, and the pair is still readable
+    // with `.0`/`.1` — the spelling every existing program uses.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map()\n  m[1] = 20\n  \
+         var t = 0\n  for kv in m { t = t + kv.0 * 100 + kv.1 }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 120);
+
+    // The destructured names survive an allocation inside the body: they are
+    // real slots, not borrowed views into the item.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map()\n  m[1] = 2\n  m[3] = 4\n  \
+         var t = 0\n  for (k, v) in m {\n    let scratch = Vec()\n    var i = 0\n    \
+         while i < 50 { scratch.push(i)\n i = i + 1 }\n    t = t + k * 10 + v\n  }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 12 + 34);
+}

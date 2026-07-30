@@ -1243,7 +1243,11 @@ impl<'t> Parser<'t> {
     fn parse_for(&mut self) {
         self.start_node(SyntaxKind::FOR_EXPR);
         self.bump(); // `for`
-        self.expect(SyntaxKind::Ident, "binding name after `for`");
+                     // The binding is a **pattern** (REP-25): `for (k, v) in m`
+                     // takes the pair apart, and a bare name is the pattern that
+                     // binds the whole item. Nothing here can be confused with the
+                     // loop body — the pattern is followed by `in`, never by `{`.
+        self.parse_pattern();
         self.expect(SyntaxKind::KW_IN, "`in` after the for-loop binding");
         self.parse_expr_no_struct_lit(); // iterator
         self.parse_block();
@@ -2920,6 +2924,51 @@ mod tests {
             "let c = Counter[Int",
             "let c = Vec[Int] + 1",
         ] {
+            let out = parse_text(bad);
+            assert!(!out.diagnostics.is_empty(), "{bad} must report");
+        }
+    }
+
+    /// **REP-25.** A `for` binding is a pattern, so `for (k, v) in m` takes the
+    /// pair apart where `for kv in m` could only name it.
+    ///
+    /// The header used to `expect(Ident)`, so the only binding a loop could have
+    /// was one name. ADR-066 decision 3 left this to REP-10 on the grounds that
+    /// destructuring in binding position *is* a pattern and there was no reason
+    /// for two grammars — this is that grammar, reused.
+    #[test]
+    fn a_for_binding_is_a_pattern() {
+        let count = |src: &str, kind: SyntaxKind| -> usize {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            construct_names(&out.tree)
+                .into_iter()
+                .filter(|k| *k == kind)
+                .count()
+        };
+
+        // The shapes, and the count of patterns each holds: the header's own,
+        // plus one per element or field.
+        for (src, patterns) in [
+            ("for x in v { }", 1),
+            ("for (k, v) in m { }", 3),
+            ("for (a, (b, c)) in v { }", 5),
+            ("for P { x, y } in ps { }", 1),
+            ("for P { at: (x, y) } in ps { }", 4),
+            ("for _ in v { }", 1),
+        ] {
+            assert_eq!(count(src, SyntaxKind::PATTERN), patterns, "{src}");
+            assert_eq!(count(src, SyntaxKind::FOR_EXPR), 1, "{src}");
+        }
+
+        // The pattern is followed by `in`, never by `{`, so a record pattern's
+        // brace cannot be read as the loop body — and the iterator's own
+        // suppression (FE-06) is unchanged.
+        let out = parse_text("for P { x } in near(Origin { x: 0 }) { 0 }");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        // A missing `in`, and a missing pattern, both still report.
+        for bad in ["for x v { }", "for in v { }", "for (x, in v { }"] {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must report");
         }

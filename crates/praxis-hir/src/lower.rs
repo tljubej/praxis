@@ -255,9 +255,14 @@ pub enum TypedExpr {
         span: (u32, u32),
     },
     /// `for binding in iter { body }` (M8, §4.11). `binding` is the loop
-    /// variable's symbol; `item_ty` is the iterator's element type. Yields Unit.
+    /// variable's **pattern** — a `Bind` for the ordinary `for x in …` and a
+    /// composite for `for (k, v) in …` (REP-25) — and `item_ty` is the
+    /// iterator's element type. Yields Unit.
+    ///
+    /// The pattern is irrefutable: lowering reports one that can fail, because a
+    /// `for` has no second arm for an item to fall through to.
     For {
-        binding: SymbolId,
+        binding: TypedPattern,
         iter: Box<TypedExpr>,
         body: Box<TypedBlock>,
         item_ty: Type,
@@ -450,6 +455,24 @@ pub enum TypedPattern {
         subpatterns: Vec<TypedPattern>,
         ty: Type,
     },
+}
+
+/// Why `pat` can fail to match, or `None` when it matches every value of its
+/// type (REP-25).
+///
+/// A binding position has no second arm, so only the shapes that always match
+/// may appear in one: a wildcard, a name, and a composite whose components are
+/// themselves irrefutable. A literal tests, and an enum variant tests — a
+/// `for Some(x) in xs` would silently skip every `None`.
+pub(crate) fn refutable_reason(pat: &TypedPattern) -> Option<&'static str> {
+    match pat {
+        TypedPattern::Wildcard | TypedPattern::Bind { .. } => None,
+        TypedPattern::Lit { .. } => Some("a literal pattern"),
+        TypedPattern::EnumVariant { .. } => Some("a variant pattern"),
+        TypedPattern::Tuple { subpatterns, .. } | TypedPattern::Record { subpatterns, .. } => {
+            subpatterns.iter().find_map(refutable_reason)
+        }
+    }
 }
 
 impl TypedPattern {
@@ -1834,22 +1857,32 @@ impl<'a> Lowerer<'a> {
                     ty: self.unit,
                 })
             });
-        // Resolve the binding symbol from the name token's declaration site
-        // (`decls`, not `refs` — the binding token is a declaration, and the
-        // body's references to it resolve to this same symbol via `refs`).
-        let binding = f
-            .binding()
-            .and_then(|t| self.decls.get(&t.text_range()).copied())
-            .unwrap_or(SymbolId(0));
         // The item type is read from the iterator's inferred element type; the
-        // inference pass records it on the binding's declaration range. A
-        // `for` binding is not an expression, so this is a `ref_types` read, not
-        // an `expr_types` one.
+        // inference pass records it on the binding **pattern**'s range. A `for`
+        // binding is not an expression, so this is a `ref_types` read, not an
+        // `expr_types` one.
         let item_ty = f
             .binding()
-            .and_then(|t| self.ref_types.get(&t.text_range()).copied())
+            .and_then(|p| self.ref_types.get(&p.syntax().text_range()).copied())
             .map(|t| self.deep(t))
             .unwrap_or(self.unit);
+        // The binding is a pattern (REP-25). It has to match **every** item, so
+        // a pattern that can fail is reported here rather than silently skipping
+        // the steps it does not match — a `for` has no second arm to go to.
+        let binding = match f.binding() {
+            Some(p) => {
+                let pat = self.lower_pattern(&p, item_ty);
+                if let Some(reason) = refutable_reason(&pat) {
+                    self.diag(
+                        p.syntax().text_range(),
+                        DiagCode::RefutableBinding,
+                        format!("a `for` binding must match every item, and {reason} does not"),
+                    );
+                }
+                pat
+            }
+            None => TypedPattern::Wildcard,
+        };
         let ty = self.node_ty(f.syntax());
         TypedExpr::For {
             binding,

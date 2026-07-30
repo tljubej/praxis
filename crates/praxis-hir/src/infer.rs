@@ -2515,12 +2515,18 @@ impl Inferer {
                     .unwrap_or_else(|| f.syntax().text_range()),
             );
         }
-        if let Some(name_tok) = f.binding() {
+        if let Some(pat) = f.binding() {
             if let Some(item) = item_ty {
-                self.ref_types.insert(name_tok.text_range(), item);
-                // Attach the element type as the binding's scheme (monomorphic —
-                // a loop variable is never generalized).
-                self.attach_scheme(Some(name_tok.clone()), Scheme::monotype(item));
+                // The binding is a pattern (REP-25): a bare name binds the item,
+                // and `(k, v)` unifies it with a pair. Either way it is the same
+                // walk a match arm goes through, at the element type.
+                // Keyed by the **pattern node**, which for a bare name is the
+                // same range as the name token and for `(k, v)` is a range no
+                // token has. Lowering reads it back for the item type, and a
+                // `for` binding is not an expression, so this is `ref_types`
+                // rather than the per-node expression map.
+                self.ref_types.insert(pat.syntax().text_range(), item);
+                self.infer_pattern(&pat, item);
             } else {
                 // Not iterable: emit Y005. Render the iterator type for the message.
                 let ty_str = self.db.render(iter_ty);

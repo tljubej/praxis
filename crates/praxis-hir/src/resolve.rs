@@ -831,13 +831,11 @@ impl Resolver {
             self.resolve_expr(scope, &iter);
         }
         let body_scope = self.out.scopes.push_child(scope);
-        if let Some(name_tok) = f.binding() {
-            self.bind(
-                body_scope,
-                SymbolKind::Let,
-                name_tok.text().to_string(),
-                name_tok.text_range(),
-            );
+        // The binding is a pattern (REP-25), so it declares whatever names it
+        // holds — one for `for x in …`, two for `for (k, v) in …` — through the
+        // same walk a match arm's pattern goes through.
+        if let Some(pat) = f.binding() {
+            self.resolve_pattern_bindings(body_scope, &pat);
         }
         if let Some(body) = f.body() {
             self.resolve_block_inner(body_scope, &body);

@@ -1388,12 +1388,14 @@ impl AstNode for ForExpr {
     }
 }
 impl ForExpr {
-    /// The binding name token (`for x in …` → `x`).
-    pub fn binding(&self) -> Option<SyntaxToken> {
-        self.syntax.children_with_tokens().find_map(|e| {
-            let t = e.into_token()?;
-            (t.kind() == K::Ident).then_some(t)
-        })
+    /// The binding pattern (`for x in …` → `x`, `for (k, v) in …` → `(k, v)`).
+    ///
+    /// A pattern and not a name token since REP-25: a `for` binds one value per
+    /// step, and taking that value apart is what a pattern is for. The
+    /// overwhelmingly common shape is still a single name, which is a
+    /// [`PatternKind::Name`].
+    pub fn binding(&self) -> Option<Pattern> {
+        child(&self.syntax)
     }
     /// The iterator expression (`for x in iter`).
     pub fn iter(&self) -> Option<Expr> {

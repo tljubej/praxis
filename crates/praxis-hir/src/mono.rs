@@ -401,7 +401,13 @@ fn resolve_expr(db: &mut TypeDb, binders: &[VarId], args: &[Type], e: &mut Typed
         | TypedExpr::FieldGet { ty, .. }
         | TypedExpr::TupleIndex { ty, .. }
         | TypedExpr::EnumVariant { ty, .. } => *ty = specialize_type(db, binders, args, *ty),
-        TypedExpr::For { ty, item_ty, .. } => {
+        TypedExpr::For {
+            ty,
+            item_ty,
+            binding,
+            ..
+        } => {
+            resolve_pattern(db, binders, args, binding);
             *ty = specialize_type(db, binders, args, *ty);
             *item_ty = specialize_type(db, binders, args, *item_ty);
         }

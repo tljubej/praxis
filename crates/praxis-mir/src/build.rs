@@ -1055,7 +1055,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             item_ty,
             ..
         } => {
-            lower_for(b, *binding, iter, body, *item_ty);
+            lower_for(b, binding, iter, body, *item_ty);
             lower_lit_gc(b, &Lit::Unit, espan) // for yields Unit
         }
         // A `loop` yields what its `break`s carry (TY-21).
@@ -1944,7 +1944,7 @@ fn lower_while(b: &mut Builder<'_>, cond: &TypedExpr, body: &praxis_hir::TypedBl
 /// once before the header, so the loop body always indexes a `Vec`.
 fn lower_for(
     b: &mut Builder<'_>,
-    binding: praxis_hir::SymbolId,
+    binding: &praxis_hir::TypedPattern,
     iter: &TypedExpr,
     body: &praxis_hir::TypedBlock,
     item_ty: Type,
@@ -2083,15 +2083,25 @@ fn lower_for(
     // The loop variable's slot: allocate one if the `for` binding has no slot
     // yet (it is introduced by the loop, not a `let` statement). Reads of the
     // binding inside the body resolve to this slot via `b.locals`.
-    let slot =
-        b.locals.get(&binding).copied().unwrap_or_else(|| {
-            b.alloc_gc(MirType::Known(item_ty), None, LocalDebugKind::User, None)
-        });
-    b.locals.insert(binding, slot);
+    let named = match binding {
+        praxis_hir::TypedPattern::Bind { symbol, .. } => Some(*symbol),
+        _ => None,
+    };
+    let slot = named
+        .and_then(|s| b.locals.get(&s).copied())
+        .unwrap_or_else(|| b.alloc_gc(MirType::Known(item_ty), None, LocalDebugKind::User, None));
+    if let Some(symbol) = named {
+        b.locals.insert(symbol, slot);
+    }
     b.push(Inst::MoveGc {
         dst: slot,
         src: item_gc,
     });
+    // A destructuring binding reads its components out of that same slot
+    // (REP-25). The pattern is irrefutable — HIR reported one that can fail — so
+    // there is no test and no branch: this is the binding half of
+    // `emit_pattern_test` with the testing half removed.
+    bind_components(b, slot, binding);
     let _ = lower_block_body(b, body);
     b.loop_stack.pop();
     // Falling off the end of the body reaches the increment the same way
@@ -4500,6 +4510,51 @@ impl Component {
                 src,
                 field_idx: idx,
             },
+        }
+    }
+}
+
+/// Bind the names an **irrefutable** pattern holds, reading whatever components
+/// it names out of `src` (REP-25).
+///
+/// The binding half of [`emit_pattern_test`] with the testing half removed: a
+/// `for` header has no second arm, so a pattern that can fail never reaches here
+/// (HIR reports `Y125`) and there is nothing to branch on. A `Wildcard` binds
+/// nothing and therefore reads nothing, exactly as it does in a match.
+fn bind_components(b: &mut Builder<'_>, src: LocalId, pat: &praxis_hir::TypedPattern) {
+    use praxis_hir::TypedPattern;
+    let (subpatterns, component) = match pat {
+        // The whole item, already in `src` — its slot is the caller's.
+        TypedPattern::Wildcard | TypedPattern::Bind { .. } => return,
+        // Refutable, and reported. Binding nothing is what keeps a reported
+        // program from also reading a component of a value that may not have
+        // one.
+        TypedPattern::Lit { .. } | TypedPattern::EnumVariant { .. } => return,
+        TypedPattern::Tuple { subpatterns, .. } => (subpatterns, Component::TupleElem),
+        TypedPattern::Record { subpatterns, .. } => (subpatterns, Component::RecordField),
+    };
+    for (idx, sub) in subpatterns.iter().enumerate() {
+        if matches!(sub, TypedPattern::Wildcard) {
+            continue;
+        }
+        let idx = idx as u32;
+        let component_local = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+        let inst = component.load(component_local, src, idx);
+        b.push(inst);
+        match sub {
+            // A name the loop body reads: its own slot, so the debugger shows it
+            // as the user local it is.
+            TypedPattern::Bind { symbol, .. } => {
+                let slot = b.locals.get(symbol).copied().unwrap_or_else(|| {
+                    b.alloc_gc(MirType::Opaque, None, LocalDebugKind::User, None)
+                });
+                b.locals.insert(*symbol, slot);
+                b.push(Inst::MoveGc {
+                    dst: slot,
+                    src: component_local,
+                });
+            }
+            _ => bind_components(b, component_local, sub),
         }
     }
 }

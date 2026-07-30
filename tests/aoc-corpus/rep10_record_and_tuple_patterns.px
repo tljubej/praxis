@@ -65,6 +65,16 @@ for m in moves {
 }
 out(match at { (x, y) => x * 100 + y })
 
+// A `for` binding is a pattern too (REP-25), so a pair comes apart in the header.
+let steps = Vec()
+steps.push((1, 10))
+steps.push((2, 20))
+var sum = 0
+for (weight, value) in steps {
+    sum = sum + weight * value
+}
+out(sum)
+
 // A record holding a tuple, matched in one pattern — the two composites compose
 // in both directions.
 struct Span {

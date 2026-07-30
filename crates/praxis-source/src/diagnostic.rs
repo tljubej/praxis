@@ -296,6 +296,12 @@ pub enum DiagCode {
     /// one no value can have at all (REP-10): a one-element tuple pattern, or a
     /// record pattern whose head names something that is not a record.
     NotAPatternForType,
+    /// `Y125` — a pattern that must match every value but can fail (REP-25): a
+    /// literal or a variant in a **binding** position, such as a `for` header.
+    ///
+    /// A binding has no second arm for an item to fall through to, so a pattern
+    /// that tests would silently skip the steps it does not match.
+    RefutableBinding,
     /// `Y124` — a pattern naming more sub-patterns than the variant has payload
     /// slots (REP-05).
     ///
@@ -400,6 +406,7 @@ impl DiagCode {
             UnknownEnumVariant => DiagnosticCode::new(Type, 122),
             NotAPatternForType => DiagnosticCode::new(Type, 123),
             TooManySubPatterns => DiagnosticCode::new(Type, 124),
+            RefutableBinding => DiagnosticCode::new(Type, 125),
 
             MalformedParserExpression => DiagnosticCode::new(Input, 0),
             ParserConversion => DiagnosticCode::new(Input, 1),
@@ -472,6 +479,7 @@ impl DiagCode {
             UnknownEnumVariant,
             NotAPatternForType,
             TooManySubPatterns,
+            RefutableBinding,
             MalformedParserExpression,
             ParserConversion,
             UnknownAtomic,
@@ -848,7 +856,7 @@ mod tests {
         // `ALL` holds each variant once, so its length is the variant count.
         // Update both together; the exhaustive match in `code()` is what makes
         // adding a variant a compile error in the first place.
-        assert_eq!(DiagCode::ALL.len(), 64);
+        assert_eq!(DiagCode::ALL.len(), 65);
         let unique: std::collections::HashSet<_> = DiagCode::ALL.iter().collect();
         assert_eq!(
             unique.len(),

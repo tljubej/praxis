@@ -5040,3 +5040,62 @@ fn an_updating_store_is_a_row_on_a_map_of_ints() {
     // contextual grammar rule exists to protect.
     assert_eq!(expr_type("min(3, 4) + max(3, 4)"), "Int");
 }
+
+/// **REP-25.** A `for` binding is a pattern, and it must match **every** item.
+///
+/// `for (k, v) in m` was unspellable: the header took one `Ident`, so a `Map`'s
+/// pair could only be named and then read with `kv.0`/`kv.1`. ADR-066 decision 3
+/// left the destructuring half to REP-10's grammar; this is that grammar in the
+/// one other position a binding appears.
+#[test]
+fn a_for_binding_is_a_pattern_and_must_match_every_item() {
+    // Each name binds at its own component's type, which a binding that named
+    // the whole item could not do.
+    let src = "let m = Map()\nm[\"a\"] = 1\nfor (k, v) in m { out(k) out(v) }\n";
+    assert_eq!(scheme_of(src, "k").as_deref(), Some("Text"));
+    assert_eq!(scheme_of(src, "v").as_deref(), Some("Int"));
+
+    // A record pattern in the header, at the fields' own types.
+    let src = "struct P { x: Int, tag: Text }\nlet ps = Vec()\nps.push(P { x: 1, tag: \"a\" })\n\
+               for P { x, tag } in ps { out(x) out(tag) }\n";
+    assert_eq!(scheme_of(src, "x").as_deref(), Some("Int"));
+    assert_eq!(scheme_of(src, "tag").as_deref(), Some("Text"));
+
+    // A bare name still binds the whole item — the overwhelmingly common shape,
+    // and the one every existing program is written with.
+    let src = "let v = Vec()\nv.push((1, 2))\nfor kv in v { out(kv.0) }\n";
+    assert_eq!(scheme_of(src, "kv").as_deref(), Some("(Int, Int)"));
+
+    // The pattern is checked against the element type like any other, so a shape
+    // the item cannot have is the ordinary mismatch.
+    let diags = analyze_and_lower_diags("let v = Vec()\nv.push(1)\nfor (a, b) in v { out(a) }\n");
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y001"),
+        "expected Y001, got {diags:?}"
+    );
+
+    // **A binding has no second arm**, so a pattern that can fail is `Y125` —
+    // both spellings, and at any depth.
+    for src in [
+        "let v = Vec()\nv.push(Some(1))\nfor Some(n) in v { out(n) }\n",
+        "let v = Vec()\nv.push((1, 2))\nfor (1, b) in v { out(b) }\n",
+        "let v = Vec()\nv.push((1, (2, 3)))\nfor (a, (2, c)) in v { out(c) }\n",
+    ] {
+        let diags = analyze_and_lower_diags(src);
+        assert!(
+            diags.iter().any(|d| d.code().to_string() == "Y125"),
+            "{src} must be Y125, got {diags:?}"
+        );
+    }
+
+    // …and the irrefutable shapes are all still accepted, including the wildcard
+    // and a partial record pattern.
+    for src in [
+        "let v = Vec()\nv.push(1)\nfor _ in v { out(0) }\n",
+        "let v = Vec()\nv.push((1, 2))\nfor (a, _) in v { out(a) }\n",
+        "struct P { x: Int, y: Int }\nlet ps = Vec()\nps.push(P { x: 1, y: 2 })\n\
+         for P { x } in ps { out(x) }\n",
+    ] {
+        assert!(is_clean_with_lower(src), "{src} must be accepted");
+    }
+}
