@@ -180,7 +180,6 @@ fn zip_materializes_both_tuple_elements() {
 }
 
 #[test]
-#[ignore = "known bug: take counts source indices after a filter"]
 fn take_after_filter_counts_filtered_elements_not_source_indices() {
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter(|x| x % 2 == 0).take(2).sum()\n}\n",
@@ -190,7 +189,6 @@ fn take_after_filter_counts_filtered_elements_not_source_indices() {
 }
 
 #[test]
-#[ignore = "known bug: skip counts source indices after a filter"]
 fn skip_after_filter_counts_filtered_elements_not_source_indices() {
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(6)\n  v.filter(|x| x % 2 == 0).skip(1).sum()\n}\n",
@@ -200,7 +198,6 @@ fn skip_after_filter_counts_filtered_elements_not_source_indices() {
 }
 
 #[test]
-#[ignore = "known bug: zip indexes the rhs with sparse pre-filter indices"]
 fn zip_after_filter_uses_dense_filtered_positions() {
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  let rhs = Vec()\n  rhs.push(10)\n  rhs.push(20)\n  v.filter(|x| x % 2 == 0).zip(rhs).count()\n}\n",
@@ -214,7 +211,6 @@ fn zip_after_filter_uses_dense_filtered_positions() {
 }
 
 #[test]
-#[ignore = "known bug: position reports the sparse source index after filter"]
 fn position_after_filter_reports_the_filtered_sequence_index() {
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.filter(|x| x % 2 == 0).position(|x| x == 4)\n}\n",
@@ -237,7 +233,6 @@ fn two_flat_map_stages_compose_without_a_compiler_panic() {
 }
 
 #[test]
-#[ignore = "known bug: take inside flat_map resets for every inner sequence"]
 fn take_after_flat_map_counts_the_global_flattened_stream() {
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let inner = Vec()\n    inner.push(x)\n    inner\n  }).take(1).count()\n}\n",
@@ -247,7 +242,6 @@ fn take_after_flat_map_counts_the_global_flattened_stream() {
 }
 
 #[test]
-#[ignore = "known bug: position inside flat_map reports a per-inner index"]
 fn position_after_flat_map_uses_the_global_flattened_index() {
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let inner = Vec()\n    inner.push(x)\n    inner\n  }).position(|x| x == 2)\n}\n",

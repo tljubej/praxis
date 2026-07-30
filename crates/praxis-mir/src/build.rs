@@ -2586,6 +2586,14 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
         _ => None,
     };
 
+    // `find`/`position` report a position, so like the stages that consume one
+    // they get a dense counter — allocated here, before the scaffold, so a
+    // splice cannot re-zero it (MIR-04, MIR-07).
+    let sink_position = match &sink {
+        Sink::Find(_) | Sink::Position(_) => Some(alloc_zeroed_counter(b)),
+        _ => None,
+    };
+
     // ---- The loop scaffold: header / body / increment / exit ---------------
     //
     // `exit` is *the* pipeline exit, and there is exactly one however deeply the
@@ -2624,8 +2632,9 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
         seen_flag,
         collect_vec,
         closure: sink_closure_slot,
+        position: sink_position,
     };
-    emit_plan(b, &steps, item, idx, &sink_plan, incr_blk, exit);
+    emit_plan(b, &steps, item, &sink_plan, incr_blk, exit);
 
     // Increment block: `idx += 1`, jump to header.
     b.cur = incr_blk;
@@ -2647,18 +2656,26 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
 
 /// A pipeline stage with everything it needs already lowered to slots: the
 /// closure or second source is a `LocalId`, not a position in a shared
-/// iterator.
+/// iterator, and a stage that needs a position owns the counter that gives it
+/// one.
+///
+/// **A stage's index is the sequence that reaches it** (MIR-04). Four stages
+/// ask "which element is this?" and the honest answer is different for each of
+/// them: after a `filter`, `take(2)` means the first two *surviving* elements,
+/// and `enumerate` numbers 0, 1, 2 without gaps. There used to be one index —
+/// the source cursor — and all four read it, so `v.filter(even).take(2)` took
+/// whatever survived among source positions 0 and 1. Each of them carries its
+/// own `count` slot now, bumped once per element that arrives, and the source
+/// cursor is not in scope here at all.
 enum Step {
     Map(LocalId),
     Filter(LocalId),
     FilterMap(LocalId),
-    /// The slot holding the already-evaluated bound.
-    Take(LocalId),
-    /// The slot holding the already-evaluated bound.
-    Skip(LocalId),
+    Take { bound: LocalId, count: LocalId },
+    Skip { bound: LocalId, count: LocalId },
     TakeWhile(LocalId),
-    Enumerate,
-    Zip(LocalId),
+    Enumerate { count: LocalId },
+    Zip { other: LocalId, count: LocalId },
 }
 
 /// The lowered mirror of [`Chain`]: the same shape, with every argument
@@ -2680,11 +2697,17 @@ struct SinkPlan<'a> {
     seen_flag: Option<LocalId>,
     collect_vec: Option<LocalId>,
     closure: Option<LocalId>,
+    /// `find`/`position` report an index, so they are position-consuming like
+    /// the four stages that are, and they get a dense counter for the same
+    /// reason: the answer is the position in the sequence that reached the
+    /// sink, not in the source (MIR-04).
+    position: Option<LocalId>,
 }
 
-/// Allocate a zeroed `Gc` Int slot: a loop cursor. `Gc` rather than `Scalar`
-/// because it is live across the `praxis_vec_get` safepoints in the loop body
-/// and the collector has to see a real value there (ADR-015 §10.3).
+/// Allocate a zeroed `Gc` Int slot: a loop cursor or a stage's dense counter.
+/// `Gc` rather than `Scalar` because it is live across the `praxis_vec_get`
+/// safepoints in the loop body and the collector has to see a real value there
+/// (ADR-015 §10.3).
 fn alloc_zeroed_counter(b: &mut Builder<'_>) -> LocalId {
     let slot = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     let zero = b.alloc_scalar(ScalarKind::Int);
@@ -2703,10 +2726,18 @@ fn alloc_zeroed_counter(b: &mut Builder<'_>) -> LocalId {
 }
 
 /// Lower every argument the chain evaluates outside the loop — each stage's
-/// closure or second source — into a [`Plan`] of the same shape.
+/// closure or second source — into a [`Plan`] of the same shape, and allocate
+/// the dense counter of each stage that needs a position.
 ///
 /// Order matters and is the chain's own: source-side stages first, exactly as
 /// the eager spelling would evaluate them.
+///
+/// The counters are allocated **here**, which is before the loop scaffold, and
+/// that placement is MIR-07 (there is nothing else to it). A counter zeroed
+/// inside the outer loop body would restart for every inner Vec of a
+/// `flat_map`, which is what the old inner index did: `take(1)` after a
+/// `flat_map` kept the first element of *each* inner sequence. Zeroed once, a
+/// counter counts the flattened stream by construction.
 fn lower_chain(b: &mut Builder<'_>, chain: &Chain) -> Plan {
     match chain {
         Chain::Then(stage, rest) => {
@@ -2715,10 +2746,21 @@ fn lower_chain(b: &mut Builder<'_>, chain: &Chain) -> Plan {
                 Stage::Filter(p) => Step::Filter(lower_expr_gc(b, p)),
                 Stage::FilterMap(f) => Step::FilterMap(lower_expr_gc(b, f)),
                 Stage::TakeWhile(p) => Step::TakeWhile(lower_expr_gc(b, p)),
-                Stage::Zip(other) => Step::Zip(lower_expr_gc(b, other)),
-                Stage::Take(n) => Step::Take(lower_expr_gc(b, n)),
-                Stage::Skip(n) => Step::Skip(lower_expr_gc(b, n)),
-                Stage::Enumerate => Step::Enumerate,
+                Stage::Zip(other) => Step::Zip {
+                    other: lower_expr_gc(b, other),
+                    count: alloc_zeroed_counter(b),
+                },
+                Stage::Take(n) => Step::Take {
+                    bound: lower_expr_gc(b, n),
+                    count: alloc_zeroed_counter(b),
+                },
+                Stage::Skip(n) => Step::Skip {
+                    bound: lower_expr_gc(b, n),
+                    count: alloc_zeroed_counter(b),
+                },
+                Stage::Enumerate => Step::Enumerate {
+                    count: alloc_zeroed_counter(b),
+                },
             };
             Plan::Step(step, Box::new(lower_chain(b, rest)))
         }
@@ -2740,19 +2782,24 @@ fn lower_chain(b: &mut Builder<'_>, chain: &Chain) -> Plan {
 /// `continue_target` is the *innermost* increment block: a `Splice` rebinds it
 /// to its own, because while a splice is running "advance to the next element"
 /// means the next inner element.
+///
+/// Note what is **not** a parameter: the loop's index. A source cursor is the
+/// business of the loop that owns it — the header's bounds check and the
+/// `praxis_vec_get` that loads the element — and no stage may read it. Each
+/// stage that needs a position carries its own dense counter (MIR-04), and
+/// making the cursor unreachable from here is what keeps it that way.
 fn emit_plan(
     b: &mut Builder<'_>,
     plan: &Plan,
     item: LocalId,
-    idx: LocalId,
     sink: &SinkPlan<'_>,
     continue_target: BlockId,
     pipeline_exit: BlockId,
 ) {
     match plan {
         Plan::Step(step, rest) => {
-            let next = emit_step(b, step, item, idx, continue_target, pipeline_exit);
-            emit_plan(b, rest, next, idx, sink, continue_target, pipeline_exit);
+            let next = emit_step(b, step, item, continue_target, pipeline_exit);
+            emit_plan(b, rest, next, sink, continue_target, pipeline_exit);
         }
         Plan::Splice { f, rest } => {
             // f(item) -> Vec[U]; the rest of the chain runs once per member.
@@ -2760,7 +2807,7 @@ fn emit_plan(
             emit_splice(b, inner, rest, sink, continue_target, pipeline_exit);
         }
         Plan::Sink => {
-            emit_sink_body(b, sink, item, idx, continue_target, pipeline_exit);
+            emit_sink_body(b, sink, item, continue_target, pipeline_exit);
             // Normal sink completion: fall through to the increment block. (A
             // sink that short-circuits — any/all/find — emitted its own jump to
             // the pipeline exit and left `b.cur` dead, in which case this jump
@@ -2782,7 +2829,6 @@ fn emit_step(
     b: &mut Builder<'_>,
     step: &Step,
     item: LocalId,
-    idx: LocalId,
     continue_target: BlockId,
     pipeline_exit: BlockId,
 ) -> LocalId {
@@ -2818,12 +2864,13 @@ fn emit_step(
             b.cur = keep_blk;
             item
         }
-        Step::Take(bound) => {
-            // If idx >= n → stop the stream; else fall through. A bound of zero
-            // or less stops before the first element, and a negative `skip`
-            // drops nothing: same comparison the literal-only path used, so the
-            // edge cases are the ones it already had.
-            let stop = idx_cmp_bound(b, idx, *bound, CmpOp::Ge);
+        Step::Take { bound, count } => {
+            // If this stage has already passed `n` elements → stop the stream;
+            // else fall through. A bound of zero or less stops before the first
+            // element, and a negative `skip` drops nothing: same comparison the
+            // literal-only path used, so the edge cases are the ones it had.
+            let seen = take_position(b, *count);
+            let stop = position_cmp_bound(b, seen, *bound, CmpOp::Ge);
             let keep_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: stop,
@@ -2833,9 +2880,11 @@ fn emit_step(
             b.cur = keep_blk;
             item
         }
-        Step::Skip(bound) => {
-            // If idx < n → skip (jump to the continue target); else fall through.
-            let skip = idx_cmp_bound(b, idx, *bound, CmpOp::Lt);
+        Step::Skip { bound, count } => {
+            // If this is among the first `n` elements to reach the stage → drop
+            // it (jump to the continue target); else fall through.
+            let seen = take_position(b, *count);
+            let skip = position_cmp_bound(b, seen, *bound, CmpOp::Lt);
             let keep_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: skip,
@@ -2845,14 +2894,17 @@ fn emit_step(
             b.cur = keep_blk;
             item
         }
-        Step::Enumerate => {
-            // Replace item with (idx, item). idx is already a Gc Int slot; copy
-            // it so the tuple owns a stable value.
+        Step::Enumerate { count } => {
+            // Replace item with (n, item), where n is this element's position in
+            // the sequence that reached `enumerate` — dense, so a `filter` in
+            // front of it numbers 0, 1, 2 rather than leaving gaps. The counter
+            // is a Gc Int slot already; copy it so the tuple owns a stable value.
             let idx_copy = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
             b.push(Inst::MoveGc {
                 dst: idx_copy,
-                src: idx,
+                src: *count,
             });
+            emit_increment(b, *count);
             let tup = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
             b.push(Inst::Alloc {
                 dst: tup,
@@ -2869,9 +2921,12 @@ fn emit_step(
             });
             tup
         }
-        Step::Zip(other) => {
-            // Stop if idx >= other.len(); else pair (item, other.get(idx)).
-            let stop = idx_ge_len(b, *other, idx);
+        Step::Zip { other, count } => {
+            // Pair the nth element to reach `zip` with `other[n]`, stopping at
+            // the shorter length. `n` is dense: after a `filter`, the surviving
+            // elements pair with `other[0]`, `other[1]`, … rather than with
+            // whatever the source positions happened to be.
+            let stop = idx_ge_len(b, *other, *count);
             let pair_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: stop,
@@ -2883,11 +2938,12 @@ fn emit_step(
             b.push(Inst::Call {
                 dst: other_item,
                 callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
-                args: vec![*other, idx],
+                args: vec![*other, *count],
                 roots: RootSlots::unannotated(),
                 debug: DebugSlots::unannotated(),
             });
             b.check_fault();
+            emit_increment(b, *count);
             let tup = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
             b.push(Inst::Alloc {
                 dst: tup,
@@ -2945,16 +3001,11 @@ fn emit_splice(
     // The rest of the chain, per inner element. "Continue" now means the inner
     // increment — the element that advances is the inner one — but the exit is
     // still the pipeline's: a `take` or an `any` that fires in here has answered
-    // for the whole chain, not for this inner Vec (MIR-08).
-    emit_plan(
-        b,
-        rest,
-        inner_item,
-        inner_idx,
-        sink,
-        inner_incr,
-        pipeline_exit,
-    );
+    // for the whole chain, not for this inner Vec (MIR-08). `inner_idx` is this
+    // loop's own cursor and goes no further than its bounds check and its
+    // `praxis_vec_get`; the stages downstream count the flattened stream through
+    // counters that were zeroed before the outer loop (MIR-07).
+    emit_plan(b, rest, inner_item, sink, inner_incr, pipeline_exit);
 
     // Inner increment block: `inner_idx += 1`, jump to the inner header. (NOT
     // the header directly from the body — jumping there skips the increment and
@@ -2969,26 +3020,44 @@ fn emit_splice(
     jump_and_go_dead(b, outer_continue);
 }
 
-/// Emit `idx <op> bound` as a Bool scalar and return it. Used by Take/Skip.
+/// Read a stage's dense counter and bump it, returning the value *before* the
+/// bump as an Int scalar: the number of elements that reached this stage ahead
+/// of this one, which is this element's position in the stage's own input
+/// sequence (MIR-04).
+///
+/// Read-then-increment, so the first element to arrive is at position zero.
+fn take_position(b: &mut Builder<'_>, count: LocalId) -> LocalId {
+    let seen = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ExtractScalar {
+        dst: seen,
+        src: count,
+        scalar: ScalarKind::Int,
+    });
+    emit_increment(b, count);
+    seen
+}
+
+/// Emit `position <op> bound` as a Bool scalar and return it. Used by
+/// Take/Skip.
 ///
 /// `bound` is a `Gc` Int slot written once before the loop, and the payload is
 /// re-extracted here on every iteration rather than hoisted into a scalar the
 /// loop carries: a scalar live across the body's safepoints is exactly what
 /// ADR-015 §10.3 says not to build, and the extract is a load.
 ///
-/// This replaced an `idx <op> <literal>` helper. The bound used to have to *be*
-/// a literal — `classify_stage` matched `take`/`skip` only against
+/// This replaced an `idx <op> <literal>` helper, twice over. The bound used to
+/// have to *be* a literal — `classify_stage` matched `take`/`skip` only against
 /// `Lit::Int`, and any other well-typed `Int` expression made the recognizer
 /// decline the whole chain, which fell through to an eager lowerer with no
 /// `take` arm and returned the Unit singleton for the enclosing chain to
-/// misread as a Vec (MIR-03).
-fn idx_cmp_bound(b: &mut Builder<'_>, idx: LocalId, bound: LocalId, op: CmpOp) -> LocalId {
-    let idx_scalar = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ExtractScalar {
-        dst: idx_scalar,
-        src: idx,
-        scalar: ScalarKind::Int,
-    });
+/// misread as a Vec (MIR-03). And the left-hand side used to be the source
+/// cursor rather than the stage's own count (MIR-04).
+fn position_cmp_bound(
+    b: &mut Builder<'_>,
+    position: LocalId,
+    bound: LocalId,
+    op: CmpOp,
+) -> LocalId {
     let bound_scalar = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ExtractScalar {
         dst: bound_scalar,
@@ -2999,13 +3068,14 @@ fn idx_cmp_bound(b: &mut Builder<'_>, idx: LocalId, bound: LocalId, op: CmpOp) -
     b.push(Inst::IntCmp {
         dst,
         op,
-        lhs: idx_scalar,
+        lhs: position,
         rhs: bound_scalar,
     });
     dst
 }
 
-/// Emit `idx >= other.len()` as a Bool scalar (used by Zip's stop condition).
+/// Emit `idx >= other.len()` as a Bool scalar (used by Zip's stop condition,
+/// where `idx` is `zip`'s own dense counter rather than the source cursor).
 fn idx_ge_len(b: &mut Builder<'_>, other: LocalId, idx: LocalId) -> LocalId {
     let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
@@ -3248,7 +3318,8 @@ fn emit_empty_collection_guard(b: &mut Builder<'_>, seen: LocalId) {
     b.cur = have;
 }
 
-/// Emit `idx += 1` (extract, add, re-materialize into the Gc slot).
+/// Emit `slot += 1` (extract, add, re-materialize into the Gc slot). Used for a
+/// loop cursor and for a stage's dense counter alike.
 fn emit_increment(b: &mut Builder<'_>, idx: LocalId) {
     let cur = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ExtractScalar {
@@ -3259,7 +3330,12 @@ fn emit_increment(b: &mut Builder<'_>, idx: LocalId) {
     let one = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ConstInt { dst: one, value: 1 });
     let next = b.alloc_scalar(ScalarKind::Int);
-    // A loop index bump, bounded by the source collection's length.
+    // A bump of one per element the loop visits, and `Bounded` is a claim about
+    // this site (ADR-044 decision 6): a cursor is bounded by its collection's
+    // length, and a stage's dense counter by the number of elements the loop can
+    // deliver — which a `flat_map` makes the length of the *flattened* stream,
+    // still bounded by what the process can allocate. Making these `Checked`
+    // would buy nothing and cost a fault test per element.
     b.push(Inst::IntBinOp {
         dst: next,
         op: IntBinOp::Add,
@@ -3308,7 +3384,6 @@ fn emit_sink_body(
     b: &mut Builder<'_>,
     plan: &SinkPlan<'_>,
     item: LocalId,
-    idx: LocalId,
     continue_target: BlockId,
     pipeline_exit: BlockId,
 ) {
@@ -3319,6 +3394,7 @@ fn emit_sink_body(
         seen_flag,
         collect_vec,
         closure: sink_closure_slot,
+        position,
     } = *plan;
     match sink {
         Sink::Sum | Sink::Product => {
@@ -3473,6 +3549,7 @@ fn emit_sink_body(
         }
         Sink::Find(_) | Sink::Position(_) => {
             let acc = acc_scalar.unwrap();
+            let count = position.expect("find/position carry a dense counter");
             let pred = sink_closure_slot.unwrap();
             let keep = call_predicate(b, pred, item);
             let found_blk = b.func.new_block();
@@ -3482,16 +3559,21 @@ fn emit_sink_body(
                 then_block: found_blk,
                 else_block: cont_blk,
             };
+            // On a hit, the answer is the position in the sequence that reached
+            // the sink: the counter's value before this element was counted.
             b.cur = found_blk;
-            let idx_scalar = b.alloc_scalar(ScalarKind::Int);
+            let position_scalar = b.alloc_scalar(ScalarKind::Int);
             b.push(Inst::ExtractScalar {
-                dst: idx_scalar,
-                src: idx,
+                dst: position_scalar,
+                src: count,
                 scalar: ScalarKind::Int,
             });
-            move_scalar(b, acc, idx_scalar);
+            move_scalar(b, acc, position_scalar);
             jump_and_go_dead(b, pipeline_exit);
+            // On a miss, count the element and go on. (There is no bump on the
+            // hit path because that path leaves the pipeline.)
             b.cur = cont_blk;
+            emit_increment(b, count);
         }
         Sink::Fold { .. } => {
             let acc = acc_gc.unwrap();

@@ -1733,6 +1733,18 @@ fn pipeline_fused_chain_survives_gc_stress() {
     // (since 2*i > 100 ⟺ i > 50): 2 * (sum(1..=299) - sum(1..=50))
     // = 2 * (44850 - 1275) = 2 * 43575 = 87150.
     assert_eq!(result.as_int(), 87150);
+
+    // The same stress over stages that own a *dense counter* (MIR-04). Each
+    // counter is a `Gc` Int slot live across every `praxis_vec_get` safepoint in
+    // the loop, exactly like the source cursor, so a root set that did not cover
+    // them would hand the collector a stale word — and after MIR-01/MIR-02, a
+    // slot the liveness pass misses is nulled rather than merely stale.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  var t = 0\n  for p in v.filter(|x| x > 100).enumerate().take(3).collect() { t = t + p.0 * 1000 + p.1 }\n  t\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    // Filtered is 101..=299; enumerate numbers it densely from zero; take(3)
+    // keeps (0,101), (1,102), (2,103) → 101 + 1102 + 2103 = 3306.
+    assert_eq!(result.as_int(), 3306);
 }
 
 #[test]
@@ -1969,6 +1981,76 @@ fn pipeline_enumerate_count() {
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
+}
+
+/// **MIR-04's `enumerate` half.** The audit's row named take/skip/zip/find/
+/// position and omitted `enumerate`, and the one test that reads an enumerate
+/// pair's payloads has no `filter` in front of it — so nothing covered the
+/// numbering itself.
+///
+/// `enumerate` numbers the sequence that reaches it. After a `filter` that is a
+/// dense 0, 1, 2 …, not the surviving source positions.
+#[test]
+fn enumerate_after_filter_numbers_the_filtered_sequence() {
+    // [1,2,3,4] -filter(even)-> [2,4] -enumerate-> (0,2), (1,4).
+    // Weighted 100*index + value: 2 + 104 = 106. Reading source indices would
+    // give (1,2), (3,4) → 406, and a swap of the halves gives something else
+    // again.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var t = 0\n  for p in v.filter(|x| x % 2 == 0).enumerate().collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 106);
+
+    // And after a `skip`, which drops from the front: [1,2,3,4].skip(2) is
+    // [3,4], numbered (0,3), (1,4) → 3 + 104 = 107.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var t = 0\n  for p in v.skip(2).enumerate().collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 107);
+}
+
+/// **The rule S21 is named for.** Every stage that asks "which element is this?"
+/// is asking about *its own* input sequence — the one that reaches it — not
+/// about the source.
+///
+/// One shared counter answers all the single-stage cases correctly, which is
+/// why the audit's per-stage regressions do not force the general rule. These
+/// are the shapes that do: two position-consuming stages with a `filter`
+/// between them, where one counter and two counters disagree.
+#[test]
+fn each_stage_counts_the_sequence_that_reaches_it() {
+    // [1..6].skip(1) = [2,3,4,5,6]; filter(even) = [2,4,6]; take(2) = [2,4].
+    // Sum 6. With one source cursor, `take` stops once the *source* index
+    // reaches 2, so only the 2 survives and the answer is 2.
+    let six = "  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.push(6)\n";
+    let answer = |tail: &str| {
+        let (rt, result) = run_main(&format!("fn main() -> Int {{\n{six}  {tail}\n}}\n"));
+        assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+        result.as_int()
+    };
+    assert_eq!(answer("v.skip(1).filter(|x| x % 2 == 0).take(2).sum()"), 6);
+    // Two `skip`s around a filter: [1..6] -skip(1)-> [2..6] -filter(even)->
+    // [2,4,6] -skip(1)-> [4,6], sum 10.
+    assert_eq!(answer("v.skip(1).filter(|x| x % 2 == 0).skip(1).sum()"), 10);
+    // A `zip` behind a filter pairs by the filtered position, and a `take`
+    // behind the zip counts the pairs: [2,4,6] zipped with [10,20,30] is three
+    // pairs, of which two are taken.
+    assert_eq!(
+        answer(
+            "let rhs = Vec()\n  rhs.push(10)\n  rhs.push(20)\n  rhs.push(30)\n  v.filter(|x| x % 2 == 0).zip(rhs).take(2).count()"
+        ),
+        2
+    );
+
+    // `position` reports the position in the sequence that reached the sink, and
+    // it must not be overwritten by a later match — which is what happens when a
+    // hit inside a `flat_map` ends only the inner loop. The inner Vecs here are
+    // [0, 5] and [10]: flattened, the first element over 4 is at index 1;
+    // per-inner, the first Vec answers 1 and the second overwrites it with 0.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let r = Vec()\n    if x == 1 { r.push(0) }\n    r.push(x * 5)\n    r\n  }).position(|p| p > 4)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1, "the flattened stream's index, once");
 }
 
 #[test]
