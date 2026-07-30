@@ -249,6 +249,12 @@ pub enum DiagCode {
     UnknownEnumVariant,
     /// `Y123` — a pattern whose shape cannot match the scrutinee (HIR-06).
     NotAPatternForType,
+    /// `Y124` — a pattern naming more sub-patterns than the variant has payload
+    /// slots (REP-05).
+    ///
+    /// Only *more*: naming fewer is legal and is padded with wildcards, so
+    /// `Some`, `Some(_)` and `Some(n)` are one test (HIR-06).
+    TooManySubPatterns,
 
     // --- Input (`I0xx`) ---
     /// `I000` — a parser expression the lowerer cannot read at all.
@@ -341,6 +347,7 @@ impl DiagCode {
             UnreachableArm => DiagnosticCode::new(Type, 121),
             UnknownEnumVariant => DiagnosticCode::new(Type, 122),
             NotAPatternForType => DiagnosticCode::new(Type, 123),
+            TooManySubPatterns => DiagnosticCode::new(Type, 124),
 
             MalformedParserExpression => DiagnosticCode::new(Input, 0),
             ParserConversion => DiagnosticCode::new(Input, 1),
@@ -407,6 +414,7 @@ impl DiagCode {
             UnreachableArm,
             UnknownEnumVariant,
             NotAPatternForType,
+            TooManySubPatterns,
             MalformedParserExpression,
             ParserConversion,
             UnknownAtomic,
@@ -783,7 +791,7 @@ mod tests {
         // `ALL` holds each variant once, so its length is the variant count.
         // Update both together; the exhaustive match in `code()` is what makes
         // adding a variant a compile error in the first place.
-        assert_eq!(DiagCode::ALL.len(), 58);
+        assert_eq!(DiagCode::ALL.len(), 59);
         let unique: std::collections::HashSet<_> = DiagCode::ALL.iter().collect();
         assert_eq!(
             unique.len(),

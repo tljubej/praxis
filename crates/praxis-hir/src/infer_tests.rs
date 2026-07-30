@@ -3831,3 +3831,89 @@ fn a_generic_fn_used_as_a_value_is_reported_rather_than_run() {
         "fn id(x) { x }\nfn main() -> Int { id(3) }\n"
     ));
 }
+
+/// **REP-06.** A `struct`/`enum` inside a function body is reported where it is
+/// written, not left silent.
+///
+/// `register_top_level` walks the source file's own statements, so a nested
+/// declaration got no symbol, no type and **no diagnostic**: declaring one was
+/// accepted in silence, and using it was an `N001` about a name written two lines
+/// above. It is `N005` now — the code a nested `fn` already uses (TY-23), because
+/// it is the same mistake, and a *use* still reports its own `N001` exactly as it
+/// does for a nested `fn`.
+#[test]
+fn a_nested_type_declaration_is_reported_at_the_declaration() {
+    // Declared and never used: this was complete silence.
+    for src in [
+        "fn main() -> Int {\n  struct Inner { a: Int }\n  3\n}",
+        "fn main() -> Int {\n  enum Inner { On, Off }\n  3\n}",
+        // Nested inside a block inside a function, which is the same position.
+        "fn main() -> Int {\n  if true {\n    struct Inner { a: Int }\n  }\n  3\n}",
+    ] {
+        let analysis = analyze(src);
+        assert!(
+            analysis
+                .diagnostics
+                .iter()
+                .any(|d| d.kind() == praxis_source::DiagCode::NestedFunction),
+            "{src} must report N005, got {:?}",
+            analysis.diagnostics
+        );
+    }
+
+    // …and the four top-level declaration kinds are untouched.
+    assert!(is_clean_with_lower(
+        "struct Point { x: Int, y: Int }\n\
+         enum Flag { On, Off }\n\
+         fn get(p: Point) -> Int { p.x }\n\
+         fn main() -> Int { get(Point { x: 1, y: 2 }) }\n"
+    ));
+    // A top-level `let`/`var` beside them, so "top level" is the file and not
+    // "the first statement".
+    assert!(is_clean_with_lower(
+        "let base = 1\nstruct Point { x: Int }\nfn main() -> Int { base }\n"
+    ));
+}
+
+/// **REP-05.** A pattern naming more sub-patterns than the variant holds is
+/// reported; naming fewer is still the padding rule.
+///
+/// `match w { Wrap(a, b) => a }` against a one-slot variant **compiled and ran**,
+/// answering the payload: `b` was lowered (so a mistake inside it still reported)
+/// and then dropped. Truncating is strictly safer than the payload read past the
+/// end it replaced — which is why it stays — but accepting is not the answer.
+/// `Y122` and `Y123` covered the two neighbouring mistakes and this one had no
+/// code; it is `Y124` now.
+#[test]
+fn a_pattern_naming_more_values_than_the_variant_holds_is_reported() {
+    let diags = analyze_and_lower_diags(
+        "enum W { Wrap(Int) }\n\
+         fn main() -> Int {\n  let w = Wrap(7)\n  match w { Wrap(a, b) => a }\n}",
+    );
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y124"),
+        "expected Y124, got {diags:?}"
+    );
+
+    // A payload-less variant holds nothing, so *any* sub-pattern is too many.
+    let diags = analyze_and_lower_diags(
+        "enum W { Empty, Wrap(Int) }\n\
+         fn main() -> Int {\n  let w = Empty\n  match w { Empty(a) => 1, Wrap(n) => n }\n}",
+    );
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y124"),
+        "a payload-less variant names zero values: {diags:?}"
+    );
+
+    // …and naming *fewer* is legal at every count — HIR-06's padding rule, which
+    // is why the check is one-sided.
+    for src in [
+        "enum W { Wrap(Int) }\nfn main() -> Int { let w = Wrap(7)\n match w { Wrap => 1 } }",
+        "enum W { Wrap(Int) }\nfn main() -> Int { let w = Wrap(7)\n match w { Wrap(_) => 1 } }",
+        "enum W { Wrap(Int) }\nfn main() -> Int { let w = Wrap(7)\n match w { Wrap(n) => n } }",
+        "enum P { Pair(Int, Int) }\nfn main() -> Int { let p = Pair(1, 2)\n match p { Pair(a) => a } }",
+        "enum P { Pair(Int, Int) }\nfn main() -> Int { let p = Pair(1, 2)\n match p { Pair(a, b) => a + b } }",
+    ] {
+        assert!(is_clean_with_lower(src), "{src} must still be accepted");
+    }
+}

@@ -2223,9 +2223,24 @@ impl<'a> Lowerer<'a> {
                 // Exactly one sub-pattern per payload slot (HIR-06). A pattern
                 // that names fewer is padded with wildcards — `Some` and
                 // `Some(_)` are the same test — and one that names *more* is
-                // truncated: the extras are lowered above so anything wrong
-                // inside them still reports, but a slot the variant does not
-                // have would make MIR read a payload index past the object.
+                // reported and then truncated (REP-05): the extras are lowered
+                // above so anything wrong inside them still reports, truncating
+                // is what keeps MIR from reading a payload index past the object,
+                // and the report is what stops `Wrap(a, b)` on a one-slot variant
+                // from *compiling and running*.
+                if sub_pats.len() > payload_types.len() {
+                    let rendered = self.db.render(resolved);
+                    let want = payload_types.len();
+                    let got = sub_pats.len();
+                    self.diag(
+                        at,
+                        DiagCode::TooManySubPatterns,
+                        format!(
+                            "`{vname}` in `{rendered}` holds {want} value(s), \
+                             but this pattern names {got}"
+                        ),
+                    );
+                }
                 subpatterns.resize(payload_types.len(), TypedPattern::Wildcard);
                 TypedPattern::EnumVariant {
                     enum_def_id,

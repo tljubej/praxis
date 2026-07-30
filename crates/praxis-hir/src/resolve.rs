@@ -33,7 +33,8 @@ use praxis_syntax::SyntaxKind;
 use rowan::{NodeOrToken, TextRange};
 
 use crate::diagnostics::{
-    duplicate_declaration, name_is_not_a_type, nested_function, unknown_type, unresolved_name,
+    duplicate_declaration, name_is_not_a_type, nested_declaration, nested_function, unknown_type,
+    unresolved_name,
 };
 use crate::name_table::NameTable;
 use crate::scope::{ScopeId, ScopeTree};
@@ -190,8 +191,16 @@ impl Resolver {
     /// declare it?" keeps this answer independent of TY-24's duplicate case,
     /// which also leaves a `fn` undeclared.
     fn is_top_level(&self, item: &FnItem) -> bool {
-        item.syntax()
-            .parent()
+        self.is_node_top_level(item.syntax())
+    }
+
+    /// Whether `node` is a direct child of the source file — the only place a
+    /// declaration may appear (§4.5, §4.6, TY-23/REP-06).
+    ///
+    /// The same question for a `struct`/`enum` as [`is_top_level`](Self::is_top_level)
+    /// asks for a `fn`, and asked once so the three answers cannot diverge.
+    fn is_node_top_level(&self, node: &praxis_syntax::SyntaxNode) -> bool {
+        node.parent()
             .is_some_and(|p| p.kind() == SyntaxKind::SOURCE_FILE)
     }
 
@@ -328,9 +337,40 @@ impl Resolver {
         }
     }
 
+    /// Report a `struct`/`enum` declared inside a function body (REP-06).
+    ///
+    /// `register_top_level` walks the source file's own statements, so a nested
+    /// declaration was never registered: it had no symbol, no type, and **no
+    /// diagnostic**. Using it was an `N001` about a name declared two lines
+    /// above, and not using it was silence.
+    ///
+    /// `N005` is the code a nested `fn` already uses (TY-23) and this is the same
+    /// mistake, so it is the same code — ADR-051 is amended rather than extended.
+    /// The report is at the declaration; a *use* still reports its own `N001`,
+    /// exactly as it does for a nested `fn`, because the name is genuinely not
+    /// bound and suppressing that would need a symbol the pass deliberately does
+    /// not mint.
+    fn reject_nested_type_decl(
+        &mut self,
+        node: &praxis_syntax::SyntaxNode,
+        name: Option<praxis_syntax::SyntaxToken>,
+    ) {
+        if self.is_node_top_level(node) {
+            return;
+        }
+        if let Some(name_tok) = name {
+            let span = range_to_span(name_tok.text_range());
+            let at = self.file_span(span);
+            self.out
+                .diagnostics
+                .push(nested_declaration(at, name_tok.text()));
+        }
+    }
+
     /// Resolve a `struct Name { field: Type, … }` declaration (M7, §4.5). The
     /// name was already registered in pass 1; here we validate the field types.
     fn resolve_struct(&mut self, scope: ScopeId, item: &StructItem) {
+        self.reject_nested_type_decl(item.syntax(), item.name());
         if let Some(fields) = item.field_list() {
             for f in fields.fields() {
                 if let Some(ty) = f.ty() {
@@ -344,6 +384,7 @@ impl Resolver {
     /// §4.6). The name + variant constructors were registered in pass 1; here we
     /// validate the variant payload types.
     fn resolve_enum(&mut self, scope: ScopeId, item: &EnumItem) {
+        self.reject_nested_type_decl(item.syntax(), item.name());
         for v in item.variants() {
             if let Some(payload_types) = v.payload_types() {
                 for ty in payload_types {

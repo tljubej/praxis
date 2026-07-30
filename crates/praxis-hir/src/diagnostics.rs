@@ -78,6 +78,21 @@ pub(crate) fn nested_function(at: FileSpan, name: &str) -> Diagnostic {
     )
 }
 
+/// `N005` — a `struct`/`enum` declared inside a function body (REP-06).
+///
+/// The same code as a nested `fn`, because it is the same mistake: only the
+/// source file's own statements are a declaration position. The wording differs
+/// by one word — "another function" is right when the nested thing is itself a
+/// function and wrong when it is a type.
+pub(crate) fn nested_declaration(at: FileSpan, name: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::NestedFunction,
+        format!("`{name}` cannot be declared inside a function"),
+        at,
+    )
+}
+
 /// `Y001` — two types that could not be unified (expected vs found).
 pub(crate) fn type_mismatch(at: FileSpan, expected: &str, found: &str) -> Diagnostic {
     Diagnostic::new(
