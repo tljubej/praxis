@@ -323,10 +323,57 @@ impl<'t> Parser<'t> {
     /// depend on whether the intervening trivia has already been emitted into
     /// the tree.
     fn newline_before(&self) -> bool {
+        self.newline_before_nth(0)
+    }
+
+    /// [`Parser::newline_before`] about the meaningful token `n` positions ahead
+    /// (0 = current), which is the lookahead half of REP-27's rule: the
+    /// field-vs-method decision looks one token past the name, and `p.x\n(a, b)`
+    /// must not be a method call for the same reason `10\n(a, b)` must not be one.
+    fn newline_before_nth(&self, n: usize) -> bool {
         self.tokens[self.cursor..]
             .iter()
-            .find(|token| !token.kind.is_trivia())
+            .filter(|token| !token.kind.is_trivia())
+            .nth(n)
             .is_some_and(|token| token.preceded_by_newline)
+    }
+
+    /// True iff the `(` here opens an **argument list** for the expression that
+    /// precedes it, rather than beginning something new (REP-27).
+    ///
+    /// A `(` and a `[` are not the same door, and this is the difference. Nothing
+    /// in the grammar begins with `[` — there is no list literal — so a `[` after a
+    /// line break can only continue the expression before it, which is what REP-16
+    /// relies on and what the postfix loop's `L_BRACK` arm says. A `(` begins three
+    /// things: a parenthesized expression, a tuple, and — since REP-10 and REP-25 —
+    /// a **tuple pattern**, in a match arm and in a `for` binding. So a line-leading
+    /// `(` is ambiguous in exactly the way ADR-049's rule is written to settle:
+    ///
+    /// ```text
+    /// match p {
+    ///     (0, 0) => 10
+    ///     (a, b) => a + b     // ← was read as `10(a, b)`
+    /// }
+    /// ```
+    ///
+    /// and the whole arm list stopped there, silently: the second arm and every arm
+    /// after it left the tree. ADR-049 saw the shape (`let x = 1\n(a, b)` parsing as
+    /// a call) and left it open because the workaround was to bind the tuple to a
+    /// name. A match arm has no such workaround — a tuple pattern *is* how the arm
+    /// is written — so this is the revisit that consequence invited.
+    ///
+    /// This is the **third** place a newline is consulted, and it is D8's own rule:
+    /// a newline ends a statement. It is not consulted anywhere in the Pratt
+    /// operator loop, so `1 +\n2` and a `.method()` chain across lines are
+    /// unchanged, and a `(` that opens an expression is unaffected — only a `(`
+    /// asked to *continue* one is.
+    ///
+    /// The cost is stated rather than hidden: a call whose callee ends a line and
+    /// whose argument list begins the next (`f\n(1)`) is two expressions now. No
+    /// program in the corpus, the suite or the design doc is written that way, and
+    /// the fix is to move the `(` up.
+    fn at_argument_list(&mut self) -> bool {
+        self.at(SyntaxKind::L_PAREN) && !self.newline_before()
     }
 
     /// True iff a value follows `break`/`return` on the same line.
@@ -938,7 +985,9 @@ impl<'t> Parser<'t> {
     fn parse_postfix(&mut self, cp: rowan::Checkpoint) {
         loop {
             match self.peek() {
-                SyntaxKind::L_PAREN => {
+                // An argument list, and **only on the same line** (REP-27). See
+                // [`Parser::at_argument_list`] for why the two brackets differ.
+                SyntaxKind::L_PAREN if self.at_argument_list() => {
                     self.start_node_at(cp, SyntaxKind::CALL_EXPR);
                     self.bump(); // `(`
                     self.parse_arg_list();
@@ -948,9 +997,9 @@ impl<'t> Parser<'t> {
                 // like the other two, so `grid[x, y].len()` and `m[k][j]` chain
                 // without a second loop.
                 //
-                // No statement can begin with `[`, so a `[` at the start of a
-                // line always continues the expression before it — the same
-                // property `(` relies on.
+                // No statement, and no pattern, can begin with `[`, so a `[` at
+                // the start of a line always continues the expression before it.
+                // A `(` cannot say that, which is REP-27.
                 SyntaxKind::L_BRACK => {
                     self.start_node_at(cp, SyntaxKind::INDEX_EXPR);
                     self.bump(); // `[`
@@ -982,8 +1031,12 @@ impl<'t> Parser<'t> {
                         break;
                     }
                     // Disambiguate field access (`p.x`) from method call
-                    // (`p.x()`): an IDENT followed by `(` is a method call.
-                    if self.nth_kind(1) == SyntaxKind::L_PAREN {
+                    // (`p.x()`): an IDENT followed by `(` **on the same line** is
+                    // a method call (REP-27). The line break matters here for the
+                    // same reason it does at the top of this loop — `p.x\n(a, b)`
+                    // as a match arm body followed by a tuple pattern was read as
+                    // `p.x(a, b)`, and the arm list stopped there.
+                    if self.nth_kind(1) == SyntaxKind::L_PAREN && !self.newline_before_nth(1) {
                         self.bump(); // method name
                         self.start_node_at(cp, SyntaxKind::METHOD_CALL_EXPR);
                         self.bump(); // `(`
@@ -1067,7 +1120,9 @@ impl<'t> Parser<'t> {
         }
         self.expect(SyntaxKind::R_BRACK, "`]`");
         self.finish_node(); // TYPE_ARG_LIST
-        if !self.at(SyntaxKind::L_PAREN) {
+                            // The `(` is required and it is on **this** line (REP-27), so the report
+                            // and what `parse_name_or_call` goes on to build cannot disagree.
+        if !self.at_argument_list() {
             let span = self.current_span();
             self.error(
                 span,
@@ -1602,7 +1657,7 @@ impl<'t> Parser<'t> {
         if takes_type_args {
             self.parse_type_arg_list();
         }
-        if self.at(SyntaxKind::L_PAREN) {
+        if self.at_argument_list() {
             self.bump(); // `(`
             self.start_node_at(cp, SyntaxKind::CALL_EXPR);
             // Re-open the path as the callee: rowan's checkpoint wraps the
@@ -3223,6 +3278,95 @@ mod tests {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must report");
         }
+    }
+
+    /// **REP-27.** A `(` that begins a line begins something new; a `(` on the
+    /// same line as the expression before it is that expression's argument list.
+    ///
+    /// `peek()` skips trivia and a newline **is** trivia, so the postfix loop and
+    /// `parse_name_or_call` both opened a `CALL_EXPR` on a line-leading `(`. In a
+    /// `match` that is silent data loss: the arm body swallowed the next arm's
+    /// tuple pattern as an argument list, the arm loop found no pattern start, and
+    /// every arm after the first left the tree.
+    #[test]
+    fn a_line_leading_paren_begins_a_new_thing_and_a_same_line_one_is_a_call() {
+        let count = |src: &str, kind: SyntaxKind| -> usize {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            construct_names(&out.tree)
+                .into_iter()
+                .filter(|k| *k == kind)
+                .count()
+        };
+
+        // The reproduction: three arms, and all three are in the tree. A `10(a,
+        // b)` call would leave one arm and one `CALL_EXPR`.
+        let arms = "let r = match p {\n    (0, 0) => 10\n    (a, b) => a + b\n    _ => 0\n}";
+        assert_eq!(count(arms, SyntaxKind::MATCH_ARM), 3);
+        assert_eq!(count(arms, SyntaxKind::CALL_EXPR), 0);
+
+        // The same shape after every kind of arm body a `(` could attach itself
+        // to — a name, a call, a subscript, a field read, a block.
+        for body in ["n", "f(1)", "m[k]", "p.x", "{ 0 }"] {
+            let src = format!("let r = match p {{\n    _ => {body}\n    (a, b) => 1\n}}");
+            assert_eq!(count(&src, SyntaxKind::MATCH_ARM), 2, "{src}");
+        }
+
+        // The other direction, which is the rule's whole content: on one line a
+        // `(` still opens an argument list, through every callee shape — a name,
+        // a call's result, a subscript's, a paren, a closure.
+        for src in [
+            "let a = f(1)",
+            "let a = f(1)(2)",
+            "let a = m[k](7)",
+            "let a = (g)(3)",
+            "let a = (|x| x * 3)(14)",
+            "let a = fs.get(0)(100)",
+        ] {
+            assert!(count(src, SyntaxKind::CALL_EXPR) >= 1, "{src}");
+        }
+
+        // A `[` is deliberately *not* subject to the rule (REP-16): no statement
+        // and no pattern begins with `[`, so a line-leading one can only continue
+        // the expression before it. That asymmetry is the decision.
+        let sub = "let a = m\n[k]";
+        assert_eq!(count(sub, SyntaxKind::INDEX_EXPR), 1);
+        assert_eq!(count(sub, SyntaxKind::LET_STMT), 1);
+
+        // Nor is the Pratt loop (ADR-049 D8): an operator that ends a line still
+        // continues across it, and so does a `.method()` chain.
+        assert_eq!(count("let a = 1 +\n2", SyntaxKind::BIN_EXPR), 1);
+        assert_eq!(
+            count("let a = v\n  .len()", SyntaxKind::METHOD_CALL_EXPR),
+            1
+        );
+        assert_eq!(
+            count(
+                "let a = v\n  .map(f)\n  .sum()",
+                SyntaxKind::METHOD_CALL_EXPR
+            ),
+            2
+        );
+
+        // A `(` that *opens* an expression is untouched wherever it appears —
+        // only a `(` asked to continue one is.
+        assert_eq!(count("let a = 1\n(b, c)", SyntaxKind::TUPLE_EXPR), 1);
+        assert_eq!(count("let a = 1\n(b, c)", SyntaxKind::LET_STMT), 1);
+        assert_eq!(count("let a = 1\n(b + c) * 2", SyntaxKind::PAREN_EXPR), 1);
+
+        // …and a `for` binding is the second place REP-10's tuple pattern made a
+        // line-leading `(` reachable (REP-25).
+        assert_eq!(
+            count("let a = 1\nfor (k, v) in m { }", SyntaxKind::FOR_EXPR),
+            1
+        );
+
+        // The cost, stated as a test rather than left to be discovered: a callee
+        // that ends a line and an argument list that begins the next are two
+        // expressions, so this is two statements and not one call.
+        let split = "let a = f\n(1)";
+        assert_eq!(count(split, SyntaxKind::CALL_EXPR), 0);
+        assert_eq!(count(split, SyntaxKind::PAREN_EXPR), 1);
     }
 
     /// The construct shape of `text` with parentheses erased, so two spellings
