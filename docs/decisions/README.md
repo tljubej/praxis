@@ -64,3 +64,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-056: `panic`, `assert` and `dbg` are real functions with real types and a real fault](./056-the-prelude-control-names-are-real-functions.md)
 - [ADR-057: A capability requirement rides on the scheme that quantified it, and a key is hashable *and* immutable](./057-a-capability-requirement-rides-on-the-scheme-that-quantified-it.md)
 - [ADR-058: The numeric prelude helpers are monomorphic `Int` functions, and their arity is their wrapper's](./058-the-numeric-prelude-helpers-are-int-functions.md)
+- [ADR-059: A range is a value, `..` is half-open, and a descending range is empty](./059-a-range-is-a-value-and-a-descending-one-is-empty.md)

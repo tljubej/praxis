@@ -77,6 +77,7 @@ unsafe fn sample(rt: &Runtime, ctx: *mut RuntimeContext, builtin: BuiltinTypeId)
                 h
             }
             B::BitSet => praxis_bitset_new(ctx),
+            B::Range => praxis_range_new(ctx, praxis_alloc_int(ctx, 1), praxis_alloc_int(ctx, 5)),
             B::Tuple => {
                 let schema = praxis_runtime::tuples::point_schema()
                     as *const praxis_runtime::tuples::TupleSchema;
@@ -129,6 +130,7 @@ const ALL: [BuiltinTypeId; BuiltinTypeId::COUNT] = {
         B::MinHeap,
         B::MaxHeap,
         B::BitSet,
+        B::Range,
         B::Tuple,
         B::Record,
         B::Enum,
@@ -280,18 +282,17 @@ fn a_type_with_no_runtime_object_has_no_descriptor() {
     let never = db.never();
     let uint = db.scalar(ScalarType::UInt);
     let int = db.int();
-    // `Range` is nullary (F5 is what makes the old `args: vec![int]` here
-    // unrepresentable); `Seq` is the compiler-internal unary sequence.
-    let range = db
-        .collection(CollectionCtor::Range, praxis_types::CollectionArgs::Nullary)
-        .expect("Range is nullary");
+    // `Seq` is the compiler-internal unary sequence: it is fused away before
+    // codegen and never materializes (§6.3), so it is the one collection ctor
+    // with no runtime object. `Range` **used to be** on this list and is not any
+    // more — it has a descriptor as of TY-34 (ADR-059), and
+    // `a_range_has_a_descriptor_now` is where that is asserted.
     let seq = db.unary_collection(CollectionCtor::Seq, int);
     let var = db.fresh_var();
 
     for (ty, what) in [
         (never, "Never"),
         (uint, "UInt"),
-        (range, "Range"),
         (seq, "Seq"),
         (var, "an unresolved variable"),
     ] {
@@ -303,6 +304,32 @@ fn a_type_with_no_runtime_object_has_no_descriptor() {
             "{what}'s refusal must explain itself"
         );
     }
+}
+
+/// The half of TY-34 this bridge can see: `Range` is a real runtime object now,
+/// so it round-trips through both directions like every other nullary
+/// collection. It was on `a_type_with_no_runtime_object_has_no_descriptor`'s list
+/// until this stage, which is why the *positive* statement is written down.
+#[test]
+fn a_range_has_a_descriptor_now() {
+    let mut db = TypeDb::new();
+    let range = db
+        .collection(CollectionCtor::Range, praxis_types::CollectionArgs::Nullary)
+        .expect("Range is nullary");
+    let desc = descriptor_for_type(&db, range).expect("Range has a runtime object");
+    assert!(std::ptr::eq(desc, &praxis_runtime::range::RANGE));
+    // …and back: the descriptor names the nullary `Range` type. Handles are
+    // compared by *shape*, not by identity — `intern` is append-only, so two
+    // structurally identical types are two handles and unification is what makes
+    // them one type.
+    let recovered = type_for_descriptor(desc, &mut db).expect("Range names its type");
+    assert!(matches!(
+        db.data(recovered),
+        praxis_types::TypeData::Collection {
+            ctor: CollectionCtor::Range,
+            args,
+        } if args.is_empty()
+    ));
 }
 
 /// Construction descriptors come from the type's arguments, and a collection of

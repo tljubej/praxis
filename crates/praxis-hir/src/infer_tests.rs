@@ -1698,6 +1698,112 @@ fn a_numeric_helper_composes_like_any_int_expression() {
     ));
 }
 
+/// TY-34's type rule (ADR-059): a range's bounds are `Int` and the range itself
+/// is the nullary `Range` collection, whose element type is `Int`.
+///
+/// `Int` bounds **only**: `iter_item` already says a range yields `Int`, and
+/// admitting `Float` bounds would make that a lie with no step to fix it (D6).
+#[test]
+fn a_ranges_bounds_are_ints_and_a_range_is_a_collection_of_them() {
+    // Both forms are `Range`, and a `Range` annotation accepts one.
+    assert!(!has_type_error("fn f() -> Range { 0..5 }"));
+    assert!(!has_type_error("fn f() -> Range { 0..=5 }"));
+    assert!(!has_type_error("fn f(n: Int) -> Range { 0..n - 1 }"));
+    // …and it is a `Range`, not an `Int` and not a `Vec[Int]`.
+    assert!(has_type_error("fn f() -> Int { 0..5 }"));
+    assert!(has_type_error("fn f() -> Vec[Int] { 0..5 }"));
+
+    // Each bound is an `Int`. Every non-`Int` bound is refused, in either
+    // position — the half that distinguishes a real rule from a fresh variable.
+    assert!(has_type_error("fn f() -> Range { \"a\"..5 }"));
+    assert!(has_type_error("fn f() -> Range { 0..\"z\" }"));
+    assert!(has_type_error("fn f() -> Range { 0.0..1.0 }"));
+    assert!(has_type_error("fn f() -> Range { true..false }"));
+    assert!(has_type_error("fn f(v: Vec[Int]) -> Range { 0..v }"));
+
+    // A range yields `Int`, so the loop variable is one.
+    assert!(!has_type_error(
+        "fn f() -> Unit { for i in 0..3 { out(i + 1) } }"
+    ));
+    assert!(has_type_error(
+        "fn f() -> Unit { for i in 0..3 { out(i + \"x\") } }"
+    ));
+    // …and a range is iterable at all, which is what `Range`'s `iter_item` arm
+    // has claimed since before the syntax existed. Annotated, because an
+    // *unannotated* iterated parameter unifies with its own element type — see
+    // `iter_item`'s optimism at `infer_for`, which affects every iterable
+    // equally and is not TY-34's.
+    assert!(!has_type_error(
+        "fn total(r: Range) -> Int { var t = 0\n for i in r { t = t + i }\n t }\n\
+         fn main() -> Int { total(0..4) }"
+    ));
+}
+
+/// A range is a first-class **value** (D6), not only a `for`-header form: it
+/// binds to a name, passes as an argument, comes back as a result, and — because
+/// its bounds cannot change once it is built — is a legal `Map` key (ADR-057 D4).
+#[test]
+fn a_range_is_an_ordinary_value() {
+    assert!(!has_type_error(
+        "fn f() -> Unit { let r = 0..5\n for i in r { out(i) } }"
+    ));
+    assert!(!has_type_error(
+        "fn widen(r: Range) -> Range { r }\n\
+         fn main() -> Range { widen(1..2) }"
+    ));
+    // A `Range` is hashable *and* immutable, so it is a key — the distinction
+    // TY-32/D4 turned on.
+    assert!(!has_type_error(
+        "fn main() -> Unit { let m = Map()\n m.insert(0..3, 1) }"
+    ));
+    assert!(!has_type_error(
+        "fn main() -> Unit { let s = Set()\n s.insert(0..3) }"
+    ));
+    // …and it is equatable, so two ranges compare.
+    assert!(!has_type_error("fn f() -> Bool { (0..3) == (0..3) }"));
+    // It is not orderable: only the five scalars with a `compare` are (ADR-045).
+    assert!(has_type_error("fn f() -> Bool { (0..3) < (1..4) }"));
+}
+
+/// A **bare** nullary collection name is the type it names. `Range` and `BitSet`
+/// are the only two ctors with no type arguments, so they are the only names that
+/// appear in type position without brackets — and that path never reached
+/// `collection_from_name`, so the annotation resolved to nothing and the binding
+/// silently became a fresh variable.
+///
+/// The symptom was a function whose annotated parameter took any type at all and
+/// then unified with whatever its body did: `fn total(r: Range) { for i in r { … } }`
+/// reported "values of type `Int` cannot be iterated". `BitSet` had it too.
+#[test]
+fn a_bare_nullary_collection_name_is_the_type_it_names() {
+    // The annotation is enforced, in both nullary ctors, in every position.
+    assert!(has_type_error("fn f(r: Range) -> Int { r }"));
+    assert!(has_type_error("fn f(b: BitSet) -> Int { b }"));
+    assert!(has_type_error("fn f() -> Range { 1 }"));
+    assert!(!has_type_error("fn f(r: Range) -> Range { r }"));
+    assert!(!has_type_error("fn f() -> Range { 0..1 }"));
+    assert!(!has_type_error("fn f() -> BitSet { BitSet() }"));
+    assert!(has_type_error("fn f(r: Range) -> Unit { out(r + 1) }"));
+    // Nested inside another collection, and as a local's annotation.
+    assert!(!has_type_error("fn f(v: Vec[Range]) -> Vec[Range] { v }"));
+    assert!(has_type_error(
+        "fn f() -> Unit { let r: Range = 5\n out(r) }"
+    ));
+
+    // …and a ctor that *does* take arguments, written bare, is the `Y007` it has
+    // always been for a wrong count — not a silent variable.
+    let codes: Vec<u32> = analyze("fn f(v: Vec) -> Int { 1 }")
+        .diagnostics
+        .iter()
+        .filter(|d| d.code().category() == DiagnosticCategory::Type)
+        .map(|d| d.code().number())
+        .collect();
+    assert!(
+        codes.contains(&7),
+        "a bracket-less `Vec` must report its missing argument as Y007, got {codes:?}"
+    );
+}
+
 /// The half a type test cannot see: each of the seven lowers to its own runtime
 /// call. Before this they reached the backend as `CallTarget::User("abs")` and
 /// the compile failed with "unresolved user function `abs`" — `panic`'s symptom,

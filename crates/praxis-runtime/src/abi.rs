@@ -216,6 +216,10 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::IntSub => praxis_int_sub as *const (),
         RuntimeSymbol::IntToFloat => praxis_int_to_float as *const (),
         RuntimeSymbol::MapContains => praxis_map_contains as *const (),
+        RuntimeSymbol::RangeGet => praxis_range_get as *const (),
+        RuntimeSymbol::RangeLen => praxis_range_len as *const (),
+        RuntimeSymbol::RangeNew => praxis_range_new as *const (),
+        RuntimeSymbol::RangeNewInclusive => praxis_range_new_inclusive as *const (),
         RuntimeSymbol::MapGet => praxis_map_get as *const (),
         RuntimeSymbol::MapInsert => praxis_map_insert as *const (),
         RuntimeSymbol::MapIsEmpty => praxis_map_is_empty as *const (),
@@ -3023,6 +3027,10 @@ unsafe fn default_cell(
             | B::MinHeap
             | B::MaxHeap
             | B::BitSet
+            // A `Range`'s zero value would be a pair of bounds nobody chose;
+            // `0..0` is *a* range but it is not "the empty one" in any sense a
+            // `Grid[Range]` cell wants.
+            | B::Range
             | B::Tuple
             | B::Record
             | B::Enum
@@ -3652,6 +3660,101 @@ pub unsafe extern "C" fn praxis_assert(ctx: *mut RuntimeContext, condition: GcRe
         unsafe { set_fault(ctx, RaisedFault::ASSERT_FAILED) };
     }
     unsafe { unit_sentinel(ctx) }
+}
+
+// ---------------------------------------------------------------------------
+// `Range` (§4.11, ADR-059).
+//
+// `a..b` and `a..=b` are two symbols rather than one symbol with a flag: the
+// choice is already a syntactic fact the MIR builder holds, and a boolean
+// smuggled through an `i64` parameter would have 2^64 spellings for two states.
+// Both bounds arrive as `Int` `GcRef`s, because a bound is an arbitrary
+// expression and every other wrapper takes its operands boxed.
+// ---------------------------------------------------------------------------
+
+/// Build the half-open range `start..end` (§4.11). A descending range is
+/// **empty** — [`RangeVal::new`](crate::range::RangeVal::new) normalizes it, so
+/// no range with a negative length exists.
+///
+/// # Safety
+/// `ctx` must be live and wired; both bounds must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_range_new(
+    ctx: *mut RuntimeContext,
+    start: GcRef,
+    end: GcRef,
+) -> GcRef {
+    let a = unsafe { int_payload(start) };
+    let b = unsafe { int_payload(end) };
+    unsafe { gc_alloc(ctx, &crate::range::RANGE, crate::range::RangeVal::new(a, b)) }
+}
+
+/// Build the inclusive range `start..=end` (§4.11).
+///
+/// # Safety
+/// `ctx` must be live and wired; both bounds must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_range_new_inclusive(
+    ctx: *mut RuntimeContext,
+    start: GcRef,
+    end: GcRef,
+) -> GcRef {
+    let a = unsafe { int_payload(start) };
+    let b = unsafe { int_payload(end) };
+    unsafe {
+        gc_alloc(
+            ctx,
+            &crate::range::RANGE,
+            crate::range::RangeVal::new_inclusive(a, b),
+        )
+    }
+}
+
+/// The number of integers in a range (§4.11) — what a `for` loop reads to
+/// bound itself.
+///
+/// **Faults when the count does not fit an `Int`.** Only the very widest ranges
+/// reach it (`Int::MIN..Int::MAX` holds `2^64 - 1` integers), and reporting a
+/// wrapped negative length instead would be a `for` loop that ran zero times
+/// over every integer there is.
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Range` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_range_len(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    // SAFETY: the compiler only emits this with a Range-typed operand.
+    let range = unsafe { &*r.payload::<crate::range::RangeVal>() };
+    match i64::try_from(range.len()) {
+        Ok(len) => unsafe { gc_alloc(ctx, &scalars::INT, len) },
+        Err(_) => {
+            unsafe { set_fault(ctx, RaisedFault::INVALID_SIZE) };
+            unsafe { unit_sentinel(ctx) }
+        }
+    }
+}
+
+/// The `index`-th integer of a range (§4.11). Faults when `index` is outside
+/// it, exactly as `Vec.get` does.
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Range` `GcRef` and
+/// `index` a valid `Int` one.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_range_get(
+    ctx: *mut RuntimeContext,
+    r: GcRef,
+    index: GcRef,
+) -> GcRef {
+    // SAFETY: the compiler only emits this with a Range-typed receiver.
+    let range = unsafe { &*r.payload::<crate::range::RangeVal>() };
+    let i = unsafe { int_payload(index) };
+    match range.get(i) {
+        Some(value) => unsafe { gc_alloc(ctx, &scalars::INT, value) },
+        None => {
+            unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
+            unsafe { unit_sentinel(ctx) }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -26,8 +26,8 @@ use praxis_ast::{
 use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
 use praxis_syntax::SyntaxKind;
 use praxis_types::{
-    unify::UnifyError, CapKind, Capability, CollectionArgs, Constraint, Level, ScalarType, Scheme,
-    Type, TypeDb,
+    unify::UnifyError, CapKind, Capability, CollectionArgs, CollectionCtor, Constraint, Level,
+    ScalarType, Scheme, Type, TypeDb,
 };
 use rowan::TextRange;
 
@@ -1142,6 +1142,7 @@ impl Inferer {
             Expr::Literal(l) => self.infer_literal(l),
             Expr::Path(p) => self.infer_path(p),
             Expr::Bin(b) => self.infer_bin(b),
+            Expr::Range(r) => self.infer_range(r),
             Expr::Unary(u) => self.infer_unary(u),
             Expr::Paren(p) => p
                 .expr()
@@ -1580,6 +1581,32 @@ impl Inferer {
         // Unresolved names were already reported by resolution; return a fresh var
         // so downstream inference does not cascade spurious errors.
         self.db.fresh_var()
+    }
+
+    /// `a..b` / `a..=b` (§4.11, ADR-059). Both bounds must be `Int`; the range
+    /// itself is the nullary `Range` collection, whose element type
+    /// `capability::iter_item` already answers as `Int`.
+    ///
+    /// The bounds are `Int` **only**. A `Float` range would need a step, and
+    /// `0.0..1.0` has no elements to iterate — `iter_item` says a range yields
+    /// `Int`, and admitting float bounds would make that a lie (D6).
+    fn infer_range(&mut self, r: &praxis_ast::RangeExpr) -> Type {
+        let (start, end) = r.bounds();
+        let start_range = start.as_ref().map(|e| e.syntax().text_range());
+        let end_range = end.as_ref().map(|e| e.syntax().text_range());
+        let st = start.map(|e| self.infer_expr(&e));
+        let et = end.map(|e| self.infer_expr(&e));
+        let whole = r.syntax().text_range();
+        let int_ty = self.db.int();
+        for (bound, at) in [(st, start_range), (et, end_range)] {
+            let Some(bound) = bound else { continue };
+            if let Err(e) = self.db.unify(bound, int_ty) {
+                self.diag_unify(self.file_span(at.unwrap_or(whole)), e);
+            }
+        }
+        self.db
+            .collection(CollectionCtor::Range, CollectionArgs::Nullary)
+            .expect("Range is nullary")
     }
 
     fn infer_bin(&mut self, b: &BinExpr) -> Type {

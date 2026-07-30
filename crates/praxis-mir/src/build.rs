@@ -603,6 +603,36 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 }
             }
         }
+        // `a..b` / `a..=b` (§4.11, ADR-059). One runtime call per form: the
+        // inclusiveness is a *symbol*, not a flag, because the choice is a
+        // syntactic fact the builder already holds and a boolean threaded through
+        // an `i64` parameter would have 2^64 spellings for two states.
+        TypedExpr::Range {
+            start,
+            end,
+            inclusive,
+            ty,
+            ..
+        } => {
+            let lo = lower_expr_gc(b, start);
+            let hi = lower_expr_gc(b, end);
+            let sym = if *inclusive {
+                RuntimeSymbol::RangeNewInclusive
+            } else {
+                RuntimeSymbol::RangeNew
+            };
+            let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
+            b.push(Inst::Call {
+                dst,
+                callee: CallTarget::Runtime(sym),
+                args: vec![lo, hi],
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
+            });
+            // Neither form faults: a descending range is empty rather than an
+            // error, and `..=Int::MAX` saturates (ADR-059 D3).
+            dst
+        }
         TypedExpr::Bin { op, lhs, rhs, .. } => {
             // Short-circuit ops must not eagerly evaluate `rhs` — it is lowered
             // only on the path that needs it (inside `lower_logical_or`).
@@ -3547,6 +3577,7 @@ fn len_symbol_for(db: &TypeDb, iter: &TypedExpr) -> RuntimeSymbol {
             praxis_types::CollectionCtor::Map => RuntimeSymbol::MapLen,
             praxis_types::CollectionCtor::Set => RuntimeSymbol::SetLen,
             praxis_types::CollectionCtor::Counter => RuntimeSymbol::CounterLen,
+            praxis_types::CollectionCtor::Range => RuntimeSymbol::RangeLen,
             _ => RuntimeSymbol::VecLen,
         },
         _ => RuntimeSymbol::VecLen,
@@ -3561,6 +3592,7 @@ fn get_symbol_for(db: &TypeDb, iter: &TypedExpr) -> RuntimeSymbol {
         TypeData::Collection { ctor, .. } => match ctor {
             praxis_types::CollectionCtor::Vec => RuntimeSymbol::VecGet,
             praxis_types::CollectionCtor::Deque => RuntimeSymbol::DequeGet,
+            praxis_types::CollectionCtor::Range => RuntimeSymbol::RangeGet,
             _ => RuntimeSymbol::VecGet,
         },
         _ => RuntimeSymbol::VecGet,
@@ -3621,6 +3653,7 @@ fn expr_static_type(e: &TypedExpr) -> Type {
         TypedExpr::Lit { ty, .. }
         | TypedExpr::Path { ty, .. }
         | TypedExpr::Bin { ty, .. }
+        | TypedExpr::Range { ty, .. }
         | TypedExpr::Unary { ty, .. }
         | TypedExpr::Paren { ty, .. }
         | TypedExpr::If { ty, .. }

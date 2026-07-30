@@ -434,6 +434,8 @@ pub enum Expr {
     Literal(Literal),
     Path(PathExpr),
     Bin(BinExpr),
+    /// `a..b` or `a..=b` — a range (§4.11, ADR-059).
+    Range(RangeExpr),
     Unary(UnaryExpr),
     Paren(ParenExpr),
     Block(BlockExpr),
@@ -477,6 +479,7 @@ impl Expr {
             Expr::Literal(e) => e.syntax(),
             Expr::Path(e) => e.syntax(),
             Expr::Bin(e) => e.syntax(),
+            Expr::Range(e) => e.syntax(),
             Expr::Unary(e) => e.syntax(),
             Expr::Paren(e) => e.syntax(),
             Expr::Block(e) => e.syntax(),
@@ -513,6 +516,7 @@ impl Expr {
             K::LITERAL => Expr::Literal(Literal::from_syntax(n)),
             K::PATH_EXPR => Expr::Path(PathExpr::from_syntax(n)),
             K::BIN_EXPR => Expr::Bin(BinExpr::from_syntax(n)),
+            K::RANGE_EXPR => Expr::Range(RangeExpr::from_syntax(n)),
             K::UNARY_EXPR => Expr::Unary(UnaryExpr::from_syntax(n)),
             K::PAREN_EXPR => Expr::Paren(ParenExpr::from_syntax(n)),
             K::BLOCK_EXPR => Expr::Block(BlockExpr::from_syntax(n)),
@@ -890,6 +894,56 @@ impl BinExpr {
         let rhs = ops.pop();
         let lhs = ops.pop();
         (lhs, rhs)
+    }
+}
+
+/// A range expression: `a..b` (half-open) or `a..=b` (inclusive) — §4.11,
+/// ADR-059.
+///
+/// Both bounds are required. There is no `a..`, `..b` or `..`: a range is a
+/// collection with a known length, and an open end has no length. The
+/// inclusiveness rides on the *operator token*, so `is_inclusive` is a question
+/// about the syntax and not a flag anyone has to keep in step.
+#[derive(Clone, Debug)]
+pub struct RangeExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for RangeExpr {
+    const KIND: K = K::RANGE_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl RangeExpr {
+    /// The operator token (`..` or `..=`).
+    pub fn op(&self) -> Option<SyntaxToken> {
+        use rowan::NodeOrToken;
+        self.syntax.children_with_tokens().find_map(|e| match e {
+            NodeOrToken::Token(t) if matches!(t.kind(), K::DOT2 | K::DOT2EQ) => Some(t),
+            _ => None,
+        })
+    }
+
+    /// Whether the upper bound is included (`..=`). A range whose operator token
+    /// is missing — only reachable from a `PARSE_ERROR` subtree — reads as
+    /// half-open, which is the form that cannot over-run its bound.
+    pub fn is_inclusive(&self) -> bool {
+        self.op().is_some_and(|t| t.kind() == K::DOT2EQ)
+    }
+
+    /// The lower and upper bound expressions.
+    pub fn bounds(&self) -> (Option<Expr>, Option<Expr>) {
+        let mut ops: Vec<_> = self
+            .syntax
+            .children()
+            .filter_map(Expr::cast_from_child)
+            .collect();
+        let end = ops.pop();
+        let start = ops.pop();
+        (start, end)
     }
 }
 

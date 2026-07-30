@@ -2056,11 +2056,34 @@ mod tests {
 
     /// P0-11's other half at this boundary: an element type with no runtime
     /// object is a compile error, not a null descriptor. `Opaque` means "no
-    /// static type here"; `Vec[Range]` means "a type that cannot exist", and
+    /// static type here"; `Vec[Seq[Int]]` means "a type that cannot exist", and
     /// conflating the two is how the wrappers ended up adopting whatever was
     /// pushed first.
+    ///
+    /// **Rewritten** for TY-34: the offending element used to be `Range`, which
+    /// had no runtime object at all. It has one now (ADR-059), so the type that
+    /// cannot exist is `Seq` — the compiler's lazy pipeline source, which is
+    /// fused away before codegen and never materializes (§6.3). The property is
+    /// unchanged; only the witness moved, and `Seq` is now the *last* ctor with
+    /// no runtime object, which is what makes it the right witness.
     #[test]
     fn a_known_element_type_with_no_descriptor_fails_the_compile() {
+        let mut db = praxis_types::TypeDb::new();
+        let int = db.int();
+        let seq = db.unary_collection(praxis_types::CollectionCtor::Seq, int);
+        let err = collection_element_descriptor_for(&db, &[MirType::Known(seq)], 0)
+            .expect_err("Seq has no runtime object");
+        assert!(
+            err.to_string().contains("Seq"),
+            "the diagnostic must name the offending type: {err}"
+        );
+    }
+
+    /// …and the type that used to be that witness now *has* a descriptor, which
+    /// is the half of TY-34 this boundary can see: a `Vec[Range]` compiles, and
+    /// its element descriptor is the one `Range` object.
+    #[test]
+    fn a_range_element_has_the_range_descriptor() {
         let mut db = praxis_types::TypeDb::new();
         let range = db
             .collection(
@@ -2068,12 +2091,9 @@ mod tests {
                 praxis_types::CollectionArgs::Nullary,
             )
             .expect("Range is nullary");
-        let err = collection_element_descriptor_for(&db, &[MirType::Known(range)], 0)
-            .expect_err("Range has no runtime object");
-        assert!(
-            err.to_string().contains("Range"),
-            "the diagnostic must name the offending type: {err}"
-        );
+        let desc = collection_element_descriptor_for(&db, &[MirType::Known(range)], 0)
+            .expect("Range has a runtime object now");
+        assert!(core::ptr::eq(desc, &praxis_runtime::range::RANGE));
     }
 
     /// A tuple allocation with no static type degrades to the empty schema —

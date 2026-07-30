@@ -483,12 +483,22 @@ impl<'a> Annotations<'a> {
         }
     }
 
-    /// A bare name in type position: a built-in scalar, or a user `struct`/`enum`.
+    /// A bare name in type position: a built-in scalar, a **nullary collection**
+    /// (`BitSet`, `Range`), or a user `struct`/`enum`.
     ///
     /// The user case reads the symbol the *resolver* bound the name to. A scope
     /// lookup here would be a second, weaker answer to a question resolution
     /// already answered — and the one it gave was wrong for an `enum`, which it
     /// simply did not look for (TY-09).
+    ///
+    /// The nullary-collection case is TY-34's: a name with no brackets never
+    /// reached [`collection_from_name`], so `fn f(r: Range)` and
+    /// `fn f(b: BitSet)` resolved to *nothing* and the parameter silently became
+    /// a fresh variable — which then unified with whatever the body did to it.
+    /// A first-class range you cannot annotate is half a value (D6), and `BitSet`
+    /// had the same hole. Routing a bare name through the same door also makes a
+    /// bracket-less `Vec` a `Y007` ("expected 1 type argument, got 0") instead of
+    /// a silent variable, which is exactly what that code says.
     fn named_type(&mut self, name: &SyntaxToken) -> Option<Type> {
         let scalar = match name.text() {
             "Int" => ScalarType::Int,
@@ -498,6 +508,9 @@ impl<'a> Annotations<'a> {
             "Float" => ScalarType::Float,
             "Unit" => return Some(self.db.unit()),
             "Never" => return Some(self.db.never()),
+            text if is_type_ctor_name(text) => {
+                return self.collection_from_name(text, Vec::new(), name.text_range());
+            }
             _ => {
                 let symbol = self.type_refs.get(&name.text_range()).copied()?;
                 return self.env.ty(symbol);

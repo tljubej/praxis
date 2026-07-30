@@ -166,14 +166,10 @@ fn builtin_for_type(db: &TypeDb, ty: Type) -> Result<BuiltinTypeId, NoRuntimeRep
             CollectionCtor::MinHeap => Ok(BuiltinTypeId::MinHeap),
             CollectionCtor::MaxHeap => Ok(BuiltinTypeId::MaxHeap),
             CollectionCtor::BitSet => Ok(BuiltinTypeId::BitSet),
-            // `Range` is unimplemented (design decision D6) and `Seq` is the
-            // compiler's lazy pipeline source, which is fused away before
-            // codegen and never materializes (§6.3). Reaching either here means
-            // a pipeline stage escaped fusion.
-            CollectionCtor::Range => Err(NoRuntimeRepr::of(
-                resolved,
-                "Range has no runtime object (design decision D6)",
-            )),
+            CollectionCtor::Range => Ok(BuiltinTypeId::Range),
+            // `Seq` is the compiler's lazy pipeline source, which is fused away
+            // before codegen and never materializes (§6.3). Reaching it here
+            // means a pipeline stage escaped fusion.
             CollectionCtor::Seq => Err(NoRuntimeRepr::of(
                 resolved,
                 "Seq is a compiler-internal lazy sequence and is fused away before codegen",
@@ -288,6 +284,9 @@ pub fn type_for_descriptor(
         BuiltinTypeId::BitSet => db
             .collection(CollectionCtor::BitSet, CollectionArgs::Nullary)
             .map_err(|_| NoRuntimeRepr::value("BitSet takes no type arguments")),
+        BuiltinTypeId::Range => db
+            .collection(CollectionCtor::Range, CollectionArgs::Nullary)
+            .map_err(|_| NoRuntimeRepr::value("Range takes no type arguments")),
         BuiltinTypeId::Vec
         | BuiltinTypeId::Deque
         | BuiltinTypeId::Grid

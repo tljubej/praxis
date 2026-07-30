@@ -278,6 +278,10 @@ runtime_symbols! {
     IntSub = "praxis_int_sub": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     IntToFloat = "praxis_int_to_float": (Ctx, Gc) -> Gc, Allocates;
     MapContains = "praxis_map_contains": (Ctx, Gc, Gc) -> Gc, Pure;
+    RangeGet = "praxis_range_get": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    RangeLen = "praxis_range_len": (Ctx, Gc) -> Gc, AllocatesAndFaults;
+    RangeNew = "praxis_range_new": (Ctx, Gc, Gc) -> Gc, Allocates;
+    RangeNewInclusive = "praxis_range_new_inclusive": (Ctx, Gc, Gc) -> Gc, Allocates;
     MapGet = "praxis_map_get": (Ctx, Gc, Gc) -> Gc, Pure;
     MapInsert = "praxis_map_insert": (Ctx, Gc, Gc, Gc) -> Gc, Allocates;
     MapIsEmpty = "praxis_map_is_empty": (Ctx, Gc) -> Gc, Pure;

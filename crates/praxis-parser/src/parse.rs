@@ -79,29 +79,44 @@ fn infix_binding_power(op: SyntaxKind) -> Option<BindingPower> {
     Some(match op {
         // Logical (lowest) — `||` not in the M1 eval set but lexed, so bind it.
         SyntaxKind::PIPE2 => bp(1, 2),
+        // Range (§4.11, ADR-059): below comparison, above nothing but `||`. So
+        // `0..n - 1` is `0..(n - 1)` — the bound is an arithmetic expression,
+        // which is how every range in the corpus is written — and `a..b == c..d`
+        // compares two ranges rather than ranging over a Bool.
+        SyntaxKind::DOT2 | SyntaxKind::DOT2EQ => bp(3, 4),
         // Comparison (non-associative in spirit; we parse left-assoc).
         SyntaxKind::EQ2
         | SyntaxKind::NEQ
         | SyntaxKind::LT
         | SyntaxKind::GT
         | SyntaxKind::LTEQ
-        | SyntaxKind::GTEQ => bp(3, 4),
+        | SyntaxKind::GTEQ => bp(5, 6),
         // Additive.
-        SyntaxKind::PLUS | SyntaxKind::MINUS => bp(5, 6),
+        SyntaxKind::PLUS | SyntaxKind::MINUS => bp(7, 8),
         // Multiplicative.
-        SyntaxKind::STAR | SyntaxKind::SLASH | SyntaxKind::PERCENT => bp(7, 8),
+        SyntaxKind::STAR | SyntaxKind::SLASH | SyntaxKind::PERCENT => bp(9, 10),
         _ => return None,
     })
+}
+
+/// The node kind an infix operator builds. Every operator but `..`/`..=` builds
+/// a [`SyntaxKind::BIN_EXPR`]; a range is its own node because it is not an
+/// operator applied to two numbers but a collection built from two bounds.
+fn infix_node_kind(op: SyntaxKind) -> SyntaxKind {
+    match op {
+        SyntaxKind::DOT2 | SyntaxKind::DOT2EQ => SyntaxKind::RANGE_EXPR,
+        _ => SyntaxKind::BIN_EXPR,
+    }
 }
 
 /// Prefix (unary) operator binding power.
 fn prefix_binding_power(op: SyntaxKind) -> Option<u8> {
     match op {
-        SyntaxKind::MINUS | SyntaxKind::BANG => Some(9),
+        SyntaxKind::MINUS | SyntaxKind::BANG => Some(11),
         // `read` is a prefix expression (§7.1): `read parser_expression`. Its
         // body is a parser-expression, not an ordinary expression, so it gets
         // the highest binding power (binds tighter than arithmetic).
-        SyntaxKind::KW_READ => Some(11),
+        SyntaxKind::KW_READ => Some(13),
         _ => None,
     }
 }
@@ -716,9 +731,10 @@ impl<'t> Parser<'t> {
             if bp.left < min_bp {
                 break;
             }
-            // Wrap the already-emitted lhs + operator + rhs in a BIN_EXPR,
-            // retroactively opening the node at the checkpoint taken before lhs.
-            self.start_node_at(cp, SyntaxKind::BIN_EXPR);
+            // Wrap the already-emitted lhs + operator + rhs in a BIN_EXPR (or a
+            // RANGE_EXPR), retroactively opening the node at the checkpoint taken
+            // before lhs.
+            self.start_node_at(cp, infix_node_kind(op));
             self.bump(); // operator
                          // The operands of a suppressed expression are suppressed too:
                          // `if a == p { … }` has the same ambiguity `if p { … }` has.
@@ -1682,6 +1698,116 @@ mod tests {
             "`1 +` and `2` are one addition, not two statements"
         );
         assert!(kinds.contains(&SyntaxKind::BIN_EXPR));
+    }
+
+    /// TY-34's syntax as the *rule* (ADR-059): `..`/`..=` is an infix operator
+    /// that builds a `RANGE_EXPR`, and it binds **looser than arithmetic and
+    /// comparison**. That is the whole reason the precedence had to be inserted
+    /// rather than appended: every range in the corpus writes an arithmetic
+    /// bound, and `0..n - 1` has to be `0..(n - 1)`.
+    #[test]
+    fn a_range_binds_looser_than_the_arithmetic_in_its_bounds() {
+        // The bound is the whole subtraction, so the RANGE_EXPR contains a
+        // BIN_EXPR rather than the other way round.
+        insta::assert_snapshot!(dump("let r = 0..n - 1"), @r#"
+        SOURCE_FILE@0..16
+          LET_STMT@0..16
+            KW_LET "let"@0..3
+            Whitespace " "@3..4
+            Ident "r"@4..5
+            Whitespace " "@5..6
+            EQ "="@6..7
+            RANGE_EXPR@7..16
+              Whitespace " "@7..8
+              LITERAL@8..9
+                IntLit "0"@8..9
+              DOT2 ".."@9..11
+              BIN_EXPR@11..16
+                PATH_EXPR@11..12
+                  Ident "n"@11..12
+                Whitespace " "@12..13
+                MINUS "-"@13..14
+                Whitespace " "@14..15
+                LITERAL@15..16
+                  IntLit "1"@15..16
+        "#);
+        // …and looser than comparison too, so `a..b == c..d` compares two ranges.
+        let out = parse_text("let b = 1..2 == 3..4");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == SyntaxKind::RANGE_EXPR)
+                .count(),
+            2,
+            "two ranges, one comparison — not a range over a Bool"
+        );
+        assert_eq!(
+            kinds.iter().filter(|k| **k == SyntaxKind::BIN_EXPR).count(),
+            1
+        );
+    }
+
+    /// `..=` is its own token in the same position, and the *node* is the same
+    /// kind — the difference is the operator token, which is where
+    /// `RangeExpr::is_inclusive` reads it from.
+    #[test]
+    fn an_inclusive_range_is_the_same_node_with_a_different_operator() {
+        let out = parse_text("let r = 0..=9");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::RANGE_EXPR));
+        assert!(kinds.contains(&SyntaxKind::DOT2EQ));
+        assert!(!kinds.contains(&SyntaxKind::DOT2));
+    }
+
+    /// A range is an ordinary expression, so it appears wherever one may: a
+    /// `for` header (where the `{` must not be read as a record literal —
+    /// FE-06), a call argument, and a parenthesized bound.
+    #[test]
+    fn a_range_is_legal_wherever_an_expression_is() {
+        for src in [
+            "for i in 0..n { out(i) }",
+            "for i in 0..=n { out(i) }",
+            "let r = (0 - 1)..(n + 1)",
+            "out(0..3)",
+            // The bound may itself be a call or a method call.
+            "let r = 0..v.len()",
+            "let r = abs(0 - 3)..max(1, 2)",
+        ] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src:?}: {:?}", out.diagnostics);
+            assert!(
+                construct_names(&out.tree).contains(&SyntaxKind::RANGE_EXPR),
+                "{src:?} produced no RANGE_EXPR"
+            );
+        }
+        // `Range` in *type* position is a type name, not a range expression —
+        // the annotation form D6 makes a first-class value worth having.
+        let out = parse_text("fn f(r: Range) -> Range { r }");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(!construct_names(&out.tree).contains(&SyntaxKind::RANGE_EXPR));
+    }
+
+    /// D8's rule, applied to the new operator: a newline after `..` continues the
+    /// expression, exactly as one after `+` does. The Pratt loop never consults
+    /// `newline_before`, and this is the test that says a range did not become the
+    /// exception (FE-04).
+    #[test]
+    fn a_range_continues_across_a_line_break() {
+        let out = parse_text("let r = 1 ..\n5");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::LET_STMT)
+                .count(),
+            1,
+            "`1 ..` and `5` are one range, not two statements"
+        );
+        assert!(kinds.contains(&SyntaxKind::RANGE_EXPR));
     }
 
     /// …and so does a postfix chain: the line break before `.len()` is inside an

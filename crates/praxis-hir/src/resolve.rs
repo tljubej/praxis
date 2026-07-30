@@ -475,6 +475,12 @@ impl Resolver {
                 }
             }
             Expr::Bin(b) => self.resolve_bin(scope, b),
+            Expr::Range(r) => {
+                let (start, end) = r.bounds();
+                for bound in [start, end].into_iter().flatten() {
+                    self.resolve_expr(scope, &bound);
+                }
+            }
             Expr::Unary(u) => {
                 if let Some(operand) = u.operand() {
                     self.resolve_expr(scope, &operand);

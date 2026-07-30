@@ -41,12 +41,14 @@ pub enum BuiltinTypeId {
     Enum,
     Closure,
     VarCell,
+    /// `Range` (§4.11, ADR-059). Appended, so every existing id is unchanged.
+    Range,
 }
 
 impl BuiltinTypeId {
     /// Number of built-in types. Kept honest by [`BUILTINS`]'s array length and
     /// by `builtins_are_indexed_by_their_id`.
-    pub const COUNT: usize = 21;
+    pub const COUNT: usize = 22;
 
     /// Total inverse of the discriminant. A `match` rather than a `transmute`,
     /// so an out-of-range word yields `None` instead of an invalid enum value.
@@ -74,6 +76,7 @@ impl BuiltinTypeId {
             18 => Enum,
             19 => Closure,
             20 => VarCell,
+            21 => Range,
             _ => return None,
         })
     }
@@ -451,6 +454,7 @@ pub static BUILTINS: [&TypeDescriptor; BuiltinTypeId::COUNT] = [
     &crate::enums::ENUM,
     &crate::closures::CLOSURE,
     &crate::var_cell::VAR_CELL,
+    &crate::range::RANGE,
 ];
 
 #[cfg(test)]

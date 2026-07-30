@@ -242,6 +242,12 @@ pub enum SyntaxKind {
     NAME_REF,
     /// A binary operator expression, e.g. `a + b`.
     BIN_EXPR,
+    /// A range expression: `a..b` (half-open) or `a..=b` (inclusive) — §4.11,
+    /// ADR-059. Its own node kind rather than a [`BIN_EXPR`](Self::BIN_EXPR):
+    /// a range is not an operator applied to two numbers, it is a *collection*
+    /// built from two bounds, and every consumer that asks "what binary
+    /// operator is this" would otherwise have to answer "none of them".
+    RANGE_EXPR,
     /// A unary operator expression, e.g. `-x`.
     UNARY_EXPR,
     /// A parenthesized expression `( expr )`.

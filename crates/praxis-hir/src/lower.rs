@@ -172,6 +172,20 @@ pub enum TypedExpr {
         ty: Type,
         span: (u32, u32),
     },
+    /// `a..b` / `a..=b` (§4.11, ADR-059). `ty` is the nullary `Range`
+    /// collection.
+    ///
+    /// `inclusive` is kept rather than normalized here: the bound is an
+    /// arbitrary expression, so "add one to the end" is an *operation* and not a
+    /// rewrite, and doing it in MIR keeps the overflow of `a..=Int::MAX` in one
+    /// place instead of two.
+    Range {
+        start: Box<TypedExpr>,
+        end: Box<TypedExpr>,
+        inclusive: bool,
+        ty: Type,
+        span: (u32, u32),
+    },
     /// `op a`.
     Unary {
         op: UnaryOp,
@@ -466,6 +480,7 @@ typed_expr_children! {
     Read {},
     Continue {},
     Bin { lhs, rhs },
+    Range { start, end },
     Unary { operand },
     Paren { inner: opt },
     If { cond, then_block: block, else_block: block_opt },
@@ -1019,6 +1034,7 @@ impl<'a> Lowerer<'a> {
             Expr::Literal(l) => self.lower_literal(l),
             Expr::Path(p) => self.lower_path(p),
             Expr::Bin(b) => self.lower_bin(b),
+            Expr::Range(r) => self.lower_range(r),
             Expr::Unary(u) => self.lower_unary(u),
             Expr::Paren(p) => match p.expr() {
                 Some(inner) => self.lower_expr(&inner),
@@ -1346,6 +1362,35 @@ impl<'a> Lowerer<'a> {
             .and_then(|t| self.resolve_symbol_at(t.text_range()))
             .unwrap_or(SymbolId(u32::MAX));
         TypedExpr::Path { symbol, ty, span }
+    }
+
+    /// `a..b` / `a..=b` (§4.11, ADR-059). Both bounds are ordinary `Int`
+    /// expressions; the inclusiveness is read off the operator token.
+    ///
+    /// A bound the parser could not produce lowers as `Unit`, which cannot be an
+    /// `Int` — the same defensive shape every other missing-operand path takes.
+    /// Inference has already reported the malformed range.
+    fn lower_range(&mut self, r: &praxis_ast::RangeExpr) -> TypedExpr {
+        let span = self.node_span(r.syntax());
+        let ty = self.node_ty(r.syntax());
+        let (start, end) = r.bounds();
+        let lower_bound = |this: &mut Self, bound: Option<praxis_ast::Expr>| match bound {
+            Some(e) => Box::new(this.lower_expr(&e)),
+            None => Box::new(TypedExpr::Lit {
+                value: Lit::Unit,
+                ty: this.unit,
+                span,
+            }),
+        };
+        let start = lower_bound(self, start);
+        let end = lower_bound(self, end);
+        TypedExpr::Range {
+            start,
+            end,
+            inclusive: r.is_inclusive(),
+            ty,
+            span,
+        }
     }
 
     fn lower_bin(&mut self, b: &BinExpr) -> TypedExpr {
@@ -2184,6 +2229,7 @@ pub fn expr_span(e: &TypedExpr) -> (u32, u32) {
         TypedExpr::Lit { span, .. }
         | TypedExpr::Path { span, .. }
         | TypedExpr::Bin { span, .. }
+        | TypedExpr::Range { span, .. }
         | TypedExpr::Unary { span, .. }
         | TypedExpr::Paren { span, .. }
         | TypedExpr::If { span, .. }
@@ -2226,6 +2272,7 @@ pub fn expr_ty(e: &TypedExpr) -> Type {
         TypedExpr::Lit { ty, .. } => *ty,
         TypedExpr::Path { ty, .. } => *ty,
         TypedExpr::Bin { ty, .. } => *ty,
+        TypedExpr::Range { ty, .. } => *ty,
         TypedExpr::Unary { ty, .. } => *ty,
         TypedExpr::Paren { ty, .. } => *ty,
         TypedExpr::Block(b) => b.ty,

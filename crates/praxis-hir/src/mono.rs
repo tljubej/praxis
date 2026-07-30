@@ -353,6 +353,7 @@ fn resolve_expr(db: &mut TypeDb, binders: &[VarId], args: &[Type], e: &mut Typed
         TypedExpr::Lit { ty, .. }
         | TypedExpr::Path { ty, .. }
         | TypedExpr::Bin { ty, .. }
+        | TypedExpr::Range { ty, .. }
         | TypedExpr::Unary { ty, .. }
         | TypedExpr::Paren { ty, .. }
         | TypedExpr::If { ty, .. }

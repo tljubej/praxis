@@ -32,6 +32,7 @@ pub mod immortal;
 pub mod maps;
 pub mod parse_detail;
 pub mod parser;
+pub mod range;
 pub mod records;
 pub mod repr;
 pub mod roots;

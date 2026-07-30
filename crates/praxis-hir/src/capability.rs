@@ -44,7 +44,7 @@
 //! variable resolves.
 
 use praxis_stdlib::{CapKind, MethodCatalog};
-use praxis_types::{data::TypeData, Capability, Type, TypeDb};
+use praxis_types::{data::TypeData, Capability, CollectionCtor, Type, TypeDb};
 
 /// **The** decision function: does `t` have `cap`?
 ///
@@ -244,9 +244,28 @@ pub fn supports_hash(db: &TypeDb, t: Type) -> bool {
 #[must_use]
 pub fn supports_hash_stable(db: &TypeDb, t: Type) -> bool {
     match db.data(db.follow(t)) {
-        // Every mutable collection is out — including `BitSet`, whose members
-        // change, and the heaps, whose contents do.
-        TypeData::Collection { .. } => false,
+        // Mutability, not container-ness (ADR-057 D4). Every collection whose
+        // contents a program can change after it is stored is out — including
+        // `BitSet`, whose members change, and the heaps, whose contents do.
+        //
+        // A `Range` is the exception, and it is one for the stated reason rather
+        // than by accident: it has **no mutator at all** (ADR-059), so its two
+        // bounds are as fixed as a tuple's elements, and a tuple of scalars has
+        // always been a key. `Seq` is a lazy pipeline source whose elements are
+        // produced on demand — it is compiler-internal and never a key.
+        TypeData::Collection { ctor, .. } => match ctor {
+            CollectionCtor::Range => true,
+            CollectionCtor::Vec
+            | CollectionCtor::Deque
+            | CollectionCtor::Map
+            | CollectionCtor::Set
+            | CollectionCtor::Counter
+            | CollectionCtor::MinHeap
+            | CollectionCtor::MaxHeap
+            | CollectionCtor::Grid
+            | CollectionCtor::BitSet
+            | CollectionCtor::Seq => false,
+        },
         // A tuple is a key iff every element is.
         TypeData::Tuple(els) => els.iter().all(|e| supports_hash_stable(db, *e)),
         // A record/enum is one iff every argument and every contained type is.

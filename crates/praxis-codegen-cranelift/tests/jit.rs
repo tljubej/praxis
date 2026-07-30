@@ -4685,6 +4685,86 @@ fn a_numeric_helper_faults_rather_than_wrapping() {
     assert_eq!(result.as_int(), i64::MAX);
 }
 
+/// TY-34 end to end (ADR-059): a `for` over a range runs the iterations the
+/// range names. This is the half no type test can see — the loop reads
+/// `praxis_range_len` and `praxis_range_get`, so a wrong `len`/`get` symbol
+/// selection typechecks identically and then iterates the wrong collection.
+#[test]
+fn a_for_over_a_range_runs_its_integers_in_order() {
+    // Half-open: 0,1,2,3,4 — five iterations, and the last is 4 rather than 5.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  var t = 0\n  for i in 0..5 { t = t * 10 + i }\n  t\n}\n");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 1234);
+
+    // Inclusive: one more iteration, the end included.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  var t = 0\n  for i in 1..=4 { t = t + i }\n  t\n}\n");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 10);
+
+    // A descending range is empty, not a countdown (D3) — the body never runs.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  var t = 7\n  for i in 5..0 { t = t + 100 }\n  t\n}\n");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 7);
+    // …and so is an empty half-open range whose bounds are equal, while the
+    // inclusive form at the same bounds runs exactly once.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  var t = 0\n  for i in 3..3 { t = t + 1 }\n  t\n}\n");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 0);
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  var t = 0\n  for i in 3..=3 { t = t + i }\n  t\n}\n");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 3);
+
+    // Negative bounds, and a bound that is an expression rather than a literal.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var t = 0\n  for i in (0 - 2)..(1 + 1) { t = t + i }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), -2);
+}
+
+/// A range is a **value** (D6), not only a `for`-header form: it survives being
+/// bound to a name, passed through a function, stored in a collection and used as
+/// a `Map` key — and it renders as the half-open interval it is.
+#[test]
+fn a_range_is_a_value_that_outlives_its_expression() {
+    // Bound to a `let`, then iterated — the range object has to survive the
+    // binding and the allocations between.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let r = 2..6\n  let v = Vec()\n  v.push(9)\n\
+         \x20 var t = 0\n  for i in r { t = t + i }\n  t + v.len()\n}\n",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 15);
+
+    // Through a function, in both directions.
+    let (rt, result) = run_main(
+        "fn widen(r: Range) -> Range { r }\n\
+         fn main() -> Int {\n  var t = 0\n  for i in widen(1..4) { t = t + i }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 6);
+
+    // As a `Map` key: hashable *and* immutable, so it is findable again by an
+    // equal range built separately (ADR-057 D4, ADR-059).
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map()\n  m.insert(0..3, 41)\n  m.get(0..3) + 1\n}\n",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 42);
+
+    // …and `1..=4` really is `1..5`, which is what normalizing at construction
+    // means: the two spellings are one key and one rendering.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  let m = Map()\n  m.insert(1..=4, 5)\n  m.get(1..5)\n}\n");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 5);
+}
+
 /// §3.3's representative program computes `sign` and `abs` on values it read,
 /// and `max(abs(dx), abs(dy))` over them. A helper has to survive being nested
 /// in an expression, called with computed operands, and used as another

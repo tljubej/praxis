@@ -56,7 +56,9 @@ pub unsafe fn instance_repr(value: GcRef) -> InstanceRepr {
     // payload its descriptor names.
     unsafe {
         match builtin {
-            // Scalars and the nullary collection are their own answer.
+            // Scalars and the two nullary collections are their own answer: a
+            // `BitSet` holds `Int`s and a `Range` yields them, so neither has an
+            // element descriptor to recover.
             BuiltinTypeId::Unit
             | BuiltinTypeId::Bool
             | BuiltinTypeId::Int
@@ -64,7 +66,8 @@ pub unsafe fn instance_repr(value: GcRef) -> InstanceRepr {
             | BuiltinTypeId::Char
             | BuiltinTypeId::Float
             | BuiltinTypeId::Text
-            | BuiltinTypeId::BitSet => InstanceRepr::Complete,
+            | BuiltinTypeId::BitSet
+            | BuiltinTypeId::Range => InstanceRepr::Complete,
 
             BuiltinTypeId::Vec => {
                 let p = &*value.payload::<crate::collections::VecPayload>();

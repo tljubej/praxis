@@ -50,6 +50,12 @@ fn walk_expr(e: &TypedExpr) -> Result<(), String> {
             walk_expr(lhs)?;
             walk_expr(rhs)
         }
+        // A range allocates but mutates nothing, so `p 0..n` is read-only in the
+        // sense §9.5 means: no command can change what the program computed.
+        TypedExpr::Range { start, end, .. } => {
+            walk_expr(start)?;
+            walk_expr(end)
+        }
         TypedExpr::Unary { operand, .. } => walk_expr(operand),
         TypedExpr::Paren { inner, .. } => {
             if let Some(inner) = inner {
