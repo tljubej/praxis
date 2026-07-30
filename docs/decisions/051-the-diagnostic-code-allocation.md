@@ -1,8 +1,9 @@
 # ADR-051: The diagnostic-code allocation
 
 **Date:** 2026-07-29
-**Status:** Accepted — amended 2026-07-29 for `Y017` (S14/TY-21; see the
-amendment note under the `Y0xx` table)
+**Status:** Accepted — amended 2026-07-29 for `Y017` (S14/TY-21) and 2026-07-30
+for `Y018`, `Y124` and `N006` (S24/REP-01, S26/REP-05, S26/REP-14); see the
+amendment notes under each table
 **Milestone:** Repair (answers the plan's **D13**, which binds before S13)
 
 ## Context
@@ -42,6 +43,7 @@ the **Name** category, following F2's own sketch, which puts `NameIsNotAType`,
 | `N003` | TY-11 | S13 | a name is used in type position but names a value |
 | `N004` | TY-24 | S13 | a name is declared twice in one scope |
 | `N005` | TY-23 | S13 | a function is declared inside a function |
+| `N006` | REP-14 | S26 | a `struct`/`enum` declaration that refers to itself (**amendment**) |
 
 ### Type — `Y0xx`, the user block
 
@@ -56,6 +58,21 @@ the **Name** category, following F2's own sketch, which puts `NameIsNotAType`,
 | `Y015` | TY-31 | S17 | a type used where a numeric one is required |
 | `Y016` | TY-26, TY-27 | S17 | an operator that is not defined for these operand types |
 | `Y017` | TY-21 | S14 | a `break` carrying a value out of a `while`/`for` (**amendment**) |
+| `Y018` | REP-01 | S24 | a **generic** `fn` used as a value (**amendment**) |
+
+**Amendment (2026-07-30).** Three codes, one of them allocated here and two
+**recorded late**. `Y018` (REP-01, S24 — ADR-061) and `Y124` (REP-05, S26 —
+`3306a04`) were spent by the sessions that needed them and this file was not
+amended at the time, which is the one thing the last consequence below asks for.
+They are in the tables above now, so the registry is again what a stage reads
+before allocating. Neither collides: both extended a contiguous block.
+
+`N006`, for REP-14. The rule above is what
+allocated it: "declaration mistakes go in the **Name** category", and a `struct`
+that refers to itself is a mistake about what was *declared* — there is no pair of
+types to have failed to unify, which is what a `Y0xx` code is for. `N004` and
+`N005` are the precedents. So `Y019` stays free and the `Y0xx` user block is still
+contiguous through `Y018`. ADR-063 is the decision behind it (D17).
 
 `TY-20` gets two codes rather than the one the plan lists: "`return` with no
 function" and "`break` with no loop" are different mistakes with different fixes,
@@ -99,6 +116,7 @@ range they never were.
 |---|---|---|---|
 | `Y122` | HIR-07 | S16 | a pattern names a variant the scrutinee's type does not have |
 | `Y123` | HIR-06 | S16 | a pattern's shape cannot match the scrutinee's type |
+| `Y124` | REP-05 | S26 | a pattern naming more sub-patterns than the variant holds (**amendment**) |
 
 ### Input — `I0xx`
 

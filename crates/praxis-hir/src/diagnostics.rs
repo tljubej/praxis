@@ -93,6 +93,51 @@ pub(crate) fn nested_declaration(at: FileSpan, name: &str) -> Diagnostic {
     )
 }
 
+/// `N006` — a `struct`/`enum` declaration that refers to itself (REP-14,
+/// ADR-063).
+///
+/// The declaration pass registers types in dependency order; a declaration in a
+/// cycle never becomes ready, and the recursive member used to fall back to a
+/// **fresh type variable** with no report. That is not merely silence: a variable
+/// unifies with everything, so `struct Node { next: Node, value: Int }` accepted
+/// `Node { next: 7, value: 1 }` and ran it.
+///
+/// `through` names the other declarations in the cycle when there are any, so a
+/// mutual pair says which two. Wording follows §5.4: it says what the program
+/// wrote and that it is not supported, and it never says "equirecursive". It does
+/// not claim the *values* are impossible — every Praxis field holds a reference,
+/// so `struct Node { children: Vec[Node] }` describes a perfectly ordinary tree.
+/// What is missing is the language feature (ADR-052), and saying so is honest
+/// where "cannot contain itself" would not be.
+pub(crate) fn recursive_type_declaration(
+    at: FileSpan,
+    name: &str,
+    through: &[String],
+) -> Diagnostic {
+    let how = if through.is_empty() {
+        format!("`{name}` refers to itself")
+    } else {
+        format!("`{name}` refers to itself through {}", list_names(through))
+    };
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::RecursiveTypeDeclaration,
+        format!("{how}, and a self-referring type is not supported"),
+        at,
+    )
+}
+
+/// `` `A` ``, `` `A` and `B` ``, `` `A`, `B` and `C` `` — for a message that
+/// names a cycle's other members.
+fn list_names(names: &[String]) -> String {
+    let quoted: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
+    match quoted.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 /// `Y001` — two types that could not be unified (expected vs found).
 pub(crate) fn type_mismatch(at: FileSpan, expected: &str, found: &str) -> Diagnostic {
     Diagnostic::new(

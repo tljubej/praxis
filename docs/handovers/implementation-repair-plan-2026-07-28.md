@@ -3450,6 +3450,25 @@ member should be and says nothing, which is wrong under either answer. So:
 report it as an unsupported recursive type (recommended, and it supersedes
 ADR-052's silence), or support it and reopen ADR-052.
 
+**ANSWERED as recommended — report it, `N006`. ADR-063.** Supporting recursive
+types stays out of scope; ADR-052's *silence* is superseded and amended in place.
+Two things the question did not have:
+
+- **A fresh variable is not a neutral fallback.** A variable unifies with
+  everything, so `struct Node { next: Node, value: Int }` accepted
+  `Node { next: 7, value: 1 }` and **ran** it — one unchecked member per recursive
+  declaration, not merely an unnamed one.
+- **A declaration that merely waits *behind* a cycle had the same hole.**
+  `struct C { a: A }` written above a recursive `A`/`B` pair was left in the
+  stalled remainder too, so `C.a` was a variable and `C { a: "text" }` compiled.
+  It is not the mistake and must not be reported: the stall now computes which
+  remaining declarations reach *themselves*, reports only those, and **resumes**
+  the readiness loop for the rest.
+
+The member is still a variable after the report, deliberately — a second report
+per use would be the cascade `N004` avoids. The code is `N006` and not `Y019`,
+which is ADR-051's own rule ("declaration mistakes go in the Name category").
+
 **D13 (Stage 13/16)**
 
 Diagnostic code allocation. Four groups each need new codes and none

@@ -816,10 +816,16 @@ fn a_type_declaration_is_registered_after_the_types_it_names() {
     );
 }
 
-/// A declaration cycle has no fixpoint in a type system without equirecursive
-/// types, so the pass must not loop looking for one. It registers what is left
-/// in source order, exactly as an unresolvable annotation has always been
-/// handled — the point of the gate is that `analyze` returns.
+/// A declaration cycle has no fixpoint in a type system without recursive types,
+/// so the pass must not loop looking for one. The point of the gate is that
+/// `analyze` returns and the rest of the file is still inferred.
+///
+/// **Amended by REP-14 (ADR-063).** The comment used to end "it registers what is
+/// left in source order, exactly as an unresolvable annotation has always been
+/// handled", which stated the defect: registering a cycle member with a fresh
+/// variable and saying nothing left one unchecked member per recursive
+/// declaration. It is reported now, and the assertion below says so — without
+/// that line the test passed equally well against the silence.
 #[test]
 fn a_type_declaration_cycle_still_analyzes() {
     let analysis = analyze(
@@ -836,6 +842,17 @@ fn a_type_declaration_cycle_still_analyzes() {
             .iter()
             .any(|s| s.name == "f" && s.scheme.is_some()),
         "the rest of the file is still inferred"
+    );
+    // …and each of the three cycle members is reported, exactly once.
+    assert_eq!(
+        analysis
+            .diagnostics
+            .iter()
+            .filter(|d| d.kind() == praxis_source::DiagCode::RecursiveTypeDeclaration)
+            .count(),
+        3,
+        "one N006 per cycle member: {:?}",
+        analysis.diagnostics
     );
 }
 
@@ -4060,4 +4077,108 @@ fn an_iterable_requirement_is_checked_at_the_element_type_the_body_needs() {
             "an Int-itemed receiver is accepted: {call}"
         );
     }
+}
+
+/// **REP-14.** A `struct`/`enum` that refers to itself is reported where it is
+/// declared, rather than registered with a fresh variable in silence.
+///
+/// The declaration pass registers types in dependency order; a declaration in a
+/// cycle never becomes ready, and the recursive member fell back to a fresh type
+/// variable with no report. That is not merely silence — a variable unifies with
+/// everything, so `struct Node { next: Node, value: Int }` accepted `Node { next:
+/// 7, value: 1 }` and **ran** it. One unchecked member per recursive declaration.
+///
+/// D17's answer, as recommended: report it (`N006`), which supersedes ADR-052's
+/// silence. Supporting recursive types is a language feature and stays out of
+/// scope.
+#[test]
+fn a_self_referring_type_declaration_is_reported_rather_than_registered_as_a_variable() {
+    let n006 = |src: &str| -> usize {
+        analyze(src)
+            .diagnostics
+            .iter()
+            .filter(|d| d.kind() == praxis_source::DiagCode::RecursiveTypeDeclaration)
+            .count()
+    };
+
+    // Direct, in both declaration keywords.
+    assert_eq!(n006("struct Node { next: Node, value: Int }"), 1);
+    assert_eq!(n006("enum List { Nil, Cons(Int, List) }"), 1);
+    // Through a collection. A `Vec[Node]` *is* representable — every Praxis field
+    // holds a reference — so this is the same missing feature and not a different
+    // one, and it had the same silent variable (its element's).
+    assert_eq!(n006("struct Node { children: Vec[Node], value: Int }"), 1);
+    assert_eq!(n006("struct Node { by_name: Map[Text, Node] }"), 1);
+    // A mutual pair, and a three-cycle: each member is reported once.
+    assert_eq!(n006("struct A { b: B }\nstruct B { a: A }"), 2);
+    assert_eq!(
+        n006("struct A { b: B }\nstruct B { c: C }\nstruct C { a: A }"),
+        3
+    );
+
+    // The message names the way round, which is the only thing that tells a
+    // mutual pair apart from two self-references.
+    let diags = analyze("struct A { b: B }\nstruct B { a: A }").diagnostics;
+    let a = diags
+        .iter()
+        .find(|d| d.message().starts_with("`A`"))
+        .expect("A is reported");
+    assert!(
+        a.message().contains("through `B`"),
+        "the cycle names its other member: {}",
+        a.message()
+    );
+
+    // **A declaration that merely waits behind a cycle is not the mistake.**
+    // `C` is written above the recursive pair, so the stalled pass used to leave
+    // it in the remainder too: it got a fresh variable for `a` and accepted a
+    // `Text` in it. It is unreported and its field is a real `A` now.
+    let src = "struct C { a: A }\n\
+               struct A { b: B }\n\
+               struct B { a: A }\n\
+               fn main() -> Unit { let c = C { a: \"not an A\" }\n out(c.a) }";
+    assert_eq!(n006(src), 2, "only A and B are recursive");
+    let diags = analyze(src);
+    assert!(
+        diags
+            .diagnostics
+            .iter()
+            .any(|d| d.kind() == praxis_source::DiagCode::TypeMismatch),
+        "C's field is a real `A`, so a Text in it is a mismatch: {:?}",
+        diags.diagnostics
+    );
+
+    // A field or variant *named* like the type is not a reference to it: only
+    // annotation tokens are in `type_refs`, which is what makes this precise.
+    assert_eq!(n006("struct Node { node: Int }"), 0);
+    assert_eq!(n006("enum E { E }"), 0);
+    // …and a non-recursive forward reference still resolves, in both directions.
+    // TY-10's gate owns the rule; this is the code that could break it.
+    assert_eq!(
+        n006("struct Outer { inner: Inner }\nstruct Inner { n: Int }"),
+        0
+    );
+    assert!(!has_type_error(
+        "struct Outer { inner: Inner }\n\
+         struct Inner { n: Int }\n\
+         fn f(o: Outer) -> Int { o.inner.n }"
+    ));
+    assert_eq!(
+        n006("enum Shape { Round(Circle) }\nstruct Circle { r: Int }"),
+        0
+    );
+
+    // Exactly one report per declaration, and no cascade about its uses: the
+    // member is still a variable on purpose, because the declaration has already
+    // been reported and a second report per use would say the same thing again.
+    let diags = analyze(
+        "struct Node { next: Node, value: Int }\n\
+         fn main() -> Int { let n = Node { next: 7, value: 1 }\n n.value }",
+    )
+    .diagnostics;
+    assert_eq!(
+        diags.len(),
+        1,
+        "one report for the declaration and nothing else: {diags:?}"
+    );
 }

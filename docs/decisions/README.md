@@ -68,3 +68,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-060: The graph helpers are closure-driven walks, and their state is a value that can be remembered](./060-the-graph-helpers-are-closure-driven-walks.md)
 - [ADR-061: A `fn` name in value position is a closure over an adapter](./061-a-fn-name-in-value-position-is-a-closure.md)
 - [ADR-062: An iterated parameter is generic in the iterable and monomorphic in its element](./062-an-iterated-parameter-is-generic-in-the-iterable-and-not-its-element.md)
+- [ADR-063: A self-referring type declaration is reported, and a declaration behind one is not](./063-a-self-referring-type-declaration-is-reported.md)

@@ -150,11 +150,27 @@ impl Declare<'_> {
     /// declaration. Inference was not, so the *name* resolved and the *type*
     /// did not exist yet (TY-10).
     ///
-    /// A declaration that never becomes ready is part of a cycle (`struct A { b: B }`
-    /// / `struct B { a: A }`, or a self-reference). The language has no
-    /// equirecursive types, so there is nothing better to do than register it
-    /// with what is known — an unresolvable member becomes a fresh variable, as
-    /// every unresolvable annotation does.
+    /// # A declaration that never becomes ready is recursive, and is reported
+    ///
+    /// **REP-14 / ADR-063.** The loop below stalls when every remaining
+    /// declaration waits on another remaining one, which means at least one of
+    /// them reaches *itself*: `struct Node { next: Node }`, or `struct A { b: B }`
+    /// / `struct B { a: A }`. Recursive types are a language feature this compiler
+    /// does not have (ADR-052), and the stall used to be handled by declaring the
+    /// remainder anyway, so a recursive member fell back to a **fresh type
+    /// variable** and said nothing.
+    ///
+    /// That was not merely silence. A variable unifies with everything, so
+    /// `struct Node { next: Node, value: Int }` accepted `Node { next: 7, value: 1
+    /// }` and ran it — one unchecked member per recursive declaration.
+    ///
+    /// The cycle members are reported (`N006`) and then registered with what is
+    /// known, which is still a fresh variable: the declaration has been reported,
+    /// and a second report per use of it would be a cascade. The loop then
+    /// **resumes**, because a declaration that was only waiting *behind* a cycle
+    /// is not itself recursive and must still get a real type — `struct C { a: A }`
+    /// written above a recursive `A`/`B` pair had the same silent variable, and
+    /// accepted a `Text` in its `A` field.
     fn declare_types(&mut self, root: &SourceFile) {
         let mut pending: Vec<TypeDecl> = root
             .stmts()
@@ -173,17 +189,64 @@ impl Declare<'_> {
             })
             .collect();
         let mut undeclared: HashSet<SymbolId> = pending.iter().map(|d| d.symbol).collect();
-        while let Some(i) = pending
-            .iter()
-            .position(|d| !mentions(d, &undeclared, self.type_refs))
-        {
-            let decl = pending.remove(i);
-            undeclared.remove(&decl.symbol);
-            self.declare_one(&decl);
+        loop {
+            // Everything whose dependencies are all in, in dependency order.
+            while let Some(i) = pending
+                .iter()
+                .position(|d| !mentions(d, &undeclared, self.type_refs))
+            {
+                let decl = pending.remove(i);
+                undeclared.remove(&decl.symbol);
+                self.declare_one(&decl);
+            }
+            if pending.is_empty() {
+                return;
+            }
+            // Stalled. Every remaining declaration mentions another remaining
+            // one, so following mentions from any of them stays inside a finite
+            // set and must revisit a node: there is a cycle, and `recursive` is
+            // never empty here. It is computed rather than asserted so a future
+            // change to `mentions` cannot turn a wrong answer into an infinite
+            // loop; if it ever *is* empty, the fallback declares the remainder
+            // and the pass still terminates.
+            let recursive = self_referring(&pending, self.type_refs);
+            if recursive.is_empty() {
+                for decl in std::mem::take(&mut pending) {
+                    self.declare_one(&decl);
+                }
+                return;
+            }
+            let cycle: HashSet<SymbolId> = recursive.iter().map(|&i| pending[i].symbol).collect();
+            // Back to front, so the earlier indices stay valid.
+            for i in recursive.into_iter().rev() {
+                let decl = pending.remove(i);
+                self.report_recursive(&decl, &cycle);
+                undeclared.remove(&decl.symbol);
+                self.declare_one(&decl);
+            }
         }
-        for decl in pending {
-            self.declare_one(&decl);
-        }
+    }
+
+    /// Report `decl` as a recursive type declaration (`N006`), naming the other
+    /// members of `cycle` it mentions directly.
+    fn report_recursive(&mut self, decl: &TypeDecl, cycle: &HashSet<SymbolId>) {
+        let name_tok = match &decl.item {
+            TypeItem::Struct(s) => s.name(),
+            TypeItem::Enum(e) => e.name(),
+        };
+        let Some(name_tok) = name_tok else { return };
+        let through: Vec<String> = mentioned_types(decl, self.type_refs)
+            .into_iter()
+            .filter(|s| *s != decl.symbol && cycle.contains(s))
+            .filter_map(|s| self.names.get(s).map(|sym| sym.name.clone()))
+            .collect();
+        let at = self.file_span(name_tok.text_range());
+        self.diagnostics
+            .push(crate::diagnostics::recursive_type_declaration(
+                at,
+                name_tok.text(),
+                &through,
+            ));
     }
 
     fn declare_one(&mut self, decl: &TypeDecl) {
@@ -331,17 +394,72 @@ fn mentions(
     undeclared: &HashSet<SymbolId>,
     type_refs: &HashMap<TextRange, SymbolId>,
 ) -> bool {
-    decl.item
-        .syntax()
-        .descendants_with_tokens()
-        .filter_map(|e| match e {
-            rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::Ident => Some(t.text_range()),
-            _ => None,
-        })
-        // Only annotation tokens are in `type_refs`, so the declaration's own
-        // name, its field names and its variant names never match.
-        .filter_map(|range| type_refs.get(&range))
+    mentioned_types(decl, type_refs)
+        .iter()
         .any(|symbol| undeclared.contains(symbol))
+}
+
+/// Every type symbol an annotation inside `decl` names, in source order, each
+/// once.
+///
+/// Only annotation tokens are in `type_refs`, so the declaration's own name, its
+/// field names and its variant names never appear — which is what makes
+/// `struct Node { node: Int }` not a self-reference and `struct Node { next: Node }`
+/// one.
+fn mentioned_types(decl: &TypeDecl, type_refs: &HashMap<TextRange, SymbolId>) -> Vec<SymbolId> {
+    let mut seen = Vec::new();
+    for e in decl.item.syntax().descendants_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = e else {
+            continue;
+        };
+        if t.kind() != SyntaxKind::Ident {
+            continue;
+        }
+        if let Some(&symbol) = type_refs.get(&t.text_range()) {
+            if !seen.contains(&symbol) {
+                seen.push(symbol);
+            }
+        }
+    }
+    seen
+}
+
+/// The indices of the declarations in `pending` that can reach **themselves**
+/// through the mention graph — the ones that are genuinely recursive (REP-14).
+///
+/// A stalled topological pass leaves more than the cycle behind: a declaration
+/// that merely *waits on* a cycle member is stuck too, and it is not the mistake.
+/// `struct C { a: A }` above a recursive `A`/`B` pair is a perfectly ordinary
+/// declaration and gets a real type once the pair is out of the way, so it must
+/// not be reported and must not be registered with a variable.
+///
+/// The graph is small (one node per type declaration in the file) and the search
+/// is a plain depth-first reachability per node, which is the clearest way to say
+/// "reaches itself". An SCC algorithm would answer the same question for the same
+/// nodes with more machinery.
+fn self_referring(pending: &[TypeDecl], type_refs: &HashMap<TextRange, SymbolId>) -> Vec<usize> {
+    let edges: Vec<Vec<SymbolId>> = pending
+        .iter()
+        .map(|d| mentioned_types(d, type_refs))
+        .collect();
+    let index_of = |symbol: SymbolId| pending.iter().position(|d| d.symbol == symbol);
+    (0..pending.len())
+        .filter(|&start| {
+            let mut seen: HashSet<usize> = HashSet::new();
+            let mut stack: Vec<usize> = vec![start];
+            while let Some(node) = stack.pop() {
+                for next in edges[node].iter().filter_map(|s| index_of(*s)) {
+                    if next == start {
+                        return true;
+                    }
+                    if seen.insert(next) {
+                        stack.push(next);
+                    }
+                }
+            }
+            false
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

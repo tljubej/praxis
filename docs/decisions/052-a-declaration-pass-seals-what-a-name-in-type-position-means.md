@@ -77,6 +77,17 @@ member that still has no type becomes a fresh variable — which is what every
 unresolvable annotation has always done. The alternative, reporting the cycle,
 is a language decision about recursive data that S13 has no mandate to make.
 
+> **Amended by ADR-063 (S26, REP-14).** The *silence* is superseded: a cycle is
+> `N006` now. Everything else here stands — supporting recursive types is still
+> out of scope, and the member is still a fresh variable, because the declaration
+> has been reported and a second report per use of it would be a cascade. What
+> this paragraph did not see is that "a fresh variable" is not a neutral fallback:
+> a variable unifies with everything, so `struct Node { next: Node, value: Int }`
+> accepted `Node { next: 7, value: 1 }` and ran it. And "in source order" left
+> declarations that merely *waited behind* a cycle in the remainder with the same
+> unchecked member; the loop resumes past the reported cycle now, so they get real
+> types.
+
 ### 4. The environment is sealed, and it is what makes the lookup total
 
 `TypeEnv` has no mutator outside `praxis_hir::decl`. `declare` is its only
@@ -129,7 +140,10 @@ halves are gated.
 - **Order type declarations by a topological sort with an explicit cycle
   report.** A sort needs the same dependency edges the readiness check already
   computes, and then needs a decision about what a cycle *means*. Rounds
-  terminate, need no edge set, and leave the language question open.
+  terminate, need no edge set, and leave the language question open. *(ADR-063
+  takes this, in the narrow form the rounds allow: the readiness check stalls, and
+  the edge set is built only for the remainder, only to answer "which of these
+  reaches itself". D17 is the decision about what a cycle means.)*
 - **A fixpoint over placeholder variables for recursive types.** This is what
   would make `struct Node { next: Node }` work, and it is a language feature
   (equirecursive or iso-recursive types), not a bug fix.

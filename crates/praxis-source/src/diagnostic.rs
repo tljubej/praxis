@@ -178,6 +178,13 @@ pub enum DiagCode {
     DuplicateDeclaration,
     /// `N005` — a function declared inside a function (TY-23).
     NestedFunction,
+    /// `N006` — a `struct`/`enum` declaration that refers to itself, directly or
+    /// through a cycle (REP-14, ADR-063).
+    ///
+    /// A declaration mistake, so it is in this category next to `N004`/`N005`
+    /// rather than in `Y0xx`: the mistake is what was *declared*, and there is no
+    /// pair of types to have failed to unify.
+    RecursiveTypeDeclaration,
 
     // --- Type (`Y0xx`), the user block ---
     /// `Y001` — two types that could not be unified.
@@ -315,6 +322,7 @@ impl DiagCode {
             NameIsNotAType => DiagnosticCode::new(Name, 3),
             DuplicateDeclaration => DiagnosticCode::new(Name, 4),
             NestedFunction => DiagnosticCode::new(Name, 5),
+            RecursiveTypeDeclaration => DiagnosticCode::new(Name, 6),
 
             TypeMismatch => DiagnosticCode::new(Type, 1),
             InfiniteType => DiagnosticCode::new(Type, 2),
@@ -386,6 +394,7 @@ impl DiagCode {
             NameIsNotAType,
             DuplicateDeclaration,
             NestedFunction,
+            RecursiveTypeDeclaration,
             TypeMismatch,
             InfiniteType,
             AnnotationConflict,
@@ -791,7 +800,7 @@ mod tests {
         // `ALL` holds each variant once, so its length is the variant count.
         // Update both together; the exhaustive match in `code()` is what makes
         // adding a variant a compile error in the first place.
-        assert_eq!(DiagCode::ALL.len(), 59);
+        assert_eq!(DiagCode::ALL.len(), 60);
         let unique: std::collections::HashSet<_> = DiagCode::ALL.iter().collect();
         assert_eq!(
             unique.len(),
