@@ -576,6 +576,10 @@ impl<'t> Parser<'t> {
                     if !self.eat(SyntaxKind::COMMA) {
                         break;
                     }
+                    // A trailing comma closes the list (REP-17).
+                    if self.at(SyntaxKind::R_PAREN) {
+                        break;
+                    }
                     // Guarantee termination on any input.
                     self.ensure_progress(before);
                 }
@@ -617,6 +621,10 @@ impl<'t> Parser<'t> {
                 if !self.eat(SyntaxKind::COMMA) {
                     break;
                 }
+                // A trailing comma closes the list (REP-17).
+                if self.at(SyntaxKind::R_BRACE) {
+                    break;
+                }
                 self.ensure_progress(before);
             }
         }
@@ -647,6 +655,10 @@ impl<'t> Parser<'t> {
                             if !self.eat(SyntaxKind::COMMA) {
                                 break;
                             }
+                            // A trailing comma closes the list (REP-17).
+                            if self.at(SyntaxKind::R_PAREN) {
+                                break;
+                            }
                             self.ensure_progress(pbefore);
                         }
                     }
@@ -654,6 +666,10 @@ impl<'t> Parser<'t> {
                 }
                 self.finish_node(); // ENUM_VARIANT
                 if !self.eat(SyntaxKind::COMMA) {
+                    break;
+                }
+                // A trailing comma closes the list (REP-17).
+                if self.at(SyntaxKind::R_BRACE) {
                     break;
                 }
                 self.ensure_progress(before);
@@ -858,6 +874,14 @@ impl<'t> Parser<'t> {
                 if !self.eat(SyntaxKind::COMMA) {
                     break;
                 }
+                // A trailing comma closes the list (REP-17). Without this the
+                // comma opened another argument, which parsed as nothing and
+                // made the call's arity one too high — §3.3's own `max(\n
+                // abs(dx),\n abs(dy),\n)` reported `expected (Int, Int) -> Int,
+                // found (Int, Int, ?T) -> ?U`.
+                if self.at(SyntaxKind::R_PAREN) {
+                    break;
+                }
                 // Guarantee termination on any input.
                 self.ensure_progress(before);
             }
@@ -888,6 +912,10 @@ impl<'t> Parser<'t> {
                 }
                 self.finish_node();
                 if !self.eat(SyntaxKind::COMMA) {
+                    break;
+                }
+                // A trailing comma closes the list (REP-17).
+                if self.at(SyntaxKind::PIPE) {
                     break;
                 }
                 self.ensure_progress(before);
@@ -1210,6 +1238,10 @@ impl<'t> Parser<'t> {
                 // The first type arg.
                 self.parse_type();
                 while self.eat(SyntaxKind::COMMA) {
+                    // A trailing comma closes the list (REP-17).
+                    if self.at(SyntaxKind::R_BRACK) {
+                        break;
+                    }
                     self.parse_type();
                 }
                 self.expect(SyntaxKind::R_BRACK, "`]`");
@@ -1325,6 +1357,10 @@ impl<'t> Parser<'t> {
                     }
                     self.finish_node();
                     if !self.eat(SyntaxKind::COMMA) {
+                        break;
+                    }
+                    // A trailing comma closes the list (REP-17).
+                    if self.at(SyntaxKind::R_BRACE) {
                         break;
                     }
                     self.ensure_progress(before);
@@ -2383,6 +2419,79 @@ mod tests {
         // is ADR-059's rule and the one row that kept its number.
         assert_eq!(shape("let r = 0..n - 1"), shape("let r = 0..(n - 1)"));
         assert_ne!(shape("let r = 0..n - 1"), shape("let r = (0..n) - 1"));
+    }
+
+    /// **REP-17.** A trailing comma closes a list; it does not open another
+    /// element.
+    ///
+    /// `parse_arg_list` looped on `eat(COMMA)` and never asked whether the closer
+    /// came next, so the comma opened an argument that parsed as nothing and the
+    /// call came out one argument too wide: **§3.3's representative program**
+    /// writes `max(\n  abs(dx),\n  abs(dy),\n)` and reported `expected (Int,
+    /// Int) -> Int, found (Int, Int, ?T) -> ?U`.
+    ///
+    /// Three of the twelve comma-separated lists already had the guard and nine
+    /// did not, which is why this asserts all of them rather than the one the
+    /// finding names — a list that accepts a trailing comma is a property of the
+    /// grammar, not of the argument list.
+    #[test]
+    fn a_trailing_comma_closes_a_list_rather_than_opening_an_element() {
+        // The list, and the same list without the trailing comma: identical trees
+        // once the comma token is out of the way, which is what "closes it" means.
+        for (with, without) in [
+            // Call arguments — the finding's own case, in §3.3's own layout.
+            (
+                "let d = max(\n  abs(a),\n  abs(b),\n)",
+                "let d = max(abs(a), abs(b))",
+            ),
+            ("let x = f(1,)", "let x = f(1)"),
+            // Tuple literal, collection type arguments.
+            ("let t = (1, 2,)", "let t = (1, 2)"),
+            ("let v: Vec[Int,] = Vec()", "let v: Vec[Int] = Vec()"),
+            (
+                "let m: Map[Text, Int,] = Map()",
+                "let m: Map[Text, Int] = Map()",
+            ),
+            // Declarations: struct fields, enum variants, an enum payload.
+            (
+                "struct P { x: Int, y: Int, }",
+                "struct P { x: Int, y: Int }",
+            ),
+            ("enum E { A, B, }", "enum E { A, B }"),
+            ("enum E { B(Int, Int,), }", "enum E { B(Int, Int) }"),
+            // Function and closure parameters.
+            (
+                "fn add(a: Int, b: Int,) -> Int { a + b }",
+                "fn add(a: Int, b: Int) -> Int { a + b }",
+            ),
+            ("let f = |a, b,| a + b", "let f = |a, b| a + b"),
+            // Record literal fields, and match arms.
+            (
+                "struct P { x: Int }\nlet p = P { x: 1, }",
+                "struct P { x: Int }\nlet p = P { x: 1 }",
+            ),
+            (
+                "let r = match n { 1 => 1, _ => 0, }",
+                "let r = match n { 1 => 1, _ => 0 }",
+            ),
+        ] {
+            let out = parse_text(with);
+            assert!(out.diagnostics.is_empty(), "{with}: {:?}", out.diagnostics);
+            let filt = |t: &str| -> Vec<SyntaxKind> {
+                construct_names(&parse_text(t).tree)
+                    .into_iter()
+                    .filter(|k| !k.is_trivia() && *k != SyntaxKind::COMMA)
+                    .collect()
+            };
+            assert_eq!(filt(with), filt(without), "{with}");
+        }
+
+        // …and a *leading* or doubled comma is still a mistake: the rule is that
+        // a comma may precede the closer, not that commas are optional.
+        for bad in ["let x = f(1,,2)", "let x = f(,1)", "let t = (1,,2)"] {
+            let out = parse_text(bad);
+            assert!(!out.diagnostics.is_empty(), "{bad} must still report");
+        }
     }
 
     /// The construct shape of `text` with parentheses erased, so two spellings
