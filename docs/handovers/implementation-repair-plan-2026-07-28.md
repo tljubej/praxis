@@ -1889,10 +1889,19 @@ evidence and a stage owner should re-reproduce before fixing.
 They are separated from the table above for provenance only. They are scheduled,
 they have owning stages, and a stage is not done until its rows are.
 
-**One row is `unscheduled`: REP-15.** It is a P0 and it arrived after every stage
-that could own it was written. It needs a design decision and a vertical slice of
+**Three rows are `unscheduled`.** **REP-15** is a P0 that arrived after every stage
+that could own it was written; it needs a design decision and a vertical slice of
 its own — a new stage, on the model of D6/S17's `Range` work — so scheduling it is
-the next session's first decision, not a line in this table.
+the next session's first decision, not a line in this table. **REP-16** and
+**REP-17** belong to S25 by subject and were found by measuring its acceptance
+criterion directly: **§3.3's representative program needs them, and the stage's
+`Ordering` note is wrong to say REP-07 + REP-08 + REP-09 are what stand between it
+and the compiler.** They were verified at `bb3bc43`, with REP-07 and REP-08
+landed — everything else in §3.3 already works, including `read lines(…)` with
+record captures, `segment.x2`, `sign`/`abs`/`max`, `0..=distance`, the tuple
+literal, `continue`, and `counts.values().count(|n| n >= 2)`.
+
+So S25's exit list is **six** rows, not four.
 
 | ID | Sev | Effort | Stage | Subsystem | Found | What |
 |---|---|---|---|---|---|---|
@@ -1910,6 +1919,8 @@ the next session's first decision, not a line in this table.
 | REP-12 | P2 | S | S23 | ty-ops | S15 (`b560e67`) | **`Grid` has no `len`, and a corpus program calls it.** `tests/aoc-corpus/day02_grid_of_char.px` calls `map.len()` on a `Grid[Char]` and gets `Y110` at *lowering*, so `praxis check` is clean and `praxis run` is not. The catalog has `width`/`height`. Either add `Grid.len` (cells, presumably) or fix the corpus program — but no Rust test covers the corpus directory, which is why nothing caught it; **the test is part of the fix**. |
 | REP-13 | P3 | S | S23 | ty-typedb | S17 unit 4 (`b6ab8eb`) | **A nullary collection renders with empty brackets.** `TypeDb::render` prints `[...]` whether or not there are arguments, so a `Y001` about a range says "found `Range[]`". Cosmetic; it predates TY-34 (`BitSet[]` has always done it). |
 | REP-14 | P2 | M | S26 | ty-scope | S13 (`de6b0e2`) | **A type-declaration cycle registers a fresh variable, silently.** `struct A { b: B }` / `struct B { a: A }` and `struct Node { next: Node }` come out of the declaration pass with a variable where the recursive member should be. ADR-052 puts *supporting* recursive types out of scope (they are equi- or iso-recursive types, a language feature) — this row is the narrower defect that survives either answer: the silence. Blocked on **D17**. |
+| REP-16 | P1 | L | **unscheduled** (S25's own criterion needs it) | fe-cli-dbg | S25 REP-08 (`bb3bc43`) | **There is no subscript syntax.** `m[key]` is a `P001` at the `[` and `counts[key] += 1` is a `P002`; the postfix loop has no `L_BRACK` arm. §4.7 writes `let value = map[key]` and says indexing a missing key **faults** where `.get` returns an `Option` — "the user chooses between explicit absence with `.get` and assertion-like access with indexing" — and §6.2 writes `counts[key] += 1` for a `Counter`, plus `distance[key] min= candidate` and `best[key] max= score`, which are two more assignment operators that do not exist either. **§3.3's representative program uses `counts[point] += 1`**, so this blocks S25's acceptance criterion just as REP-07 and REP-08 did. It is a read form, a compound-assign form, an lvalue in the assignment grammar and a per-collection lowering, so it is L. Needs a decision on how far to go: the read and `+=` are what §3.3 needs; `min=`/`max=` are §6.2's and can be separate. |
+| REP-17 | P2 | S | **unscheduled** (S25's own criterion needs it) | fe-cli-dbg | S25 REP-08 (`bb3bc43`) | **A trailing comma in an argument list is parsed as an extra argument.** `max(\n  abs(dx),\n  abs(dy),\n)` reports `expected (Int, Int) -> Int, found (Int, Int, ?T) -> ?U` — `parse_arg_list` loops on `eat(COMMA)` and does not check for the closing `)` afterwards, so the trailing comma opens a third argument that parses as nothing. **§3.3's representative program writes exactly that call**, over three lines with a trailing comma. The fix is one `if self.at(R_PAREN) { break }` in the loop; the same shape should be checked for the other comma-separated lists (tuple, `Vec` literal, record literal, param list, match arms). |
 | REP-15 | P0 | L | **unscheduled** | mir-codegen | S26 REP-03 (`586a149`) | **Six of the nine iterable collections have no `for` lowering: iterating one segfaults or answers with garbage.** `for x in s` over a `Set`, `for i in b` over a `BitSet` and `for kv in c` over a `Counter` each pass `praxis check` and **kill the process**; `for kv in m` over a `Map` likewise; and a `MinHeap` is worse — `for x in h` over `[3, 1, 2]` sums to `4349199564`, a **silently wrong answer** out of a program that reports nothing. MIR's `get_symbol_for` has arms for `Vec`, `Deque` and `Range` and a `_ => VecGet` default, so a `Set` object's payload is read as a `Vec`'s; `len_symbol_for` has the same default. It is not a missing match arm: the runtime has **no indexed accessor** for `Set`, `BitSet`, `Map`, `Counter`, `Grid` or the heaps to select — `MapGet`/`CounterGet` are keyed lookups and `GridGet` takes `(x, y)`. So it needs an iteration protocol (an nth-member symbol per collection, or a cursor) plus a `for` lowering that uses it, which is D6's Range slice again at six times the width. `capability::iter_item` has claimed all nine are iterable since M8; nothing ever lowered six of them, and no test ran a `for` over one. **Needs a decision** on the protocol *and* on whether `for (k, v) in m` destructures, since `for kv in m` is the only spelling today (REP-10's tuple patterns are the other half of that). |
 
 ## 5. Stages
@@ -2982,7 +2993,11 @@ record/tuple patterns.
 **Ordering**
 
 REP-07 and REP-08 first: **§3.3's representative program needs both**, and with
-REP-09 it compiles — which is the readable milestone for this stage. REP-07 is
+REP-09 it compiles — which is the readable milestone for this stage. **(Measured
+at `bb3bc43`, with REP-07 and REP-08 landed: it also needs REP-16 — there is no
+`m[key]` syntax at all and §3.3 writes `counts[point] += 1` — and REP-17, a
+trailing comma in an argument list. Both are in §4.1. Everything else in the
+program works.)** REP-07 is
 not only grammar: `&&`/`||` short-circuit, so they lower to branches and not to
 a call, and the precedence goes *below* comparison and above `..` (which S17
 already inserted at `bp(3, 4)` — **read the whole table**, every number moved

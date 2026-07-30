@@ -31,7 +31,7 @@ Update this file at the end of every stage.
 | S18 … S21 | not started | |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
-| S25 — Grammar completion | **part** (REP-07; REP-08, REP-09, REP-10 left) | `c74e062` |
+| S25 — Grammar completion | **part** (REP-07, REP-08; REP-09, REP-10, REP-16, REP-17 left) | `c74e062`, `bb3bc43` |
 | S26 — Declaration, pattern and inference gaps | **done** | `3306a04`, `b3bb6f5`, `4b7d763` |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
@@ -39,10 +39,12 @@ S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
 TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
-**Fifteen defects found while executing the plan are registered** as
-**REP-01 … REP-15** in the plan's **§4.1**. REP-01…REP-14 are owned by four new
-stages (**S23**–**S26**) and three new decisions (**D15**–**D17**), all three of
-which are now answered. **REP-15 is a P0 and is `unscheduled`** — see §4.
+**Seventeen defects found while executing the plan are registered** as
+**REP-01 … REP-17** in the plan's **§4.1**. REP-01…REP-14 are owned by four new
+stages (**S23**–**S26**) and three new decisions (**D15**–**D17**), two of which
+are now answered. **Three rows are `unscheduled`**: **REP-15**, a P0, and
+**REP-16**/**REP-17**, which belong to S25 by subject — **§3.3's representative
+program needs them, so S25's exit list is six rows and not four.** See §4.
 
 **S23 is closed.** All four of its findings are fixed and gated — **REP-13**,
 **REP-11**, **REP-12** and **REP-02** — each as its own commit with the suite
@@ -65,7 +67,7 @@ representative program compiling. Beyond it are S18…S21, which were never star
 and REP-15.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1406 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1409 passed, 0 failed, 38 ignored**. `just ci` is green.
 
 S26's five new gates:
 
@@ -2351,8 +2353,8 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 **Two candidates, and the choice is a judgement call the next session should make
 deliberately: S25, or the new P0 REP-15.**
-`12-repair-s26-and-rep07-handover.md` is the last session's note and has both in
-detail, including a scoping of REP-08 against this tree.
+`12-repair-s26-and-s25-part-handover.md` is the last session's note and has both
+in detail, including a scoping of REP-16 against this tree.
 
 **S17, S23, S24 and S26 are all closed.** Every REP row the plan scheduled is done
 except S25's four. Of the repair's three new decisions, **D15 (S24) and D17 (S26)
@@ -2370,11 +2372,21 @@ are answered and implemented**; **D16 is S25's and is still open**.
   D6's `Range` work, and it needs a decision first (the protocol, *and* whether
   `for (k, v) in m` destructures, which is REP-10's other half). It is the most
   severe thing left in the tree.
-- **S25 is open, with REP-07 done** (`c74e062`). Its acceptance criterion is that
-  **§3.3's representative program compiles**, which nothing else in the repair
-  can claim, and it is the most *visible* thing left. **REP-08 (`p.0`) is next in
-  the stage's own ordering** and is the other half of what that program needs;
-  REP-09's `Counter[(Int, Int)]()` completes it, and REP-10 is last and largest.
+- **S25 is open, with REP-07 and REP-08 done** (`c74e062`, `bb3bc43`). Its
+  acceptance criterion is that **§3.3's representative program compiles**, which
+  nothing else in the repair can claim, and it is the most *visible* thing left.
+  **That program was measured directly at `bb3bc43`, and the stage's ordering note
+  is wrong about what stands between it and the compiler.** It needs REP-09
+  (`Counter[(Int, Int)]()`) *and* two rows the register did not have:
+  **REP-16** — there is no `m[key]` syntax at all, and §3.3 writes
+  `counts[point] += 1` — and **REP-17**, a trailing comma in an argument list.
+  Everything else in it already works, including `read lines(…)` with record
+  captures, `segment.x2`, `sign`/`abs`/`max`, `0..=distance`, the tuple literal,
+  `continue`, and `counts.values().count(|n| n >= 2)`. **REP-16 is the big one**
+  (a read form, a compound-assign form, an lvalue in the assignment grammar and a
+  per-collection lowering, plus §6.2's `min=`/`max=` to decide about); REP-17 is
+  one `if` in `parse_arg_list`.
+
   The precedence table was renumbered by REP-07 — `||` at `bp(1, 2)`, `..` at
   `bp(3, 4)`, `&&` at `bp(5, 6)`, then comparison, additive, multiplicative,
   prefix `13`, `read` `15` — so **read the whole table** before adding to it.
@@ -2392,6 +2404,19 @@ What S25 has delivered so far:
   `Never`, so `false && panic("x")` reported "expected Never, found Bool" — a
   `Y001` about the operator rather than about the program. `||` carried that from
   the day it was written; `&&` is what made it visible.
+- **A tuple element is its own node at every level** — `TUPLE_INDEX_EXPR`,
+  `Expr::TupleIndex`, `TypedExpr::TupleIndex`, `Inst::LoadTupleElem` — because a
+  record field and a tuple element lower to *different runtime symbols*.
+  `RuntimeSymbol::TupleGet` already existed with no MIR caller, so there is no new
+  runtime code. Seven exhaustive walks had to be visited; the compiler named each.
+- **A digit run immediately after a `DOT` token is an index and takes no
+  fraction**, or `t.0.1` lexes its `0.1` as one float and a nested tuple stays
+  unreadable. It is a *token* rule, not a byte rule: in `1.5..2.5` the byte before
+  `2` is a `.` too, and that one is inside a `DOT2`.
+- **`Y019` is spent, in inference.** A `.n` on a non-tuple or past the end. Not
+  `Y112`, which is a *lowering* diagnostic — `praxis check` does not run lowering,
+  so a program reported only there is clean under `check` and fails under `run`.
+  **`Y020` and `N007` are the next free codes.**
 
 **S18 is still `D1`-blocked** and D1 is still open, so it is not the answer to
 "what next" either — see the S18 block below for what it needs.

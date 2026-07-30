@@ -1,7 +1,7 @@
-# Repair session handover — S26 closed, and S25 opened
+# Repair session handover — S26 closed, and S25 half done
 
 **Date:** 2026-07-30
-**Tree:** `c74e062` · **Suite:** 1406 passed, 0 failed, 38 ignored · `just ci` green
+**Tree:** `bb3bc43` · **Suite:** 1409 passed, 0 failed, 38 ignored · `just ci` green
 
 `implementation-repair-progress.md` is still the living status and this file does
 not replace it — read §1 and §4 there first. This is the session-scoped note: what
@@ -13,25 +13,32 @@ rediscovered.
 | Stage | Rows | Commits |
 |---|---|---|
 | **S26** — declaration, pattern and inference gaps | REP-03 + REP-04, REP-14 (closing the stage) | `b3bb6f5`, `4b7d763`, docs `fd4ba67` |
-| **S25** — grammar completion | REP-07 (of four) | `c74e062` |
+| **S25** — grammar completion | REP-07, REP-08 | `c74e062`, `bb3bc43` |
 
 **S26 is closed and D17 is answered**, so **D16 is the only repair decision still
 open**. Two new ADRs: **062** (an iterated parameter is generic in the iterable and
 monomorphic in its element) and **063** (a self-referring type declaration is
 reported).
 
-**One new finding, and it is a P0: REP-15.** It is registered in the plan's §4.1
-and is deliberately `unscheduled` — see below.
+**Three new findings, one of them a P0.** **REP-15** (six of the nine iterables
+have no `for` lowering) is the P0. **REP-16** (there is no `m[key]` syntax at all)
+and **REP-17** (a trailing comma in an argument list is parsed as an extra
+argument) came from measuring S25's own acceptance criterion, and they change it:
+**§3.3's representative program needs both**, so S25's exit list is six rows and
+not four. All three are registered in the plan's §4.1 and are `unscheduled`.
 
-Three of §4.1's fifteen rows remain: **REP-08, REP-09, REP-10** (the rest of S25),
+Four of §4.1's seventeen rows remain in S25 — **REP-09, REP-10, REP-16, REP-17** —
 plus REP-15.
 
 ## Where to start
 
-**REP-08 — `p.0`, tuple element access.** It is next in S25's own ordering, it is
-the other half of what §3.3's representative program needs, and it is scoped below.
-After it, REP-09 (`Counter[(Int, Int)]()`) is what completes that program — which
-is the stage's acceptance criterion and the most visible thing left in the repair.
+**REP-17, then REP-16, then REP-09** — that is what §3.3's representative program
+still needs, measured directly against this tree rather than taken from the plan.
+REP-17 is one `if` in `parse_arg_list` and is the cheapest thing left in the
+repair; **REP-16 is the big one** and is scoped below. The program's other halves
+already work: `read lines(…)` with record captures, `segment.x2`, `sign`/`abs`/
+`max`, `0..=distance`, the tuple literal, `continue`, `!diagonals && dx != 0 && dy
+!= 0`, and `counts.values().count(|n| n >= 2)`.
 
 **But REP-15 is more severe, and choosing is a real decision.** Six of the nine
 iterable collections have no `for` lowering at all: `for x in s` over a `Set`, `for
@@ -48,34 +55,47 @@ again at six times the width, plus a decision (the protocol, *and* whether
 has claimed all nine are iterable since M8 and nothing ever lowered six of them; no
 test ran a `for` over one.
 
-### REP-08, scoped against this tree
+### REP-16, scoped against this tree
 
-`p.0` is a `P001` "expected name after `.`" — the postfix loop at
-`crates/praxis-parser/src/parse.rs:814` requires an `Ident` after `DOT`. The pieces:
+`m[key]` is a `P001` at the `[` and `counts[key] += 1` a `P002`: the postfix loop
+in `crates/praxis-parser/src/parse.rs` has arms for `L_PAREN` and `DOT` and none
+for `L_BRACK`. Four pieces, and a decision:
 
-1. **Lexer** — check first whether `t.0.1` lexes as `t`, `.`, `0`, `.`, `1` or as
-   `t`, `.`, `0.1` (a float). `eat_number` already has the `DOT2` carve-out for
-   ranges; a `.` *after* a digit run may need the same treatment.
-2. **Parser** — accept an `IntLit` after `DOT` in the postfix loop.
-3. **Node kind** — recommend a **new** one rather than an `IntLit` inside
-   `FIELD_EXPR`. Tuple indexing is by position and the index must be a literal;
-   a record field is by name. ADR-061's `TypedExpr::FnValue` is the precedent for
-   "its own node, not a flag", and the reason is the same: the four exhaustive
-   matches (`mono::resolve_expr`, MIR's `lower_expr_gc` and `expr_static_type`, the
-   debugger's purity walk) then make the addition a compile error rather than a
-   silently skipped slot.
-4. **Inference** — the receiver must be a `Tuple`, the index in range, the result
-   the element's type. `p.0` on a non-tuple is a **named diagnostic** per the exit
-   criterion, and `Y112` ("no field on this type") is the wrong one to reuse — the
-   receiver has no field *positions*, not a missing name. **`Y019` is free** in the
-   `Y0xx` user block; amend ADR-051 before spending it.
-5. **HIR** — `TypedExpr::FieldGet` already carries a `field_idx`, so the typed tree
-   needs only the receiver's *kind* to differ.
-6. **MIR + codegen** — `Inst::LoadField` hard-codes `RuntimeSymbol::RecordField` at
-   `crates/praxis-codegen-cranelift/src/lower.rs:1258`. **`RuntimeSymbol::TupleGet`
-   already exists** (`praxis_tuple_get(ctx, tuple, idx) -> GcRef`, `Pure`) and has
-   no MIR caller today, so this is a second instruction (or a discriminated
-   `LoadField`) and no new runtime work.
+1. **The read form.** §4.7 is explicit about the semantics and they are not
+   `.get`'s: "Indexing a missing map key **faults** instead of returning an
+   option… the user chooses between explicit absence with `.get` and
+   assertion-like access with indexing." So it is a distinct runtime call, not
+   sugar for `get`.
+2. **The compound-assign form.** `counts[key] += 1` is what §3.3 writes, and §6.2
+   adds "`Counter[T]` behaves as a map whose absent values read as zero" — so the
+   `Counter` case is a read-or-zero plus a store, not a fault.
+3. **An lvalue in the assignment grammar.** Assignment is statement-level
+   (`is_assignment_op`), and its target is a name today. A subscript target is the
+   first thing that is not.
+4. **A per-collection lowering**, as `for` has: `Vec`, `Deque`, `Map`, `Counter`,
+   `Grid` and `Text` all index, and each has its own symbol.
+
+**The decision is how far to go.** §6.2 also writes `distance[key] min= candidate`
+and `best[key] max= score` — two assignment operators that do not exist — and says
+"for `min=` and `max=`, an absent entry accepts the first value". The read and `+=`
+are what §3.3 needs; `min=`/`max=` are §6.2's and can be their own row.
+
+### REP-08, as landed (kept for the reasoning, not as work)
+
+The scoping guess above it was right about the node kind and wrong to treat the
+lexer as an open question — it is the load-bearing half. **A digit run whose
+immediately preceding *token* is a bare `DOT` is an index and takes no fraction**,
+or `t.0.1` folds its `0.1` into one `FloatLit` and a nested tuple stays unreadable
+even though the parser accepts `p.0`. It must be the token and not the source byte:
+in `1.5..2.5` the byte before `2` is a `.` too, and that one was consumed into a
+`DOT2`.
+
+It is its own node at every level — `TUPLE_INDEX_EXPR`, `Expr::TupleIndex`,
+`TypedExpr::TupleIndex`, `Inst::LoadTupleElem` — and adding the variant sent the
+compiler to **seven** exhaustive walks, not the four the guess listed: F20's child
+walker and MIR's `verify` and `liveness` were the extra three.
+`RuntimeSymbol::TupleGet` did already exist with no MIR caller, so there was no new
+runtime code.
 
 ## Four things worth not rediscovering
 
@@ -97,10 +117,14 @@ test ran a `for` over one.
    at the use site with the `for` as its note.
 
 3. **ADR-051 is accurate again.** It had not been amended for `Y018` (S24) or
-   `Y124` (S26 part 1); both are back-recorded, along with the new `N006`.
-   **`Y019` is the next free code in the `Y0xx` user block and `N007` in `N0xx`.**
-   Declaration mistakes go in the Name category — that is the ADR's own rule, and
-   it is why REP-14 did not spend `Y019`.
+   `Y124` (S26 part 1); both are back-recorded, along with `N006` (REP-14) and
+   `Y019` (REP-08). **`Y020` is the next free code in the `Y0xx` user block and
+   `N007` in `N0xx`.** Declaration mistakes go in the Name category — that is the
+   ADR's own rule, and it is why REP-14 did not spend a `Y0xx` code.
+   **A report a stage wants `praxis check` to see must be emitted in inference**:
+   `check` does not run lowering, so `Y112`'s emitter is clean under `check` and
+   fails under `run`, which is REP-12's asymmetry. `Y018` and `Y019` are both in
+   inference for that reason.
 
 4. **`&&` and `||` are one MIR function now** (`lower_short_circuit`), with the
    skipping side's answer flipped. If you add a third short-circuiting form, that
@@ -108,7 +132,15 @@ test ran a `for` over one.
    a divergent one is absorbed — without that, `false && panic("x")` reported
    "expected Never, found Bool".
 
-## Three places the plan was wrong, and what replaced it
+## Four places the plan was wrong, and what replaced it
+
+- **S25's ordering note says REP-07 + REP-08 + REP-09 are what stand between
+  §3.3's representative program and the compiler.** Measured at `bb3bc43`, with
+  REP-07 and REP-08 landed, it also needs **REP-16** (`counts[point] += 1` — there
+  is no subscript syntax at all) and **REP-17** (the trailing comma in its
+  three-line `max(…)` call is parsed as a third argument). Both are now in §4.1.
+  This is the stage's *acceptance criterion*, so the correction is not cosmetic —
+  it is two more rows before the stage can close.
 
 - **REP-07's row says "There is no `&&` or `||`."** `||` already worked, end to
   end: lexed as `PIPE2`, bound at `bp(1, 2)`, typed in `infer_bin`, and lowered by
