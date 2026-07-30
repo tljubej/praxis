@@ -536,6 +536,33 @@ fn render_collection_types() {
     assert_eq!(db.render(nested), "Vec[Map[Text, Int]]");
 }
 
+/// REP-13: the brackets belong to the arguments, so a ctor with none has none.
+///
+/// The collection arm wrote `[` and `]` unconditionally, so every diagnostic
+/// about a nullary collection named a type nobody can write: a `Y001` said
+/// "found `Range[]`". `BitSet` has done it since it existed; `Range` (TY-34)
+/// made it visible. Both nullary ctors are here because the rule is the arity,
+/// not the name — and the unary and binary cases are re-asserted alongside so a
+/// fix that dropped *every* bracket could not pass.
+#[test]
+fn a_collection_with_no_type_arguments_renders_without_brackets() {
+    let mut db = TypeDb::new();
+    for ctor in [CollectionCtor::Range, CollectionCtor::BitSet] {
+        assert_eq!(ctor.arity(), 0, "{} is the nullary case", ctor.name());
+        let t = coll(&mut db, ctor, vec![]);
+        assert_eq!(db.render(t), ctor.name());
+    }
+
+    // …and an argument still prints, at every arity and nested inside a
+    // nullary-carrying type.
+    let i = db.int();
+    let bits = coll(&mut db, CollectionCtor::BitSet, vec![]);
+    let vec_of_bits = db.vec(bits);
+    assert_eq!(db.render(vec_of_bits), "Vec[BitSet]");
+    let map = coll(&mut db, CollectionCtor::Map, vec![bits, i]);
+    assert_eq!(db.render(map), "Map[BitSet, Int]");
+}
+
 // --- record & enum types (M7, ADR-025) --------------------------------------
 //
 // Records and enums use def-id indirection: the heavy field/variant data lives

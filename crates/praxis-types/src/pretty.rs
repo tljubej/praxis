@@ -98,14 +98,9 @@ impl TypeDb {
             }
             TypeData::Collection { ctor, args } => {
                 let _ = out.write_str(ctor.name());
-                out.push('[');
-                for (i, a) in args.iter().enumerate() {
-                    if i > 0 {
-                        out.write_str(", ").ok();
-                    }
-                    self.write_type(*a, out, names, binders);
-                }
-                out.push(']');
+                // Through the same writer the nominal types use, so a nullary
+                // ctor prints bare: `Range`, not `Range[]` (REP-13).
+                self.write_type_args(args, out, names, binders);
             }
             TypeData::Record { def, args } => {
                 let rdef = self.record_def(*def);
@@ -156,12 +151,17 @@ impl TypeDb {
         }
     }
 
-    /// Write a nominal type's arguments, `[A, B]`, or nothing when it has none.
+    /// Write a type's arguments, `[A, B]`, or nothing when it has none.
     ///
     /// `Option` used to print as a bare name whatever it held, because the
     /// element type lived in a *fresh def per site* rather than in the type
     /// (TY-06) — which is also why the monomorphizer's `db.render` cache key
     /// could not tell `Option[Int]` from `Option[Text]` (MONO-03).
+    ///
+    /// Collections come through here too, which is REP-13: the collection arm
+    /// wrote its own brackets unconditionally, so a `Y001` about a range said
+    /// "found `Range[]`". One writer, one rule — the brackets belong to the
+    /// arguments and a type with none has none.
     fn write_type_args(
         &self,
         args: &[Type],
