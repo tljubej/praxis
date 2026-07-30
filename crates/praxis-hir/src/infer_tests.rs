@@ -59,6 +59,26 @@ fn has_input_error(text: &str) -> bool {
         .any(|d| d.code().category() == DiagnosticCategory::Input)
 }
 
+/// The `ParserAst` the first `read`/`parse` body in `src` converts to.
+///
+/// Some of what S19 fixed is invisible in the synthesized *type*: a decoded
+/// separator, a capture's own parser, the shape of a `choice`'s cases. This is
+/// how those are asserted.
+fn parser_ast_of(src: &str) -> praxis_input_parser::ParserAst {
+    use praxis_ast::AstNode;
+    let map = SourceMap::new();
+    let id = map.intern("parser_ast_test.px", src);
+    let parsed = parse(id, src);
+    let pe = parsed
+        .tree
+        .descendants()
+        .find_map(praxis_ast::ParserExpr::cast)
+        .expect("a parser expression");
+    let mut diagnostics = Vec::new();
+    crate::parser_lower::convert_parser_expr_for_test(&pe, id, &mut diagnostics)
+        .unwrap_or_else(|| panic!("{src} converts: {diagnostics:?}"))
+}
+
 /// Whether `text` reports the given input-parser diagnostic. Stronger than
 /// [`has_input_error`]: it pins *which* rule fired, so a test cannot pass on
 /// some unrelated `I0xx` the change happened to provoke.
@@ -2768,6 +2788,82 @@ fn mixed_template_capture_kinds_are_preserved() {
         !has_type_error(src),
         "the `port` capture is Int even when an earlier capture is Word"
     );
+    // The types themselves, not just the absence of a complaint: both captures
+    // used to collapse to the *first* recognizable kind, so this record was
+    // `{ name: Text, port: Text }` and `row.port + 1` was the only thing that
+    // noticed.
+    assert_eq!(
+        scheme_of("let row = read `{name:word},{port:int}`", "row").as_deref(),
+        Some("{ name: Text, port: Int }")
+    );
+}
+
+/// **D10, end to end.** A capture body is a full parser expression — nested
+/// calls and a nested template included — and the type it synthesizes is the
+/// body's own. §7.7's monkey line is the first case.
+#[test]
+fn a_capture_body_is_a_full_parser_expression() {
+    for (src, expected) in [
+        (
+            "let m = read `Starting items: {items:csv(int)}`",
+            "{ items: Vec[Int] }",
+        ),
+        ("let m = read `{x:optional(int)}`", "{ x: Option[Int] }"),
+        ("let m = read `{s:sep(\"-\", word)}`", "{ s: Vec[Text] }"),
+        ("let m = read `{c:one_of(\"^v<>\")}`", "{ c: Char }"),
+        // Anonymous captures keep §7.3's scalar/tuple rule, and the body's own
+        // type is what fills it.
+        ("let m = read `{csv(int)}`", "Vec[Int]"),
+        (
+            "let m = read `{a:int} {b:csv(word)}`",
+            "{ a: Int, b: Vec[Text] }",
+        ),
+    ] {
+        assert!(!has_input_error(src), "{src} must be accepted");
+        assert_eq!(
+            scheme_of(src, "m").as_deref(),
+            Some(expected),
+            "{src} must synthesize the body's own type"
+        );
+    }
+
+    // A capture body may hold a template of its own, which also needs D10's
+    // lexer half: closing the token at the first inner backtick made this
+    // source three unrelated token runs. Asserted on the AST rather than the
+    // rendered type, because an anonymous enum renders as `{ g:  }` today — a
+    // display gap that belongs to whoever owns `TypeDb::render`.
+    {
+        use praxis_input_parser::{ParserAst, TemplatePart};
+        let src = "let m = read `{g:choice(Pt: `{x:int},{y:int}`, Name: word)}`";
+        assert!(!has_input_error(src), "a nested template is a parser body");
+        match parser_ast_of(src) {
+            ParserAst::Template { parts, .. } => match &parts[0] {
+                TemplatePart::Capture { name, parser } => {
+                    assert_eq!(name.as_ref().map(|n| n.as_str()), Some("g"));
+                    match parser.as_ref() {
+                        ParserAst::Choice { cases, .. } => {
+                            assert_eq!(cases.len(), 2);
+                            assert_eq!(cases[0].0, "Pt");
+                            assert!(matches!(cases[0].1, ParserAst::Template { .. }));
+                            assert!(matches!(cases[1].1, ParserAst::Atomic { .. }));
+                        }
+                        other => panic!("expected Choice, got {other:?}"),
+                    }
+                }
+                other => panic!("expected a capture, got {other:?}"),
+            },
+            other => panic!("expected Template, got {other:?}"),
+        }
+    }
+
+    // And a malformed body reports rather than being read as something else.
+    for src in [
+        "let m = read `{x:csv(int, int)}`",
+        "let m = read `{x:frobnicate(int)}`",
+        "let m = read `{x:sep(\"\", int)}`",
+    ] {
+        assert!(has_input_error(src), "{src} must report");
+    }
 }
 
 #[test]
@@ -2942,23 +3038,7 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
 /// *every* quote at each end rather than one.
 #[test]
 fn a_parser_string_literal_is_decoded_once_like_every_other_literal() {
-    use praxis_ast::AstNode;
     use praxis_input_parser::ParserAst;
-
-    /// The `ParserAst` a `read <expr>` in `src` converts to.
-    fn parser_ast_of(src: &str) -> ParserAst {
-        let map = SourceMap::new();
-        let id = map.intern("parser_literal.px", src);
-        let parsed = parse(id, src);
-        let pe = parsed
-            .tree
-            .descendants()
-            .find_map(praxis_ast::ParserExpr::cast)
-            .expect("a parser expression");
-        let mut diagnostics = Vec::new();
-        crate::parser_lower::convert_parser_expr_for_test(&pe, id, &mut diagnostics)
-            .unwrap_or_else(|| panic!("{src} converts: {diagnostics:?}"))
-    }
 
     // `\t` is one tab, not the two characters `\` and `t`. This is the whole
     // finding: `sep("\t", int)` split on a backslash.

@@ -30,6 +30,19 @@ pub use language::{PraxisLanguage, SyntaxElement, SyntaxNode, SyntaxToken};
 
 use praxis_source::Span;
 
+/// How deeply backtick templates may nest inside each other's captures (D10).
+///
+/// A capture body is a full parser expression, so `` `{g:choice(A: `{x:int}`)}` ``
+/// is one template containing another — which makes the lexer's template run
+/// and the input parser's `scan_template` mutually recursive with the file's
+/// own text. Both must refuse deep nesting rather than overflow the stack, and
+/// they must refuse it at the *same* depth or one of them accepts what the
+/// other cannot read. It lives here because `praxis-syntax` is the crate they
+/// both already depend on.
+///
+/// The bound is far above anything a person writes.
+pub const MAX_TEMPLATE_NESTING: usize = 32;
+
 /// A token the lexer emits before it is folded into the lossless tree: its kind,
 /// the source span it covers, and whether a line break sits in front of it.
 ///

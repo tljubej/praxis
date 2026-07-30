@@ -29,6 +29,8 @@
 use praxis_source::{DiagCode, Diagnostic, FileId, Severity, Span};
 use praxis_syntax::{SyntaxKind, Token};
 
+use praxis_syntax::MAX_TEMPLATE_NESTING;
+
 /// The result of lexing one source file: the token stream and any diagnostics.
 ///
 /// Diagnostics are returned alongside tokens rather than via `Result` because a
@@ -443,21 +445,22 @@ impl<'a> Lexer<'a> {
         matched
     }
 
+    /// Consume a backtick template as **one** token, interior and all.
+    ///
+    /// The interior is opaque here; `praxis_input_parser::scan_template`
+    /// re-scans it. What is not opaque is where the token *ends*, and that is a
+    /// consequence of D10: a capture body is a full parser expression, so
+    /// `` `{g:choice(A: `{x:int}`)}` `` is one template containing another. The
+    /// predecessor closed at the first unescaped backtick, which cut that into
+    /// three unrelated token runs and produced errors about the fragments.
+    ///
+    /// The rule is brace depth: **a backtick closes the token only at depth 0**;
+    /// inside a capture it opens a nested template, which is consumed by the
+    /// same function one level down. `\\` still hides a backtick, so an escaped
+    /// one cannot terminate anything.
     fn eat_template(&mut self, start: usize) {
-        // Consume until the matching closing backtick. The M6 template lexer
-        // will re-scan the contents; for M1 the whole template is one token.
-        self.pos += 1; // opening backtick
-        while self.pos < self.src.len() && self.bytes()[self.pos] != b'`' {
-            // Honour `\\` so an escaped backtick doesn't terminate the template.
-            if self.bytes()[self.pos] == b'\\' && self.pos + 1 < self.src.len() {
-                self.pos += 2;
-            } else {
-                self.pos += 1;
-            }
-        }
-        if self.pos < self.src.len() {
-            self.pos += 1; // closing backtick
-        } else {
+        let closed = self.eat_template_run(0);
+        if !closed {
             self.diagnostic(
                 Span::new(start as u32, self.pos as u32),
                 DiagCode::UnterminatedTemplate,
@@ -465,6 +468,44 @@ impl<'a> Lexer<'a> {
             );
         }
         self.push(SyntaxKind::BacktickTemplate, start);
+    }
+
+    /// Consume one `` `…` `` run starting at the cursor's opening backtick.
+    /// Returns whether it was closed.
+    ///
+    /// `depth` bounds the nesting: a lexer walks whatever the file contains, so
+    /// `"`".repeat(100_000)` inside braces must not recurse without limit. Past
+    /// the bound a backtick simply closes, which lands on the ordinary
+    /// unterminated/unexpected-token paths rather than on the stack.
+    fn eat_template_run(&mut self, depth: usize) -> bool {
+        self.pos += 1; // opening backtick
+        let mut braces = 0usize;
+        while self.pos < self.src.len() {
+            match self.bytes()[self.pos] {
+                // Honour `\\` so an escaped backtick doesn't terminate the run.
+                b'\\' if self.pos + 1 < self.src.len() => self.pos += 2,
+                b'{' => {
+                    braces += 1;
+                    self.pos += 1;
+                }
+                b'}' => {
+                    braces = braces.saturating_sub(1);
+                    self.pos += 1;
+                }
+                b'`' => {
+                    if braces == 0 || depth >= MAX_TEMPLATE_NESTING {
+                        self.pos += 1; // closing backtick
+                        return true;
+                    }
+                    // Inside a capture: this opens a template of its own.
+                    if !self.eat_template_run(depth + 1) {
+                        return false;
+                    }
+                }
+                _ => self.pos += 1,
+            }
+        }
+        false
     }
 
     fn diagnose_unknown(&mut self, start: usize, len: usize) {
@@ -664,6 +705,69 @@ mod tests {
         let (_, diags) = lex_text("let p = `never closes");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].kind(), DiagCode::UnterminatedTemplate);
+    }
+
+    /// **D10's lexer half.** A capture body is a full parser expression, so a
+    /// template may contain a template. Closing at the first unescaped backtick
+    /// cut `` `{g:choice(A: `{x:int}`)}` `` into three unrelated token runs, and
+    /// the scanner never saw the template the source wrote.
+    ///
+    /// A backtick closes only at brace depth 0; inside a capture it opens a
+    /// nested run.
+    #[test]
+    fn a_nested_backtick_template_is_one_token() {
+        let src = "let p = `{g:choice(A: `{x:int}`, B: word)}`";
+        let (kinds, diags) = lex_text(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == SyntaxKind::BacktickTemplate)
+                .count(),
+            1,
+            "the whole thing is one template token, inner backticks included"
+        );
+
+        // Two levels deep, and two nested templates side by side.
+        for src in [
+            "let p = `{a:choice(A: `{b:choice(C: `{c:int}`)}`)}`",
+            "let p = `{a:choice(A: `{x:int}`, B: `{y:word}`)}`",
+        ] {
+            let (kinds, diags) = lex_text(src);
+            assert!(diags.is_empty(), "{src}: {diags:?}");
+            assert_eq!(
+                kinds
+                    .iter()
+                    .filter(|k| **k == SyntaxKind::BacktickTemplate)
+                    .count(),
+                1,
+                "{src}"
+            );
+        }
+
+        // An escaped backtick still cannot terminate anything, at either depth.
+        let (_, diags) = lex_text(r"let p = `a\`b`");
+        assert!(diags.is_empty(), "{diags:?}");
+
+        // And an outer template that never closes still faults.
+        let (_, diags) = lex_text("let p = `{g:choice(A: `{x:int}`)}");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].kind(), DiagCode::UnterminatedTemplate);
+    }
+
+    /// A lexer walks whatever the file contains. Past the nesting bound a
+    /// backtick simply closes, so adversarial input lands on the ordinary
+    /// diagnostic paths rather than on the stack (D10).
+    #[test]
+    fn template_nesting_past_the_bound_does_not_recurse_without_limit() {
+        let src = format!("let p = {}", "`{a:".repeat(5_000));
+        let (_, diags) = lex_text(&src);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.kind() == DiagCode::UnterminatedTemplate),
+            "deep nesting must report, not overflow"
+        );
     }
 
     #[test]

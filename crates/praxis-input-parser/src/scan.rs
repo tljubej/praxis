@@ -36,7 +36,7 @@ use crate::validate::ValidationError;
 /// `"{a:" + "{".repeat(100_000)` is adversarial input — and a *compiler* may
 /// not answer adversarial input with a stack overflow. The bound is far above
 /// anything a person writes.
-pub const MAX_NESTING: usize = 32;
+pub use praxis_syntax::MAX_TEMPLATE_NESTING as MAX_NESTING;
 
 /// An error encountered while scanning a template interior or a capture body.
 #[derive(Debug, Clone, PartialEq, Eq)]
