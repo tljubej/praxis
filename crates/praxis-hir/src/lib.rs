@@ -32,8 +32,9 @@ pub mod scope;
 pub mod symbol;
 
 pub use lower::{
-    expr_span, expr_ty, lower, stmt_exprs, stmt_span, AssignOp, BinOp, Lit, TypedBlock, TypedExpr,
-    TypedFn, TypedItem, TypedMatchArm, TypedModule, TypedParam, TypedPattern, TypedStmt, UnaryOp,
+    entry_point, expr_span, expr_ty, lower, stmt_exprs, stmt_span, AssignOp, BinOp, Lit,
+    TypedBlock, TypedExpr, TypedFn, TypedItem, TypedMatchArm, TypedModule, TypedParam,
+    TypedPattern, TypedStmt, UnaryOp, ENTRY_NAME,
 };
 pub use name_table::NameTable;
 /// The identity of a compiled parser plan, re-exported so MIR can name the

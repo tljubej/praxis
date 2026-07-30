@@ -4585,3 +4585,92 @@ fn the_parsers_type_constructors_are_the_compilers() {
         );
     }
 }
+
+/// **REP-19's typed-tree shape** (ADR-067). A file's top-level statements are
+/// lowered into one generated item, in source order, and a file with none has no
+/// such item.
+///
+/// §3.2 has always said this — "top-level statements are wrapped in a generated
+/// entry function" — and nothing wrapped them: `lower` walked the root looking
+/// only for `fn`/`struct`/`enum` and dropped everything else with a comment
+/// saying M4 only JITs `fn` items. So `out(1)` at top level type-checked and
+/// then vanished between the typed tree and MIR.
+#[test]
+fn a_files_top_level_statements_become_one_generated_item() {
+    use praxis_ast::AstNode;
+    let lowered = |text: &str| {
+        let map = SourceMap::new();
+        let id = map.intern("entry_test.px", text);
+        let parsed = parse(id, text);
+        let mut analysis = analyze_root(id, &parsed.tree);
+        let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+        crate::lower::lower(id, &root, &mut analysis)
+    };
+    let entry_of = |module: &crate::TypedModule| -> Option<usize> {
+        module.items.iter().find_map(|item| match item {
+            crate::TypedItem::Fn(f) if f.name == crate::ENTRY_NAME => Some(f.body.stmts.len()),
+            _ => None,
+        })
+    };
+
+    // Three statements, one item — and the declarations between them stay their
+    // own items, because a `fn` inside a `fn` is `N005`: the entry point cannot
+    // be a source transformation that wraps the file.
+    let module = lowered("out(1)\nfn f() -> Int { 2 }\nlet x = f()\nout(x)\n");
+    assert_eq!(entry_of(&module), Some(3), "the three top-level statements");
+    assert!(
+        module
+            .items
+            .iter()
+            .any(|item| matches!(item, crate::TypedItem::Fn(f) if f.name == "f")),
+        "`f` is still its own item"
+    );
+
+    // A `struct` and an `enum` are type-only and contribute nothing to run, so a
+    // file of declarations alone has no entry item at all — which is what leaves
+    // `fn main` as the host's fallback rather than a competing rule.
+    let module = lowered("struct P { x: Int }\nenum E { A }\nfn main() { out(1) }\n");
+    assert_eq!(entry_of(&module), None);
+
+    // The generated item is a nullary `Unit` function, which is what makes a
+    // file have no *value*: `out(overlaps(segments, false))` is a statement and
+    // not a result the host would print a second time.
+    let module = lowered("out(1)\n");
+    let entry = module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::TypedItem::Fn(f) if f.name == crate::ENTRY_NAME => Some(f),
+            _ => None,
+        })
+        .expect("an entry item");
+    assert!(entry.params.is_empty());
+    assert_eq!(entry.body.stmts.len(), 1);
+    assert!(matches!(
+        entry.body.tail,
+        crate::TypedExpr::Lit {
+            value: crate::Lit::Unit,
+            ..
+        }
+    ));
+
+    // Its name is not an identifier, so the parser cannot produce a second
+    // definition of it (ADR-064's rule for the subscript rows, at the one other
+    // name the compiler mints into this namespace).
+    assert!(
+        !crate::ENTRY_NAME
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_'),
+        "`{}` must not be spellable",
+        crate::ENTRY_NAME
+    );
+
+    // `entry_point`'s rule, at the level it lives: the generated item wins, a
+    // declared `main` is the fallback, and a file with neither has none.
+    assert_eq!(
+        crate::entry_point(|n| n == crate::ENTRY_NAME || n == "main"),
+        Some(crate::ENTRY_NAME)
+    );
+    assert_eq!(crate::entry_point(|n| n == "main"), Some("main"));
+    assert_eq!(crate::entry_point(|_| false), None);
+}

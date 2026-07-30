@@ -1,0 +1,11 @@
+// REP-19: top-level statements and `fn` declarations interleave, and the
+// statements run in source order regardless of where the declarations sit.
+out(1)
+
+fn double(n: Int) -> Int { n * 2 }
+
+out(double(2))
+
+fn shout(n: Int) { out(n) }
+
+shout(double(3))

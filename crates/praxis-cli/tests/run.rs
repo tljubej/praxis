@@ -694,3 +694,113 @@ fn m10b_ws6_reload_on_malformed_source_keeps_session() {
         "bt runs against the old snapshot after a failed reload: {combined}"
     );
 }
+
+// ===========================================================================
+// REP-19: a top-level statement executes (ADR-067)
+// ===========================================================================
+
+/// **REP-19's headline.** A file's top-level statements are its program, and
+/// §3.2 has said so since the design doc was written: "top-level statements are
+/// wrapped in a generated entry function."
+///
+/// Nothing wrapped them. `TypedModule.items` held only `fn` declarations,
+/// `lower_module` emitted only those, and the host called `main` — so
+/// `out(1)\nlet x = 2\nout(x)` passed `praxis check` and printed **nothing**,
+/// then exited 1 with "no `main` function to run". §3.3 and §4.2 are written
+/// entirely at top level, so the design doc's own programs are what that
+/// silenced.
+#[test]
+fn a_top_level_statement_runs_in_the_order_it_is_written() {
+    // Every top-level statement kind: a call, a `let` read by a later one, a
+    // `var`, and an assignment to it. Order is the assertion — a set of
+    // statements that ran in the wrong order prints the same three lines.
+    assert_passes("top_level_statements.px", "1\n2\n3");
+
+    // Declarations interleave with statements and do not move them: `double` is
+    // declared between two `out`s and callable by both the one after it and the
+    // one after that.
+    assert_passes("top_level_calls_a_declared_fn.px", "1\n4\n6");
+}
+
+/// `fn main` is an ordinary function when the file has top-level statements, and
+/// the entry point when it does not (ADR-067).
+///
+/// The fallback is what keeps every program written in the `fn main` convention
+/// working — the whole corpus, and every end-to-end test in this file. The design
+/// doc never mentions a `main`.
+#[test]
+fn a_declared_main_is_the_entry_point_only_when_nothing_else_is() {
+    // No top-level statements: `main` runs, exactly as before — both a
+    // `Unit`-returning one, whose output is its `out(…)` calls, and an
+    // `Int`-returning one, whose answer the host prints.
+    assert_passes("unit_main_out.px", "kurac");
+    assert_passes("constant.px", "42");
+
+    // Both: the top level runs, and `main` runs because the top level calls it.
+    // Once — a rule that ran the top level *and then* called `main` would print
+    // `2` twice.
+    assert_passes("top_level_beside_fn_main.px", "1\n2\n3");
+
+    // Neither: the file declares a function and never calls it, so there is
+    // nothing to run. The message names both spellings, because either one would
+    // have made it a program.
+    let (code, stdout, stderr) = run_fixture("no_statements_and_no_main.px");
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("no statements to run") && stderr.contains("`main`"),
+        "the error names both ways to have an entry point: {stderr}"
+    );
+}
+
+/// The entry point's own name is `<entry>`, which is **not an identifier** — so
+/// no program can declare a second function with it, and no program can call it.
+///
+/// That is ADR-064's rule for the subscript rows applied to the one other name
+/// the compiler mints into the same namespace. The crash debugger renders it, so
+/// a fault in a top-level statement names a frame the user can recognize as not
+/// theirs.
+#[test]
+fn the_entry_points_name_is_not_one_a_program_can_spell() {
+    let dir = std::env::temp_dir().join("praxis_rep19_entry_name");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src_path = dir.join("entry.px");
+
+    // A fault in a top-level statement reaches the crash debugger, and the frame
+    // it names is the generated one.
+    std::fs::write(&src_path, "let v = Vec()\nout(v.get(0))\n").unwrap();
+    let output = Command::new(bin_path())
+        .arg("run")
+        .arg(&src_path)
+        .output()
+        .expect("failed to run praxis");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("index out of bounds"),
+        "a top-level statement's fault reaches the host: {combined}"
+    );
+    assert!(
+        combined.contains("<entry>"),
+        "the generated frame is named, and named unspellably: {combined}"
+    );
+
+    // `<entry>` is not a name the parser can produce, so a program cannot
+    // declare one — the closest spelling is a parse error rather than a second
+    // definition.
+    std::fs::write(&src_path, "fn <entry>() { out(1) }\n").unwrap();
+    let output = Command::new(bin_path())
+        .arg("check")
+        .arg(&src_path)
+        .output()
+        .expect("failed to run praxis");
+    assert_ne!(
+        output.status.code().unwrap_or(-1),
+        0,
+        "`fn <entry>()` must not be a declaration"
+    );
+
+    let _ = std::fs::remove_file(&src_path);
+}

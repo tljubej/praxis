@@ -1,16 +1,21 @@
 // §3.3's complete representative program — S25's acceptance criterion.
 //
-// Verbatim from the design doc, with one change: its body is inside `fn main()`.
-// §3.3 writes the whole program at top level, and **a top-level statement is
-// analyzed and then never executed** (REP-19) — `praxis run` calls the `main`
-// function and nothing else, so the verbatim text compiles and prints nothing.
-// That is registered as its own finding; everything else here is the design doc's
-// own text, including the template, the explicit `Counter[(Int, Int)]()`, the
-// trailing comma in `max(…)`, `counts[point] += 1` and `counts.values()`.
+// **Verbatim from the design doc**, top-level statements and all. It was wrapped
+// in a `fn main()` until REP-19 landed, because a top-level statement was
+// analyzed and then never executed: the verbatim text compiled and printed
+// nothing. §3.3 is written entirely at top level, so the design doc's own
+// program is what that silenced.
+//
+// Everything below the comment is the design doc's own text, including the
+// template, the explicit `Counter[(Int, Int)]()`, the trailing comma in `max(…)`,
+// `counts[point] += 1`, `counts.values()` — and the top-level `let` and two
+// `out(…)` calls.
 //
 // Input (on stdin): AoC-2021-day-5-shaped line segments.
 // Output: the number of points covered by two or more segments, first ignoring
 // diagonals and then including them.
+let segments = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)
+
 fn overlaps(segments, diagonals) {
     let counts = Counter[(Int, Int)]()
 
@@ -39,8 +44,5 @@ fn overlaps(segments, diagonals) {
     counts.values().count(|n| n >= 2)
 }
 
-fn main() {
-    let segments = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)
-    out(overlaps(segments, false))
-    out(overlaps(segments, true))
-}
+out(overlaps(segments, false))
+out(overlaps(segments, true))

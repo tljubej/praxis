@@ -1,0 +1,11 @@
+// REP-19: a file's top-level statements are its program. §3.2 says so — "top-level
+// statements are wrapped in a generated entry function" — and until ADR-067 they
+// were analyzed and then dropped, so this file printed nothing.
+//
+// There is no `fn main` here at all, which is how §3.2, §3.3 and §4.2 are written.
+out(1)
+let x = 2
+out(x)
+var y = x
+y = y + 1
+out(y)

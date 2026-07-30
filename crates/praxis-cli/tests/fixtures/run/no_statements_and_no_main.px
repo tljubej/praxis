@@ -1,0 +1,3 @@
+// REP-19: a file with no top-level statements and no `fn main` has no entry
+// point. The `fn` here is declared and never called.
+fn unused() -> Int { 1 }

@@ -1,0 +1,44 @@
+// AoC corpus fixture: §3.2's program shape (REP-19; §3.2, §3.3, §4.2).
+//
+// "A single file is the normal program unit. Top-level statements are wrapped in
+// a generated entry function." — §3.2. Nothing wrapped them: a top-level
+// statement was analyzed and then dropped between the typed tree and MIR, so
+// this file's shape passed `praxis check` and printed nothing, then exited 1
+// with "no `main` function to run".
+//
+// There is no `fn main` here, which is how every program in the design doc is
+// written — §3.2's own example, §3.3's representative program, and §4.2's
+// bindings section.
+//
+// Input (on stdin): one integer per line.
+// Output: the sum, the largest, and how many are above the mean.
+let numbers = read lines(int)
+
+fn above(values, threshold) {
+    var n = 0
+    for v in values {
+        if v > threshold {
+            n = n + 1
+        }
+    }
+    n
+}
+
+let total = numbers.sum()
+out(total)
+
+var largest = 0
+for n in numbers {
+    if n > largest {
+        largest = n
+    }
+}
+out(largest)
+
+// Declarations may sit between statements; the statements still run in the order
+// they are written.
+fn mean(values, sum) {
+    sum / values.len()
+}
+
+out(above(numbers, mean(numbers, total)))

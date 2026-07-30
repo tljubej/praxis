@@ -86,16 +86,27 @@ pub fn run(
         return Ok(1);
     }
 
-    // Capture `main`'s declared return type before the module is consumed by
-    // monomorphization. A `Unit`-returning `main` has no answer value to print
-    // (its observable output comes from `out(...)` calls), so the host prints
-    // `main`'s result only when it is non-`Unit`.
-    let main_return_type = module
-        .items
-        .iter()
-        .find_map(|item| match item {
-            TypedItem::Fn(f) if f.name == "main" => Some(f.return_type),
-            _ => None,
+    // Which function the host calls, and its declared return type — both read
+    // before monomorphization consumes the module.
+    //
+    // A file's top-level statements are its program (REP-19, ADR-067), so
+    // `<entry>` is the answer when the file has any. It always returns `Unit`,
+    // which is also the rule that keeps `out(…)` at top level from printing
+    // twice: a `Unit`-returning entry has no answer value to print, so the host
+    // prints a result only for the `fn main` fallback and only when it is
+    // non-`Unit`.
+    let entry_name = praxis_hir::entry_point(|name| {
+        module
+            .items
+            .iter()
+            .any(|item| matches!(item, TypedItem::Fn(f) if f.name == name))
+    });
+    let main_return_type = entry_name
+        .and_then(|name| {
+            module.items.iter().find_map(|item| match item {
+                TypedItem::Fn(f) if f.name == name => Some(f.return_type),
+                _ => None,
+            })
         })
         .unwrap_or_else(|| analysis.db.unit());
 
@@ -131,10 +142,10 @@ pub fn run(
         }
     };
 
-    let main_id = match ids.get("main") {
+    let main_id = match entry_name.and_then(|name| ids.get(name)) {
         Some(id) => *id,
         None => {
-            eprintln!("error: no `main` function to run");
+            eprintln!("error: no statements to run and no `main` function");
             return Ok(1);
         }
     };

@@ -1,0 +1,11 @@
+// REP-19: a file with both runs its top-level statements. `main` is then an
+// ordinary function — it runs because the top level calls it, once, and not
+// because the host singles it out.
+out(1)
+
+fn main() {
+    out(2)
+}
+
+main()
+out(3)

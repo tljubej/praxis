@@ -180,9 +180,14 @@ impl DebugSession {
         let ids = new_jit
             .compile(&funcs, &mut analysis.db)
             .map_err(|e| format!("JIT compile failed: {e}"))?;
-        let main_id = *ids
-            .get("main")
-            .ok_or_else(|| "no `main` function in reloaded source".to_string())?;
+        // The same entry-point rule the CLI's `run` uses (REP-19, ADR-067): a
+        // file's top-level statements are its program, and `fn main` is the
+        // fallback for a file with none.
+        let main_id = *praxis_hir::entry_point(|name| ids.contains_key(name))
+            .and_then(|name| ids.get(name))
+            .ok_or_else(|| {
+                "no statements to run and no `main` function in reloaded source".to_string()
+            })?;
         // SAFETY: main_id is a finalized entry in new_jit.
         let new_entry: MainEntry = unsafe { std::mem::transmute(new_jit.entry(main_id)) };
         // 3. Compilation succeeded — swap in the new state (§9.7: discard old

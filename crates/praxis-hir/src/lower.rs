@@ -623,6 +623,48 @@ pub enum UnaryOp {
 // Lowering
 // ---------------------------------------------------------------------------
 
+/// The name of the synthetic function holding a file's top-level statements
+/// (REP-19, ADR-067).
+///
+/// **Not an identifier**, and deliberately: the parser cannot produce this name,
+/// so no program can declare a second function with it and no program can call
+/// it. That is ADR-064's rule for the subscript rows, applied to the one other
+/// name the compiler mints into the same namespace.
+pub const ENTRY_NAME: &str = "<entry>";
+
+/// The entry point of a compiled module, given the function names it defines.
+///
+/// A file's top-level statements are its program, so [`ENTRY_NAME`] wins when it
+/// exists. A file with no top-level statements has none, and falls back to a
+/// declared `fn main` — which is the convention every corpus program and every
+/// end-to-end test is written in, and which the design doc never mentions.
+///
+/// Both hosts that execute a module (the CLI's `run` and the debugger's reload)
+/// ask this, so the rule is in one place rather than two.
+#[must_use]
+pub fn entry_point<'n>(defines: impl Fn(&str) -> bool) -> Option<&'n str> {
+    if defines(ENTRY_NAME) {
+        Some(ENTRY_NAME)
+    } else if defines("main") {
+        Some("main")
+    } else {
+        None
+    }
+}
+
+/// Whether a top-level node is a *statement* — something the entry point runs —
+/// rather than a declaration.
+///
+/// The three declaration kinds are the exceptions and they are named positively:
+/// a `fn` is lowered as its own item, and `struct`/`enum` are type-only and
+/// produce no runtime item at all. Anything else at the top level is a
+/// `let`/`var`/assignment/expression, which is a statement (REP-19).
+fn is_top_level_stmt(node: &SyntaxNode) -> bool {
+    FnItem::cast(node.clone()).is_none()
+        && StructItem::cast(node.clone()).is_none()
+        && EnumItem::cast(node.clone()).is_none()
+}
+
 /// Lower a fully analyzed file into a typed tree.
 ///
 /// `analysis` must be the result of [`analyze`](crate::analyze) on `root`; pass
@@ -657,6 +699,20 @@ pub fn lower(
     let bool_ = db.bool();
     let text = db.text();
     let unit = db.unit();
+    // A file's top-level statements are its program (REP-19). They need a
+    // function to live in, and that function needs a symbol — minted here,
+    // before the lowerer borrows the name table, and only when there is
+    // something to put in it. A `Fn` symbol with no `decl` span: it is a real
+    // declaration, written by the compiler rather than by the file.
+    let entry_symbol = root.stmts().any(|node| is_top_level_stmt(&node)).then(|| {
+        names.insert(crate::Symbol {
+            id: crate::SymbolId(0), // overwritten by `insert`
+            name: ENTRY_NAME.to_string(),
+            kind: crate::SymbolKind::Fn,
+            decl: None,
+            scheme: None,
+        })
+    });
     let mut l = Lowerer {
         file,
         db,
@@ -680,6 +736,11 @@ pub fn lower(
         escaping_vars: std::collections::HashSet::new(),
     };
     let mut items = Vec::new();
+    // The top-level statements, in source order, for the entry point. They are
+    // interleaved with the `fn` items in the file and separated here: a `fn`
+    // inside a `fn` is `N005`, so the entry point cannot simply be "the file",
+    // and the declarations have to stay where they are.
+    let mut entry_stmts = Vec::new();
     for node in root.stmts() {
         if let Some(fn_item) = FnItem::cast(node.clone()) {
             if let Some(tfn) = l.lower_fn(&fn_item) {
@@ -695,9 +756,43 @@ pub fn lower(
         if EnumItem::cast(node.clone()).is_some() {
             // No codegen for the declaration itself.
         }
-        // Top-level `let`/`var`/`expr`/`assign` are not lowered yet — M4 only
-        // JITs `fn` items (the entry point is a `fn main` or similar). They are
-        // still type-checked by `analyze`; they simply have no runtime lowering.
+        // A top-level `let`/`var`/`expr`/`assign` **executes** (REP-19): it goes
+        // into the entry point, in the order it is written. It used to be
+        // analyzed and then dropped, so `out(1)` at top level passed
+        // `praxis check` and printed nothing — which silenced §3.3 and §4.2,
+        // the design doc's own programs.
+        if is_top_level_stmt(&node) {
+            if let Some(stmt) = l.lower_stmt(&node) {
+                entry_stmts.push(stmt);
+            }
+        }
+    }
+    if let Some(symbol) = entry_symbol {
+        let span = {
+            let r = root.syntax().text_range();
+            (u32::from(r.start()), u32::from(r.end()))
+        };
+        let fn_type = l.db.func(Vec::new(), unit);
+        items.push(TypedItem::Fn(TypedFn {
+            symbol,
+            name: ENTRY_NAME.to_string(),
+            params: Vec::new(),
+            return_type: unit,
+            // A file has no value: every top-level statement runs for effect and
+            // the tail is Unit. `out(overlaps(segments, false))` is a statement
+            // here, not a result — which is why nothing is printed twice.
+            body: TypedBlock {
+                stmts: entry_stmts,
+                tail: TypedExpr::Lit {
+                    value: Lit::Unit,
+                    ty: unit,
+                    span,
+                },
+                ty: unit,
+            },
+            fn_type,
+            span,
+        }));
     }
     TypedModule {
         items,
