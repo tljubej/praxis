@@ -567,8 +567,11 @@ pub enum BinOp {
     Gt,
     Le,
     Ge,
-    // Logical (Bool -> Bool -> Bool).
+    // Logical (Bool -> Bool -> Bool). Both **short-circuit**, so MIR lowers each
+    // to a branch rather than to an operation on two evaluated operands — which
+    // is why they are one variant each and not a `BoolOp` with a flag.
     LogicalOr,
+    LogicalAnd,
 }
 
 /// Unary operators.
@@ -1475,6 +1478,7 @@ impl<'a> Lowerer<'a> {
                 _ => unreachable!(),
             },
             Some(SyntaxKind::PIPE2) => BinOp::LogicalOr,
+            Some(SyntaxKind::AMP2) => BinOp::LogicalAnd,
             _ => BinOp::Add,
         };
         TypedExpr::Bin {

@@ -876,6 +876,7 @@ impl BinExpr {
                         | K::LTEQ
                         | K::GTEQ
                         | K::PIPE2
+                        | K::AMP2
                 ) =>
             {
                 Some(t)

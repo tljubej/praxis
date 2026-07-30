@@ -77,24 +77,33 @@ struct BindingPower {
 /// The binding power of `op`, or `None` if it is not a binary operator.
 fn infix_binding_power(op: SyntaxKind) -> Option<BindingPower> {
     Some(match op {
-        // Logical (lowest) — `||` not in the M1 eval set but lexed, so bind it.
+        // Logical or (lowest of all).
         SyntaxKind::PIPE2 => bp(1, 2),
         // Range (§4.11, ADR-059): below comparison, above nothing but `||`. So
         // `0..n - 1` is `0..(n - 1)` — the bound is an arithmetic expression,
-        // which is how every range in the corpus is written — and `a..b == c..d`
-        // compares two ranges rather than ranging over a Bool.
+        // which is how every range in the corpus is written.
         SyntaxKind::DOT2 | SyntaxKind::DOT2EQ => bp(3, 4),
+        // Logical and (REP-07): **below comparison and above `..`**, which is the
+        // position the repair plan specifies and the one that moves the fewest
+        // numbers — `||` and `..` keep theirs, so ADR-059's stated `bp(3, 4)`
+        // stays true. The two rules that matter are both preserved: `&&` binds
+        // tighter than `||` (`a || b && c` is `a || (b && c)`) and looser than
+        // comparison (`a == b && c == d` is `(a == b) && (c == d)`), which is
+        // §3.3's own shape. Where `&&` sits relative to `..` is arbitrary — a
+        // range of `Bool`s and a range bound that is a `&&` are both nonsense —
+        // so it is settled by churn, not by meaning.
+        SyntaxKind::AMP2 => bp(5, 6),
         // Comparison (non-associative in spirit; we parse left-assoc).
         SyntaxKind::EQ2
         | SyntaxKind::NEQ
         | SyntaxKind::LT
         | SyntaxKind::GT
         | SyntaxKind::LTEQ
-        | SyntaxKind::GTEQ => bp(5, 6),
+        | SyntaxKind::GTEQ => bp(7, 8),
         // Additive.
-        SyntaxKind::PLUS | SyntaxKind::MINUS => bp(7, 8),
+        SyntaxKind::PLUS | SyntaxKind::MINUS => bp(9, 10),
         // Multiplicative.
-        SyntaxKind::STAR | SyntaxKind::SLASH | SyntaxKind::PERCENT => bp(9, 10),
+        SyntaxKind::STAR | SyntaxKind::SLASH | SyntaxKind::PERCENT => bp(11, 12),
         _ => return None,
     })
 }
@@ -112,11 +121,13 @@ fn infix_node_kind(op: SyntaxKind) -> SyntaxKind {
 /// Prefix (unary) operator binding power.
 fn prefix_binding_power(op: SyntaxKind) -> Option<u8> {
     match op {
-        SyntaxKind::MINUS | SyntaxKind::BANG => Some(11),
+        // Above every infix operator, so `!a && b` is `(!a) && b` — §3.3's own
+        // `!diagonals && dx != 0` — and `-a * b` is `(-a) * b`.
+        SyntaxKind::MINUS | SyntaxKind::BANG => Some(13),
         // `read` is a prefix expression (§7.1): `read parser_expression`. Its
         // body is a parser-expression, not an ordinary expression, so it gets
         // the highest binding power (binds tighter than arithmetic).
-        SyntaxKind::KW_READ => Some(13),
+        SyntaxKind::KW_READ => Some(15),
         _ => None,
     }
 }
@@ -2314,6 +2325,75 @@ mod tests {
         };
         assert_eq!(filt(&a), filt(&b));
     }
+    /// **REP-07.** `&&` is one token and one infix operator, and its precedence
+    /// is the two facts that matter: tighter than `||`, looser than comparison.
+    ///
+    /// `p.x == 2 && p.y == 2` was a `P001` at the first `&` — `praxis-syntax` had
+    /// only a bare `AMP` and no production for it. `||` was already lexed, bound,
+    /// typed and lowered, so this is `&&` alone plus the precedence row that had
+    /// nowhere to go: inserting it moved comparison, additive, multiplicative and
+    /// both prefix powers up by two, which is why the whole table is re-asserted
+    /// below rather than just the new row.
+    #[test]
+    fn logical_and_binds_tighter_than_or_and_looser_than_comparison() {
+        // One token, not two `AMP`s — max-munch, as for `||`.
+        let out = parse_text("let b = x && y");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::AMP2));
+        assert!(!kinds.contains(&SyntaxKind::AMP), "`&&` is never two `&`s");
+
+        // `a || b && c` is `a || (b && c)`: the outer BIN_EXPR is the `||`.
+        assert_eq!(
+            shape("let r = a || b && c"),
+            shape("let r = a || (b && c)"),
+            "&& binds tighter than ||"
+        );
+        assert_ne!(shape("let r = a || b && c"), shape("let r = (a || b) && c"));
+
+        // `a == b && c == d` is `(a == b) && (c == d)` — §3.3's own shape, and
+        // the reason `&&` must be looser than comparison.
+        assert_eq!(
+            shape("let r = a == b && c == d"),
+            shape("let r = (a == b) && (c == d)")
+        );
+
+        // `!x && y` is `(!x) && y`: prefix stays above every infix operator,
+        // which the renumbering had to preserve. §3.3 writes `!diagonals && …`.
+        assert_eq!(shape("let r = !x && y"), shape("let r = (!x) && y"));
+        assert_ne!(shape("let r = !x && y"), shape("let r = !(x && y)"));
+
+        // The rest of the table, re-asserted because every number in it moved:
+        // arithmetic still binds tighter than comparison, `*` than `+`, and unary
+        // minus than `*`.
+        assert_eq!(shape("let r = a + b < c"), shape("let r = (a + b) < c"));
+        assert_eq!(shape("let r = a + b * c"), shape("let r = a + (b * c)"));
+        assert_eq!(shape("let r = -a * b"), shape("let r = (-a) * b"));
+        // …and `..` still binds looser than the arithmetic in its bounds, which
+        // is ADR-059's rule and the one row that kept its number.
+        assert_eq!(shape("let r = 0..n - 1"), shape("let r = 0..(n - 1)"));
+        assert_ne!(shape("let r = 0..n - 1"), shape("let r = (0..n) - 1"));
+    }
+
+    /// The construct shape of `text` with parentheses erased, so two spellings
+    /// that differ only by explicit grouping compare equal exactly when they
+    /// parse to the same tree. Comparing the raw kind lists could not: the
+    /// parenthesized form has `PAREN_EXPR`, `L_PAREN` and `R_PAREN` in it.
+    fn shape(text: &str) -> Vec<SyntaxKind> {
+        let out = parse_text(text);
+        assert!(out.diagnostics.is_empty(), "{text}: {:?}", out.diagnostics);
+        construct_names(&out.tree)
+            .into_iter()
+            .filter(|k| {
+                !k.is_trivia()
+                    && !matches!(
+                        k,
+                        SyntaxKind::PAREN_EXPR | SyntaxKind::L_PAREN | SyntaxKind::R_PAREN
+                    )
+            })
+            .collect()
+    }
+
     fn construct_names(node: &SyntaxNode) -> Vec<SyntaxKind> {
         let mut out = Vec::new();
         collect(node, &mut out);

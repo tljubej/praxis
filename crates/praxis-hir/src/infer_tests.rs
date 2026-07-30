@@ -4182,3 +4182,53 @@ fn a_self_referring_type_declaration_is_reported_rather_than_registered_as_a_var
         "one report for the declaration and nothing else: {diags:?}"
     );
 }
+
+/// **REP-07.** `&&` and `||` take two `Bool`s and produce one, and a divergent
+/// operand is absorbed rather than reported.
+///
+/// There is no truthiness, so the type rule is the whole rule and it is the same
+/// for both operators — the short-circuit is MIR's. The `Never` half is what the
+/// exit criterion's own example needs: `panic` is `Never`, so `false &&
+/// panic("x")` unified `Never` with `Bool` and reported "expected Never, found
+/// Bool" — a `Y001` about the operator rather than about the program. The
+/// operands **join** now (TY-19/ADR-053), which is what every other branch point
+/// in the language already does.
+#[test]
+fn the_logical_operators_take_two_bools_and_produce_one() {
+    for op in ["&&", "||"] {
+        // The rule.
+        assert_eq!(
+            expr_type(&format!("true {op} false")),
+            "Bool",
+            "{op} is Bool"
+        );
+        assert!(!has_type_error(&format!(
+            "fn f(a: Bool, b: Bool) -> Bool {{ a {op} b }}"
+        )));
+        // Either operand may be an arbitrary `Bool` expression, including a
+        // comparison — which is the shape the precedence exists for.
+        assert!(!has_type_error(&format!(
+            "fn f(x: Int, y: Int) -> Bool {{ x == 1 {op} y != 0 }}"
+        )));
+        // A non-`Bool` operand is refused, in either position. There is no
+        // truthiness: an `Int` is not a condition.
+        assert!(has_type_error(&format!("fn f() -> Bool {{ 1 {op} true }}")));
+        assert!(has_type_error(&format!("fn f() -> Bool {{ true {op} 1 }}")));
+        assert!(has_type_error(&format!(
+            "fn f(v: Vec[Int]) -> Bool {{ v {op} true }}"
+        )));
+        // …and the result is a `Bool` and not the operand type.
+        assert!(has_type_error(&format!(
+            "fn f() -> Int {{ true {op} false }}"
+        )));
+
+        // A divergent operand is absorbed, in either position.
+        assert!(
+            !has_type_error(&format!("fn f() -> Bool {{ false {op} panic(\"x\") }}")),
+            "a `Never` right operand is absorbed by {op}"
+        );
+        assert!(!has_type_error(&format!(
+            "fn f() -> Bool {{ panic(\"x\") {op} false }}"
+        )));
+    }
+}

@@ -1899,17 +1899,26 @@ impl Inferer {
                 }
                 self.db.bool()
             }
-            // `||` (logical or) — lexed; result Bool, operands Bool.
-            Some(SyntaxKind::PIPE2) => {
+            // `&&` / `||` (§4.12): both operands `Bool`, result `Bool`. There is
+            // no truthiness, so this is the whole rule — the *short-circuit* is
+            // MIR's, not a typing difference between the two operators.
+            //
+            // The operands **join** with `Bool` rather than unifying with it, so a
+            // divergent one is absorbed (TY-19/ADR-053): `false && panic("x")` is
+            // the exit criterion's own example, and `panic` is `Never`. Unifying
+            // reported "expected Never, found Bool" — a `Y001` about the operator,
+            // not about the program — which is what `||` did before `&&` existed
+            // to make it visible.
+            Some(SyntaxKind::PIPE2 | SyntaxKind::AMP2) => {
                 let bool = self.db.bool();
                 if let (Some(l), Some(r)) = (lt, rt) {
                     let whole = b.syntax().text_range();
                     let lhs_at = lhs_range.unwrap_or(whole);
                     let rhs_at = rhs_range.unwrap_or(whole);
-                    if let Err(e) = self.db.unify(l, bool) {
+                    if let Err(e) = self.db.join(bool, l) {
                         self.diag_unify(self.file_span(lhs_at), e);
                     }
-                    if let Err(e) = self.db.unify(r, bool) {
+                    if let Err(e) = self.db.join(bool, r) {
                         self.diag_unify(self.file_span(rhs_at), e);
                     }
                 }

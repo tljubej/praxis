@@ -841,10 +841,11 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
         }
         TypedExpr::Bin { op, lhs, rhs, .. } => {
             // Short-circuit ops must not eagerly evaluate `rhs` — it is lowered
-            // only on the path that needs it (inside `lower_logical_or`).
-            if *op == BinOp::LogicalOr {
+            // only on the path that needs it, inside `lower_short_circuit`.
+            if let BinOp::LogicalOr | BinOp::LogicalAnd = op {
                 let l = lower_expr_gc(b, lhs);
-                return lower_logical_or(b, l, rhs);
+                let skip_on = *op == BinOp::LogicalOr;
+                return lower_short_circuit(b, l, rhs, skip_on);
             }
             let l = lower_expr_gc(b, lhs);
             let r = lower_expr_gc(b, rhs);
@@ -945,8 +946,9 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                         }
                     }
                 }
-                // LogicalOr is handled above (before eager rhs lowering).
-                BinOp::LogicalOr => unreachable!(),
+                // Both short-circuit operators are handled above, before `rhs`
+                // is lowered — reaching here would mean it already had been.
+                BinOp::LogicalOr | BinOp::LogicalAnd => unreachable!(),
             }
         }
         TypedExpr::Unary { op, operand, .. } => {
@@ -1680,14 +1682,29 @@ fn lower_value_cmp(b: &mut Builder<'_>, lhs: LocalId, rhs: LocalId) -> LocalId {
     dst
 }
 
-/// Lower short-circuiting logical or: `lhs || rhs`.
+/// Lower a short-circuiting logical operator: `lhs || rhs` or `lhs && rhs`
+/// (REP-07).
 ///
-/// `lhs || rhs` is `if lhs { true } else { rhs }`: evaluate `lhs`; if it is
-/// true the result is `true` and `rhs` is *not* evaluated (its side effects and
-/// any GC safepoint are skipped). Otherwise the result is `rhs`. Both operands
-/// are `Bool` `GcRef`s; `lhs_gc` is already lowered, `rhs_expr` is lowered only
-/// on the false path.
-fn lower_logical_or(b: &mut Builder<'_>, lhs_gc: LocalId, rhs_expr: &TypedExpr) -> LocalId {
+/// Both are one shape with the *answer* on the skipping side flipped:
+///
+/// - `lhs || rhs` is `if lhs { true } else { rhs }`
+/// - `lhs && rhs` is `if lhs { rhs } else { false }`
+///
+/// `skip_on` is the `lhs` value that decides the whole expression — `true` for
+/// `||`, `false` for `&&` — and it is also the literal that arm produces, which
+/// is why one function serves both. On that path `rhs` is **not evaluated**: its
+/// side effects, its faults and its GC safepoints are all skipped, which is the
+/// point of the operator and not an optimization. `false && panic("x")` must not
+/// fault.
+///
+/// Both operands are `Bool` `GcRef`s; `lhs_gc` is already lowered and `rhs_expr`
+/// is lowered into exactly one of the two blocks.
+fn lower_short_circuit(
+    b: &mut Builder<'_>,
+    lhs_gc: LocalId,
+    rhs_expr: &TypedExpr,
+    skip_on: bool,
+) -> LocalId {
     let lhs_bool = b.alloc_scalar(ScalarKind::Bool);
     b.push(Inst::ExtractScalar {
         dst: lhs_bool,
@@ -1703,16 +1720,22 @@ fn lower_logical_or(b: &mut Builder<'_>, lhs_gc: LocalId, rhs_expr: &TypedExpr) 
         then_block: true_blk,
         else_block: false_blk,
     };
-    // lhs true → result = true.
-    b.cur = true_blk;
-    let true_val = lower_lit_gc(b, &Lit::Bool(true), None);
+    // The block `lhs == skip_on` reaches: the answer is `skip_on` itself, and
+    // `rhs` is never lowered into it.
+    let (short_blk, long_blk) = if skip_on {
+        (true_blk, false_blk)
+    } else {
+        (false_blk, true_blk)
+    };
+    b.cur = short_blk;
+    let lit = lower_lit_gc(b, &Lit::Bool(skip_on), None);
     b.push(Inst::MoveGc {
         dst: result,
-        src: true_val,
+        src: lit,
     });
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join };
-    // lhs false → evaluate rhs.
-    b.cur = false_blk;
+    // The other block: the answer is whatever `rhs` is.
+    b.cur = long_blk;
     let rhs_val = lower_expr_gc(b, rhs_expr);
     b.push(Inst::MoveGc {
         dst: result,

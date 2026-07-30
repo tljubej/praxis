@@ -113,6 +113,9 @@ pub enum SyntaxKind {
     PIPE2,
     /// `&`
     AMP,
+    /// `&&` — logical and (REP-07). The lexer's max-munch keeps it one token, as
+    /// it does `||`, so a bare `AMP` is never part of one.
+    AMP2,
     /// `_` — a lone underscore (placeholder/punning site).
     UNDERSCORE,
 

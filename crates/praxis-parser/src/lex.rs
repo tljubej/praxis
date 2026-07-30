@@ -398,6 +398,7 @@ impl<'a> Lexer<'a> {
             Some(b">=") => Some(SyntaxKind::GTEQ),
             Some(b"..") => Some(SyntaxKind::DOT2),
             Some(b"||") => Some(SyntaxKind::PIPE2),
+            Some(b"&&") => Some(SyntaxKind::AMP2),
             Some(b"+=") => Some(SyntaxKind::PLUS_EQ),
             Some(b"-=") => Some(SyntaxKind::MINUS_EQ),
             Some(b"*=") => Some(SyntaxKind::STAR_EQ),

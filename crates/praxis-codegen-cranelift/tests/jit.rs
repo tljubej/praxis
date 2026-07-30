@@ -5408,3 +5408,71 @@ fn a_for_over_an_unannotated_parameter_runs_against_each_iterable_it_is_given() 
     assert!(!rt.has_pending_fault(), "copy over a Range faulted");
     assert_eq!(result.as_int(), 6);
 }
+
+/// **REP-07.** `&&` and `||` short-circuit: the right operand is not evaluated
+/// on the path that cannot need it.
+///
+/// The half no parse test can see, and the point of the operators. `false &&
+/// panic("x")` must produce `false`, not a fault — MIR lowers `rhs` into exactly
+/// one of the two blocks, so its side effects, its faults and its GC safepoints
+/// are all skipped. `&&` and `||` are one lowering with the skipping side's answer
+/// flipped, so each direction is asserted for both.
+#[test]
+fn the_logical_operators_short_circuit_and_answer_their_truth_table() {
+    // The truth table, both operators, all four rows each.
+    for (src, want) in [
+        ("fn main() -> Bool { true && true }", true),
+        ("fn main() -> Bool { true && false }", false),
+        ("fn main() -> Bool { false && true }", false),
+        ("fn main() -> Bool { false && false }", false),
+        ("fn main() -> Bool { true || true }", true),
+        ("fn main() -> Bool { true || false }", true),
+        ("fn main() -> Bool { false || true }", true),
+        ("fn main() -> Bool { false || false }", false),
+    ] {
+        let (rt, result) = run_main(src);
+        assert!(!rt.has_pending_fault(), "{src} faulted");
+        assert_eq!(result.as_bool(), want, "{src}");
+    }
+
+    // Short circuit: the skipped operand is one that would fault, so reaching it
+    // is observable rather than a matter of inspecting the MIR.
+    for src in [
+        "fn main() -> Bool { false && panic(\"not reached\") }",
+        "fn main() -> Bool { true || panic(\"not reached\") }",
+        // …and one that faults by dividing rather than by panicking, so the test
+        // does not depend on `panic`'s own path.
+        "fn main() -> Bool { false && (1 / 0) == 0 }",
+        "fn main() -> Bool { true || (1 / 0) == 0 }",
+    ] {
+        let (rt, _result) = run_main(src);
+        assert!(!rt.has_pending_fault(), "{src} evaluated its right operand");
+    }
+    // …and the other direction really does evaluate it, or the test above would
+    // pass against an implementation that never evaluates `rhs` at all.
+    for src in [
+        "fn main() -> Bool { true && panic(\"reached\") }",
+        "fn main() -> Bool { false || panic(\"reached\") }",
+    ] {
+        let (rt, _result) = run_main(src);
+        assert!(rt.has_pending_fault(), "{src} must reach its right operand");
+    }
+
+    // Precedence, observed as a value: `&&` binds tighter than `||`, so this is
+    // `false || (true && false)` and not `(false || true) && false`… which are
+    // both `false`. Use a case where they differ: `true || false && false` is
+    // `true || (false && false)` = true, and `(true || false) && false` = false.
+    let (rt, result) = run_main("fn main() -> Bool { true || false && false }");
+    assert!(!rt.has_pending_fault());
+    assert!(result.as_bool(), "&& binds tighter than ||");
+
+    // §3.3's own shape, end to end: comparisons under `&&` under a `!`.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  \
+           let diagonals = false\n  let dx = 1\n  let dy = 0\n  \
+           if !diagonals && dx != 0 && dy != 0 { 9 } else { 8 }\n\
+         }",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 8);
+}
