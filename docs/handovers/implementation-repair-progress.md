@@ -36,6 +36,7 @@ Update this file at the end of every stage.
 | REP-15 — the iteration protocol (no stage; ADR-066) | **done** | `a1c0b76` |
 | REP-19 — top-level statements execute (no stage; ADR-067) | **done** | `11e107c` |
 | REP-23 — a fused pair carries both halves (no stage) | **done** | `3678b6d` |
+| REP-22 — a function does not capture (no stage; ADR-068) | **done** | `db944f0` |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
@@ -45,8 +46,7 @@ part (see §6).
 **Twenty-three defects found while executing the plan are registered** as
 **REP-01 … REP-23** in the plan's **§4.1**. REP-01…REP-14 are owned by four new
 stages (**S23**–**S26**) and three new decisions (**D15**–**D17**), two of which
-are now answered. **Two rows are `unscheduled`**: **REP-22** (a P0, reassessed
-this session after measuring it) and **REP-21** (a P3).
+are now answered. **One row is `unscheduled`: REP-21**, a P3.
 
 **§3.3's representative program now runs verbatim from the design doc** —
 top-level `let`, top-level `out`s and no `fn main` anywhere.
@@ -64,11 +64,14 @@ program, in a generated `<entry>` function, and `fn main` is the fallback for a
 file with none. **REP-23** — a fused `enumerate()`'s pair held *neither* half —
 landed as ADR-066's null slot, which was already its fix.
 
-**One new P0 is registered and unfixed: REP-22.** A `fn` body that reads a
-top-level binding answers `Unit`; **through a closure it answers a nine-digit
-number**. Both forms were measured at `a1c0b76` and behave identically there, so
-REP-19 did not cause them — it made them easy to reach, because the design doc's
-program shape puts bindings at the top level. **This is where to start.**
+**One new P0 was found and closed in the same session: REP-22.** A `fn` body that
+read a top-level binding answered `Unit`; through a closure it answered a
+nine-digit number. Both were measured at `a1c0b76` and behave identically there,
+so REP-19 did not cause them — it made them easy to reach, because the design
+doc's program shape puts bindings at the top level. **`N007` reports it**
+(ADR-068): §4.9/§4.10 already drew the line and only §4.10 says "capture".
+
+**The repair has no P0 left.**
 
 **S23 is closed.** All four of its findings are fixed and gated — **REP-13**,
 **REP-11**, **REP-12** and **REP-02** — each as its own commit with the suite
@@ -87,13 +90,14 @@ is their decision.
 
 **S25 is the only stage left in the repair's own schedule**, and **REP-10 is its
 last scheduled row** — record and tuple patterns. Its acceptance criterion is met
-verbatim (above). Beyond it are S18…S21, which were never started, and the two
-unscheduled rows: **REP-22** (a P0) and **REP-21** (a P3).
+verbatim (above). Beyond it are S18…S21, which were never started, and one
+unscheduled row: **REP-21** (a P3).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1443 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1444 passed, 0 failed, 38 ignored**. `just ci` is green.
 
-This session's twelve new gates and two rewrites (**ADR-066**, **ADR-067**):
+This session's sixteen new gates and three rewrites (**ADR-066**, **ADR-067**,
+**ADR-068**):
 
 | Test | File | Pins |
 |---|---|---|
@@ -112,6 +116,7 @@ This session's twelve new gates and two rewrites (**ADR-066**, **ADR-067**):
 | `a_declared_main_is_the_entry_point_only_when_nothing_else_is` | `run.rs` | all four combinations, including that `main` runs **once** for `fn main(){…}` + `main()` |
 | `the_entry_points_name_is_not_one_a_program_can_spell` | `run.rs` | the crash frame reads `<entry>`, and `fn <entry>()` does not parse |
 | `a_files_top_level_statements_become_one_generated_item` | `infer_tests.rs` | the typed tree — three statements in one item, declarations still their own, a nullary `Unit` shape, and `entry_point`'s three cases |
+| `a_fn_that_reads_a_binding_around_it_is_reported` | `infer_tests.rs` | REP-22 — both forms, a `var` and an assignment target, a block one level deeper; **and the three that must stay clean**: a top-level closure (§4.10's own example), a closure over its own function's locals, and every non-binding kind. Plus one report per use with no cascade, and a forward reference still `N001` |
 
 `every_runtime_symbol_mir_emits_is_registered` was **extended** with a `for` over
 each of the six snapshot iterables: a `for` is the only caller of four of the new
@@ -121,6 +126,14 @@ wrappers, so nothing else in that program would reach them.
 `an_opaque_tuple_type_keeps_its_arity_with_unknown_slots`. It was a §8.2
 bug-pinning test — it asserted the empty schema that dropped every fused pair's
 elements — so it would have gone red as a "regression".
+
+`a_nested_type_declaration_is_reported_at_the_declaration` was **amended**: it
+asserted that `let base = 1` / `struct Point {…}` / `fn main() -> Int { base }` is
+clean, and the `fn main` reading `base` was incidental to what it is about ("top
+level is the file, not the first statement"). A top-level statement reads the
+binding now.
+
+`all_lists_every_variant`'s count is **64**.
 
 `a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names` documents,
 in passing, that `read grid(int)` over `12\n34\n` produces cells `[12, 2, 34, 4]`.
@@ -1139,6 +1152,19 @@ fallback for a file with no top-level statements; neither is the error
 **`lower`'s root walk has a fourth case.** `is_top_level_stmt` names the three
 declaration kinds positively and everything else is a statement, so a new
 top-level *declaration* form must be added there or it will start executing.
+
+**A `fn` body has a boundary now** (`Resolver::fn_boundary`), and a name that
+crosses it to reach a `let`/`var`/param is `N007` (ADR-068). A **closure** body
+opens no boundary — a closure captures — so the question is always about the
+nearest enclosing `fn`. If you add a scope-opening construct, decide whether it is
+a function or a closure for this purpose; everything that is not a `fn` item is a
+closure.
+
+**`ScopeTree` gained `lookup_binding` and `is_within`.** `lookup` is now the
+first's `.map(|(sym, _)| sym)`, so there is one walk, not two.
+
+**`N007` is spent; `N008` is next free** and `Y019` is still free. `DiagCode::ALL`
+is 64 long and `all_lists_every_variant` asserts the count.
 
 ### From an earlier session (S17: TY-33 unit 3 — the graph helpers)
 
@@ -2486,17 +2512,12 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**REP-22 is the answer.** It is the only P0 in the tree, and this session created
-neither half of it — it measured both at `a1c0b76` and they behave identically
-there. What changed is how easily a program reaches it: REP-19 made the design
-doc's own program shape work, and that shape puts bindings at the top level.
+**REP-10 is the answer** — record and tuple patterns, S25's last scheduled row and
+the only thing left in the repair's own schedule. **The tree has no P0.**
 `14-repair-rep15-rep19-rep23-handover.md` is this session's note.
 
-Two rows are unscheduled and one is scheduled:
+One row is unscheduled and one is scheduled:
 
-- **REP-22 (P0, `unscheduled`)** — a `fn` body that reads a top-level binding
-  answers `Unit`; **through a closure it answers a nine-digit number**. Detail
-  below; it needs a decision before it needs code.
 - **REP-10 (P2, S25)** — record and tuple patterns, the last row S25 schedules.
   `exhaustive.rs` already handles the `Closed`-with-one-constructor shape they
   produce, so it is a parser and lowering change. It is also the other half of
@@ -2505,7 +2526,10 @@ Two rows are unscheduled and one is scheduled:
   no caller and both catalog row names are reserved (ADR-064), so what is left is
   a contextual grammar rule: `min` is an identifier, so `min=` is two tokens.
 
-**REP-22 in detail.**
+Beyond those two, **S18…S21 were never started** — S18 is `D1`-blocked and D1 is
+still open. That is the next real decision after REP-10.
+
+**REP-22, for the record** (closed as ADR-068 in the session that found it).
 
 ```praxis
 let x = 1
@@ -2528,19 +2552,12 @@ A **top-level** closure is fine — `let offset = 10` then
 `<entry>` and capture works normally. So the boundary is a `fn` body, not a
 closure body, and that is the shape any check has to have.
 
-The decision it needs: **either report it** (a name mistake, so ADR-051 puts it in
-the `N0xx` block — **`N007` is next free**) **or make top-level bindings real
-globals**, which is a language decision §3.2 does not make and which would need a
-storage answer, an initialization order and a GC root. The narrow defect that
-survives either answer is the **silence**, which is REP-14's shape and how that
-row was scoped.
-
-If reporting: a `fn` body's scope is a child of the enclosing scope, so the
-lookup walks straight out to the top level. What is missing is the *boundary* —
-`ScopeTree::lookup` does not say which scope it found the binding in, and
-`resolve_fn` does not record that its body scope is a function boundary. Both are
-small; the care is in not reporting a closure's legitimate capture, and in what a
-`fn` referring to another `fn` (or a `struct`, or a builtin) must keep doing.
+**Both are `N007` now** (ADR-068). §4.9 describes functions, §4.10 describes
+closures, and only §4.10 says "capture" — so the language had already drawn the
+line and nothing implemented it. The alternative, making top-level bindings real
+**globals**, is a language feature §3.2 does not ask for: it needs storage, an
+initialization order, a GC root, and an answer for a `fn` called before the
+binding's statement runs. If that is ever wanted, this ADR is what it supersedes.
 
 **S17, S23, S24 and S26 are all closed.** Of the repair's three new decisions,
 **D15 (S24) and D17 (S26) are answered and implemented**; **D16 is S25's and is

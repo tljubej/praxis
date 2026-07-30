@@ -1,7 +1,7 @@
-# Repair session handover — the last P0, and §3.3 verbatim
+# Repair session handover — no P0 left, and §3.3 verbatim
 
 **Date:** 2026-07-30
-**Tree:** `3678b6d` · **Suite:** 1443 passed, 0 failed, 38 ignored · `just ci` green
+**Tree:** `db944f0` · **Suite:** 1444 passed, 0 failed, 38 ignored · `just ci` green
 
 `implementation-repair-progress.md` is still the living status and this file does
 not replace it — read §1 and §4 there first. This is the session-scoped note: what
@@ -15,57 +15,31 @@ rediscovered.
 | **REP-15** (P0) — a `for` iterates a snapshot | `a1c0b76` | **066** |
 | **REP-19** (P1) — a file's top-level statements are its program | `11e107c` | **067** |
 | **REP-23** (P1) — a fused pair carries both of its halves | `3678b6d` | 066 (decision 5) |
+| **REP-22** (P0) — a function does not capture (`N007`) | `db944f0` | **068** |
 
-**The repair's last P0 is closed**, and **§3.3's representative program now runs
+**The repair has no P0 left**, and **§3.3's representative program now runs
 verbatim from the design doc** — top-level `let`, top-level `out`s, no `fn main`
 anywhere. `tests/aoc-corpus/s33_representative_program.px` *is* the design doc's
 text; the `fn main()` wrapper and the comment explaining it are gone.
 
-**Two findings registered: REP-22 and REP-23.** REP-23 landed with the session.
-**REP-22 is a new P0** and is where to start.
+**Two findings registered: REP-22 and REP-23**, and both landed in the session
+that found them. REP-22 was reassessed to P0 after its closure form was measured:
+it answered a nine-digit number, not `Unit`.
 
 ## Where to start
 
-**REP-22** — a `fn` body that reads a top-level binding.
+**REP-10** — record and tuple patterns. It is S25's last scheduled row and the
+only thing left in the repair's own schedule, and it is also the other half of
+`for (k, v) in m`, which ADR-066 deliberately left to it. `exhaustive.rs` already
+handles the `Closed`-with-one-constructor shape it produces, so it is a parser and
+lowering change rather than a checker one.
 
-```praxis
-let x = 1
-fn f() { x }
-out(f())          // Unit
+After it: **REP-21** (P3, `min=`/`max=`, whose runtime wrappers and catalog row
+names already exist — what is left is a contextual grammar rule) and then
+**S18…S21**, which were never started. S18 is `D1`-blocked and D1 is still open;
+that is the next real decision.
 
-let y = 5
-fn g() { |n| n + y }
-out(g()(1))       // 4388746929
-```
-
-Both pass `praxis check`. Resolution resolves the name to the top-level symbol and
-inference types it; MIR has no slot for it inside the function. A `fn` does not
-capture (§4.9/§4.10 — closures do, functions do not) and **nothing says so**.
-
-**This session did not cause it.** Both forms were measured at `a1c0b76`, before
-REP-19, and behave identically there. What changed is reachability: the design
-doc's program shape puts bindings at the top level, and REP-19 made that shape
-work. A **top-level** closure is fine — `let offset = 10` then
-`v.map(|x| x + offset).sum()` answers `23`, because both live in `<entry>` — so
-the boundary is a `fn` body, not a closure body.
-
-The decision: **report it** (a name mistake; ADR-051 puts it in the `N0xx` block
-and **`N007` is next free**) **or make top-level bindings globals**, which §3.2
-does not decide and which needs storage, initialization order and a GC root. The
-narrow defect that survives either answer is the **silence** — REP-14's shape.
-
-If reporting: a `fn` body's scope is a child of the enclosing scope, so the lookup
-walks straight out. What is missing is the *boundary* — `ScopeTree::lookup` does
-not report which scope it found the binding in, and `resolve_fn` does not mark its
-body scope as a function boundary. Both are small. The care is in not reporting a
-closure's legitimate capture, and in what a `fn` naming another `fn` (or a
-`struct`, or a builtin) must keep doing.
-
-The other two rows, both below P0: **REP-10** (P2, S25's last scheduled row —
-record and tuple patterns, and the other half of `for (k, v) in m`) and **REP-21**
-(P3, `min=`/`max=`, whose runtime wrappers and catalog row names already exist).
-
-## Six things worth not rediscovering
+## Seven things worth not rediscovering
 
 1. **An nth-member accessor is the wrong protocol, and it is the one the code's
    shape suggests.** `get_symbol_for`/`len_symbol_for` looked like they wanted one
@@ -114,6 +88,15 @@ record and tuple patterns, and the other half of `for (k, v) in m`) and **REP-21
    the property rather than trusting it, and the crash debugger renders the name,
    so a fault in a top-level statement shows a frame the user can tell is not
    theirs.
+
+7. **REP-22's fix is about the symbol's *kind*, not only its scope.** A `fn` body
+   naming another `fn`, a `struct`, an `enum`, a variant constructor or a builtin
+   must keep working — those are reachable from anywhere by construction. Only a
+   `let`, a `var` or a parameter is a local of the function that declared it. And
+   the boundary is a **`fn` body**, never a closure body: a closure *does* capture
+   (§4.10), so `let offset = 10` with `v.map(|x| x + offset)` at top level is
+   §4.10's own example and must stay clean. All three of those are asserted, and
+   two of them failed first when the gate was written.
 
 ## The `praxis check` sweep
 
