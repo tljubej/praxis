@@ -623,11 +623,11 @@ fn lower_inst<M: Module>(
                     // praxis_alloc_tuple(ctx, schema_ptr). Then fill in each
                     // element via praxis_tuple_set.
                     // The arity comes from the *elements* when the type does not
-                    // give one (REP-23): a fused `enumerate`/`zip` pair carries
-                    // `MirType::Opaque` until MIR-05, and a zero-arity schema
-                    // sizes the payload to zero, so both `praxis_tuple_set`
-                    // calls below wrote into nothing and `[10, 20].enumerate()`
-                    // answered `[(), ()]`.
+                    // give one (REP-23). A zero-arity schema sizes the payload
+                    // to zero, so both `praxis_tuple_set` calls below wrote into
+                    // nothing and `[10, 20].enumerate()` answered `[(), ()]` —
+                    // back when a fused `enumerate`/`zip` pair carried
+                    // `MirType::Opaque` (MIR-05 gave it the catalog's type).
                     let schema_ptr = tuple_schema_for(db, *ty, elements.len(), generation)?;
                     let schema_imm = builder.ins().iconst(GC, schema_ptr as i64);
                     // praxis_alloc_tuple(ctx, schema_ptr) -> GcRef.
@@ -1692,11 +1692,14 @@ fn tuple_schema_for(
     generation: &Generation,
 ) -> Result<*const praxis_runtime::tuples::TupleSchema> {
     use praxis_types::data::TypeData;
-    // Resolve the element types. `Opaque` means the lowering had no tuple type
-    // (the fused `enumerate`/`zip` pipelines, until MIR-05); a non-tuple type is
-    // a misuse (the HIR only lowers `TypedExpr::Tuple` here). Both degrade to a
-    // schema of `arity` **unknown** slots rather than panicking in the JIT — but
-    // only the second is a surprise now, because the first says so in the MIR.
+    // Resolve the element types. `Opaque` means the lowering had no tuple type;
+    // a non-tuple type is a misuse (the HIR only lowers `TypedExpr::Tuple`
+    // here). Both degrade to a schema of `arity` **unknown** slots rather than
+    // panicking in the JIT — but only the second is a surprise now, because the
+    // first says so in the MIR. Since MIR-05 every tuple-building site supplies
+    // a type, including the fused `enumerate`/`zip` pairs that were the standing
+    // exception; what an `Opaque` reaches here through today is a builder with
+    // genuinely nothing to say.
     //
     // Unknown, and not *absent* (REP-23): the arity sizes the payload, so a
     // zero-slot schema for a two-element tuple made `praxis_tuple_set` drop both

@@ -28,7 +28,10 @@ Update this file at the end of every stage.
 | S15 — Per-use types into HIR and MIR, then monomorphization | **done** (one exit criterion deferred; see §4) | `93c05ec`, `f3c76a8`, `77b2ad6`, `b560e67` |
 | S16 — Records, patterns, exhaustiveness, enum constructors | **done** | `57e2e5b`, `06f3c44`, `b8e2c7b`, `e918741` |
 | S17 — Constraint channel and capabilities | **done** | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c`, `e801e6a`, `b6ab8eb`, `fb82f79` |
-| S18 … S21 | not started | |
+| S18 — Option contract and enum nominal identity | not started | |
+| S19 — Input-parser compile pipeline | not started | |
+| S20 — Parser runtime cursor and region ownership | not started | |
+| S21 — Pipeline plan representation and per-stage indices | **done** | `7a38a2a`, `7264de8`, `ac606ba`, `2f68e84`, `333ca4e`, + the ADR-071/docs commit |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
 | S25 — Grammar completion | **done** — its acceptance criterion is met **verbatim**, and all nine of its rows have landed (REP-07, REP-08, REP-17, REP-16, REP-09, REP-18, REP-20, REP-19, REP-10) | `c74e062`, `bb3bc43`, `11976cc`, `0ee29b1`, `2f9bcbd`, `b495e93`, `11e107c`, `ca7385e` |
@@ -77,8 +80,9 @@ doc's program shape puts bindings at the top level. **`N007` reports it**
 (ADR-068): §4.9/§4.10 already drew the line and only §4.10 says "capture".
 
 **The repair has no P0 left, and no scheduled row of any severity.** Every stage
-the plan schedules is closed except **S18…S21, which were never started**; S18 is
-`D1`-blocked and D1 is still open. That is the next real decision.
+the plan schedules is closed except **S18, S19 and S20** (S21 closed after this
+paragraph was written); S18 is `D1`-blocked and D1 is still open. That is the
+next real decision.
 
 **S23 is closed.** All four of its findings are fixed and gated — **REP-13**,
 **REP-11**, **REP-12** and **REP-02** — each as its own commit with the suite
@@ -100,10 +104,44 @@ record and tuple patterns (ADR-069) — and REP-21 (`min=`/`max=`, ADR-070) was 
 one unscheduled row. **REP-24 was found in between**: §4.5's and §4.6's own
 declaration examples do not parse, because a declaration's members had to be
 comma-separated and the design doc writes them on separate lines. What is left of
-the repair is **S18…S21, which were never started**; S18 is `D1`-blocked.
+the repair is **S18, S19 and S20** — S21 is closed below; S18 is `D1`-blocked.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1458 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1478 passed, 0 failed, 24 ignored**, measured after S21 alone (the
+previous line read 1458/38; the tree it was measured on counts 1457, so read the
+delta rather than the absolute). `just ci` is green. The 24 that remain belong to
+S18, S19 and S20.
+
+**S21 is closed** (ADR-071). All six of its findings are fixed — MIR-06, MIR-08,
+MIR-03, MIR-04+MIR-07 (one commit, as the plan requires) and MIR-05 — and all
+**fourteen** of its exit-criterion regressions are un-ignored and green, plus
+seven new gates. The stage is one representational change showing through in
+five places: the plan was a flat `Vec<Stage>` with one index, and both halves of
+that were wrong. The chain is recursive now (a `flat_map` *holds* what follows
+it, so `Stage` has no `FlatMap` variant and the `unreachable!` is deleted rather
+than guarded), each position-consuming stage owns a dense counter allocated
+before the loop, and the emitter carries one pipeline exit distinct from the
+innermost continue. `praxis-mir` has **zero** ignored tests now.
+
+Alone in `docs/decisions/README.md`: **ADR-069 and ADR-070 were never indexed**.
+Added with 071.
+
+This stage's seven new gates and one ADR (**071**) — MIR-03…MIR-08:
+
+| Test | File | Pins |
+|---|---|---|
+| `a_flat_map_inside_a_flat_map_flattens_both_levels` | `jit.rs` | MIR-06's *semantics* — the exit-criterion test only asserts the compiler survives, and asserts a count a wrong nesting could also produce. Every level weighted (×10, ×100) so dropping one, running one at the wrong depth or ordering them backwards all answer differently; plus a stage written *between* two splices, which must run at the depth it was written at |
+| `take_while_after_flat_map_stops_the_whole_stream` | `jit.rs` | MIR-08's stage half — the audit covers `any` only. Applied per inner Vec, `take_while` silently becomes a `filter`, so the assertion is the **absence of a DivByZero**: an element past the stop point that would divide by zero if the stream kept going. Second case puts the stop *inside* an inner Vec rather than at its start |
+| `a_take_bound_is_evaluated_once_before_the_loop` | `praxis-mir/src/build.rs` | MIR-03's evaluation order, which no behavioural test can see for a pure bound — exactly one `CallTarget::User("bound")` in `main`, and it precedes the loop header's `praxis_vec_len`. Both `take` and `skip` |
+| `a_take_or_skip_bound_is_any_int_expression` | `jit.rs` | MIR-03's answers — a binding, an arithmetic expression, one that calls back into the receiver, composition with the stages around it, and the four degenerate bounds (`0`, negative, past the end) keeping the meaning the literal spelling had |
+| `enumerate_after_filter_numbers_the_filtered_sequence` | `jit.rs` | MIR-04's `enumerate` half, which the audit's row omits — `(0,2),(1,4)` weighted so a sparse index and a swap both fail, after a `filter` and after a `skip` |
+| `each_stage_counts_the_sequence_that_reaches_it` | `jit.rs` | the rule the stage is named for, and the one thing a single *shared* counter still gets wrong — two position-consuming stages around a `filter` at values where one counter and two disagree, three ways; plus `position`'s overwrite case, where inner Vecs of different lengths make a later match answer a *smaller* index |
+| `a_fused_pairs_schema_names_its_element_types` | `adversarial_audit.rs` | the only assertion separating MIR-05 from REP-23's fallback — REP-23 made a typeless pair keep its arity, so the two `*_materializes_*` regressions pass either way. Reads the **schema**: INT twice for `enumerate`, INT and TEXT for `zip` (so a schema echoing the receiver's element type fails on one and not the other), and an unpushed `Vec` still compiling, which keeps ADR-066 decision 5 reachable |
+
+`pipeline_fused_chain_survives_gc_stress` was **extended** rather than replaced:
+300 elements through `filter` + `enumerate` + `take`, because the new counters
+are `Gc` slots live across every `praxis_vec_get` safepoint in the loop and a
+slot the liveness pass misses is nulled (MIR-01/MIR-02), not merely stale.
 
 This session's fourteen new gates and two ADRs (**069**, **070**) — REP-10,
 REP-24, REP-21 and REP-25:
@@ -1139,6 +1177,51 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
+### From S21 (MIR-03…MIR-08) — read this if you touch the fused pipeline
+
+**The pipeline plan is a recursive `Chain`, not a `Vec<Stage>`** (ADR-071). Two
+enums mirror each other: `Chain` is the recognizer's (`Then` / `Splice` /
+`Sink`, carrying `TypedExpr`s) and `Plan` is the lowered one, carrying each
+stage's already-lowered `LocalId`s. `Stage` has **no `FlatMap` variant** and
+must not grow one — a splice is a nesting, and keeping it out of the
+element-wise enum is what deletes the `unreachable!` structurally instead of
+guarding it. If you add a combinator, decide first whether it transforms an
+element or replaces it with a sequence.
+
+**A stage does not have access to the loop index.** `emit_plan`/`emit_step` do
+not take one. Each of `take`/`skip`/`zip`/`enumerate` and the `find`/`position`
+sinks carries a **dense counter** allocated by `lower_chain` (before the loop
+scaffold, which is what makes it survive a splice), read then bumped. A new
+position-consuming stage adds its own counter; there is no shared index to
+reach for, deliberately.
+
+**`b.loop_stack` is not used by the pipeline any more, and must not be.**
+`break_loop`/`continue_loop` are deleted; the emitter carries `pipeline_exit`
+(one per chain, however deep) and `continue_target` (rebound by each splice).
+`lower_break`/`lower_continue` are the loop stack's only readers now. The
+deletion is safe because **every expression a fused chain contains is lowered
+above the loop scaffold** — if you ever lower a user expression *inside* a fused
+body, that stops being true and this is the thing to revisit.
+
+**`take`/`skip` bounds are `TypedExpr`, not `i64`.** Any `Int` expression, and
+`classify_link` no longer matches on `Lit::Int`. Consequence worth knowing: all
+23 registered `MethodLowering::Intrinsic` names are now recognized, so
+`lower_pipeline_combinator` and the `lower_seq_*` family are **unreachable for a
+well-typed program**. They are kept on purpose (ADR-029 decision 1); deleting
+them is a fine standalone commit and a bad rider on anything else.
+
+**A fused `enumerate`/`zip` pair carries a real tuple type** (MIR-05), read off
+the call node. There is no unconditional `MirType::Opaque` at a
+descriptor-producing site left in the tree. The verifier's
+`OpaqueAtDescriptorSite` rule still stays **off**, for a different reason than
+before: an unresolved inference variable legitimately yields `Opaque`, and
+ADR-066 decision 5 answers that with a null schema slot. `verify.rs`'s note is
+rewritten to say so — it used to blame a catalog defect TY-31 had fixed.
+
+**`tuple_element_descriptor_ids` (adversarial_audit.rs) has a null-safe
+sibling.** It dereferenced every schema slot unconditionally, which is UB on a
+null one; use `tuple_element_descriptor_slots` when a slot might be unknown.
+
 ### From this session (REP-15, REP-19, REP-23)
 
 **A `for` no longer indexes what it was given** (ADR-066). It indexes a
@@ -2118,7 +2201,9 @@ safepoint calls. `CheckFault` calls `spill_debug` only.
 `call_predicate`, `idx_ge_len`, `emit_bounds_check`, `emit_increment`,
 `idx_cmp_const`, `sink_alloc`, `emit_sink_body`, `emit_flat_map_inner`,
 `run_stage` and `alloc_empty_vec` all lost the parameter. If you add a helper,
-do not thread one back in.
+do not thread one back in. (S21 renamed three of those: `idx_cmp_const` is
+`position_cmp_bound`, `run_stage` is `emit_step`, and `emit_flat_map_inner` is
+`emit_splice`. The rule is unchanged.)
 
 **Root sets shrink, and shadow slots get nulled.** Any test that assumed a
 value stays rooted after its last use is now wrong. Any reasoning that "the
@@ -2890,14 +2975,17 @@ Carried forward from S17's earlier sessions:
   the match on it is exhaustive; the first row that genuinely needs a capability —
   a registered `sorted`, a `unique`, a `Vec.contains` — adds the arm and the
   `require_cap` route together. **Do not add the arm before its row.**
-- **`alloc_empty_vec` still writes `MirType::Opaque`, and the reason has changed.**
-  S15 could not read the chain's result type because `enumerate`/`zip` declared it
-  wrongly. TY-31 fixed the rows, so the type is now correct — but the *fused*
-  lowering still has no per-stage item type (MIR-05, S21), so the tuple a fused
-  `enumerate` builds is still `AllocKind::Tuple { ty: Opaque }`. **H10's verifier
-  rule is now blocked on MIR-05 alone.** The comment in `build.rs`'s
-  `alloc_empty_vec` still cites the catalog rows and should be updated when S21
-  gets there.
+- **`alloc_empty_vec` still writes `MirType::Opaque`, and the reason has changed
+  twice.** S15 could not read the chain's result type because `enumerate`/`zip`
+  declared it wrongly; TY-31 fixed the rows and **S21's MIR-05 made the fused
+  lowering read them**, so both the type and the pair it builds are right now.
+  What is left is a smaller claim, and the `build.rs` comment states it: a
+  `praxis_vec_new` adopts the first pushed value's descriptor, so an empty
+  collect-target has no descriptor to state. Deriving one here is a change to
+  *collection construction* — it has to answer what happens when the declared
+  and the adopted descriptor disagree — and belongs with whatever makes the
+  element descriptor authoritative. **H10's verifier rule is no longer blocked
+  on a lowering gap at all**; see the rewritten note in `verify.rs`.
 - ~~**The lexer does not support digit separators**, though `lower.rs` strips `_`
   from an `IntLit` before parsing it.~~ **Fixed in S23** (`809d138`) — the lexer
   accepts them, so the strip is the live half. The rule is
@@ -3109,17 +3197,23 @@ blocked on this stage. The ADR is **054**. Notes worth carrying:
   `AllocKind::Collection` a program writes carries real type arguments. Two
   descriptor sites are left, both `AllocKind::Tuple { ty: Opaque }`: the tuple a
   fused `enumerate` or `zip` builds. They need **two** things:
-  1. **MIR-05's per-stage item types (S21).** A fused chain knows what its
-     source yields; what stage *n* yields is a fact no stage carries.
-  2. ~~**A method catalog that describes `enumerate` and `zip`.**~~ **Fixed —
-     this entry is stale.** Both rows declared `result: Vec[T]` when S15 wrote
-     it; **TY-31 corrected them** and they now declare `vec_of_index_and_t()` and
-     `vec_of_t_and_u()`, gated by `enumerate_and_zip_report_the_pairs_they_build`.
-     So H10 waits on MIR-05 alone. Until then,
-     `alloc_empty_vec` deliberately does **not** read its element type from the
-     chain's result type, though that type is `Known` at every call site: it
-     would swap an honest null descriptor — which the runtime repairs on the
-     first push — for a wrong one.
+  1. ~~**MIR-05's per-stage item types (S21).**~~ **Landed in S21** (ADR-071).
+     The pair type is one element-of from the call node's own result type; the
+     recognizer was throwing it away with a `..`.
+  2. ~~**A method catalog that describes `enumerate` and `zip`.**~~ **Fixed by
+     TY-31** — the rows declare `vec_of_index_and_t()` and `vec_of_t_and_u()`,
+     gated by `enumerate_and_zip_report_the_pairs_they_build`.
+
+  **Both halves are done, and the rule is still off**, for a reason neither S9
+  nor S15 had stated: `Opaque` is a **legal answer**. A type that is still an
+  inference variable has no descriptor and never will — `let m = Map()` or an
+  unpushed `let v = Vec()` — and ADR-066 decision 5 answers it with a null schema
+  slot the runtime resolves off the value's own header. A rule that refused
+  `Opaque` outright would reject working programs. The rule that *could* be
+  turned on is narrower — "no `Opaque` where the type could have been resolved"
+  — and stating it needs a distinction `MirType` does not carry between "still a
+  variable" and "the lowering did not look". That is a representation change, not
+  a verifier change. `verify.rs`'s note says all of this now.
 - **`MirType::expect_known`/`MirTypeError` are still unwritten**, for the same
   reason they were in S9: their only consumer is the rule above.
 - **The corpus triage found nothing, for the seventh time.** Every `.px` under

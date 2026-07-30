@@ -2278,6 +2278,16 @@ fn lower_return(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
 // The old per-combinator eager lowerers (`lower_pipeline_combinator` +
 // `lower_seq_*`) are kept verbatim below as a fallback for any chain the
 // recognizer declines, so a regression here can never break the eager path.
+//
+// Note for whoever comes next: since MIR-03 removed the literal-only `take`/
+// `skip` restriction, all **23** registered `MethodLowering::Intrinsic` names
+// are recognized by `classify_link`/`classify_sink`, so the fallback is
+// unreachable for a well-typed program — and its `_` arm answers the Unit
+// singleton, which is what MIR-03 was. It is deliberately kept (ADR-029
+// decision 1 names it the incremental-safety net, and deleting a 350-line net
+// in the same change that rewrites the thing it is a net for is the one edit
+// nobody could bisect). Deleting it is a reasonable later commit *on its own*,
+// with `emit_index_loop`/`alloc_empty_vec` following it out.
 // ===========================================================================
 
 /// A streaming pipeline stage: transform *one* element, possibly skipping it or
@@ -3891,13 +3901,22 @@ fn lower_seq_count(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -
 /// into the same null descriptor the wrapper already expects: the result Vec
 /// adopts each pushed value's descriptor on first push.
 ///
-/// It is *not* derived from `result_ty`, though `result_ty` is `Known` at every
-/// call site now. A chain ending in `enumerate` or `zip` has a result type the
-/// method catalog gets wrong — both rows declare `result: Vec[T]`, the
-/// receiver's own element type, so `v.enumerate()` on a `Vec[Int]` is
-/// `Vec[Int]` rather than `Vec[(Int, Int)]`. Reading it would swap an honest
-/// null descriptor for a wrong one, which is strictly worse: the runtime knows
-/// what to do with absence. See `praxis_mir::verify`'s note on H10.
+/// The *reason* it is not derived from `result_ty` has changed, twice. S15
+/// could not read it because the method catalog described `enumerate` and `zip`
+/// wrongly — both rows declared `result: Vec[T]`, the receiver's own element
+/// type — so a chain ending in either had a result type that would have named
+/// the wrong element descriptor. TY-31 fixed the rows and S21's MIR-05 made the
+/// fused lowering read them, so `result_ty` is both `Known` and *right* at every
+/// call site now.
+///
+/// What is left is a smaller claim: the null descriptor is not a gap, it is how
+/// a `Vec` is built. `praxis_vec_new` adopts the first pushed value's
+/// descriptor, so an empty collect-target has no descriptor to state and the
+/// element type would only be re-derived at the first push. Deriving it here
+/// would be a change to collection construction — one that has to answer what
+/// happens when the two disagree — and belongs with whatever makes the element
+/// descriptor authoritative rather than adopted. See `praxis_mir::verify`'s
+/// note on H10.
 fn alloc_empty_vec(b: &mut Builder<'_>, result_ty: MirType) -> LocalId {
     let result = b.alloc_gc(result_ty, None, LocalDebugKind::Temp, None);
     b.push(Inst::Alloc {

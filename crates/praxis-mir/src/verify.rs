@@ -38,30 +38,34 @@
 //! accumulator into a `Gc` slot (an allocation per iteration) or weakening the
 //! rule until it says nothing.
 //!
-//! **`OpaqueAtDescriptorSite` is still off, and S15 found out why** (hazard
-//! H10). The plan schedules it here, on the grounds that lowering could not
-//! supply per-use types until F15. F15 landed, and it supplied them: the
+//! **`OpaqueAtDescriptorSite` is still off, and the reason has changed twice**
+//! (hazard H10). The plan schedules it here, on the grounds that lowering could
+//! not supply per-use types until F15. F15 landed and supplied them: the
 //! `for`-loop item, the parser result, the closure value, the indirect call
-//! result and a pipeline's *source* item are all `MirType::Known` now, and
-//! every `AllocKind::Collection` a program writes carries real type arguments.
+//! result and a pipeline's *source* item are all `MirType::Known`, and every
+//! `AllocKind::Collection` a program writes carries real type arguments. Two
+//! sites were left — the pair a fused `enumerate` or `zip` builds — and they
+//! needed two things: the catalog to describe those two methods correctly, and
+//! the fused lowering to read what it describes. **Both have landed** (TY-31
+//! and S21's MIR-05), so no lowering site emits an unconditional `Opaque` into
+//! a descriptor-producing position any more.
 //!
-//! Two descriptor sites are left, both in the fused pipeline, and both are
-//! `AllocKind::Tuple { ty: Opaque }` — the tuple a fused `enumerate` or `zip`
-//! builds. Turning the rule on would refuse to compile every program that uses
-//! either. They need **two** things, not one:
+//! What blocks the rule now is not a lowering gap at all — it is that `Opaque`
+//! is a **legal answer**. A type that is still an inference variable has no
+//! descriptor and never will: `let m = Map()` generalizes at the `let`, so a
+//! `for kv in m` whose body never opens the pair leaves K and V unresolved, and
+//! `let v = Vec()` with no push leaves a chain over it the same way. ADR-066
+//! decision 5 answers that with a **null schema slot** and a runtime read of the
+//! value's own header, which is never the wrong descriptor. A rule that refused
+//! `Opaque` outright would reject those programs.
 //!
-//! 1. **MIR-05's per-stage item types** (S21). A fused chain knows what its
-//!    source yields; what stage *n* yields is a fact no stage carries.
-//! 2. **A method catalog that describes `enumerate` and `zip`.** Their rows
-//!    declare `result: Vec[T]` — the receiver's own element type — so
-//!    `v.enumerate()` on a `Vec[Int]` types as `Vec[Int]` rather than
-//!    `Vec[(Int, Int)]`. F15 makes lowering *believe* the catalog, where it
-//!    used to re-derive a harmless fresh variable from the same row, so
-//!    deriving the tuple's type from the chain's result type today would
-//!    replace an honest null descriptor with a wrong one. See the S15 entry in
-//!    the repair progress note; this is a finding the register does not have.
-//!
-//! `MirType::expect_known` lands with the rule that needs it.
+//! So the rule this file is waiting for is narrower than the one the plan named:
+//! not "no `Opaque` at a descriptor site", but "no `Opaque` at a descriptor site
+//! *whose type could have been resolved*" — which needs a way to distinguish an
+//! unresolved inference variable from a lowering that simply did not look. That
+//! distinction does not exist in `MirType` today, and inventing it is a change
+//! to the representation, not to this pass. `MirType::expect_known` lands with
+//! the rule that needs it.
 
 use std::collections::BTreeSet;
 
