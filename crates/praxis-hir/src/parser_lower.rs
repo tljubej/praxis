@@ -138,7 +138,7 @@ fn convert_parser_expr(
             }
         }
         ParserExprKind::Template => {
-            let parts = convert_template(parser_expr, file, diagnostics, span);
+            let parts = convert_template(parser_expr, file, diagnostics);
             Some(ParserAst::Template { parts, span })
         }
         ParserExprKind::Call => convert_constructor_call(parser_expr, file, diagnostics, span),
@@ -167,7 +167,6 @@ fn convert_template(
     parser_expr: &ParserExpr,
     file: FileId,
     diagnostics: &mut Vec<Diagnostic>,
-    span: Span,
 ) -> Vec<TemplatePart> {
     let Some(token) = find_template_token(parser_expr) else {
         return Vec::new();
@@ -206,7 +205,6 @@ fn convert_template(
                 e.code(),
                 e.to_string(),
             ));
-            let _ = span;
             Vec::new()
         }
     }
