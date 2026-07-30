@@ -2710,9 +2710,29 @@ mutating_a_structural_key_does_not_break_lookup_by_the_same_value
 (adversarial_audit.rs:357). The currently-PASSING numeric_scalars_are_orderable
 (capability.rs:261-296) asserts Text/Char orderability and changes meaning.
 
-### S18 — Option contract and enum nominal identity
+### S18 — Option contract and enum nominal identity — **DONE (2026-07-31)**
 
 *3 findings · weight 19*
+
+> **Landed.** All three findings, D1's answer, the two owed fault kinds, the
+> catalog sweep and the corpus. ADRs **074** (enum nominal identity), **075**
+> (the fault kinds) and **076** (D1 and `AbiRet::GcUnit`). ABI 13 → 14 — S18's
+> one bump, and there is none left in this round.
+>
+> Corrections to what this block says, all found by doing it:
+> * The bump is **13 → 14**, not 12 → 13; S17 spent the previous one.
+> * `infer.rs:1688-1697`'s fresh-`Option`-per-site minting was **already fixed**
+>   by TY-06 before S18 opened.
+> * Every line number in the exit criteria had moved: the two runtime tests were
+>   at `abi.rs:5659`/`:5679`, the `infer_tests.rs` one at `:2442`, and the two
+>   audit ones at `:573`/`:588`. The `unit_sentinel` count is **94**, not 56.
+> * Two of the five exit tests had to be **rewritten**, not merely un-ignored:
+>   both audit tests asserted a descriptor id (`== TUPLE`, `== INT`), which was
+>   the best a `V`-typed row could ask for and is not the contract now. Three
+>   further tests elsewhere pinned the defect and were rewritten too.
+> * `praxis_alloc_enum` did not merely gain a schema parameter; it **lost** its
+>   arity one, which is read from the schema as `praxis_alloc_tuple` already
+>   read its own.
 
 **Goal**
 
