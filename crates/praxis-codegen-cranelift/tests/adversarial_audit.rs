@@ -228,7 +228,6 @@ fn position_after_filter_reports_the_filtered_sequence_index() {
 }
 
 #[test]
-#[ignore = "known bug: a second flat_map reaches an unreachable MIR arm"]
 fn two_flat_map_stages_compose_without_a_compiler_panic() {
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let a = Vec()\n    a.push(x)\n    a\n  }).flat_map(|x| {\n    let b = Vec()\n    b.push(x)\n    b\n  }).count()\n}\n",

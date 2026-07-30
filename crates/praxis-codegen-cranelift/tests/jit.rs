@@ -1965,6 +1965,49 @@ fn pipeline_flat_map_sum() {
     assert_eq!(result.as_int(), 66);
 }
 
+/// **MIR-06's semantics.** A `flat_map` inside a `flat_map` flattens *both*
+/// levels, in order, with everything between them applied once per element of
+/// the level it sits in.
+///
+/// The exit-criterion test (`two_flat_map_stages_compose_without_a_compiler_panic`)
+/// only asserts that the compiler survives, and it asserts a count — which a
+/// wrong-but-non-panicking nesting could also produce. These weight every level
+/// so that dropping one, running one at the wrong depth, or ordering the two
+/// backwards all answer a different number.
+#[test]
+fn a_flat_map_inside_a_flat_map_flattens_both_levels() {
+    // [1,2] -flat_map(x -> [x, x*10])-> [1,10,2,20]
+    //       -flat_map(y -> [y, y*100])-> [1,100,10,1000,2,200,20,2000]
+    // sum = 101 * (1 + 10 + 2 + 20) = 3333, and there are eight elements.
+    let outer = "  let v = Vec()\n  v.push(1)\n  v.push(2)\n";
+    let two_levels = "v.flat_map(|x| {\n    let a = Vec()\n    a.push(x)\n    a.push(x * 10)\n    a\n  }).flat_map(|y| {\n    let c = Vec()\n    c.push(y)\n    c.push(y * 100)\n    c\n  })";
+    let (rt, result) = run_main(&format!(
+        "fn main() -> Int {{\n{outer}  {two_levels}.sum()\n}}\n"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3333, "both levels must be flattened");
+
+    let (rt, result) = run_main(&format!(
+        "fn main() -> Int {{\n{outer}  {two_levels}.count()\n}}\n"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 8, "two doublings over two elements");
+
+    // A stage *between* the two splices runs once per element of the first
+    // level, not once per outer element:
+    // [1,2] -> [1,10,2,20] -map(*2)-> [2,20,4,40] -flat_map(y -> [y, y+1])->
+    // [2,3,20,21,4,5,40,41], sum = 136.
+    let (rt, result) = run_main(&format!(
+        "fn main() -> Int {{\n{outer}  v.flat_map(|x| {{\n    let a = Vec()\n    a.push(x)\n    a.push(x * 10)\n    a\n  }}).map(|y| y * 2).flat_map(|z| {{\n    let c = Vec()\n    c.push(z)\n    c.push(z + 1)\n    c\n  }}).sum()\n}}\n"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        136,
+        "a stage between two splices runs at the depth it was written at"
+    );
+}
+
 #[test]
 fn pipeline_filter_map_keeps_results() {
     // filter_map is modeled as map-keep (no Unit to filter). [1,2,3].filter_map(*2)
