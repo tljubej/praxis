@@ -168,6 +168,47 @@ pub(crate) fn tuple_index_out_of_range(at: FileSpan, arity: usize, index: usize)
     )
 }
 
+/// `Y020` — a subscript **read** on a type that has none (REP-16).
+///
+/// `indices` is in the message because arity is part of what selects the
+/// operation: `Grid[T]` indexes at two and `Map[K, V]` at one, so `grid[x]` is a
+/// mistake about a receiver that does index. The signature is
+/// `fn(FileSpan, &str, usize)` so it can be passed as the `unresolved` report of
+/// [`crate::infer`]'s catalog dispatch.
+pub(crate) fn not_indexable(at: FileSpan, ty: &str, indices: usize) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::NotIndexable,
+        format!("values of type `{ty}` cannot be indexed with {indices} index(es)"),
+        at,
+    )
+}
+
+/// `Y020` — a subscript **store** on a type that has none (REP-16).
+///
+/// The same code as [`not_indexable`] and a different message, because the two
+/// halves of the surface are not the same set: a `Vec` reads through `v[0]` and
+/// has no element store in the language at all, so "cannot be indexed" would be
+/// wrong about it while "cannot be assigned through" is exact.
+pub(crate) fn not_index_assignable(at: FileSpan, ty: &str, indices: usize) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::NotIndexable,
+        format!("values of type `{ty}` cannot be assigned through {indices} index(es)"),
+        at,
+    )
+}
+
+/// `Y021` — an assignment whose left side names no storage (REP-16).
+pub(crate) fn not_an_assignment_target(at: FileSpan) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::NotAnAssignmentTarget,
+        "the left side of an assignment must be a name or an index".to_string(),
+        at,
+    )
+}
+
 /// `Y001` — two types that could not be unified (expected vs found).
 pub(crate) fn type_mismatch(at: FileSpan, expected: &str, found: &str) -> Diagnostic {
     Diagnostic::new(

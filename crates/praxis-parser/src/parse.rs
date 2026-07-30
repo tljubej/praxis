@@ -689,8 +689,29 @@ impl<'t> Parser<'t> {
             self.finish_node();
             return true;
         }
-        self.start_node(SyntaxKind::EXPR_STMT);
+        // The expression is parsed before the statement node is opened, because
+        // what it turns out to be decides the kind: an assignment operator after
+        // it makes the whole thing a `PLACE_ASSIGN_STMT` whose first child is the
+        // target (REP-16, `counts[point] += 1`), and anything else an `EXPR_STMT`.
+        //
+        // A bare `name` target never reaches here — `parse_stmt` sends
+        // `name = …` to `parse_assign_stmt` on the token after the name — so the
+        // targets this sees are the compound ones. Whether the target is a place
+        // at all is inference's answer (`Y021`) rather than the parser's: `x.y =
+        // 1` and `f() = 1` are well-formed *shapes* whose mistake is that they
+        // name no storage, and a parse error there says only "expected a
+        // statement separator".
+        self.eat_trivia();
+        let cp = self.checkpoint_lhs();
         self.parse_expr();
+        if is_assignment_op(self.peek()) {
+            self.start_node_at(cp, SyntaxKind::PLACE_ASSIGN_STMT);
+            self.bump(); // assignment operator
+            self.parse_expr();
+            self.finish_node(); // PLACE_ASSIGN_STMT
+            return true;
+        }
+        self.start_node_at(cp, SyntaxKind::EXPR_STMT);
         self.finish_node();
         true
     }
@@ -827,6 +848,26 @@ impl<'t> Parser<'t> {
                     self.parse_arg_list();
                     self.finish_node(); // CALL_EXPR
                 }
+                // `m[key]`, `grid[x, y]` — a subscript (REP-16). A postfix form
+                // like the other two, so `grid[x, y].len()` and `m[k][j]` chain
+                // without a second loop.
+                //
+                // No statement can begin with `[`, so a `[` at the start of a
+                // line always continues the expression before it — the same
+                // property `(` relies on.
+                SyntaxKind::L_BRACK => {
+                    self.start_node_at(cp, SyntaxKind::INDEX_EXPR);
+                    self.bump(); // `[`
+                                 // A subscript selects *something*, so unlike a call's
+                                 // argument list an empty one is a syntax error rather than an
+                                 // arity the catalog happens not to have a row for.
+                    if self.at(SyntaxKind::R_BRACK) {
+                        let span = self.current_span();
+                        self.error(span, "expected an index expression");
+                    }
+                    self.parse_arg_list_until(SyntaxKind::R_BRACK, "`]`");
+                    self.finish_node(); // INDEX_EXPR
+                }
                 SyntaxKind::DOT => {
                     self.bump(); // `.`
                                  // `p.0` — a tuple element, selected by position (REP-08).
@@ -866,8 +907,19 @@ impl<'t> Parser<'t> {
     /// The `arg, arg, …)` of a call, with the opening `(` already consumed.
     /// Emits the `ARG_LIST` node and consumes the closing `)`.
     fn parse_arg_list(&mut self) {
+        self.parse_arg_list_until(SyntaxKind::R_PAREN, "`)`");
+    }
+
+    /// The `arg, arg, …<closer>` of a call or a subscript, with the opener
+    /// already consumed. Emits the `ARG_LIST` node and consumes `closer`.
+    ///
+    /// One function for both brackets: `grid[x, y]` (§6.4) is a comma-separated
+    /// expression list with the same trailing-comma rule a call's has, and REP-17
+    /// is the reminder that a second copy of a list loop is a second place for the
+    /// rule to be missing.
+    fn parse_arg_list_until(&mut self, closer: SyntaxKind, closer_msg: &str) {
         self.start_node(SyntaxKind::ARG_LIST);
-        if !self.at(SyntaxKind::R_PAREN) {
+        if !self.at(closer) {
             loop {
                 let before = self.meaningful_index();
                 self.parse_expr();
@@ -879,14 +931,14 @@ impl<'t> Parser<'t> {
                 // made the call's arity one too high — §3.3's own `max(\n
                 // abs(dx),\n abs(dy),\n)` reported `expected (Int, Int) -> Int,
                 // found (Int, Int, ?T) -> ?U`.
-                if self.at(SyntaxKind::R_PAREN) {
+                if self.at(closer) {
                     break;
                 }
                 // Guarantee termination on any input.
                 self.ensure_progress(before);
             }
         }
-        self.expect(SyntaxKind::R_PAREN, "`)`");
+        self.expect(closer, closer_msg);
         self.finish_node(); // ARG_LIST
     }
 
@@ -2474,6 +2526,8 @@ mod tests {
                 "let r = match n { 1 => 1, _ => 0, }",
                 "let r = match n { 1 => 1, _ => 0 }",
             ),
+            // Subscript indices (REP-16), which are the thirteenth list.
+            ("let c = grid[x, y,]", "let c = grid[x, y]"),
         ] {
             let out = parse_text(with);
             assert!(out.diagnostics.is_empty(), "{with}: {:?}", out.diagnostics);
@@ -2491,6 +2545,109 @@ mod tests {
         for bad in ["let x = f(1,,2)", "let x = f(,1)", "let t = (1,,2)"] {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must still report");
+        }
+    }
+
+    /// **REP-16.** A subscript is a postfix form like a call, so it chains with
+    /// the other two in any order — and a statement whose target is one is an
+    /// assignment.
+    ///
+    /// `m[key]` was a `P001` at the `[` and `counts[key] += 1` a `P002`: the
+    /// postfix loop had arms for `(` and `.` and none for `[`.
+    #[test]
+    fn a_subscript_is_a_postfix_form_and_can_be_an_assignment_target() {
+        // Reads, at both arities, and chained with the other postfix forms in
+        // every order — which is what one loop over all three buys.
+        for src in [
+            "let v = m[key]",
+            "let c = grid[x, y]",
+            "let n = m[a][b]",
+            "let n = f(x)[0]",
+            "let n = grid[x, y].len()",
+            "let n = v[0].0",
+            "let n = rows[i].len() + 1",
+            "let n = m[k](7)",
+        ] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+        }
+
+        // A subscript wraps the *whole* preceding expression, so `f(x)[0]` is one
+        // statement and not two.
+        let out = parse_text("let n = f(x)[0]");
+        assert_eq!(
+            construct_names(&out.tree)
+                .iter()
+                .filter(|k| **k == SyntaxKind::INDEX_EXPR)
+                .count(),
+            1
+        );
+
+        // Assignment through a subscript, in every operator the grammar has.
+        for src in [
+            "m[key] = 1",
+            "counts[key] += 1",
+            "m[key] -= 1",
+            "m[key] *= 2",
+            "m[key] /= 2",
+            "m[key] %= 2",
+            "grid[x, y] = 7",
+            "m[a][b] += 1",
+        ] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            assert_eq!(
+                construct_names(&out.tree)
+                    .iter()
+                    .filter(|k| **k == SyntaxKind::PLACE_ASSIGN_STMT)
+                    .count(),
+                1,
+                "{src} is one assignment statement"
+            );
+        }
+
+        // A bare name target is still an `ASSIGN_STMT` — a different node with a
+        // *token* target — so the two paths have not merged.
+        let out = parse_text("x += 1");
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::ASSIGN_STMT), "{kinds:?}");
+        assert!(!kinds.contains(&SyntaxKind::PLACE_ASSIGN_STMT), "{kinds:?}");
+
+        // A target that names no storage **parses**: the mistake is inference's
+        // (`Y021`), because "expected a statement separator" says nothing about
+        // it. This is the assertion that would fail if the wrap were made
+        // conditional on the target's shape.
+        for src in ["f() = 3", "p.x = 3", "v.len() += 1"] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            assert_eq!(
+                construct_names(&out.tree)
+                    .iter()
+                    .filter(|k| **k == SyntaxKind::PLACE_ASSIGN_STMT)
+                    .count(),
+                1,
+                "{src}"
+            );
+        }
+
+        // No statement can begin with `[`, so a `[` after a line break continues
+        // the expression before it — the property `(` already relies on, and the
+        // reason the postfix arm needs no newline guard.
+        let out = parse_text(
+            "let n = m
+[key]",
+        );
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert_eq!(
+            out.tree.children().count(),
+            1,
+            "the subscript stays part of the binding"
+        );
+
+        // An unclosed subscript is reported rather than swallowing the rest.
+        for bad in ["let v = m[key", "let v = m[]", "m[key] ="] {
+            let out = parse_text(bad);
+            assert!(!out.diagnostics.is_empty(), "{bad} must report");
         }
     }
 

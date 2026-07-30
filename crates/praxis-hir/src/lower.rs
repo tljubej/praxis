@@ -128,6 +128,26 @@ pub enum TypedStmt {
         value: TypedExpr,
         span: (u32, u32),
     },
+    /// `m[key] = v` / `counts[key] += 1` — a store through a subscript (REP-16,
+    /// §6.2).
+    ///
+    /// Its own statement rather than a desugaring into `m[key] = m[key] + v`: the
+    /// desugared form names the receiver and every index **twice**, and MIR lowers
+    /// each `TypedExpr` where it stands, so `m[f()] += 1` would call `f` twice.
+    /// Carrying the pieces once is what makes the read-modify-write evaluate its
+    /// place exactly once.
+    ///
+    /// `get` is the read symbol a compound operator needs and is `None` for a
+    /// plain `=`, which reads nothing.
+    IndexAssign {
+        receiver: TypedExpr,
+        indices: Vec<TypedExpr>,
+        get: Option<praxis_stdlib::abi::RuntimeSymbol>,
+        set: praxis_stdlib::abi::RuntimeSymbol,
+        op: AssignOp,
+        value: TypedExpr,
+        span: (u32, u32),
+    },
     /// A bare expression evaluated for effect.
     Expr(TypedExpr),
 }
@@ -983,6 +1003,9 @@ impl<'a> Lowerer<'a> {
         if let Some(assign) = AssignStmt::cast(node.clone()) {
             return self.lower_assign(&assign);
         }
+        if let Some(assign) = praxis_ast::PlaceAssignStmt::cast(node.clone()) {
+            return self.lower_place_assign(&assign);
+        }
         if let Some(expr_stmt) = ExprStmt::cast(node.clone()) {
             if let Some(e) = expr_stmt.expr() {
                 return Some(TypedStmt::Expr(self.lower_expr(&e)));
@@ -1046,17 +1069,76 @@ impl<'a> Lowerer<'a> {
         let symbol = self.resolve_symbol_at(range)?;
         let value = stmt.value()?;
         let value = self.lower_expr(&value);
-        let op = match stmt.op().map(|t| t.kind()) {
+        let op = Self::assign_op_of(stmt.op().map(|t| t.kind()));
+        Some(TypedStmt::Assign {
+            symbol,
+            name,
+            op,
+            value,
+            span: self.node_span(stmt.syntax()),
+        })
+    }
+
+    /// The assignment operator a token spells. Shared by the name-target and
+    /// place-target statements so the two cannot drift.
+    fn assign_op_of(tok: Option<SyntaxKind>) -> AssignOp {
+        match tok {
             Some(SyntaxKind::PLUS_EQ) => AssignOp::AddAssign,
             Some(SyntaxKind::MINUS_EQ) => AssignOp::SubAssign,
             Some(SyntaxKind::STAR_EQ) => AssignOp::MulAssign,
             Some(SyntaxKind::SLASH_EQ) => AssignOp::DivAssign,
             Some(SyntaxKind::PERCENT_EQ) => AssignOp::RemAssign,
             _ => AssignOp::Assign,
+        }
+    }
+
+    /// `m[key] = v`, `counts[key] += 1` — a store through a subscript (REP-16).
+    ///
+    /// Inference resolved the store row and recorded it at the target's node range
+    /// (as it records a method at its name token), so this reads the entry rather
+    /// than re-deriving one. A target that is not a subscript, or a receiver with
+    /// no store row, was already reported there (`Y021`/`Y020`); lowering drops the
+    /// statement, which is what every unresolvable statement here does.
+    fn lower_place_assign(&mut self, stmt: &praxis_ast::PlaceAssignStmt) -> Option<TypedStmt> {
+        let Some(Expr::Index(idx)) = stmt.target() else {
+            return None;
         };
-        Some(TypedStmt::Assign {
-            symbol,
-            name,
+        let op = Self::assign_op_of(stmt.op().map(|t| t.kind()));
+        let resolved = self.method_refs.get(&idx.syntax().text_range()).copied()?;
+        let set = match &resolved.entry.lowering {
+            praxis_stdlib::MethodLowering::RuntimeSymbol(sym) => *sym,
+            // No subscript row is an intrinsic, and one would have no call for
+            // MIR to emit here. Dropping the statement is the same answer an
+            // unresolved store gets.
+            praxis_stdlib::MethodLowering::Intrinsic(_) => return None,
+        };
+        let receiver = idx.receiver().map(|r| self.lower_expr(&r))?;
+        let indices: Vec<TypedExpr> = idx.indices().iter().map(|e| self.lower_expr(e)).collect();
+        let value = self.lower_expr(&stmt.value()?);
+        // A compound operator reads before it writes. The read symbol comes from
+        // the *same* receiver type inference resolved the store against — not from
+        // one lowering derived itself, which is the HIR-02 mistake — so the pair
+        // always describes one collection.
+        let get = if op == AssignOp::Assign {
+            None
+        } else {
+            let hits = crate::catalog::lookup(
+                self.db,
+                self.catalog,
+                resolved.receiver,
+                praxis_stdlib::catalog::INDEX_READ,
+                indices.len(),
+            );
+            match hits.first().map(|e| &e.lowering) {
+                Some(praxis_stdlib::MethodLowering::RuntimeSymbol(sym)) => Some(*sym),
+                _ => return None,
+            }
+        };
+        Some(TypedStmt::IndexAssign {
+            receiver,
+            indices,
+            get,
+            set,
             op,
             value,
             span: self.node_span(stmt.syntax()),
@@ -1104,6 +1186,7 @@ impl<'a> Lowerer<'a> {
             Expr::RecordLit(r) => self.lower_record_lit(r),
             Expr::FieldGet(f) => self.lower_field_get(f),
             Expr::TupleIndex(t) => self.lower_tuple_index(t),
+            Expr::Index(i) => self.lower_index(i),
             Expr::Match(m) => self.lower_match(m),
             // M7-WS7: closure parsing, resolution, and inference are complete;
             // the runtime lowering (synthetic MIR function, capture environment,
@@ -2035,6 +2118,51 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// `m[key]`, `grid[x, y]` — a subscript read (REP-16).
+    ///
+    /// Lowers to a [`TypedExpr::MethodCall`] rather than a variant of its own,
+    /// because that is what it *is* once the row is resolved: a runtime call with
+    /// the receiver first and the indices after it, which is MethodCall's shape
+    /// exactly. `name` carries the catalog spelling (`[]`), so a MIR dump reads as
+    /// the source did.
+    ///
+    /// An unresolved subscript was reported in inference (`Y020`), so there is no
+    /// report here — unlike a method call, whose `Y110` lowering owns because it has
+    /// the name span.
+    fn lower_index(&mut self, i: &praxis_ast::IndexExpr) -> TypedExpr {
+        let span = self.node_span(i.syntax());
+        let receiver = match i.receiver() {
+            Some(r) => self.lower_expr(&r),
+            None => return self.error_expr(),
+        };
+        let args: Vec<TypedExpr> = i.indices().iter().map(|e| self.lower_expr(e)).collect();
+        let resolved = self.method_refs.get(&i.syntax().text_range()).copied();
+        let Some(resolved) = resolved else {
+            return TypedExpr::MethodCall {
+                receiver: Box::new(receiver),
+                name: praxis_stdlib::catalog::INDEX_READ.to_string(),
+                lowering_symbol: None,
+                args,
+                purity: praxis_stdlib::Purity::Impure,
+                ty: self.node_ty(i.syntax()),
+                span,
+            };
+        };
+        let lowering_symbol = match &resolved.entry.lowering {
+            praxis_stdlib::MethodLowering::RuntimeSymbol(sym) => Some(*sym),
+            praxis_stdlib::MethodLowering::Intrinsic(_) => None,
+        };
+        TypedExpr::MethodCall {
+            receiver: Box::new(receiver),
+            name: praxis_stdlib::catalog::INDEX_READ.to_string(),
+            lowering_symbol,
+            args,
+            purity: resolved.entry.purity,
+            ty: self.deep(resolved.result),
+            span,
+        }
+    }
+
     fn lower_field_get(&mut self, f: &FieldExpr) -> TypedExpr {
         let span = self.node_span(f.syntax());
         let receiver = match f.receiver() {
@@ -2364,13 +2492,41 @@ pub fn expr_span(e: &TypedExpr) -> (u32, u32) {
     }
 }
 
+/// A statement's immediate sub-expressions, in evaluation order.
+///
+/// Written once for the same reason [`TypedExpr::children`] is (F20): three walks
+/// over `TypedStmt` — MIR's closure collection, MIR's function-value collection,
+/// and the debugger's purity check — each named the fields by hand, so a
+/// statement with more than one expression had three places to be forgotten.
+/// `IndexAssign` is the first with three.
+pub fn stmt_exprs(s: &TypedStmt) -> impl Iterator<Item = &TypedExpr> {
+    let mut out: Vec<&TypedExpr> = Vec::new();
+    match s {
+        TypedStmt::Let { init, .. } | TypedStmt::Var { init, .. } => out.push(init),
+        TypedStmt::Assign { value, .. } => out.push(value),
+        TypedStmt::IndexAssign {
+            receiver,
+            indices,
+            value,
+            ..
+        } => {
+            out.push(receiver);
+            out.extend(indices);
+            out.push(value);
+        }
+        TypedStmt::Expr(e) => out.push(e),
+    }
+    out.into_iter()
+}
+
 /// The source span `[start, end)` (byte offsets) carried by a typed statement.
 /// `TypedStmt::Expr` carries the span on its inner expression.
 pub fn stmt_span(s: &TypedStmt) -> (u32, u32) {
     match s {
         TypedStmt::Let { span, .. }
         | TypedStmt::Var { span, .. }
-        | TypedStmt::Assign { span, .. } => *span,
+        | TypedStmt::Assign { span, .. }
+        | TypedStmt::IndexAssign { span, .. } => *span,
         TypedStmt::Expr(e) => expr_span(e),
     }
 }

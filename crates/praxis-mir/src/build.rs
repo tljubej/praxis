@@ -123,12 +123,11 @@ fn collect_closures_block(block: &TypedBlock, out: &mut Vec<LiftedClosure>) {
 }
 
 fn collect_closures_stmt(stmt: &TypedStmt, out: &mut Vec<LiftedClosure>) {
-    match stmt {
-        TypedStmt::Let { init, .. } | TypedStmt::Var { init, .. } => {
-            collect_closures_expr(init, out)
-        }
-        TypedStmt::Assign { value, .. } => collect_closures_expr(value, out),
-        TypedStmt::Expr(e) => collect_closures_expr(e, out),
+    // The sub-expression list is `praxis-hir`'s, for the reason the *child* list
+    // is F20's: a statement field this walk forgot is a synthetic function that
+    // never gets emitted.
+    for e in praxis_hir::stmt_exprs(stmt) {
+        collect_closures_expr(e, out);
     }
 }
 
@@ -174,12 +173,8 @@ fn collect_fn_values(block: &TypedBlock) -> Vec<FnValueAdapter> {
 
 fn collect_fn_values_block(block: &TypedBlock, out: &mut Vec<FnValueAdapter>) {
     for stmt in &block.stmts {
-        match stmt {
-            TypedStmt::Let { init, .. } | TypedStmt::Var { init, .. } => {
-                collect_fn_values_expr(init, out)
-            }
-            TypedStmt::Assign { value, .. } => collect_fn_values_expr(value, out),
-            TypedStmt::Expr(e) => collect_fn_values_expr(e, out),
+        for e in praxis_hir::stmt_exprs(stmt) {
+            collect_fn_values_expr(e, out);
         }
     }
     collect_fn_values_expr(&block.tail, out);
@@ -747,6 +742,66 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                     });
                 }
             }
+        }
+        // `m[key] = v`, `counts[key] += 1` — a store through a subscript
+        // (REP-16). The receiver and the indices are lowered **once**, into
+        // locals reused by the read and the write, so a compound operator
+        // evaluates its place exactly once: `m[f()] += 1` calls `f` once.
+        //
+        // Which wrappers to call is HIR's answer (`get`/`set`, from the catalog
+        // rows inference resolved), not one re-derived here from the receiver's
+        // static ctor — the mistake `get_symbol_for` makes for `for` and REP-15
+        // is about.
+        TypedStmt::IndexAssign {
+            receiver,
+            indices,
+            get,
+            set,
+            op,
+            value,
+            span,
+        } => {
+            let recv = lower_expr_gc(b, receiver);
+            let index_locals: Vec<LocalId> = indices.iter().map(|i| lower_expr_gc(b, i)).collect();
+            let stored = if *op == AssignOp::Assign {
+                lower_expr_gc(b, value)
+            } else {
+                // Read-modify-write. `get` is `Some` for every compound operator
+                // (HIR drops the statement otherwise), and the arithmetic is
+                // `Int`'s — the same operation, and the same restriction, a
+                // compound assignment to a local has.
+                let Some(get) = *get else { return };
+                let cur = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, Some(*span));
+                let mut args = Vec::with_capacity(index_locals.len() + 1);
+                args.push(recv);
+                args.extend(index_locals.iter().copied());
+                b.push(Inst::Call {
+                    dst: cur,
+                    callee: CallTarget::Runtime(get),
+                    args,
+                    roots: RootSlots::unannotated(),
+                    debug: DebugSlots::unannotated(),
+                });
+                b.check_fault();
+                let rhs = lower_expr_gc(b, value);
+                let result = lower_int_binop(b, op_to_int_binop(*op), cur, rhs);
+                lower_materialize(b, result, Some(*span))
+            };
+            // The store's arguments are the receiver, the indices, then the value
+            // — the catalog row's parameter order.
+            let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, Some(*span));
+            let mut args = Vec::with_capacity(index_locals.len() + 2);
+            args.push(recv);
+            args.extend(index_locals);
+            args.push(stored);
+            b.push(Inst::Call {
+                dst,
+                callee: CallTarget::Runtime(*set),
+                args,
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
+            });
+            b.check_fault();
         }
         TypedStmt::Expr(e) => {
             let _ = lower_expr_gc(b, e);
@@ -4923,5 +4978,60 @@ mod tests {
             ),
             "zip must carry a two-element tuple type into codegen, got {tuple_ty:?}"
         );
+    }
+    /// **REP-16's MIR shape.** A compound store through a subscript emits one
+    /// read, one store, and lowers its receiver and indices **once**.
+    ///
+    /// The instruction counts are the assertion a behavioural test cannot make:
+    /// a desugaring into `c[k] = c[k] + 1` produces the same *answer* for a
+    /// side-effect-free index, and twice the calls.
+    #[test]
+    fn a_compound_store_through_a_subscript_reads_once_and_writes_once() {
+        let (funcs, _) = lower_src_to_mir(
+            "fn main() -> Int {\n  let c = Counter()\n  c[\"k\"] += 1\n  c[\"k\"]\n}",
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let runtime_calls = |sym: RuntimeSymbol| -> usize {
+            main.blocks
+                .iter()
+                .flat_map(|b| b.insts.iter())
+                .filter(|i| {
+                    matches!(
+                        i,
+                        Inst::Call {
+                            callee: CallTarget::Runtime(s),
+                            ..
+                        } if *s == sym
+                    )
+                })
+                .count()
+        };
+        // Two reads in the program: the `+=`'s own, and the trailing `c["k"]`.
+        assert_eq!(runtime_calls(RuntimeSymbol::CounterGet), 2);
+        assert_eq!(runtime_calls(RuntimeSymbol::CounterSet), 1);
+        // `inc` is never involved: `+= 1` is a read-modify-write, not
+        // `praxis_counter_inc` in disguise — which would give the right answer
+        // here and the wrong one for `+= 2`.
+        assert_eq!(runtime_calls(RuntimeSymbol::CounterInc), 0);
+
+        // A plain store reads nothing.
+        let (funcs, _) =
+            lower_src_to_mir("fn main() -> Int {\n  let m = Map()\n  m[\"k\"] = 1\n  m.len()\n}");
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let map_index = main
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .filter(|i| {
+                matches!(
+                    i,
+                    Inst::Call {
+                        callee: CallTarget::Runtime(RuntimeSymbol::MapIndex),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(map_index, 0, "`m[k] = v` performs no read");
     }
 }

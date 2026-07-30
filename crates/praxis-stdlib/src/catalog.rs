@@ -12,6 +12,32 @@ use std::fmt;
 
 use crate::type_pattern::{Bound, TypePattern};
 
+/// The catalog name of the subscript **read** `m[key]` (REP-16).
+///
+/// A subscript is dispatched on the receiver's shape and its arity exactly as a
+/// method is — `grid[x, y]` is `Grid[T]` at arity two, `m[key]` is `Map[K, V]` at
+/// arity one — so it is a catalog row rather than a second dispatch table. The
+/// spelling is not an identifier, which is what keeps it out of source: the
+/// parser only accepts an `Ident` after `.`, so `m.[](k)` cannot be written, and
+/// nothing in the language can name these rows except the subscript grammar.
+pub const INDEX_READ: &str = "[]";
+
+/// The catalog name of the subscript **store** `m[key] = value` (REP-16). The
+/// value is the last parameter, after the indices.
+pub const INDEX_STORE: &str = "[]=";
+
+/// The catalog name of `distance[key] min= candidate` (§6.2) — and
+/// [`INDEX_STORE_MAX`] its `max=` dual.
+///
+/// Their own rows rather than a read-modify-write over [`INDEX_READ`] and
+/// [`INDEX_STORE`], because §6.2 gives them a semantics no read can express: "an
+/// absent entry accepts the first value", where a subscript *read* of an absent
+/// key faults (§4.7).
+pub const INDEX_STORE_MIN: &str = "[]min=";
+
+/// The catalog name of `best[key] max= score` (§6.2). See [`INDEX_STORE_MIN`].
+pub const INDEX_STORE_MAX: &str = "[]max=";
+
 /// Whether a method is pure or has side effects.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Purity {

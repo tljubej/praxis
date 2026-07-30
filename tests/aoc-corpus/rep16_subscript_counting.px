@@ -1,0 +1,48 @@
+// AoC corpus fixture: subscript reads and stores (REP-16; §4.7, §6.2).
+//
+// The counting shape §3.3's representative program uses — `counts[key] += 1` on a
+// Counter keyed by a tuple — plus a Map read and store, so both collections'
+// subscript wrappers are exercised end to end by one program.
+//
+// Input (on stdin): lines of `x,y` points.
+// Output: how many points appear at least twice, the busiest count, a value
+// computed through Map subscripts, and an absent Counter key's zero.
+fn main() {
+    let points = read lines(`{x:int},{y:int}`)
+
+    let counts = Counter()
+    for p in points {
+        counts[(p.x, p.y)] += 1
+    }
+
+    var busiest = 0
+    for p in points {
+        let n = counts[(p.x, p.y)]
+        if n > busiest { busiest = n }
+    }
+
+    // Count the *distinct* repeated points. Each one is visited once per
+    // occurrence, so the first visit records it and stores a 1 through the
+    // subscript, which is what stops the later visits from counting it again.
+    var repeated = 0
+    for p in points {
+        if counts[(p.x, p.y)] > 1 {
+            repeated += 1
+            counts[(p.x, p.y)] = 1
+        }
+    }
+    out(repeated)
+    out(busiest)
+
+    // A Map indexes to its value type and stores through the same brackets.
+    let labels = Map()
+    labels["origin"] = 0
+    labels["far"] = 99
+    labels["far"] += 1
+    out(labels["far"] - labels["origin"])
+
+    // An absent Counter key reads as zero (§6.2) where an absent Map key would
+    // fault (§4.7) — the difference the two catalog rows exist for.
+    out(counts[(1000, 1000)])
+}
+main()

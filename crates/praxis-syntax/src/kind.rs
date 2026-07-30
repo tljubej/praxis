@@ -183,6 +183,15 @@ pub enum SyntaxKind {
     EXPR_STMT,
     /// A reassignment statement: `name = expr` or `name += expr` etc. (§4.2).
     ASSIGN_STMT,
+    /// A reassignment through a place expression: `m[key] = expr`,
+    /// `counts[key] += 1` (REP-16, §6.2).
+    ///
+    /// Its own kind rather than an `ASSIGN_STMT` with an expression target: an
+    /// `ASSIGN_STMT`'s target is a *token* and its single expression child is the
+    /// value, so a target that is itself an expression cannot be told from the
+    /// value. The target here is the first expression child and the value the
+    /// second.
+    PLACE_ASSIGN_STMT,
     /// A top-level or nested `fn` declaration.
     FN_ITEM,
     /// A `struct Name { field: Type, … }` declaration (M7, §4.5).
@@ -204,6 +213,12 @@ pub enum SyntaxKind {
     /// selected by name — two different operations that lower to two different
     /// runtime calls.
     TUPLE_INDEX_EXPR,
+    /// A `receiver[index]` subscript expression (REP-16, §4.7/§6.2/§6.4).
+    ///
+    /// The index list is an `ARG_LIST`, because §6.4's `grid[x, y]` makes a
+    /// subscript variadic: the arity is part of what selects the operation, the
+    /// same way a method call's is.
+    INDEX_EXPR,
     /// A `receiver.field` field-access expression (M7, §4.5).
     FIELD_EXPR,
     /// A `match scrutinee { pattern => expr, … }` expression (M7, §4.6/§4.11).

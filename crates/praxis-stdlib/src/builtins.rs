@@ -164,8 +164,163 @@ pub fn builtin_catalog() -> MethodCatalog {
         // The explicit Int→Float widening method (§4.12). The first Int-receiver
         // method; establishes the pattern for scalar-receiver methods.
         .entry(int_to_float())
+        // Subscripts (REP-16, §4.7/§6.2/§6.4). Six collections read; the three
+        // that have a store at all also store. See the block comment above
+        // `vec_index` for why these are catalog rows.
+        .entry(vec_index())
+        .entry(deque_index())
+        .entry(text_index())
+        .entry(map_index())
+        .entry(map_index_set())
+        .entry(counter_index())
+        .entry(counter_index_set())
+        .entry(grid_index())
+        .entry(grid_index_set())
         .finish()
         .expect("built-in catalog must be duplicate-free")
+}
+
+// --- Subscript rows (REP-16, §4.7/§6.2/§6.4) ---------------------------------
+//
+// `m[key]`, `counts[key] += 1` and `grid[x, y]` dispatch through the catalog on
+// the receiver's shape and the index count, which is what a method call already
+// does. Their names — `[]`, `[]=` — are not identifiers, so no program can spell
+// them; the subscript grammar is their only caller.
+//
+// Which collections index is a language decision and this table is where it is
+// recorded. Six read: `Vec`, `Deque`, `Text`, `Map`, `Counter`, `Grid`. Three
+// store: `Map`, `Counter`, `Grid` — the three that have a store *at all* today
+// (`Map.insert`, `Grid.set`, and `praxis_counter_set`). A `Vec` element cannot be
+// assigned through any spelling in the language, subscript or method, so
+// `v[0] = x` is reported rather than silently given one here.
+//
+// The read rows repeat their `get` sibling's symbol on purpose — except `Map`,
+// whose two answers differ by design: `.get` returns Unit for an absent key and
+// `map[key]` **faults** (§4.7), so it has its own wrapper.
+
+fn vec_index() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: crate::catalog::INDEX_READ,
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::var("T"),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecGet),
+        doc: "`v[i]` — the element at `i`; faults if out of range.",
+        stability: Stability::Stable,
+    }
+}
+
+fn deque_index() -> MethodEntry {
+    MethodEntry {
+        receiver: deque_of_t(),
+        name: crate::catalog::INDEX_READ,
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::var("T"),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequeGet),
+        doc: "`d[i]` — the element at `i` (0-based from the front); faults if out of range.",
+        stability: Stability::Stable,
+    }
+}
+
+fn text_index() -> MethodEntry {
+    MethodEntry {
+        receiver: text_receiver(),
+        name: crate::catalog::INDEX_READ,
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::TextGet),
+        doc: "`t[i]` — the scalar value of the char at `i`; faults if out of range.",
+        stability: Stability::Stable,
+    }
+}
+
+fn map_index() -> MethodEntry {
+    MethodEntry {
+        receiver: map_of_k_v(),
+        name: crate::catalog::INDEX_READ,
+        params: vec![TypePattern::var("K")],
+        result: TypePattern::var("V"),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapIndex),
+        doc: "`m[key]` — the value for `key`; **faults** if absent (§4.7; `.get` is the \
+              spelling that answers with absence).",
+        stability: Stability::Stable,
+    }
+}
+
+fn map_index_set() -> MethodEntry {
+    MethodEntry {
+        receiver: map_of_k_v(),
+        name: crate::catalog::INDEX_STORE,
+        params: vec![TypePattern::var("K"), TypePattern::var("V")],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapInsert),
+        doc: "`m[key] = value` — set `key`, replacing any prior value.",
+        stability: Stability::Stable,
+    }
+}
+
+fn counter_index() -> MethodEntry {
+    MethodEntry {
+        receiver: counter_of_t(),
+        name: crate::catalog::INDEX_READ,
+        params: vec![TypePattern::var("T")],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CounterGet),
+        doc: "`c[key]` — the count for `key`, or zero if absent (§6.2); never faults.",
+        stability: Stability::Stable,
+    }
+}
+
+fn counter_index_set() -> MethodEntry {
+    MethodEntry {
+        receiver: counter_of_t(),
+        name: crate::catalog::INDEX_STORE,
+        params: vec![TypePattern::var("T"), TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CounterSet),
+        doc: "`c[key] = n` — set the count for `key`.",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_index() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: crate::catalog::INDEX_READ,
+        params: vec![
+            TypePattern::Scalar(ScalarType::Int),
+            TypePattern::Scalar(ScalarType::Int),
+        ],
+        result: TypePattern::var("T"),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridGet),
+        doc: "`grid[x, y]` — the cell at (x, y) (§6.4); faults if out of range.",
+        stability: Stability::Stable,
+    }
+}
+
+fn grid_index_set() -> MethodEntry {
+    MethodEntry {
+        receiver: grid_of_t(),
+        name: crate::catalog::INDEX_STORE,
+        params: vec![
+            TypePattern::Scalar(ScalarType::Int),
+            TypePattern::Scalar(ScalarType::Int),
+            TypePattern::var("T"),
+        ],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridSet),
+        doc: "`grid[x, y] = value` — set the cell at (x, y); faults if out of range.",
+        stability: Stability::Stable,
+    }
 }
 
 // --- Text methods --------------------------------------------------------
@@ -2022,6 +2177,123 @@ mod tests {
             .next()
             .expect("bitset.insert exists");
         assert!(insert.can_fault());
+    }
+
+    /// **REP-16.** The subscript rows are the closed set the language documents,
+    /// and their names cannot be written in source.
+    ///
+    /// Two properties in one test because they are both about the same decision.
+    /// Which collections index is a *language* answer (§4.7/§6.2/§6.4), so a row
+    /// added or dropped by accident should fail here rather than surface as a
+    /// program that mysteriously compiles. And a row whose name is an identifier
+    /// would be callable as `m.foo(k)`, which no design section describes.
+    #[test]
+    fn the_subscript_rows_are_a_closed_set_no_program_can_name() {
+        let cat = builtin_catalog();
+        let of = |ctor: CollectionCtor, args: usize| TypePattern::Collection {
+            ctor,
+            args: (0..args).map(|_| TypePattern::var("T")).collect(),
+        };
+        let map_pat = TypePattern::Collection {
+            ctor: CollectionCtor::Map,
+            args: vec![TypePattern::var("K"), TypePattern::var("V")],
+        };
+
+        // Six read. `Text` is a scalar receiver, so it is spelled differently.
+        for (pat, indices, what) in [
+            (of(CollectionCtor::Vec, 1), 1, "Vec"),
+            (of(CollectionCtor::Deque, 1), 1, "Deque"),
+            (map_pat.clone(), 1, "Map"),
+            (of(CollectionCtor::Counter, 1), 1, "Counter"),
+            (of(CollectionCtor::Grid, 1), 2, "Grid"),
+            (text_receiver(), 1, "Text"),
+        ] {
+            let hits: Vec<_> = cat
+                .by_receiver_and_name(&pat, crate::catalog::INDEX_READ)
+                .collect();
+            assert_eq!(hits.len(), 1, "{what} reads through exactly one row");
+            assert_eq!(hits[0].arity(), indices, "{what} indexes at {indices}");
+        }
+
+        // Three store — the three with a store at all. A `Vec` reads and does not
+        // store, which is the asymmetry the `Y020` message has to describe.
+        for (pat, args, what) in [
+            (map_pat.clone(), 2, "Map"),
+            (of(CollectionCtor::Counter, 1), 2, "Counter"),
+            (of(CollectionCtor::Grid, 1), 3, "Grid"),
+        ] {
+            let hits: Vec<_> = cat
+                .by_receiver_and_name(&pat, crate::catalog::INDEX_STORE)
+                .collect();
+            assert_eq!(hits.len(), 1, "{what} stores through exactly one row");
+            assert_eq!(
+                hits[0].arity(),
+                args,
+                "{what}'s store takes its indices and then the value"
+            );
+        }
+
+        // Nothing else has either row.
+        for (pat, what) in [
+            (of(CollectionCtor::Set, 1), "Set"),
+            (of(CollectionCtor::MinHeap, 1), "MinHeap"),
+            (of(CollectionCtor::MaxHeap, 1), "MaxHeap"),
+            (of(CollectionCtor::BitSet, 0), "BitSet"),
+        ] {
+            for name in [crate::catalog::INDEX_READ, crate::catalog::INDEX_STORE] {
+                assert_eq!(
+                    cat.by_receiver_and_name(&pat, name).count(),
+                    0,
+                    "{what} has no `{name}`"
+                );
+            }
+        }
+        for (pat, what) in [
+            (of(CollectionCtor::Vec, 1), "Vec"),
+            (of(CollectionCtor::Deque, 1), "Deque"),
+            (text_receiver(), "Text"),
+        ] {
+            assert_eq!(
+                cat.by_receiver_and_name(&pat, crate::catalog::INDEX_STORE)
+                    .count(),
+                0,
+                "{what} reads through a subscript and has no element store"
+            );
+        }
+
+        // A `Map`'s two reads are two *different* wrappers: §4.7 gives `.get` and
+        // `map[key]` different answers about an absent key, so pointing both rows
+        // at one wrapper would take the choice away from the user.
+        let get = cat
+            .by_receiver_and_name(&map_pat, "get")
+            .next()
+            .expect("Map.get");
+        let index = cat
+            .by_receiver_and_name(&map_pat, crate::catalog::INDEX_READ)
+            .next()
+            .expect("Map's subscript");
+        assert_ne!(get.lowering, index.lowering);
+        assert!(
+            index.can_fault() && !get.can_fault(),
+            "indexing faults where `.get` answers"
+        );
+
+        // No subscript name is an identifier, so the subscript grammar is their
+        // only caller: the parser accepts only an `Ident` after `.`.
+        for name in [
+            crate::catalog::INDEX_READ,
+            crate::catalog::INDEX_STORE,
+            crate::catalog::INDEX_STORE_MIN,
+            crate::catalog::INDEX_STORE_MAX,
+        ] {
+            assert!(
+                !name
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphabetic() || c == '_'),
+                "`{name}` must not be spellable as a method name"
+            );
+        }
     }
 
     /// M8-WS7 closed-catalog check: every §6.1 collection has at least the

@@ -1107,20 +1107,35 @@ fn adv_map_get_absent_returns_unit() {
 }
 
 #[test]
-fn adv_map_index_missing_key_does_not_fault_current_behavior() {
-    // §4.7 SPEC: indexing a missing map key with `m[key]` "faults instead of
-    // returning an option". But the current implementation lowers `m[key]` to
-    // the same path as `.get` (returns Unit for absent), so it does NOT fault.
-    // Documenting the current (non-spec) behavior; flip to assert a fault when
-    // the `m[key]`-vs-`.get` distinction is implemented.
+fn adv_map_index_of_a_missing_key_faults_where_get_answers() {
+    // §4.7's own sentence, both halves in one test: "indexing a missing map key
+    // faults instead of returning an option… the user chooses between explicit
+    // absence with `.get` and assertion-like access with indexing" (REP-16).
+    //
+    // This test used to assert the opposite — that `m[key]` does *not* fault —
+    // and it passed for a reason that had nothing to do with maps: there was no
+    // subscript grammar at all, so `let v = m["missing"]` parsed as `let v = m`
+    // followed by a recovered statement, and the `v` it compared was the map.
+    // The two spellings really are two operations now.
     let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"a\", 1)\n  let v = m[\"missing\"]\n  if v == 0 { 1 } else { 0 }\n}\n";
-    let (rt, result) = run_main(src);
+    let (rt, _) = run_main(src);
     assert!(
-        !rt.has_pending_fault(),
-        "m[key] currently returns Unit, not a fault"
+        rt.has_pending_fault(),
+        "§4.7: indexing a missing key faults"
     );
-    // Unit != Int 0, so the comparison is false → 0.
-    assert_eq!(result.as_int(), 0);
+
+    // …and `.get` on the same absent key does not, so the fault is the
+    // subscript's choice and not the map's.
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"a\", 1)\n  let v = m.get(\"missing\")\n  if v == 0 { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0, "Unit is not Int 0");
+
+    // A present key is the value, through the subscript.
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"a\", 7)\n  m[\"a\"]\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
 }
 
 // --- M8-WS4: MinHeap[T] / MaxHeap[T] (§6.1, §11.2) --------------------------
@@ -5530,4 +5545,144 @@ fn a_tuple_element_reads_the_value_at_that_position() {
     let (rt, result) = run_main("fn main() -> Float { 3.0 }");
     assert!(!rt.has_pending_fault());
     assert!((result.as_float() - 3.0).abs() < 1e-12);
+}
+
+/// **REP-16 end to end.** A subscript reads and writes the collection it names,
+/// through every receiver that has the operation.
+///
+/// The half no type test can see: which runtime wrapper each row selects. A
+/// `Counter` read that reached `praxis_map_get` would answer Unit where §6.2
+/// promises zero, and a `Grid` store that forgot to pass both coordinates would
+/// write the wrong cell — both type-check.
+#[test]
+fn a_subscript_reads_and_writes_through_the_wrapper_its_receiver_needs() {
+    // Read, on each of the six.
+    for (src, want) in [
+        ("let v = Vec()\n v.push(10)\n v.push(20)\n v[1]", 20),
+        (
+            "let d = Deque()\n d.push_back(4)\n d.push_front(9)\n d[0]",
+            9,
+        ),
+        ("let m = Map()\n m.insert(\"a\", 7)\n m[\"a\"]", 7),
+        // §6.2: a `Counter`'s absent key reads as zero and does not fault, which
+        // is the one read that differs from its `Map` sibling's.
+        (
+            "let c = Counter()\n c.inc(\"a\")\n c[\"a\"] + c[\"nope\"]",
+            1,
+        ),
+        ("\"abc\"[1]", 98),
+    ] {
+        let (rt, result) = run_main(&format!("fn main() -> Int {{\n  {src}\n}}\n"));
+        assert!(!rt.has_pending_fault(), "{src} faulted: {:?}", rt.fault());
+        assert_eq!(result.as_int(), want, "{src}");
+    }
+
+    // Store, on the three that have one — and read back through the subscript, so
+    // the pair has to agree about which collection it is talking to.
+    for (src, want) in [
+        ("let m = Map()\n m[\"a\"] = 5\n m[\"a\"]", 5),
+        ("let m = Map()\n m[\"a\"] = 5\n m[\"a\"] = 6\n m.len()", 1),
+        ("let c = Counter()\n c[\"a\"] = 4\n c[\"a\"]", 4),
+    ] {
+        let (rt, result) = run_main(&format!("fn main() -> Int {{\n  {src}\n}}\n"));
+        assert!(!rt.has_pending_fault(), "{src} faulted: {:?}", rt.fault());
+        assert_eq!(result.as_int(), want, "{src}");
+    }
+
+    // Every compound operator, through a `Counter` — §3.3's own `+=` plus the
+    // four the grammar also admits, so the read-modify-write is general and not
+    // `inc` in disguise.
+    for (op, want) in [("+=", 13), ("-=", 7), ("*=", 30), ("/=", 3), ("%=", 1)] {
+        let src = format!(
+            "fn main() -> Int {{\n  let c = Counter()\n  c[\"k\"] = 10\n  c[\"k\"] {op} 3\n  c[\"k\"]\n}}\n"
+        );
+        let (rt, result) = run_main(&src);
+        assert!(!rt.has_pending_fault(), "{op} faulted: {:?}", rt.fault());
+        assert_eq!(result.as_int(), want, "{op}");
+    }
+
+    // A `Counter`'s zero default is what makes `counts[key] += 1` work on a key
+    // that has never been seen — §3.3 never initializes one.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let c = Counter()\n  c[\"a\"] += 1\n  c[\"a\"] += 1\n  \
+         c[\"b\"] += 5\n  c[\"a\"] * 100 + c[\"b\"]\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 205);
+
+    // A tuple key, which is what §3.3 counts by. The key is a fresh allocation
+    // every iteration, so this only works if identity is structural (ADR-026).
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let c = Counter()\n  \
+         for i in 0..3 { c[(1, 2)] += 1 }\n  c[(1, 2)] * 10 + c.len()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 31, "one key, counted three times");
+}
+
+/// **REP-16's two-coordinate subscript** (§6.4): `grid[x, y]` reads and writes the
+/// cell at (x, y), and the coordinate order is x-then-y.
+#[test]
+fn a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names() {
+    // A 2×2 grid read from input (a `Grid()` is 0×0, so it has no cell to name).
+    // The written cell is deliberately **off the diagonal**: a store that reached
+    // `praxis_grid_set(g, y, x, v)` would pass on a diagonal cell.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let g = read grid(int)\n  g[1, 0] = 7\n  \
+         g[1, 0] * 100 + g[0, 0] * 10 + g[0, 1]\n}\n",
+        "12\n34\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 700 + 120 + 34);
+
+    // `.get`/`.set` and the subscript are the same cell, which is what says the
+    // two spellings are one operation for a `Grid` (unlike a `Map`'s, §4.7).
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let g = read grid(int)\n  g.set(1, 1, 5)\n  \
+         g[1, 1] * 10 + g.get(1, 1)\n}\n",
+        "12\n34\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 55);
+
+    // Out of range faults rather than reading a neighbour, from either side.
+    let (rt, _) = run_main_with_input(
+        "fn main() -> Int {\n  let g = read grid(int)\n  g[99, 0]\n}\n",
+        "12\n34\n",
+    );
+    assert!(rt.has_pending_fault(), "an out-of-range read faults");
+    let (rt, _) = run_main_with_input(
+        "fn main() -> Int {\n  let g = read grid(int)\n  g[0, 99] = 1\n  0\n}\n",
+        "12\n34\n",
+    );
+    assert!(rt.has_pending_fault(), "an out-of-range store faults");
+}
+
+/// **REP-16's evaluation rule.** A compound assignment through a subscript
+/// evaluates its receiver and indices **once**.
+///
+/// The desugaring `m[k] += v` → `m[k] = m[k] + v` names the place twice, and MIR
+/// lowers each `TypedExpr` where it stands, so an index with a side effect would
+/// happen twice. `TypedStmt::IndexAssign` carries the pieces once for this
+/// reason, and this is the test that fails if it is ever desugared.
+#[test]
+fn a_compound_assignment_through_a_subscript_evaluates_its_place_once() {
+    // `key` appends to a log and returns the key, so the log's length is the
+    // number of times the index expression ran.
+    let (rt, result) = run_main(
+        "fn key(log) { log.push(1)\n \"k\" }\n\
+         fn main() -> Int {\n  let log = Vec()\n  let c = Counter()\n  \
+         c[key(log)] += 1\n  log.len() * 10 + c[\"k\"]\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 11, "one call to `key`, one increment");
+
+    // …and the receiver too, which is the other half a desugaring would double.
+    let (rt, result) = run_main(
+        "fn pick(log, c) { log.push(1)\n c }\n\
+         fn main() -> Int {\n  let log = Vec()\n  let c = Counter()\n  \
+         pick(log, c)[\"k\"] += 2\n  log.len() * 10 + c[\"k\"]\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 12, "one call to `pick`, one increment");
 }

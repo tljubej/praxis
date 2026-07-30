@@ -120,6 +120,40 @@ pub(crate) fn infer_with_tree(
     }
 }
 
+/// How a catalog dispatch reports a **concrete** receiver with no matching row
+/// (REP-16).
+///
+/// The count is carried beside the builder because it is not the argument count:
+/// a subscript store's arguments are the indices *and* the value, and it is the
+/// index count the message has to name, or `v[0] = 5` reports "2 index(es)".
+#[derive(Clone, Copy)]
+struct UnresolvedReport {
+    build: fn(FileSpan, &str, usize) -> Diagnostic,
+    indices: usize,
+}
+
+/// The report a deferred [`Capability::HasMethod`] owes if it turns out to be a
+/// subscript on a receiver that has none, or `None` for an ordinary method (whose
+/// miss lowering reports as `Y110`).
+///
+/// `args` is the requirement's argument count, which for a store is the indices
+/// *and* the value.
+fn subscript_unresolved_report(name: &str, args: usize) -> Option<UnresolvedReport> {
+    if name == praxis_stdlib::catalog::INDEX_READ {
+        return Some(UnresolvedReport {
+            build: crate::diagnostics::not_indexable,
+            indices: args,
+        });
+    }
+    if name == praxis_stdlib::catalog::INDEX_STORE {
+        return Some(UnresolvedReport {
+            build: crate::diagnostics::not_index_assignable,
+            indices: args.saturating_sub(1),
+        });
+    }
+    None
+}
+
 /// The inference state.
 ///
 /// There is **no scope tree here**. Inference used to own one — the resolver's,
@@ -393,6 +427,22 @@ impl Inferer {
         let receiver_ty = self.db.follow(c.var_type());
         let hits = crate::catalog::lookup(&self.db, self.catalog, receiver_ty, &name, params.len());
         let Some(entry) = hits.first().copied() else {
+            // A **subscript** requirement that resolves to a receiver with no
+            // such row has to be reported here, because nothing downstream will:
+            // `lower_index` emits no `Y110` (inference owns `Y020`, so that
+            // `praxis check` sees it), so `fn first(m, k) { m[k] }` applied to a
+            // `Set` would otherwise be accepted and then silently dropped at
+            // lowering. A *method* requirement is still left alone: lowering
+            // reports it, and it has the name span.
+            if let Some(report) = subscript_unresolved_report(&name, params.len()) {
+                let rendered = self.db.render(receiver_ty);
+                let at = range_of(c.at);
+                self.diagnostics.push((report.build)(
+                    self.file_span(at),
+                    &rendered,
+                    report.indices,
+                ));
+            }
             return;
         };
         // The entry's patterns, instantiated through one shared name map so a
@@ -920,6 +970,8 @@ impl Inferer {
             self.infer_fn(&fn_);
         } else if let Some(assign) = AssignStmt::cast(node.clone()) {
             self.infer_assign(&assign);
+        } else if let Some(assign) = praxis_ast::PlaceAssignStmt::cast(node.clone()) {
+            self.infer_place_assign(&assign);
         } else if let Some(expr) = ExprStmt::cast(node.clone()) {
             if let Some(e) = expr.expr() {
                 self.infer_expr(&e);
@@ -1312,6 +1364,7 @@ impl Inferer {
             Expr::RecordLit(r) => self.infer_record_lit(r),
             Expr::FieldGet(f) => self.infer_field_get(f),
             Expr::TupleIndex(t) => self.infer_tuple_index(t),
+            Expr::Index(i) => self.infer_index(i),
             Expr::Match(m) => self.infer_match(m),
             // M7-WS7: closure — type is `Func`; params bind in a child scope.
             Expr::Closure(c) => self.infer_closure(c),
@@ -1598,6 +1651,105 @@ impl Inferer {
                 ));
                 self.db.fresh_var()
             }
+        }
+    }
+
+    /// `m[key]`, `grid[x, y]` — a subscript read (REP-16, §4.7/§6.2/§6.4).
+    ///
+    /// Dispatched through the method catalog under [`INDEX_READ`], so which
+    /// collections index and at what arity is one table's answer rather than a
+    /// match arm here — and so an unannotated receiver defers on the constraint
+    /// channel exactly as `values.sum()` does (TY-30). `fn first(m, k) { m[k] }`
+    /// therefore infers, and the requirement is answered by whatever the call site
+    /// puts in `m`'s place.
+    ///
+    /// A concrete receiver with no row is `Y020`, reported here rather than at
+    /// lowering: `praxis check` does not run lowering, so a program reported only
+    /// there is clean under `check` and fails under `run` (REP-12's asymmetry).
+    fn infer_index(&mut self, i: &praxis_ast::IndexExpr) -> Type {
+        let receiver_ty = match i.receiver() {
+            Some(r) => self.infer_expr(&r),
+            None => self.db.fresh_var(),
+        };
+        let indices = i.indices();
+        let report = UnresolvedReport {
+            build: crate::diagnostics::not_indexable,
+            indices: indices.len(),
+        };
+        self.infer_catalog_call(
+            receiver_ty,
+            praxis_stdlib::catalog::INDEX_READ,
+            &indices,
+            i.syntax().text_range(),
+            Some(report),
+        )
+    }
+
+    /// `m[key] = v`, `counts[key] += 1` — a subscript store (REP-16, §6.2).
+    ///
+    /// The store is a second catalog row ([`INDEX_STORE`]) rather than the read
+    /// row written backwards, because the two surfaces are not the same set: a
+    /// `Vec` reads through a subscript and has no element store anywhere in the
+    /// language, and a `Counter`'s read is zero-defaulting where its store is not.
+    ///
+    /// A compound operator needs the value the read yields *and* the value the
+    /// store takes to agree, which they do by construction — both are the entry's
+    /// last parameter — so what is left to check is that the type is one the
+    /// arithmetic accepts. That goes through the channel for `infer_assign`'s
+    /// reason (TY-31): `fn bump(m, k) { m[k] += 1 }` leaves the value a variable,
+    /// and answering "not numeric" about a variable is wrong.
+    fn infer_place_assign(&mut self, stmt: &praxis_ast::PlaceAssignStmt) {
+        let Some(target) = stmt.target() else { return };
+        let value_ty = stmt
+            .value()
+            .map(|e| self.infer_expr(&e))
+            .unwrap_or_else(|| self.db.fresh_var());
+        let Expr::Index(idx) = &target else {
+            // `f() = 1`, `x.y = 1`: a shape the grammar admits and that names no
+            // storage. The target is still inferred — it is a well-formed
+            // expression whose own mistakes are worth reporting.
+            let at = target.syntax().text_range();
+            self.infer_expr(&target);
+            self.diagnostics
+                .push(crate::diagnostics::not_an_assignment_target(
+                    self.file_span(at),
+                ));
+            return;
+        };
+        let receiver_ty = match idx.receiver() {
+            Some(r) => self.infer_expr(&r),
+            None => self.db.fresh_var(),
+        };
+        // The store's arguments are the indices and then the value, which is why
+        // the value is inferred first: `infer_catalog_call` pushes each expected
+        // param type into its argument, and the value expression is one of them.
+        let mut args = idx.indices();
+        let report = UnresolvedReport {
+            build: crate::diagnostics::not_index_assignable,
+            // The *index* count, which is one less than the argument count: the
+            // store's last argument is the value.
+            indices: args.len(),
+        };
+        if let Some(v) = stmt.value() {
+            args.push(v);
+        }
+        self.infer_catalog_call(
+            receiver_ty,
+            praxis_stdlib::catalog::INDEX_STORE,
+            &args,
+            idx.syntax().text_range(),
+            Some(report),
+        );
+        let compound = stmt
+            .op()
+            .is_some_and(|t| !matches!(t.kind(), SyntaxKind::EQ));
+        if compound {
+            self.require_cap_as(
+                value_ty,
+                Capability::Kind(CapKind::Numeric),
+                stmt.syntax().text_range(),
+                Some(crate::diagnostics::compound_assign_non_numeric),
+            );
         }
     }
 
@@ -2500,10 +2652,46 @@ impl Inferer {
         // inferring, so a closure arg whose param type is the element type gets
         // pinned). Arity is the arg count.
         let arg_exprs: Vec<Expr> = m.arg_list().map(|a| a.args().collect()).unwrap_or_default();
-        let arity = arg_exprs.len();
+        let key = m
+            .method_name()
+            .map(|t| t.text_range())
+            .unwrap_or_else(|| m.syntax().text_range());
+        self.infer_catalog_call(receiver_ty, &name, &arg_exprs, key, None)
+    }
 
+    /// Resolve one catalog-dispatched operation — a method call, or a subscript
+    /// (REP-16) — against the receiver type, the name and the arity, and return
+    /// its result type.
+    ///
+    /// One function for both because dispatch *is* the same act: §5.7's table is
+    /// keyed by receiver shape and name, and a subscript's brackets select a row
+    /// of it the way a method's name does. Sharing it is not only economy — the
+    /// bidirectional argument inference, the `HasMethod` deferral for a receiver
+    /// that is still a variable, TY-31's bounds and TY-32's collection invariants
+    /// are each load-bearing, and a second copy would be a second place for one of
+    /// them to be missing.
+    ///
+    /// `key` is where the [`crate::MethodRef`] is recorded — lowering reads that
+    /// map and nothing else (F15/HIR-02) — and where diagnostics point. A method
+    /// call keys on its name token; a subscript has no name token and keys on the
+    /// whole `INDEX_EXPR` node, whose range always ends in `]` and so can never
+    /// collide with an identifier's.
+    ///
+    /// `unresolved` is the report for a **concrete** receiver with no matching
+    /// row. A method call passes `None`: lowering owns `Y110` and has the name
+    /// span. A subscript passes its own, because there is no method name to report
+    /// about and because `praxis check` never runs lowering (REP-12).
+    fn infer_catalog_call(
+        &mut self,
+        receiver_ty: Type,
+        name: &str,
+        arg_exprs: &[Expr],
+        key: TextRange,
+        unresolved: Option<UnresolvedReport>,
+    ) -> Type {
+        let arity = arg_exprs.len();
         // Look up the method in the catalog via the ADR-010 bridge.
-        let hits = crate::catalog::lookup(&self.db, self.catalog, receiver_ty, &name, arity);
+        let hits = crate::catalog::lookup(&self.db, self.catalog, receiver_ty, name, arity);
         let Some(entry) = hits.first().copied() else {
             // Infer the args anyway (for nested diagnostics), and the result is
             // a fresh var either way.
@@ -2519,11 +2707,14 @@ impl Inferer {
             // program pins the receiver — which is the whole of TY-30, and what
             // makes §5.2's `fn total(values) { values.sum() }` infer.
             if self.db.var_id_of(self.db.follow(receiver_ty)).is_some() {
-                let at = m
-                    .method_name()
-                    .map(|t| t.text_range())
-                    .unwrap_or_else(|| m.syntax().text_range());
-                self.require_method(receiver_ty, name, arg_types, result, at);
+                self.require_method(receiver_ty, name.to_string(), arg_types, result, key);
+            } else if let Some(report) = unresolved {
+                let rendered = self.db.render(self.db.follow(receiver_ty));
+                self.diagnostics.push((report.build)(
+                    self.file_span(key),
+                    &rendered,
+                    report.indices,
+                ));
             }
             return result;
         };
@@ -2575,10 +2766,7 @@ impl Inferer {
             }
             arg_types.push(at);
         }
-        let name_range = m
-            .method_name()
-            .map(|t| t.text_range())
-            .unwrap_or_else(|| m.syntax().text_range());
+        let name_range = key;
         // What the entry declares about its own type variables (TY-31). Applied
         // after the receiver and the arguments have unified, so a bound on `T`
         // is asked about the type the call site actually chose.
@@ -2589,19 +2777,17 @@ impl Inferer {
         // and required *after* the arguments have unified, so `m.insert(key, 1)`
         // has pinned `K` to the key's type by now.
         self.require_collection_invariants(receiver_ty, name_range);
-        // Record the resolved method at its name token (HIR-02). Lowering reads
-        // the entry rather than repeating the catalog lookup against a receiver
-        // type it derived itself, and hover reads the result.
-        if let Some(tok) = m.method_name() {
-            self.method_refs.insert(
-                tok.text_range(),
-                crate::MethodRef {
-                    entry,
-                    receiver: receiver_ty,
-                    result: result_ty,
-                },
-            );
-        }
+        // Record the resolved method at `key` (HIR-02). Lowering reads the entry
+        // rather than repeating the catalog lookup against a receiver type it
+        // derived itself, and hover reads the result.
+        self.method_refs.insert(
+            key,
+            crate::MethodRef {
+                entry,
+                receiver: receiver_ty,
+                result: result_ty,
+            },
+        );
         result_ty
     }
 

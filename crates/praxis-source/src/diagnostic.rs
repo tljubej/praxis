@@ -238,6 +238,24 @@ pub enum DiagCode {
     /// reported only there is clean under `check` and fails under `run` (REP-12's
     /// asymmetry). This one is emitted in inference.
     NoTupleElement,
+    /// `Y020` — a subscript on a type that has none (REP-16), in either
+    /// direction: `s[0]` on a `Set`, `v[0] = x` on a `Vec` (which can be read
+    /// through a subscript but has no element store in the language at all), or
+    /// `grid[x]` — the wrong *arity* for a receiver that does index, since
+    /// `grid[x, y]` is the spelling §6.4 gives.
+    ///
+    /// Not `Y110` ("no such method"): a subscript names no method, so a message
+    /// about one would name something the program did not write — and `Y110` is a
+    /// lowering diagnostic, where this is emitted in inference so `praxis check`
+    /// sees it (REP-12's asymmetry).
+    NotIndexable,
+    /// `Y021` — an assignment whose left side names no storage (REP-16):
+    /// `f() = 1`, `x.y = 1`, `a + b[0] = 1`.
+    ///
+    /// Distinct from `Y009` ("assignment to something that is not a `var`"),
+    /// which is about a *binding* that exists and may not be written. This one is
+    /// about a left side that is not a place at all.
+    NotAnAssignmentTarget,
 
     // --- Type (`Y09x`), internal ---
     /// `Y099` — internal: a type the compiler expected was absent.
@@ -352,6 +370,8 @@ impl DiagCode {
             ValueBreakOutsideLoopExpression => DiagnosticCode::new(Type, 17),
             GenericFunctionAsValue => DiagnosticCode::new(Type, 18),
             NoTupleElement => DiagnosticCode::new(Type, 19),
+            NotIndexable => DiagnosticCode::new(Type, 20),
+            NotAnAssignmentTarget => DiagnosticCode::new(Type, 21),
 
             InternalMissingType => DiagnosticCode::new(Type, 99),
 
@@ -424,6 +444,8 @@ impl DiagCode {
             ValueBreakOutsideLoopExpression,
             GenericFunctionAsValue,
             NoTupleElement,
+            NotIndexable,
+            NotAnAssignmentTarget,
             InternalMissingType,
             NoMethodOnType,
             NoFieldOnType,
@@ -811,7 +833,7 @@ mod tests {
         // `ALL` holds each variant once, so its length is the variant count.
         // Update both together; the exhaustive match in `code()` is what makes
         // adding a variant a compile error in the first place.
-        assert_eq!(DiagCode::ALL.len(), 61);
+        assert_eq!(DiagCode::ALL.len(), 63);
         let unique: std::collections::HashSet<_> = DiagCode::ALL.iter().collect();
         assert_eq!(
             unique.len(),

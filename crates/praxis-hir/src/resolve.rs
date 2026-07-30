@@ -26,7 +26,8 @@ use std::collections::HashMap;
 use praxis_ast::{
     ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, BreakExpr, CallExpr, ContinueExpr,
     ElseBranch, EnumItem, Expr, ExprStmt, FieldExpr, FnItem, ForExpr, IfExpr, LetStmt, LoopExpr,
-    Param, ParamList, RecordLitExpr, ReturnExpr, SourceFile, StructItem, VarStmt, WhileExpr,
+    Param, ParamList, PlaceAssignStmt, RecordLitExpr, ReturnExpr, SourceFile, StructItem, VarStmt,
+    WhileExpr,
 };
 use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
 use praxis_syntax::SyntaxKind;
@@ -330,6 +331,13 @@ impl Resolver {
             self.resolve_enum(scope, &enum_);
         } else if let Some(assign) = AssignStmt::cast(node.clone()) {
             self.resolve_assign(scope, &assign);
+        } else if let Some(assign) = PlaceAssignStmt::cast(node.clone()) {
+            // `m[key] = v` (REP-16). Both sides are expressions here — the
+            // target names no binding of its own, so there is nothing to bind and
+            // nothing to declare, only names to resolve.
+            for e in [assign.target(), assign.value()].into_iter().flatten() {
+                self.resolve_expr(scope, &e);
+            }
         } else if let Some(expr) = ExprStmt::cast(node.clone()) {
             if let Some(e) = expr.expr() {
                 self.resolve_expr(scope, &e);
@@ -579,6 +587,17 @@ impl Resolver {
             Expr::TupleIndex(t) => {
                 if let Some(receiver) = t.receiver() {
                     self.resolve_expr(scope, &receiver);
+                }
+            }
+            // A subscript (REP-16): the receiver and every index are ordinary
+            // expressions. What the brackets *select* is resolved against the
+            // catalog during inference, as a method name is.
+            Expr::Index(i) => {
+                if let Some(receiver) = i.receiver() {
+                    self.resolve_expr(scope, &receiver);
+                }
+                for index in i.indices() {
+                    self.resolve_expr(scope, &index);
                 }
             }
             // M7-WS5: match — resolve the scrutinee and each arm's body. Pattern

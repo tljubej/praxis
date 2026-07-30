@@ -240,6 +240,20 @@ fn rewrite_stmt(stmt: &mut TypedStmt, pass: &mut MonoPass<'_>) {
     match stmt {
         TypedStmt::Let { init, .. } | TypedStmt::Var { init, .. } => rewrite_expr(init, pass),
         TypedStmt::Assign { value, .. } => rewrite_expr(value, pass),
+        // Every sub-expression of a subscript store, not only the value: a
+        // receiver or an index can hold the call this pass retargets.
+        TypedStmt::IndexAssign {
+            receiver,
+            indices,
+            value,
+            ..
+        } => {
+            rewrite_expr(receiver, pass);
+            for i in indices {
+                rewrite_expr(i, pass);
+            }
+            rewrite_expr(value, pass);
+        }
         TypedStmt::Expr(e) => rewrite_expr(e, pass),
     }
 }
@@ -341,6 +355,18 @@ fn resolve_stmt(db: &mut TypeDb, binders: &[VarId], args: &[Type], stmt: &mut Ty
             resolve_expr(db, binders, args, init);
         }
         TypedStmt::Assign { value, .. } => resolve_expr(db, binders, args, value),
+        TypedStmt::IndexAssign {
+            receiver,
+            indices,
+            value,
+            ..
+        } => {
+            resolve_expr(db, binders, args, receiver);
+            for i in indices {
+                resolve_expr(db, binders, args, i);
+            }
+            resolve_expr(db, binders, args, value);
+        }
         TypedStmt::Expr(e) => resolve_expr(db, binders, args, e),
     }
 }

@@ -169,8 +169,9 @@ fn walk_expr(e: &TypedExpr) -> Result<(), String> {
 }
 
 /// Walk a block's statements + tail. Statement-level `Let`/`Var`/`Assign` can
-/// appear inside a `Block` or `If` arm; `Assign` and `Var` (reassignable) are
-/// mutations and must reject. (`Let` is a pure binding; allowed.)
+/// appear inside a `Block` or `If` arm; `Assign`, `IndexAssign` and `Var`
+/// (reassignable) are mutations and must reject. (`Let` is a pure binding;
+/// allowed.)
 fn walk_block(b: &TypedBlock) -> Result<(), String> {
     for stmt in &b.stmts {
         use praxis_hir::TypedStmt;
@@ -181,6 +182,16 @@ fn walk_block(b: &TypedBlock) -> Result<(), String> {
             }
             TypedStmt::Assign { .. } => {
                 return Err("assignment mutates — `p` rejects mutating expressions".to_string());
+            }
+            // `m[key] = v` mutates the collection, which is a stronger reason to
+            // reject than a local assignment's: the write outlives the expression
+            // (REP-16, ADR-034).
+            TypedStmt::IndexAssign { .. } => {
+                return Err(
+                    "an indexed assignment mutates a collection — `p` rejects mutating \
+                     expressions"
+                        .to_string(),
+                );
             }
             TypedStmt::Expr(e) => walk_expr(e)?,
         }

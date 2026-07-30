@@ -156,6 +156,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::CounterIsEmpty => praxis_counter_is_empty as *const (),
         RuntimeSymbol::CounterLen => praxis_counter_len as *const (),
         RuntimeSymbol::CounterNew => praxis_counter_new as *const (),
+        RuntimeSymbol::CounterSet => praxis_counter_set as *const (),
         RuntimeSymbol::DequeGet => praxis_deque_get as *const (),
         RuntimeSymbol::DequeIsEmpty => praxis_deque_is_empty as *const (),
         RuntimeSymbol::DequeLen => praxis_deque_len as *const (),
@@ -231,6 +232,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::RangeNew => praxis_range_new as *const (),
         RuntimeSymbol::RangeNewInclusive => praxis_range_new_inclusive as *const (),
         RuntimeSymbol::MapGet => praxis_map_get as *const (),
+        RuntimeSymbol::MapIndex => praxis_map_index as *const (),
         RuntimeSymbol::MapInsert => praxis_map_insert as *const (),
         RuntimeSymbol::MapIsEmpty => praxis_map_is_empty as *const (),
         RuntimeSymbol::MapLen => praxis_map_len as *const (),
@@ -2262,6 +2264,38 @@ pub unsafe extern "C" fn praxis_map_get(ctx: *mut RuntimeContext, map: GcRef, ke
     }
 }
 
+/// `map[key]` (§4.7): the value for `key`, **faulting** if it is absent.
+///
+/// A different wrapper from [`praxis_map_get`] because the two answers are the
+/// language's own choice, not an implementation detail: §4.7 says "indexing a
+/// missing map key faults instead of returning an option… the user chooses
+/// between explicit absence with `.get` and assertion-like access with
+/// indexing". Sharing one wrapper would take that choice away from the user.
+///
+/// The fault is [`FaultKind::IndexOutOfBounds`](crate::FaultKind::IndexOutOfBounds)
+/// — an index the collection does not hold, which is what its doc already
+/// describes. A dedicated `MissingKey` kind would read better and is owed to the
+/// next stage that spends an ABI bump, exactly as `clamp`'s empty range is.
+///
+/// # Safety
+/// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`; `key`
+/// must be a valid `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_map_index(
+    ctx: *mut RuntimeContext,
+    map: GcRef,
+    key: GcRef,
+) -> GcRef {
+    let p = unsafe { map_payload(map) };
+    match p.entries.get(&DynamicKey::new(key)) {
+        Some(v) => *v,
+        None => {
+            unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
+            unsafe { unit_sentinel(ctx) }
+        }
+    }
+}
+
 /// True iff `key` is present, as a boxed Bool.
 ///
 /// # Safety
@@ -2552,6 +2586,31 @@ pub unsafe extern "C" fn praxis_counter_inc(
             p.entries.insert(dk, one);
         }
     }
+    unsafe { unit_sentinel(ctx) }
+}
+
+/// `counts[key] = value` (§6.2): set the count for `key`, replacing any prior
+/// one; returns Unit.
+///
+/// [`praxis_counter_inc`] adds exactly one, so it cannot express
+/// `counts[key] += n` or `counts[key] = n`. A subscript assignment is a
+/// read-modify-write over the pair (`praxis_counter_get`, this), which is what
+/// makes every assignment operator work on a `Counter` rather than only `+= 1`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `counter` and `key` must be valid `GcRef`s and
+/// `value` must be an `Int`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_counter_set(
+    ctx: *mut RuntimeContext,
+    counter: GcRef,
+    key: GcRef,
+    value: GcRef,
+) -> GcRef {
+    unsafe { maybe_collect(ctx) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let p = unsafe { counter_payload_mut(scope.root(counter)) };
+    p.entries.insert(DynamicKey::new(key), value);
     unsafe { unit_sentinel(ctx) }
 }
 
@@ -5372,6 +5431,66 @@ mod tests {
             counts.iter().all(|(n4, n8)| *n4 == 0 && *n8 == 0),
             "an out-of-range point has no in-grid neighbours: {counts:?}"
         );
+        assert_eq!(rt.fault(), FaultKind::None);
+    }
+
+    /// **REP-16 at the unit level.** `map[key]` faults on an absent key where
+    /// `.get` answers, and `praxis_counter_set` replaces a count where
+    /// `praxis_counter_inc` only adds one.
+    ///
+    /// Here as well as in the JIT tests because §4.7's choice is the *runtime's*
+    /// to make: the two map wrappers differ in one line, and a compiler that
+    /// pointed both rows at `praxis_map_get` would still pass every type test.
+    #[test]
+    fn a_map_index_faults_where_get_answers_and_a_counter_set_replaces() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let (present, absent_get) = unsafe {
+            let map = praxis_map_new(ctx, &crate::scalars::INT as *const _);
+            let key = praxis_alloc_int(ctx, 1);
+            let val = praxis_alloc_int(ctx, 42);
+            praxis_map_insert(ctx, map, key, val);
+            let present = int_payload(praxis_map_index(ctx, map, key));
+            assert_eq!(rt.fault(), FaultKind::None, "a present key does not fault");
+            // `.get` on an absent key is the Unit sentinel and no fault…
+            let other = praxis_alloc_int(ctx, 2);
+            let absent_get = praxis_map_get(ctx, map, other);
+            assert_eq!(rt.fault(), FaultKind::None, "`.get` does not fault");
+            // …and the subscript on the same key faults.
+            praxis_map_index(ctx, map, other);
+            (present, absent_get)
+        };
+        assert_eq!(present, 42);
+        assert_eq!(
+            absent_get.descriptor().id(),
+            crate::scalars::UNIT.id(),
+            "`.get` answers with absence"
+        );
+        assert_eq!(
+            rt.fault(),
+            FaultKind::IndexOutOfBounds,
+            "§4.7: indexing a missing key faults"
+        );
+        unsafe { drop_ctx(ctx) };
+
+        // The counter half: `set` replaces, where `inc` adds one.
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let (after_inc, after_set, len) = unsafe {
+            let c = praxis_counter_new(ctx, &crate::scalars::INT as *const _);
+            let key = praxis_alloc_int(ctx, 7);
+            praxis_counter_inc(ctx, c, key);
+            let after_inc = int_payload(praxis_counter_get(ctx, c, key));
+            let five = praxis_alloc_int(ctx, 5);
+            praxis_counter_set(ctx, c, key, five);
+            let after_set = int_payload(praxis_counter_get(ctx, c, key));
+            let len = int_payload(praxis_counter_len(ctx, c));
+            (after_inc, after_set, len)
+        };
+        unsafe { drop_ctx(ctx) };
+        assert_eq!(after_inc, 1);
+        assert_eq!(after_set, 5, "a set replaces rather than adds");
+        assert_eq!(len, 1, "and does not add a second entry for the same key");
         assert_eq!(rt.fault(), FaultKind::None);
     }
 

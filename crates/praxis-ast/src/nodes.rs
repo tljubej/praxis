@@ -464,6 +464,8 @@ pub enum Expr {
     FieldGet(FieldExpr),
     /// `receiver.0` tuple element access (REP-08, §4.4).
     TupleIndex(TupleIndexExpr),
+    /// `receiver[index]` subscript (REP-16, §4.7/§6.2/§6.4).
+    Index(IndexExpr),
     /// `match scrutinee { pattern => expr, … }` (M7, §4.6).
     Match(MatchExpr),
     /// `|params| expr` closure (M7, §4.10).
@@ -500,6 +502,7 @@ impl Expr {
             Expr::RecordLit(e) => e.syntax(),
             Expr::FieldGet(e) => e.syntax(),
             Expr::TupleIndex(e) => e.syntax(),
+            Expr::Index(e) => e.syntax(),
             Expr::Match(e) => e.syntax(),
             Expr::Closure(e) => e.syntax(),
             Expr::Error(n) => n,
@@ -538,6 +541,7 @@ impl Expr {
             K::RECORD_LIT_EXPR => Expr::RecordLit(RecordLitExpr::from_syntax(n)),
             K::FIELD_EXPR => Expr::FieldGet(FieldExpr::from_syntax(n)),
             K::TUPLE_INDEX_EXPR => Expr::TupleIndex(TupleIndexExpr::from_syntax(n)),
+            K::INDEX_EXPR => Expr::Index(IndexExpr::from_syntax(n)),
             K::MATCH_EXPR => Expr::Match(MatchExpr::from_syntax(n)),
             K::CLOSURE_EXPR => Expr::Closure(ClosureExpr::from_syntax(n)),
             K::PARSE_ERROR => Expr::Error(n),
@@ -613,6 +617,91 @@ impl TupleIndexExpr {
     /// panicking, and the caller reports it like any other bad index.
     pub fn index(&self) -> Option<usize> {
         self.index_token()?.text().parse().ok()
+    }
+}
+
+/// `receiver[index]` — a subscript (REP-16). The first child is the receiver
+/// expression; the `ARG_LIST` holds the indices.
+///
+/// The index list is a list rather than one expression because §6.4's
+/// `grid[x, y]` takes two. Arity is part of what selects the operation — a
+/// one-index `Grid` subscript is as much a mistake as a two-index `Map` one — so
+/// it is carried rather than flattened.
+#[derive(Clone, Debug)]
+pub struct IndexExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for IndexExpr {
+    const KIND: K = K::INDEX_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl IndexExpr {
+    /// The receiver expression (`m` in `m[key]`).
+    pub fn receiver(&self) -> Option<Expr> {
+        self.syntax.children().find_map(Expr::cast_from_child)
+    }
+    /// The `[index, …]` list.
+    pub fn index_list(&self) -> Option<ArgList> {
+        child(&self.syntax)
+    }
+    /// The index expressions, in source order.
+    pub fn indices(&self) -> Vec<Expr> {
+        self.index_list()
+            .map(|l| l.args().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// `place = expr` / `place += expr` — a reassignment whose target is an
+/// expression rather than a name (REP-16): `m[key] = v`, `counts[key] += 1`.
+///
+/// Two expression children, in source order: the target and the value. A bare
+/// `name = expr` is an [`AssignStmt`] instead, whose target is a *token* — which
+/// is why this is a second node and not a widened first one.
+#[derive(Clone, Debug)]
+pub struct PlaceAssignStmt {
+    syntax: SyntaxNode,
+}
+impl AstNode for PlaceAssignStmt {
+    const KIND: K = K::PLACE_ASSIGN_STMT;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl PlaceAssignStmt {
+    /// The assignment target — the expression left of the operator.
+    pub fn target(&self) -> Option<Expr> {
+        self.syntax.children().find_map(Expr::cast_from_child)
+    }
+    /// The assignment operator token (`=`, `+=`, …).
+    pub fn op(&self) -> Option<SyntaxToken> {
+        use rowan::NodeOrToken;
+        self.syntax.children_with_tokens().find_map(|e| match e {
+            NodeOrToken::Token(t)
+                if matches!(
+                    t.kind(),
+                    K::EQ | K::PLUS_EQ | K::MINUS_EQ | K::STAR_EQ | K::SLASH_EQ | K::PERCENT_EQ
+                ) =>
+            {
+                Some(t)
+            }
+            _ => None,
+        })
+    }
+    /// The value expression — the one right of the operator.
+    pub fn value(&self) -> Option<Expr> {
+        self.syntax
+            .children()
+            .filter_map(Expr::cast_from_child)
+            .nth(1)
     }
 }
 

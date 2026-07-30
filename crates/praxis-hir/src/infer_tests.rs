@@ -2851,13 +2851,7 @@ fn a_capture_first_seen_as_an_assignment_target_keeps_its_type() {
     fn find_closure_in_block(b: &crate::TypedBlock) -> Option<&crate::TypedExpr> {
         b.stmts
             .iter()
-            .find_map(|s| match s {
-                crate::TypedStmt::Let { init, .. } | crate::TypedStmt::Var { init, .. } => {
-                    find_closure(init)
-                }
-                crate::TypedStmt::Assign { value, .. } => find_closure(value),
-                crate::TypedStmt::Expr(e) => find_closure(e),
-            })
+            .find_map(|s| crate::stmt_exprs(s).find_map(find_closure))
             .or_else(|| find_closure(&b.tail))
     }
 
@@ -2940,12 +2934,8 @@ fn the_child_walker_reaches_every_expression_position() {
     }
     fn walk_block(b: &crate::TypedBlock, found: &mut Vec<String>) {
         for stmt in &b.stmts {
-            match stmt {
-                crate::TypedStmt::Let { init, .. } | crate::TypedStmt::Var { init, .. } => {
-                    walk_expr(init, found);
-                }
-                crate::TypedStmt::Assign { value, .. } => walk_expr(value, found),
-                crate::TypedStmt::Expr(e) => walk_expr(e, found),
+            for e in crate::stmt_exprs(stmt) {
+                walk_expr(e, found);
             }
         }
         walk_expr(&b.tail, found);
@@ -4297,4 +4287,197 @@ fn a_tuple_element_is_read_by_position_and_a_bad_index_is_reported() {
     // An unresolved receiver says nothing: `p.0` on an unannotated parameter is
     // optimistic, as every capability question about a variable is.
     assert!(!y019("fn first(p) { p.0 }"));
+}
+
+/// **REP-16, the read form.** `m[key]` is the type the receiver holds at that
+/// key, and which receivers index is the catalog's answer.
+///
+/// Six collections index and the arity is part of the operation, so this asserts
+/// the *result* type at each — a subscript that returned the receiver, or the
+/// element pattern's uninstantiated `?T`, would pass a "no diagnostic" test.
+/// `Grid` is the reason arity is here at all: §6.4 spells it `grid[x, y]`, so
+/// `grid[x]` is a mistake about a receiver that does index.
+#[test]
+fn a_subscript_reads_the_type_the_receiver_holds_at_that_key() {
+    let y020 = |src: &str| -> bool {
+        analyze(src)
+            .diagnostics
+            .iter()
+            .any(|d| d.kind() == praxis_source::DiagCode::NotIndexable)
+    };
+
+    // Each of the six, at a result type that is not the receiver's own.
+    assert_eq!(
+        scheme_of(
+            "fn f(v: Vec[Text]) -> Text { v[0] }\nlet _p = f(Vec())",
+            "_p"
+        ),
+        Some("Text".to_string())
+    );
+    assert_eq!(
+        scheme_of(
+            "fn f(d: Deque[Text]) -> Text { d[0] }\nlet _p = f(Deque())",
+            "_p"
+        ),
+        Some("Text".to_string())
+    );
+    assert_eq!(
+        scheme_of(
+            "fn f(m: Map[Text, Float]) -> Float { m[\"a\"] }\nlet _p = f(Map())",
+            "_p"
+        ),
+        Some("Float".to_string())
+    );
+    // A `Counter`'s value is its count, whatever its key type is (§6.2).
+    assert_eq!(
+        scheme_of(
+            "fn f(c: Counter[Text]) -> Int { c[\"a\"] }\nlet _p = f(Counter())",
+            "_p"
+        ),
+        Some("Int".to_string())
+    );
+    assert_eq!(
+        scheme_of(
+            "fn f(g: Grid[Text]) -> Text { g[0, 0] }\nlet _p = f(Grid())",
+            "_p"
+        ),
+        Some("Text".to_string())
+    );
+    // `Text` indexes to a char's scalar value, which is what `.get` answers too.
+    assert_eq!(
+        scheme_of("fn f(t: Text) -> Int { t[0] }\nlet _p = f(\"ab\")", "_p"),
+        Some("Int".to_string())
+    );
+
+    // The key is checked, not accepted: a `Map[Text, Int]` indexed by an Int is a
+    // mismatch, which is only visible because the row's `K` unified with it.
+    assert!(has_type_error("fn f(m: Map[Text, Int]) -> Int { m[0] }"));
+    assert!(!has_type_error(
+        "fn f(m: Map[Text, Int]) -> Int { m[\"a\"] }"
+    ));
+
+    // A receiver with no subscript at all.
+    assert!(y020("fn f(s: Set[Int]) -> Int { s[0] }"));
+    assert!(y020("fn f(b: BitSet) -> Int { b[0] }"));
+    assert!(y020("fn f(h: MinHeap[Int]) -> Int { h[0] }"));
+    assert!(y020("fn f(n: Int) -> Int { n[0] }"));
+    assert!(y020("struct P { x: Int }\nfn f(p: P) -> Int { p[0] }"));
+
+    // …and the right receiver at the wrong arity, in both directions.
+    assert!(y020("fn f(g: Grid[Int]) -> Int { g[0] }"));
+    assert!(y020("fn f(v: Vec[Int]) -> Int { v[0, 1] }"));
+
+    // `.get` is untouched — the two spellings are two rows, and `Map`'s differ on
+    // purpose (§4.7), so a fix that made one the other would show here.
+    assert!(!has_type_error(
+        "fn f(m: Map[Text, Int]) -> Int { m.get(\"a\") }"
+    ));
+}
+
+/// **REP-16 through the constraint channel.** A subscript on an unannotated
+/// parameter defers and is answered by the call site, exactly as `values.sum()`
+/// is (TY-30) — because a subscript dispatches through the same catalog.
+#[test]
+fn a_subscript_on_an_unannotated_parameter_is_answered_by_the_call_site() {
+    // The requirement rides on the scheme: `first` is generic in its receiver.
+    assert!(!has_type_error(
+        "fn first(m, k) { m[k] }\nfn main() -> Int { let m = Map()\n m.insert(\"a\", 1)\n first(m, \"a\") }"
+    ));
+    // …and the *element* type is the answer, not a fresh variable: a `Text` result
+    // used as an `Int` is a mismatch.
+    assert!(has_type_error(
+        "fn first(m, k) { m[k] }\nfn main() -> Int { let m = Map()\n m.insert(\"a\", \"x\")\n first(m, \"a\") }"
+    ));
+    // A call site whose receiver does not index at all is reported when the
+    // requirement is discharged rather than accepted in silence.
+    assert!(has_type_error(
+        "fn first(m, k) { m[k] }\nfn main() -> Int { let s = Set()\n s.insert(1)\n first(s, 1) }"
+    ));
+    // A subscript is exactly as generic as a method call and no more: the
+    // requirement **pins** its receiver (`pin_to_level`, TY-30/ADR-057), so one
+    // function serves one receiver kind. Two kinds through one function is a
+    // `Y001` about the two signatures — the same answer `fn size(c) { c.len() }`
+    // gives, which is what makes this a property of the channel rather than of
+    // subscripts.
+    assert!(has_type_error(
+        "fn first(c, k) { c[k] }\n\
+         fn main() -> Int { let m = Map()\n m.insert(\"a\", 1)\n \
+         let v = Vec()\n v.push(2)\n first(m, \"a\") + first(v, 0) }"
+    ));
+    assert!(has_type_error(
+        "fn size(c) { c.len() }\n\
+         fn main() -> Int { let m = Map()\n m.insert(\"a\", 1)\n \
+         let v = Vec()\n v.push(2)\n size(m) + size(v) }"
+    ));
+    // One kind at two call sites is fine, which is the half that has to keep
+    // working.
+    assert!(!has_type_error(
+        "fn first(c, k) { c[k] }\n\
+         fn main() -> Int { let a = Vec()\n a.push(1)\n \
+         let b = Vec()\n b.push(2)\n first(a, 0) + first(b, 0) }"
+    ));
+}
+
+/// **REP-16, the store form.** `m[key] = v` and `counts[key] += 1` reach the
+/// three collections that have a store, and an assignment whose left side names
+/// no storage is `Y021` rather than a parse error.
+#[test]
+fn a_store_through_a_subscript_needs_a_receiver_that_has_one() {
+    let y020 = |src: &str| -> bool {
+        analyze(src)
+            .diagnostics
+            .iter()
+            .any(|d| d.kind() == praxis_source::DiagCode::NotIndexable)
+    };
+    let y021 = |src: &str| -> bool {
+        analyze(src)
+            .diagnostics
+            .iter()
+            .any(|d| d.kind() == praxis_source::DiagCode::NotAnAssignmentTarget)
+    };
+
+    // The three that store, plain and compound.
+    assert!(!has_type_error("fn f(m: Map[Text, Int]) { m[\"a\"] = 1 }"));
+    assert!(!has_type_error(
+        "fn f(m: Map[Text, Int]) { m[\"a\"] = 1\n m[\"a\"] += 2 }"
+    ));
+    assert!(!has_type_error("fn f(c: Counter[Text]) { c[\"a\"] += 1 }"));
+    assert!(!has_type_error("fn f(g: Grid[Int]) { g[0, 1] = 7 }"));
+
+    // The stored type is checked against the collection's, in both positions.
+    assert!(has_type_error(
+        "fn f(m: Map[Text, Int]) { m[\"a\"] = \"x\" }"
+    ));
+    assert!(has_type_error("fn f(m: Map[Text, Int]) { m[0] = 1 }"));
+    assert!(has_type_error("fn f(g: Grid[Int]) { g[0, 1] = \"x\" }"));
+
+    // A `Vec` reads through a subscript and has **no element store anywhere in
+    // the language** — no `v[0] = x`, and no `.set` either — so this is reported
+    // rather than given one silently.
+    assert!(y020("fn f(v: Vec[Int]) { v[0] = 1 }"));
+    assert!(!y020("fn f(v: Vec[Int]) -> Int { v[0] }"));
+    // Nor a `Text`, which is immutable.
+    assert!(y020("fn f(t: Text) { t[0] = 1 }"));
+    // And a receiver with no subscript at all is the same code from either side.
+    assert!(y020("fn f(s: Set[Int]) { s[0] = 1 }"));
+
+    // A left side that names no storage. Each of these used to be a parse error
+    // about a missing statement separator, which said nothing about the mistake.
+    assert!(y021("fn g() -> Int { 1 }\nfn f() { g() = 3 }"));
+    assert!(y021("struct P { x: Int }\nfn f(p: P) { p.x = 3 }"));
+    assert!(y021("fn f(v: Vec[Int]) { v.len() += 1 }"));
+    // …and the target's own mistakes are still reported, so the statement is not
+    // simply discarded.
+    assert!(has_name_error("fn f() { nope() = 3 }"));
+
+    // A plain `var` assignment is untouched: it is a different statement kind and
+    // `parse_stmt` still routes it there.
+    assert!(!has_type_error("fn f() { var x = 1\n x = 2\n x += 3 }"));
+    assert!(!y021("fn f() { var x = 1\n x = 2 }"));
+
+    // A compound store still requires a numeric value (TY-15/TY-31 through the
+    // subscript): `m[k] += true` is the mistake `flag += false` was.
+    assert!(has_type_error(
+        "fn f(m: Map[Text, Bool]) { m[\"a\"] = true\n m[\"a\"] += true }"
+    ));
 }

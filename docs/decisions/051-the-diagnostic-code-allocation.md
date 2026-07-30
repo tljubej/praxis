@@ -2,8 +2,8 @@
 
 **Date:** 2026-07-29
 **Status:** Accepted — amended 2026-07-29 for `Y017` (S14/TY-21) and 2026-07-30
-for `Y018`, `Y124`, `N006` and `Y019` (S24/REP-01, S26/REP-05, S26/REP-14,
-S25/REP-08); see the amendment notes under each table
+for `Y018`, `Y124`, `N006`, `Y019`, `Y020` and `Y021` (S24/REP-01, S26/REP-05,
+S26/REP-14, S25/REP-08, S25/REP-16); see the amendment notes under each table
 **Milestone:** Repair (answers the plan's **D13**, which binds before S13)
 
 ## Context
@@ -60,6 +60,8 @@ the **Name** category, following F2's own sketch, which puts `NameIsNotAType`,
 | `Y017` | TY-21 | S14 | a `break` carrying a value out of a `while`/`for` (**amendment**) |
 | `Y018` | REP-01 | S24 | a **generic** `fn` used as a value (**amendment**) |
 | `Y019` | REP-08 | S25 | a `.n` element access on something with no such element (**amendment**) |
+| `Y020` | REP-16 | S25 | a subscript on a type that has none, in either direction (**amendment**) |
+| `Y021` | REP-16 | S25 | an assignment whose left side names no storage (**amendment**) |
 
 **Amendment (2026-07-30).** Four codes, two of them allocated here and two
 **recorded late**. `Y018` (REP-01, S24 — ADR-061) and `Y124` (REP-05, S26 —
@@ -83,8 +85,21 @@ types to have failed to unify, which is what a `Y0xx` code is for. `N004` and
 `N005` are the precedents — which is what kept REP-14 out of the `Y0xx` block and
 left `Y019` for REP-08. ADR-063 is the decision behind it (D17).
 
-**`Y020` and `N007` are the next free codes.** The `Y0xx` user block is contiguous
-through `Y019` and the `N0xx` block through `N006`.
+`Y020` and `Y021`, for REP-16 (ADR-064). `Y020` is one code with two messages, for
+`Y019`'s reason: a receiver with no subscript and a receiver with no *store* are
+one mistake at two ends of the same surface — and the two messages have to differ
+because a `Vec` reads through `v[0]` and has no element store, so "cannot be
+indexed" would be false about it. It also covers the right receiver at the wrong
+arity (`grid[x]`, where §6.4 spells it `grid[x, y]`), since arity is part of what
+selects the operation.
+
+`Y021` is *not* `Y009` ("assignment to something that is not a `var`"). `Y009` is
+about a binding that exists and may not be written; `Y021` is about a left side
+that is not a place at all — `f() = 1`, `p.x = 1`. Both are in inference, for
+`Y019`'s reason.
+
+**`Y022` and `N007` are the next free codes.** The `Y0xx` user block is contiguous
+through `Y021` and the `N0xx` block through `N006`.
 
 `TY-20` gets two codes rather than the one the plan lists: "`return` with no
 function" and "`break` with no loop" are different mistakes with different fixes,
