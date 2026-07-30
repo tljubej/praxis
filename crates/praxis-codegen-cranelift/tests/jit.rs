@@ -1908,6 +1908,40 @@ fn pipeline_take_then_map_then_sum() {
     assert_eq!(result.as_int(), 60);
 }
 
+/// **MIR-03.** The bound of a `take`/`skip` is an `Int` expression, not an `Int`
+/// literal. The catalog types the parameter `Int` and says nothing about
+/// literals; a chain whose bound was anything else used to be declined by the
+/// recognizer, fall through to a combinator lowerer with no `take` arm, and
+/// answer the Unit singleton — which the enclosing chain then read as a Vec.
+#[test]
+fn a_take_or_skip_bound_is_any_int_expression() {
+    let five = "  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n";
+    let answer = |tail: &str| {
+        let (rt, result) = run_main(&format!("fn main() -> Int {{\n{five}  {tail}\n}}\n"));
+        assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+        result.as_int()
+    };
+
+    // A binding, the shape the ignored regressions used.
+    assert_eq!(answer("let n = 3\n  v.take(n).sum()"), 6);
+    assert_eq!(answer("let n = 2\n  v.skip(n).sum()"), 12);
+    // An arithmetic expression, and one that calls back into the receiver.
+    assert_eq!(answer("let n = 1\n  v.take(n + n).sum()"), 3);
+    assert_eq!(answer("v.skip(v.len() - 2).sum()"), 9);
+    // The bound still composes with the stages around it.
+    assert_eq!(answer("let n = 4\n  v.take(n).map(|x| x * 10).sum()"), 100);
+    assert_eq!(answer("let n = 4\n  v.take(n).filter(|x| x > 2).sum()"), 7);
+    // Degenerate bounds keep the meaning the literal spelling had: `take` of
+    // nothing is empty, `skip` of nothing drops nothing, and a negative bound is
+    // the same comparison rather than a special case.
+    assert_eq!(answer("let n = 0\n  v.take(n).sum()"), 0);
+    assert_eq!(answer("let n = 0\n  v.skip(n).sum()"), 15);
+    assert_eq!(answer("let n = 0 - 1\n  v.take(n).sum()"), 0);
+    assert_eq!(answer("let n = 0 - 1\n  v.skip(n).sum()"), 15);
+    assert_eq!(answer("let n = 99\n  v.take(n).sum()"), 15);
+    assert_eq!(answer("let n = 99\n  v.skip(n).sum()"), 0);
+}
+
 #[test]
 fn pipeline_take_while_stops_at_predicate() {
     // [1,2,3,4,1].take_while(<4) = [1,2,3] (stops at first 4, does NOT resume

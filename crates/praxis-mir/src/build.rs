@@ -2296,10 +2296,12 @@ enum Stage {
     Filter(Box<TypedExpr>),
     /// `(T) -> U` — map, then drop the result if it is Unit.
     FilterMap(Box<TypedExpr>),
-    /// Keep at most `n` leading elements, then stop.
-    Take(i64),
-    /// Drop the first `n` elements.
-    Skip(i64),
+    /// Keep at most `n` leading elements, then stop. `n` is any `Int`
+    /// expression; the catalog types the parameter `Int` and says nothing about
+    /// literals, so neither does this (MIR-03).
+    Take(Box<TypedExpr>),
+    /// Drop the first `n` elements. `n` is any `Int` expression.
+    Skip(Box<TypedExpr>),
     /// Stop at the first element that fails the predicate.
     TakeWhile(Box<TypedExpr>),
     /// Replace the element with `(index, element)` tuples.
@@ -2397,18 +2399,8 @@ fn classify_link(name: &str, args: &[TypedExpr]) -> Option<Link> {
         ("take_while", [p]) => Link::Stage(Stage::TakeWhile(Box::new(p.clone()))),
         ("enumerate", []) => Link::Stage(Stage::Enumerate),
         ("zip", [other]) => Link::Stage(Stage::Zip(Box::new(other.clone()))),
-        (
-            "take",
-            [TypedExpr::Lit {
-                value: Lit::Int(n), ..
-            }],
-        ) => Link::Stage(Stage::Take(*n)),
-        (
-            "skip",
-            [TypedExpr::Lit {
-                value: Lit::Int(n), ..
-            }],
-        ) => Link::Stage(Stage::Skip(*n)),
+        ("take", [n]) => Link::Stage(Stage::Take(Box::new(n.clone()))),
+        ("skip", [n]) => Link::Stage(Stage::Skip(Box::new(n.clone()))),
         _ => return None,
     })
 }
@@ -2660,8 +2652,10 @@ enum Step {
     Map(LocalId),
     Filter(LocalId),
     FilterMap(LocalId),
-    Take(i64),
-    Skip(i64),
+    /// The slot holding the already-evaluated bound.
+    Take(LocalId),
+    /// The slot holding the already-evaluated bound.
+    Skip(LocalId),
     TakeWhile(LocalId),
     Enumerate,
     Zip(LocalId),
@@ -2722,8 +2716,8 @@ fn lower_chain(b: &mut Builder<'_>, chain: &Chain) -> Plan {
                 Stage::FilterMap(f) => Step::FilterMap(lower_expr_gc(b, f)),
                 Stage::TakeWhile(p) => Step::TakeWhile(lower_expr_gc(b, p)),
                 Stage::Zip(other) => Step::Zip(lower_expr_gc(b, other)),
-                Stage::Take(n) => Step::Take(*n),
-                Stage::Skip(n) => Step::Skip(*n),
+                Stage::Take(n) => Step::Take(lower_expr_gc(b, n)),
+                Stage::Skip(n) => Step::Skip(lower_expr_gc(b, n)),
                 Stage::Enumerate => Step::Enumerate,
             };
             Plan::Step(step, Box::new(lower_chain(b, rest)))
@@ -2824,9 +2818,12 @@ fn emit_step(
             b.cur = keep_blk;
             item
         }
-        Step::Take(n) => {
-            // If idx >= n → stop the stream; else fall through.
-            let stop = idx_cmp_const(b, idx, *n, CmpOp::Ge);
+        Step::Take(bound) => {
+            // If idx >= n → stop the stream; else fall through. A bound of zero
+            // or less stops before the first element, and a negative `skip`
+            // drops nothing: same comparison the literal-only path used, so the
+            // edge cases are the ones it already had.
+            let stop = idx_cmp_bound(b, idx, *bound, CmpOp::Ge);
             let keep_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: stop,
@@ -2836,9 +2833,9 @@ fn emit_step(
             b.cur = keep_blk;
             item
         }
-        Step::Skip(n) => {
+        Step::Skip(bound) => {
             // If idx < n → skip (jump to the continue target); else fall through.
-            let skip = idx_cmp_const(b, idx, *n, CmpOp::Lt);
+            let skip = idx_cmp_bound(b, idx, *bound, CmpOp::Lt);
             let keep_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: skip,
@@ -2972,25 +2969,38 @@ fn emit_splice(
     jump_and_go_dead(b, outer_continue);
 }
 
-/// Emit `idx <op> n` as a Bool scalar and return it. Used by Take/Skip.
-fn idx_cmp_const(b: &mut Builder<'_>, idx: LocalId, n: i64, op: CmpOp) -> LocalId {
+/// Emit `idx <op> bound` as a Bool scalar and return it. Used by Take/Skip.
+///
+/// `bound` is a `Gc` Int slot written once before the loop, and the payload is
+/// re-extracted here on every iteration rather than hoisted into a scalar the
+/// loop carries: a scalar live across the body's safepoints is exactly what
+/// ADR-015 §10.3 says not to build, and the extract is a load.
+///
+/// This replaced an `idx <op> <literal>` helper. The bound used to have to *be*
+/// a literal — `classify_stage` matched `take`/`skip` only against
+/// `Lit::Int`, and any other well-typed `Int` expression made the recognizer
+/// decline the whole chain, which fell through to an eager lowerer with no
+/// `take` arm and returned the Unit singleton for the enclosing chain to
+/// misread as a Vec (MIR-03).
+fn idx_cmp_bound(b: &mut Builder<'_>, idx: LocalId, bound: LocalId, op: CmpOp) -> LocalId {
     let idx_scalar = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ExtractScalar {
         dst: idx_scalar,
         src: idx,
         scalar: ScalarKind::Int,
     });
-    let n_scalar = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ConstInt {
-        dst: n_scalar,
-        value: n,
+    let bound_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ExtractScalar {
+        dst: bound_scalar,
+        src: bound,
+        scalar: ScalarKind::Int,
     });
     let dst = b.alloc_scalar(ScalarKind::Bool);
     b.push(Inst::IntCmp {
         dst,
         op,
         lhs: idx_scalar,
-        rhs: n_scalar,
+        rhs: bound_scalar,
     });
     dst
 }
@@ -5017,7 +5027,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: dynamic take arguments fall through to a Unit intrinsic stub"]
     fn dynamic_take_argument_does_not_silently_lower_to_unit() {
         // `take` is typed to accept any Int expression, not literals only. The
         // intrinsic fallback must preserve that contract instead of returning
@@ -5048,7 +5057,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: dynamic skip arguments fall through to a Unit intrinsic stub"]
     fn dynamic_skip_argument_does_not_silently_lower_to_unit() {
         let (funcs, _analysis) = lower_src_to_mir(
             "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let n = 2\n  v.skip(n).sum()\n}\n",
@@ -5073,6 +5081,53 @@ mod tests {
             unit_fallbacks.is_empty(),
             "a well-typed `skip(n)` pipeline must not lower through a Unit fallback"
         );
+    }
+
+    /// **MIR-03's evaluation order.** A `take`/`skip` bound is an expression, so
+    /// *when* it runs is part of the contract: once, before the loop, like every
+    /// other pipeline argument — not once per element.
+    ///
+    /// No behavioural test can see this for a pure bound, which is why it is
+    /// asserted on the MIR: one call to the user function, and it is emitted
+    /// before the loop's first `praxis_vec_len` (the header's bounds check), so
+    /// it cannot be inside the body.
+    #[test]
+    fn a_take_bound_is_evaluated_once_before_the_loop() {
+        for method in ["take", "skip"] {
+            let (funcs, _analysis) = lower_src_to_mir(&format!(
+                "fn bound() -> Int {{ 2 }}\nfn main() -> Int {{\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.{method}(bound()).sum()\n}}\n"
+            ));
+            let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+            // Blocks are appended in emission order, and so are the instructions
+            // in each, so a flat walk is the emission sequence.
+            let calls: Vec<&str> = main
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter_map(|inst| match inst {
+                    Inst::Call {
+                        callee: CallTarget::User(name),
+                        ..
+                    } if name == "bound" => Some("bound"),
+                    Inst::Call {
+                        callee: CallTarget::Runtime(RuntimeSymbol::VecLen),
+                        ..
+                    } => Some("len"),
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(
+                calls.iter().filter(|c| **c == "bound").count(),
+                1,
+                "`{method}(bound())` must evaluate its bound exactly once, got {calls:?}"
+            );
+            assert_eq!(
+                calls.first(),
+                Some(&"bound"),
+                "the bound must be evaluated before the loop's bounds check, got {calls:?}"
+            );
+        }
     }
 
     #[test]
