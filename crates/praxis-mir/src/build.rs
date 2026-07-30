@@ -3581,19 +3581,30 @@ fn sink_finish(
             });
             dst
         }
-        // `min`/`max` are the scalar siblings of the three above and share the
-        // empty case, but *not* the defect: their accumulator starts at `0`, so
-        // an empty sequence yields a defined — if debatable — answer rather than
-        // an unwritten slot. Whether `0` is the right answer is D1's question
-        // (absence in the source language), not MIR-09's, and the suite pins the
-        // current behaviour deliberately.
-        Sink::Sum
-        | Sink::Product
-        | Sink::Count
-        | Sink::Min
-        | Sink::Max
-        | Sink::Find(_)
-        | Sink::Position(_) => {
+        // **D1.** `min`/`max` are the scalar siblings of the three above and
+        // share the empty case. Their accumulator is *seeded* with `0` rather
+        // than left unwritten, so the empty sequence had a defined answer — and
+        // `0` is a **wrong** answer, not a missing one: it is smaller than every
+        // element of `[3, 4]` and larger than every element of `[-3, -4]`, so a
+        // caller cannot tell it from a real minimum. D1 settled that they join
+        // the three seeded sinks rather than becoming `Option`, because an empty
+        // `min` is a caller mistake and not the ordinary absence §4.7 is about.
+        Sink::Min | Sink::Max => {
+            emit_empty_collection_guard(b, seen_flag.expect("min/max carry a seen flag"));
+            let acc = acc_scalar.unwrap();
+            let dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
+            b.push(Inst::Materialize {
+                dst,
+                src: acc,
+                scalar: ScalarKind::Int,
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
+            });
+            dst
+        }
+        // These five always have an answer on an empty sequence, and it is the
+        // right one: `0`, `1`, `0`, and the two miss sentinels.
+        Sink::Sum | Sink::Product | Sink::Count | Sink::Find(_) | Sink::Position(_) => {
             let acc = acc_scalar.unwrap();
             let dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
             b.push(Inst::Materialize {

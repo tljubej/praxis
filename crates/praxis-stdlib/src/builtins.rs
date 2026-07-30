@@ -2088,7 +2088,7 @@ fn seq_min_on_vec() -> MethodEntry {
         result: TypePattern::Scalar(ScalarType::Int),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_min"),
-        doc: "Smallest (Int) element; the first element seeds the accumulator.",
+        doc: "Smallest (Int) element. Faults on an empty sequence (D1).",
         stability: Stability::Stable,
     }
 }
@@ -2101,7 +2101,7 @@ fn seq_min_on_seq() -> MethodEntry {
         result: TypePattern::Scalar(ScalarType::Int),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_min"),
-        doc: "Smallest (Int) element; the first element seeds the accumulator.",
+        doc: "Smallest (Int) element. Faults on an empty sequence (D1).",
         stability: Stability::Stable,
     }
 }
@@ -2114,7 +2114,7 @@ fn seq_max_on_vec() -> MethodEntry {
         result: TypePattern::Scalar(ScalarType::Int),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_max"),
-        doc: "Largest (Int) element; the first element seeds the accumulator.",
+        doc: "Largest (Int) element. Faults on an empty sequence (D1).",
         stability: Stability::Stable,
     }
 }
@@ -2127,7 +2127,7 @@ fn seq_max_on_seq() -> MethodEntry {
         result: TypePattern::Scalar(ScalarType::Int),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_max"),
-        doc: "Largest (Int) element; the first element seeds the accumulator.",
+        doc: "Largest (Int) element. Faults on an empty sequence (D1).",
         stability: Stability::Stable,
     }
 }

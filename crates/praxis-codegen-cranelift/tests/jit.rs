@@ -3563,14 +3563,51 @@ fn adv_pipeline_empty_source_collect_is_empty_vec() {
     assert_eq!(result.as_int(), 0);
 }
 
+/// **D1.** An empty `min`/`max` faults; it does not answer `0`.
+///
+/// This test used to be `adv_pipeline_empty_source_min_is_zero`, and its
+/// comment called the behaviour "a known edge — document current behavior".
+/// Documenting it is what made it a defect-pinning test: `0` is not a *missing*
+/// answer, it is a **wrong** one. It is below every element of `[3, 4]` and
+/// above every element of `[-3, -4]`, so nothing at the call site can tell it
+/// from a real minimum, and the accumulator was seeded rather than derived from
+/// the data at all.
+///
+/// `reduce`, `min_by` and `max_by` already faulted here (MIR-09); D1 settled
+/// that `min`/`max` join them rather than becoming `Option`, because an empty
+/// `min` is a mistake in the program and not the domain-level absence §4.7
+/// reserves `Option` for.
 #[test]
-fn adv_pipeline_empty_source_min_is_zero() {
-    // Empty source → min. The accumulator is seeded to 0 and never updated.
-    // (min/max on empty is a known edge — document current behavior.)
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.min()\n}\n";
-    let (rt, result) = run_main(src);
+fn an_empty_min_or_max_faults_rather_than_answering_zero() {
+    for sink in ["min", "max"] {
+        let src = format!("fn main() -> Int {{\n  let v = Vec()\n  v.{sink}()\n}}\n");
+        let (rt, _result) = run_main(&src);
+        assert_eq!(
+            rt.fault(),
+            praxis_runtime::FaultKind::EmptyCollection,
+            "an empty `{sink}` has no answer"
+        );
+    }
+
+    // A source that a `filter` empties is the same case, and is the one a real
+    // program hits: the Vec is non-empty and nothing survives the predicate.
+    let (rt, _result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  \
+         v.filter(|x| x > 100).min()\n}\n",
+    );
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
+
+    // …and a non-empty one still answers, so the guard is the empty case and
+    // not a new refusal.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  let v = Vec()\n  v.push(3)\n  v.push(4)\n  v.min()\n}\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), 0);
+    assert_eq!(result.as_int(), 3);
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(0 - 3)\n  v.push(0 - 4)\n  v.max()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), -3, "the seeded 0 was above every element");
 }
 
 #[test]
