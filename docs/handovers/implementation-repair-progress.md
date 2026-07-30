@@ -32,17 +32,17 @@ Update this file at the end of every stage.
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
 | S25 — Grammar completion | not started | |
-| S26 — Declaration, pattern and inference gaps | **part** (REP-05, REP-06; REP-03/04 and REP-14 left) | `3306a04` |
+| S26 — Declaration, pattern and inference gaps | **done** | `3306a04`, `b3bb6f5`, `4b7d763` |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
 TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
-**Fourteen defects found while executing the plan are now registered and
-scheduled** as **REP-01 … REP-14** in the plan's **§4.1**, owned by four new
-stages (**S23**–**S26**) and three new decisions (**D15**–**D17**). They were
-carried as prose in this file for nine sessions; they are schedulable work now.
+**Fifteen defects found while executing the plan are registered** as
+**REP-01 … REP-15** in the plan's **§4.1**. REP-01…REP-14 are owned by four new
+stages (**S23**–**S26**) and three new decisions (**D15**–**D17**), all three of
+which are now answered. **REP-15 is a P0 and is `unscheduled`** — see §4.
 
 **S23 is closed.** All four of its findings are fixed and gated — **REP-13**,
 **REP-11**, **REP-12** and **REP-02** — each as its own commit with the suite
@@ -53,22 +53,35 @@ top-level `fn` in value position lowered to `Unit`, so `let f = double\n f(3)`
 passed `praxis check` and aborted the host with a SIGBUS — is fixed and gated.
 **D15 is answered as recommended (a closure value) and implemented: ADR-061.**
 
-**S26 is two-fifths done.** **REP-06** (a nested `struct`/`enum` was silently
-dropped — `N005` now) and **REP-05** (a wrong sub-pattern count was silently
-truncated — `Y124` now) are fixed and gated. **REP-03 + REP-04 are the stage's
-main event and are untouched**; they are one fix and must land together, and the
-plan puts them first within the stage. **REP-14** is also left. Seven REP rows
-remain in total: four in S25 and three in S26.
+**S26 is closed.** All five findings are fixed and gated — **REP-03**, **REP-04**,
+**REP-05**, **REP-06** and **REP-14** — and **D17 is answered as recommended
+(report the cycle) and implemented: ADR-063.** REP-03 + REP-04 were the stage's
+main event and landed together as one commit, which the plan requires; **ADR-062**
+is their decision.
+
+**S25 is the only stage left in the repair's own schedule**, with four rows
+(REP-07…REP-10) and the most visible acceptance criterion in the plan: §3.3's
+representative program compiling. Beyond it are S18…S21, which were never started,
+and REP-15.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1399 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1403 passed, 0 failed, 38 ignored**. `just ci` is green.
 
-S26's two new gates so far:
+S26's five new gates:
 
 | Test | File | Pins |
 |---|---|---|
+| `an_unannotated_iterated_parameter_is_generic_in_the_iterable_not_its_element` | `infer_tests.rs` | REP-03 — the scheme itself (`forall T. (T) -> Int`, where it was `(Int) -> Int`), four collection ctors, two ctors at one element type in one program, and `copy`'s element type in both directions |
+| `an_iterable_requirement_is_checked_at_the_element_type_the_body_needs` | `infer_tests.rs` | REP-04 — the `Y001` and its note, four differently-itemed ctors, `Y005` still owning not-iterable-at-all, and the right element accepted at each ctor so the check is a unification and not a blanket refusal |
+| `a_for_over_an_unannotated_parameter_runs_against_each_iterable_it_is_given` | `jit.rs` | the half no type test can see: three ctors' `len`/`get` symbols, all three in one program (where the clones have to be distinct), and `copy` running |
+| `a_self_referring_type_declaration_is_reported_rather_than_registered_as_a_variable` | `infer_tests.rs` | REP-14 — both keywords, through a `Vec` and a `Map`, a mutual pair and a three-cycle, the cycle named in the message, **the collateral declaration unreported *and* correctly typed**, a field named like its type not counting, TY-10's forward references still resolving, and one report with no cascade |
 | `a_nested_type_declaration_is_reported_at_the_declaration` | `infer_tests.rs` | REP-06 — both keywords, a declaration nested two levels deep (a block inside a function), and that the four top-level declaration kinds are untouched |
 | `a_pattern_naming_more_values_than_the_variant_holds_is_reported` | `infer_tests.rs` | REP-05 — `Y124` for one too many *and* for any sub-pattern on a payload-less variant, plus all five spellings of "fewer", which is HIR-06's padding rule and is why the check is one-sided |
+
+`a_type_declaration_cycle_still_analyzes` was **amended**: its assertions still
+hold, but its comment stated the defect ("registers what is left in source order,
+exactly as an unresolvable annotation has always been handled") and it passed
+equally well against the silence. It asserts one `N006` per cycle member now.
 
 S24's seven new gates (REP-01 — ADR-061):
 
@@ -2336,34 +2349,59 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**Start with REP-03 + REP-04** (S26). `11-repair-s23-s24-s26-handover.md` is the
-last session's note and has their mechanism, their reproduction and the one line
-in `capability.rs` that causes both.
+**Two candidates, and the choice is a judgement call the next session should make
+deliberately: S25, or the new P0 REP-15.**
+`12-repair-s26-handover.md` is the last session's note and has both in detail.
 
-**S17, S23 and S24 are all closed, and S26 is two-fifths done.** Nothing remains
-in the first three, and **the repair has no P0 left**.
+**S17, S23, S24 and S26 are all closed.** Every REP row the plan scheduled is done
+except S25's four. Of the repair's three new decisions, **D15 (S24) and D17 (S26)
+are answered and implemented**; **D16 is S25's and is still open**.
 
-**S25 or S26 is next, and neither is blocked.** S25 is the more visible: its
-acceptance criterion is a program from the design doc compiling, which nothing
-else in the repair can claim. S26 is the more dangerous class — programs that are
-silently accepted or wrongly rejected today.
-
+- **REP-15 is a P0 and is `unscheduled`.** Found while landing REP-03, and
+  pre-existing: **six of the nine iterable collections have no `for` lowering at
+  all.** `for x in s` over a `Set`, `for i in b` over a `BitSet`, `for kv in c`
+  over a `Counter` and `for kv in m` over a `Map` each pass `praxis check` and
+  **kill the process**; a `MinHeap` over `[3, 1, 2]` sums to `4349199564` — a
+  silently wrong answer, which is worse. MIR's `get_symbol_for` has arms for
+  `Vec`, `Deque` and `Range` and defaults everything else to `VecGet`, and the
+  runtime has **no indexed accessor** for the other six to select. So it is a
+  vertical slice — an iteration protocol plus a `for` lowering — on the model of
+  D6's `Range` work, and it needs a decision first (the protocol, *and* whether
+  `for (k, v) in m` destructures, which is REP-10's other half). It is the most
+  severe thing left in the tree.
 - **S25** — the grammar gaps (REP-07…REP-10). Its acceptance criterion is that
   **§3.3's representative program compiles**, which nothing else in the repair
-  can claim. REP-07's `&&`/`||` and REP-09's `Counter[(Int, Int)]()` are what
-  stand between it and the compiler; note that S17 already inserted `..` at
-  `bp(3, 4)`, so **read the whole precedence table** before adding to it.
-- **S26** — the silent-wrong ones. **REP-05 and REP-06 are done** (`3306a04`);
-  **REP-03 + REP-04** are the stage's main event and are untouched. They are one
-  fix and must land together — `iter_item` answering an unresolved receiver with
-  *itself* is why a `for` over an unannotated parameter rejects a legal program,
-  and answering with a **fresh** item variable is what gives the deferred
-  `Iterable { item }` constraint two things to relate. ADR-057 is the map for
-  both. **REP-14** is also left, and D17 blocks only its wording — the detect half
-  can land first.
+  can claim, and it is the most *visible* thing left. REP-07's `&&`/`||` and
+  REP-09's `Counter[(Int, Int)]()` are what stand between it and the compiler;
+  note that S17 already inserted `..` at `bp(3, 4)`, so **read the whole
+  precedence table** before adding to it. **D16 is S25's open decision** (does
+  `assert` take a message — i.e. does the language get arity-based overloading or
+  optional parameters), and the plan warns against answering it by accident from
+  `assert`'s case alone.
 
 **S18 is still `D1`-blocked** and D1 is still open, so it is not the answer to
 "what next" either — see the S18 block below for what it needs.
+
+What S26 delivered, and the three things worth carrying out of it:
+
+- **An iterated parameter is generic in the iterable and monomorphic in its
+  element** (ADR-062). The asymmetry is the decision and it falls out of what
+  lowering needs concrete: MIR picks `len`/`get` from the iterator's **static
+  ctor**, so the iterator must stay quantified (one clone per iterable kind), while
+  the item must be **pinned** (`pin_to_level`, TY-30's rule at a second door)
+  because mono substitutes from the call site's argument types and never runs the
+  constraint channel. If you touch either, that is the reasoning to preserve.
+- **`Iterable` is the second capability discharged by *resolving*.**
+  `Inferer::resolve_deferred_iterable` sits beside `resolve_deferred_method`, and
+  `capability::check` deliberately still answers only the yes/no — its failure
+  shape is `Err(offending type)` and a wrong element type is a *mismatch*.
+- **A recursive `struct`/`enum` is `N006`** (ADR-063, D17). The member is still a
+  fresh variable after the report, deliberately — a second report per use would be
+  the cascade `N004` avoids. **`N007` is next free in the `N0xx` block; `Y019` is
+  still free**, because ADR-051's rule puts declaration mistakes in the Name
+  category. ADR-051 was also **back-filled** with `Y018` and `Y124`, which the two
+  previous sessions spent without amending it; it is accurate again, so read it
+  before spending a code.
 
 What S24 delivered, and the three things worth carrying out of it:
 
@@ -3027,11 +3065,21 @@ implementation added to the answer, both in the ADR: the existing calling
 convention did **not** already fit (hence the per-function adapter), and a
 *generic* `fn` has no function value at all, which is `Y018`.
 
-**D16 and D17 are open and are the repair's own** (plan §7, end). Neither blocks a
-stage outright: D16 (`assert`'s message, and whether the language gets optional
-parameters or arity overloading) belongs to S25, and D17 (what
-`struct Node { next: Node }` reports) blocks only REP-14's *wording* — the plan
-says the detect half can land first.
+**D17 is answered *and implemented*** — see **ADR-063**. A `struct`/`enum` that
+refers to itself is `N006`, which was the recommendation, and it supersedes
+ADR-052's silence in place. Two things the implementation added to the answer, both
+in the ADR: a fresh variable was not a neutral fallback (it unifies with everything,
+so `Node { next: 7 }` compiled and ran), and a declaration that merely *waited
+behind* a cycle had the same hole and must not be reported — the readiness loop
+resumes past the reported members now.
+
+**D16 is the one repair decision still open** (plan §7, end): does `assert` take a
+message, and more generally does the language get arity-based overloading or
+optional parameters? It belongs to **S25**, and the plan's warning is the important
+part — `assert`'s message is the cheapest possible motivating case, so answering it
+in isolation would set the precedent by accident. **REP-15 needs a decision too**
+and has no `D` number yet: the iteration protocol for the six unlowered iterables,
+and whether `for (k, v) in m` destructures.
 
 **D14 is answered** — see ADR-040. The `Safepoint` token shipped with a named,
 `pub(crate)` `Heap::alloc_unpaced` back door for the host helpers and the
