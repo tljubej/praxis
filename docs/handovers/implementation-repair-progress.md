@@ -31,7 +31,7 @@ Update this file at the end of every stage.
 | S18 … S21 | not started | |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
-| S25 — Grammar completion | **part** (REP-07, REP-08, REP-17; REP-09, REP-10, REP-16 left) | `c74e062`, `bb3bc43`, `11976cc` |
+| S25 — Grammar completion | **part** — its acceptance criterion is **met** (REP-07, REP-08, REP-17, REP-16, REP-09, REP-18, REP-20; REP-10 left, plus REP-19 and REP-21) | `c74e062`, `bb3bc43`, `11976cc`, `0ee29b1`, `2f9bcbd`, `b495e93` |
 | S26 — Declaration, pattern and inference gaps | **done** | `3306a04`, `b3bb6f5`, `4b7d763` |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
@@ -39,12 +39,20 @@ S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
 TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
-**Seventeen defects found while executing the plan are registered** as
-**REP-01 … REP-17** in the plan's **§4.1**. REP-01…REP-14 are owned by four new
+**Twenty-one defects found while executing the plan are registered** as
+**REP-01 … REP-21** in the plan's **§4.1**. REP-01…REP-14 are owned by four new
 stages (**S23**–**S26**) and three new decisions (**D15**–**D17**), two of which
-are now answered. **Two rows are `unscheduled`**: **REP-15**, a P0, and **REP-16**, which belongs to
-S25 by subject — **§3.3's representative program needs it, so S25's exit list is
-six rows and not four** (REP-17, the third of them, is done). See §4.
+are now answered. **Three rows are `unscheduled`**: **REP-15** (a P0), **REP-19**
+and **REP-21**.
+
+**S25's acceptance criterion is met: §3.3's representative program compiles and
+runs.** It is `tests/aoc-corpus/s33_representative_program.px` and answers `5`
+and `12`. Getting there took **five** rows the register did not have when the
+stage was written — REP-16, REP-17, REP-18, REP-20 and (in framing only) REP-19 —
+each invisible until the one before it landed, because the program failed earlier
+every time it was measured. Its body is inside `fn main()` for REP-19's reason:
+§3.3 is written entirely at top level and **a top-level statement is never
+executed**. See §4.
 
 **S23 is closed.** All four of its findings are fixed and gated — **REP-13**,
 **REP-11**, **REP-12** and **REP-02** — each as its own commit with the suite
@@ -61,13 +69,42 @@ passed `praxis check` and aborted the host with a SIGBUS — is fixed and gated.
 main event and landed together as one commit, which the plan requires; **ADR-062**
 is their decision.
 
-**S25 is the only stage left in the repair's own schedule**, with four rows
-(REP-07…REP-10) and the most visible acceptance criterion in the plan: §3.3's
-representative program compiling. Beyond it are S18…S21, which were never started,
-and REP-15.
+**S25 is the only stage left in the repair's own schedule**, and **REP-10 is its
+last scheduled row** — record and tuple patterns. Its acceptance criterion is
+already met (above). Beyond it are S18…S21, which were never started, and the
+three unscheduled rows: **REP-15** (a P0), **REP-19** and **REP-21**.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1410 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1435 passed, 0 failed, 38 ignored**. `just ci` is green.
+
+S25's second half added ten gates and replaced one (**ADR-064**, **ADR-065**):
+
+| Test | File | Pins |
+|---|---|---|
+| `a_subscript_is_a_postfix_form_and_can_be_an_assignment_target` | `parse.rs` | REP-16's grammar — every chaining order, every assignment operator, a bare-name target still an `ASSIGN_STMT`, a non-place target *parsing* (its mistake is `Y021`'s), `[` after a line break continuing the expression, and `m[]` reported |
+| `a_subscript_reads_the_type_the_receiver_holds_at_that_key` | `infer_tests.rs` | the six receivers that read, each at a result type that is not the receiver's own, the key checked rather than accepted, and `Y020` for no-subscript *and* wrong-arity (`grid[x]`) |
+| `a_subscript_on_an_unannotated_parameter_is_answered_by_the_call_site` | `infer_tests.rs` | the `HasMethod` deferral through a subscript — including that it is **as** generic as a method call and no more, which is `pin_to_level`'s doing and not the subscript's |
+| `a_store_through_a_subscript_needs_a_receiver_that_has_one` | `infer_tests.rs` | the three that store, the stored type checked in both positions, `Vec` reading-but-not-storing, `Y021` for three non-places, and a compound store still `Numeric` |
+| `a_subscript_reads_and_writes_through_the_wrapper_its_receiver_needs` | `jit.rs` | the half no type test can see — six reads, three stores, all five compound operators (so `+= 1` is not `inc` in disguise), the `Counter` zero default, and a tuple key counted three times |
+| `a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names` | `jit.rs` | §6.4's `grid[x, y]`, on an **off-diagonal** cell so a swapped pair fails, plus that `.get`/`.set` name the same cell |
+| `a_compound_assignment_through_a_subscript_evaluates_its_place_once` | `jit.rs` | the desugaring this is not: an index *and* a receiver that log when they run |
+| `a_compound_store_through_a_subscript_reads_once_and_writes_once` | `praxis-mir/src/build.rs` | the instruction counts, which is the assertion a behavioural test cannot make |
+| `the_subscript_rows_are_a_closed_set_no_program_can_name` | `builtins.rs` | which collections index is a *language* answer, `Map`'s two reads being two wrappers, and that no row name is spellable |
+| `a_map_index_faults_where_get_answers_and_a_counter_set_replaces` | `praxis-runtime/src/abi.rs` | §4.7's choice at the level that makes it — the two map wrappers differ in one line |
+| `a_type_constructors_brackets_are_type_arguments_and_every_other_names_are_a_subscript` | `parse.rs` | REP-09's rule, and `m[k](7)` surviving it |
+| `a_constructors_written_type_arguments_say_what_it_constructs` | `infer_tests.rs` | the *type*, not the absence of a diagnostic — plus `Y007` for the count and `N002`/`N003` for the annotation |
+| `the_parsers_type_constructors_are_the_compilers` | `infer_tests.rs` | the two copies of the name list agree |
+| `a_constructor_with_written_type_arguments_builds_what_it_names` | `jit.rs` | the descriptor reaching the allocation, which is what keys the collection |
+| `a_keyed_collection_enumerates_in_a_deterministic_order` | `jit.rs` | REP-18 — `count(pred)` agreeing with `filter(pred).count()`, `keys()`/`values()` index-aligned, and the order asserted twice |
+| `a_keyed_collection_enumerates_and_count_has_two_arities` | `builtins.rs` | the rows, and that a `Counter`'s values are counts where a `Map`'s are its value type |
+| `a_template_literal_that_begins_with_a_space_matches` | `jit.rs` | REP-20 — §3.3's own template, and the policy still flexible in both directions |
+| `a_literals_edge_whitespace_is_its_policy_and_not_its_text` | `scan.rs` | the same rule at the scanner, where it lives |
+
+`adv_map_index_missing_key_does_not_fault_current_behavior` was **replaced** by
+`adv_map_index_of_a_missing_key_faults_where_get_answers`. It asserted that
+`m["missing"]` does *not* fault and passed for a reason that had nothing to do with
+maps: with no subscript grammar, `let v = m["missing"]` parsed as `let v = m` plus
+a recovered statement, and the `v` it compared was the map.
 
 S26's five new gates:
 
@@ -2351,14 +2388,33 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**Two candidates, and the choice is a judgement call the next session should make
-deliberately: S25, or the new P0 REP-15.**
-`12-repair-s26-and-s25-part-handover.md` is the last session's note and has both
-in detail, including a scoping of REP-16 against this tree.
+**REP-15 is the answer.** It is the only P0 left in the tree and the most severe
+thing in it, and S25's acceptance criterion — the reason to prefer S25 last
+session — **is met**. `13-repair-s25-second-half-handover.md` is the last session's
+note; read it for what REP-19 needs and for the five things worth not
+rediscovering.
 
-**S17, S23, S24 and S26 are all closed.** Every REP row the plan scheduled is done
-except S25's four. Of the repair's three new decisions, **D15 (S24) and D17 (S26)
-are answered and implemented**; **D16 is S25's and is still open**.
+Three rows are unscheduled and one is scheduled:
+
+- **REP-15 (P0, `unscheduled`)** — six of the nine iterable collections have no
+  `for` lowering at all. Detail below; it needs a decision before it needs code.
+- **REP-19 (P1, `unscheduled`)** — a top-level statement is analyzed and never
+  executed. §3.3 and §4.2 are both written at top level, so this silences the
+  design doc's own programs. Needs a decision: what happens when a file has
+  top-level statements *and* a `fn main`.
+- **REP-10 (P2, S25)** — record and tuple patterns, the last row S25 schedules.
+  `exhaustive.rs` already handles the `Closed`-with-one-constructor shape they
+  produce, so it is a parser and lowering change.
+- **REP-21 (P3, `unscheduled`)** — `min=`/`max=`. Both runtime wrappers exist with
+  no caller and both catalog row names are reserved (ADR-064), so what is left is
+  a contextual grammar rule: `min` is an identifier, so `min=` is two tokens.
+
+**S17, S23, S24 and S26 are all closed.** Of the repair's three new decisions,
+**D15 (S24) and D17 (S26) are answered and implemented**; **D16 is S25's and is
+still open** — and nothing in the stage's remaining row needs it. Note that
+REP-18's second arity of `count` is *not* D16: the method catalog has always been
+keyed by `(receiver, name, arity)`, so two arities of one method name were always
+legal there. D16 is about a **prelude function**, `assert`.
 
 - **REP-15 is a P0 and is `unscheduled`.** Found while landing REP-03, and
   pre-existing: **six of the nine iterable collections have no `for` lowering at
@@ -2372,30 +2428,22 @@ are answered and implemented**; **D16 is S25's and is still open**.
   D6's `Range` work, and it needs a decision first (the protocol, *and* whether
   `for (k, v) in m` destructures, which is REP-10's other half). It is the most
   severe thing left in the tree.
-- **S25 is open, with REP-07, REP-08 and REP-17 done** (`c74e062`, `bb3bc43`,
-  `11976cc`). Its
-  acceptance criterion is that **§3.3's representative program compiles**, which
-  nothing else in the repair can claim, and it is the most *visible* thing left.
-  **That program was measured directly at `bb3bc43`, and the stage's ordering note
-  is wrong about what stands between it and the compiler.** It needs REP-09
-  (`Counter[(Int, Int)]()`) *and* two rows the register did not have:
-  **REP-16** — there is no `m[key]` syntax at all, and §3.3 writes
-  `counts[point] += 1` — and **REP-17**, a trailing comma in an argument list,
-  **which has since landed**. Everything else in it already works, including `read lines(…)` with record
-  captures, `segment.x2`, `sign`/`abs`/`max`, `0..=distance`, the tuple literal,
-  `continue`, and `counts.values().count(|n| n >= 2)`. **REP-16 is the big one**
-  (a read form, a compound-assign form, an lvalue in the assignment grammar and a
-  per-collection lowering, plus §6.2's `min=`/`max=` to decide about); with REP-09
-  it is all that stands between §3.3 and the compiler.
+- **S25's acceptance criterion is met.** §3.3's representative program compiles
+  and runs, as `tests/aoc-corpus/s33_representative_program.px`. Getting there
+  took **five rows the register did not have** when the stage was written, found
+  one at a time because each was invisible until the one before it landed:
+  REP-16 (no subscript syntax), REP-17 (a trailing comma), REP-09 (turned from a
+  missing form into an *ambiguity* by REP-16), REP-18 (`values()` and
+  `count(pred)` — neither existed), REP-20 (a template literal beginning with a
+  space could never match), and REP-19 in framing only (the program is written at
+  top level, and a top-level statement never executes, so the corpus copy wraps
+  its body in `fn main()`).
 
-  The precedence table was renumbered by REP-07 — `||` at `bp(1, 2)`, `..` at
-  `bp(3, 4)`, `&&` at `bp(5, 6)`, then comparison, additive, multiplicative,
-  prefix `13`, `read` `15` — so **read the whole table** before adding to it.
-  **D16 is S25's open decision** (does `assert` take a message — i.e. does the
-  language get arity-based overloading or optional parameters), and the plan warns
-  against answering it by accident from `assert`'s case alone.
+  **Read the whole precedence table before adding to it** — REP-07 renumbered it:
+  `||` at `bp(1, 2)`, `..` at `bp(3, 4)`, `&&` at `bp(5, 6)`, then comparison,
+  additive, multiplicative, prefix `13`, `read` `15`.
 
-What S25 has delivered so far:
+What S25 has delivered:
 
 - **`&&` is `AMP2`, and `||` already worked.** REP-07's row overstates it: `||` was
   lexed, bound, typed and lowered with a real short circuit before this stage. The
@@ -2420,7 +2468,32 @@ What S25 has delivered so far:
   **`Y020` and `N007` are the next free codes.**
 - **A trailing comma closes a list, in all twelve of them.** Nine had the hole and
   three did not; fixing only `parse_arg_list` would have left the rest, and the
-  property is the grammar's rather than one function's.
+  property is the grammar's rather than one function's. (Thirteen now — a
+  subscript's index list is one.)
+- **A subscript is a catalog row** (ADR-064), under the unspellable names `[]` and
+  `[]=`. Dispatch on receiver shape *and arity* is what §5.7's table already is, so
+  the `HasMethod` deferral, TY-31's bounds, TY-32's invariants and monomorphization
+  are the ones a method call already gets. Six collections read, three store — and
+  the sets differ on purpose: a `Vec` element cannot be assigned through **any**
+  spelling in the language.
+- **A compound store carries its place once** (`TypedStmt::IndexAssign`). The
+  desugaring `m[k] += v` → `m[k] = m[k] + v` names the receiver and every index
+  twice, and MIR lowers each `TypedExpr` where it stands, so `m[f()] += 1` would
+  call `f` twice. Two gates hold that line.
+- **`stmt_exprs` is F20's `children` for statements.** Three walks over
+  `TypedStmt` named the fields by hand, and `IndexAssign` is the first statement
+  with three expressions.
+- **A type constructor's brackets are type arguments and every other name's are a
+  subscript** (ADR-065), decided from a closed list of names the parser holds —
+  because nothing else can: the brackets are identical and the contents are
+  ambiguous too. `m[k](7)` is what the rule protects.
+- **A keyed collection's enumeration order is fixed** (`maps::ordered_entries`,
+  by the key's rendered form). A `HashMap`'s order is randomized per process, and
+  for `keys()`/`values()` that would change a program's *answer* and not only its
+  printing — RT-16 with teeth. The two are index-aligned in consequence.
+- **A space run at either end of a template literal is the whitespace policy, not
+  text.** Both were also in the bytes the interpreter had to match, so the leading
+  one could never match at all.
 
 **S18 is still `D1`-blocked** and D1 is still open, so it is not the answer to
 "what next" either — see the S18 block below for what it needs.
