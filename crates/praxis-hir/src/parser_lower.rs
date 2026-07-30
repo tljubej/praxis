@@ -273,6 +273,20 @@ fn convert_constructor_call(
     // M9 constructors (§7.5) are dispatched by name before the M6
     // `Constructor::from_keyword` table — they have richer arg shapes (positional
     // + named) that the M6 table doesn't model.
+    if ctor_name == "repeated" {
+        // `repeated(P)` is not a parser in its own right — it is the marker on
+        // the final named argument of a `sections` call, and it means "consume
+        // every remaining section". Anywhere else there is nothing for it to
+        // repeat over, and it used to be dropped in silence (IP-09).
+        diagnostics.push(err_diag(
+            file,
+            span,
+            DiagCode::MisplacedRepeatedTail,
+            "`repeated(...)` is only the final named argument of a `sections` call (§7.5)"
+                .to_string(),
+        ));
+        return None;
+    }
     if ctor_name == "block" {
         return Some(build_block(args, span));
     }
@@ -409,10 +423,11 @@ fn convert_constructor_call(
             // `sections` with named args is the heterogeneous form (M9, §7.5):
             // build a `SectionsNamed`. A named arg whose value is a `repeated(P)`
             // call is the tail and consumes all remaining sections.
-            if ctor == Constructor::Sections
-                && args.iter().any(|a| matches!(a, CallArg::Named { .. }))
-            {
-                return Some(build_sections_named(args, span));
+            // A `RepeatedTail` is a named argument too — testing only for
+            // `Named` meant `sections(a: repeated(int), b: repeated(int))` did
+            // not reach the named path at all and was dropped in silence.
+            if ctor == Constructor::Sections && has_named_args {
+                return build_sections_named(args, file, diagnostics, span);
             }
             if let Some(CallArg::Parser(child)) = args.into_iter().next() {
                 Some(match ctor {
@@ -624,7 +639,46 @@ fn unwrap_repeated_child(call: &ParserExpr) -> Option<ParserExpr> {
 /// and becomes the `repeated_tail`. Positional args are not permitted in the
 /// heterogeneous form — if any appear, they are dropped with a diagnostic
 /// (validation surfaces the structural error).
-fn build_sections_named(args: Vec<CallArg>, span: Span) -> ParserAst {
+fn build_sections_named(
+    args: Vec<CallArg>,
+    file: FileId,
+    diagnostics: &mut Vec<Diagnostic>,
+    span: Span,
+) -> Option<ParserAst> {
+    // §7.5: `repeated(parser)` may appear only as the *final* named argument.
+    // Both halves of that rule used to be silent (IP-09): a second tail
+    // overwrote the first, and a tail written before other fields was moved to
+    // the end — so the program that ran was not the program that was written.
+    // `args` arrives in source order, which is what makes "last" checkable.
+    let tail_positions: Vec<usize> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| matches!(a, CallArg::RepeatedTail { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    if tail_positions.len() > 1 {
+        diagnostics.push(err_diag(
+            file,
+            span,
+            DiagCode::MisplacedRepeatedTail,
+            "`sections` takes at most one `repeated(...)` tail (§7.5)".to_string(),
+        ));
+        return None;
+    }
+    if let Some(&at) = tail_positions.first() {
+        if at != args.len() - 1 {
+            diagnostics.push(err_diag(
+                file,
+                span,
+                DiagCode::MisplacedRepeatedTail,
+                "a `repeated(...)` tail may appear only as the final named argument (§7.5): it \
+                 consumes every remaining section, so nothing can follow it"
+                    .to_string(),
+            ));
+            return None;
+        }
+    }
+
     let mut fields: Vec<(String, ParserAst)> = Vec::new();
     let mut repeated_tail: Option<(String, Box<ParserAst>)> = None;
     for arg in args {
@@ -642,11 +696,11 @@ fn build_sections_named(args: Vec<CallArg>, span: Span) -> ParserAst {
             _ => {}
         }
     }
-    ParserAst::SectionsNamed {
+    Some(ParserAst::SectionsNamed {
         fields,
         repeated_tail,
         span,
-    }
+    })
 }
 
 /// Build a `ParserAst::Block` from the args of a `block(item, ...)` call (M9,

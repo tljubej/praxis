@@ -59,6 +59,14 @@ fn has_input_error(text: &str) -> bool {
         .any(|d| d.code().category() == DiagnosticCategory::Input)
 }
 
+/// Whether `text` reports the given input-parser diagnostic. Stronger than
+/// [`has_input_error`]: it pins *which* rule fired, so a test cannot pass on
+/// some unrelated `I0xx` the change happened to provoke.
+fn reports_input_code(text: &str, code: praxis_source::DiagCode) -> bool {
+    let wanted = code.code();
+    analyze(text).diagnostics.iter().any(|d| d.code() == wanted)
+}
+
 /// Like [`has_type_error`] but also runs lowering, so diagnostics emitted during
 /// lowering (e.g. exhaustiveness Y120/Y121, which need the lowered patterns) are
 /// included. The exhaustiveness checker runs in `lower()`, not `analyze()`.
@@ -2790,6 +2798,54 @@ fn optional_rejects_extra_arguments() {
     assert!(
         has_input_error(src),
         "special constructors must validate source arity before discarding arguments"
+    );
+}
+
+/// **IP-09's second half.** §7.5: "`repeated(parser)` may appear only as the
+/// final named argument". Neither half of that was checked — a second tail
+/// silently overwrote the first, and a tail written before other fields was
+/// silently moved to the end, so the parser that ran was not the one written.
+#[test]
+fn a_repeated_tail_is_last_and_singular() {
+    use praxis_source::DiagCode;
+
+    // Misordered: `boards` consumes every remaining section, so `draws` after
+    // it can never match. This used to compile into the *reordered* parser.
+    assert!(
+        reports_input_code(
+            "let b = read sections(boards: repeated(matrix(int)), draws: csv(int))",
+            DiagCode::MisplacedRepeatedTail
+        ),
+        "a tail before another field silently reordered the call"
+    );
+
+    // Two tails: the second used to overwrite the first, so `a` vanished.
+    assert!(
+        reports_input_code(
+            "let b = read sections(a: repeated(int), b: repeated(int))",
+            DiagCode::MisplacedRepeatedTail
+        ),
+        "`sections` takes at most one tail"
+    );
+
+    // Outside `sections` there is nothing to repeat over. This used to fall
+    // through `Constructor::from_keyword`'s `?` and produce no diagnostic.
+    assert!(
+        reports_input_code(
+            "let b = read repeated(int)",
+            DiagCode::MisplacedRepeatedTail
+        ),
+        "a bare `repeated(...)` is not a parser"
+    );
+
+    // And the legal shape is still clean and still builds the tail last —
+    // `tests/aoc-corpus/m9_bingo.px`'s own call.
+    let legal = "let b = read sections(draws: csv(int), boards: repeated(matrix(int)))";
+    assert!(!has_input_error(legal), "the ordered form is legal");
+    assert_eq!(
+        scheme_of(legal, "b").as_deref(),
+        Some("{ draws: Vec[Int], boards: Vec[Grid[Int]] }"),
+        "the tail is the last field and it is a Vec of the repeated parser's result"
     );
 }
 

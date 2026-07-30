@@ -75,7 +75,19 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
                 seen.push(name.clone());
                 validate_node(child, errs);
             }
-            if let Some((_name, tail)) = repeated_tail {
+            // The tail is a field of the generated record too (IP-09). It used
+            // to be validated for its *parser* and never for its *name*, so
+            // `sections(items: lines(int), items: repeated(int))` synthesized a
+            // record with two fields called `items`.
+            if let Some((name, tail)) = repeated_tail {
+                if seen.contains(name) {
+                    errs.push(ValidationError {
+                        span: *span,
+                        code: DiagCode::DuplicateSectionField,
+                        message: format!("duplicate section field `{name}`"),
+                    });
+                }
+                seen.push(name.clone());
                 validate_node(tail, errs);
             }
         }
@@ -361,7 +373,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: repeated-tail names are omitted from duplicate-field validation"]
     fn repeated_section_tail_cannot_reuse_a_fixed_field_name() {
         let ast = ParserAst::SectionsNamed {
             fields: vec![("items".to_string(), atom())],
