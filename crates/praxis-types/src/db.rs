@@ -334,12 +334,23 @@ impl TypeDb {
     /// for it directly when it has learned something about a variable that makes
     /// quantifying it *wrong* even though no link says so.
     ///
-    /// The one caller today is TY-30: a variable a method was called on cannot
-    /// be quantified, because there is one lowered body per source function and
-    /// a method call in it lowers to exactly one catalog entry. Pinning the
-    /// receiver is what makes `fn total(values) { values.sum() }` come out
-    /// `Vec[Int] -> Int` — the answer §5.2 states — rather than a scheme whose
-    /// body no call site can lower.
+    /// Both callers are the same fact about lowering, from two doors: **there is
+    /// one lowered body per source function**, and monomorphization substitutes a
+    /// clone's types from the call site's *argument types* — it does not run the
+    /// constraint channel. So a variable only the channel can resolve must not be
+    /// quantified, or it reaches MIR unbound.
+    ///
+    /// - **TY-30** — a variable a method was called on. A method call lowers to
+    ///   exactly one catalog entry, and pinning the receiver is what makes
+    ///   `fn total(values) { values.sum() }` come out `Vec[Int] -> Int`, the
+    ///   answer §5.2 states, rather than a scheme whose body no call site can
+    ///   lower.
+    /// - **REP-03** (ADR-062) — the fresh item variable a `for` over an
+    ///   *unresolved* iterator mints. The deferred `Iterable { item }` is the only
+    ///   thing that ever says what it holds, and MIR reads it to type the loop
+    ///   variable's slot. The **iterator** is deliberately *not* pinned: MIR picks
+    ///   `len`/`get` from its static ctor, so one clone per iterable kind is what
+    ///   makes those symbols right.
     pub fn pin_to_level(&mut self, t: Type, site: Level) {
         self.lower_levels(t, site);
     }

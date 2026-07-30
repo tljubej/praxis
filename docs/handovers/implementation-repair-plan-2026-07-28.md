@@ -1889,6 +1889,11 @@ evidence and a stage owner should re-reproduce before fixing.
 They are separated from the table above for provenance only. They are scheduled,
 they have owning stages, and a stage is not done until its rows are.
 
+**One row is `unscheduled`: REP-15.** It is a P0 and it arrived after every stage
+that could own it was written. It needs a design decision and a vertical slice of
+its own — a new stage, on the model of D6/S17's `Range` work — so scheduling it is
+the next session's first decision, not a line in this table.
+
 | ID | Sev | Effort | Stage | Subsystem | Found | What |
 |---|---|---|---|---|---|---|
 | REP-01 | P0 | M | S24 | hir-mono | S17 unit 3 (`fb82f79`) | A top-level `fn` in **value position lowers to `Unit`**. `fn double(n: Int) -> Int { n * 2 }` then `let f = double\n f(3)` passes `praxis check` and **aborts the host with SIGBUS**: inference accepts it (a `fn`'s type *is* a `Func`), lowering evaluates the bare name to `Unit`, and `Inst::CallIndirect` reads that Unit's payload as a function pointer. Blocked on **D15**. |
@@ -1905,6 +1910,7 @@ they have owning stages, and a stage is not done until its rows are.
 | REP-12 | P2 | S | S23 | ty-ops | S15 (`b560e67`) | **`Grid` has no `len`, and a corpus program calls it.** `tests/aoc-corpus/day02_grid_of_char.px` calls `map.len()` on a `Grid[Char]` and gets `Y110` at *lowering*, so `praxis check` is clean and `praxis run` is not. The catalog has `width`/`height`. Either add `Grid.len` (cells, presumably) or fix the corpus program — but no Rust test covers the corpus directory, which is why nothing caught it; **the test is part of the fix**. |
 | REP-13 | P3 | S | S23 | ty-typedb | S17 unit 4 (`b6ab8eb`) | **A nullary collection renders with empty brackets.** `TypeDb::render` prints `[...]` whether or not there are arguments, so a `Y001` about a range says "found `Range[]`". Cosmetic; it predates TY-34 (`BitSet[]` has always done it). |
 | REP-14 | P2 | M | S26 | ty-scope | S13 (`de6b0e2`) | **A type-declaration cycle registers a fresh variable, silently.** `struct A { b: B }` / `struct B { a: A }` and `struct Node { next: Node }` come out of the declaration pass with a variable where the recursive member should be. ADR-052 puts *supporting* recursive types out of scope (they are equi- or iso-recursive types, a language feature) — this row is the narrower defect that survives either answer: the silence. Blocked on **D17**. |
+| REP-15 | P0 | L | **unscheduled** | mir-codegen | S26 REP-03 (`586a149`) | **Six of the nine iterable collections have no `for` lowering: iterating one segfaults or answers with garbage.** `for x in s` over a `Set`, `for i in b` over a `BitSet` and `for kv in c` over a `Counter` each pass `praxis check` and **kill the process**; `for kv in m` over a `Map` likewise; and a `MinHeap` is worse — `for x in h` over `[3, 1, 2]` sums to `4349199564`, a **silently wrong answer** out of a program that reports nothing. MIR's `get_symbol_for` has arms for `Vec`, `Deque` and `Range` and a `_ => VecGet` default, so a `Set` object's payload is read as a `Vec`'s; `len_symbol_for` has the same default. It is not a missing match arm: the runtime has **no indexed accessor** for `Set`, `BitSet`, `Map`, `Counter`, `Grid` or the heaps to select — `MapGet`/`CounterGet` are keyed lookups and `GridGet` takes `(x, y)`. So it needs an iteration protocol (an nth-member symbol per collection, or a cursor) plus a `for` lowering that uses it, which is D6's Range slice again at six times the width. `capability::iter_item` has claimed all nine are iterable since M8; nothing ever lowered six of them, and no test ran a `for` over one. **Needs a decision** on the protocol *and* on whether `for (k, v) in m` destructures, since `for kv in m` is the only spelling today (REP-10's tuple patterns are the other half of that). |
 
 ## 5. Stages
 

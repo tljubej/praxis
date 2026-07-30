@@ -5343,3 +5343,68 @@ fn a_fault_inside_a_fn_value_is_not_swallowed_by_its_adapter() {
     );
     assert!(rt.has_pending_fault(), "the DivByZero has to arrive");
 }
+
+/// **REP-03.** A `for` over an unannotated parameter runs, and runs against the
+/// iterable each call site chose.
+///
+/// The half no type test can see, and the one that says the *iterator* is still
+/// quantified. MIR picks the `len`/`get` runtime symbols from the iterator's
+/// **static** collection ctor, so one lowered body per iterable kind is not an
+/// optimization here — it is the only way the symbols can be right.
+/// Monomorphization is what provides them: the iterator stays a binder, so
+/// `total(v)` and `total(0..4)` in one program are two clones with `praxis_vec_*`
+/// and `praxis_range_*` respectively. Pinning the iterator instead — the obvious
+/// way to make the item resolvable — would have made this program a signature
+/// disagreement and never reached codegen at all.
+///
+/// The **element** is the other half: `copy` recorded the loop variable's type as
+/// the *collection's* before the fix, so it inferred `Vec[Vec[Int]]` and faulted
+/// with "value does not have the declared type" out of a program `praxis check`
+/// accepted.
+#[test]
+fn a_for_over_an_unannotated_parameter_runs_against_each_iterable_it_is_given() {
+    const TOTAL: &str = "fn total(r) { var t = 0\n for i in r { t = t + i }\n t }\n";
+
+    // One source function, three collection ctors, three sets of symbols.
+    for (main, want) in [
+        (
+            "fn main() -> Int { var v = Vec()\n v.push(10)\n v.push(20)\n total(v) }",
+            30,
+        ),
+        ("fn main() -> Int { total(0..4) }", 6),
+        (
+            "fn main() -> Int { var d = Deque()\n d.push_back(4)\n d.push_back(5)\n total(d) }",
+            9,
+        ),
+        // …and all three in one program, which is where the clones have to be
+        // distinct: a single body reusing `praxis_vec_len` on a `Range` reads a
+        // length out of the wrong payload word.
+        (
+            "fn main() -> Int { var v = Vec()\n v.push(10)\n v.push(20)\n \
+             var d = Deque()\n d.push_back(4)\n \
+             total(v) + total(0..4) + total(d) }",
+            40,
+        ),
+    ] {
+        let (rt, result) = run_main(&format!("{TOTAL}{main}"));
+        assert!(!rt.has_pending_fault(), "faulted: {main}");
+        assert_eq!(result.as_int(), want, "{main}");
+    }
+
+    // The element half: a `Vec` built out of an unannotated iterable holds the
+    // *elements*, and this is the program that faulted at run time before.
+    const COPY: &str = "fn copy(vs) { var o = Vec()\n for v in vs { o.push(v) }\n o }\n";
+    let (rt, result) = run_main(&format!(
+        "{COPY}fn main() -> Int {{ var s = Vec()\n s.push(7)\n s.push(9)\n \
+         let d = copy(s)\n d.get(0) + d.get(1) }}"
+    ));
+    assert!(!rt.has_pending_fault(), "copy over a Vec faulted");
+    assert_eq!(result.as_int(), 16);
+    // …and the same body over a different ctor, so the element type is read from
+    // the argument and not from the first use.
+    let (rt, result) = run_main(&format!(
+        "{COPY}fn main() -> Int {{ let d = copy(1..4)\n d.len() + d.get(2) }}"
+    ));
+    assert!(!rt.has_pending_fault(), "copy over a Range faulted");
+    assert_eq!(result.as_int(), 6);
+}

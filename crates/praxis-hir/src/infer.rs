@@ -439,6 +439,50 @@ impl Inferer {
         );
     }
 
+    /// Answer an `Iterable` requirement whose receiver has since resolved: get
+    /// the item that receiver actually yields, and **unify** it with the one the
+    /// constraint carries (REP-04).
+    ///
+    /// This is the other end of REP-03. `capability::check` answers iterability
+    /// as a yes/no, which is all it can do — its failure shape is "the offending
+    /// type" and "iterates, but not at that element type" is a *mismatch*. So a
+    /// constraint that discharged at a differently-itemed iterable was silently
+    /// accepted:
+    ///
+    /// ```praxis
+    /// fn total(r) { var t = 0
+    ///   for i in r { t = t + i }        // requires Iterable { item = Int }
+    ///   t }
+    /// fn main() -> Int { total(names) } // names: Vec[Text] — accepted, before
+    /// ```
+    ///
+    /// Unifying is also what makes the requirement *productive* rather than
+    /// merely permissive: when the item is the fresh variable `iter_item` minted
+    /// for an unresolved iterator, this is the only thing that ever says what the
+    /// loop variable holds — the same role `resolve_deferred_method` plays for
+    /// `HasMethod`, and the reason both are discharged by resolving rather than by
+    /// checking.
+    ///
+    /// A receiver that is not iterable **at all** is still the channel's to
+    /// report, unchanged: `Y005` at the use site with the `for` as the note.
+    fn resolve_deferred_iterable(&mut self, c: &Constraint, item: Type) {
+        let receiver = self.db.follow(c.var_type());
+        let Some(yielded) = crate::capability::iter_item(&mut self.db, receiver) else {
+            let offender = self.db.follow(receiver);
+            self.report_cap_failure(&c.cap, offender, c.report_at(), c.origin_note());
+            return;
+        };
+        // `item` is what the body requires and `yielded` is what this receiver
+        // provides, so the mismatch reads "expected `Int`, found `Text`".
+        if let Err(e) = self.db.unify(item, yielded) {
+            let mut diag = self.unify_diagnostic(c.report_at(), e);
+            if let Some(origin) = c.origin_note() {
+                diag = diag.with_note(origin, "this is the operation that requires it");
+            }
+            self.diagnostics.push(diag);
+        }
+    }
+
     /// Enforce what a catalog entry declares about its own type variables
     /// (TY-31).
     ///
@@ -533,6 +577,13 @@ impl Inferer {
                 self.resolve_deferred_method(&c);
                 continue;
             }
+            // `Iterable` is the second: it *produces* the item type, so it is
+            // discharged by unifying that item rather than by asking whether the
+            // receiver iterates at all (REP-04).
+            if let Capability::Iterable { item } = c.cap {
+                self.resolve_deferred_iterable(&c, item);
+                continue;
+            }
             let ty = c.var_type();
             if let Err(offender) = crate::capability::check(&mut self.db, self.catalog, ty, &c.cap)
             {
@@ -578,15 +629,24 @@ impl Inferer {
     }
 
     fn diag_unify(&mut self, at: FileSpan, err: UnifyError) {
+        let diag = self.unify_diagnostic(at, err);
+        self.diagnostics.push(diag);
+    }
+
+    /// The diagnostic for `err`, **unpushed** — for the one caller that has a
+    /// second span to attach before it goes out.
+    ///
+    /// A deferred `Iterable` reports at the use site and explains itself at the
+    /// `for` (ADR-057 decision 2), and `Diagnostic::with_note` is what adds the
+    /// second span; a helper that pushes cannot be given one.
+    fn unify_diagnostic(&self, at: FileSpan, err: UnifyError) -> Diagnostic {
         match err {
             UnifyError::Mismatch { expected, found } => {
                 let e = self.db.render(expected);
                 let f = self.db.render(found);
-                self.diagnostics.push(type_mismatch(at, &e, &f));
+                type_mismatch(at, &e, &f)
             }
-            UnifyError::Occurs { .. } => {
-                self.diagnostics.push(infinite_type(at));
-            }
+            UnifyError::Occurs { .. } => infinite_type(at),
         }
     }
 
@@ -2035,21 +2095,50 @@ impl Inferer {
 
     /// `for binding in iter { body }` (M8, §4.11). The iterator must be iterable
     /// (§5.4); the binding gets the element type. `for` yields Unit.
+    ///
+    /// **An unannotated iterated parameter is generic in the iterable and
+    /// monomorphic in the item** (REP-03). `iter_item` answers an unresolved
+    /// iterator with a *fresh* item variable, so the two are related by the
+    /// deferred `Iterable { item }` constraint rather than by being the same
+    /// variable — which is what `fn total(r) { … for i in r { t = t + i } … }`
+    /// needs, because pinning the item used to pin the iterator with it.
+    ///
+    /// That fresh variable is then **pinned to the declaration group's level**,
+    /// for ADR-057 Decision 5's reason and no other: there is one lowered body per
+    /// source function, and monomorphization substitutes a clone's types from the
+    /// call site's *arguments*. It does not run the constraint channel, so an
+    /// item variable the channel is the only resolver of would reach MIR unbound —
+    /// and MIR reads the item type to type the loop variable's slot. The
+    /// **iterator** stays quantified, which is what lets one `for` body lower
+    /// against `Vec`, `BitSet` and `Range`: each is its own clone, and each
+    /// clone's `len`/`get` symbols are selected from a concrete ctor.
+    ///
+    /// So `total` generalizes to "any iterable of `Int`". Two call sites that
+    /// disagree about the *element* are a disagreement about `total`'s signature,
+    /// exactly as two receivers at one method call site are (ADR-057 D5).
     fn infer_for(&mut self, f: &ForExpr) -> Type {
         let iter_ty = f
             .iter()
             .map(|i| self.infer_expr(&i))
             .unwrap_or_else(|| self.db.fresh_var());
+        // Whether the iterator is still a variable, asked *before* `iter_item`
+        // mints anything: it decides both that the requirement will be deferred
+        // and that the item is a fresh variable needing the pin above.
+        let iter_deferred = self.db.var_id_of(self.db.follow(iter_ty)).is_some();
         // The iterator must be iterable; `iter_item` returns the element type
         // (None → Y005 not_iterable). Record the element type on the binding's
         // reference range so the lowerer can read it.
         let item_ty = crate::capability::iter_item(&mut self.db, iter_ty);
-        // An unresolved iterator yields *itself* from `iter_item`, which is the
-        // optimism that let `fn drain(values) { for v in values { … } }` accept
-        // `drain(1)`: the requirement was answered against a variable and then
-        // discarded at generalization. Defer it instead (TY-29). A concrete
-        // iterator is decided here, exactly as before.
+        // An unresolved iterator's requirement cannot be answered here: it may be
+        // generalized and then instantiated at a type that is not iterable at all,
+        // which is what let `fn drain(values) { for v in values { … } }` accept
+        // `drain(1)` (TY-29). Defer it. A concrete iterator is decided on the
+        // spot, exactly as before.
         if let Some(item) = item_ty {
+            if iter_deferred {
+                let site = self.decl_site;
+                self.db.pin_to_level(item, site);
+            }
             self.require_cap(
                 iter_ty,
                 Capability::Iterable { item },

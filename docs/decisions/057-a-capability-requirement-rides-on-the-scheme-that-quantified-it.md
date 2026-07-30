@@ -238,7 +238,9 @@ unified — is a compile error to add halfway.
 - **Generalization has a second rule now**, and it is a rule about lowering:
   level and *pinning*. `pin_to_level` is the only way to state it, and TY-30 is
   its only caller. A future stage that gives mono its own method resolution could
-  lift the pin; nothing else can.
+  lift the pin; nothing else can. *(ADR-062 gives it a second caller: a `for`'s
+  item variable, for the same reason — mono substitutes from the call site's
+  argument types and does not run this channel.)*
 - **A requirement the receiver's own type carries reaches through a deferred
   method.** `resolve_deferred_method` calls `require_collection_invariants` on the
   receiver it just learned, so `fn store(m, k) { m.insert(k, 1) }` refuses a
@@ -259,11 +261,17 @@ unified — is a compile error to add halfway.
   capability whose discharge writes to `method_refs` rather than answering a
   yes/no. Its gate is
   `collection_method_constrains_unannotated_receiver_parameter`.
-- **`Iterable`'s `item` is not unified at discharge.** `check` answers the
+- ~~**`Iterable`'s `item` is not unified at discharge.** `check` answers the
   yes/no; which item type a receiver yields is established where the `for` is
   inferred. A constraint that resolves to a *differently*-itemed iterable would
   not be caught — no finding asks for it, and `iter_item` is a function of the
-  receiver alone.
+  receiver alone.~~ **Superseded by ADR-062** (REP-04). Two findings asked for it
+  in the end, and they are one fix: `iter_item` answering an unresolved receiver
+  with *itself* is why a `for` over an unannotated parameter pinned that parameter
+  to its own element type (REP-03), and unifying the item at discharge is what
+  makes the fresh variable that replaces it resolvable. `Iterable` is discharged
+  by `Inferer::resolve_deferred_iterable` now, and is the second capability that
+  resolves rather than answers.
 - **A `Bound::Cap` arm has no catalog row (Decision 6).** Nothing in the
   catalog needs one, because the receiver's type already answers those
   questions. The next row that genuinely does — a registered `sorted`, a

@@ -83,12 +83,22 @@ pub fn check(
         Capability::Kind(CapKind::Numeric) => {
             fail_unless(supports_numeric(db, t), db, t, CapKind::Numeric)
         }
-        // Iterability is a yes/no about the receiver; *which* item it yields is
-        // established by unification at the discharge site, not here.
-        Capability::Iterable { .. } => match iter_item(db, t) {
-            Some(_) => Ok(()),
-            None => Err(db.follow(t)),
-        },
+        // Iterability is a yes/no about the receiver. *Which* item it yields is
+        // unified by `Inferer::resolve_deferred_iterable`, which is the only
+        // caller that has both an item to relate it to and somewhere to report a
+        // disagreement (REP-04): the failure here is `Err(offending type)`, and
+        // "iterates, but not at that element type" is a mismatch and not that.
+        Capability::Iterable { .. } => {
+            if db.var_id_of(db.follow(t)).is_some() {
+                // Still a variable: optimistically yes, as everywhere else — and
+                // without minting the fresh item `iter_item` would answer with.
+                return Ok(());
+            }
+            match iter_item(db, t) {
+                Some(_) => Ok(()),
+                None => Err(db.follow(t)),
+            }
+        }
         Capability::HasMethod { name, params, .. } => {
             if db.var_id_of(db.follow(t)).is_some() {
                 // Still a variable: optimistically yes, as everywhere else.
@@ -376,11 +386,31 @@ pub fn supports_ord(db: &TypeDb, t: Type) -> bool {
 /// `MinHeap[T]`/`MaxHeap[T]` yields `T`; a `BitSet` yields `Int`; a `Grid[T]`
 /// yields its cell type `T`; a `Range` yields `Int`. A `Map[K, V]` yields the
 /// `(K, V)` tuple (so a pipeline over a map threads key/value pairs). Functions,
-/// scalars, records, enums, and tuples are not iterable. An unresolved type
-/// variable is optimistically iterable, yielding itself (inference will pin it).
+/// scalars, records, enums, and tuples are not iterable.
+///
+/// # An unresolved receiver yields a *fresh* variable (REP-03)
+///
+/// It used to yield **itself**, and that is a legal program rejected:
+///
+/// ```praxis
+/// fn total(r) { var t = 0
+///   for i in r { t = t + i }
+///   t }
+/// ```
+///
+/// The loop variable and the iterator came back as one variable, so `t + i`
+/// pinned the *iterator* to `Int` and the `for` reported `Y005` — "values of
+/// type `Int` cannot be iterated" — about a parameter the program never typed.
+/// Identically for `Vec`, `BitSet` and `Range`, which is why TY-34's gates all
+/// annotate their iterated parameters.
+///
+/// A fresh variable is also what gives the deferred `Iterable { item }`
+/// constraint two things to relate, which is what makes REP-04 checkable at all:
+/// `Inferer::resolve_deferred_iterable` unifies the item this function answers
+/// with the one the constraint carries once the receiver is known.
 ///
 /// Takes `&mut TypeDb` because the `Map[K, V]` and `Counter[T]` cases mint fresh
-/// tuple types to return as the `Item`.
+/// tuple types to return as the `Item` — and because of the arm above.
 #[must_use]
 pub fn iter_item(db: &mut TypeDb, t: Type) -> Option<Type> {
     use praxis_stdlib::type_pattern::{CollectionCtor, ScalarType};
@@ -389,7 +419,7 @@ pub fn iter_item(db: &mut TypeDb, t: Type) -> Option<Type> {
     // `db.scalar` calls below.
     let shape = match db.data(db.follow(t)) {
         TypeData::Collection { ctor, args } => Some((*ctor, args.clone())),
-        TypeData::Var(_) => return Some(t),
+        TypeData::Var(_) => return Some(db.fresh_var()),
         _ => None,
     }?;
     let (ctor, args) = shape;

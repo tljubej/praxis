@@ -3917,3 +3917,147 @@ fn a_pattern_naming_more_values_than_the_variant_holds_is_reported() {
         assert!(is_clean_with_lower(src), "{src} must still be accepted");
     }
 }
+
+/// **REP-03.** A `for` over an unannotated parameter is generic in the
+/// **iterable** and monomorphic in the **element** — the two are no longer one
+/// variable.
+///
+/// `iter_item` answered an unresolved receiver with *itself*, so the loop
+/// variable and the iterator came back as the same type. Two things followed, and
+/// both were wrong:
+///
+/// - `t = t + i` pinned that one variable to `Int`, and the `for` then reported
+///   `Y005` "values of type `Int` cannot be iterated" — about a parameter the
+///   program never typed. A legal program rejected, identically for `Vec`,
+///   `BitSet` and `Range`, which is why TY-34's gates all annotate.
+/// - When nothing pinned it, the loop variable's recorded type was the
+///   *collection's*: `fn copy(vs) { var o = Vec()\n for v in vs { o.push(v) }\n
+///   o }` inferred `o: Vec[Vec[Int]]` and faulted at run time with "value does
+///   not have the declared type" — out of a program `praxis check` accepted.
+///
+/// So the assertion is not only "accepted": it is what `total` *is*. `forall T.
+/// (T) -> Int` — any iterable, of `Int` — where it used to be `(Int) -> Int`.
+#[test]
+fn an_unannotated_iterated_parameter_is_generic_in_the_iterable_not_its_element() {
+    const TOTAL: &str = "fn total(r) { var t = 0\n for i in r { t = t + i }\n t }\n";
+
+    // The rule, as the type. The iterable is quantified; the element is not,
+    // because `t + i` said what it is.
+    let scheme = scheme_of(TOTAL, "total").expect("total has a scheme");
+    insta::assert_snapshot!(scheme, @"forall T. (T) -> Int");
+
+    // …and it is satisfied by each of the three iterables the finding names.
+    // `Vec` and `Range` also *run*; a `BitSet` has no element accessor in the
+    // runtime, so this is the criterion's "accepted" and no more (see REP-15).
+    for call in [
+        "fn main() -> Int { var v = Vec()\n v.push(1)\n total(v) }",
+        "fn main() -> Int { total(0..4) }",
+        "fn main() -> Int { var b = BitSet()\n b.insert(3)\n total(b) }",
+        // A `Deque` too, so "iterable" is a property and not a three-name list.
+        "fn main() -> Int { var d = Deque()\n d.push_back(1)\n total(d) }",
+    ] {
+        assert!(
+            !has_type_error(&format!("{TOTAL}{call}")),
+            "must be accepted: {call}"
+        );
+    }
+
+    // Two *different* iterable kinds at the same element type are two
+    // instantiations of one signature, which is what "an iterable of `Int`"
+    // means. A `Vec` and a `Range` in one program is not a disagreement.
+    assert!(!has_type_error(&format!(
+        "{TOTAL}fn main() -> Int {{ var v = Vec()\n v.push(1)\n total(v) + total(0..4) }}"
+    )));
+
+    // The loop variable is the **element**, not the collection: this is the half
+    // that faulted at run time rather than being reported. `o` is a `Vec[Int]`
+    // now, so returning it as one is accepted and returning `Vec[Vec[Int]]` is
+    // not.
+    const COPY: &str = "fn copy(vs) { var o = Vec()\n for v in vs { o.push(v) }\n o }\n";
+    assert!(!has_type_error(&format!(
+        "{COPY}fn main() -> Int {{ var s = Vec()\n s.push(1)\n let d: Vec[Int] = copy(s)\n d.len() }}"
+    )));
+    assert!(has_type_error(&format!(
+        "{COPY}fn main() -> Int {{ var s = Vec()\n s.push(1)\n let d: Vec[Vec[Int]] = copy(s)\n d.len() }}"
+    )));
+
+    // An annotated parameter is untouched — the shape every existing gate uses.
+    assert!(!has_type_error(
+        "fn total(r: Vec[Int]) -> Int { var t = 0\n for i in r { t = t + i }\n t }"
+    ));
+    // …and a concrete non-iterable is still `Y005` where it is written.
+    assert!(has_type_error(
+        "fn main() -> Unit { for i in 3 { out(i) } }"
+    ));
+}
+
+/// **REP-04.** An `Iterable` requirement is discharged by **unifying** the item,
+/// so a receiver that iterates at the wrong element type is reported.
+///
+/// `capability::check` answers iterability as a yes/no — its failure shape is
+/// "the offending type", and "iterates, but not at that element type" is a
+/// *mismatch*, not that. So a constraint carried through generalization and
+/// discharged at a differently-itemed iterable was silently accepted. This is the
+/// half that has never had a test, and it could not have had one before REP-03:
+/// on the unfixed tree the same program reports `Y005` at the `for`, because
+/// pinning the element pinned the iterator with it.
+///
+/// The report goes to the **use site** with the `for` as its note (ADR-057
+/// decision 2): `for i in r { t = t + i }` is correct for every other
+/// instantiation of `total`.
+#[test]
+fn an_iterable_requirement_is_checked_at_the_element_type_the_body_needs() {
+    const TOTAL: &str = "fn total(r) { var t = 0\n for i in r { t = t + i }\n t }\n";
+
+    // A `Vec[Text]` iterates. It does not iterate `Int`s, which is what the body
+    // requires — reported, with the note.
+    let diags = analyze_and_lower_diags(&format!(
+        "{TOTAL}fn main() -> Int {{ var names = Vec()\n names.push(\"a\")\n total(names) }}"
+    ));
+    let mismatch = diags
+        .iter()
+        .find(|d| d.code().to_string() == "Y001")
+        .unwrap_or_else(|| panic!("expected Y001, got {diags:?}"));
+    assert!(
+        mismatch.message().contains("Int") && mismatch.message().contains("Text"),
+        "the message names both element types: {}",
+        mismatch.message()
+    );
+    assert!(
+        !mismatch.notes().is_empty(),
+        "the requirement's own span is the note"
+    );
+
+    // Every differently-itemed iterable is the same answer, whatever its ctor.
+    for call in [
+        "fn main() -> Int { var m = Map()\n m.insert(1, 2)\n total(m) }",
+        "fn main() -> Int { var v = Vec()\n v.push(1.5)\n total(v) }",
+        "fn main() -> Int { var s = Set()\n s.insert(\"a\")\n total(s) }",
+    ] {
+        assert!(
+            has_type_error(&format!("{TOTAL}{call}")),
+            "a differently-itemed receiver must be reported: {call}"
+        );
+    }
+
+    // Not iterable **at all** is still the channel's own `Y005`, unchanged —
+    // TY-29's gate, restated here because this is the function that now decides
+    // both outcomes.
+    let diags = analyze_and_lower_diags(&format!("{TOTAL}fn main() -> Int {{ total(1) }}"));
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y005"),
+        "an Int is not iterable at any element type: {diags:?}"
+    );
+
+    // …and the right element type is accepted at every one of those ctors, so the
+    // check is a real unification and not "reject the unfamiliar".
+    for call in [
+        "fn main() -> Int { var v = Vec()\n v.push(1)\n total(v) }",
+        "fn main() -> Int { var s = Set()\n s.insert(1)\n total(s) }",
+    ] {
+        assert!(
+            !has_type_error(&format!("{TOTAL}{call}")),
+            "an Int-itemed receiver is accepted: {call}"
+        );
+    }
+}
