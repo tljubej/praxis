@@ -6387,3 +6387,78 @@ fn a_destructuring_for_binding_reads_each_item_apart() {
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 12 + 34);
 }
+
+/// **REP-28.** A field read on an unannotated parameter reads the field, and the
+/// call site is what says which record it is.
+///
+/// The half no type test can see: §4.9's own example did not merely fail to
+/// typecheck — it passed `praxis check` and then failed at lowering, so what has
+/// to be shown is that the *index* is right, at each field, through each shape a
+/// record can be reached in.
+#[test]
+fn a_field_read_on_an_unannotated_parameter_reads_that_records_field() {
+    // §4.9's example, verbatim in shape: both fields, weighted so a swapped index
+    // is a different answer.
+    let (rt, result) = run_main(
+        "struct P { x: Int, y: Int }\n\
+         fn dist(a) -> Int { a.x * 10 + a.y }\n\
+         fn main() -> Int { dist(P { x: 3, y: 7 }) }\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 37);
+
+    // A field that is not the first, on a record with a `Text` between two `Int`s
+    // — the index is read from the definition and not from the order of use.
+    let (rt, result) = run_main(
+        "struct R { a: Int, tag: Text, b: Int }\n\
+         fn back(r) -> Int { r.b }\n\
+         fn main() -> Int { back(R { a: 1, tag: \"t\", b: 9 }) }\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 9);
+
+    // Chained through a second unannotated parameter: `outer.inner` is a deferred
+    // read whose result is itself a record, and `.x` on it is a second deferred
+    // read that only the first one's discharge can resolve.
+    let (rt, result) = run_main(
+        "struct Inner { x: Int }\n\
+         struct Outer { inner: Inner }\n\
+         fn deep(o) -> Int { o.inner.x }\n\
+         fn main() -> Int { deep(Outer { inner: Inner { x: 42 } }) }\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+
+    // The field's own type is what the read produces, so a `Text` field reached
+    // through an unannotated parameter is usable as a `Text`.
+    let (rt, result) = run_main(
+        "struct N { name: Text, n: Int }\n\
+         fn label(v) -> Int { v.name.len() }\n\
+         fn main() -> Int { label(N { name: \"abcd\", n: 0 }) }\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4);
+
+    // The record may arrive from a collection rather than a literal — the call
+    // site pins it either way.
+    let (rt, result) = run_main(
+        "struct P { x: Int, y: Int }\n\
+         fn sumx(p) -> Int { p.x }\n\
+         fn main() -> Int {\n  let ps = Vec()\n  ps.push(P { x: 5, y: 0 })\n  \
+         ps.push(P { x: 6, y: 0 })\n  var t = 0\n  \
+         for p in ps { t = t + sumx(p) }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 11);
+
+    // …and the read survives 200 allocations between the call and the use, so the
+    // receiver is a rooted value and not a stale view.
+    let (rt, result) = run_main(
+        "struct P { x: Int, y: Int }\n\
+         fn far(p) -> Int {\n  let scratch = Vec()\n  var i = 0\n  \
+         while i < 200 { scratch.push(P { x: i, y: i })\n i = i + 1 }\n  p.x + p.y\n}\n\
+         fn main() -> Int { far(P { x: 11, y: 22 }) }\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 33);
+}

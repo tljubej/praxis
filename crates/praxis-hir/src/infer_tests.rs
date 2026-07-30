@@ -5179,3 +5179,89 @@ fn a_record_literals_head_must_name_a_struct() {
         "an undefined head is N001 alone: {diags:?}"
     );
 }
+
+/// **REP-28.** A field read constrains its receiver, so §4.9's own example
+/// compiles.
+///
+/// `struct P { x: Int, y: Int }` / `fn dist(a) -> Int { a.x + a.y }` /
+/// `out(dist(P { x: 1, y: 2 }))` passed `praxis check` clean and then failed under
+/// `praxis run` with `Y112`: `infer_field_get` answered an unresolved receiver with
+/// a fresh variable and recorded nothing, so `a` was generalized with no
+/// requirement to re-ask at the call. This is TY-30 at the third door, through
+/// `require_cap` — a predicate called directly is TY-29 by another name.
+#[test]
+fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
+    // §4.9's own example, and it is clean through lowering — which is what
+    // "passed `check` and failed under `run`" means it was not.
+    assert!(is_clean_with_lower(
+        "struct P { x: Int, y: Int }\n\
+         fn dist(a) -> Int { a.x + a.y }\n\
+         out(dist(P { x: 1, y: 2 }))\n"
+    ));
+
+    // The call site is what says which record it is, and the parameter comes out
+    // at that record — not `forall T. (T) -> …`.
+    let src = "struct P { x: Int, y: Int }\n\
+               fn getx(a) { a.x }\n\
+               out(getx(P { x: 1, y: 2 }))\n";
+    assert_eq!(scheme_of(src, "getx").as_deref(), Some("(P) -> Int"));
+
+    // The field's own type is what the read produces, so the result follows the
+    // field and not the arithmetic that happens to use it.
+    let src = "struct N { name: Text, n: Int }\n\
+               fn label(v) { v.name }\n\
+               out(label(N { name: \"t\", n: 1 }))\n";
+    assert_eq!(scheme_of(src, "label").as_deref(), Some("(N) -> Text"));
+
+    // Chained: the outer read's discharge is what makes the inner one
+    // dischargeable, so a two-deep read on an unannotated parameter resolves.
+    assert!(is_clean_with_lower(
+        "struct Inner { x: Int }\nstruct Outer { inner: Inner }\n\
+         fn deep(o) -> Int { o.inner.x }\n\
+         out(deep(Outer { inner: Inner { x: 42 } }))\n"
+    ));
+
+    // **The receiver is pinned, not quantified** (ADR-057 decision 5's rule at
+    // this door): there is one lowered body per source function and
+    // `lower_field_get` reads one record definition for the field's index, so two
+    // call sites at two records are a disagreement about the signature.
+    let diags = analyze_and_lower_diags(
+        "struct P { x: Int, y: Int }\nstruct Q { x: Text }\n\
+         fn getx(a) { a.x }\nout(getx(P { x: 1, y: 2 }))\nout(getx(Q { x: \"t\" }))\n",
+    );
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y001"),
+        "two records at one field-read site is Y001, got {diags:?}"
+    );
+
+    // A receiver the program pins to a record **without** the field is still
+    // `Y112` at lowering, from its one emitter — the same division `HasMethod`
+    // keeps with `Y110`, and the reason a never-called generic body reports there
+    // rather than here.
+    let diags = analyze_and_lower_diags(
+        "struct P { x: Int, y: Int }\nfn getz(a) { a.z }\nout(getz(P { x: 1, y: 2 }))\n",
+    );
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y112"),
+        "expected Y112, got {diags:?}"
+    );
+
+    // A concrete receiver that is not a record at all is unchanged, and so is a
+    // concrete record's own field read — the fast path is still the fast path.
+    let diags = analyze_and_lower_diags("let n = 1\nout(n.x)\n");
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y112"),
+        "expected Y112, got {diags:?}"
+    );
+    assert!(is_clean_with_lower(
+        "struct P { x: Int, y: Int }\nlet p = P { x: 1, y: 2 }\nout(p.x + p.y)\n"
+    ));
+
+    // The requirement rides the scheme rather than being decided once: a helper
+    // that reads a field of *another* helper's parameter resolves through both.
+    assert!(is_clean_with_lower(
+        "struct P { x: Int, y: Int }\n\
+         fn getx(a) { a.x }\nfn twice(b) { getx(b) + getx(b) }\n\
+         out(twice(P { x: 4, y: 0 }))\n"
+    ));
+}

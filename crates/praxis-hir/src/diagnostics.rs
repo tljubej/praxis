@@ -424,6 +424,22 @@ pub(crate) fn unknown_method(at: FileSpan, name: &str, ty: &str) -> Diagnostic {
     )
 }
 
+/// `Y112` at a *use* site rather than at a field name — [`unknown_method`]'s
+/// counterpart for `Capability::HasField` (REP-28).
+///
+/// The honest translation of the capability, and the match arm that names it is
+/// what keeps it honest if a second emitter appears. `require_field` defers only a
+/// receiver that is still a variable, and a deferred one is resolved rather than
+/// vetoed, so nothing reaches this today.
+pub(crate) fn unknown_field(at: FileSpan, name: &str, ty: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::NoFieldOnType,
+        format!("no field `{name}` on type `{ty}`"),
+        at,
+    )
+}
+
 /// `Y007` — a type constructor in an annotation was given the wrong number of
 /// type arguments, e.g. `Map[Int]` or `Vec[Int, Text]`.
 ///

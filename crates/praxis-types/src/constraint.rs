@@ -59,6 +59,16 @@ pub enum Capability {
         params: Vec<Type>,
         result: Type,
     },
+    /// Has a field `name` of type `ty`. Emitted by a field read on a receiver
+    /// whose type is not yet known (REP-28) — the third capability discharged by
+    /// *resolving* rather than by answering a yes/no, because the field's type is
+    /// something the read produces and nothing else says.
+    ///
+    /// Without it `fn dist(a) -> Int { a.x + a.y }` constrained `a` not at all:
+    /// the read answered a fresh variable, `a` was generalized, and §4.9's own
+    /// example passed `praxis check` and then failed under `praxis run` with
+    /// `Y112`.
+    HasField { name: String, ty: Type },
 }
 
 impl Capability {

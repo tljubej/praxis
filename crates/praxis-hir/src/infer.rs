@@ -503,6 +503,68 @@ impl Inferer {
         );
     }
 
+    /// Require `receiver` to have a field `name` of type `ty` — the deferred half
+    /// of a field read (REP-28).
+    ///
+    /// This is TY-30's shape at the third door. A field read whose receiver was
+    /// still a variable constrained **nothing**: `infer_field_get` answered a fresh
+    /// variable and recorded no requirement, so the parameter was generalized and
+    /// the read failed later. §4.9's own example is the reproduction —
+    /// `struct P { x: Int, y: Int }` / `fn dist(a) -> Int { a.x + a.y }` /
+    /// `out(dist(P { x: 1, y: 2 }))` passed `praxis check` and then failed under
+    /// `praxis run` with `Y112` "no field `x` on this type".
+    ///
+    /// Going through [`require_cap`](Self::require_cap) rather than deciding here
+    /// is the discipline the progress doc names: a predicate called directly is
+    /// TY-29 by another name — the answer is thrown away at generalization and
+    /// never re-asked at the use site.
+    ///
+    /// **The receiver and the field's type are pinned to the declaration group's
+    /// level**, for ADR-057 Decision 5's reason and ADR-062 Decision 2's: there is
+    /// one lowered body per source function, and monomorphization substitutes from
+    /// the call site's argument types without running this channel. `lower_field_get`
+    /// reads the receiver's *record definition* to get the field's index, so one
+    /// field-read site carries one record type. Two call sites that disagree about
+    /// it are a disagreement about the function's signature, exactly as two
+    /// receivers at one method call site are.
+    fn require_field(&mut self, receiver: Type, name: String, ty: Type, at: TextRange) {
+        let site = self.decl_site;
+        self.db.pin_to_level(receiver, site);
+        self.db.pin_to_level(ty, site);
+        self.require_cap(receiver, Capability::HasField { name, ty }, at);
+    }
+
+    /// Answer a `HasField` requirement whose receiver has since resolved: ask that
+    /// record what the field holds and **unify** it with the type the read handed
+    /// back (REP-28).
+    ///
+    /// The third capability discharged by *producing* rather than by checking, and
+    /// for the same reason as the other two: the deferred read returned a bare
+    /// variable, and this is the only thing that ever says what it holds.
+    ///
+    /// A receiver that turns out to have no such field is left alone here, exactly
+    /// as `HasMethod` leaves `Y110` to lowering: `Y112` has one emitter, it has the
+    /// field-name span, and it fires for both shapes that reach it. Reporting here
+    /// as well would be the same mistake twice.
+    fn resolve_deferred_field(&mut self, c: &Constraint, name: &str, ty: Type) {
+        let receiver = self.db.follow(c.var_type());
+        let field = match self.db.data(receiver) {
+            praxis_types::TypeData::Record { def, args } => {
+                let (def, args) = (*def, args.to_vec());
+                self.db.record_field_of(def, &args, name).map(|(_, t)| t)
+            }
+            _ => None,
+        };
+        let Some(field) = field else { return };
+        if let Err(e) = self.db.unify(ty, field) {
+            let mut diag = self.unify_diagnostic(c.report_at(), e);
+            if let Some(origin) = c.origin_note() {
+                diag = diag.with_note(origin, "this is the operation that requires it");
+            }
+            self.diagnostics.push(diag);
+        }
+    }
+
     /// Answer an `Iterable` requirement whose receiver has since resolved: get
     /// the item that receiver actually yields, and **unify** it with the one the
     /// constraint carries (REP-04).
@@ -648,6 +710,14 @@ impl Inferer {
                 self.resolve_deferred_iterable(&c, item);
                 continue;
             }
+            // `HasField` is the third, and it produces the field's type: the
+            // deferred read handed back a bare variable and nothing else ever
+            // says what it holds (REP-28).
+            if let Capability::HasField { ref name, ty } = c.cap {
+                let name = name.clone();
+                self.resolve_deferred_field(&c, &name, ty);
+                continue;
+            }
             let ty = c.var_type();
             if let Err(offender) = crate::capability::check(&mut self.db, self.catalog, ty, &c.cap)
             {
@@ -684,6 +754,13 @@ impl Inferer {
             // match is what keeps it honest if a second emitter appears.
             Capability::HasMethod { name, .. } => {
                 crate::diagnostics::unknown_method(at, name, &rendered)
+            }
+            // Unreachable for the same reason `HasMethod`'s arm is: `require_field`
+            // only defers a receiver that is still a variable, and a deferred one is
+            // discharged by [`Inferer::resolve_deferred_field`], which leaves the
+            // failure to lowering (it owns `Y112` and has the field-name span).
+            Capability::HasField { name, .. } => {
+                crate::diagnostics::unknown_field(at, name, &rendered)
             }
         };
         if let Some(origin) = origin {
@@ -1640,6 +1717,18 @@ impl Inferer {
 
     /// Infer the type of a field access `receiver.field` (M7, §4.5). Returns the
     /// field's declared type.
+    ///
+    /// A receiver that is still a **variable** goes on the constraint channel
+    /// (REP-28). It used to constrain nothing at all: the read answered a fresh
+    /// variable and recorded no requirement, so the parameter was generalized and
+    /// §4.9's own example — `fn dist(a) -> Int { a.x + a.y }` — passed `praxis
+    /// check` and then failed under `praxis run` with `Y112`. That is TY-30's shape
+    /// exactly, and [`require_field`](Self::require_field) is TY-30's fix at the
+    /// third door.
+    ///
+    /// A **concrete** receiver with no such field is left to lowering, unchanged:
+    /// `Y112` has one emitter and it has the field-name span, which is the same
+    /// division `HasMethod` and `Y110` keep.
     fn infer_field_get(&mut self, f: &FieldExpr) -> Type {
         let receiver_ty = f
             .receiver()
@@ -1650,16 +1739,17 @@ impl Inferer {
         };
         let fname = field_tok.text().to_string();
         let resolved = self.db.follow(receiver_ty);
-        match self.db.data(resolved) {
-            praxis_types::TypeData::Record { def, args } => {
-                let (def, args) = (*def, args.clone());
-                self.db
-                    .record_field_of(def, &args, &fname)
-                    .map(|(_, t)| t)
-                    .unwrap_or_else(|| self.db.fresh_var())
+        if let praxis_types::TypeData::Record { def, args } = self.db.data(resolved) {
+            let (def, args) = (*def, args.clone());
+            if let Some((_, ty)) = self.db.record_field_of(def, &args, &fname) {
+                return ty;
             }
-            _ => self.db.fresh_var(),
         }
+        let result = self.db.fresh_var();
+        if self.db.var_id_of(resolved).is_some() {
+            self.require_field(receiver_ty, fname, result, field_tok.text_range());
+        }
+        result
     }
 
     /// `p.0` — a tuple element, selected by position (REP-08, §4.4).

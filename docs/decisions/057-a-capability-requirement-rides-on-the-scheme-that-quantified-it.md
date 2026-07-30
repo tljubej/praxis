@@ -1,7 +1,8 @@
 # ADR-057: A capability requirement rides on the scheme that quantified it, and a key is hashable *and* immutable
 
 **Date:** 2026-07-29
-**Status:** Accepted — implemented
+**Status:** Accepted — implemented; Decision 5 extended 2026-07-31 by REP-28
+(`HasField`, the third capability discharged by resolving)
 **Milestone:** Repair (stage S17 — F10's constraint channel, TY-25…TY-32, RT-08)
 
 ## Context
@@ -272,6 +273,22 @@ unified — is a compile error to add halfway.
   makes the fresh variable that replaces it resolvable. `Iterable` is discharged
   by `Inferer::resolve_deferred_iterable` now, and is the second capability that
   resolves rather than answers.
+- **`HasField` is the third capability, and the third discharged by resolving**
+  (REP-28, 2026-07-31). A field read on a receiver that was still a variable
+  constrained nothing at all — the same defect Decision 5 fixed for a method call,
+  at the other member syntax. §4.9's own example is the reproduction:
+  `fn dist(a) -> Int { a.x + a.y }` passed `praxis check` and failed under `praxis
+  run` with `Y112`. `Capability::HasField { name, ty }` rides the channel,
+  `Inferer::resolve_deferred_field` asks the resolved record what the field holds
+  and **unifies** it with the type the read handed back, and the receiver and the
+  field's type are `pin_to_level`'d for Decision 5's reason: `lower_field_get`
+  reads one record definition for the field's index, so one read site carries one
+  record type. `pin_to_level` has three callers now.
+
+  The division of reports is Decision 5's, unchanged: a receiver that resolves to a
+  record without the field is left to lowering, which owns `Y112` and has the
+  field-name span. So a never-called `fn dist(a) { a.x }` still reports there,
+  exactly as a never-called `fn total(v) { v.sum() }` reports `Y110` there.
 - **A `Bound::Cap` arm has no catalog row (Decision 6).** Nothing in the
   catalog needs one, because the receiver's type already answers those
   questions. The next row that genuinely does — a registered `sorted`, a
