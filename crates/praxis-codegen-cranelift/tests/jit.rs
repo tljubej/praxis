@@ -4685,6 +4685,379 @@ fn a_numeric_helper_faults_rather_than_wrapping() {
     assert_eq!(result.as_int(), i64::MAX);
 }
 
+// --- §6.5's graph helpers (TY-33 unit 3, ADR-060) ---------------------------
+
+/// A graph as a `steps` function, for the tests below. `1 -> {2, 3}`, `2 -> {4}`,
+/// `3 -> {4}`, `4 -> {}` — the diamond, which is the smallest graph that tells
+/// breadth-first from depth-first and tells "reached once" from "reached twice".
+const DIAMOND: &str = "fn steps(n: Int) -> Vec[Int] {\n\
+                       \x20 var v = Vec()\n\
+                       \x20 if n == 1 {\n    v.push(2)\n    v.push(3)\n  }\n\
+                       \x20 if n == 2 { v.push(4) }\n\
+                       \x20 if n == 3 { v.push(4) }\n\
+                       \x20 v\n\
+                       }\n";
+
+/// TY-33's third unit end to end: the two traversals visit every reachable
+/// state, once, in the order their names promise.
+///
+/// The half no type test can see. Inference says the result is `Vec[Int]`; that
+/// the wrapper behind the name walks the graph *at all* — that it calls the
+/// closure, reads the `Vec` it hands back, and recognizes a state it has already
+/// seen — is a fact only a run establishes. Before this the call reached the
+/// backend as `CallTarget::User("bfs")` and the compile failed.
+///
+/// The order is encoded as decimal digits, so a walk that visited the right
+/// states in the wrong order fails rather than passing on a length check.
+#[test]
+fn the_two_traversals_visit_every_reachable_state_in_the_order_they_name() {
+    let digits =
+        "fn digits(v: Vec[Int]) -> Int {\n  var t = 0\n  for n in v { t = t * 10 + n }\n  t\n}\n";
+
+    let (rt, result) = run_main(&format!(
+        "{DIAMOND}{digits}fn main() -> Int {{ digits(bfs(1, |n| steps(n))) }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1234, "breadth-first is 1, 2, 3, 4");
+
+    let (rt, result) = run_main(&format!(
+        "{DIAMOND}{digits}fn main() -> Int {{ digits(dfs(1, |n| steps(n))) }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        1243,
+        "depth-first descends into the first neighbour: 1, 2, 4, 3"
+    );
+
+    // The join is reached twice and visited once — the visited set, observed.
+    let (rt, result) = run_main(&format!(
+        "{DIAMOND}fn main() -> Int {{ bfs(1, |n| steps(n)).len() }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4);
+
+    // A cycle terminates rather than walking forever.
+    let (rt, result) = run_main(
+        "fn steps(n: Int) -> Vec[Int] {\n  var v = Vec()\n  v.push((n + 1) % 3)\n  v\n}\n\
+         fn main() -> Int { bfs(0, |n| steps(n)).len() }",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}
+
+/// `flood_fill` answers a `Set` of everything reachable, and a state the graph
+/// does not reach is not in it. The `Set` is a real one — its `contains` is the
+/// same structural membership every other `Set` has, which is what the state's
+/// `HashStable` requirement buys.
+#[test]
+fn a_flood_fill_reaches_exactly_the_states_the_graph_connects() {
+    let (rt, result) = run_main(&format!(
+        "{DIAMOND}fn main() -> Int {{ flood_fill(1, |n| steps(n)).len() }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4);
+
+    // Started from the far side, only the far side is reachable.
+    let (rt, result) = run_main(&format!(
+        "{DIAMOND}fn main() -> Int {{ flood_fill(3, |n| steps(n)).len() }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2, "3 reaches only itself and 4");
+
+    // Membership is the `Set`'s own structural `contains`, not a length check.
+    let (rt, result) = run_main(&format!(
+        "{DIAMOND}fn main() -> Int {{\n\
+         \x20 let seen = flood_fill(1, |n| steps(n))\n\
+         \x20 if seen.contains(4) {{ 1 }} else {{ 0 }}\n\
+         }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+    let (rt, result) = run_main(&format!(
+        "{DIAMOND}fn main() -> Int {{\n\
+         \x20 let seen = flood_fill(1, |n| steps(n))\n\
+         \x20 if seen.contains(9) {{ 1 }} else {{ 0 }}\n\
+         }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+/// `bfs_distance` counts steps to the first state its predicate accepts, and
+/// answers `None` when there is none. The `Option` the runtime builds is an
+/// ordinary one: it matches against the same `Some`/`None` arms a program's own
+/// `Option` does, which is what the shared variant tags mean.
+#[test]
+fn a_distance_is_the_step_count_and_an_unreachable_goal_is_none() {
+    let unwrap = "fn unwrap(d: Option[Int]) -> Int {\n\
+                  \x20 match d {\n    Some(k) => k,\n    None => 0 - 1,\n  }\n\
+                  }\n";
+
+    let (rt, result) = run_main(&format!(
+        "{DIAMOND}{unwrap}fn main() -> Int \
+         {{ unwrap(bfs_distance(1, |n| steps(n), |n| n == 4)) }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+
+    // A start that already satisfies the predicate is zero steps, not one.
+    let (rt, result) = run_main(&format!(
+        "{DIAMOND}{unwrap}fn main() -> Int \
+         {{ unwrap(bfs_distance(1, |n| steps(n), |n| n == 1)) }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+
+    // No state satisfies it: `None`, not a sentinel and not a fault.
+    let (rt, result) = run_main(&format!(
+        "{DIAMOND}{unwrap}fn main() -> Int \
+         {{ unwrap(bfs_distance(1, |n| steps(n), |n| n == 99)) }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), -1);
+
+    // The distance is the *shortest* path. The long way round is enqueued
+    // first, so a walk that answered with the first goal it enqueued says 3.
+    let (rt, result) = run_main(&format!(
+        "fn steps(n: Int) -> Vec[Int] {{\n\
+         \x20 var v = Vec()\n\
+         \x20 if n == 1 {{\n    v.push(2)\n    v.push(5)\n  }}\n\
+         \x20 if n == 2 {{ v.push(3) }}\n\
+         \x20 if n == 3 {{ v.push(4) }}\n\
+         \x20 if n == 5 {{ v.push(4) }}\n\
+         \x20 v\n\
+         }}\n\
+         {unwrap}fn main() -> Int {{ unwrap(bfs_distance(1, |n| steps(n), |n| n == 4)) }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+/// `dijkstra` answers the least *cost*, not the fewest steps — the whole
+/// difference between it and `bfs_distance`, and the half a step-counting walk
+/// gets wrong. The cheap three-hop path beats the expensive one-hop edge.
+#[test]
+fn a_cost_table_holds_the_least_cost_to_every_reachable_state() {
+    // 1 -> 4 costs 10 directly; 1 -> 2 -> 3 -> 4 costs 3.
+    let graph = "fn steps(n: Int) -> Vec[Int] {\n\
+                 \x20 var v = Vec()\n\
+                 \x20 if n == 1 {\n    v.push(2)\n    v.push(4)\n  }\n\
+                 \x20 if n == 2 { v.push(3) }\n\
+                 \x20 if n == 3 { v.push(4) }\n\
+                 \x20 v\n\
+                 }\n\
+                 fn cost(a: Int, b: Int) -> Int {\n\
+                 \x20 if a == 1 {\n    if b == 4 { 10 } else { 1 }\n  } else { 1 }\n\
+                 }\n";
+
+    let (rt, result) = run_main(&format!(
+        "{graph}fn main() -> Int {{ dijkstra(1, |n| steps(n), |a, b| cost(a, b)).get(4) }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        3,
+        "the cheap long path, not the dear short one"
+    );
+
+    // The start is in the table at zero, and every reachable state is in it once.
+    let (rt, result) = run_main(&format!(
+        "{graph}fn main() -> Int {{ dijkstra(1, |n| steps(n), |a, b| cost(a, b)).get(1) }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+    let (rt, result) = run_main(&format!(
+        "{graph}fn main() -> Int {{ dijkstra(1, |n| steps(n), |a, b| cost(a, b)).len() }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4);
+
+    // A negative edge weight faults: Dijkstra never reconsiders a settled state,
+    // so its answer would be quietly too large (ADR-060).
+    let (rt, _result) = run_main(&format!(
+        "{graph}fn main() -> Int {{ dijkstra(1, |n| steps(n), |a, b| 0 - 1).len() }}"
+    ));
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::InvalidSize);
+}
+
+/// `a_star` answers the cheapest cost to a goal, and the heuristic changes only
+/// which states it examines — never the answer. The same graph is searched with
+/// a zero heuristic (which is Dijkstra) and with an exact one.
+#[test]
+fn a_star_finds_the_cheapest_goal_and_the_heuristic_does_not_change_it() {
+    let graph = "fn steps(n: Int) -> Vec[Int] {\n\
+                 \x20 var v = Vec()\n\
+                 \x20 if n == 1 {\n    v.push(2)\n    v.push(4)\n  }\n\
+                 \x20 if n == 2 { v.push(3) }\n\
+                 \x20 if n == 3 { v.push(4) }\n\
+                 \x20 v\n\
+                 }\n\
+                 fn cost(a: Int, b: Int) -> Int {\n\
+                 \x20 if a == 1 {\n    if b == 4 { 10 } else { 1 }\n  } else { 1 }\n\
+                 }\n\
+                 fn remaining(n: Int) -> Int {\n\
+                 \x20 if n == 1 { 3 } else {\n    if n == 2 { 2 } else {\n      if n == 3 { 1 } else { 0 }\n    }\n  }\n\
+                 }\n\
+                 fn unwrap(d: Option[Int]) -> Int {\n\
+                 \x20 match d {\n    Some(k) => k,\n    None => 0 - 1,\n  }\n\
+                 }\n";
+
+    let (rt, result) = run_main(&format!(
+        "{graph}fn main() -> Int \
+         {{ unwrap(a_star(1, |n| steps(n), |a, b| cost(a, b), |n| 0, |n| n == 4)) }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+
+    let (rt, result) = run_main(&format!(
+        "{graph}fn main() -> Int \
+         {{ unwrap(a_star(1, |n| steps(n), |a, b| cost(a, b), |n| remaining(n), |n| n == 4)) }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        3,
+        "an admissible heuristic changes nothing"
+    );
+
+    // An unreachable goal is `None`, and a start that is already a goal is 0.
+    let (rt, result) = run_main(&format!(
+        "{graph}fn main() -> Int \
+         {{ unwrap(a_star(1, |n| steps(n), |a, b| cost(a, b), |n| 0, |n| n == 99)) }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), -1);
+    let (rt, result) = run_main(&format!(
+        "{graph}fn main() -> Int \
+         {{ unwrap(a_star(1, |n| steps(n), |a, b| cost(a, b), |n| 0, |n| n == 1)) }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+
+    // A negative heuristic breaks the ordering the search is built on, and is
+    // the one caller error A* can see.
+    let (rt, _result) = run_main(&format!(
+        "{graph}fn main() -> Int \
+         {{ unwrap(a_star(1, |n| steps(n), |a, b| cost(a, b), |n| 0 - 5, |n| n == 4)) }}"
+    ));
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::InvalidSize);
+}
+
+/// A state is a **value**, not an integer the walk happens to understand. A
+/// record of scalars — which is what a grid position is written as — walks, is
+/// recognized as already-visited when the neighbour function mints an equal but
+/// freshly allocated one, and keys the cost table.
+///
+/// This is the property the `HashStable` requirement exists for, observed: the
+/// walk's visited set compares states structurally, so a `steps` that allocates
+/// a new record every call still terminates.
+#[test]
+fn a_state_may_be_any_value_that_can_be_remembered() {
+    let grid = "struct P { x: Int, y: Int }\n\
+                fn steps(p: P) -> Vec[P] {\n\
+                \x20 var v = Vec()\n\
+                \x20 if p.x < 2 { v.push(P { x: p.x + 1, y: p.y }) }\n\
+                \x20 if p.y < 2 { v.push(P { x: p.x, y: p.y + 1 }) }\n\
+                \x20 v\n\
+                }\n\
+                fn corner(p: P) -> Bool {\n\
+                \x20 if p.x == 2 { p.y == 2 } else { false }\n\
+                }\n\
+                fn unwrap(d: Option[Int]) -> Int {\n\
+                \x20 match d {\n    Some(k) => k,\n    None => 0 - 1,\n  }\n\
+                }\n";
+
+    // A 3x3 grid: nine positions, every one of them reached once.
+    let (rt, result) = run_main(&format!(
+        "{grid}fn main() -> Int {{ bfs(P {{ x: 0, y: 0 }}, |p| steps(p)).len() }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 9);
+
+    // …four steps to the far corner, which is the Manhattan distance.
+    let (rt, result) = run_main(&format!(
+        "{grid}fn main() -> Int \
+         {{ unwrap(bfs_distance(P {{ x: 0, y: 0 }}, |p| steps(p), |p| corner(p))) }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4);
+
+    // …and the cost table is keyed on the record, so a freshly built equal
+    // position finds its entry.
+    let (rt, result) = run_main(&format!(
+        "{grid}fn main() -> Int {{\n\
+         \x20 let costs = dijkstra(P {{ x: 0, y: 0 }}, |p| steps(p), |a, b| 1)\n\
+         \x20 costs.get(P {{ x: 2, y: 2 }})\n\
+         }}"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4);
+}
+
+/// A walk holds every state it has seen in Rust structures the collector cannot
+/// scan, so each one has to be rooted in the native frame (P0-07). A graph big
+/// enough to collect several times over, whose neighbour function allocates on
+/// every call, is what makes the rooting observable: without it the visited set
+/// holds reclaimed objects and the answer is wrong or the host dies.
+#[test]
+fn a_walk_roots_the_states_it_is_holding_across_its_own_allocations() {
+    let (rt, result) = run_main(
+        "fn steps(n: Int) -> Vec[Int] {\n\
+         \x20 var v = Vec()\n\
+         \x20 if n < 400 { v.push(n + 1) }\n\
+         \x20 v\n\
+         }\n\
+         fn main() -> Int { bfs(0, |n| steps(n)).len() }",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 401);
+
+    // The same, through the weighted walk, which additionally holds a cost table
+    // and a priority queue.
+    let (rt, result) = run_main(
+        "fn steps(n: Int) -> Vec[Int] {\n\
+         \x20 var v = Vec()\n\
+         \x20 if n < 400 { v.push(n + 1) }\n\
+         \x20 v\n\
+         }\n\
+         fn main() -> Int { dijkstra(0, |n| steps(n), |a, b| 2).get(400) }",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 800);
+}
+
+/// A fault raised *inside* a neighbour closure stops the walk and reaches the
+/// call site. The helper is a runtime call that calls back into generated code,
+/// so the fault has to cross that boundary in both directions — and a walk that
+/// kept going would keep walking a graph of Unit sentinels.
+#[test]
+fn a_fault_inside_a_closure_stops_the_walk() {
+    let (rt, _result) = run_main(
+        "fn steps(n: Int) -> Vec[Int] {\n\
+         \x20 var v = Vec()\n\
+         \x20 v.push(n / 0)\n\
+         \x20 v\n\
+         }\n\
+         fn main() -> Int { bfs(1, |n| steps(n)).len() }",
+    );
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::DivByZero);
+
+    // …and `panic` inside a goal predicate, which is the other closure position.
+    let (rt, _result) = run_main(
+        "fn steps(n: Int) -> Vec[Int] { Vec() }\n\
+         fn main() -> Int {\n\
+         \x20 let d = bfs_distance(1, |n| steps(n), |n| panic(\"stop\"))\n\
+         \x20 0\n\
+         }",
+    );
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::Panic);
+}
+
 /// TY-34 end to end (ADR-059): a `for` over a range runs the iterations the
 /// range names. This is the half no type test can see — the loop reads
 /// `praxis_range_len` and `praxis_range_get`, so a wrong `len`/`get` symbol

@@ -19,6 +19,7 @@
 use crate::context::{RaisedFault, RuntimeContext};
 use crate::dynamic_key::DynamicKey;
 use crate::gc::GcRef;
+use crate::graph::GraphOracle;
 use crate::heap::{Heap, Safepoint};
 use crate::roots::{NativeScope, Rooted};
 use crate::scalars;
@@ -132,6 +133,9 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::AllocUnit => praxis_alloc_unit as *const (),
         RuntimeSymbol::AllocVarCell => praxis_alloc_var_cell as *const (),
         RuntimeSymbol::Assert => praxis_assert as *const (),
+        RuntimeSymbol::AStar => praxis_a_star as *const (),
+        RuntimeSymbol::Bfs => praxis_bfs as *const (),
+        RuntimeSymbol::BfsDistance => praxis_bfs_distance as *const (),
         RuntimeSymbol::BitsetContains => praxis_bitset_contains as *const (),
         RuntimeSymbol::BitsetInsert => praxis_bitset_insert as *const (),
         RuntimeSymbol::BitsetIsEmpty => praxis_bitset_is_empty as *const (),
@@ -158,6 +162,8 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::DequePushBack => praxis_deque_push_back as *const (),
         RuntimeSymbol::DequePushFront => praxis_deque_push_front as *const (),
         RuntimeSymbol::Dbg => praxis_dbg as *const (),
+        RuntimeSymbol::Dfs => praxis_dfs as *const (),
+        RuntimeSymbol::Dijkstra => praxis_dijkstra as *const (),
         RuntimeSymbol::EnumPayload => praxis_enum_payload as *const (),
         RuntimeSymbol::EnumSetPayload => praxis_enum_set_payload as *const (),
         RuntimeSymbol::EnumTag => praxis_enum_tag as *const (),
@@ -176,6 +182,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::FloatSqrt => praxis_float_sqrt as *const (),
         RuntimeSymbol::FloatToInt => praxis_float_to_int as *const (),
         RuntimeSymbol::FloatToText => praxis_float_to_text as *const (),
+        RuntimeSymbol::FloodFill => praxis_flood_fill as *const (),
         RuntimeSymbol::GetInput => praxis_get_input as *const (),
         RuntimeSymbol::GridCells => praxis_grid_cells as *const (),
         RuntimeSymbol::GridColumn => praxis_grid_column as *const (),
@@ -3822,6 +3829,420 @@ pub unsafe extern "C" fn praxis_run_parser(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Graph helpers (§6.5, ADR-060).
+//
+// Six prelude names whose graph is a closure: the caller passes a start state
+// and a function from a state to its neighbours, and the wrapper walks whatever
+// that function describes. `crate::graph` owns the six algorithms and never
+// touches a closure; `ClosureOracle` below is the one thing that does.
+// ---------------------------------------------------------------------------
+
+/// A [`GraphOracle`](crate::graph::GraphOracle) backed by the closures a
+/// program passed, with every state it is handed rooted in a native frame.
+///
+/// The scope is what makes the walks safe: a state lives in a Rust visited set
+/// or queue, which the collector cannot see, and every closure call may
+/// allocate. `retain` roots each state the moment the walk decides to remember
+/// it, so a collection triggered inside the *next* call finds it (P0-07).
+struct ClosureOracle<'s, 'c> {
+    ctx: *mut RuntimeContext,
+    scope: &'s NativeScope<'c>,
+    /// `(T) -> Vec[T]`.
+    neighbours: GcRef,
+    /// `(T, T) -> Int`, or the Unit sentinel for a helper that has no weights.
+    weight: GcRef,
+    /// `(T) -> Int`, or the Unit sentinel for a helper with no heuristic.
+    heuristic: GcRef,
+    /// `(T) -> Bool`, or the Unit sentinel for a helper with no goal test.
+    goal: GcRef,
+}
+
+impl ClosureOracle<'_, '_> {
+    /// Call `closure` with `args`, or `Err` if it faulted — or if it is not a
+    /// closure at all.
+    ///
+    /// The type checker says every one of these operands is a function, and the
+    /// only runtime representation of a function value is a closure object. The
+    /// descriptor is checked anyway: the alternative to a `TypeMismatch` fault
+    /// is transmuting whatever the payload's first word happens to be into a
+    /// function pointer and jumping to it.
+    unsafe fn call(
+        &mut self,
+        closure: GcRef,
+        args: &[GcRef],
+    ) -> Result<GcRef, crate::graph::Aborted> {
+        if !std::ptr::eq(closure.descriptor(), &crate::closures::CLOSURE) {
+            return Err(self.abort(crate::context::FaultKind::TypeMismatch));
+        }
+        // SAFETY: the descriptor check above proves the payload is a
+        // `ClosurePayload`, so `fn_ptr` is the entry point the codegen wrote
+        // there (`praxis_alloc_closure`).
+        let fn_ptr = unsafe { (*closure.payload::<crate::closures::ClosurePayload>()).fn_ptr };
+        // A closure's entry point is `fn(ctx, closure_self, params...) -> GcRef`
+        // (§4.10, Approach B): the closure value itself is a hidden first
+        // explicit argument, and the prologue loads its captures from it. The
+        // arity is fixed by the helper's signature, which inference has already
+        // checked, so only the shapes the six helpers use exist here.
+        let result = match args {
+            // SAFETY: `fn_ptr` is a finalized JIT entry whose parameter count is
+            // the one the type checker enforced for this operand; every value
+            // crossing is a `GcRef`, which is the ABI's only value kind.
+            [a] => unsafe {
+                let f: unsafe extern "C" fn(*mut RuntimeContext, GcRef, GcRef) -> GcRef =
+                    std::mem::transmute(fn_ptr);
+                f(self.ctx, closure, *a)
+            },
+            // SAFETY: as above, at the two-parameter shape.
+            [a, b] => unsafe {
+                let f: unsafe extern "C" fn(*mut RuntimeContext, GcRef, GcRef, GcRef) -> GcRef =
+                    std::mem::transmute(fn_ptr);
+                f(self.ctx, closure, *a, *b)
+            },
+            // Unreachable: `GraphParam` has no shape with another arity, and the
+            // match on it in `seed_builtin_schemes` is exhaustive. Faulting is
+            // still the only safe answer, because the alternative is calling
+            // with the wrong number of arguments.
+            _ => return Err(self.abort(crate::context::FaultKind::TypeMismatch)),
+        };
+        // The closure ran arbitrary Praxis code and may have faulted. Its result
+        // on that path is the Unit sentinel, so continuing would walk a graph of
+        // Units; stop instead, leaving the fault for the call site's own check.
+        if unsafe { praxis_check_fault(self.ctx) } != 0 {
+            return Err(crate::graph::Aborted);
+        }
+        Ok(self.scope.root(result).get())
+    }
+
+    /// The `i64` inside a boxed `Int` a closure returned, or a fault if it is
+    /// not one.
+    unsafe fn int_result(&mut self, value: GcRef) -> Result<i64, crate::graph::Aborted> {
+        if !std::ptr::eq(value.descriptor(), &scalars::INT) {
+            return Err(self.abort(crate::context::FaultKind::TypeMismatch));
+        }
+        Ok(unsafe { int_payload(value) })
+    }
+}
+
+impl crate::graph::GraphOracle for ClosureOracle<'_, '_> {
+    fn neighbours(&mut self, state: GcRef) -> Result<Vec<GcRef>, crate::graph::Aborted> {
+        // SAFETY: `ctx` is live for the wrapper's duration and `neighbours` is
+        // the operand the type checker typed `(T) -> Vec[T]`.
+        let result = unsafe { self.call(self.neighbours, &[state])? };
+        if !std::ptr::eq(result.descriptor(), &crate::collections::VEC) {
+            return Err(self.abort(crate::context::FaultKind::TypeMismatch));
+        }
+        // SAFETY: the descriptor check proves the payload is a `VecPayload`, and
+        // the result is rooted by `call`, so reading its items cannot race a
+        // collection — nothing allocates between here and the copy.
+        let items = unsafe { (*result.payload::<VecPayload>()).items.clone() };
+        for item in &items {
+            self.scope.root(*item);
+        }
+        Ok(items)
+    }
+
+    fn weight(&mut self, from: GcRef, to: GcRef) -> Result<i64, crate::graph::Aborted> {
+        // SAFETY: as above, at the `(T, T) -> Int` operand.
+        let result = unsafe { self.call(self.weight, &[from, to])? };
+        // SAFETY: `result` is a live, rooted `GcRef`.
+        unsafe { self.int_result(result) }
+    }
+
+    fn heuristic(&mut self, state: GcRef) -> Result<i64, crate::graph::Aborted> {
+        // SAFETY: as above, at the `(T) -> Int` operand.
+        let result = unsafe { self.call(self.heuristic, &[state])? };
+        // SAFETY: `result` is a live, rooted `GcRef`.
+        unsafe { self.int_result(result) }
+    }
+
+    fn is_goal(&mut self, state: GcRef) -> Result<bool, crate::graph::Aborted> {
+        // SAFETY: as above, at the `(T) -> Bool` operand.
+        let result = unsafe { self.call(self.goal, &[state])? };
+        // `Bool` is an immortal singleton pair (RT-03), so the answer is which
+        // singleton came back — but the payload is what the descriptor
+        // describes, and reading it is what a non-`Bool` would corrupt.
+        if !std::ptr::eq(result.descriptor(), &scalars::BOOL) {
+            return Err(self.abort(crate::context::FaultKind::TypeMismatch));
+        }
+        // SAFETY: the descriptor check proves the payload is a `Bool`'s `i64`.
+        Ok(unsafe { int_payload(result) } != 0)
+    }
+
+    fn retain(&mut self, state: GcRef) {
+        self.scope.root(state);
+    }
+
+    fn abort(&mut self, kind: crate::context::FaultKind) -> crate::graph::Aborted {
+        if let Some(fault) = RaisedFault::new(kind) {
+            // SAFETY: `ctx` is live and wired for the wrapper's duration.
+            unsafe { set_fault(self.ctx, fault) };
+        }
+        crate::graph::Aborted
+    }
+}
+
+/// The descriptor every state in this walk shares: the start state's own.
+///
+/// The type checker guarantees one state type per call, and a `GcRef` carries
+/// its descriptor in its header — so the start state is the authority on what
+/// the result collection holds, and no separate type argument has to cross the
+/// ABI.
+#[inline]
+fn state_descriptor(start: GcRef) -> *const TypeDescriptor {
+    start.descriptor() as *const TypeDescriptor
+}
+
+/// Build a `Vec[T]` holding `states`, in order.
+///
+/// # Safety
+/// `ctx` must be live and wired; every state must be a valid, rooted `GcRef`.
+unsafe fn states_as_vec(
+    ctx: *mut RuntimeContext,
+    element: *const TypeDescriptor,
+    states: &[GcRef],
+) -> GcRef {
+    let result = unsafe { praxis_vec_new(ctx, element) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let rooted = scope.root(result);
+    // SAFETY: `result` is the `Vec` just allocated, and `rooted` proves it is in
+    // the collector's root set for the borrow.
+    let payload = unsafe { vec_payload_mut(rooted) };
+    payload.items.extend_from_slice(states);
+    result
+}
+
+/// `bfs(start, neighbours)` — every reachable state, in breadth-first order
+/// (§6.5).
+///
+/// # Safety
+/// `ctx` must be live and wired; `start` must be a valid `GcRef` and
+/// `neighbours` a closure value of type `(T) -> Vec[T]`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_bfs(
+    ctx: *mut RuntimeContext,
+    start: GcRef,
+    neighbours: GcRef,
+) -> GcRef {
+    // SAFETY: the caller upholds ctx/operand validity.
+    unsafe {
+        let scope = NativeScope::new(ctx);
+        let mut oracle = ClosureOracle {
+            ctx,
+            scope: &scope,
+            neighbours,
+            weight: unit_sentinel(ctx),
+            heuristic: unit_sentinel(ctx),
+            goal: unit_sentinel(ctx),
+        };
+        match crate::graph::bfs_order(&mut oracle, start) {
+            Ok(states) => states_as_vec(ctx, state_descriptor(start), &states),
+            Err(_) => unit_sentinel(ctx),
+        }
+    }
+}
+
+/// `dfs(start, neighbours)` — every reachable state, in depth-first pre-order
+/// (§6.5).
+///
+/// # Safety
+/// As [`praxis_bfs`].
+#[no_mangle]
+pub unsafe extern "C" fn praxis_dfs(
+    ctx: *mut RuntimeContext,
+    start: GcRef,
+    neighbours: GcRef,
+) -> GcRef {
+    // SAFETY: the caller upholds ctx/operand validity.
+    unsafe {
+        let scope = NativeScope::new(ctx);
+        let mut oracle = ClosureOracle {
+            ctx,
+            scope: &scope,
+            neighbours,
+            weight: unit_sentinel(ctx),
+            heuristic: unit_sentinel(ctx),
+            goal: unit_sentinel(ctx),
+        };
+        match crate::graph::dfs_order(&mut oracle, start) {
+            Ok(states) => states_as_vec(ctx, state_descriptor(start), &states),
+            Err(_) => unit_sentinel(ctx),
+        }
+    }
+}
+
+/// `flood_fill(start, neighbours)` — every reachable state, as a `Set` (§6.5).
+///
+/// # Safety
+/// As [`praxis_bfs`].
+#[no_mangle]
+pub unsafe extern "C" fn praxis_flood_fill(
+    ctx: *mut RuntimeContext,
+    start: GcRef,
+    neighbours: GcRef,
+) -> GcRef {
+    // SAFETY: the caller upholds ctx/operand validity.
+    unsafe {
+        let scope = NativeScope::new(ctx);
+        let mut oracle = ClosureOracle {
+            ctx,
+            scope: &scope,
+            neighbours,
+            weight: unit_sentinel(ctx),
+            heuristic: unit_sentinel(ctx),
+            goal: unit_sentinel(ctx),
+        };
+        let states = match crate::graph::reachable(&mut oracle, start) {
+            Ok(states) => states,
+            Err(_) => return unit_sentinel(ctx),
+        };
+        let result = praxis_set_new(ctx, state_descriptor(start));
+        let rooted = scope.root(result);
+        let payload = set_payload_mut(rooted);
+        for state in states {
+            payload.entries.insert(DynamicKey::new(state));
+        }
+        result
+    }
+}
+
+/// `bfs_distance(start, neighbours, is_goal)` — the fewest steps to a goal, or
+/// `None` (§6.5).
+///
+/// # Safety
+/// `ctx` must be live and wired; `start` must be a valid `GcRef`, `neighbours` a
+/// `(T) -> Vec[T]` closure and `goal` a `(T) -> Bool` closure.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_bfs_distance(
+    ctx: *mut RuntimeContext,
+    start: GcRef,
+    neighbours: GcRef,
+    goal: GcRef,
+) -> GcRef {
+    // SAFETY: the caller upholds ctx/operand validity.
+    unsafe {
+        let scope = NativeScope::new(ctx);
+        let mut oracle = ClosureOracle {
+            ctx,
+            scope: &scope,
+            neighbours,
+            weight: unit_sentinel(ctx),
+            heuristic: unit_sentinel(ctx),
+            goal,
+        };
+        match crate::graph::bfs_distance(&mut oracle, start) {
+            Ok(distance) => alloc_optional_int(ctx, distance),
+            Err(_) => unit_sentinel(ctx),
+        }
+    }
+}
+
+/// `dijkstra(start, neighbours, weight)` — the least cost to every reachable
+/// state, as a `Map[T, Int]` (§6.5).
+///
+/// # Safety
+/// `ctx` must be live and wired; `start` must be a valid `GcRef`, `neighbours` a
+/// `(T) -> Vec[T]` closure and `weight` a `(T, T) -> Int` closure.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_dijkstra(
+    ctx: *mut RuntimeContext,
+    start: GcRef,
+    neighbours: GcRef,
+    weight: GcRef,
+) -> GcRef {
+    // SAFETY: the caller upholds ctx/operand validity.
+    unsafe {
+        let scope = NativeScope::new(ctx);
+        let mut oracle = ClosureOracle {
+            ctx,
+            scope: &scope,
+            neighbours,
+            weight,
+            heuristic: unit_sentinel(ctx),
+            goal: unit_sentinel(ctx),
+        };
+        let costs = match crate::graph::dijkstra_costs(&mut oracle, start) {
+            Ok(costs) => costs,
+            Err(_) => return unit_sentinel(ctx),
+        };
+        let result = scope.root(praxis_map_new(ctx, state_descriptor(start)));
+        for (state, cost) in costs {
+            // Each boxed cost is allocated *before* the payload borrow: an
+            // allocation while a `&mut MapPayload` is live is what `Rooted`
+            // exists to make impossible, and taking the borrow per entry is
+            // what keeps that true.
+            let boxed = scope.root(gc_alloc(ctx, &scalars::INT, cost));
+            map_payload_mut(result)
+                .entries
+                .insert(DynamicKey::new(state), boxed.get());
+        }
+        result.get()
+    }
+}
+
+/// `a_star(start, neighbours, weight, heuristic, is_goal)` — the cheapest cost
+/// to a goal, or `None` (§6.5).
+///
+/// # Safety
+/// `ctx` must be live and wired; `start` must be a valid `GcRef` and each of
+/// `neighbours`, `weight`, `heuristic` and `goal` a closure value of the type
+/// the helper's signature declares.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_a_star(
+    ctx: *mut RuntimeContext,
+    start: GcRef,
+    neighbours: GcRef,
+    weight: GcRef,
+    heuristic: GcRef,
+    goal: GcRef,
+) -> GcRef {
+    // SAFETY: the caller upholds ctx/operand validity.
+    unsafe {
+        let scope = NativeScope::new(ctx);
+        let mut oracle = ClosureOracle {
+            ctx,
+            scope: &scope,
+            neighbours,
+            weight,
+            heuristic,
+            goal,
+        };
+        match crate::graph::a_star_cost(&mut oracle, start) {
+            Ok(cost) => alloc_optional_int(ctx, cost),
+            Err(_) => unit_sentinel(ctx),
+        }
+    }
+}
+
+/// Allocate `Some(n)` or `None` for an `Option[Int]` result.
+///
+/// The tags are `Option`'s own declaration order — `Some` first, `None` second
+/// (`TypeDb::new`) — which is the same order the codegen uses for a `Some(x)`
+/// the program writes, so a runtime-built `Option` matches against the same
+/// arms.
+///
+/// # Safety
+/// `ctx` must be live and wired.
+unsafe fn alloc_optional_int(ctx: *mut RuntimeContext, value: Option<i64>) -> GcRef {
+    // SAFETY: the caller upholds ctx validity.
+    unsafe {
+        match value {
+            Some(n) => {
+                let scope = NativeScope::new(ctx);
+                let some = scope.root(praxis_alloc_enum(ctx, OPTION_SOME_TAG, 1));
+                let boxed = gc_alloc(ctx, &scalars::INT, n);
+                praxis_enum_set_payload(ctx, some.get(), 0, boxed);
+                some.get()
+            }
+            None => praxis_alloc_enum(ctx, OPTION_NONE_TAG, 0),
+        }
+    }
+}
+
+/// `Option`'s variant discriminants, in the order `TypeDb::new` declares them.
+const OPTION_SOME_TAG: i64 = 0;
+const OPTION_NONE_TAG: i64 = 1;
 
 #[cfg(test)]
 mod tests {

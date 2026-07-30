@@ -194,6 +194,9 @@ runtime_symbols! {
     AllocUnit = "praxis_alloc_unit": (Ctx) -> Gc, Pure;
     AllocVarCell = "praxis_alloc_var_cell": (Ctx, Gc) -> Gc, Allocates;
     Assert = "praxis_assert": (Ctx, Gc) -> Gc, Faults;
+    AStar = "praxis_a_star": (Ctx, Gc, Gc, Gc, Gc, Gc) -> Gc, AllocatesAndFaults;
+    Bfs = "praxis_bfs": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    BfsDistance = "praxis_bfs_distance": (Ctx, Gc, Gc, Gc) -> Gc, AllocatesAndFaults;
     BitsetContains = "praxis_bitset_contains": (Ctx, Gc, Gc) -> Gc, Pure;
     BitsetInsert = "praxis_bitset_insert": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     BitsetIsEmpty = "praxis_bitset_is_empty": (Ctx, Gc) -> Gc, Pure;
@@ -220,6 +223,8 @@ runtime_symbols! {
     DequePushBack = "praxis_deque_push_back": (Ctx, Gc, Gc) -> Gc, Allocates;
     DequePushFront = "praxis_deque_push_front": (Ctx, Gc, Gc) -> Gc, Allocates;
     Dbg = "praxis_dbg": (Ctx, Gc) -> Gc, Pure;
+    Dfs = "praxis_dfs": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    Dijkstra = "praxis_dijkstra": (Ctx, Gc, Gc, Gc) -> Gc, AllocatesAndFaults;
     EnumPayload = "praxis_enum_payload": (Ctx, Gc, RawI64) -> Gc, Pure;
     EnumSetPayload = "praxis_enum_set_payload": (Ctx, Gc, RawI64, Gc) -> Gc, Pure;
     EnumTag = "praxis_enum_tag": (Ctx, Gc) -> Gc, Allocates;
@@ -238,6 +243,7 @@ runtime_symbols! {
     FloatSqrt = "praxis_float_sqrt": (Ctx, Gc) -> Gc, Allocates;
     FloatToInt = "praxis_float_to_int": (Ctx, Gc) -> Gc, AllocatesAndFaults;
     FloatToText = "praxis_float_to_text": (Ctx, Gc) -> Gc, Allocates;
+    FloodFill = "praxis_flood_fill": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     GetInput = "praxis_get_input": (Ctx) -> Gc, Pure;
     GridCells = "praxis_grid_cells": (Ctx, Gc) -> Gc, Allocates;
     GridColumn = "praxis_grid_column": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;

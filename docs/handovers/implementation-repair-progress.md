@@ -27,7 +27,7 @@ Update this file at the end of every stage.
 | S14 — Control flow: bottom type, contexts, joins, loop values | **done** | `fd909a1`, `92a1b84`, `bf91879`, `9cffbe5`, `f93b25f`, `ea506a6` |
 | S15 — Per-use types into HIR and MIR, then monomorphization | **done** (one exit criterion deferred; see §4) | `93c05ec`, `f3c76a8`, `77b2ad6`, `b560e67` |
 | S16 — Records, patterns, exhaustiveness, enum constructors | **done** | `57e2e5b`, `06f3c44`, `b8e2c7b`, `e918741` |
-| S17 — Constraint channel and capabilities | **in progress** (all 11 findings; TY-33 units 1–2 of 4) | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c`, `e801e6a`, `b6ab8eb` |
+| S17 — Constraint channel and capabilities | **done** | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c`, `e801e6a`, `b6ab8eb`, *this session* |
 | S18 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
@@ -36,30 +36,32 @@ TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1349 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1381 passed, 0 failed, 38 ignored**. `just ci` is green.
 
-**S17 is open and is the largest stage in the repair. All eleven of its findings
-are now done** — **TY-25**, **TY-26**, **TY-27**, **TY-28**, **TY-29**,
-**TY-30**, **TY-31**, **TY-32**, **TY-33**, **TY-34** and **RT-08** — but the
-stage is **not** closed, because D5 split TY-33 into four units and only **two**
-have landed: unit 1 (`panic`/`assert`/`dbg`) and unit 2 (the seven numeric
-helpers). **F10's constraint channel landed as its own commit** with the suite
-green, per plan §9 step 2. The ADRs are **056** (the control names), **057** (the
-channel + D4 + TY-30's pinning rule + TY-31's bounds), **058** (the numeric
-helpers) and **059** (the range slice); ADR-057 also supersedes **ADR-010's
-lapsed M7 deferral** of the §5.4 capability system, which the plan's F10 block
-asked for.
+**S17 is closed. It was the largest stage in the repair.** All eleven of its
+findings are done — **TY-25**, **TY-26**, **TY-27**, **TY-28**, **TY-29**,
+**TY-30**, **TY-31**, **TY-32**, **TY-33**, **TY-34** and **RT-08** — and all
+four of D5's units have landed: unit 1 (`panic`/`assert`/`dbg`), unit 2 (the
+seven numeric helpers), unit 3 (**the six graph helpers**) and unit 4 (the
+`..`/`..=` slice). **F10's constraint channel landed as its own commit** with
+the suite green, per plan §9 step 2. The ADRs are **056** (the control names),
+**057** (the channel + D4 + TY-30's pinning rule + TY-31's bounds), **058** (the
+numeric helpers), **059** (the range slice) and **060** (the graph helpers);
+ADR-057 also supersedes **ADR-010's lapsed M7 deferral** of the §5.4 capability
+system, which the plan's F10 block asked for.
 
-**What is left is TY-33's unit 3 — the six graph helpers — and it is blocked on
-a design decision the plan says is owed.** §4 has the question, a concrete
-recommendation, and everything already in place for it. Nothing else in S17
-remains.
+**TY-33 is fully closed: `seed_builtin_schemes` now covers every prelude name
+that denotes a value, so there are no phantom names left.** The graph-representation
+decision D5 said was "owed before the unit starts" is answered in ADR-060, and
+the answer was already written down — §6.5 asks for "closure-based algorithms
+that do not require materializing a graph object" and shows the exact spelling.
+See §4 for what S18 needs.
 
 Thirteen exit-criterion tests were un-ignored by S17, bringing the repair's
 running total to **ninety-seven** of the audit's ignored regressions un-ignored
 and passing. (TY-33 units 2–4 and TY-34 have **no** ignored exit-criterion tests
 of their own — the plan's S17 list covers unit 1's `prelude_assert_requires_bool`
-and nothing else from D5/D6 — so both landed as new gates only.)
+and nothing else from D5/D6 — so all three landed as new gates only.)
 
 | Test | File | Finding |
 |---|---|---|
@@ -76,6 +78,45 @@ and nothing else from D5/D6 — so both landed as new gates only.)
 | `integer_literal_overflow_is_diagnosed` | `infer_tests.rs` | TY-28 |
 | `collection_method_constrains_unannotated_receiver_parameter` | `infer_tests.rs` | TY-30 |
 | `sum_requires_int_elements` | `infer_tests.rs` | TY-31 |
+
+TY-33 unit 3's thirty-two new gates (D5's graph slice — ADR-060), plus one
+amended:
+
+| Test | File | Pins |
+|---|---|---|
+| `each_graph_helper_has_the_signature_its_contract_needs` | `infer_tests.rs` | the rule — the result each name promises, that it is *that* result, and the arity in each of the three shapes |
+| `a_graph_helpers_closures_agree_with_each_other_about_the_state` | `infer_tests.rs` | one state variable shared by every closure: the neighbour's argument and element, the weight's two operands, the goal's `Bool`, the heuristic's `Int` |
+| `a_graph_helpers_state_must_be_one_the_walk_can_remember` | `infer_tests.rs` | D4 reaching the six — `Y014` at the *call*, every mutable collection refused, a record of scalars accepted |
+| `a_graph_state_requirement_reaches_through_a_generic_function` | `infer_tests.rs` | F10's hardest test: the requirement defers on an unannotated parameter, is claimed by that function's scheme, and is answered at its caller |
+| `each_graph_helper_reaches_the_backend` | `infer_tests.rs` | the half a type test cannot see — six names that lowered as "unresolved user function" |
+| `the_two_traversals_visit_every_reachable_state_in_the_order_they_name` | `jit.rs` | breadth-first is `1234` and depth-first is `1243` on one diamond; the join visited once; a cycle terminates |
+| `a_flood_fill_reaches_exactly_the_states_the_graph_connects` | `jit.rs` | the `Set` is a real one — structural `contains`, and the far side reaches only itself |
+| `a_distance_is_the_step_count_and_an_unreachable_goal_is_none` | `jit.rs` | zero steps for a start that is already a goal, `None` for no goal, and the *shortest* path rather than the first enqueued |
+| `a_cost_table_holds_the_least_cost_to_every_reachable_state` | `jit.rs` | the cheap three-hop path beats the dear one-hop edge — the whole difference from `bfs_distance` — plus the negative-weight fault |
+| `a_star_finds_the_cheapest_goal_and_the_heuristic_does_not_change_it` | `jit.rs` | the same answer with a zero and an exact heuristic, `None`, zero, and the negative-heuristic fault |
+| `a_state_may_be_any_value_that_can_be_remembered` | `jit.rs` | a record state walks a 3×3 grid, is recognized when freshly allocated, and keys the cost table |
+| `a_walk_roots_the_states_it_is_holding_across_its_own_allocations` | `jit.rs` | P0-07 observed — 401 states held in Rust structures across a closure that allocates every call |
+| `a_fault_inside_a_closure_stops_the_walk` | `jit.rs` | a fault crossing *into* generated code and back — `DivByZero` from a neighbour, `Panic` from a goal predicate |
+| `breadth_first_and_depth_first_visit_in_the_orders_they_name` | `praxis-runtime/src/graph.rs` | the same rule at the unit level, without a compiler in the room |
+| `a_depth_first_walk_takes_the_first_neighbour_first` | `graph.rs` | the stack reverses the neighbour list; a symmetric graph would hide it |
+| `a_cycle_is_walked_once_and_terminates` | `graph.rs` | both walks, and the diamond that enqueues its join twice |
+| `a_lone_state_is_its_own_walk` | `graph.rs` | the start alone, which is why no walk answers with an `Option` |
+| `two_equal_states_are_one_state_however_they_were_allocated` | `graph.rs` | identity is `DynamicKey`'s, not pointer identity — what every real neighbour closure needs |
+| `every_remembered_state_was_retained_first` | `graph.rs` | the rooting contract, stated where the walks have to honour it |
+| `a_distance_counts_steps_and_absence_is_none` | `graph.rs` | steps not edges, zero for an immediate goal, `None` for none |
+| `a_distance_is_the_shortest_path_not_the_first_found` | `graph.rs` | the long way is enqueued first |
+| `a_cost_table_prefers_a_cheap_long_path_to_an_expensive_short_one` | `graph.rs` | Dijkstra's own property, plus that an unreachable state is *absent* |
+| `each_state_is_settled_once` | `graph.rs` | a later, longer route adds no second entry |
+| `a_negative_edge_weight_faults_rather_than_answering` | `graph.rs` | both weighted walks, `InvalidSize` |
+| `a_cost_with_no_int_faults_rather_than_wrapping` | `graph.rs` | ADR-058's rule at the one place a walk does arithmetic nobody wrote |
+| `a_star_finds_the_cheapest_goal_whatever_the_heuristic_estimates` | `graph.rs` | zero and exact heuristics agree |
+| `a_star_answers_nothing_for_an_unreachable_goal` | `graph.rs` | …and zero for a start that is one |
+| `a_negative_heuristic_faults_rather_than_misordering_the_search` | `graph.rs` | the one caller error A\* can see |
+| `every_graph_helper_is_a_prelude_name` | `praxis-stdlib/src/prelude.rs` | the two lists agree — a name in only one is a phantom or an unreachable wrapper |
+| `a_graph_helpers_arity_is_the_wrappers_arity` | `prelude.rs` | six signatures, one authority on the count; and every wrapper's shape is `(Ctx, Gc…) -> Gc` |
+| `a_graph_helper_takes_a_start_state_and_then_only_functions` | `prelude.rs` | §6.5's shape as a property of the table |
+| `only_a_goal_directed_helper_can_answer_with_nothing` | `prelude.rs` | the `Goal`/`Option` pairing — why `dijkstra` needs no `Option` and `bfs` needs no `Option` either |
+| `each_helper_has_its_own_wrapper` | `prelude.rs` | **amended** — a copy-pasted graph row would make one name compute another's answer |
 
 TY-34's twelve new gates (D6's slice — ADR-059):
 
@@ -773,7 +814,11 @@ have (a binder list and a matching argument list), and it already existed for
 F12. **`HasMethod` is emitted and resolved** (TY-30, ADR-057 D5) and **the
 catalog declares bounds** (TY-31, ADR-057 D6) — both emitters exist now. The one
 `Capability` arm with no emitter is none; the one `Bound` shape with no catalog
-row is a capability bound, and §4 says why.
+row is a capability bound, and §4 says why. **The channel's hardest consumer is
+the graph helpers** (ADR-060): a `bfs` on an unannotated parameter defers
+`HashStable`, the enclosing function's scheme claims it, and each call to *that*
+function answers it — the emit → claim → re-emit → discharge lifecycle running
+end to end for a requirement the user never wrote down.
 
 **F9 — the one `TypeFolder`: landed whole.** `praxis_types::fold` is the only
 walk over `TypeData`, its match has no catch-all, and the five hand-written
@@ -882,7 +927,47 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S17: TY-33 unit 2 and TY-34)
+### From this session (S17: TY-33 unit 3 — the graph helpers)
+
+**`praxis-runtime` calls back into generated code, for the first time.**
+`praxis_runtime::abi::ClosureOracle` transmutes a closure's `fn_ptr` and calls
+it as `fn(ctx, closure_self, args…)` — §4.10's Approach B, the same convention
+`Inst::CallIndirect` emits and the same transmute the debugger's
+`call_with_arity` and the CLI's `main` entry already do. **Two rules follow, and
+anything else that calls back has to follow them too:** a `GcRef` held in a Rust
+structure across such a call must be rooted in a `NativeScope` (P0-07), and
+`praxis_check_fault` must be checked *after every call back* — a closure that
+faulted returns the Unit sentinel, and continuing walks a graph of Units.
+
+**`praxis_runtime::graph` is a new module and the six algorithms live there, not
+in `abi.rs`.** They talk to a `GraphOracle` trait and never touch a closure,
+which is what lets fifteen of the unit's gates be unit tests. If you add a walk,
+add it there; if you add an oracle method, both implementations are exhaustive.
+
+**`RuntimeSymbol` has six new variants** — `Bfs`, `BfsDistance`, `Dfs`,
+`Dijkstra`, `AStar`, `FloodFill` — so `praxis_runtime::abi::address`'s match
+needed six arms. Additive: no `#[repr(C)]` layout moved and
+`RUNTIME_ABI_VERSION` stays 13.
+
+**`seed_builtin_schemes` is now total over the prelude.** Every `PRELUDE` name
+that denotes a value has a scheme; a name that does not would get a fresh
+variable, which is TY-33 and not a default. If you add a prelude name, seed it in
+the same commit.
+
+**`praxis_stdlib::prelude` exports `GraphParam`/`GraphResult`, and `infer.rs`
+matches both exhaustively.** A new parameter or result shape is a compile error
+at the one place that builds a scheme from it — the same trick `RuntimeSymbol`
+plays for call targets.
+
+**A test that builds a `Runtime` must not move it afterwards.**
+`Runtime::context()` hands out a `RuntimeContext` holding `&mut self.heap` as a
+raw pointer, so returning an unboxed `Runtime` from a test helper invalidates
+every context minted from it — which shows up as "RefCell already borrowed"
+inside the allocator, a non-unwinding panic, and a SIGABRT. `graph.rs`'s helper
+returns a `Box<Runtime>` and says why. Existing helpers (`wired_ctx`) dodge it
+by living in the same stack frame as the `Runtime`.
+
+### From an earlier session (S17: TY-33 unit 2 and TY-34)
 
 **The Pratt precedence table is renumbered.** `..`/`..=` is `bp(3, 4)`, inserted
 between `||` and comparison, so comparison is `bp(5, 6)`, additive `bp(7, 8)`,
@@ -2186,72 +2271,71 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**All eleven of S17's findings are done. The one thing left in the stage is
-TY-33's unit 3 — the six graph helpers — and it is blocked on a design decision
-the plan says is owed.** Read the plan's §5 S17 entry and §7's D5 first.
+**S17 is closed. Start at S18, which is `D1`-blocked — read the next section
+first.** Nothing in S17 remains.
 
-What is done:
+What S17 delivered:
 
 - **F10's constraint channel landed whole** (ADR-057), as its own commit with
   the suite green. §2 and §3 say what it is and what the four verbs are. **If
   you add a capability check anywhere, go through `Inferer::require_cap`** —
   calling a predicate directly is TY-29 by another name.
 - **All eleven findings are done and gated: TY-25…TY-34 and RT-08.**
-- **TY-33 unit 1** (`panic`, `assert`, `dbg` — ADR-056), **unit 2** (the seven
-  numeric helpers — ADR-058) and **TY-34** (the range slice — ADR-059) are done.
+- **All four of D5/D6's units are done:** unit 1 (`panic`, `assert`, `dbg` —
+  ADR-056), unit 2 (the seven numeric helpers — ADR-058), unit 3 (the six graph
+  helpers — ADR-060) and unit 4 (the range slice — ADR-059).
 
-### The one thing left: TY-33 unit 3 — the six graph helpers
+### What unit 3 turned out to be
 
-`bfs`, `bfs_distance`, `dfs`, `dijkstra`, `a_star`, `flood_fill`. They are the
-**last six phantom prelude names**: each is in `PRELUDE`, so a reference
-resolves, and then `seed_builtin_schemes` skips it, inference hands out a fresh
-variable that unifies with anything, and the call lowers as
-`CallTarget::User("bfs")` — a direct call to a function nobody defined. That is
-the exact shape `panic` had before ADR-056 and `abs` had before ADR-058.
+D5 said the six graph helpers were "more work than the other ten findings of
+S17 combined" and that their representation decision was owed. **The decision
+was already written down** — §6.5 asks for "closure-based algorithms that do not
+require materializing a graph object" and shows the spelling — so the answer was
+cheap and the work was mostly the walks themselves. ADR-060 has both halves.
 
-**D5 says this unit is more work than the other ten findings of S17 combined,
-and that its representation decision "is not in this plan and is owed before the
-unit starts".** That is still true. The two questions D5 names:
+Two structural notes worth carrying, because nothing else in the tree looks like
+them:
 
-1. **What does a caller pass as the neighbour function?** A closure
-   `(T) -> Vec[T]`, a `Map[T, Vec[T]]` adjacency table, or a `Grid` plus an
-   implicit 4-/8-neighbourhood — and whether one name accepts more than one of
-   those.
-2. **Do `dijkstra`/`a_star` take edge weights as a closure or a `Map`?** And
-   `a_star` needs a heuristic, which is a third function-shaped argument.
+- **`praxis-runtime` calls *back* into generated code now.** Everything before
+  `praxis_runtime::abi::ClosureOracle` was a leaf. Two consequences follow and
+  both are load-bearing: a state held in a Rust structure must be rooted through
+  the `NativeScope` (P0-07) or the next closure's allocation reclaims it, and a
+  fault raised inside a closure must be *checked after every call back* or the
+  walk carries on over Unit sentinels. `a_walk_roots_the_states_it_is_holding_across_its_own_allocations`
+  and `a_fault_inside_a_closure_stops_the_walk` are the two gates.
+- **The algorithms never touch a closure.** `praxis_runtime::graph` asks a
+  `GraphOracle`; the ABI supplies the one implementation that transmutes a JIT'd
+  function pointer, and the tests supply one backed by a table. That is what
+  makes fifteen of the unit's gates plain unit tests rather than end-to-end runs.
 
-**A recommendation, so the answer is cheap to give.** The closure form is the one
-the type system already supports end to end: `bfs(start, |n| neighbours_of(n))`
-is a monomorphic-per-instantiation call whose argument is an ordinary
-`Func`, and §4.10's closures, HIR-08's captures and `Inst::CallIndirect` all
-work today. An adjacency `Map` would need `Map.get`'s contract settled first,
-which is **D1 in S18** and still open. A `Grid` overload would need arity- or
-type-based overloading, which the language does not have (see ADR-056's note on
-`assert`). So: **one closure-shaped signature per name**, with `dijkstra`/`a_star`
-taking the weight (and heuristic) as further closures, and any `Grid` convenience
-deferred to a milestone that owns it.
+Things this session found that the register does not have:
 
-The element type wants a capability, and this is where F10's channel gets its
-hardest test — which is exactly why the plan says **do not interleave this unit
-with anything**. A `bfs` over `T` needs `T` to be a `Set` element and a `Map`
-key, which is `CapKind::HashStable`, and `require_cap` on a scheme's own binder
-is the route (ADR-057). `dijkstra` additionally needs its cost type orderable for
-the heap, and `heap_element_must_be_orderable` is the gate that already says what
-that looks like.
+- **A top-level `fn` used as a value evaluates to `Unit`, and calling it takes a
+  SIGBUS.** `fn double(n: Int) -> Int { n * 2 }` … `let f = double\n f(3)` aborts
+  the host: inference accepts it (a `fn`'s type *is* a `Func`), lowering
+  evaluates the bare name to `Unit`, and `Inst::CallIndirect` then reads that
+  Unit's payload as a function pointer. `praxis check` is clean. It is
+  **pre-existing** — it has nothing to do with the graph helpers — but a helper
+  is a new way to reach it, and the helpers' descriptor check turns it into a
+  `TypeMismatch` fault with a proper backtrace rather than a crash. The fix is
+  either to lower a `fn` name in value position as a closure or to reject it;
+  no finding covers it. Found while gating ADR-060.
+- **A tuple has no element syntax**, so `(Int, Int)` is a legal graph state that
+  no neighbour function can read: `p.0` is `P001` ("expected name after `.`").
+  A record of scalars is what a grid position has to be written as meanwhile,
+  and `a_state_may_be_any_value_that_can_be_remembered` uses one. The corpus
+  already knows — `day10_bfs_shortest_distance.px` has a comment saying "tuple
+  field access is deferred" and hand-encodes its adjacency around it.
+- **There is no `&&`/`||`, and §3.3's own representative program uses `&&`.**
+  `p.x == 2 && p.y == 2` is a parse error at the first `&`; `praxis-syntax` has a
+  single `AMP` token and no binary production for it. `!` *is* there (the corpus
+  uses `!visited.contains(nb)`), so it is the two connectives that are missing.
+  This joins `Counter[(Int, Int)]()`'s explicit type arguments on the list of
+  things standing between §3.3 and compiling. No finding covers it.
 
-What is already in place for it:
+### S18
 
-- **`MinHeap`/`MaxHeap`, `Deque`, `Set`, `Map` and `Counter` are all real**, with
-  wrappers in the F4 manifest. A `dijkstra` needs no new collection.
-- **`Option[T]`** is real (F12), which is what `bfs_distance` on an unreachable
-  target wants to return — but **read D1 first**: `Map.get`'s contract is the
-  same question and S18 owns it.
-- **The channel's `HasMethod` and `Iterable` emitters both exist** (TY-30,
-  TY-31), so a signature that constrains its argument has a route.
-- **`Range` is a real value now** (ADR-059), so a `flood_fill` over a grid's
-  positions can write `0..w` without a helper.
-
-### After S17: S18
+**S18 is `D1`-blocked and D1 is still open** (plan §7): `Map.get`/`Grid.find`
 
 **S18 is `D1`-blocked and D1 is still open** (plan §7): `Map.get`/`Grid.find`
 returning `Option[V]` versus `V`-with-`Unit`. Two `#[ignore]`d tests name it
@@ -2262,7 +2346,8 @@ directly — `absent_map_get_does_not_return_an_untyped_unit_sentinel` and
 first one available, since S17 spent 12→13 and both ADR-058 and ADR-059 declined
 to spend a second (see below).
 
-Things this session found that the register does not have:
+Carried forward from S17's earlier sessions (§4's own "found, not in the
+register" list above is *this* session's):
 
 - **A `for` over an *unannotated* parameter unifies the parameter with its own
   element type.** `iter_item` answers an unresolved iterator with *itself* — the
@@ -2288,7 +2373,8 @@ Things this session found that the register does not have:
   `P002` ("expected `;` or a line break between statements") at the `[`. The
   element type is inferred from use instead, so the program works when written
   `Counter()`; but the design doc's own spelling does not parse. No finding
-  covers it. It is the last thing standing between §3.3 and compiling.
+  covers it. **It is one of two things standing between §3.3 and compiling** —
+  the other is `&&`, which this session found; see above.
 - **A nullary collection renders as `Range[]` / `BitSet[]`.** `db.render` prints
   the brackets whether or not there are arguments, so a `Y001` about a range says
   "found `Range[]`". Cosmetic, and it predates TY-34 (`BitSet[]` has always done
@@ -2337,25 +2423,30 @@ Carried forward from S17's earlier sessions:
   with a `via` span, and `resolve_deferred_method` would then write a
   `method_refs` entry per instantiation against one token. It guards with
   `c.via.is_none()`; read that before lifting the pin.
-- **The corpus triage found nothing, for the ninth, tenth and eleventh times** —
-  once per S17 session, most recently after TY-34. Every `.px` under `tests/` and
-  every CLI fixture went through `praxis check`, and the corpus through
-  `praxis run` as well. Only the three fixtures that are *meant* to report do,
-  plus `tests/aoc-corpus/day02_grid_of_char.px`'s `Y110` — S15's pre-existing
-  `map.len()` on a `Grid[Char]`, still there, still not S17's. **`check` alone is
-  not the triage**: `Y110` is reported at *lowering*, so a `praxis check` sweep
-  shows a clean corpus while `praxis run` shows the one break. Run both.
-- **The one ABI bump S17 was allowed (H17) went to ADR-056, and the two units
+- **The corpus triage found nothing, for the ninth through twelfth times** —
+  once per S17 session, most recently after the graph helpers. Every `.px` under
+  `tests/` and every CLI fixture went through `praxis check`, and the corpus
+  through `praxis run` as well. Only the three fixtures that are *meant* to
+  report do, plus `tests/aoc-corpus/day02_grid_of_char.px`'s `Y110` — S15's
+  pre-existing `map.len()` on a `Grid[Char]`, still there, still not S17's.
+  **`check` alone is not the triage**: `Y110` is reported at *lowering*, so a
+  `praxis check` sweep shows a clean corpus while `praxis run` shows the one
+  break. Run both — and run the `read`-driven programs with real input, because
+  `< /dev/null` makes every one of them fault with `ParseFailed`, which is the
+  input's fault and not the tree's.
+- **The one ABI bump S17 was allowed (H17) went to ADR-056, and the three units
   after it each declined to spend a second** — deliberately, and each records
   what it cost:
   - ADR-058: an inverted `clamp` range borrows `FaultKind::InvalidSize` instead
     of getting a kind of its own.
   - ADR-059: `praxis_range_len`'s out-of-range count borrows the same kind.
-  Both are cases of one missing kind — an **empty range**. Whichever stage next
-  spends a bump (S18's RT-13 is the first that must) should add it and re-point
-  those two raises. `BuiltinTypeId::Range` needed no bump: it is appended, so no
-  existing id or `#[repr(C)]` layout moved, and the same reasoning covered
-  ADR-058's seven new symbols.
+  - ADR-060: a negative edge weight and a negative heuristic borrow it too.
+  The first two are cases of one missing kind — an **empty range**; the third is
+  a second missing kind, "an argument this algorithm has no answer for".
+  Whichever stage next spends a bump (S18's RT-13 is the first that must) should
+  add both and re-point those four raises. `BuiltinTypeId::Range` needed no bump:
+  it is appended, so no existing id or `#[repr(C)]` layout moved, and the same
+  reasoning covered ADR-058's seven and ADR-060's six new symbols.
 
 **S16 is closed.** All five findings are fixed and gated — HIR-03, HIR-04,
 HIR-05, HIR-06 and HIR-07 — and all eight exit-criterion tests pass. HIR-05
@@ -2365,19 +2456,19 @@ and declares nothing, and `a_wildcard_binder_is_legal_and_declares_nothing`
 already pins all three of D7's positions including the closure param. The
 stage's ADR is **055**.
 
-**S17 — the constraint channel and capabilities.** Eleven findings, weight 66,
-the largest stage in the repair, and the one the plan gates on three design
-decisions. **All three are answered, in the plan itself — §7's D4, D5 and D6 each
-carry an ANSWERED paragraph, and the plan's own §5 S17 entry splits the stage
-into four units.** D4 rejects mutable collections as keys (the recommendation);
-D5 implements all fifteen prelude names including the six graph helpers (against
-it); D6 implements `..`/`..=` in full (against it).
+**S17 is closed.** Eleven findings, weight 66, the largest stage in the repair,
+and the one the plan gates on three design decisions. **All three were answered
+in the plan itself — §7's D4, D5 and D6 each carry an ANSWERED paragraph, and
+the plan's own §5 S17 entry splits the stage into four units.** D4 rejects
+mutable collections as keys (the recommendation); D5 implements all fifteen
+prelude names including the six graph helpers (against it); D6 implements
+`..`/`..=` in full (against it).
 
-**Read the plan's §5 S17 entry and §7's D5 before continuing the stage.** Units
-1, 2 and 4 are done — ADR-056, ADR-058 and ADR-059 — and **unit 3 is the only one
-left**. D6's four owed sub-decisions are all answered and implemented in ADR-059;
-D5's graph-representation decision is the one still owed, and §4 has the question
-with a recommendation.
+All four units landed — ADR-056, ADR-058, ADR-060 and ADR-059. D6's four owed
+sub-decisions are answered and implemented in ADR-059; D5's owed
+graph-representation decision is answered and implemented in ADR-060, and the
+answer came from §6.5 rather than from a fresh design: the helpers are
+closure-driven, which is what the design doc's own example already showed.
 
 The list S16 wrote of what S17 would want, with where each now stands:
 

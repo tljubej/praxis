@@ -922,6 +922,27 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 }
                 return dst;
             }
+            // §6.5's graph helpers: `bfs`, `bfs_distance`, `dfs`, `dijkstra`,
+            // `a_star`, `flood_fill`. Each is one runtime call taking the start
+            // state and the closures the program wrote — the same one path as
+            // the numeric helpers, because every one of them takes only `Gc`
+            // operands and returns one. All six allocate and all six can fault
+            // (a closure they call may), so each is followed by a fault check.
+            // Before this they fell through to `CallTarget::User` and failed the
+            // compile with "unresolved user function `bfs`" (TY-33, ADR-060).
+            if let Some(helper) = praxis_stdlib::graph_helper(callee_name) {
+                let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
+                let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
+                b.push(Inst::Call {
+                    dst,
+                    callee: CallTarget::Runtime(helper.symbol),
+                    args: arg_locals,
+                    roots: RootSlots::unannotated(),
+                    debug: DebugSlots::unannotated(),
+                });
+                b.check_fault();
+                return dst;
+            }
             // Float constants `pi()`/`e()` (§4.12): direct runtime calls that
             // allocate a Float. No arguments; no fault.
             if callee_name == "pi" || callee_name == "e" {

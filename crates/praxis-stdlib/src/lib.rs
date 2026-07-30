@@ -26,5 +26,8 @@ pub use catalog::{
     MethodCatalog, MethodCatalogError, MethodEntry, MethodLowering, Purity, Stability,
 };
 pub use completion::{completion_data, CompletionItem};
-pub use prelude::{numeric_helper, NumericHelper, NUMERIC_HELPERS, PRELUDE};
+pub use prelude::{
+    graph_helper, numeric_helper, GraphHelper, GraphParam, GraphResult, NumericHelper,
+    GRAPH_HELPERS, NUMERIC_HELPERS, PRELUDE,
+};
 pub use type_pattern::{Bound, TypePattern};

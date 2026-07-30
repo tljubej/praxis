@@ -1823,6 +1823,193 @@ fn each_numeric_helper_reaches_the_backend() {
     }
 }
 
+// --- §6.5's graph helpers (TY-33 unit 3, ADR-060) ---------------------------
+
+/// A neighbour function over `Int` states, for the tests below. Written once
+/// because every graph helper takes one and the interesting part is never the
+/// graph.
+const STEPS: &str = "fn steps(n: Int) -> Vec[Int] { Vec() }\n";
+
+/// Each of the six has the signature its contract needs: one state type, a
+/// neighbour function of it, the result the helper's name promises — and the
+/// arity, which a fresh type variable could not enforce at all.
+///
+/// Before this every one of them got a fresh variable, so `bfs(1)` was accepted,
+/// `bfs("a", |n| steps(n))` was accepted, and the program then failed the
+/// compile with "unresolved user function `bfs`" (TY-33).
+#[test]
+fn each_graph_helper_has_the_signature_its_contract_needs() {
+    // The results are what §6.5's names promise: an order, a set, a cost table,
+    // an optional distance.
+    assert!(!has_type_error(&format!(
+        "{STEPS}fn main() -> Vec[Int] {{ bfs(1, |n| steps(n)) }}"
+    )));
+    assert!(!has_type_error(&format!(
+        "{STEPS}fn main() -> Vec[Int] {{ dfs(1, |n| steps(n)) }}"
+    )));
+    assert!(!has_type_error(&format!(
+        "{STEPS}fn main() -> Set[Int] {{ flood_fill(1, |n| steps(n)) }}"
+    )));
+    assert!(!has_type_error(&format!(
+        "{STEPS}fn main() -> Map[Int, Int] {{ dijkstra(1, |n| steps(n), |a, b| 1) }}"
+    )));
+    assert!(!has_type_error(&format!(
+        "{STEPS}fn main() -> Option[Int] {{ bfs_distance(1, |n| steps(n), |n| n == 9) }}"
+    )));
+    assert!(!has_type_error(&format!(
+        "{STEPS}fn main() -> Option[Int] \
+         {{ a_star(1, |n| steps(n), |a, b| 1, |n| 0, |n| n == 9) }}"
+    )));
+
+    // …and each is *that* result, not "whatever the caller wanted".
+    assert!(has_type_error(&format!(
+        "{STEPS}fn main() -> Set[Int] {{ bfs(1, |n| steps(n)) }}"
+    )));
+    assert!(has_type_error(&format!(
+        "{STEPS}fn main() -> Vec[Int] {{ flood_fill(1, |n| steps(n)) }}"
+    )));
+    assert!(has_type_error(&format!(
+        "{STEPS}fn main() -> Int {{ bfs_distance(1, |n| steps(n), |n| n == 9) }}"
+    )));
+    assert!(has_type_error(&format!(
+        "{STEPS}fn main() -> Set[Int] {{ dijkstra(1, |n| steps(n), |a, b| 1) }}"
+    )));
+
+    // The arity is the wrapper's, and inference enforces it: neither a short
+    // call nor a long one typechecks.
+    assert!(has_type_error(&format!("{STEPS}fn main() {{ bfs(1) }}")));
+    assert!(has_type_error(&format!(
+        "{STEPS}fn main() {{ bfs(1, |n| steps(n), |n| true) }}"
+    )));
+    assert!(has_type_error(&format!(
+        "{STEPS}fn main() {{ bfs_distance(1, |n| steps(n)) }}"
+    )));
+    assert!(has_type_error(&format!(
+        "{STEPS}fn main() {{ a_star(1, |n| steps(n), |a, b| 1, |n| 0) }}"
+    )));
+}
+
+/// Each closure parameter has the shape its position declares, and the state
+/// type is **one** variable shared by all of them. That is the whole difference
+/// between a signature and a fresh variable: the neighbour function's argument,
+/// its element type, the weight's two operands, the goal's argument and the
+/// start state are the same `T`, so disagreeing about it anywhere is an error.
+#[test]
+fn a_graph_helpers_closures_agree_with_each_other_about_the_state() {
+    // The neighbour function returns a `Vec` of the *state* type, not of
+    // anything else.
+    assert!(has_type_error(
+        "fn steps(n: Int) -> Vec[Text] { Vec() }\n\
+         fn main() { bfs(1, |n| steps(n)) }"
+    ));
+    // …and it takes the state type, so a start of another type is refused.
+    assert!(has_type_error(&format!(
+        "{STEPS}fn main() {{ bfs(\"a\", |n| steps(n)) }}"
+    )));
+    // The goal predicate answers `Bool`.
+    assert!(has_type_error(&format!(
+        "{STEPS}fn main() {{ bfs_distance(1, |n| steps(n), |n| n + 1) }}"
+    )));
+    // The weight and the heuristic answer `Int`.
+    assert!(has_type_error(&format!(
+        "{STEPS}fn main() {{ dijkstra(1, |n| steps(n), |a, b| true) }}"
+    )));
+    assert!(has_type_error(&format!(
+        "{STEPS}fn main() {{ a_star(1, |n| steps(n), |a, b| 1, |n| \"far\", |n| n == 9) }}"
+    )));
+    // A weight function takes *two* states — the edge, not the endpoint.
+    assert!(has_type_error(&format!(
+        "{STEPS}fn main() {{ dijkstra(1, |n| steps(n), |a| 1) }}"
+    )));
+    // And a neighbour function must be a function at all.
+    assert!(has_type_error(&format!("{STEPS}fn main() {{ bfs(1, 2) }}")));
+}
+
+/// A graph helper's state has to be one the walk can *remember* — a `Set`
+/// element and a `Map` key — so D4's rule reaches it: a mutable collection is
+/// refused, and it is refused **at the call**, which is the only place that can
+/// name the type.
+#[test]
+fn a_graph_helpers_state_must_be_one_the_walk_can_remember() {
+    let codes: Vec<u32> = analyze(
+        "fn steps(v: Vec[Int]) -> Vec[Vec[Int]] { Vec() }\n\
+         fn main() { var start = Vec()\n  start.push(1)\n  bfs(start, |v| steps(v)) }",
+    )
+    .diagnostics
+    .iter()
+    .filter(|d| d.code().category() == DiagnosticCategory::Type)
+    .map(|d| d.code().number())
+    .collect();
+    assert!(
+        codes.contains(&14),
+        "a mutable state type must be the same Y014 a Map key is, got {codes:?}"
+    );
+
+    // Every mutable collection is refused, in every helper.
+    for state in ["Vec[Int]", "Set[Int]", "Map[Int, Int]", "Deque[Int]"] {
+        let src = format!(
+            "fn steps(v: {state}) -> Vec[{state}] {{ Vec() }}\n\
+             fn walk(start: {state}) {{ bfs(start, |v| steps(v)) }}"
+        );
+        assert!(has_type_error(&src), "a {state} state was accepted");
+    }
+    // …and an immutable one is not. A record of scalars is what a grid position
+    // is written as, and it is a legal state.
+    assert!(!has_type_error(
+        "struct P { x: Int, y: Int }\n\
+         fn steps(p: P) -> Vec[P] { Vec() }\n\
+         fn main() { dfs(P { x: 0, y: 0 }, |p| steps(p)) }"
+    ));
+    assert!(!has_type_error(
+        "fn steps(t: Text) -> Vec[Text] { Vec() }\n\
+         fn main() { flood_fill(\"a\", |t| steps(t)) }"
+    ));
+}
+
+/// The state requirement rides F10's channel rather than being decided at the
+/// call: a helper called on an *unannotated* parameter defers the requirement,
+/// the enclosing function's scheme claims it, and the caller that pins the type
+/// is where it is answered.
+///
+/// This is the hardest thing the channel does, and it is what D5 meant by "a
+/// graph helper's signature is where the channel gets its hardest test".
+#[test]
+fn a_graph_state_requirement_reaches_through_a_generic_function() {
+    // `walk`'s parameter is a variable when `bfs` is checked, so the
+    // requirement cannot be decided there. It is decided at `main`'s call.
+    assert!(has_type_error(
+        "fn walk(start, step) { bfs(start, step) }\n\
+         fn steps(v: Vec[Int]) -> Vec[Vec[Int]] { Vec() }\n\
+         fn main() { var s = Vec()\n  s.push(1)\n  walk(s, |v| steps(v)) }"
+    ));
+    // …and the same generic function is fine at a state that can be remembered,
+    // which is what makes the rejection a requirement and not a ban on
+    // deferring.
+    assert!(!has_type_error(&format!(
+        "fn walk(start, step) {{ bfs(start, step) }}\n\
+         {STEPS}fn main() {{ walk(1, |n| steps(n)) }}"
+    )));
+}
+
+/// The half a type test cannot see: each of the six lowers to its own runtime
+/// call. Before this they reached the backend as `CallTarget::User("bfs")` and
+/// the compile failed with "unresolved user function `bfs`" — `panic`'s
+/// symptom, on the last six names that had it (TY-33).
+#[test]
+fn each_graph_helper_reaches_the_backend() {
+    for src in [
+        "fn main() -> Vec[Int] { bfs(1, |n| steps(n)) }",
+        "fn main() -> Vec[Int] { dfs(1, |n| steps(n)) }",
+        "fn main() -> Set[Int] { flood_fill(1, |n| steps(n)) }",
+        "fn main() -> Map[Int, Int] { dijkstra(1, |n| steps(n), |a, b| 1) }",
+        "fn main() -> Option[Int] { bfs_distance(1, |n| steps(n), |n| n == 9) }",
+        "fn main() -> Option[Int] { a_star(1, |n| steps(n), |a, b| 1, |n| 0, |n| n == 9) }",
+    ] {
+        let program = format!("{STEPS}{src}");
+        assert!(is_clean_with_lower(&program), "did not lower: {src}");
+    }
+}
+
 // --- capability constraints must survive polymorphism -----------------------
 
 #[test]

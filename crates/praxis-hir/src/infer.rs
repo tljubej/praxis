@@ -251,6 +251,36 @@ impl Inferer {
         self.require_cap_as(t, cap, at, None);
     }
 
+    /// Require the state type of a graph-helper call to be one the walk can
+    /// remember (ADR-060). A no-op for every other callee.
+    ///
+    /// The six §6.5 helpers keep a visited set and, for the weighted ones, a
+    /// cost table keyed on the state — so a state has to be a `Set` element and
+    /// a `Map` key, which is [`CapKind::HashStable`]. A state that can change
+    /// after the walk has stored it cannot be found again, and the walk revisits
+    /// it forever: exactly D4's rule, at a different door.
+    ///
+    /// The requirement is emitted **here** rather than claimed by the helper's
+    /// scheme in `seed_builtin_schemes`, and the reason is the diagnostic. A
+    /// constraint claimed by a prelude name's scheme has no source span to point
+    /// its "this is the operation that requires it" note at; emitted at the call,
+    /// it reports at the call and needs no note. It still rides the channel: a
+    /// state type that is a *variable* here — `fn walk(s) { bfs(s, step) }` — is
+    /// deferred, claimed by `walk`'s own scheme, and re-checked at each call to
+    /// `walk`, which is the whole point of F10.
+    fn require_graph_state(&mut self, callee: SymbolId, state: Option<Type>, at: TextRange) {
+        let is_helper = self.names.get(callee).is_some_and(|s| {
+            s.kind == SymbolKind::Builtin && praxis_stdlib::graph_helper(&s.name).is_some()
+        });
+        if !is_helper {
+            return;
+        }
+        // No first argument means the call's arity is already wrong, and the
+        // mismatch has been reported. There is no state type to constrain.
+        let Some(state) = state else { return };
+        self.require_cap(state, Capability::Kind(CapKind::HashStable), at);
+    }
+
     /// [`require_cap`](Self::require_cap) with the caller's own wording for a
     /// failure it can decide **immediately**.
     ///
@@ -621,8 +651,8 @@ impl Inferer {
     ///
     /// A name that is **not** seeded here gets a fresh type variable, which
     /// unifies with anything and then lowers as a call to a function nobody
-    /// defined — the whole of TY-33. The six graph helpers are the last names in
-    /// that state (D5's unit 3).
+    /// defined — the whole of TY-33. Every prelude name that denotes a value now
+    /// has a scheme here, so there are none left in that state.
     fn seed_builtin_schemes(&mut self) {
         // Collect the ids first to avoid borrowing `self.names` while mutating it.
         let to_seed: Vec<(SymbolId, String)> = self
@@ -644,6 +674,7 @@ impl Inferer {
                         || s.name == "pi"
                         || s.name == "e"
                         || praxis_stdlib::numeric_helper(&s.name).is_some()
+                        || praxis_stdlib::graph_helper(&s.name).is_some()
                         || crate::decl::collection_ctor_for(&s.name).is_some())
             })
             .map(|s| (s.id, s.name.clone()))
@@ -746,6 +777,60 @@ impl Inferer {
                     // the scheme and the call it becomes cannot disagree.
                     let params = vec![int_ty; helper.arity()];
                     db.func(params, int_ty)
+                }
+                // §6.5's graph helpers (ADR-060). Each is `forall T` over one
+                // state type: the first parameter is a state and every other one
+                // is a function of it, which is what "closure-based algorithms
+                // that do not require materializing a graph object" means. The
+                // row states the *shapes*; the types are built here, because
+                // `praxis-stdlib` cannot name a `Type`.
+                //
+                // The state type also has to be a `Set` element and a `Map` key
+                // — the walks remember where they have been — and that
+                // requirement is emitted at each call site rather than claimed
+                // here, so a failure points at the call rather than at a prelude
+                // name with no source span. See [`Inferer::require_graph_state`].
+                name if praxis_stdlib::graph_helper(name).is_some() => {
+                    let helper = praxis_stdlib::graph_helper(name).expect("just matched");
+                    let state = db.fresh_var();
+                    let params = helper
+                        .params
+                        .iter()
+                        .map(|p| match p {
+                            praxis_stdlib::GraphParam::Start => state,
+                            praxis_stdlib::GraphParam::Neighbours => {
+                                let states = db.vec(state);
+                                db.func(vec![state], states)
+                            }
+                            praxis_stdlib::GraphParam::Weight => {
+                                let int_ty = db.int();
+                                db.func(vec![state, state], int_ty)
+                            }
+                            praxis_stdlib::GraphParam::Heuristic => {
+                                let int_ty = db.int();
+                                db.func(vec![state], int_ty)
+                            }
+                            praxis_stdlib::GraphParam::Goal => {
+                                let bool_ty = db.bool();
+                                db.func(vec![state], bool_ty)
+                            }
+                        })
+                        .collect();
+                    let result = match helper.result {
+                        praxis_stdlib::GraphResult::VisitOrder => db.vec(state),
+                        praxis_stdlib::GraphResult::Reached => {
+                            db.unary_collection(CollectionCtor::Set, state)
+                        }
+                        praxis_stdlib::GraphResult::CostTable => {
+                            let int_ty = db.int();
+                            db.map(state, int_ty)
+                        }
+                        praxis_stdlib::GraphResult::Distance => {
+                            let int_ty = db.int();
+                            db.option_of(int_ty)
+                        }
+                    };
+                    db.func(params, result)
                 }
                 other => panic!("unexpected builtin `{other}` seeded"),
             });
@@ -2154,6 +2239,10 @@ impl Inferer {
                         // into the expected Func type — this is the call site's
                         // monomorphization witness (WS8, §13.6).
                         let arg_types_snapshot = arg_types.clone();
+                        // A graph helper's first argument is the state the walk
+                        // starts from, and the requirement below is about its
+                        // type. Read before the witness is moved.
+                        let state_arg = arg_types_snapshot.first().copied();
                         let expected = self.db.func(arg_types, result);
                         if let Err(e) = self.db.unify(callee_ty, expected) {
                             let at = c.syntax().text_range();
@@ -2175,6 +2264,14 @@ impl Inferer {
                                 // specialize from otherwise (MONO-02).
                                 result,
                             },
+                        );
+                        // A graph helper's state type has to be a `Set` element
+                        // and a `Map` key, because the walk remembers where it
+                        // has been (ADR-060).
+                        self.require_graph_state(
+                            resolved.symbol,
+                            state_arg,
+                            c.syntax().text_range(),
                         );
                         // For the common builtin `out(x)`, the scheme is
                         // forall T. (T) -> Unit, so the result unifies to Unit.

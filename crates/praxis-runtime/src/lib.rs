@@ -26,6 +26,7 @@ pub mod descriptor;
 pub mod dynamic_key;
 pub mod enums;
 pub mod gc;
+pub mod graph;
 pub mod heap;
 pub mod heaps;
 pub mod immortal;
