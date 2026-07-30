@@ -91,6 +91,9 @@ fn walk_expr(e: &TypedExpr) -> Result<(), String> {
             Ok(())
         }
         TypedExpr::FieldGet { receiver, .. } => walk_expr(receiver),
+        // Reading a tuple element allocates nothing and mutates nothing, exactly
+        // as reading a record field does.
+        TypedExpr::TupleIndex { receiver, .. } => walk_expr(receiver),
         TypedExpr::EnumVariant { args, .. } => {
             for a in args {
                 walk_expr(a)?;

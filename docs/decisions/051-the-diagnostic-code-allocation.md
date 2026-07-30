@@ -2,8 +2,8 @@
 
 **Date:** 2026-07-29
 **Status:** Accepted — amended 2026-07-29 for `Y017` (S14/TY-21) and 2026-07-30
-for `Y018`, `Y124` and `N006` (S24/REP-01, S26/REP-05, S26/REP-14); see the
-amendment notes under each table
+for `Y018`, `Y124`, `N006` and `Y019` (S24/REP-01, S26/REP-05, S26/REP-14,
+S25/REP-08); see the amendment notes under each table
 **Milestone:** Repair (answers the plan's **D13**, which binds before S13)
 
 ## Context
@@ -59,20 +59,32 @@ the **Name** category, following F2's own sketch, which puts `NameIsNotAType`,
 | `Y016` | TY-26, TY-27 | S17 | an operator that is not defined for these operand types |
 | `Y017` | TY-21 | S14 | a `break` carrying a value out of a `while`/`for` (**amendment**) |
 | `Y018` | REP-01 | S24 | a **generic** `fn` used as a value (**amendment**) |
+| `Y019` | REP-08 | S25 | a `.n` element access on something with no such element (**amendment**) |
 
-**Amendment (2026-07-30).** Three codes, one of them allocated here and two
+**Amendment (2026-07-30).** Four codes, two of them allocated here and two
 **recorded late**. `Y018` (REP-01, S24 — ADR-061) and `Y124` (REP-05, S26 —
 `3306a04`) were spent by the sessions that needed them and this file was not
 amended at the time, which is the one thing the last consequence below asks for.
 They are in the tables above now, so the registry is again what a stage reads
 before allocating. Neither collides: both extended a contiguous block.
 
+`Y019`, for REP-08 — a `.n` on a receiver that is not a tuple, or an index past
+its arity. Not `Y112` ("no field on this type"): a tuple has no field *names*, so
+that message would name the wrong thing, and `Y112` is emitted at **lowering**,
+which `praxis check` does not run — `Y019` is emitted in inference for `Y018`'s
+reason. One code with two messages, because "you cannot index this" and "there is
+no element there" are one mistake at two receivers, and the arity is the useful
+thing to say when there is one.
+
 `N006`, for REP-14. The rule above is what
 allocated it: "declaration mistakes go in the **Name** category", and a `struct`
 that refers to itself is a mistake about what was *declared* — there is no pair of
 types to have failed to unify, which is what a `Y0xx` code is for. `N004` and
-`N005` are the precedents. So `Y019` stays free and the `Y0xx` user block is still
-contiguous through `Y018`. ADR-063 is the decision behind it (D17).
+`N005` are the precedents — which is what kept REP-14 out of the `Y0xx` block and
+left `Y019` for REP-08. ADR-063 is the decision behind it (D17).
+
+**`Y020` and `N007` are the next free codes.** The `Y0xx` user block is contiguous
+through `Y019` and the `N0xx` block through `N006`.
 
 `TY-20` gets two codes rather than the one the plan lists: "`return` with no
 function" and "`break` with no loop" are different mistakes with different fixes,

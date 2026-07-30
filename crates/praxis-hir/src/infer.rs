@@ -1311,6 +1311,7 @@ impl Inferer {
             Expr::Parse(p) => self.infer_parse(p),
             Expr::RecordLit(r) => self.infer_record_lit(r),
             Expr::FieldGet(f) => self.infer_field_get(f),
+            Expr::TupleIndex(t) => self.infer_tuple_index(t),
             Expr::Match(m) => self.infer_match(m),
             // M7-WS7: closure — type is `Func`; params bind in a child scope.
             Expr::Closure(c) => self.infer_closure(c),
@@ -1541,6 +1542,62 @@ impl Inferer {
                     .unwrap_or_else(|| self.db.fresh_var())
             }
             _ => self.db.fresh_var(),
+        }
+    }
+
+    /// `p.0` — a tuple element, selected by position (REP-08, §4.4).
+    ///
+    /// A `(Int, Int)` was a legal value, a legal `Map` key and a legal graph state
+    /// (ADR-060) that **no function could read**: `p.0` was a `P001` at the dot.
+    ///
+    /// The report is emitted **here** and not at lowering, for `Y018`'s reason
+    /// (ADR-061): `praxis check` does not run lowering, so a program reported only
+    /// there is clean under `check` and fails under `run` — the asymmetry REP-12
+    /// was about. `Y112`'s emitter, which is where a bad *field* is reported, has
+    /// exactly that shape today.
+    ///
+    /// An unresolved receiver says nothing. That is the same optimism every
+    /// capability predicate has about a variable, and it is why `fn first(p) {
+    /// p.0 }` comes out with a fresh result type rather than a diagnostic; giving
+    /// it a real answer needs a "has an element at position n" requirement on the
+    /// constraint channel, which no finding asks for.
+    fn infer_tuple_index(&mut self, t: &praxis_ast::TupleIndexExpr) -> Type {
+        let receiver_ty = t
+            .receiver()
+            .map(|r| self.infer_expr(&r))
+            .unwrap_or_else(|| self.db.fresh_var());
+        let at = t.syntax().text_range();
+        // A literal too large for a `usize` is out of range for every tuple, so
+        // it reports like any other out-of-range index rather than specially.
+        let index = t.index().unwrap_or(usize::MAX);
+        let resolved = self.db.follow(receiver_ty);
+        match self.db.data(resolved) {
+            praxis_types::TypeData::Tuple(els) => {
+                let (arity, element) = (els.len(), els.get(index).copied());
+                match element {
+                    Some(el) => el,
+                    None => {
+                        self.diagnostics
+                            .push(crate::diagnostics::tuple_index_out_of_range(
+                                self.file_span(at),
+                                arity,
+                                index,
+                            ));
+                        self.db.fresh_var()
+                    }
+                }
+            }
+            // Optimistic: inference has not said what this is yet.
+            praxis_types::TypeData::Var(_) => self.db.fresh_var(),
+            _ => {
+                let rendered = self.db.render(resolved);
+                self.diagnostics.push(crate::diagnostics::not_a_tuple(
+                    self.file_span(at),
+                    &rendered,
+                    index,
+                ));
+                self.db.fresh_var()
+            }
         }
     }
 

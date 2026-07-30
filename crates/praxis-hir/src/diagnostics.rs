@@ -138,6 +138,36 @@ fn list_names(names: &[String]) -> String {
     }
 }
 
+/// `Y019` — a `.n` element access on a receiver that is not a tuple (REP-08).
+///
+/// A tuple has no field *names*, so `Y112`'s "no field `0` on this type" would
+/// name the wrong thing. Wording follows §5.4: it says what the program did.
+pub(crate) fn not_a_tuple(at: FileSpan, ty: &str, index: usize) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::NoTupleElement,
+        format!("values of type `{ty}` have no element `{index}` — only a tuple does"),
+        at,
+    )
+}
+
+/// `Y019` — a `.n` past the end of a tuple (REP-08).
+///
+/// The same code as [`not_a_tuple`] and a different message: the receiver *is* a
+/// tuple, so naming its arity is the useful thing to say.
+pub(crate) fn tuple_index_out_of_range(at: FileSpan, arity: usize, index: usize) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::NoTupleElement,
+        format!(
+            "a tuple of {arity} elements has no element `{index}` — its elements are \
+             `0` to `{}`",
+            arity - 1
+        ),
+        at,
+    )
+}
+
 /// `Y001` — two types that could not be unified (expected vs found).
 pub(crate) fn type_mismatch(at: FileSpan, expected: &str, found: &str) -> Diagnostic {
     Diagnostic::new(

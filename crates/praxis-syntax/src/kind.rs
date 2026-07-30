@@ -197,6 +197,13 @@ pub enum SyntaxKind {
     FIELD,
     /// A `Name { field: expr, … }` record-literal expression (M7, §4.5).
     RECORD_LIT_EXPR,
+    /// A `receiver.0` tuple-element expression (REP-08, §4.4).
+    ///
+    /// Its own kind rather than a `FIELD_EXPR` holding an `IntLit`: an element is
+    /// selected by **position** and the index must be a literal, where a field is
+    /// selected by name — two different operations that lower to two different
+    /// runtime calls.
+    TUPLE_INDEX_EXPR,
     /// A `receiver.field` field-access expression (M7, §4.5).
     FIELD_EXPR,
     /// A `match scrutinee { pattern => expr, … }` expression (M7, §4.6/§4.11).

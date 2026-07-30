@@ -344,6 +344,19 @@ pub enum Inst {
         src: LocalId,
         field_idx: u32,
     },
+    /// Read an element out of a tuple `GcRef` into a `Gc` local (REP-08, §4.4).
+    /// `index` is the element's position. Not a safepoint (no allocation).
+    ///
+    /// Its own instruction rather than a [`Inst::LoadField`] with a flag: the two
+    /// call different runtime symbols (`praxis_tuple_get` and
+    /// `praxis_record_field`), and choosing between them from the receiver's type
+    /// at codegen time would be a second answer to a question the typed tree has
+    /// already given.
+    LoadTupleElem {
+        dst: LocalId,
+        src: LocalId,
+        index: u32,
+    },
     /// Read the variant tag of an enum `GcRef` into a `Scalar(Int)` local (M7,
     /// §4.6). The codegen reads the tag directly from the payload without
     /// allocating. Not a safepoint.

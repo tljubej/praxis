@@ -1273,6 +1273,21 @@ fn lower_inst<M: Module>(
             )?;
             builder.def_var(vars[dst.0 as usize], field);
         }
+        Inst::LoadTupleElem { dst, src, index } => {
+            // praxis_tuple_get(ctx, tuple, idx) -> GcRef. `Pure`, so not a
+            // safepoint — the element is already allocated inside the tuple.
+            let tuple = builder.use_var(vars[src.0 as usize]);
+            let idx_val = builder.ins().iconst(GC, *index as i64);
+            let elem = call_symbol(
+                builder,
+                ctx_val,
+                &[tuple, idx_val],
+                RuntimeSymbol::TupleGet,
+                module,
+                imports,
+            )?;
+            builder.def_var(vars[dst.0 as usize], elem);
+        }
         Inst::EnumTag { dst, src } => {
             // Read the tag directly from the EnumPayload. The payload starts at
             // gc_ref + GcHeader::payload_offset_for(align_of(EnumPayload)) —

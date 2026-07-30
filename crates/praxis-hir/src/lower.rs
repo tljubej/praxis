@@ -337,6 +337,21 @@ pub enum TypedExpr {
     },
     /// `receiver.field` field access (M7, §4.5). `field_idx` is the field's
     /// index in the record's `RecordDef`.
+    /// `receiver.0` — a tuple element, selected by position (REP-08, §4.4).
+    ///
+    /// Its own variant rather than a `FieldGet` with a positional index: a record
+    /// field and a tuple element lower to two different runtime symbols
+    /// (`praxis_record_field` and `praxis_tuple_get`), so MIR must be told which
+    /// one this is rather than re-deriving it from the receiver's type. Adding the
+    /// variant is what sends the compiler to every exhaustive walk that has to
+    /// know about it — the same reason `TypedExpr::FnValue` is a variant and not a
+    /// flag on `Path` (ADR-061).
+    TupleIndex {
+        receiver: Box<TypedExpr>,
+        index: u32,
+        ty: Type,
+        span: (u32, u32),
+    },
     FieldGet {
         receiver: Box<TypedExpr>,
         field_idx: u32,
@@ -514,6 +529,7 @@ typed_expr_children! {
     Parse { text },
     RecordLit { fields: field_each },
     FieldGet { receiver },
+    TupleIndex { receiver },
     EnumVariant { args: each },
     Match { scrutinee, arms: arm_each },
     Closure { body: block },
@@ -1087,6 +1103,7 @@ impl<'a> Lowerer<'a> {
             Expr::Parse(p) => self.lower_parse(p),
             Expr::RecordLit(r) => self.lower_record_lit(r),
             Expr::FieldGet(f) => self.lower_field_get(f),
+            Expr::TupleIndex(t) => self.lower_tuple_index(t),
             Expr::Match(m) => self.lower_match(m),
             // M7-WS7: closure parsing, resolution, and inference are complete;
             // the runtime lowering (synthetic MIR function, capture environment,
@@ -1997,6 +2014,27 @@ impl<'a> Lowerer<'a> {
 
     /// Lower a `receiver.field` field access (M7, §4.5). Looks up the field's
     /// index and type from the receiver's record type.
+    /// `p.0` — a tuple element (REP-08). Inference has already reported a
+    /// receiver that is not a tuple, or an index past its arity, so this reads
+    /// the index and the recorded type and does no checking of its own.
+    fn lower_tuple_index(&mut self, t: &praxis_ast::TupleIndexExpr) -> TypedExpr {
+        let span = self.node_span(t.syntax());
+        let receiver = match t.receiver() {
+            Some(r) => self.lower_expr(&r),
+            None => return self.error_expr(),
+        };
+        let Some(index) = t.index().and_then(|i| u32::try_from(i).ok()) else {
+            return self.error_expr();
+        };
+        let ty = self.node_ty(t.syntax());
+        TypedExpr::TupleIndex {
+            receiver: Box::new(receiver),
+            index,
+            ty,
+            span,
+        }
+    }
+
     fn lower_field_get(&mut self, f: &FieldExpr) -> TypedExpr {
         let span = self.node_span(f.syntax());
         let receiver = match f.receiver() {
@@ -2318,6 +2356,7 @@ pub fn expr_span(e: &TypedExpr) -> (u32, u32) {
         | TypedExpr::Parse { span, .. }
         | TypedExpr::RecordLit { span, .. }
         | TypedExpr::FieldGet { span, .. }
+        | TypedExpr::TupleIndex { span, .. }
         | TypedExpr::EnumVariant { span, .. }
         | TypedExpr::Match { span, .. }
         | TypedExpr::Closure { span, .. } => *span,
@@ -2363,6 +2402,7 @@ pub fn expr_ty(e: &TypedExpr) -> Type {
         TypedExpr::Parse { ty, .. } => *ty,
         TypedExpr::RecordLit { ty, .. } => *ty,
         TypedExpr::FieldGet { ty, .. } => *ty,
+        TypedExpr::TupleIndex { ty, .. } => *ty,
         TypedExpr::EnumVariant { ty, .. } => *ty,
         TypedExpr::Match { ty, .. } => *ty,
         TypedExpr::Closure { ty, .. } => *ty,

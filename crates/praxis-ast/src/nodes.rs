@@ -462,6 +462,8 @@ pub enum Expr {
     RecordLit(RecordLitExpr),
     /// `receiver.field` field access (M7, §4.5).
     FieldGet(FieldExpr),
+    /// `receiver.0` tuple element access (REP-08, §4.4).
+    TupleIndex(TupleIndexExpr),
     /// `match scrutinee { pattern => expr, … }` (M7, §4.6).
     Match(MatchExpr),
     /// `|params| expr` closure (M7, §4.10).
@@ -497,6 +499,7 @@ impl Expr {
             Expr::Parse(e) => e.syntax(),
             Expr::RecordLit(e) => e.syntax(),
             Expr::FieldGet(e) => e.syntax(),
+            Expr::TupleIndex(e) => e.syntax(),
             Expr::Match(e) => e.syntax(),
             Expr::Closure(e) => e.syntax(),
             Expr::Error(n) => n,
@@ -534,6 +537,7 @@ impl Expr {
             K::PARSE_EXPR => Expr::Parse(ParseExpr::from_syntax(n)),
             K::RECORD_LIT_EXPR => Expr::RecordLit(RecordLitExpr::from_syntax(n)),
             K::FIELD_EXPR => Expr::FieldGet(FieldExpr::from_syntax(n)),
+            K::TUPLE_INDEX_EXPR => Expr::TupleIndex(TupleIndexExpr::from_syntax(n)),
             K::MATCH_EXPR => Expr::Match(MatchExpr::from_syntax(n)),
             K::CLOSURE_EXPR => Expr::Closure(ClosureExpr::from_syntax(n)),
             K::PARSE_ERROR => Expr::Error(n),
@@ -566,6 +570,49 @@ impl RecordLitExpr {
     /// The `{ field: expr, … }` initializer list.
     pub fn field_list(&self) -> Option<FieldList> {
         child(&self.syntax)
+    }
+}
+
+/// `receiver.0` — tuple element access (REP-08, §4.4). The first child is the
+/// receiver expression; the index is the trailing `IntLit` token.
+///
+/// Its own node rather than a `FieldExpr` holding an `IntLit`: an element is
+/// selected by **position** and the index must be a literal, where a field is
+/// selected by name. The two lower to two different runtime calls, and keeping
+/// them apart is what makes every exhaustive match downstream ask about both.
+#[derive(Clone, Debug)]
+pub struct TupleIndexExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for TupleIndexExpr {
+    const KIND: K = K::TUPLE_INDEX_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl TupleIndexExpr {
+    /// The receiver expression (`p` in `p.0`).
+    pub fn receiver(&self) -> Option<Expr> {
+        self.syntax.children().find_map(Expr::cast_from_child)
+    }
+    /// The index token (`0` in `p.0`).
+    pub fn index_token(&self) -> Option<SyntaxToken> {
+        self.syntax.children_with_tokens().find_map(|e| match e {
+            rowan::NodeOrToken::Token(t) if t.kind() == K::IntLit => Some(t),
+            _ => None,
+        })
+    }
+    /// The index as a number, or `None` when the literal does not fit a `usize`.
+    ///
+    /// A tuple's arity is small and the index is written by hand, so an
+    /// out-of-`usize` literal is a mistake rather than a case to support — but it
+    /// is *representable* in the source, so this answers `None` rather than
+    /// panicking, and the caller reports it like any other bad index.
+    pub fn index(&self) -> Option<usize> {
+        self.index_token()?.text().parse().ok()
     }
 }
 

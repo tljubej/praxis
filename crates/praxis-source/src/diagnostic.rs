@@ -229,6 +229,15 @@ pub enum DiagCode {
     /// and a value has none. `|x| id(x)` is the spelling that works — the
     /// closure's body *is* a call site.
     GenericFunctionAsValue,
+    /// `Y019` — a `.0` element access on something that has no such element
+    /// (REP-08): a receiver that is not a tuple, or an index past its arity.
+    ///
+    /// Not `Y112` ("no field on this type"): a tuple has no field *names*, so a
+    /// message about a missing field would name the wrong thing, and `Y112` is a
+    /// lowering diagnostic — `praxis check` never runs lowering, so a program
+    /// reported only there is clean under `check` and fails under `run` (REP-12's
+    /// asymmetry). This one is emitted in inference.
+    NoTupleElement,
 
     // --- Type (`Y09x`), internal ---
     /// `Y099` — internal: a type the compiler expected was absent.
@@ -342,6 +351,7 @@ impl DiagCode {
             OperatorNotDefined => DiagnosticCode::new(Type, 16),
             ValueBreakOutsideLoopExpression => DiagnosticCode::new(Type, 17),
             GenericFunctionAsValue => DiagnosticCode::new(Type, 18),
+            NoTupleElement => DiagnosticCode::new(Type, 19),
 
             InternalMissingType => DiagnosticCode::new(Type, 99),
 
@@ -413,6 +423,7 @@ impl DiagCode {
             OperatorNotDefined,
             ValueBreakOutsideLoopExpression,
             GenericFunctionAsValue,
+            NoTupleElement,
             InternalMissingType,
             NoMethodOnType,
             NoFieldOnType,
@@ -800,7 +811,7 @@ mod tests {
         // `ALL` holds each variant once, so its length is the variant count.
         // Update both together; the exhaustive match in `code()` is what makes
         // adding a variant a compile error in the first place.
-        assert_eq!(DiagCode::ALL.len(), 60);
+        assert_eq!(DiagCode::ALL.len(), 61);
         let unique: std::collections::HashSet<_> = DiagCode::ALL.iter().collect();
         assert_eq!(
             unique.len(),

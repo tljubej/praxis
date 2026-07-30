@@ -575,6 +575,12 @@ impl Resolver {
             // a scope binding; it's resolved against the struct type during
             // inference.
             Expr::FieldGet(f) => self.resolve_field_get(scope, f),
+            // A tuple index names nothing, so only the receiver is resolved.
+            Expr::TupleIndex(t) => {
+                if let Some(receiver) = t.receiver() {
+                    self.resolve_expr(scope, &receiver);
+                }
+            }
             // M7-WS5: match — resolve the scrutinee and each arm's body. Pattern
             // variable bindings enter a child scope.
             Expr::Match(m) => self.resolve_match(scope, m),

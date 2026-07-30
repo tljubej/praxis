@@ -512,6 +512,7 @@ fn operands(inst: &Inst) -> Vec<LocalId> {
         Inst::ExtractScalar { dst, src, .. }
         | Inst::Materialize { dst, src, .. }
         | Inst::LoadField { dst, src, .. }
+        | Inst::LoadTupleElem { dst, src, .. }
         | Inst::EnumTag { dst, src }
         | Inst::EnumPayloadGet { dst, src, .. }
         | Inst::MoveGc { dst, src } => v.extend([*dst, *src]),

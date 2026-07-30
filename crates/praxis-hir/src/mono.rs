@@ -373,6 +373,7 @@ fn resolve_expr(db: &mut TypeDb, binders: &[VarId], args: &[Type], e: &mut Typed
         | TypedExpr::Parse { ty, .. }
         | TypedExpr::RecordLit { ty, .. }
         | TypedExpr::FieldGet { ty, .. }
+        | TypedExpr::TupleIndex { ty, .. }
         | TypedExpr::EnumVariant { ty, .. } => *ty = specialize_type(db, binders, args, *ty),
         TypedExpr::For { ty, item_ty, .. } => {
             *ty = specialize_type(db, binders, args, *ty);

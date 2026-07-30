@@ -813,9 +813,19 @@ impl<'t> Parser<'t> {
                 }
                 SyntaxKind::DOT => {
                     self.bump(); // `.`
+                                 // `p.0` — a tuple element, selected by position (REP-08).
+                                 // The lexer guarantees the literal is an integer here: a
+                                 // digit run immediately after a `.` takes no fraction, so
+                                 // `t.0.1` is two indices and not an index and a float.
+                    if self.at(SyntaxKind::IntLit) {
+                        self.start_node_at(cp, SyntaxKind::TUPLE_INDEX_EXPR);
+                        self.bump(); // the index
+                        self.finish_node(); // TUPLE_INDEX_EXPR
+                        continue;
+                    }
                     if !self.at(SyntaxKind::Ident) {
                         let span = self.current_span();
-                        self.error(span, "expected name after `.`");
+                        self.error(span, "expected a name or a tuple index after `.`");
                         break;
                     }
                     // Disambiguate field access (`p.x`) from method call

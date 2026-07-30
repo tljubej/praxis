@@ -1301,6 +1301,23 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             field_idx,
             ..
         } => lower_field_get(b, receiver, *field_idx),
+        // `p.0` — a tuple element (REP-08). A different runtime symbol from a
+        // record field's, which is why it is a different instruction.
+        TypedExpr::TupleIndex {
+            receiver,
+            index,
+            ty,
+            ..
+        } => {
+            let src = lower_expr_gc(b, receiver);
+            let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, None);
+            b.push(Inst::LoadTupleElem {
+                dst,
+                src,
+                index: *index,
+            });
+            dst
+        }
         // M7: enum variant construction.
         TypedExpr::EnumVariant {
             enum_def_id,
@@ -3921,6 +3938,7 @@ fn expr_static_type(e: &TypedExpr) -> Type {
         | TypedExpr::Parse { ty, .. }
         | TypedExpr::RecordLit { ty, .. }
         | TypedExpr::FieldGet { ty, .. }
+        | TypedExpr::TupleIndex { ty, .. }
         | TypedExpr::EnumVariant { ty, .. }
         | TypedExpr::Match { ty, .. }
         | TypedExpr::Closure { ty, .. } => *ty,

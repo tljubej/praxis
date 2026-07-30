@@ -250,7 +250,16 @@ impl<'a> Lexer<'a> {
         // next byte is another `.`) and `1.method()` (the next byte is a letter).
         // A `_` cannot open a fraction for the same reason: `1._0` is not a
         // float, so a separator is only ever *between* digits.
-        if self.peek_is_dot_then_digit() {
+        //
+        // …and a digit run that *itself* follows a `.` is a **tuple index**, so
+        // it takes no fraction at all (REP-08). `t.0.1` is `t`, `.0`, `.1` — two
+        // indices — and lexing the `0.1` as one float is what made a nested tuple
+        // unreadable even once the parser accepted `p.0`. The rule is adjacency:
+        // the immediately preceding token, with no trivia between, is a `DOT`.
+        // A `..` is `DOT2` and is a different token, so `0..1.5` is untouched,
+        // and no float literal in any program has a bare `DOT` before it — in
+        // `1.5` the `.` is consumed *inside* this function and never emitted.
+        if !self.preceded_by_dot(start) && self.peek_is_dot_then_digit() {
             is_float = true;
             // Consume the `.`.
             self.pos += 1;
@@ -297,6 +306,24 @@ impl<'a> Lexer<'a> {
             }
             self.pos += run;
         }
+    }
+
+    /// True iff the token just emitted is a bare `DOT` ending exactly at `start`
+    /// — nothing between it and the literal now being lexed, not even whitespace
+    /// (REP-08).
+    ///
+    /// The one caller is [`Self::eat_number`]: a digit run in that position is a
+    /// **tuple index** and takes no fractional part, so `t.0.1` is two indices
+    /// rather than an index and a float.
+    ///
+    /// It has to be the *token* and not the source byte. In `1.5..2.5` the byte
+    /// before `2` is a `.` too — the second one of the `..` — but that `.` was
+    /// consumed into a `DOT2`, which is a different token and leaves `2.5` the
+    /// float it is.
+    fn preceded_by_dot(&self, start: usize) -> bool {
+        self.tokens.last().is_some_and(|last| {
+            last.kind == SyntaxKind::DOT && last.span.end().to_u32() as usize == start
+        })
     }
 
     /// True iff the current position is a `.` immediately followed by an ASCII
@@ -1097,6 +1124,62 @@ error[T003]: unexpected character in source
         assert_eq!(text, "1");
         let (kinds, _) = lex_text("1._0");
         assert!(!kinds.contains(&SyntaxKind::FloatLit));
+    }
+
+    /// **REP-08.** A digit run immediately after a `.` is a **tuple index**, so
+    /// it takes no fractional part: `t.0.1` is two indices, not an index and the
+    /// float `0.1`.
+    ///
+    /// The parser accepting `p.0` is not enough on its own — a nested tuple was
+    /// unreadable while the lexer folded `0.1` into one `FloatLit`. The rule is
+    /// adjacency to a bare `DOT` **token**, which is why `1.5..2.5` is untouched:
+    /// the byte before its `2` is a `.` too, but that one was consumed into a
+    /// `DOT2`.
+    #[test]
+    fn a_digit_run_after_a_dot_is_an_index_and_takes_no_fraction() {
+        // The defect's own case.
+        let (kinds, _) = lex_text("t.0.1");
+        assert!(
+            !kinds.contains(&SyntaxKind::FloatLit),
+            "`t.0.1` is two indices: {kinds:?}"
+        );
+        assert_eq!(
+            kinds.iter().filter(|k| **k == SyntaxKind::IntLit).count(),
+            2
+        );
+        assert_eq!(kinds.iter().filter(|k| **k == SyntaxKind::DOT).count(), 2);
+
+        // A single index, and a wider one.
+        for src in ["p.0", "x.10", "p.0 + 1"] {
+            let (kinds, diags) = lex_text(src);
+            assert!(diags.is_empty(), "{src}: {diags:?}");
+            assert!(kinds.contains(&SyntaxKind::IntLit), "{src}");
+            assert!(!kinds.contains(&SyntaxKind::FloatLit), "{src}");
+        }
+
+        // …and every float that is *not* in that position still lexes as one.
+        for src in ["3.0", "1.5", "let x = 0.25", "1.5e3", "3.141_592"] {
+            let (kinds, diags) = lex_text(src);
+            assert!(diags.is_empty(), "{src}: {diags:?}");
+            assert!(kinds.contains(&SyntaxKind::FloatLit), "{src}: {kinds:?}");
+        }
+        // The one that made the rule a *token* rule: the byte before `2` is the
+        // second `.` of the `..`, but that `.` is inside a `DOT2`.
+        let (kinds, _) = lex_text("1.5..2.5");
+        assert_eq!(
+            kinds.iter().filter(|k| **k == SyntaxKind::FloatLit).count(),
+            2,
+            "both bounds are floats: {kinds:?}"
+        );
+        assert!(kinds.contains(&SyntaxKind::DOT2));
+        // A range whose upper bound is a float, with an integer lower bound —
+        // the same trap one token earlier.
+        let (kinds, _) = lex_text("0..1.5");
+        assert!(kinds.contains(&SyntaxKind::FloatLit), "{kinds:?}");
+        // A method call on a float literal is unaffected: the `.` before `sqrt`
+        // is not before a digit.
+        let (kinds, _) = lex_text("1.5.sqrt()");
+        assert!(kinds.contains(&SyntaxKind::FloatLit), "{kinds:?}");
     }
 
     /// A separated bound is still a bound: `1_000..2_000` is a range (TY-34),

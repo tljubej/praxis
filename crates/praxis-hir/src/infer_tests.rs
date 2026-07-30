@@ -4232,3 +4232,69 @@ fn the_logical_operators_take_two_bools_and_produce_one() {
         )));
     }
 }
+
+/// **REP-08.** `p.0` reads a tuple element, and reading past the end — or off
+/// something that is not a tuple — is `Y019` in *inference*.
+///
+/// A `(Int, Int)` was a legal value, a legal `Map` key and a legal graph state
+/// (ADR-060) that **no function could read**: `p.0` was a `P001` at the dot, and
+/// `tests/aoc-corpus/day10_bfs_shortest_distance.px` says so in a comment and
+/// hand-encodes its adjacency around it.
+///
+/// The report is in inference and not at lowering, for `Y018`'s reason (ADR-061):
+/// `praxis check` does not run lowering, so a program reported only there is clean
+/// under `check` and fails under `run` — the asymmetry REP-12 was about. It is
+/// also **not** `Y112` ("no field on this type"): a tuple has no field *names*.
+#[test]
+fn a_tuple_element_is_read_by_position_and_a_bad_index_is_reported() {
+    let y019 = |src: &str| -> bool {
+        analyze(src)
+            .diagnostics
+            .iter()
+            .any(|d| d.kind() == praxis_source::DiagCode::NoTupleElement)
+    };
+
+    // Every position of every arity, and the element's *type* — a fresh variable
+    // would accept all of these and prove nothing.
+    assert_eq!(expr_type("(1, 2).0"), "Int");
+    assert_eq!(expr_type("(1, \"a\").1"), "Text");
+    assert_eq!(expr_type("(1, \"a\", true).2"), "Bool");
+    assert_eq!(expr_type("(1, 2, 3, 4, 5).4"), "Int");
+    // …and a nested one, which is the case the lexer had to be taught: `n.0.1`
+    // is two indices and not an index and the float `0.1`.
+    assert_eq!(expr_type("((1, \"a\"), 3).0.1"), "Text");
+
+    // Through a binding, a parameter and a closure body.
+    assert!(!has_type_error(
+        "fn fst(p: (Int, Text)) -> Int { p.0 }\n\
+         fn main() -> Int { let q = (1, \"a\")\n fst(q) }"
+    ));
+    assert!(!has_type_error(
+        "fn main() -> Int { let f = |p: (Int, Int)| p.0 + p.1\n f((1, 2)) }"
+    ));
+    // The element type is enforced, not invented.
+    assert!(has_type_error("fn f() -> Text { (1, 2).0 }"));
+
+    // Past the end, at every arity — including an index no `usize` can hold,
+    // which is out of range for every tuple.
+    assert!(y019("fn f() -> Int { (1, 2).2 }"));
+    assert!(y019("fn f() -> Int { (1, 2).5 }"));
+    assert!(y019("fn f() -> Int { (1, 2).99999999999999999999 }"));
+    // …and off something that is not a tuple at all: a scalar, a collection, a
+    // record — each of which has its own way of not having elements.
+    assert!(y019("fn f() -> Int { let n = 1\n n.0 }"));
+    assert!(y019("fn f() -> Int { let t = \"ab\"\n t.0 }"));
+    assert!(y019("fn f(v: Vec[Int]) -> Int { v.0 }"));
+    assert!(y019("struct P { x: Int }\nfn f(p: P) -> Int { p.0 }"));
+
+    // A *record* field is untouched — same syntax, different operation, and the
+    // codes must not have swapped.
+    assert!(!has_type_error(
+        "struct P { x: Int }\nfn f(p: P) -> Int { p.x }"
+    ));
+    assert!(!y019("struct P { x: Int }\nfn f(p: P) -> Int { p.x }"));
+
+    // An unresolved receiver says nothing: `p.0` on an unannotated parameter is
+    // optimistic, as every capability question about a variable is.
+    assert!(!y019("fn first(p) { p.0 }"));
+}

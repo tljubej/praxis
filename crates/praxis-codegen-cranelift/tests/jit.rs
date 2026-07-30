@@ -5476,3 +5476,58 @@ fn the_logical_operators_short_circuit_and_answer_their_truth_table() {
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 8);
 }
+
+/// **REP-08.** A tuple element read at run time is the element the position
+/// names, at every arity and through every shape that holds one.
+///
+/// The half no type test can see: `praxis_tuple_get` had **no MIR caller** before
+/// this — the symbol existed and nothing reached it, because `Inst::LoadField`
+/// hard-codes `praxis_record_field` and a tuple index had no instruction of its
+/// own. A `LoadField` reused here would read a record's field table out of a
+/// tuple's payload.
+#[test]
+fn a_tuple_element_reads_the_value_at_that_position() {
+    for (src, want) in [
+        ("fn main() -> Int { (1, 2).0 }", 1),
+        ("fn main() -> Int { (1, 2).1 }", 2),
+        // Every position of a wider tuple, so an off-by-one in the index would
+        // show rather than cancel.
+        ("fn main() -> Int { (10, 20, 30, 40, 50).0 }", 10),
+        ("fn main() -> Int { (10, 20, 30, 40, 50).2 }", 30),
+        ("fn main() -> Int { (10, 20, 30, 40, 50).4 }", 50),
+        // Nested — the lexer rule's own case: `n.0.1` is two indices.
+        ("fn main() -> Int { ((1, 2), 3).0.1 }", 2),
+        ("fn main() -> Int { ((1, 2), 3).1 }", 3),
+        // Through a binding, a parameter, and a closure body.
+        ("fn main() -> Int { let p = (7, 9)\n p.0 + p.1 }", 16),
+        (
+            "fn snd(p: (Int, Int)) -> Int { p.1 }\nfn main() -> Int { snd((3, 4)) }",
+            4,
+        ),
+        (
+            "fn main() -> Int { let f = |p: (Int, Int)| p.0 * p.1\n f((6, 7)) }",
+            42,
+        ),
+        // Out of a collection, which is how a corpus program actually holds them.
+        (
+            "fn main() -> Int { var v = Vec()\n v.push((1, 5))\n v.get(0).1 }",
+            5,
+        ),
+    ] {
+        let (rt, result) = run_main(src);
+        assert!(!rt.has_pending_fault(), "{src} faulted");
+        assert_eq!(result.as_int(), want, "{src}");
+    }
+
+    // A non-`Int` element comes back as itself, so the read is not quietly an
+    // integer extraction.
+    let (rt, result) = run_main("fn main() -> Bool { (1, true).1 }");
+    assert!(!rt.has_pending_fault());
+    assert!(result.as_bool());
+
+    // A float literal is still a float: `3.0` is one token, and only a digit run
+    // *after* a `.` is an index.
+    let (rt, result) = run_main("fn main() -> Float { 3.0 }");
+    assert!(!rt.has_pending_fault());
+    assert!((result.as_float() - 3.0).abs() < 1e-12);
+}
