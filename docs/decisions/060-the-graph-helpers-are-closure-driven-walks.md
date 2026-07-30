@@ -189,6 +189,9 @@ and it is not diagnosed. That is stated rather than hidden: the search's contrac
 is that the estimate never exceeds the true remaining cost, and checking it would
 mean computing the answer twice.
 
+> **Paid in S18 (ADR-075).** Both rows are now `FaultKind::NoAnswer`, the kind
+> this section's own heading asked for.
+
 `InvalidSize` is borrowed twice more here, and the debt ADR-058 recorded grows
 rather than shrinking. Its doc already covers "an argument the runtime cannot
 honour"; a negative weight and a negative heuristic are that, and S17 has no ABI

@@ -1091,9 +1091,8 @@ pub unsafe extern "C" fn praxis_int_max(
 /// mistake in the program, not in the data, and TY-28 already settled that the
 /// repair reports those rather than inventing a number. (Rust's `Ord::clamp`
 /// panics on the same input; a panic across `extern "C"` is what §10.4 forbids,
-/// so it is a fault.) The kind is `InvalidSize` — an argument the runtime cannot
-/// honour — because S17's one ABI bump is spent (H17); ADR-058 says why, and a
-/// dedicated kind is owed to whichever stage next spends one.
+/// so it is a fault.) The kind is `EmptyRange` — the kind ADR-058 recorded as
+/// owed to whichever stage next spent an ABI bump, which S18 does.
 ///
 /// # Safety
 /// `ctx` must be live and wired; all three operands must be valid `Int`
@@ -1109,7 +1108,7 @@ pub unsafe extern "C" fn praxis_int_clamp(
     let lo = unsafe { int_payload(low) };
     let hi = unsafe { int_payload(high) };
     if lo > hi {
-        unsafe { set_fault(ctx, RaisedFault::INVALID_SIZE) };
+        unsafe { set_fault(ctx, RaisedFault::EMPTY_RANGE) };
         return unsafe { unit_sentinel(ctx) };
     }
     if v < lo {
@@ -4033,6 +4032,12 @@ pub unsafe extern "C" fn praxis_range_new_inclusive(
 /// wrapped negative length instead would be a `for` loop that ran zero times
 /// over every integer there is.
 ///
+/// The kind is `IntOverflow`, which is what `gcd`, `lcm` and A\*'s path cost
+/// already answer for a result with no `Int`. ADR-059 wanted it in the
+/// empty-range kind alongside `clamp`; S18 declined, because the range this
+/// fires on is the *fullest* one there is and "empty range" would be a fault
+/// message that lies about it. ADR-075 records the disagreement.
+///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Range` `GcRef`.
 #[no_mangle]
@@ -4042,7 +4047,7 @@ pub unsafe extern "C" fn praxis_range_len(ctx: *mut RuntimeContext, r: GcRef) ->
     match i64::try_from(range.len()) {
         Ok(len) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, len) },
         Err(_) => {
-            unsafe { set_fault(ctx, RaisedFault::INVALID_SIZE) };
+            unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
             unsafe { unit_sentinel(ctx) }
         }
     }
@@ -4849,7 +4854,7 @@ mod tests {
             let hi = praxis_alloc_int(ctx, 0);
             let r = praxis_int_clamp(ctx, v, lo, hi);
             assert!(rt.has_pending_fault());
-            assert_eq!(rt.fault(), FaultKind::InvalidSize);
+            assert_eq!(rt.fault(), FaultKind::EmptyRange);
             assert_eq!(r.as_ptr(), rt.immortals().unit().as_ptr());
         }
         let _ = rt.take_fault();
@@ -4861,6 +4866,45 @@ mod tests {
             let r = praxis_int_clamp(ctx, v, same, same);
             assert!(!rt.has_pending_fault());
             assert_eq!(r.as_ptr(), same.as_ptr());
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// A range whose member count has no `Int` faults with `IntOverflow`,
+    /// answering the Unit sentinel like every other faulting wrapper.
+    ///
+    /// There was no test for this at all until S18 re-pointed the kind. ADR-059
+    /// assigned the case to the empty-range kind it and ADR-058 were both owed;
+    /// S18 declined and gave it `IntOverflow` instead, because
+    /// `Int::MIN..Int::MAX` is the *widest* range expressible and "empty range"
+    /// would be a fault message that contradicts the input. `gcd`, `lcm` and
+    /// A\*'s path cost already answer `IntOverflow` for a result with no `Int`
+    /// (ADR-075).
+    #[test]
+    fn a_range_whose_count_has_no_int_faults_rather_than_wrapping_negative() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; both bounds are valid Ints.
+        unsafe {
+            let lo = praxis_alloc_int(ctx, i64::MIN);
+            let hi = praxis_alloc_int(ctx, i64::MAX);
+            let r = praxis_range_new(ctx, lo, hi);
+            let len = praxis_range_len(ctx, r);
+            assert!(rt.has_pending_fault());
+            assert_eq!(rt.fault(), FaultKind::IntOverflow);
+            assert_eq!(len.as_ptr(), rt.immortals().unit().as_ptr());
+        }
+        let _ = rt.take_fault();
+        // A range one narrower is countable, so the refusal is the edge and not
+        // the rule.
+        // SAFETY: ctx wired; both bounds are valid Ints.
+        unsafe {
+            let lo = praxis_alloc_int(ctx, 0);
+            let hi = praxis_alloc_int(ctx, i64::MAX);
+            let r = praxis_range_new(ctx, lo, hi);
+            let len = praxis_range_len(ctx, r);
+            assert!(!rt.has_pending_fault());
+            assert_eq!(praxis_int_load(ctx, len), i64::MAX);
         }
         unsafe { drop_ctx(ctx) };
     }

@@ -233,7 +233,7 @@ pub fn dijkstra_costs(
             oracle.retain(next);
             let step = oracle.weight(state, next)?;
             if step < 0 {
-                return Err(oracle.abort(FaultKind::InvalidSize));
+                return Err(oracle.abort(FaultKind::NoAnswer));
             }
             let Some(through) = cost.checked_add(step) else {
                 return Err(oracle.abort(FaultKind::IntOverflow));
@@ -292,7 +292,7 @@ pub fn a_star_cost(oracle: &mut dyn GraphOracle, start: GcRef) -> Result<Option<
             oracle.retain(next);
             let step = oracle.weight(state, next)?;
             if step < 0 {
-                return Err(oracle.abort(FaultKind::InvalidSize));
+                return Err(oracle.abort(FaultKind::NoAnswer));
             }
             let Some(through) = cost.checked_add(step) else {
                 return Err(oracle.abort(FaultKind::IntOverflow));
@@ -321,7 +321,7 @@ pub fn a_star_cost(oracle: &mut dyn GraphOracle, start: GcRef) -> Result<Option<
 fn estimate(oracle: &mut dyn GraphOracle, state: GcRef, cost: i64) -> Result<i64, Aborted> {
     let h = oracle.heuristic(state)?;
     if h < 0 {
-        return Err(oracle.abort(FaultKind::InvalidSize));
+        return Err(oracle.abort(FaultKind::NoAnswer));
     }
     match cost.checked_add(h) {
         Some(f) => Ok(f),
@@ -634,14 +634,14 @@ mod tests {
         t.weights = vec![((1, 2), -1)];
         let start = t.state(1);
         assert_eq!(dijkstra_costs(&mut t, start), Err(Aborted));
-        assert_eq!(t.raised, Some(FaultKind::InvalidSize));
+        assert_eq!(t.raised, Some(FaultKind::NoAnswer));
 
         let (_rt2, mut t2) = table(&[(1, &[2]), (2, &[])]);
         t2.weights = vec![((1, 2), -1)];
         t2.goals = vec![2];
         let start2 = t2.state(1);
         assert_eq!(a_star_cost(&mut t2, start2), Err(Aborted));
-        assert_eq!(t2.raised, Some(FaultKind::InvalidSize));
+        assert_eq!(t2.raised, Some(FaultKind::NoAnswer));
     }
 
     /// A path whose cost leaves the `Int` range faults rather than wrapping —
@@ -706,6 +706,6 @@ mod tests {
         t.heuristics = vec![(1, -5)];
         let start = t.state(1);
         assert_eq!(a_star_cost(&mut t, start), Err(Aborted));
-        assert_eq!(t.raised, Some(FaultKind::InvalidSize));
+        assert_eq!(t.raised, Some(FaultKind::NoAnswer));
     }
 }

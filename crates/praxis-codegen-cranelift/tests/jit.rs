@@ -4739,11 +4739,11 @@ fn a_numeric_helper_faults_rather_than_wrapping() {
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
 
     // An inverted `clamp` range is empty, so there is no value to return.
-    // ADR-058: the kind is `InvalidSize` until a stage spends an ABI bump on one
-    // of its own.
+    // ADR-058 borrowed `InvalidSize` for it and recorded a dedicated kind as
+    // owed; S18 spent a bump and paid it (ADR-075).
     let (rt, _r) = run_main("fn main() -> Int { clamp(5, 10, 0) }");
     assert!(rt.has_pending_fault());
-    assert_eq!(rt.fault(), praxis_runtime::FaultKind::InvalidSize);
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyRange);
 
     // …and the total three are total at the same edges.
     let (rt, result) = run_main("fn main() -> Int { sign(0 - 9223372036854775807 - 1) }");
@@ -4951,7 +4951,7 @@ fn a_cost_table_holds_the_least_cost_to_every_reachable_state() {
         "{graph}fn main() -> Int {{ dijkstra(1, |n| steps(n), |a, b| 0 - 1).len() }}"
     ));
     assert!(rt.has_pending_fault());
-    assert_eq!(rt.fault(), praxis_runtime::FaultKind::InvalidSize);
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::NoAnswer);
 }
 
 /// `a_star` answers the cheapest cost to a goal, and the heuristic changes only
@@ -5015,7 +5015,7 @@ fn a_star_finds_the_cheapest_goal_and_the_heuristic_does_not_change_it() {
          {{ unwrap(a_star(1, |n| steps(n), |a, b| cost(a, b), |n| 0 - 5, |n| n == 4)) }}"
     ));
     assert!(rt.has_pending_fault());
-    assert_eq!(rt.fault(), praxis_runtime::FaultKind::InvalidSize);
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::NoAnswer);
 }
 
 /// A state is a **value**, not an integer the walk happens to understand. A

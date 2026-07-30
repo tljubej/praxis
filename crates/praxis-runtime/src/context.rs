@@ -73,16 +73,16 @@ pub enum FaultKind {
     /// than panicking across the ABI — but the recovery is a fault, not a
     /// silent success, and now says so.
     InvalidText = 9,
-    /// A size, extent or range the runtime cannot honour: a negative `Grid`
-    /// width or height, a `width * height` that overflows or exceeds
-    /// [`GridExtent::MAX_CELLS`](crate::collections::GridExtent::MAX_CELLS), a
-    /// `BitSet` member outside [`BitIndex`](crate::bitset::BitIndex)'s range
-    /// (§9.2), or a `clamp(v, low, high)` whose `low` exceeds its `high`
-    /// (ADR-058). The first three reached Rust as a `usize` cast and became an
-    /// OOM abort or a capacity-overflow panic *across* `extern "C"`; they are now
-    /// faults (RT-07). The last has no kind of its own because S17's one ABI
-    /// bump is spent; a dedicated empty-range kind is owed to the next stage
-    /// that spends one.
+    /// A size or extent the runtime cannot honour: a negative `Grid` width or
+    /// height, a `width * height` that overflows or exceeds
+    /// [`GridExtent::MAX_CELLS`](crate::collections::GridExtent::MAX_CELLS), or
+    /// a `BitSet` member outside [`BitIndex`](crate::bitset::BitIndex)'s range
+    /// (§9.2). All three reached Rust as a `usize` cast and became an OOM abort
+    /// or a capacity-overflow panic *across* `extern "C"`; they are now faults
+    /// (RT-07).
+    ///
+    /// `clamp`'s inverted range borrowed this kind through S17 and no longer
+    /// does: it is [`EmptyRange`](Self::EmptyRange).
     InvalidSize = 10,
     /// A value did not have the type its destination declared: pushing a
     /// `Float` into a `Vec[Int]`, or constructing a `Grid[T]` whose cell type
@@ -98,6 +98,29 @@ pub enum FaultKind {
     /// message: `assert` takes a condition and nothing else, so any text would
     /// only restate the kind. `panic` is the name that carries words.
     AssertFailed = 13,
+    /// A range with no members was asked for a member: `clamp(v, low, high)`
+    /// with `low > high` (ADR-058), which names an empty inclusive range and so
+    /// has no value to clamp to.
+    ///
+    /// ADR-058 recorded this kind as *owed*, because a new `FaultKind` costs an
+    /// ABI bump and S17's was spent; S18 spends one and pays it. ADR-059 wanted
+    /// `praxis_range_len`'s uncountable range in here too — S18 declined and
+    /// gave it [`IntOverflow`](Self::IntOverflow) instead, because
+    /// `Int::MIN..Int::MAX` is the *fullest* range there is and calling it empty
+    /// would be a fault message that lies. See ADR-075.
+    EmptyRange = 14,
+    /// An argument this algorithm has no answer for: a negative edge weight in
+    /// `dijkstra`/`a_star`, whose settle-once-and-never-reconsider shape makes a
+    /// negative edge silently overstate the answer, and a negative heuristic,
+    /// which makes `f = g + h` decrease along a path (ADR-060).
+    ///
+    /// The operand is well-formed and the graph is well-formed; what is absent
+    /// is a *correct answer this algorithm could produce*, which is why neither
+    /// [`InvalidSize`](Self::InvalidSize) nor
+    /// [`TypeMismatch`](Self::TypeMismatch) fits. ADR-060 asked for this kind by
+    /// its own heading — "an answer the walk cannot compute is a fault, not a
+    /// wrong number" — and S18 pays it with the same bump.
+    NoAnswer = 15,
 }
 
 /// The message a [`FaultKind::Panic`] or [`FaultKind::AssertFailed`] carries.
@@ -184,6 +207,10 @@ impl RaisedFault {
     pub const PANIC: RaisedFault = RaisedFault(FaultKind::Panic);
     /// An `assert(condition)` found its condition false (§9.1).
     pub const ASSERT_FAILED: RaisedFault = RaisedFault(FaultKind::AssertFailed);
+    /// A range with no members was asked for a member (ADR-058).
+    pub const EMPTY_RANGE: RaisedFault = RaisedFault(FaultKind::EmptyRange);
+    /// An argument this algorithm has no answer for (ADR-060).
+    pub const NO_ANSWER: RaisedFault = RaisedFault(FaultKind::NoAnswer);
 
     /// The raisable fault `kind` names, or `None` for [`FaultKind::None`] —
     /// which is the *absence* of a fault and cannot be raised.
@@ -220,6 +247,8 @@ impl std::fmt::Display for FaultKind {
             FaultKind::TypeMismatch => write!(f, "value does not have the declared type"),
             FaultKind::Panic => write!(f, "panic"),
             FaultKind::AssertFailed => write!(f, "assertion failed"),
+            FaultKind::EmptyRange => write!(f, "empty range"),
+            FaultKind::NoAnswer => write!(f, "an argument this algorithm has no answer for"),
         }
     }
 }
