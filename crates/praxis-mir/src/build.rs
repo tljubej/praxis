@@ -5493,4 +5493,63 @@ mod tests {
         assert_eq!(nested.elems, 2);
         assert_eq!(nested.fields, vec![0, 1]);
     }
+
+    /// **REP-21.** An updating store is **one** call and no read.
+    ///
+    /// The assertion a behavioural test cannot make: a read of a *present* key
+    /// would succeed and leave the answer right, so nothing would show that
+    /// `d[k] min= v` had quietly become the read-modify-write §6.2 says it is
+    /// not. On an absent key the same read faults (§4.7) — which is the bug this
+    /// pins, one step before it is observable.
+    #[test]
+    fn an_updating_store_is_one_call_and_reads_nothing() {
+        let calls = |src: &str, sym: RuntimeSymbol| -> usize {
+            let (funcs, _) = lower_src_to_mir(src);
+            let main = funcs.iter().find(|f| f.name == "main").expect("main");
+            main.blocks
+                .iter()
+                .flat_map(|b| b.insts.iter())
+                .filter(|i| {
+                    matches!(
+                        i,
+                        Inst::Call {
+                            callee: CallTarget::Runtime(s),
+                            ..
+                        } if *s == sym
+                    )
+                })
+                .count()
+        };
+        const MIN: &str = "fn main() -> Int {\n  let d = Map()\n  d[\"a\"] min= 5\n  d[\"a\"]\n}";
+        const MAX: &str = "fn main() -> Int {\n  let b = Map()\n  b[\"a\"] max= 5\n  b[\"a\"]\n}";
+
+        assert_eq!(calls(MIN, RuntimeSymbol::MapUpdateMin), 1);
+        assert_eq!(calls(MAX, RuntimeSymbol::MapUpdateMax), 1);
+        // Neither the plain store nor the read is involved. The trailing `d["a"]`
+        // is one `MapIndex`; a read-modify-write would make it two.
+        for src in [MIN, MAX] {
+            assert_eq!(calls(src, RuntimeSymbol::MapInsert), 0, "no plain store");
+            assert_eq!(
+                calls(src, RuntimeSymbol::MapIndex),
+                1,
+                "only the read the program wrote"
+            );
+        }
+        // …and the two operators do not share a wrapper.
+        assert_eq!(calls(MIN, RuntimeSymbol::MapUpdateMax), 0);
+        assert_eq!(calls(MAX, RuntimeSymbol::MapUpdateMin), 0);
+
+        // A `+=` through the same subscript still reads first — the compound
+        // operators are untouched, which is the regression a shared path would
+        // cause.
+        let compound =
+            "fn main() -> Int {\n  let d = Map()\n  d[\"a\"] = 1\n  d[\"a\"] += 2\n  d[\"a\"]\n}";
+        assert_eq!(
+            calls(compound, RuntimeSymbol::MapIndex),
+            2,
+            "the `+=`'s read and the program's"
+        );
+        assert_eq!(calls(compound, RuntimeSymbol::MapInsert), 2);
+        assert_eq!(calls(compound, RuntimeSymbol::MapUpdateMin), 0);
+    }
 }

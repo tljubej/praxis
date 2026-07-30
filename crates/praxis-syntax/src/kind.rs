@@ -192,6 +192,17 @@ pub enum SyntaxKind {
     /// value. The target here is the first expression child and the value the
     /// second.
     PLACE_ASSIGN_STMT,
+    /// The two-token `min=` / `max=` operator of an updating store (REP-21,
+    /// §6.2): an `Ident` spelling `min` or `max`, immediately followed by `=`.
+    ///
+    /// A node rather than a token because `min` **is** an identifier — the lexer
+    /// cannot claim it without taking `min` away from every program that names
+    /// the prelude helper — so the operator is decided contextually, at the one
+    /// position where an identifier cannot otherwise appear. Wrapping the pair
+    /// keeps the `=` from being a direct child of the statement, where a walk
+    /// looking for the assignment operator would read the update as a plain
+    /// store.
+    UPDATE_OP,
     /// A top-level or nested `fn` declaration.
     FN_ITEM,
     /// A `struct Name { field: Type, … }` declaration (M7, §4.5).

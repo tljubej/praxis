@@ -229,6 +229,30 @@ pub(crate) fn not_index_assignable(at: FileSpan, ty: &str, indices: usize) -> Di
     )
 }
 
+/// `Y020` — a `min=` update on a type that has none (REP-21).
+///
+/// Its own message beside [`not_index_assignable`] because a `Counter` *can* be
+/// assigned through one index — `c[k] = n` is a row — and what it has not is the
+/// updating store. "Cannot be assigned through 1 index" would be false about the
+/// very receiver it is most likely to be written for.
+pub(crate) fn not_index_min_updatable(at: FileSpan, ty: &str, indices: usize) -> Diagnostic {
+    not_index_updatable(at, ty, indices, "min=")
+}
+
+/// `Y020` — a `max=` update on a type that has none (REP-21).
+pub(crate) fn not_index_max_updatable(at: FileSpan, ty: &str, indices: usize) -> Diagnostic {
+    not_index_updatable(at, ty, indices, "max=")
+}
+
+fn not_index_updatable(at: FileSpan, ty: &str, indices: usize, op: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::NotIndexable,
+        format!("values of type `{ty}` cannot be updated with `{op}` through {indices} index(es)"),
+        at,
+    )
+}
+
 /// `Y021` — an assignment whose left side names no storage (REP-16).
 pub(crate) fn not_an_assignment_target(at: FileSpan) -> Diagnostic {
     Diagnostic::new(

@@ -4963,3 +4963,80 @@ fn a_record_or_tuple_match_is_exhaustive_without_a_catch_all() {
          let r = match o { Some(P { x, y }) => x, None => 0 }\n"
     ));
 }
+
+/// **REP-21.** `min=` and `max=` are catalog rows of their own, on a `Map` whose
+/// value type is bound to `Int`.
+///
+/// §6.2 writes `distance[key] min= candidate` and says "an absent entry accepts
+/// the first value" — a semantics no read-modify-write over the subscript rows
+/// can express, because a subscript read of an absent key *faults* (§4.7). So
+/// they are rows, not desugarings, and the type rule is the row's.
+#[test]
+fn an_updating_store_is_a_row_on_a_map_of_ints() {
+    // The value is an `Int` because the wrapper compares through `int_payload`,
+    // and the bound **pins** it rather than merely permitting it: an
+    // unannotated `Map()` becomes a `Map[?K, Int]` at the first `min=`.
+    assert!(is_clean_with_lower(
+        "let d = Map()\nd[\"a\"] min= 5\nd[\"a\"] min= 3\nout(d[\"a\"])\n"
+    ));
+    assert_eq!(
+        expr_type("{ let d = Map()\n d[\"a\"] min= 5\n d }"),
+        "Map[Text, Int]",
+        "the row's bound pins the value type"
+    );
+
+    // A value that is not an `Int` is the ordinary mismatch.
+    let diags = analyze_and_lower_diags("let d = Map()\nd[\"a\"] = \"v\"\nd[\"a\"] min= \"w\"\n");
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y001"),
+        "expected Y001, got {diags:?}"
+    );
+
+    // A receiver with no updating store is `Y020`, and the message names the
+    // operator — a `Counter` *can* be assigned through one index, so "cannot be
+    // assigned through 1 index" would be false about the very receiver this is
+    // most likely to be written for.
+    for (src, op) in [
+        ("let c = Counter()\nc[\"k\"] min= 1\n", "min="),
+        ("let g = Grid()\ng[0, 0] max= 1\n", "max="),
+        ("let v = Vec()\nv.push(1)\nv[0] min= 1\n", "min="),
+    ] {
+        let diags = analyze_and_lower_diags(src);
+        let y020 = diags
+            .iter()
+            .find(|d| d.code().to_string() == "Y020")
+            .unwrap_or_else(|| panic!("expected Y020 for {src}, got {diags:?}"));
+        assert!(
+            y020.message().contains(op),
+            "the message must name `{op}`: {}",
+            y020.message()
+        );
+    }
+
+    // A target that is not a place at all is `Y021`, as it is for every other
+    // assignment operator.
+    let diags = analyze_and_lower_diags("var x = 1\nx min= 2\n");
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y021"),
+        "expected Y021, got {diags:?}"
+    );
+
+    // The receiver may be an unannotated parameter: the row defers through
+    // `HasMethod` exactly as a method call does (TY-30), and the call site
+    // answers it — in both directions.
+    assert!(is_clean_with_lower(
+        "fn relax(d, k, v) { d[k] min= v }\n\
+         let dist = Map()\ndist[\"a\"] = 10\nrelax(dist, \"a\", 4)\nout(dist[\"a\"])\n"
+    ));
+    let diags = analyze_and_lower_diags(
+        "fn relax(d, k, v) { d[k] min= v }\nlet c = Counter()\nrelax(c, \"a\", 4)\n",
+    );
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y020"),
+        "the requirement is answered at the call: {diags:?}"
+    );
+
+    // …and `min`/`max` are still the prelude's own functions, which is what the
+    // contextual grammar rule exists to protect.
+    assert_eq!(expr_type("min(3, 4) + max(3, 4)"), "Int");
+}

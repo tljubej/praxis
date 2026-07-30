@@ -400,6 +400,30 @@ impl<'t> Parser<'t> {
         None
     }
 
+    /// `true` if an updating store's operator starts here: an `Ident` spelling
+    /// `min` or `max`, **immediately** followed by `=` (REP-21, §6.2).
+    ///
+    /// Adjacency is the rule, exactly as it is for `+=`: `min=` is one operator
+    /// spelled in two tokens because `min` is an identifier, and `min = x` with a
+    /// space is two tokens that mean what they say. Checking the raw token stream
+    /// rather than [`Parser::nth_kind`] is what makes that askable — `nth_kind`
+    /// skips trivia, which is precisely the difference.
+    ///
+    /// `==` cannot be mistaken for it: the lexer's max-munch makes that one
+    /// `EQ2` token.
+    fn at_update_op(&mut self) -> bool {
+        if !self.at(SyntaxKind::Ident) {
+            return false;
+        }
+        if !matches!(self.peek_text(), Some("min" | "max")) {
+            return false;
+        }
+        let ident = self.meaningful_index();
+        self.tokens
+            .get(ident + 1)
+            .is_some_and(|t| t.kind == SyntaxKind::EQ)
+    }
+
     /// `true` if the current meaningful token is `kind`.
     fn at(&mut self, kind: SyntaxKind) -> bool {
         self.peek() == kind
@@ -765,6 +789,20 @@ impl<'t> Parser<'t> {
         if is_assignment_op(self.peek()) {
             self.start_node_at(cp, SyntaxKind::PLACE_ASSIGN_STMT);
             self.bump(); // assignment operator
+            self.parse_expr();
+            self.finish_node(); // PLACE_ASSIGN_STMT
+            return true;
+        }
+        // `distance[key] min= candidate` (REP-21, §6.2). The operator is two
+        // tokens, so the parser decides it here rather than the lexer: `min` is
+        // an identifier everywhere else, and a lexer rule would take it away from
+        // every program that names the prelude helper.
+        if self.at_update_op() {
+            self.start_node_at(cp, SyntaxKind::PLACE_ASSIGN_STMT);
+            self.start_node(SyntaxKind::UPDATE_OP);
+            self.bump(); // `min` / `max`
+            self.bump(); // `=`
+            self.finish_node(); // UPDATE_OP
             self.parse_expr();
             self.finish_node(); // PLACE_ASSIGN_STMT
             return true;
@@ -2885,6 +2923,86 @@ mod tests {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must report");
         }
+    }
+
+    /// **REP-21.** `min=` and `max=` are operators exactly where an identifier
+    /// cannot be one, and `min` is still a name everywhere else.
+    ///
+    /// §6.2 writes `distance[key] min= candidate` and `best[key] max= score`, and
+    /// neither parsed: `min` is an `Ident`, so `min=` is two tokens and no
+    /// assignment operator matched. The rule is contextual by necessity — a lexer
+    /// rule that claimed `min=` would take `min` away from every program that
+    /// calls the prelude helper (ADR-058), which §3.3's own program does.
+    #[test]
+    fn an_updating_store_is_an_operator_only_where_a_name_cannot_be() {
+        let count = |src: &str, kind: SyntaxKind| -> usize {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            construct_names(&out.tree)
+                .into_iter()
+                .filter(|k| *k == kind)
+                .count()
+        };
+
+        // §6.2's own two lines, and the shapes around them: a computed index, a
+        // computed value, and the operator inside a block.
+        for src in [
+            "distance[key] min= candidate",
+            "best[key] max= score",
+            "d[a + b] min= f(x)",
+            "fn go() {\n  d[k] max= n\n}",
+            "grid[x, y] min= 3",
+        ] {
+            assert_eq!(count(src, SyntaxKind::UPDATE_OP), 1, "{src}");
+            assert_eq!(count(src, SyntaxKind::PLACE_ASSIGN_STMT), 1, "{src}");
+        }
+
+        // The operator is **adjacent**, as `+=` is: with a space it is an
+        // identifier followed by `=`, which is two statements run together and
+        // reports as one.
+        for spaced in ["d[k] min = 3", "d[k] max = 3"] {
+            let out = parse_text(spaced);
+            assert!(!out.diagnostics.is_empty(), "{spaced} must report");
+        }
+
+        // `min` and `max` are ordinary names everywhere else — the whole reason
+        // the rule is contextual.
+        for src in [
+            "let d = min(3, 4)",
+            "let d = max(abs(a), abs(b))",
+            "let m = min",
+            "out(min(1, 2) + max(3, 4))",
+            // …including as the receiver of a subscript, where the identifier is
+            // followed by `[` and not by `=`.
+            "let v = min[0]",
+        ] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            assert_eq!(count(src, SyntaxKind::UPDATE_OP), 0, "{src}");
+        }
+
+        // `==` is one token by max-munch, so a comparison can never be read as an
+        // update, and no other identifier gets the rule.
+        for src in ["let r = d[k] == v", "let r = m[k] == 3"] {
+            assert_eq!(count(src, SyntaxKind::UPDATE_OP), 0, "{src}");
+        }
+        let out = parse_text("d[k] mid= 3");
+        assert!(
+            !out.diagnostics.is_empty(),
+            "only `min` and `max` are operators"
+        );
+
+        // A target that is not a place still *parses*, exactly as `f() = 1` does
+        // (REP-16): naming no storage is inference's report and not the parser's.
+        for src in ["x min= 1", "f() max= 1"] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            assert_eq!(count(src, SyntaxKind::UPDATE_OP), 1, "{src}");
+        }
+
+        // …and a missing value is a mistake, not an empty store.
+        let out = parse_text("d[k] min=");
+        assert!(!out.diagnostics.is_empty(), "a value is required");
     }
 
     /// **REP-24.** A declaration's members are separated by a comma **or** a

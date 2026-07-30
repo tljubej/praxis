@@ -6254,3 +6254,75 @@ fn a_record_and_a_tuple_pattern_read_the_components_they_name() {
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 37);
 }
+
+/// **REP-21.** `min=` keeps the smaller value, `max=` the larger, and an absent
+/// entry accepts the first — which is the half no type test can see, and the
+/// half the runtime wrappers had been waiting for since they were written with
+/// no caller.
+#[test]
+fn an_updating_store_keeps_the_better_value_and_accepts_the_first() {
+    // `min=` on a key that already has a value: the smaller wins, whichever
+    // order the candidates arrive in, and a *worse* candidate changes nothing.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let d = Map()\n  d[\"a\"] = 10\n  \
+         d[\"a\"] min= 4\n  d[\"a\"] min= 7\n  d[\"a\"] min= 9\n  d[\"a\"]\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4);
+
+    // `max=` is its dual, and the two are different wrappers: a program that
+    // computed one with the other answers 4 here.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let b = Map()\n  b[\"a\"] = 10\n  \
+         b[\"a\"] max= 4\n  b[\"a\"] max= 17\n  b[\"a\"] max= 9\n  b[\"a\"]\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 17);
+
+    // **An absent entry accepts the first value** (§6.2), and it must not fault:
+    // a subscript *read* of an absent key does (§4.7), which is exactly why this
+    // cannot be a read-modify-write and is a row of its own.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let d = Map()\n  d[\"fresh\"] min= 42\n  \
+         let b = Map()\n  b[\"fresh\"] max= 7\n  d[\"fresh\"] * 100 + b[\"fresh\"]\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4207);
+
+    // …and the first value is accepted *whatever* it is: a later, larger
+    // candidate does not replace it under `min=`.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let d = Map()\n  d[\"k\"] min= 3\n  d[\"k\"] min= 100\n  d[\"k\"]\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+
+    // Several keys, and a key computed by an expression — the place is a real
+    // subscript and not a name in disguise.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let d = Map()\n  var i = 0\n  \
+         while i < 6 {\n    d[i % 3] min= 10 - i\n    i = i + 1\n  }\n  \
+         d[0] * 100 + d[1] * 10 + d[2]\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 765, "keys 0,1,2 keep 7,6,5");
+
+    // §6.2's own shape: a Dijkstra-style relaxation through a generic helper, so
+    // the deferred receiver reaches the backend as well as the type checker.
+    let (rt, result) = run_main(
+        "fn relax(dist, key, candidate) {\n  dist[key] min= candidate\n}\n\
+         fn main() -> Int {\n  let distance = Map()\n  \
+         relax(distance, 1, 7)\n  relax(distance, 1, 3)\n  relax(distance, 2, 9)\n  \
+         distance[1] * 100 + distance[2]\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 309);
+
+    // The update does not read: a `min=` on a map with an absent key runs where
+    // `d[k] = d[k] + 1` would fault, and the map still holds one entry per key.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let d = Map()\n  d[\"a\"] min= 5\n  d[\"a\"] min= 5\n  d.len()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}

@@ -681,20 +681,44 @@ impl PlaceAssignStmt {
     pub fn target(&self) -> Option<Expr> {
         self.syntax.children().find_map(Expr::cast_from_child)
     }
-    /// The assignment operator token (`=`, `+=`, …).
-    pub fn op(&self) -> Option<SyntaxToken> {
+    /// What this statement does to the place it names.
+    ///
+    /// A [`PlaceAssignOp`] and not the operator *token*, because `min=`/`max=`
+    /// has no token of its own (REP-21) — it is an `Ident` and an `=` under an
+    /// `UPDATE_OP` node. A token accessor would answer `None` for those two and
+    /// every caller would read them as a plain store, which is the difference
+    /// between "keep the smaller value" and "overwrite it".
+    pub fn op(&self) -> PlaceAssignOp {
         use rowan::NodeOrToken;
-        self.syntax.children_with_tokens().find_map(|e| match e {
-            NodeOrToken::Token(t)
-                if matches!(
-                    t.kind(),
-                    K::EQ | K::PLUS_EQ | K::MINUS_EQ | K::STAR_EQ | K::SLASH_EQ | K::PERCENT_EQ
-                ) =>
-            {
-                Some(t)
+        for child in self.syntax.children_with_tokens() {
+            match child {
+                NodeOrToken::Token(t) => {
+                    return match t.kind() {
+                        K::EQ => PlaceAssignOp::Set,
+                        K::PLUS_EQ => PlaceAssignOp::Add,
+                        K::MINUS_EQ => PlaceAssignOp::Sub,
+                        K::STAR_EQ => PlaceAssignOp::Mul,
+                        K::SLASH_EQ => PlaceAssignOp::Div,
+                        K::PERCENT_EQ => PlaceAssignOp::Rem,
+                        _ => continue,
+                    };
+                }
+                NodeOrToken::Node(n) if n.kind() == K::UPDATE_OP => {
+                    let is_min = n.children_with_tokens().any(
+                        |e| matches!(e, NodeOrToken::Token(t) if t.kind() == K::Ident && t.text() == "min"),
+                    );
+                    return if is_min {
+                        PlaceAssignOp::Min
+                    } else {
+                        PlaceAssignOp::Max
+                    };
+                }
+                NodeOrToken::Node(_) => {}
             }
-            _ => None,
-        })
+        }
+        // The node is only built when an operator was seen, so this is
+        // unreachable for any tree the parser produces.
+        PlaceAssignOp::Set
     }
     /// The value expression — the one right of the operator.
     pub fn value(&self) -> Option<Expr> {
@@ -702,6 +726,45 @@ impl PlaceAssignStmt {
             .children()
             .filter_map(Expr::cast_from_child)
             .nth(1)
+    }
+}
+
+/// What a `place op= value` statement does (REP-16, REP-21).
+///
+/// Every spelling of the operator, in one enum, so the two that are not a token
+/// cannot be forgotten: `min=` and `max=` are an identifier and an `=` (§6.2),
+/// decided contextually because `min` is a name a program may use.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PlaceAssignOp {
+    /// `m[k] = v` — replace.
+    Set,
+    /// `m[k] += v` and its four arithmetic siblings — read, compute, write.
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    /// `d[k] min= v` — keep the smaller, or accept the first value (§6.2).
+    Min,
+    /// `b[k] max= v` — keep the larger, or accept the first value (§6.2).
+    Max,
+}
+
+impl PlaceAssignOp {
+    /// Whether this operator reads the place before writing it — true for the
+    /// five arithmetic compounds and **false** for `min=`/`max=`, whose whole
+    /// point is that they do not: a subscript read of an absent key faults
+    /// (§4.7), and §6.2 says an absent entry accepts the first value.
+    #[must_use]
+    pub fn reads_before_writing(self) -> bool {
+        matches!(
+            self,
+            PlaceAssignOp::Add
+                | PlaceAssignOp::Sub
+                | PlaceAssignOp::Mul
+                | PlaceAssignOp::Div
+                | PlaceAssignOp::Rem
+        )
     }
 }
 

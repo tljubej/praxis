@@ -1,0 +1,48 @@
+// AoC corpus fixture: `min=` and `max=` map updates (REP-21; §6.2).
+//
+// §6.2's own two lines — `distance[key] min= candidate` and `best[key] max=
+// score` — in the shape that motivates them: a shortest-path relaxation, where
+// the first candidate for a key has to be accepted because there is nothing to
+// compare it against yet. A read-modify-write cannot express that: a subscript
+// read of an absent key faults (§4.7), so `d[k] = min(d[k], c)` would fault on
+// every state the walk reaches for the first time.
+//
+// Input (on stdin): lines of `from,to,weight` edges over nodes 0..4.
+// Output: the relaxed distance to each node, the best single edge weight, and
+// the count of nodes reached.
+let edges = read lines(`{from:int},{to:int},{weight:int}`)
+
+// Relax through a helper, so the receiver is an unannotated parameter and the
+// row is answered at the call site (TY-30's deferral).
+fn relax(distance, key, candidate) {
+    distance[key] min= candidate
+}
+
+let distance = Map()
+distance[0] = 0
+
+// Three passes is enough for this graph; a node with no edge into it stays
+// absent, which is what `.len()` counts at the end.
+var pass = 0
+while pass < 3 {
+    for e in edges {
+        // A `read` yields an *anonymous* structural record, which no record
+        // pattern can name (REP-10's patterns are nominal), so its fields are
+        // read with `.` as §4.5 writes them.
+        if distance.contains(e.from) {
+            relax(distance, e.to, distance[e.from] + e.weight)
+        }
+    }
+    pass = pass + 1
+}
+
+out(distance[4])
+
+// `max=` is the dual, and the first score for a key is accepted the same way.
+let best = Map()
+for e in edges {
+    best["any"] max= e.weight
+}
+out(best["any"])
+
+out(distance.len())

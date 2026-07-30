@@ -1235,7 +1235,21 @@ impl<'a> Lowerer<'a> {
         let Some(Expr::Index(idx)) = stmt.target() else {
             return None;
         };
-        let op = Self::assign_op_of(stmt.op().map(|t| t.kind()));
+        // `min=`/`max=` write **without reading** — that is what §6.2's "an
+        // absent entry accepts the first value" means, and the comparison is the
+        // wrapper's. So they lower as a plain store whose row is a different one,
+        // which inference already resolved (REP-21, ADR-064).
+        let place_op = stmt.op();
+        let op = match place_op {
+            praxis_ast::PlaceAssignOp::Set
+            | praxis_ast::PlaceAssignOp::Min
+            | praxis_ast::PlaceAssignOp::Max => AssignOp::Assign,
+            praxis_ast::PlaceAssignOp::Add => AssignOp::AddAssign,
+            praxis_ast::PlaceAssignOp::Sub => AssignOp::SubAssign,
+            praxis_ast::PlaceAssignOp::Mul => AssignOp::MulAssign,
+            praxis_ast::PlaceAssignOp::Div => AssignOp::DivAssign,
+            praxis_ast::PlaceAssignOp::Rem => AssignOp::RemAssign,
+        };
         let resolved = self.method_refs.get(&idx.syntax().text_range()).copied()?;
         let set = match &resolved.entry.lowering {
             praxis_stdlib::MethodLowering::RuntimeSymbol(sym) => *sym,

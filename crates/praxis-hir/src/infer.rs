@@ -151,6 +151,20 @@ fn subscript_unresolved_report(name: &str, args: usize) -> Option<UnresolvedRepo
             indices: args.saturating_sub(1),
         });
     }
+    // The updating stores (REP-21). Their own message, because a receiver that
+    // has a plain store and no `min=` is the case worth being exact about.
+    if name == praxis_stdlib::catalog::INDEX_STORE_MIN {
+        return Some(UnresolvedReport {
+            build: crate::diagnostics::not_index_min_updatable,
+            indices: args.saturating_sub(1),
+        });
+    }
+    if name == praxis_stdlib::catalog::INDEX_STORE_MAX {
+        return Some(UnresolvedReport {
+            build: crate::diagnostics::not_index_max_updatable,
+            indices: args.saturating_sub(1),
+        });
+    }
     None
 }
 
@@ -1723,9 +1737,21 @@ impl Inferer {
         // The store's arguments are the indices and then the value, which is why
         // the value is inferred first: `infer_catalog_call` pushes each expected
         // param type into its argument, and the value expression is one of them.
+        // Which row the store is dispatched through is the operator's answer:
+        // `min=`/`max=` are rows of their own (REP-21, ADR-064), because §6.2
+        // gives them a semantics no read-modify-write can express.
+        let op = stmt.op();
+        let row = match op {
+            praxis_ast::PlaceAssignOp::Min => praxis_stdlib::catalog::INDEX_STORE_MIN,
+            praxis_ast::PlaceAssignOp::Max => praxis_stdlib::catalog::INDEX_STORE_MAX,
+            _ => praxis_stdlib::catalog::INDEX_STORE,
+        };
         let mut args = idx.indices();
         let report = UnresolvedReport {
-            build: crate::diagnostics::not_index_assignable,
+            // One row, one message: the same table the deferred case reads, so a
+            // receiver that has no `min=` is told that and not "no store".
+            build: subscript_unresolved_report(row, args.len() + 1)
+                .map_or(crate::diagnostics::not_index_assignable, |r| r.build),
             // The *index* count, which is one less than the argument count: the
             // store's last argument is the value.
             indices: args.len(),
@@ -1735,15 +1761,14 @@ impl Inferer {
         }
         self.infer_catalog_call(
             receiver_ty,
-            praxis_stdlib::catalog::INDEX_STORE,
+            row,
             &args,
             idx.syntax().text_range(),
             Some(report),
         );
-        let compound = stmt
-            .op()
-            .is_some_and(|t| !matches!(t.kind(), SyntaxKind::EQ));
-        if compound {
+        // Only the arithmetic compounds need a numeric value: an updating store's
+        // row already binds it to `Int`, which is what its wrapper reads.
+        if op.reads_before_writing() {
             self.require_cap_as(
                 value_ty,
                 Capability::Kind(CapKind::Numeric),

@@ -178,6 +178,12 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(counter_index_set())
         .entry(grid_index())
         .entry(grid_index_set())
+        // …and the two updating stores §6.2 writes (REP-21). Map only: they are
+        // the two wrappers that exist, and an absent entry accepting the first
+        // value is a semantics no read-modify-write over the rows above can
+        // express, because a subscript read of an absent key faults (§4.7).
+        .entry(map_index_min())
+        .entry(map_index_max())
         // Keyed enumeration (REP-18). §3.3's `counts.values()`, plus the `Map`
         // siblings — the only way to enumerate a `Map` while REP-15 stands.
         .entry(counter_keys())
@@ -345,6 +351,52 @@ fn map_index_set() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapInsert),
         doc: "`m[key] = value` — set `key`, replacing any prior value.",
+        stability: Stability::Stable,
+    }
+}
+
+/// The `Map[K, V]` receiver of `min=`/`max=`, whose value is bound to `Int`.
+///
+/// A **bound** rather than a literal `Int` argument, for TY-31's reason: the
+/// bound *pins* an unresolved value type instead of merely permitting it, so
+/// `let d = Map()` followed by `d[k] min= 1` gives `d` an `Int` value type rather
+/// than reporting. The bound is what the wrapper needs — `praxis_map_update_min`
+/// compares through `int_payload`, so a `Map[Text, Text]` would read its values
+/// as `i64`s.
+fn map_of_k_int_value() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::Map,
+        args: vec![
+            TypePattern::var("K"),
+            TypePattern::is_scalar("V", ScalarType::Int),
+        ],
+    }
+}
+
+fn map_index_min() -> MethodEntry {
+    MethodEntry {
+        receiver: map_of_k_int_value(),
+        name: crate::catalog::INDEX_STORE_MIN,
+        params: vec![TypePattern::var("K"), TypePattern::var("V")],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapUpdateMin),
+        doc: "`d[key] min= candidate` — keep the smaller value; an absent entry \
+              accepts the first value (§6.2).",
+        stability: Stability::Stable,
+    }
+}
+
+fn map_index_max() -> MethodEntry {
+    MethodEntry {
+        receiver: map_of_k_int_value(),
+        name: crate::catalog::INDEX_STORE_MAX,
+        params: vec![TypePattern::var("K"), TypePattern::var("V")],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapUpdateMax),
+        doc: "`b[key] max= score` — keep the larger value; an absent entry accepts \
+              the first value (§6.2).",
         stability: Stability::Stable,
     }
 }
@@ -2476,6 +2528,61 @@ mod tests {
         assert!(
             index.can_fault() && !get.can_fault(),
             "indexing faults where `.get` answers"
+        );
+
+        // The two **updating** stores (REP-21): `Map` only, at the same arity as
+        // its plain store, and pointing at wrappers of their own — a row that
+        // reused `MapInsert` would spell `min=` and mean `=`.
+        let map_int_value = TypePattern::Collection {
+            ctor: CollectionCtor::Map,
+            args: vec![
+                TypePattern::var("K"),
+                TypePattern::is_scalar("V", ScalarType::Int),
+            ],
+        };
+        let plain_store = cat
+            .by_receiver_and_name(&map_pat, crate::catalog::INDEX_STORE)
+            .next()
+            .expect("Map's store")
+            .lowering
+            .clone();
+        for (name, what) in [
+            (crate::catalog::INDEX_STORE_MIN, "min="),
+            (crate::catalog::INDEX_STORE_MAX, "max="),
+        ] {
+            let hits: Vec<_> = cat.by_receiver_and_name(&map_int_value, name).collect();
+            assert_eq!(hits.len(), 1, "`{what}` is one row on a Map");
+            assert_eq!(hits[0].arity(), 2, "`{what}` takes its key and its value");
+            assert_ne!(
+                hits[0].lowering, plain_store,
+                "`{what}` must not lower to the plain store"
+            );
+            // …and no other receiver has one, including the collections that do
+            // have a plain store.
+            for (pat, other) in [
+                (of(CollectionCtor::Counter, 1), "Counter"),
+                (of(CollectionCtor::Grid, 1), "Grid"),
+                (of(CollectionCtor::Vec, 1), "Vec"),
+                (of(CollectionCtor::Set, 1), "Set"),
+            ] {
+                assert_eq!(
+                    cat.by_receiver_and_name(&pat, name).count(),
+                    0,
+                    "{other} has no `{what}`"
+                );
+            }
+        }
+        // The two are different rows from each other, or one of them computes
+        // the other's answer.
+        assert_ne!(
+            cat.by_receiver_and_name(&map_int_value, crate::catalog::INDEX_STORE_MIN)
+                .next()
+                .expect("min=")
+                .lowering,
+            cat.by_receiver_and_name(&map_int_value, crate::catalog::INDEX_STORE_MAX)
+                .next()
+                .expect("max=")
+                .lowering,
         );
 
         // No subscript name is an identifier, so the subscript grammar is their
