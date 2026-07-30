@@ -95,8 +95,10 @@ together.
 
 ## 2. Shape of the work
 
-The 21 stages form five mostly-independent tracks over a small shared prefix.
-The runtime spine is the critical path; the type spine is the longest.
+The audit's 21 stages form five mostly-independent tracks over a small shared
+prefix. The runtime spine is the critical path; the type spine is the longest.
+Four further stages — **S23–S26**, for the defects §4.1 records as found *during*
+the repair — hang off the end and depend on none of the tracks.
 
 ```text
   S1 runtime identity ─┬─> S4 ──> S5 ──> S6 ──> S7 ─┬─> S8   generation arenas
@@ -113,6 +115,11 @@ The runtime spine is the critical path; the type spine is the longest.
   S19 parser compile ──> S20 parser runtime   (S20's last item needs S5)
 
   S2  independent hardening — runs alongside everything
+
+  S23 independent hardening, round two — likewise (§4.1)
+  S24 function values (P0; needs D15) ── independent of every stage above
+  S25 grammar completion ──> §3.3's program compiles
+  S26 declaration / pattern / inference gaps
 ```
 
 | Stage | Name | Findings | P0 | P1 | Weight |
@@ -138,13 +145,24 @@ The runtime spine is the critical path; the type spine is the longest.
 | S19 | Input-parser compile pipeline | 11 | 0 | 6 | 19 |
 | S20 | Parser runtime cursor and region ownership | 14 | 1 | 11 | 51 |
 | S21 | Pipeline plan representation and per-stage indices | 6 | 0 | 6 | 28 |
-| | **Total** | **139** | **15** | **93** | **616** |
+| | **Audit total** | **139** | **15** | **93** | **616** |
+| S23 | Independent hardening, round two | 4 | 0 | 0 | 4 |
+| S24 | Function values | 1 | 1 | 0 | 3 |
+| S25 | Grammar completion | 4 | 0 | 2 | 17 |
+| S26 | Declaration, pattern and inference gaps | 5 | 0 | 3 | 11 |
+| | **With §4.1** | **153** | **16** | **98** | **651** |
 
 Weight is S=1, M=3, L=8, XL=20 — relative sizing only, not days. The 21
 foundations carry a further 208 weight, and most of the stage weight above is
 discharged by them: per-finding work after its foundation lands is usually
 small. Read the totals as "the foundations are the project; the findings are
 the acceptance criteria".
+
+**S23–S26 are not the audit's.** They are §4.1: fourteen defects found while
+executing this plan, registered after S17 closed. They add 35 weight — about
+5% — which is the honest measure of how much the audit missed, and the one P0
+among them (REP-01, a host abort from a program that passes `praxis check`) is
+the measure of how much that matters.
 
 **Suggested release gates.** S1-S5 close every live memory-safety and
 ABI-soundness defect and are the minimum before shipping anything. S6-S10
@@ -1715,6 +1733,10 @@ Per-finding evidence, code sites, fix specification, gating tests and blast
 radius are recorded in the verification data behind this plan; this table is
 the index.
 
+**§4.1 is a second register**, for defects found *while executing this plan*
+rather than by the audit. They are scheduled the same way and their stages are
+real; what differs is provenance, and that is why they are not mixed in below.
+
 | ID | Sev | Status | Effort | Stage | Subsystem |
 |---|---|---|---|---|---|
 | P0-01 | P0 | CONFIRMED | M | S1 | p0-identity |
@@ -1856,6 +1878,33 @@ the index.
 | FE-03 | P3 | CONFIRMED | S | S2 | fe-cli-dbg |
 | FE-08 | P3 | PARTIAL | S | S2 | fe-cli-dbg |
 | IP-13 | P3 | CONFIRMED | S | S2 | ip-compile |
+
+### 4.1 Findings discovered during the repair
+
+Defects the audit did not have, found while executing this plan. Each was
+reproduced against the tree at the commit named, and the reproduction is in the
+row — these have no verification data behind them, so the row **is** the
+evidence and a stage owner should re-reproduce before fixing.
+
+They are separated from the table above for provenance only. They are scheduled,
+they have owning stages, and a stage is not done until its rows are.
+
+| ID | Sev | Effort | Stage | Subsystem | Found | What |
+|---|---|---|---|---|---|---|
+| REP-01 | P0 | M | S24 | hir-mono | S17 unit 3 (`fb82f79`) | A top-level `fn` in **value position lowers to `Unit`**. `fn double(n: Int) -> Int { n * 2 }` then `let f = double\n f(3)` passes `praxis check` and **aborts the host with SIGBUS**: inference accepts it (a `fn`'s type *is* a `Func`), lowering evaluates the bare name to `Unit`, and `Inst::CallIndirect` reads that Unit's payload as a function pointer. Blocked on **D15**. |
+| REP-02 | P2 | S | S23 | rt | S17 unit 2 (`e801e6a`) | `gc_alloc` is generic over its payload and asserts the width at **runtime**, so `gc_alloc(ctx, &scalars::INT, 0)` — an `i32` literal — aborts with "payload size mismatch for descriptor Int" from inside `extern "C"`. §10.4 forbids a non-unwinding panic there. Not reachable from a Praxis program; it is a latent trap for runtime authors, and it cost one debugging cycle. The descriptor knows its payload type, so the signature does not have to be generic. |
+| REP-03 | P1 | M | S26 | ty-ops | S17 unit 4 (`b6ab8eb`) | **A `for` over an unannotated parameter unifies the parameter with its own element type.** `capability::iter_item` answers an unresolved receiver with *itself*, so the loop variable and the iterator become one variable and any use of the item pins the iterator: `fn total(r) { var t = 0\n for i in r { t = t + i }\n t }` reports `Y005` "values of type `Int` cannot be iterated" — a legal program rejected. Identically for `Vec`, `BitSet` and `Range`. The fix is for `iter_item` to answer an unresolved receiver with a **fresh** item variable and let the deferred `Iterable { item }` relate the two, which is REP-04 from the other end. Fix both together. |
+| REP-04 | P2 | M | S26 | ty-ops | S17 F10 (`e04fcf7`) | **`Iterable`'s `item` is not unified at discharge.** `capability::check` answers the yes/no; a constraint that resolves to a *differently*-itemed iterable is not caught. It is the one place the channel is weaker than its `Capability` shape suggests, and it is REP-03's other end. |
+| REP-05 | P1 | S | S26 | hir-mono | S16 (`e918741`) | **A wrong sub-pattern count is silently truncated.** With `enum W { Wrap(Int) }`, `match w { Wrap(a, b) => a }` **compiles and runs**, returning the payload; `b` is lowered (so a mistake inside it still reports) and then dropped. `Y122`/`Y123` cover the two neighbouring mistakes and this one has no code. Truncating is safer than the payload read past the end it replaced, but accepting is not the answer. Needs a `Y12x`; `Y124` is next free (ADR-051). |
+| REP-06 | P1 | S | S26 | ty-scope | S13 (`de6b0e2`) | **A nested `struct`/`enum` is silently dropped.** `register_top_level` never declared one and the declaration pass walks only top-level statements, so a `struct` inside a block has no symbol and no type. Declaring one is accepted in silence and *using* it is `N001` "`Inner` is not defined" — pointing at a name declared two lines above. `resolve_top_stmt`/`resolve_block_stmt` is where an `N005`-shaped report goes; `N005` is already "cannot be declared inside another function" for `fn`. |
+| REP-07 | P1 | M | S25 | fe-cli-dbg | S17 unit 3 (`fb82f79`) | **There is no `&&` or `||`.** `p.x == 2 && p.y == 2` is a parse error at the first `&`; `praxis-syntax` has a single `AMP` token and no binary production for it. `!` exists. **§3.3's representative program in the design doc uses `&&`** (`if !diagonals && dx != 0 && dy != 0`), so this blocks it. Short-circuit evaluation is the point, so this is a lowering change as well as a grammar one. |
+| REP-08 | P1 | M | S25 | fe-cli-dbg | S17 unit 3 (`fb82f79`) | **A tuple has no element syntax.** `p.0` is `P001` "expected name after `.`". A `(Int, Int)` is a legal value, a legal `Map` key and a legal graph state (ADR-060) that **no function can read**. `tests/aoc-corpus/day10_bfs_shortest_distance.px` says so in a comment and hand-encodes its adjacency around it; §6.5's own example needs it. |
+| REP-09 | P2 | M | S25 | fe-cli-dbg | S17 unit 2 (`e801e6a`) | **Explicit type arguments on a constructor call have no grammar.** `Counter[(Int, Int)]()` — which §3.3 writes — is a `P002` at the `[`. The element type is inferred from use instead, so `Counter()` works; the design doc's own spelling does not parse. With REP-07 this is the rest of what stands between §3.3 and compiling. |
+| REP-10 | P2 | L | S25 | fe-cli-dbg | S16 (`e918741`) | **Records and tuples have no pattern syntax.** `match p { P { x, y } => x }` is `P001` "expected `=>` in match arm". Their exhaustiveness signature is `Open` in consequence, so a match on one needs a `_`. When the grammar grows one they become `Closed` with a single constructor and `exhaustive.rs`'s matrix already handles that shape — the checker is ready, the parser is not. |
+| REP-11 | P2 | S | S23 | fe-cli-dbg | S17 (`f87e6ab`) | **The lexer rejects digit separators that `lower.rs` strips.** `1_000` is a `P002`; `9_223_372_036_854_775_808` lexes as `9` followed by an identifier. `lower.rs` strips `_` from an `IntLit` before parsing it, so **one of the two is dead code**. Either accept them in the lexer or delete the strip. |
+| REP-12 | P2 | S | S23 | ty-ops | S15 (`b560e67`) | **`Grid` has no `len`, and a corpus program calls it.** `tests/aoc-corpus/day02_grid_of_char.px` calls `map.len()` on a `Grid[Char]` and gets `Y110` at *lowering*, so `praxis check` is clean and `praxis run` is not. The catalog has `width`/`height`. Either add `Grid.len` (cells, presumably) or fix the corpus program — but no Rust test covers the corpus directory, which is why nothing caught it; **the test is part of the fix**. |
+| REP-13 | P3 | S | S23 | ty-typedb | S17 unit 4 (`b6ab8eb`) | **A nullary collection renders with empty brackets.** `TypeDb::render` prints `[...]` whether or not there are arguments, so a `Y001` about a range says "found `Range[]`". Cosmetic; it predates TY-34 (`BitSet[]` has always done it). |
+| REP-14 | P2 | M | S26 | ty-scope | S13 (`de6b0e2`) | **A type-declaration cycle registers a fresh variable, silently.** `struct A { b: B }` / `struct B { a: A }` and `struct Node { next: Node }` come out of the declaration pass with a variable where the recursive member should be. ADR-052 puts *supporting* recursive types out of scope (they are equi- or iso-recursive types, a language feature) — this row is the narrower defect that survives either answer: the silence. Blocked on **D17**. |
 
 ## 5. Stages
 
@@ -2825,6 +2874,181 @@ the scalar-across-safepoint rule would initially fail on the eager lower_seq_*
 lowerers; IP-11's missing atomics are real but `uint` has no runtime descriptor
 and should not ship.
 
+---
+
+**S22 closes the audit's stages. S23–S26 below are §4.1's** — the defects found
+while executing this plan. They come after the audit's stages by numbering only,
+not by priority: **S24 holds the repair's last P0**, and S23 depends on nothing
+at all, so either may be taken whenever an earlier stage is blocked on a
+decision.
+
+### S23 — Independent hardening, round two (runs parallel with every other stage)
+
+*4 findings · weight 4*
+
+**Goal**
+
+The repair-discovered defects that depend on nothing and block nothing. S2's
+role, for §4.1's rows.
+
+| Finding | Sev | Effort |
+|---|---|---|
+| REP-02 | P2 | S |
+| REP-11 | P2 | S |
+| REP-12 | P2 | S |
+| REP-13 | P3 | S |
+
+**Ordering**
+
+None. Each is independently landable and none touches a `#[repr(C)]` layout or
+the ABI version. Take them whenever a stage is blocked on a decision.
+
+**Exit criteria**
+
+NEW tests, one per finding — none of these has a gate today.
+REP-02: `gc_alloc`'s width comes from the descriptor, so a caller cannot pass a
+payload of the wrong width — a compile-time property, gated by the signature
+plus a test that every `scalars::*` descriptor's declared payload type matches
+what its allocator writes.
+REP-11: `1_000` is `1000` and `1_0_0` is `100`, in expression *and* pattern
+position; and whichever of lexer-accept / strip-delete is chosen, the other side
+has no dead code left (grep for the strip).
+REP-12: every `.px` under `tests/` runs through `praxis run` in a Rust test —
+this is the missing coverage that let the break sit, and it belongs in the same
+commit as whichever way REP-12 is answered.
+REP-13: `TypeDb::render` of a nullary collection is `Range`, not `Range[]`, and
+a unary one still renders its argument.
+
+### S24 — Function values
+
+*1 finding · weight 8*
+
+**Goal**
+
+Make a bare `fn` name in value position mean something, rather than lowering to
+`Unit` and taking the host down when it is called.
+
+| Finding | Sev | Effort |
+|---|---|---|
+| REP-01 | P0 | M |
+
+**Ordering**
+
+BLOCKED ON A DESIGN DECISION (**D15**: closure value, or compile error). This is
+the only P0 left in the repair and it is a host abort reachable from a program
+that passes `praxis check`, so it should be scheduled ahead of S25 and S26
+whichever way D15 goes. If D15 says "closure value", the fix is in
+`lower.rs`'s path-expression lowering and reuses `praxis_alloc_closure` with an
+empty environment — a top-level `fn` captures nothing, so the env is `[]` and
+the existing calling convention already fits. If D15 says "compile error", the
+fix is in inference and is `S`, not `M`.
+
+Note that a graph helper (ADR-060) already contains this at *its* boundary: the
+helpers check the descriptor and raise `TypeMismatch` rather than jumping. That
+is containment for one caller, not a fix, and it should not be generalized into
+one — the bug is that the name evaluates to `Unit` at all.
+
+**Exit criteria**
+
+NEW tests. `let f = double\n f(3)` runs and answers `6` (or is rejected with a
+named diagnostic, per D15) — through a `let`, through a parameter of declared
+function type, and through a graph helper's neighbour argument, which is the
+third way to reach it. Plus a `jit.rs` gate: whatever D15 chooses, **no program
+that passes `praxis check` may abort the host**.
+
+### S25 — Grammar completion
+
+*4 findings · weight 12*
+
+**Goal**
+
+Close the source-syntax gaps the design doc's own programs need: the logical
+connectives, tuple element access, explicit constructor type arguments, and
+record/tuple patterns.
+
+| Finding | Sev | Effort |
+|---|---|---|
+| REP-07 | P1 | M |
+| REP-08 | P1 | M |
+| REP-09 | P2 | M |
+| REP-10 | P2 | L |
+
+**Ordering**
+
+REP-07 and REP-08 first: **§3.3's representative program needs both**, and with
+REP-09 it compiles — which is the readable milestone for this stage. REP-07 is
+not only grammar: `&&`/`||` short-circuit, so they lower to branches and not to
+a call, and the precedence goes *below* comparison and above `..` (which S17
+already inserted at `bp(3, 4)` — **read the whole table**, every number moved
+once already). REP-10 last: it is the largest and `exhaustive.rs` already
+handles the `Closed`-with-one-constructor shape it produces, so it is a parser
+and lowering change rather than a checker one.
+
+**Exit criteria**
+
+NEW tests throughout; none of these has a gate.
+REP-07: precedence against comparison and `..` both ways, short-circuit observed
+(`false && panic("x")` does not fault), and `||`'s dual.
+REP-08: `p.0` on every tuple arity, in expression and in a closure body, plus
+that `p.0` on a non-tuple is a named diagnostic and not a field lookup.
+REP-09: `Counter[(Int, Int)]()` parses and means what the annotation says, and
+disagreeing with inferred use is a `Y001`.
+REP-10: a record pattern binds every field, a tuple pattern binds by position,
+and the exhaustiveness signature for both becomes `Closed` — so a `match` on a
+record with one arm and no `_` is accepted where it needed a `_` before.
+**And the acceptance criterion for the stage: §3.3's representative program,
+verbatim from the design doc, compiles and runs.**
+
+### S26 — Declaration, pattern and inference gaps
+
+*5 findings · weight 11*
+
+**Goal**
+
+The repair-discovered defects that silently accept a wrong program or reject a
+right one.
+
+| Finding | Sev | Effort |
+|---|---|---|
+| REP-03 | P1 | M |
+| REP-05 | P1 | S |
+| REP-06 | P1 | S |
+| REP-04 | P2 | M |
+| REP-14 | P2 | M |
+
+**Ordering**
+
+**REP-03 and REP-04 are one fix and must land together** — they are the same
+defect from two ends. `iter_item` answers an unresolved receiver with *itself*,
+which is why a `for` over an unannotated parameter pins the parameter to its own
+element type; answering with a **fresh** item variable is what makes the deferred
+`Iterable { item }` constraint have two things to relate, which is what REP-04
+needs to be checkable at all. Doing either alone leaves the other unfixable in
+the same shape. Land them before the rest: this is the constraint channel, and
+S17's ADR-057 is the map.
+
+REP-14 is BLOCKED ON A DESIGN DECISION (**D17**), but only for its wording; a
+fresh variable in a recursive member is wrong under every answer and the *detect*
+half can land first. REP-05 needs a new diagnostic code — `Y124` is next free
+(ADR-051) — and REP-06 reuses `N005`, which already says "cannot be declared
+inside another function" for `fn`.
+
+**Exit criteria**
+
+NEW tests throughout.
+REP-03/04: `fn total(r) { var t = 0\n for i in r { t = t + i }\n t }` is accepted
+and `total` generalizes to an iterable of `Int`, for `Vec`, `BitSet` and `Range`;
+and an `Iterable` constraint that discharges at a differently-itemed receiver is
+*reported*, which is the half that has never had a test.
+REP-05: `Wrap(a, b)` against a one-slot variant is `Y124`, and the right arity
+still binds and still runs.
+REP-06: a nested `struct`/`enum` is `N005` at the declaration, not `N001` at the
+use; and the four top-level declaration kinds are untouched.
+REP-14: `struct Node { next: Node }` reports rather than registering a variable
+(per D17), and a non-recursive forward reference still resolves — TY-10's
+`a_type_declaration_is_registered_after_the_types_it_names` is the gate that must
+stay green.
+
 ## 6. Sequencing hazards
 
 The audit's warning that "later fixes otherwise expose latent unsafe paths" is
@@ -2994,17 +3218,22 @@ near adversarial_audit.rs:284 that P0-11 inverts.
 
 These are not implementation choices — each changes what the language means,
 which programs compile, or what an ADR says. Every one needs an answer from the
-repo owner, and each should produce an ADR. **D1, D3 and D5 block their stage
-outright**; the rest can be decided while earlier stages are in flight.
+repo owner, and each should produce an ADR. **D1, D3, D5 and D15 block their
+stage outright**; the rest can be decided while earlier stages are in flight.
+
+D15, D16 and D17 arose during the repair rather than from the audit, and belong
+to §4.1's stages; they are at the end of this section.
 
 > **Answers, added as they arrive.** The numbered text below each heading is the
 > original question and is left exactly as written; an **ANSWERED** paragraph
 > under it is the repo owner's decision. An answer here is a decision, not an
 > ADR — the ADR is written by the session that *lands* it, which is why
 > `docs/decisions/` has one per implemented decision and not one per answer.
-> Answered so far: **D2** (ADR-053), **D3** (ADR-045), **D4**, **D5**, **D6**,
-> **D7**/**D8** (ADR-049), **D9** (ADR-042), **D13** (ADR-051), **D14**
-> (ADR-040). Still open: **D1** (blocking S18), **D10**, **D11**, **D12**.
+> Answered so far: **D2** (ADR-053), **D3** (ADR-045), **D4**, **D5** (ADR-060
+> settles the graph representation D5 left owed), **D6**, **D7**/**D8**
+> (ADR-049), **D9** (ADR-042), **D13** (ADR-051), **D14** (ADR-040). Still open:
+> **D1** (blocking S18), **D10**, **D11**, **D12**, **D15** (blocking S24),
+> **D16**, **D17**.
 
 **D1 (Stage 18, blocking)**
 
@@ -3155,6 +3384,49 @@ Panic-across-FFI policy: catch_unwind at every #[no_mangle] extern "C"
 boundary, or panic=abort plus per-wrapper totality proofs. RT-06, RT-07 and the
 parser findings all reach a Rust panic from inside extern "C"; this policy
 should precede those fixes.
+
+**D15 (Stage 24, blocking)**
+
+REP-01: what does a bare `fn` name in **value position** mean? Today it lowers
+to `Unit` and calling it takes the host down with a SIGBUS, from a program that
+passes `praxis check`. Two answers, and both are defensible:
+
+- **A closure value.** `let f = double` allocates a closure over `double`'s
+  entry point with an empty environment — a top-level `fn` captures nothing, so
+  the existing `fn(ctx, closure_self, args…)` convention already fits and
+  `praxis_alloc_closure` already takes an empty env. `f(3)` then works through
+  the `Inst::CallIndirect` path unchanged. **Recommended**: it is what the type
+  already claims (a `fn`'s type *is* a `Func`), the runtime shape exists, and it
+  is what a caller writing `bfs(start, steps)` obviously means.
+- **A compile error.** A bare `fn` name is only legal as a callee; a value needs
+  `|n| double(n)`. Cheaper (an inference check, effort `S`), and it keeps
+  function values to one representation — but it makes the type system claim
+  something the language will not do, and every closure-taking API grows a
+  wrapper-lambda tax.
+
+Whichever way it goes, the invariant the stage must establish is the same: **no
+program that passes `praxis check` may abort the host.**
+
+**D16 (Stage 25)**
+
+Does `assert` take a message, and more generally does the language get
+**arity-based overloading or optional parameters**? `assert(cond, "why")` has no
+spelling today because a name has one scheme (ADR-056 records this). The same
+wall is why the six graph helpers each have exactly one signature and why a
+`Grid` convenience overload for `bfs` was not built (ADR-060). Recommend
+deciding this once, for the language, rather than per name — and note that
+`assert`'s message is the cheapest possible motivating case, so answering it in
+isolation would set the precedent by accident.
+
+**D17 (Stage 26)**
+
+REP-14: what does `struct Node { next: Node }` report? ADR-052 already put
+*supporting* recursive types out of scope — they are equi- or iso-recursive
+types, a language feature, not a repair. This decision is narrower: the
+declaration pass currently leaves a **fresh type variable** where the recursive
+member should be and says nothing, which is wrong under either answer. So:
+report it as an unsupported recursive type (recommended, and it supersedes
+ADR-052's silence), or support it and reopen ADR-052.
 
 **D13 (Stage 13/16)**
 

@@ -29,11 +29,19 @@ Update this file at the end of every stage.
 | S16 — Records, patterns, exhaustiveness, enum constructors | **done** | `57e2e5b`, `06f3c44`, `b8e2c7b`, `e918741` |
 | S17 — Constraint channel and capabilities | **done** | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c`, `e801e6a`, `b6ab8eb`, `fb82f79` |
 | S18 … S21 | not started | |
+| S23 … S26 — the repair's own discoveries (plan §4.1) | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
 TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
+
+**Fourteen defects found while executing the plan are now registered and
+scheduled** as **REP-01 … REP-14** in the plan's new **§4.1**, owned by four new
+stages (**S23**–**S26**) and three new decisions (**D15**–**D17**). They were
+carried as prose in this file for nine sessions; they are schedulable work now.
+**REP-01 is the only P0 left in the repair** — a top-level `fn` in value position
+lowers to `Unit`, so a program that passes `praxis check` aborts the host.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
 Now: **1381 passed, 0 failed, 38 ignored**. `just ci` is green.
@@ -2271,8 +2279,27 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**S17 is closed. Start at S18, which is `D1`-blocked — read the next section
-first.** Nothing in S17 remains.
+**S17 is closed.** Nothing in it remains.
+
+**Where to go next is now a choice, and S18 is not obviously it.** S18 is
+`D1`-blocked and D1 is still open. Meanwhile the plan has four new stages —
+**S23**–**S26**, the repair's own discoveries, registered in plan §4.1 — and one
+of them holds the **only P0 left in the repair**:
+
+- **S24 (REP-01)** — a top-level `fn` in value position lowers to `Unit`, so
+  `let f = double\n f(3)` passes `praxis check` and aborts the host with SIGBUS.
+  Blocked on **D15**, but D15 is a small question with a clear recommendation.
+  **Take this first if D15 can be answered.**
+- **S23** — four independent small ones (REP-02, REP-11, REP-12, REP-13) that
+  depend on nothing and block nothing. This is S2's role and it is what to do
+  while a decision is outstanding.
+- **S25** — the grammar gaps (REP-07…REP-10). Its acceptance criterion is that
+  **§3.3's representative program compiles**, which nothing else in the repair
+  can claim.
+- **S26** — the silent-wrong ones (REP-03…REP-06, REP-14). REP-03 and REP-04 are
+  one fix and must land together.
+
+So: **if D15 is answered, S24; if not, S23, which needs no decision at all.**
 
 What S17 delivered:
 
@@ -2308,30 +2335,31 @@ them:
   function pointer, and the tests supply one backed by a table. That is what
   makes fifteen of the unit's gates plain unit tests rather than end-to-end runs.
 
-Things this session found that the register does not have:
+Things this session found — **now registered and scheduled** as **REP-01**,
+**REP-08** and **REP-07** in the plan's new **§4.1**:
 
-- **A top-level `fn` used as a value evaluates to `Unit`, and calling it takes a
-  SIGBUS.** `fn double(n: Int) -> Int { n * 2 }` … `let f = double\n f(3)` aborts
-  the host: inference accepts it (a `fn`'s type *is* a `Func`), lowering
+- **REP-01 — a top-level `fn` used as a value evaluates to `Unit`, and calling it
+  takes a SIGBUS.** `fn double(n: Int) -> Int { n * 2 }` … `let f = double\n f(3)`
+  aborts the host: inference accepts it (a `fn`'s type *is* a `Func`), lowering
   evaluates the bare name to `Unit`, and `Inst::CallIndirect` then reads that
   Unit's payload as a function pointer. `praxis check` is clean. It is
   **pre-existing** — it has nothing to do with the graph helpers — but a helper
   is a new way to reach it, and the helpers' descriptor check turns it into a
-  `TypeMismatch` fault with a proper backtrace rather than a crash. The fix is
-  either to lower a `fn` name in value position as a closure or to reject it;
-  no finding covers it. Found while gating ADR-060.
-- **A tuple has no element syntax**, so `(Int, Int)` is a legal graph state that
-  no neighbour function can read: `p.0` is `P001` ("expected name after `.`").
-  A record of scalars is what a grid position has to be written as meanwhile,
-  and `a_state_may_be_any_value_that_can_be_remembered` uses one. The corpus
-  already knows — `day10_bfs_shortest_distance.px` has a comment saying "tuple
-  field access is deferred" and hand-encodes its adjacency around it.
-- **There is no `&&`/`||`, and §3.3's own representative program uses `&&`.**
-  `p.x == 2 && p.y == 2` is a parse error at the first `&`; `praxis-syntax` has a
-  single `AMP` token and no binary production for it. `!` *is* there (the corpus
-  uses `!visited.contains(nb)`), so it is the two connectives that are missing.
-  This joins `Counter[(Int, Int)]()`'s explicit type arguments on the list of
-  things standing between §3.3 and compiling. No finding covers it.
+  `TypeMismatch` fault with a proper backtrace rather than a crash. **It is the
+  only P0 left in the repair**; it owns **S24** and is blocked on **D15**.
+- **REP-08 — a tuple has no element syntax**, so `(Int, Int)` is a legal graph
+  state that no neighbour function can read: `p.0` is `P001` ("expected name
+  after `.`"). A record of scalars is what a grid position has to be written as
+  meanwhile, and `a_state_may_be_any_value_that_can_be_remembered` uses one. The
+  corpus already knows — `day10_bfs_shortest_distance.px` has a comment saying
+  "tuple field access is deferred" and hand-encodes its adjacency around it.
+  **S25.**
+- **REP-07 — there is no `&&`/`||`, and §3.3's own representative program uses
+  `&&`.** `p.x == 2 && p.y == 2` is a parse error at the first `&`;
+  `praxis-syntax` has a single `AMP` token and no binary production for it. `!`
+  *is* there (the corpus uses `!visited.contains(nb)`), so it is the two
+  connectives that are missing. With REP-09 it is what stands between §3.3 and
+  compiling, and **making §3.3 compile is S25's acceptance criterion**.
 
 ### S18
 
@@ -2346,10 +2374,10 @@ directly — `absent_map_get_does_not_return_an_untyped_unit_sentinel` and
 first one available, since S17 spent 12→13 and both ADR-058 and ADR-059 declined
 to spend a second (see below).
 
-Carried forward from S17's earlier sessions (§4's own "found, not in the
-register" list above is *this* session's):
+Carried forward from S17's earlier sessions — **all four are registered and
+scheduled now** (plan §4.1):
 
-- **A `for` over an *unannotated* parameter unifies the parameter with its own
+- **REP-03 — a `for` over an *unannotated* parameter unifies the parameter with its own
   element type.** `iter_item` answers an unresolved iterator with *itself* — the
   optimism ADR-057 records and `infer_for`'s comment states — so the loop
   variable and the iterator are the same variable, and any use of the item pins
@@ -2358,27 +2386,27 @@ register" list above is *this* session's):
   `BitSet` and `Range`. The deferred constraint is `Iterable { item }` where
   `item` *is* the receiver's variable, which is why deferring it does not help.
   A real fix wants `iter_item` to answer an unresolved receiver with a **fresh**
-  item variable and let the deferred constraint relate the two — which is the
-  "`Iterable`'s `item` is not unified at discharge" note below, from the other
-  end. No finding covers it; it is why TY-34's gates annotate.
-- **`gc_alloc` is generic over its payload and checks the width at *runtime*.**
+  item variable and let the deferred constraint relate the two — which is
+  **REP-04** below, from the other end. **The two are one fix and S26 says so.**
+  It is why TY-34's gates annotate.
+- **REP-02 — `gc_alloc` is generic over its payload and checks the width at *runtime*.**
   `gc_alloc(ctx, &scalars::INT, 0)` — an `i32` literal, because Rust's default
   integer type is not `i64` — aborts the process with "payload size mismatch for
   descriptor Int" from inside `extern "C"`, which is a non-unwinding panic across
   the ABI (§10.4 forbids it; D12 is the policy question). It cost one debugging
   cycle in unit 2. The descriptor knows its payload type, so the signature does
-  not have to be generic.
-- **Explicit type arguments on a constructor call have no grammar.**
+  not have to be generic. **S23.**
+- **REP-09 — explicit type arguments on a constructor call have no grammar.**
   `Counter[(Int, Int)]()` — which §3.3's representative program writes — is a
   `P002` ("expected `;` or a line break between statements") at the `[`. The
   element type is inferred from use instead, so the program works when written
-  `Counter()`; but the design doc's own spelling does not parse. No finding
-  covers it. **It is one of two things standing between §3.3 and compiling** —
-  the other is `&&`, which this session found; see above.
-- **A nullary collection renders as `Range[]` / `BitSet[]`.** `db.render` prints
-  the brackets whether or not there are arguments, so a `Y001` about a range says
-  "found `Range[]`". Cosmetic, and it predates TY-34 (`BitSet[]` has always done
-  it).
+  `Counter()`; but the design doc's own spelling does not parse. **It is one of
+  two things standing between §3.3 and compiling** — the other is REP-07's `&&`;
+  see above. **S25**, which makes §3.3 compile as its acceptance criterion.
+- **REP-13 — a nullary collection renders as `Range[]` / `BitSet[]`.** `db.render`
+  prints the brackets whether or not there are arguments, so a `Y001` about a
+  range says "found `Range[]`". Cosmetic, and it predates TY-34 (`BitSet[]` has
+  always done it). **S23.**
 
 Carried forward from S17's earlier sessions:
 
@@ -2405,16 +2433,22 @@ Carried forward from S17's earlier sessions:
   from an `IntLit` before parsing it. `9_223_372_036_854_775_808` lexes as `9`
   followed by the identifier `_223_372_036_854_775_808`, so it is an `N001`.
   Either the lexer should accept them or the strip should go; one of the two is
-  dead code. Found while gating TY-28.
+  dead code. Found while gating TY-28. **Registered as REP-11 — S23.**
 - **`assert` takes one argument and cannot take a message.** A name has one
   scheme and the type system has no arity-based overloading, so
   `assert(cond, "why")` has no spelling. ADR-056 records it; giving it one is a
-  language decision.
-- **`Iterable`'s `item` is not unified at discharge.** `check` answers the
-  yes/no; a constraint that resolves to a *differently*-itemed iterable is not
-  caught. No finding asks for it and `iter_item` is a function of the receiver
-  alone, but it is the one place the channel is weaker than its `Capability`
-  shape suggests.
+  language decision — **now written down as D16**, which asks it for the
+  *language* (optional parameters or arity overloading) rather than for `assert`,
+  because `assert`'s message is the cheapest possible motivating case and
+  answering it alone would set the precedent by accident. The same wall is why
+  each graph helper has exactly one signature (ADR-060).
+- **REP-04 — `Iterable`'s `item` is not unified at discharge.** `check` answers
+  the yes/no; a constraint that resolves to a *differently*-itemed iterable is not
+  caught. `iter_item` is a function of the receiver alone, which is why this is
+  **the same fix as REP-03** — answering an unresolved receiver with a *fresh*
+  item variable is what gives the deferred constraint two things to relate. It is
+  the one place the channel is weaker than its `Capability` shape suggests.
+  **S26, and the two must land together.**
 - **A `HasMethod` constraint is never claimed by a scheme, and that is load
   bearing.** `pin_to_level` is what guarantees it: the receiver stops being
   quantifiable, so `claim_constraints` never sees it among a scheme's binders. If
@@ -2501,15 +2535,18 @@ The list S16 wrote of what S17 would want, with where each now stands:
 
 What S16 leaves behind, all deliberate:
 
-- **A wrong sub-pattern count is not diagnosed.** `Wrap(a, b)` against a
+- **REP-05 — a wrong sub-pattern count is not diagnosed.** `Wrap(a, b)` against a
   one-slot variant lowers `b` (so anything wrong inside it still reports) and
-  then drops it. The register has no finding for it, `Y122`/`Y123` cover the two
-  neighbouring mistakes, and truncating is strictly safer than the payload
-  read past the end that it replaces. It is the natural companion to whatever
-  stage next allocates a `Y12x`.
-- **Records and tuples have no pattern syntax**, so their signature is `Open`
-  and a match on one needs a `_`. When the grammar grows one, they become
-  `Closed` with a single constructor and the matrix already handles that shape.
+  then drops it — the program **compiles and runs**. `Y122`/`Y123` cover the two
+  neighbouring mistakes, and truncating is strictly safer than the payload read
+  past the end that it replaces, but accepting is not the answer. **S26**, with
+  `Y124` (ADR-051's next free code).
+- **REP-10 — records and tuples have no pattern syntax**, so their signature is
+  `Open` and a match on one needs a `_`. `match p { P { x, y } => x }` is a
+  `P001` at the `{`. When the grammar grows one, they become `Closed` with a
+  single constructor and the matrix already handles that shape — **the checker is
+  ready and the parser is not**, which is what makes this a parser-and-lowering
+  change rather than an exhaustiveness one. **S25.**
 - **`a_bare_constructor_name_is_that_constructor_at_any_payload` passes against
   the unfixed tree.** It pins the padding *rule*, not the bug — the matrix reads
   sub-patterns through `get(i).unwrap_or(&WILDCARD)`, so it is defensive against
@@ -2603,12 +2640,11 @@ blocked on this stage. The ADR is **054**. Notes worth carrying:
   fused `enumerate` or `zip` builds. They need **two** things:
   1. **MIR-05's per-stage item types (S21).** A fused chain knows what its
      source yields; what stage *n* yields is a fact no stage carries.
-  2. **A method catalog that describes `enumerate` and `zip`.** Both rows
-     declare `result: Vec[T]`. Verified, not read off the rows:
-     `fn main(v: Vec[Int])` with `let e = v.enumerate()` gives `e :: Vec[Int]`.
-     This is **a finding the register does not have**, and F15 sharpens it —
-     lowering believes the catalog now. It belongs with S21's MIR-05, or with
-     whatever stage next touches `praxis-stdlib`'s sequence rows. Until then,
+  2. ~~**A method catalog that describes `enumerate` and `zip`.**~~ **Fixed —
+     this entry is stale.** Both rows declared `result: Vec[T]` when S15 wrote
+     it; **TY-31 corrected them** and they now declare `vec_of_index_and_t()` and
+     `vec_of_t_and_u()`, gated by `enumerate_and_zip_report_the_pairs_they_build`.
+     So H10 waits on MIR-05 alone. Until then,
      `alloc_empty_vec` deliberately does **not** read its element type from the
      chain's result type, though that type is `Known` at every call site: it
      would swap an honest null descriptor — which the runtime repairs on the
@@ -2623,7 +2659,8 @@ blocked on this stage. The ADR is **054**. Notes worth carrying:
   `tests/aoc-corpus/day02_grid_of_char.px` calls `map.len()` on a `Grid[Char]`,
   and the catalog has no `Grid.len` — it has `width`/`height`. Confirmed
   against the tree before this stage's first commit. No Rust test covers the
-  corpus directory, which is why nothing had caught it.
+  corpus directory, which is why nothing had caught it. **Registered as REP-12 —
+  S23, and the missing corpus test is part of the fix.**
 
 **What S15 deliberately left:**
 
@@ -2670,7 +2707,10 @@ blocked on this stage. The ADR is **054**. Notes worth carrying:
 - **No reachability analysis decides whether a `break` is *reachable*.**
   `loop { if false { break 1 } }` is `Int`, not `Never`: the join is over the
   `break`s that are *written*, not the ones that can run. Making it otherwise is
-  a dataflow pass no finding asks for.
+  a dataflow pass no finding asks for. **Deliberately left unscheduled** when the
+  repair's other discoveries were registered as REP-01…REP-14: this is a stated
+  design choice (ADR-053), not a defect, and the answer it gives is sound —
+  merely less precise than a dataflow pass would give.
 
 **What S13 deliberately left:**
 
@@ -2679,20 +2719,25 @@ blocked on this stage. The ADR is **054**. Notes worth carrying:
   Dependency-ordered binding groups over the **call graph** are what mutual
   recursion needs to generalize correctly — see "What S11 deliberately left"
   below, which is still exactly true. `infer_declaration_group` is where they go.
-- **A type-declaration cycle registers rather than reports.** `struct A { b: B }`
-  / `struct B { a: A }` and `struct Node { next: Node }` come out of the pass
-  with a fresh variable where the recursive member should be. Making that work is
-  equirecursive (or iso-recursive) types — a language feature; making it an
-  *error* is a language decision. ADR-052 records both as out of scope.
+- **REP-14 — a type-declaration cycle registers rather than reports.**
+  `struct A { b: B }` / `struct B { a: A }` and `struct Node { next: Node }` come
+  out of the pass with a fresh variable where the recursive member should be.
+  Making that work is equirecursive (or iso-recursive) types — a language
+  feature; making it an *error* is a language decision. ADR-052 records both as
+  out of scope. **The narrower defect is scheduled anyway (S26): a fresh variable
+  and silence is wrong under either answer.** The wording is **D17**.
 - **A compound assignment against an unconstrained target is not reported.**
   `fn f(a) { a += 1 }` leaves `a` a variable. Pinning it to `Int` would make the
   check total and would silently change inference for every unannotated numeric
   parameter; S17's TY-31 (`Y015`) is where numeric constraints get a channel.
-- **A nested `struct`/`enum` is still ignored, silently.** `register_top_level`
-  never declared one and the declaration pass only walks top-level statements, so
-  a `struct` inside a block has no symbol and no type. It was equally ignored
-  before; F19's dispatcher split (`resolve_top_stmt` vs `resolve_block_stmt`) is
-  what would make it an `N005`-shaped report, and no finding asks for it.
+- **REP-06 — a nested `struct`/`enum` is still ignored, silently.**
+  `register_top_level` never declared one and the declaration pass only walks
+  top-level statements, so a `struct` inside a block has no symbol and no type.
+  It was equally ignored before; F19's dispatcher split (`resolve_top_stmt` vs
+  `resolve_block_stmt`) is what makes it an `N005`-shaped report. **Now
+  scheduled — S26.** Verified: declaring one is accepted in silence and *using*
+  it is `N001` "`Inner` is not defined", pointing at a name declared two lines
+  above, which is the confusing half.
 - **`Analysis.scopes` is still public and still populated.** Inference no longer
   reads it, but it is resolution's output and the LSP is its notional consumer.
 
