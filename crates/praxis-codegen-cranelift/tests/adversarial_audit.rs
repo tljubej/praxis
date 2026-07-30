@@ -257,7 +257,6 @@ fn position_after_flat_map_uses_the_global_flattened_index() {
 }
 
 #[test]
-#[ignore = "known bug: flat_map any short-circuits only the current inner loop"]
 fn any_after_flat_map_short_circuits_the_whole_pipeline() {
     let (runtime, result) = run_main(
         "fn main() -> Bool {\n  let v = Vec()\n  v.push(1)\n  v.push(0)\n  v.flat_map(|x| {\n    let inner = Vec()\n    inner.push(x)\n    inner\n  }).any(|x| x == 1 || 10 / x > 0)\n}\n",

@@ -2008,6 +2008,37 @@ fn a_flat_map_inside_a_flat_map_flattens_both_levels() {
     );
 }
 
+/// **MIR-08's `take_while` half.** A stage that stops the stream stops the
+/// *stream*, not the inner Vec it happened to be looking at.
+///
+/// The exit-criterion test covers `any`; nothing covered `take_while`, and its
+/// failure mode inside a splice is worse than an early stop: applied per inner
+/// Vec, `take_while` silently becomes a `filter`, so elements after the stop
+/// point are processed and can fault.
+#[test]
+fn take_while_after_flat_map_stops_the_whole_stream() {
+    // [3,1,5] -flat_map(x -> [x])-> [3,1,5] -take_while(> 2)-> [3], and
+    // 100 / (3 - 5) = -50. Per inner Vec, `1` is merely dropped and `5` goes on
+    // to divide by zero — which is the assertion, because a wrong answer here
+    // would be indistinguishable from a right one for a total mapper.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(3)\n  v.push(1)\n  v.push(5)\n  v.flat_map(|x| {\n    let a = Vec()\n    a.push(x)\n    a\n  }).take_while(|y| y > 2).map(|y| 100 / (y - 5)).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(
+        !rt.has_pending_fault(),
+        "nothing after the stop point may run: {:?}",
+        rt.fault()
+    );
+    assert_eq!(result.as_int(), -50);
+
+    // The same with inner Vecs of length two, so the stop lands *inside* an
+    // inner sequence rather than at its start: [1,2] -> [1,10,2,20],
+    // take_while(< 5) -> [1].
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let a = Vec()\n    a.push(x)\n    a.push(x * 10)\n    a\n  }).take_while(|y| y < 5).count()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1, "the stream stops at the first 10");
+}
+
 #[test]
 fn pipeline_filter_map_keeps_results() {
     // filter_map is modeled as map-keep (no Unit to filter). [1,2,3].filter_map(*2)

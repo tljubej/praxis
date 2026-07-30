@@ -2595,6 +2595,14 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     };
 
     // ---- The loop scaffold: header / body / increment / exit ---------------
+    //
+    // `exit` is *the* pipeline exit, and there is exactly one however deeply the
+    // chain nests: a splice adds an inner header/body/increment, but never an
+    // inner place to stop the stream (MIR-08). No `LoopCtx` is pushed for either
+    // loop — a user `break`/`continue` cannot appear in a fused body, because
+    // every expression the chain contains is lowered above this line (a closure
+    // body is a separate MIR function), so a loop stack here would only be a
+    // second, weaker way to name the targets the emitter already carries.
     let header = b.func.new_block();
     let body_blk = b.func.new_block();
     let incr_blk = b.func.new_block();
@@ -2607,11 +2615,6 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
 
     // Body: load the element, thread it through the chain, run the sink.
     b.cur = body_blk;
-    b.loop_stack.push(LoopCtx {
-        continue_target: incr_blk, // filter-skip / flat-map-tail → increment
-        break_target: exit,        // take / take_while / any / all / find → exit
-        result: None,              // a fused pipeline loop yields through its sink
-    });
     let item = b.alloc_gc(source_item_ty, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: item,
@@ -2631,7 +2634,6 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
         closure: sink_closure_slot,
     };
     emit_plan(b, &steps, item, idx, &sink_plan, incr_blk, exit);
-    b.loop_stack.pop();
 
     // Increment block: `idx += 1`, jump to header.
     b.cur = incr_blk;
@@ -2676,6 +2678,7 @@ enum Plan {
 /// Everything the sink needs, allocated once before the loop. Passed by
 /// reference through the recursive emitter so a splice's inner loop feeds the
 /// *same* accumulators the outer loop does.
+#[derive(Clone, Copy)]
 struct SinkPlan<'a> {
     sink: &'a Sink,
     acc_scalar: Option<LocalId>,
@@ -2750,38 +2753,25 @@ fn emit_plan(
     idx: LocalId,
     sink: &SinkPlan<'_>,
     continue_target: BlockId,
-    exit: BlockId,
+    pipeline_exit: BlockId,
 ) {
     match plan {
         Plan::Step(step, rest) => {
-            let next = emit_step(b, step, item, idx, continue_target, exit);
-            emit_plan(b, rest, next, idx, sink, continue_target, exit);
+            let next = emit_step(b, step, item, idx, continue_target, pipeline_exit);
+            emit_plan(b, rest, next, idx, sink, continue_target, pipeline_exit);
         }
         Plan::Splice { f, rest } => {
             // f(item) -> Vec[U]; the rest of the chain runs once per member.
             let inner = invoke_closure(b, *f, vec![item]);
-            emit_splice(b, inner, rest, sink, continue_target, exit);
+            emit_splice(b, inner, rest, sink, continue_target, pipeline_exit);
         }
         Plan::Sink => {
-            emit_sink_body(
-                b,
-                sink.sink,
-                item,
-                idx,
-                sink.acc_scalar,
-                sink.acc_gc,
-                sink.seen_flag,
-                sink.collect_vec,
-                sink.closure,
-            );
+            emit_sink_body(b, sink, item, idx, continue_target, pipeline_exit);
             // Normal sink completion: fall through to the increment block. (A
-            // sink that short-circuits — any/all/find — emitted its own break
-            // and left `b.cur` dead, in which case this jump lands in a dead
-            // block, harmlessly.)
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
-                target: continue_target,
-            };
-            b.cur = b.func.new_block();
+            // sink that short-circuits — any/all/find — emitted its own jump to
+            // the pipeline exit and left `b.cur` dead, in which case this jump
+            // lands in a dead block, harmlessly.)
+            jump_and_go_dead(b, continue_target);
         }
     }
 }
@@ -2790,13 +2780,17 @@ fn emit_plan(
 /// `b.cur` on the live continuation: a step that drops (`filter`, `skip`) or
 /// stops (`take`, `take_while`, `zip` past the shorter length) has already
 /// branched those paths away.
+///
+/// The two targets are different things, and MIR-08 is what happens when they
+/// are conflated: `continue_target` advances the *innermost* sequence (a splice
+/// rebinds it), while `pipeline_exit` ends the whole chain from any depth.
 fn emit_step(
     b: &mut Builder<'_>,
     step: &Step,
     item: LocalId,
     idx: LocalId,
     continue_target: BlockId,
-    exit: BlockId,
+    pipeline_exit: BlockId,
 ) -> LocalId {
     match step {
         Step::Map(f) => invoke_closure(b, *f, vec![item]),
@@ -2825,18 +2819,18 @@ fn emit_step(
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: keep,
                 then_block: keep_blk,
-                else_block: exit, // predicate false → stop the loop
+                else_block: pipeline_exit, // predicate false → stop the stream
             };
             b.cur = keep_blk;
             item
         }
         Step::Take(n) => {
-            // If idx >= n → stop (jump to exit); else fall through.
+            // If idx >= n → stop the stream; else fall through.
             let stop = idx_cmp_const(b, idx, *n, CmpOp::Ge);
             let keep_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: stop,
-                then_block: exit,
+                then_block: pipeline_exit,
                 else_block: keep_blk,
             };
             b.cur = keep_blk;
@@ -2884,7 +2878,7 @@ fn emit_step(
             let pair_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: stop,
-                then_block: exit,
+                then_block: pipeline_exit,
                 else_block: pair_blk,
             };
             b.cur = pair_blk;
@@ -2929,7 +2923,7 @@ fn emit_splice(
     rest: &Plan,
     sink: &SinkPlan<'_>,
     outer_continue: BlockId,
-    exit: BlockId,
+    pipeline_exit: BlockId,
 ) {
     let inner_idx = alloc_zeroed_counter(b);
 
@@ -2942,11 +2936,6 @@ fn emit_splice(
     emit_bounds_check(b, inner_vec, inner_idx, body_blk, inner_exit);
 
     b.cur = body_blk;
-    b.loop_stack.push(LoopCtx {
-        continue_target: inner_incr,
-        break_target: inner_exit,
-        result: None, // a fused pipeline loop yields through its sink
-    });
     let inner_item = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: inner_item,
@@ -2957,9 +2946,18 @@ fn emit_splice(
     });
     b.check_fault();
     // The rest of the chain, per inner element. "Continue" now means the inner
-    // increment: the element that advances is the inner one.
-    emit_plan(b, rest, inner_item, inner_idx, sink, inner_incr, exit);
-    b.loop_stack.pop();
+    // increment — the element that advances is the inner one — but the exit is
+    // still the pipeline's: a `take` or an `any` that fires in here has answered
+    // for the whole chain, not for this inner Vec (MIR-08).
+    emit_plan(
+        b,
+        rest,
+        inner_item,
+        inner_idx,
+        sink,
+        inner_incr,
+        pipeline_exit,
+    );
 
     // Inner increment block: `inner_idx += 1`, jump to the inner header. (NOT
     // the header directly from the body — jumping there skips the increment and
@@ -2971,10 +2969,7 @@ fn emit_splice(
     // The splice is done with this outer element: advance the sequence feeding
     // it.
     b.cur = inner_exit;
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
-        target: outer_continue,
-    };
-    b.cur = b.func.new_block();
+    jump_and_go_dead(b, outer_continue);
 }
 
 /// Emit `idx <op> n` as a Bool scalar and return it. Used by Take/Skip.
@@ -3290,18 +3285,31 @@ fn move_scalar(b: &mut Builder<'_>, dst: LocalId, src: LocalId) {
 }
 
 /// Emit the sink's per-element update into the current (live) body block.
-#[allow(clippy::too_many_arguments)]
+///
+/// `pipeline_exit` is where a sink that has its answer goes — `any` once true,
+/// `all` once false, `find`/`position` on a hit. It is the *whole* chain's exit
+/// even when this element arrived through a splice: a sink that stopped only the
+/// inner loop would go on evaluating its predicate on elements after the answer
+/// was decided, and would let a later match overwrite `find`'s (MIR-08).
+/// `continue_target` is the innermost increment, which is where `reduce`'s
+/// first-element seed goes: seeding advances the stream by one element, it does
+/// not end it.
 fn emit_sink_body(
     b: &mut Builder<'_>,
-    sink: &Sink,
+    plan: &SinkPlan<'_>,
     item: LocalId,
     idx: LocalId,
-    acc_scalar: Option<LocalId>,
-    acc_gc: Option<LocalId>,
-    seen_flag: Option<LocalId>,
-    collect_vec: Option<LocalId>,
-    sink_closure_slot: Option<LocalId>,
+    continue_target: BlockId,
+    pipeline_exit: BlockId,
 ) {
+    let SinkPlan {
+        sink,
+        acc_scalar,
+        acc_gc,
+        seen_flag,
+        collect_vec,
+        closure: sink_closure_slot,
+    } = *plan;
     match sink {
         Sink::Sum | Sink::Product => {
             let acc = acc_scalar.unwrap();
@@ -3443,14 +3451,14 @@ fn emit_sink_body(
                 then_block: trip_blk,
                 else_block: cont_blk,
             };
-            // trip: set acc, break out of the loop.
+            // trip: set acc, end the pipeline.
             b.cur = trip_blk;
             let val = if matches!(sink, Sink::Any(_)) { 1 } else { 0 };
             b.push(Inst::ConstInt {
                 dst: acc,
                 value: val,
             });
-            break_loop(b);
+            jump_and_go_dead(b, pipeline_exit);
             b.cur = cont_blk;
         }
         Sink::Find(_) | Sink::Position(_) => {
@@ -3472,7 +3480,7 @@ fn emit_sink_body(
                 scalar: ScalarKind::Int,
             });
             move_scalar(b, acc, idx_scalar);
-            break_loop(b);
+            jump_and_go_dead(b, pipeline_exit);
             b.cur = cont_blk;
         }
         Sink::Fold { .. } => {
@@ -3505,7 +3513,7 @@ fn emit_sink_body(
                 dst: acc,
                 src: item,
             });
-            continue_loop(b);
+            jump_and_go_dead(b, continue_target);
             b.cur = fold_blk;
             let new_acc = invoke_closure(b, f, vec![acc, item]);
             b.push(Inst::MoveGc {
@@ -3544,29 +3552,16 @@ fn invert_bool(b: &mut Builder<'_>, x: LocalId) -> LocalId {
     not_x
 }
 
-/// Jump to the enclosing loop's break target and leave `b.cur` on a fresh dead
-/// block so subsequent lowering has somewhere to append.
-fn break_loop(b: &mut Builder<'_>) {
-    let ctx = *b
-        .loop_stack
-        .last()
-        .expect("a pipeline stage runs inside the loop context the fusion pushed");
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
-        target: ctx.break_target,
-    };
-    b.cur = b.func.new_block();
-}
-
-/// Jump to the enclosing loop's continue target and leave `b.cur` on a fresh
-/// dead block.
-fn continue_loop(b: &mut Builder<'_>) {
-    let ctx = *b
-        .loop_stack
-        .last()
-        .expect("a pipeline stage runs inside the loop context the fusion pushed");
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
-        target: ctx.continue_target,
-    };
+/// Terminate the current block with a jump to `target` and leave `b.cur` on a
+/// fresh dead block, so a caller that keeps emitting has somewhere to append.
+///
+/// This replaced a pair of `break_loop`/`continue_loop` helpers that read
+/// `b.loop_stack.last()`. Reading the *innermost* loop is exactly what a
+/// pipeline must not do: a chain has one exit however deeply it nests, and the
+/// innermost stack frame inside a `flat_map` splice named the inner loop's exit
+/// (MIR-08). The emitter carries both targets explicitly now.
+fn jump_and_go_dead(b: &mut Builder<'_>, target: BlockId) {
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target };
     b.cur = b.func.new_block();
 }
 
