@@ -27,7 +27,7 @@ Update this file at the end of every stage.
 | S14 — Control flow: bottom type, contexts, joins, loop values | **done** | `fd909a1`, `92a1b84`, `bf91879`, `9cffbe5`, `f93b25f`, `ea506a6` |
 | S15 — Per-use types into HIR and MIR, then monomorphization | **done** (one exit criterion deferred; see §4) | `93c05ec`, `f3c76a8`, `77b2ad6`, `b560e67` |
 | S16 — Records, patterns, exhaustiveness, enum constructors | **done** | `57e2e5b`, `06f3c44`, `b8e2c7b`, `e918741` |
-| S17 — Constraint channel and capabilities | **in progress** (9 of 11 findings + TY-33 unit 1) | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c` |
+| S17 — Constraint channel and capabilities | **in progress** (all 11 findings; TY-33 units 1–2 of 4) | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c`, `e801e6a`, `b6ab8eb` |
 | S18 … S21 | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
@@ -36,24 +36,30 @@ TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1320 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1349 passed, 0 failed, 38 ignored**. `just ci` is green.
 
-**S17 is open and is the largest stage in the repair.** Nine of its eleven
-findings are done — **TY-25**, **TY-26**, **TY-27**, **TY-28**, **TY-29**,
-**TY-30**, **TY-31**, **TY-32** and **RT-08** — plus **TY-33's first unit**
-(`panic`/`assert`/`dbg`). **F10's constraint channel landed as its own commit**
-with the suite green, per plan §9 step 2. The ADRs are **056** (the control
-names) and **057** (the channel + D4 + TY-30's pinning rule + TY-31's bounds);
-ADR-057 also supersedes **ADR-010's lapsed M7 deferral** of the §5.4 capability
-system, which the plan's F10 block asked for.
+**S17 is open and is the largest stage in the repair. All eleven of its findings
+are now done** — **TY-25**, **TY-26**, **TY-27**, **TY-28**, **TY-29**,
+**TY-30**, **TY-31**, **TY-32**, **TY-33**, **TY-34** and **RT-08** — but the
+stage is **not** closed, because D5 split TY-33 into four units and only **two**
+have landed: unit 1 (`panic`/`assert`/`dbg`) and unit 2 (the seven numeric
+helpers). **F10's constraint channel landed as its own commit** with the suite
+green, per plan §9 step 2. The ADRs are **056** (the control names), **057** (the
+channel + D4 + TY-30's pinning rule + TY-31's bounds), **058** (the numeric
+helpers) and **059** (the range slice); ADR-057 also supersedes **ADR-010's
+lapsed M7 deferral** of the §5.4 capability system, which the plan's F10 block
+asked for.
 
-**The stage's first unit is done.** What is left is **TY-34** (D6's `..`/`..=`
-vertical slice) and **TY-33's units 2–4** (the numeric prelude helpers, then the
-six graph helpers). §4 says what each needs and what is already in place.
+**What is left is TY-33's unit 3 — the six graph helpers — and it is blocked on
+a design decision the plan says is owed.** §4 has the question, a concrete
+recommendation, and everything already in place for it. Nothing else in S17
+remains.
 
-Thirteen exit-criterion tests were un-ignored by S17 so far, bringing the
-repair's running total to **ninety-seven** of the audit's ignored regressions
-un-ignored and passing:
+Thirteen exit-criterion tests were un-ignored by S17, bringing the repair's
+running total to **ninety-seven** of the audit's ignored regressions un-ignored
+and passing. (TY-33 units 2–4 and TY-34 have **no** ignored exit-criterion tests
+of their own — the plan's S17 list covers unit 1's `prelude_assert_requires_bool`
+and nothing else from D5/D6 — so both landed as new gates only.)
 
 | Test | File | Finding |
 |---|---|---|
@@ -70,6 +76,41 @@ un-ignored and passing:
 | `integer_literal_overflow_is_diagnosed` | `infer_tests.rs` | TY-28 |
 | `collection_method_constrains_unannotated_receiver_parameter` | `infer_tests.rs` | TY-30 |
 | `sum_requires_int_elements` | `infer_tests.rs` | TY-31 |
+
+TY-34's twelve new gates (D6's slice — ADR-059):
+
+| Test | File | Pins |
+|---|---|---|
+| `a_range_binds_looser_than_the_arithmetic_in_its_bounds` | `parse.rs` | the precedence had to be **inserted**, not appended — `0..n - 1` is `0..(n - 1)`, and `a..b == c..d` is two ranges |
+| `an_inclusive_range_is_the_same_node_with_a_different_operator` | `parse.rs` | one node kind, two operator tokens — where `is_inclusive` reads from |
+| `a_range_is_legal_wherever_an_expression_is` | `parse.rs` | `for` header (FE-06's `{`), call argument, method-call bound; and that `Range` in *type* position is a name, not a range |
+| `a_range_continues_across_a_line_break` | `parse.rs` | D8's rule needed no special case: `1 ..\n5` is one range |
+| `a_ranges_bounds_are_ints_and_a_range_is_a_collection_of_them` | `infer_tests.rs` | the type rule — `Int` bounds in both positions, `Range` result, `Int` loop variable |
+| `a_range_is_an_ordinary_value` | `infer_tests.rs` | D6's value-ness: binds, passes, returns, is a `Map` key and a `Set` element, is equatable, is **not** orderable |
+| `a_bare_nullary_collection_name_is_the_type_it_names` | `infer_tests.rs` | the annotation hole — `Range`/`BitSet` written bare, plus a bracket-less `Vec` as `Y007` |
+| `a_for_over_a_range_runs_its_integers_in_order` | `jit.rs` | the half no type test can see: `len`/`get` symbol selection, both forms, the empty and descending cases, negative and computed bounds |
+| `a_range_is_a_value_that_outlives_its_expression` | `jit.rs` | …and that a range survives a binding, a call and a `Map` insert — including that `1..=4` and `1..5` are one key |
+| `a_range_element_has_the_range_descriptor` | codegen `lower.rs` | `Vec[Range]` compiles now, and its element descriptor is the one `Range` object |
+| `a_range_has_a_descriptor_now` | `praxis-repr/src/tests.rs` | both bridge directions, and why the *positive* statement is written down |
+| five tests in `range.rs` | `praxis-runtime/src/range.rs` | the constructor's invariant: a descending range is empty, `..=` differs by one element, `..=Int::MAX` saturates, an out-of-range index has no element, the descriptor's capabilities |
+
+TY-33 unit 2's thirteen new gates (ADR-058):
+
+| Test | File | Pins |
+|---|---|---|
+| `each_numeric_helper_has_the_int_type_its_contract_needs` | `infer_tests.rs` | the rule — `Int` result, `Int` operands, and the **arity** in each of three shapes |
+| `a_numeric_helper_composes_like_any_int_expression` | `infer_tests.rs` | §3.3's `max(abs(dx), abs(dy))`, nested, and still checked |
+| `each_numeric_helper_reaches_the_backend` | `infer_tests.rs` | the half a type test cannot see — seven names that lowered as "unresolved user function" |
+| `each_numeric_helper_computes_what_it_names` | `jit.rs` | 24 cases; a table that named the wrong symbol typechecks identically |
+| `a_numeric_helper_faults_rather_than_wrapping` | `jit.rs` | `abs(Int::MIN)`, `lcm` overflow, inverted `clamp` — and that `sign`/`min`/`max` are total at the same edges |
+| `numeric_helpers_nest_and_carry_computed_operands` | `jit.rs` | a helper's temp surviving the allocations around it |
+| `every_numeric_helper_is_a_prelude_name` | `prelude.rs` | the two lists agree — a name in only one is a phantom or an unreachable wrapper |
+| `a_helpers_arity_is_the_wrappers_arity` | `prelude.rs` | the row states no arity; and every wrapper's shape is `(Ctx, Gc…) -> Gc` |
+| `each_helper_has_its_own_wrapper` | `prelude.rs` | a copy-pasted row would make one name compute another's answer |
+| `the_selecting_helpers_return_an_operand_and_allocate_nothing` | `praxis-runtime/src/abi.rs` | why `min`/`max`/`clamp` are `Pure` — by **pointer**, so an allocating version fails |
+| `an_inverted_clamp_range_faults_rather_than_guessing` | `abi.rs` | …and that a one-value range is not inverted |
+| `gcd_and_lcm_are_non_negative_and_refuse_only_what_has_no_int` | `abi.rs` | the `i128` computation: `Int::MIN`'s divisors, `(0, 0)`, both signs, and the one pair that faults |
+| `abs_faults_on_the_value_with_no_positive_and_sign_does_not` | `abi.rs` | the `AllocatesAndFaults`-vs-`Allocates` distinction, observed |
 
 TY-31's six new gates:
 
@@ -602,9 +643,10 @@ The eight new gates for the findings that had none:
 | `neighbors_of_an_extreme_point_are_empty_rather_than_a_panic` | `abi.rs` | RT-07 neighbour overflow |
 | `a_known_element_type_with_no_descriptor_fails_the_compile` | `lower.rs` | P0-11's D9 answer |
 
-Plus the seven crate tests in `praxis-repr/src/tests.rs`, of which
-`every_builtin_value_round_trips` is F11's stated contract: a live sample of all
-twenty-one built-ins, round-tripped by descriptor **pointer**.
+Plus the crate tests in `praxis-repr/src/tests.rs`, of which
+`every_builtin_value_round_trips` is F11's stated contract: a live sample of
+**all twenty-two** built-ins (twenty-one before TY-34 added `Range`),
+round-tripped by descriptor **pointer**.
 
 Two tests were **rewritten**, not merely un-ignored, because S6 inverted their
 premise:
@@ -840,7 +882,52 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S17: TY-30 and TY-31)
+### From this session (S17: TY-33 unit 2 and TY-34)
+
+**The Pratt precedence table is renumbered.** `..`/`..=` is `bp(3, 4)`, inserted
+between `||` and comparison, so comparison is `bp(5, 6)`, additive `bp(7, 8)`,
+multiplicative `bp(9, 10)`, prefix `11` and `read` `13`. **If you add an operator,
+read the whole table** — every number moved except `||`'s.
+
+**`SyntaxKind::RANGE_EXPR` and `praxis_ast::RangeExpr` are new, and `Expr::Range`
+is a new variant of an exhaustive enum.** So is `TypedExpr::Range { start, end,
+inclusive, ty, span }`, with a row in F20's `typed_expr_children!`. Adding either
+was five compile errors and nothing else, which is the design working: `infer.rs`,
+`lower.rs`, `resolve.rs`, `mono.rs`, `build.rs` and the debugger's `purity.rs` all
+have exhaustive matches and each named itself.
+
+**A bare nullary collection name in type position now resolves.** `named_type`
+routes a name through `collection_from_name` when `is_type_ctor_name` says it is a
+ctor, so `fn f(r: Range)` and `fn f(b: BitSet)` mean what they say — they used to
+resolve to *nothing* and leave a fresh variable. **A bracket-less `Vec`/`Map`/…
+is now a `Y007`** ("expected 1 type argument, got 0") where it used to be silent.
+Nothing in the corpus writes one, but a test that did would newly report.
+
+**`supports_hash_stable`'s collection arm is per-ctor, not a blanket `false`.**
+`CollectionCtor::Range` is a key; every other collection is not. If you add a
+collection ctor you must answer for it — which is the point.
+
+**`BuiltinTypeId` has a 22nd variant (`Range`) and `COUNT` is 22.** Two places
+list every built-in by hand and both are compile-checked:
+`descriptor::BUILTINS` (by array length) and `praxis-repr/src/tests.rs`'s `ALL`
+(by `COUNT`). A new built-in fails both rather than silently skipping the
+round-trip.
+
+**`Seq` is the only `CollectionCtor` with no runtime object.** `Range` had been
+the other one, and two tests used it as their witness for "a type that cannot
+exist" — both **rewritten** to `Seq`. If you need such a witness, `Seq` is it, and
+there is now no third.
+
+**Seven new `praxis_int_*` symbols and four `praxis_range_*` ones.** Adding a
+symbol is a manifest row plus an `address` arm; both matches are exhaustive.
+`RUNTIME_ABI_VERSION` is still **13** — see §4 on why, and on the one fault kind
+those two units owe.
+
+**`praxis_stdlib::numeric_helper(name)` is the one lookup from a prelude name to
+its wrapper**, and `NumericHelper::arity` reads the manifest rather than storing a
+count. Inference and MIR both go through it. Do not add a second list.
+
+### From an earlier session (S17: TY-30 and TY-31)
 
 **`TypePattern::Var` is a struct variant.** `TypePattern::Var("T")` no longer
 compiles; write `TypePattern::var("T")` (or `TypePattern::is_scalar("T",
@@ -1781,8 +1868,8 @@ with three `_ => INT` arms is gone. **Do not add a local descriptor match
 anywhere** — add an arm to the bridge, where the round-trip test sees it.
 
 **A descriptor request can fail, and there are two kinds of failure.**
-`NoReprCause::NoSuchObject` (`Never`, `UInt`, `Range`, `Seq`, a non-built-in
-descriptor) is always a compile error. `NoReprCause::Unresolved` (a type
+`NoReprCause::NoSuchObject` (`Never`, `UInt`, `Seq`, a non-built-in descriptor —
+`Range` was on this list until TY-34) is always a compile error. `NoReprCause::Unresolved` (a type
 variable) is tolerated *only* where null is representable — a collection's
 element descriptor — because `let xs = Vec()` generalizes at the `let` and S15
 is what fixes it. Ask `e.is_unresolved()`, do not match on the reason string.
@@ -2099,10 +2186,9 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**S17's first unit is done. The next thing to do is TY-33's unit 2 — the numeric
-prelude helpers.** Read the plan's §5 S17 entry and §7's D5/D6 first; D5 and D6
-both went *against* the recommendation, which is what makes the stage several
-sessions rather than one.
+**All eleven of S17's findings are done. The one thing left in the stage is
+TY-33's unit 3 — the six graph helpers — and it is blocked on a design decision
+the plan says is owed.** Read the plan's §5 S17 entry and §7's D5 first.
 
 What is done:
 
@@ -2110,55 +2196,105 @@ What is done:
   the suite green. §2 and §3 say what it is and what the four verbs are. **If
   you add a capability check anywhere, go through `Inferer::require_cap`** —
   calling a predicate directly is TY-29 by another name.
-- **Nine of eleven findings are done and gated: TY-25…TY-32 and RT-08.** The
-  stage's first unit — F10's channel plus the eleven findings — is closed except
-  for TY-33 and TY-34, which are the units D5 and D6 made stage-sized.
-- **TY-33's first unit is done** (`panic`, `assert`, `dbg` — ADR-056).
+- **All eleven findings are done and gated: TY-25…TY-34 and RT-08.**
+- **TY-33 unit 1** (`panic`, `assert`, `dbg` — ADR-056), **unit 2** (the seven
+  numeric helpers — ADR-058) and **TY-34** (the range slice — ADR-059) are done.
 
-What is left, in the order to do it:
+### The one thing left: TY-33 unit 3 — the six graph helpers
 
-- **TY-33 unit 2 — the numeric prelude helpers, and it is unblocked now.** The
-  plan calls them "the eight numeric helpers" and names seven: `abs`, `sign`,
-  `min`, `max`, `clamp`, `gcd`, `lcm`. `praxis-stdlib`'s `PRELUDE` also lists the
-  two constants `pi` and `e`, which are the same unit's work. Every one of them
-  is a **phantom today**: the name is in `PRELUDE`, so it resolves, and then it
-  gets a fresh type and lowers as a missing user function — the shape `panic` had
-  before ADR-056. What unit 1 built is the pattern to copy:
-  `Inferer::seed_builtin_schemes` gives the name a real scheme, and
-  `control_builtin_symbol` in `praxis-mir`'s `build.rs` is the one lookup from
-  name to runtime symbol, with the fault check driven by the ABI manifest's own
-  `Effect`. Read ADR-056 and follow it.
-  - **Half of them already have a runtime symbol**, because they exist as
-    *methods*: `abs`, `sign`, `sqrt`, `floor`, `ceil`, `round`, `to_float`,
-    `to_int`, `to_text` are catalog rows on `Int`/`Float` with
-    `MethodLowering::RuntimeSymbol`, and `Float.min`/`Float.max` take a second
-    `Float`. A free `abs(x)` can lower to the same wrapper.
-  - **What has no wrapper: `Int` min/max, `clamp`, `gcd`, `lcm`.** Decide
-    per name whether to add a `praxis_*` wrapper (ABI manifest row + address
-    table, which is two lines since F4) or to fold it in MIR. `RUNTIME_ABI_VERSION`
-    is **13** and S17's one bump (H17) is already spent — adding a *symbol* is
-    additive and changes no `#[repr(C)]` layout, so it needs no second bump;
-    check before assuming.
-  - **TY-31's bound is *not* what these want.** The plan says they "want TY-31's
-    numeric constraint", and TY-31 delivered `Bound::Is(ScalarType)` on catalog
-    rows instead, for the reason ADR-057 D6 gives. A prelude *function* is a
-    scheme, so a genuinely polymorphic `min`/`max`/`abs` would carry
-    `Capability::Kind(CapKind::Numeric)` on its own binder through the F10
-    channel — which works and has no emitter yet. **The simpler and more honest
-    option is a monomorphic `Int` signature**, matching what the sinks turned out
-    to need and what the lowerings actually support; `Float.min`/`Float.max`
-    already exist as methods for the float case. Pick one deliberately and record
-    it.
-- **TY-34 is D6's full `..`/`..=` vertical slice**, and D6 lists four
-  sub-decisions it does *not* settle (half-openness, value-ness, descending
-  behaviour, endpoint types), all owed before the slice starts. Two anchors
-  exist: `CollectionCtor::Range` and `capability::iter_item`'s
-  `(CollectionCtor::Range, _) => Int` arm.
-- **D5's graph helpers (unit 3) need a graph *representation* decision** that is
-  not in the plan and is owed before that unit starts. Do not interleave it with
-  anything.
+`bfs`, `bfs_distance`, `dfs`, `dijkstra`, `a_star`, `flood_fill`. They are the
+**last six phantom prelude names**: each is in `PRELUDE`, so a reference
+resolves, and then `seed_builtin_schemes` skips it, inference hands out a fresh
+variable that unifies with anything, and the call lowers as
+`CallTarget::User("bfs")` — a direct call to a function nobody defined. That is
+the exact shape `panic` had before ADR-056 and `abs` had before ADR-058.
+
+**D5 says this unit is more work than the other ten findings of S17 combined,
+and that its representation decision "is not in this plan and is owed before the
+unit starts".** That is still true. The two questions D5 names:
+
+1. **What does a caller pass as the neighbour function?** A closure
+   `(T) -> Vec[T]`, a `Map[T, Vec[T]]` adjacency table, or a `Grid` plus an
+   implicit 4-/8-neighbourhood — and whether one name accepts more than one of
+   those.
+2. **Do `dijkstra`/`a_star` take edge weights as a closure or a `Map`?** And
+   `a_star` needs a heuristic, which is a third function-shaped argument.
+
+**A recommendation, so the answer is cheap to give.** The closure form is the one
+the type system already supports end to end: `bfs(start, |n| neighbours_of(n))`
+is a monomorphic-per-instantiation call whose argument is an ordinary
+`Func`, and §4.10's closures, HIR-08's captures and `Inst::CallIndirect` all
+work today. An adjacency `Map` would need `Map.get`'s contract settled first,
+which is **D1 in S18** and still open. A `Grid` overload would need arity- or
+type-based overloading, which the language does not have (see ADR-056's note on
+`assert`). So: **one closure-shaped signature per name**, with `dijkstra`/`a_star`
+taking the weight (and heuristic) as further closures, and any `Grid` convenience
+deferred to a milestone that owns it.
+
+The element type wants a capability, and this is where F10's channel gets its
+hardest test — which is exactly why the plan says **do not interleave this unit
+with anything**. A `bfs` over `T` needs `T` to be a `Set` element and a `Map`
+key, which is `CapKind::HashStable`, and `require_cap` on a scheme's own binder
+is the route (ADR-057). `dijkstra` additionally needs its cost type orderable for
+the heap, and `heap_element_must_be_orderable` is the gate that already says what
+that looks like.
+
+What is already in place for it:
+
+- **`MinHeap`/`MaxHeap`, `Deque`, `Set`, `Map` and `Counter` are all real**, with
+  wrappers in the F4 manifest. A `dijkstra` needs no new collection.
+- **`Option[T]`** is real (F12), which is what `bfs_distance` on an unreachable
+  target wants to return — but **read D1 first**: `Map.get`'s contract is the
+  same question and S18 owns it.
+- **The channel's `HasMethod` and `Iterable` emitters both exist** (TY-30,
+  TY-31), so a signature that constrains its argument has a route.
+- **`Range` is a real value now** (ADR-059), so a `flood_fill` over a grid's
+  positions can write `0..w` without a helper.
+
+### After S17: S18
+
+**S18 is `D1`-blocked and D1 is still open** (plan §7): `Map.get`/`Grid.find`
+returning `Option[V]` versus `V`-with-`Unit`. Two `#[ignore]`d tests name it
+directly — `absent_map_get_does_not_return_an_untyped_unit_sentinel` and
+`absent_grid_find_does_not_return_an_untyped_unit_sentinel` in
+`praxis-runtime/src/abi.rs`. S18 also owns **RT-13**, F12's runtime half, which
+§2 records as deliberately unlanded and which needs an ABI bump of its own — the
+first one available, since S17 spent 12→13 and both ADR-058 and ADR-059 declined
+to spend a second (see below).
 
 Things this session found that the register does not have:
+
+- **A `for` over an *unannotated* parameter unifies the parameter with its own
+  element type.** `iter_item` answers an unresolved iterator with *itself* — the
+  optimism ADR-057 records and `infer_for`'s comment states — so the loop
+  variable and the iterator are the same variable, and any use of the item pins
+  the iterator. `fn total(r) { var t = 0\n for i in r { t = t + i }\n t }` reports
+  `Y005` "values of type `Int` cannot be iterated", identically for `Vec`,
+  `BitSet` and `Range`. The deferred constraint is `Iterable { item }` where
+  `item` *is* the receiver's variable, which is why deferring it does not help.
+  A real fix wants `iter_item` to answer an unresolved receiver with a **fresh**
+  item variable and let the deferred constraint relate the two — which is the
+  "`Iterable`'s `item` is not unified at discharge" note below, from the other
+  end. No finding covers it; it is why TY-34's gates annotate.
+- **`gc_alloc` is generic over its payload and checks the width at *runtime*.**
+  `gc_alloc(ctx, &scalars::INT, 0)` — an `i32` literal, because Rust's default
+  integer type is not `i64` — aborts the process with "payload size mismatch for
+  descriptor Int" from inside `extern "C"`, which is a non-unwinding panic across
+  the ABI (§10.4 forbids it; D12 is the policy question). It cost one debugging
+  cycle in unit 2. The descriptor knows its payload type, so the signature does
+  not have to be generic.
+- **Explicit type arguments on a constructor call have no grammar.**
+  `Counter[(Int, Int)]()` — which §3.3's representative program writes — is a
+  `P002` ("expected `;` or a line break between statements") at the `[`. The
+  element type is inferred from use instead, so the program works when written
+  `Counter()`; but the design doc's own spelling does not parse. No finding
+  covers it. It is the last thing standing between §3.3 and compiling.
+- **A nullary collection renders as `Range[]` / `BitSet[]`.** `db.render` prints
+  the brackets whether or not there are arguments, so a `Y001` about a range says
+  "found `Range[]`". Cosmetic, and it predates TY-34 (`BitSet[]` has always done
+  it).
+
+Carried forward from S17's earlier sessions:
 
 - **`Bound::Cap` does not exist, and the reason is a finding of its own.** TY-31
   was planned as a *capability* bound migration. It is not one: `sum`, `product`,
@@ -2201,11 +2337,25 @@ Things this session found that the register does not have:
   with a `via` span, and `resolve_deferred_method` would then write a
   `method_refs` entry per instantiation against one token. It guards with
   `c.via.is_none()`; read that before lifting the pin.
-- **The corpus triage found nothing, for the ninth time.** Every `.px` under
-  `tests/` and every CLI fixture went through `praxis check`, and the corpus
-  through `praxis run` as well. Only the three fixtures that are *meant* to report
-  do, plus `tests/aoc-corpus/day02_grid_of_char.px`'s `Y110` — S15's pre-existing
-  `map.len()` on a `Grid[Char]`, still there, still not S17's.
+- **The corpus triage found nothing, for the ninth, tenth and eleventh times** —
+  once per S17 session, most recently after TY-34. Every `.px` under `tests/` and
+  every CLI fixture went through `praxis check`, and the corpus through
+  `praxis run` as well. Only the three fixtures that are *meant* to report do,
+  plus `tests/aoc-corpus/day02_grid_of_char.px`'s `Y110` — S15's pre-existing
+  `map.len()` on a `Grid[Char]`, still there, still not S17's. **`check` alone is
+  not the triage**: `Y110` is reported at *lowering*, so a `praxis check` sweep
+  shows a clean corpus while `praxis run` shows the one break. Run both.
+- **The one ABI bump S17 was allowed (H17) went to ADR-056, and the two units
+  after it each declined to spend a second** — deliberately, and each records
+  what it cost:
+  - ADR-058: an inverted `clamp` range borrows `FaultKind::InvalidSize` instead
+    of getting a kind of its own.
+  - ADR-059: `praxis_range_len`'s out-of-range count borrows the same kind.
+  Both are cases of one missing kind — an **empty range**. Whichever stage next
+  spends a bump (S18's RT-13 is the first that must) should add it and re-point
+  those two raises. `BuiltinTypeId::Range` needed no bump: it is appended, so no
+  existing id or `#[repr(C)]` layout moved, and the same reasoning covered
+  ADR-058's seven new symbols.
 
 **S16 is closed.** All five findings are fixed and gated — HIR-03, HIR-04,
 HIR-05, HIR-06 and HIR-07 — and all eight exit-criterion tests pass. HIR-05
@@ -2223,9 +2373,11 @@ into four units.** D4 rejects mutable collections as keys (the recommendation);
 D5 implements all fifteen prelude names including the six graph helpers (against
 it); D6 implements `..`/`..=` in full (against it).
 
-**Read the plan's §5 S17 entry and §7's D5/D6 before continuing the stage.** Unit
-1 is done; units 2, 3 and 4 remain, and two of them have sub-decisions §7 records
-as still owed.
+**Read the plan's §5 S17 entry and §7's D5 before continuing the stage.** Units
+1, 2 and 4 are done — ADR-056, ADR-058 and ADR-059 — and **unit 3 is the only one
+left**. D6's four owed sub-decisions are all answered and implemented in ADR-059;
+D5's graph-representation decision is the one still owed, and §4 has the question
+with a recommendation.
 
 The list S16 wrote of what S17 would want, with where each now stands:
 
@@ -2790,9 +2942,9 @@ one. Settle both together.
 
 | | Decision | Blocks |
 |---|---|---|
-| D4 | Hashability of mutable collections as Map keys | S17 |
-| D5 | The 15 phantom prelude names: implement or delete | S17 |
-| D6 | `CollectionCtor::Range`: delete or implement | S17 |
+| D4 | Hashability of mutable collections as Map keys | S17 — **answered and implemented** (ADR-057) |
+| D5 | The 15 phantom prelude names: implement or delete | S17 — answered; units 1–2 implemented (ADR-056, ADR-058). **Unit 3's graph-representation sub-decision is still owed** |
+| D6 | `CollectionCtor::Range`: delete or implement | S17 — **answered and implemented, all four sub-decisions included** (ADR-059) |
 | D1 | `Map.get` / `Grid.find` — `Option[V]` or V-with-Unit; and `min`/`max` on an empty sequence. Source-visible | S18 |
 | D10 | How much parser-expression grammar a template capture body may contain | S19 |
 | D11 | `grid(int)` granularity; greediness of `text`/`word` | S20 |
@@ -2801,6 +2953,33 @@ one. Settle both together.
 ## 6. Corrections to the plan
 
 Things the plan states that are no longer or were not quite true.
+
+- **The numeric prelude helpers do not "want TY-31's numeric constraint".** Plan
+  §5's S17 unit 2 and §7's D5 both say they do, and sequence them after the
+  constraint channel for that reason. TY-31 delivered `Bound::Is(ScalarType)`
+  rather than a capability (ADR-057 D6), and the helpers took **monomorphic `Int`
+  signatures** (ADR-058) — because `CapKind::Numeric` admits `Float` and there is
+  no wrapper serving both widths, which is the same trap that made
+  `Vec[Float].sum()` add a float's bits as an integer. The sequencing was right;
+  the reason given for it was not. §4.12 already answers the `Float` cases: they
+  are methods.
+- **The plan calls them "the eight numeric helpers" and names seven.** `abs`,
+  `sign`, `min`, `max`, `clamp`, `gcd`, `lcm` is seven; the eighth is presumably
+  `pi`/`e`, which are two, and which already had schemes and dispatch before the
+  unit started. Seven wrappers landed.
+- **TY-34's lexer layer was already done.** D6 lists "lexer tokens" as the first
+  of six layers. `DOT2` and `DOT2EQ` were already `SyntaxKind` variants, the
+  number scanner already refused to read `1.` as a float when a second `.`
+  follows, and three lex tests already pinned it. The slice was five layers.
+- **TY-34's FE-04 interaction needed no decision.** D6 flags `1 ..\n5` as
+  "needing a decision of its own". It does not: D8's rule is already "never
+  inside the Pratt loop", the loop does not consult `newline_before`, and a
+  newline after `..` continues exactly as one after `+` does.
+  `a_range_continues_across_a_line_break` is the gate that says so.
+- **TY-33 units 2–4 and TY-34 have no ignored exit-criterion tests.** The plan's
+  S17 exit list covers unit 1's `prelude_assert_requires_bool` and the eleven
+  findings; nothing in the audit's ignored suite names a numeric helper or a
+  range. Both units are gated by new tests only, which is §8.3's shape.
 
 - **`numeric_scalars_are_orderable` did not invert.** Plan §8.2 lists it as a
   passing test whose "meaning inverts" in S17, because TY-32 was expected to
