@@ -824,6 +824,14 @@ impl Resolver {
         } else if let Some(callee_expr) = c.callee_expr() {
             self.resolve_expr(scope, &callee_expr);
         }
+        // Written type arguments are type annotations (REP-09), so they are checked
+        // like any other: `Counter[Nope]()` is `N002` and `Counter[x]()` is `N003`,
+        // at the annotation, before inference has an opinion about the call.
+        if let Some(type_args) = c.type_args() {
+            for ty in type_args.args() {
+                self.check_type_annotation(scope, &ty);
+            }
+        }
         if let Some(args) = c.arg_list() {
             self.resolve_args(scope, &args);
         }

@@ -132,6 +132,25 @@ fn prefix_binding_power(op: SyntaxKind) -> Option<u8> {
     }
 }
 
+/// The compiler-owned type constructors, the only names that take an explicit
+/// type-argument list in expression position (REP-09, §3.3's
+/// `Counter[(Int, Int)]()`).
+///
+/// The parser has to know these **by name**, because nothing else can tell
+/// `Counter[(Int, Int)]()` from `m[key]`: the brackets are the same and the
+/// contents are ambiguous too — `Int` is a legal expression, and `(Int, Int)` a
+/// legal tuple of two. `parse`'s own special case (§7.1) is the precedent for a
+/// name-driven decision here.
+///
+/// The list is the §6.1 collection set plus `Option`, and `praxis-hir`'s
+/// `is_type_ctor_name` is the other copy of it —
+/// `the_parsers_type_constructors_are_the_compilers` asserts the two agree, so a
+/// name in only one cannot go unnoticed.
+pub const TYPE_CONSTRUCTOR_NAMES: &[&str] = &[
+    "Vec", "Deque", "Map", "Set", "Counter", "MinHeap", "MaxHeap", "BitSet", "Grid", "Range",
+    "Option",
+];
+
 /// Whether `op` is an assignment operator (statement-level reassignment, §4.2).
 /// These are not infix expression operators; they are parsed as statements.
 fn is_assignment_op(op: SyntaxKind) -> bool {
@@ -363,7 +382,7 @@ impl<'t> Parser<'t> {
     /// The source text of the current meaningful token (trivia skipped). Used to
     /// special-case keywords-that-look-like-idents such as `parse` and parser
     /// constructor names (`lines`, `csv`, …).
-    fn peek_text(&mut self) -> Option<&str> {
+    fn peek_text(&mut self) -> Option<&'t str> {
         let mut idx = self.cursor;
         while idx < self.tokens.len() {
             let kind = self.tokens[idx].kind;
@@ -942,6 +961,44 @@ impl<'t> Parser<'t> {
         self.finish_node(); // ARG_LIST
     }
 
+    /// The `[Type, …]` type-argument list of a constructor call (REP-09), with the
+    /// name already emitted and the `[` still current.
+    ///
+    /// A type-argument list exists only on a constructor *call*, so the `(` after
+    /// it is required: `Counter[Int]` alone names a type in value position, which
+    /// no expression grammar accepts.
+    fn parse_type_arg_list(&mut self) {
+        self.start_node(SyntaxKind::TYPE_ARG_LIST);
+        self.bump(); // `[`
+        if self.at(SyntaxKind::R_BRACK) {
+            let span = self.current_span();
+            self.error(span, "expected a type argument");
+        } else {
+            loop {
+                let before = self.meaningful_index();
+                self.parse_type();
+                if !self.eat(SyntaxKind::COMMA) {
+                    break;
+                }
+                // A trailing comma closes the list (REP-17).
+                if self.at(SyntaxKind::R_BRACK) {
+                    break;
+                }
+                // Guarantee termination on any input.
+                self.ensure_progress(before);
+            }
+        }
+        self.expect(SyntaxKind::R_BRACK, "`]`");
+        self.finish_node(); // TYPE_ARG_LIST
+        if !self.at(SyntaxKind::L_PAREN) {
+            let span = self.current_span();
+            self.error(
+                span,
+                "`(` — a type argument list belongs to a constructor call",
+            );
+        }
+    }
+
     /// `|params| expr` — a closure expression (M7, §4.10). Params are bare names
     /// optionally annotated `: Type`, separated by commas, between two `|`. The
     /// body is a single expression (which may be a `{ block }`). Closures capture
@@ -1380,9 +1437,23 @@ impl<'t> Parser<'t> {
             self.finish_node(); // PARSE_EXPR
             return;
         }
+        // `Counter[(Int, Int)]()` — explicit type arguments on a constructor call
+        // (REP-09, §3.3). Decided from the *name* before the brackets are reached,
+        // because the brackets themselves are a subscript's (REP-16) and their
+        // contents cannot break the tie: `Int` parses as an expression too.
+        //
+        // Consequence, stated rather than hidden: a binding that shadows a type
+        // constructor's name cannot be subscripted — `Counter[0]` reads as a type
+        // argument list and then wants a `(`. That is the whole cost of the rule,
+        // and it buys `m[k](7)` staying a call on an indexed closure.
+        let takes_type_args = name_text.is_some_and(|t| TYPE_CONSTRUCTOR_NAMES.contains(&t))
+            && self.nth_kind(1) == SyntaxKind::L_BRACK;
         self.start_node(SyntaxKind::PATH_EXPR);
         self.bump(); // name
         self.finish_node();
+        if takes_type_args {
+            self.parse_type_arg_list();
+        }
         if self.at(SyntaxKind::L_PAREN) {
             self.bump(); // `(`
             self.start_node_at(cp, SyntaxKind::CALL_EXPR);
@@ -2646,6 +2717,65 @@ mod tests {
 
         // An unclosed subscript is reported rather than swallowing the rest.
         for bad in ["let v = m[key", "let v = m[]", "m[key] ="] {
+            let out = parse_text(bad);
+            assert!(!out.diagnostics.is_empty(), "{bad} must report");
+        }
+    }
+
+    /// **REP-09.** A type constructor's name followed by `[` opens a
+    /// type-argument list; every other name followed by `[` is a subscript.
+    ///
+    /// `Counter[(Int, Int)]()` — which §3.3 writes — was a `P002` at the `[`. The
+    /// two forms are the same two characters, and their contents cannot break the
+    /// tie either (`Int` is a legal expression, `(Int, Int)` a legal tuple), so the
+    /// name in front is the whole rule and this is where it is pinned.
+    #[test]
+    fn a_type_constructors_brackets_are_type_arguments_and_every_other_names_are_a_subscript() {
+        let count = |text: &str, kind: SyntaxKind| -> usize {
+            let out = parse_text(text);
+            assert!(out.diagnostics.is_empty(), "{text}: {:?}", out.diagnostics);
+            construct_names(&out.tree)
+                .into_iter()
+                .filter(|k| *k == kind)
+                .count()
+        };
+
+        // §3.3's own spelling, and the shapes around it.
+        for src in [
+            "let c = Counter[(Int, Int)]()",
+            "let v = Vec[Int]()",
+            "let m = Map[Text, Int]()",
+            "let g = Grid[Vec[Int]]()",
+            // A trailing comma closes this list too (REP-17).
+            "let m = Map[Text, Int,]()",
+        ] {
+            assert_eq!(count(src, SyntaxKind::TYPE_ARG_LIST), 1, "{src}");
+            assert_eq!(count(src, SyntaxKind::INDEX_EXPR), 0, "{src}");
+            assert_eq!(count(src, SyntaxKind::CALL_EXPR), 1, "{src}");
+        }
+
+        // …and every other name's brackets are still a subscript, including a
+        // subscript **followed by a call**, which is what a "brackets before `(`
+        // are type arguments" rule would have broken.
+        for src in [
+            "let v = m[key]",
+            "let v = m[key](7)",
+            "let v = counter[key]",
+            "let v = grid[x, y]",
+        ] {
+            assert_eq!(count(src, SyntaxKind::INDEX_EXPR), 1, "{src}");
+            assert_eq!(count(src, SyntaxKind::TYPE_ARG_LIST), 0, "{src}");
+        }
+
+        // A type-argument list belongs to a *call*, so a bare one reports rather
+        // than parsing as a type in value position. An empty one reports too: a
+        // constructor with no arguments is spelled `Counter()`.
+        for bad in [
+            "let c = Counter[Int]",
+            "let c = Counter[]()",
+            "let c = Counter[Int",
+            "let c = Vec[Int] + 1",
+        ] {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must report");
         }

@@ -5686,3 +5686,39 @@ fn a_compound_assignment_through_a_subscript_evaluates_its_place_once() {
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 12, "one call to `pick`, one increment");
 }
+
+/// **REP-09 end to end.** A constructor with written type arguments runs, and it
+/// builds the collection the annotation names.
+///
+/// The half a type test cannot see: the ctor's runtime call carries a *descriptor*
+/// chosen from the element type, and the descriptor selects hash and equality for
+/// a `Map`/`Counter` key. A written type argument that reached inference but not
+/// the allocation would type-check and then key the collection by the wrong
+/// comparison.
+#[test]
+fn a_constructor_with_written_type_arguments_builds_what_it_names() {
+    // A tuple-keyed `Counter`, spelled the way §3.3 spells it. The key is a fresh
+    // allocation each iteration, so the three increments only land on one key if
+    // the descriptor gives structural identity (ADR-026).
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let c = Counter[(Int, Int)]()\n  \
+         for i in 0..3 { c[(1, 2)] += 1 }\n  c[(1, 2)] * 10 + c.len()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 31);
+
+    // Each ctor arity, and a nested argument.
+    for (src, want) in [
+        ("let v = Vec[Int]()\n  v.push(4)\n  v[0]", 4),
+        ("let m = Map[Text, Int]()\n  m[\"a\"] = 9\n  m[\"a\"]", 9),
+        (
+            "let m = Map[Text, Vec[Int]]()\n  let inner = Vec()\n  inner.push(3)\n  \
+             m[\"a\"] = inner\n  m[\"a\"].len()",
+            1,
+        ),
+    ] {
+        let (rt, result) = run_main(&format!("fn main() -> Int {{\n  {src}\n}}\n"));
+        assert!(!rt.has_pending_fault(), "{src} faulted: {:?}", rt.fault());
+        assert_eq!(result.as_int(), want, "{src}");
+    }
+}

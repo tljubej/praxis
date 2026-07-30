@@ -13,4 +13,4 @@ pub mod parse;
 
 pub use fmt::{format_node, format_source};
 pub use lex::{lex, LexOutput};
-pub use parse::{parse, ParseOutput};
+pub use parse::{parse, ParseOutput, TYPE_CONSTRUCTOR_NAMES};

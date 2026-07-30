@@ -1397,6 +1397,36 @@ impl CallExpr {
     pub fn arg_list(&self) -> Option<ArgList> {
         child(&self.syntax)
     }
+    /// The written `[Type, …]` type arguments, for a constructor call that has
+    /// them (REP-09): `Counter[(Int, Int)]()`. `None` for every other call.
+    pub fn type_args(&self) -> Option<TypeArgList> {
+        child(&self.syntax)
+    }
+}
+
+/// The `[Type, …]` type-argument list of a constructor call (REP-09, §3.3).
+///
+/// A sibling of the `ArgList` rather than part of the callee path, because it
+/// belongs to the *call*: `Counter` alone is still just a name, and the arguments
+/// say what the one call it heads constructs.
+#[derive(Clone, Debug)]
+pub struct TypeArgList {
+    syntax: SyntaxNode,
+}
+impl AstNode for TypeArgList {
+    const KIND: K = K::TYPE_ARG_LIST;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl TypeArgList {
+    /// The type arguments, in source order.
+    pub fn args(&self) -> impl Iterator<Item = TypeRef> + '_ {
+        children(&self.syntax)
+    }
 }
 
 /// A `read parser_expression` prefix expression (§7.1, M6). Its single child is

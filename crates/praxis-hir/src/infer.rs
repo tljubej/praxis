@@ -2580,6 +2580,13 @@ impl Inferer {
                         // starts from, and the requirement below is about its
                         // type. Read before the witness is moved.
                         let state_arg = arg_types_snapshot.first().copied();
+                        // Written type arguments constrain what this call
+                        // constructs (REP-09): `Counter[(Int, Int)]()` says the
+                        // key type here, where inference would otherwise wait for
+                        // a use to pin it. Applied to the *instantiated* callee, so
+                        // the constraint lands on this call site's variables and
+                        // not on the ctor's scheme.
+                        self.apply_written_type_args(c, callee_ty);
                         let expected = self.db.func(arg_types, result);
                         if let Err(e) = self.db.unify(callee_ty, expected) {
                             let at = c.syntax().text_range();
@@ -2630,6 +2637,67 @@ impl Inferer {
 
     fn collect_args(&mut self, args: &ArgList) -> Vec<Type> {
         args.args().map(|a| self.infer_expr(&a)).collect()
+    }
+
+    /// Unify a call's written type arguments with the type its callee constructs
+    /// (REP-09, §3.3's `Counter[(Int, Int)]()`).
+    ///
+    /// `callee_ty` is the callee's type **instantiated at this call site**, so its
+    /// result's arguments are this call's own variables — the ones a later use
+    /// would otherwise be the only thing to pin. Unifying rather than substituting
+    /// is what makes a disagreement a `Y001` at the use that disagrees:
+    /// `let c = Counter[Text]()\n c.inc(1)` reports about `Int` and `Text` rather
+    /// than silently preferring one.
+    ///
+    /// The arity check is `Y007`, the code a written `Vec[Int, Text]` annotation
+    /// already gets — it is the same mistake in a second position.
+    fn apply_written_type_args(&mut self, c: &CallExpr, callee_ty: Type) {
+        let Some(written) = c.type_args() else { return };
+        let list: Vec<praxis_ast::TypeRef> = written.args().collect();
+        let at = self.file_span(written.syntax().text_range());
+        // The constructed type is the callee's *result*: `Counter` is
+        // `forall T. () -> Counter[T]`, and the arguments belong to the `Counter[T]`.
+        let constructed = match self.db.data(self.db.follow(callee_ty)) {
+            praxis_types::TypeData::Func { result, .. } => *result,
+            // A callee that is not a function has already been reported (or will
+            // be by the unification below); saying so again here is the cascade
+            // every other report in this function avoids.
+            _ => return,
+        };
+        let (name, params) = match self.db.data(self.db.follow(constructed)) {
+            praxis_types::TypeData::Collection { ctor, args } => {
+                (ctor.name().to_string(), args.clone())
+            }
+            praxis_types::TypeData::Enum { def, args } => {
+                let name = self.db.enum_def(*def).name.clone();
+                (
+                    name.unwrap_or_else(|| "this type".to_string()),
+                    args.clone(),
+                )
+            }
+            _ => return,
+        };
+        if params.len() != list.len() {
+            self.diagnostics
+                .push(crate::diagnostics::wrong_type_argument_count(
+                    at,
+                    &name,
+                    list.len(),
+                    params.len(),
+                ));
+            return;
+        }
+        for (param, written_ty) in params.iter().zip(&list) {
+            let Some(resolved) = self.resolve_type(written_ty) else {
+                // The annotation names nothing (`N002`/`N003`, already reported by
+                // resolution); inference falls back to what use says, as it does
+                // for every unresolvable annotation.
+                continue;
+            };
+            if let Err(e) = self.db.unify(*param, resolved) {
+                self.diag_unify(self.file_span(written_ty.syntax().text_range()), e);
+            }
+        }
     }
 
     /// Infer `receiver.method(args)` (M5, §16.2). Resolves the method against

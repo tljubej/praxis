@@ -213,6 +213,14 @@ pub enum SyntaxKind {
     /// selected by name — two different operations that lower to two different
     /// runtime calls.
     TUPLE_INDEX_EXPR,
+    /// The `[Type, …]` type-argument list of a constructor call (REP-09, §3.3):
+    /// the brackets in `Counter[(Int, Int)]()`.
+    ///
+    /// Its own kind rather than an `INDEX_EXPR` holding types: the brackets in
+    /// `Counter[(Int, Int)]()` and in `m[key]` are the same two characters and
+    /// two different operations, and only the *name* in front tells them apart
+    /// (`Int` is a legal expression too, so the contents cannot).
+    TYPE_ARG_LIST,
     /// A `receiver[index]` subscript expression (REP-16, §4.7/§6.2/§6.4).
     ///
     /// The index list is an `ARG_LIST`, because §6.4's `grid[x, y]` makes a

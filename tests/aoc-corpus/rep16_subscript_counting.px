@@ -1,8 +1,9 @@
 // AoC corpus fixture: subscript reads and stores (REP-16; §4.7, §6.2).
 //
 // The counting shape §3.3's representative program uses — `counts[key] += 1` on a
-// Counter keyed by a tuple — plus a Map read and store, so both collections'
-// subscript wrappers are exercised end to end by one program.
+// Counter[(Int, Int)] declared with §3.3's own explicit type arguments (REP-09) —
+// plus a Map read and store, so both collections' subscript wrappers are exercised
+// end to end by one program.
 //
 // Input (on stdin): lines of `x,y` points.
 // Output: how many points appear at least twice, the busiest count, a value
@@ -10,7 +11,7 @@
 fn main() {
     let points = read lines(`{x:int},{y:int}`)
 
-    let counts = Counter()
+    let counts = Counter[(Int, Int)]()
     for p in points {
         counts[(p.x, p.y)] += 1
     }

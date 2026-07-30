@@ -4481,3 +4481,107 @@ fn a_store_through_a_subscript_needs_a_receiver_that_has_one() {
         "fn f(m: Map[Text, Bool]) { m[\"a\"] = true\n m[\"a\"] += true }"
     ));
 }
+
+/// **REP-09.** `Counter[(Int, Int)]()` parses, and it means what the annotation
+/// says: the element type is the written one, and a use that disagrees is a
+/// `Y001`.
+///
+/// §3.3 writes the explicit form. The element type is inferred from use as well,
+/// so `Counter()` already worked and the design doc's own spelling did not — which
+/// is why the assertions here are about the *type*, not about the absence of a
+/// diagnostic.
+#[test]
+fn a_constructors_written_type_arguments_say_what_it_constructs() {
+    // The written argument is the element type, at each arity the ctors have.
+    assert_eq!(
+        scheme_of("let c = Counter[(Int, Int)]()", "c"),
+        Some("Counter[(Int, Int)]".to_string())
+    );
+    assert_eq!(
+        scheme_of("let v = Vec[Text]()", "v"),
+        Some("Vec[Text]".to_string())
+    );
+    assert_eq!(
+        scheme_of("let m = Map[Text, Vec[Int]]()", "m"),
+        Some("Map[Text, Vec[Int]]".to_string())
+    );
+    // Without the annotation the element stays quantified, which is the
+    // difference the form exists to make.
+    assert_eq!(
+        scheme_of("let v = Vec[Int]()", "v"),
+        Some("Vec[Int]".to_string())
+    );
+
+    // A use that agrees is clean; a use that disagrees is a `Y001`. This is the
+    // pair that says the annotation *constrains* rather than decorates.
+    assert!(!has_type_error(
+        "fn main() -> Int { let c = Counter[Text]()\n c.inc(\"a\")\n c.len() }"
+    ));
+    assert!(has_type_error(
+        "fn main() -> Int { let c = Counter[Text]()\n c.inc(1)\n c.len() }"
+    ));
+    assert!(has_type_error(
+        "fn main() -> Int { let m = Map[Text, Int]()\n m.insert(\"a\", \"b\")\n m.len() }"
+    ));
+    // …and through the subscript the same annotation now enables (REP-16).
+    assert!(!has_type_error(
+        "fn main() -> Int { let c = Counter[(Int, Int)]()\n c[(1, 2)] += 1\n c[(1, 2)] }"
+    ));
+    assert!(has_type_error(
+        "fn main() -> Int { let c = Counter[(Int, Int)]()\n c[\"a\"] += 1\n c.len() }"
+    ));
+
+    // The wrong *number* of arguments is `Y007` — the code a written
+    // `Vec[Int, Text]` annotation already gets, because it is the same mistake in
+    // a second position.
+    let y007 = |src: &str| -> bool {
+        analyze(src)
+            .diagnostics
+            .iter()
+            .any(|d| d.kind() == praxis_source::DiagCode::WrongTypeArgumentCount)
+    };
+    assert!(y007("let v = Vec[Int, Text]()"));
+    assert!(y007("let m = Map[Text]()"));
+    assert!(!y007("let m = Map[Text, Int]()"));
+
+    // A type argument is an annotation, so its own mistakes are annotation
+    // mistakes: an unknown name is `N002` and a *value* in type position `N003`.
+    assert!(has_name_error("let v = Vec[Nope]()"));
+    assert!(has_name_error(
+        "fn f() -> Int { let n = 1\n let v = Vec[n]()\n 0 }"
+    ));
+
+    // An annotated binding and an annotated constructor agree, which is the
+    // property that says the two spellings are one type language.
+    assert!(!has_type_error("let c: Counter[Text] = Counter[Text]()"));
+    assert!(has_type_error("let c: Counter[Int] = Counter[Text]()"));
+}
+
+/// The parser's closed list of type-constructor names and the compiler's are the
+/// same list (REP-09).
+///
+/// The parser has to know the names to tell `Counter[T]()` from `m[key]`, and it
+/// cannot ask the compiler — it does not depend on `praxis-stdlib`. So there are
+/// two copies, and this is the test that keeps them from drifting: a name in only
+/// one is either a constructor whose type arguments do not parse, or a binding
+/// name that can never be subscripted.
+#[test]
+fn the_parsers_type_constructors_are_the_compilers() {
+    for name in praxis_parser::TYPE_CONSTRUCTOR_NAMES {
+        assert!(
+            crate::decl::is_type_ctor_name(name),
+            "`{name}` takes type arguments in the parser but is not a compiler type constructor"
+        );
+    }
+    // …and the other direction, over the closed set the compiler recognizes.
+    for name in [
+        "Vec", "Deque", "Map", "Set", "Counter", "MinHeap", "MaxHeap", "BitSet", "Grid", "Range",
+        "Option",
+    ] {
+        assert!(crate::decl::is_type_ctor_name(name), "`{name}`");
+        assert!(
+            praxis_parser::TYPE_CONSTRUCTOR_NAMES.contains(&name),
+            "`{name}` is a compiler type constructor whose type arguments do not parse"
+        );
+    }
+}
