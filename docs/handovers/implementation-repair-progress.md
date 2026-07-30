@@ -31,7 +31,7 @@ Update this file at the end of every stage.
 | S18 … S21 | not started | |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
-| S25 — Grammar completion | not started | |
+| S25 — Grammar completion | **part** (REP-07; REP-08, REP-09, REP-10 left) | `c74e062` |
 | S26 — Declaration, pattern and inference gaps | **done** | `3306a04`, `b3bb6f5`, `4b7d763` |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
@@ -65,7 +65,7 @@ representative program compiling. Beyond it are S18…S21, which were never star
 and REP-15.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1403 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1406 passed, 0 failed, 38 ignored**. `just ci` is green.
 
 S26's five new gates:
 
@@ -2351,7 +2351,8 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 **Two candidates, and the choice is a judgement call the next session should make
 deliberately: S25, or the new P0 REP-15.**
-`12-repair-s26-handover.md` is the last session's note and has both in detail.
+`12-repair-s26-and-rep07-handover.md` is the last session's note and has both in
+detail, including a scoping of REP-08 against this tree.
 
 **S17, S23, S24 and S26 are all closed.** Every REP row the plan scheduled is done
 except S25's four. Of the repair's three new decisions, **D15 (S24) and D17 (S26)
@@ -2369,15 +2370,28 @@ are answered and implemented**; **D16 is S25's and is still open**.
   D6's `Range` work, and it needs a decision first (the protocol, *and* whether
   `for (k, v) in m` destructures, which is REP-10's other half). It is the most
   severe thing left in the tree.
-- **S25** — the grammar gaps (REP-07…REP-10). Its acceptance criterion is that
+- **S25 is open, with REP-07 done** (`c74e062`). Its acceptance criterion is that
   **§3.3's representative program compiles**, which nothing else in the repair
-  can claim, and it is the most *visible* thing left. REP-07's `&&`/`||` and
-  REP-09's `Counter[(Int, Int)]()` are what stand between it and the compiler;
-  note that S17 already inserted `..` at `bp(3, 4)`, so **read the whole
-  precedence table** before adding to it. **D16 is S25's open decision** (does
-  `assert` take a message — i.e. does the language get arity-based overloading or
-  optional parameters), and the plan warns against answering it by accident from
-  `assert`'s case alone.
+  can claim, and it is the most *visible* thing left. **REP-08 (`p.0`) is next in
+  the stage's own ordering** and is the other half of what that program needs;
+  REP-09's `Counter[(Int, Int)]()` completes it, and REP-10 is last and largest.
+  The precedence table was renumbered by REP-07 — `||` at `bp(1, 2)`, `..` at
+  `bp(3, 4)`, `&&` at `bp(5, 6)`, then comparison, additive, multiplicative,
+  prefix `13`, `read` `15` — so **read the whole table** before adding to it.
+  **D16 is S25's open decision** (does `assert` take a message — i.e. does the
+  language get arity-based overloading or optional parameters), and the plan warns
+  against answering it by accident from `assert`'s case alone.
+
+What S25 has delivered so far:
+
+- **`&&` is `AMP2`, and `||` already worked.** REP-07's row overstates it: `||` was
+  lexed, bound, typed and lowered with a real short circuit before this stage. The
+  two operators are one MIR function now (`lower_short_circuit`), with the skipping
+  side's answer flipped.
+- **The logical operands `join` with `Bool` rather than unifying.** `panic` is
+  `Never`, so `false && panic("x")` reported "expected Never, found Bool" — a
+  `Y001` about the operator rather than about the program. `||` carried that from
+  the day it was written; `&&` is what made it visible.
 
 **S18 is still `D1`-blocked** and D1 is still open, so it is not the answer to
 "what next" either — see the S18 block below for what it needs.
