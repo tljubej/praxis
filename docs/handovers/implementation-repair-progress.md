@@ -30,7 +30,8 @@ Update this file at the end of every stage.
 | S17 — Constraint channel and capabilities | **done** | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c`, `e801e6a`, `b6ab8eb`, `fb82f79` |
 | S18 … S21 | not started | |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
-| S24 … S26 — the rest of the repair's own discoveries (plan §4.1) | not started | |
+| S24 — Function values | **done** | `ce5f323` |
+| S25, S26 — the rest of the repair's own discoveries (plan §4.1) | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
@@ -38,19 +39,34 @@ TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
 **Fourteen defects found while executing the plan are now registered and
-scheduled** as **REP-01 … REP-14** in the plan's new **§4.1**, owned by four new
+scheduled** as **REP-01 … REP-14** in the plan's **§4.1**, owned by four new
 stages (**S23**–**S26**) and three new decisions (**D15**–**D17**). They were
 carried as prose in this file for nine sessions; they are schedulable work now.
-**REP-01 is the only P0 left in the repair** — a top-level `fn` in value position
-lowers to `Unit`, so a program that passes `praxis check` aborts the host.
 
 **S23 is closed.** All four of its findings are fixed and gated — **REP-13**,
 **REP-11**, **REP-12** and **REP-02** — each as its own commit with the suite
-green, which is what the stage is for. Ten REP rows are left, in S24, S25 and
-S26.
+green, which is what the stage is for.
+
+**S24 is closed, and with it the repair has no P0 left.** **REP-01** — a
+top-level `fn` in value position lowered to `Unit`, so `let f = double\n f(3)`
+passed `praxis check` and aborted the host with a SIGBUS — is fixed and gated.
+**D15 is answered as recommended (a closure value) and implemented: ADR-061.**
+Nine REP rows remain, in S25 and S26.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1390 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1397 passed, 0 failed, 38 ignored**. `just ci` is green.
+
+S24's seven new gates (REP-01 — ADR-061):
+
+| Test | File | Pins |
+|---|---|---|
+| `a_top_level_fn_is_a_callable_value` | `jit.rs` | the stage's invariant, and **the test process aborting is the failure mode** — through a `let`, a parameter of declared function type, a two-argument function where a shifted list is a wrong answer rather than a crash, and a `Vec` element called postfix |
+| `a_fn_value_is_callable_from_the_runtime_side` | `jit.rs` | …and through a graph helper, where `praxis-runtime` calls back into generated code (ADR-060's boundary) |
+| `a_fault_inside_a_fn_value_is_not_swallowed_by_its_adapter` | `jit.rs` | the adapter is on the fault path's way out, so it checks after its one call |
+| `a_fn_used_as_a_value_gets_one_adapter_per_function` | `praxis-mir/src/build.rs` | the adapter's shape — `[closure_self, p0…pn]`, one direct call forwarding only the parameters, one adapter for two uses, and an empty environment at the site |
+| `a_direct_call_does_not_go_through_a_function_value` | `build.rs` | the regression a careless fix would cause: every call in every program allocating a closure first |
+| `a_fn_name_in_value_position_is_a_function_value` | `infer_tests.rs` | the typed tree — `FnValue` with the callee's name and signature, and a `let` holding a *closure* still a `Closure` |
+| `a_generic_fn_used_as_a_value_is_reported_rather_than_run` | `infer_tests.rs` | `Y018` at *analysis* (so `praxis check` sees it), that `\|x\| id(x)` and a monomorphic `fn` are both clean, and that calling the generic function directly is untouched |
 
 S23's nine new gates. It un-ignored nothing — none of §4.1's rows has an
 ignored regression, because the audit never saw them — so all nine are new:
@@ -1354,8 +1370,10 @@ and no MIR is built for a program that reports); the last two by the fusion
 pushing its own frame before it emits a stage. This was the plan's fourth S14
 exit criterion.
 
-**`Y017` is the block's ninth spent code**, so the next free number is `Y018`.
-ADR-051's "findings that need no code" list no longer contains TY-21.
+**`Y017` is the block's ninth spent code**, so the next free number was `Y018` —
+**which S24 has since spent** on `Y018` (a generic `fn` used as a value, ADR-061).
+`Y019` is next. ADR-051's "findings that need no code" list no longer contains
+TY-21.
 
 ### From an earlier session (S14's TY-19, TY-16, TY-17, TY-18 and TY-20)
 
@@ -2304,19 +2322,14 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**S17 and S23 are both closed.** Nothing in either remains.
+**S17, S23 and S24 are all closed.** Nothing in any of them remains, and **the
+repair has no P0 left**.
 
-**S24 is next, and it needs D15 answered.** It holds the **only P0 left in the
-repair**, and the invariant it must establish does not depend on which way D15
-goes: *no program that passes `praxis check` may abort the host.*
+**S25 or S26 is next, and neither is blocked.** S25 is the more visible: its
+acceptance criterion is a program from the design doc compiling, which nothing
+else in the repair can claim. S26 is the more dangerous class — programs that are
+silently accepted or wrongly rejected today.
 
-- **S24 (REP-01)** — a top-level `fn` in value position lowers to `Unit`, so
-  `let f = double\n f(3)` passes `praxis check` and aborts the host with SIGBUS.
-  Blocked on **D15** (closure value, or compile error), which is a small question
-  with a clear recommendation in plan §7: **closure value**, because a `fn`'s type
-  already *is* a `Func`, `praxis_alloc_closure` already takes an empty
-  environment, and a top-level `fn` captures nothing. Effort is `M` that way and
-  `S` the other. **Take this first if D15 can be answered.**
 - **S25** — the grammar gaps (REP-07…REP-10). Its acceptance criterion is that
   **§3.3's representative program compiles**, which nothing else in the repair
   can claim. REP-07's `&&`/`||` and REP-09's `Counter[(Int, Int)]()` are what
@@ -2327,6 +2340,26 @@ goes: *no program that passes `praxis check` may abort the host.*
 
 **S18 is still `D1`-blocked** and D1 is still open, so it is not the answer to
 "what next" either — see the S18 block below for what it needs.
+
+What S24 delivered, and the three things worth carrying out of it:
+
+- **A `fn` name in value position is a `TypedExpr::FnValue`**, and it lowers to a
+  closure over a per-function **adapter** (`__fnvalue_double`). The adapter exists
+  because the plan's sketch was wrong on one point: a closure's synthetic function
+  takes the closure as a hidden first explicit argument and a top-level `fn` does
+  not, so "reuse `praxis_alloc_closure` with an empty environment" needs something
+  to absorb that slot or every argument lands one to the left. ADR-061 has both
+  halves.
+- **The typed tree has a new variant, and four exhaustive matches now name it** —
+  `mono::resolve_expr`, MIR's `lower_expr_gc` and `expr_static_type`, and the
+  debugger's purity walk. All four are exhaustive deliberately; if you add a
+  variant, the compiler will send you to them.
+- **`Y018` exists**: a *generic* `fn` used as a value. Monomorphization is driven
+  by call sites and a value has none, so there is nothing to specialize; the
+  message names `|x| id(x)` because a closure body *is* a call site. **`Y019` is
+  the next free code in ADR-051's `Y0xx` block.** Giving a generic function a real
+  function value needs mono keyed on a use-site substitution witness — which S15
+  already records as unlanded — so this is a diagnostic now and a feature later.
 
 What S23 delivered, and the two things worth carrying out of it:
 
@@ -2382,15 +2415,12 @@ them:
 Things this session found — **now registered and scheduled** as **REP-01**,
 **REP-08** and **REP-07** in the plan's new **§4.1**:
 
-- **REP-01 — a top-level `fn` used as a value evaluates to `Unit`, and calling it
-  takes a SIGBUS.** `fn double(n: Int) -> Int { n * 2 }` … `let f = double\n f(3)`
-  aborts the host: inference accepts it (a `fn`'s type *is* a `Func`), lowering
-  evaluates the bare name to `Unit`, and `Inst::CallIndirect` then reads that
-  Unit's payload as a function pointer. `praxis check` is clean. It is
-  **pre-existing** — it has nothing to do with the graph helpers — but a helper
-  is a new way to reach it, and the helpers' descriptor check turns it into a
-  `TypeMismatch` fault with a proper backtrace rather than a crash. **It is the
-  only P0 left in the repair**; it owns **S24** and is blocked on **D15**.
+- ~~**REP-01 — a top-level `fn` used as a value evaluates to `Unit`, and calling
+  it takes a SIGBUS.**~~ **Fixed in S24** (`ce5f323`, ADR-061). D15 is answered as
+  recommended: the name is a closure value. The finding was **pre-existing** — it
+  had nothing to do with the graph helpers — but a helper was a new way to reach
+  it, and their descriptor check is containment rather than a fix. The repair has
+  no P0 left.
 - **REP-08 — a tuple has no element syntax**, so `(Int, Int)` is a legal graph
   state that no neighbour function can read: `p.0` is `P001` ("expected name
   after `.`"). A record of scalars is what a grid position has to be written as
@@ -2971,11 +3001,17 @@ owed — the answer was already in §6.5). D6 is ADR-059, which answers all four
 sub-decisions §7 lists: half-openness, value-ness, descending behaviour and
 endpoint types.
 
-**D15, D16 and D17 are open and are the repair's own** (plan §7, end). **D15
-blocks S24 outright** and is the one that matters next: it is the only P0 left.
-D16 (`assert`'s message, and whether the language gets optional parameters or
-arity overloading) and D17 (what `struct Node { next: Node }` reports) belong to
-S25 and S26 and can be decided while S24 is in flight.
+**D15 is answered *and implemented*** — see **ADR-061**. A bare `fn` name in
+value position is a closure value, which was the recommendation. Two things the
+implementation added to the answer, both in the ADR: the existing calling
+convention did **not** already fit (hence the per-function adapter), and a
+*generic* `fn` has no function value at all, which is `Y018`.
+
+**D16 and D17 are open and are the repair's own** (plan §7, end). Neither blocks a
+stage outright: D16 (`assert`'s message, and whether the language gets optional
+parameters or arity overloading) belongs to S25, and D17 (what
+`struct Node { next: Node }` reports) blocks only REP-14's *wording* — the plan
+says the detect half can land first.
 
 **D14 is answered** — see ADR-040. The `Safepoint` token shipped with a named,
 `pub(crate)` `Heap::alloc_unpaced` back door for the host helpers and the
@@ -3048,7 +3084,8 @@ a `Y001` — the alternative (a bare `break` contributing nothing) would have ma
 
 **S14 spent one new code, `Y017`**, and ADR-051 is amended for it — the amendment
 path that ADR's own last consequence describes. The `Y0xx` user block is now
-spent through `Y017`; the next free number is `Y018`.
+spent through `Y017`; the next free number was `Y018`, **which S24 has since
+spent** (ADR-061). `Y019` is next.
 
 **D1 and D5 still block their stages**; neither has been answered.
 

@@ -3231,8 +3231,8 @@ to §4.1's stages; they are at the end of this section.
 > `docs/decisions/` has one per implemented decision and not one per answer.
 > Answered so far: **D2** (ADR-053), **D3** (ADR-045), **D4**, **D5** (ADR-060
 > settles the graph representation D5 left owed), **D6**, **D7**/**D8**
-> (ADR-049), **D9** (ADR-042), **D13** (ADR-051), **D14** (ADR-040). Still open:
-> **D1** (blocking S18), **D10**, **D11**, **D12**, **D15** (blocking S24),
+> (ADR-049), **D9** (ADR-042), **D13** (ADR-051), **D14** (ADR-040), **D15**
+> (ADR-061). Still open: **D1** (blocking S18), **D10**, **D11**, **D12**,
 > **D16**, **D17**.
 
 **D1 (Stage 18, blocking)**
@@ -3406,6 +3406,22 @@ passes `praxis check`. Two answers, and both are defensible:
 
 Whichever way it goes, the invariant the stage must establish is the same: **no
 program that passes `praxis check` may abort the host.**
+
+**ANSWERED — a closure value.** The recommendation, confirmed. Implemented in
+S24; see **ADR-061**.
+
+Two things the answer's implementation found, both recorded in the ADR because
+this block's sketch says otherwise:
+
+- **The existing calling convention does *not* already fit.** The environment is
+  empty, but a closure's synthetic function takes the closure as a hidden first
+  explicit argument and a top-level `fn` does not, so `praxis_alloc_closure` over
+  the `fn`'s own address would land every argument one slot to the left. Each
+  adapted `fn` gets one **adapter** — `[closure_self, p0 … pn]` forwarding
+  `[p0 … pn]` — and that is the whole of the new machinery.
+- **A *generic* `fn` has no function value.** Monomorphization is driven by call
+  sites and a value has none, so it is `Y018` in inference, with `|x| id(x)` named
+  as the remedy. That was not part of the question and is part of the answer.
 
 **D16 (Stage 25)**
 
