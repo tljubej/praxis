@@ -2987,38 +2987,11 @@ fn unit_lit(db: &mut TypeDb) -> TypedExpr {
 
 /// Strip surrounding quotes and unescape simple escapes from a `"…"` literal.
 ///
-/// **The language's one text decoder.** `parser_lower` used to carry a second
-/// one — `raw.trim_start_matches('"').trim_end_matches('"')` — which never
-/// unescaped anything and stripped *every* quote at each end, so `sep("\t", …)`
-/// split on backslash-t and `sep("\"\"", …)` lost both of its real quotes
-/// (IP-08). Two decoders in one crate was the finding; this is `pub(crate)` so
-/// there is one.
-pub(crate) fn unquote_text(raw: &str) -> String {
-    let bytes = raw.as_bytes();
-    if bytes.len() < 2 || bytes[0] != b'"' || bytes[bytes.len() - 1] != b'"' {
-        return raw.to_string();
-    }
-    let inner = &raw[1..raw.len() - 1];
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('r') => out.push('\r'),
-                Some('"') => out.push('"'),
-                Some('\\') => out.push('\\'),
-                Some('0') => out.push('\0'),
-                Some(other) => {
-                    out.push('\\');
-                    out.push(other);
-                }
-                None => out.push('\\'),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
+/// **This is not a decoder** — it is the local name for the workspace's one
+/// decoder, `praxis_syntax::literal::unquote_text`. There used to be a second
+/// copy in `parser_lower` that never unescaped anything and stripped *every*
+/// quote at each end (IP-08); the rule now lives in `praxis-syntax`, which the
+/// input-parser's capture-body parser can also reach, so there is exactly one.
+fn unquote_text(raw: &str) -> String {
+    praxis_syntax::literal::unquote_text(raw)
 }

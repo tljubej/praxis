@@ -9,6 +9,7 @@
 //! The modules:
 //! - [`kind`] — the single `SyntaxKind` enum (tokens, trivia, tree nodes).
 //! - [`ident`] — the one identifier character class (§4.1).
+//! - [`literal`] — the one text-literal decoder (§4.3, IP-08).
 //! - [`numeric`] — the one digit-separator rule for numeric literals (§4.3).
 //! - [`language`] — the rowan `Language` impl and node aliases.
 //! - [`span_bridge`] — `Span` ↔ `rowan::TextRange` conversions (the only place
@@ -20,6 +21,7 @@
 pub mod ident;
 pub mod kind;
 pub mod language;
+pub mod literal;
 pub mod numeric;
 pub mod span_bridge;
 

@@ -184,7 +184,7 @@ fn block_positional_field_names(p: &ParserAst) -> Vec<String> {
         ParserAst::Template { parts, .. } => parts
             .iter()
             .filter_map(|part| match part {
-                TemplatePart::Capture { name: Some(n), .. } => Some(n.clone()),
+                TemplatePart::Capture { name: Some(n), .. } => Some(n.as_str().to_string()),
                 _ => None,
             })
             .collect(),
@@ -463,7 +463,7 @@ pub fn check_call(ctor: Constructor, args: &[ArgKind], span: Span) -> Vec<Valida
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{AtomicKind, EmptySeparator, Separator};
+    use crate::ast::{AtomicKind, CaptureName, EmptySeparator, Separator};
     use praxis_source::{DiagCode, Span};
 
     fn atom() -> ParserAst {
@@ -487,7 +487,7 @@ mod tests {
         let ast = ParserAst::Template {
             parts: vec![
                 TemplatePart::Capture {
-                    name: Some("x".to_string()),
+                    name: Some(CaptureName::parse("x").expect("an identifier")),
                     parser: Box::new(atom()),
                 },
                 TemplatePart::Capture {
@@ -507,11 +507,11 @@ mod tests {
         let ast = ParserAst::Template {
             parts: vec![
                 TemplatePart::Capture {
-                    name: Some("x".to_string()),
+                    name: Some(CaptureName::parse("x").expect("an identifier")),
                     parser: Box::new(atom()),
                 },
                 TemplatePart::Capture {
-                    name: Some("x".to_string()),
+                    name: Some(CaptureName::parse("x").expect("an identifier")),
                     parser: Box::new(atom()),
                 },
             ],

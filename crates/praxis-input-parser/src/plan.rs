@@ -629,7 +629,7 @@ fn lower_template_parts(
                     .iter()
                     .position(|(_, p)| std::ptr::eq(*p, part))
                     .map(|i| i as u16);
-                let name_static = name.as_ref().map(|n| b.alloc_str(n));
+                let name_static = name.as_ref().map(|n| b.alloc_str(n.as_str()));
                 nodes.push(TemplatePartNode::Capture {
                     child,
                     field_index,

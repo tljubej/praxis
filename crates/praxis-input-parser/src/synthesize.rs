@@ -73,7 +73,8 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Result<Type, TypeCtorErro
                                     parser,
                                 } = part
                                 {
-                                    rec_fields.push((n.clone(), synthesize(parser, db)?));
+                                    rec_fields
+                                        .push((n.as_str().to_string(), synthesize(parser, db)?));
                                 }
                             }
                         }
@@ -189,7 +190,10 @@ fn record_type(captures: &[&TemplatePart], db: &mut TypeDb) -> Result<Type, Type
     for part in captures {
         match part {
             TemplatePart::Capture { name, parser } => {
-                let name_str = name.clone().unwrap_or_default();
+                let name_str = name
+                    .as_ref()
+                    .map(|n| n.as_str().to_string())
+                    .unwrap_or_default();
                 fields.push((name_str, synthesize(parser, db)?));
             }
             _ => unreachable!("filtered to captures"),
@@ -201,7 +205,7 @@ fn record_type(captures: &[&TemplatePart], db: &mut TypeDb) -> Result<Type, Type
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{AtomicKind, TemplatePart};
+    use crate::ast::{AtomicKind, CaptureName, TemplatePart};
     use praxis_source::Span;
 
     fn atom(kind: AtomicKind) -> ParserAst {
@@ -352,11 +356,11 @@ mod tests {
         let ast = ParserAst::Template {
             parts: vec![
                 TemplatePart::Capture {
-                    name: Some("x".into()),
+                    name: Some(CaptureName::parse("x").expect("an identifier")),
                     parser: Box::new(atom(AtomicKind::Int)),
                 },
                 TemplatePart::Capture {
-                    name: Some("y".into()),
+                    name: Some(CaptureName::parse("y").expect("an identifier")),
                     parser: Box::new(atom(AtomicKind::Int)),
                 },
             ],
@@ -383,11 +387,11 @@ mod tests {
             child: Box::new(ParserAst::Template {
                 parts: vec![
                     TemplatePart::Capture {
-                        name: Some("x".into()),
+                        name: Some(CaptureName::parse("x").expect("an identifier")),
                         parser: Box::new(atom(AtomicKind::Int)),
                     },
                     TemplatePart::Capture {
-                        name: Some("y".into()),
+                        name: Some(CaptureName::parse("y").expect("an identifier")),
                         parser: Box::new(atom(AtomicKind::Int)),
                     },
                 ],

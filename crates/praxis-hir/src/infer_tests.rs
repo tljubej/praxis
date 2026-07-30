@@ -2759,7 +2759,6 @@ fn unknown_enum_variant_pattern_is_rejected() {
 // --- input-parser conversion preserves source structure ---------------------
 
 #[test]
-#[ignore = "known bug: every template capture reuses the first capture kind"]
 fn mixed_template_capture_kinds_are_preserved() {
     let src = "fn main() -> Int {\n\
                  let row = read `{name:word},{port:int}`\n\
@@ -2772,13 +2771,47 @@ fn mixed_template_capture_kinds_are_preserved() {
 }
 
 #[test]
-#[ignore = "known bug: unknown template capture kinds silently default to Int"]
 fn unknown_template_capture_parser_is_diagnosed() {
     let src = "let value = read `{value:intr}`";
     assert!(
         has_input_error(src),
         "a misspelled capture parser must not silently default to Int"
     );
+    // Any `I0xx` satisfies the line above; only I012 satisfies ADR-051, which
+    // allocated `UnknownCaptureKind` for exactly this and had no constructor
+    // anywhere in the tree. Every `ScanError` used to be flattened into I030.
+    assert!(
+        reports_input_code(src, praxis_source::DiagCode::UnknownCaptureKind),
+        "the code ADR-051 allocated for this is I012, not the generic I030"
+    );
+}
+
+/// **IP-04 and IP-06 through the bridge**, which is where they are observable
+/// as *diagnostics*: `ScanError` used to be flattened into `TemplateScan`
+/// (I030) by one `err_diag` call, so I011, I012 and I013 were allocated in
+/// ADR-051 and constructed nowhere.
+#[test]
+fn a_template_scan_error_reports_the_code_its_own_rule_was_given() {
+    use praxis_source::DiagCode;
+
+    for (src, code) in [
+        ("let v = read `{9x:int}`", DiagCode::InvalidCaptureName),
+        ("let v = read `{value:intr}`", DiagCode::UnknownCaptureKind),
+        (
+            "let v = read `{x:frobnicate(int)}`",
+            DiagCode::UnknownConstructor,
+        ),
+        (
+            "let v = read `{x:csv(int, int)}`",
+            DiagCode::ConstructorArity,
+        ),
+        ("let v = read `prefix\\`", DiagCode::TemplateScan),
+    ] {
+        assert!(
+            reports_input_code(src, code),
+            "{src} must report {code:?}, not the generic template-scan code"
+        );
+    }
 }
 
 #[test]

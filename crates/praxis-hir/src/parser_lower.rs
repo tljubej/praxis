@@ -9,8 +9,8 @@
 use praxis_ast::{AstNode, ParserExpr, ParserExprKind, ParserNamedArg};
 use praxis_input_parser::ast::{AtomicKind, Constructor, ParserAst, TemplatePart};
 use praxis_input_parser::{
-    check_call, lower_to_plan, register_plan, scan_template, synthesize, validate, ArgKind, PlanId,
-    Separator, ValidationError,
+    build_call, lower_to_plan, register_plan, scan_template, synthesize, validate, CallArg, PlanId,
+    ValidationError,
 };
 use praxis_source::{DiagCode, Diagnostic, FileId, FileSpan, Severity, Span};
 use praxis_types::{Type, TypeDb};
@@ -155,140 +155,89 @@ fn convert_parser_expr(
 }
 
 /// Convert a template's `BacktickTemplate` token into `TemplatePart`s.
+///
+/// The scanner returns the parts **complete** now, each capture carrying the
+/// parser its own body names (IP-05). This function used to throw that away and
+/// rebuild every capture by calling `extract_capture_kind(&template_text,
+/// &name)` — which rescanned the whole template from the beginning, returned
+/// the *first* recognizable atomic name, and ignored the `name` parameter
+/// entirely. So `` `{name:word},{port:int}` `` typed both captures `Text`, and
+/// a template it recognized nothing in defaulted to `Int`.
 fn convert_template(
     parser_expr: &ParserExpr,
     file: FileId,
     diagnostics: &mut Vec<Diagnostic>,
     span: Span,
 ) -> Vec<TemplatePart> {
-    let Some(template_text) = find_template_text(parser_expr) else {
+    let Some(token) = find_template_token(parser_expr) else {
         return Vec::new();
     };
-    let interior = template_text
+    let text = token.text().to_string();
+    let interior = text
         .strip_prefix('`')
         .and_then(|s| s.strip_suffix('`'))
-        .unwrap_or(&template_text);
+        .unwrap_or(&text);
+    // The scanner works in offsets relative to the interior; the file offset of
+    // the interior is the token's start plus the opening backtick.
+    let base = u32::from(token.text_range().start()) + 1;
 
     match scan_template(interior) {
-        Ok(scanned_parts) => scanned_parts
+        Ok(parts) => parts
             .into_iter()
             .map(|part| match part {
                 TemplatePart::Literal { text, ws } => TemplatePart::Literal { text, ws },
-                TemplatePart::Capture { name, parser: _ } => {
-                    // For M6, captures contain a simple atomic parser name.
-                    // scan_template recorded the body text; we recover it by
-                    // re-reading the capture body from the interior. Since the
-                    // scanner left a placeholder, we default to `int` and let
-                    // the actual body be inferred from the template text.
-                    // A proper fix is to have scan_template return the body text;
-                    // for M6 we parse the body from the capture's source.
-                    let kind = extract_capture_kind(&template_text, &name);
-                    TemplatePart::Capture {
-                        name,
-                        parser: Box::new(ParserAst::Atomic { kind, span }),
-                    }
+                TemplatePart::Capture { name, mut parser } => {
+                    parser.shift_spans(base);
+                    TemplatePart::Capture { name, parser }
                 }
             })
             .collect(),
         Err(e) => {
+            // **The code comes from the error** (IP-06). Every `ScanError` used
+            // to be flattened into `TemplateScan` (I030) here, so the codes
+            // ADR-051 allocated for a bad capture name (I011), an unknown
+            // capture kind (I012) and an unknown constructor (I013) were
+            // constructed nowhere in the tree. `ScanError::code` is an
+            // exhaustive match, so a new variant has to decide.
+            let at = base + e.byte_offset() as u32;
             diagnostics.push(err_diag(
                 file,
-                span,
-                DiagCode::TemplateScan,
-                format!("template scan error: {e}"),
+                Span::at(at.min(u32::from(token.text_range().end()))),
+                e.code(),
+                e.to_string(),
             ));
+            let _ = span;
             Vec::new()
         }
     }
 }
 
-/// Best-effort extraction of a capture's atomic kind from the template text.
-/// This handles the common M6 cases (`{int}`, `{x:int}`, `{word}`, etc.). The
-/// scan_template function should ideally return the body text; this is a
-/// pragmatic bridge for v1.
-fn extract_capture_kind(template_text: &str, _name: &Option<String>) -> AtomicKind {
-    // Scan the template for `{...}` captures and return the first recognizable
-    // atomic kind. This is a simplification — a real impl would pair captures
-    // with their bodies. For M6, templates like `{int}` and `{x:int}` work.
-    let mut in_capture = false;
-    let mut body = String::new();
-    for ch in template_text.chars() {
-        if ch == '{' {
-            in_capture = true;
-            body.clear();
-        } else if ch == '}' {
-            in_capture = false;
-            let body = body.rsplit(':').next().unwrap_or("").trim();
-            if let Some(kind) = AtomicKind::from_keyword(body) {
-                return kind;
-            }
-        } else if in_capture {
-            body.push(ch);
-        }
-    }
-    AtomicKind::Int // default
-}
-
-/// Find the raw text of a `BacktickTemplate` token inside a `PARSER_TEMPLATE`.
-fn find_template_text(parser_expr: &ParserExpr) -> Option<String> {
-    use rowan::NodeOrToken;
-    for child in parser_expr.syntax().descendants_with_tokens() {
-        if let NodeOrToken::Token(t) = child {
-            if t.kind() == praxis_syntax::SyntaxKind::BacktickTemplate {
-                return Some(t.text().to_string());
-            }
-        }
-    }
-    None
-}
-
-/// One argument to a constructor call, as written (§7.5).
+/// Find the `BacktickTemplate` token inside a `PARSER_TEMPLATE`.
 ///
-/// Every constructor's argument list is checked against
-/// [`praxis_input_parser::check_call`] *before* anything is built, so a builder
-/// below never has an argument left over to drop. That is IP-07's whole
-/// content: the M9 constructors used to be dispatched by an `if ctor_name ==
-/// "…"` chain that took `args.into_iter().next()` and let the rest fall on the
-/// floor, so `optional(int, word)` and `read frobnicate(int)` both compiled.
-enum CallArg {
-    /// A positional parser expression.
-    Parser(ParserAst),
-    /// A positional string literal (`sep`'s separator, `one_of`'s set).
-    String(String),
-    /// A bare keyword flag: the `ragged` of `grid(P, ragged, fill: 0)`. It used
-    /// to be recognized by a text comparison and *skipped*, which is why
-    /// `fill:` alone silently produced the ragged parser.
-    Flag(String),
-    /// A named argument `name: parser_expr` (M9, §7.5).
-    Named { name: String, parser: ParserAst },
-    /// A named argument whose value is a keyword, not a parser: `skip:
-    /// whitespace`, `fill: 0`. Kept as source text, because there is no parser
-    /// expression to convert — the predecessor stored a dummy `Atomic { Int }`
-    /// beside the text and every reader had to know to ignore it.
-    Keyword { name: String, value: String },
-    /// The `repeated(...)` tail marker of named `sections`
-    /// (`boards: repeated(matrix(int))`): `name` is the field, `parser`
-    /// consumes every remaining section into a `Vec[result(P)]`.
-    RepeatedTail { name: String, parser: ParserAst },
-}
-
-impl CallArg {
-    /// This argument's shape, with the payload dropped — what `check_call`
-    /// reads.
-    fn kind(&self) -> ArgKind {
-        match self {
-            CallArg::Parser(_) => ArgKind::Parser,
-            CallArg::String(_) => ArgKind::String,
-            CallArg::Flag(f) => ArgKind::Flag(f.clone()),
-            CallArg::Named { name, .. } | CallArg::Keyword { name, .. } => {
-                ArgKind::Named(name.clone())
+/// The **token**, not its text: the capture bodies' spans are relative to the
+/// template's interior and have to be rebased onto the file, which needs the
+/// token's start (IP-05).
+fn find_template_token(parser_expr: &ParserExpr) -> Option<praxis_syntax::SyntaxToken> {
+    use rowan::NodeOrToken;
+    parser_expr
+        .syntax()
+        .descendants_with_tokens()
+        .find_map(|child| match child {
+            NodeOrToken::Token(t) if t.kind() == praxis_syntax::SyntaxKind::BacktickTemplate => {
+                Some(t)
             }
-            CallArg::RepeatedTail { name, .. } => ArgKind::RepeatedTail(name.clone()),
-        }
-    }
+            _ => None,
+        })
 }
 
 /// Convert a constructor call rowan node into a `ParserAst`.
+///
+/// The **whole** of §7.5's argument handling lives in
+/// [`praxis_input_parser::build_call`], which checks the call's shape before it
+/// builds anything and which the capture-body parser shares. This function's
+/// job is only to turn rowan into a [`CallArg`] list. It used to be an
+/// `if ctor_name == "…"` chain that ran ahead of the arity table, took
+/// `args.into_iter().next()` and dropped the rest (IP-07).
 fn convert_constructor_call(
     parser_expr: &ParserExpr,
     file: FileId,
@@ -315,219 +264,19 @@ fn convert_constructor_call(
         return None;
     };
 
-    if ctor == Constructor::Repeated {
-        // `repeated(P)` is not a parser in its own right — it is the marker on
-        // the final named argument of a `sections` call, and it means "consume
-        // every remaining section". Anywhere else there is nothing for it to
-        // repeat over, and it used to be dropped in silence (IP-09).
-        diagnostics.push(err_diag(
-            file,
-            span,
-            DiagCode::MisplacedRepeatedTail,
-            "`repeated(...)` is only the final named argument of a `sections` call (§7.5)"
-                .to_string(),
-        ));
-        return None;
-    }
-
     // An argument that did not convert has already reported; building on top of
-    // the shortened list would report a *second*, wrong thing (an arity error
-    // for an argument the source did write).
+    // the shortened list would report a *second*, wrong thing — an arity error
+    // naming an argument the source did write.
     if !all_args_converted {
         return None;
     }
 
-    // §7.5's shape, checked before anything is built (IP-07).
-    let kinds: Vec<ArgKind> = args.iter().map(CallArg::kind).collect();
-    let shape_errors = check_call(ctor, &kinds, span);
-    if !shape_errors.is_empty() {
-        for err in &shape_errors {
-            diagnostics.push(validation_error_to_diagnostic(err, file));
-        }
-        return None;
-    }
-
-    // From here the argument list has exactly the shape §7.5 gives this
-    // constructor, so each arm consumes all of it.
-    match ctor {
-        Constructor::Lines => Some(ParserAst::Lines {
-            child: Box::new(sole_parser(args, ctor, file, diagnostics, span)?),
-            span,
-        }),
-        Constructor::Csv => Some(ParserAst::Csv {
-            child: Box::new(sole_parser(args, ctor, file, diagnostics, span)?),
-            span,
-        }),
-        Constructor::Ws => Some(ParserAst::Ws {
-            child: Box::new(sole_parser(args, ctor, file, diagnostics, span)?),
-            span,
-        }),
-        Constructor::Matrix => Some(ParserAst::Matrix {
-            child: Box::new(sole_parser(args, ctor, file, diagnostics, span)?),
-            span,
-        }),
-        Constructor::Optional => Some(ParserAst::Optional {
-            child: Box::new(sole_parser(args, ctor, file, diagnostics, span)?),
-            span,
-        }),
-        Constructor::Scan => Some(ParserAst::Scan {
-            child: Box::new(sole_parser(args, ctor, file, diagnostics, span)?),
-            span,
-        }),
-        Constructor::Sections => {
-            // One name, two shapes: `sections(P)` is homogeneous,
-            // `sections(name: P, …)` is the heterogeneous form (§7.5).
-            if kinds
-                .iter()
-                .any(|k| matches!(k, ArgKind::Named(_) | ArgKind::RepeatedTail(_)))
-            {
-                build_sections_named(args, file, diagnostics, span)
-            } else {
-                Some(ParserAst::Sections {
-                    child: Box::new(sole_parser(args, ctor, file, diagnostics, span)?),
-                    span,
-                })
+    match build_call(ctor, args, span) {
+        Ok(ast) => Some(ast),
+        Err(errs) => {
+            for err in &errs {
+                diagnostics.push(validation_error_to_diagnostic(err, file));
             }
-        }
-        Constructor::Sep => {
-            let mut separator = None;
-            let mut child = None;
-            for arg in args {
-                match arg {
-                    CallArg::String(s) => separator = Some(s),
-                    CallArg::Parser(p) => child = Some(p),
-                    _ => {}
-                }
-            }
-            // A missing separator used to be laundered into `String::new()`,
-            // which is the one separator that can never advance a cursor
-            // (IP-10). `Separator::new` refuses it and the call does not build.
-            let separator = match Separator::new(separator.as_deref().unwrap_or("")) {
-                Ok(sep) => sep,
-                Err(_) => {
-                    diagnostics.push(err_diag(
-                        file,
-                        span,
-                        DiagCode::EmptySeparator,
-                        "`sep` needs a non-empty separator: an empty one never advances"
-                            .to_string(),
-                    ));
-                    return None;
-                }
-            };
-            Some(ParserAst::Sep {
-                separator,
-                child: Box::new(child?),
-                span,
-            })
-        }
-        Constructor::OneOf => {
-            let chars = args.into_iter().find_map(|a| match a {
-                CallArg::String(s) => Some(s),
-                _ => None,
-            })?;
-            Some(ParserAst::OneOf { chars, span })
-        }
-        Constructor::Chars => {
-            let mut child = None;
-            let mut skip = praxis_input_parser::SkipPolicy::Whitespace;
-            for arg in args {
-                match arg {
-                    CallArg::Parser(p) => child = Some(p),
-                    CallArg::Keyword { name, value } if name == "skip" => {
-                        // An unrecognized policy used to leave the default in
-                        // place, so `skip: wihtespace` silently ran as
-                        // `whitespace`.
-                        match praxis_input_parser::SkipPolicy::from_keyword(&value) {
-                            Some(policy) => skip = policy,
-                            None => {
-                                diagnostics.push(err_diag(
-                                    file,
-                                    span,
-                                    DiagCode::InvalidConstructorArgument,
-                                    format!(
-                                        "`skip: {value}` is not a skip policy — \
-                                         `none`, `whitespace` or `newlines` (§7.5)"
-                                    ),
-                                ));
-                                return None;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Some(ParserAst::Characters {
-                child: Box::new(child?),
-                skip,
-                span,
-            })
-        }
-        Constructor::Grid => {
-            let mut child = None;
-            let mut fill = None;
-            for arg in args {
-                match arg {
-                    CallArg::Parser(p) => child = Some(p),
-                    CallArg::Keyword { name, value } if name == "fill" => fill = Some(value),
-                    _ => {}
-                }
-            }
-            let child = Box::new(child?);
-            Some(match fill {
-                Some(fill) => ParserAst::GridRagged { child, fill, span },
-                None => ParserAst::Grid { child, span },
-            })
-        }
-        Constructor::Block => {
-            use praxis_input_parser::ast::BlockItem;
-            let items = args
-                .into_iter()
-                .filter_map(|arg| match arg {
-                    CallArg::Parser(p) => Some(BlockItem::Positional(p)),
-                    CallArg::Named { name, parser } => Some(BlockItem::Named { name, parser }),
-                    _ => None,
-                })
-                .collect();
-            Some(ParserAst::Block { items, span })
-        }
-        Constructor::Choice => {
-            let cases = args
-                .into_iter()
-                .filter_map(|arg| match arg {
-                    CallArg::Named { name, parser } => Some((name, parser)),
-                    _ => None,
-                })
-                .collect();
-            Some(ParserAst::Choice { cases, span })
-        }
-        // Rejected above, before the shape check.
-        Constructor::Repeated => None,
-    }
-}
-
-/// The single positional parser of a call `check_call` has already accepted as
-/// `ArgShape::Positional(1)`.
-///
-/// A `None` here means the shape table and this extractor disagree, which is a
-/// bug in the table rather than in the source — so it *reports* rather than
-/// quietly building a parser out of nothing. The silent drop is the finding.
-fn sole_parser(
-    args: Vec<CallArg>,
-    ctor: Constructor,
-    file: FileId,
-    diagnostics: &mut Vec<Diagnostic>,
-    span: Span,
-) -> Option<ParserAst> {
-    match args.into_iter().next() {
-        Some(CallArg::Parser(p)) => Some(p),
-        _ => {
-            diagnostics.push(err_diag(
-                file,
-                span,
-                DiagCode::InvalidConstructorArgument,
-                format!("`{}` needs one parser argument (§7.5)", ctor.keyword()),
-            ));
             None
         }
     }
@@ -645,17 +394,17 @@ fn extract_call_args(
 /// Decode a parser constructor's string-literal argument, or `None` if the
 /// argument is not a well-formed text literal.
 ///
-/// Delegates to [`crate::lower::unquote_text`] — the language's one decoder
-/// (IP-08). The predecessor trimmed quote *characters* off both ends and never
-/// unescaped, so `sep("\t", int)` split on the two characters `\` and `t`,
-/// `one_of("\"")` was broken, and `sep("\"\"", int)` lost both real quotes to
-/// `trim_end_matches`.
+/// Delegates to [`praxis_syntax::literal::unquote_text`] — the workspace's one
+/// decoder (IP-08). The predecessor trimmed quote *characters* off both ends
+/// and never unescaped, so `sep("\t", int)` split on the two characters `\` and
+/// `t`, `one_of("\"")` was broken, and `sep("\"\"", int)` lost both real quotes
+/// to `trim_end_matches`.
 fn unquote_parser_literal(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    if trimmed.len() < 2 || !trimmed.starts_with('"') || !trimmed.ends_with('"') {
+    if !praxis_syntax::literal::is_text_literal(trimmed) {
         return None;
     }
-    Some(crate::lower::unquote_text(trimmed))
+    Some(praxis_syntax::literal::unquote_text(trimmed))
 }
 
 /// The span of a rowan node, as a `praxis-source` [`Span`].
@@ -685,72 +434,6 @@ fn unwrap_repeated_child(call: &ParserExpr) -> Option<ParserExpr> {
         } else {
             None
         }
-    })
-}
-
-/// Build a `ParserAst::SectionsNamed` from the args of a heterogeneous
-/// `sections(name: P, ..., tail: repeated(P))` call (M9, §7.5). Named args
-/// become fields in source order; a `RepeatedTail` arg (if any) must be last
-/// and becomes the `repeated_tail`. Positional args are not permitted in the
-/// heterogeneous form — if any appear, they are dropped with a diagnostic
-/// (validation surfaces the structural error).
-fn build_sections_named(
-    args: Vec<CallArg>,
-    file: FileId,
-    diagnostics: &mut Vec<Diagnostic>,
-    span: Span,
-) -> Option<ParserAst> {
-    // §7.5: `repeated(parser)` may appear only as the *final* named argument.
-    // Both halves of that rule used to be silent (IP-09): a second tail
-    // overwrote the first, and a tail written before other fields was moved to
-    // the end — so the program that ran was not the program that was written.
-    // `args` arrives in source order, which is what makes "last" checkable.
-    let tail_positions: Vec<usize> = args
-        .iter()
-        .enumerate()
-        .filter(|(_, a)| matches!(a, CallArg::RepeatedTail { .. }))
-        .map(|(i, _)| i)
-        .collect();
-    if tail_positions.len() > 1 {
-        diagnostics.push(err_diag(
-            file,
-            span,
-            DiagCode::MisplacedRepeatedTail,
-            "`sections` takes at most one `repeated(...)` tail (§7.5)".to_string(),
-        ));
-        return None;
-    }
-    if let Some(&at) = tail_positions.first() {
-        if at != args.len() - 1 {
-            diagnostics.push(err_diag(
-                file,
-                span,
-                DiagCode::MisplacedRepeatedTail,
-                "a `repeated(...)` tail may appear only as the final named argument (§7.5): it \
-                 consumes every remaining section, so nothing can follow it"
-                    .to_string(),
-            ));
-            return None;
-        }
-    }
-
-    let mut fields: Vec<(String, ParserAst)> = Vec::new();
-    let mut repeated_tail: Option<(String, Box<ParserAst>)> = None;
-    for arg in args {
-        match arg {
-            CallArg::Named { name, parser } => fields.push((name, parser)),
-            CallArg::RepeatedTail { name, parser } => {
-                repeated_tail = Some((name, Box::new(parser)));
-            }
-            // `check_call` has already refused a positional or a string in a
-            // heterogeneous `sections`, so there is nothing else to see here.
-            _ => {}
-        }
-    }
-    Some(ParserAst::SectionsNamed {
-        fields,
-        repeated_tail,
-        span,
     })
 }
 

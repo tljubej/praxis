@@ -75,14 +75,60 @@ pub enum WsPolicy {
     Tab,
 }
 
+/// The name of a template capture — **an identifier by construction** (IP-04).
+///
+/// §4.1 allows Unicode identifiers and F3 gave the workspace one character
+/// class for them. The scanner used to carry a private ASCII copy of the rule,
+/// so `{λ:int}` was not recognized as a *named* capture at all: the whole body
+/// `λ:int` was silently reinterpreted as the parser expression. A name a
+/// consumer cannot accept must be reported, never rewritten into a different
+/// name — see `praxis_syntax::ident::is_ident`, which is the predicate.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CaptureName(Box<str>);
+
+/// The one way [`CaptureName::parse`] fails: the text is not an identifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidCaptureName;
+
+impl CaptureName {
+    /// The **only** constructor.
+    ///
+    /// # Errors
+    /// [`InvalidCaptureName`] when `text` is not a §4.1 identifier.
+    pub fn parse(text: &str) -> Result<Self, InvalidCaptureName> {
+        if praxis_syntax::ident::is_ident(text) {
+            Ok(CaptureName(text.into()))
+        } else {
+            Err(InvalidCaptureName)
+        }
+    }
+
+    /// The name text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CaptureName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// One part of a backtick template (§7.9 `TemplatePart`).
 #[derive(Clone, Debug)]
 pub enum TemplatePart {
     /// A literal run: the raw matched bytes plus the whitespace policy.
     Literal { text: String, ws: WsPolicy },
     /// A capture `{name? : parser}`. `name` is `None` for anonymous captures.
+    ///
+    /// `parser` is the capture's **own** parser expression, parsed from its own
+    /// body (IP-05, D10). It used to be a placeholder `Atomic { Int }` that the
+    /// HIR overwrote by rescanning the whole template and taking the first
+    /// recognizable name — so every capture in a template shared one kind.
     Capture {
-        name: Option<String>,
+        name: Option<CaptureName>,
         parser: Box<ParserAst>,
     },
 }
@@ -287,6 +333,76 @@ impl ParserAst {
             | ParserAst::Characters { span, .. }
             | ParserAst::Matrix { span, .. }
             | ParserAst::GridRagged { span, .. } => *span,
+        }
+    }
+
+    /// Shift every span in this subtree by `delta` bytes.
+    ///
+    /// The template scanner works in **interior-relative** offsets: it is given
+    /// the text between the backticks and knows nothing about where the token
+    /// sits in the file. The HIR bridge, which does know, rebases the tree by
+    /// the token's start + 1 (the opening backtick). Without this a capture
+    /// body's diagnostic caret would land near the top of the file.
+    pub fn shift_spans(&mut self, delta: u32) {
+        fn shift_part(part: &mut TemplatePart, delta: u32) {
+            if let TemplatePart::Capture { parser, .. } = part {
+                parser.shift_spans(delta);
+            }
+        }
+        // Bind the span mutably in one place, then recurse into the children.
+        match self {
+            ParserAst::Atomic { span, .. } | ParserAst::OneOf { span, .. } => {
+                *span = span.shifted(delta);
+            }
+            ParserAst::Template { parts, span } => {
+                *span = span.shifted(delta);
+                for part in parts {
+                    shift_part(part, delta);
+                }
+            }
+            ParserAst::Lines { child, span }
+            | ParserAst::Sections { child, span }
+            | ParserAst::Csv { child, span }
+            | ParserAst::Ws { child, span }
+            | ParserAst::Grid { child, span }
+            | ParserAst::Sep { child, span, .. }
+            | ParserAst::Optional { child, span }
+            | ParserAst::Scan { child, span }
+            | ParserAst::Matrix { child, span }
+            | ParserAst::GridRagged { child, span, .. }
+            | ParserAst::Characters { child, span, .. } => {
+                *span = span.shifted(delta);
+                child.shift_spans(delta);
+            }
+            ParserAst::SectionsNamed {
+                fields,
+                repeated_tail,
+                span,
+            } => {
+                *span = span.shifted(delta);
+                for (_, p) in fields {
+                    p.shift_spans(delta);
+                }
+                if let Some((_, tail)) = repeated_tail {
+                    tail.shift_spans(delta);
+                }
+            }
+            ParserAst::Block { items, span } => {
+                *span = span.shifted(delta);
+                for item in items {
+                    match item {
+                        BlockItem::Positional(p) | BlockItem::Named { parser: p, .. } => {
+                            p.shift_spans(delta);
+                        }
+                    }
+                }
+            }
+            ParserAst::Choice { cases, span } => {
+                *span = span.shifted(delta);
+                for (_, p) in cases {
+                    p.shift_spans(delta);
+                }
+            }
         }
     }
 }
