@@ -24,6 +24,13 @@ use crate::GcRef;
 
 /// The static shape of a tuple: an ordered list of element descriptors (positional,
 /// no names). Leaked to `&'static` once per distinct shape by the codegen.
+///
+/// A slot may be **null**, meaning the compiler had no static type for that
+/// element — the same honest encoding a `Vec`'s element descriptor already uses
+/// (HIR-01/MONO-01: `let m = Map()` generalizes at the `let`, so a use whose
+/// program never inspects the elements leaves them unresolved). The arity is
+/// still exact, so nothing is lost; the *value's own* descriptor answers for a
+/// null slot, and it is read from the object's header, so it is never wrong.
 #[repr(C)]
 pub struct TupleSchema {
     pub descriptors: &'static [*const TypeDescriptor],
@@ -35,6 +42,23 @@ impl TupleSchema {
         self.descriptors.len()
     }
 
+    /// The descriptor to dispatch slot `i` through for `value`: the static one
+    /// when the compiler had it, and the value's own otherwise.
+    ///
+    /// Falling back to the header is what makes a null slot safe rather than
+    /// merely tolerated — the alternative that was there first, refusing to
+    /// compile, rejected `let m = Map()` followed by a `for` that never looks
+    /// inside the pair (REP-15).
+    fn descriptor_at(&self, i: usize, value: GcRef) -> &'static TypeDescriptor {
+        match self.descriptors.get(i).copied() {
+            Some(d) if !d.is_null() => {
+                // SAFETY: a non-null slot is a `'static` descriptor pointer.
+                unsafe { &*d }
+            }
+            _ => value.descriptor(),
+        }
+    }
+
     /// Whether two schemas describe the *same* tuple shape: equal arity and the
     /// same element descriptor in every slot.
     ///
@@ -44,6 +68,10 @@ impl TupleSchema {
     /// parser — and two of them minting an `(Int, Int)` used to yield tuples
     /// that compared unequal to each other. Descriptors are `static`, so slot
     /// comparison is pointer comparison (ADR-038).
+    ///
+    /// A **null** slot is unknown, not a fourth type: it agrees with whatever
+    /// the other side says, and the values decide (see `tuple_equals`, which
+    /// compares the two objects' own descriptors for such a slot).
     #[must_use]
     pub fn same_shape(&self, other: &TupleSchema) -> bool {
         self.descriptors.len() == other.descriptors.len()
@@ -51,7 +79,7 @@ impl TupleSchema {
                 .descriptors
                 .iter()
                 .zip(other.descriptors.iter())
-                .all(|(a, b)| std::ptr::eq(*a, *b))
+                .all(|(a, b)| a.is_null() || b.is_null() || std::ptr::eq(*a, *b))
     }
 }
 
@@ -88,7 +116,7 @@ unsafe fn tuple_format(payload: *const u8, out: &mut dyn fmt::Write) {
         if i > 0 {
             let _ = out.write_str(", ");
         }
-        let elem_desc = unsafe { &*schema.descriptors[i] };
+        let elem_desc = schema.descriptor_at(i, *item);
         (elem_desc.format)(item.payload::<u8>() as *const u8, out);
     }
     let _ = out.write_str(")");
@@ -116,7 +144,15 @@ unsafe fn tuple_equals(a: *const u8, b: *const u8) -> bool {
     // Element-wise equality through the element descriptor (§11.4). If the
     // element type is not equatable, the tuple is not equatable (§5.5).
     for (i, (x, y)) in pa.items.iter().zip(pb.items.iter()).enumerate() {
-        let Some(eq) = unsafe { &*schema.descriptors[i] }.equals else {
+        let desc = schema.descriptor_at(i, *x);
+        // For a slot the compiler had no type for, `desc` is `x`'s own — so `y`
+        // must carry the same one before its payload is read through it. Two
+        // values of different types are unequal; reading one as the other is the
+        // wrong-payload read P0-11 is about.
+        if !std::ptr::eq(desc, schema.descriptor_at(i, *y)) {
+            return false;
+        }
+        let Some(eq) = desc.equals else {
             return false;
         };
         let xe = x.payload::<u8>() as *const u8;
@@ -137,8 +173,9 @@ unsafe fn tuple_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     for (i, item) in p.items.iter().enumerate() {
         // The slot's type is part of the shape `eq` now compares, so it is part
         // of the hash too — two tuples that differ only in shape must be free to
-        // land in different buckets.
-        let elem_desc = unsafe { &*schema.descriptors[i] };
+        // land in different buckets. Reading it off the *value* for an unknown
+        // slot is what keeps hash and eq agreeing there: both ask the object.
+        let elem_desc = schema.descriptor_at(i, *item);
         hasher.write_bytes(&elem_desc.id().to_u32().to_le_bytes());
         // If the element type is not hashable, the tuple is not hashable (§5.5).
         let Some(hash_elem) = elem_desc.hash else {
@@ -234,6 +271,70 @@ mod tests {
         let embedded = unsafe { (*payload).schema };
         assert_eq!(embedded, schema as *const TupleSchema);
         assert_eq!(unsafe { (*payload).items.len() }, 2);
+    }
+
+    /// **REP-15's collateral.** A schema slot may be **null** — the compiler had
+    /// no static type for that element — and the value's own descriptor answers
+    /// for it.
+    ///
+    /// `let m = Map()` followed by a `for kv in m` whose body never opens the
+    /// pair is the program that produces one: nothing ever resolves K or V, and
+    /// refusing to compile it (which is what happened first) rejects a working
+    /// program. It is the same answer `collection_arg_descriptor` already gives
+    /// an unresolved element type, and the header is why it is safe rather than
+    /// merely permissive — an object always knows what it is.
+    #[test]
+    fn an_unknown_schema_slot_reads_the_values_own_descriptor() {
+        let mut rt = crate::Runtime::new();
+        let mut ctx = rt.context();
+        let unknown: &'static TupleSchema = Box::leak(Box::new(TupleSchema {
+            descriptors: Box::leak(vec![std::ptr::null(); 2].into_boxed_slice()),
+        }));
+        let build = |ctx: &mut crate::RuntimeContext, a: GcRef, b: GcRef| {
+            let t = unsafe { praxis_alloc_tuple(ctx, unknown) };
+            unsafe {
+                praxis_tuple_set(ctx, t, 0, a);
+                praxis_tuple_set(ctx, t, 1, b);
+            }
+            t
+        };
+
+        // Arity is still exact, so both elements are stored rather than dropped.
+        let (one, txt) = (rt.alloc_int(1), rt.alloc_text("hi"));
+        let mixed = build(&mut ctx, one, txt);
+        assert_eq!(
+            unsafe { (*(mixed.payload::<TuplePayload>())).items.len() },
+            2
+        );
+        // Formatting reads each element through its own descriptor, so the Text
+        // renders as a Text and not as an `i64` read of its buffer pointer.
+        let mut rendered = String::new();
+        unsafe {
+            tuple_format(mixed.payload::<u8>() as *const u8, &mut rendered);
+        }
+        assert_eq!(rendered, "(1, hi)");
+
+        // Equality still works, and still distinguishes.
+        let same = build(&mut ctx, rt.alloc_int(1), rt.alloc_text("hi"));
+        let other = build(&mut ctx, rt.alloc_int(1), rt.alloc_text("no"));
+        assert!(mixed.equals(&same));
+        assert!(!mixed.equals(&other));
+
+        // Two values of *different* types in one slot are unequal rather than
+        // one being read as the other (P0-11).
+        let swapped = build(&mut ctx, rt.alloc_text("hi"), rt.alloc_int(1));
+        assert!(!mixed.equals(&swapped));
+
+        // An unknown slot agrees with a known one rather than contradicting it,
+        // so a `(?, ?)` and an `(Int, Int)` holding the same values are equal.
+        let known = unsafe { praxis_alloc_tuple(&mut ctx, point_schema()) };
+        for (index, value) in [3_i64, 4].into_iter().enumerate() {
+            let v = rt.alloc_int(value);
+            unsafe { praxis_tuple_set(&mut ctx, known, index as i64, v) };
+        }
+        let unknown_pair = build(&mut ctx, rt.alloc_int(3), rt.alloc_int(4));
+        assert!(known.equals(&unknown_pair));
+        assert!(unknown_pair.equals(&known));
     }
 
     #[test]

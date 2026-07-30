@@ -142,6 +142,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::BitsetContains => praxis_bitset_contains as *const (),
         RuntimeSymbol::BitsetInsert => praxis_bitset_insert as *const (),
         RuntimeSymbol::BitsetIsEmpty => praxis_bitset_is_empty as *const (),
+        RuntimeSymbol::BitsetItems => praxis_bitset_items as *const (),
         RuntimeSymbol::BitsetLen => praxis_bitset_len as *const (),
         RuntimeSymbol::BitsetNew => praxis_bitset_new as *const (),
         RuntimeSymbol::BitsetRemove => praxis_bitset_remove as *const (),
@@ -245,12 +246,14 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::MapUpdateMin => praxis_map_update_min as *const (),
         RuntimeSymbol::MapValues => praxis_map_values as *const (),
         RuntimeSymbol::MaxHeapIsEmpty => praxis_max_heap_is_empty as *const (),
+        RuntimeSymbol::MaxHeapItems => praxis_max_heap_items as *const (),
         RuntimeSymbol::MaxHeapLen => praxis_max_heap_len as *const (),
         RuntimeSymbol::MaxHeapNew => praxis_max_heap_new as *const (),
         RuntimeSymbol::MaxHeapPeek => praxis_max_heap_peek as *const (),
         RuntimeSymbol::MaxHeapPop => praxis_max_heap_pop as *const (),
         RuntimeSymbol::MaxHeapPush => praxis_max_heap_push as *const (),
         RuntimeSymbol::MinHeapIsEmpty => praxis_min_heap_is_empty as *const (),
+        RuntimeSymbol::MinHeapItems => praxis_min_heap_items as *const (),
         RuntimeSymbol::MinHeapLen => praxis_min_heap_len as *const (),
         RuntimeSymbol::MinHeapNew => praxis_min_heap_new as *const (),
         RuntimeSymbol::MinHeapPeek => praxis_min_heap_peek as *const (),
@@ -276,6 +279,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         }
         RuntimeSymbol::SetInsert => praxis_set_insert as *const (),
         RuntimeSymbol::SetIsEmpty => praxis_set_is_empty as *const (),
+        RuntimeSymbol::SetItems => praxis_set_items as *const (),
         RuntimeSymbol::SetLen => praxis_set_len as *const (),
         RuntimeSymbol::SetNew => praxis_set_new as *const (),
         RuntimeSymbol::SetRemove => praxis_set_remove as *const (),
@@ -2565,6 +2569,24 @@ pub unsafe extern "C" fn praxis_set_is_empty(ctx: *mut RuntimeContext, set: GcRe
     unsafe { bool_ref(ctx, p.entries.is_empty()) }
 }
 
+/// Every member, as a `Vec[T]` in [`crate::maps::ordered_members`] order — the
+/// snapshot `for x in s` iterates (REP-15, ADR-066).
+///
+/// There is no `praxis_set_get`, and this is why: a `HashSet` has no nth member,
+/// so an indexed accessor would be a linear scan per step and the loop would be
+/// quadratic. The snapshot is one pass, and it is what makes the order
+/// deterministic — which for `for` is the program's *answer* and not only its
+/// printing.
+///
+/// # Safety
+/// `ctx` must be live and wired; `set` must be a valid `Set` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_set_items(ctx: *mut RuntimeContext, set: GcRef) -> GcRef {
+    let elem_desc = unsafe { set_payload(set) }.element_descriptor;
+    let members = unsafe { crate::maps::ordered_members(&set_payload(set).entries) };
+    unsafe { vec_of(ctx, elem_desc, members.into_iter()) }
+}
+
 // --- Counter[T] -------------------------------------------------------------
 
 /// Allocate an empty `Counter[T]`. `key_descriptor` selects hash/eq.
@@ -2843,6 +2865,23 @@ pub unsafe extern "C" fn praxis_max_heap_len(ctx: *mut RuntimeContext, heap_ref:
     unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.items.len() as i64) }
 }
 
+/// Every element, as a `Vec[T]` in [`crate::heaps::in_pop_order`] — the snapshot
+/// `for x in h` iterates (REP-15, ADR-066). The heap is **not** drained.
+///
+/// A heap's backing array is heap-ordered only at its root, so an indexed
+/// accessor over it would answer in insertion-history order; that is what made
+/// `for x in h` over `[3, 1, 2]` sum to a nine-digit number before this existed
+/// — it was reading the array as a `Vec`'s.
+///
+/// # Safety
+/// `ctx` must be live and wired; `heap_ref` must be a valid `MaxHeap` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_max_heap_items(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
+    let p = unsafe { max_heap_payload(heap_ref) };
+    let items = crate::heaps::in_pop_order(&p.items, |e| e.value);
+    unsafe { vec_of(ctx, p.element_descriptor, items.into_iter()) }
+}
+
 /// True iff the heap is empty, as a boxed Bool.
 ///
 /// # Safety
@@ -2950,6 +2989,19 @@ pub unsafe extern "C" fn praxis_min_heap_peek(ctx: *mut RuntimeContext, heap_ref
 pub unsafe extern "C" fn praxis_min_heap_len(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     let p = unsafe { min_heap_payload(heap_ref) };
     unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.items.len() as i64) }
+}
+
+/// Every element, as a `Vec[T]` in [`crate::heaps::in_pop_order`] — ascending,
+/// because the stored entry is a `Reverse<HeapEntry>`. See
+/// [`praxis_max_heap_items`].
+///
+/// # Safety
+/// `ctx` must be live and wired; `heap_ref` must be a valid `MinHeap` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_min_heap_items(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
+    let p = unsafe { min_heap_payload(heap_ref) };
+    let items = crate::heaps::in_pop_order(&p.items, |e| e.0.value);
+    unsafe { vec_of(ctx, p.element_descriptor, items.into_iter()) }
 }
 
 /// True iff the heap is empty, as a boxed Bool.
@@ -3069,6 +3121,31 @@ pub unsafe extern "C" fn praxis_bitset_contains(
 pub unsafe extern "C" fn praxis_bitset_len(ctx: *mut RuntimeContext, bs: GcRef) -> GcRef {
     let p = unsafe { bitset_payload(bs) };
     unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.count() as i64) }
+}
+
+/// Every member, as a `Vec[Int]` **ascending** — the snapshot `for i in b`
+/// iterates (REP-15, ADR-066).
+///
+/// This is the one iterable whose members are not objects: they are bit
+/// positions, so each one is boxed here rather than copied from the payload.
+///
+/// # Safety
+/// `ctx` must be live and wired; `bs` must be a valid `BitSet` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_bitset_items(ctx: *mut RuntimeContext, bs: GcRef) -> GcRef {
+    // The members are read out before the first allocation: `vec_of` allocates
+    // per element, and a collection during the walk would move nothing here
+    // (the bits are not objects) but would leave the borrow of the payload
+    // spanning a safepoint, which is the shape P0-07 forbids.
+    let members: Vec<i64> = unsafe { bitset_payload(bs) }.members().collect();
+    let result = unsafe { praxis_vec_new(ctx, &scalars::INT as *const _) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let rooted = scope.root(result);
+    for value in members {
+        let boxed = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, value) };
+        unsafe { vec_payload_mut(rooted) }.items.push(boxed);
+    }
+    result
 }
 
 /// True iff the bitset is empty, as a boxed Bool.

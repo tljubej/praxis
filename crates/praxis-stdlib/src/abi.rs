@@ -200,6 +200,7 @@ runtime_symbols! {
     BitsetContains = "praxis_bitset_contains": (Ctx, Gc, Gc) -> Gc, Pure;
     BitsetInsert = "praxis_bitset_insert": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     BitsetIsEmpty = "praxis_bitset_is_empty": (Ctx, Gc) -> Gc, Pure;
+    BitsetItems = "praxis_bitset_items": (Ctx, Gc) -> Gc, Allocates;
     BitsetLen = "praxis_bitset_len": (Ctx, Gc) -> Gc, Allocates;
     BitsetNew = "praxis_bitset_new": (Ctx) -> Gc, Allocates;
     BitsetRemove = "praxis_bitset_remove": (Ctx, Gc, Gc) -> Gc, Pure;
@@ -303,12 +304,14 @@ runtime_symbols! {
     MapValues = "praxis_map_values": (Ctx, Gc) -> Gc, Allocates;
     MapUpdateMin = "praxis_map_update_min": (Ctx, Gc, Gc, Gc) -> Gc, Allocates;
     MaxHeapIsEmpty = "praxis_max_heap_is_empty": (Ctx, Gc) -> Gc, Pure;
+    MaxHeapItems = "praxis_max_heap_items": (Ctx, Gc) -> Gc, Allocates;
     MaxHeapLen = "praxis_max_heap_len": (Ctx, Gc) -> Gc, Allocates;
     MaxHeapNew = "praxis_max_heap_new": (Ctx, Ptr) -> Gc, Allocates;
     MaxHeapPeek = "praxis_max_heap_peek": (Ctx, Gc) -> Gc, Faults;
     MaxHeapPop = "praxis_max_heap_pop": (Ctx, Gc) -> Gc, Faults;
     MaxHeapPush = "praxis_max_heap_push": (Ctx, Gc, Gc) -> Gc, Allocates;
     MinHeapIsEmpty = "praxis_min_heap_is_empty": (Ctx, Gc) -> Gc, Pure;
+    MinHeapItems = "praxis_min_heap_items": (Ctx, Gc) -> Gc, Allocates;
     MinHeapLen = "praxis_min_heap_len": (Ctx, Gc) -> Gc, Allocates;
     MinHeapNew = "praxis_min_heap_new": (Ctx, Ptr) -> Gc, Allocates;
     MinHeapPeek = "praxis_min_heap_peek": (Ctx, Gc) -> Gc, Faults;
@@ -330,6 +333,7 @@ runtime_symbols! {
     SetFrameSourceSpan = "praxis_set_frame_source_span": (Ctx, RawU32, RawU32) -> Void, Pure;
     SetInsert = "praxis_set_insert": (Ctx, Gc, Gc) -> Gc, Allocates;
     SetIsEmpty = "praxis_set_is_empty": (Ctx, Gc) -> Gc, Pure;
+    SetItems = "praxis_set_items": (Ctx, Gc) -> Gc, Allocates;
     SetLen = "praxis_set_len": (Ctx, Gc) -> Gc, Allocates;
     SetNew = "praxis_set_new": (Ctx, Ptr) -> Gc, Allocates;
     SetRemove = "praxis_set_remove": (Ctx, Gc, Gc) -> Gc, Pure;

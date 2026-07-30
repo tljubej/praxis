@@ -17,19 +17,30 @@ use std::fmt;
 use crate::descriptor::{BuiltinTypeId, Tracer, TypeDescriptor};
 use crate::GcRef;
 
-/// Write a heap's elements in **pop order** — the order the program would see
-/// them if it drained the heap.
+/// A heap's elements in **pop order** — the order the program would see them if
+/// it drained the heap, without draining it.
 ///
 /// `BinaryHeap::iter` yields the backing array, which is heap-ordered only at
 /// the root: `[3, 1, 2]` and `[3, 2, 1]` are both valid layouts for the same
 /// contents, and which one exists depends on insertion history. So the same
-/// heap could print two ways (RT-16). Sorting descending by the heap's own
-/// `Ord` is pop order for a `BinaryHeap<T>` whatever `T` is — for `MinHeap`,
-/// whose `T` is `Reverse<HeapEntry>`, that comes out ascending by element,
-/// which is what `pop` gives.
+/// heap could print two ways (RT-16) — and, since `for x in h` iterates a
+/// snapshot of this (REP-15, ADR-066), could *answer* two ways. Sorting
+/// descending by the heap's own `Ord` is pop order for a `BinaryHeap<T>`
+/// whatever `T` is — for `MinHeap`, whose `T` is `Reverse<HeapEntry>`, that
+/// comes out ascending by element, which is what `pop` gives.
 ///
 /// This is the one collection whose deterministic order is also *meaningful*:
 /// heaps carry an ordering by construction, so nothing here waits on D3.
+pub(crate) fn in_pop_order<T: Ord, F: Fn(&T) -> GcRef>(
+    items: &BinaryHeap<T>,
+    value_of: F,
+) -> Vec<GcRef> {
+    let mut ordered: Vec<&T> = items.iter().collect();
+    ordered.sort_unstable_by(|a, b| b.cmp(a));
+    ordered.into_iter().map(value_of).collect()
+}
+
+/// Write a heap's elements in [`in_pop_order`].
 ///
 /// # Safety
 /// Every element must match `elem_desc`.
@@ -39,14 +50,12 @@ unsafe fn write_in_pop_order<T: Ord, F: Fn(&T) -> GcRef>(
     items: &BinaryHeap<T>,
     value_of: F,
 ) {
-    let mut ordered: Vec<&T> = items.iter().collect();
-    ordered.sort_unstable_by(|a, b| b.cmp(a));
     let _ = out.write_str("[");
-    for (i, entry) in ordered.iter().enumerate() {
+    for (i, value) in in_pop_order(items, value_of).into_iter().enumerate() {
         if i > 0 {
             let _ = out.write_str(", ");
         }
-        let ep = value_of(entry).payload::<u8>() as *const u8;
+        let ep = value.payload::<u8>() as *const u8;
         // SAFETY: the caller guarantees every element matches `elem_desc`.
         unsafe { (elem_desc.format)(ep, out) };
     }
@@ -286,6 +295,60 @@ mod tests {
         };
         assert_eq!(a.cmp(&beta), std::cmp::Ordering::Less);
         assert_eq!(beta.cmp(&a), std::cmp::Ordering::Greater);
+    }
+
+    /// **REP-15.** `in_pop_order` answers what draining the heap would, without
+    /// draining it — and for a `MinHeap`, whose entries are `Reverse`d, that is
+    /// ascending.
+    ///
+    /// The backing array is the thing this is not: `[3, 1, 2]` and `[3, 2, 1]`
+    /// are both valid layouts for the same heap, so a `for` that indexed the
+    /// array would answer by insertion history. It answered worse than that
+    /// before ADR-066 — it read the payload as a `Vec`'s.
+    #[test]
+    fn a_heaps_snapshot_is_the_order_draining_it_would_give() {
+        let rt = crate::Runtime::new();
+        let entry = |n: i64| HeapEntry {
+            value: rt.alloc_int(n),
+            descriptor: &crate::scalars::INT,
+        };
+        let read_back = |items: Vec<GcRef>| -> Vec<i64> {
+            // SAFETY: every element is an `Int`.
+            items
+                .into_iter()
+                .map(|v| unsafe { *v.payload::<i64>() })
+                .collect()
+        };
+
+        // Built in an order whose array layout is not sorted, so "the array" and
+        // "pop order" are different sequences.
+        let mut max: BinaryHeap<HeapEntry> = BinaryHeap::new();
+        for n in [3, 1, 2] {
+            max.push(entry(n));
+        }
+        assert_eq!(read_back(in_pop_order(&max, |e| e.value)), vec![3, 2, 1]);
+
+        let mut min: BinaryHeap<Reverse<HeapEntry>> = BinaryHeap::new();
+        for n in [3, 1, 2] {
+            min.push(Reverse(entry(n)));
+        }
+        assert_eq!(read_back(in_pop_order(&min, |e| e.0.value)), vec![1, 2, 3]);
+
+        // Draining the same heap agrees, which is the property that makes this
+        // order the meaningful one rather than merely a fixed one.
+        let mut drained = Vec::new();
+        while let Some(Reverse(e)) = min.pop() {
+            drained.push(unsafe { *e.value.payload::<i64>() });
+        }
+        assert_eq!(drained, vec![1, 2, 3]);
+
+        // And the snapshot did not consume the heap it was taken from.
+        let mut max_again: BinaryHeap<HeapEntry> = BinaryHeap::new();
+        for n in [3, 1, 2] {
+            max_again.push(entry(n));
+        }
+        let _ = in_pop_order(&max_again, |e| e.value);
+        assert_eq!(max_again.len(), 3, "iterating is not popping");
     }
 
     /// ADR-045 decision 3: an entry never dispatches a `compare` callback at a

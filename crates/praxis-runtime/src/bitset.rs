@@ -88,6 +88,26 @@ impl BitSetPayload {
     pub(crate) fn count(&self) -> usize {
         self.words.iter().map(|w| w.count_ones() as usize).sum()
     }
+
+    /// Every set bit's value, **ascending**.
+    ///
+    /// A `BitSet` is the one keyed collection whose deterministic order needs no
+    /// decision: the bits *are* the members and their word order is their
+    /// numeric order. `for i in b` iterates a snapshot of this (REP-15,
+    /// ADR-066), and it is the order [`bitset_format`] already prints.
+    pub(crate) fn members(&self) -> impl Iterator<Item = i64> + '_ {
+        self.words.iter().enumerate().flat_map(|(word_idx, &word)| {
+            let mut bits = word;
+            std::iter::from_fn(move || {
+                if bits == 0 {
+                    return None;
+                }
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1; // clear the lowest set bit
+                Some((word_idx * 64 + bit) as i64)
+            })
+        })
+    }
 }
 
 unsafe fn bitset_trace(_payload: *mut u8, _tracer: &mut dyn Tracer) {
@@ -103,19 +123,11 @@ unsafe fn bitset_format(payload: *const u8, out: &mut dyn fmt::Write) {
     // SAFETY: caller guarantees `payload` points at an initialized BitSetPayload.
     let p = unsafe { &*(payload as *const BitSetPayload) };
     let _ = out.write_str("{");
-    let mut first = true;
-    for (word_idx, &word) in p.words.iter().enumerate() {
-        let mut bits = word;
-        while bits != 0 {
-            let bit = bits.trailing_zeros() as usize;
-            let value = word_idx * 64 + bit;
-            if !first {
-                let _ = out.write_str(", ");
-            }
-            first = false;
-            let _ = write!(out, "{value}");
-            bits &= bits - 1; // clear the lowest set bit
+    for (i, value) in p.members().enumerate() {
+        if i > 0 {
+            let _ = out.write_str(", ");
         }
+        let _ = write!(out, "{value}");
     }
     let _ = out.write_str("}");
 }
@@ -197,6 +209,31 @@ mod tests {
     /// Shorthand: a bit that is in range by construction.
     fn bit(i: i64) -> BitIndex {
         BitIndex::new(i).expect("in-range test bit")
+    }
+
+    /// **REP-15.** A `BitSet`'s members come out ascending, across word
+    /// boundaries — the order `for i in b` walks and the order it prints.
+    #[test]
+    fn a_bitsets_members_come_out_ascending() {
+        let mut b = BitSetPayload { words: Vec::new() };
+        // Deliberately inserted out of order and spanning three words, so a
+        // per-word or per-insertion order is a different sequence.
+        for i in [130, 5, 64, 0, 63] {
+            b.insert(bit(i));
+        }
+        assert_eq!(b.members().collect::<Vec<_>>(), vec![0, 5, 63, 64, 130]);
+        // The same rule the formatter uses, so `out(b)` and a `for` agree.
+        let mut rendered = String::new();
+        // SAFETY: `b` is an initialized BitSetPayload.
+        unsafe { bitset_format((&b as *const BitSetPayload).cast::<u8>(), &mut rendered) };
+        assert_eq!(rendered, "{0, 5, 63, 64, 130}");
+        // An empty one yields nothing rather than one member or forever.
+        let empty = BitSetPayload { words: Vec::new() };
+        assert_eq!(empty.members().count(), 0);
+        // …and so does one whose words are present but all zero, which is the
+        // shape `remove` leaves behind.
+        let cleared = BitSetPayload { words: vec![0, 0] };
+        assert_eq!(cleared.members().count(), 0);
     }
 
     #[test]

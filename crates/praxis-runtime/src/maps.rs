@@ -103,6 +103,31 @@ pub(crate) unsafe fn ordered_entries(entries: &HashMap<DynamicKey, GcRef>) -> Ve
     rows.into_iter().map(|(_, k, v)| (k, v)).collect()
 }
 
+/// The members of a `Set` in the same **deterministic** order
+/// [`ordered_entries`] gives a keyed collection: sorted by the member's rendered
+/// form (REP-15).
+///
+/// `for x in s` iterates a snapshot of this (ADR-066), so the order is the
+/// program's answer and not only its printing — the same reason
+/// [`ordered_entries`] exists. It is the order [`write_sorted`] already prints a
+/// set in, so `{1, 3, 4}` and `for x in s` agree, and it moves when D3 does.
+///
+/// # Safety
+/// Every member's payload must match the descriptor it carries.
+pub(crate) unsafe fn ordered_members(entries: &HashSet<DynamicKey>) -> Vec<GcRef> {
+    let mut rows: Vec<(String, GcRef)> = entries
+        .iter()
+        .map(|k| {
+            let mut rendered = String::new();
+            // SAFETY: the member's payload matches the descriptor it carries.
+            unsafe { render_into(&mut rendered, k.descriptor(), k.value()) };
+            (rendered, k.value())
+        })
+        .collect();
+    rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    rows.into_iter().map(|(_, k)| k).collect()
+}
+
 // ===========================================================================
 // Map[K, V]
 // ===========================================================================
@@ -520,6 +545,63 @@ mod tests {
         let backward = rendered(set_format, &build([9, 5, 4, 1, 3]));
         assert_eq!(forward, backward);
         assert_eq!(forward, "{1, 3, 4, 5, 9}");
+    }
+
+    /// **REP-15.** A `Set`'s snapshot order is the order it prints in, and
+    /// neither follows the hash table's own.
+    ///
+    /// This matters more than the formatting rule it shares: `for x in s`
+    /// iterates the snapshot, so the order is the *answer* a program computes
+    /// and not only the string it prints. Rust randomizes the table's order per
+    /// process, so a program that concatenates its members would answer
+    /// differently on two runs.
+    #[test]
+    fn a_sets_members_come_out_in_the_order_it_prints_them() {
+        let rt = crate::Runtime::new();
+        let build = |order: [i64; 5]| SetPayload {
+            element_descriptor: &crate::scalars::INT,
+            entries: order.iter().map(|&n| int_key(&rt, n)).collect(),
+        };
+
+        let read_back = |p: &SetPayload| -> Vec<i64> {
+            // SAFETY: every member is an `Int` matching the element descriptor.
+            unsafe { ordered_members(&p.entries) }
+                .into_iter()
+                .map(|m| unsafe { *m.payload::<i64>() })
+                .collect()
+        };
+        let forward = read_back(&build([3, 1, 4, 5, 9]));
+        let backward = read_back(&build([9, 5, 4, 1, 3]));
+        assert_eq!(forward, backward, "insertion order must not show through");
+        assert_eq!(forward, vec![1, 3, 4, 5, 9]);
+        // …and it is the same order `set_format` writes, which is the property
+        // that keeps `out(s)` and `for x in s` from disagreeing.
+        assert_eq!(
+            rendered(set_format, &build([3, 1, 4, 5, 9])),
+            "{1, 3, 4, 5, 9}"
+        );
+    }
+
+    /// `keys()` and `values()` are index-aligned because they share one order,
+    /// and a `for` over the same map is the third caller of it (REP-15/REP-18).
+    #[test]
+    fn a_keyed_collections_entries_come_out_paired() {
+        let rt = crate::Runtime::new();
+        let p = MapPayload {
+            key_descriptor: &crate::scalars::INT,
+            value_descriptor: &crate::scalars::INT,
+            entries: [3, 1, 2]
+                .iter()
+                .map(|&n| (int_key(&rt, n), rt.alloc_int(n * 10)))
+                .collect(),
+        };
+        // SAFETY: every key and value is an `Int` matching its descriptor.
+        let rows = unsafe { ordered_entries(&p.entries) };
+        let pairs: Vec<(i64, i64)> = rows
+            .into_iter()
+            .map(|(k, v)| unsafe { (*k.payload::<i64>(), *v.payload::<i64>()) })
+            .collect();
+        assert_eq!(pairs, vec![(1, 10), (2, 20), (3, 30)]);
     }
 
     #[test]

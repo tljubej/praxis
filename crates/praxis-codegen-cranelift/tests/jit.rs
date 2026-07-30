@@ -67,8 +67,19 @@ fn every_runtime_symbol_mir_emits_is_registered() {
         "  let p = P { x: 1, y: 2 }\n",
         "  let e = B(7)\n",
         "  let f = |z| z + 1\n",
+        "  let b = BitSet()\n  b.insert(6)\n",
+        "  let mh = MinHeap()\n  mh.push(7)\n",
+        "  let xh = MaxHeap()\n  xh.push(8)\n",
         "  var acc = 0\n",
         "  for x in v { acc = acc + f(x) }\n",
+        // Every snapshot symbol REP-15's `IterPlan` can select — a `for` is the
+        // only caller of four of them, so nothing else would reach them here.
+        "  for x in s { acc = acc + x }\n",
+        "  for x in b { acc = acc + x }\n",
+        "  for x in mh { acc = acc + x }\n",
+        "  for x in xh { acc = acc + x }\n",
+        "  for kv in m { acc = acc + kv.1 }\n",
+        "  for kv in c { acc = acc + kv.1 }\n",
         "  let txt = \"hi\"\n",
         "  out(txt.len())\n",
         "  let fl = 1.5\n  out(fl.sqrt())\n",
@@ -5854,4 +5865,266 @@ fn a_template_literal_that_begins_with_a_space_matches() {
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
+}
+
+// ===========================================================================
+// REP-15: every iterable has a `for` lowering (ADR-066)
+// ===========================================================================
+
+/// **REP-15's headline.** `capability::iter_item` has said all ten collections
+/// are iterable since M8, and **six of them had no lowering at all**: MIR's
+/// symbol pickers had arms for `Vec`, `Deque` and `Range` and defaulted the rest
+/// to `praxis_vec_get`, so a `Set`'s payload was read as a `Vec`'s.
+///
+/// So this is the test the defect existed for lack of: one `for` per iterable,
+/// each answering something a wrong read could not produce. Two of the failure
+/// modes are not assertions — **hanging and dying are**: `for x in s` over a
+/// `Set` used to kill the test process, and a `MinHeap` over `[3, 1, 2]` summed
+/// to `4349199564`, which is the worse one because nothing reported it.
+#[test]
+fn a_for_reaches_every_member_of_every_iterable() {
+    // The three that already worked, so a regression here fails loudly rather
+    // than quietly turning into a snapshot.
+    for (src, want, what) in [
+        (
+            "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  \
+             var t = 0\n  for x in v { t = t * 10 + x }\n  t\n}\n",
+            12,
+            "Vec, in push order",
+        ),
+        (
+            "fn main() -> Int {\n  let d = Deque()\n  d.push_back(1)\n  d.push_front(2)\n  \
+             var t = 0\n  for x in d { t = t * 10 + x }\n  t\n}\n",
+            21,
+            "Deque, front to back",
+        ),
+        (
+            "fn main() -> Int {\n  var t = 0\n  for i in 1..4 { t = t * 10 + i }\n  t\n}\n",
+            123,
+            "Range, ascending and half-open",
+        ),
+        // A `Set` is the one that killed the process. Two members, so a
+        // one-member answer is a different number from a two-member one.
+        (
+            "fn main() -> Int {\n  let s = Set()\n  s.insert(3)\n  s.insert(1)\n  \
+             var t = 0\n  for x in s { t = t * 10 + x }\n  t\n}\n",
+            13,
+            "Set, ascending by rendered member",
+        ),
+        // A `BitSet`'s members are bit positions, not objects: each is boxed by
+        // the snapshot rather than copied out of the payload.
+        (
+            "fn main() -> Int {\n  let b = BitSet()\n  b.insert(5)\n  b.insert(2)\n  \
+             var t = 0\n  for i in b { t = t * 10 + i }\n  t\n}\n",
+            25,
+            "BitSet, ascending",
+        ),
+        // The silently-wrong one. `[3, 1, 2]` in *pop* order is 1, 2, 3 — the
+        // backing array is heap-ordered only at its root, so an indexed read of
+        // it would answer in insertion-history order even if the read were
+        // type-correct.
+        (
+            "fn main() -> Int {\n  let h = MinHeap()\n  h.push(3)\n  h.push(1)\n  h.push(2)\n  \
+             var t = 0\n  for x in h { t = t * 10 + x }\n  t\n}\n",
+            123,
+            "MinHeap, ascending (pop order)",
+        ),
+        (
+            "fn main() -> Int {\n  let h = MaxHeap()\n  h.push(1)\n  h.push(3)\n  h.push(2)\n  \
+             var t = 0\n  for x in h { t = t * 10 + x }\n  t\n}\n",
+            321,
+            "MaxHeap, descending (pop order)",
+        ),
+        // A keyed collection yields the `(K, V)` pair `iter_item` has always
+        // said it does; both halves are read here so a pair built in the wrong
+        // order fails.
+        (
+            "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 7)\n  m.insert(2, 8)\n  \
+             var t = 0\n  for kv in m { t = t * 100 + kv.0 * 10 + kv.1 }\n  t\n}\n",
+            1728,
+            "Map, key then value",
+        ),
+        (
+            "fn main() -> Int {\n  let c = Counter()\n  c.inc(1)\n  c.inc(1)\n  c.inc(2)\n  \
+             var t = 0\n  for kv in c { t = t * 100 + kv.0 * 10 + kv.1 }\n  t\n}\n",
+            1221,
+            "Counter, key then count",
+        ),
+    ] {
+        let (rt, result) = run_main(src);
+        assert!(!rt.has_pending_fault(), "{what} faulted: {:?}", rt.fault());
+        assert_eq!(result.as_int(), want, "{what}");
+    }
+
+    // A `Grid` is the tenth, and it needs input: a `Grid()` is 0×0.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let g = read grid(char)\n  var n = 0\n  \
+         for c in g { n = n + 1 }\n  n\n}\n",
+        "ab\ncd\n",
+    );
+    assert!(!rt.has_pending_fault(), "Grid faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4, "Grid, every cell row-major");
+
+    // An empty one of each iterates zero times rather than once or forever —
+    // the shape a length read off the wrong payload gets wrong first.
+    for (src, what) in [
+        ("let s = Set()\n  for x in s { n = n + 1 }", "Set"),
+        ("let b = BitSet()\n  for x in b { n = n + 1 }", "BitSet"),
+        ("let h = MinHeap()\n  for x in h { n = n + 1 }", "MinHeap"),
+        ("let h = MaxHeap()\n  for x in h { n = n + 1 }", "MaxHeap"),
+        ("let m = Map()\n  for kv in m { n = n + 1 }", "Map"),
+        ("let c = Counter()\n  for kv in c { n = n + 1 }", "Counter"),
+    ] {
+        let src = format!("fn main() -> Int {{\n  var n = 0\n  {src}\n  n\n}}\n");
+        let (rt, result) = run_main(&src);
+        assert!(
+            !rt.has_pending_fault(),
+            "empty {what} faulted: {:?}",
+            rt.fault()
+        );
+        assert_eq!(result.as_int(), 0, "an empty {what} iterates zero times");
+    }
+}
+
+/// A `for` iterates a **snapshot** taken once before the loop (ADR-066), and the
+/// two consequences that has are observable from a program.
+///
+/// The first is that the loop body may mutate the collection it is walking
+/// without the walk changing under it — which a live cursor over a `HashMap`
+/// could not offer at all, since Rust's own iterator would be invalidated.
+///
+/// The second is that a heap is **not drained**: pop order is where the snapshot
+/// gets its order, not how it gets its members.
+#[test]
+fn a_for_iterates_a_snapshot_of_what_it_was_given() {
+    // Inserting into the set being walked adds nothing to *this* walk. Members
+    // 1 and 2 are visited; 11 and 12 are inserted and not seen.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let s = Set()\n  s.insert(1)\n  s.insert(2)\n  \
+         var n = 0\n  for x in s { n = n + 1\n s.insert(x + 10) }\n  n * 10 + s.len()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 24, "two steps, four members afterwards");
+
+    // The heap still holds everything it held: iterating is not popping.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let h = MinHeap()\n  h.push(3)\n  h.push(1)\n  \
+         var n = 0\n  for x in h { n = n + 1 }\n  n * 10 + h.len()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 22, "two steps, and the heap is untouched");
+
+    // The snapshot has to survive the body's allocations: it is a `Gc` local the
+    // loop keeps live, and if liveness missed it a collection would reclaim the
+    // `Vec` being indexed. 300 members × an allocating body is well past the
+    // initial 64 KiB threshold.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let s = Set()\n  var i = 0\n  \
+         while i < 300 { s.insert(i)\n i = i + 1 }\n  \
+         var t = 0\n  for x in s { t = t + x * 2 }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 299 * 300, "sum(0..300) * 2");
+
+    // …and so must the *pair* of snapshots a keyed collection walks, where the
+    // keys must survive the values' allocation as well as the body's.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map()\n  var i = 0\n  \
+         while i < 300 { m.insert(i, i)\n i = i + 1 }\n  \
+         var t = 0\n  for kv in m { t = t + kv.0 + kv.1 }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 299 * 300, "sum(0..300) twice over");
+}
+
+/// A `for`'s order is the order the collection's own accessors already promise,
+/// which is what makes an iterating program's answer reproducible.
+///
+/// A `HashSet`'s iteration order is randomized **per process**, so this is RT-16
+/// with teeth again (REP-18): the same program would sum the same numbers but
+/// concatenate them differently on two runs. The three orders are each pinned
+/// against the accessor that shares them.
+#[test]
+fn an_iterables_order_is_the_one_its_own_accessors_promise() {
+    // A `Map`'s `for` visits exactly what `keys()`/`values()` list, in step.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map()\n  m.insert(3, 30)\n  m.insert(1, 10)\n  \
+         m.insert(2, 20)\n  let ks = m.keys()\n  let vs = m.values()\n  \
+         var i = 0\n  var agree = 1\n  \
+         for kv in m { if kv.0 != ks.get(i) { agree = 0 }\n \
+         if kv.1 != vs.get(i) { agree = 0 }\n i = i + 1 }\n  agree * 10 + i\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 13, "three steps, every one index-aligned");
+
+    // A `Counter`'s is the same rule through the same helper.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let c = Counter()\n  c.inc(2)\n  c.inc(1)\n  c.inc(1)\n  \
+         let ks = c.keys()\n  var i = 0\n  var agree = 1\n  \
+         for kv in c { if kv.0 != ks.get(i) { agree = 0 }\n i = i + 1 }\n  agree * 10 + i\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 12);
+
+    // A heap's is pop order, which is the one order here that is *meaningful*
+    // rather than merely fixed — so it is asserted as a sequence and not only as
+    // a set. Popping the same heap answers the same sequence.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let h = MinHeap()\n  h.push(5)\n  h.push(1)\n  h.push(9)\n  \
+         var walked = 0\n  for x in h { walked = walked * 10 + x }\n  \
+         var popped = 0\n  while h.len() > 0 { popped = popped * 10 + h.pop() }\n  \
+         if walked == popped { walked } else { 0 }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 159, "walking and draining agree");
+
+    // Insertion order does not show through: two sets built in opposite orders
+    // concatenate to the same number. (An in-process proxy for the per-process
+    // seed, which is the same one `maps.rs`'s own gates use.)
+    let (rt, forward) = run_main(
+        "fn main() -> Int {\n  let s = Set()\n  s.insert(1)\n  s.insert(2)\n  s.insert(3)\n  \
+         var t = 0\n  for x in s { t = t * 10 + x }\n  t\n}\n",
+    );
+    let (rt2, backward) = run_main(
+        "fn main() -> Int {\n  let s = Set()\n  s.insert(3)\n  s.insert(2)\n  s.insert(1)\n  \
+         var t = 0\n  for x in s { t = t * 10 + x }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault() && !rt2.has_pending_fault());
+    assert_eq!(forward.as_int(), backward.as_int());
+    assert_eq!(forward.as_int(), 123);
+}
+
+/// ADR-062's asymmetry, extended to the seven iterables that had no lowering:
+/// **one `for` body serves every iterable it is given**, because the iterator
+/// stays quantified and monomorphization makes one clone per iterable kind —
+/// and each clone picks its own [`IterPlan`] from a concrete ctor.
+///
+/// REP-03's gate proves this for `Vec`, `BitSet` and `Range`. Those three were
+/// the three that *worked*; this is the half of the property REP-15 was hiding.
+#[test]
+fn a_for_over_an_unannotated_parameter_reaches_each_iterable_it_is_given() {
+    // One source function, four ctors, all four in one program — so the clones
+    // have to be distinct and each has to select its own accessor pair.
+    let (rt, result) = run_main(
+        "fn total(c) { var t = 0\n for x in c { t = t + x }\n t }\n\
+         fn main() -> Int {\n  \
+         let v = Vec()\n  v.push(1)\n  \
+         let s = Set()\n  s.insert(2)\n  \
+         let b = BitSet()\n  b.insert(4)\n  \
+         let h = MinHeap()\n  h.push(8)\n  \
+         total(v) + total(s) + total(b) + total(h)\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 15, "each clone reached its own members");
+
+    // …including the paired plan, whose item is a tuple rather than an element.
+    let (rt, result) = run_main(
+        "fn tally(c) { var t = 0\n for kv in c { t = t + kv.1 }\n t }\n\
+         fn main() -> Int {\n  \
+         let m = Map()\n  m.insert(1, 5)\n  \
+         let c = Counter()\n  c.inc(9)\n  \
+         tally(m) * 10 + tally(c)\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 51);
 }

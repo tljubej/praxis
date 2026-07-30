@@ -1694,13 +1694,30 @@ fn tuple_schema_for(
         Some(TypeData::Tuple(els)) => els.clone(),
         _ => Vec::new(),
     };
-    // Every slot must resolve. The schema is what tuple equality, hashing and
-    // formatting dispatch through, so a `Unit` or `Enum` element mislabelled
-    // `Int` reads its payload as an `i64` (P0-11).
+    // Every slot that has a type must resolve to *that* type's descriptor. The
+    // schema is what tuple equality, hashing and formatting dispatch through, so
+    // a `Unit` or `Enum` element mislabelled `Int` reads its payload as an `i64`
+    // (P0-11).
+    //
+    // A slot that is still an inference *variable* is the one exception, and it
+    // is the same one `collection_arg_descriptor` makes for the same reason
+    // (HIR-01/MONO-01, hazard H10): `let m = Map()` generalizes at the `let`, so
+    // a `for kv in m` whose body never looks inside the pair leaves K and V
+    // unresolved, and failing the compile there rejects a working program. The
+    // null slot says "no static type" and the runtime reads the value's own
+    // descriptor off its header — which is never the wrong one.
     let descriptors: Vec<*const praxis_runtime::descriptor::TypeDescriptor> = element_types
         .iter()
         .enumerate()
-        .map(|(i, t)| descriptor_for_type(db, *t).with_context(|| format!("tuple element {i}")))
+        .map(|(i, t)| match praxis_repr::descriptor_for_type(db, *t) {
+            Ok(d) => Ok(d as *const _),
+            Err(e) if e.is_unresolved() => Ok(std::ptr::null()),
+            Err(e) => Err(anyhow!(
+                "tuple element {i}: cannot emit a runtime descriptor for `{}`: {}",
+                db.render(*t),
+                e.reason
+            )),
+        })
         .collect::<Result<Vec<_>>>()?;
     Ok(generation.tuple_schema(&descriptors))
 }

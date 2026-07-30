@@ -1,0 +1,104 @@
+// AoC corpus fixture: `for` over every iterable shape (REP-15; §4.11, §6.1).
+//
+// Six of the ten iterables had no `for` lowering at all: MIR read a `Set`'s
+// payload through `praxis_vec_get`, which hung or killed the process, and a
+// `MinHeap` answered a nine-digit number out of three small ints. Each one is
+// walked here, and each answer is one a wrong read could not produce.
+//
+// A `for` iterates a **snapshot** taken once at loop entry (ADR-066), and the
+// order is the one each collection's own accessors already promise: ascending by
+// rendered form for the hashed ones, ascending bit for a `BitSet`, pop order for
+// a heap, row-major for a `Grid`. That is what lets this program have an
+// expected output at all — a `HashMap`'s own order is randomized per process.
+//
+// Each walk is its own function so the digits it concatenates are its own; one
+// `main` holding all ten runs past the shadow-frame's slot cap.
+//
+// Input (on stdin): a small character grid.
+// Output: one line per iterable, then the grid's cell count.
+
+// Digits, in visit order — so a wrong order is a different number and not just a
+// different sum.
+fn digits(c) {
+    var acc = 0
+    for x in c {
+        acc = acc * 10 + x
+    }
+    acc
+}
+
+// The same shape for a keyed collection, whose member is a (key, value) pair.
+fn pair_digits(c) {
+    var acc = 0
+    for kv in c {
+        acc = acc * 100 + kv.0 * 10 + kv.1
+    }
+    acc
+}
+
+fn main() {
+    // A Vec, a Deque and a Range are the three that always worked; they are here
+    // so a regression in the in-place plan fails alongside the snapshot ones.
+    let v = Vec()
+    v.push(1)
+    v.push(2)
+    v.push(3)
+    out(digits(v))
+
+    let d = Deque()
+    d.push_back(2)
+    d.push_front(1)
+    out(digits(d))
+
+    out(digits(1..4))
+
+    // A Set: inserted out of order, walked in order.
+    let s = Set()
+    s.insert(3)
+    s.insert(1)
+    s.insert(2)
+    out(digits(s))
+
+    // A BitSet's members are bit positions rather than objects, so the snapshot
+    // boxes each one.
+    let b = BitSet()
+    b.insert(5)
+    b.insert(1)
+    out(digits(b))
+
+    // The heaps walk in pop order without being drained: the length afterwards
+    // says so.
+    let lo = MinHeap()
+    lo.push(3)
+    lo.push(1)
+    lo.push(2)
+    out(digits(lo) * 10 + lo.len())
+
+    let hi = MaxHeap()
+    hi.push(1)
+    hi.push(3)
+    hi.push(2)
+    out(digits(hi))
+
+    // A keyed collection yields the (key, value) pair, and both halves are read
+    // through the tuple element syntax REP-08 added.
+    let m = Map()
+    m.insert(1, 4)
+    m.insert(2, 5)
+    out(pair_digits(m))
+
+    let c = Counter()
+    c.inc(7)
+    c.inc(7)
+    c.inc(9)
+    out(pair_digits(c))
+
+    // A Grid yields its cells row-major. A `Grid()` is 0×0, so this one is read.
+    let g = read grid(char)
+    var cells = 0
+    for cell in g {
+        cells = cells + 1
+    }
+    out(cells)
+}
+main()

@@ -69,3 +69,6 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-061: A `fn` name in value position is a closure over an adapter](./061-a-fn-name-in-value-position-is-a-closure.md)
 - [ADR-062: An iterated parameter is generic in the iterable and monomorphic in its element](./062-an-iterated-parameter-is-generic-in-the-iterable-and-not-its-element.md)
 - [ADR-063: A self-referring type declaration is reported, and a declaration behind one is not](./063-a-self-referring-type-declaration-is-reported.md)
+- [ADR-064: A subscript is a catalog row, and a store is a different row from a read](./064-a-subscript-is-a-catalog-row.md)
+- [ADR-065: A type constructor's brackets are type arguments and every other name's are a subscript](./065-a-type-constructors-brackets-are-type-arguments.md)
+- [ADR-066: A `for` iterates a snapshot, and the snapshot is where the order is decided](./066-a-for-iterates-a-snapshot.md)

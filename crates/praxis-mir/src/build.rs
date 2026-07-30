@@ -1936,10 +1936,12 @@ fn lower_while(b: &mut Builder<'_>, cond: &TypedExpr, body: &praxis_hir::TypedBl
 }
 
 /// `for binding in iter { body }` (M8-WS6, §4.11). Lowers to an index loop over
-/// the source: a header tests `i < len`, the body binds `iter.get(i)` to the
-/// loop variable, runs, increments `i`, and jumps back. Generalizes across
-/// Vec/Deque via the element-indexed `get` runtime symbol. (Map/Set/Grid
-/// iteration via `for` is a follow-up; the common Vec/Deque case is wired here.)
+/// the source: a header tests `i < len`, the body binds the member at `i` to the
+/// loop variable, runs, increments `i`, and jumps back.
+///
+/// *What* it indexes is [`IterPlan`]'s answer (REP-15, ADR-066). Three iterables
+/// index themselves; the other seven are walked through a **snapshot** taken
+/// once before the header, so the loop body always indexes a `Vec`.
 fn lower_for(
     b: &mut Builder<'_>,
     binding: praxis_hir::SymbolId,
@@ -1948,7 +1950,20 @@ fn lower_for(
     item_ty: Type,
 ) {
     // Lower the iterator once; it lives in a Gc slot for the loop's duration.
-    let iter_local = lower_expr_gc(b, iter);
+    let iter_source = lower_expr_gc(b, iter);
+    // Take the snapshot before the header, so it is one call per loop and not
+    // one per step — and so the loop walks a value nothing in the body can
+    // mutate. `iter_local` is what the header and body index from here on; for
+    // the paired plan it is the keys and `paired_values` holds the values.
+    let plan = iter_plan(b.db, iter);
+    let (iter_local, paired_values) = match plan {
+        IterPlan::InPlace { .. } => (iter_source, None),
+        IterPlan::Snapshot(items) => (snapshot(b, iter_source, items), None),
+        IterPlan::Paired { keys, values } => (
+            snapshot(b, iter_source, keys),
+            Some(snapshot(b, iter_source, values)),
+        ),
+    };
     // The index lives in a Gc Int slot (not a scalar) so it persists across the
     // loop's block boundaries like other Gc values. Start at 0.
     let idx_gc = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
@@ -1977,7 +1992,7 @@ fn lower_for(
     b.cur = header;
 
     // `len = iter.len()`.
-    let len_sym = len_symbol_for(b.db, iter);
+    let len_sym = plan.len_symbol();
     let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: len_dst,
@@ -2021,7 +2036,7 @@ fn lower_for(
     });
     b.cur = body_blk;
     // Bind the loop variable: `binding = iter.get(idx_gc)`.
-    let get_sym = get_symbol_for(b.db, iter);
+    let get_sym = plan.get_symbol();
     // The item and the loop variable are the iterator's element type, which the
     // typed tree carries on the `For` node (`item_ty`). Both slots used to be
     // `Opaque`, so the debugger showed a `for` binding with no type at all.
@@ -2034,6 +2049,37 @@ fn lower_for(
         debug: DebugSlots::unannotated(),
     });
     b.check_fault();
+    // A keyed collection's member is the `(K, V)` pair `item_ty` names, and the
+    // two halves arrive from two index-aligned snapshots. The pair is built
+    // *here* rather than in the runtime because the tuple's schema is the
+    // compiler's answer already — `AllocKind::Tuple` resolves it from `item_ty`,
+    // the same way a `(a, b)` literal does — so no runtime schema interner has
+    // to exist.
+    let item_gc = match paired_values {
+        None => item_gc,
+        Some(values) => {
+            let value_gc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+            b.push(Inst::Call {
+                dst: value_gc,
+                callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
+                args: vec![values, idx_gc],
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
+            });
+            b.check_fault();
+            let pair = b.alloc_gc(MirType::Known(item_ty), None, LocalDebugKind::Temp, None);
+            b.push(Inst::Alloc {
+                dst: pair,
+                alloc: AllocKind::Tuple {
+                    ty: MirType::Known(item_ty),
+                    elements: vec![item_gc, value_gc],
+                },
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
+            });
+            pair
+        }
+    };
     // The loop variable's slot: allocate one if the `for` binding has no slot
     // yet (it is introduced by the loop, not a `let` statement). Reads of the
     // binding inside the body resolve to this slot via `b.locals`.
@@ -3896,38 +3942,119 @@ fn emit_index_loop<F>(
     b.cur = exit;
 }
 
-/// Pick the `praxis_<kind>_len` runtime symbol for an iterable expression by its
-/// static collection ctor. Defaults to `praxis_vec_len` (the common Vec case).
-fn len_symbol_for(db: &TypeDb, iter: &TypedExpr) -> RuntimeSymbol {
-    use praxis_types::data::TypeData;
-    let ty = expr_static_type(iter);
-    match db.data(db.follow(ty)) {
-        TypeData::Collection { ctor, .. } => match ctor {
-            praxis_types::CollectionCtor::Vec => RuntimeSymbol::VecLen,
-            praxis_types::CollectionCtor::Deque => RuntimeSymbol::DequeLen,
-            praxis_types::CollectionCtor::Map => RuntimeSymbol::MapLen,
-            praxis_types::CollectionCtor::Set => RuntimeSymbol::SetLen,
-            praxis_types::CollectionCtor::Counter => RuntimeSymbol::CounterLen,
-            praxis_types::CollectionCtor::Range => RuntimeSymbol::RangeLen,
-            _ => RuntimeSymbol::VecLen,
-        },
-        _ => RuntimeSymbol::VecLen,
+/// How a `for` reaches the members of the thing it iterates (REP-15, ADR-066).
+///
+/// Only three of the ten iterables answer "the member at `i`" in constant time.
+/// The rest have no nth member to ask for at all: a `HashSet` would need a
+/// linear scan per step, a heap's backing array is heap-ordered only at its root,
+/// and `MapGet`/`CounterGet` take a *key*. So the loop takes a **snapshot** —
+/// one runtime call before the header, answering a `Vec` — and indexes that.
+///
+/// The distinction this enum makes is the one the defect was made of: reading a
+/// `Set`'s payload through `praxis_vec_get` was a wrong-type read that hung or
+/// killed the process, and a `MinHeap`'s was a silently wrong answer. There is no
+/// default arm here for the same reason — a new collection ctor is a compile
+/// error until someone says how it iterates.
+#[derive(Clone, Copy)]
+enum IterPlan {
+    /// The iterable indexes itself in constant time: `(len, get)`.
+    InPlace {
+        len: RuntimeSymbol,
+        get: RuntimeSymbol,
+    },
+    /// One call materializes every member as a `Vec`, and the loop walks that.
+    Snapshot(RuntimeSymbol),
+    /// Two **index-aligned** calls materialize the keys and the values (REP-18's
+    /// rows share one ordering, which is what makes them aligned), and the loop
+    /// pairs them per step into the `(K, V)` tuple the item type names.
+    Paired {
+        keys: RuntimeSymbol,
+        values: RuntimeSymbol,
+    },
+}
+
+impl IterPlan {
+    /// The symbol the header calls for the member count. A snapshot's count is
+    /// its `Vec`'s, not the source collection's — they agree, and asking the
+    /// `Vec` is what keeps the two sides of `i < len` about one object.
+    fn len_symbol(self) -> RuntimeSymbol {
+        match self {
+            IterPlan::InPlace { len, .. } => len,
+            IterPlan::Snapshot(_) | IterPlan::Paired { .. } => RuntimeSymbol::VecLen,
+        }
+    }
+
+    /// The symbol the body calls for the member at the current index.
+    fn get_symbol(self) -> RuntimeSymbol {
+        match self {
+            IterPlan::InPlace { get, .. } => get,
+            IterPlan::Snapshot(_) | IterPlan::Paired { .. } => RuntimeSymbol::VecGet,
+        }
     }
 }
 
-/// Pick the `praxis_<kind>_get` runtime symbol for element access.
-fn get_symbol_for(db: &TypeDb, iter: &TypedExpr) -> RuntimeSymbol {
+/// The [`IterPlan`] for an iterable expression, by its static collection ctor.
+///
+/// A non-collection static type cannot reach here from a well-typed program —
+/// `capability::iter_item` answers `None` for one and the `for` is a `Y005` — so
+/// the fallback is the shape MIR has always assumed rather than a panic.
+fn iter_plan(db: &TypeDb, iter: &TypedExpr) -> IterPlan {
     use praxis_types::data::TypeData;
+    use praxis_types::CollectionCtor as C;
     let ty = expr_static_type(iter);
-    match db.data(db.follow(ty)) {
-        TypeData::Collection { ctor, .. } => match ctor {
-            praxis_types::CollectionCtor::Vec => RuntimeSymbol::VecGet,
-            praxis_types::CollectionCtor::Deque => RuntimeSymbol::DequeGet,
-            praxis_types::CollectionCtor::Range => RuntimeSymbol::RangeGet,
-            _ => RuntimeSymbol::VecGet,
+    let TypeData::Collection { ctor, .. } = db.data(db.follow(ty)) else {
+        return IterPlan::InPlace {
+            len: RuntimeSymbol::VecLen,
+            get: RuntimeSymbol::VecGet,
+        };
+    };
+    match ctor {
+        C::Vec | C::Seq => IterPlan::InPlace {
+            len: RuntimeSymbol::VecLen,
+            get: RuntimeSymbol::VecGet,
         },
-        _ => RuntimeSymbol::VecGet,
+        C::Deque => IterPlan::InPlace {
+            len: RuntimeSymbol::DequeLen,
+            get: RuntimeSymbol::DequeGet,
+        },
+        C::Range => IterPlan::InPlace {
+            len: RuntimeSymbol::RangeLen,
+            get: RuntimeSymbol::RangeGet,
+        },
+        C::Set => IterPlan::Snapshot(RuntimeSymbol::SetItems),
+        C::BitSet => IterPlan::Snapshot(RuntimeSymbol::BitsetItems),
+        C::MinHeap => IterPlan::Snapshot(RuntimeSymbol::MinHeapItems),
+        C::MaxHeap => IterPlan::Snapshot(RuntimeSymbol::MaxHeapItems),
+        // A grid yields its cells, row-major (§6.4). `GridGet` takes `(x, y)`,
+        // so there is no one-index accessor to walk in place.
+        C::Grid => IterPlan::Snapshot(RuntimeSymbol::GridCells),
+        C::Map => IterPlan::Paired {
+            keys: RuntimeSymbol::MapKeys,
+            values: RuntimeSymbol::MapValues,
+        },
+        C::Counter => IterPlan::Paired {
+            keys: RuntimeSymbol::CounterKeys,
+            values: RuntimeSymbol::CounterValues,
+        },
     }
+}
+
+/// Emit `sym(source)` and answer the `Vec` local it lands in: one member-list
+/// snapshot for [`IterPlan::Snapshot`] or [`IterPlan::Paired`].
+///
+/// The result is a `Gc` slot like any other, so the loop's own liveness roots it
+/// for the loop's duration — which it must be, since the body allocates.
+fn snapshot(b: &mut Builder<'_>, source: LocalId, sym: RuntimeSymbol) -> LocalId {
+    let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+    b.push(Inst::Call {
+        dst,
+        callee: CallTarget::Runtime(sym),
+        args: vec![source],
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
+    });
+    b.check_fault();
+    dst
 }
 
 // --- helpers --------------------------------------------------------------
@@ -5042,5 +5169,153 @@ mod tests {
             })
             .count();
         assert_eq!(map_index, 0, "`m[k] = v` performs no read");
+    }
+
+    /// **REP-15's MIR shape** (ADR-066). A `for` over a collection that cannot
+    /// index itself takes **one** snapshot, **before** the loop — and a `for`
+    /// over one that can takes none.
+    ///
+    /// The instruction counts are the assertion a behavioural test cannot make.
+    /// A snapshot per step gives the same answer for every program in the suite
+    /// and turns each loop quadratic in its allocations; a snapshot on a `Vec`
+    /// gives the same answer too, and copies every vector any program iterates.
+    #[test]
+    fn a_for_snapshots_once_before_the_loop_or_not_at_all() {
+        let runtime_calls = |f: &Function, sym: RuntimeSymbol| -> usize {
+            f.blocks
+                .iter()
+                .flat_map(|b| b.insts.iter())
+                .filter(|i| {
+                    matches!(
+                        i,
+                        Inst::Call {
+                            callee: CallTarget::Runtime(s),
+                            ..
+                        } if *s == sym
+                    )
+                })
+                .count()
+        };
+
+        // Six members, so "once per step" and "once" are different numbers.
+        let (funcs, _) = lower_src_to_mir(
+            "fn main() -> Int {\n  let s = Set()\n  var i = 0\n  \
+             while i < 6 { s.insert(i)\n i = i + 1 }\n  \
+             var t = 0\n  for x in s { t = t + x }\n  t\n}",
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        assert_eq!(runtime_calls(main, RuntimeSymbol::SetItems), 1);
+        // …and it is not in the loop: the snapshot's block dominates the header,
+        // so it holds no `Terminator::Branch` back-edge target. The cheap
+        // structural form of that: the block holding it also holds the `for`'s
+        // index initialization, which runs once by construction.
+        let snapshot_block = main
+            .blocks
+            .iter()
+            .position(|b| {
+                b.insts.iter().any(|i| {
+                    matches!(
+                        i,
+                        Inst::Call {
+                            callee: CallTarget::Runtime(RuntimeSymbol::SetItems),
+                            ..
+                        }
+                    )
+                })
+            })
+            .expect("the snapshot is emitted");
+        // The `for`'s header is the block that reads the snapshot's length; the
+        // `while` earlier in the program has a header too, so "the first block
+        // that branches" would find the wrong one.
+        let header_block = main
+            .blocks
+            .iter()
+            .position(|b| {
+                b.insts.iter().any(|i| {
+                    matches!(
+                        i,
+                        Inst::Call {
+                            callee: CallTarget::Runtime(RuntimeSymbol::VecLen),
+                            ..
+                        }
+                    )
+                })
+            })
+            .expect("the loop has a header");
+        assert!(
+            snapshot_block < header_block,
+            "the snapshot must precede the header, not sit inside the loop"
+        );
+        // The walk itself is the `Vec` accessor pair, on the snapshot.
+        assert_eq!(runtime_calls(main, RuntimeSymbol::VecLen), 1);
+        assert_eq!(runtime_calls(main, RuntimeSymbol::VecGet), 1);
+        assert_eq!(
+            runtime_calls(main, RuntimeSymbol::SetLen),
+            0,
+            "the header counts the snapshot, so both sides of `i < len` are one object"
+        );
+
+        // A keyed collection snapshots **twice**, and pairs the two per step —
+        // one `AllocKind::Tuple` inside the body, not one per collection.
+        let (funcs, _) = lower_src_to_mir(
+            "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 2)\n  \
+             var t = 0\n  for kv in m { t = t + kv.1 }\n  t\n}",
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        assert_eq!(runtime_calls(main, RuntimeSymbol::MapKeys), 1);
+        assert_eq!(runtime_calls(main, RuntimeSymbol::MapValues), 1);
+        assert_eq!(
+            runtime_calls(main, RuntimeSymbol::VecGet),
+            2,
+            "one read per snapshot per step"
+        );
+        let tuples = main
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .filter(|i| {
+                matches!(
+                    i,
+                    Inst::Alloc {
+                        alloc: AllocKind::Tuple { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(tuples, 1, "the pair is built once per step, in the body");
+
+        // The regression a careless fix would cause: an indexable collection
+        // must not be copied to be walked.
+        for (src, snapshot_free) in [
+            (
+                "let v = Vec()\n  v.push(1)\n  for x in v { t = t + x }",
+                "Vec",
+            ),
+            (
+                "let d = Deque()\n  d.push_back(1)\n  for x in d { t = t + x }",
+                "Deque",
+            ),
+            ("for x in 0..3 { t = t + x }", "Range"),
+        ] {
+            let src = format!("fn main() -> Int {{\n  var t = 0\n  {src}\n  t\n}}");
+            let (funcs, _) = lower_src_to_mir(&src);
+            let main = funcs.iter().find(|f| f.name == "main").expect("main");
+            for sym in [
+                RuntimeSymbol::SetItems,
+                RuntimeSymbol::BitsetItems,
+                RuntimeSymbol::MinHeapItems,
+                RuntimeSymbol::MaxHeapItems,
+                RuntimeSymbol::GridCells,
+                RuntimeSymbol::MapKeys,
+                RuntimeSymbol::CounterKeys,
+            ] {
+                assert_eq!(
+                    runtime_calls(main, sym),
+                    0,
+                    "a {snapshot_free} is walked in place, not copied ({sym})"
+                );
+            }
+        }
     }
 }
