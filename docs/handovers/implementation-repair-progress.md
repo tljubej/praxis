@@ -31,7 +31,8 @@ Update this file at the end of every stage.
 | S18 … S21 | not started | |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
-| S25, S26 — the rest of the repair's own discoveries (plan §4.1) | not started | |
+| S25 — Grammar completion | not started | |
+| S26 — Declaration, pattern and inference gaps | **part** (REP-05, REP-06; REP-03/04 and REP-14 left) | `3306a04` |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
@@ -51,10 +52,23 @@ green, which is what the stage is for.
 top-level `fn` in value position lowered to `Unit`, so `let f = double\n f(3)`
 passed `praxis check` and aborted the host with a SIGBUS — is fixed and gated.
 **D15 is answered as recommended (a closure value) and implemented: ADR-061.**
-Nine REP rows remain, in S25 and S26.
+
+**S26 is two-fifths done.** **REP-06** (a nested `struct`/`enum` was silently
+dropped — `N005` now) and **REP-05** (a wrong sub-pattern count was silently
+truncated — `Y124` now) are fixed and gated. **REP-03 + REP-04 are the stage's
+main event and are untouched**; they are one fix and must land together, and the
+plan puts them first within the stage. **REP-14** is also left. Seven REP rows
+remain in total: four in S25 and three in S26.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1397 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1399 passed, 0 failed, 38 ignored**. `just ci` is green.
+
+S26's two new gates so far:
+
+| Test | File | Pins |
+|---|---|---|
+| `a_nested_type_declaration_is_reported_at_the_declaration` | `infer_tests.rs` | REP-06 — both keywords, a declaration nested two levels deep (a block inside a function), and that the four top-level declaration kinds are untouched |
+| `a_pattern_naming_more_values_than_the_variant_holds_is_reported` | `infer_tests.rs` | REP-05 — `Y124` for one too many *and* for any sub-pattern on a payload-less variant, plus all five spellings of "fewer", which is HIR-06's padding rule and is why the check is one-sided |
 
 S24's seven new gates (REP-01 — ADR-061):
 
@@ -2335,8 +2349,14 @@ silently accepted or wrongly rejected today.
   can claim. REP-07's `&&`/`||` and REP-09's `Counter[(Int, Int)]()` are what
   stand between it and the compiler; note that S17 already inserted `..` at
   `bp(3, 4)`, so **read the whole precedence table** before adding to it.
-- **S26** — the silent-wrong ones (REP-03…REP-06, REP-14). REP-03 and REP-04 are
-  one fix and must land together; ADR-057 is the map for both.
+- **S26** — the silent-wrong ones. **REP-05 and REP-06 are done** (`3306a04`);
+  **REP-03 + REP-04** are the stage's main event and are untouched. They are one
+  fix and must land together — `iter_item` answering an unresolved receiver with
+  *itself* is why a `for` over an unannotated parameter rejects a legal program,
+  and answering with a **fresh** item variable is what gives the deferred
+  `Iterable { item }` constraint two things to relate. ADR-057 is the map for
+  both. **REP-14** is also left, and D17 blocks only its wording — the detect half
+  can land first.
 
 **S18 is still `D1`-blocked** and D1 is still open, so it is not the answer to
 "what next" either — see the S18 block below for what it needs.
@@ -2614,12 +2634,10 @@ The list S16 wrote of what S17 would want, with where each now stands:
 
 What S16 leaves behind, all deliberate:
 
-- **REP-05 — a wrong sub-pattern count is not diagnosed.** `Wrap(a, b)` against a
-  one-slot variant lowers `b` (so anything wrong inside it still reports) and
-  then drops it — the program **compiles and runs**. `Y122`/`Y123` cover the two
-  neighbouring mistakes, and truncating is strictly safer than the payload read
-  past the end that it replaces, but accepting is not the answer. **S26**, with
-  `Y124` (ADR-051's next free code).
+- ~~**REP-05 — a wrong sub-pattern count is not diagnosed.**~~ **Fixed in S26**
+  (`3306a04`). It is `Y124`, and the truncation stays — it is what keeps MIR from
+  reading a payload index past the object. The check is one-sided: naming *fewer*
+  is HIR-06's padding rule. **`Y125` is the next free match code.**
 - **REP-10 — records and tuples have no pattern syntax**, so their signature is
   `Open` and a match on one needs a `_`. `match p { P { x, y } => x }` is a
   `P001` at the `{`. When the grammar grows one, they become `Closed` with a
@@ -2811,14 +2829,12 @@ blocked on this stage. The ADR is **054**. Notes worth carrying:
   `fn f(a) { a += 1 }` leaves `a` a variable. Pinning it to `Int` would make the
   check total and would silently change inference for every unannotated numeric
   parameter; S17's TY-31 (`Y015`) is where numeric constraints get a channel.
-- **REP-06 — a nested `struct`/`enum` is still ignored, silently.**
-  `register_top_level` never declared one and the declaration pass only walks
-  top-level statements, so a `struct` inside a block has no symbol and no type.
-  It was equally ignored before; F19's dispatcher split (`resolve_top_stmt` vs
-  `resolve_block_stmt`) is what makes it an `N005`-shaped report. **Now
-  scheduled — S26.** Verified: declaring one is accepted in silence and *using*
-  it is `N001` "`Inner` is not defined", pointing at a name declared two lines
-  above, which is the confusing half.
+- ~~**REP-06 — a nested `struct`/`enum` is still ignored, silently.**~~ **Fixed in
+  S26** (`3306a04`). It is `N005` at the declaration — the code a nested `fn`
+  already uses, since it is the same mistake. No dispatcher split was needed:
+  `resolve_top_stmt` is what a block's statements already go through, so the
+  check is one guard in `resolve_struct`/`resolve_enum`. A *use* still reports its
+  own `N001`, which is exactly what a nested `fn` does.
 - **`Analysis.scopes` is still public and still populated.** Inference no longer
   reads it, but it is resolution's output and the LSP is its notional consumer.
 
