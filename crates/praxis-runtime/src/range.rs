@@ -18,7 +18,7 @@
 
 use std::fmt;
 
-use crate::descriptor::{BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
+use crate::descriptor::{BuiltinTypeId, DynamicHasher, Payload, Tracer, TypeDescriptor};
 
 /// The `Range` payload: a half-open `[start, end)` interval over `Int`.
 ///
@@ -148,6 +148,9 @@ pub static RANGE: TypeDescriptor = TypeDescriptor::builtin::<RangeVal>(
     Some(range_hash),
     None,
 );
+
+/// `Range`'s payload handle (REP-02): the two-`i64` value, not a scalar.
+pub static RANGE_PAYLOAD: Payload<RangeVal> = Payload::new(&RANGE);
 
 #[cfg(test)]
 mod tests {

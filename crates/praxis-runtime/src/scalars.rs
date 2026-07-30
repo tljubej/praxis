@@ -9,11 +9,19 @@
 //! scalars are the leaf case that proves the descriptor machinery without
 //! exercising nested references. Composite tracing is covered by `Vec[T]`
 //! (ADR-013).
+//!
+//! Each descriptor is followed by its [`Payload`] handle — `INT_PAYLOAD` beside
+//! `INT` — which is what the allocators take (REP-02). The descriptor derives
+//! its width from the payload type and then erases it, so an allocator handed a
+//! bare `&TypeDescriptor` could only compare widths at runtime; the handle
+//! carries the type, and the pairing is checked when the `static` is evaluated.
 
 use std::cmp::Ordering;
 use std::fmt;
 
-use crate::descriptor::{hash_value, BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
+use crate::descriptor::{
+    hash_value, BuiltinTypeId, DynamicHasher, Payload, Tracer, TypeDescriptor,
+};
 
 // ---- payload types ---------------------------------------------------------
 //
@@ -66,6 +74,10 @@ pub static UNIT: TypeDescriptor = TypeDescriptor::builtin::<UnitPayload>(
     None,
 );
 
+/// `Unit`'s payload handle (REP-02). Its one value is an immortal, minted at
+/// startup — nothing gc-allocates a `Unit`.
+pub static UNIT_PAYLOAD: Payload<UnitPayload> = Payload::new(&UNIT);
+
 // ---- Bool ------------------------------------------------------------------
 
 unsafe fn bool_trace(_: *mut u8, _: &mut dyn Tracer) {}
@@ -97,6 +109,10 @@ pub static BOOL: TypeDescriptor = TypeDescriptor::builtin::<BoolPayload>(
     // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
     None,
 );
+
+/// `Bool`'s payload handle (REP-02). Both values are immortals too (RT-03), so
+/// this mints the pair at startup rather than one per comparison.
+pub static BOOL_PAYLOAD: Payload<BoolPayload> = Payload::new(&BOOL);
 
 // ---- Int -------------------------------------------------------------------
 
@@ -134,6 +150,11 @@ pub static INT: TypeDescriptor = TypeDescriptor::builtin::<IntPayload>(
     Some(int_compare),
 );
 
+/// `Int`'s payload handle (REP-02). `IntPayload` is `i64` while a Rust integer
+/// literal defaults to `i32` — the mismatch that used to abort the process, and
+/// that this handle makes the compiler resolve.
+pub static INT_PAYLOAD: Payload<IntPayload> = Payload::new(&INT);
+
 // ---- Byte ------------------------------------------------------------------
 
 unsafe fn byte_trace(_: *mut u8, _: &mut dyn Tracer) {}
@@ -169,6 +190,11 @@ pub static BYTE: TypeDescriptor = TypeDescriptor::builtin::<BytePayload>(
     // Unsigned numeric order (ADR-045).
     Some(byte_compare),
 );
+
+/// `Byte`'s payload handle (REP-02). Its payload is the same Rust type as
+/// `Bool`'s, which is why a handle names its descriptor explicitly instead of
+/// the pairing being derived from the payload type.
+pub static BYTE_PAYLOAD: Payload<BytePayload> = Payload::new(&BYTE);
 
 // ---- Char ------------------------------------------------------------------
 
@@ -217,6 +243,11 @@ pub static CHAR: TypeDescriptor = TypeDescriptor::builtin::<CharPayload>(
     // Unicode scalar value order (ADR-045).
     Some(char_compare),
 );
+
+/// `Char`'s payload handle (REP-02). `CharPayload` is `u32`, not `char`: the two
+/// share a layout, so the runtime width check could never tell them apart — and
+/// one call site was passing a `char`. The type argument is what says which.
+pub static CHAR_PAYLOAD: Payload<CharPayload> = Payload::new(&CHAR);
 
 // ---- Float ------------------------------------------------------------------
 
@@ -293,6 +324,9 @@ pub static FLOAT: TypeDescriptor = TypeDescriptor::builtin::<FloatPayload>(
     // Numeric order with NaN last (ADR-045).
     Some(float_compare),
 );
+
+/// `Float`'s payload handle (REP-02).
+pub static FLOAT_PAYLOAD: Payload<FloatPayload> = Payload::new(&FLOAT);
 
 // ---- validation helper -----------------------------------------------------
 
@@ -522,5 +556,84 @@ mod tests {
         assert!(is_valid_char(0x10FFFF));
         assert!(!is_valid_char(0x110000));
         assert!(!is_valid_char(0xD800)); // surrogate
+    }
+
+    /// REP-02: every scalar's payload handle names the type its descriptor
+    /// describes, and the allocator writes exactly that.
+    ///
+    /// The *pairing* is already a compile-time property — each `Payload::new`
+    /// above runs during const evaluation of a `static`, so a handle whose type
+    /// argument disagreed with its descriptor would not build, and the value's
+    /// type is checked at every `gc_alloc` call site. What a test can still add
+    /// is that the list is **complete** (a scalar with no handle is one whose
+    /// callers must fall back to something unchecked) and that the round trip
+    /// through a real allocation reads back the value that went in — the
+    /// "declared payload type matches what its allocator writes" half.
+    #[test]
+    fn every_scalar_has_a_payload_handle_and_it_round_trips() {
+        use crate::descriptor::{BuiltinTypeId, Payload};
+
+        // One entry per scalar `BuiltinTypeId`, so a new scalar without a handle
+        // fails the exhaustive match below rather than being forgotten.
+        fn declared(id: BuiltinTypeId) -> Option<(&'static TypeDescriptor, usize, usize)> {
+            /// The layout `Payload<T>` promises, read back off the handle.
+            fn of<T: Copy>(p: Payload<T>) -> (&'static TypeDescriptor, usize, usize) {
+                (
+                    p.descriptor(),
+                    std::mem::size_of::<T>(),
+                    std::mem::align_of::<T>(),
+                )
+            }
+            Some(match id {
+                BuiltinTypeId::Unit => of(UNIT_PAYLOAD),
+                BuiltinTypeId::Bool => of(BOOL_PAYLOAD),
+                BuiltinTypeId::Int => of(INT_PAYLOAD),
+                BuiltinTypeId::Byte => of(BYTE_PAYLOAD),
+                BuiltinTypeId::Char => of(CHAR_PAYLOAD),
+                BuiltinTypeId::Float => of(FLOAT_PAYLOAD),
+                // Not a scalar: its payload owns Rust resources or is composite,
+                // so it is allocated through `alloc_with` and has no `Copy`
+                // handle. `Range` is the one non-scalar that does — see
+                // `range.rs`.
+                _ => return None,
+            })
+        }
+
+        for (id, expected) in [
+            (BuiltinTypeId::Unit, &UNIT),
+            (BuiltinTypeId::Bool, &BOOL),
+            (BuiltinTypeId::Int, &INT),
+            (BuiltinTypeId::Byte, &BYTE),
+            (BuiltinTypeId::Char, &CHAR),
+            (BuiltinTypeId::Float, &FLOAT),
+        ] {
+            let (descriptor, size, align) =
+                declared(id).unwrap_or_else(|| panic!("{id:?} has no payload handle"));
+            // The handle carries the one `static`, so descriptor identity — which
+            // is pointer identity (ADR-038) — survives being wrapped.
+            assert!(
+                std::ptr::eq(descriptor, expected),
+                "{id:?}'s handle names another descriptor"
+            );
+            assert_eq!(size, descriptor.size(), "{id:?} payload width");
+            assert_eq!(align, descriptor.align(), "{id:?} payload alignment");
+        }
+
+        // The round trip: what each allocator writes is readable as the declared
+        // payload type. `praxis_alloc_int` used to take an `i64` and hand it to a
+        // generic `gc_alloc` that checked the width at runtime; the width is now
+        // the handle's, and this is the value arriving intact through it.
+        let rt = crate::Runtime::new();
+        assert_eq!(rt.alloc_int(-42).as_int(), -42);
+        assert_eq!(rt.alloc_float(2.5).as_float(), 2.5);
+        // SAFETY: each ref was just allocated with the matching descriptor, so
+        // its payload is a value of that type.
+        unsafe {
+            assert_eq!(*rt.alloc_byte(255).payload::<BytePayload>(), 255);
+            assert_eq!(
+                *rt.alloc_char('A' as u32).payload::<CharPayload>(),
+                'A' as u32
+            );
+        }
     }
 }

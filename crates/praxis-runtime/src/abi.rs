@@ -23,7 +23,10 @@ use crate::graph::GraphOracle;
 use crate::heap::{Heap, Safepoint};
 use crate::roots::{NativeScope, Rooted};
 use crate::scalars;
-use crate::{collections::VecPayload, descriptor::TypeDescriptor};
+use crate::{
+    collections::VecPayload,
+    descriptor::{Payload, TypeDescriptor},
+};
 pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 
 /// The runtime ABI version for this build. Bump this whenever the layout of
@@ -371,17 +374,26 @@ unsafe fn safepoint<'a>(ctx: *mut RuntimeContext) -> (&'a Heap, Safepoint<'a>) {
 
 /// Pace the collector, then allocate a `Copy` payload (§12.4).
 ///
+/// The descriptor arrives as a [`Payload<T>`] — `scalars::INT_PAYLOAD`, not
+/// `&scalars::INT` — so `value`'s Rust type is checked against it here, at the
+/// call. This signature *is* REP-02's fix.
+///
+/// While the descriptor was a bare reference and `T` was free,
+/// `gc_alloc(ctx, &scalars::INT, 0)` compiled — a Rust integer literal defaults
+/// to `i32` — and aborted the process from inside `extern "C"` with "payload
+/// size mismatch for descriptor Int", a non-unwinding panic across the ABI that
+/// §10.4 forbids. Two things changed: a value of the wrong type is now an
+/// `E0308` at the call, and an *untyped* literal infers as the payload type
+/// instead of defaulting, so REP-02's own reproduction is correct code rather
+/// than a rejected one.
+///
 /// # Safety
-/// `ctx` must be live and wired; `T` must match `descriptor`'s payload type.
+/// `ctx` must be live and wired.
 #[inline]
-unsafe fn gc_alloc<T: Copy>(
-    ctx: *mut RuntimeContext,
-    descriptor: &'static TypeDescriptor,
-    value: T,
-) -> GcRef {
+unsafe fn gc_alloc<T: Copy>(ctx: *mut RuntimeContext, payload: Payload<T>, value: T) -> GcRef {
     // SAFETY: caller upholds ctx validity.
     let (h, sp) = unsafe { safepoint(ctx) };
-    h.alloc(sp, descriptor, value)
+    h.alloc(sp, payload, value)
 }
 
 /// Pace the collector, then allocate a payload that owns Rust resources.
@@ -461,7 +473,7 @@ pub unsafe extern "C" fn praxis_alloc_int(ctx: *mut RuntimeContext, value: i64) 
     // it — so it is safe across this collection (the *previous* allocation's
     // result was already spilled by the backend before this wrapper was called).
     // SAFETY: caller upholds the ctx/heap validity.
-    unsafe { gc_alloc(ctx, &scalars::INT, value) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, value) }
 }
 
 /// Allocate a boxed `Bool` from a 0/1 value (§4.3). Returns the immortal
@@ -521,7 +533,7 @@ pub unsafe extern "C" fn praxis_alloc_char(ctx: *mut RuntimeContext, value: i64)
         return unsafe { unit_sentinel(ctx) };
     }
     // SAFETY: caller upholds ctx/heap validity; code is a validated scalar.
-    unsafe { gc_alloc(ctx, &scalars::CHAR, code) }
+    unsafe { gc_alloc(ctx, scalars::CHAR_PAYLOAD, code) }
 }
 
 /// Allocate an owned `Text` from a UTF-8 byte buffer (§4.3, ADR-013).
@@ -622,7 +634,7 @@ pub unsafe extern "C" fn praxis_char_load(_ctx: *mut RuntimeContext, r: GcRef) -
 pub unsafe extern "C" fn praxis_alloc_float(ctx: *mut RuntimeContext, value: i64) -> GcRef {
     let f = f64::from_bits(value as u64);
     // SAFETY: caller upholds ctx/heap validity; all f64 values are valid Floats.
-    unsafe { gc_alloc(ctx, &scalars::FLOAT, f) }
+    unsafe { gc_alloc(ctx, scalars::FLOAT_PAYLOAD, f) }
 }
 
 /// Read a `Float` payload as its IEEE-754 bit pattern widened to `i64`
@@ -664,7 +676,7 @@ unsafe fn float_payload(r: GcRef) -> f64 {
 pub unsafe extern "C" fn praxis_int_to_float(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     let i = unsafe { int_payload(r) };
     // SAFETY: ctx/heap valid; every widened int is a valid Float payload.
-    unsafe { gc_alloc(ctx, &scalars::FLOAT, i as f64) }
+    unsafe { gc_alloc(ctx, scalars::FLOAT_PAYLOAD, i as f64) }
 }
 
 /// Narrow a `Float` to an `Int` by truncating toward zero (§4.12). Faults
@@ -689,14 +701,14 @@ pub unsafe extern "C" fn praxis_float_to_int(ctx: *mut RuntimeContext, r: GcRef)
     // then exact for every representable integer and inexact-but-safe for the
     // fractional part (which is discarded).
     // SAFETY: ctx/heap valid; the value is in i64 range.
-    unsafe { gc_alloc(ctx, &scalars::INT, f as i64) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, f as i64) }
 }
 
 /// Re-box a `Float` after a pure transform (no fault possible). Used by
 /// `abs`/`sqrt`/`floor`/`ceil`/`round`/`sign`.
 unsafe fn rebox_float(ctx: *mut RuntimeContext, out: f64) -> GcRef {
     // SAFETY: ctx/heap valid; every f64 is a valid Float payload.
-    unsafe { gc_alloc(ctx, &scalars::FLOAT, out) }
+    unsafe { gc_alloc(ctx, scalars::FLOAT_PAYLOAD, out) }
 }
 
 /// `Float.abs()` — absolute value (§4.12).
@@ -860,7 +872,7 @@ pub unsafe extern "C" fn praxis_float_to_text(ctx: *mut RuntimeContext, r: GcRef
 #[no_mangle]
 pub unsafe extern "C" fn praxis_float_pi(ctx: *mut RuntimeContext) -> GcRef {
     // SAFETY: ctx/heap valid.
-    unsafe { gc_alloc(ctx, &scalars::FLOAT, core::f64::consts::PI) }
+    unsafe { gc_alloc(ctx, scalars::FLOAT_PAYLOAD, core::f64::consts::PI) }
 }
 
 /// `e()` — Euler's number as a `Float` (§4.12 prelude free function).
@@ -870,7 +882,7 @@ pub unsafe extern "C" fn praxis_float_pi(ctx: *mut RuntimeContext) -> GcRef {
 #[no_mangle]
 pub unsafe extern "C" fn praxis_float_e(ctx: *mut RuntimeContext) -> GcRef {
     // SAFETY: ctx/heap valid.
-    unsafe { gc_alloc(ctx, &scalars::FLOAT, core::f64::consts::E) }
+    unsafe { gc_alloc(ctx, scalars::FLOAT_PAYLOAD, core::f64::consts::E) }
 }
 
 // ---------------------------------------------------------------------------
@@ -892,7 +904,7 @@ macro_rules! checked_int_binop {
             let a = unsafe { int_payload(lhs) };
             let b = unsafe { int_payload(rhs) };
             match a.$op(b) {
-                Some(result) => unsafe { gc_alloc(ctx, &scalars::INT, result) },
+                Some(result) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, result) },
                 None => {
                     unsafe { set_fault(ctx, $fault) };
                     unsafe { unit_sentinel(ctx) }
@@ -929,7 +941,7 @@ pub unsafe extern "C" fn praxis_int_div(ctx: *mut RuntimeContext, lhs: GcRef, rh
     }
     // Division truncates toward zero (Rust's `i64::div_euclid` rounds differently;
     // Praxis follows C/Rust integer division semantics toward zero).
-    unsafe { gc_alloc(ctx, &scalars::INT, a / b) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, a / b) }
 }
 
 /// Checked `Int` remainder (§4.12). Faults on division by zero, and on overflow
@@ -952,7 +964,7 @@ pub unsafe extern "C" fn praxis_int_rem(ctx: *mut RuntimeContext, lhs: GcRef, rh
         unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
         return unsafe { unit_sentinel(ctx) };
     }
-    unsafe { gc_alloc(ctx, &scalars::INT, a % b) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, a % b) }
 }
 
 /// Negate an `Int` (§4.12). Faults on overflow (`Int::MIN`).
@@ -963,7 +975,7 @@ pub unsafe extern "C" fn praxis_int_rem(ctx: *mut RuntimeContext, lhs: GcRef, rh
 pub unsafe extern "C" fn praxis_int_neg(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     let a = unsafe { int_payload(r) };
     match a.checked_neg() {
-        Some(result) => unsafe { gc_alloc(ctx, &scalars::INT, result) },
+        Some(result) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, result) },
         None => {
             unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
             unsafe { unit_sentinel(ctx) }
@@ -993,7 +1005,7 @@ pub unsafe extern "C" fn praxis_int_neg(ctx: *mut RuntimeContext, r: GcRef) -> G
 pub unsafe extern "C" fn praxis_int_abs(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     let a = unsafe { int_payload(r) };
     match a.checked_abs() {
-        Some(result) => unsafe { gc_alloc(ctx, &scalars::INT, result) },
+        Some(result) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, result) },
         None => {
             unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
             unsafe { unit_sentinel(ctx) }
@@ -1009,7 +1021,7 @@ pub unsafe extern "C" fn praxis_int_abs(ctx: *mut RuntimeContext, r: GcRef) -> G
 #[no_mangle]
 pub unsafe extern "C" fn praxis_int_sign(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     let a = unsafe { int_payload(r) };
-    unsafe { gc_alloc(ctx, &scalars::INT, a.signum()) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, a.signum()) }
 }
 
 /// `min(a, b)` (§16.1): the smaller operand, returned as **the reference that
@@ -1119,7 +1131,7 @@ pub unsafe extern "C" fn praxis_int_gcd(ctx: *mut RuntimeContext, lhs: GcRef, rh
     let a = unsafe { int_payload(lhs) };
     let b = unsafe { int_payload(rhs) };
     match checked_gcd(a, b) {
-        Some(result) => unsafe { gc_alloc(ctx, &scalars::INT, result) },
+        Some(result) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, result) },
         None => {
             unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
             unsafe { unit_sentinel(ctx) }
@@ -1141,7 +1153,7 @@ pub unsafe extern "C" fn praxis_int_lcm(ctx: *mut RuntimeContext, lhs: GcRef, rh
     // `lcm(n, 0)` is 0 for every n: 0 is a multiple of everything, and dividing
     // by the gcd below would divide by zero when both are 0.
     if a == 0 || b == 0 {
-        return unsafe { gc_alloc(ctx, &scalars::INT, 0i64) };
+        return unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, 0i64) };
     }
     // |a / gcd * b| in i128, which cannot overflow: both operands fit i64, so
     // the product fits i128 with room to spare. The range check is the only
@@ -1150,7 +1162,7 @@ pub unsafe extern "C" fn praxis_int_lcm(ctx: *mut RuntimeContext, lhs: GcRef, rh
         .map(|g| ((a as i128) / (g as i128) * (b as i128)).abs())
         .and_then(|m| i64::try_from(m).ok());
     match result {
-        Some(result) => unsafe { gc_alloc(ctx, &scalars::INT, result) },
+        Some(result) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, result) },
         None => {
             unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
             unsafe { unit_sentinel(ctx) }
@@ -1502,7 +1514,7 @@ pub unsafe extern "C" fn praxis_enum_tag(ctx: *mut RuntimeContext, enum_value: G
     let tag = unsafe { (*payload).tag as i64 };
     // SAFETY: alloc boxes the i64 into a fresh Int object. The tag value is
     // already in a register, so GC collecting enum_value here is safe.
-    unsafe { gc_alloc(ctx, &crate::scalars::INT, tag) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, tag) }
 }
 
 /// Read payload slot `idx` of an enum value (M7, §4.6). Returns the slot's
@@ -1918,7 +1930,7 @@ pub unsafe extern "C" fn praxis_vec_len(ctx: *mut RuntimeContext, vec: GcRef) ->
     let p = unsafe { vec_payload(vec) };
     let len = p.items.len() as i64;
     // len allocates the returned Int, but the input vec is still live via `vec`.
-    unsafe { gc_alloc(ctx, &scalars::INT, len) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, len) }
 }
 
 /// The element at `index`, or an `IndexOutOfBounds` fault if out of range
@@ -2099,7 +2111,7 @@ pub unsafe extern "C" fn praxis_deque_pop_back(ctx: *mut RuntimeContext, deque: 
 pub unsafe extern "C" fn praxis_deque_len(ctx: *mut RuntimeContext, deque: GcRef) -> GcRef {
     let p = unsafe { deque_payload(deque) };
     let len = p.items.len() as i64;
-    unsafe { gc_alloc(ctx, &scalars::INT, len) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, len) }
 }
 
 /// The element at `index` (0-based from the front); faults `IndexOutOfBounds`.
@@ -2288,7 +2300,7 @@ pub unsafe extern "C" fn praxis_map_remove(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_map_len(ctx: *mut RuntimeContext, map: GcRef) -> GcRef {
     let p = unsafe { map_payload(map) };
-    unsafe { gc_alloc(ctx, &scalars::INT, p.entries.len() as i64) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.entries.len() as i64) }
 }
 
 /// True iff the map is empty, as a boxed Bool.
@@ -2451,7 +2463,7 @@ pub unsafe extern "C" fn praxis_set_contains(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_set_len(ctx: *mut RuntimeContext, set: GcRef) -> GcRef {
     let p = unsafe { set_payload(set) };
-    unsafe { gc_alloc(ctx, &scalars::INT, p.entries.len() as i64) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.entries.len() as i64) }
 }
 
 /// True iff the set is empty, as a boxed Bool.
@@ -2513,7 +2525,7 @@ pub unsafe extern "C" fn praxis_counter_get(
         Some(v) => unsafe { int_payload(*v) },
         None => 0, // §6.2: absent reads as zero.
     };
-    unsafe { gc_alloc(ctx, &scalars::INT, count) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, count) }
 }
 
 /// Increment the count for `key` by one (inserting 1 if absent); returns Unit.
@@ -2533,10 +2545,10 @@ pub unsafe extern "C" fn praxis_counter_inc(
         Some(v) => {
             let cur = unsafe { int_payload(*v) };
             // SAFETY: ctx is wired; alloc a fresh Int for the incremented value.
-            *v = unsafe { gc_alloc(ctx, &scalars::INT, cur + 1) };
+            *v = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, cur + 1) };
         }
         None => {
-            let one = unsafe { gc_alloc(ctx, &scalars::INT, 1_i64) };
+            let one = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, 1_i64) };
             p.entries.insert(dk, one);
         }
     }
@@ -2550,7 +2562,7 @@ pub unsafe extern "C" fn praxis_counter_inc(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_counter_len(ctx: *mut RuntimeContext, counter: GcRef) -> GcRef {
     let p = unsafe { counter_payload(counter) };
-    unsafe { gc_alloc(ctx, &scalars::INT, p.entries.len() as i64) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.entries.len() as i64) }
 }
 
 /// True iff the counter has no keys, as a boxed Bool.
@@ -2684,7 +2696,7 @@ pub unsafe extern "C" fn praxis_max_heap_peek(ctx: *mut RuntimeContext, heap_ref
 #[no_mangle]
 pub unsafe extern "C" fn praxis_max_heap_len(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     let p = unsafe { max_heap_payload(heap_ref) };
-    unsafe { gc_alloc(ctx, &scalars::INT, p.items.len() as i64) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.items.len() as i64) }
 }
 
 /// True iff the heap is empty, as a boxed Bool.
@@ -2793,7 +2805,7 @@ pub unsafe extern "C" fn praxis_min_heap_peek(ctx: *mut RuntimeContext, heap_ref
 #[no_mangle]
 pub unsafe extern "C" fn praxis_min_heap_len(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     let p = unsafe { min_heap_payload(heap_ref) };
-    unsafe { gc_alloc(ctx, &scalars::INT, p.items.len() as i64) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.items.len() as i64) }
 }
 
 /// True iff the heap is empty, as a boxed Bool.
@@ -2912,7 +2924,7 @@ pub unsafe extern "C" fn praxis_bitset_contains(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_bitset_len(ctx: *mut RuntimeContext, bs: GcRef) -> GcRef {
     let p = unsafe { bitset_payload(bs) };
-    unsafe { gc_alloc(ctx, &scalars::INT, p.count() as i64) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.count() as i64) }
 }
 
 /// True iff the bitset is empty, as a boxed Bool.
@@ -2955,9 +2967,9 @@ unsafe fn alloc_point(ctx: *mut RuntimeContext, x: i64, y: i64) -> GcRef {
     let schema = crate::tuples::point_schema();
     let schema_ptr = schema as *const crate::tuples::TupleSchema;
     let tup = scope.root(unsafe { praxis_alloc_tuple(ctx, schema_ptr) });
-    let x_ref = scope.root(unsafe { gc_alloc(ctx, &scalars::INT, x) });
+    let x_ref = scope.root(unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x) });
     unsafe { praxis_tuple_set(ctx, tup.get(), 0, x_ref.get()) };
-    let y_ref = unsafe { gc_alloc(ctx, &scalars::INT, y) };
+    let y_ref = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, y) };
     unsafe { praxis_tuple_set(ctx, tup.get(), 1, y_ref) };
     tup.get()
 }
@@ -3017,10 +3029,13 @@ unsafe fn default_cell(
         match builtin {
             B::Unit => Some(unit_sentinel(ctx)),
             B::Bool => Some(bool_ref(ctx, false)),
-            B::Int => Some(gc_alloc(ctx, &scalars::INT, 0_i64)),
-            B::Byte => Some(gc_alloc(ctx, &scalars::BYTE, 0_u8)),
-            B::Char => Some(gc_alloc(ctx, &scalars::CHAR, '\0')),
-            B::Float => Some(gc_alloc(ctx, &scalars::FLOAT, 0.0_f64)),
+            B::Int => Some(gc_alloc(ctx, scalars::INT_PAYLOAD, 0_i64)),
+            B::Byte => Some(gc_alloc(ctx, scalars::BYTE_PAYLOAD, 0_u8)),
+            // `0_u32`, not `'\0'`: a `Char`'s payload is the scalar *value*, and
+            // a Rust `char` only happened to fit because it shares `u32`'s
+            // layout. REP-02's signature is what said so.
+            B::Char => Some(gc_alloc(ctx, scalars::CHAR_PAYLOAD, 0_u32)),
+            B::Float => Some(gc_alloc(ctx, scalars::FLOAT_PAYLOAD, 0.0_f64)),
             B::Text => Some(praxis_alloc_text(ctx, std::ptr::null(), 0)),
             // A composite has no zero value the runtime can invent: a
             // `Grid[Vec[Int]]` must be filled by the program that knows what its
@@ -3106,7 +3121,7 @@ pub unsafe extern "C" fn praxis_grid_new(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_grid_width(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
     let p = unsafe { grid_payload(grid) };
-    unsafe { gc_alloc(ctx, &scalars::INT, p.width as i64) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.width as i64) }
 }
 
 /// The grid height (number of rows), as a boxed Int.
@@ -3118,7 +3133,7 @@ pub unsafe extern "C" fn praxis_grid_height(ctx: *mut RuntimeContext, grid: GcRe
     let p = unsafe { grid_payload(grid) };
     // height = items.len() / width.
     let height = grid_height(p.items.len(), p.width);
-    unsafe { gc_alloc(ctx, &scalars::INT, height as i64) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, height as i64) }
 }
 
 /// The cell at `(x, y)`; faults `IndexOutOfBounds` if out of range.
@@ -3535,7 +3550,7 @@ pub unsafe extern "C" fn praxis_text_len(ctx: *mut RuntimeContext, text: GcRef) 
     // SAFETY: caller guarantees `text` is Text.
     let s = unsafe { text_str(text) };
     let len = s.chars().count() as i64;
-    unsafe { gc_alloc(ctx, &scalars::INT, len) }
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, len) }
 }
 
 /// True iff `text` has no chars, as a boxed `Bool`.
@@ -3573,7 +3588,7 @@ pub unsafe extern "C" fn praxis_text_get(
     match s.chars().nth(idx as usize) {
         Some(ch) => {
             // Return the scalar value as an Int (Char is reserved; M5 uses Int).
-            unsafe { gc_alloc(ctx, &scalars::INT, ch as i64) }
+            unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, ch as i64) }
         }
         None => {
             unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
@@ -3693,7 +3708,13 @@ pub unsafe extern "C" fn praxis_range_new(
 ) -> GcRef {
     let a = unsafe { int_payload(start) };
     let b = unsafe { int_payload(end) };
-    unsafe { gc_alloc(ctx, &crate::range::RANGE, crate::range::RangeVal::new(a, b)) }
+    unsafe {
+        gc_alloc(
+            ctx,
+            crate::range::RANGE_PAYLOAD,
+            crate::range::RangeVal::new(a, b),
+        )
+    }
 }
 
 /// Build the inclusive range `start..=end` (§4.11).
@@ -3711,7 +3732,7 @@ pub unsafe extern "C" fn praxis_range_new_inclusive(
     unsafe {
         gc_alloc(
             ctx,
-            &crate::range::RANGE,
+            crate::range::RANGE_PAYLOAD,
             crate::range::RangeVal::new_inclusive(a, b),
         )
     }
@@ -3732,7 +3753,7 @@ pub unsafe extern "C" fn praxis_range_len(ctx: *mut RuntimeContext, r: GcRef) ->
     // SAFETY: the compiler only emits this with a Range-typed operand.
     let range = unsafe { &*r.payload::<crate::range::RangeVal>() };
     match i64::try_from(range.len()) {
-        Ok(len) => unsafe { gc_alloc(ctx, &scalars::INT, len) },
+        Ok(len) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, len) },
         Err(_) => {
             unsafe { set_fault(ctx, RaisedFault::INVALID_SIZE) };
             unsafe { unit_sentinel(ctx) }
@@ -3756,7 +3777,7 @@ pub unsafe extern "C" fn praxis_range_get(
     let range = unsafe { &*r.payload::<crate::range::RangeVal>() };
     let i = unsafe { int_payload(index) };
     match range.get(i) {
-        Some(value) => unsafe { gc_alloc(ctx, &scalars::INT, value) },
+        Some(value) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, value) },
         None => {
             unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
             unsafe { unit_sentinel(ctx) }
@@ -4172,7 +4193,7 @@ pub unsafe extern "C" fn praxis_dijkstra(
             // allocation while a `&mut MapPayload` is live is what `Rooted`
             // exists to make impossible, and taking the borrow per entry is
             // what keeps that true.
-            let boxed = scope.root(gc_alloc(ctx, &scalars::INT, cost));
+            let boxed = scope.root(gc_alloc(ctx, scalars::INT_PAYLOAD, cost));
             map_payload_mut(result)
                 .entries
                 .insert(DynamicKey::new(state), boxed.get());
@@ -4231,7 +4252,7 @@ unsafe fn alloc_optional_int(ctx: *mut RuntimeContext, value: Option<i64>) -> Gc
             Some(n) => {
                 let scope = NativeScope::new(ctx);
                 let some = scope.root(praxis_alloc_enum(ctx, OPTION_SOME_TAG, 1));
-                let boxed = gc_alloc(ctx, &scalars::INT, n);
+                let boxed = gc_alloc(ctx, scalars::INT_PAYLOAD, n);
                 praxis_enum_set_payload(ctx, some.get(), 0, boxed);
                 some.get()
             }

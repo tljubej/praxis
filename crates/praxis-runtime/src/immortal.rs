@@ -10,7 +10,7 @@
 //! as `Unit`").
 
 use crate::heap::Heap;
-use crate::scalars::{BoolPayload, BOOL, UNIT};
+use crate::scalars::{BoolPayload, BOOL_PAYLOAD, UNIT_PAYLOAD};
 use crate::GcRef;
 
 /// Proof that an [`Heap::alloc_immortal`] call comes from this module.
@@ -38,9 +38,9 @@ impl Immortals {
         // Bypass `Heap::alloc`'s live-set registration: immortals are managed
         // out-of-band. We use the same low-level layout so the descriptors and
         // accessors still work on them.
-        let unit = heap.alloc_immortal(&UNIT, (), ImmortalWitness(()));
-        let true_ = heap.alloc_immortal(&BOOL, 1_u8, ImmortalWitness(()));
-        let false_ = heap.alloc_immortal(&BOOL, 0_u8, ImmortalWitness(()));
+        let unit = heap.alloc_immortal(UNIT_PAYLOAD, (), ImmortalWitness(()));
+        let true_ = heap.alloc_immortal(BOOL_PAYLOAD, 1_u8, ImmortalWitness(()));
+        let false_ = heap.alloc_immortal(BOOL_PAYLOAD, 0_u8, ImmortalWitness(()));
         // Immortals start black so a mark phase that happens to visit them (e.g.
         // via a root that aliases them) does not transiently un-protect them.
         unit.header().set_mark_color(crate::gc::BLACK);

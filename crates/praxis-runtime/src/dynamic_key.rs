@@ -227,6 +227,14 @@ mod tests {
         None,
     );
 
+    // The payload handles for the three fixtures (REP-02). Declared as
+    // `static`s, which is what makes `Payload::new`'s layout check a
+    // compile-time one — a fixture whose type argument disagreed with its
+    // `for_test::<P>` payload would not build.
+    static A_PAYLOAD: crate::descriptor::Payload<i64> = crate::descriptor::Payload::new(&LOGICAL_A);
+    static B_PAYLOAD: crate::descriptor::Payload<i64> = crate::descriptor::Payload::new(&LOGICAL_B);
+    static C_PAYLOAD: crate::descriptor::Payload<u8> = crate::descriptor::Payload::new(&LOGICAL_C);
+
     /// Wire a fresh runtime and return its context pointer (test helper).
     fn wired_ctx(rt: &mut Runtime) -> *mut RuntimeContext {
         let ctx = Box::leak(Box::new(rt.context()));
@@ -279,8 +287,8 @@ mod tests {
     #[test]
     fn dynamic_keys_with_different_descriptors_are_never_equal() {
         let heap = Heap::new();
-        let a = heap.alloc_unpaced(&LOGICAL_A, 7_i64);
-        let b = heap.alloc_unpaced(&LOGICAL_B, 7_i64);
+        let a = heap.alloc_unpaced(A_PAYLOAD, 7_i64);
+        let b = heap.alloc_unpaced(B_PAYLOAD, 7_i64);
 
         assert_ne!(
             DynamicKey::new(a),
@@ -295,8 +303,8 @@ mod tests {
     #[test]
     fn a_mismatched_key_never_dispatches_the_equality_callback() {
         let heap = Heap::new();
-        let wide = heap.alloc_unpaced(&LOGICAL_A, 7_i64);
-        let narrow = heap.alloc_unpaced(&LOGICAL_C, 7_u8);
+        let wide = heap.alloc_unpaced(A_PAYLOAD, 7_i64);
+        let narrow = heap.alloc_unpaced(C_PAYLOAD, 7_u8);
 
         // `LOGICAL_A::equals` would read eight bytes out of a one-byte payload.
         // Equality must answer `false` from the descriptors alone.
@@ -312,8 +320,8 @@ mod tests {
         use std::collections::HashSet;
 
         let heap = Heap::new();
-        let a = heap.alloc_unpaced(&LOGICAL_A, 7_i64);
-        let b = heap.alloc_unpaced(&LOGICAL_B, 7_i64);
+        let a = heap.alloc_unpaced(A_PAYLOAD, 7_i64);
+        let b = heap.alloc_unpaced(B_PAYLOAD, 7_i64);
 
         let mut set = HashSet::new();
         assert!(set.insert(DynamicKey::new(a)));

@@ -19,7 +19,7 @@ use std::ptr::NonNull;
 
 use bumpalo::Bump;
 
-use crate::descriptor::TypeDescriptor;
+use crate::descriptor::{Payload, TypeDescriptor};
 use crate::gc::{GcHeader, GcRef, HeapId, BLACK, GREY, WHITE};
 use crate::roots::{RootSet, RuntimeRoots};
 use crate::Tracer;
@@ -196,16 +196,11 @@ impl Heap {
     /// reclaims (RT-03).
     pub(crate) fn alloc_immortal<T: Copy>(
         &self,
-        descriptor: &'static TypeDescriptor,
+        payload: Payload<T>,
         value: T,
         _witness: crate::immortal::ImmortalWitness,
     ) -> GcRef {
-        assert_eq!(
-            std::mem::size_of::<T>(),
-            descriptor.size(),
-            "payload size mismatch for descriptor {}",
-            descriptor.name
-        );
+        let descriptor = payload.descriptor();
         // SAFETY: `T: Copy`, bytes are fully initialized.
         let r = unsafe { self.alloc_raw(descriptor, |payload| (payload as *mut T).write(value)) };
         // Remove the registration `alloc_raw` just performed, so sweep skips it.
@@ -242,20 +237,28 @@ impl Heap {
     /// which writes the value via `ptr::write` so its `Drop` later runs
     /// correctly.
     ///
-    /// # Panics
-    /// Panics if `T`'s size does not match `descriptor.size`.
+    /// The descriptor arrives as a [`Payload<T>`], so "this value is not that
+    /// descriptor's payload" is a type error at the call rather than an assert
+    /// here (REP-02).
     pub fn alloc<T: Copy>(
         &self,
         _safepoint: Safepoint<'_>,
-        descriptor: &'static TypeDescriptor,
+        payload: Payload<T>,
         value: T,
     ) -> GcRef {
-        self.alloc_unpaced(descriptor, value)
+        self.alloc_unpaced(payload, value)
     }
 
     /// Allocate an object whose payload owns Rust resources, initializing it
     /// with `init`. `init` receives a pointer to the uninitialized payload bytes
     /// and must fully initialize them.
+    ///
+    /// This path keeps its runtime layout assertions, deliberately: `init` is a
+    /// closure writing through a `*mut u8`, so there is no payload type for a
+    /// [`Payload<T>`] to carry (REP-02 removed the checks from the `Copy` path,
+    /// where the type *is* available). Every caller here writes a specific
+    /// non-`Copy` payload — a `Box<str>`, a `VecPayload` — and passes that type's
+    /// own `size_of`/`align_of`, which is why the assertions have never fired.
     ///
     /// # Safety
     /// `init` must initialize the payload in place and must not panic after
@@ -292,20 +295,11 @@ impl Heap {
     /// A `praxis_*` wrapper must never use this: generated code roots what it
     /// holds across a call the manifest declares `Allocates`, which is exactly
     /// what makes the paced path safe there.
-    pub(crate) fn alloc_unpaced<T: Copy>(
-        &self,
-        descriptor: &'static TypeDescriptor,
-        value: T,
-    ) -> GcRef {
-        assert_eq!(
-            std::mem::size_of::<T>(),
-            descriptor.size(),
-            "payload size mismatch for descriptor {}",
-            descriptor.name
-        );
+    pub(crate) fn alloc_unpaced<T: Copy>(&self, payload: Payload<T>, value: T) -> GcRef {
         // SAFETY: `T: Copy`, so writing the bytes is sufficient initialization
-        // (no `Drop` to run later).
-        unsafe { self.alloc_raw(descriptor, |payload| (payload as *mut T).write(value)) }
+        // (no `Drop` to run later); and `Payload<T>` is the descriptor's own
+        // payload type, so the bytes fit the block `alloc_raw` lays out.
+        unsafe { self.alloc_raw(payload.descriptor(), |p| (p as *mut T).write(value)) }
     }
 
     /// [`Heap::alloc_with`] **without** pacing the collector. See
@@ -654,7 +648,7 @@ mod tests {
     use crate::collections::{VecPayload, VEC};
     use crate::descriptor::TypeDescriptor;
     use crate::roots::RootScope;
-    use crate::scalars::{INT, UNIT};
+    use crate::scalars::{INT, INT_PAYLOAD, UNIT_PAYLOAD};
     use crate::{GcRef, Tracer};
     use std::cell::Cell;
     use std::sync::{
@@ -706,7 +700,7 @@ mod tests {
     #[test]
     fn alloc_int_round_trips_payload() {
         let heap = Heap::new();
-        let r = heap.alloc_unpaced(&INT, 42_i64);
+        let r = heap.alloc_unpaced(INT_PAYLOAD, 42_i64);
         assert_eq!(r.descriptor().name, "Int");
         // SAFETY: `r` was allocated with INT, payload is i64.
         let v = unsafe { *r.payload::<i64>() };
@@ -717,7 +711,7 @@ mod tests {
     #[test]
     fn collect_reclaims_unrooted_allocation() {
         let heap = Heap::new();
-        let _ = heap.alloc_unpaced(&INT, 1_i64);
+        let _ = heap.alloc_unpaced(INT_PAYLOAD, 1_i64);
         assert_eq!(heap.stats().live_count, 1);
 
         let roots = RootScope::new(); // nothing rooted
@@ -733,7 +727,7 @@ mod tests {
     fn collect_preserves_rooted_allocation() {
         let heap = Heap::new();
         let mut scope = RootScope::new();
-        let r = heap.alloc_unpaced(&INT, 7_i64);
+        let r = heap.alloc_unpaced(INT_PAYLOAD, 7_i64);
         scope.root(r);
         assert_eq!(heap.stats().live_count, 1);
 
@@ -756,7 +750,7 @@ mod tests {
         // Build [10, 20, 30] as Int GcRefs.
         let elems: Vec<GcRef> = [10_i64, 20, 30]
             .iter()
-            .map(|&v| heap.alloc_unpaced(&INT, v))
+            .map(|&v| heap.alloc_unpaced(INT_PAYLOAD, v))
             .collect();
 
         // Wrap in a Vec[T] payload. Element type is recorded in the payload
@@ -779,7 +773,7 @@ mod tests {
 
         // Allocate garbage that should be reclaimed.
         for i in 0..5_i64 {
-            let _ = heap.alloc_unpaced(&INT, 1000 + i);
+            let _ = heap.alloc_unpaced(INT_PAYLOAD, 1000 + i);
         }
         assert_eq!(heap.stats().live_count, 9); // vec + 3 ints + 5 garbage
 
@@ -805,7 +799,10 @@ mod tests {
         let mut scope = RootScope::new();
 
         let inner_alloc = |ints: &[i64]| -> GcRef {
-            let elems: Vec<GcRef> = ints.iter().map(|&v| heap.alloc_unpaced(&INT, v)).collect();
+            let elems: Vec<GcRef> = ints
+                .iter()
+                .map(|&v| heap.alloc_unpaced(INT_PAYLOAD, v))
+                .collect();
             unsafe {
                 heap.alloc_with_unpaced(
                     &VEC,
@@ -840,7 +837,7 @@ mod tests {
         scope.root(outer);
 
         // Garbage.
-        let _ = heap.alloc_unpaced(&UNIT, ());
+        let _ = heap.alloc_unpaced(UNIT_PAYLOAD, ());
 
         heap.collect_with(&scope);
 
@@ -977,7 +974,7 @@ mod tests {
     fn foreign_heap_root_cannot_delay_reclamation() {
         let first = Heap::new();
         let second = Heap::new();
-        let value = first.alloc_unpaced(&INT, 1_i64);
+        let value = first.alloc_unpaced(INT_PAYLOAD, 1_i64);
         let mut foreign_roots = RootScope::new();
         foreign_roots.root(value);
 
@@ -995,7 +992,7 @@ mod tests {
     /// one happened within `limit` allocations.
     fn allocate_until_paced(heap: &Heap, limit: usize) -> bool {
         for i in 0..limit {
-            let _ = heap.alloc_unpaced(&INT, i as i64);
+            let _ = heap.alloc_unpaced(INT_PAYLOAD, i as i64);
             if heap.maybe_collect_with(&RootScope::new()) {
                 return true;
             }
@@ -1008,7 +1005,7 @@ mod tests {
         let mut heap = Heap::new();
         // Only a *paced* collection grows the threshold, so drive one.
         assert!(allocate_until_paced(&heap, 100_000));
-        let _ = heap.alloc_unpaced(&INT, 1_i64);
+        let _ = heap.alloc_unpaced(INT_PAYLOAD, 1_i64);
         assert_ne!(*heap.bytes_since_collect.borrow(), 0);
         assert_ne!(*heap.collect_threshold.borrow(), INITIAL_COLLECT_THRESHOLD);
 
@@ -1135,14 +1132,14 @@ mod tests {
         const OBJECTS_PER_CYCLE: usize = 4_096;
 
         for i in 0..OBJECTS_PER_CYCLE {
-            let _ = heap.alloc_unpaced(&INT, i as i64);
+            let _ = heap.alloc_unpaced(INT_PAYLOAD, i as i64);
         }
         heap.collect_with(&RootScope::new());
         let first_cycle_bytes = heap.arena.allocated_bytes();
 
         for cycle in 1..=8 {
             for i in 0..OBJECTS_PER_CYCLE {
-                let _ = heap.alloc_unpaced(&INT, (cycle * OBJECTS_PER_CYCLE + i) as i64);
+                let _ = heap.alloc_unpaced(INT_PAYLOAD, (cycle * OBJECTS_PER_CYCLE + i) as i64);
             }
             heap.collect_with(&RootScope::new());
         }
@@ -1163,7 +1160,7 @@ mod tests {
     fn every_allocation_records_the_offset_it_was_laid_out_with() {
         let heap = Heap::new();
 
-        let int = heap.alloc_unpaced(&INT, 1_i64);
+        let int = heap.alloc_unpaced(INT_PAYLOAD, 1_i64);
         assert_eq!(
             int.payload::<i64>() as usize - int.as_ptr() as usize,
             GcHeader::payload_offset_for(INT.align())
@@ -1189,7 +1186,7 @@ mod tests {
     fn allocations_carry_their_owning_heap() {
         let first = Heap::new();
         let second = Heap::new();
-        let mine = first.alloc_unpaced(&INT, 1_i64);
+        let mine = first.alloc_unpaced(INT_PAYLOAD, 1_i64);
 
         assert_eq!(mine.header().heap_id(), Some(first.id()));
         assert!(first.owns(mine));
@@ -1203,7 +1200,7 @@ mod tests {
     #[test]
     fn sweeping_poisons_the_reclaimed_header() {
         let heap = Heap::new();
-        let doomed = heap.alloc_unpaced(&INT, 1_i64);
+        let doomed = heap.alloc_unpaced(INT_PAYLOAD, 1_i64);
         assert!(!doomed.header().is_poisoned());
 
         heap.collect_with(&RootScope::new());
@@ -1219,7 +1216,7 @@ mod tests {
     #[test]
     fn a_swept_reference_is_not_traced_again() {
         let heap = Heap::new();
-        let stale = heap.alloc_unpaced(&INT, 1_i64);
+        let stale = heap.alloc_unpaced(INT_PAYLOAD, 1_i64);
         heap.collect_with(&RootScope::new());
         assert!(stale.header().is_poisoned());
 
@@ -1240,17 +1237,17 @@ mod tests {
     /// with this heap's id, unpoisoned, and reading back as its new type.
     #[test]
     fn a_reclaimed_block_is_reused_for_the_next_object_of_its_layout() {
-        use crate::scalars::FLOAT;
+        use crate::scalars::FLOAT_PAYLOAD;
         let heap = Heap::new();
 
-        let doomed = heap.alloc_unpaced(&INT, 1_i64);
+        let doomed = heap.alloc_unpaced(INT_PAYLOAD, 1_i64);
         let address = doomed.as_ptr();
         heap.collect_with(&RootScope::new());
         assert!(doomed.header().is_poisoned());
 
         // `Float`'s payload has `Int`'s size and alignment, so it files under
         // the same `BlockLayout`.
-        let reused = heap.alloc_unpaced(&FLOAT, 2.5_f64);
+        let reused = heap.alloc_unpaced(FLOAT_PAYLOAD, 2.5_f64);
 
         assert_eq!(
             reused.as_ptr(),
@@ -1270,7 +1267,7 @@ mod tests {
     #[test]
     fn reset_discards_the_free_list() {
         let mut heap = Heap::new();
-        let doomed = heap.alloc_unpaced(&INT, 1_i64);
+        let doomed = heap.alloc_unpaced(INT_PAYLOAD, 1_i64);
         let stale = doomed.as_ptr();
         heap.collect_with(&RootScope::new());
         assert_eq!(heap.free.borrow().values().map(Vec::len).sum::<usize>(), 1);
@@ -1278,7 +1275,7 @@ mod tests {
         heap.reset();
 
         assert_eq!(heap.free.borrow().values().map(Vec::len).sum::<usize>(), 0);
-        let fresh = heap.alloc_unpaced(&INT, 2_i64);
+        let fresh = heap.alloc_unpaced(INT_PAYLOAD, 2_i64);
         assert_eq!(fresh.header().heap_id(), Some(heap.id()));
         // The address may legitimately be reused by the fresh arena; what must
         // not happen is the *stale block* being handed out with the old layout
@@ -1293,13 +1290,13 @@ mod tests {
     fn reset_mints_a_new_heap_identity() {
         let mut heap = Heap::new();
         let before = heap.id();
-        let _ = heap.alloc_unpaced(&INT, 1_i64);
+        let _ = heap.alloc_unpaced(INT_PAYLOAD, 1_i64);
 
         heap.reset();
 
         assert_ne!(heap.id(), before);
         assert_eq!(
-            heap.alloc_unpaced(&INT, 2_i64).header().heap_id(),
+            heap.alloc_unpaced(INT_PAYLOAD, 2_i64).header().heap_id(),
             Some(heap.id())
         );
     }

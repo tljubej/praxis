@@ -237,7 +237,7 @@ unsafe fn copy_chain(top: *mut DebugFrame) -> Vec<SnapshotFrame> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scalars::INT;
+    use crate::scalars::{INT, INT_PAYLOAD};
     use crate::{Runtime, LOCAL_KIND_USER};
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn explicit_collection_preserves_values_held_by_a_crash_snapshot() {
         let runtime = Runtime::new();
-        let value = runtime.heap().alloc_unpaced(&INT, 42_i64);
+        let value = runtime.heap().alloc_unpaced(INT_PAYLOAD, 42_i64);
         let snapshot = CrashSnapshot {
             frames: vec![SnapshotFrame {
                 parent: usize::MAX,
@@ -301,7 +301,7 @@ mod tests {
     fn a_snapshot_may_be_dropped_after_the_runtime_it_names() {
         let snapshot = {
             let runtime = Runtime::new();
-            let value = runtime.heap().alloc_unpaced(&INT, 42_i64);
+            let value = runtime.heap().alloc_unpaced(INT_PAYLOAD, 42_i64);
             CrashSnapshot {
                 frames: vec![SnapshotFrame {
                     parent: usize::MAX,

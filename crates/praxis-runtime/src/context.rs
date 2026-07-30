@@ -710,7 +710,7 @@ impl Default for Runtime {
 impl Runtime {
     /// Allocate an `Int` (§4.3).
     pub fn alloc_int(&self, value: i64) -> GcRef {
-        self.heap.alloc_unpaced(&crate::scalars::INT, value)
+        self.heap.alloc_unpaced(crate::scalars::INT_PAYLOAD, value)
     }
 
     /// Allocate a `Bool` as the corresponding immortal singleton (§4.3). Booleans
@@ -721,7 +721,7 @@ impl Runtime {
 
     /// Allocate a `Byte` (§4.3).
     pub fn alloc_byte(&self, value: u8) -> GcRef {
-        self.heap.alloc_unpaced(&crate::scalars::BYTE, value)
+        self.heap.alloc_unpaced(crate::scalars::BYTE_PAYLOAD, value)
     }
 
     /// Allocate a `Char` (§4.3). Panics if `value` is not a valid scalar value.
@@ -730,13 +730,14 @@ impl Runtime {
             crate::scalars::is_valid_char(value),
             "{value:#x} is not a valid Unicode scalar"
         );
-        self.heap.alloc_unpaced(&crate::scalars::CHAR, value)
+        self.heap.alloc_unpaced(crate::scalars::CHAR_PAYLOAD, value)
     }
 
     /// Allocate a `Float` (§4.3, §4.12). All finite values, ±infinity, and NaN
     /// are valid payloads — `Float` arithmetic never faults (IEEE-754).
     pub fn alloc_float(&self, value: f64) -> GcRef {
-        self.heap.alloc_unpaced(&crate::scalars::FLOAT, value)
+        self.heap
+            .alloc_unpaced(crate::scalars::FLOAT_PAYLOAD, value)
     }
 
     /// The immortal `Unit` (§4.3).

@@ -414,6 +414,83 @@ impl TypeDescriptor {
     }
 }
 
+/// A descriptor together with the Rust type of the payload it describes
+/// (REP-02).
+///
+/// [`TypeDescriptor::builtin`] takes the payload type `P`, derives `size`/`align`
+/// from it, and then **erases it**. So every allocator downstream took the
+/// payload as a bare generic and could only compare widths at *runtime* —
+/// `gc_alloc(ctx, &scalars::INT, 0)` passes an `i32`, because Rust's default
+/// integer type is not `i64`, and it aborted the process with "payload size
+/// mismatch for descriptor Int" from inside `extern "C"`. A non-unwinding panic
+/// across the ABI is exactly what §10.4 forbids, and the assertion could not
+/// fire until the wrong call ran.
+///
+/// `Payload<T>` re-attaches the type. The pairing is checked once, where the
+/// handle is declared — [`Payload::new`] is a `const fn` whose assertions run
+/// during const evaluation, so a `static`/`const` handle whose `T` is not its
+/// descriptor's payload **fails to compile**. And because the allocators take
+/// the handle and the value together, the value's type is checked at every call
+/// site by ordinary type inference. Neither mistake reaches a runtime assert.
+pub struct Payload<T: Copy> {
+    descriptor: &'static TypeDescriptor,
+    /// `fn() -> T` rather than `T`: invariance is not wanted here, and this
+    /// marker leaves `Payload<T>` `Copy`/`Send`/`Sync` whatever `T` is.
+    _payload: std::marker::PhantomData<fn() -> T>,
+}
+
+// Derived impls would demand `T: Clone`/`T: Copy` bounds that the marker makes
+// unnecessary — a handle is two words of shared metadata, not a value.
+impl<T: Copy> Clone for Payload<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T: Copy> Copy for Payload<T> {}
+
+impl<T: Copy> Payload<T> {
+    /// Pair `descriptor` with the payload type `T`.
+    ///
+    /// Declare the result as a `const` or `static` — that is what makes the
+    /// check a compile-time one. Called in a runtime expression the assertions
+    /// are ordinary ones, which is the situation this type exists to remove.
+    ///
+    /// # Panics
+    /// During const evaluation, if `T`'s layout is not the one `descriptor`
+    /// declares.
+    #[must_use]
+    pub const fn new(descriptor: &'static TypeDescriptor) -> Payload<T> {
+        assert!(
+            std::mem::size_of::<T>() == descriptor.size(),
+            "payload type is not this descriptor's width"
+        );
+        assert!(
+            std::mem::align_of::<T>() == descriptor.align(),
+            "payload type is not this descriptor's alignment"
+        );
+        Payload {
+            descriptor,
+            _payload: std::marker::PhantomData,
+        }
+    }
+
+    /// The descriptor this handle carries. Its *address* is the type's identity,
+    /// and the handle holds the one `static`, so that identity survives.
+    #[must_use]
+    pub const fn descriptor(self) -> &'static TypeDescriptor {
+        self.descriptor
+    }
+}
+
+impl<T: Copy> fmt::Debug for Payload<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Payload")
+            .field("descriptor", &self.descriptor.name)
+            .field("size", &std::mem::size_of::<T>())
+            .finish()
+    }
+}
+
 impl fmt::Debug for TypeDescriptor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TypeDescriptor")

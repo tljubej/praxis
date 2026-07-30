@@ -121,13 +121,13 @@ impl Rt {
     /// Allocate a boxed `Int`.
     fn alloc_int(&self, value: i64) -> GcRef {
         // SAFETY: ctx is valid (caller upholds).
-        unsafe { heap_ref(self.ctx).alloc_unpaced(&scalars::INT, value) }
+        unsafe { heap_ref(self.ctx).alloc_unpaced(scalars::INT_PAYLOAD, value) }
     }
 
     /// Allocate a boxed `Char` from a Unicode scalar.
     fn alloc_char(&self, value: u32) -> GcRef {
         // SAFETY: ctx is valid.
-        unsafe { heap_ref(self.ctx).alloc_unpaced(&scalars::CHAR, value) }
+        unsafe { heap_ref(self.ctx).alloc_unpaced(scalars::CHAR_PAYLOAD, value) }
     }
 
     /// Allocate a source-slice `Text` pointing into `owner`, or `None` if the
