@@ -352,6 +352,11 @@ fn resolve_expr(db: &mut TypeDb, binders: &[VarId], args: &[Type], e: &mut Typed
     match e {
         TypedExpr::Lit { ty, .. }
         | TypedExpr::Path { ty, .. }
+        // A function value carries only its own `Func` type; the function it
+        // names is specialized (or not) by its own call sites, and a *generic*
+        // one used as a value has no call site to specialize from — see
+        // `a_generic_fn_used_as_a_value_is_reported_rather_than_run`.
+        | TypedExpr::FnValue { ty, .. }
         | TypedExpr::Bin { ty, .. }
         | TypedExpr::Range { ty, .. }
         | TypedExpr::Unary { ty, .. }

@@ -3741,3 +3741,93 @@ fn an_out_of_range_int_literal_is_reported_rather_than_saturated() {
     );
     assert!(diags.iter().any(|d| d.code().to_string() == "Y013"));
 }
+
+/// **REP-01, ADR-061.** A top-level `fn` in value position lowers to a *function
+/// value*, and the typed tree says so.
+///
+/// It used to lower to `TypedExpr::Path`, whose symbol has no local slot, so MIR
+/// answered `Unit` and `Inst::CallIndirect` read that Unit's payload as a
+/// function pointer. The distinction is the symbol's **kind**: a `let` holding a
+/// closure is a `Path` and has a `Func` type too, so the scheme cannot tell them
+/// apart — the same reason `SymbolKind::EnumVariant` exists (HIR-03).
+#[test]
+fn a_fn_name_in_value_position_is_a_function_value() {
+    use praxis_ast::AstNode;
+
+    let src = "fn double(n: Int) -> Int { n * 2 }\n\
+               fn main() -> Int {\n  let f = double\n  let g = |n| n * 3\n  f(1) + g(1)\n}\n";
+    let map = SourceMap::new();
+    let id = map.intern("fn_value.px", src);
+    let parsed = parse(id, src);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = crate::lower::lower(id, &root, &mut analysis);
+    let main = module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::TypedItem::Fn(f) if f.name == "main" => Some(f),
+            _ => None,
+        })
+        .expect("main function");
+
+    // `let f = double` — a function value naming `double`, typed as `double`'s
+    // own signature.
+    let crate::TypedStmt::Let { init, .. } = &main.body.stmts[0] else {
+        panic!("expected `let f = double`, got {:?}", main.body.stmts[0]);
+    };
+    let crate::TypedExpr::FnValue {
+        callee_name, ty, ..
+    } = init
+    else {
+        panic!("a `fn` in value position is a function value, got {init:?}");
+    };
+    assert_eq!(callee_name, "double");
+    assert_eq!(analysis.db.render(*ty), "(Int) -> Int");
+
+    // …and a `let` holding a *closure* is still a closure literal, so the new
+    // arm did not swallow the case it sits next to.
+    let crate::TypedStmt::Let { init, .. } = &main.body.stmts[1] else {
+        panic!("expected `let g = |n| n * 3`");
+    };
+    assert!(
+        matches!(init, crate::TypedExpr::Closure { .. }),
+        "a closure literal is unchanged: {init:?}"
+    );
+}
+
+/// A **generic** `fn` used as a value is reported where it is written, not left
+/// to fail in the backend.
+///
+/// Monomorphization is driven by call sites; a value has none, so the adapter
+/// would call a clone-source the mono pass drops and the JIT would say
+/// "unresolved user function `id`" — a Cranelift error for a program `praxis
+/// check` accepted, which is TY-33's shape all over again. `Y018` names the
+/// remedy instead, and the remedy works: a closure body *is* a call site.
+#[test]
+fn a_generic_fn_used_as_a_value_is_reported_rather_than_run() {
+    let diags =
+        analyze_and_lower_diags("fn id(x) { x }\nfn main() -> Int {\n  let f = id\n  f(3)\n}\n");
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y018"),
+        "expected Y018, got {diags:?}"
+    );
+    // It is reported at *analysis*, so `praxis check` sees it — the asymmetry
+    // REP-12 was about.
+    assert!(has_type_error(
+        "fn id(x) { x }\nfn main() -> Int {\n  let f = id\n  f(3)\n}\n"
+    ));
+
+    // The remedy compiles, and so does a monomorphic function used as a value.
+    assert!(is_clean_with_lower(
+        "fn id(x) { x }\nfn main() -> Int {\n  let f = |n| id(n)\n  f(3)\n}\n"
+    ));
+    assert!(is_clean_with_lower(
+        "fn double(n: Int) -> Int { n * 2 }\nfn main() -> Int {\n  let f = double\n  f(3)\n}\n"
+    ));
+    // And *calling* the generic function directly is untouched — the report is
+    // about value position only.
+    assert!(is_clean_with_lower(
+        "fn id(x) { x }\nfn main() -> Int { id(3) }\n"
+    ));
+}

@@ -164,6 +164,23 @@ pub enum TypedExpr {
         ty: Type,
         span: (u32, u32),
     },
+    /// A top-level `fn` name used in **value** position (REP-01, ADR-061):
+    /// `let f = double`, or `double` passed where a `Func` is expected.
+    ///
+    /// Distinct from [`Path`](Self::Path) because a `fn` is not a binding: it has
+    /// no local slot, so a `Path` to one lowered to `Unit` and `Inst::CallIndirect`
+    /// then read that Unit's payload as a function pointer — a SIGBUS from a
+    /// program that passed `praxis check`. It lowers to a closure over the
+    /// function with an empty environment (a top-level `fn` captures nothing).
+    ///
+    /// `callee_name` is here for the reason `Call`'s is: the MIR builder names
+    /// its target without a `NameTable`.
+    FnValue {
+        callee: SymbolId,
+        callee_name: String,
+        ty: Type,
+        span: (u32, u32),
+    },
     /// `a op b`.
     Bin {
         op: BinOp,
@@ -477,6 +494,7 @@ macro_rules! typed_expr_children {
 typed_expr_children! {
     Lit {},
     Path {},
+    FnValue {},
     Read {},
     Continue {},
     Bin { lhs, rhs },
@@ -1366,6 +1384,23 @@ impl<'a> Lowerer<'a> {
             .name()
             .and_then(|t| self.resolve_symbol_at(t.text_range()))
             .unwrap_or(SymbolId(u32::MAX));
+        // A top-level `fn` in value position is a function value, not a binding
+        // reference (REP-01, ADR-061). It reaches here only in value position —
+        // `lower_call` resolves a named callee itself and never comes through
+        // `lower_path` — so this is exactly the `let f = double` case, which used
+        // to lower to `Unit` and take the host down when the value was called.
+        if self.symbol_kind(symbol) == Some(crate::SymbolKind::Fn) {
+            return TypedExpr::FnValue {
+                callee: symbol,
+                callee_name: self
+                    .names
+                    .get(symbol)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default(),
+                ty,
+                span,
+            };
+        }
         TypedExpr::Path { symbol, ty, span }
     }
 
@@ -1710,6 +1745,14 @@ impl<'a> Lowerer<'a> {
     /// variant's identity from here. It does not hand back the payload either —
     /// a generic def's payload is written in terms of its *parameters* (F12),
     /// so reading it off the def would answer `T` rather than the element type.
+    /// What kind of declaration `symbol` is, or `None` for the unresolved
+    /// sentinel. The *kind* is what distinguishes a `fn` from a binding that
+    /// holds a function value — a scheme cannot, since both are `Func`s, which is
+    /// the same reason `SymbolKind::EnumVariant` is load-bearing (HIR-03).
+    fn symbol_kind(&self, symbol: SymbolId) -> Option<crate::SymbolKind> {
+        self.names.get(symbol).map(|s| s.kind)
+    }
+
     fn enum_variant_of(&self, symbol: SymbolId) -> Option<(praxis_types::EnumDefId, usize)> {
         let sym = self.names.get(symbol)?;
         if sym.kind != crate::SymbolKind::EnumVariant {
@@ -2237,6 +2280,7 @@ pub fn expr_span(e: &TypedExpr) -> (u32, u32) {
     match e {
         TypedExpr::Lit { span, .. }
         | TypedExpr::Path { span, .. }
+        | TypedExpr::FnValue { span, .. }
         | TypedExpr::Bin { span, .. }
         | TypedExpr::Range { span, .. }
         | TypedExpr::Unary { span, .. }
@@ -2280,6 +2324,7 @@ pub fn expr_ty(e: &TypedExpr) -> Type {
     match e {
         TypedExpr::Lit { ty, .. } => *ty,
         TypedExpr::Path { ty, .. } => *ty,
+        TypedExpr::FnValue { ty, .. } => *ty,
         TypedExpr::Bin { ty, .. } => *ty,
         TypedExpr::Range { ty, .. } => *ty,
         TypedExpr::Unary { ty, .. } => *ty,

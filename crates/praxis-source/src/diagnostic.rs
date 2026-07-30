@@ -215,6 +215,13 @@ pub enum DiagCode {
     OperatorNotDefined,
     /// `Y017` — a `break` carrying a value out of a `while`/`for` (TY-21).
     ValueBreakOutsideLoopExpression,
+    /// `Y018` — a **generic** `fn` used as a value (REP-01, ADR-061).
+    ///
+    /// A monomorphic one is a closure over its adapter; a generic one has no
+    /// instantiation to adapt, because monomorphization is driven by call sites
+    /// and a value has none. `|x| id(x)` is the spelling that works — the
+    /// closure's body *is* a call site.
+    GenericFunctionAsValue,
 
     // --- Type (`Y09x`), internal ---
     /// `Y099` — internal: a type the compiler expected was absent.
@@ -320,6 +327,7 @@ impl DiagCode {
             NotNumeric => DiagnosticCode::new(Type, 15),
             OperatorNotDefined => DiagnosticCode::new(Type, 16),
             ValueBreakOutsideLoopExpression => DiagnosticCode::new(Type, 17),
+            GenericFunctionAsValue => DiagnosticCode::new(Type, 18),
 
             InternalMissingType => DiagnosticCode::new(Type, 99),
 
@@ -388,6 +396,7 @@ impl DiagCode {
             NotNumeric,
             OperatorNotDefined,
             ValueBreakOutsideLoopExpression,
+            GenericFunctionAsValue,
             InternalMissingType,
             NoMethodOnType,
             NoFieldOnType,
@@ -774,7 +783,7 @@ mod tests {
         // `ALL` holds each variant once, so its length is the variant count.
         // Update both together; the exhaustive match in `code()` is what makes
         // adding a variant a compile error in the first place.
-        assert_eq!(DiagCode::ALL.len(), 57);
+        assert_eq!(DiagCode::ALL.len(), 58);
         let unique: std::collections::HashSet<_> = DiagCode::ALL.iter().collect();
         assert_eq!(
             unique.len(),

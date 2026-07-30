@@ -51,7 +51,47 @@ pub fn lower_module(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
             funcs.push(lower_closure_fn(&closure, db, escaping));
         }
     }
+    // …and one adapter per *function value* (REP-01, ADR-061). Deduplicated by
+    // name: every `let f = double` in the module shares `double`'s one adapter.
+    let mut adapted: Vec<FnValueAdapter> = Vec::new();
+    for item in &module.items {
+        let TypedItem::Fn(tfn) = item;
+        for adapter in collect_fn_values(&tfn.body) {
+            if !adapted.iter().any(|a| a.target == adapter.target) {
+                adapted.push(adapter);
+            }
+        }
+    }
+    for adapter in &adapted {
+        funcs.push(lower_fn_value_adapter(adapter, db));
+    }
     funcs
+}
+
+/// One top-level `fn` used as a value, and the adapter it needs (REP-01,
+/// ADR-061).
+///
+/// A closure's synthetic function takes the closure itself as a hidden first
+/// explicit argument — `fn(ctx, closure_self, args…)` — and a top-level `fn`
+/// does not: it is `fn(ctx, args…)`. So a `fn`'s address cannot be handed to
+/// `praxis_alloc_closure` directly, however empty the environment is; every
+/// argument would land one slot to the left. The adapter is the one-instruction
+/// function that bridges the two conventions.
+struct FnValueAdapter {
+    /// The user function being adapted, by name.
+    target: String,
+    /// Its type at the use site — a `Func`, whose parameter count is the
+    /// adapter's arity and whose result is what it returns.
+    fn_ty: Type,
+}
+
+impl FnValueAdapter {
+    /// The adapter's MIR/symbol name. One per target, so two uses of the same
+    /// function share it. Shaped like the other synthetic names (`__closure_0`,
+    /// `__p_expr`) so it cannot be confused with a user function in a backtrace.
+    fn name(target: &str) -> String {
+        format!("__fnvalue_{target}")
+    }
 }
 
 /// A closure literal lifted out of a body for synthetic-function emission.
@@ -118,6 +158,47 @@ fn collect_closures_expr(e: &TypedExpr, out: &mut Vec<LiftedClosure>) {
             body: (**body).clone(),
             captures: captures.clone(),
             self_ty: *ty,
+        });
+    }
+}
+
+/// Every `TypedExpr::FnValue` in a body, in source order (REP-01).
+///
+/// The same walk as [`collect_closures`] and for the same reason: the child list
+/// is F20's, so a function value in a field this forgot cannot happen.
+fn collect_fn_values(block: &TypedBlock) -> Vec<FnValueAdapter> {
+    let mut out = Vec::new();
+    collect_fn_values_block(block, &mut out);
+    out
+}
+
+fn collect_fn_values_block(block: &TypedBlock, out: &mut Vec<FnValueAdapter>) {
+    for stmt in &block.stmts {
+        match stmt {
+            TypedStmt::Let { init, .. } | TypedStmt::Var { init, .. } => {
+                collect_fn_values_expr(init, out)
+            }
+            TypedStmt::Assign { value, .. } => collect_fn_values_expr(value, out),
+            TypedStmt::Expr(e) => collect_fn_values_expr(e, out),
+        }
+    }
+    collect_fn_values_expr(&block.tail, out);
+}
+
+fn collect_fn_values_expr(e: &TypedExpr, out: &mut Vec<FnValueAdapter>) {
+    for child in e.children() {
+        collect_fn_values_expr(child, out);
+    }
+    for block in e.blocks() {
+        collect_fn_values_block(block, out);
+    }
+    if let TypedExpr::FnValue {
+        callee_name, ty, ..
+    } = e
+    {
+        out.push(FnValueAdapter {
+            target: callee_name.clone(),
+            fn_ty: *ty,
         });
     }
 }
@@ -369,6 +450,110 @@ fn lower_closure_fn(
     b.func
 }
 
+/// The adapter function for a top-level `fn` used as a value (REP-01, ADR-061).
+///
+/// Its params are `[closure_self, p0 … pn]` — the closure convention — and its
+/// body is one direct call to the target with `[p0 … pn]`, dropping the self
+/// slot the target has no parameter for. `n` is the arity of the `Func` type at
+/// the use site, which inference has already checked against the declaration, so
+/// the adapter cannot disagree with either side about how many arguments there
+/// are.
+///
+/// It is what "reuse `praxis_alloc_closure` with an empty environment" actually
+/// requires: the env is empty (a top-level `fn` captures nothing) but the *call*
+/// convention still has the extra hidden argument, so something has to absorb
+/// it. Nothing else about the closure path changes — the allocation, the fn_ptr
+/// read, the `call_indirect`, the rooting are all the existing ones.
+fn lower_fn_value_adapter(adapter: &FnValueAdapter, db: &mut TypeDb) -> Function {
+    let int_ty = db.int();
+    let float_ty = db.float();
+    let bool_ty = db.bool();
+    let text_ty = db.text();
+    let char_ty = db.char();
+    let unit_ty = db.unit();
+
+    // The parameter and result types are read off the `Func`. A use site whose
+    // type is not a `Func` cannot occur — inference gives a `fn` name its
+    // declared function type — but the fallback is a nullary adapter returning
+    // `Unit`, which is a well-formed function rather than a malformed one.
+    let (param_tys, result_ty) = match db.data(db.follow(adapter.fn_ty)) {
+        praxis_types::TypeData::Func { params, result } => (params.clone(), *result),
+        _ => (Vec::new(), unit_ty),
+    };
+
+    let mut func = Function {
+        name: FnValueAdapter::name(&adapter.target),
+        params: Vec::new(),
+        return_local: LocalId(0),
+        locals: Vec::new(),
+        blocks: Vec::new(),
+        debug_names: Vec::new(),
+        debug_kinds: Vec::new(),
+        debug_spans: Vec::new(),
+        // Synthetic, like a lifted closure: no source span of its own.
+        span: (0, 0),
+    };
+    let entry = func.new_block();
+    let fault = func.new_block();
+    func.blocks[fault.0 as usize].term = Terminator::Fault;
+
+    let escaping = std::collections::HashSet::new();
+    let mut b = Builder {
+        func,
+        locals: std::collections::HashMap::new(),
+        cur: entry,
+        fault_block: fault,
+        db,
+        int_ty,
+        float_ty,
+        bool_ty,
+        text_ty,
+        char_ty,
+        unit_ty,
+        escaping_vars: &escaping,
+        loop_stack: Vec::new(),
+    };
+
+    // Param 0: the closure value. Unused — the environment is empty — but it is
+    // the ABI slot every `call_indirect` through a closure passes, and dropping
+    // it here is the whole point of the adapter.
+    let self_local = b.alloc_gc(
+        MirType::Known(adapter.fn_ty),
+        Some("__closure_self".to_string()),
+        LocalDebugKind::Temp,
+        None,
+    );
+    b.func.params.push(self_local);
+
+    // The forwarded parameters, in order. No symbol binding: nothing in this
+    // body names them, so they exist only as ABI slots.
+    let forwarded: Vec<LocalId> = param_tys
+        .iter()
+        .map(|ty| {
+            let id = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, None);
+            b.func.params.push(id);
+            id
+        })
+        .collect();
+
+    let ret = b.alloc_gc(MirType::Known(result_ty), None, LocalDebugKind::Temp, None);
+    b.func.return_local = ret;
+    b.push(Inst::Call {
+        dst: ret,
+        callee: CallTarget::User(adapter.target.clone()),
+        args: forwarded,
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
+    });
+    // The target may fault, and the adapter is on the fault path's way out: a
+    // fault raised inside it has to reach this frame's `Terminator::Fault`
+    // rather than be carried past as a Unit sentinel.
+    b.check_fault();
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Return { value: ret };
+
+    b.func
+}
+
 impl<'a> Builder<'a> {
     /// Allocate a `Gc` local. `debug_name` is the source name (for user
     /// bindings/params/captures); `debug_kind` classifies it for the debugger;
@@ -602,6 +787,27 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     lower_lit_gc(b, &Lit::Unit, espan)
                 }
             }
+        }
+        // A top-level `fn` used as a value (REP-01, ADR-061): a closure over its
+        // adapter with an empty environment. This arm is what a `Path` to a `fn`
+        // used to fall through to the `None` above and answer `Unit` for — and
+        // `Inst::CallIndirect` then read the Unit's payload as a function
+        // pointer, which is a SIGBUS from a program `praxis check` accepted.
+        TypedExpr::FnValue {
+            callee_name, ty, ..
+        } => {
+            let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
+            b.push(Inst::Alloc {
+                dst,
+                alloc: AllocKind::Closure {
+                    fn_name: FnValueAdapter::name(callee_name),
+                    captures: Vec::new(),
+                },
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
+            });
+            b.check_fault();
+            dst
         }
         // `a..b` / `a..=b` (§4.11, ADR-059). One runtime call per form: the
         // inclusiveness is a *symbol*, not a flag, because the choice is a
@@ -3673,6 +3879,7 @@ fn expr_static_type(e: &TypedExpr) -> Type {
     match e {
         TypedExpr::Lit { ty, .. }
         | TypedExpr::Path { ty, .. }
+        | TypedExpr::FnValue { ty, .. }
         | TypedExpr::Bin { ty, .. }
         | TypedExpr::Range { ty, .. }
         | TypedExpr::Unary { ty, .. }
@@ -4106,6 +4313,103 @@ mod tests {
         assert!(
             rendered.iter().any(|t| t == "(Int) -> Int"),
             "the closure value's own type: {rendered:?}"
+        );
+    }
+
+    /// **REP-01, ADR-061.** A top-level `fn` in value position allocates a
+    /// closure over an adapter, and the adapter is one per function however many
+    /// times it is used.
+    ///
+    /// The adapter is the part the plan's sketch did not have: a closure's
+    /// synthetic function takes the closure as a hidden first argument and a
+    /// top-level `fn` does not, so handing the `fn`'s own address to
+    /// `praxis_alloc_closure` would shift every argument one slot left. Its
+    /// params are `[closure_self, forwarded…]` and its body is one direct call.
+    #[test]
+    fn a_fn_used_as_a_value_gets_one_adapter_per_function() {
+        let (funcs, analysis) = lower_src_to_mir(
+            "fn double(n: Int) -> Int { n * 2 }\n\
+             fn main() -> Int {\n  let f = double\n  let g = double\n  f(1) + g(2)\n}",
+        );
+        let adapters: Vec<&Function> = funcs
+            .iter()
+            .filter(|f| f.name.starts_with("__fnvalue_"))
+            .collect();
+        assert_eq!(
+            adapters.len(),
+            1,
+            "two uses of one function share its adapter: {:?}",
+            funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        let adapter = adapters[0];
+        assert_eq!(adapter.name, "__fnvalue_double");
+        // `[closure_self, n]` — the self slot the convention requires, plus the
+        // one parameter `double` actually declares.
+        assert_eq!(
+            adapter.params.len(),
+            2,
+            "the hidden self slot plus one forwarded argument"
+        );
+        // The body forwards to the real function, and forwards only the
+        // parameters — the self slot is dropped, which is the whole job.
+        let calls: Vec<&Inst> = adapter
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .filter(|i| matches!(i, Inst::Call { .. }))
+            .collect();
+        assert_eq!(calls.len(), 1, "one direct call: {calls:?}");
+        let Inst::Call { callee, args, .. } = calls[0] else {
+            unreachable!()
+        };
+        assert!(
+            matches!(callee, CallTarget::User(n) if n == "double"),
+            "the adapter calls the function it adapts: {callee:?}"
+        );
+        assert_eq!(args, &vec![adapter.params[1]], "the forwarded parameter");
+
+        // And the use site is a closure allocation with an empty environment,
+        // not the `Unit` a `Path` to a `fn` used to lower to.
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let allocs: Vec<&AllocKind> = main
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .filter_map(|i| match i {
+                Inst::Alloc { alloc, .. } => Some(alloc),
+                _ => None,
+            })
+            .filter(|a| matches!(a, AllocKind::Closure { .. }))
+            .collect();
+        assert_eq!(allocs.len(), 2, "one per use: {allocs:?}");
+        for a in allocs {
+            let AllocKind::Closure { fn_name, captures } = a else {
+                unreachable!()
+            };
+            assert_eq!(fn_name, "__fnvalue_double");
+            assert!(captures.is_empty(), "a top-level `fn` captures nothing");
+        }
+        let _ = analysis;
+    }
+
+    /// …and a *direct* call is still a direct call. `lower_call` resolves a named
+    /// callee itself, so it never comes through the path lowering — if it did,
+    /// every call in every program would allocate a closure first.
+    #[test]
+    fn a_direct_call_does_not_go_through_a_function_value() {
+        let (funcs, _analysis) =
+            lower_src_to_mir("fn double(n: Int) -> Int { n * 2 }\nfn main() -> Int { double(21) }");
+        assert!(
+            !funcs.iter().any(|f| f.name.starts_with("__fnvalue_")),
+            "no adapter: {:?}",
+            funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        assert!(
+            main.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| {
+                matches!(i, Inst::Call { callee: CallTarget::User(n), .. } if n == "double")
+            }),
+            "still one direct call to `double`"
         );
     }
 

@@ -1660,12 +1660,42 @@ impl Inferer {
                 let site = self.file_span(range);
                 let ty = self.db.instantiate_at(&scheme, site);
                 self.ref_types.insert(range, ty);
+                // A `fn` name reaches here only in **value** position: a call's
+                // callee is instantiated by `infer_call`, which records its own
+                // node type. A monomorphic one becomes a closure over its adapter
+                // (REP-01, ADR-061); a *generic* one has nothing to adapt, because
+                // monomorphization is driven by call sites and a value has none —
+                // so the adapter would call a clone-source the mono pass drops,
+                // and the JIT would fail with "unresolved user function". That is
+                // reported here instead, where the name is written, and where
+                // `praxis check` can see it.
+                if self.is_generic_fn(resolved.symbol, &scheme) {
+                    let name = self
+                        .names
+                        .get(resolved.symbol)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+                    self.diagnostics
+                        .push(crate::diagnostics::generic_function_as_value(site, &name));
+                }
                 return ty;
             }
         }
         // Unresolved names were already reported by resolution; return a fresh var
         // so downstream inference does not cascade spurious errors.
         self.db.fresh_var()
+    }
+
+    /// Whether `symbol` is a `fn` whose scheme quantifies anything — the case a
+    /// function *value* cannot represent (REP-01).
+    ///
+    /// The kind is what makes this answerable: a `let` bound to a closure also
+    /// has a `Func` scheme, and a generalized one at that, so the scheme alone
+    /// cannot tell a declaration from a binding that holds a value (the same
+    /// reason `SymbolKind::EnumVariant` exists — HIR-03).
+    fn is_generic_fn(&self, symbol: SymbolId, scheme: &praxis_types::Scheme) -> bool {
+        self.names.get(symbol).map(|s| s.kind) == Some(SymbolKind::Fn)
+            && !scheme.binders().is_empty()
     }
 
     /// `a..b` / `a..=b` (§4.11, ADR-059). Both bounds must be `Int`; the range

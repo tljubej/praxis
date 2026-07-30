@@ -5254,3 +5254,92 @@ fn a_deferred_method_with_arguments_runs() {
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 42);
 }
+
+// ---- Function values (REP-01, ADR-061) ----
+
+/// **REP-01, the only P0 left in the repair.** A top-level `fn` used as a value
+/// is a callable closure.
+///
+/// `let f = double` lowered to `Unit` and `Inst::CallIndirect` then read that
+/// Unit's payload as a function pointer, so this program — which `praxis check`
+/// accepts, because a `fn`'s type *is* a `Func` — took the host down with a
+/// SIGBUS. **This test aborting the test process is the failure mode**, not a
+/// wrong answer.
+///
+/// All three routes the stage names are here: a `let`, a parameter of declared
+/// function type, and a graph helper's closure argument (§6.5's helpers were the
+/// new way to reach the bug, and their descriptor check is containment, not a
+/// fix). A `Vec` element is a fourth, and is the one that also exercises the
+/// postfix call form.
+#[test]
+fn a_top_level_fn_is_a_callable_value() {
+    // Through a `let`, then called by name — the finding's own reproduction.
+    let (rt, result) = run_main(
+        "fn double(n: Int) -> Int { n * 2 }\n\
+         fn main() -> Int {\n  let f = double\n  f(3)\n}\n",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 6);
+
+    // Through a parameter of declared function type, alongside a closure
+    // literal in the same position: the two are one calling convention.
+    let (rt, result) = run_main(
+        "fn double(n: Int) -> Int { n * 2 }\n\
+         fn apply(g: (Int) -> Int, n: Int) -> Int { g(n) }\n\
+         fn main() -> Int { apply(double, 20) + apply(|x| x + 1, 1) }\n",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 42);
+
+    // Two arguments, so a shifted argument list would be visible as a wrong
+    // answer rather than only as a crash.
+    let (rt, result) = run_main(
+        "fn sub(a: Int, b: Int) -> Int { a - b }\n\
+         fn main() -> Int {\n  let f = sub\n  f(50, 8)\n}\n",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 42);
+
+    // Stored in a collection and called postfix, which reaches the value
+    // through `callee_expr` rather than through a name.
+    let (rt, result) = run_main(
+        "fn double(n: Int) -> Int { n * 2 }\n\
+         fn main() -> Int {\n  let fs = Vec()\n  fs.push(double)\n  fs.get(0)(21)\n}\n",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+/// …and through a graph helper, where `praxis-runtime` calls *back* into
+/// generated code. The helper receives the adapter's closure and calls it once
+/// per state; a `Unit` here is what its descriptor check used to turn into a
+/// `TypeMismatch` fault.
+#[test]
+fn a_fn_value_is_callable_from_the_runtime_side() {
+    let (rt, result) = run_main(
+        "fn step(n: Int) -> Vec[Int] {\n  \
+           let v = Vec()\n  \
+           if n < 4 { v.push(n + 1) }\n  \
+           v\n\
+         }\n\
+         fn at_goal(n: Int) -> Bool { n == 4 }\n\
+         fn main() -> Int {\n  \
+           let d = bfs_distance(0, step, at_goal)\n  \
+           match d { Some(k) => k, None => 0 - 1 }\n\
+         }\n",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 4);
+}
+
+/// A fault raised inside the adapted function still reaches the caller as a
+/// fault — the adapter is on the fault path's way out, so it checks after its
+/// one call instead of returning the Unit sentinel as a value.
+#[test]
+fn a_fault_inside_a_fn_value_is_not_swallowed_by_its_adapter() {
+    let (rt, _result) = run_main(
+        "fn half(n: Int) -> Int { n / 0 }\n\
+         fn main() -> Int {\n  let f = half\n  f(10)\n}\n",
+    );
+    assert!(rt.has_pending_fault(), "the DivByZero has to arrive");
+}

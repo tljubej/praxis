@@ -412,3 +412,21 @@ pub(crate) fn operator_not_defined(at: FileSpan, op: &str, ty: &str) -> Diagnost
         at,
     )
 }
+
+/// `Y018` — a **generic** `fn` used as a value (REP-01, ADR-061).
+///
+/// The wording names the remedy because there is one and it is exact: a closure
+/// body *is* a call site, so `|x| id(x)` gives monomorphization the
+/// instantiation a bare value cannot carry. Saying "monomorphization" would name
+/// the machinery instead of the fix.
+pub(crate) fn generic_function_as_value(at: FileSpan, name: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::GenericFunctionAsValue,
+        format!(
+            "`{name}` is generic, so it has no single function value; \
+             write `|x| {name}(x)` to fix its type arguments at the call"
+        ),
+        at,
+    )
+}

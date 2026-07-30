@@ -65,3 +65,5 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-057: A capability requirement rides on the scheme that quantified it, and a key is hashable *and* immutable](./057-a-capability-requirement-rides-on-the-scheme-that-quantified-it.md)
 - [ADR-058: The numeric prelude helpers are monomorphic `Int` functions, and their arity is their wrapper's](./058-the-numeric-prelude-helpers-are-int-functions.md)
 - [ADR-059: A range is a value, `..` is half-open, and a descending range is empty](./059-a-range-is-a-value-and-a-descending-one-is-empty.md)
+- [ADR-060: The graph helpers are closure-driven walks, and their state is a value that can be remembered](./060-the-graph-helpers-are-closure-driven-walks.md)
+- [ADR-061: A `fn` name in value position is a closure over an adapter](./061-a-fn-name-in-value-position-is-a-closure.md)

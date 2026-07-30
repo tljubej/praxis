@@ -140,6 +140,14 @@ fn walk_expr(e: &TypedExpr) -> Result<(), String> {
         TypedExpr::Closure { .. } => {
             Err("closure literals may capture and mutate — `p` rejects them".to_string())
         }
+        // A bare `fn` name (REP-01) captures nothing and mutates nothing — but
+        // `p double` would allocate a closure whose adapter the crash generation
+        // has no code for, and the value is not something the user can do
+        // anything with in a read-only prompt. Rejected with the closure
+        // literals, for the same reason and not for a different one.
+        TypedExpr::FnValue { .. } => {
+            Err("a function value has no readable form — `p` rejects it".to_string())
+        }
         TypedExpr::While { .. } => {
             Err("`while` diverges — `p` evaluates a single value".to_string())
         }
