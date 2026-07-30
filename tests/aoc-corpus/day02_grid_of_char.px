@@ -3,8 +3,13 @@
 //   "..##......."
 //   "#...#...#.."
 //   ".#....#..#."
-// → parses as Grid[Char].
+// → parses as Grid[Char]. Result: the cell count, 3 rows × 11 columns = 33.
+//
+// A `Grid` has `width` and `height` and no `len` — §6.4's required API does not
+// list one, and "how many" would have to choose between cells and rows. This
+// program called `len()` anyway, which is reported at *lowering*, so
+// `praxis check` was clean and only `praxis run` broke (REP-12).
 fn main() -> Int {
     let map = read grid(char);
-    map.len()
+    map.width() * map.height()
 }

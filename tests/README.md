@@ -19,3 +19,21 @@ empty `.gitkeep` markers).
 Crate-local unit and integration tests (e.g. the `praxis check` acceptance test)
 live under each crate's own `tests/` directory. The suites here are reserved for
 tests that span the whole compiler pipeline.
+
+## Running programs: the `.px` / `.in` / `.out` triple
+
+Every `.px` program anywhere under this tree is executed by
+`crates/praxis-cli/tests/corpus.rs`, which walks the directories rather than
+listing them, so a new program is covered as soon as it lands. Each one needs:
+
+| File | Required | What |
+|---|---|---|
+| `name.px` | yes | the program |
+| `name.out` | **yes** | its expected stdout, exactly as `praxis run` prints it |
+| `name.in` | only if it `read`s | the input, passed as `--input` |
+
+A program with no `.out` fails the test rather than being skipped — a skipped
+fixture is what the test exists to prevent. Until this test existed nothing ran
+the corpus at all, and `day02_grid_of_char.px` sat calling a `Grid` method that
+does not exist: `praxis check` reported nothing (the method is resolved at
+lowering) while `praxis run` exited 1 (REP-12).
