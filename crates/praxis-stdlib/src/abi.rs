@@ -185,7 +185,7 @@ runtime_symbols! {
     AllocBool = "praxis_alloc_bool": (Ctx, RawI64) -> Gc, Pure;
     AllocChar = "praxis_alloc_char": (Ctx, RawI64) -> Gc, AllocatesAndFaults;
     AllocClosure = "praxis_alloc_closure": (Ctx, Ptr, RawI64) -> Gc, Allocates;
-    AllocEnum = "praxis_alloc_enum": (Ctx, RawI64, RawI64) -> Gc, Allocates;
+    AllocEnum = "praxis_alloc_enum": (Ctx, Ptr, RawI64) -> Gc, Allocates;
     AllocFloat = "praxis_alloc_float": (Ctx, RawI64) -> Gc, Allocates;
     AllocInt = "praxis_alloc_int": (Ctx, RawI64) -> Gc, Allocates;
     AllocRecord = "praxis_alloc_record": (Ctx, Ptr) -> Gc, Allocates;

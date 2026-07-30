@@ -51,6 +51,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use bumpalo::Bump;
 use praxis_runtime::descriptor::TypeDescriptor;
+use praxis_runtime::enums::{EnumSchema, EnumVariantShape};
 use praxis_runtime::records::{RecordField, RecordSchema, SchemaIdentity};
 use praxis_runtime::tuples::TupleSchema;
 use praxis_runtime::{DebugLocalMeta, HeapDrained};
@@ -90,6 +91,17 @@ impl GenerationId {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct RecordKey(GenerationId, u32);
 
+/// The key an enum schema is cached under: the generation, the def id, **and**
+/// the resolved payload-descriptor sequence of every variant.
+///
+/// The last part is what a record key does not need. `Option` is a *generic*
+/// def (F12), so one `EnumDefId` covers `Option[Int]` and `Option[Text]`, whose
+/// `Some` slots must not share a schema — a schema is what `equals`/`hash`
+/// dispatch through, and the wrong one there reads a `Text` header as an `i64`
+/// (P0-11). The generation half carries MIR-12/DBG-06's lesson unchanged.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct EnumKey(GenerationId, u32, Box<[Box<[usize]>]>);
+
 /// Statistics about what a generation is holding, for tests and diagnostics.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct GenerationStats {
@@ -101,6 +113,8 @@ pub struct GenerationStats {
     pub record_schemas: usize,
     /// Distinct tuple schemas built.
     pub tuple_schemas: usize,
+    /// Distinct enum schemas built.
+    pub enum_schemas: usize,
     /// Distinct debug-local-metadata arrays built.
     pub debug_meta_arrays: usize,
 }
@@ -119,6 +133,7 @@ pub struct Generation {
     strings: RefCell<HashMap<Box<str>, *const str>>,
     record_schemas: RefCell<HashMap<RecordKey, *const RecordSchema>>,
     tuple_schemas: RefCell<TupleSchemaCache>,
+    enum_schemas: RefCell<HashMap<EnumKey, *const EnumSchema>>,
     debug_metas: RefCell<DebugMetaCache>,
 }
 
@@ -169,6 +184,7 @@ impl Generation {
             strings: RefCell::new(HashMap::new()),
             record_schemas: RefCell::new(HashMap::new()),
             tuple_schemas: RefCell::new(HashMap::new()),
+            enum_schemas: RefCell::new(HashMap::new()),
             debug_metas: RefCell::new(HashMap::new()),
         }
     }
@@ -185,6 +201,7 @@ impl Generation {
             strings: self.strings.borrow().len(),
             record_schemas: self.record_schemas.borrow().len(),
             tuple_schemas: self.tuple_schemas.borrow().len(),
+            enum_schemas: self.enum_schemas.borrow().len(),
             debug_meta_arrays: self.debug_metas.borrow().len(),
         }
     }
@@ -199,8 +216,8 @@ impl Generation {
         if let Ok(mut owned) = Rc::try_unwrap(this) {
             // SAFETY: `_proof` is a `HeapDrained`, minted only by
             // `Runtime::teardown`, which drops the heap and so finalizes every
-            // payload that could hold a `*const RecordSchema` or
-            // `*const TupleSchema` into this arena. Nothing dereferences the
+            // payload that could hold a `*const RecordSchema`, a
+            // `*const TupleSchema` or a `*const EnumSchema` into this arena. Nothing dereferences the
             // arena after this point: the caches are dropped with `owned`, and
             // generated code that embedded these addresses lives in the
             // `JITModule`, which `Jit` declares *before* the generation and
@@ -258,6 +275,60 @@ impl Generation {
         let raw: *const RecordSchema = schema;
         self.record_schemas.borrow_mut().insert(key, raw);
         Ok(raw)
+    }
+
+    /// The enum schema for `def_id` at one instantiation, built once per
+    /// (def, payload-descriptor sequence).
+    ///
+    /// `variants` is the variant list in declaration order — the tag indexes it
+    /// — each entry a name and its payload descriptors. Unlike
+    /// [`record_schema`](Self::record_schema) the caller resolves before the
+    /// lookup rather than behind a closure, because the resolved descriptors
+    /// *are* the cache key: `Option[Int]` and `Option[Text]` are one def and
+    /// must not be one schema.
+    pub fn enum_schema(
+        &self,
+        def_id: u32,
+        identity: SchemaIdentity,
+        variants: Vec<(&'static str, Vec<*const TypeDescriptor>)>,
+    ) -> *const EnumSchema {
+        let key = EnumKey(
+            self.id,
+            def_id,
+            variants
+                .iter()
+                .map(|(_, payload)| payload.iter().map(|d| *d as usize).collect())
+                .collect(),
+        );
+        if let Some(&hit) = self.enum_schemas.borrow().get(&key) {
+            return hit;
+        }
+        let shapes: Vec<EnumVariantShape> = variants
+            .into_iter()
+            .map(|(name, payload)| {
+                let stored: &[*const TypeDescriptor] = self.arena.alloc_slice_copy(&payload);
+                // SAFETY (lifetime erasure): `EnumVariantShape::payload` declares
+                // `&'static` and the slice lives in this generation's arena; see
+                // `alloc_str`.
+                let stored: &'static [*const TypeDescriptor] =
+                    unsafe { &*(stored as *const [*const TypeDescriptor]) };
+                EnumVariantShape {
+                    name,
+                    payload: stored,
+                }
+            })
+            .collect();
+        let stored: &[EnumVariantShape] = self.arena.alloc_slice_fill_iter(shapes);
+        // SAFETY (lifetime erasure): as above.
+        let stored: &'static [EnumVariantShape] =
+            unsafe { &*(stored as *const [EnumVariantShape]) };
+        let schema: &EnumSchema = self.arena.alloc(EnumSchema {
+            identity,
+            variants: stored,
+        });
+        let raw: *const EnumSchema = schema;
+        self.enum_schemas.borrow_mut().insert(key, raw);
+        raw
     }
 
     /// The tuple schema for an element-descriptor sequence, built once per

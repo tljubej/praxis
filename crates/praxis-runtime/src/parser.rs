@@ -173,11 +173,17 @@ impl Rt {
         }
     }
 
-    /// Allocate an enum value (M9): `tag` selects the variant; `items` are the
-    /// payload values. Matches the `EnumPayload` layout that codegen-produced
-    /// `match` code expects (§4.6, M7). Used by `choice`/`optional`.
-    fn alloc_enum(&self, tag: u32, items: Vec<GcRef>) -> GcRef {
-        let payload = crate::enums::EnumPayload { tag, items };
+    /// Allocate an enum value (M9): `schema` says which enum type it is, `tag`
+    /// selects the variant, and `items` are the payload values. Matches the
+    /// `EnumPayload` layout that codegen-produced `match` code expects (§4.6,
+    /// M7). Used by `choice`/`optional`.
+    fn alloc_enum(
+        &self,
+        schema: *const crate::enums::EnumSchema,
+        tag: u32,
+        items: Vec<GcRef>,
+    ) -> GcRef {
+        let payload = crate::enums::EnumPayload { schema, tag, items };
         // SAFETY: ctx is valid; payload matches ENUM's layout.
         unsafe {
             heap_ref(self.ctx).alloc_with_unpaced(
@@ -527,7 +533,8 @@ fn walk_choice(
             Ok((value, new_offset)) => {
                 // First match wins. Tag with this case's index; the value is
                 // the single payload slot.
-                let enum_ref = rt.alloc_enum(tag as u32, vec![value]);
+                let schema = enum_schema_for(cases);
+                let enum_ref = rt.alloc_enum(schema, tag as u32, vec![value]);
                 return Ok((enum_ref, new_offset));
             }
             Err(_inner) => {
@@ -556,14 +563,14 @@ fn walk_optional(
 ) -> WalkResult {
     match unsafe { walk(rt.ctx, plan, child, bytes, offset) } {
         Ok((value, new_offset)) => {
-            let some_ref = rt.alloc_enum(0, vec![value]);
+            let some_ref = rt.alloc_enum(crate::enums::option_schema(), 0, vec![value]);
             Ok((some_ref, new_offset))
         }
         Err(_) => {
             // Consume nothing; return None (tag 1, no payload). The inner
             // failure is intentionally swallowed — `optional` is parser-level
             // optionality, not exception recovery.
-            let none_ref = rt.alloc_enum(1, Vec::new());
+            let none_ref = rt.alloc_enum(crate::enums::option_schema(), 1, Vec::new());
             Ok((none_ref, offset))
         }
     }
@@ -1164,11 +1171,25 @@ struct TupleSchemaEntry {
     schema: Box<crate::tuples::TupleSchema>,
 }
 
+/// One cached enum schema and everything it points at.
+struct EnumSchemaEntry {
+    /// The case-name sequence this schema serves.
+    key: Vec<&'static str>,
+    /// The variant shapes the schema borrows. See [`RecordSchemaEntry::fields`].
+    #[allow(dead_code)]
+    variants: Box<[crate::enums::EnumVariantShape]>,
+    /// The one-slot payload arrays each variant shape borrows.
+    #[allow(dead_code)]
+    payloads: Box<[*const crate::TypeDescriptor]>,
+    schema: Box<crate::enums::EnumSchema>,
+}
+
 /// The parser interpreter's schema cache.
 #[derive(Default)]
 struct ParserSchemas {
     records: Vec<RecordSchemaEntry>,
     tuples: Vec<TupleSchemaEntry>,
+    enums: Vec<EnumSchemaEntry>,
 }
 
 // SAFETY: the entries hold raw `*const TypeDescriptor`s into process-static
@@ -1232,6 +1253,63 @@ fn record_schema_for(
     cache.records.push(RecordSchemaEntry {
         key,
         fields,
+        schema,
+    });
+    raw
+}
+
+/// The `EnumSchema` for a `choice`'s case list, built once and shared
+/// afterwards, so two parses of one template produce values that compare equal.
+///
+/// `choice(Name: P, …)` synthesizes an **anonymous** enum (§7.5,
+/// `synthesize::ParserAst::Choice`), so its identity is its case-name shape and
+/// the key is that sequence.
+///
+/// Every payload slot is **null** — unknown. The interpreter learns a case's
+/// value type from the value the child plan produced, never from a static type,
+/// and a null slot says exactly that: the value's own descriptor answers, and
+/// it is read off the object's header, so it is never wrong. The arity is still
+/// exact (one payload per case), which is what sizes the payload.
+fn enum_schema_for(cases: &'static [(&'static str, u32)]) -> *const crate::enums::EnumSchema {
+    let mut guard = SCHEMAS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cache = guard.get_or_insert_with(ParserSchemas::default);
+    let key: Vec<&'static str> = cases.iter().map(|(name, _)| *name).collect();
+    if let Some(entry) = cache.enums.iter().find(|e| e.key == key) {
+        return &*entry.schema as *const _;
+    }
+    // One unknown slot per case, in one owned array the variant shapes borrow
+    // disjoint single-element windows of.
+    let payloads: Box<[*const crate::TypeDescriptor]> =
+        vec![std::ptr::null(); cases.len()].into_boxed_slice();
+    let variants: Box<[crate::enums::EnumVariantShape]> = key
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            // SAFETY (lifetime erasure): the window lives in the boxed
+            // `payloads` this entry owns; `retire_schemas` discharges it.
+            let slot: &'static [*const crate::TypeDescriptor] =
+                unsafe { &*(&payloads[i..=i] as *const [*const crate::TypeDescriptor]) };
+            crate::enums::EnumVariantShape {
+                name,
+                payload: slot,
+            }
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    // SAFETY (lifetime erasure): as `record_schema_for`.
+    let borrowed: &'static [crate::enums::EnumVariantShape] =
+        unsafe { &*(&*variants as *const [crate::enums::EnumVariantShape]) };
+    let schema = Box::new(crate::enums::EnumSchema {
+        identity: crate::records::SchemaIdentity::Anonymous,
+        variants: borrowed,
+    });
+    let raw: *const crate::enums::EnumSchema = &*schema;
+    cache.enums.push(EnumSchemaEntry {
+        key,
+        variants,
+        payloads,
         schema,
     });
     raw

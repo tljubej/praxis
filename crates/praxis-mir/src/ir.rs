@@ -399,9 +399,18 @@ pub enum AllocKind {
     },
     /// A boxed enum value (M7, §4.6). `enum_def_id` identifies the enum,
     /// `variant_idx` is the discriminant, and `args` are the payload values.
+    ///
+    /// `ty` is the value's static type — `Option[Int]`, not `Option` — because
+    /// the backend resolves an `EnumSchema` from it and the def alone cannot
+    /// say what `Some`'s payload descriptor is for a *generic* def. `Option` is
+    /// the one the language has (F12), and it is exactly the one every
+    /// `Map.get`/`Grid.find`/graph-walk result is. [`MirType::Opaque`] means
+    /// the lowering had no type; the payload slots then go unknown (null) and
+    /// the values' own descriptors answer, as they do for a tuple.
     Enum {
         enum_def_id: u32,
         variant_idx: u32,
+        ty: MirType,
         args: Vec<LocalId>,
     },
     /// A boxed tuple (M7, §4.5 structural tuples). `ty` is the tuple's static

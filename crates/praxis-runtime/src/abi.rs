@@ -85,7 +85,16 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// `fault_message` — the slot `praxis_panic`/`praxis_assert` write the
 /// program's message into. Appended after `false_ref`, so every
 /// generated-code-read offset is unchanged; the struct's size is not.
-pub const RUNTIME_ABI_VERSION: u32 = 13;
+/// v14 (repair S18): `EnumPayload` gained a leading `schema: *const EnumSchema`
+/// — an enum value now records which enum *type* it is (RT-13) — so the `tag`
+/// moved from offset 0 to offset 8 and generated code reads it through
+/// `offset_of!` rather than a literal. `praxis_alloc_enum` changed shape with
+/// it: `(ctx, schema, tag)`, with the arity read from the schema instead of
+/// passed beside it. `FaultKind` also gained `EmptyRange` and `NoAnswer`, the
+/// two kinds three S17 ADRs recorded as owed (ADR-058, ADR-059, ADR-060), and
+/// four raises that had been borrowing `InvalidSize` moved onto them. A runtime
+/// of the previous version would read an enum's schema pointer as its tag.
+pub const RUNTIME_ABI_VERSION: u32 = 14;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -107,7 +116,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 13;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 14;
 
 // ---------------------------------------------------------------------------
 // The runtime symbol table (F4).
@@ -1481,20 +1490,37 @@ pub unsafe extern "C" fn praxis_record_field(
         .unwrap_or_else(|| unsafe { unit_sentinel(ctx) })
 }
 
-/// Allocate an enum value (M7, §4.6) with variant `tag` and `arity` payload
-/// slots all initialized to Unit. Payload values are filled via
-/// [`praxis_enum_set_payload`] after allocation. Returns the enum `GcRef`.
+/// Allocate an enum value (M7, §4.6) of the type `schema_ptr` describes, with
+/// variant `tag` and every payload slot initialized to Unit. Payload values are
+/// filled via [`praxis_enum_set_payload`] after allocation. Returns the enum
+/// `GcRef`.
+///
+/// The arity is **read from the schema** rather than passed alongside it, as
+/// [`praxis_alloc_tuple`] already does: a schema and an arity that disagree is
+/// a state no caller can now reach. A null schema, or a tag the schema has no
+/// variant for, allocates nothing and answers the Unit sentinel — the same
+/// answer `praxis_alloc_tuple` gives a null schema.
 ///
 /// # Safety
-/// `ctx` must be live and wired.
+/// `ctx` must be live and wired; `schema_ptr` must be null or a valid
+/// `'static` pointer.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_enum(
     ctx: *mut RuntimeContext,
+    schema_ptr: *const crate::enums::EnumSchema,
     tag: i64,
-    arity: i64,
 ) -> GcRef {
-    let unit = unit_sentinel(ctx);
-    let items = vec![unit; arity as usize];
+    if schema_ptr.is_null() || tag < 0 {
+        return unsafe { unit_sentinel(ctx) };
+    }
+    // SAFETY: caller guarantees schema_ptr is a valid 'static pointer.
+    let schema = unsafe { &*schema_ptr };
+    if schema.variant_at(tag as usize).is_none() {
+        return unsafe { unit_sentinel(ctx) };
+    }
+    let arity = schema.arity_of(tag as usize);
+    let unit = unsafe { unit_sentinel(ctx) };
+    let items = vec![unit; arity];
     // SAFETY: EnumPayload matches ENUM's size/align and is fully initialized.
     unsafe {
         gc_alloc_with(
@@ -1504,10 +1530,50 @@ pub unsafe extern "C" fn praxis_alloc_enum(
             std::mem::align_of::<crate::enums::EnumPayload>(),
             |payload| {
                 (payload as *mut crate::enums::EnumPayload).write(crate::enums::EnumPayload {
+                    schema: schema_ptr,
                     tag: tag as u32,
                     items,
                 });
             },
+        )
+    }
+}
+
+/// Allocate `Some(value)` under the runtime's own [`option_schema`].
+///
+/// `value` is rooted across the enum allocation: the allocation is a safepoint,
+/// and a bare `GcRef` argument is not in anyone's root set.
+///
+/// [`option_schema`]: crate::enums::option_schema
+///
+/// # Safety
+/// `ctx` must be live and wired; `value` must be a valid `GcRef`.
+pub(crate) unsafe fn option_some(ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
+    // SAFETY: the caller upholds ctx/value validity.
+    unsafe {
+        let scope = NativeScope::new(ctx);
+        let rooted = scope.root(value);
+        let some = praxis_alloc_enum(
+            ctx,
+            crate::enums::option_schema(),
+            crate::enums::OPTION_SOME_TAG,
+        );
+        praxis_enum_set_payload(ctx, some, 0, rooted.get());
+        some
+    }
+}
+
+/// Allocate `None` under the runtime's own `option_schema`.
+///
+/// # Safety
+/// `ctx` must be live and wired.
+pub(crate) unsafe fn option_none(ctx: *mut RuntimeContext) -> GcRef {
+    // SAFETY: the caller upholds ctx validity.
+    unsafe {
+        praxis_alloc_enum(
+            ctx,
+            crate::enums::option_schema(),
+            crate::enums::OPTION_NONE_TAG,
         )
     }
 }
@@ -4471,20 +4537,13 @@ unsafe fn alloc_optional_int(ctx: *mut RuntimeContext, value: Option<i64>) -> Gc
     unsafe {
         match value {
             Some(n) => {
-                let scope = NativeScope::new(ctx);
-                let some = scope.root(praxis_alloc_enum(ctx, OPTION_SOME_TAG, 1));
                 let boxed = gc_alloc(ctx, scalars::INT_PAYLOAD, n);
-                praxis_enum_set_payload(ctx, some.get(), 0, boxed);
-                some.get()
+                option_some(ctx, boxed)
             }
-            None => praxis_alloc_enum(ctx, OPTION_NONE_TAG, 0),
+            None => option_none(ctx),
         }
     }
 }
-
-/// `Option`'s variant discriminants, in the order `TypeDb::new` declares them.
-const OPTION_SOME_TAG: i64 = 0;
-const OPTION_NONE_TAG: i64 = 1;
 
 #[cfg(test)]
 mod tests {
@@ -4520,8 +4579,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_thirteen_after_the_panic_message_slot() {
-        assert_eq!(RUNTIME_ABI_VERSION, 13);
+    fn version_is_fourteen_after_the_enum_schema_pointer() {
+        assert_eq!(RUNTIME_ABI_VERSION, 14);
     }
 
     #[test]

@@ -1378,8 +1378,9 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             enum_def_id,
             variant_idx,
             args,
+            ty,
             ..
-        } => lower_enum_variant(b, *enum_def_id, *variant_idx, args),
+        } => lower_enum_variant(b, *enum_def_id, *variant_idx, *ty, args),
         // M7-WS5: match expression — lowered to a tag-compare branch chain.
         TypedExpr::Match {
             scrutinee, arms, ..
@@ -4249,15 +4250,18 @@ fn lower_enum_variant(
     b: &mut Builder<'_>,
     enum_def_id: praxis_types::EnumDefId,
     variant_idx: u32,
+    ty: praxis_types::Type,
     args: &[TypedExpr],
 ) -> LocalId {
     let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
-    let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+    let mir_ty = MirType::Known(ty);
+    let dst = b.alloc_gc(mir_ty, None, LocalDebugKind::Temp, None);
     b.push(Inst::Alloc {
         dst,
         alloc: AllocKind::Enum {
             enum_def_id: enum_def_id.to_u32(),
             variant_idx,
+            ty: mir_ty,
             args: arg_locals,
         },
         roots: RootSlots::unannotated(),
