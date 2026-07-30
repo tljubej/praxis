@@ -1,7 +1,7 @@
 # Repair session handover — S26 closed, and S25 half done
 
 **Date:** 2026-07-30
-**Tree:** `bb3bc43` · **Suite:** 1409 passed, 0 failed, 38 ignored · `just ci` green
+**Tree:** `11976cc` · **Suite:** 1410 passed, 0 failed, 38 ignored · `just ci` green
 
 `implementation-repair-progress.md` is still the living status and this file does
 not replace it — read §1 and §4 there first. This is the session-scoped note: what
@@ -13,7 +13,7 @@ rediscovered.
 | Stage | Rows | Commits |
 |---|---|---|
 | **S26** — declaration, pattern and inference gaps | REP-03 + REP-04, REP-14 (closing the stage) | `b3bb6f5`, `4b7d763`, docs `fd4ba67` |
-| **S25** — grammar completion | REP-07, REP-08 | `c74e062`, `bb3bc43` |
+| **S25** — grammar completion | REP-07, REP-08, REP-17 | `c74e062`, `bb3bc43`, `11976cc` |
 
 **S26 is closed and D17 is answered**, so **D16 is the only repair decision still
 open**. Two new ADRs: **062** (an iterated parameter is generic in the iterable and
@@ -25,18 +25,17 @@ have no `for` lowering) is the P0. **REP-16** (there is no `m[key]` syntax at al
 and **REP-17** (a trailing comma in an argument list is parsed as an extra
 argument) came from measuring S25's own acceptance criterion, and they change it:
 **§3.3's representative program needs both**, so S25's exit list is six rows and
-not four. All three are registered in the plan's §4.1 and are `unscheduled`.
+not four. All three are registered in the plan's §4.1. **REP-17 landed in this
+session**; REP-15 and REP-16 are `unscheduled`.
 
-Four of §4.1's seventeen rows remain in S25 — **REP-09, REP-10, REP-16, REP-17** —
-plus REP-15.
+Three of §4.1's seventeen rows remain in S25 — **REP-09, REP-10, REP-16** — plus
+REP-15.
 
 ## Where to start
 
-**REP-17, then REP-16, then REP-09** — that is what §3.3's representative program
-still needs, measured directly against this tree rather than taken from the plan.
-REP-17 is one `if` in `parse_arg_list` and is the cheapest thing left in the
-repair; **REP-16 is the big one** and is scoped below. The program's other halves
-already work: `read lines(…)` with record captures, `segment.x2`, `sign`/`abs`/
+**REP-16, then REP-09** — that is what §3.3's representative program still needs,
+measured directly against this tree rather than taken from the plan. **REP-16 is
+the big one** and is scoped below. The program's other halves already work: `read lines(…)` with record captures, `segment.x2`, `sign`/`abs`/
 `max`, `0..=distance`, the tuple literal, `continue`, `!diagonals && dx != 0 && dy
 != 0`, and `counts.values().count(|n| n >= 2)`.
 
@@ -97,7 +96,7 @@ walker and MIR's `verify` and `liveness` were the extra three.
 `RuntimeSymbol::TupleGet` did already exist with no MIR caller, so there was no new
 runtime code.
 
-## Four things worth not rediscovering
+## Five things worth not rediscovering
 
 1. **ADR-062's asymmetry is load-bearing, and it is not arbitrary.** A `for` over
    an unannotated parameter leaves the **iterator quantified** and **pins the
@@ -126,7 +125,12 @@ runtime code.
    fails under `run`, which is REP-12's asymmetry. `Y018` and `Y019` are both in
    inference for that reason.
 
-4. **`&&` and `||` are one MIR function now** (`lower_short_circuit`), with the
+4. **A trailing comma closes a list, and nine of the twelve had the hole.**
+   Only the tuple literal, the `parse()` call and the parser call already stopped
+   at their closer. If you add a comma-separated list, the guard is
+   `if self.at(<closer>) { break }` after the `eat(COMMA)`.
+
+5. **`&&` and `||` are one MIR function now** (`lower_short_circuit`), with the
    skipping side's answer flipped. If you add a third short-circuiting form, that
    is where it goes. And the operands **join** with `Bool` rather than unifying, so
    a divergent one is absorbed — without that, `false && panic("x")` reported
@@ -136,11 +140,12 @@ runtime code.
 
 - **S25's ordering note says REP-07 + REP-08 + REP-09 are what stand between
   §3.3's representative program and the compiler.** Measured at `bb3bc43`, with
-  REP-07 and REP-08 landed, it also needs **REP-16** (`counts[point] += 1` — there
-  is no subscript syntax at all) and **REP-17** (the trailing comma in its
-  three-line `max(…)` call is parsed as a third argument). Both are now in §4.1.
-  This is the stage's *acceptance criterion*, so the correction is not cosmetic —
-  it is two more rows before the stage can close.
+  REP-07 and REP-08 landed, it also needed **REP-16** (`counts[point] += 1` —
+  there is no subscript syntax at all) and **REP-17** (the trailing comma in its
+  three-line `max(…)` call was parsed as a third argument). Both are now in §4.1
+  and REP-17 has landed. This is the stage's *acceptance criterion*, so the
+  correction is not cosmetic — it was two more rows before the stage could close,
+  and it is one now.
 
 - **REP-07's row says "There is no `&&` or `||`."** `||` already worked, end to
   end: lexed as `PIPE2`, bound at `bp(1, 2)`, typed in `infer_bin`, and lowered by

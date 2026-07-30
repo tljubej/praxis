@@ -31,7 +31,7 @@ Update this file at the end of every stage.
 | S18 … S21 | not started | |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
-| S25 — Grammar completion | **part** (REP-07, REP-08; REP-09, REP-10, REP-16, REP-17 left) | `c74e062`, `bb3bc43` |
+| S25 — Grammar completion | **part** (REP-07, REP-08, REP-17; REP-09, REP-10, REP-16 left) | `c74e062`, `bb3bc43`, `11976cc` |
 | S26 — Declaration, pattern and inference gaps | **done** | `3306a04`, `b3bb6f5`, `4b7d763` |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
@@ -42,9 +42,9 @@ part (see §6).
 **Seventeen defects found while executing the plan are registered** as
 **REP-01 … REP-17** in the plan's **§4.1**. REP-01…REP-14 are owned by four new
 stages (**S23**–**S26**) and three new decisions (**D15**–**D17**), two of which
-are now answered. **Three rows are `unscheduled`**: **REP-15**, a P0, and
-**REP-16**/**REP-17**, which belong to S25 by subject — **§3.3's representative
-program needs them, so S25's exit list is six rows and not four.** See §4.
+are now answered. **Two rows are `unscheduled`**: **REP-15**, a P0, and **REP-16**, which belongs to
+S25 by subject — **§3.3's representative program needs it, so S25's exit list is
+six rows and not four** (REP-17, the third of them, is done). See §4.
 
 **S23 is closed.** All four of its findings are fixed and gated — **REP-13**,
 **REP-11**, **REP-12** and **REP-02** — each as its own commit with the suite
@@ -67,7 +67,7 @@ representative program compiling. Beyond it are S18…S21, which were never star
 and REP-15.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1409 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1410 passed, 0 failed, 38 ignored**. `just ci` is green.
 
 S26's five new gates:
 
@@ -2372,20 +2372,21 @@ are answered and implemented**; **D16 is S25's and is still open**.
   D6's `Range` work, and it needs a decision first (the protocol, *and* whether
   `for (k, v) in m` destructures, which is REP-10's other half). It is the most
   severe thing left in the tree.
-- **S25 is open, with REP-07 and REP-08 done** (`c74e062`, `bb3bc43`). Its
+- **S25 is open, with REP-07, REP-08 and REP-17 done** (`c74e062`, `bb3bc43`,
+  `11976cc`). Its
   acceptance criterion is that **§3.3's representative program compiles**, which
   nothing else in the repair can claim, and it is the most *visible* thing left.
   **That program was measured directly at `bb3bc43`, and the stage's ordering note
   is wrong about what stands between it and the compiler.** It needs REP-09
   (`Counter[(Int, Int)]()`) *and* two rows the register did not have:
   **REP-16** — there is no `m[key]` syntax at all, and §3.3 writes
-  `counts[point] += 1` — and **REP-17**, a trailing comma in an argument list.
-  Everything else in it already works, including `read lines(…)` with record
+  `counts[point] += 1` — and **REP-17**, a trailing comma in an argument list,
+  **which has since landed**. Everything else in it already works, including `read lines(…)` with record
   captures, `segment.x2`, `sign`/`abs`/`max`, `0..=distance`, the tuple literal,
   `continue`, and `counts.values().count(|n| n >= 2)`. **REP-16 is the big one**
   (a read form, a compound-assign form, an lvalue in the assignment grammar and a
-  per-collection lowering, plus §6.2's `min=`/`max=` to decide about); REP-17 is
-  one `if` in `parse_arg_list`.
+  per-collection lowering, plus §6.2's `min=`/`max=` to decide about); with REP-09
+  it is all that stands between §3.3 and the compiler.
 
   The precedence table was renumbered by REP-07 — `||` at `bp(1, 2)`, `..` at
   `bp(3, 4)`, `&&` at `bp(5, 6)`, then comparison, additive, multiplicative,
@@ -2417,6 +2418,9 @@ What S25 has delivered so far:
   `Y112`, which is a *lowering* diagnostic — `praxis check` does not run lowering,
   so a program reported only there is clean under `check` and fails under `run`.
   **`Y020` and `N007` are the next free codes.**
+- **A trailing comma closes a list, in all twelve of them.** Nine had the hole and
+  three did not; fixing only `parse_arg_list` would have left the rest, and the
+  property is the grammar's rather than one function's.
 
 **S18 is still `D1`-blocked** and D1 is still open, so it is not the answer to
 "what next" either — see the S18 block below for what it needs.
