@@ -7,14 +7,21 @@
 //
 // A record and a tuple have one constructor each, so every match here is
 // exhaustive without a `_`; the enum match keeps its `_`-free arm list for the
-// same reason it always did.
+// same reason it always did. The declarations are written the way §4.5 and §4.6
+// write theirs — one member per line, no commas (REP-24).
 //
 // Input (on stdin): lines of `x,y` points.
 // Output: the axis classification of each point summed, the quadrant walk's
 // total, and the nested shape's answer.
-struct Point { x: Int, y: Int }
+struct Point {
+    x: Int
+    y: Int
+}
 
-enum Move { Step(Int, Int), Stay }
+enum Move {
+    Step(Int, Int)
+    Stay
+}
 
 let points = read lines(`{x:int},{y:int}`)
 
@@ -60,7 +67,10 @@ out(match at { (x, y) => x * 100 + y })
 
 // A record holding a tuple, matched in one pattern — the two composites compose
 // in both directions.
-struct Span { label: Text, ends: (Int, Int) }
+struct Span {
+    label: Text
+    ends: (Int, Int)
+}
 
 let s = Span { label: "ab", ends: (3, 9) }
 out(match s { Span { label, ends: (lo, hi) } => label.len() * 100 + (hi - lo) })

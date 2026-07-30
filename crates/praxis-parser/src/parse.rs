@@ -641,11 +641,10 @@ impl<'t> Parser<'t> {
                 self.expect(SyntaxKind::COLON, "`:` before field type");
                 self.parse_type();
                 self.finish_node();
-                if !self.eat(SyntaxKind::COMMA) {
-                    break;
-                }
-                // A trailing comma closes the list (REP-17).
-                if self.at(SyntaxKind::R_BRACE) {
+                // A comma **or** a line break separates fields (REP-24) — §4.5's
+                // own `struct Point { x: Int\n y: Int }` writes the second, and a
+                // trailing comma closes the list either way (REP-17).
+                if !self.member_separator("struct fields") {
                     break;
                 }
                 self.ensure_progress(before);
@@ -654,6 +653,44 @@ impl<'t> Parser<'t> {
         self.expect(SyntaxKind::R_BRACE, "`}` to end struct fields");
         self.finish_node(); // FIELD_LIST
         self.finish_node(); // STRUCT_ITEM
+        true
+    }
+
+    /// Whether another member of a brace-delimited declaration follows, having
+    /// consumed the separator between them (REP-24).
+    ///
+    /// A member is followed by a comma **or** a line break, which is the rule
+    /// match arms have had since FE-04 (D8, ADR-049) and the one §4.5's and
+    /// §4.6's own declarations are written with:
+    ///
+    /// ```praxis
+    /// struct Point {
+    ///     x: Int
+    ///     y: Int
+    /// }
+    /// ```
+    ///
+    /// The two separators are interchangeable and a trailing comma still closes
+    /// the list (REP-17), so the answer is `false` at the closing brace whichever
+    /// one preceded it. A member that follows with *neither* is reported at the
+    /// same code a run-together statement is — and then parsed anyway, because
+    /// the mistake is the separator and not the member.
+    fn member_separator(&mut self, what: &str) -> bool {
+        let comma = self.eat(SyntaxKind::COMMA);
+        // A closing brace ends the list, and an `Ident` is the only token that
+        // can begin either kind of member — anything else is a mistake the
+        // member's own parser will report.
+        if self.at(SyntaxKind::R_BRACE) || !self.at(SyntaxKind::Ident) {
+            return false;
+        }
+        if !comma && !self.newline_before() {
+            let span = self.current_span();
+            self.error_with(
+                DiagCode::ExpectedStatementSeparator,
+                span,
+                format!("expected `,` or a line break between {what}"),
+            );
+        }
         true
     }
 
@@ -688,11 +725,9 @@ impl<'t> Parser<'t> {
                     self.expect(SyntaxKind::R_PAREN, "`)` to close variant payload");
                 }
                 self.finish_node(); // ENUM_VARIANT
-                if !self.eat(SyntaxKind::COMMA) {
-                    break;
-                }
-                // A trailing comma closes the list (REP-17).
-                if self.at(SyntaxKind::R_BRACE) {
+                                    // A comma **or** a line break, as §4.6's own `enum Tile { Empty\n
+                                    // Wall\n … }` writes it (REP-24).
+                if !self.member_separator("enum variants") {
                     break;
                 }
                 self.ensure_progress(before);
@@ -2849,6 +2884,84 @@ mod tests {
         ] {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must report");
+        }
+    }
+
+    /// **REP-24.** A declaration's members are separated by a comma **or** a
+    /// line break — which is how §4.5 and §4.6 write their own.
+    ///
+    /// `struct Point {\n x: Int\n y: Int\n}` was `P001` "expected `}` to end
+    /// struct fields", and so was §4.6's `enum Tile`. Both lists looped on
+    /// `eat(COMMA)` alone, so the design doc's own declarations did not parse and
+    /// every declaration in the corpus is written on one line because of it. Match
+    /// arms have taken either separator since FE-04 (D8, ADR-049); these two are
+    /// the same rule at the same kind of brace.
+    #[test]
+    fn a_declarations_members_take_a_comma_or_a_line_break() {
+        // The design doc's own text, verbatim, and the comma form beside it: the
+        // same tree once the comma token is out of the way, which is what "either
+        // separator" means.
+        for (breaks, commas) in [
+            (
+                "struct Point {\n    x: Int\n    y: Int\n}",
+                "struct Point { x: Int, y: Int }",
+            ),
+            (
+                "enum Tile {\n    Empty\n    Wall\n    Number(Int)\n    Portal(Text)\n}",
+                "enum Tile { Empty, Wall, Number(Int), Portal(Text) }",
+            ),
+            // Mixed, in both orders — the two separators are interchangeable and
+            // not two dialects.
+            (
+                "struct P {\n    x: Int, y: Int\n    z: Int\n}",
+                "struct P { x: Int, y: Int, z: Int }",
+            ),
+            ("enum E {\n    A, B\n    C\n}", "enum E { A, B, C }"),
+            // …and a trailing comma still closes the list, whichever preceded it
+            // (REP-17).
+            (
+                "struct P {\n    x: Int\n    y: Int,\n}",
+                "struct P { x: Int, y: Int }",
+            ),
+            ("enum E {\n    A\n    B,\n}", "enum E { A, B }"),
+        ] {
+            let out = parse_text(breaks);
+            assert!(
+                out.diagnostics.is_empty(),
+                "{breaks}: {:?}",
+                out.diagnostics
+            );
+            let filt = |t: &str| -> Vec<SyntaxKind> {
+                construct_names(&parse_text(t).tree)
+                    .into_iter()
+                    .filter(|k| !k.is_trivia() && *k != SyntaxKind::COMMA)
+                    .collect()
+            };
+            assert_eq!(filt(breaks), filt(commas), "{breaks}");
+        }
+
+        // The rule is a separator, not "separators are optional": two members on
+        // one line with neither is still a mistake.
+        for bad in [
+            "struct P { x: Int y: Int }",
+            "enum E { A B }",
+            "enum E { A(Int) B }",
+        ] {
+            let out = parse_text(bad);
+            assert!(!out.diagnostics.is_empty(), "{bad} must report");
+        }
+
+        // The shapes with no separator to give: an empty declaration and a
+        // one-member one, on one line and across lines.
+        for src in [
+            "struct P { }",
+            "enum E { }",
+            "struct P { x: Int }",
+            "struct P {\n    x: Int\n}",
+            "enum E {\n    A\n}",
+        ] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
         }
     }
 
