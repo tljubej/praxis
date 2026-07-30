@@ -3405,13 +3405,16 @@ so `Node { next: 7 }` compiled and ran), and a declaration that merely *waited
 behind* a cycle had the same hole and must not be reported — the readiness loop
 resumes past the reported members now.
 
-**D16 is the one repair decision still open** (plan §7, end): does `assert` take a
+**D1, D10, D11 and D12 are answered** (2026-07-31) — see the table at the end of
+this section for the answers and the plan's §7 for the reasoning under each
+heading. That leaves **D16 as the one decision still open**: does `assert` take a
 message, and more generally does the language get arity-based overloading or
 optional parameters? It belongs to **S25**, and the plan's warning is the important
 part — `assert`'s message is the cheapest possible motivating case, so answering it
-in isolation would set the precedent by accident. **REP-15 needs a decision too**
-and has no `D` number yet: the iteration protocol for the six unlowered iterables,
-and whether `for (k, v) in m` destructures.
+in isolation would set the precedent by accident. (**REP-15 needed a decision too**
+and never got a `D` number: the iteration protocol for the six unlowered iterables,
+and whether `for (k, v) in m` destructures. Both are answered in ADR-066 and by
+REP-25.)
 
 **D14 is answered** — see ADR-040. The `Safepoint` token shipped with a named,
 `pub(crate)` `Heap::alloc_unpaced` back door for the host helpers and the
@@ -3487,7 +3490,9 @@ path that ADR's own last consequence describes. The `Y0xx` user block is now
 spent through `Y017`; the next free number was `Y018`, **which S24 has since
 spent** (ADR-061). `Y019` is next.
 
-**D1 and D5 still block their stages**; neither has been answered.
+~~**D1 and D5 still block their stages**; neither has been answered.~~ Both are
+answered now — D5 in S17 (ADR-056/058/060), D1 on 2026-07-31. **No decision blocks
+a stage.**
 
 **S17 is the next stage, and its three gating decisions — D4, D5 and D6 — are
 all answered.** The answers are written into the *plan* as well, under §7's
@@ -3575,10 +3580,32 @@ one. Settle both together.
 | D4 | Hashability of mutable collections as Map keys | S17 — **answered and implemented** (ADR-057) |
 | D5 | The 15 phantom prelude names: implement or delete | S17 — answered; units 1–2 implemented (ADR-056, ADR-058). **Unit 3's graph-representation sub-decision is still owed** |
 | D6 | `CollectionCtor::Range`: delete or implement | S17 — **answered and implemented, all four sub-decisions included** (ADR-059) |
-| D1 | `Map.get` / `Grid.find` — `Option[V]` or V-with-Unit; and `min`/`max` on an empty sequence. Source-visible | S18 |
-| D10 | How much parser-expression grammar a template capture body may contain | S19 |
-| D11 | `grid(int)` granularity; greediness of `text`/`word` | S20 |
-| D12 | Panic-across-FFI policy — should precede RT-06, RT-07 and the parser findings | cross-cutting |
+| D1 | `Map.get` / `Grid.find` — `Option[V]` or V-with-Unit; and `min`/`max` on an empty sequence. Source-visible | S18 — **answered** (2026-07-31): `Option[V]`, an empty `min`/`max` faults, `Counter.get` keeps its zero default |
+| D10 | How much parser-expression grammar a template capture body may contain | S19 — **answered** (2026-07-31): a full parser expression, nested |
+| D11 | `grid(int)` granularity; greediness of `text`/`word` | S20 — **answered** (2026-07-31): `grid(int)` is a whole token, `text`/`word` are non-greedy |
+| D12 | Panic-across-FFI policy — should precede RT-06, RT-07 and the parser findings | cross-cutting — **answered** (2026-07-31): per-wrapper totality plus one `catch_unwind` backstop |
+
+**D1, D10, D11 and D12 were answered together on 2026-07-31**, in the session that
+started S18 — four of the five questions left, in one sitting. The reasoning is in
+the plan's §7 under each heading. The short version:
+
+- **D1** was not really open. §5.7 writes `Map[K,V].get(K) -> Option[V]` as a
+  signature and §4.7 says `Option[T]` is "normal domain-level absence"; the
+  implementation had simply never followed. What the answer adds is the second
+  case: an empty `min`/`max` **faults** rather than answering `0`, joining the
+  three seeded sinks MIR-09 already gave a fault. `Counter.get` keeps its zero
+  default (§6.2, deliberate).
+- **D10** was spent by §7.7's own monkey example, which writes
+  `{items:csv(int)}`. "Atomics only" is not a smaller language; it is one that
+  cannot run the document's example.
+- **D11**: a cell parser inside `grid` parses a cell exactly as it would anywhere
+  else, so `grid(int)` is one integer token and `grid(digit)` is the per-digit
+  parser — otherwise `digit` names nothing. And `text`/`word` stop before the
+  following literal, because a greedy capture makes every template with a
+  trailing literal unmatchable.
+- **D12** is both halves: per-wrapper totality is the contract, and one
+  `catch_unwind` at each `extern "C"` entry is the proof it cannot be violated
+  silently. `panic=abort` was rejected because it deletes M10's crash report.
 
 ## 6. Corrections to the plan
 

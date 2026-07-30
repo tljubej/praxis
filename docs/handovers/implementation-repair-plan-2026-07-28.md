@@ -3271,11 +3271,18 @@ to §4.1's stages; they are at the end of this section.
 > under it is the repo owner's decision. An answer here is a decision, not an
 > ADR — the ADR is written by the session that *lands* it, which is why
 > `docs/decisions/` has one per implemented decision and not one per answer.
-> Answered so far: **D2** (ADR-053), **D3** (ADR-045), **D4**, **D5** (ADR-060
-> settles the graph representation D5 left owed), **D6**, **D7**/**D8**
-> (ADR-049), **D9** (ADR-042), **D13** (ADR-051), **D14** (ADR-040), **D15**
-> (ADR-061). Still open: **D1** (blocking S18), **D10**, **D11**, **D12**,
-> **D16**, **D17**.
+> Answered so far: **D1**, **D2** (ADR-053), **D3** (ADR-045), **D4**, **D5**
+> (ADR-060 settles the graph representation D5 left owed), **D6**, **D7**/**D8**
+> (ADR-049), **D9** (ADR-042), **D10**, **D11**, **D12**, **D13** (ADR-051),
+> **D14** (ADR-040), **D15** (ADR-061), **D17** (ADR-063). Still open: **D16**
+> alone.
+>
+> **D1, D10, D11 and D12 were answered together (2026-07-31)**, in the session
+> that started S18. That is four of the five remaining questions in one sitting,
+> and it is deliberate: S18 needs D1, S19 needs D10, S20 needs D11 *and* D12, and
+> the three stages left after S18 are the whole of what the repair has not
+> started. Answering them one stage at a time would have stopped the work three
+> more times to ask the same kind of question.
 
 **D1 (Stage 18, blocking)**
 
@@ -3283,6 +3290,32 @@ Map.get and Grid.find contract: Option[V] per §5.7/§4.7, or keep V-with-Unit?
 Source-visible; breaks every program using m.get(k) as a bare V. Also decide
 whether Counter.get keeps its zero-default (§6.2 says deliberate — recommend
 yes, unchanged).
+
+**ANSWERED — `Option[V]`, and an empty `min`/`max` faults.** Three parts:
+
+1. **`Map.get` and `Grid.find` answer `Option[V]`.** The design doc had already
+   decided this and the implementation simply never followed: §5.7 writes
+   `Map[K,V].get(K) -> Option[V]` as a signature, and §4.7 says `Option[T]`
+   "represents normal domain-level absence. It is not an error channel" — which
+   is exactly the case a missing key is. There was no second candidate worth
+   weighing: keeping V-with-Unit means keeping a value whose *static* type says
+   `V` and whose runtime representation is a `Unit` under it, which is the
+   soundness hole RT-14/RT-15 are, not a contract.
+2. **`min`/`max` on an empty sequence fault**, rather than answering `0`. MIR-09
+   already gave the three *seeded* sinks (`reduce`, `min_by`, `max_by`) a fault
+   for the same reason, and the only thing that distinguished `min`/`max` was
+   that their accumulator happens to be a scalar seeded to `0` — an
+   implementation accident, not an answer. `0` is a *wrong* answer rather than a
+   missing one: `[].min()` is not zero, and a puzzle that reduces over a filtered
+   sequence silently reads the empty case as a real minimum. They are not made
+   `Option` either, which was the third candidate: `Option` is right where absence
+   is ordinary (a key may be missing), and wrong where it is a caller mistake
+   every single call site would have to unwrap.
+   `adv_pipeline_empty_source_min_is_zero` is a §8.2 bug-pinning test and is
+   rewritten by the stage that lands this.
+3. **`Counter.get` keeps its zero default**, unchanged — the recommendation, and
+   §6.2 says it is deliberate. A counter's absent key *has* a defined answer, and
+   it is the one every counting program wants.
 
 **D2 (Stage 14)**
 
@@ -3415,10 +3448,52 @@ How much of the parser-expression grammar a template capture body may contain
 (§7.3 shows only atomics; the scanner's }-scan at scan.rs:80-82 cannot handle a
 nested brace).
 
+**ANSWERED — a capture body is a full parser expression.** `{items:csv(int)}`,
+`{x:optional(int)}` and a nested `{g:choice(…)}` are all legal, and the scanner
+learns brace-, paren- and backtick-aware depth tracking instead of scanning to
+the first `}`.
+
+The question reads as "how much grammar do we allow", but the design doc had
+already spent it: **§7.7's own monkey example writes
+`` `  Starting items: {items:csv(int)}` ``**, and §7.8's derivation table gives a
+result type for every parser including the nesting ones. So "atomics only" is not
+a smaller language, it is a language that cannot run the document's own example.
+The middle option — atomics plus one call level — buys nothing: the bounded scan
+it allows is *the same scan* as the unbounded one, because tracking depth to 1 and
+tracking depth to n are one loop with one counter, and refusing depth 2 would then
+be an arbitrary rule the scanner has to carry a diagnostic for.
+
+The real cost is not the grammar, it is that the `}`-scan cannot stay a scan: a
+capture body may contain `}`, `)`, `,` and a backtick template of its own, so the
+body's extent has to be found by the same cursor discipline IP-01 is introducing
+anyway. That is why this is answered *with* IP-01 and not before it.
+
 **D11 (Stage 20)**
 
 IPR-06: does grid(int) mean one digit per cell or a full token? IPR-10/IPR-11:
 does `text`/`word` become non-greedy with lookahead to the following literal?
+
+**ANSWERED — a cell parser means what it means everywhere else, and `text`/`word`
+stop at the following literal.** Two halves:
+
+1. **`grid(int)` is one whole integer token per cell; `grid(digit)` is the
+   per-digit one.** §7.5's `grid(cell_parser)` entry shows `grid(char)` and
+   `grid(digit)` as its two examples, and `digit` exists *for* the
+   one-digit-per-cell case — if
+   `grid(int)` also meant that, `digit` would name nothing. The rule that falls
+   out is the one worth having: a cell parser inside `grid` parses a cell exactly
+   as it would parse anywhere else, so `int` is an integer token, `digit` is one
+   digit, `char` is one scalar. Today `read grid(int)` over `12\n34\n` answers
+   cells `[12, 2, 34, 4]` — it reads the token *and* then re-reads its tail — and
+   that is not either candidate semantics, it is IPR-06.
+2. **`text` and `word` are non-greedy with lookahead to the following literal.**
+   A template is a sequence of literals and captures, and a capture that swallows
+   the literal after it makes every template with a trailing literal unmatchable —
+   `` `{name:text}: {v:int}` `` cannot work under greedy `text`. Greediness is only
+   defensible when a capture is *last* in its region, which is the case the
+   non-greedy rule already handles (no following literal, so the lookahead is the
+   region end). So there is no program the greedy rule serves that the non-greedy
+   one does not.
 
 **D12 (cross-cutting)**
 
@@ -3426,6 +3501,25 @@ Panic-across-FFI policy: catch_unwind at every #[no_mangle] extern "C"
 boundary, or panic=abort plus per-wrapper totality proofs. RT-06, RT-07 and the
 parser findings all reach a Rust panic from inside extern "C"; this policy
 should precede those fixes.
+
+**ANSWERED — per-wrapper totality, with one `catch_unwind` backstop at the
+boundary.** Both, and the order matters: totality is the contract and the shim is
+the proof that the contract cannot be violated *silently*.
+
+A wrapper is total — a malformed argument raises a fault through the fault
+protocol, and no wrapper reaches a Rust `panic!` on any input generated code can
+hand it. That is the property the tests gate. On top of it, every
+`#[no_mangle] extern "C"` entry point is wrapped once so that a panic which
+escapes anyway becomes a fault instead of unwinding into JIT frames — because
+unwinding across `extern "C"` into Cranelift-generated frames is undefined
+behaviour, and "we proved it cannot happen" is exactly the claim a repair like this
+one exists to distrust.
+
+`panic=abort` was the third candidate and is rejected for a reason the crash
+debugger makes concrete: M10 exists so that a failing program prints a numbered
+backtrace and drops into a REPL. An abort produces neither. A policy that turns
+every residual bug into a silent process death would delete the one feature the
+milestone before this repair shipped.
 
 **D15 (Stage 24, blocking)**
 
