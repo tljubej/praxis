@@ -292,7 +292,7 @@ runtime_symbols! {
     RangeLen = "praxis_range_len": (Ctx, Gc) -> Gc, AllocatesAndFaults;
     RangeNew = "praxis_range_new": (Ctx, Gc, Gc) -> Gc, Allocates;
     RangeNewInclusive = "praxis_range_new_inclusive": (Ctx, Gc, Gc) -> Gc, Allocates;
-    MapGet = "praxis_map_get": (Ctx, Gc, Gc) -> Gc, Pure;
+    MapGet = "praxis_map_get": (Ctx, Gc, Gc) -> Gc, Allocates;
     MapIndex = "praxis_map_index": (Ctx, Gc, Gc) -> Gc, Faults;
     MapInsert = "praxis_map_insert": (Ctx, Gc, Gc, Gc) -> Gc, Allocates;
     MapIsEmpty = "praxis_map_is_empty": (Ctx, Gc) -> Gc, Pure;

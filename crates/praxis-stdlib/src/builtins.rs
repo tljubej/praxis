@@ -882,12 +882,15 @@ fn map_get() -> MethodEntry {
         receiver: map_of_k_v(),
         name: "get",
         params: vec![TypePattern::var("K")],
-        // For now the result is V (Unit if absent); a real Option[V] is a
-        // follow-up once Option lands more broadly.
-        result: TypePattern::var("V"),
+        // §5.7 writes this signature literally: `Map[K,V].get(K) -> Option[V]`.
+        // The row said `V` and the wrapper answered the Unit sentinel on a miss
+        // (RT-14), which is a value whose static type is `V` and whose runtime
+        // descriptor is `Unit`. §4.7: absence is `Option`, and `map[key]` is
+        // the assertion-like half that faults.
+        result: TypePattern::Option(Box::new(TypePattern::var("V"))),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapGet),
-        doc: "The value for `key`, or Unit if absent (use `contains` to distinguish).",
+        doc: "The value for `key` as `Some(value)`, or `None` if absent.",
         stability: Stability::Stable,
     }
 }
@@ -1476,10 +1479,13 @@ fn grid_find() -> MethodEntry {
         receiver: grid_of_t(),
         name: "find",
         params: vec![TypePattern::var("T")],
-        result: point_pattern(),
+        // Absence is `Option`, not the Unit sentinel under a `(Int, Int)`
+        // static type (RT-15, §4.7). `find_all` needs no such thing — a `Vec`
+        // already encodes "nothing matched" as emptiness.
+        result: TypePattern::Option(Box::new(point_pattern())),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridFind),
-        doc: "The first (x, y) whose cell equals `value`, or Unit if none.",
+        doc: "The first (x, y) whose cell equals `value` as `Some((x, y))`, or `None`.",
         stability: Stability::Stable,
     }
 }

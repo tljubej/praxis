@@ -2882,6 +2882,12 @@ fn pattern_to_type(db: &mut TypeDb, p: &TypePattern) -> Type {
             let tys: Vec<Type> = els.iter().map(|e| pattern_to_type(db, e)).collect();
             tuple_or_degenerate(db, tys)
         }
+        // The prelude's *one* `Option` def (F12), instantiated at the inner
+        // pattern. Registering a fresh def per row is what TY-06 was.
+        TypePattern::Option(inner) => {
+            let elem = pattern_to_type(db, inner);
+            db.option_of(elem)
+        }
         TypePattern::Opaque => db.fresh_var(),
     }
 }
@@ -2932,6 +2938,13 @@ fn pattern_to_type_named_impl(
                 .map(|e| pattern_to_type_named_impl(db, e, names))
                 .collect();
             tuple_or_degenerate(db, tys)
+        }
+        // As `pattern_to_type`, but the inner pattern shares this
+        // instantiation's variables: `Map[K, V].get(K) -> Option[V]` names `V`
+        // twice and both must be the one variable.
+        TypePattern::Option(inner) => {
+            let elem = pattern_to_type_named_impl(db, inner, names);
+            db.option_of(elem)
         }
         TypePattern::Opaque => db.fresh_var(),
     }

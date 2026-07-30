@@ -2439,7 +2439,6 @@ fn heap_element_orderability_agrees_with_the_runtime() {
 }
 
 #[test]
-#[ignore = "known bug: Map.get is still typed as V instead of Option[V]"]
 fn map_get_returns_option() {
     let src = "fn lookup(map: Map[Text, Int]) -> Option[Int] { map.get(\"key\") }";
     assert!(
@@ -4370,10 +4369,17 @@ fn a_subscript_reads_the_type_the_receiver_holds_at_that_key() {
     assert!(y020("fn f(g: Grid[Int]) -> Int { g[0] }"));
     assert!(y020("fn f(v: Vec[Int]) -> Int { v[0, 1] }"));
 
-    // `.get` is untouched — the two spellings are two rows, and `Map`'s differ on
-    // purpose (§4.7), so a fix that made one the other would show here.
-    assert!(!has_type_error(
+    // The two spellings are two rows, and `Map`'s differ on purpose (§4.7): the
+    // subscript is the assertion-like half and answers `V`, while `.get` is the
+    // explicit-absence half and answers `Option[V]`. This assertion used to be
+    // its own negation — `.get` returning a bare `Int` was accepted, because the
+    // row said `V` while the wrapper answered the Unit sentinel (RT-14). A fix
+    // that made one spelling the other would still show here.
+    assert!(has_type_error(
         "fn f(m: Map[Text, Int]) -> Int { m.get(\"a\") }"
+    ));
+    assert!(!has_type_error(
+        "fn f(m: Map[Text, Int]) -> Option[Int] { m.get(\"a\") }"
     ));
 }
 

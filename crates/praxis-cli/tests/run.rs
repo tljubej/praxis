@@ -804,3 +804,19 @@ fn the_entry_points_name_is_not_one_a_program_can_spell() {
 
     let _ = std::fs::remove_file(&src_path);
 }
+
+/// RT-13, at the surface. An enum value renders its **variant name**: the
+/// runtime carries an `EnumSchema` now, so `Number(7)` prints as `Number(7)`
+/// rather than as the `<variant 2: 7>` a value whose whole identity was its tag
+/// could only manage.
+///
+/// `Some`/`None` are here beside a declared enum on purpose — the prelude
+/// `Option` is one enum def like any other (F12), and a `Some` the program
+/// wrote must render the same way as one the runtime built.
+#[test]
+fn run_pass_enum_renders_its_variant_name() {
+    assert_passes(
+        "enum_variant_names.px",
+        "Empty\nWall\nNumber(7)\nSome(3)\nNone\nSome(x)",
+    );
+}

@@ -47,8 +47,13 @@ pub const PRELUDE: &[PreludeEntry] = &[
     PreludeEntry::new("Grid", "2D grid with rectangular indexing."),
     PreludeEntry::new("BitSet", "Compact set of non-negative integers."),
     // Optionality (M9). Option[T] is a polymorphic enum: Some(T) carries a
-    // value, None marks absence. Returned by the `optional(P)` parser and by
-    // `find`/`position` on a miss.
+    // value, None marks absence (§4.7 — "normal domain-level absence… not an
+    // error channel"). Returned by the `optional(P)` parser, by `Map.get` and
+    // `Grid.find` (D1), and by the graph walks that may not reach their goal.
+    //
+    // NOT by `find`/`position` on a sequence, which this used to claim: those
+    // answer an `Int` index with a `-1` miss sentinel. That is a separate
+    // question from D1's and is not S18's to change.
     PreludeEntry::new("Option", "Optional value: Some(T) or None."),
     PreludeEntry::variant("Some", "Wrap a value in an Option."),
     PreludeEntry::variant("None", "The absent Option value."),

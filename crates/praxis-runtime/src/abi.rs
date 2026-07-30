@@ -2347,18 +2347,32 @@ pub unsafe extern "C" fn praxis_map_insert(
     unsafe { unit_sentinel(ctx) }
 }
 
-/// The value for `key`, or Unit if absent (use `contains` to distinguish). A
-/// real `Option[V]` return is a follow-up; for now absent returns Unit.
+/// `Some(value)` for `key`, or `None` if absent (§4.7, §5.7).
+///
+/// §5.7 writes the signature `Map[K,V].get(K) -> Option[V]` and §4.7 opens
+/// "Option[T] represents normal domain-level absence. It is not an error
+/// channel." This used to answer the Unit sentinel under a `V` static type
+/// (RT-14): the program had a value it could not distinguish from a real one
+/// without `contains`, and the type system said it was a `V`.
+///
+/// The `Option` is built through the runtime's own `option_schema`, whose
+/// `Some` slot is unknown — `V` is learned from the value found, never from a
+/// static type — and which `EnumSchema::same_type` therefore recognizes as the
+/// same type as the codegen's `Option[Int]`. That is what lets the result match
+/// against arms the program wrote.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`; `key`
 /// must be a valid `GcRef`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_map_get(ctx: *mut RuntimeContext, map: GcRef, key: GcRef) -> GcRef {
-    let p = unsafe { map_payload(map) };
-    match p.entries.get(&DynamicKey::new(key)) {
-        Some(v) => *v,
-        None => unsafe { unit_sentinel(ctx) },
+    let found = {
+        let p = unsafe { map_payload(map) };
+        p.entries.get(&DynamicKey::new(key)).copied()
+    };
+    match found {
+        Some(v) => unsafe { option_some(ctx, v) },
+        None => unsafe { option_none(ctx) },
     }
 }
 
@@ -3637,7 +3651,12 @@ pub unsafe extern "C" fn praxis_grid_column(
     result
 }
 
-/// The first `(x, y)` position whose cell equals `value`, or Unit if none.
+/// `Some((x, y))` for the first position whose cell equals `value`, or `None`
+/// (§4.7).
+///
+/// This used to answer the Unit sentinel under a `(Int, Int)` static type
+/// (RT-15). `find_all` needs no equivalent: a `Vec` already encodes "nothing
+/// matched" as emptiness.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `grid` and `value` must be valid `GcRef`s.
@@ -3661,10 +3680,11 @@ pub unsafe extern "C" fn praxis_grid_find(
         };
         if matches {
             let (x, y) = grid_xy(i, p.width);
-            return unsafe { alloc_point(ctx, x, y) };
+            // `option_some` roots the point across the enum allocation.
+            return unsafe { option_some(ctx, alloc_point(ctx, x, y)) };
         }
     }
-    unsafe { unit_sentinel(ctx) }
+    unsafe { option_none(ctx) }
 }
 
 /// All `(x, y)` positions whose cell equals `value`, as a `Vec`.
@@ -5717,7 +5737,7 @@ mod tests {
             praxis_map_insert(ctx, map, key, val);
             let present = int_payload(praxis_map_index(ctx, map, key));
             assert_eq!(rt.fault(), FaultKind::None, "a present key does not fault");
-            // `.get` on an absent key is the Unit sentinel and no fault…
+            // `.get` on an absent key is `None` and no fault…
             let other = praxis_alloc_int(ctx, 2);
             let absent_get = praxis_map_get(ctx, map, other);
             assert_eq!(rt.fault(), FaultKind::None, "`.get` does not fault");
@@ -5728,8 +5748,8 @@ mod tests {
         assert_eq!(present, 42);
         assert_eq!(
             absent_get.descriptor().id(),
-            crate::scalars::UNIT.id(),
-            "`.get` answers with absence"
+            crate::enums::ENUM.id(),
+            "`.get` answers with absence, and absence is an `Option` value"
         );
         assert_eq!(
             rt.fault(),
@@ -5759,45 +5779,83 @@ mod tests {
         assert_eq!(rt.fault(), FaultKind::None);
     }
 
+    /// S18 exit criterion (RT-14). `Map.get` is statically value-typed, so an
+    /// absent key cannot answer the Unit sentinel — a value whose static type is
+    /// `V` and whose runtime descriptor is `Unit` is exactly the confusion the
+    /// repair exists to close.
+    ///
+    /// Strengthened past the `!= UNIT` it was ignored with: the answer is an
+    /// `Option`, so the test says which one — the `None` variant of the
+    /// runtime's own `option_schema`, which is what makes it match a program's
+    /// `None` arm.
     #[test]
-    #[ignore = "known bug: absent Map.get returns Unit despite its value result type"]
     fn absent_map_get_does_not_return_an_untyped_unit_sentinel() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
-        let missing;
+        let (missing, found);
         unsafe {
             let map = praxis_map_new(ctx, &crate::scalars::INT as *const _);
             let key = praxis_alloc_int(ctx, 1);
             missing = praxis_map_get(ctx, map, key);
+            let value = praxis_alloc_int(ctx, 42);
+            praxis_map_insert(ctx, map, key, value);
+            found = praxis_map_get(ctx, map, key);
         }
-        unsafe { drop_ctx(ctx) };
 
         assert_ne!(
             missing.descriptor().id(),
             crate::scalars::UNIT.id(),
             "Map.get is statically value-typed; absence needs Option or a checked fault, not Unit"
         );
+        assert_eq!(missing.descriptor().id(), crate::enums::ENUM.id());
+        assert_eq!(
+            enum_tag_of(missing),
+            crate::enums::OPTION_NONE_TAG as u32,
+            "absence is `None`"
+        );
+        assert_eq!(enum_tag_of(found), crate::enums::OPTION_SOME_TAG as u32);
+        // …and the `Some` carries the value, rather than merely not being Unit.
+        let payload = unsafe { praxis_enum_payload(ctx, found, 0) };
+        assert_eq!(unsafe { praxis_int_load(ctx, payload) }, 42);
+        unsafe { drop_ctx(ctx) };
     }
 
+    /// The variant tag of an enum value, read the way the runtime's own
+    /// `enum_format` reads it.
+    fn enum_tag_of(value: GcRef) -> u32 {
+        // SAFETY: the caller passes an ENUM-descriptor object.
+        unsafe { (*(value.payload::<u8>() as *const crate::enums::EnumPayload)).tag }
+    }
+
+    /// S18 exit criterion (RT-15). The same rule under a *tuple* static type:
+    /// `Grid.find` answers `(Int, Int)`, so "nothing matched" cannot be the Unit
+    /// sentinel wearing that type.
     #[test]
-    #[ignore = "known bug: absent Grid.find returns Unit despite its point result type"]
     fn absent_grid_find_does_not_return_an_untyped_unit_sentinel() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
-        let missing;
+        let (missing, found);
         unsafe {
             let cell = praxis_alloc_int(ctx, 1);
             let sought = praxis_alloc_int(ctx, 2);
             let grid = rt.alloc_grid(&crate::scalars::INT, vec![cell], 1);
             missing = praxis_grid_find(ctx, grid, sought);
+            let present = praxis_alloc_int(ctx, 1);
+            found = praxis_grid_find(ctx, grid, present);
         }
-        unsafe { drop_ctx(ctx) };
 
         assert_ne!(
             missing.descriptor().id(),
             crate::scalars::UNIT.id(),
             "Grid.find is statically point-typed; absence needs Option or a checked fault, not Unit"
         );
+        assert_eq!(missing.descriptor().id(), crate::enums::ENUM.id());
+        assert_eq!(enum_tag_of(missing), crate::enums::OPTION_NONE_TAG as u32);
+        // …and a hit is `Some((x, y))`, still a real point inside the option.
+        assert_eq!(enum_tag_of(found), crate::enums::OPTION_SOME_TAG as u32);
+        let point = unsafe { praxis_enum_payload(ctx, found, 0) };
+        assert_eq!(point.descriptor().id(), crate::tuples::TUPLE.id());
+        unsafe { drop_ctx(ctx) };
     }
 
     // --- GC pacing (§12.4, ADR-019) ----------------------------------------
