@@ -211,7 +211,9 @@ runtime_symbols! {
     ClosureSetCapture = "praxis_closure_set_capture": (Ctx, Gc, RawI64, Gc) -> Gc, Pure;
     CounterGet = "praxis_counter_get": (Ctx, Gc, Gc) -> Gc, Allocates;
     CounterInc = "praxis_counter_inc": (Ctx, Gc, Gc) -> Gc, Allocates;
+    CounterKeys = "praxis_counter_keys": (Ctx, Gc) -> Gc, Allocates;
     CounterSet = "praxis_counter_set": (Ctx, Gc, Gc, Gc) -> Gc, Allocates;
+    CounterValues = "praxis_counter_values": (Ctx, Gc) -> Gc, Allocates;
     CounterIsEmpty = "praxis_counter_is_empty": (Ctx, Gc) -> Gc, Pure;
     CounterLen = "praxis_counter_len": (Ctx, Gc) -> Gc, Allocates;
     CounterNew = "praxis_counter_new": (Ctx, Ptr) -> Gc, Allocates;
@@ -293,10 +295,12 @@ runtime_symbols! {
     MapIndex = "praxis_map_index": (Ctx, Gc, Gc) -> Gc, Faults;
     MapInsert = "praxis_map_insert": (Ctx, Gc, Gc, Gc) -> Gc, Allocates;
     MapIsEmpty = "praxis_map_is_empty": (Ctx, Gc) -> Gc, Pure;
+    MapKeys = "praxis_map_keys": (Ctx, Gc) -> Gc, Allocates;
     MapLen = "praxis_map_len": (Ctx, Gc) -> Gc, Allocates;
     MapNew = "praxis_map_new": (Ctx, Ptr) -> Gc, Allocates;
     MapRemove = "praxis_map_remove": (Ctx, Gc, Gc) -> Gc, Pure;
     MapUpdateMax = "praxis_map_update_max": (Ctx, Gc, Gc, Gc) -> Gc, Allocates;
+    MapValues = "praxis_map_values": (Ctx, Gc) -> Gc, Allocates;
     MapUpdateMin = "praxis_map_update_min": (Ctx, Gc, Gc, Gc) -> Gc, Allocates;
     MaxHeapIsEmpty = "praxis_max_heap_is_empty": (Ctx, Gc) -> Gc, Pure;
     MaxHeapLen = "praxis_max_heap_len": (Ctx, Gc) -> Gc, Allocates;

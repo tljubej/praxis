@@ -5722,3 +5722,136 @@ fn a_constructor_with_written_type_arguments_builds_what_it_names() {
         assert_eq!(result.as_int(), want, "{src}");
     }
 }
+
+/// **REP-18.** A keyed collection can be enumerated, in a deterministic order, and
+/// `count` takes a predicate.
+///
+/// §3.3's representative program ends `counts.values().count(|n| n >= 2)`, and
+/// neither half existed: `values` was in no catalog row, and `count` was defined
+/// only at arity zero. The order is asserted because a `HashMap`'s own iteration
+/// order is randomized per process — without a fixed order the *answer* of a
+/// program like `m.keys()[0]` would change between runs, which is RT-16 in a place
+/// where printing is not the only thing affected.
+#[test]
+fn a_keyed_collection_enumerates_in_a_deterministic_order() {
+    // `values()` on a Counter, which is what §3.3 needs.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let c = Counter[Text]()\n  c[\"a\"] = 3\n  c[\"b\"] = 1\n  \
+         c[\"c\"] = 5\n  c.values().count(|n| n >= 2)\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2, "two of the three counts are >= 2");
+
+    // `count(pred)` is `filter(pred).count()`, and the two spellings agree.
+    for (src, want) in [
+        ("v.count(|n| n > 2)", 2),
+        ("v.filter(|n| n > 2).count()", 2),
+        ("v.count()", 4),
+        // …and it composes with the stages before it, because it *is* a filter
+        // plus the count sink rather than a sink of its own.
+        ("v.map(|n| n * 2).count(|n| n > 4)", 2),
+    ] {
+        let program = format!(
+            "fn main() -> Int {{\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  \
+             v.push(4)\n  {src}\n}}\n"
+        );
+        let (rt, result) = run_main(&program);
+        assert!(!rt.has_pending_fault(), "{src} faulted: {:?}", rt.fault());
+        assert_eq!(result.as_int(), want, "{src}");
+    }
+
+    // `keys()` and `values()` are **index-aligned**: the pair at each index is one
+    // entry. Three keys whose rendered order differs from their insertion order,
+    // so an implementation that returned the `HashMap`'s order would disagree with
+    // itself here rather than only look untidy.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map[Text, Int]()\n  m[\"c\"] = 3\n  m[\"a\"] = 1\n  \
+         m[\"b\"] = 2\n  let ks = m.keys()\n  let vs = m.values()\n  \
+         var ok = 0\n  for i in 0..ks.len() { if m[ks[i]] == vs[i] { ok += 1 } }\n  ok\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        3,
+        "every index pairs a key with its own value"
+    );
+
+    // The order itself, twice in one process and asserted against the rendered-key
+    // order the formatter already uses.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map[Text, Int]()\n  m[\"c\"] = 3\n  m[\"a\"] = 1\n  \
+         m[\"b\"] = 2\n  let vs = m.values()\n  vs[0] * 100 + vs[1] * 10 + vs[2]\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 123, "ordered by key: a, b, c");
+
+    // An empty collection enumerates to an empty `Vec` rather than faulting.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map[Text, Int]()\n  \
+         m.keys().len() + m.values().len()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+/// **REP-20.** A template literal that begins with a space matches.
+///
+/// The interpreter honours a literal's whitespace policy *before* matching its
+/// bytes, and the scanner left the leading space run in the text as well — so the
+/// space was consumed twice and the literal could never match. §3.3's own template
+/// is `` `{x1:int},{y1:int} -> {x2:int},{y2:int}` ``, which failed at the `-` of
+/// `->` on every input.
+#[test]
+fn a_template_literal_that_begins_with_a_space_matches() {
+    // The finding's own shape, and §3.3's.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let rs = read lines(`{a:int} -> {b:int}`)\n  \
+         var t = 0\n  for r in rs { t = t + r.a * r.b }\n  t\n}\n",
+        "1 -> 2\n3 -> 4\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 14);
+
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  \
+         let rs = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)\n  \
+         var t = 0\n  for r in rs { t = t + r.x2 - r.x1 + r.y2 - r.y1 }\n  t\n}\n",
+        "0,9 -> 5,9\n8,0 -> 0,8\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    // (5 - 0) + (9 - 9) for the first line, (0 - 8) + (8 - 0) for the second.
+    assert_eq!(result.as_int(), 5);
+
+    // The policy is still flexible, which is what stripping the run *into* it
+    // preserves: extra spaces and none at all both match.
+    for input in ["1 -> 2\n", "1    ->    2\n", "1->2\n"] {
+        let (rt, result) = run_main_with_input(
+            "fn main() -> Int {\n  let rs = read lines(`{a:int} -> {b:int}`)\n  \
+             var t = 0\n  for r in rs { t = t + r.a + r.b }\n  t\n}\n",
+            input,
+        );
+        assert!(
+            !rt.has_pending_fault(),
+            "{input:?} faulted: {:?}",
+            rt.fault()
+        );
+        assert_eq!(result.as_int(), 3, "{input:?}");
+    }
+
+    // A literal with no leading space is untouched, and one that is *only* spaces
+    // is a whitespace part.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let rs = read lines(`{a:int},{b:int}`)\n  \
+         var t = 0\n  for r in rs { t = t + r.a + r.b }\n  t\n}\n",
+        "1,2\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let rs = read lines(`{a:int} {b:int}`)\n  \
+         var t = 0\n  for r in rs { t = t + r.a + r.b }\n  t\n}\n",
+        "1 2\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}

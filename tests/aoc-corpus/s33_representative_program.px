@@ -1,0 +1,46 @@
+// §3.3's complete representative program — S25's acceptance criterion.
+//
+// Verbatim from the design doc, with one change: its body is inside `fn main()`.
+// §3.3 writes the whole program at top level, and **a top-level statement is
+// analyzed and then never executed** (REP-19) — `praxis run` calls the `main`
+// function and nothing else, so the verbatim text compiles and prints nothing.
+// That is registered as its own finding; everything else here is the design doc's
+// own text, including the template, the explicit `Counter[(Int, Int)]()`, the
+// trailing comma in `max(…)`, `counts[point] += 1` and `counts.values()`.
+//
+// Input (on stdin): AoC-2021-day-5-shaped line segments.
+// Output: the number of points covered by two or more segments, first ignoring
+// diagonals and then including them.
+fn overlaps(segments, diagonals) {
+    let counts = Counter[(Int, Int)]()
+
+    for segment in segments {
+        let dx = sign(segment.x2 - segment.x1)
+        let dy = sign(segment.y2 - segment.y1)
+
+        if !diagonals && dx != 0 && dy != 0 {
+            continue
+        }
+
+        let distance = max(
+            abs(segment.x2 - segment.x1),
+            abs(segment.y2 - segment.y1),
+        )
+
+        for step in 0..=distance {
+            let point = (
+                segment.x1 + dx * step,
+                segment.y1 + dy * step,
+            )
+            counts[point] += 1
+        }
+    }
+
+    counts.values().count(|n| n >= 2)
+}
+
+fn main() {
+    let segments = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)
+    out(overlaps(segments, false))
+    out(overlaps(segments, true))
+}

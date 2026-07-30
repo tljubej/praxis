@@ -104,6 +104,8 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(seq_sum_on_seq())
         .entry(seq_count_on_vec())
         .entry(seq_count_on_seq())
+        .entry(seq_count_if_on_vec())
+        .entry(seq_count_if_on_seq())
         .entry(seq_collect_on_vec())
         .entry(seq_collect_on_seq())
         // M8-WS11: the remaining non-barrier combinators. Each is an intrinsic
@@ -176,8 +178,91 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(counter_index_set())
         .entry(grid_index())
         .entry(grid_index_set())
+        // Keyed enumeration (REP-18). §3.3's `counts.values()`, plus the `Map`
+        // siblings — the only way to enumerate a `Map` while REP-15 stands.
+        .entry(counter_keys())
+        .entry(counter_values())
+        .entry(map_keys())
+        .entry(map_values())
         .finish()
         .expect("built-in catalog must be duplicate-free")
+}
+
+// --- Keyed enumeration (REP-18) ----------------------------------------------
+//
+// §3.3's representative program ends in `counts.values().count(|n| n >= 2)`, and
+// `values` existed nowhere: not in the catalog, and nowhere else in the design doc
+// either. These four rows are it, plus the `Map` siblings — which are also the only
+// way to enumerate a `Map` today, because `for kv in m` has no lowering at all
+// (REP-15).
+//
+// Each answers a `Vec`, so every §6.3 pipeline combinator applies to the result.
+// The order is fixed and deterministic (by the key's rendered form), so `keys()`
+// and `values()` are index-aligned and a program's *answer* cannot depend on a
+// `HashMap`'s per-process seed.
+
+fn counter_keys() -> MethodEntry {
+    MethodEntry {
+        receiver: counter_of_t(),
+        name: "keys",
+        params: vec![],
+        result: TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![TypePattern::var("T")],
+        },
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CounterKeys),
+        doc: "Every key, as a `Vec[T]`, ordered with `values()`.",
+        stability: Stability::Stable,
+    }
+}
+
+fn counter_values() -> MethodEntry {
+    MethodEntry {
+        receiver: counter_of_t(),
+        name: "values",
+        params: vec![],
+        result: TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![TypePattern::Scalar(ScalarType::Int)],
+        },
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CounterValues),
+        doc: "Every count, as a `Vec[Int]`, ordered with `keys()`.",
+        stability: Stability::Stable,
+    }
+}
+
+fn map_keys() -> MethodEntry {
+    MethodEntry {
+        receiver: map_of_k_v(),
+        name: "keys",
+        params: vec![],
+        result: TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![TypePattern::var("K")],
+        },
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapKeys),
+        doc: "Every key, as a `Vec[K]`, ordered with `values()`.",
+        stability: Stability::Stable,
+    }
+}
+
+fn map_values() -> MethodEntry {
+    MethodEntry {
+        receiver: map_of_k_v(),
+        name: "values",
+        params: vec![],
+        result: TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![TypePattern::var("V")],
+        },
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapValues),
+        doc: "Every value, as a `Vec[V]`, ordered with `keys()`.",
+        stability: Stability::Stable,
+    }
 }
 
 // --- Subscript rows (REP-16, §4.7/§6.2/§6.4) ---------------------------------
@@ -1568,6 +1653,36 @@ fn seq_count_on_vec() -> MethodEntry {
     }
 }
 
+/// `v.count(pred)` — §6.3's `count` with a predicate, which is what §3.3 writes
+/// (REP-18). A second *arity* of one name, which the catalog's
+/// `(receiver, name, arity)` key has always allowed: `count()` is the element
+/// count and `count(pred)` the matching-element count.
+fn seq_count_if_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: "count",
+        params: vec![t_to_bool()],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        lowering: MethodLowering::Intrinsic("seq_count"),
+        doc: "Number of elements satisfying the predicate.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_count_if_on_seq() -> MethodEntry {
+    MethodEntry {
+        receiver: seq_of_t(),
+        name: "count",
+        params: vec![t_to_bool()],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        lowering: MethodLowering::Intrinsic("seq_count"),
+        doc: "Number of elements satisfying the predicate.",
+        stability: Stability::Stable,
+    }
+}
+
 fn seq_count_on_seq() -> MethodEntry {
     MethodEntry {
         receiver: seq_of_t(),
@@ -2177,6 +2292,91 @@ mod tests {
             .next()
             .expect("bitset.insert exists");
         assert!(insert.can_fault());
+    }
+
+    /// **REP-18.** A keyed collection can be enumerated, `count` has two arities,
+    /// and every enumeration answers a `Vec` so §6.3 applies to it.
+    ///
+    /// §3.3's last line is `counts.values().count(|n| n >= 2)` and **neither half
+    /// existed**: `values` was in no row, and `count` only at arity zero. The
+    /// second arity is not a language decision — the catalog's key has always been
+    /// `(receiver, name, arity)` — but it is the first row to use it, so this is
+    /// where that is written down.
+    #[test]
+    fn a_keyed_collection_enumerates_and_count_has_two_arities() {
+        let cat = builtin_catalog();
+        let map_pat = TypePattern::Collection {
+            ctor: CollectionCtor::Map,
+            args: vec![TypePattern::var("K"), TypePattern::var("V")],
+        };
+        let counter_pat = counter_of_t();
+
+        // Both collections enumerate both ways, and each answers a `Vec`.
+        for (pat, what) in [(map_pat.clone(), "Map"), (counter_pat.clone(), "Counter")] {
+            for name in ["keys", "values"] {
+                let hits: Vec<_> = cat.by_receiver_and_name(&pat, name).collect();
+                assert_eq!(hits.len(), 1, "{what}.{name}()");
+                assert_eq!(hits[0].arity(), 0, "{what}.{name}() takes no arguments");
+                assert!(
+                    matches!(
+                        hits[0].result,
+                        TypePattern::Collection {
+                            ctor: CollectionCtor::Vec,
+                            ..
+                        }
+                    ),
+                    "{what}.{name}() answers a Vec so every §6.3 combinator applies"
+                );
+            }
+        }
+
+        // A `Counter`'s values are its counts, whatever its key type is (§6.2),
+        // where a `Map`'s are its value type. The two are not the same row written
+        // twice.
+        let counter_values = cat
+            .by_receiver_and_name(&counter_pat, "values")
+            .next()
+            .expect("Counter.values");
+        assert_eq!(
+            counter_values.result,
+            TypePattern::Collection {
+                ctor: CollectionCtor::Vec,
+                args: vec![TypePattern::Scalar(ScalarType::Int)]
+            }
+        );
+        let map_values = cat
+            .by_receiver_and_name(&map_pat, "values")
+            .next()
+            .expect("Map.values");
+        assert_eq!(
+            map_values.result,
+            TypePattern::Collection {
+                ctor: CollectionCtor::Vec,
+                args: vec![TypePattern::var("V")]
+            }
+        );
+        // …and `keys()` is the *key* type, which is what makes `m[ks[i]]` legal.
+        let map_keys = cat
+            .by_receiver_and_name(&map_pat, "keys")
+            .next()
+            .expect("Map.keys");
+        assert_eq!(
+            map_keys.result,
+            TypePattern::Collection {
+                ctor: CollectionCtor::Vec,
+                args: vec![TypePattern::var("K")]
+            }
+        );
+
+        // `count` at two arities, on both receivers a pipeline can start from.
+        for (pat, what) in [(vec_of_t(), "Vec"), (seq_of_t(), "Seq")] {
+            let arities: Vec<usize> = cat
+                .by_receiver_and_name(&pat, "count")
+                .map(|e| e.arity())
+                .collect();
+            assert_eq!(arities.len(), 2, "{what}.count has two rows");
+            assert!(arities.contains(&0) && arities.contains(&1), "{what}");
+        }
     }
 
     /// **REP-16.** The subscript rows are the closed set the language documents,

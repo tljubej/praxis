@@ -2360,12 +2360,21 @@ fn recognize_pipeline(db: &praxis_types::TypeDb, expr: &TypedExpr) -> Option<Pip
     };
     // The outermost call is either a terminal sink, or a streaming stage that
     // needs an implicit collect to produce a Vec (e.g. `let out = v.map(f)`).
-    let (outermost_stage, sink) = match classify_sink(name, args) {
-        Some(s) => (None, s),
-        None => {
-            let stage = classify_stage(name, args)?;
-            (Some(stage), Sink::Collect)
-        }
+    //
+    // `count(pred)` is the one call that is **both** (REP-18, §3.3's
+    // `counts.values().count(|n| n >= 2)`): it is exactly `filter(pred).count()`,
+    // so it is recognized as that pair rather than as a sink of its own. No new
+    // sink lowering, and it fuses into the same single loop the two-call spelling
+    // does.
+    let (outermost_stage, sink) = match (name.as_str(), args.as_slice()) {
+        ("count", [pred]) => (Some(Stage::Filter(Box::new(pred.clone()))), Sink::Count),
+        _ => match classify_sink(name, args) {
+            Some(s) => (None, s),
+            None => {
+                let stage = classify_stage(name, args)?;
+                (Some(stage), Sink::Collect)
+            }
+        },
     };
     // Walk the receiver chain collecting stages, outermost-first. `cur` is the
     // node under inspection; once it stops being a streaming `MethodCall` it is

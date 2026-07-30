@@ -155,8 +155,10 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::CounterInc => praxis_counter_inc as *const (),
         RuntimeSymbol::CounterIsEmpty => praxis_counter_is_empty as *const (),
         RuntimeSymbol::CounterLen => praxis_counter_len as *const (),
+        RuntimeSymbol::CounterKeys => praxis_counter_keys as *const (),
         RuntimeSymbol::CounterNew => praxis_counter_new as *const (),
         RuntimeSymbol::CounterSet => praxis_counter_set as *const (),
+        RuntimeSymbol::CounterValues => praxis_counter_values as *const (),
         RuntimeSymbol::DequeGet => praxis_deque_get as *const (),
         RuntimeSymbol::DequeIsEmpty => praxis_deque_is_empty as *const (),
         RuntimeSymbol::DequeLen => praxis_deque_len as *const (),
@@ -235,11 +237,13 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::MapIndex => praxis_map_index as *const (),
         RuntimeSymbol::MapInsert => praxis_map_insert as *const (),
         RuntimeSymbol::MapIsEmpty => praxis_map_is_empty as *const (),
+        RuntimeSymbol::MapKeys => praxis_map_keys as *const (),
         RuntimeSymbol::MapLen => praxis_map_len as *const (),
         RuntimeSymbol::MapNew => praxis_map_new as *const (),
         RuntimeSymbol::MapRemove => praxis_map_remove as *const (),
         RuntimeSymbol::MapUpdateMax => praxis_map_update_max as *const (),
         RuntimeSymbol::MapUpdateMin => praxis_map_update_min as *const (),
+        RuntimeSymbol::MapValues => praxis_map_values as *const (),
         RuntimeSymbol::MaxHeapIsEmpty => praxis_max_heap_is_empty as *const (),
         RuntimeSymbol::MaxHeapLen => praxis_max_heap_len as *const (),
         RuntimeSymbol::MaxHeapNew => praxis_max_heap_new as *const (),
@@ -1330,6 +1334,31 @@ unsafe fn vec_payload_mut<'s>(r: Rooted<'s>) -> &'s mut VecPayload {
     unsafe { &mut *r.get().payload::<VecPayload>() }
 }
 
+/// Build a `Vec[T]` holding `items`, with `element_descriptor` as its element
+/// type — the shape every wrapper that answers with a collection needs.
+///
+/// The `Vec` is rooted across the pushes, which is the part worth having in one
+/// place: `praxis_vec_new` allocates, and so may the caller's own iteration, so a
+/// collection between the allocation and the last push would reclaim it.
+///
+/// # Safety
+/// `ctx` must be live and wired; `element_descriptor` must be a valid
+/// `'static TypeDescriptor`; every item must be a valid `GcRef` whose payload
+/// matches it.
+unsafe fn vec_of(
+    ctx: *mut RuntimeContext,
+    element_descriptor: &'static TypeDescriptor,
+    items: impl Iterator<Item = GcRef>,
+) -> GcRef {
+    let result = unsafe { praxis_vec_new(ctx, element_descriptor) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let rp = unsafe { vec_payload_mut(scope.root(result)) };
+    for item in items {
+        rp.items.push(item);
+    }
+    result
+}
+
 /// Allocate a new empty `Vec[T]` with the given element descriptor (§11.2).
 /// Returns a `GcRef` to a zero-length vector.
 ///
@@ -2337,6 +2366,32 @@ pub unsafe extern "C" fn praxis_map_len(ctx: *mut RuntimeContext, map: GcRef) ->
     unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.entries.len() as i64) }
 }
 
+/// `m.keys()` — every key, as a `Vec[K]` (REP-18). Ordered like
+/// [`praxis_counter_keys`], and index-aligned with [`praxis_map_values`].
+///
+/// This and `values()` are the only way to enumerate a `Map` today: `for kv in m`
+/// has no lowering at all (REP-15).
+///
+/// # Safety
+/// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_map_keys(ctx: *mut RuntimeContext, map: GcRef) -> GcRef {
+    let key_desc = unsafe { map_payload(map) }.key_descriptor;
+    let rows = unsafe { crate::maps::ordered_entries(&map_payload(map).entries) };
+    unsafe { vec_of(ctx, key_desc, rows.into_iter().map(|(k, _)| k)) }
+}
+
+/// `m.values()` — every value, as a `Vec[V]` (REP-18). See [`praxis_map_keys`].
+///
+/// # Safety
+/// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_map_values(ctx: *mut RuntimeContext, map: GcRef) -> GcRef {
+    let val_desc = unsafe { map_payload(map) }.value_descriptor;
+    let rows = unsafe { crate::maps::ordered_entries(&map_payload(map).entries) };
+    unsafe { vec_of(ctx, val_desc, rows.into_iter().map(|(_, v)| v)) }
+}
+
 /// True iff the map is empty, as a boxed Bool.
 ///
 /// # Safety
@@ -2612,6 +2667,36 @@ pub unsafe extern "C" fn praxis_counter_set(
     let p = unsafe { counter_payload_mut(scope.root(counter)) };
     p.entries.insert(DynamicKey::new(key), value);
     unsafe { unit_sentinel(ctx) }
+}
+
+/// `c.keys()` — every key, as a `Vec[T]` (REP-18).
+///
+/// Ordered by the key's rendered form, so it is the *same* order
+/// [`praxis_counter_values`] uses and the two are index-aligned. A `HashMap`'s own
+/// order is randomized per process, so returning it would make the same program
+/// answer differently on two runs (RT-16 in a place where the value depends on it,
+/// not only the printing).
+///
+/// # Safety
+/// `ctx` must be live and wired; `counter` must be a valid `Counter` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_counter_keys(ctx: *mut RuntimeContext, counter: GcRef) -> GcRef {
+    let key_desc = unsafe { counter_payload(counter) }.key_descriptor;
+    let rows = unsafe { crate::maps::ordered_entries(&counter_payload(counter).entries) };
+    unsafe { vec_of(ctx, key_desc, rows.into_iter().map(|(k, _)| k)) }
+}
+
+/// `c.values()` — every count, as a `Vec[Int]` (REP-18).
+///
+/// §3.3's representative program is `counts.values().count(|n| n >= 2)`. Ordered
+/// like [`praxis_counter_keys`]; see it for why the order is fixed.
+///
+/// # Safety
+/// `ctx` must be live and wired; `counter` must be a valid `Counter` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_counter_values(ctx: *mut RuntimeContext, counter: GcRef) -> GcRef {
+    let rows = unsafe { crate::maps::ordered_entries(&counter_payload(counter).entries) };
+    unsafe { vec_of(ctx, &scalars::INT, rows.into_iter().map(|(_, v)| v)) }
 }
 
 /// The number of distinct keys, as a boxed Int.

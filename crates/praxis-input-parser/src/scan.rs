@@ -58,10 +58,31 @@ pub fn scan_template(interior: &str) -> Result<Vec<TemplatePart>, ScanError> {
     let mut i = 0;
 
     // Flush the accumulated literal run with its policy.
+    //
+    // **A space/tab run at either end of a literal is flexible whitespace, not text**
+    // (REP-20). §7.2's rule is that an ordinary run of spaces or tabs is flexible,
+    // and both ends of a literal already have something that honours it: the
+    // interpreter applies the literal's own policy before matching its bytes, and
+    // every capture consumes leading whitespace before it walks. Leaving the runs
+    // in the text made them *also* exact, so they had to be matched twice:
+    //
+    //   - The leading run could never match at all. §3.3's own
+    //     `` `{x1:int},{y1:int} -> {x2:int},{y2:int}` `` failed at the `-` of `->`
+    //     on every input, because the policy consumed the space and then the
+    //     literal " -> " was compared against "-> ".
+    //   - The trailing run made the spacing rigid on one side only: `1 -> 2`
+    //     matched and `1->2` did not.
+    //
+    // A run *inside* a literal is untouched — nothing else consumes it, so it stays
+    // exact — and `\x20` is the escape for a space that must be matched literally.
     let flush = |lit: &mut String, lit_ws: &mut WsPolicy, parts: &mut Vec<TemplatePart>| {
         if !lit.is_empty() {
+            let text = std::mem::take(lit);
+            let stripped = text.trim_matches([' ', '\t']);
+            // A literal whose runs strip it to nothing is pure whitespace, and it
+            // is still emitted: the policy is the part.
             parts.push(TemplatePart::Literal {
-                text: std::mem::take(lit),
+                text: stripped.to_string(),
                 ws: *lit_ws,
             });
             *lit_ws = WsPolicy::SpaceRun;
@@ -239,6 +260,59 @@ mod tests {
         match &parts[2] {
             TemplatePart::Capture { name, .. } => assert_eq!(name.as_deref(), Some("y")),
             _ => panic!("expected capture"),
+        }
+    }
+
+    /// **REP-20 at the unit level.** A space/tab run at either end of a literal
+    /// becomes the whitespace policy and leaves the text.
+    ///
+    /// Here as well as in the JIT tests because this is the *scanner's* rule: the
+    /// interpreter honours a policy it is given, and the defect was that the same
+    /// spaces were also in the bytes it had to match.
+    #[test]
+    fn a_literals_edge_whitespace_is_its_policy_and_not_its_text() {
+        // §3.3's own template. The middle literal is `-> `, not ` -> `.
+        let parts = scan_template("{x1:int},{y1:int} -> {x2:int},{y2:int}").unwrap();
+        let literals: Vec<&str> = parts
+            .iter()
+            .filter_map(|p| match p {
+                TemplatePart::Literal { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(literals, vec![",", "->", ","]);
+
+        // Both ends, and a run *inside* a literal, which stays exact — nothing else
+        // consumes it, and `\\x20` is the escape for a space that must match.
+        let parts = scan_template("{a:int} a b {b:int}").unwrap();
+        match &parts[1] {
+            TemplatePart::Literal { text, ws } => {
+                assert_eq!(text, "a b");
+                assert_eq!(*ws, WsPolicy::SpaceRun);
+            }
+            _ => panic!("expected literal"),
+        }
+
+        // A literal that is only whitespace strips to nothing and is still emitted:
+        // the policy is the part.
+        let parts = scan_template("{a:int} {b:int}").unwrap();
+        assert_eq!(parts.len(), 3);
+        match &parts[1] {
+            TemplatePart::Literal { text, ws } => {
+                assert!(text.is_empty());
+                assert_eq!(*ws, WsPolicy::SpaceRun);
+            }
+            _ => panic!("expected literal"),
+        }
+
+        // An escaped policy is untouched: it carries no text to strip.
+        let parts = scan_template(r"{a:int}\s+{b:int}").unwrap();
+        match &parts[1] {
+            TemplatePart::Literal { text, ws } => {
+                assert!(text.is_empty());
+                assert_eq!(*ws, WsPolicy::OneOrMore);
+            }
+            _ => panic!("expected ws literal"),
         }
     }
 

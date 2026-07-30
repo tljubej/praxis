@@ -73,6 +73,36 @@ pub(crate) fn write_sorted<I: Iterator<Item = String>>(
     let _ = out.write_str(close);
 }
 
+/// The entries of a keyed collection in a **deterministic** order: sorted by the
+/// key's rendered form (REP-18).
+///
+/// The order matters because `keys()` and `values()` promise to be index-aligned,
+/// and because a `HashMap`'s own iteration order is randomized per process — the
+/// same program would answer differently on two runs, which is RT-16 again in a
+/// place where the value, not just the printing, depends on it.
+///
+/// The sort key is the same one [`write_sorted`] uses, and for the same reason:
+/// `TypeDescriptor::compare` is `None` on every descriptor pending D3, so the
+/// rendered form is the only total order available. So `{10: a, 9: b}` orders `10`
+/// first — lexicographic, not numeric. When D3 lands, `write_sorted` and this are
+/// the two places that change.
+///
+/// # Safety
+/// Every key's payload must match the descriptor it carries.
+pub(crate) unsafe fn ordered_entries(entries: &HashMap<DynamicKey, GcRef>) -> Vec<(GcRef, GcRef)> {
+    let mut rows: Vec<(String, GcRef, GcRef)> = entries
+        .iter()
+        .map(|(k, v)| {
+            let mut rendered = String::new();
+            // SAFETY: the key's payload matches the descriptor it carries.
+            unsafe { render_into(&mut rendered, k.descriptor(), k.value()) };
+            (rendered, k.value(), *v)
+        })
+        .collect();
+    rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    rows.into_iter().map(|(_, k, v)| (k, v)).collect()
+}
+
 // ===========================================================================
 // Map[K, V]
 // ===========================================================================
