@@ -31,28 +31,44 @@ Update this file at the end of every stage.
 | S18 … S21 | not started | |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
-| S25 — Grammar completion | **part** — its acceptance criterion is **met** (REP-07, REP-08, REP-17, REP-16, REP-09, REP-18, REP-20; REP-10 left, plus REP-19 and REP-21) | `c74e062`, `bb3bc43`, `11976cc`, `0ee29b1`, `2f9bcbd`, `b495e93` |
+| S25 — Grammar completion | **part** — its acceptance criterion is met **verbatim** (REP-07, REP-08, REP-17, REP-16, REP-09, REP-18, REP-20, and REP-19 with it); **REP-10 left**, plus REP-21 | `c74e062`, `bb3bc43`, `11976cc`, `0ee29b1`, `2f9bcbd`, `b495e93`, `11e107c` |
 | S26 — Declaration, pattern and inference gaps | **done** | `3306a04`, `b3bb6f5`, `4b7d763` |
+| REP-15 — the iteration protocol (no stage; ADR-066) | **done** | `a1c0b76` |
+| REP-19 — top-level statements execute (no stage; ADR-067) | **done** | `11e107c` |
+| REP-23 — a fused pair carries both halves (no stage) | **done** | `3678b6d` |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
 TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
-**Twenty-one defects found while executing the plan are registered** as
-**REP-01 … REP-21** in the plan's **§4.1**. REP-01…REP-14 are owned by four new
+**Twenty-three defects found while executing the plan are registered** as
+**REP-01 … REP-23** in the plan's **§4.1**. REP-01…REP-14 are owned by four new
 stages (**S23**–**S26**) and three new decisions (**D15**–**D17**), two of which
-are now answered. **Three rows are `unscheduled`**: **REP-15** (a P0), **REP-19**
-and **REP-21**.
+are now answered. **Two rows are `unscheduled`**: **REP-22** (a P0, reassessed
+this session after measuring it) and **REP-21** (a P3).
 
-**S25's acceptance criterion is met: §3.3's representative program compiles and
-runs.** It is `tests/aoc-corpus/s33_representative_program.px` and answers `5`
-and `12`. Getting there took **five** rows the register did not have when the
-stage was written — REP-16, REP-17, REP-18, REP-20 and (in framing only) REP-19 —
+**§3.3's representative program now runs verbatim from the design doc** —
+top-level `let`, top-level `out`s and no `fn main` anywhere.
+`tests/aoc-corpus/s33_representative_program.px` *is* the design doc's text now,
+and answers `5` and `12`. Getting there took **six** rows the register did not
+have when S25 was written — REP-16, REP-17, REP-18, REP-20, REP-09 and REP-19 —
 each invisible until the one before it landed, because the program failed earlier
-every time it was measured. Its body is inside `fn main()` for REP-19's reason:
-§3.3 is written entirely at top level and **a top-level statement is never
-executed**. See §4.
+every time it was measured. The `fn main()` wrapper the corpus copy carried is
+gone: REP-19 landed. See §4.
+
+**The repair had one P0 left and it is closed. REP-15 is done** (ADR-066): six of
+the ten iterables had no `for` lowering, and a `for` iterates a **snapshot** now.
+**REP-19 is done with it** (ADR-067): a file's top-level statements are its
+program, in a generated `<entry>` function, and `fn main` is the fallback for a
+file with none. **REP-23** — a fused `enumerate()`'s pair held *neither* half —
+landed as ADR-066's null slot, which was already its fix.
+
+**One new P0 is registered and unfixed: REP-22.** A `fn` body that reads a
+top-level binding answers `Unit`; **through a closure it answers a nine-digit
+number**. Both forms were measured at `a1c0b76` and behave identically there, so
+REP-19 did not cause them — it made them easy to reach, because the design doc's
+program shape puts bindings at the top level. **This is where to start.**
 
 **S23 is closed.** All four of its findings are fixed and gated — **REP-13**,
 **REP-11**, **REP-12** and **REP-02** — each as its own commit with the suite
@@ -70,12 +86,46 @@ main event and landed together as one commit, which the plan requires; **ADR-062
 is their decision.
 
 **S25 is the only stage left in the repair's own schedule**, and **REP-10 is its
-last scheduled row** — record and tuple patterns. Its acceptance criterion is
-already met (above). Beyond it are S18…S21, which were never started, and the
-three unscheduled rows: **REP-15** (a P0), **REP-19** and **REP-21**.
+last scheduled row** — record and tuple patterns. Its acceptance criterion is met
+verbatim (above). Beyond it are S18…S21, which were never started, and the two
+unscheduled rows: **REP-22** (a P0) and **REP-21** (a P3).
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1435 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1443 passed, 0 failed, 38 ignored**. `just ci` is green.
+
+This session's twelve new gates and two rewrites (**ADR-066**, **ADR-067**):
+
+| Test | File | Pins |
+|---|---|---|
+| `a_for_reaches_every_member_of_every_iterable` | `jit.rs` | REP-15's headline — all ten iterables, each at an answer a wrong read could not give, plus an empty one of each. **Two of its failure modes are not assertions**: the test process used to hang (`Set`) and to die |
+| `a_for_iterates_a_snapshot_of_what_it_was_given` | `jit.rs` | the decision — mutation during the walk is well-defined, a heap is not drained, and both the single and the *paired* snapshot survive 300 allocating iterations |
+| `an_iterables_order_is_the_one_its_own_accessors_promise` | `jit.rs` | `keys()`/`values()` index-aligned with the `for`, a heap's walk agreeing with draining it, and insertion order not showing through |
+| `a_for_over_an_unannotated_parameter_reaches_each_iterable_it_is_given` | `jit.rs` | ADR-062's half REP-15 was hiding: one body, four ctors in one program, and the paired plan through a second |
+| `a_for_snapshots_once_before_the_loop_or_not_at_all` | `praxis-mir/src/build.rs` | the instruction counts — one snapshot, in a block before the header; two for a keyed collection with one tuple per step; and **zero** for a `Vec`/`Deque`/`Range`, which is the regression a careless fix would cause |
+| `a_sets_members_come_out_in_the_order_it_prints_them` | `maps.rs` | `ordered_members`, and that `out(s)` and `for x in s` share it |
+| `a_keyed_collections_entries_come_out_paired` | `maps.rs` | the order `keys()`/`values()`/`for` all read |
+| `a_heaps_snapshot_is_the_order_draining_it_would_give` | `heaps.rs` | pop order for both heaps, agreeing with `pop`, and the heap intact afterwards |
+| `a_bitsets_members_come_out_ascending` | `bitset.rs` | across three words, and the two empty shapes |
+| `an_unknown_schema_slot_reads_the_values_own_descriptor` | `tuples.rs` | ADR-066's decision 5 — arity kept, a `Text` slot not read as an `i64`, two differently-typed values unequal rather than misread, and `(?, ?)` equal to `(Int, Int)` |
+| `a_fused_pair_carries_both_of_its_halves` | `jit.rs` | REP-23 — `.0` and `.1` weighted differently so a swap fails too, for `enumerate` and `zip`, and the pairs comparing as values |
+| `a_top_level_statement_runs_in_the_order_it_is_written` | `praxis-cli/tests/run.rs` | REP-19 — every statement kind, and declarations interleaved without moving them |
+| `a_declared_main_is_the_entry_point_only_when_nothing_else_is` | `run.rs` | all four combinations, including that `main` runs **once** for `fn main(){…}` + `main()` |
+| `the_entry_points_name_is_not_one_a_program_can_spell` | `run.rs` | the crash frame reads `<entry>`, and `fn <entry>()` does not parse |
+| `a_files_top_level_statements_become_one_generated_item` | `infer_tests.rs` | the typed tree — three statements in one item, declarations still their own, a nullary `Unit` shape, and `entry_point`'s three cases |
+
+`every_runtime_symbol_mir_emits_is_registered` was **extended** with a `for` over
+each of the six snapshot iterables: a `for` is the only caller of four of the new
+wrappers, so nothing else in that program would reach them.
+
+`an_opaque_tuple_type_yields_an_empty_schema` was **rewritten** as
+`an_opaque_tuple_type_keeps_its_arity_with_unknown_slots`. It was a §8.2
+bug-pinning test — it asserted the empty schema that dropped every fused pair's
+elements — so it would have gone red as a "regression".
+
+`a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names` documents,
+in passing, that `read grid(int)` over `12\n34\n` produces cells `[12, 2, 34, 4]`.
+That is the input parser's and not REP-15's; a `for` over that grid visits exactly
+those four cells, which is what `g.cells()` says.
 
 S25's second half added ten gates and replaced one (**ADR-064**, **ADR-065**):
 
@@ -1042,7 +1092,55 @@ No other foundation has been started.
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
 
-### From this session (S17: TY-33 unit 3 — the graph helpers)
+### From this session (REP-15, REP-19, REP-23)
+
+**A `for` no longer indexes what it was given** (ADR-066). It indexes a
+**snapshot**: `IterPlan` decides, and only `Vec`/`Deque`/`Range`/`Seq` are walked
+in place. If you touch `lower_for`, the two things to preserve are that the
+snapshot is emitted **before** the header (one call per loop, not per step) and
+that `IterPlan` has **no default arm** — the `_ => VecGet` default *was* REP-15.
+
+**Four new runtime wrappers, and `for` is their only caller**:
+`praxis_set_items`, `praxis_bitset_items`, `praxis_min_heap_items`,
+`praxis_max_heap_items`. They are **not** catalog rows, so `s.items()` is `Y110`.
+`Map`/`Counter` need none — they snapshot through REP-18's `keys()`/`values()`,
+which are index-aligned, and the `(K, V)` pair is built in MIR with
+`AllocKind::Tuple`.
+
+**Three new ordering helpers, and each is shared with a formatter**:
+`maps::ordered_members` (Set), `heaps::in_pop_order` (both heaps, factored out of
+`write_in_pop_order`), `BitSetPayload::members` (ascending). When D3 lands and
+`TypeDescriptor::compare` is populated, `write_sorted`, `ordered_entries` and
+`ordered_members` are the three places that change — one more than the last
+session's note said.
+
+**A `TupleSchema` slot may be null**, meaning "the compiler had no static type
+here", and the runtime reads the value's own descriptor off its header
+(`TupleSchema::descriptor_at`). Two things depend on it: `let m = Map()` plus a
+`for kv in m` that never opens the pair compiles, and a fused `enumerate`/`zip`
+pair keeps its **arity** so its elements are not dropped (REP-23). `same_shape`
+treats a null slot as agreeing with anything, and `tuple_equals` compares the two
+objects' own descriptors for such a slot rather than reading one as the other.
+
+**`tuple_schema_for` takes an arity now.** The call site passes `elements.len()`,
+which is what makes an `Opaque` tuple type keep its shape.
+
+**A file's top-level statements are lowered** (ADR-067), into a
+`TypedItem::Fn` named `praxis_hir::ENTRY_NAME` = `<entry>` — **not an
+identifier**, so no program can declare or call it. It is an ordinary nullary
+`Unit` item: mono, MIR and the backend needed no change. Its `SymbolId` is minted
+into the `NameTable` with no `decl` span.
+
+**`praxis_hir::entry_point` is the entry-point rule**, and both hosts ask it (the
+CLI's `run`, the debugger's `reload`). `<entry>` wins; a declared `fn main` is the
+fallback for a file with no top-level statements; neither is the error
+"no statements to run and no `main` function".
+
+**`lower`'s root walk has a fourth case.** `is_top_level_stmt` names the three
+declaration kinds positively and everything else is a statement, so a new
+top-level *declaration* form must be added there or it will start executing.
+
+### From an earlier session (S17: TY-33 unit 3 — the graph helpers)
 
 **`praxis-runtime` calls back into generated code, for the first time.**
 `praxis_runtime::abi::ClosureOracle` transmutes a closure's `fn_ptr` and calls
@@ -2388,26 +2486,61 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**REP-15 is the answer.** It is the only P0 left in the tree and the most severe
-thing in it, and S25's acceptance criterion — the reason to prefer S25 last
-session — **is met**. `13-repair-s25-second-half-handover.md` is the last session's
-note; read it for what REP-19 needs and for the five things worth not
-rediscovering.
+**REP-22 is the answer.** It is the only P0 in the tree, and this session created
+neither half of it — it measured both at `a1c0b76` and they behave identically
+there. What changed is how easily a program reaches it: REP-19 made the design
+doc's own program shape work, and that shape puts bindings at the top level.
+`14-repair-rep15-rep19-rep23-handover.md` is this session's note.
 
-Three rows are unscheduled and one is scheduled:
+Two rows are unscheduled and one is scheduled:
 
-- **REP-15 (P0, `unscheduled`)** — six of the nine iterable collections have no
-  `for` lowering at all. Detail below; it needs a decision before it needs code.
-- **REP-19 (P1, `unscheduled`)** — a top-level statement is analyzed and never
-  executed. §3.3 and §4.2 are both written at top level, so this silences the
-  design doc's own programs. Needs a decision: what happens when a file has
-  top-level statements *and* a `fn main`.
+- **REP-22 (P0, `unscheduled`)** — a `fn` body that reads a top-level binding
+  answers `Unit`; **through a closure it answers a nine-digit number**. Detail
+  below; it needs a decision before it needs code.
 - **REP-10 (P2, S25)** — record and tuple patterns, the last row S25 schedules.
   `exhaustive.rs` already handles the `Closed`-with-one-constructor shape they
-  produce, so it is a parser and lowering change.
+  produce, so it is a parser and lowering change. It is also the other half of
+  `for (k, v) in m`, which ADR-066 deliberately left to it.
 - **REP-21 (P3, `unscheduled`)** — `min=`/`max=`. Both runtime wrappers exist with
   no caller and both catalog row names are reserved (ADR-064), so what is left is
   a contextual grammar rule: `min` is an identifier, so `min=` is two tokens.
+
+**REP-22 in detail.**
+
+```praxis
+let x = 1
+fn f() { x }
+out(f())          // Unit
+
+let y = 5
+fn g() { |n| n + y }
+out(g()(1))       // 4388746929
+```
+
+Both pass `praxis check`. Resolution resolves the name to the top-level symbol and
+inference types it, but MIR has no slot for it inside the function: a `fn` does
+not capture (§4.9/§4.10 — closures do, functions do not) and **nothing says so**.
+The closure form is worse than the bare one because capture analysis captures a
+symbol with no slot, so the environment cell holds whatever the read found.
+
+A **top-level** closure is fine — `let offset = 10` then
+`v.map(|x| x + offset).sum()` answers `23`, because after ADR-067 both live in
+`<entry>` and capture works normally. So the boundary is a `fn` body, not a
+closure body, and that is the shape any check has to have.
+
+The decision it needs: **either report it** (a name mistake, so ADR-051 puts it in
+the `N0xx` block — **`N007` is next free**) **or make top-level bindings real
+globals**, which is a language decision §3.2 does not make and which would need a
+storage answer, an initialization order and a GC root. The narrow defect that
+survives either answer is the **silence**, which is REP-14's shape and how that
+row was scoped.
+
+If reporting: a `fn` body's scope is a child of the enclosing scope, so the
+lookup walks straight out to the top level. What is missing is the *boundary* —
+`ScopeTree::lookup` does not say which scope it found the binding in, and
+`resolve_fn` does not record that its body scope is a function boundary. Both are
+small; the care is in not reporting a closure's legitimate capture, and in what a
+`fn` referring to another `fn` (or a `struct`, or a builtin) must keep doing.
 
 **S17, S23, S24 and S26 are all closed.** Of the repair's three new decisions,
 **D15 (S24) and D17 (S26) are answered and implemented**; **D16 is S25's and is
@@ -2416,28 +2549,43 @@ REP-18's second arity of `count` is *not* D16: the method catalog has always bee
 keyed by `(receiver, name, arity)`, so two arities of one method name were always
 legal there. D16 is about a **prelude function**, `assert`.
 
-- **REP-15 is a P0 and is `unscheduled`.** Found while landing REP-03, and
-  pre-existing: **six of the nine iterable collections have no `for` lowering at
-  all.** `for x in s` over a `Set`, `for i in b` over a `BitSet`, `for kv in c`
-  over a `Counter` and `for kv in m` over a `Map` each pass `praxis check` and
-  **kill the process**; a `MinHeap` over `[3, 1, 2]` sums to `4349199564` — a
-  silently wrong answer, which is worse. MIR's `get_symbol_for` has arms for
-  `Vec`, `Deque` and `Range` and defaults everything else to `VecGet`, and the
-  runtime has **no indexed accessor** for the other six to select. So it is a
-  vertical slice — an iteration protocol plus a `for` lowering — on the model of
-  D6's `Range` work, and it needs a decision first (the protocol, *and* whether
-  `for (k, v) in m` destructures, which is REP-10's other half). It is the most
-  severe thing left in the tree.
-- **S25's acceptance criterion is met.** §3.3's representative program compiles
-  and runs, as `tests/aoc-corpus/s33_representative_program.px`. Getting there
-  took **five rows the register did not have** when the stage was written, found
-  one at a time because each was invisible until the one before it landed:
-  REP-16 (no subscript syntax), REP-17 (a trailing comma), REP-09 (turned from a
-  missing form into an *ambiguity* by REP-16), REP-18 (`values()` and
-  `count(pred)` — neither existed), REP-20 (a template literal beginning with a
-  space could never match), and REP-19 in framing only (the program is written at
-  top level, and a top-level statement never executes, so the corpus copy wraps
-  its body in `fn main()`).
+- **S25's acceptance criterion is met verbatim.** §3.3's representative program
+  runs as the design doc writes it — top-level `let`, top-level `out`s, no
+  `fn main` anywhere — and `tests/aoc-corpus/s33_representative_program.px` *is*
+  that text. Getting there took **six rows the register did not have** when the
+  stage was written, found one at a time because each was invisible until the one
+  before it landed: REP-16 (no subscript syntax), REP-17 (a trailing comma),
+  REP-09 (turned from a missing form into an *ambiguity* by REP-16), REP-18
+  (`values()` and `count(pred)` — neither existed), REP-20 (a template literal
+  beginning with a space could never match) and REP-19 (a top-level statement
+  never executed).
+
+What this session delivered, and the four things worth carrying out of it:
+
+- **A `for` iterates a snapshot** (ADR-066). Six of the ten iterables had no
+  lowering at all — MIR read a `Set`'s `HashSet` payload through
+  `praxis_vec_get`. An *nth-member* accessor is what the code's shape suggests
+  and it does not survive the collections: a `HashSet` has no nth member
+  (quadratic), and a `BinaryHeap`'s array is heap-ordered only at its root, so
+  indexing it answers by insertion history. **If you are tempted to make the
+  snapshot lazy, that is the reasoning to re-read.**
+- **`Map`/`Counter` needed no new wrapper**: REP-18's `keys()`/`values()` are
+  index-aligned because they share one order, so they *are* the protocol, and the
+  pair is built in MIR. Building it in the runtime was the other candidate and it
+  is wrong for a reason worth knowing — a `Map`'s payload records `INT` as its
+  value descriptor unconditionally, so a `Map[Text, Text]`'s pair would read its
+  value as an `i64`.
+- **A top-level statement executes** (ADR-067), and §3.2 had required it all
+  along: "top-level statements are wrapped in a generated entry function". The
+  decision that was actually open — what happens when the file also declares
+  `fn main` — is answered as a **fallback**, not a layer: running the top level
+  *and then* calling `main` would run `main` twice for `fn main(){…}` + `main()`,
+  and reporting a file with both would reject that ordinary program.
+- **`an_opaque_tuple_type_yields_an_empty_schema` was a §8.2 bug-pinning test**
+  and nobody had listed it as one. It asserted the empty schema that dropped every
+  fused pair's elements (REP-23), so it would have gone red as a "regression".
+  Rewritten, with the inversion explained. **§8.2's table is not exhaustive**; a
+  passing test that asserts a defect can be anywhere.
 
   **Read the whole precedence table before adding to it** — REP-07 renumbered it:
   `||` at `bp(1, 2)`, `..` at `bp(3, 4)`, `&&` at `bp(5, 6)`, then comparison,
@@ -2497,6 +2645,9 @@ What S25 has delivered:
 
 **S18 is still `D1`-blocked** and D1 is still open, so it is not the answer to
 "what next" either — see the S18 block below for what it needs.
+
+`14-repair-rep15-rep19-rep23-handover.md` is this session's note; read it for
+REP-22's detail and for the six things worth not rediscovering.
 
 What S26 delivered, and the three things worth carrying out of it:
 
