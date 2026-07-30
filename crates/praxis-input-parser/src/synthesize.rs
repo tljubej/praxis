@@ -131,9 +131,18 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Result<Type, TypeCtorErro
 /// The result type of an atomic parser (§7.4).
 fn atomic_type(kind: AtomicKind, db: &mut TypeDb) -> Type {
     match kind {
-        AtomicKind::Int | AtomicKind::Digit => db.int(),
+        // `uint` is `Int`, deliberately: `ScalarType::UInt` is reserved and has
+        // no runtime object (`praxis_repr::builtin_for_type` answers
+        // `NoRuntimeRepr`), so typing a `uint` capture as `UInt` would make
+        // every program containing one fail to compile under D9. The
+        // non-negativity is the *parse rule*, in `walk_atomic`.
+        AtomicKind::Int | AtomicKind::UInt | AtomicKind::Digit => db.int(),
+        AtomicKind::Float => db.float(),
+        AtomicKind::Byte => db.scalar(praxis_types::ScalarType::Byte),
         AtomicKind::Char => db.char(),
-        AtomicKind::Word | AtomicKind::Text | AtomicKind::Rest => db.text(),
+        AtomicKind::Word | AtomicKind::Identifier | AtomicKind::Text | AtomicKind::Rest => {
+            db.text()
+        }
     }
 }
 
@@ -212,6 +221,42 @@ mod tests {
         ParserAst::Atomic {
             kind,
             span: Span::at(0),
+        }
+    }
+
+    /// **IP-11's type half.** Every one of §7.4's ten atomics has a result
+    /// type, and `uint`'s is `Int`.
+    ///
+    /// Not `ScalarType::UInt`: `praxis_repr::builtin_for_type` answers
+    /// `NoRuntimeRepr` for `UInt` (it is reserved and has no runtime object,
+    /// pinned by `a_type_with_no_runtime_object_has_no_descriptor`), and under
+    /// D9 a JIT compile *fails* when a descriptor is missing — so a `uint`
+    /// capture typed `UInt` would make every program containing one fail to
+    /// compile. §7.4's non-negativity is the parse rule instead.
+    #[test]
+    fn every_atomic_the_design_requires_has_a_type() {
+        use praxis_types::{ScalarType, TypeData};
+        let mut db = TypeDb::new();
+        for kind in AtomicKind::ALL {
+            let t = synthesize(&atom(*kind), &mut db).expect("an atomic synthesizes");
+            let expected = match kind {
+                AtomicKind::Int | AtomicKind::UInt | AtomicKind::Digit => ScalarType::Int,
+                AtomicKind::Float => ScalarType::Float,
+                AtomicKind::Byte => ScalarType::Byte,
+                AtomicKind::Char => ScalarType::Char,
+                AtomicKind::Word | AtomicKind::Identifier | AtomicKind::Text | AtomicKind::Rest => {
+                    ScalarType::Text
+                }
+            };
+            match db.data(t) {
+                TypeData::Scalar(s) => assert_eq!(*s, expected, "for `{}`", kind.keyword()),
+                other => panic!("`{}` must be a scalar, got {other:?}", kind.keyword()),
+            }
+            assert!(
+                !matches!(db.data(t), TypeData::Scalar(ScalarType::UInt)),
+                "`{}` must not be typed UInt: it has no runtime object",
+                kind.keyword()
+            );
         }
     }
 

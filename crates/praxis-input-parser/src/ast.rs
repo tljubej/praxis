@@ -13,21 +13,50 @@
 
 use praxis_source::Span;
 
-/// One of the atomic parsers (§7.4). The M6 subset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One of the atomic parsers (§7.4).
+///
+/// **§7.4's list is closed, and this is all ten of it.** Four were missing
+/// (IP-11) — `uint`, `float`, `byte`, `identifier` — so a program that wrote
+/// one got "unknown atomic parser" for a name the design document requires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AtomicKind {
     /// Signed decimal integer → `Int`.
     Int,
+    /// Non-negative decimal integer → `Int`.
+    ///
+    /// **`Int`, not `ScalarType::UInt`.** `UInt` is reserved and has no runtime
+    /// object at all: `praxis_repr::builtin_for_type` answers `NoRuntimeRepr`
+    /// for it, and under D9 a JIT compile fails when a descriptor is missing —
+    /// so a `uint` capture typed `UInt` would make every program containing one
+    /// fail to compile. The non-negativity is enforced by the *parse rule*
+    /// (a leading `-` is refused), which is what §7.4 asks for.
+    UInt,
+    /// Decimal floating-point number → `Float`.
+    Float,
+    /// A decimal integer in `0..=255` → `Byte`.
+    ///
+    /// A decimal integer and not a raw input byte: a raw byte cannot be
+    /// re-sliced as `Text` without breaking the UTF-8 invariant every
+    /// source-slice `Text` relies on.
+    Byte,
     /// One Unicode scalar value → `Char`.
     Char,
+    /// One decimal digit → `Int`.
+    Digit,
     /// Non-empty run excluding whitespace and parser-delimiter punctuation → `Text`.
     Word,
+    /// An identifier run → `Text`.
+    ///
+    /// §7.4 says "ASCII-like identifier syntax by default"; this uses §4.1's
+    /// **one** identifier class (`praxis_syntax::ident`), which is a deliberate
+    /// widening. A parser that accepted a narrower set of names than the
+    /// language itself does would refuse identifiers a Praxis program can
+    /// declare, and F3 exists precisely so there is not a second rule.
+    Identifier,
     /// Minimally consumes text until the following template literal can match → `Text`.
     Text,
     /// The remainder of the current region → `Text`.
     Rest,
-    /// One decimal digit → `Int`.
-    Digit,
 }
 
 impl AtomicKind {
@@ -35,11 +64,15 @@ impl AtomicKind {
     pub fn keyword(self) -> &'static str {
         match self {
             AtomicKind::Int => "int",
+            AtomicKind::UInt => "uint",
+            AtomicKind::Float => "float",
+            AtomicKind::Byte => "byte",
             AtomicKind::Char => "char",
+            AtomicKind::Digit => "digit",
             AtomicKind::Word => "word",
+            AtomicKind::Identifier => "identifier",
             AtomicKind::Text => "text",
             AtomicKind::Rest => "rest",
-            AtomicKind::Digit => "digit",
         }
     }
 
@@ -47,14 +80,33 @@ impl AtomicKind {
     pub fn from_keyword(name: &str) -> Option<Self> {
         Some(match name {
             "int" => AtomicKind::Int,
+            "uint" => AtomicKind::UInt,
+            "float" => AtomicKind::Float,
+            "byte" => AtomicKind::Byte,
             "char" => AtomicKind::Char,
+            "digit" => AtomicKind::Digit,
             "word" => AtomicKind::Word,
+            "identifier" => AtomicKind::Identifier,
             "text" => AtomicKind::Text,
             "rest" => AtomicKind::Rest,
-            "digit" => AtomicKind::Digit,
             _ => return None,
         })
     }
+
+    /// Every atomic, in §7.4's order. The list is **closed**: a test sweeps it,
+    /// so a new atomic cannot be added without a type and a runtime rule.
+    pub const ALL: &'static [AtomicKind] = &[
+        AtomicKind::Int,
+        AtomicKind::UInt,
+        AtomicKind::Float,
+        AtomicKind::Byte,
+        AtomicKind::Char,
+        AtomicKind::Digit,
+        AtomicKind::Word,
+        AtomicKind::Identifier,
+        AtomicKind::Text,
+        AtomicKind::Rest,
+    ];
 }
 
 /// How a template literal run of whitespace matches input (§7.2).
@@ -550,19 +602,39 @@ impl Constructor {
 mod tests {
     use super::*;
 
+    /// §7.4's list is a **closed set of ten**, and it used to be six: `uint`,
+    /// `float`, `byte` and `identifier` had no row at all, so a program that
+    /// wrote one of the design document's own atomic names got "unknown atomic
+    /// parser" (IP-11).
     #[test]
     fn atomic_round_trips_keywords() {
-        for kind in [
-            AtomicKind::Int,
-            AtomicKind::Char,
-            AtomicKind::Word,
-            AtomicKind::Text,
-            AtomicKind::Rest,
-            AtomicKind::Digit,
-        ] {
-            assert_eq!(AtomicKind::from_keyword(kind.keyword()), Some(kind));
+        for kind in AtomicKind::ALL {
+            assert_eq!(AtomicKind::from_keyword(kind.keyword()), Some(*kind));
         }
         assert_eq!(AtomicKind::from_keyword("nope"), None);
+
+        // §7.4 verbatim, in its own order.
+        let names: Vec<&str> = AtomicKind::ALL.iter().map(|k| k.keyword()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "int",
+                "uint",
+                "float",
+                "byte",
+                "char",
+                "digit",
+                "word",
+                "identifier",
+                "text",
+                "rest"
+            ]
+        );
+        // And nothing else is an atomic — an eleventh name would have to be
+        // added to §7.4 first.
+        for not_an_atomic in ["uint8", "integer", "string", "line", "lines", "sep"] {
+            assert_eq!(AtomicKind::from_keyword(not_an_atomic), None);
+        }
     }
 
     /// **Rewritten (IP-07).** This used to assert three numbers out of
