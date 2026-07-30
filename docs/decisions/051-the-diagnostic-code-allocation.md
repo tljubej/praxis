@@ -145,13 +145,14 @@ range they never were.
 | `Y122` | HIR-07 | S16 | a pattern names a variant the scrutinee's type does not have |
 | `Y123` | HIR-06 | S16 | a pattern's shape cannot match the scrutinee's type |
 | `Y124` | REP-05 | S26 | a pattern naming more sub-patterns than the variant holds (**amendment**) |
+| `Y125` | REP-25 | — | a pattern that must match every value but can fail, in a **binding** position (**amendment**) |
 
 **REP-10 spent no code** (ADR-069). A record *pattern* naming a field the record
 does not have, or naming one twice, is the literal's own mistake read in the other
 direction, so it is `Y114`/`Y115`; a one-element tuple pattern and a record
 pattern whose head is not a record are both `Y123`, whose meaning — "this shape
 cannot match" — is exactly what is wrong with them. The next free codes are
-`Y022`, `Y116`, `Y125` and `N008`.
+`Y022`, `Y116`, `Y126` and `N008`.
 
 ### Input — `I0xx`
 

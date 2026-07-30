@@ -39,17 +39,19 @@ Update this file at the end of every stage.
 | REP-22 — a function does not capture (no stage; ADR-068) | **done** | `db944f0` |
 | REP-24 — a declaration's members take a line break (no stage) | **done** | `33b386f` |
 | REP-21 — `min=`/`max=` map updates (no stage; ADR-070) | **done** | `8833cb7` |
+| REP-25 — a `for` binding is a pattern (no stage) | **done** | `0066a6f` |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
 TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
-**Twenty-four defects found while executing the plan are registered** as
-**REP-01 … REP-24** in the plan's **§4.1**, and **every one of them is done.**
+**Twenty-five defects found while executing the plan are registered** as
+**REP-01 … REP-25** in the plan's **§4.1**, and **every one of them is done.**
 REP-01…REP-14 are owned by four new stages (**S23**–**S26**) and three new
-decisions (**D15**–**D17**), two of which are now answered. **REP-24 is this
-session's own find**: §4.5's and §4.6's declaration examples did not parse.
+decisions (**D15**–**D17**), two of which are now answered. **REP-24 and REP-25
+are this session's own**: §4.5's and §4.6's declaration examples did not parse,
+and `for (k, v) in m` had no binding position to be written in.
 
 **§3.3's representative program now runs verbatim from the design doc** —
 top-level `let`, top-level `out`s and no `fn main` anywhere.
@@ -101,10 +103,10 @@ comma-separated and the design doc writes them on separate lines. What is left o
 the repair is **S18…S21, which were never started**; S18 is `D1`-blocked.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1455 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1458 passed, 0 failed, 38 ignored**. `just ci` is green.
 
-This session's eleven new gates and three ADRs (**069**, **070**) — REP-10,
-REP-24 and REP-21:
+This session's fourteen new gates and two ADRs (**069**, **070**) — REP-10,
+REP-24, REP-21 and REP-25:
 
 | Test | File | Pins |
 |---|---|---|
@@ -118,6 +120,9 @@ REP-24 and REP-21:
 | `an_updating_store_is_an_operator_only_where_a_name_cannot_be` | `parse.rs` | REP-21's contextual rule — §6.2's two lines, **adjacency** (`min = 3` with a space still reports), `min`/`max` still ordinary names in five positions including as a subscript receiver, `==` unaffected by max-munch, and a non-place target still parsing |
 | `an_updating_store_is_a_row_on_a_map_of_ints` | `infer_tests.rs` | the row — the bound *pinning* `Map()` to `Map[Text, Int]`, `Y001` for a non-`Int` value, `Y020` **naming the operator** for three receivers that have a plain store or none, `Y021` for a name target, and the deferral answered at the call site in both directions |
 | `an_updating_store_keeps_the_better_value_and_accepts_the_first` | `jit.rs` | §6.2's semantics — smaller/larger kept in any order, **an absent entry accepted without a fault** (which is why it cannot be a read-modify-write), a computed key, and §6.2's own relaxation through a generic helper |
+| `a_for_binding_is_a_pattern` | `parse.rs` | REP-25's grammar — six header shapes and the pattern count each holds, a record pattern's brace not being read as the loop body, and the three malformed headers |
+| `a_for_binding_is_a_pattern_and_must_match_every_item` | `infer_tests.rs` | each name at its *component's* type, a bare name still binding the whole item, `Y001` for a shape the element cannot have, and **`Y125` at any depth** — a binding has no second arm |
+| `a_destructuring_for_binding_reads_each_item_apart` | `jit.rs` | the half no type test can see — both iteration plans (a `Map`'s paired snapshot and a `Vec` in place), a record pattern with an unnamed field, a nested pair, and the destructured names surviving 50 allocations inside the body |
 | `an_updating_store_is_one_call_and_reads_nothing` | `build.rs` | the assertion a behavioural test cannot make: a read of a *present* key would leave every answer right. One call, no `MapIndex`, no `MapInsert` — and `+=` through the same subscript still reading twice |
 
 `the_subscript_rows_are_a_closed_set_no_program_can_name` was **extended** with
@@ -2566,12 +2571,10 @@ because neither was reproduced against a stated contract:
   `.field`, and `rep21_min_max_updates.px` says so in a comment where it would
   otherwise have used a pattern. Giving it one needs a name-less spelling
   (`{ from, to }`) that §4.5 does not write.
-- **`for (k, v) in m` is still not spelled**, and it is no longer a *grammar*
-  question — REP-10's pattern grammar is the one a `for` binding would reuse (ADR-069
-  says so, and ADR-066 decision 3 left the destructuring half to REP-10). What is
-  left is the binding position: `for` takes an `Ident` token, and giving it a
-  pattern means an irrefutable destructuring in the loop header, a refutable one to
-  report, and `TypedExpr::For`'s `binding: SymbolId` to reshape.
+- ~~**`for (k, v) in m` is still not spelled.**~~ **Done as REP-25** (`0066a6f`),
+  in the same session: once REP-10's grammar existed the binding position was all
+  that was left, and it needed no new syntax. A refutable binding is the new
+  `Y125`.
 
 **REP-22, for the record** (closed as ADR-068 in the session that found it).
 

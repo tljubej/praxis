@@ -1,7 +1,7 @@
 # Repair session handover — the register is closed
 
 **Date:** 2026-07-30
-**Tree:** `8833cb7` · **Suite:** 1455 passed, 0 failed, 38 ignored · `just ci` green
+**Tree:** `0066a6f` · **Suite:** 1458 passed, 0 failed, 38 ignored · `just ci` green
 
 `implementation-repair-progress.md` is still the living status and this file does
 not replace it — read §1 and §4 there first. This is the session-scoped note: what
@@ -15,13 +15,18 @@ rediscovered.
 | **REP-10** (P2, S25's last scheduled row) — a record and a tuple are patterns | `ca7385e` | **069** |
 | **REP-24** (P2, **new**) — a declaration's members take a line break | `33b386f` | — |
 | **REP-21** (P3, the one unscheduled row) — `min=`/`max=` map updates | `8833cb7` | **070** |
+| **REP-25** (P2, **new**) — a `for` binding is a pattern | `0066a6f` | — |
 
 **Every row in the plan's §4.1 register is now done, and S25 is closed.** What is
 left of the repair is **S18…S21, which were never started**; S18 is `D1`-blocked
 and D1 is still open.
 
-**One finding was registered this session: REP-24**, and it landed in the same
-session. It was found while writing REP-10's corpus program: §4.5's own
+**Two findings were registered this session — REP-24 and REP-25** — and both
+landed in it. REP-25 is `for (k, v) in m`, which ADR-066 decision 3 had deferred
+to REP-10: once REP-10's grammar existed, the binding *position* was all that was
+left, and it needed no new syntax.
+
+REP-24 was found while writing REP-10's corpus program: §4.5's own
 `struct Point {\n x: Int\n y: Int\n}` and §4.6's `enum Tile { Empty\n Wall\n … }`
 are both `P001`, because a declaration's members had to be comma-separated. **The
 defect had shaped the tests rather than being caught by them** — every declaration
@@ -38,7 +43,7 @@ one available. Whoever spends it should add the **two missing fault kinds** at t
 same time: four raises currently borrow `InvalidSize` for "an empty range"
 (ADR-058, ADR-059) and "an argument this algorithm has no answer for" (ADR-060).
 
-## Seven things worth not rediscovering
+## Eight things worth not rediscovering
 
 1. **The exhaustiveness checker was already ready for REP-10, and S16 said so.**
    Maranget's matrix handles a `Closed` signature with one constructor — `Bool`'s
@@ -87,6 +92,14 @@ same time: four raises currently borrow `InvalidSize` for "an empty range"
    compare through `int_payload`, and the **bound** — not a literal `Int` argument —
    is what pins an unresolved `Map()` instead of reporting (TY-31's rule).
 
+8. **A `for` binding needed no new grammar and no new MIR shape.**
+   `TypedExpr::For.binding` became a `TypedPattern`; a bare name is a `Bind` that
+   lowers to exactly the slot it always did (same `LocalDebugKind::User`, same
+   debug metadata), and `bind_components` is `emit_pattern_test` with the testing
+   half removed — no branch, because a binding position is irrefutable. That last
+   word is the load-bearing one: `for Some(n) in v` would silently skip every
+   `None`, so a refutable pattern is `Y125` and the check recurses.
+
 ## Two things noticed and not chased
 
 Neither is in the register, because neither was reproduced against a stated
@@ -98,12 +111,11 @@ contract.
   `Y001`. `rep21_min_max_updates.px` has a comment saying so where it would
   otherwise have used a pattern. A spelling would have to be name-less
   (`{ from, to }`), which §4.5 does not write.
-- **`for (k, v) in m` is still not spelled**, and it is no longer a grammar
-  question — ADR-069 and ADR-066 decision 3 both point at the pattern grammar,
-  which now exists. What is left is the binding *position*: `for` takes an `Ident`
-  token, so giving it a pattern means an irrefutable destructuring in the loop
-  header, a refutable one to report, and `TypedExpr::For`'s `binding: SymbolId` to
-  reshape.
+- **One unreproduced test failure.** A single `just ci` run reported a failure in
+  `praxis-runtime`'s lib tests with no test named in the captured output; eight
+  subsequent runs of that crate (lib and full) and two full `just ci` runs were
+  clean. Not chased further, and recorded here rather than dropped: if
+  `praxis-runtime` fails once in a future session, this is not the first time.
 
 ## The `praxis check` sweep
 
@@ -112,6 +124,7 @@ Done, over `crates/praxis-cli/tests/fixtures`: `bad_byte.px`, `parse_error.px` a
 `tests/` corpus is executed by
 `every_corpus_program_runs_and_prints_the_answer_it_documents` (REP-12) and gained
 two programs this session: `rep10_record_and_tuple_patterns.px` (both composites,
-with literal sub-patterns that select an arm, and declarations written in §4.5's
-and §4.6's own style) and `rep21_min_max_updates.px` (a relaxation that reaches
-every node for the first time — the shape a read-modify-write cannot express).
+with literal sub-patterns that select an arm, declarations written in §4.5's and
+§4.6's own style, and a destructuring `for` header) and `rep21_min_max_updates.px`
+(a relaxation that reaches every node for the first time — the shape a
+read-modify-write cannot express).
