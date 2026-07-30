@@ -1501,7 +1501,10 @@ fn signature_for<M: Module>(sym: RuntimeSymbol, module: &M) -> Signature {
         sig.params.push(AbiParam::new(abi_type(kind, pointer)));
     }
     match abi.ret {
-        AbiRet::Gc | AbiRet::Ptr => sig.returns.push(AbiParam::new(pointer)),
+        // `GcUnit` is a `GcRef` like any other at the machine level — the
+        // distinction it draws is about what the *value* means, not how it
+        // travels (RT-14).
+        AbiRet::Gc | AbiRet::GcUnit | AbiRet::Ptr => sig.returns.push(AbiParam::new(pointer)),
         AbiRet::RawI64 => sig.returns.push(AbiParam::new(types::I64)),
         AbiRet::Void => {}
     }

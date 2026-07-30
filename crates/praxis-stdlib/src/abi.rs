@@ -39,10 +39,38 @@ pub enum AbiKind {
 }
 
 /// What a wrapper returns.
+///
+/// The `Gc`/`GcUnit` split is the one fact `AbiRet` did not carry, and its
+/// absence is what let RT-14 and RT-15 exist: `praxis_map_get` and
+/// `praxis_grid_find` were declared `-> Gc` and answered the Unit sentinel on a
+/// miss, while their catalog rows promised a `V` and an `(Int, Int)`. Nothing in
+/// the workspace could relate the two, because "a `GcRef`" said nothing about
+/// whether the reference could be Unit.
+///
+/// **There is deliberately no third arm.** "May be Unit, may be a value" *is*
+/// RT-14/RT-15, and its absence from this enum is what makes the defect
+/// unrepresentable rather than merely fixed. A wrapper whose answer is
+/// sometimes absent says so in its result *type* — `Option[T]` (§4.7) — or it
+/// faults.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum AbiRet {
-    /// A `GcRef`.
+    /// A `GcRef` carrying the wrapper's **answer**: a value of the result type
+    /// its catalog row declares.
+    ///
+    /// The Unit sentinel still comes back on a fault return — that is the ABI's
+    /// universal "a Praxis function returns a valid `GcRef` even when it
+    /// unwinds" — and, in the handful of wrappers the *codegen* calls directly
+    /// (`praxis_alloc_enum` with a null schema, `praxis_tuple_get` with an
+    /// out-of-range index), on a refusal the compiler was responsible for
+    /// having prevented. Neither is "the value is absent", which is the state
+    /// this arm rules out.
     Gc,
+    /// A `GcRef` that is **always** the Unit sentinel: the wrapper's answer is
+    /// "done", not a value. `Vec.push`, `Map.insert`, `out`, `assert`.
+    ///
+    /// Not `Void`: the call still yields a `GcRef` the caller's uniform value
+    /// channel consumes, and codegen treats it exactly as it treats `Gc`.
+    GcUnit,
     /// A raw `i64`.
     RawI64,
     /// A pointer-width raw word (a frame pointer, a function pointer).
@@ -191,19 +219,19 @@ runtime_symbols! {
     AllocRecord = "praxis_alloc_record": (Ctx, Ptr) -> Gc, Allocates;
     AllocText = "praxis_alloc_text": (Ctx, Ptr, Ptr) -> Gc, AllocatesAndFaults;
     AllocTuple = "praxis_alloc_tuple": (Ctx, Ptr) -> Gc, Allocates;
-    AllocUnit = "praxis_alloc_unit": (Ctx) -> Gc, Pure;
+    AllocUnit = "praxis_alloc_unit": (Ctx) -> GcUnit, Pure;
     AllocVarCell = "praxis_alloc_var_cell": (Ctx, Gc) -> Gc, Allocates;
-    Assert = "praxis_assert": (Ctx, Gc) -> Gc, Faults;
+    Assert = "praxis_assert": (Ctx, Gc) -> GcUnit, Faults;
     AStar = "praxis_a_star": (Ctx, Gc, Gc, Gc, Gc, Gc) -> Gc, AllocatesAndFaults;
     Bfs = "praxis_bfs": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     BfsDistance = "praxis_bfs_distance": (Ctx, Gc, Gc, Gc) -> Gc, AllocatesAndFaults;
     BitsetContains = "praxis_bitset_contains": (Ctx, Gc, Gc) -> Gc, Pure;
-    BitsetInsert = "praxis_bitset_insert": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    BitsetInsert = "praxis_bitset_insert": (Ctx, Gc, Gc) -> GcUnit, AllocatesAndFaults;
     BitsetIsEmpty = "praxis_bitset_is_empty": (Ctx, Gc) -> Gc, Pure;
     BitsetItems = "praxis_bitset_items": (Ctx, Gc) -> Gc, Allocates;
     BitsetLen = "praxis_bitset_len": (Ctx, Gc) -> Gc, Allocates;
     BitsetNew = "praxis_bitset_new": (Ctx) -> Gc, Allocates;
-    BitsetRemove = "praxis_bitset_remove": (Ctx, Gc, Gc) -> Gc, Pure;
+    BitsetRemove = "praxis_bitset_remove": (Ctx, Gc, Gc) -> GcUnit, Pure;
     BoolLoad = "praxis_bool_load": (Ctx, Gc) -> RawI64, Pure;
     CharLoad = "praxis_char_load": (Ctx, Gc) -> RawI64, Pure;
     CheckFault = "praxis_check_fault": (Ctx) -> RawI64, Pure;
@@ -211,9 +239,9 @@ runtime_symbols! {
     ClosureFnPtr = "praxis_closure_fn_ptr": (Ctx, Gc) -> Ptr, Pure;
     ClosureSetCapture = "praxis_closure_set_capture": (Ctx, Gc, RawI64, Gc) -> Gc, Pure;
     CounterGet = "praxis_counter_get": (Ctx, Gc, Gc) -> Gc, Allocates;
-    CounterInc = "praxis_counter_inc": (Ctx, Gc, Gc) -> Gc, Allocates;
+    CounterInc = "praxis_counter_inc": (Ctx, Gc, Gc) -> GcUnit, Allocates;
     CounterKeys = "praxis_counter_keys": (Ctx, Gc) -> Gc, Allocates;
-    CounterSet = "praxis_counter_set": (Ctx, Gc, Gc, Gc) -> Gc, Allocates;
+    CounterSet = "praxis_counter_set": (Ctx, Gc, Gc, Gc) -> GcUnit, Allocates;
     CounterValues = "praxis_counter_values": (Ctx, Gc) -> Gc, Allocates;
     CounterIsEmpty = "praxis_counter_is_empty": (Ctx, Gc) -> Gc, Pure;
     CounterLen = "praxis_counter_len": (Ctx, Gc) -> Gc, Allocates;
@@ -224,8 +252,8 @@ runtime_symbols! {
     DequeNew = "praxis_deque_new": (Ctx, Ptr) -> Gc, Allocates;
     DequePopBack = "praxis_deque_pop_back": (Ctx, Gc) -> Gc, Faults;
     DequePopFront = "praxis_deque_pop_front": (Ctx, Gc) -> Gc, Faults;
-    DequePushBack = "praxis_deque_push_back": (Ctx, Gc, Gc) -> Gc, Allocates;
-    DequePushFront = "praxis_deque_push_front": (Ctx, Gc, Gc) -> Gc, Allocates;
+    DequePushBack = "praxis_deque_push_back": (Ctx, Gc, Gc) -> GcUnit, Allocates;
+    DequePushFront = "praxis_deque_push_front": (Ctx, Gc, Gc) -> GcUnit, Allocates;
     Dbg = "praxis_dbg": (Ctx, Gc) -> Gc, Pure;
     Dfs = "praxis_dfs": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     Dijkstra = "praxis_dijkstra": (Ctx, Gc, Gc, Gc) -> Gc, AllocatesAndFaults;
@@ -263,7 +291,7 @@ runtime_symbols! {
     GridRotateLeft = "praxis_grid_rotate_left": (Ctx, Gc) -> Gc, Allocates;
     GridRotateRight = "praxis_grid_rotate_right": (Ctx, Gc) -> Gc, Allocates;
     GridRow = "praxis_grid_row": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
-    GridSet = "praxis_grid_set": (Ctx, Gc, Gc, Gc, Gc) -> Gc, Faults;
+    GridSet = "praxis_grid_set": (Ctx, Gc, Gc, Gc, Gc) -> GcUnit, Faults;
     GridTranspose = "praxis_grid_transpose": (Ctx, Gc) -> Gc, Allocates;
     GridWidth = "praxis_grid_width": (Ctx, Gc) -> Gc, Allocates;
     IntAbs = "praxis_int_abs": (Ctx, Gc) -> Gc, AllocatesAndFaults;
@@ -294,36 +322,36 @@ runtime_symbols! {
     RangeNewInclusive = "praxis_range_new_inclusive": (Ctx, Gc, Gc) -> Gc, Allocates;
     MapGet = "praxis_map_get": (Ctx, Gc, Gc) -> Gc, Allocates;
     MapIndex = "praxis_map_index": (Ctx, Gc, Gc) -> Gc, Faults;
-    MapInsert = "praxis_map_insert": (Ctx, Gc, Gc, Gc) -> Gc, Allocates;
+    MapInsert = "praxis_map_insert": (Ctx, Gc, Gc, Gc) -> GcUnit, Allocates;
     MapIsEmpty = "praxis_map_is_empty": (Ctx, Gc) -> Gc, Pure;
     MapKeys = "praxis_map_keys": (Ctx, Gc) -> Gc, Allocates;
     MapLen = "praxis_map_len": (Ctx, Gc) -> Gc, Allocates;
     MapNew = "praxis_map_new": (Ctx, Ptr) -> Gc, Allocates;
-    MapRemove = "praxis_map_remove": (Ctx, Gc, Gc) -> Gc, Pure;
-    MapUpdateMax = "praxis_map_update_max": (Ctx, Gc, Gc, Gc) -> Gc, Allocates;
+    MapRemove = "praxis_map_remove": (Ctx, Gc, Gc) -> GcUnit, Pure;
+    MapUpdateMax = "praxis_map_update_max": (Ctx, Gc, Gc, Gc) -> GcUnit, Allocates;
     MapValues = "praxis_map_values": (Ctx, Gc) -> Gc, Allocates;
-    MapUpdateMin = "praxis_map_update_min": (Ctx, Gc, Gc, Gc) -> Gc, Allocates;
+    MapUpdateMin = "praxis_map_update_min": (Ctx, Gc, Gc, Gc) -> GcUnit, Allocates;
     MaxHeapIsEmpty = "praxis_max_heap_is_empty": (Ctx, Gc) -> Gc, Pure;
     MaxHeapItems = "praxis_max_heap_items": (Ctx, Gc) -> Gc, Allocates;
     MaxHeapLen = "praxis_max_heap_len": (Ctx, Gc) -> Gc, Allocates;
     MaxHeapNew = "praxis_max_heap_new": (Ctx, Ptr) -> Gc, Allocates;
     MaxHeapPeek = "praxis_max_heap_peek": (Ctx, Gc) -> Gc, Faults;
     MaxHeapPop = "praxis_max_heap_pop": (Ctx, Gc) -> Gc, Faults;
-    MaxHeapPush = "praxis_max_heap_push": (Ctx, Gc, Gc) -> Gc, Allocates;
+    MaxHeapPush = "praxis_max_heap_push": (Ctx, Gc, Gc) -> GcUnit, Allocates;
     MinHeapIsEmpty = "praxis_min_heap_is_empty": (Ctx, Gc) -> Gc, Pure;
     MinHeapItems = "praxis_min_heap_items": (Ctx, Gc) -> Gc, Allocates;
     MinHeapLen = "praxis_min_heap_len": (Ctx, Gc) -> Gc, Allocates;
     MinHeapNew = "praxis_min_heap_new": (Ctx, Ptr) -> Gc, Allocates;
     MinHeapPeek = "praxis_min_heap_peek": (Ctx, Gc) -> Gc, Faults;
     MinHeapPop = "praxis_min_heap_pop": (Ctx, Gc) -> Gc, Faults;
-    MinHeapPush = "praxis_min_heap_push": (Ctx, Gc, Gc) -> Gc, Allocates;
-    Panic = "praxis_panic": (Ctx, Gc) -> Gc, Faults;
+    MinHeapPush = "praxis_min_heap_push": (Ctx, Gc, Gc) -> GcUnit, Allocates;
+    Panic = "praxis_panic": (Ctx, Gc) -> GcUnit, Faults;
     PopDebugFrame = "praxis_pop_debug_frame": (Ctx, Ptr) -> Void, Pure;
     PopShadowFrame = "praxis_pop_shadow_frame": (Ctx, Ptr) -> Void, Pure;
     PushDebugFrame = "praxis_push_debug_frame": (Ctx, Ptr, RawU32, RawU32, Ptr) -> Ptr, Pure;
     PushShadowFrame = "praxis_push_shadow_frame": (Ctx, RawU32) -> Ptr, Pure;
     RaiseDivByZeroIf = "praxis_raise_div_by_zero_if": (Ctx, RawI64) -> Void, Faults;
-    RaiseEmptyCollection = "praxis_raise_empty_collection": (Ctx) -> Gc, Faults;
+    RaiseEmptyCollection = "praxis_raise_empty_collection": (Ctx) -> GcUnit, Faults;
     RaiseIntOverflowIf = "praxis_raise_int_overflow_if": (Ctx, RawI64) -> Void, Faults;
     RaiseStackOverflow = "praxis_raise_stack_overflow": (Ctx) -> Void, Faults;
     RecordField = "praxis_record_field": (Ctx, Gc, RawU32) -> Gc, Pure;
@@ -331,12 +359,12 @@ runtime_symbols! {
     RunParser = "praxis_run_parser": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     SetContains = "praxis_set_contains": (Ctx, Gc, Gc) -> Gc, Pure;
     SetFrameSourceSpan = "praxis_set_frame_source_span": (Ctx, RawU32, RawU32) -> Void, Pure;
-    SetInsert = "praxis_set_insert": (Ctx, Gc, Gc) -> Gc, Allocates;
+    SetInsert = "praxis_set_insert": (Ctx, Gc, Gc) -> GcUnit, Allocates;
     SetIsEmpty = "praxis_set_is_empty": (Ctx, Gc) -> Gc, Pure;
     SetItems = "praxis_set_items": (Ctx, Gc) -> Gc, Allocates;
     SetLen = "praxis_set_len": (Ctx, Gc) -> Gc, Allocates;
     SetNew = "praxis_set_new": (Ctx, Ptr) -> Gc, Allocates;
-    SetRemove = "praxis_set_remove": (Ctx, Gc, Gc) -> Gc, Pure;
+    SetRemove = "praxis_set_remove": (Ctx, Gc, Gc) -> GcUnit, Pure;
     SnapshotDebugChain = "praxis_snapshot_debug_chain": (Ctx) -> Void, Pure;
     StructEq = "praxis_struct_eq": (Ctx, Gc, Gc) -> RawI64, Pure;
     TextGet = "praxis_text_get": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
@@ -351,8 +379,8 @@ runtime_symbols! {
     VecIsEmpty = "praxis_vec_is_empty": (Ctx, Gc) -> Gc, Pure;
     VecLen = "praxis_vec_len": (Ctx, Gc) -> Gc, Allocates;
     VecNew = "praxis_vec_new": (Ctx, Ptr) -> Gc, Allocates;
-    VecPush = "praxis_vec_push": (Ctx, Gc, Gc) -> Gc, Allocates;
-    WriteStdout = "praxis_write_stdout": (Ctx, Gc) -> Gc, Pure;
+    VecPush = "praxis_vec_push": (Ctx, Gc, Gc) -> GcUnit, Allocates;
+    WriteStdout = "praxis_write_stdout": (Ctx, Gc) -> GcUnit, Pure;
 }
 
 /// Build-time coverage of the effect table (P0-08c).
@@ -392,6 +420,14 @@ const _: () = {
         // must agree with the row rather than being independently answerable.
         assert!(sig.effect.allocates() == sym.allocates());
         assert!(sig.effect.faults() == sym.faults());
+
+        // `GcUnit` gets no check here on purpose. The invariant it exists for
+        // relates a manifest row to a *catalog* row — a non-faulting wrapper
+        // with a non-`Unit` result type must not be able to answer the sentinel
+        // (RT-14/RT-15) — and the catalog is built at run time, so the check
+        // lives in `builtins::tests::a_non_faulting_row_with_a_value_result_\
+        // cannot_answer_the_unit_sentinel`. An assertion here that restated
+        // something already true would say nothing.
 
         i += 1;
     }

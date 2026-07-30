@@ -2651,4 +2651,117 @@ mod tests {
         assert!(cat.by_receiver_and_name(&grid_pat, "width").count() >= 1);
         assert!(cat.by_receiver_and_name(&grid_pat, "neighbors4").count() >= 1);
     }
+
+    /// **S18's standing invariant.** Every catalog row that lowers to a runtime
+    /// wrapper declares a `Unit` result if and only if that wrapper's manifest
+    /// return is `AbiRet::GcUnit`.
+    ///
+    /// This is RT-14 and RT-15 stated as a rule instead of as two bugs.
+    /// `Map.get` declared `V` and `Grid.find` declared `(Int, Int)`; both were
+    /// non-faulting; both answered `unit_sentinel(ctx)` when the key or the cell
+    /// was not there. So a program held a value whose *static* type was `Int`
+    /// and whose *runtime descriptor* was `Unit`, with nothing in the workspace
+    /// able to notice — `allocates` and `can_fault` are derived from the
+    /// manifest, but "can this answer be Unit" had nowhere to live at all.
+    ///
+    /// It has somewhere now, and the **absence of a third `AbiRet` arm** is the
+    /// load-bearing part rather than this test. "May be Unit, may be a value" is
+    /// exactly the defect, and it cannot be spelled: an author restoring RT-14
+    /// has to write either `GcUnit` — which this test refuses beside a `V`
+    /// result — or `Gc`, which is then a claim the wrapper must honour and which
+    /// `absent_map_get_does_not_return_an_untyped_unit_sentinel` checks in the
+    /// runtime. Between the two there is nowhere for the old behaviour to live.
+    ///
+    /// **What this does not prove**, stated plainly: the manifest row is
+    /// hand-asserted, at exactly the trust level `Effect` already is, so what
+    /// this catches is a *catalog row disagreeing with its manifest row*, not a
+    /// manifest row that lies about its wrapper. Reverting `map_get`'s result to
+    /// `TypePattern::var("V")` and leaving `MapGet` at `-> Gc` passes here, and
+    /// is caught in `praxis-runtime` instead. The precedent for trusting a
+    /// hand-written manifest row that far is `MethodEntry::can_fault`'s own doc:
+    /// the per-row `bool` it replaced had drifted, and one place to write the
+    /// fact is what fixed it.
+    ///
+    /// The sweep runs over *every* such row, faulting ones included. A faulting
+    /// wrapper's Unit is the ABI's universal unwind answer, which is a different
+    /// thing from its declared result — so the biconditional holds there too,
+    /// and restricting the sweep would only make it weaker.
+    #[test]
+    fn a_non_faulting_row_with_a_value_result_cannot_answer_the_unit_sentinel() {
+        let cat = builtin_catalog();
+        let mut checked = 0;
+        for entry in cat.entries() {
+            // An intrinsic has no wrapper: it expands to MIR instructions whose
+            // effects are their own (`MethodEntry::can_fault` says the same).
+            let MethodLowering::RuntimeSymbol(sym) = entry.lowering else {
+                continue;
+            };
+            checked += 1;
+            let ret = sym.sig().ret;
+            let result_is_unit = entry.result == TypePattern::Unit;
+            match (ret, result_is_unit) {
+                (abi::AbiRet::GcUnit, true) | (abi::AbiRet::Gc, false) => {}
+                _ => panic!(
+                    "{}.{} declares `{}` and lowers to `{}`, whose manifest return is \
+                     {ret:?}. A wrapper answers either a value (`AbiRet::Gc`, \
+                     non-`Unit` result) or nothing (`AbiRet::GcUnit`, `Unit` \
+                     result); an answer that is sometimes absent is spelled \
+                     `Option[T]` (§4.7), never a Unit sentinel under a value type.",
+                    entry.receiver,
+                    entry.name,
+                    entry.result,
+                    sym.name(),
+                ),
+            }
+        }
+        // A guard against the sweep silently covering nothing — every row being
+        // faulting, or `entries()` being empty, would otherwise pass.
+        assert!(
+            checked >= 40,
+            "expected the sweep to reach most of the catalog, it reached {checked} rows"
+        );
+    }
+
+    /// The two rows D1 answered, spelled out — so a future edit that quietly
+    /// puts `Map.get` back to `V` fails *by name* as well as through the sweep.
+    #[test]
+    fn map_get_and_grid_find_answer_an_option() {
+        let cat = builtin_catalog();
+        let map_pat = TypePattern::Collection {
+            ctor: CollectionCtor::Map,
+            args: vec![TypePattern::var("K"), TypePattern::var("V")],
+        };
+        let get = cat
+            .by_receiver_and_name(&map_pat, "get")
+            .next()
+            .expect("map.get exists");
+        assert_eq!(
+            get.result,
+            TypePattern::Option(Box::new(TypePattern::var("V"))),
+            "§5.7 writes `Map[K,V].get(K) -> Option[V]`"
+        );
+
+        let grid_pat = TypePattern::Collection {
+            ctor: CollectionCtor::Grid,
+            args: vec![TypePattern::var("T")],
+        };
+        let find = cat
+            .by_receiver_and_name(&grid_pat, "find")
+            .next()
+            .expect("grid.find exists");
+        assert_eq!(find.result, TypePattern::Option(Box::new(point_pattern())));
+
+        // …and `Counter.get` keeps its zero default, which is not absence at
+        // all: §6.2 says a counter's absent values *read as zero*.
+        let counter_pat = counter_of_t();
+        let counter_get = cat
+            .by_receiver_and_name(&counter_pat, "get")
+            .next()
+            .expect("counter.get exists");
+        assert_eq!(
+            counter_get.result,
+            TypePattern::Scalar(ScalarType::Int),
+            "§6.2: a Counter's absent values read as zero, deliberately"
+        );
+    }
 }
