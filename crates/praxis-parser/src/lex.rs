@@ -235,22 +235,26 @@ impl<'a> Lexer<'a> {
     /// A leading-dot float (`.5`) is not reachable here because the dispatch
     /// routes on the first byte: `.` is `Punct`. Leading-dot floats are not
     /// supported (a deliberate simplification); users write `0.5`.
+    ///
+    /// Every digit run admits `_` separators between its digits (REP-11), so
+    /// `1_000`, `3.141_592` and `1e1_0` are each one token. The rule is
+    /// `praxis_syntax::numeric`'s, and the same module strips them back out when
+    /// lowering reads the value — the two halves used to disagree, with the
+    /// lexer rejecting what the decoder stripped.
     fn eat_number(&mut self, start: usize) {
         // Integer part: one or more digits (the first is already known present).
-        while self.pos < self.src.len() && self.bytes()[self.pos].is_ascii_digit() {
-            self.pos += 1;
-        }
+        self.eat_digit_run();
         let mut is_float = false;
         // Fractional part: `.` followed by a digit. The "followed by a digit"
         // check is what disambiguates `1.5` (float) from `1..5` (range: the
         // next byte is another `.`) and `1.method()` (the next byte is a letter).
+        // A `_` cannot open a fraction for the same reason: `1._0` is not a
+        // float, so a separator is only ever *between* digits.
         if self.peek_is_dot_then_digit() {
             is_float = true;
             // Consume the `.`.
             self.pos += 1;
-            while self.pos < self.src.len() && self.bytes()[self.pos].is_ascii_digit() {
-                self.pos += 1;
-            }
+            self.eat_digit_run();
         }
         // Exponent part: `e` or `E`, optional `+`/`-`, then one or more digits.
         if matches!(self.bytes().get(self.pos), Some(b'e') | Some(b'E')) {
@@ -263,9 +267,7 @@ impl<'a> Lexer<'a> {
                 if matches!(self.bytes().get(self.pos), Some(b'+') | Some(b'-')) {
                     self.pos += 1;
                 }
-                while self.pos < self.src.len() && self.bytes()[self.pos].is_ascii_digit() {
-                    self.pos += 1;
-                }
+                self.eat_digit_run();
             }
         }
         let kind = if is_float {
@@ -274,6 +276,27 @@ impl<'a> Lexer<'a> {
             SyntaxKind::IntLit
         };
         self.push(kind, start);
+    }
+
+    /// Consume digits and the `_` separators between them, leaving `pos` on the
+    /// first byte that is neither (REP-11).
+    ///
+    /// Each caller has already consumed at least one digit, which is what makes
+    /// a separator's left-hand digit certain; `separator_run_len` checks it
+    /// regardless. A trailing `_` is not consumed — `1_` is the literal `1`
+    /// followed by the `_` token (FE-02), not a literal with a dangling
+    /// separator.
+    fn eat_digit_run(&mut self) {
+        loop {
+            while self.pos < self.src.len() && self.bytes()[self.pos].is_ascii_digit() {
+                self.pos += 1;
+            }
+            let run = praxis_syntax::numeric::separator_run_len(self.bytes(), self.pos);
+            if run == 0 {
+                return;
+            }
+            self.pos += run;
+        }
     }
 
     /// True iff the current position is a `.` immediately followed by an ASCII
@@ -1015,6 +1038,78 @@ error[T003]: unexpected character in source
         assert!(kinds.contains(&SyntaxKind::IntLit));
         assert!(kinds.contains(&SyntaxKind::DOT));
         assert!(kinds.contains(&SyntaxKind::Ident));
+        assert!(!kinds.contains(&SyntaxKind::FloatLit));
+    }
+
+    /// REP-11: a `_` between digits belongs to the literal, in every digit run.
+    ///
+    /// `1_000` was a `P002` at the `_` and `9_223_372_036_854_775_808` lexed as
+    /// `9` followed by an identifier — while lowering stripped separators on the
+    /// other side, so the pair never met. The token text keeps the separators;
+    /// removing them is the decoder's half.
+    #[test]
+    fn a_digit_separator_belongs_to_the_literal() {
+        for (src, kind) in [
+            ("1_000", SyntaxKind::IntLit),
+            ("1_0_0", SyntaxKind::IntLit),
+            // A run is one separator: nothing here counts `_`s.
+            ("1__0", SyntaxKind::IntLit),
+            // The finding's own case, which used to lex as `9` + an identifier.
+            ("9_223_372_036_854_775_808", SyntaxKind::IntLit),
+            // Every digit run, not just the integer part.
+            ("3.141_592", SyntaxKind::FloatLit),
+            ("1_0.5", SyntaxKind::FloatLit),
+            ("1e1_0", SyntaxKind::FloatLit),
+            ("1.5e-1_0", SyntaxKind::FloatLit),
+        ] {
+            let (got, text) = lex_one_number(src);
+            assert_eq!(got, kind, "{src} lexed as {got:?}");
+            assert_eq!(text, src, "{src} did not lex as one token");
+            let (_, diags) = lex_text(src);
+            assert!(diags.is_empty(), "{src} reported {diags:?}");
+        }
+    }
+
+    /// …and a `_` with no digit after it is not part of the literal at all.
+    ///
+    /// `1_` is the literal `1` followed by the `_` token FE-02 gave a kind of
+    /// its own — which the parser rejects where it stands. A separator has
+    /// digits on *both* sides, so the number never ends in punctuation.
+    #[test]
+    fn a_trailing_separator_is_not_part_of_the_literal() {
+        let (kind, text) = lex_one_number("1_");
+        assert_eq!(kind, SyntaxKind::IntLit);
+        assert_eq!(text, "1");
+        let (kinds, _) = lex_text("1_");
+        assert!(kinds.contains(&SyntaxKind::UNDERSCORE));
+
+        // A name after the `_` is a name: `1_a` is `1` then `_a`.
+        let (kind, text) = lex_one_number("1_a");
+        assert_eq!(kind, SyntaxKind::IntLit);
+        assert_eq!(text, "1");
+        let (kinds, _) = lex_text("1_a");
+        assert!(kinds.contains(&SyntaxKind::Ident));
+
+        // A separator cannot open a fraction — `1._0` is not a float.
+        let (kind, text) = lex_one_number("1._0");
+        assert_eq!(kind, SyntaxKind::IntLit);
+        assert_eq!(text, "1");
+        let (kinds, _) = lex_text("1._0");
+        assert!(!kinds.contains(&SyntaxKind::FloatLit));
+    }
+
+    /// A separated bound is still a bound: `1_000..2_000` is a range (TY-34),
+    /// not a float and not one token.
+    #[test]
+    fn a_separated_literal_is_still_a_range_bound() {
+        let (kinds, diags) = lex_text("1_000..2_000");
+        assert!(diags.is_empty(), "got diagnostics: {diags:?}");
+        assert_eq!(
+            kinds.iter().filter(|k| **k == SyntaxKind::IntLit).count(),
+            2,
+            "expected two IntLit tokens"
+        );
+        assert!(kinds.contains(&SyntaxKind::DOT2));
         assert!(!kinds.contains(&SyntaxKind::FloatLit));
     }
 }

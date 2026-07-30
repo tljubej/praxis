@@ -194,6 +194,52 @@ fn runs_subtraction_and_division() {
     assert_eq!(result.as_int(), 3);
 }
 
+/// REP-11: a digit separator is punctuation, so it changes no value.
+///
+/// The half no lexer test can see. Lowering strips the `_`s and parses what is
+/// left; before the lexer accepted them that strip was unreachable, and the
+/// float path had no strip at all — `3.141_592` would have parsed as nothing and
+/// become `0.0`. Both positions the exit criterion names are here: an expression
+/// and a pattern, which read the token through two different decoders.
+#[test]
+fn a_digit_separator_does_not_change_the_number() {
+    for (src, want) in [
+        ("fn main() -> Int { 1_000 }", 1000),
+        ("fn main() -> Int { 1_0_0 }", 100),
+        ("fn main() -> Int { 1__0 }", 10),
+        // The boundary still fits, with separators in the way of reading it.
+        ("fn main() -> Int { 9_223_372_036_854_775_807 }", i64::MAX),
+        // Arithmetic over separated operands, and a separated range bound.
+        ("fn main() -> Int { 1_000 + 2_000 }", 3000),
+        (
+            "fn main() -> Int { var t = 0\n for i in 1_0..1_2 { t = t + i }\n t }",
+            21,
+        ),
+        // Pattern position: the arm matches the value the expression wrote.
+        (
+            "fn main() -> Int { let n = 1_000\n match n { 1_000 => 7, _ => 0 } }",
+            7,
+        ),
+        (
+            "fn main() -> Int { let n = 1000\n match n { 1_0_0 => 1, 1_000 => 7, _ => 0 } }",
+            7,
+        ),
+    ] {
+        let (rt, result) = run_main(src);
+        assert!(!rt.has_pending_fault(), "{src} faulted");
+        assert_eq!(result.as_int(), want, "{src}");
+    }
+
+    // A float's fraction and exponent are separated too, and 0.0 is what a
+    // missing strip would have produced.
+    let (rt, result) = run_main("fn main() -> Float { 1.234_567 }");
+    assert!(!rt.has_pending_fault());
+    assert!((result.as_float() - 1.234_567).abs() < 1e-12);
+    let (rt, result) = run_main("fn main() -> Float { 1.5e1_0 }");
+    assert!(!rt.has_pending_fault());
+    assert!((result.as_float() - 1.5e10).abs() < 1.0);
+}
+
 // ---- Float (§4.12) ----
 
 #[test]

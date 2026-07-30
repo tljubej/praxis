@@ -3719,6 +3719,11 @@ fn an_out_of_range_int_literal_is_reported_rather_than_saturated() {
     for src in [
         "fn main() -> Int { 9223372036854775808 }",
         "fn main() -> Int { 99999999999999999999999 }",
+        // The separated spelling is the same literal and the same report. This
+        // is REP-11's own reproduction: before the lexer accepted separators it
+        // was `9` followed by the identifier `_223…`, so the mistake surfaced as
+        // an `N001` about an undefined name.
+        "fn main() -> Int { 9_223_372_036_854_775_808 }",
     ] {
         let diags = analyze_and_lower_diags(src);
         assert!(

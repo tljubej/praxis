@@ -1259,7 +1259,7 @@ impl<'a> Lowerer<'a> {
                 // fault on the actual arithmetic anyway". It does not: the
                 // saturated value is a perfectly good `Int` and the program runs
                 // with a number nobody wrote (TY-28).
-                let cleaned: String = text.chars().filter(|c| *c != '_').collect();
+                let cleaned = praxis_syntax::numeric::strip_digit_separators(text);
                 let value = match cleaned.parse::<i64>() {
                     Ok(v) => v,
                     Err(_) => {
@@ -1281,8 +1281,13 @@ impl<'a> Lowerer<'a> {
                 let text = tok.text();
                 // Parse the lexed float token (`3.14`, `1e10`, …) as f64. The
                 // lexer guarantees a valid float syntax, so parse failure is a
-                // defensive fallback (substitute 0.0) rather than a panic.
-                let value = text.parse::<f64>().unwrap_or(0.0);
+                // defensive fallback (substitute 0.0) rather than a panic — and
+                // the separators have to come out first, because `3.141_592`
+                // does not parse and 0.0 is not the number anybody wrote
+                // (REP-11).
+                let value = praxis_syntax::numeric::strip_digit_separators(text)
+                    .parse::<f64>()
+                    .unwrap_or(0.0);
                 TypedExpr::Lit {
                     value: Lit::Float(value),
                     ty,
@@ -2049,7 +2054,7 @@ impl<'a> Lowerer<'a> {
                 };
                 let value = match tok.kind() {
                     SyntaxKind::IntLit => {
-                        let cleaned: String = tok.text().chars().filter(|c| *c != '_').collect();
+                        let cleaned = praxis_syntax::numeric::strip_digit_separators(tok.text());
                         // Out of range in a *pattern* is the same mistake as in
                         // an expression (TY-28): a saturated literal would match
                         // a value the program never named.
@@ -2066,7 +2071,11 @@ impl<'a> Lowerer<'a> {
                             }
                         }
                     }
-                    SyntaxKind::FloatLit => Lit::Float(tok.text().parse::<f64>().unwrap_or(0.0)),
+                    SyntaxKind::FloatLit => Lit::Float(
+                        praxis_syntax::numeric::strip_digit_separators(tok.text())
+                            .parse::<f64>()
+                            .unwrap_or(0.0),
+                    ),
                     SyntaxKind::TextLit => Lit::Text(unquote_text(tok.text())),
                     SyntaxKind::KW_TRUE => Lit::Bool(true),
                     SyntaxKind::KW_FALSE => Lit::Bool(false),

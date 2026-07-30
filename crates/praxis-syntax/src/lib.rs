@@ -8,6 +8,8 @@
 //!
 //! The modules:
 //! - [`kind`] — the single `SyntaxKind` enum (tokens, trivia, tree nodes).
+//! - [`ident`] — the one identifier character class (§4.1).
+//! - [`numeric`] — the one digit-separator rule for numeric literals (§4.3).
 //! - [`language`] — the rowan `Language` impl and node aliases.
 //! - [`span_bridge`] — `Span` ↔ `rowan::TextRange` conversions (the only place
 //!   the two offset worlds meet; Praxis `Span` stays the diagnostic source of
@@ -18,6 +20,7 @@
 pub mod ident;
 pub mod kind;
 pub mod language;
+pub mod numeric;
 pub mod span_bridge;
 
 pub use kind::SyntaxKind;
