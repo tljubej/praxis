@@ -2336,8 +2336,12 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**S17, S23 and S24 are all closed.** Nothing in any of them remains, and **the
-repair has no P0 left**.
+**Start with REP-03 + REP-04** (S26). `11-repair-s23-s24-s26-handover.md` is the
+last session's note and has their mechanism, their reproduction and the one line
+in `capability.rs` that causes both.
+
+**S17, S23 and S24 are all closed, and S26 is two-fifths done.** Nothing remains
+in the first three, and **the repair has no P0 left**.
 
 **S25 or S26 is next, and neither is blocked.** S25 is the more visible: its
 acceptance criterion is a program from the design doc compiling, which nothing
