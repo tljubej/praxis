@@ -29,7 +29,8 @@ Update this file at the end of every stage.
 | S16 — Records, patterns, exhaustiveness, enum constructors | **done** | `57e2e5b`, `06f3c44`, `b8e2c7b`, `e918741` |
 | S17 — Constraint channel and capabilities | **done** | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c`, `e801e6a`, `b6ab8eb`, `fb82f79` |
 | S18 … S21 | not started | |
-| S23 … S26 — the repair's own discoveries (plan §4.1) | not started | |
+| S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
+| S24 … S26 — the rest of the repair's own discoveries (plan §4.1) | not started | |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
@@ -43,8 +44,32 @@ carried as prose in this file for nine sessions; they are schedulable work now.
 **REP-01 is the only P0 left in the repair** — a top-level `fn` in value position
 lowers to `Unit`, so a program that passes `praxis check` aborts the host.
 
+**S23 is closed.** All four of its findings are fixed and gated — **REP-13**,
+**REP-11**, **REP-12** and **REP-02** — each as its own commit with the suite
+green, which is what the stage is for. Ten REP rows are left, in S24, S25 and
+S26.
+
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1381 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1390 passed, 0 failed, 38 ignored**. `just ci` is green.
+
+S23's nine new gates. It un-ignored nothing — none of §4.1's rows has an
+ignored regression, because the audit never saw them — so all nine are new:
+
+| Test | File | Pins |
+|---|---|---|
+| `a_collection_with_no_type_arguments_renders_without_brackets` | `types_tests.rs` | REP-13 — both nullary ctors, and the unary/binary cases alongside so dropping *every* bracket fails |
+| `a_digit_separator_belongs_to_the_literal` | `praxis-parser/src/lex.rs` | REP-11's rule in all three digit runs, including `9_223_372_036_854_775_808`, which used to lex as `9` plus an identifier |
+| `a_trailing_separator_is_not_part_of_the_literal` | `lex.rs` | …and the other side of the rule: `1_`, `1_a`, `1._0` — a separator has digits on **both** sides |
+| `a_separated_literal_is_still_a_range_bound` | `lex.rs` | the interaction with TY-34: `1_000..2_000` is two literals and a `DOT2` |
+| `a_separator_is_underscores_with_a_digit_on_each_side` | `praxis-syntax/src/numeric.rs` | the rule at the unit level, where both halves of it live |
+| `stripping_removes_every_separator_and_borrows_when_there_are_none` | `numeric.rs` | the decoder half, and that an ordinary literal is not copied |
+| `a_digit_separator_does_not_change_the_number` | `jit.rs` | the half no lexer test can see — the **value**, in expression and pattern position, plus the two float shapes a missing strip would have turned into `0.0` |
+| `every_corpus_program_runs_and_prints_the_answer_it_documents` | `praxis-cli/tests/corpus.rs` | REP-12's real finding: **nothing ran the corpus**. Walks `tests/` rather than listing it, and a `.px` with no `.out` fails rather than being skipped |
+| `every_scalar_has_a_payload_handle_and_it_round_trips` | `scalars.rs` | REP-02's completeness half — the handle list is exhaustive over the scalar ids, each names its own descriptor by pointer, and a real allocation reads back as the declared type |
+
+`an_out_of_range_int_literal_is_reported_rather_than_saturated` was **amended**
+with REP-11's own reproduction: the separated spelling of an over-large literal
+is the same `Y013`, where it used to be an `N001` about an undefined name.
 
 **S17 is closed. It was the largest stage in the repair.** All eleven of its
 findings are done — **TY-25**, **TY-26**, **TY-27**, **TY-28**, **TY-29**,
@@ -2279,27 +2304,46 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**S17 is closed.** Nothing in it remains.
+**S17 and S23 are both closed.** Nothing in either remains.
 
-**Where to go next is now a choice, and S18 is not obviously it.** S18 is
-`D1`-blocked and D1 is still open. Meanwhile the plan has four new stages —
-**S23**–**S26**, the repair's own discoveries, registered in plan §4.1 — and one
-of them holds the **only P0 left in the repair**:
+**S24 is next, and it needs D15 answered.** It holds the **only P0 left in the
+repair**, and the invariant it must establish does not depend on which way D15
+goes: *no program that passes `praxis check` may abort the host.*
 
 - **S24 (REP-01)** — a top-level `fn` in value position lowers to `Unit`, so
   `let f = double\n f(3)` passes `praxis check` and aborts the host with SIGBUS.
-  Blocked on **D15**, but D15 is a small question with a clear recommendation.
-  **Take this first if D15 can be answered.**
-- **S23** — four independent small ones (REP-02, REP-11, REP-12, REP-13) that
-  depend on nothing and block nothing. This is S2's role and it is what to do
-  while a decision is outstanding.
+  Blocked on **D15** (closure value, or compile error), which is a small question
+  with a clear recommendation in plan §7: **closure value**, because a `fn`'s type
+  already *is* a `Func`, `praxis_alloc_closure` already takes an empty
+  environment, and a top-level `fn` captures nothing. Effort is `M` that way and
+  `S` the other. **Take this first if D15 can be answered.**
 - **S25** — the grammar gaps (REP-07…REP-10). Its acceptance criterion is that
   **§3.3's representative program compiles**, which nothing else in the repair
-  can claim.
+  can claim. REP-07's `&&`/`||` and REP-09's `Counter[(Int, Int)]()` are what
+  stand between it and the compiler; note that S17 already inserted `..` at
+  `bp(3, 4)`, so **read the whole precedence table** before adding to it.
 - **S26** — the silent-wrong ones (REP-03…REP-06, REP-14). REP-03 and REP-04 are
-  one fix and must land together.
+  one fix and must land together; ADR-057 is the map for both.
 
-So: **if D15 is answered, S24; if not, S23, which needs no decision at all.**
+**S18 is still `D1`-blocked** and D1 is still open, so it is not the answer to
+"what next" either — see the S18 block below for what it needs.
+
+What S23 delivered, and the two things worth carrying out of it:
+
+- **The corpus is executed by a Rust test now** —
+  `crates/praxis-cli/tests/corpus.rs`. It walks `tests/` for `.px` files instead
+  of listing them, and each program is a triple: the source, a **required**
+  `name.out` holding its expected stdout, and a `name.in` for the ones that
+  `read`. A program with no `.out` fails the test rather than being skipped.
+  **The per-stage corpus triage the plan mandates is now partly automatic**: what
+  is left to do by hand each stage is the `praxis check` sweep over
+  `crates/praxis-cli/tests/fixtures`, which is not under `tests/`.
+- **`gc_alloc` takes a `Payload<T>`, not a `&TypeDescriptor`.** If you add a
+  runtime allocation of a `Copy` payload, reach for `scalars::INT_PAYLOAD` (and
+  declare a new handle beside any new descriptor). The handle exists so the
+  width check is the compiler's; passing the descriptor and the value separately
+  is REP-02 again. The `alloc_with` path keeps its runtime assertions and says
+  why: `init` writes through a `*mut u8`, so there is no type to carry.
 
 What S17 delivered:
 
@@ -2389,13 +2433,14 @@ scheduled now** (plan §4.1):
   item variable and let the deferred constraint relate the two — which is
   **REP-04** below, from the other end. **The two are one fix and S26 says so.**
   It is why TY-34's gates annotate.
-- **REP-02 — `gc_alloc` is generic over its payload and checks the width at *runtime*.**
-  `gc_alloc(ctx, &scalars::INT, 0)` — an `i32` literal, because Rust's default
-  integer type is not `i64` — aborts the process with "payload size mismatch for
-  descriptor Int" from inside `extern "C"`, which is a non-unwinding panic across
-  the ABI (§10.4 forbids it; D12 is the policy question). It cost one debugging
-  cycle in unit 2. The descriptor knows its payload type, so the signature does
-  not have to be generic. **S23.**
+- ~~**REP-02 — `gc_alloc` is generic over its payload and checks the width at
+  *runtime*.**~~ **Fixed in S23** (`2a1fa57`). `descriptor::Payload<T>` pairs a
+  descriptor with its Rust payload type; the `Copy` allocators take the handle and
+  the value together, so a wrong type is an `E0308` at the call and a wrong
+  handle fails const evaluation of its own `static`. An untyped literal now
+  infers as the payload type instead of defaulting to `i32`, so the finding's own
+  reproduction is correct code. The signature found one real mismatch on its
+  first build: `default_cell` was passing a Rust `char` for a `Char`.
 - **REP-09 — explicit type arguments on a constructor call have no grammar.**
   `Counter[(Int, Int)]()` — which §3.3's representative program writes — is a
   `P002` ("expected `;` or a line break between statements") at the `[`. The
@@ -2403,10 +2448,10 @@ scheduled now** (plan §4.1):
   `Counter()`; but the design doc's own spelling does not parse. **It is one of
   two things standing between §3.3 and compiling** — the other is REP-07's `&&`;
   see above. **S25**, which makes §3.3 compile as its acceptance criterion.
-- **REP-13 — a nullary collection renders as `Range[]` / `BitSet[]`.** `db.render`
-  prints the brackets whether or not there are arguments, so a `Y001` about a
-  range says "found `Range[]`". Cosmetic, and it predates TY-34 (`BitSet[]` has
-  always done it). **S23.**
+- ~~**REP-13 — a nullary collection renders as `Range[]` / `BitSet[]`.**~~
+  **Fixed in S23** (`9ea5495`). The collection arm writes its arguments through
+  `write_type_args`, the same writer the nominal arm already used, which returns
+  early on an empty list. One writer, one rule.
 
 Carried forward from S17's earlier sessions:
 
@@ -2429,11 +2474,15 @@ Carried forward from S17's earlier sessions:
   rule is now blocked on MIR-05 alone.** The comment in `build.rs`'s
   `alloc_empty_vec` still cites the catalog rows and should be updated when S21
   gets there.
-- **The lexer does not support digit separators**, though `lower.rs` strips `_`
-  from an `IntLit` before parsing it. `9_223_372_036_854_775_808` lexes as `9`
-  followed by the identifier `_223_372_036_854_775_808`, so it is an `N001`.
-  Either the lexer should accept them or the strip should go; one of the two is
-  dead code. Found while gating TY-28. **Registered as REP-11 — S23.**
+- ~~**The lexer does not support digit separators**, though `lower.rs` strips `_`
+  from an `IntLit` before parsing it.~~ **Fixed in S23** (`809d138`) — the lexer
+  accepts them, so the strip is the live half. The rule is
+  `praxis_syntax::numeric`'s, next to `ident`'s character class and for the same
+  reason: the lexer decides how far a literal runs and lowering decodes its text,
+  and they are in different crates. A separator is **one or more `_` with a digit
+  on each side**, in every digit run, so `1_0.5_5e1_0` is one token. Both float
+  decoders needed the strip they never had: `3.141_592` does not parse as an
+  `f64`, and both answer a parse failure with `0.0`.
 - **`assert` takes one argument and cannot take a message.** A name has one
   scheme and the type system has no arity-based overloading, so
   `assert(cond, "why")` has no spelling. ADR-056 records it; giving it one is a
@@ -2659,8 +2708,10 @@ blocked on this stage. The ADR is **054**. Notes worth carrying:
   `tests/aoc-corpus/day02_grid_of_char.px` calls `map.len()` on a `Grid[Char]`,
   and the catalog has no `Grid.len` — it has `width`/`height`. Confirmed
   against the tree before this stage's first commit. No Rust test covers the
-  corpus directory, which is why nothing had caught it. **Registered as REP-12 —
-  S23, and the missing corpus test is part of the fix.**
+  corpus directory, which is why nothing had caught it. **Fixed in S23**
+  (`c64f0d6`): §6.4's required API lists no `Grid.len` and inventing one would
+  have to choose between cells and rows, so the *program* was wrong and now asks
+  for `map.width() * map.height()`. The corpus test landed with it.
 
 **What S15 deliberately left:**
 
@@ -2912,13 +2963,19 @@ H8, H9 and H16 remain discharged.**
 
 ## 5. Design decisions still open
 
-**D4, D5 and D6 are answered *and partly implemented*.** D4 is ADR-057 (a
-mutable collection is not a key — the recommendation, confirmed). D5's first
-unit is ADR-056 (`panic`/`assert`/`dbg`); its other two units — the eight
-numeric helpers and the six graph helpers — are not started, and the graph unit
-still owes a **graph representation** decision that is not in the plan. D6
-(`..`/`..=` in full) is not started and owes four sub-decisions §7 lists:
-half-openness, value-ness, descending behaviour, endpoint types.
+**D4, D5 and D6 are answered *and fully implemented*.** D4 is ADR-057 (a
+mutable collection is not a key — the recommendation, confirmed). D5 is ADR-056
+(`panic`/`assert`/`dbg`), ADR-058 (the seven numeric helpers) and ADR-060 (the
+six graph helpers, which also settles the graph-representation decision D5 left
+owed — the answer was already in §6.5). D6 is ADR-059, which answers all four
+sub-decisions §7 lists: half-openness, value-ness, descending behaviour and
+endpoint types.
+
+**D15, D16 and D17 are open and are the repair's own** (plan §7, end). **D15
+blocks S24 outright** and is the one that matters next: it is the only P0 left.
+D16 (`assert`'s message, and whether the language gets optional parameters or
+arity overloading) and D17 (what `struct Node { next: Node }` reports) belong to
+S25 and S26 and can be decided while S24 is in flight.
 
 **D14 is answered** — see ADR-040. The `Safepoint` token shipped with a named,
 `pub(crate)` `Heap::alloc_unpaced` back door for the host helpers and the
