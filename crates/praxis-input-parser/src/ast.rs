@@ -291,9 +291,15 @@ impl ParserAst {
     }
 }
 
-/// The name of a structural constructor (for dispatch in the parser / validation).
-/// Maps an identifier like `"lines"` to its constructor kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The name of a structural constructor — **the whole of §7.5**, not just the
+/// M6 six.
+///
+/// This table used to know six names, and the eight M9 constructors were
+/// dispatched ahead of it by an `if ctor_name == "…"` chain in `praxis-hir`
+/// that took `args.into_iter().next()` and dropped the rest (IP-07). A
+/// constructor with no row here had no arity, so it had no arity *error*
+/// either: an unknown name became `None` with no diagnostic at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Constructor {
     Lines,
     Sections,
@@ -301,10 +307,50 @@ pub enum Constructor {
     Ws,
     Sep,
     Grid,
+    Matrix,
+    Chars,
+    OneOf,
+    Block,
+    Choice,
+    Optional,
+    Scan,
+    /// `repeated(P)` — legal **only** as the final named argument of a
+    /// `sections` call (§7.5). It is in the table so that the name is known and
+    /// its misuse is `MisplacedRepeatedTail` rather than "unknown constructor".
+    Repeated,
+}
+
+/// The **shape** of a constructor call's argument list (§7.5).
+///
+/// A count was not enough: `sep` takes a string and then a parser, `choice`
+/// takes named arguments and no positional ones, `chars` takes a parser and an
+/// optional keyword. Checking only `positional_arity` is why
+/// `optional(int, word)` and `choice(int)` both passed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArgShape {
+    /// Exactly `n` positional parsers and nothing else.
+    Positional(usize),
+    /// `sep("s", P)` — one string literal, then one parser.
+    StringThenParser,
+    /// `one_of("LR")` — one string literal.
+    OneString,
+    /// `chars(P, skip: policy)` — one parser and an optional `skip:` keyword.
+    ParserWithSkip,
+    /// `grid(P)` or `grid(P, ragged, fill: value)` — the ragged flag and the
+    /// fill value come as a pair or not at all.
+    GridMaybeRagged,
+    /// `sections(P)` **or** `sections(name: P, …)` — the homogeneous and
+    /// heterogeneous forms are one name with two shapes.
+    OnePositionalOrNamed,
+    /// `block(item, …)` — one or more positional parsers and/or named items.
+    Items,
+    /// `choice(Name: P, …)` — named arguments only, at least `at_least` of them.
+    NamedOnly { at_least: usize },
 }
 
 impl Constructor {
-    /// Parse a constructor name, or `None` if unknown / not an M6 constructor.
+    /// Parse a constructor name, or `None` if no §7.5 constructor is spelled
+    /// that way.
     pub fn from_keyword(name: &str) -> Option<Self> {
         Some(match name {
             "lines" => Constructor::Lines,
@@ -313,17 +359,73 @@ impl Constructor {
             "ws" => Constructor::Ws,
             "sep" => Constructor::Sep,
             "grid" => Constructor::Grid,
+            "matrix" => Constructor::Matrix,
+            "chars" => Constructor::Chars,
+            "one_of" => Constructor::OneOf,
+            "block" => Constructor::Block,
+            "choice" => Constructor::Choice,
+            "optional" => Constructor::Optional,
+            "scan" => Constructor::Scan,
+            "repeated" => Constructor::Repeated,
             _ => return None,
         })
     }
 
-    /// The expected positional argument count for this constructor.
-    pub fn expected_arity(self) -> usize {
+    /// The source keyword for this constructor.
+    pub fn keyword(self) -> &'static str {
         match self {
-            Constructor::Lines | Constructor::Sections | Constructor::Csv | Constructor::Ws => 1,
-            // sep takes (separator, parser).
-            Constructor::Sep => 2,
-            Constructor::Grid => 1,
+            Constructor::Lines => "lines",
+            Constructor::Sections => "sections",
+            Constructor::Csv => "csv",
+            Constructor::Ws => "ws",
+            Constructor::Sep => "sep",
+            Constructor::Grid => "grid",
+            Constructor::Matrix => "matrix",
+            Constructor::Chars => "chars",
+            Constructor::OneOf => "one_of",
+            Constructor::Block => "block",
+            Constructor::Choice => "choice",
+            Constructor::Optional => "optional",
+            Constructor::Scan => "scan",
+            Constructor::Repeated => "repeated",
+        }
+    }
+
+    /// Every constructor, so a test can sweep the table.
+    pub const ALL: &'static [Constructor] = &[
+        Constructor::Lines,
+        Constructor::Sections,
+        Constructor::Csv,
+        Constructor::Ws,
+        Constructor::Sep,
+        Constructor::Grid,
+        Constructor::Matrix,
+        Constructor::Chars,
+        Constructor::OneOf,
+        Constructor::Block,
+        Constructor::Choice,
+        Constructor::Optional,
+        Constructor::Scan,
+        Constructor::Repeated,
+    ];
+
+    /// The shape of this constructor's argument list (§7.5).
+    pub fn arg_shape(self) -> ArgShape {
+        match self {
+            Constructor::Lines
+            | Constructor::Csv
+            | Constructor::Ws
+            | Constructor::Matrix
+            | Constructor::Optional
+            | Constructor::Scan
+            | Constructor::Repeated => ArgShape::Positional(1),
+            Constructor::Sections => ArgShape::OnePositionalOrNamed,
+            Constructor::Sep => ArgShape::StringThenParser,
+            Constructor::OneOf => ArgShape::OneString,
+            Constructor::Chars => ArgShape::ParserWithSkip,
+            Constructor::Grid => ArgShape::GridMaybeRagged,
+            Constructor::Block => ArgShape::Items,
+            Constructor::Choice => ArgShape::NamedOnly { at_least: 1 },
         }
     }
 }
@@ -347,10 +449,43 @@ mod tests {
         assert_eq!(AtomicKind::from_keyword("nope"), None);
     }
 
+    /// **Rewritten (IP-07).** This used to assert three numbers out of
+    /// `expected_arity`, which was the whole of the constructor check — and a
+    /// count cannot say that `sep`'s first argument is a *string*, that
+    /// `choice` takes no positional argument at all, or that `optional` takes
+    /// one and not two. Eight of §7.5's fourteen constructors had no row here,
+    /// so they had no arity and therefore no arity error.
+    ///
+    /// The table now states the *shape*, and this asserts it for every name.
     #[test]
-    fn constructor_arity_table() {
-        assert_eq!(Constructor::Lines.expected_arity(), 1);
-        assert_eq!(Constructor::Sep.expected_arity(), 2);
-        assert_eq!(Constructor::Grid.expected_arity(), 1);
+    fn constructor_round_trips_keywords_and_states_its_shape() {
+        for ctor in Constructor::ALL {
+            assert_eq!(
+                Constructor::from_keyword(ctor.keyword()),
+                Some(*ctor),
+                "`{}` must round-trip through the table",
+                ctor.keyword()
+            );
+        }
+        assert_eq!(Constructor::from_keyword("frobnicate"), None);
+
+        // Every §7.5 name is spelled here, so a new constructor cannot be added
+        // without deciding what its arguments look like.
+        assert_eq!(Constructor::ALL.len(), 14);
+        assert_eq!(Constructor::Lines.arg_shape(), ArgShape::Positional(1));
+        assert_eq!(Constructor::Optional.arg_shape(), ArgShape::Positional(1));
+        assert_eq!(Constructor::Sep.arg_shape(), ArgShape::StringThenParser);
+        assert_eq!(Constructor::OneOf.arg_shape(), ArgShape::OneString);
+        assert_eq!(Constructor::Chars.arg_shape(), ArgShape::ParserWithSkip);
+        assert_eq!(Constructor::Grid.arg_shape(), ArgShape::GridMaybeRagged);
+        assert_eq!(
+            Constructor::Sections.arg_shape(),
+            ArgShape::OnePositionalOrNamed
+        );
+        assert_eq!(Constructor::Block.arg_shape(), ArgShape::Items);
+        assert_eq!(
+            Constructor::Choice.arg_shape(),
+            ArgShape::NamedOnly { at_least: 1 }
+        );
     }
 }

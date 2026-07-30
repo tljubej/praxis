@@ -2782,7 +2782,6 @@ fn unknown_template_capture_parser_is_diagnosed() {
 }
 
 #[test]
-#[ignore = "known bug: unknown parser constructors are dropped without a diagnostic"]
 fn unknown_parser_constructor_is_diagnosed() {
     let src = "let value = read frobnicate(int)";
     assert!(
@@ -2792,13 +2791,169 @@ fn unknown_parser_constructor_is_diagnosed() {
 }
 
 #[test]
-#[ignore = "known bug: parser conversion discards extra constructor arguments"]
 fn optional_rejects_extra_arguments() {
     let src = "let value = read optional(int, word)";
     assert!(
         has_input_error(src),
         "special constructors must validate source arity before discarding arguments"
     );
+}
+
+/// **IP-07's sweep.** Eight of §7.5's fourteen constructors were dispatched by
+/// an `if ctor_name == "…"` chain that ran *before* the arity table, took
+/// `args.into_iter().next()`, and dropped everything else. So a wrong argument
+/// count was not an error, a wrong argument *kind* was not an error, and a name
+/// with no row at all was not an error either — it was `None` with no
+/// diagnostic.
+///
+/// Every name at its correct shape is clean; every mistake reports; and the
+/// accepted calls are checked for the AST they built, not merely for the
+/// absence of a complaint — a silent drop leaves no diagnostic behind.
+#[test]
+fn every_constructor_checks_its_arguments_before_it_builds_anything() {
+    use praxis_source::DiagCode;
+
+    // §7.5's table, each at the shape the design doc writes.
+    for (call, expected) in [
+        ("lines(int)", "Vec[Int]"),
+        ("sections(lines(int))", "Vec[Vec[Int]]"),
+        ("csv(int)", "Vec[Int]"),
+        ("ws(int)", "Vec[Int]"),
+        ("sep(\" -> \", word)", "Vec[Text]"),
+        ("grid(char)", "Grid[Char]"),
+        ("grid(char, ragged, fill: 0)", "Grid[Char]"),
+        ("matrix(int)", "Grid[Int]"),
+        ("chars(one_of(\"^v<>\"), skip: whitespace)", "Vec[Char]"),
+        ("one_of(\"LR\")", "Char"),
+        ("optional(int)", "Option[Int]"),
+        ("scan(int)", "Vec[Int]"),
+        (
+            "block(`{id:int}`, items: lines(int))",
+            "{ id: Int, items: Vec[Int] }",
+        ),
+    ] {
+        let src = format!("let value = read {call}");
+        assert!(
+            !has_input_error(&src),
+            "`{call}` is §7.5's own shape and must be accepted"
+        );
+        assert_eq!(
+            scheme_of(&src, "value").as_deref(),
+            Some(expected),
+            "`{call}` must build the parser it names, not a truncated one"
+        );
+    }
+
+    // A name with no row: `Constructor::from_keyword(&name)?` used to swallow
+    // this whole.
+    assert!(
+        reports_input_code("let v = read frobnicate(int)", DiagCode::UnknownConstructor),
+        "an unknown constructor is I013"
+    );
+
+    // Wrong count.
+    for call in [
+        "optional(int, word)",
+        "lines()",
+        "lines(int, int)",
+        "csv(int, int)",
+        "sep(\",\")",
+        "one_of(\"a\", \"b\")",
+    ] {
+        let src = format!("let v = read {call}");
+        assert!(
+            has_input_error(&src),
+            "`{call}` has the wrong number of arguments"
+        );
+    }
+
+    // Wrong *kind* — the half a count can never see.
+    for (call, why) in [
+        ("sep(int, int)", "a parser where the separator belongs"),
+        (
+            "sep(\",\", \",\")",
+            "a string where the element parser belongs",
+        ),
+        ("one_of(int)", "a parser where a character set belongs"),
+        ("choice(int)", "a positional in a named-only constructor"),
+        ("lines(\"x\")", "a string where a parser belongs"),
+        (
+            "sections(int, rules: lines(int))",
+            "a positional beside named sections",
+        ),
+        (
+            "chars(one_of(\"ab\"), fill: 0)",
+            "a keyword `chars` does not take",
+        ),
+        ("grid(char, fill: 0)", "`fill:` without `ragged`"),
+        ("grid(char, ragged)", "`ragged` without `fill:`"),
+        (
+            "chars(one_of(\"ab\"), skip: sideways)",
+            "a skip policy that does not exist",
+        ),
+    ] {
+        let src = format!("let v = read {call}");
+        assert!(has_input_error(&src), "`{call}` is {why}");
+    }
+
+    // `block()` with nothing in it has no fields and consumes nothing.
+    assert!(
+        has_input_error("let v = read block()"),
+        "a `block` needs at least one item"
+    );
+}
+
+/// **IP-08.** A parser constructor's string literal used to be decoded by
+/// `raw.trim_start_matches('"').trim_end_matches('"')` — a second decoder,
+/// beside `lower::unquote_text`, which never unescaped and which stripped
+/// *every* quote at each end rather than one.
+#[test]
+fn a_parser_string_literal_is_decoded_once_like_every_other_literal() {
+    use praxis_ast::AstNode;
+    use praxis_input_parser::ParserAst;
+
+    /// The `ParserAst` a `read <expr>` in `src` converts to.
+    fn parser_ast_of(src: &str) -> ParserAst {
+        let map = SourceMap::new();
+        let id = map.intern("parser_literal.px", src);
+        let parsed = parse(id, src);
+        let pe = parsed
+            .tree
+            .descendants()
+            .find_map(praxis_ast::ParserExpr::cast)
+            .expect("a parser expression");
+        let mut diagnostics = Vec::new();
+        crate::parser_lower::convert_parser_expr_for_test(&pe, id, &mut diagnostics)
+            .unwrap_or_else(|| panic!("{src} converts: {diagnostics:?}"))
+    }
+
+    // `\t` is one tab, not the two characters `\` and `t`. This is the whole
+    // finding: `sep("\t", int)` split on a backslash.
+    match parser_ast_of(r#"let v = read sep("\t", int)"#) {
+        ParserAst::Sep { separator, .. } => assert_eq!(separator.as_str(), "\t"),
+        other => panic!("expected Sep, got {other:?}"),
+    }
+
+    // One quote, not zero: `trim_end_matches('"')` ate the escaped quote too.
+    match parser_ast_of(r#"let v = read one_of("\"")"#) {
+        ParserAst::OneOf { chars, .. } => assert_eq!(chars, "\""),
+        other => panic!("expected OneOf, got {other:?}"),
+    }
+
+    // Both real quotes survive. `trim_start_matches`/`trim_end_matches` strip a
+    // *run*, so this used to decode to the empty separator — the one IP-10 says
+    // cannot exist.
+    match parser_ast_of(r#"let v = read sep("\"\"", int)"#) {
+        ParserAst::Sep { separator, .. } => assert_eq!(separator.as_str(), "\"\""),
+        other => panic!("expected Sep, got {other:?}"),
+    }
+
+    // And an escape neither decoder knows is preserved exactly as
+    // `unquote_text` preserves it — which is how the two are shown to be one.
+    match parser_ast_of(r#"let v = read sep("\q", int)"#) {
+        ParserAst::Sep { separator, .. } => assert_eq!(separator.as_str(), r"\q"),
+        other => panic!("expected Sep, got {other:?}"),
+    }
 }
 
 /// **IP-09's second half.** §7.5: "`repeated(parser)` may appear only as the

@@ -8,7 +8,7 @@
 //! offsets). The HIR layer, which knows the [`FileId`], converts these into full
 //! [`Diagnostic`]s with the `I0xx` (input-parser) category.
 
-use crate::ast::{Constructor, ParserAst, TemplatePart};
+use crate::ast::{ArgShape, Constructor, ParserAst, TemplatePart};
 use praxis_source::{DiagCode, Span};
 
 /// A structural error found while validating a parser AST.
@@ -232,40 +232,232 @@ fn validate_template(parts: &[TemplatePart], span: Span, errs: &mut Vec<Validati
     }
 }
 
-/// Validate a constructor call's arity. Returns the error (if any) so the caller
-/// can report it with the call-site span.
-pub fn check_constructor_arity(
-    ctor: Constructor,
-    actual: usize,
-    span: Span,
-) -> Option<ValidationError> {
-    let expected = ctor.expected_arity();
-    if actual != expected {
-        Some(ValidationError {
-            span,
-            code: DiagCode::ConstructorArity,
-            message: format!(
-                "`{}` expects {} argument{}, got {}",
-                ctor_name(ctor),
-                expected,
-                if expected == 1 { "" } else { "s" },
-                actual
-            ),
-        })
-    } else {
-        None
+/// What one argument of a constructor call *is*, with no payload — enough to
+/// decide whether the call has the shape §7.5 gives it.
+///
+/// The payloads live in `praxis-hir`'s `CallArg` (they hold a `ParserAst` and
+/// the rowan text). This is the projection both callers can share: the HIR
+/// bridge and the capture-body parser in [`crate::body`] check the same table,
+/// so the two grammars cannot drift.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArgKind {
+    /// A positional parser expression.
+    Parser,
+    /// A positional string literal.
+    String,
+    /// A bare keyword flag, e.g. the `ragged` of `grid(P, ragged, fill: 0)`.
+    Flag(String),
+    /// A named argument `name: value`.
+    Named(String),
+    /// A named `name: repeated(P)` tail.
+    RepeatedTail(String),
+}
+
+impl ArgKind {
+    fn describe(&self) -> String {
+        match self {
+            ArgKind::Parser => "a parser".to_string(),
+            ArgKind::String => "a string literal".to_string(),
+            ArgKind::Flag(f) => format!("the flag `{f}`"),
+            ArgKind::Named(n) => format!("the named argument `{n}:`"),
+            ArgKind::RepeatedTail(n) => format!("the repeated tail `{n}:`"),
+        }
     }
 }
 
-fn ctor_name(c: Constructor) -> &'static str {
-    match c {
-        Constructor::Lines => "lines",
-        Constructor::Sections => "sections",
-        Constructor::Csv => "csv",
-        Constructor::Ws => "ws",
-        Constructor::Sep => "sep",
-        Constructor::Grid => "grid",
+/// Check a constructor call against §7.5's shape for that constructor —
+/// **before anything is built** (IP-07).
+///
+/// Returns every problem found; an empty vector means the argument list has
+/// exactly the shape the constructor's builder expects, so the builder has
+/// nothing left to drop. The predecessor compared one number
+/// (`positional_arity`) against one number (`expected_arity`), which is why
+/// `optional(int, word)` (checked by no table at all), `choice(int)` (a
+/// positional in a named-only constructor) and `sep(int, int)` (a parser where
+/// a separator belongs) all passed.
+pub fn check_call(ctor: Constructor, args: &[ArgKind], span: Span) -> Vec<ValidationError> {
+    let mut errs = Vec::new();
+    let name = ctor.keyword();
+    let arity = |errs: &mut Vec<ValidationError>, expected: &str, actual: usize| {
+        errs.push(ValidationError {
+            span,
+            code: DiagCode::ConstructorArity,
+            message: format!("`{name}` expects {expected}, got {actual}"),
+        });
+    };
+    let bad_arg = |errs: &mut Vec<ValidationError>, at: usize, arg: &ArgKind, wanted: &str| {
+        errs.push(ValidationError {
+            span,
+            code: DiagCode::InvalidConstructorArgument,
+            message: format!(
+                "`{name}` argument {} is {}, but {wanted}",
+                at + 1,
+                arg.describe()
+            ),
+        });
+    };
+
+    match ctor.arg_shape() {
+        ArgShape::Positional(n) => {
+            if args.len() != n {
+                arity(
+                    &mut errs,
+                    &format!("{n} argument{}", if n == 1 { "" } else { "s" }),
+                    args.len(),
+                );
+            }
+            for (i, a) in args.iter().enumerate() {
+                if *a != ArgKind::Parser {
+                    bad_arg(&mut errs, i, a, "every argument must be a parser");
+                }
+            }
+        }
+        ArgShape::StringThenParser => {
+            if args.len() != 2 {
+                arity(&mut errs, "2 arguments", args.len());
+            }
+            for (i, a) in args.iter().enumerate() {
+                let wanted = if i == 0 {
+                    ("the separator must be a string literal", ArgKind::String)
+                } else {
+                    ("the element parser must be a parser", ArgKind::Parser)
+                };
+                if *a != wanted.1 {
+                    bad_arg(&mut errs, i, a, wanted.0);
+                }
+            }
+        }
+        ArgShape::OneString => {
+            if args.len() != 1 {
+                arity(&mut errs, "1 argument", args.len());
+            }
+            for (i, a) in args.iter().enumerate() {
+                if *a != ArgKind::String {
+                    bad_arg(
+                        &mut errs,
+                        i,
+                        a,
+                        "the character set must be a string literal",
+                    );
+                }
+            }
+        }
+        ArgShape::ParserWithSkip => {
+            match args.first() {
+                Some(ArgKind::Parser) => {}
+                Some(other) => bad_arg(&mut errs, 0, other, "the first argument must be a parser"),
+                None => arity(&mut errs, "1 or 2 arguments", 0),
+            }
+            for (i, a) in args.iter().enumerate().skip(1) {
+                match a {
+                    ArgKind::Named(n) if n == "skip" && i == 1 => {}
+                    other => bad_arg(&mut errs, i, other, "only `skip:` may follow the parser"),
+                }
+            }
+            if args.len() > 2 {
+                arity(&mut errs, "1 or 2 arguments", args.len());
+            }
+        }
+        ArgShape::GridMaybeRagged => {
+            match args.first() {
+                Some(ArgKind::Parser) => {}
+                Some(other) => {
+                    bad_arg(&mut errs, 0, other, "the cell parser must be a parser");
+                }
+                None => arity(&mut errs, "1 or 3 arguments", 0),
+            }
+            let mut ragged = false;
+            let mut fill = false;
+            for (i, a) in args.iter().enumerate().skip(1) {
+                match a {
+                    ArgKind::Flag(f) if f == "ragged" && !ragged => ragged = true,
+                    ArgKind::Named(n) if n == "fill" && !fill => fill = true,
+                    other => bad_arg(
+                        &mut errs,
+                        i,
+                        other,
+                        "only `ragged` and `fill:` may follow the cell parser",
+                    ),
+                }
+            }
+            // §7.5 spells them together: `grid(P, ragged, fill: value)`. A
+            // `fill:` with no `ragged` used to *become* the ragged form, which
+            // is a different parser than the one written.
+            if ragged != fill {
+                errs.push(ValidationError {
+                    span,
+                    code: DiagCode::InvalidConstructorArgument,
+                    message:
+                        "`grid`'s ragged form is written `grid(P, ragged, fill: value)` — `ragged` \
+                         and `fill:` come together or not at all (§7.5)"
+                            .to_string(),
+                });
+            }
+        }
+        ArgShape::OnePositionalOrNamed => {
+            let named = args
+                .iter()
+                .filter(|a| matches!(a, ArgKind::Named(_) | ArgKind::RepeatedTail(_)))
+                .count();
+            if named == 0 {
+                // Homogeneous `sections(P)`.
+                if args.len() != 1 {
+                    arity(&mut errs, "1 argument, or named sections", args.len());
+                }
+                for (i, a) in args.iter().enumerate() {
+                    if *a != ArgKind::Parser {
+                        bad_arg(&mut errs, i, a, "the section parser must be a parser");
+                    }
+                }
+            } else {
+                // Heterogeneous `sections(name: P, …)`: no positional at all.
+                for (i, a) in args.iter().enumerate() {
+                    if matches!(a, ArgKind::Parser | ArgKind::String | ArgKind::Flag(_)) {
+                        bad_arg(
+                            &mut errs,
+                            i,
+                            a,
+                            "a named `sections` takes only named arguments",
+                        );
+                    }
+                }
+            }
+        }
+        ArgShape::Items => {
+            if args.is_empty() {
+                arity(&mut errs, "at least 1 item", 0);
+            }
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, ArgKind::Parser | ArgKind::Named(_)) {
+                    bad_arg(
+                        &mut errs,
+                        i,
+                        a,
+                        "a `block` item is a parser or a named parser",
+                    );
+                }
+            }
+        }
+        ArgShape::NamedOnly { at_least } => {
+            let named = args
+                .iter()
+                .filter(|a| matches!(a, ArgKind::Named(_)))
+                .count();
+            if named < at_least {
+                arity(
+                    &mut errs,
+                    &format!("at least {at_least} named argument(s)"),
+                    named,
+                );
+            }
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, ArgKind::Named(_)) {
+                    bad_arg(&mut errs, i, a, "every argument must be `Name: parser`");
+                }
+            }
+        }
     }
+    errs
 }
 
 #[cfg(test)]
@@ -332,9 +524,9 @@ mod tests {
 
     #[test]
     fn arity_mismatch_reported() {
-        let err = check_constructor_arity(Constructor::Sep, 1, Span::at(0));
-        assert!(err.is_some());
-        assert_eq!(err.unwrap().code, DiagCode::ConstructorArity);
+        let errs = check_call(Constructor::Sep, &[ArgKind::String], Span::at(0));
+        assert!(!errs.is_empty());
+        assert_eq!(errs[0].code, DiagCode::ConstructorArity);
     }
 
     /// **The assertion is inverted on purpose (IP-10).**

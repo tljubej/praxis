@@ -2986,7 +2986,14 @@ fn unit_lit(db: &mut TypeDb) -> TypedExpr {
 }
 
 /// Strip surrounding quotes and unescape simple escapes from a `"…"` literal.
-fn unquote_text(raw: &str) -> String {
+///
+/// **The language's one text decoder.** `parser_lower` used to carry a second
+/// one — `raw.trim_start_matches('"').trim_end_matches('"')` — which never
+/// unescaped anything and stripped *every* quote at each end, so `sep("\t", …)`
+/// split on backslash-t and `sep("\"\"", …)` lost both of its real quotes
+/// (IP-08). Two decoders in one crate was the finding; this is `pub(crate)` so
+/// there is one.
+pub(crate) fn unquote_text(raw: &str) -> String {
     let bytes = raw.as_bytes();
     if bytes.len() < 2 || bytes[0] != b'"' || bytes[bytes.len() - 1] != b'"' {
         return raw.to_string();

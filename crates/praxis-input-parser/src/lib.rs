@@ -18,7 +18,7 @@ pub mod synthesize;
 pub mod validate;
 
 pub use ast::{
-    AtomicKind, BlockItem, Constructor, EmptySeparator, ParserAst, Separator, SkipPolicy,
+    ArgShape, AtomicKind, BlockItem, Constructor, EmptySeparator, ParserAst, Separator, SkipPolicy,
     TemplatePart, WsPolicy,
 };
 pub use plan::{
@@ -27,7 +27,7 @@ pub use plan::{
 };
 pub use scan::{scan_template, ScanError};
 pub use synthesize::synthesize;
-pub use validate::{check_constructor_arity, validate, ValidationError};
+pub use validate::{check_call, validate, ArgKind, ValidationError};
 
 /// Marker documenting that this crate is filled at Milestone 6.
 pub const FILLED_AT_MILESTONE: u32 = 6;
