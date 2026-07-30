@@ -28,7 +28,8 @@ Update this file at the end of every stage.
 | S15 — Per-use types into HIR and MIR, then monomorphization | **done** (one exit criterion deferred; see §4) | `93c05ec`, `f3c76a8`, `77b2ad6`, `b560e67` |
 | S16 — Records, patterns, exhaustiveness, enum constructors | **done** | `57e2e5b`, `06f3c44`, `b8e2c7b`, `e918741` |
 | S17 — Constraint channel and capabilities | **done** | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c`, `e801e6a`, `b6ab8eb`, `fb82f79` |
-| S18 … S21 | not started | |
+| S18, S20, S21 | not started | |
+| S19 — Input-parser compile pipeline | **done** | `93fc49b`, `f64e950`, `3f644de`, `c3fd726`, `f8b54b3`, `6664841` |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
 | S25 — Grammar completion | **done** — its acceptance criterion is met **verbatim**, and all nine of its rows have landed (REP-07, REP-08, REP-17, REP-16, REP-09, REP-18, REP-20, REP-19, REP-10) | `c74e062`, `bb3bc43`, `11976cc`, `0ee29b1`, `2f9bcbd`, `b495e93`, `11e107c`, `ca7385e` |
@@ -77,8 +78,15 @@ doc's program shape puts bindings at the top level. **`N007` reports it**
 (ADR-068): §4.9/§4.10 already drew the line and only §4.10 says "capture".
 
 **The repair has no P0 left, and no scheduled row of any severity.** Every stage
-the plan schedules is closed except **S18…S21, which were never started**; S18 is
-`D1`-blocked and D1 is still open. That is the next real decision.
+the plan schedules is closed except **S18, S20 and S21**; S18 is `D1`-blocked and
+D1 is still open. That is the next real decision.
+
+**S19 is closed.** All eleven of its findings are fixed and gated — IP-01 … IP-11
+— and **D10 is answered as recommended (a capture body is a full parser
+expression) and implemented: ADR-072.** ADR-073 is the constructor half. **S19
+was a hard barrier before S20 and its outputs are real, not stubbed**: the
+scanner returns complete `TemplatePart`s, so IPR-13's descriptor derivation has
+a capture's own parser to read.
 
 **S23 is closed.** All four of its findings are fixed and gated — **REP-13**,
 **REP-11**, **REP-12** and **REP-02** — each as its own commit with the suite
@@ -100,10 +108,13 @@ record and tuple patterns (ADR-069) — and REP-21 (`min=`/`max=`, ADR-070) was 
 one unscheduled row. **REP-24 was found in between**: §4.5's and §4.6's own
 declaration examples do not parse, because a declaration's members had to be
 comma-separated and the design doc writes them on separate lines. What is left of
-the repair is **S18…S21, which were never started**; S18 is `D1`-blocked.
+the repair is **S18, S20 and S21**; S18 is `D1`-blocked. (S19 is closed — see
+above.)
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1458 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1491 passed, 0 failed, 30 ignored**. `just ci` is green. S19 un-ignored
+**eight** exit-criterion tests; `praxis-input-parser` has no ignored test left at
+all.
 
 This session's fourteen new gates and two ADRs (**069**, **070**) — REP-10,
 REP-24, REP-21 and REP-25:
@@ -129,6 +140,44 @@ REP-24, REP-21 and REP-25:
 the two updating rows: `Map` only, at the plain store's arity, and pointing at
 wrappers of their own — a row that reused `MapInsert` would spell `min=` and mean
 `=`.
+
+### S19 — the input-parser compile pipeline (IP-01 … IP-11)
+
+Eight ignored exit-criterion tests un-ignored, ten new gates, two rewritten, two
+ADRs (**072**, **073**) and an amendment to **ADR-023**.
+
+| Test | File | Pins |
+|---|---|---|
+| `empty_separator_is_rejected_before_plan_construction` | `praxis-input-parser/src/validate.rs` | **REWRITTEN** (§8.2). It used to build `Sep { separator: String::new() }` and ask whether `validate` reported it — a question that presumes the value exists, and the *value* is the hazard. It now asks whether the value can be built at all; the `String::new()` no longer compiles |
+| `repeated_section_tail_cannot_reuse_a_fixed_field_name` | `validate.rs` | IP-09 — the tail's name is a field name, so `sections(items: …, items: repeated(…))` is `I024`. Passes verbatim |
+| `regression_unicode_literal_text_is_preserved` | `scan.rs` | IP-01 — `λ=` is `λ=`, not `Î»=`. The scalar cursor, at the one place `char::from(u8)` used to be |
+| `regression_trailing_backslash_is_an_invalid_escape` | `scan.rs` | IP-02 — a terminal `\` is an invalid escape **anchored at the backslash**, not literal text |
+| `mixed_template_capture_kinds_are_preserved` | `infer_tests.rs` | IP-05 — and the *type*, not just the absence of a complaint: `{name:word},{port:int}` is `{ name: Text, port: Int }` |
+| `unknown_template_capture_parser_is_diagnosed` | `infer_tests.rs` | IP-06 — no `Int` default, **and `I012`**: any `I0xx` satisfies the original assertion, only I012 satisfies ADR-051 |
+| `unknown_parser_constructor_is_diagnosed` | `infer_tests.rs` | IP-07 — `read frobnicate(int)` is `I013`, not a silent `?` on an `Option` |
+| `optional_rejects_extra_arguments` | `infer_tests.rs` | IP-07 — a dropped argument is an error before it is a drop |
+| `an_invalid_escape_reports_the_sequence_the_source_actually_wrote` | `scan.rs` | IP-03 — `\sq` reports `\sq` not `\ss`, `\x2` reports `\x2` not `\x`, and each `seq` is compared against **the source's own substring at `byte_offset`**, so the message and the text are one thing |
+| `a_capture_name_is_the_languages_own_identifier` | `scan.rs` | IP-04 — `{λ:int}` names `λ`; `{9x:int}` and `{a b:int}` are `InvalidCaptureName` rather than being silently reread as anonymous captures over the whole body; `{int}` is still anonymous |
+| `every_capture_keeps_its_own_parser` | `scan.rs` | IP-05/IP-06 at the scanner — each capture's own kind, anonymous ones too, and no `Int` for a name that means nothing |
+| `a_capture_body_is_a_parser_expression` | `scan.rs` | D10 — `csv(int)`, `optional(int)`, `sep("-", int)`, a `}` **inside a string** not ending the capture, a colon inside a nested call not being the name split, and three malformed bodies |
+| `a_capture_body_is_a_full_parser_expression` | `infer_tests.rs` | D10 end to end — §7.7's monkey line and five more, each asserted at the type it synthesizes, plus a nested backtick template asserted on the AST |
+| `nesting_past_the_bound_is_an_error_and_not_a_stack_overflow` | `scan.rs` | the bound D10 makes necessary — `scan_template` and `parse_capture_body` are mutually recursive now, and the old scan could not recurse at all |
+| `a_nested_backtick_template_is_one_token` | `praxis-parser/src/lex.rs` | D10's lexer half — two levels, two siblings, an escaped backtick still terminating nothing, and an unclosed outer template still `T002` |
+| `template_nesting_past_the_bound_does_not_recurse_without_limit` | `lex.rs` | the same bound, from the lexer's side |
+| `every_constructor_checks_its_arguments_before_it_builds_anything` | `infer_tests.rs` | IP-07's sweep — §7.5's thirteen shapes each asserted at **the AST they build**, six wrong counts, ten wrong *kinds*, and `block()` |
+| `a_repeated_tail_is_last_and_singular` | `infer_tests.rs` | IP-09's other half — misordered, doubled, and outside `sections`, all `I028`; the legal form still `{ draws: Vec[Int], boards: Vec[Grid[Int]] }` |
+| `a_template_scan_error_reports_the_code_its_own_rule_was_given` | `infer_tests.rs` | the exhaustive `ScanError → DiagCode` map — I011, I012, I013, I022 and I030 each from the rule that means it, instead of everything flattening to I030 |
+| `a_parser_string_literal_is_decoded_once_like_every_other_literal` | `infer_tests.rs` | IP-08 — `"\t"` is a tab, `"\""` is one quote, `"\"\""` keeps **both**, and an unknown escape survives exactly as `unquote_text` leaves it, which is how the two decoders are shown to be one |
+| `constructor_round_trips_keywords_and_states_its_shape` | `praxis-input-parser/src/ast.rs` | **REWRITTEN**. It used to assert three numbers out of `expected_arity`; a count cannot say `sep`'s first argument is a string. All fourteen §7.5 names, each at its `ArgShape` |
+| `atomic_round_trips_keywords` | `ast.rs` | **extended** — §7.4's ten names verbatim **in its own order**, and that no eleventh exists |
+| `every_atomic_the_design_requires_has_a_type` | `synthesize.rs` | IP-11 — each of the ten at its scalar, and that **none** is `ScalarType::UInt` |
+| `every_atomic_the_design_requires_has_a_parser_and_a_type` | `praxis-runtime/src/parser.rs` | IP-11's runtime half — `uint` refusing `-1` while `int` accepts it, `float` on six inputs including `7.` consuming only the `7`, `byte` refusing `256`, `identifier` reading `λx` and stopping at `-` |
+| `every_atomic_the_design_requires_runs_in_a_compiled_program` | `jit.rs` | the half neither can see — the four new atomics through the real ABI with real input, and in a template capture, which is how they will be written |
+| `a_sections_tail_is_last_and_singular_here_too` | `praxis-input-parser/src/body.rs` | that the capture-body parser applies **the same** tail rules, because it is the same `build_call` |
+| `one_quote_comes_off_each_end`, `the_six_escapes_decode`, `an_unknown_escape_is_preserved_verbatim` | `praxis-syntax/src/literal.rs` | the decoder that is now the workspace's only one |
+
+`arity_mismatch_reported` was rewritten onto `check_call`; `sep_lower_interns_separator`
+and `a_compiled_plan_owns_its_interned_strings` build through `Separator::new` now.
 
 This session's sixteen new gates and three rewrites (**ADR-066**, **ADR-067**,
 **ADR-068**):
@@ -1138,6 +1187,62 @@ No other foundation has been started.
 
 Mechanical consequences a fresh context will hit immediately. Items from earlier
 sessions are kept — they are still true.
+
+### From S19 (the input-parser compile pipeline)
+
+**`scan_template` returns finished parts.** Each `TemplatePart::Capture` carries
+the parser its **own** body names. The placeholder `Atomic { Int }` and
+`parser_lower::extract_capture_kind` are gone. If you are S20: this is the input
+IPR-13's descriptor derivation was waiting for — it is real, not stubbed.
+
+**Three AST shapes changed, and they break every construction site.**
+`ParserAst::Sep::separator` is a `Separator` (`Separator::new(&str)` is the only
+constructor and it refuses `""`); `TemplatePart::Capture::name` is an
+`Option<CaptureName>` (`CaptureName::parse` is the only constructor and it asks
+`praxis_syntax::ident::is_ident`); `AtomicKind` has ten variants, not six, and
+every match on it is exhaustive.
+
+**Constructor calls do not go through `praxis-hir` any more.** The `if ctor_name
+== "…"` chain is deleted. `praxis_input_parser::build_call(ctor, args, span)` is
+the one builder, `check_call` is the one shape check, and `Constructor::ALL` is
+all fourteen of §7.5. `check_constructor_arity` and `Constructor::expected_arity`
+no longer exist. `praxis-hir`'s job is rowan → `Vec<CallArg>` and nothing else.
+
+**`ScanError` carries its own `DiagCode`.** `ScanError::code()` is an exhaustive
+match with **no wildcard**; a new variant must decide. Do not add an
+`err_diag(..., DiagCode::TemplateScan, ...)` for a scan error — that flattening
+is what IP-06 was.
+
+**The scanner's spans are interior-relative.** `convert_template` rebases the
+whole subtree with `ParserAst::shift_spans(token_start + 1)`. If you produce a
+`ParserAst` from template text anywhere else, rebase it or its diagnostics will
+caret the wrong place. `Span::shifted` is new in `praxis-source`.
+
+**`unquote_text` moved to `praxis_syntax::literal`.** It is the workspace's one
+text-literal decoder; `praxis-hir`'s is a one-line forwarder. `is_text_literal`
+is beside it. There is also `praxis_syntax::MAX_TEMPLATE_NESTING` (32), which the
+lexer and the template scanner **share** — they walk the same file text, so a
+different bound in each would mean one accepts what the other cannot read.
+
+**The lexer's `BacktickTemplate` token spans nested templates.** A backtick
+closes the token only at brace depth 0. `` `{g:choice(A: `{x:int}`)}` `` is one
+token now; it used to be three runs.
+
+**`praxis-runtime` names `praxis-syntax` directly.** §7.4's `identifier` atomic
+parses with §4.1's character class, and a second copy of that rule is what F3
+exists to prevent. It was already an indirect dependency.
+
+**`uint` is `Int`.** Not `ScalarType::UInt`, which has no runtime object —
+`praxis_repr::builtin_for_type` refuses it. The non-negativity is the parse rule
+(`walk_atomic` refuses a leading `-`). Same file: `byte` means a decimal integer
+in `0..=255`, and `identifier` uses §4.1's Unicode class, not §7.4's
+"ASCII-like". Both are recorded in ADR-023's amendment.
+
+**A `read`/`parse` that used to compile may now report.** An unrecognized capture
+kind used to mean `int` and a surplus constructor argument used to be dropped.
+`every_corpus_program_runs_and_prints_the_answer_it_documents` runs every `.px`
+under `tests/` with its real input, so the corpus is covered — `praxis check`
+alone would not be.
 
 ### From this session (REP-15, REP-19, REP-23)
 
@@ -3581,7 +3686,7 @@ one. Settle both together.
 | D5 | The 15 phantom prelude names: implement or delete | S17 — answered; units 1–2 implemented (ADR-056, ADR-058). **Unit 3's graph-representation sub-decision is still owed** |
 | D6 | `CollectionCtor::Range`: delete or implement | S17 — **answered and implemented, all four sub-decisions included** (ADR-059) |
 | D1 | `Map.get` / `Grid.find` — `Option[V]` or V-with-Unit; and `min`/`max` on an empty sequence. Source-visible | S18 — **answered** (2026-07-31): `Option[V]`, an empty `min`/`max` faults, `Counter.get` keeps its zero default |
-| D10 | How much parser-expression grammar a template capture body may contain | S19 — **answered** (2026-07-31): a full parser expression, nested |
+| D10 | How much parser-expression grammar a template capture body may contain | S19 — **answered and implemented** (2026-07-31): a full parser expression, nested. ADR-072 |
 | D11 | `grid(int)` granularity; greediness of `text`/`word` | S20 — **answered** (2026-07-31): `grid(int)` is a whole token, `text`/`word` are non-greedy |
 | D12 | Panic-across-FFI policy — should precede RT-06, RT-07 and the parser findings | cross-cutting — **answered** (2026-07-31): per-wrapper totality plus one `catch_unwind` backstop |
 
@@ -3610,6 +3715,46 @@ the plan's §7 under each heading. The short version:
 ## 6. Corrections to the plan
 
 Things the plan states that are no longer or were not quite true.
+
+- **D10's answer needed a change the answer does not mention: the lexer.**
+  `Lexer::eat_template` closed the `BacktickTemplate` token at the first
+  unescaped backtick, so `` `{g:choice(A: `{x:int}`)}` `` lexed as three
+  unrelated token runs and `scan_template` never saw the template the source
+  wrote. "The scanner learns brace-, paren- and backtick-aware depth tracking"
+  is necessary and not sufficient; the token has to reach the scanner first. It
+  is ~25 lines in `lex.rs` and it landed as its own commit (ADR-072 decision 4).
+- **S19's exit list says "un-ignore and pass"
+  `empty_separator_is_rejected_before_plan_construction`, but the plan's own F14
+  makes that impossible to do literally.** The test constructs
+  `ParserAst::Sep { separator: String::new(), … }`; a `Separator` newtype means
+  that line does not compile. The two requirements cannot both hold, and the
+  newtype is the one the plan names twice — so the body was **rewritten** (§8.2)
+  and the name kept. The inversion is the point: the question changes from "does
+  `validate` report it?" to "can the value be built at all?".
+- **The plan says S19 needs no new diagnostic code, and that is right — but for a
+  different reason than "every case maps to an allocated code".** Four of the six
+  codes ADR-051 allocated for S19 (I011, I012, I013, I014) plus I023 and I028
+  were *constructed nowhere in the tree*. The finding is not that codes were
+  missing; it is that six allocated codes had no constructor, because every scan
+  error flattened into I030 and every constructor error into nothing. No code was
+  spent; six started being used.
+- **IP-11's `TypeId(5)` collision is genuinely gone and `uint` is still not
+  shippable as spelled.** S1 derived `BuiltinTypeId` from its discriminants
+  (`Float = 5`, `Text = 6`), so a `float` atomic is safe. `uint` is a *different*
+  problem the audit's PARTIAL narrowing names correctly:
+  `praxis_repr::builtin_for_type` answers `NoRuntimeRepr` for `ScalarType::UInt`,
+  so it synthesizes `Int` and enforces non-negativity in the parse rule.
+- **`TemplatePart::Capture` did not gain a `span`.** The recon plan asks for one,
+  for §8.3's caret. It is unnecessary: the capture's *parser* already carries a
+  span, and that span now covers the body — which is what a caret wants to point
+  at — once `ParserAst::shift_spans` rebases it. Adding a second span to a part
+  that is not a `ParserAst` node would have been one more thing to keep in sync.
+- **The plan's S19 file map says `praxis-parser` is only a dev-dependency of
+  `praxis-hir`, and takes that as the reason the capture-body parser must live in
+  `praxis-input-parser`.** The conclusion is right and the reason is ADR-023's
+  dependency direction, not the dev-dependency: `praxis-parser` is a real
+  dependency of `praxis-ast`, `praxis-cli`, `praxis-mir`, `praxis-debugger` and
+  `praxis-codegen-cranelift` — it is a dev-dependency of `praxis-hir` only.
 
 - **The numeric prelude helpers do not "want TY-31's numeric constraint".** Plan
   §5's S17 unit 2 and §7's D5 both say they do, and sequence them after the

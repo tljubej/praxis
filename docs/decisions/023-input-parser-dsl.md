@@ -1,6 +1,65 @@
 # ADR-023: Input-parser DSL — three-layer compile/runtime split
 
-**Date:** 2026-07-23 · **Status:** accepted
+**Date:** 2026-07-23 · **Status:** accepted · **Amended:** 2026-07-31 (S19)
+
+> ## Amendments (2026-07-31, stage S19)
+>
+> The three-layer split is unchanged and so is the dependency direction. Four
+> claims below are not true any more, and two §7.4 deviations are recorded here
+> because this is the ADR that describes what the DSL crate owns.
+>
+> 1. **`scan_template` parses capture bodies.** The layer-1 bullet says it
+>    "re-scans the interior of a backtick template into `TemplatePart`s" and the
+>    module doc used to add that it "only classifies template structure — it does
+>    not parse capture bodies", with the parser-expression parser in
+>    `praxis-parser` feeding the capture interior back through the ordinary
+>    grammar. That never happened: the body was thrown away and the HIR guessed
+>    it back by rescanning the template. Under **D10** a capture body is a full
+>    parser expression, and it is parsed *inside* `praxis-input-parser` — which is
+>    what the dependency direction this ADR fixes requires. See **ADR-072**.
+>
+> 2. **The plan is not `#[repr(C)]` and plans do not live for the process
+>    lifetime.** "The flat `#[repr(C)]` runtime node arena" and "holds plans for
+>    the process lifetime" were superseded by S8 (IP-12): a `CompiledPlan` owns a
+>    `bumpalo` arena, registration is bounded and refuses cleanly, `PlanId` is a
+>    `NonZeroU32`, and `retire_all_plans` reclaims. `plan.rs`'s own module doc is
+>    the authority; the same stale claim in
+>    `crates/praxis-runtime/src/parser.rs` has been corrected. See also ADR-043.
+>
+> 3. **`validate` is not the only static check, and `check_constructor_arity` is
+>    gone.** A constructor call is checked against §7.5's *shape* before anything
+>    is built, by `check_call`/`build_call`, which the rowan bridge and the
+>    capture-body parser share. See **ADR-073**.
+>
+> 4. **The MIR immediate is a `PlanId`, not a boxed `Int` index.** "The MIR
+>    passes the index as a boxed `Int` `GcRef`" predates S8's `PlanId`.
+>
+> ### §7.4 deviations, recorded (IP-11)
+>
+> - **`uint` synthesizes `Int`, not `ScalarType::UInt`.** `UInt` is reserved and
+>   has no runtime object: `praxis_repr::builtin_for_type` answers
+>   `NoRuntimeRepr` for it (pinned by
+>   `a_type_with_no_runtime_object_has_no_descriptor`), and under **D9** a JIT
+>   compile fails when a descriptor is missing — so a `uint` capture typed `UInt`
+>   would make every program containing one fail to compile. §7.4's
+>   non-negativity is enforced by the **parse rule**: a leading `-` is not a
+>   `uint`.
+> - **`identifier` uses §4.1's Unicode identifier class**, not §7.4's
+>   "ASCII-like identifier syntax by default". F3 gave the workspace one
+>   character class; a parser that accepted fewer names than the language itself
+>   declares would refuse identifiers a Praxis program can write.
+> - **`byte` means a decimal integer in `0..=255`**, not a raw input byte: a raw
+>   byte cannot be re-sliced as `Text` without breaking the UTF-8 invariant every
+>   source-slice `Text` depends on.
+>
+> ### One more crate boundary
+>
+> `praxis-runtime` names `praxis-syntax` directly now (it was already an indirect
+> dependency), because §7.4's `identifier` atomic parses with §4.1's character
+> class and a second copy of that rule is what F3 exists to prevent. The
+> workspace's one text-literal decoder moved to `praxis_syntax::literal` for the
+> same reason. `praxis-input-parser` still does **not** depend on `praxis-parser`,
+> and `praxis-parser` does not depend on `praxis-input-parser`.
 
 ## Context
 
