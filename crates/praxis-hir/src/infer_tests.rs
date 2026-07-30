@@ -5099,3 +5099,83 @@ fn a_for_binding_is_a_pattern_and_must_match_every_item() {
         assert!(is_clean_with_lower(src), "{src} must be accepted");
     }
 }
+
+/// **REP-26.** A record literal's head must name a `struct`.
+///
+/// `let x = 1` / `let p = x { a: 1 }` passed `praxis check`, printed `Unit`, and
+/// `p + 1` printed a raw pointer — REP-01's shape, a program the checker accepts
+/// whose value has no representation. `infer_record_lit` read the head symbol's
+/// type and never asked what the symbol *was*.
+#[test]
+fn a_record_literals_head_must_name_a_struct() {
+    // The reproduction, and it is `N008` in **inference** — so `praxis check`
+    // sees it, which is the whole point (REP-12).
+    let analysis = analyze("let x = 1\nlet p = x { a: 1 }\nout(p)\n");
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|d| d.code().to_string() == "N008"),
+        "expected N008 from analysis alone, got {:?}",
+        analysis.diagnostics
+    );
+
+    // Every kind of declaration that is not a `struct` answers the same way, and
+    // the message names the kind — an `enum` is a perfectly good *type* and still
+    // has no fields to initialize, so "not a type" would be a lie about it.
+    for (src, kind) in [
+        ("let x = 1\nlet p = x { a: 1 }\n", "a `let` binding"),
+        ("var x = 1\nlet p = x { a: 1 }\n", "a `var` binding"),
+        ("fn f() { 1 }\nlet p = f { a: 1 }\n", "a function"),
+        ("enum E { A }\nlet p = E { a: 1 }\n", "an enum type"),
+        ("enum E { A }\nlet p = A { a: 1 }\n", "an enum variant"),
+        ("let p = out { a: 1 }\n", "a built-in name"),
+        ("fn g(q) { q { a: 1 } }\n", "a parameter"),
+    ] {
+        let diags = analyze(src).diagnostics;
+        let n008 = diags
+            .iter()
+            .find(|d| d.code().to_string() == "N008")
+            .unwrap_or_else(|| panic!("expected N008 for {src}, got {diags:?}"));
+        assert!(
+            n008.message().contains(kind),
+            "the message must name `{kind}`: {}",
+            n008.message()
+        );
+    }
+
+    // The literal answers a fresh variable rather than the head's own type, so
+    // the arithmetic that used to print a pointer no longer has an `Int` to
+    // pretend to be.
+    assert_ne!(
+        scheme_of("let x = 1\nlet p = x { a: 1 }\n", "p").as_deref(),
+        Some("Int"),
+        "the literal must not keep the head's type"
+    );
+
+    // The initializers are still inferred, so a mistake inside one is still
+    // reported rather than swallowed with the literal.
+    let diags = analyze("let x = 1\nlet p = x { a: nope }\n").diagnostics;
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "N001"),
+        "an initializer's own mistake survives: {diags:?}"
+    );
+
+    // …and an actual `struct` head is untouched, including one whose field is
+    // initialized from an ordinary binding.
+    for src in [
+        "struct P { x: Int, y: Int }\nlet p = P { x: 1, y: 2 }\nout(p.x)\n",
+        "struct P { x: Int }\nlet q = 5\nlet p = P { x: q }\nout(p.x)\n",
+    ] {
+        assert!(is_clean_with_lower(src), "{src} must be accepted");
+    }
+
+    // A head that resolves to *nothing* is still `N001` and only `N001`: there is
+    // no symbol to have the wrong kind.
+    let diags = analyze("let p = Nope { a: 1 }\n").diagnostics;
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "N001")
+            && !diags.iter().any(|d| d.code().to_string() == "N008"),
+        "an undefined head is N001 alone: {diags:?}"
+    );
+}

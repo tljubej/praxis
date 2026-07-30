@@ -157,6 +157,33 @@ pub(crate) fn recursive_type_declaration(
     )
 }
 
+/// `N008` — a record literal whose head does not name a `struct` (REP-26).
+///
+/// ```praxis
+/// let x = 1
+/// let p = x { a: 1 }      // N008
+/// ```
+///
+/// Nothing checked, so the literal kept the head's own type and lowered to
+/// nothing: `out(p)` printed `Unit` and `out(p + 1)` printed a raw pointer. That
+/// is REP-01's shape — a program `praxis check` accepts whose value has no
+/// representation — and it is why the report is made in inference rather than at
+/// lowering (REP-12).
+///
+/// A declaration mistake, so it is in the Name category next to `N003` ("a name
+/// used in type position that names a value"): a record literal's head *is* a type
+/// position, and what is wrong is which declaration the name reaches. The kind is
+/// named because that is the whole of the answer — an `enum` is a type and still
+/// has no fields to initialize.
+pub(crate) fn not_a_record_literal_head(at: FileSpan, name: &str, kind: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::NotARecordLiteralHead,
+        format!("`{name}` is {kind}, so `{name} {{ … }}` does not build a record"),
+        at,
+    )
+}
+
 /// `` `A` ``, `` `A` and `B` ``, `` `A`, `B` and `C` `` — for a message that
 /// names a cycle's other members.
 fn list_names(names: &[String]) -> String {

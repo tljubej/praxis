@@ -1485,15 +1485,29 @@ impl Inferer {
     /// Infer the type of a record literal `Name { field: expr, … }` (M7, §4.5).
     /// Looks up the struct type, unifies each field initializer with the declared
     /// field type, and returns the struct type.
+    ///
+    /// **The head has to be a `struct`, and nothing asked (REP-26).** A head that
+    /// resolved to anything else kept that thing's type and lowered to nothing:
+    /// `let x = 1` / `let p = x { a: 1 }` passed `praxis check`, printed `Unit`,
+    /// and `p + 1` printed a raw pointer. That is REP-01's shape — a program the
+    /// checker accepts whose value has no representation — so the report is made
+    /// **here**, in inference, where `praxis check` sees it (REP-12).
+    ///
+    /// It is the symbol's **kind** that decides, which is REP-22's rule at another
+    /// door: the head names a declaration, and `SymbolKind::Struct` is the only one
+    /// a `{ … }` can build. Deciding on the head's *type* instead would let an
+    /// unresolved one (a parameter, whose type is a variable) look like a failure
+    /// and would say nothing useful about an `enum`, which is a perfectly good type
+    /// with no fields to initialize.
     fn infer_record_lit(&mut self, r: &RecordLitExpr) -> Type {
         // The literal's head is an ordinary name reference, so resolution
         // already decided which symbol it names — including under shadowing,
         // where a scope lookup here would answer differently.
-        let struct_ty = r
+        let resolved_head = r
             .name()
             .and_then(|p| p.name())
-            .and_then(|tok| self.refs.get(&tok.text_range()).copied())
-            .and_then(|resolved| self.type_env.ty(resolved.symbol));
+            .and_then(|tok| self.refs.get(&tok.text_range()).copied());
+        let struct_ty = resolved_head.and_then(|resolved| self.type_env.ty(resolved.symbol));
         // The head is a `PATH_EXPR` nothing evaluates; the type it names is its
         // type, and a head that names nothing is a fresh variable like any other
         // unresolved expression.
@@ -1501,18 +1515,36 @@ impl Inferer {
             let head_ty = struct_ty.unwrap_or_else(|| self.db.fresh_var());
             self.record_node_type(head.syntax(), head_ty);
         }
-        let Some(struct_ty) = struct_ty else {
-            // Unknown struct: infer each field for diagnostics, return a fresh var.
-            if let Some(fl) = r.field_list() {
-                for f in fl.fields() {
-                    if let Some(e) = f.expr() {
-                        self.infer_expr(&e);
-                    }
+        // A head that is not a `struct` (REP-26). Reported before the type is
+        // consulted, so an `enum`, a `fn`, a builtin and a binding all answer the
+        // same way and all of them stop here.
+        if let Some(resolved) = resolved_head {
+            if let Some(sym) = self.names.get(resolved.symbol) {
+                if sym.kind != SymbolKind::Struct {
+                    let at = r
+                        .name()
+                        .and_then(|p| p.name())
+                        .map(|tok| tok.text_range())
+                        .unwrap_or_else(|| r.syntax().text_range());
+                    let kind = describe_binding(sym.kind);
+                    let name = sym.name.clone();
+                    self.diagnostics
+                        .push(crate::diagnostics::not_a_record_literal_head(
+                            self.file_span(at),
+                            &name,
+                            kind,
+                        ));
+                    return self.infer_record_lit_fields_only(r);
                 }
             }
-            return self.db.fresh_var();
+        }
+        let Some(struct_ty) = struct_ty else {
+            // Unknown struct: infer each field for diagnostics, return a fresh var.
+            return self.infer_record_lit_fields_only(r);
         };
-        // Get the record def to look up declared field types.
+        // Get the record def to look up declared field types. A `struct` symbol
+        // whose type is not a record is a declaration that failed to register
+        // (`N006`); it has been reported and there is nothing here to check.
         let (def_id, def_args) = match self.db.data(self.db.follow(struct_ty)) {
             praxis_types::TypeData::Record { def, args } => (*def, args.clone()),
             _ => return struct_ty,
@@ -1586,6 +1618,24 @@ impl Inferer {
                 ));
         }
         struct_ty
+    }
+
+    /// Infer a record literal's field initializers for their own diagnostics, and
+    /// answer a fresh variable.
+    ///
+    /// The two heads that cannot be checked — one that resolved to nothing
+    /// (`N001`) and one that is not a `struct` (`N008`, REP-26) — both take this
+    /// path: the initializers are expressions the program wrote, and dropping them
+    /// drops whatever else is wrong inside them.
+    fn infer_record_lit_fields_only(&mut self, r: &RecordLitExpr) -> Type {
+        if let Some(fl) = r.field_list() {
+            for f in fl.fields() {
+                if let Some(e) = f.expr() {
+                    self.infer_expr(&e);
+                }
+            }
+        }
+        self.db.fresh_var()
     }
 
     /// Infer the type of a field access `receiver.field` (M7, §4.5). Returns the
