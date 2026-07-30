@@ -2304,11 +2304,15 @@ enum Stage {
     Skip(Box<TypedExpr>),
     /// Stop at the first element that fails the predicate.
     TakeWhile(Box<TypedExpr>),
-    /// Replace the element with `(index, element)` tuples.
-    Enumerate,
+    /// Replace the element with `(index, element)` tuples. `pair_ty` is the pair
+    /// type, read off the call node (MIR-05).
+    Enumerate { pair_ty: MirType },
     /// Pair each element with the corresponding element of `other`, stopping at
-    /// the shorter length.
-    Zip(Box<TypedExpr>),
+    /// the shorter length. `pair_ty` is the pair type.
+    Zip {
+        other: Box<TypedExpr>,
+        pair_ty: MirType,
+    },
 }
 
 /// One recognized link in a pipeline chain: an element-wise [`Stage`], or a
@@ -2390,19 +2394,51 @@ struct PipelinePlan {
 /// Classify a single `MethodCall` node as one link of a streaming chain. `None`
 /// means "not a recognized streaming op" — the recognizer treats the receiver
 /// eagerly.
-fn classify_link(name: &str, args: &[TypedExpr]) -> Option<Link> {
+///
+/// `ty` is the call node's own result type, which only the two pair-building
+/// stages read (MIR-05): `enumerate`'s is `Vec[(Int, T)]` and `zip`'s is
+/// `Vec[(T, U)]`, so the pair type they allocate is one element-of away.
+fn classify_link(
+    db: &praxis_types::TypeDb,
+    name: &str,
+    args: &[TypedExpr],
+    ty: Type,
+) -> Option<Link> {
     Some(match (name, args) {
         ("map", [f]) => Link::Stage(Stage::Map(Box::new(f.clone()))),
         ("filter", [p]) => Link::Stage(Stage::Filter(Box::new(p.clone()))),
         ("filter_map", [f]) => Link::Stage(Stage::FilterMap(Box::new(f.clone()))),
         ("flat_map", [f]) => Link::Splice(Box::new(f.clone())),
         ("take_while", [p]) => Link::Stage(Stage::TakeWhile(Box::new(p.clone()))),
-        ("enumerate", []) => Link::Stage(Stage::Enumerate),
-        ("zip", [other]) => Link::Stage(Stage::Zip(Box::new(other.clone()))),
+        ("enumerate", []) => Link::Stage(Stage::Enumerate {
+            pair_ty: pair_ty_of(db, ty),
+        }),
+        ("zip", [other]) => Link::Stage(Stage::Zip {
+            other: Box::new(other.clone()),
+            pair_ty: pair_ty_of(db, ty),
+        }),
         ("take", [n]) => Link::Stage(Stage::Take(Box::new(n.clone()))),
         ("skip", [n]) => Link::Stage(Stage::Skip(Box::new(n.clone()))),
         _ => return None,
     })
+}
+
+/// The pair type a fused `enumerate`/`zip` allocates: the element of the call's
+/// own `Vec[(…, …)]` result type (MIR-05).
+///
+/// [`MirType::Opaque`] when the call's result is not a single-argument
+/// collection — which the catalog's rows make impossible for these two, but the
+/// fallback is not decoration: a *half* of a `Known` pair may still be an
+/// inference variable (a `Vec` that was never pushed to), and the backend
+/// answers that with a **null schema slot** so the runtime reads the value's own
+/// header. ADR-066 decision 5. It is also why the verifier's
+/// `OpaqueAtDescriptorSite` rule stays off: refusing to compile an unresolved
+/// element type would reject working programs.
+fn pair_ty_of(db: &praxis_types::TypeDb, ty: Type) -> MirType {
+    match b_db_element_of(db, ty) {
+        Some(t) => MirType::Known(t),
+        None => MirType::Opaque,
+    }
 }
 
 /// Classify a single `MethodCall` node as a terminal sink, or `None` if it's a
@@ -2465,7 +2501,7 @@ fn recognize_pipeline(db: &praxis_types::TypeDb, expr: &TypedExpr) -> Option<Pip
         _ => match classify_sink(name, args) {
             Some(s) => (None, s),
             None => {
-                let link = classify_link(name, args)?;
+                let link = classify_link(db, name, args, *result_ty)?;
                 (Some(link), Sink::Collect)
             }
         },
@@ -2482,10 +2518,11 @@ fn recognize_pipeline(db: &praxis_types::TypeDb, expr: &TypedExpr) -> Option<Pip
         receiver: inner_recv,
         name: inner_name,
         args: inner_args,
+        ty: inner_ty,
         ..
     } = cur
     {
-        match classify_link(inner_name, inner_args) {
+        match classify_link(db, inner_name, inner_args, *inner_ty) {
             Some(link) => {
                 links.push(link);
                 cur = inner_recv;
@@ -2671,11 +2708,24 @@ enum Step {
     Map(LocalId),
     Filter(LocalId),
     FilterMap(LocalId),
-    Take { bound: LocalId, count: LocalId },
-    Skip { bound: LocalId, count: LocalId },
+    Take {
+        bound: LocalId,
+        count: LocalId,
+    },
+    Skip {
+        bound: LocalId,
+        count: LocalId,
+    },
     TakeWhile(LocalId),
-    Enumerate { count: LocalId },
-    Zip { other: LocalId, count: LocalId },
+    Enumerate {
+        count: LocalId,
+        pair_ty: MirType,
+    },
+    Zip {
+        other: LocalId,
+        count: LocalId,
+        pair_ty: MirType,
+    },
 }
 
 /// The lowered mirror of [`Chain`]: the same shape, with every argument
@@ -2746,9 +2796,10 @@ fn lower_chain(b: &mut Builder<'_>, chain: &Chain) -> Plan {
                 Stage::Filter(p) => Step::Filter(lower_expr_gc(b, p)),
                 Stage::FilterMap(f) => Step::FilterMap(lower_expr_gc(b, f)),
                 Stage::TakeWhile(p) => Step::TakeWhile(lower_expr_gc(b, p)),
-                Stage::Zip(other) => Step::Zip {
+                Stage::Zip { other, pair_ty } => Step::Zip {
                     other: lower_expr_gc(b, other),
                     count: alloc_zeroed_counter(b),
+                    pair_ty: *pair_ty,
                 },
                 Stage::Take(n) => Step::Take {
                     bound: lower_expr_gc(b, n),
@@ -2758,8 +2809,9 @@ fn lower_chain(b: &mut Builder<'_>, chain: &Chain) -> Plan {
                     bound: lower_expr_gc(b, n),
                     count: alloc_zeroed_counter(b),
                 },
-                Stage::Enumerate => Step::Enumerate {
+                Stage::Enumerate { pair_ty } => Step::Enumerate {
                     count: alloc_zeroed_counter(b),
+                    pair_ty: *pair_ty,
                 },
             };
             Plan::Step(step, Box::new(lower_chain(b, rest)))
@@ -2894,7 +2946,7 @@ fn emit_step(
             b.cur = keep_blk;
             item
         }
-        Step::Enumerate { count } => {
+        Step::Enumerate { count, pair_ty } => {
             // Replace item with (n, item), where n is this element's position in
             // the sequence that reached `enumerate` — dense, so a `filter` in
             // front of it numbers 0, 1, 2 rather than leaving gaps. The counter
@@ -2905,15 +2957,17 @@ fn emit_step(
                 src: *count,
             });
             emit_increment(b, *count);
-            let tup = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+            let tup = b.alloc_gc(*pair_ty, None, LocalDebugKind::Temp, None);
             b.push(Inst::Alloc {
                 dst: tup,
                 alloc: AllocKind::Tuple {
-                    // A fused `enumerate` has no tuple type until MIR-05 carries
-                    // per-stage item types (S21); saying so explicitly is what
-                    // keeps the backend from building a schema out of whichever
-                    // type the arena happened to intern first.
-                    ty: MirType::Opaque,
+                    // The catalog declares `enumerate`'s result `Vec[(Int, T)]`,
+                    // so the pair's type is a fact the chain already carries and
+                    // the backend can resolve a real element descriptor for each
+                    // half (MIR-05). `Opaque` here now means only "the element
+                    // type is still an inference variable", which ADR-066
+                    // decision 5 answers with a null schema slot.
+                    ty: *pair_ty,
                     elements: vec![idx_copy, item],
                 },
                 roots: RootSlots::unannotated(),
@@ -2921,7 +2975,11 @@ fn emit_step(
             });
             tup
         }
-        Step::Zip { other, count } => {
+        Step::Zip {
+            other,
+            count,
+            pair_ty,
+        } => {
             // Pair the nth element to reach `zip` with `other[n]`, stopping at
             // the shorter length. `n` is dense: after a `filter`, the surviving
             // elements pair with `other[0]`, `other[1]`, … rather than with
@@ -2944,12 +3002,13 @@ fn emit_step(
             });
             b.check_fault();
             emit_increment(b, *count);
-            let tup = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+            let tup = b.alloc_gc(*pair_ty, None, LocalDebugKind::Temp, None);
             b.push(Inst::Alloc {
                 dst: tup,
                 alloc: AllocKind::Tuple {
-                    // As for `enumerate` above: no tuple type here until MIR-05.
-                    ty: MirType::Opaque,
+                    // As for `enumerate` above: the catalog declares `zip`'s
+                    // result `Vec[(T, U)]`, so the pair's type is known.
+                    ty: *pair_ty,
                     elements: vec![item, other_item],
                 },
                 roots: RootSlots::unannotated(),
@@ -5354,7 +5413,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: enumerate emits an opaque tuple type (MIR-05, S21)"]
     fn enumerate_tuple_allocation_carries_a_real_two_element_type() {
         // Codegen builds TupleSchema from AllocKind::Tuple.ty. `MirType::Opaque`
         // does not make codegen infer a schema from runtime values; it creates a
@@ -5389,7 +5447,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: zip emits an opaque tuple type (MIR-05, S21)"]
     fn zip_tuple_allocation_carries_a_real_two_element_type() {
         let (funcs, analysis) = lower_src_to_mir(
             "fn main() {\n  let lhs = Vec()\n  lhs.push(10)\n  let rhs = Vec()\n  rhs.push(20)\n  lhs.zip(rhs)\n}\n",

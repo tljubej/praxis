@@ -110,7 +110,11 @@ fn tuple_items(value: GcRef) -> Vec<GcRef> {
     unsafe { (*payload).items.clone() }
 }
 
-fn tuple_element_descriptor_ids(value: GcRef) -> Vec<praxis_runtime::descriptor::TypeId> {
+/// Each schema slot's descriptor id, or `None` for a **null** slot — "the
+/// compiler had no static type here", which is a legal answer (ADR-066
+/// decision 5) and the one thing that distinguishes a real element type from
+/// the runtime falling back to the value's own header.
+fn tuple_element_descriptor_slots(value: GcRef) -> Vec<Option<praxis_runtime::descriptor::TypeId>> {
     assert_eq!(
         value.descriptor().id(),
         praxis_runtime::tuples::TUPLE.id(),
@@ -123,8 +127,21 @@ fn tuple_element_descriptor_ids(value: GcRef) -> Vec<praxis_runtime::descriptor:
     schema
         .descriptors
         .iter()
-        // SAFETY: schema entries are pointers to process-static descriptors.
-        .map(|descriptor| unsafe { &**descriptor }.id())
+        .map(|descriptor| {
+            if descriptor.is_null() {
+                None
+            } else {
+                // SAFETY: a non-null schema entry is a process-static descriptor.
+                Some(unsafe { &**descriptor }.id())
+            }
+        })
+        .collect()
+}
+
+fn tuple_element_descriptor_ids(value: GcRef) -> Vec<praxis_runtime::descriptor::TypeId> {
+    tuple_element_descriptor_slots(value)
+        .into_iter()
+        .map(|slot| slot.expect("every slot of this tuple should carry a static type"))
         .collect()
 }
 
@@ -143,7 +160,6 @@ fn fault_epilogue_returns_the_valid_unit_sentinel() {
 }
 
 #[test]
-#[ignore = "known bug: enumerate tuples use an empty opaque schema"]
 fn enumerate_materializes_index_and_element_tuple_payloads() {
     // The older enumerate test only counted results. Inspect the claimed
     // `(index, element)` values themselves so an empty TupleSchema cannot pass.
@@ -160,8 +176,58 @@ fn enumerate_materializes_index_and_element_tuple_payloads() {
     assert_eq!((second[0].as_int(), second[1].as_int()), (1, 20));
 }
 
+/// **MIR-05.** The pair a fused `enumerate`/`zip` builds carries the type the
+/// method catalog already declares, so its schema slots name real descriptors.
+///
+/// This is the only assertion that separates MIR-05 from REP-23's fallback.
+/// REP-23 made a typeless pair keep its *arity*, so the values survive and
+/// `enumerate_materializes_index_and_element_tuple_payloads` passes either way;
+/// what it cannot see is that every slot said "no static type" and formatting,
+/// hashing and equality were dispatching through the values' own headers rather
+/// than through the compiler's answer.
 #[test]
-#[ignore = "known bug: zip tuples use an empty opaque schema"]
+fn a_fused_pairs_schema_names_its_element_types() {
+    let int = praxis_runtime::scalars::INT.id();
+    let text = praxis_runtime::text::TEXT.id();
+
+    // `enumerate` on a Vec[Int] is Vec[(Int, Int)].
+    let (runtime, result) =
+        run_main("fn main() {\n  let v = Vec()\n  v.push(10)\n  v.enumerate()\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        tuple_element_descriptor_slots(result.as_vec()[0]),
+        vec![Some(int), Some(int)],
+        "enumerate's pair is (Int, T), and both halves are named"
+    );
+
+    // `zip` pairs two *different* element types, so a schema that echoed the
+    // receiver's element type for both slots would fail here and not above.
+    let (runtime, result) = run_main(
+        "fn main() {\n  let a = Vec()\n  a.push(1)\n  let b = Vec()\n  b.push(\"s\")\n  a.zip(b)\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        tuple_element_descriptor_slots(result.as_vec()[0]),
+        vec![Some(int), Some(text)],
+        "zip's pair is (T, U), and the two halves differ"
+    );
+
+    // The mirror case, which must stay reachable: a receiver whose element type
+    // is still an inference variable compiles, and its unresolved half becomes a
+    // null slot rather than a compile error (ADR-066 decision 5). This is why
+    // the verifier's `OpaqueAtDescriptorSite` rule stays off — turning it on
+    // would refuse a program that works.
+    let (runtime, result) =
+        run_main("fn main() -> Int {\n  let v = Vec()\n  v.enumerate().count()\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        0,
+        "an unpushed Vec still enumerates to empty"
+    );
+}
+
+#[test]
 fn zip_materializes_both_tuple_elements() {
     // Counting zipped values does not prove that either tuple element was
     // stored. Read both payload slots.
