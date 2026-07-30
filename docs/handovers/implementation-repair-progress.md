@@ -29,7 +29,7 @@ Update this file at the end of every stage.
 | S16 — Records, patterns, exhaustiveness, enum constructors | **done** | `57e2e5b`, `06f3c44`, `b8e2c7b`, `e918741` |
 | S17 — Constraint channel and capabilities | **done** | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c`, `e801e6a`, `b6ab8eb`, `fb82f79` |
 | S18, S20, S21 | not started | |
-| S19 — Input-parser compile pipeline | **done** | `93fc49b`, `f64e950`, `3f644de`, `c3fd726`, `f8b54b3`, `6664841` |
+| S19 — Input-parser compile pipeline | **done** | `93fc49b`, `f64e950`, `3f644de`, `c3fd726`, `f8b54b3`, `6664841`, `c3ec8cb`, `7844b7f` |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
 | S25 — Grammar completion | **done** — its acceptance criterion is met **verbatim**, and all nine of its rows have landed (REP-07, REP-08, REP-17, REP-16, REP-09, REP-18, REP-20, REP-19, REP-10) | `c74e062`, `bb3bc43`, `11976cc`, `0ee29b1`, `2f9bcbd`, `b495e93`, `11e107c`, `ca7385e` |
@@ -1237,6 +1237,19 @@ exists to prevent. It was already an indirect dependency.
 (`walk_atomic` refuses a leading `-`). Same file: `byte` means a decimal integer
 in `0..=255`, and `identifier` uses §4.1's Unicode class, not §7.4's
 "ASCII-like". Both are recorded in ADR-023's amendment.
+
+**For S20, one thing S19 made reachable and did not fix.** A template capture is
+still handed the **whole** remaining input rather than a region bounded by the
+literal that follows it — `walk_template` passes `bytes` and the child's own
+cursor decides where to stop (`crates/praxis-runtime/src/parser.rs`, the
+`Capture` arm). That was invisible while every capture was an atomic, because
+`int` and `word` stop at a delimiter on their own. Now that a capture body is a
+full parser expression, `` read lines(`Monkey {id:int}: {items:csv(int)}`) ``
+over `"Monkey 0: 1,2,3\nMonkey 1: 4,5\n"` gives the first row **four** items:
+the `csv` runs past the end of its line. It is the same defect as the ignored
+`csv does not bound child parsers to an individual token` and
+`lines accepts a child parser that consumed only a prefix`, reached from a new
+direction. It belongs to S20's region ownership, not to the compile pipeline.
 
 **A `read`/`parse` that used to compile may now report.** An unrecognized capture
 kind used to mean `int` and a surplus constructor argument used to be dropped.
