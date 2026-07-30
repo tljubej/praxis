@@ -176,6 +176,10 @@ fn is_pattern_start(kind: SyntaxKind) -> bool {
             | SyntaxKind::KW_TRUE
             | SyntaxKind::KW_FALSE
             | SyntaxKind::Ident
+            // A tuple pattern (REP-10). Without it a `match` arm after
+            // `(a, b) => …` stopped the arm list, so the second arm and every
+            // arm after it vanished from the tree.
+            | SyntaxKind::L_PAREN
     )
 }
 
@@ -1254,9 +1258,26 @@ impl<'t> Parser<'t> {
         self.finish_node(); // MATCH_EXPR
     }
 
-    /// Parse a pattern (M7, §4.6). M7 supports: `_` (wildcard), a literal
-    /// (Int/Text/Bool), a variable bind (`x`), an enum variant (`Empty` or
-    /// `Number(sub_pattern, …)`), and tuple/record patterns.
+    /// Parse a pattern (M7, §4.6; REP-10). Grammar:
+    ///
+    /// ```text
+    /// pattern := "_"                                  // wildcard
+    ///          | literal                              // Int / Text / true / false
+    ///          | Ident                                 // variable bind or payload-less variant
+    ///          | Ident "(" [pattern ("," pattern)*] ")" // enum variant
+    ///          | Ident "{" [pattern_field ("," pattern_field)*] "}" // record (§4.5)
+    ///          | "(" pattern ("," pattern)* ")"        // tuple (§4.4)
+    /// pattern_field := Ident [":" pattern]
+    /// ```
+    ///
+    /// A record pattern's `{` is unambiguous where a record *literal*'s is not
+    /// (FE-06): a pattern is followed by `=>` or `in`, never by a block, so
+    /// nothing else can be waiting for that brace.
+    ///
+    /// Parentheses in pattern position are **always** a tuple — there is no
+    /// grouping form, because a pattern has no precedence to override. `(p)` is
+    /// therefore a one-element tuple pattern, which `Y123` reports against every
+    /// type: `TypeData::Tuple` carries two elements or more.
     fn parse_pattern(&mut self) {
         self.start_node(SyntaxKind::PATTERN);
         match self.peek() {
@@ -1270,21 +1291,28 @@ impl<'t> Parser<'t> {
                 self.bump(); // literal
             }
             SyntaxKind::Ident => {
-                self.bump(); // variant name or variable bind
-                             // Enum variant with payload: `Name(pat, pat, …)`.
-                if self.eat(SyntaxKind::L_PAREN) {
-                    if !self.at(SyntaxKind::R_PAREN) {
-                        loop {
-                            let before = self.meaningful_index();
-                            self.parse_pattern();
-                            if !self.eat(SyntaxKind::COMMA) {
-                                break;
-                            }
-                            self.ensure_progress(before);
-                        }
-                    }
+                self.bump(); // variant name, record name, or variable bind
+                if self.at(SyntaxKind::L_BRACE) {
+                    // Record pattern: `Name { field, field: pat, … }` (REP-10).
+                    self.parse_record_pattern_fields();
+                } else if self.eat(SyntaxKind::L_PAREN) {
+                    // Enum variant with payload: `Name(pat, pat, …)`.
+                    self.parse_pattern_list(SyntaxKind::R_PAREN);
                     self.expect(SyntaxKind::R_PAREN, "`)` to close variant pattern");
                 }
+            }
+            SyntaxKind::L_PAREN => {
+                // Tuple pattern `(a, b)` — or a grouping `(p)`, which the list
+                // leaves as the one child it parsed (REP-10).
+                self.bump(); // `(`
+                if self.at(SyntaxKind::R_PAREN) {
+                    // `()` has no type to match: `Unit` is not a tuple.
+                    let span = self.current_span();
+                    self.error(span, "expected a pattern");
+                } else {
+                    self.parse_pattern_list(SyntaxKind::R_PAREN);
+                }
+                self.expect(SyntaxKind::R_PAREN, "`)` to close tuple pattern");
             }
             _ => {
                 let span = self.current_span();
@@ -1295,6 +1323,49 @@ impl<'t> Parser<'t> {
             }
         }
         self.finish_node(); // PATTERN
+    }
+
+    /// A comma-separated list of patterns, up to but not including `closer`.
+    /// A trailing comma closes the list rather than opening an element (REP-17).
+    fn parse_pattern_list(&mut self, closer: SyntaxKind) {
+        loop {
+            let before = self.meaningful_index();
+            self.parse_pattern();
+            if !self.eat(SyntaxKind::COMMA) {
+                break;
+            }
+            if self.at(closer) {
+                break;
+            }
+            self.ensure_progress(before);
+        }
+    }
+
+    /// The `{ field, field: pat, … }` body of a record pattern (REP-10, §4.5).
+    /// A punned field binds the field's own name; an explicit one matches the
+    /// sub-pattern against that field.
+    fn parse_record_pattern_fields(&mut self) {
+        self.bump(); // `{`
+        if !self.at(SyntaxKind::R_BRACE) {
+            loop {
+                let before = self.meaningful_index();
+                self.start_node(SyntaxKind::PATTERN_FIELD);
+                self.expect(SyntaxKind::Ident, "field name");
+                if self.eat(SyntaxKind::COLON) {
+                    self.parse_pattern();
+                }
+                self.finish_node(); // PATTERN_FIELD
+                if !self.eat(SyntaxKind::COMMA) {
+                    break;
+                }
+                // A trailing comma closes the list (REP-17).
+                if self.at(SyntaxKind::R_BRACE) {
+                    break;
+                }
+                self.ensure_progress(before);
+            }
+        }
+        self.expect(SyntaxKind::R_BRACE, "`}` to close record pattern");
     }
 
     // --- types (M2) ---------------------------------------------------------
@@ -2775,6 +2846,99 @@ mod tests {
             "let c = Counter[]()",
             "let c = Counter[Int",
             "let c = Vec[Int] + 1",
+        ] {
+            let out = parse_text(bad);
+            assert!(!out.diagnostics.is_empty(), "{bad} must report");
+        }
+    }
+
+    /// **REP-10.** A record pattern and a tuple pattern are patterns wherever a
+    /// pattern is legal, and each carries its sub-patterns in a shape the rest of
+    /// the compiler can read.
+    ///
+    /// `match p { P { x, y } => x }` was `P001` "expected `=>` in match arm" and
+    /// `match t { (a, b) => a }` was "expected a pattern": the pattern grammar had
+    /// four forms and neither of these was one, which is why records and tuples
+    /// had an `Open` exhaustiveness signature — no pattern could name them.
+    ///
+    /// The list of shapes matters more than any one of them. A record pattern's
+    /// fields are `PATTERN_FIELD`s and a tuple's elements are bare `PATTERN`s, so
+    /// `P { x }` never looks like `P(x)`, and `P { x: p }` and `P { x }` are one
+    /// node shape with an optional child rather than two identifier-counting
+    /// rules.
+    #[test]
+    fn a_record_pattern_names_fields_and_a_tuple_pattern_names_positions() {
+        let count = |src: &str, kind: SyntaxKind| -> usize {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            construct_names(&out.tree)
+                .into_iter()
+                .filter(|k| *k == kind)
+                .count()
+        };
+
+        // A record pattern's fields, punned and explicit and mixed. The `{` is
+        // unambiguous here where a record *literal*'s is not (FE-06): a pattern
+        // is followed by `=>`, never by a block.
+        for (src, fields) in [
+            ("let a = match p { P { x } => x }", 1),
+            ("let a = match p { P { x, y } => x }", 2),
+            ("let a = match p { P { x: 1, y } => y }", 2),
+            ("let a = match p { P { x: q, y: r } => q }", 2),
+            // A trailing comma closes this list too (REP-17).
+            ("let a = match p { P { x, y, } => x }", 2),
+        ] {
+            assert_eq!(count(src, SyntaxKind::PATTERN_FIELD), fields, "{src}");
+        }
+
+        // A tuple pattern's elements are sub-patterns, at every arity and nested.
+        // The counts include the arm's own outer pattern.
+        for (src, patterns) in [
+            ("let a = match t { (x, y) => x }", 3),
+            ("let a = match t { (x, y, z) => x }", 4),
+            ("let a = match t { (x, (y, z)) => x }", 5),
+            ("let a = match t { (1, _) => 0, _ => 1 }", 4),
+            // …and a trailing comma, which is the fifteenth list (REP-17).
+            ("let a = match t { (x, y,) => x }", 3),
+        ] {
+            assert_eq!(count(src, SyntaxKind::PATTERN), patterns, "{src}");
+        }
+
+        // The two compose: a record field holding a tuple, a tuple element
+        // holding a record, and a variant payload holding either.
+        for src in [
+            "let a = match p { P { at: (x, y) } => x }",
+            "let a = match t { (P { x }, n) => x }",
+            "let a = match o { Some(P { x, y }) => x, None => 0 }",
+            "let a = match o { Some((x, y)) => x, None => 0 }",
+        ] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+        }
+
+        // A tuple pattern must be able to *start* an arm, or the arm list stops
+        // at it and every arm after it silently leaves the tree — which is what
+        // `is_pattern_start` decides.
+        let out = parse_text("let a = match t { (x, y) => x\n _ => 0 }");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert_eq!(
+            count(
+                "let a = match t { (x, y) => x\n _ => 0 }",
+                SyntaxKind::MATCH_ARM
+            ),
+            2,
+            "both arms are in the tree"
+        );
+
+        // The shapes that are not patterns. `()` has no type to match — `Unit` is
+        // not a tuple — and a field with a `:` and nothing after it is a pattern
+        // the program did not finish writing.
+        for bad in [
+            "let a = match u { () => 0 }",
+            "let a = match p { P { x: } => 0 }",
+            "let a = match p { P { , x } => 0 }",
+            "let a = match p { P { x => 0 }",
+            "let a = match t { (x, => 0 }",
         ] {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must report");

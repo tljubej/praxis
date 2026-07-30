@@ -239,6 +239,15 @@ pub enum SyntaxKind {
     /// A pattern (M7, §4.6): wildcard `_`, literal, variable bind, enum variant,
     /// or tuple/record destructuring.
     PATTERN,
+    /// One `name` or `name: pattern` field of a record pattern (REP-10, §4.5).
+    ///
+    /// Its own kind rather than the [`FIELD`](Self::FIELD) a struct declaration
+    /// and a record literal share: those hold a type and an expression, and this
+    /// holds a *pattern*. A punned `P { x }` and an explicit `P { x: p }` are
+    /// then one node shape — the name is always the token, the sub-pattern is
+    /// always the optional child — so pairing a field with its pattern never has
+    /// to count identifiers.
+    PATTERN_FIELD,
     /// A single `name: Type` parameter.
     PARAM,
     /// The `(...)` parameter list.

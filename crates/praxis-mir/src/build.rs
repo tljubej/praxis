@@ -4429,36 +4429,128 @@ fn emit_pattern_test(
             b.cur = sub_ok;
             // Test each sub-pattern against its payload slot. Chain them: all
             // must succeed. Extract each payload slot and recurse.
-            emit_subpattern_tests(b, scrut, subpatterns, 0, on_success, on_fail);
+            emit_subpattern_tests(
+                b,
+                scrut,
+                subpatterns,
+                Component::EnumPayload,
+                0,
+                on_success,
+                on_fail,
+            );
+        }
+        // `(a, b)` and `P { x, y }` (REP-10). Neither tests the value itself: a
+        // tuple type and a record type have one constructor each, so the shape
+        // always matches and the whole test is the components'. The only
+        // difference between them is which instruction reads a component.
+        TypedPattern::Tuple { subpatterns, .. } => {
+            emit_subpattern_tests(
+                b,
+                scrut,
+                subpatterns,
+                Component::TupleElem,
+                0,
+                on_success,
+                on_fail,
+            );
+        }
+        TypedPattern::Record { subpatterns, .. } => {
+            emit_subpattern_tests(
+                b,
+                scrut,
+                subpatterns,
+                Component::RecordField,
+                0,
+                on_success,
+                on_fail,
+            );
         }
     }
 }
 
-/// Recursively test a chain of sub-patterns against consecutive payload slots
-/// of `scrut` (an enum value), starting at `slot_idx`. All must succeed to
-/// reach `on_success`; any failure jumps to `on_fail`.
+/// Which part of a composite value a sub-pattern is tested against, and so which
+/// instruction reads it (REP-10).
+///
+/// The three are one walk because the chaining is identical — every component
+/// must match, and any failure leaves by the same edge — and three copies of
+/// that block structure is three places for a fall-through to go missing.
+#[derive(Clone, Copy)]
+enum Component {
+    /// An enum variant's payload slot.
+    EnumPayload,
+    /// A tuple's element, by position.
+    TupleElem,
+    /// A record's field, by declaration index — which is what makes a record
+    /// pattern's sub-patterns positional in HIR.
+    RecordField,
+}
+
+impl Component {
+    /// Read component `idx` of `src` into `dst`.
+    fn load(self, dst: LocalId, src: LocalId, idx: u32) -> Inst {
+        match self {
+            Component::EnumPayload => Inst::EnumPayloadGet { dst, src, idx },
+            Component::TupleElem => Inst::LoadTupleElem {
+                dst,
+                src,
+                index: idx,
+            },
+            Component::RecordField => Inst::LoadField {
+                dst,
+                src,
+                field_idx: idx,
+            },
+        }
+    }
+}
+
+/// Recursively test a chain of sub-patterns against consecutive components of
+/// `scrut`, starting at `slot_idx`. All must succeed to reach `on_success`; any
+/// failure jumps to `on_fail`.
 fn emit_subpattern_tests(
     b: &mut Builder<'_>,
     scrut: LocalId,
     subpatterns: &[praxis_hir::TypedPattern],
+    component: Component,
     slot_idx: u32,
     on_success: BlockId,
     on_fail: BlockId,
 ) {
     if let Some(sub) = subpatterns.get(slot_idx as usize) {
-        // Extract this payload slot into a local.
+        // A wildcard asks nothing of the component, so the component is not
+        // read: the row lowering padded to arity costs nothing, and `Some` reads
+        // no payload where `Some(n)` reads one. Only a `Wildcard` may be skipped
+        // — a `Bind` matches anything too, but it needs the value.
+        if matches!(sub, praxis_hir::TypedPattern::Wildcard) {
+            emit_subpattern_tests(
+                b,
+                scrut,
+                subpatterns,
+                component,
+                slot_idx + 1,
+                on_success,
+                on_fail,
+            );
+            return;
+        }
+        // Extract this component into a local.
         let payload = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
-        b.push(Inst::EnumPayloadGet {
-            dst: payload,
-            src: scrut,
-            idx: slot_idx,
-        });
+        let inst = component.load(payload, scrut, slot_idx);
+        b.push(inst);
         // Test `sub` against `payload`. If it matches, continue to the next
         // sub-pattern; if not, fail.
         let next = b.func.new_block();
         emit_pattern_test(b, payload, sub, next, on_fail);
         b.cur = next;
-        emit_subpattern_tests(b, scrut, subpatterns, slot_idx + 1, on_success, on_fail);
+        emit_subpattern_tests(
+            b,
+            scrut,
+            subpatterns,
+            component,
+            slot_idx + 1,
+            on_success,
+            on_fail,
+        );
     } else {
         // All sub-patterns matched: success.
         b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
@@ -5317,5 +5409,88 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **REP-10.** A record pattern reads a field and a tuple pattern reads an
+    /// element — and neither tests a tag first.
+    ///
+    /// This is the assertion a behavioural test cannot make. Both composites have
+    /// **one constructor**, so the shape always matches and the whole test is the
+    /// components'; an `EnumTag` compare here would be a branch on a word that is
+    /// not a tag. And the two readers are different runtime symbols, so a walk
+    /// that reused the enum's `EnumPayloadGet` for either would read a record's
+    /// header as a payload slot.
+    #[test]
+    fn a_record_pattern_reads_fields_and_a_tuple_pattern_reads_elements() {
+        /// What one program's `main` reads, by instruction: the field indices a
+        /// `LoadField` names, then the counts of the other three readers.
+        struct Reads {
+            fields: Vec<u32>,
+            elems: usize,
+            tags: usize,
+            payloads: usize,
+        }
+        let reads = |src: &str| -> Reads {
+            let (funcs, _) = lower_src_to_mir(src);
+            let main = funcs.iter().find(|f| f.name == "main").expect("main");
+            let all = || main.blocks.iter().flat_map(|b| b.insts.iter());
+            Reads {
+                fields: all()
+                    .filter_map(|i| match i {
+                        Inst::LoadField { field_idx, .. } => Some(*field_idx),
+                        _ => None,
+                    })
+                    .collect(),
+                elems: all()
+                    .filter(|i| matches!(i, Inst::LoadTupleElem { .. }))
+                    .count(),
+                tags: all().filter(|i| matches!(i, Inst::EnumTag { .. })).count(),
+                payloads: all()
+                    .filter(|i| matches!(i, Inst::EnumPayloadGet { .. }))
+                    .count(),
+            }
+        };
+
+        let record = reads(
+            "struct P { x: Int, y: Int }\n\
+             fn main() -> Int {\n  let p = P { x: 1, y: 2 }\n  \
+             match p { P { x, y } => x + y }\n}",
+        );
+        assert_eq!(
+            record.fields,
+            vec![0, 1],
+            "one read per named field, in order"
+        );
+        assert_eq!(record.elems, 0);
+        assert_eq!(
+            record.tags, 0,
+            "a record has one constructor: there is no tag to compare"
+        );
+
+        let tuple = reads("fn main() -> Int {\n  let t = (1, 2)\n  match t { (a, b) => a + b }\n}");
+        assert_eq!(tuple.elems, 2, "one read per element");
+        assert!(tuple.fields.is_empty());
+        assert_eq!(tuple.tags, 0);
+
+        // A field the pattern does not name is not read at all — the wildcard
+        // that pads the row costs nothing — and the ones it does name are read
+        // at their own declared index.
+        let partial = reads(
+            "struct P { a: Int, b: Int, c: Int }\n\
+             fn main() -> Int {\n  let p = P { a: 1, b: 2, c: 3 }\n  match p { P { c } => c }\n}",
+        );
+        assert_eq!(partial.fields, vec![2], "the third field, and only it");
+
+        // An enum payload still tests its tag, and reads through its own
+        // instruction: the three readers are chosen per composite, not per depth.
+        let nested = reads(
+            "struct P { x: Int, y: Int }\n\
+             fn main() -> Int {\n  let o = Some((P { x: 1, y: 2 }, 3))\n  \
+             match o { Some((P { x, y }, k)) => x + y + k, None => 0 }\n}",
+        );
+        assert_eq!(nested.tags, 2, "`Some` and `None` each compare a tag");
+        assert_eq!(nested.payloads, 1);
+        assert_eq!(nested.elems, 2);
+        assert_eq!(nested.fields, vec![0, 1]);
     }
 }

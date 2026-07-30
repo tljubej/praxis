@@ -433,6 +433,43 @@ pub enum TypedPattern {
         subpatterns: Vec<TypedPattern>,
         ty: Type,
     },
+    /// `(a, b)` — matches each element against its sub-pattern (REP-10, §4.4).
+    /// Always matches the shape: a tuple has one constructor, so the test is the
+    /// elements' and never the tuple's.
+    Tuple {
+        subpatterns: Vec<TypedPattern>,
+        ty: Type,
+    },
+    /// `P { x, y: p }` — matches each field against its sub-pattern (REP-10,
+    /// §4.5). Like [`EnumVariant`](Self::EnumVariant)'s payload, `subpatterns` is
+    /// **positional** over the record's declared fields and padded to their
+    /// count, so a field the pattern does not name is a `Wildcard` and MIR reads
+    /// slot *i* for sub-pattern *i*.
+    Record {
+        record_def_id: praxis_types::RecordDefId,
+        subpatterns: Vec<TypedPattern>,
+        ty: Type,
+    },
+}
+
+impl TypedPattern {
+    /// The sub-patterns this pattern matches against the components of the value
+    /// it tests — a variant's payload, a tuple's elements, a record's fields —
+    /// and an empty slice for a pattern with no components.
+    ///
+    /// Written once because three walks want it: the usefulness matrix asks it
+    /// twice and MIR's decision tree once, and each of them used to name
+    /// `EnumVariant` by hand, which is how a new composite pattern silently
+    /// becomes a catch-all in all three (HIR-06's failure mode).
+    #[must_use]
+    pub fn sub_patterns(&self) -> &[TypedPattern] {
+        match self {
+            TypedPattern::Wildcard | TypedPattern::Lit { .. } | TypedPattern::Bind { .. } => &[],
+            TypedPattern::EnumVariant { subpatterns, .. }
+            | TypedPattern::Tuple { subpatterns, .. }
+            | TypedPattern::Record { subpatterns, .. } => subpatterns,
+        }
+    }
 }
 
 /// Every variant's children, written **once** (F20).
@@ -2510,6 +2547,94 @@ impl<'a> Lowerer<'a> {
                 TypedPattern::EnumVariant {
                     enum_def_id,
                     variant_idx: idx as u32,
+                    subpatterns,
+                    ty: scrutinee_ty,
+                }
+            }
+            // `(a, b)` — one sub-pattern per element (REP-10, §4.4). Inference
+            // unified the scrutinee with a tuple of the pattern's own arity, so
+            // a shape that does not fit has already reported; this reads the
+            // element types and recurses.
+            PatternKind::Tuple => {
+                let resolved = self.db.follow(scrutinee_ty);
+                let element_types = match self.db.data(resolved) {
+                    praxis_types::TypeData::Tuple(els) => els.clone(),
+                    praxis_types::TypeData::Var(_) => return TypedPattern::Wildcard,
+                    _ => {
+                        let rendered = self.db.render(resolved);
+                        self.diag(
+                            pat.syntax().text_range(),
+                            DiagCode::NotAPatternForType,
+                            format!("`(…)` is not a pattern for `{rendered}`"),
+                        );
+                        return TypedPattern::Wildcard;
+                    }
+                };
+                let subs: Vec<_> = pat.sub_patterns().collect();
+                let mut subpatterns = Vec::new();
+                for (i, sub) in subs.iter().enumerate() {
+                    let sub_ty = element_types.get(i).copied().unwrap_or(scrutinee_ty);
+                    subpatterns.push(self.lower_pattern(sub, sub_ty));
+                }
+                // Exactly one sub-pattern per element, for the reason REP-05
+                // gives at a variant's payload: a row narrower or wider than the
+                // column list pairs the matrix's types off by one, and MIR would
+                // read an element the tuple does not have.
+                subpatterns.resize(element_types.len(), TypedPattern::Wildcard);
+                TypedPattern::Tuple {
+                    subpatterns,
+                    ty: scrutinee_ty,
+                }
+            }
+            // `P { x, y: p }` — one sub-pattern per *declared* field, in
+            // declaration order (REP-10, §4.5). A field the pattern does not
+            // name stays a wildcard.
+            PatternKind::Record(rname) => {
+                let resolved = self.db.follow(scrutinee_ty);
+                let (record_def_id, record_args) = match self.db.data(resolved) {
+                    praxis_types::TypeData::Record { def, args } => (*def, args.clone()),
+                    praxis_types::TypeData::Var(_) => return TypedPattern::Wildcard,
+                    _ => {
+                        let rendered = self.db.render(resolved);
+                        self.diag(
+                            pat.syntax().text_range(),
+                            DiagCode::NotAPatternForType,
+                            format!("`{rname} {{ … }}` is not a pattern for `{rendered}`"),
+                        );
+                        return TypedPattern::Wildcard;
+                    }
+                };
+                let fields = self.db.record_fields_of(record_def_id, &record_args);
+                let mut subpatterns = vec![TypedPattern::Wildcard; fields.len()];
+                for field in pat.fields() {
+                    let Some(name_tok) = field.name() else {
+                        continue;
+                    };
+                    let fname = name_tok.text().to_string();
+                    // A field the record does not have is inference's `Y114`.
+                    let Some((idx, field_ty)) = fields
+                        .iter()
+                        .enumerate()
+                        .find_map(|(i, f)| (f.name == fname).then_some((i, f.ty)))
+                    else {
+                        continue;
+                    };
+                    subpatterns[idx] = match field.pattern() {
+                        Some(sub) => self.lower_pattern(&sub, field_ty),
+                        // A punned field `P { x }` binds the field to its own
+                        // name — the same binding a `Name` pattern makes, at the
+                        // field's type rather than the whole record's.
+                        None => match self.resolve_decl_at(name_tok.text_range()) {
+                            Some(symbol) => TypedPattern::Bind {
+                                symbol,
+                                ty: field_ty,
+                            },
+                            None => TypedPattern::Wildcard,
+                        },
+                    };
+                }
+                TypedPattern::Record {
+                    record_def_id,
                     subpatterns,
                     ty: scrutinee_ty,
                 }

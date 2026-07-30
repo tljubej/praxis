@@ -276,9 +276,12 @@ pub enum DiagCode {
     NoFieldOnType,
     /// `Y113` — a record literal missing one or more fields (HIR-04).
     MissingRecordFields,
-    /// `Y114` — a record literal naming a field the type does not have (HIR-04).
+    /// `Y114` — a record literal *or pattern* naming a field the type does not
+    /// have (HIR-04, REP-10).
     UnknownRecordField,
-    /// `Y115` — a record literal naming one field twice (HIR-04).
+    /// `Y115` — a record literal *or pattern* naming one field twice (HIR-04,
+    /// REP-10). In a pattern the second sub-pattern would silently replace the
+    /// first, so one of the two bindings the program wrote would never happen.
     DuplicateRecordField,
 
     // --- Type (`Y12x`), match errors ---
@@ -289,7 +292,9 @@ pub enum DiagCode {
     /// `Y122` — a pattern naming a variant the scrutinee's type has not
     /// (HIR-07).
     UnknownEnumVariant,
-    /// `Y123` — a pattern whose shape cannot match the scrutinee (HIR-06).
+    /// `Y123` — a pattern whose shape cannot match the scrutinee (HIR-06), or
+    /// one no value can have at all (REP-10): a one-element tuple pattern, or a
+    /// record pattern whose head names something that is not a record.
     NotAPatternForType,
     /// `Y124` — a pattern naming more sub-patterns than the variant has payload
     /// slots (REP-05).

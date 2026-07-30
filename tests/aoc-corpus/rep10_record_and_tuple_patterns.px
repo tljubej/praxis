@@ -1,0 +1,66 @@
+// AoC corpus fixture: record and tuple patterns (REP-10; §4.4, §4.5, §4.6).
+//
+// The shape a grid puzzle takes apart every value with: a record read from the
+// input, matched field by field, and a tuple matched by position — each with a
+// literal sub-pattern that *selects* an arm, which is what makes the components
+// tested rather than merely bound.
+//
+// A record and a tuple have one constructor each, so every match here is
+// exhaustive without a `_`; the enum match keeps its `_`-free arm list for the
+// same reason it always did.
+//
+// Input (on stdin): lines of `x,y` points.
+// Output: the axis classification of each point summed, the quadrant walk's
+// total, and the nested shape's answer.
+struct Point { x: Int, y: Int }
+
+enum Move { Step(Int, Int), Stay }
+
+let points = read lines(`{x:int},{y:int}`)
+
+// A record pattern binds each field at that field's own type. The first two arms
+// name a literal for `x`, so the arm a point takes depends on its components and
+// not only on its shape.
+fn classify(p: Point) -> Int {
+    match p {
+        Point { x: 0, y: 0 } => 0
+        Point { x: 0, y } => y
+        Point { x, y: 0 } => x * 10
+        Point { x, y } => x * 100 + y
+    }
+}
+
+var total = 0
+for p in points {
+    total = total + classify(Point { x: p.x, y: p.y })
+}
+out(total)
+
+// A tuple pattern binds by position, and nests: the step is read out of the
+// enum's payload, the payload is a pair, and the pair's halves are the walk's
+// two axes.
+fn advance(here: (Int, Int), m: Move) -> (Int, Int) {
+    match m {
+        Step(dx, dy) => match here { (x, y) => (x + dx, y + dy) }
+        Stay => here
+    }
+}
+
+let moves = Vec()
+moves.push(Step(1, 0))
+moves.push(Step(0, 2))
+moves.push(Stay)
+moves.push(Step(3, 4))
+
+var at = (0, 0)
+for m in moves {
+    at = advance(at, m)
+}
+out(match at { (x, y) => x * 100 + y })
+
+// A record holding a tuple, matched in one pattern — the two composites compose
+// in both directions.
+struct Span { label: Text, ends: (Int, Int) }
+
+let s = Span { label: "ab", ends: (3, 9) }
+out(match s { Span { label, ends: (lo, hi) } => label.len() * 100 + (hi - lo) })

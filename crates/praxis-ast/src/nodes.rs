@@ -844,6 +844,11 @@ impl AstNode for Pattern {
 }
 impl Pattern {
     /// The kind of this pattern, as a [`PatternKind`].
+    ///
+    /// Read off the node's **direct** children, which is what keeps the shapes
+    /// apart: a tuple pattern's elements and a record pattern's field names are
+    /// nested one node deeper, so `(_, x)` is not a wildcard, `(1, 2)` is not a
+    /// literal, and `P { x }` names `P` and not `x`.
     pub fn kind(&self) -> PatternKind {
         let syntax = &self.syntax;
         // Check for wildcard.
@@ -860,12 +865,18 @@ impl Pattern {
         {
             return PatternKind::Literal;
         }
-        // Check for an Ident — variant or variable bind.
+        // Check for an Ident — record, variant or variable bind.
         let name_tok = syntax.children_with_tokens().find_map(|e| match e {
             rowan::NodeOrToken::Token(t) if t.kind() == K::Ident => Some(t),
             _ => None,
         });
         if let Some(tok) = name_tok {
+            // `Name { … }` — a record pattern (REP-10). Its fields are
+            // `PATTERN_FIELD`s, so it never collides with a variant's
+            // sub-patterns.
+            if syntax.children().any(|c| c.kind() == K::PATTERN_FIELD) {
+                return PatternKind::Record(tok.text().to_string());
+            }
             // If followed by `(`, it's a variant with sub-patterns.
             let has_parens = syntax.children().any(|c| c.kind() == K::PATTERN);
             if has_parens {
@@ -873,11 +884,26 @@ impl Pattern {
             }
             return PatternKind::Name(tok.text().to_string());
         }
+        // No name and no literal: `(a, b)` — a tuple pattern (REP-10). The
+        // parenthesis is what distinguishes it from a node the parser gave up
+        // on, which has neither.
+        if syntax
+            .children_with_tokens()
+            .any(|e| matches!(e, rowan::NodeOrToken::Token(t) if t.kind() == K::L_PAREN))
+        {
+            return PatternKind::Tuple;
+        }
         PatternKind::Wildcard
     }
-    /// Sub-patterns (for a variant pattern `Number(n, _)`).
+    /// Sub-patterns, in order: a variant pattern's payload (`Number(n, _)`) or a
+    /// tuple pattern's elements (`(a, b)`). A record pattern's are reached
+    /// through [`Pattern::fields`], since each carries a field name.
     pub fn sub_patterns(&self) -> impl Iterator<Item = Pattern> + '_ {
         self.syntax.children().filter_map(Pattern::cast)
+    }
+    /// The fields of a record pattern `P { x, y: p }`, in source order.
+    pub fn fields(&self) -> impl Iterator<Item = PatternField> + '_ {
+        children::<PatternField>(&self.syntax)
     }
     /// The name token, if this is a variant or variable-bind pattern.
     pub fn name_token(&self) -> Option<SyntaxToken> {
@@ -905,7 +931,36 @@ impl Pattern {
     }
 }
 
-/// What kind of pattern a [`Pattern`] is (M7, §4.6).
+/// One `name` or `name: pattern` field of a record pattern (REP-10, §4.5).
+#[derive(Clone, Debug)]
+pub struct PatternField {
+    syntax: SyntaxNode,
+}
+impl AstNode for PatternField {
+    const KIND: K = K::PATTERN_FIELD;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl PatternField {
+    /// The field's name token.
+    pub fn name(&self) -> Option<SyntaxToken> {
+        self.syntax.children_with_tokens().find_map(|e| match e {
+            rowan::NodeOrToken::Token(t) if t.kind() == K::Ident => Some(t),
+            _ => None,
+        })
+    }
+    /// The sub-pattern the field is matched against, or `None` when the field is
+    /// punned (`P { x }`) — which binds the field to its own name.
+    pub fn pattern(&self) -> Option<Pattern> {
+        child(&self.syntax)
+    }
+}
+
+/// What kind of pattern a [`Pattern`] is (M7, §4.6; REP-10).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PatternKind {
     /// `_` — matches anything.
@@ -916,6 +971,11 @@ pub enum PatternKind {
     Name(String),
     /// An enum variant: `Empty` or `Number(…)` — the string is the variant name.
     Variant(String),
+    /// A tuple: `(a, b)` — matches by position (§4.4).
+    Tuple,
+    /// A record: `P { x, y: p }` — matches by field name (§4.5). The string is
+    /// the record's name.
+    Record(String),
 }
 
 /// A literal: `IntLit`, `TextLit`, `true`/`false`, backtick template.

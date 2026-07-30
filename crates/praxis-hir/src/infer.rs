@@ -1818,15 +1818,40 @@ impl Inferer {
                 // A variable bind: matches anything of the scrutinee's type.
                 // Bind the variable to `expected`'s type.
                 if let Some(tok) = pat.name_token() {
-                    let range = tok.text_range();
-                    if let Some(&symbol) = self.decls.get(&range) {
-                        if let Some(sym) = self.names.get_mut(symbol) {
-                            sym.scheme = Some(Scheme::monotype(expected));
-                        }
-                    }
+                    self.bind_pattern_name(tok.text_range(), expected);
                 }
                 let _ = name;
             }
+            // `(a, b)` — a tuple pattern (REP-10, §4.4). The elements are fresh
+            // variables unified *through* the scrutinee, so an unannotated
+            // parameter destructured in a `match` is pinned to a tuple by the
+            // pattern rather than left open.
+            PatternKind::Tuple => {
+                let subs: Vec<_> = pat.sub_patterns().collect();
+                let elems: Vec<Type> = subs.iter().map(|_| self.db.fresh_var()).collect();
+                match praxis_types::TupleElems::new(elems.clone()) {
+                    Ok(te) => {
+                        let tuple_ty = self.db.tuple(te);
+                        if let Err(e) = self.db.unify(expected, tuple_ty) {
+                            self.diag_unify(self.file_span(pat.syntax().text_range()), e);
+                        }
+                    }
+                    // A tuple type has two elements or more, so `(p)` matches
+                    // nothing — the parser has no grouping form to have meant.
+                    Err(_) => {
+                        let at = self.file_span(pat.syntax().text_range());
+                        self.diagnostics.push(crate::diagnostics::not_a_pattern(
+                            at,
+                            "a tuple pattern names two elements or more",
+                        ));
+                    }
+                }
+                for (sub, elem_ty) in subs.iter().zip(elems) {
+                    self.infer_pattern(sub, elem_ty);
+                }
+            }
+            // `P { x, y: p }` — a record pattern (REP-10, §4.5).
+            PatternKind::Record(rname) => self.infer_record_pattern(pat, &rname, expected),
             PatternKind::Variant(vname) => {
                 // An enum variant pattern. The constructor is a name reference
                 // resolution already resolved; read the variant off its symbol.
@@ -1850,6 +1875,106 @@ impl Inferer {
                         }
                     }
                     let _ = variant_idx;
+                }
+            }
+        }
+    }
+
+    /// Bind the name *declared* at `range` by a pattern to `ty`.
+    ///
+    /// A pattern binding is monomorphic: it names a piece of the scrutinee, and
+    /// the scrutinee is one value.
+    fn bind_pattern_name(&mut self, range: TextRange, ty: Type) {
+        if let Some(&symbol) = self.decls.get(&range) {
+            if let Some(sym) = self.names.get_mut(symbol) {
+                sym.scheme = Some(Scheme::monotype(ty));
+            }
+        }
+    }
+
+    /// Infer a record pattern `P { x, y: p }` against `expected` (REP-10, §4.5).
+    ///
+    /// The head is a type name resolution already resolved, exactly as a record
+    /// *literal*'s is; the fields are checked against that record's declared
+    /// fields, and a field the record does not have is the literal's own `Y114`.
+    ///
+    /// Unlike a literal, a pattern need not name every field: an unnamed field is
+    /// a wildcard, which is HIR-06's padding rule at the second kind of composite
+    /// pattern (`Some` and `Some(_)` are one test for the same reason).
+    fn infer_record_pattern(&mut self, pat: &praxis_ast::Pattern, rname: &str, expected: Type) {
+        let head_ty = pat
+            .name_token()
+            .and_then(|tok| self.refs.get(&tok.text_range()).copied())
+            .and_then(|resolved| self.type_env.ty(resolved.symbol));
+        let at = self.file_span(pat.syntax().text_range());
+        // A head that names nothing has already been reported (`N001`), and a
+        // head that names something which is not a record cannot match at all.
+        let Some(head_ty) = head_ty else {
+            self.infer_record_pattern_fields_only(pat);
+            return;
+        };
+        let (def_id, def_args) = match self.db.data(self.db.follow(head_ty)) {
+            praxis_types::TypeData::Record { def, args } => (*def, args.clone()),
+            _ => {
+                let rendered = self.db.render(self.db.follow(head_ty));
+                self.diagnostics.push(crate::diagnostics::not_a_pattern(
+                    at,
+                    &format!("`{rname}` is `{rendered}`, which has no fields to match"),
+                ));
+                self.infer_record_pattern_fields_only(pat);
+                return;
+            }
+        };
+        // The pattern's own type *is* the record it names; a scrutinee of some
+        // other type is the ordinary mismatch, reported where it is written.
+        if let Err(e) = self.db.unify(expected, head_ty) {
+            self.diag_unify(at, e);
+        }
+        let type_name = self.db.render(self.db.follow(head_ty));
+        let mut seen: Vec<String> = Vec::new();
+        for field in pat.fields() {
+            let Some(fname_tok) = field.name() else {
+                continue;
+            };
+            let fname = fname_tok.text().to_string();
+            let field_at = self.file_span(fname_tok.text_range());
+            if seen.contains(&fname) {
+                self.diagnostics
+                    .push(crate::diagnostics::duplicate_pattern_field(
+                        field_at, &fname,
+                    ));
+                continue;
+            }
+            seen.push(fname.clone());
+            let Some((_, field_ty)) = self.db.record_field_of(def_id, &def_args, &fname) else {
+                self.diagnostics
+                    .push(crate::diagnostics::unknown_record_field(
+                        field_at, &type_name, &fname,
+                    ));
+                continue;
+            };
+            match field.pattern() {
+                // `P { y: p }` — match the sub-pattern against the field.
+                Some(sub) => self.infer_pattern(&sub, field_ty),
+                // `P { x }` — bind the field to its own name.
+                None => self.bind_pattern_name(fname_tok.text_range(), field_ty),
+            }
+        }
+    }
+
+    /// The sub-patterns of a record pattern whose head named no record, inferred
+    /// against fresh variables so their own bindings still get a type and their
+    /// own mistakes are still reported. The head's diagnostic is the answer to
+    /// what the record is; nothing further is known about the fields.
+    fn infer_record_pattern_fields_only(&mut self, pat: &praxis_ast::Pattern) {
+        for field in pat.fields() {
+            let fresh = self.db.fresh_var();
+            match field.pattern() {
+                Some(sub) => self.infer_pattern(&sub, fresh),
+                None => {
+                    if let Some(tok) = field.name() {
+                        self.bind_pattern_name(tok.text_range(), fresh);
+                    }
                 }
             }
         }

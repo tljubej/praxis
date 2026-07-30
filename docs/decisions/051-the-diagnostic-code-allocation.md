@@ -131,8 +131,8 @@ error?" a greppable question.
 | Code | Finding | Stage | Meaning |
 |---|---|---|---|
 | `Y113` | HIR-04 | S16 | a record literal is missing one or more fields |
-| `Y114` | HIR-04 | S16 | a record literal names a field the type does not have |
-| `Y115` | HIR-04 | S16 | a record literal names one field twice |
+| `Y114` | HIR-04 | S16 | a record literal **or pattern** names a field the type does not have (**amendment**) |
+| `Y115` | HIR-04 | S16 | a record literal **or pattern** names one field twice (**amendment**) |
 
 `Y111` stays unallocated: `Y110`/`Y112` were assigned as "method"/"field" with a
 gap between them, and closing it retroactively would make the two look like a
@@ -145,6 +145,13 @@ range they never were.
 | `Y122` | HIR-07 | S16 | a pattern names a variant the scrutinee's type does not have |
 | `Y123` | HIR-06 | S16 | a pattern's shape cannot match the scrutinee's type |
 | `Y124` | REP-05 | S26 | a pattern naming more sub-patterns than the variant holds (**amendment**) |
+
+**REP-10 spent no code** (ADR-069). A record *pattern* naming a field the record
+does not have, or naming one twice, is the literal's own mistake read in the other
+direction, so it is `Y114`/`Y115`; a one-element tuple pattern and a record
+pattern whose head is not a record are both `Y123`, whose meaning — "this shape
+cannot match" — is exactly what is wrong with them. The next free codes are
+`Y022`, `Y116`, `Y125` and `N008`.
 
 ### Input — `I0xx`
 

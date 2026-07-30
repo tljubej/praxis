@@ -4773,3 +4773,193 @@ fn a_fn_that_reads_a_binding_around_it_is_reported() {
         .iter()
         .any(|d| d.kind() == praxis_source::DiagCode::FunctionReadsOuterBinding));
 }
+
+/// **REP-10.** A record pattern binds each field it names at *that field's*
+/// type, and a tuple pattern binds each element at that element's.
+///
+/// `match p { P { x, y } => x }` was a `P001` and there was no way to take a
+/// record or a tuple apart in a pattern at all. The assertion is the *types*
+/// rather than the absence of a diagnostic: a pattern that bound every name at
+/// the scrutinee's own type would also be clean, and it would be wrong at the
+/// first arithmetic.
+///
+/// The record's fields differ in type on purpose, so binding by name is
+/// observable — a lowering that paired fields by position rather than by name
+/// would type `tag` as `Int` here.
+#[test]
+fn a_record_pattern_binds_a_field_at_the_fields_own_type() {
+    const DECL: &str = "struct P { x: Int, tag: Text }\nlet p = P { x: 1, tag: \"a\" }\n";
+
+    // Punned: `P { x }` binds `x` to the field `x`.
+    let src = format!("{DECL}let r = match p {{ P {{ x, tag }} => x }}\n");
+    assert_eq!(scheme_of(&src, "x").as_deref(), Some("Int"));
+    assert_eq!(scheme_of(&src, "tag").as_deref(), Some("Text"));
+
+    // Explicit: `P { x: n }` binds `n` to the field `x`, whatever it is called.
+    let src = format!("{DECL}let r = match p {{ P {{ tag: s, x: n }} => n }}\n");
+    assert_eq!(scheme_of(&src, "n").as_deref(), Some("Int"));
+    assert_eq!(
+        scheme_of(&src, "s").as_deref(),
+        Some("Text"),
+        "the field's type, not the position's — the fields are written swapped"
+    );
+
+    // A field the pattern does not name is simply not bound; naming fewer is
+    // legal, which is HIR-06's padding rule at a second kind of composite.
+    assert!(is_clean_with_lower(&format!(
+        "{DECL}let r = match p {{ P {{ x }} => x }}\n"
+    )));
+
+    // The mistakes, each at the code the *literal* form already spends: the
+    // record does not have that field, or the pattern names one twice — where
+    // the second sub-pattern would silently replace the first.
+    let diags = analyze_and_lower_diags(&format!("{DECL}let r = match p {{ P {{ z }} => 1 }}\n"));
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y114"),
+        "expected Y114, got {diags:?}"
+    );
+    let diags = analyze_and_lower_diags(&format!(
+        "{DECL}let r = match p {{ P {{ x, x: q }} => 1 }}\n"
+    ));
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y115"),
+        "expected Y115, got {diags:?}"
+    );
+
+    // The head is a *type* name, so it is checked twice over: against the
+    // scrutinee, and against being a record at all.
+    let diags = analyze_and_lower_diags(
+        "struct P { x: Int }\nstruct Q { y: Int }\n\
+         let p = P { x: 1 }\nlet r = match p { Q { y } => y }\n",
+    );
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y001"),
+        "a pattern for another record is a mismatch: {diags:?}"
+    );
+    let diags = analyze_and_lower_diags("let n = 1\nlet r = match n { Nope { y } => y }\n");
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "N001"),
+        "an undefined head is an undefined name: {diags:?}"
+    );
+    let diags = analyze_and_lower_diags("let n = 1\nlet r = match n { Int { y } => y }\n");
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y123"),
+        "a head that is not a record has no fields to match: {diags:?}"
+    );
+}
+
+/// **REP-10.** A tuple pattern binds by position, and the scrutinee it is
+/// matched against has to be a tuple of that arity.
+#[test]
+fn a_tuple_pattern_binds_by_position() {
+    // Two differently-typed elements, so a pattern that bound both at one type
+    // — or paired them the other way round — is a different answer.
+    let src = "let t = (1, \"a\")\nlet r = match t { (n, s) => n }\n";
+    assert_eq!(scheme_of(src, "n").as_deref(), Some("Int"));
+    assert_eq!(scheme_of(src, "s").as_deref(), Some("Text"));
+
+    // Nested, and mixed with the other composite forms.
+    let src = "struct P { x: Int, tag: Text }\n\
+               let t = (P { x: 1, tag: \"a\" }, 2)\n\
+               let r = match t { (P { x, tag }, k) => x + k }\n";
+    assert_eq!(scheme_of(src, "x").as_deref(), Some("Int"));
+    assert_eq!(scheme_of(src, "tag").as_deref(), Some("Text"));
+    assert_eq!(scheme_of(src, "k").as_deref(), Some("Int"));
+
+    // A tuple pattern *pins* an unresolved scrutinee rather than accepting it:
+    // the elements are fresh variables unified through the scrutinee's type.
+    let scheme = scheme_of("fn first(t) { match t { (a, b) => a } }\n", "first")
+        .expect("first has a scheme");
+    insta::assert_snapshot!(scheme, @"forall T U. ((T, U)) -> T");
+
+    // The shapes that do not fit. A non-tuple and a wrong arity are both the
+    // ordinary mismatch, reported where the pattern is written.
+    for src in [
+        "let n = 1\nlet r = match n { (a, b) => a }\n",
+        "let t = (1, 2)\nlet r = match t { (a, b, c) => a }\n",
+    ] {
+        let diags = analyze_and_lower_diags(src);
+        assert!(
+            diags.iter().any(|d| d.code().to_string() == "Y001"),
+            "{src} must report a mismatch, got {diags:?}"
+        );
+    }
+
+    // `(p)` is a one-element tuple pattern and there is no such type — the
+    // parser has no grouping form for it to have meant, so it reports rather
+    // than quietly matching whatever is inside.
+    let diags = analyze_and_lower_diags("let n = 1\nlet r = match n { (a) => a }\n");
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y123"),
+        "expected Y123, got {diags:?}"
+    );
+}
+
+/// **REP-10's exit criterion.** A record and a tuple have **one constructor**,
+/// so a `match` on one is exhaustive without a `_`.
+///
+/// Both were `Open` before, and only because no pattern could name them: the
+/// matrix has always handled a `Closed` signature with a single constructor —
+/// `exhaustive.rs` needed the two `Ctor` rows and nothing else.
+#[test]
+fn a_record_or_tuple_match_is_exhaustive_without_a_catch_all() {
+    const DECL: &str = "struct P { x: Int, y: Int }\nlet p = P { x: 1, y: 2 }\nlet t = (1, 2)\n";
+
+    // One arm, no `_`, and it covers everything.
+    for arm in [
+        "match p { P { x, y } => x + y }",
+        "match p { P { x } => x }",
+        "match p { P { x: a, y: b } => a }",
+        "match t { (a, b) => a + b }",
+        "match t { (a, _) => a }",
+    ] {
+        assert!(
+            is_clean_with_lower(&format!("{DECL}let r = {arm}\n")),
+            "{arm} must be exhaustive on its own"
+        );
+    }
+
+    // …so a `_` after it is now *unreachable*, which is the other half of the
+    // same fact and the regression a signature that stayed `Open` would hide.
+    let diags = analyze_and_lower_diags(&format!(
+        "{DECL}let r = match p {{ P {{ x, y }} => x, _ => 0 }}\n"
+    ));
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y121"),
+        "expected Y121, got {diags:?}"
+    );
+
+    // A component that does *not* cover its own type leaves the match
+    // non-exhaustive, and the witness names the shape rather than a bare `_`:
+    // the recursion goes through the new constructors, it does not stop at them.
+    for (src, missing) in [
+        (
+            format!("{DECL}let r = match p {{ P {{ x: 1, y }} => y }}\n"),
+            "P { x: _, y: _ }",
+        ),
+        (
+            format!("{DECL}let r = match t {{ (1, b) => b }}\n"),
+            "(_, _)",
+        ),
+    ] {
+        let diags = analyze_and_lower_diags(&src);
+        let y120 = diags
+            .iter()
+            .find(|d| d.code().to_string() == "Y120")
+            .unwrap_or_else(|| panic!("expected Y120, got {diags:?}"));
+        assert!(
+            y120.message().contains(missing),
+            "the witness must name `{missing}`: {}",
+            y120.message()
+        );
+    }
+
+    // An enum whose payload is a record or a tuple is exhaustive when the
+    // payload's own components are covered — the two new constructors recurse
+    // like a variant's, which is the whole of HIR-06 at a second shape.
+    assert!(is_clean_with_lower(
+        "struct P { x: Int, y: Int }\n\
+         let o = Some(P { x: 1, y: 2 })\n\
+         let r = match o { Some(P { x, y }) => x, None => 0 }\n"
+    ));
+}

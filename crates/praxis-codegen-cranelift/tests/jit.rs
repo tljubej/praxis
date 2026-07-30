@@ -6174,3 +6174,83 @@ fn a_fused_pair_carries_both_of_its_halves() {
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 10, "equal to itself, unequal to the other");
 }
+
+/// **REP-10.** A record pattern reads *fields* and a tuple pattern reads
+/// *elements* — the half no type test can see, because the two are different
+/// runtime symbols (`praxis_record_field` and `praxis_tuple_get`) and a pattern
+/// that picked the wrong one would type-check identically.
+///
+/// Every component is weighted differently, so reading the right slots in the
+/// wrong order fails as loudly as dropping one.
+#[test]
+fn a_record_and_a_tuple_pattern_read_the_components_they_name() {
+    // A record, punned. `x * 100 + y` is a different answer from `y * 100 + x`.
+    let (rt, result) = run_main(
+        "struct P { x: Int, y: Int }\n\
+         fn main() -> Int {\n  let p = P { x: 3, y: 4 }\n  \
+         match p { P { x, y } => x * 100 + y }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 304);
+
+    // …and explicit, with the fields written in the *other* order, so a
+    // lowering that paired sub-patterns by position rather than by declared
+    // field index answers 403.
+    let (rt, result) = run_main(
+        "struct P { x: Int, y: Int }\n\
+         fn main() -> Int {\n  let p = P { x: 3, y: 4 }\n  \
+         match p { P { y: b, x: a } => a * 100 + b }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 304, "bound by field name, not by position");
+
+    // A tuple, by position.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  let t = (3, 4)\n  match t { (a, b) => a * 100 + b }\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 304);
+
+    // A literal sub-pattern *selects* an arm: the components are tested, not
+    // merely bound, so the first arm has to fail on its first element.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var t = 0\n  \
+         for n in 1..4 {\n    let p = (n, n * 10)\n    \
+         t = t + match p { (1, b) => b, (2, _) => 200, (_, b) => b * 2 }\n  }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        10 + 200 + 60,
+        "one arm per value, in order"
+    );
+
+    // The composites nest, in both directions, and through an enum payload —
+    // which is the three component readers chained in one decision tree.
+    let (rt, result) = run_main(
+        "struct P { x: Int, y: Int }\n\
+         fn main() -> Int {\n  let o = Some((P { x: 3, y: 4 }, 5))\n  \
+         match o { Some((P { x, y }, k)) => x * 100 + y * 10 + k, None => 0 }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 345);
+
+    // A field the pattern does not name is a wildcard, and the ones it does are
+    // still read from their own slots — a padded row must not shift the rest.
+    let (rt, result) = run_main(
+        "struct P { a: Int, b: Int, c: Int }\n\
+         fn main() -> Int {\n  let p = P { a: 1, b: 2, c: 3 }\n  \
+         match p { P { c } => c }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3, "the third field, not the first");
+
+    // A record pattern binds a field of any type, not only the scalar the
+    // arithmetic above could hide a mis-read of.
+    let (rt, result) = run_main(
+        "struct Tagged { name: Text, n: Int }\n\
+         fn main() -> Int {\n  let t = Tagged { name: \"abc\", n: 7 }\n  \
+         match t { Tagged { name, n } => name.len() * 10 + n }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 37);
+}

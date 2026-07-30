@@ -43,7 +43,7 @@
 //! real constructor patterns nest in the source.
 
 use praxis_source::{Diagnostic, FileId, FileSpan, Span};
-use praxis_types::{data::TypeData, EnumDefId, ScalarType, Type, TypeDb};
+use praxis_types::{data::TypeData, EnumDefId, RecordDefId, ScalarType, Type, TypeDb};
 
 use crate::diagnostics::{non_exhaustive, unreachable_arm};
 use crate::lower::{Lit, TypedMatchArm, TypedPattern};
@@ -147,6 +147,14 @@ enum Ctor {
     Variant { def: EnumDefId, idx: u32 },
     /// A literal value.
     Lit(LitKey),
+    /// A tuple (REP-10). One constructor for the whole type, so a column of
+    /// tuples is `Closed` on it: `match p { (x, y) => … }` needs no `_`, and
+    /// what is left uncovered is a question about the *elements*.
+    Tuple,
+    /// A record of definition `def` (REP-10) — one constructor, for the same
+    /// reason a tuple has one. The def is part of the identity for the reason a
+    /// variant's is.
+    Record { def: RecordDefId },
 }
 
 /// A literal's identity.
@@ -194,12 +202,13 @@ impl LitKey {
 
 /// The constructors a type's values can be built with.
 enum Signature {
-    /// A set that can be enumerated: an enum's variants, or `Bool`'s two
-    /// literals. A match over one is exhaustive without a `_`.
+    /// A set that can be enumerated: an enum's variants, `Bool`'s two literals,
+    /// or the single constructor a tuple and a record each have. A match over one
+    /// is exhaustive without a `_`.
     Closed(Vec<Ctor>),
     /// Too many to enumerate (`Int`, `Float`, `Text`, `Char`), or a type the
-    /// checker cannot see into (an unresolved variable, a record, a tuple).
-    /// Either way a `_` arm is required.
+    /// checker cannot see into (an unresolved variable). Either way a `_` arm is
+    /// required.
     Open,
 }
 
@@ -219,6 +228,11 @@ fn signature(db: &TypeDb, ty: Type) -> Signature {
             Ctor::Lit(LitKey::Bool(false)),
             Ctor::Lit(LitKey::Bool(true)),
         ]),
+        // One constructor each (REP-10), which is what makes
+        // `match p { P { x, y } => … }` exhaustive where it used to need a `_`.
+        // Both were `Open` only because no pattern could name them.
+        TypeData::Tuple(_) => Signature::Closed(vec![Ctor::Tuple]),
+        TypeData::Record { def, .. } => Signature::Closed(vec![Ctor::Record { def: *def }]),
         _ => Signature::Open,
     }
 }
@@ -236,26 +250,48 @@ fn head_ctor(pat: &TypedPattern) -> Option<Ctor> {
             def: *enum_def_id,
             idx: *variant_idx,
         }),
+        TypedPattern::Tuple { .. } => Some(Ctor::Tuple),
+        TypedPattern::Record { record_def_id, .. } => Some(Ctor::Record {
+            def: *record_def_id,
+        }),
     }
 }
 
 /// The types of `ctor`'s fields, when a value of `col_ty` is built with it.
 ///
 /// The payload comes from the column type's *arguments*, so `Some(n)` against
-/// an `Option[Int]` recurses at `Int` and not at the def's own parameter (F12).
+/// an `Option[Int]` recurses at `Int` and not at the def's own parameter (F12),
+/// and a record's fields are read at the instance's arguments for the same
+/// reason.
 fn ctor_field_types(db: &mut TypeDb, col_ty: Type, ctor: &Ctor) -> Vec<Type> {
-    let Ctor::Variant { def, idx } = ctor else {
-        return Vec::new();
-    };
     let resolved = db.follow(col_ty);
-    let args = match db.data(resolved) {
-        TypeData::Enum { def: col_def, args } if col_def == def => args.clone(),
-        // Not this constructor's enum: an ill-typed pattern, already reported.
-        // No fields, so specialization drops every row rather than pairing
-        // sub-patterns with types they do not have.
-        _ => return Vec::new(),
-    };
-    db.variant_payload_of(*def, &args, *idx as usize)
+    match ctor {
+        Ctor::Lit(_) => Vec::new(),
+        Ctor::Variant { def, idx } => {
+            let args = match db.data(resolved) {
+                TypeData::Enum { def: col_def, args } if col_def == def => args.clone(),
+                // Not this constructor's enum: an ill-typed pattern, already
+                // reported. No fields, so specialization drops every row rather
+                // than pairing sub-patterns with types they do not have.
+                _ => return Vec::new(),
+            };
+            db.variant_payload_of(*def, &args, *idx as usize)
+        }
+        Ctor::Tuple => match db.data(resolved) {
+            TypeData::Tuple(els) => els.clone(),
+            _ => Vec::new(),
+        },
+        Ctor::Record { def } => {
+            let args = match db.data(resolved) {
+                TypeData::Record { def: col_def, args } if col_def == def => args.clone(),
+                _ => return Vec::new(),
+            };
+            db.record_fields_of(*def, &args)
+                .into_iter()
+                .map(|f| f.ty)
+                .collect()
+        }
+    }
 }
 
 /// `S(c, P)` — the rows that can match a value built with `c`, each with its
@@ -275,13 +311,12 @@ fn specialize<'p>(matrix: &[Row<'p>], ctor: &Ctor, arity: usize) -> Vec<Row<'p>>
             }
             Some(c) if c == *ctor => {
                 let mut new_row: Row<'p> = Vec::with_capacity(arity + rest.len());
-                if let TypedPattern::EnumVariant { subpatterns, .. } = *head {
-                    // Lowering pads to arity; `get` is what keeps a mis-shaped
-                    // pattern from making the row a different width than the
-                    // column list.
-                    for i in 0..arity {
-                        new_row.push(subpatterns.get(i).unwrap_or(&WILDCARD));
-                    }
+                // Lowering pads to arity; `get` is what keeps a mis-shaped
+                // pattern from making the row a different width than the column
+                // list.
+                let subpatterns = head.sub_patterns();
+                for i in 0..arity {
+                    new_row.push(subpatterns.get(i).unwrap_or(&WILDCARD));
                 }
                 new_row.extend_from_slice(rest);
                 out.push(new_row);
@@ -316,6 +351,14 @@ enum Witness {
         fields: Vec<Witness>,
     },
     Lit(LitKey),
+    /// `(_, _)` — a tuple whose elements are the uncovered shapes (REP-10).
+    Tuple(Vec<Witness>),
+    /// `P { x: _, y: _ }` — a record, rendered with its own field names, which
+    /// is why the def travels with it (REP-10).
+    Record {
+        def: RecordDefId,
+        fields: Vec<Witness>,
+    },
 }
 
 fn render_witness(db: &TypeDb, w: &Witness) -> String {
@@ -335,21 +378,41 @@ fn render_witness(db: &TypeDb, w: &Witness) -> String {
                 format!("{name}({})", rendered.join(", "))
             }
         }
+        Witness::Tuple(fields) => {
+            let rendered: Vec<String> = fields.iter().map(|f| render_witness(db, f)).collect();
+            format!("({})", rendered.join(", "))
+        }
+        Witness::Record { def, fields } => {
+            let rdef = db.record_def(*def);
+            let name = rdef.name.as_deref().unwrap_or("record");
+            let rendered: Vec<String> = fields
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let fname = rdef.fields.get(i).map_or("?", |d| d.name.as_str());
+                    format!("{fname}: {}", render_witness(db, f))
+                })
+                .collect();
+            format!("{name} {{ {} }}", rendered.join(", "))
+        }
     }
 }
 
 /// A missing constructor as a witness, with every field left `_`.
 fn witness_for(db: &mut TypeDb, col_ty: Type, ctor: &Ctor) -> Witness {
+    let arity = ctor_field_types(db, col_ty, ctor).len();
     match ctor {
-        Ctor::Variant { def, idx } => {
-            let arity = ctor_field_types(db, col_ty, ctor).len();
-            Witness::Variant {
-                def: *def,
-                idx: *idx,
-                fields: vec![Witness::Wild; arity],
-            }
-        }
+        Ctor::Variant { def, idx } => Witness::Variant {
+            def: *def,
+            idx: *idx,
+            fields: vec![Witness::Wild; arity],
+        },
         Ctor::Lit(k) => Witness::Lit(k.clone()),
+        Ctor::Tuple => Witness::Tuple(vec![Witness::Wild; arity]),
+        Ctor::Record { def } => Witness::Record {
+            def: *def,
+            fields: vec![Witness::Wild; arity],
+        },
     }
 }
 
@@ -366,6 +429,8 @@ fn rebuild(ctor: &Ctor, arity: usize, row: Vec<Witness>) -> Vec<Witness> {
             fields,
         },
         Ctor::Lit(k) => Witness::Lit(k.clone()),
+        Ctor::Tuple => Witness::Tuple(fields),
+        Ctor::Record { def } => Witness::Record { def: *def, fields },
     };
     let mut out = Vec::with_capacity(row.len() + 1);
     out.push(head);
@@ -405,10 +470,9 @@ fn useful<'p>(
             let arity = field_types.len();
             let spec = specialize(matrix, &ctor, arity);
             let mut sub_q: Vec<&'p TypedPattern> = Vec::with_capacity(arity + q_rest.len());
-            if let TypedPattern::EnumVariant { subpatterns, .. } = *head {
-                for i in 0..arity {
-                    sub_q.push(subpatterns.get(i).unwrap_or(&WILDCARD));
-                }
+            let subpatterns = head.sub_patterns();
+            for i in 0..arity {
+                sub_q.push(subpatterns.get(i).unwrap_or(&WILDCARD));
             }
             sub_q.extend_from_slice(q_rest);
             let mut sub_types = field_types;

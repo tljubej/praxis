@@ -459,9 +459,34 @@ pub(crate) fn missing_record_fields(
     )
 }
 
+/// `Y123` — a pattern whose shape cannot match, with the reason spelled out
+/// (REP-10).
+///
+/// The shape is what is wrong, not the type it was matched against: a tuple
+/// pattern with one element and a record pattern whose head is not a record both
+/// name something no value can be.
+pub(crate) fn not_a_pattern(at: FileSpan, reason: &str) -> Diagnostic {
+    Diagnostic::new(Severity::Error, DiagCode::NotAPatternForType, reason, at)
+}
+
+/// `Y115` — a record *pattern* naming one field twice (REP-10).
+///
+/// The same code as a literal's duplicate, because it is the same mistake read
+/// in the other direction: the second sub-pattern would silently replace the
+/// first, so one of the two bindings the program wrote would never happen.
+pub(crate) fn duplicate_pattern_field(at: FileSpan, field: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::DuplicateRecordField,
+        format!("field `{field}` is matched more than once"),
+        at,
+    )
+}
+
 /// `Y114` — a record literal naming a field the type does not have (HIR-04).
 ///
-/// The initializer was not lowered at all, so its side effects disappeared.
+/// The initializer was not lowered at all, so its side effects disappeared. A
+/// record *pattern* naming one is the same mistake and the same code (REP-10).
 pub(crate) fn unknown_record_field(at: FileSpan, type_name: &str, field: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,

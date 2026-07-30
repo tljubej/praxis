@@ -463,6 +463,10 @@ fn resolve_pattern(
         P::Lit { ty, .. } | P::Bind { ty, .. } => *ty = specialize_type(db, binders, args, *ty),
         P::EnumVariant {
             ty, subpatterns, ..
+        }
+        | P::Tuple { ty, subpatterns }
+        | P::Record {
+            ty, subpatterns, ..
         } => {
             *ty = specialize_type(db, binders, args, *ty);
             for sub in subpatterns {

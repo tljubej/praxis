@@ -674,14 +674,44 @@ impl Resolver {
     }
 
     /// Bind any variable names introduced by a pattern in `scope` (M7, §4.6).
-    /// A `Name(x)` pattern introduces a binding `x`; a `Variant(Sub)` recurses
-    /// into sub-patterns.
+    /// A `Name(x)` pattern introduces a binding `x`; a `Variant(Sub)`, a tuple
+    /// and a record recurse into their sub-patterns.
     fn resolve_pattern_bindings(&mut self, scope: ScopeId, pat: &praxis_ast::Pattern) {
         match pat.kind() {
             praxis_ast::PatternKind::Wildcard | praxis_ast::PatternKind::Literal => {}
             praxis_ast::PatternKind::Name(name) => {
                 if let Some(tok) = pat.name_token() {
                     self.bind(scope, SymbolKind::Let, name, tok.text_range());
+                }
+            }
+            // `(a, b)` — every element is a pattern of its own (REP-10).
+            praxis_ast::PatternKind::Tuple => {
+                for sub in pat.sub_patterns() {
+                    self.resolve_pattern_bindings(scope, &sub);
+                }
+            }
+            // `P { x, y: p }` — the head is a *type* name, so it resolves like a
+            // record literal's head and an undefined one is `N001`. A punned
+            // field binds the field's own name; an explicit one recurses.
+            praxis_ast::PatternKind::Record(_) => {
+                if let Some(tok) = pat.name_token() {
+                    self.resolve_name_ref(scope, &tok);
+                }
+                for field in pat.fields() {
+                    let Some(name_tok) = field.name() else {
+                        continue;
+                    };
+                    match field.pattern() {
+                        Some(sub) => self.resolve_pattern_bindings(scope, &sub),
+                        None => {
+                            self.bind(
+                                scope,
+                                SymbolKind::Let,
+                                name_tok.text().to_string(),
+                                name_tok.text_range(),
+                            );
+                        }
+                    }
                 }
             }
             praxis_ast::PatternKind::Variant(name) => {
