@@ -93,14 +93,42 @@ impl ScopeTree {
     /// name resolution.
     #[must_use]
     pub fn lookup(&self, scope: ScopeId, name: &str) -> Option<SymbolId> {
+        self.lookup_binding(scope, name).map(|(sym, _)| sym)
+    }
+
+    /// Like [`lookup`](Self::lookup), and also **where** the binding was found.
+    ///
+    /// The scope is what answers "did this name cross a boundary": a `fn` body
+    /// is a child of the scope around it, so the lookup walks straight out to the
+    /// file's top level and a `fn` reading a top-level `let` resolved silently
+    /// (REP-22). Only the caller knows which boundaries matter, so this reports
+    /// the fact and decides nothing.
+    #[must_use]
+    pub fn lookup_binding(&self, scope: ScopeId, name: &str) -> Option<(SymbolId, ScopeId)> {
         let mut current = Some(scope);
         while let Some(s) = current {
             if let Some(&sym) = self.scopes[s.0 as usize].bindings.get(name) {
-                return Some(sym);
+                return Some((sym, s));
             }
             current = self.scopes[s.0 as usize].parent;
         }
         None
+    }
+
+    /// Whether `scope` is `ancestor` or is nested inside it.
+    ///
+    /// Reflexive on purpose: a binding in the very scope being asked about has
+    /// not crossed it.
+    #[must_use]
+    pub fn is_within(&self, scope: ScopeId, ancestor: ScopeId) -> bool {
+        let mut current = Some(scope);
+        while let Some(s) = current {
+            if s == ancestor {
+                return true;
+            }
+            current = self.scopes[s.0 as usize].parent;
+        }
+        false
     }
 }
 

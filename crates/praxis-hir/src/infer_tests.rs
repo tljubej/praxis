@@ -3876,9 +3876,12 @@ fn a_nested_type_declaration_is_reported_at_the_declaration() {
          fn main() -> Int { get(Point { x: 1, y: 2 }) }\n"
     ));
     // A top-level `let`/`var` beside them, so "top level" is the file and not
-    // "the first statement".
+    // "the first statement". The `let` is read by a *top-level* statement here:
+    // it used to be read by `main`, which is `N007` now that a `fn` reading a
+    // binding around it is reported (REP-22) — a different check, and one this
+    // test is not about.
     assert!(is_clean_with_lower(
-        "let base = 1\nstruct Point { x: Int }\nfn main() -> Int { base }\n"
+        "let base = 1\nstruct Point { x: Int }\nvar total = base\nfn main() -> Int { 0 }\n"
     ));
 }
 
@@ -4673,4 +4676,100 @@ fn a_files_top_level_statements_become_one_generated_item() {
     );
     assert_eq!(crate::entry_point(|n| n == "main"), Some("main"));
     assert_eq!(crate::entry_point(|_| false), None);
+}
+
+/// **REP-22.** A `fn` body that names a binding declared outside it is reported
+/// (`N007`, ADR-068) rather than compiling and answering wrongly.
+///
+/// ```praxis
+/// let x = 1
+/// fn f() { x }
+/// out(f())          // Unit
+/// ```
+///
+/// It passed `praxis check` and printed `Unit`: the binding is a local of
+/// whatever function encloses it, and a `fn` body has no slot for another
+/// function's local. Through a closure it was worse — `fn g() { |n| n + x }`
+/// captured a symbol with no slot, so `g()(1)` printed a nine-digit number.
+///
+/// The boundary is a **`fn` body**, not a closure body, because a closure *does*
+/// capture (§4.10) and a function does not (§4.9). That asymmetry is the whole
+/// check, and both halves of it are asserted here.
+#[test]
+fn a_fn_that_reads_a_binding_around_it_is_reported() {
+    let reports_n007 = |src: &str| {
+        analyze_and_lower_diags(src)
+            .iter()
+            .any(|d| d.kind() == praxis_source::DiagCode::FunctionReadsOuterBinding)
+    };
+
+    // Both forms, and the closure one is the one that answered with garbage.
+    assert!(reports_n007("let x = 1\nfn f() -> Int { x }\nout(f())\n"));
+    assert!(reports_n007(
+        "let x = 5\nfn g() { |n| n + x }\nout(g()(1))\n"
+    ));
+    // A `var` and a read through an assignment target, so it is the binding kind
+    // that decides and not the expression position.
+    assert!(reports_n007("var x = 1\nfn f() -> Int { x }\n"));
+    assert!(reports_n007("var x = 1\nfn f() { x = 2 }\n"));
+    // Nested one level deeper than the body itself: the boundary is the
+    // function, not the block.
+    assert!(reports_n007(
+        "let x = 1\nfn f() -> Int { if true { x } else { 0 } }\n"
+    ));
+
+    // A closure at the **top level** captures, and must keep doing so: after
+    // ADR-067 both it and the binding are inside the generated entry, so there
+    // is no boundary between them. This is §4.10's own example.
+    assert!(!reports_n007(
+        "let offset = 10\nlet v = Vec()\nv.push(1)\nout(v.map(|x| x + offset).sum())\n"
+    ));
+    // …and a closure inside a `fn` capturing that `fn`'s own locals is the same
+    // rule from the other side.
+    assert!(!reports_n007(
+        "fn f(v) { let k = 10\n v.map(|x| x + k).sum() }\n"
+    ));
+
+    // Everything that is *not* a binding stays reachable from anywhere — which
+    // is what makes this a check on the symbol's kind and not on where it was
+    // declared alone.
+    assert!(!reports_n007(
+        "fn helper() -> Int { 1 }\nfn f() -> Int { helper() }\n"
+    ));
+    assert!(!reports_n007(
+        "struct P { x: Int }\nfn f() -> Int { P { x: 1 }.x }\n"
+    ));
+    assert!(!reports_n007(
+        "enum E { A, B }\nfn f() -> Int { match A { A => 1, B => 2 } }\n"
+    ));
+    assert!(!reports_n007("fn f(n: Int) -> Int { abs(n) }\n"));
+    // A parameter and a local of the function itself, and recursion.
+    assert!(!reports_n007(
+        "fn f(n: Int) -> Int { let m = n + 1\n if n < 1 { m } else { f(n - 1) } }\n"
+    ));
+
+    // One report per use site, and no cascade: the reference is still recorded,
+    // so inference types the body as written and adds nothing.
+    let diags = analyze_and_lower_diags("let x = 1\nfn f() -> Int { x + x }\n");
+    assert_eq!(
+        diags
+            .iter()
+            .filter(|d| d.kind() == praxis_source::DiagCode::FunctionReadsOuterBinding)
+            .count(),
+        2,
+        "one per use, and {diags:?} has nothing else"
+    );
+    assert_eq!(diags.len(), 2, "no cascade: {diags:?}");
+
+    // A binding declared *after* the function is `N001`, not this: only `fn`,
+    // `struct` and `enum` are pre-registered for forward reference, so the name
+    // is genuinely not in scope yet and there is no binding to have crossed a
+    // boundary. Saying which code it is keeps the two from being confused later.
+    let forward = analyze_and_lower_diags("fn f() -> Int { x }\nlet x = 1\n");
+    assert!(forward
+        .iter()
+        .any(|d| d.kind() == praxis_source::DiagCode::UnknownName));
+    assert!(!forward
+        .iter()
+        .any(|d| d.kind() == praxis_source::DiagCode::FunctionReadsOuterBinding));
 }

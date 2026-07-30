@@ -34,8 +34,8 @@ use praxis_syntax::SyntaxKind;
 use rowan::{NodeOrToken, TextRange};
 
 use crate::diagnostics::{
-    duplicate_declaration, name_is_not_a_type, nested_declaration, nested_function, unknown_type,
-    unresolved_name,
+    duplicate_declaration, function_reads_outer_binding, name_is_not_a_type, nested_declaration,
+    nested_function, unknown_type, unresolved_name,
 };
 use crate::name_table::NameTable;
 use crate::scope::{ScopeId, ScopeTree};
@@ -125,6 +125,20 @@ pub fn resolve(file: FileId, root: &SourceFile) -> NameResolution {
 struct Resolver {
     file: FileId,
     out: NameResolution,
+    /// The innermost enclosing **`fn` body** scope and the function's name, when
+    /// resolution is inside one (REP-22).
+    ///
+    /// A `fn` body's scope is a child of the scope around it, so a lookup walks
+    /// straight out of the function and finds whatever the file declared — which
+    /// is right for another `fn`, a `struct` and a builtin, and wrong for a
+    /// binding, because a `fn` does not capture. This is the boundary that makes
+    /// the difference askable.
+    ///
+    /// A **closure** body opens no boundary of its own: a closure does capture,
+    /// so the question is always about the nearest enclosing `fn`. A closure at
+    /// the top level therefore has none, which is why `let offset = 10` and
+    /// `v.map(|x| x + offset)` is fine.
+    fn_boundary: Option<(ScopeId, String)>,
 }
 
 impl Resolver {
@@ -132,6 +146,7 @@ impl Resolver {
         Resolver {
             file,
             out: NameResolution::default(),
+            fn_boundary: None,
         }
     }
 
@@ -481,7 +496,18 @@ impl Resolver {
             self.bind_params(body_scope, &pl);
         }
         if let Some(body) = item.body() {
+            // Everything in the body is inside this function's boundary
+            // (REP-22). Saved and restored rather than set and cleared: a
+            // nested `fn` is already `N005` above, but it is still *resolved*,
+            // and leaving the boundary cleared afterwards would silence every
+            // reference in the rest of the outer body.
+            let outer = self.fn_boundary.replace((
+                body_scope,
+                item.name()
+                    .map_or_else(String::new, |t| t.text().to_string()),
+            ));
             self.resolve_block_inner(body_scope, &body);
+            self.fn_boundary = outer;
         }
         let _ = fn_symbol;
     }
@@ -850,10 +876,54 @@ impl Resolver {
     fn resolve_name_ref(&mut self, scope: ScopeId, tok: &praxis_syntax::SyntaxToken) {
         let range = tok.text_range();
         let name = tok.text().to_string();
-        match self.lookup(scope, &name) {
-            Some(symbol) => self.record_ref(scope, symbol, range),
+        match self.out.scopes.lookup_binding(scope, &name) {
+            Some((symbol, bound_in)) => {
+                self.reject_outer_binding(&name, symbol, bound_in, range);
+                self.record_ref(scope, symbol, range);
+            }
             None => self.unresolved(range, &name),
         }
+    }
+
+    /// Report a `fn` body naming a binding declared outside it (REP-22,
+    /// ADR-068).
+    ///
+    /// Only *bindings* cross badly: a `let`, a `var` or another function's
+    /// parameter is a local of the function that declared it, and a `fn` body has
+    /// no slot for one. Every other kind is fine by construction — another `fn`,
+    /// a `struct`, an `enum`, a variant constructor and the prelude's builtins
+    /// are all reachable from anywhere, which is what makes this a check on the
+    /// symbol's *kind* and not on where it was declared alone.
+    ///
+    /// The reference is still recorded afterwards, deliberately: inference then
+    /// types the body as written and reports nothing further, which is `N004`'s
+    /// no-cascade rule. One report per use site is the whole answer.
+    fn reject_outer_binding(
+        &mut self,
+        name: &str,
+        symbol: SymbolId,
+        bound_in: ScopeId,
+        range: TextRange,
+    ) {
+        let Some((boundary, func)) = self.fn_boundary.clone() else {
+            return;
+        };
+        if self.out.scopes.is_within(bound_in, boundary) {
+            return;
+        }
+        let is_binding = self.out.names.get(symbol).is_some_and(|s| {
+            matches!(
+                s.kind,
+                SymbolKind::Let | SymbolKind::Var | SymbolKind::Param
+            )
+        });
+        if !is_binding {
+            return;
+        }
+        let at = self.file_span(range_to_span(range));
+        self.out
+            .diagnostics
+            .push(function_reads_outer_binding(at, name, &func));
     }
 
     // --- type annotations --------------------------------------------------

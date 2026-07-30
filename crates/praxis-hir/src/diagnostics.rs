@@ -93,6 +93,36 @@ pub(crate) fn nested_declaration(at: FileSpan, name: &str) -> Diagnostic {
     )
 }
 
+/// `N007` — a `fn` body naming a binding declared outside it (REP-22, ADR-068).
+///
+/// ```praxis
+/// let x = 1
+/// fn f() { x }        // N007
+/// ```
+///
+/// It resolved, silently, and answered **`Unit`** — the binding is a local of
+/// whatever function encloses it (the file's own generated entry, after
+/// ADR-067), and a `fn` body has no slot for another function's local. Through a
+/// closure it was worse: `fn g() { |n| n + x }` captured a symbol with no slot,
+/// so the environment cell held whatever the read found and `g()(1)` printed a
+/// nine-digit number.
+///
+/// A `fn` does not capture — §4.9 describes functions and §4.10 describes
+/// closures, and only the second says "capture". So the message names the
+/// distinction and the two ways out, because both are ordinary: pass it as a
+/// parameter, or write a closure.
+pub(crate) fn function_reads_outer_binding(at: FileSpan, name: &str, func: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::FunctionReadsOuterBinding,
+        format!(
+            "`{func}` cannot use `{name}`: a function does not capture the bindings around it \
+             (pass `{name}` as a parameter, or use a closure)"
+        ),
+        at,
+    )
+}
+
 /// `N006` — a `struct`/`enum` declaration that refers to itself (REP-14,
 /// ADR-063).
 ///

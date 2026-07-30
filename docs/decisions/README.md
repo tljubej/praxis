@@ -73,3 +73,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-065: A type constructor's brackets are type arguments and every other name's are a subscript](./065-a-type-constructors-brackets-are-type-arguments.md)
 - [ADR-066: A `for` iterates a snapshot, and the snapshot is where the order is decided](./066-a-for-iterates-a-snapshot.md)
 - [ADR-067: A file's top-level statements are its program, and `fn main` is the fallback](./067-a-files-top-level-statements-are-its-program.md)
+- [ADR-068: A function does not capture, and saying so is `N007`](./068-a-function-does-not-capture.md)

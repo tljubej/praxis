@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-29
 **Status:** Accepted — amended 2026-07-29 for `Y017` (S14/TY-21) and 2026-07-30
-for `Y018`, `Y124`, `N006`, `Y019`, `Y020` and `Y021` (S24/REP-01, S26/REP-05,
+for `Y018`, `Y124`, `N006`, `Y019`, `Y020`, `Y021` and `N007` (S24/REP-01, S26/REP-05,
 S26/REP-14, S25/REP-08, S25/REP-16); see the amendment notes under each table
 **Milestone:** Repair (answers the plan's **D13**, which binds before S13)
 
@@ -44,6 +44,7 @@ the **Name** category, following F2's own sketch, which puts `NameIsNotAType`,
 | `N004` | TY-24 | S13 | a name is declared twice in one scope |
 | `N005` | TY-23 | S13 | a function is declared inside a function |
 | `N006` | REP-14 | S26 | a `struct`/`enum` declaration that refers to itself (**amendment**) |
+| `N007` | REP-22 | — | a `fn` body naming a binding declared outside it (**amendment**, ADR-068) |
 
 ### Type — `Y0xx`, the user block
 
@@ -98,8 +99,8 @@ about a binding that exists and may not be written; `Y021` is about a left side
 that is not a place at all — `f() = 1`, `p.x = 1`. Both are in inference, for
 `Y019`'s reason.
 
-**`Y022` and `N007` are the next free codes.** The `Y0xx` user block is contiguous
-through `Y021` and the `N0xx` block through `N006`.
+**`Y022` and `N008` are the next free codes.** The `Y0xx` user block is contiguous
+through `Y021` and the `N0xx` block through `N007`.
 
 `TY-20` gets two codes rather than the one the plan lists: "`return` with no
 function" and "`break` with no loop" are different mistakes with different fixes,

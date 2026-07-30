@@ -185,6 +185,14 @@ pub enum DiagCode {
     /// rather than in `Y0xx`: the mistake is what was *declared*, and there is no
     /// pair of types to have failed to unify.
     RecursiveTypeDeclaration,
+    /// `N007` — a `fn` body naming a binding declared outside it (REP-22,
+    /// ADR-068).
+    ///
+    /// A declaration mistake in the same sense `N005` is: the name resolves, and
+    /// what is wrong is *where* it was declared relative to what reads it. A `fn`
+    /// does not capture (§4.9/§4.10 — closures do, functions do not), so the
+    /// binding has no storage the body can reach.
+    FunctionReadsOuterBinding,
 
     // --- Type (`Y0xx`), the user block ---
     /// `Y001` — two types that could not be unified.
@@ -350,6 +358,7 @@ impl DiagCode {
             DuplicateDeclaration => DiagnosticCode::new(Name, 4),
             NestedFunction => DiagnosticCode::new(Name, 5),
             RecursiveTypeDeclaration => DiagnosticCode::new(Name, 6),
+            FunctionReadsOuterBinding => DiagnosticCode::new(Name, 7),
 
             TypeMismatch => DiagnosticCode::new(Type, 1),
             InfiniteType => DiagnosticCode::new(Type, 2),
@@ -425,6 +434,7 @@ impl DiagCode {
             DuplicateDeclaration,
             NestedFunction,
             RecursiveTypeDeclaration,
+            FunctionReadsOuterBinding,
             TypeMismatch,
             InfiniteType,
             AnnotationConflict,
@@ -833,7 +843,7 @@ mod tests {
         // `ALL` holds each variant once, so its length is the variant count.
         // Update both together; the exhaustive match in `code()` is what makes
         // adding a variant a compile error in the first place.
-        assert_eq!(DiagCode::ALL.len(), 63);
+        assert_eq!(DiagCode::ALL.len(), 64);
         let unique: std::collections::HashSet<_> = DiagCode::ALL.iter().collect();
         assert_eq!(
             unique.len(),
