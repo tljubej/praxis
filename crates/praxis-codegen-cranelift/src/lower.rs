@@ -622,7 +622,13 @@ fn lower_inst<M: Module>(
                     // tuple's static type, leak it, embed its address, and call
                     // praxis_alloc_tuple(ctx, schema_ptr). Then fill in each
                     // element via praxis_tuple_set.
-                    let schema_ptr = tuple_schema_for(db, *ty, generation)?;
+                    // The arity comes from the *elements* when the type does not
+                    // give one (REP-23): a fused `enumerate`/`zip` pair carries
+                    // `MirType::Opaque` until MIR-05, and a zero-arity schema
+                    // sizes the payload to zero, so both `praxis_tuple_set`
+                    // calls below wrote into nothing and `[10, 20].enumerate()`
+                    // answered `[(), ()]`.
+                    let schema_ptr = tuple_schema_for(db, *ty, elements.len(), generation)?;
                     let schema_imm = builder.ins().iconst(GC, schema_ptr as i64);
                     // praxis_alloc_tuple(ctx, schema_ptr) -> GcRef.
                     let tuple_ref = call_symbol(
@@ -1682,18 +1688,26 @@ fn record_schema_for(
 fn tuple_schema_for(
     db: &praxis_types::TypeDb,
     ty: MirType,
+    arity: usize,
     generation: &Generation,
 ) -> Result<*const praxis_runtime::tuples::TupleSchema> {
     use praxis_types::data::TypeData;
     // Resolve the element types. `Opaque` means the lowering had no tuple type
     // (the fused `enumerate`/`zip` pipelines, until MIR-05); a non-tuple type is
     // a misuse (the HIR only lowers `TypedExpr::Tuple` here). Both degrade to a
-    // zero-element schema rather than panicking in the JIT — but only the second
-    // is a surprise now, because the first says so in the MIR.
-    let element_types: Vec<praxis_types::Type> = match ty.known().map(|t| db.data(db.follow(t))) {
-        Some(TypeData::Tuple(els)) => els.clone(),
-        _ => Vec::new(),
-    };
+    // schema of `arity` **unknown** slots rather than panicking in the JIT — but
+    // only the second is a surprise now, because the first says so in the MIR.
+    //
+    // Unknown, and not *absent* (REP-23): the arity sizes the payload, so a
+    // zero-slot schema for a two-element tuple made `praxis_tuple_set` drop both
+    // values and `[10, 20].enumerate()` answer `[(), ()]`. The values' own
+    // descriptors answer for the slots, which is ADR-066's decision 5 — the type
+    // gap stays MIR-05's, and the silent dropping stops being anyone's.
+    let element_types: Vec<Option<praxis_types::Type>> =
+        match ty.known().map(|t| db.data(db.follow(t))) {
+            Some(TypeData::Tuple(els)) => els.iter().copied().map(Some).collect(),
+            _ => vec![None; arity],
+        };
     // Every slot that has a type must resolve to *that* type's descriptor. The
     // schema is what tuple equality, hashing and formatting dispatch through, so
     // a `Unit` or `Enum` element mislabelled `Int` reads its payload as an `i64`
@@ -1709,14 +1723,19 @@ fn tuple_schema_for(
     let descriptors: Vec<*const praxis_runtime::descriptor::TypeDescriptor> = element_types
         .iter()
         .enumerate()
-        .map(|(i, t)| match praxis_repr::descriptor_for_type(db, *t) {
-            Ok(d) => Ok(d as *const _),
-            Err(e) if e.is_unresolved() => Ok(std::ptr::null()),
-            Err(e) => Err(anyhow!(
-                "tuple element {i}: cannot emit a runtime descriptor for `{}`: {}",
-                db.render(*t),
-                e.reason
-            )),
+        .map(|(i, t)| {
+            let Some(t) = t else {
+                return Ok(std::ptr::null());
+            };
+            match praxis_repr::descriptor_for_type(db, *t) {
+                Ok(d) => Ok(d as *const _),
+                Err(e) if e.is_unresolved() => Ok(std::ptr::null()),
+                Err(e) => Err(anyhow!(
+                    "tuple element {i}: cannot emit a runtime descriptor for `{}`: {}",
+                    db.render(*t),
+                    e.reason
+                )),
+            }
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(generation.tuple_schema(&descriptors))
@@ -2128,17 +2147,29 @@ mod tests {
         assert!(core::ptr::eq(desc, &praxis_runtime::range::RANGE));
     }
 
-    /// A tuple allocation with no static type degrades to the empty schema —
-    /// the same shape the `Type(0)` placeholder produced by accident, now
-    /// reached deliberately from an explicitly typeless MIR node (MIR-05 in S21
-    /// supplies the real fused-pipeline tuple types).
+    /// A tuple allocation with no static type keeps its **arity** and leaves
+    /// every slot unknown (REP-23, ADR-066 decision 5).
+    ///
+    /// This test asserted the opposite — an *empty* schema — and that assertion
+    /// was the defect written down. `praxis_alloc_tuple` sizes the payload from
+    /// the schema, so a zero-slot schema for a two-element tuple made both
+    /// `praxis_tuple_set` calls write into nothing: `[10, 20].enumerate()`
+    /// answered `[(), ()]`, with both halves of every pair dropped. The type gap
+    /// is still MIR-05's (S21 supplies the real fused-pipeline tuple types); what
+    /// changed is that "no static type" is now a slot the runtime answers from
+    /// the value's own header rather than a slot that does not exist.
     #[test]
-    fn an_opaque_tuple_type_yields_an_empty_schema() {
+    fn an_opaque_tuple_type_keeps_its_arity_with_unknown_slots() {
         let db = praxis_types::TypeDb::new();
         let generation = Generation::new();
         let schema =
-            tuple_schema_for(&db, MirType::Opaque, &generation).expect("no elements to resolve");
+            tuple_schema_for(&db, MirType::Opaque, 2, &generation).expect("no elements to resolve");
         // SAFETY: the schema is owned by `generation`, which outlives the read.
-        assert_eq!(unsafe { &*schema }.arity(), 0);
+        let schema = unsafe { &*schema };
+        assert_eq!(schema.arity(), 2, "the payload is sized from this");
+        assert!(
+            schema.descriptors.iter().all(|d| d.is_null()),
+            "and every slot says it has no static type"
+        );
     }
 }

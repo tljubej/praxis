@@ -6128,3 +6128,49 @@ fn a_for_over_an_unannotated_parameter_reaches_each_iterable_it_is_given() {
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 51);
 }
+
+/// **REP-23.** A fused `enumerate()`/`zip()` pair holds both of its halves.
+///
+/// It held **neither**: MIR emits `AllocKind::Tuple { ty: MirType::Opaque, … }`
+/// for the fused pipelines — their item types arrive with MIR-05 — the codegen
+/// degraded `Opaque` to a *zero-element* schema, and `praxis_alloc_tuple` sizes
+/// the payload from the schema. So both `praxis_tuple_set` calls wrote into a
+/// zero-length `items` and `[10, 20].enumerate()` answered `[(), ()]`, out of a
+/// documented §6.3 combinator and with nothing reported.
+///
+/// The static types are still MIR-05's to supply (S21). What this pins is that
+/// the *values* survive — the schema keeps its arity and says "no static type"
+/// per slot, which ADR-066 made a thing a slot can say.
+#[test]
+fn a_fused_pair_carries_both_of_its_halves() {
+    // `enumerate` pairs an index with an element, so reading `.0` and `.1` with
+    // different weights fails on a swap as well as on a drop.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  \
+         var t = 0\n  for p in v.enumerate().collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 360, "(0,10) + (1,20) + (2,30), weighted");
+
+    // `zip` is the other producer of an `Opaque`-typed pair.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let a = Vec()\n  a.push(1)\n  a.push(2)\n  \
+         let b = Vec()\n  b.push(30)\n  b.push(40)\n  \
+         var t = 0\n  for p in a.zip(b).collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 370, "(1,30) + (2,40), weighted");
+
+    // The pairs are also *values*: two runs of the same pipeline are equal, and
+    // one whose halves differ is not — so the elements reach equality's
+    // element-wise walk and are not compared as two empty tuples.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  \
+         let w = Vec()\n  w.push(1)\n  w.push(9)\n  \
+         let same = v.enumerate().collect() == v.enumerate().collect()\n  \
+         let diff = v.enumerate().collect() == w.enumerate().collect()\n  \
+         if same { 10 } else { 0 } + if diff { 1 } else { 0 }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 10, "equal to itself, unequal to the other");
+}
