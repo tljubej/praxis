@@ -31,22 +31,25 @@ Update this file at the end of every stage.
 | S18 … S21 | not started | |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
-| S25 — Grammar completion | **part** — its acceptance criterion is met **verbatim** (REP-07, REP-08, REP-17, REP-16, REP-09, REP-18, REP-20, and REP-19 with it); **REP-10 left**, plus REP-21 | `c74e062`, `bb3bc43`, `11976cc`, `0ee29b1`, `2f9bcbd`, `b495e93`, `11e107c` |
+| S25 — Grammar completion | **done** — its acceptance criterion is met **verbatim**, and all nine of its rows have landed (REP-07, REP-08, REP-17, REP-16, REP-09, REP-18, REP-20, REP-19, REP-10) | `c74e062`, `bb3bc43`, `11976cc`, `0ee29b1`, `2f9bcbd`, `b495e93`, `11e107c`, `ca7385e` |
 | S26 — Declaration, pattern and inference gaps | **done** | `3306a04`, `b3bb6f5`, `4b7d763` |
 | REP-15 — the iteration protocol (no stage; ADR-066) | **done** | `a1c0b76` |
 | REP-19 — top-level statements execute (no stage; ADR-067) | **done** | `11e107c` |
 | REP-23 — a fused pair carries both halves (no stage) | **done** | `3678b6d` |
 | REP-22 — a function does not capture (no stage; ADR-068) | **done** | `db944f0` |
+| REP-24 — a declaration's members take a line break (no stage) | **done** | `33b386f` |
+| REP-21 — `min=`/`max=` map updates (no stage; ADR-070) | **done** | `8833cb7` |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
 TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
-**Twenty-three defects found while executing the plan are registered** as
-**REP-01 … REP-23** in the plan's **§4.1**. REP-01…REP-14 are owned by four new
-stages (**S23**–**S26**) and three new decisions (**D15**–**D17**), two of which
-are now answered. **One row is `unscheduled`: REP-21**, a P3.
+**Twenty-four defects found while executing the plan are registered** as
+**REP-01 … REP-24** in the plan's **§4.1**, and **every one of them is done.**
+REP-01…REP-14 are owned by four new stages (**S23**–**S26**) and three new
+decisions (**D15**–**D17**), two of which are now answered. **REP-24 is this
+session's own find**: §4.5's and §4.6's declaration examples did not parse.
 
 **§3.3's representative program now runs verbatim from the design doc** —
 top-level `let`, top-level `out`s and no `fn main` anywhere.
@@ -71,7 +74,9 @@ so REP-19 did not cause them — it made them easy to reach, because the design
 doc's program shape puts bindings at the top level. **`N007` reports it**
 (ADR-068): §4.9/§4.10 already drew the line and only §4.10 says "capture".
 
-**The repair has no P0 left.**
+**The repair has no P0 left, and no scheduled row of any severity.** Every stage
+the plan schedules is closed except **S18…S21, which were never started**; S18 is
+`D1`-blocked and D1 is still open. That is the next real decision.
 
 **S23 is closed.** All four of its findings are fixed and gated — **REP-13**,
 **REP-11**, **REP-12** and **REP-02** — each as its own commit with the suite
@@ -88,13 +93,37 @@ passed `praxis check` and aborted the host with a SIGBUS — is fixed and gated.
 main event and landed together as one commit, which the plan requires; **ADR-062**
 is their decision.
 
-**S25 is the only stage left in the repair's own schedule**, and **REP-10 is its
-last scheduled row** — record and tuple patterns. Its acceptance criterion is met
-verbatim (above). Beyond it are S18…S21, which were never started, and one
-unscheduled row: **REP-21** (a P3).
+**S25 is closed and so is the register.** REP-10 was its last scheduled row —
+record and tuple patterns (ADR-069) — and REP-21 (`min=`/`max=`, ADR-070) was the
+one unscheduled row. **REP-24 was found in between**: §4.5's and §4.6's own
+declaration examples do not parse, because a declaration's members had to be
+comma-separated and the design doc writes them on separate lines. What is left of
+the repair is **S18…S21, which were never started**; S18 is `D1`-blocked.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1444 passed, 0 failed, 38 ignored**. `just ci` is green.
+Now: **1455 passed, 0 failed, 38 ignored**. `just ci` is green.
+
+This session's eleven new gates and three ADRs (**069**, **070**) — REP-10,
+REP-24 and REP-21:
+
+| Test | File | Pins |
+|---|---|---|
+| `a_record_pattern_names_fields_and_a_tuple_pattern_names_positions` | `parse.rs` | REP-10's grammar — punned/explicit/mixed fields, every tuple arity, both composites nested in each other and in a variant payload, a trailing comma in each of the two new lists, **that a tuple pattern can start an arm** (or the arm list stops there and every later arm leaves the tree), and the five shapes that are not patterns |
+| `a_record_pattern_binds_a_field_at_the_fields_own_type` | `infer_tests.rs` | the *types*, not the absence of a diagnostic — the record's fields differ in type so binding by name is observable, the explicit form is written with its fields **swapped**, and the four mistakes: `Y114`, `Y115`, `Y001` for another record's pattern, `N001` for an undefined head |
+| `a_tuple_pattern_binds_by_position` | `infer_tests.rs` | two differently-typed elements, nesting through a record, the scheme a tuple pattern *pins* (`forall T U. ((T, U)) -> T`), and `Y123` for the one-element pattern no type has |
+| `a_record_or_tuple_match_is_exhaustive_without_a_catch_all` | `infer_tests.rs` | **REP-10's exit criterion** — five one-arm matches with no `_`, the `Y121` that is its other half, and the `Y120` witness naming the shape (`P { x: _, y: _ }`, `(_, _)`) so the recursion is shown to go *through* the new constructors |
+| `a_record_and_a_tuple_pattern_read_the_components_they_name` | `jit.rs` | the half no type test can see — every component weighted, the explicit form written in the other order, a literal sub-pattern *selecting* an arm, three readers chained through `Some((P { … }, k))`, and a padded row not shifting the fields it does name |
+| `a_record_pattern_reads_fields_and_a_tuple_pattern_reads_elements` | `praxis-mir/src/build.rs` | the instruction choice — `LoadField` vs `LoadTupleElem`, **no `EnumTag`** (one constructor, so there is no tag to compare), the field indices actually read, and that an enum payload still tests its tag |
+| `a_declarations_members_take_a_comma_or_a_line_break` | `parse.rs` | REP-24 — §4.5's and §4.6's own text verbatim, equal to the comma spelling once the comma token is out of the way; mixed separators in both orders; a trailing comma after either; and that neither separator is *optional* |
+| `an_updating_store_is_an_operator_only_where_a_name_cannot_be` | `parse.rs` | REP-21's contextual rule — §6.2's two lines, **adjacency** (`min = 3` with a space still reports), `min`/`max` still ordinary names in five positions including as a subscript receiver, `==` unaffected by max-munch, and a non-place target still parsing |
+| `an_updating_store_is_a_row_on_a_map_of_ints` | `infer_tests.rs` | the row — the bound *pinning* `Map()` to `Map[Text, Int]`, `Y001` for a non-`Int` value, `Y020` **naming the operator** for three receivers that have a plain store or none, `Y021` for a name target, and the deferral answered at the call site in both directions |
+| `an_updating_store_keeps_the_better_value_and_accepts_the_first` | `jit.rs` | §6.2's semantics — smaller/larger kept in any order, **an absent entry accepted without a fault** (which is why it cannot be a read-modify-write), a computed key, and §6.2's own relaxation through a generic helper |
+| `an_updating_store_is_one_call_and_reads_nothing` | `build.rs` | the assertion a behavioural test cannot make: a read of a *present* key would leave every answer right. One call, no `MapIndex`, no `MapInsert` — and `+=` through the same subscript still reading twice |
+
+`the_subscript_rows_are_a_closed_set_no_program_can_name` was **extended** with
+the two updating rows: `Map` only, at the plain store's arity, and pointing at
+wrappers of their own — a row that reused `MapInsert` would spell `min=` and mean
+`=`.
 
 This session's sixteen new gates and three rewrites (**ADR-066**, **ADR-067**,
 **ADR-068**):
@@ -2512,22 +2541,37 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**REP-10 is the answer** — record and tuple patterns, S25's last scheduled row and
-the only thing left in the repair's own schedule. **The tree has no P0.**
-`14-repair-rep15-rep19-rep23-handover.md` is this session's note.
+**S18 is the answer, and it needs D1 answered first.** Every row the register
+holds is done and every stage the plan schedules is closed; what is left is
+**S18…S21, which were never started**. `15-repair-rep10-rep24-rep21-handover.md`
+is this session's note.
 
-One row is unscheduled and one is scheduled:
+- **D1 (plan §7)** — `Map.get`/`Grid.find` answering `Option[V]` versus
+  `V`-with-`Unit`, and with it `min`/`max` on an empty sequence (which answer `0`
+  today; `adv_pipeline_empty_source_min_is_zero` pins it). Two `#[ignore]`d tests
+  name it directly, in `praxis-runtime/src/abi.rs`.
+- **S18 also owns RT-13**, F12's runtime half — `EnumSchema`, `EnumPayload`'s
+  schema pointer, and `praxis_alloc_enum`'s new schema parameter — which must land
+  in **one** commit with codegen and spends the ABI bump 12 → 13 (H17). Whoever
+  spends it should also add the **two missing fault kinds** four raises currently
+  borrow `InvalidSize` for: an empty range (ADR-058, ADR-059) and "an argument
+  this algorithm has no answer for" (ADR-060).
 
-- **REP-10 (P2, S25)** — record and tuple patterns, the last row S25 schedules.
-  `exhaustive.rs` already handles the `Closed`-with-one-constructor shape they
-  produce, so it is a parser and lowering change. It is also the other half of
-  `for (k, v) in m`, which ADR-066 deliberately left to it.
-- **REP-21 (P3, `unscheduled`)** — `min=`/`max=`. Both runtime wrappers exist with
-  no caller and both catalog row names are reserved (ADR-064), so what is left is
-  a contextual grammar rule: `min` is an identifier, so `min=` is two tokens.
+Two things this session found and did **not** chase — neither is registered,
+because neither was reproduced against a stated contract:
 
-Beyond those two, **S18…S21 were never started** — S18 is `D1`-blocked and D1 is
-still open. That is the next real decision after REP-10.
+- **An anonymous structural record has no pattern.** A `read lines(...)` yields
+  `{ from: Int, to: Int, weight: Int }`, and REP-10's record pattern is *nominal*
+  — it names a `struct`. So a parser-produced record can only be taken apart with
+  `.field`, and `rep21_min_max_updates.px` says so in a comment where it would
+  otherwise have used a pattern. Giving it one needs a name-less spelling
+  (`{ from, to }`) that §4.5 does not write.
+- **`for (k, v) in m` is still not spelled**, and it is no longer a *grammar*
+  question — REP-10's pattern grammar is the one a `for` binding would reuse (ADR-069
+  says so, and ADR-066 decision 3 left the destructuring half to REP-10). What is
+  left is the binding position: `for` takes an `Ident` token, and giving it a
+  pattern means an irrefutable destructuring in the loop header, a refutable one to
+  report, and `TypedExpr::For`'s `binding: SymbolId` to reshape.
 
 **REP-22, for the record** (closed as ADR-068 in the session that found it).
 
@@ -2663,8 +2707,9 @@ What S25 has delivered:
 **S18 is still `D1`-blocked** and D1 is still open, so it is not the answer to
 "what next" either — see the S18 block below for what it needs.
 
-`14-repair-rep15-rep19-rep23-handover.md` is this session's note; read it for
-REP-22's detail and for the six things worth not rediscovering.
+`14-repair-rep15-rep19-rep23-handover.md` is the previous session's note; read it
+for REP-22's detail and for the six things worth not rediscovering.
+`15-repair-rep10-rep24-rep21-handover.md` is this one's.
 
 What S26 delivered, and the three things worth carrying out of it:
 
