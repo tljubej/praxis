@@ -2068,7 +2068,7 @@ fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescri
         // A template's result is a scalar (single anon capture), a record (named
         // captures), or Unit (no captures). A tuple's result is a tuple. These
         // are uniform descriptors too (schema in the payload).
-        PlanNode::Template { parts } => template_result_descriptor(parts),
+        PlanNode::Template { parts } => template_result_descriptor(plan, parts),
         PlanNode::Tuple { .. } => &crate::tuples::TUPLE,
     }
 }
@@ -2092,30 +2092,44 @@ fn atomic_descriptor(kind: AtomicKind) -> &'static crate::TypeDescriptor {
 /// anonymous capture, a record if it has named captures, Unit if none. (A
 /// multi-anon-capture template lowers to a `Tuple` node, handled above.)
 fn template_result_descriptor(
+    plan: &ParserPlan,
     parts: &[praxis_input_parser::TemplatePartNode],
 ) -> &'static crate::TypeDescriptor {
+    let mut single_anonymous: Option<u32> = None;
     let mut captures = 0usize;
     let mut any_named = false;
     for p in parts {
-        if let praxis_input_parser::TemplatePartNode::Capture { name, .. } = p {
+        if let praxis_input_parser::TemplatePartNode::Capture { name, child, .. } = p {
             captures += 1;
             if name.is_some() {
                 any_named = true;
+            } else {
+                single_anonymous = Some(*child);
             }
         }
     }
     if any_named {
         &crate::records::RECORD
     } else if captures == 1 {
-        // Single anonymous capture → scalar. The exact scalar descriptor depends
-        // on the capture's child, but for descriptor-table purposes the element
-        // is a GC value; the per-value descriptor is read from the value's own
-        // header at trace/format/eq/hash time. Returning a generic GC scalar
-        // descriptor here would be more precise, but the collection wrappers
-        // (vec_equals etc.) dispatch through the value's own descriptor, so this
-        // is only consulted for the collection's *element* tag. Use INT as a
-        // sound default (the value's real descriptor governs tracing).
-        &scalars::INT
+        // Single anonymous capture → the child's own result descriptor.
+        //
+        // This used to be `&scalars::INT`, defended by a comment arguing it was
+        // "a sound default" because the per-value descriptor is read from the
+        // object's header at trace time. It is not a default at all: it is the
+        // tag a *collection* carries for its elements, and `vec_format`,
+        // `vec_equals` and `vec_hash` dispatch through exactly that tag. So
+        // `lines(`{word}`)` produced a `Vec` of `Text` objects whose element
+        // descriptor said `Int`, and rendering it read a `Text` payload through
+        // the `Int` callback (IPR-13).
+        //
+        // Deriving it is only correct because a capture names its own parser
+        // body (IP-05, S19). Before that, every capture in a template shared
+        // one guessed kind, and reading the child here would have shipped a
+        // green test asserting the wrong descriptor.
+        match single_anonymous {
+            Some(child) => child_descriptor(plan, child),
+            None => &scalars::UNIT,
+        }
     } else {
         &scalars::UNIT
     }
@@ -2533,7 +2547,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: single-capture templates hard-code the Int descriptor"]
     fn single_anonymous_template_capture_uses_its_child_descriptor() {
         let parts: &'static [praxis_input_parser::TemplatePartNode] = Box::leak(
             vec![praxis_input_parser::TemplatePartNode::Capture {

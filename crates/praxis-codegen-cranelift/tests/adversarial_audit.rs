@@ -492,7 +492,6 @@ fn lines_rest_is_bounded_to_each_line() {
 }
 
 #[test]
-#[ignore = "known bug: anonymous word templates are tagged with the INT descriptor"]
 fn anonymous_word_template_vec_uses_the_text_element_descriptor() {
     let src = "fn main() -> Vec[Text] {\n  read lines(`{word}`)\n}\n";
     let (runtime, result) = run_main_with_input(src, "alpha\nbeta\n");
