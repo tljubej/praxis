@@ -121,6 +121,41 @@ impl<'a> Input<'a> {
         }
     }
 
+    /// The region a **root** parse runs against: the whole buffer minus the
+    /// line terminator the file ends with.
+    ///
+    /// A trailing newline is not data and it is not an error. Every real input
+    /// carries one — `praxis-cli`'s runner reads the file verbatim, and every
+    /// `.in` in the corpus ends with `\n` — so the byte after the last value is
+    /// a `\n` that no parser was asked to read.
+    ///
+    /// This is the one place that is handled. `walk_exact`'s rule ("a bounded
+    /// child must fill its bound") is right, and so is applying it to the
+    /// tokens `ws`, `sep`, `csv` and `chars` cut out of their region; what was
+    /// wrong was the *region*, because at the root it ran to the end of the
+    /// file and therefore glued the terminator onto the last token. Trimming it
+    /// here fixes `read ws(int)`, `read sep(s, P)` and
+    /// `read chars(P, skip: whitespace)` — and §7.5's own
+    /// `chars(one_of("^v<>"), skip: whitespace)` example — at once, rather than
+    /// teaching each constructor to forgive one byte.
+    ///
+    /// Exactly one terminator is dropped (`\r\n` or `\n`). A file ending in
+    /// `"\n\n"` really does have a blank final line, and `sections` splits on
+    /// it; swallowing the run would delete data rather than a convention.
+    #[inline]
+    pub(crate) fn root_region(&self) -> ByteRegion {
+        let whole = self.whole();
+        let bytes = self.text.as_bytes();
+        let mut end = bytes.len();
+        if end > 0 && bytes[end - 1] == b'\n' {
+            end -= 1;
+            if end > 0 && bytes[end - 1] == b'\r' {
+                end -= 1;
+            }
+        }
+        whole.subregion(whole.start(), whole.start().advance(end))
+    }
+
     /// The whole buffer's text. Regions read through this, never around it.
     #[inline]
     fn text(&self) -> &'a str {
@@ -398,6 +433,32 @@ mod tests {
             .map(|l| l.str(&i2).expect("a line is a str"))
             .collect();
         assert_eq!(lines2, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn the_root_region_excludes_the_files_trailing_newline() {
+        // The blocker this repair closes: the root region used to run to the
+        // end of the file, so every constructor that bounds a child against
+        // `region.end()` demanded the child eat the `\n`.
+        for (text, want) in [
+            ("1 2 3\n", "1 2 3"),
+            ("a -> b\r\n", "a -> b"),
+            ("^v<>\n", "^v<>"),
+            ("no terminator", "no terminator"),
+            ("\n", ""),
+            ("", ""),
+            // Exactly one terminator: a blank final line is data, and
+            // `sections` splits on it.
+            ("first\n\n", "first\n"),
+        ] {
+            let (_rt, owner) = input_over(text);
+            let i = unsafe { Input::new(owner) }.expect("a Text is UTF-8");
+            assert_eq!(
+                i.root_region().str(&i),
+                Some(want),
+                "root region of {text:?}"
+            );
+        }
     }
 
     #[test]

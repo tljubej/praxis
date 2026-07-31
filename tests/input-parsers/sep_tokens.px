@@ -1,0 +1,9 @@
+// Input-parser fixture: `sep(separator, P)` at the ROOT, newline-terminated.
+//
+// §7.5's own spelling, `sep(" -> ", word)`. The final token runs to the end of
+// the region, so a root region that included the file's `\n` handed `word` a
+// token of `b\n`.
+fn main() -> Int {
+    let v = read sep(" -> ", word);
+    v.len()
+}

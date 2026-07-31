@@ -63,7 +63,14 @@ unsafe fn run_plan(ctx: *mut RuntimeContext, plan: &ParserPlan, input: GcRef) ->
         unsafe { clear_parse_detail(ctx) };
         return unsafe { fault_sentinel(ctx) };
     };
-    let region = i.whole();
+    // **The root region ends where the data ends** (S20 repair). It used to be
+    // the whole buffer, so the file's trailing newline was inside the region
+    // every root constructor bounds its children against — and `read ws(int)`,
+    // `read sep(" -> ", word)` and `read chars(P, skip: whitespace)` all built
+    // their final token up to `region.end()` and then required the child to eat
+    // a `\n`. That faulted on every real input file, including §7.5's own
+    // `chars(one_of("^v<>"), skip: whitespace)` example.
+    let region = i.root_region();
     // Root the input for the whole parse. `RuntimeRoots`'s `input` arm reads
     // `ctx.input_source`, which for `parse(text, P)` is a *different* Text —
     // and this one owns every source-slice the parse produces (IPR-14).
@@ -82,7 +89,10 @@ unsafe fn run_plan(ctx: *mut RuntimeContext, plan: &ParserPlan, input: GcRef) ->
         Err(fail) => {
             // Record the deepest failure into the runtime's detail slot, then
             // raise the fault. The host reads the detail after `ParseFailed`.
-            unsafe { record_fail(ctx, fail, region.bytes(&i)) };
+            // The preview is taken against the **whole** buffer: failure
+            // offsets are absolute, and showing the terminator the root region
+            // excludes is what makes "actual: 1 2 3⏎" readable.
+            unsafe { record_fail(ctx, fail, i.whole().bytes(&i)) };
             unsafe { fault_sentinel(ctx) }
         }
     }
@@ -103,7 +113,8 @@ unsafe fn run_root(
 ) -> Result<GcRef, ParseFail> {
     // SAFETY: the caller guarantees `input` is a valid Text GcRef.
     let i = unsafe { Input::new(input) }.expect("the test's input is a Text");
-    let region = i.whole();
+    // The same root region `run_plan` uses, for the same reason.
+    let region = i.root_region();
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(ctx) };
     let _input = scope.root(input);
@@ -2686,9 +2697,27 @@ mod tests {
         );
         assert_eq!(parse("1 2\n", SkipPolicy::Newlines), Some(vec![1, 2]));
         assert_eq!(
-            parse("12\n", SkipPolicy::None),
+            parse("1\n2", SkipPolicy::None),
             None,
-            "`skip: none` absorbs nothing, so a trailing newline is a mismatch"
+            "`skip: none` absorbs nothing, so an interior newline is a mismatch"
+        );
+        // **Inverted by the S20 repair, deliberately** (plan §8.2). This line
+        // used to assert that `parse("12\n", None)` faults, on the reading that
+        // "`skip: none` absorbs nothing, so a trailing newline is a mismatch".
+        // The premise was wrong about *which* newline: the byte at the end of
+        // an input file is the file's terminator, not a byte the program asked
+        // any parser to read, and requiring `chars` to consume it faulted every
+        // newline-terminated file — §7.5's own
+        // `chars(one_of("^v<>"), skip: whitespace)` example included. The root
+        // region now ends where the data ends (`Input::root_region`), so the
+        // terminator is outside the region and no skip policy has to forgive
+        // it. `parse("1\n2", None)` above keeps the half of the claim that was
+        // true: a newline *inside* the data is still a mismatch under
+        // `skip: none`.
+        assert_eq!(
+            parse("12\n", SkipPolicy::None),
+            Some(vec![1, 2]),
+            "the file's own terminator is not inside the root region"
         );
     }
 

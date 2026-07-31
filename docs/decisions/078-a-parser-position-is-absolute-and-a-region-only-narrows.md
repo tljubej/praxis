@@ -99,6 +99,33 @@ A capture with no literal after it is unbounded for the same reason — there is
 nothing to stop before, and requiring exhaustion there would fault every
 root-level template on its input's trailing newline.
 
+### The root *region* ends where the data ends
+
+Not requiring exhaustion at the root turned out to be necessary and not
+sufficient, and the difference cost this stage a blocker. Exhaustion is a
+parent's decision, but a parent's decision is made against a *region*, and the
+root region was the whole file — terminator included. So `read ws(int)` over
+`"1 2 3\n"` cut its last token as `3\n` and required `int` to fill it;
+`read sep(" -> ", word)` ran its final token to `region.end()` and required
+`word` to fill it; `read chars(P, skip: whitespace)` reached the `\n`, could not
+skip it (`whitespace` is horizontal whitespace), and handed it to a child that
+could not read it. Each of those faulted on every real input file, §7.5's own
+`chars(one_of("^v<>"), skip: whitespace)` example among them.
+
+The fix is one line in one place, `Input::root_region`: the region a root parse
+runs against is the buffer minus the line terminator the file ends with. The
+"a bounded child must fill its bound" rule is unchanged and every constructor
+keeps bounding its children exactly as before — what changes is that the bound
+no longer contains a byte the program never asked anything to read. Exactly one
+terminator is dropped (`\r\n` or `\n`): a file ending in `"\n\n"` really does
+have a blank final line, and `sections` splits on it.
+
+The corollary for anyone adding a constructor: a construct that tokenizes to
+`region.end()` needs no trailing-newline special case, and must not grow one.
+Anything that forgives a terminator per constructor is fixing this in the wrong
+place, N times, and will disagree with itself — which is how `csv` came to be
+the one constructor that survived, purely because `csv_tokens` calls `trim()`.
+
 ## Decision 4: a failed `choice` reports the case that got furthest
 
 Every case's failure used to be discarded and replaced with `"any choice case"`

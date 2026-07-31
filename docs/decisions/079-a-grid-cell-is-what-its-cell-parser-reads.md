@@ -150,11 +150,22 @@ amended with a comment recording the inversion.
 the function returned `Ok`: `chars(digit, skip: none)` over `"12x34"` answered
 `[1, 2]` and reported nothing.
 
-The failure propagates. §7.5's rule then falls out of the loop's own shape — the
-skip policy runs once more after the last match, so `skip: whitespace` and
-`skip: newlines` absorb a trailing run, and under `skip: none` a trailing byte
-the child cannot read is a mismatch. That is the whole policy set, and it needed
-no extra rule.
+The failure propagates. §7.5's rule then falls out of the loop's own shape: the
+skip policy runs once more after the last match, so a trailing run the policy
+covers is absorbed, and a trailing byte the policy does not cover must be read
+by the child or it is a mismatch.
+
+**Amended.** This decision first said that "`skip: whitespace` and
+`skip: newlines` absorb a trailing run", and that was false for
+`skip: whitespace`, which is *horizontal* whitespace — spaces and tabs — and
+therefore cannot absorb a `\n`. The claim was load-bearing for exactly the wrong
+case: the input file's own trailing newline. So §7.5's documented example,
+`read chars(one_of("^v<>"), skip: whitespace)`, faulted on every ordinary file.
+
+Nothing here changes to fix that, because nothing here was the problem: the
+file's terminator is not part of the data and is now not part of the root region
+(ADR-078 Decision 3). What this decision governs is a trailing run *inside* the
+data, and there the sentence above holds for each policy's own byte set.
 
 ## Consequences
 
