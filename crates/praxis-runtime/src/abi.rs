@@ -666,32 +666,35 @@ unsafe fn read_scalar<T: Copy>(r: GcRef, handle: crate::descriptor::Payload<T>) 
 /// signature change is a larger edit than the one memory-safety needs.
 #[inline]
 unsafe fn int_payload(r: GcRef) -> i64 {
-    let descriptor = r.descriptor();
-    if descriptor.size() != std::mem::size_of::<i64>() {
-        int_payload_width_mismatch(descriptor.name, descriptor.size());
-    }
-    // SAFETY: the width check above proves the object's payload is at least
-    // eight bytes, so the read is in bounds. The compiler only emits these
-    // calls with Int-typed operands; the payload follows the header and is an
-    // `i64`. Faults that would feed a non-`Int` (e.g. the Unit sentinel) into an
-    // arithmetic wrapper are diverted before reaching here by `Inst::CheckFault`
-    // branching to the fault block (§10.4), so operands on the normal path are
-    // always valid `Int`s.
-    unsafe { *r.payload::<i64>() }
+    // SAFETY: `read_scalar` proves `r`'s descriptor *is* `INT` before reading,
+    // so the eight bytes are in bounds and are an `i64`. The compiler only emits
+    // these calls with Int-typed operands, and a fault that would feed a
+    // non-`Int` (the Unit sentinel, say) into an arithmetic wrapper is diverted
+    // by `Inst::CheckFault` before it gets here (§10.4).
+    unsafe { read_scalar(r, scalars::INT_PAYLOAD) }
+        .unwrap_or_else(|| scalar_type_mismatch("int_payload", "Int", r.descriptor().name))
 }
 
-/// [`int_payload`]'s refusal, out of line so the check costs a
+/// The refusal every scalar reader shares, out of line so the check costs a
 /// never-taken branch on the hot path (REP-56).
 ///
-/// `#[cold]` and `#[inline(never)]` are what let the check be unconditional
-/// without the message-building code landing in every arithmetic wrapper.
+/// `#[cold]` and `#[inline(never)]` are what let the check be unconditional —
+/// and it must be unconditional, because the first repair of this made it a
+/// `debug_assert`. That compiles out, so a `praxis check`-clean program did an
+/// eight-byte out-of-bounds heap read and printed a different random number on
+/// every run, while a debug build reported the assertion and aborted. Two
+/// profiles, two answers, and the wrong one was the one users get. `just ci`
+/// never builds release, so nothing in the gate could see it.
+///
+/// A panic here is ADR-080's defined path: `abi_guard!` catches it, raises
+/// `RaisedFault::PANIC` naming the wrapper, and either faults into the crash
+/// debugger or prints the message and aborts. A defined abort is not a *good*
+/// answer to REP-56 — the good answer is the payload record type REP-56 is
+/// filed for, and it is still owed — but it is a bounded one.
 #[cold]
 #[inline(never)]
-fn int_payload_width_mismatch(name: &'static str, size: usize) -> ! {
-    panic!(
-        "int_payload reads eight bytes; `{name}` is {size} wide — use `read_scalar` \
-         with that type's `Payload` handle instead (REP-37)"
-    );
+fn scalar_type_mismatch(what: &'static str, want: &'static str, found: &'static str) -> ! {
+    panic!("{what} wants a `{want}` payload; this value is a `{found}` (REP-56)");
 }
 
 /// The Unit sentinel GcRef from the context's input source slot. (Unit is an
@@ -859,17 +862,15 @@ pub unsafe extern "C" fn praxis_int_load(_ctx: *mut RuntimeContext, r: GcRef) ->
 #[no_mangle]
 pub unsafe extern "C" fn praxis_bool_load(_ctx: *mut RuntimeContext, r: GcRef) -> i64 {
     abi_guard!("praxis_bool_load", _ctx, {
-        // Bool payload is stored as the immortal true/false; compare pointer identity
-        // against the descriptor to recover the bit is not possible without the
-        // immortals. Instead read the stored byte payload (immortal Bools carry a
-        // bool payload).
-        // SAFETY: caller guarantees `r` is a Bool; payload is a bool-sized value.
-        let p: *mut bool = r.payload::<bool>();
-        if unsafe { *p } {
-            1
-        } else {
-            0
-        }
+        // Read the byte, then decide — never `*r.payload::<bool>()`. A Rust
+        // `bool` whose byte is not 0 or 1 is an *invalid value*, and
+        // materializing one is undefined behaviour whatever the read's bounds
+        // are; `BoolPayload` is a `u8` precisely so the runtime never has to.
+        // SAFETY: `read_scalar` bounds the read against `r`'s own descriptor.
+        let byte = unsafe { read_scalar(r, scalars::BOOL_PAYLOAD) }.unwrap_or_else(|| {
+            scalar_type_mismatch("praxis_bool_load", "Bool", r.descriptor().name)
+        });
+        i64::from(byte != 0)
     })
 }
 
@@ -880,9 +881,11 @@ pub unsafe extern "C" fn praxis_bool_load(_ctx: *mut RuntimeContext, r: GcRef) -
 #[no_mangle]
 pub unsafe extern "C" fn praxis_char_load(_ctx: *mut RuntimeContext, r: GcRef) -> i64 {
     abi_guard!("praxis_char_load", _ctx, {
-        // SAFETY: caller guarantees `r` is a Char; payload is a u32 scalar value.
-        let p: *mut u32 = r.payload::<u32>();
-        unsafe { *p as i64 }
+        // SAFETY: `read_scalar` bounds the read against `r`'s own descriptor.
+        let code = unsafe { read_scalar(r, scalars::CHAR_PAYLOAD) }.unwrap_or_else(|| {
+            scalar_type_mismatch("praxis_char_load", "Char", r.descriptor().name)
+        });
+        i64::from(code)
     })
 }
 
@@ -927,8 +930,9 @@ pub unsafe extern "C" fn praxis_float_load(_ctx: *mut RuntimeContext, r: GcRef) 
 /// # Safety
 /// `r` must be a valid `Float` `GcRef`.
 unsafe fn float_payload(r: GcRef) -> f64 {
-    // SAFETY: caller guarantees `r` is a Float; payload is an f64.
-    unsafe { *r.payload::<f64>() }
+    // SAFETY: `read_scalar` proves `r`'s descriptor is `FLOAT` before reading.
+    unsafe { read_scalar(r, scalars::FLOAT_PAYLOAD) }
+        .unwrap_or_else(|| scalar_type_mismatch("float_payload", "Float", r.descriptor().name))
 }
 
 /// Widen an `Int` to a `Float` (§4.12). Never faults — every `i64` is exactly
@@ -5362,30 +5366,77 @@ mod tests {
     /// compiled artifact to ask. `every_no_mangle_wrapper_is_behind_the_panic_guard`
     /// is the same technique for the same reason.
     #[test]
-    fn int_payloads_width_check_is_not_compiled_out_of_release() {
+    fn every_scalar_payload_read_goes_through_the_bounded_reader() {
         let source = include_str!("abi.rs");
-        const SIGNATURE: &str = "unsafe fn int_payload(r: GcRef) -> i64 {";
+
+        // 1. The reader itself checks before it reads, and the check is an
+        //    ordinary branch — not a `debug_assert`, which compiles out of a
+        //    release build. That distinction IS the finding: with the check
+        //    compiled out, a `praxis check`-clean program did an out-of-bounds
+        //    read and printed a different random number every run, while debug
+        //    aborted cleanly. `just ci` never builds release, so nothing in the
+        //    gate could see it.
+        const SIGNATURE: &str =
+            "unsafe fn read_scalar<T: Copy>(r: GcRef, handle: crate::descriptor::Payload<T>) -> Option<T> {";
         let at = source
             .find(SIGNATURE)
-            .expect("`int_payload`'s definition moved; this gate names it by signature");
+            .expect("`read_scalar`'s definition moved; this gate names it by signature");
         let body_start = at + SIGNATURE.len();
-        // The function ends at the first `}` in the first column after it.
         let body_len = source[body_start..]
             .find("\n}")
-            .expect("`int_payload` has no closing brace in the first column");
+            .expect("`read_scalar` has no closing brace in the first column");
         let body = &source[body_start..body_start + body_len];
 
         assert!(
             !body.contains("debug_assert"),
-            "`int_payload`'s width check is a `debug_assert`, which is compiled out of \
-             a release build — and what is left is an unchecked eight-byte read off a \
-             payload that may be narrower (REP-56). Make it an ordinary branch.\n\
-             body was:{body}"
+            "`read_scalar`'s type check is a `debug_assert`, which is compiled out of a \
+             release build — and what is left is an unchecked read off a payload that may \
+             be narrower (REP-56). Make it an ordinary branch.\nbody was:{body}"
         );
         assert!(
-            body.contains("descriptor.size() != std::mem::size_of::<i64>()"),
-            "`int_payload` no longer checks the payload's width before reading eight \
-             bytes of it (REP-37, REP-56).\nbody was:{body}"
+            body.contains("std::ptr::eq(r.descriptor(), handle.descriptor())"),
+            "`read_scalar` no longer proves the value is the handle's type before reading \
+             it (REP-37, REP-56).\nbody was:{body}"
+        );
+
+        // 2. Nothing else in this file reads a scalar payload directly. This is
+        //    the half that matters, and the half the first repair missed: it
+        //    bounded `int_payload` and left `float_payload`, `praxis_char_load`
+        //    and `praxis_bool_load` reading unchecked, because a gate that names
+        //    one function can only ever gate that function.
+        //
+        //    Scanned over the crate's own code only: `include_str!` hands us this
+        //    test too, whose list below would otherwise match itself, and
+        //    comments naming the pattern are describing it rather than doing it.
+        let code: String = source[..source
+            .find("#[cfg(test)]")
+            .expect("abi.rs has no test module marker")]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for forbidden in [
+            "*r.payload::<i64>()",
+            "*r.payload::<f64>()",
+            "*r.payload::<u32>()",
+            "r.payload::<bool>()",
+        ] {
+            assert!(
+                !code.contains(forbidden),
+                "a scalar payload is read directly as `{forbidden}` instead of through \
+                 `read_scalar`, so its type is unchecked in release (REP-56). Route it \
+                 through `read_scalar(r, scalars::…_PAYLOAD)` instead."
+            );
+        }
+
+        // 3. And no Rust `bool` is ever materialized from a payload byte: a
+        //    `bool` whose byte is not 0 or 1 is an *invalid value*, which is
+        //    undefined behaviour independently of whether the read was in
+        //    bounds. `BoolPayload` is a `u8` precisely so it never has to be.
+        assert!(
+            !code.contains("Payload<bool>") && !code.contains("read_scalar::<bool>"),
+            "a `bool` is read straight out of a payload; read `scalars::BOOL_PAYLOAD` \
+             (a `u8`) and compare it instead (REP-56)."
         );
     }
 
@@ -5398,7 +5449,7 @@ mod tests {
     /// abort where the manifest makes that fault unobservable). What must not
     /// happen, in any profile, is the read.
     #[test]
-    fn int_payload_refuses_a_payload_narrower_than_eight_bytes() {
+    fn a_scalar_read_refuses_a_value_that_is_not_its_type() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx is wired to rt; the Unit immortal is a valid GcRef.
@@ -5425,7 +5476,8 @@ mod tests {
             .or_else(|| payload.downcast_ref::<&str>().copied())
             .unwrap_or("");
         assert!(
-            message.contains("int_payload reads eight bytes"),
+            message.contains("int_payload wants a `Int` payload")
+                && message.contains("this value is a `Unit`"),
             "unexpected panic message: {message:?}"
         );
     }
