@@ -67,6 +67,16 @@ reached `Heap::alloc` directly would be correct — it would have to come throug
 
 ## Decision 3: `alloc_unpaced` is the named back door, and it is `pub(crate)`
 
+> **Amended by S20 (IPR-14, 2026-07-31): the second caller is gone.** The
+> parser interpreter's seventeen intermediates live in `NativeScope`s and every
+> allocation in `parser.rs` goes through `Heap::alloc`/`alloc_with`, in the one
+> commit this decision said it would take. The clause below is kept as written
+> because the *reasoning* is what a future third caller will be tempted by, and
+> the answer to it is now on record: the argument "no root set can see my
+> locals" is answered by a `NativeScope`, not by this route. `alloc_unpaced`'s
+> doc comment names one legitimate caller, and ADR-078 Decision 6 records the
+> retirement.
+
 Two callers legitimately cannot pace, and they are the only ones:
 
 * **the host's `Runtime::alloc_*` helpers.** The host holds results in Rust
@@ -75,7 +85,7 @@ Two callers legitimately cannot pace, and they are the only ones:
 * **the parser interpreter.** Its intermediates are unrooted; H1. IPR-14 (S20)
   gives them `NativeScope`s and moves `parser.rs` to the paced path in the same
   commit that adds its safepoints, at which point this route loses its second
-  caller.
+  caller. *(Done — see the amendment above.)*
 
 This is option 2 of the three D14 offered, chosen over option 1 (land IPR-14
 early) because IPR-14 is a careful rewrite across 1,600 lines of recursive

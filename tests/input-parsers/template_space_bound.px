@@ -1,0 +1,16 @@
+// Input-parser fixture: a capture bounded by a whitespace-only template part.
+//
+// `{name:text} {v:int}` — the most ordinary template shape there is. The space
+// between the two captures is a `Literal` with empty text and a space-run
+// policy (§7.9), and §7.4's "minimally consumes text until the following
+// template literal can match" does not exempt it. Without the bound, `text`
+// swallows the whole line and the space run reports "expected whitespace" at
+// the end of it.
+fn main() -> Int {
+    let rows = read lines(`{name:text} {v:int}`);
+    var total = 0;
+    for row in rows {
+        total = total + row.v;
+    }
+    total
+}

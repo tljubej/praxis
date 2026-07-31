@@ -464,8 +464,91 @@ fn heavy_jit_loop_proves_that_automatic_collection_actually_ran() {
     );
 }
 
+/// **IPR-14, and the one thing a result-only parser test cannot see.**
+///
+/// The interpreter's `Vec<GcRef>` intermediates were invisible to every root
+/// set. What kept them alive was that the parser never paced: `parser.rs` was
+/// the last caller of `Heap::alloc_unpaced`, so no collection ever ran *inside*
+/// a parse. That made the intermediates a memory-growth bug and nothing worse —
+/// and it is exactly why adding a safepoint before rooting them would have
+/// converted it into a use-after-free (ADR-040 Decision 3, hazard H1).
+///
+/// This is the shape that puts collections in the middle of the assembly.
+/// `scan(choice(...))` retries every case at every position, and the `mul(1,x)`
+/// junk makes the first case allocate an `Int` for its first capture and *then*
+/// fail — so the parse produces far more garbage than it keeps, which is what
+/// paces the collector. The live intermediates being tested are `scan`'s
+/// growing `items` vector and each `choice` payload held across `alloc_enum`.
+///
+/// Two assertions, because either alone would pass with the rooting removed.
+/// The values must be compared and not merely counted: swept storage is reused
+/// (the free list is keyed on layout), so a reclaimed live intermediate
+/// surfaces as type confusion rather than a clean crash. And `live_count` has
+/// to be far below what was allocated, or nothing was reclaimed at all.
+///
+/// **What this test does and does not gate.** Its subject is that pacing and
+/// rooting are *consistent*: in a tree with only the two `scope.root(…)` calls
+/// in `walk_scan` and `walk_choice` deleted it answers 574840 against 449400,
+/// which is the number this commit reports. It is not a differential against
+/// the pre-S20 base — it passes at `b2184c8`, where the parser is unpaced and
+/// unrooted, so both assertions hold with no collection inside the parse at
+/// all. The `live_count` guard cannot tell a sweep that ran while the parse was
+/// assembling from one the generated code paced during the `for` loop
+/// afterwards; measuring the parse itself would need a collection counter
+/// sampled across a program that only does `read`.
 #[test]
-#[ignore = "known bug: nested sections lose their absolute source offsets"]
+fn choice_backtracking_under_allocation_pressure_keeps_every_live_intermediate() {
+    // 600 real matches; 15 allocate-then-fail attempts before each one.
+    const GROUPS: usize = 600;
+    const JUNK_PER_GROUP: usize = 15;
+    let mut input = String::new();
+    let mut expected: i64 = 0;
+    for n in 0..GROUPS {
+        for _ in 0..JUNK_PER_GROUP {
+            // `mul(` and the first `int` both match, so the case allocates
+            // before `x` defeats its second capture. That allocation is the
+            // garbage this test runs on.
+            input.push_str("mul(1,x) ");
+        }
+        if n % 2 == 0 {
+            writeln!(&mut input, "dbl({n})").unwrap();
+            expected += (n as i64) * 2;
+        } else {
+            writeln!(&mut input, "tpl({n})").unwrap();
+            expected += (n as i64) * 3;
+        }
+    }
+
+    let src = "fn main() -> Int {\n  \
+               let ms = read scan(choice(\n    \
+               M: `mul({a:int},{b:int})`,\n    \
+               D: `dbl({int})`,\n    \
+               T: `tpl({int})`,\n  ))\n  \
+               var total = 0\n  \
+               for m in ms {\n    \
+               total = total + match m {\n      \
+               M(p) => 0\n      \
+               D(n) => n * 2\n      \
+               T(n) => n * 3\n    }\n  }\n  total\n}\n";
+    let (runtime, result) = run_main_with_input(src, &input);
+
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        expected,
+        "every match's payload must survive the collections that ran during the parse"
+    );
+    // At least GROUPS * JUNK_PER_GROUP = 9000 objects were allocated and
+    // discarded inside the parse, on top of the ~600 that survive it. Without a
+    // sweep every one of them is still registered.
+    let stats = runtime.heap().stats();
+    assert!(
+        stats.live_count < 6_000,
+        "no sweep ran inside the parse, so this proves nothing about rooting: {stats:?}"
+    );
+}
+
+#[test]
 fn sections_preserve_text_offsets_into_the_original_input() {
     let src = "fn main() -> Text {\n  let groups = read sections(lines(word))\n  groups.get(1).get(0)\n}\n";
     let (runtime, result) = run_main_with_input(src, "alpha\n\nbeta\n");
@@ -474,7 +557,6 @@ fn sections_preserve_text_offsets_into_the_original_input() {
 }
 
 #[test]
-#[ignore = "known bug: lines accepts a child parser that consumed only a prefix"]
 fn lines_require_each_child_parser_to_consume_the_whole_line() {
     // `int` may consume the `12` prefix, but the trailing `junk` makes the line
     // invalid under §7.5 full-consumption semantics.
@@ -490,7 +572,6 @@ fn lines_require_each_child_parser_to_consume_the_whole_line() {
 }
 
 #[test]
-#[ignore = "known bug: lines(rest) receives the full remaining input, not one line"]
 fn lines_rest_is_bounded_to_each_line() {
     let src = "fn main() -> Text {\n  let values = read lines(rest)\n  values.get(1)\n}\n";
     let (runtime, result) = run_main_with_input(src, "alpha\nbeta\ngamma\n");
@@ -499,7 +580,6 @@ fn lines_rest_is_bounded_to_each_line() {
 }
 
 #[test]
-#[ignore = "known bug: anonymous word templates are tagged with the INT descriptor"]
 fn anonymous_word_template_vec_uses_the_text_element_descriptor() {
     let src = "fn main() -> Vec[Text] {\n  read lines(`{word}`)\n}\n";
     let (runtime, result) = run_main_with_input(src, "alpha\nbeta\n");
@@ -520,7 +600,6 @@ fn anonymous_word_template_vec_uses_the_text_element_descriptor() {
 }
 
 #[test]
-#[ignore = "known bug: text captures consume literals that follow the capture"]
 fn template_text_capture_stops_before_the_following_literal() {
     let src = "fn main() -> Text {\n  let parsed = read `pre{body:text}post`\n  parsed.body\n}\n";
     let (runtime, result) = run_main_with_input(src, "premiddlepost");
@@ -528,10 +607,758 @@ fn template_text_capture_stops_before_the_following_literal() {
     assert_eq!(result.as_text(), "middle");
 }
 
+/// **A `grid(char)` column is positional, so a space is a cell.**
+///
+/// D11 made a grid's width a *cell count*, which is right; combined with
+/// `walk_atomic`'s unconditional leading-horizontal-whitespace trim it meant
+/// `char` skipped every space in a row and the space vanished as a cell. So
+/// `grid(char)` over `"ab\na b\n"` counted two cells in both rows and answered
+/// a clean 2x2 grid with `b` shifted left into the space's slot — a **wrong
+/// answer** where the byte-width predecessor gave a wrong shape. A silently
+/// misaligned grid is the worse of the two.
+///
+/// `char` now reads the scalar at the cursor. §7.4's "surrounding horizontal
+/// space handled by caller" is a rule for the numeric atomics; a character
+/// parser that skips spaces cannot represent one.
+///
+/// Every input here ends with a newline, which is the case the stage got wrong
+/// everywhere else.
 #[test]
-#[ignore = "known bug: chars(int) advertises Char while storing Int objects"]
+fn a_grid_of_char_is_positional_so_a_space_is_a_cell() {
+    // A space occupies its own column.
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
+    let (runtime, result) = run_main_with_input(src, "a b\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 31, "\"a b\" is three columns, not two");
+
+    // And it is readable at the column it occupies.
+    let src = "fn main() -> Char {\n  let g = read grid(char)\n  g.get(1, 0)\n}\n";
+    let (runtime, result) = run_main_with_input(src, "a b\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_char(), ' ');
+
+    // Trailing and leading spaces are cells too, for the same reason.
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
+    let (runtime, result) = run_main_with_input(src, "ab \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 31);
+    let (runtime, result) = run_main_with_input(src, " a\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 21);
+
+    // A genuinely ragged grid is rejected again, which is the point: §7.5 says
+    // every row has the same cell count, and this input does not.
+    let (runtime, _raw, _unit) = run_main_raw_with_input(
+        "fn main() -> Int {\n  let g = read grid(char)\n  g.width()\n}\n",
+        "ab\na b\n",
+    );
+    assert_eq!(
+        runtime.fault(),
+        praxis_runtime::FaultKind::ParseFailed,
+        "a two-cell row and a three-cell row are not one grid"
+    );
+}
+
+/// **A row's trailing horizontal whitespace is padding, not a cell.**
+///
+/// `grid(int)` faulted on a row ending in a space while `matrix(int)` over the
+/// identical file succeeded — two whitespace-token constructors disagreeing
+/// about one ordinary input. §7.5 requires only that every row have the same
+/// cell count.
+#[test]
+fn a_grid_row_may_end_in_horizontal_whitespace() {
+    let src =
+        "fn main() -> Int {\n  let g = read grid(int)\n  g.width() * 100 + g.height() * 10 + g[1, 1]\n}\n";
+    let (runtime, result) = run_main_with_input(src, "12 34 \n56 78 \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 2 * 100 + 2 * 10 + 78);
+
+    // The same file through `matrix`, which never had the defect: the two
+    // constructors agree now, and that agreement is the assertion.
+    let src = "fn main() -> Int {\n  let g = read matrix(int)\n  g.width() * 100 + g.height() * 10 + g[1, 1]\n}\n";
+    let (runtime, result) = run_main_with_input(src, "12 34 \n56 78 \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 2 * 100 + 2 * 10 + 78);
+}
+
+/// **Whitespace is data when the parser offered it reads it — for every root
+/// parser and every file ending.** A matrix, not an example, because this class
+/// of defect has now been shipped three times and each time the fix was checked
+/// against one example.
+///
+/// Round one applied `walk_exact`'s "a bounded child must fill its bound" rule
+/// at a root region that ran to the end of the file, so `read ws(int)` over
+/// `"1 2 3\n"` asked `int` to eat the `\n`. Round two trimmed exactly one
+/// terminator off the buffer, and a file ending `"\n\n"` reproduced that
+/// verbatim — `read ws(P)`, `read sep(s, P)` and `read chars(P, skip:)` faulted
+/// with the identical messages, one byte later. Both treated a number of bytes
+/// rather than the rule.
+///
+/// The rule is stated in `parser/cursor.rs`: **whitespace is data when the
+/// parser offered it reads it.** The deciding half is the one that can ask —
+/// `walk_exact`, `walk_characters` and `walk_grid_row` forgive a leftover run
+/// through one predicate, and `trailing_blank_run` lets `lines`, `grid` — both
+/// forms, uniform and ragged — and `matrix` drop a trailing blank *line* only
+/// when their parser makes nothing of it. The
+/// parser-independent half decides nothing any more: it drops a trailing run of
+/// **empty** lines, which have no bytes to offer anyone. Together they leave the
+/// terminator to nobody, so the root region is simply the whole buffer.
+///
+/// Round three had those two halves answering the same question differently:
+/// `split_lines` deleted a trailing line of *spaces* without asking, so
+/// `grid(char)` called `"ab\ncd \n"` ragged (a space is a cell) and silently
+/// answered a 2x2 grid for `"ab\ncd\n  \n"` (a line of spaces is not a line).
+/// The `grid(char)` block at the end of this test is the pair that disagreed,
+/// asserted together.
+///
+/// Every root constructor §7.5 names is crossed with every ending real input
+/// arrives with. Each cell asserts a **value** and not merely the absence of a
+/// fault, so a rule that swallowed data instead of whitespace would fail here
+/// too.
+#[test]
+fn every_root_parser_reads_every_file_ending() {
+    // No terminator; the ordinary one; CRLF; a blank final line; a trailing
+    // space before the newline; and a final line of nothing but spaces.
+    const ENDINGS: [&str; 6] = ["", "\n", "\r\n", "\n\n", " \n", "\n  \n"];
+
+    // (label, program, input body without any terminator, the one answer every
+    // ending must give). The answers are shaped so a mis-split fails: a count
+    // *and* an element, or a width *and* a height.
+    let forms: [(&str, &str, &str, i64); 13] = [
+        ("ws(int)", "read ws(int)", "1 2 3", 33),
+        ("sep(\",\", int)", "read sep(\",\", int)", "1,2,3", 33),
+        ("csv(int)", "read csv(int)", "1,2,3", 33),
+        (
+            "chars(digit, skip: none)",
+            "read chars(digit, skip: none)",
+            "123",
+            33,
+        ),
+        (
+            "chars(digit, skip: whitespace)",
+            "read chars(digit, skip: whitespace)",
+            "1 2 3",
+            33,
+        ),
+        (
+            "chars(digit, skip: newlines)",
+            "read chars(digit, skip: newlines)",
+            "1\n2\n3",
+            33,
+        ),
+        ("lines(int)", "read lines(int)", "1\n2\n3", 33),
+        ("lines(csv(int))", "read lines(csv(int))", "1\n2\n3", 33),
+        // A template at the root, and the same template under `lines`: the
+        // capture bound is region-relative, so both have to be checked.
+        (
+            "lines(template)",
+            "read lines(`{n:int} x`)",
+            "1 x\n2 x\n3 x",
+            33,
+        ),
+        ("matrix(int)", "read matrix(int)", "1 2 3", 31),
+        ("grid(digit)", "read grid(digit)", "123", 31),
+        (
+            "sections(lines(int))",
+            "read sections(lines(int))",
+            "1\n2\n3",
+            33,
+        ),
+        (
+            "sep(\" -> \", word)",
+            "read sep(\" -> \", word)",
+            "a -> b -> c",
+            31,
+        ),
+    ];
+
+    for (label, parser, body, want) in forms {
+        // `len() * 10 + <a member>` for a Vec; `width() * 10 + height()` for a
+        // Grid; the trailing-`x` template Vec reads its last capture.
+        let tail = match label {
+            "matrix(int)" | "grid(digit)" => "v.width() * 10 + v.height()",
+            "lines(csv(int))" => "v.len() * 10 + v.get(2).get(0)",
+            "lines(template)" => "v.len() * 10 + v.get(2).n",
+            "sections(lines(int))" => "v.len() * 30 + v.get(0).get(2)",
+            "sep(\" -> \", word)" => "v.len() * 10 + v.get(2).len()",
+            _ => "v.len() * 10 + v.get(2)",
+        };
+        let src = format!("fn main() -> Int {{\n  let v = {parser}\n  {tail}\n}}\n");
+        for ending in ENDINGS {
+            let input = format!("{body}{ending}");
+            let (runtime, result) = run_main_with_input(&src, &input);
+            assert!(
+                !runtime.has_pending_fault(),
+                "{label} over {input:?} faulted: {:?}",
+                runtime.fault()
+            );
+            assert_eq!(
+                result.as_int(),
+                want,
+                "{label} over {input:?} — every ending is the same data"
+            );
+        }
+    }
+
+    // §7.5's own `chars(one_of("^v<>"), skip: whitespace)`, which is the
+    // spelling both earlier rounds broke. Its elements are `Char`s, so the
+    // measure is the count — enough here, because a terminator read as an
+    // element or a value dropped both change it.
+    let src = "fn main() -> Int {\n  let v = read chars(one_of(\"^v<>\"), skip: whitespace)\n  v.len()\n}\n";
+    for ending in ENDINGS {
+        let input = format!("^v<>{ending}");
+        let (runtime, result) = run_main_with_input(src, &input);
+        assert!(
+            !runtime.has_pending_fault(),
+            "§7.5's chars example over {input:?} faulted: {:?}",
+            runtime.fault()
+        );
+        assert_eq!(result.as_int(), 4, "four moves, whatever ends the file");
+    }
+
+    // Two rows the matrix states rather than shares, because their right answer
+    // genuinely differs — and saying so is the point of a matrix.
+    //
+    // `rest` consumes the remainder of its region, and at the root the region
+    // is the buffer. So it reads the terminator, which is what makes
+    // `parse(t, rest)` the identity on `t` — the property the round-two trim
+    // broke, and the reason the trim is gone rather than merely smaller.
+    let src = "fn main() -> Int {\n  let t = read rest\n  t.len()\n}\n";
+    for ending in ENDINGS {
+        let input = format!("abc{ending}");
+        let (runtime, result) = run_main_with_input(src, &input);
+        assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+        assert_eq!(
+            result.as_int(),
+            input.len() as i64,
+            "`rest` reads its whole region, terminator included: {input:?}"
+        );
+    }
+
+    // `grid(char)` is positional, so a space is a cell (ADR-079) — and this is
+    // the block where the two halves of the rule used to contradict each other,
+    // seventeen lines apart, one asserting each answer. They are asserted
+    // together now.
+    //
+    // An ending with no bytes for `char` to read is nobody's, so it is the same
+    // 2x2 grid…
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
+    for ending in ["", "\n", "\r\n", "\n\n", "\n\n\n", "\r\n\r\n"] {
+        let input = format!("ab\ncd{ending}");
+        let (runtime, result) = run_main_with_input(src, &input);
+        assert!(
+            !runtime.has_pending_fault(),
+            "grid(char) over {input:?} faulted: {:?}",
+            runtime.fault()
+        );
+        assert_eq!(result.as_int(), 22, "grid(char) over {input:?}");
+    }
+    // …a final line of two spaces is a **row of two cells**, because `char`
+    // reads a space. This is the cell round three asserted as 22 while
+    // asserting six lines below that one space on a data row is a cell: a line
+    // of spaces was deleted by `split_lines` before `char` was asked. One
+    // question, one answer — the child's.
+    for ending in ["\n  \n", "\n  \n\n", "\n  "] {
+        let input = format!("ab\ncd{ending}");
+        let (runtime, result) = run_main_with_input(src, &input);
+        assert!(
+            !runtime.has_pending_fault(),
+            "grid(char) over {input:?} faulted: {:?}",
+            runtime.fault()
+        );
+        assert_eq!(
+            result.as_int(),
+            23,
+            "grid(char) over {input:?} — two spaces `char` reads are a third row"
+        );
+    }
+    // A grid of nothing but spaces is that grid, not an empty one. Round three
+    // answered width 0, height 0 here — four cells silently deleted.
+    let (runtime, result) = run_main_with_input(src, "  \n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        22,
+        "\"  \\n  \\n\" is a 2x2 grid of spaces"
+    );
+    // The children that cannot read a space read none of it, and for them the
+    // same file ending is nobody's: `grid(digit)`, `matrix(int)` and
+    // `lines(int)` are unmoved by it. That difference is the rule working, not
+    // the constructors disagreeing.
+    let digits =
+        "fn main() -> Int {\n  let g = read grid(digit)\n  g.width() * 10 + g.height()\n}\n";
+    let (runtime, result) = run_main_with_input(digits, "12\n34\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 22, "`digit` reads no cell in \"  \"");
+    // …and a file whose last row alone carries a trailing space is a **ragged
+    // grid**. That is a complaint about the data, and a different complaint
+    // from "the rest of the line": put the space on every row and the grid is
+    // simply one column wider.
+    let (runtime, _raw, _unit) = run_main_raw_with_input(src, "ab\ncd \n");
+    assert_eq!(
+        runtime.fault(),
+        praxis_runtime::FaultKind::ParseFailed,
+        "a two-cell row and a three-cell row are not one grid, whatever the third cell is"
+    );
+    let (runtime, result) = run_main_with_input(src, "ab \ncd \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 32, "every row three cells wide");
+    // A tab is a character exactly as a space is, so a final line of `" \t "`
+    // is a **three-cell row** and the grid is ragged — where the two-space
+    // ending five lines above is a two-cell row that fits. The commit that
+    // moved this cell named it and nothing end-to-end held it: the ragged
+    // direction was pinned only for the all-spaces shape and the tab only at
+    // the substrate, so a regression that made a tab behave unlike a space
+    // would have been caught only indirectly.
+    let (runtime, _raw, _unit) = run_main_raw_with_input(src, "ab\ncd\n \t \n");
+    assert_eq!(
+        runtime.fault(),
+        praxis_runtime::FaultKind::ParseFailed,
+        "\" \\t \" is three cells against a two-cell grid"
+    );
+
+    // `lines(rest)` is lossless, which is `rest`'s identity property one level
+    // up: round three's extent trim deleted the third line for every child,
+    // including the children that read it.
+    let src =
+        "fn main() -> Int {\n  let v = read lines(rest)\n  v.len() * 10 + v.get(1).len()\n}\n";
+    let (runtime, result) = run_main_with_input(src, "ab\ncd\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 32, "`rest` reads \"  \", so it is a line");
+
+    // **A capture answers from the rule too** — the last construct that did
+    // not. `skip_capture_ws` used to move the cursor before the child was ever
+    // offered the bytes, so the same child on the same file answered one way
+    // bare and another inside a template: silently for `char` (two elements,
+    // not three), as a hard fault for the interior blank line, and as lost
+    // bytes for `text`/`rest`. The only template row in the matrix above is
+    // `` `{n:int} x` ``, whose child cannot read whitespace, so the skip was
+    // invisible to the whole suite. Each pair is asserted together, so the two
+    // spellings cannot drift apart again.
+    let pairs: [(&str, &str, &str, i64); 4] = [
+        // A trailing line of two spaces is one `char` cell, so it is an element.
+        (
+            "lines(char) / lines(`{a:char}`) over a trailing blank line",
+            "read lines(char)",
+            "read lines(`{a:char}`)",
+            3,
+        ),
+        // The same rule at an *interior* blank line, where the skip did not
+        // merely lose an element — it faulted where the bare spelling read.
+        (
+            "lines(char) / lines(`{a:char}`) over an interior blank line",
+            "read lines(char)",
+            "read lines(`{a:char}`)",
+            3,
+        ),
+        // `lines(rest)` is lossless and so is the capture spelling of it.
+        (
+            "lines(rest) / lines(`{a:rest}`) last element bytes",
+            "read lines(rest)",
+            "read lines(`{a:rest}`)",
+            2,
+        ),
+        // Ditto `text`, which is `rest` with a bound and no bound here.
+        (
+            "lines(text) / lines(`{a:text}`) last element bytes",
+            "read lines(text)",
+            "read lines(`{a:text}`)",
+            2,
+        ),
+    ];
+    for (n, (label, bare, capture, want)) in pairs.iter().enumerate() {
+        let (input, bare_tail, capture_tail) = match n {
+            0 => ("x\ny\n  \n", "v.len()", "v.len()"),
+            1 => ("x\n  \ny\n", "v.len()", "v.len()"),
+            _ => (
+                "x\ny\n  \n",
+                "v.get(v.len() - 1).len()",
+                "v.get(v.len() - 1).a.len()",
+            ),
+        };
+        for (parser, tail, which) in [
+            (bare, bare_tail, "bare"),
+            (capture, capture_tail, "capture"),
+        ] {
+            let src = format!("fn main() -> Int {{\n  let v = {parser}\n  {tail}\n}}\n");
+            let (runtime, result) = run_main_with_input(&src, input);
+            assert!(
+                !runtime.has_pending_fault(),
+                "{label} ({which}) over {input:?} faulted: {:?}",
+                runtime.fault()
+            );
+            assert_eq!(
+                result.as_int(),
+                *want,
+                "{label} ({which}) over {input:?} — one child, one answer"
+            );
+        }
+    }
+    // A capture at the root, with no `lines` in the picture: `rest` and `text`
+    // read their leading whitespace, and wrapping them in a capture does not
+    // take it away.
+    for parser in ["rest", "text"] {
+        let bare = format!("fn main() -> Int {{\n  let t = read {parser}\n  t.len()\n}}\n");
+        let capture =
+            format!("fn main() -> Int {{\n  let r = read `{{a:{parser}}}`\n  r.a.len()\n}}\n");
+        for (src, which) in [(&bare, "bare"), (&capture, "capture")] {
+            let (runtime, result) = run_main_with_input(src, " ab\n");
+            assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+            assert_eq!(
+                result.as_int(),
+                4,
+                "`{parser}` ({which}) reads its leading space"
+            );
+        }
+    }
+    // The bound scan still starts past the capture's own leading whitespace,
+    // which is a bound question and not a whitespace-reading one. Without that
+    // offset the following literal run — `SpaceRun` plus empty text — matches
+    // the indent itself, `n` is bounded at byte 0 and `int` is handed the word.
+    let src =
+        "fn main() -> Int {\n  let v = read lines(`{n:int} x`)\n  v.len() * 10 + v.get(2).n\n}\n";
+    let (runtime, result) = run_main_with_input(src, " 1 x\n 2 x\n 3 x\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 33, "an indented template still matches");
+
+    // **A csv field answers from the rule too.** `csv_tokens` used to
+    // `str::trim()` every field, which decided about whitespace without asking
+    // the field's parser — and `trim()` eats vertical whitespace, so `csv(rest)`
+    // lost the terminator `sep(",", rest)` keeps. §7.5's "ignore horizontal
+    // whitespace around each comma" now falls out of the rule instead: `int`
+    // skips it, `char` reads it, and neither is told which.
+    for (label, child, input, tail, want) in [
+        (
+            "rest keeps the terminator",
+            "rest",
+            "a,b,c\n",
+            "v.get(2).len()",
+            2,
+        ),
+        (
+            "text keeps the leading space",
+            "text",
+            "a, b,c\n",
+            "v.get(1).len()",
+            2,
+        ),
+        (
+            "char reads a space as a field",
+            "char",
+            "a, ,c\n",
+            "v.len()",
+            3,
+        ),
+        (
+            "int still skips its padding",
+            "int",
+            " 1, 2, 3\n",
+            "v.len() * 10 + v.get(2)",
+            33,
+        ),
+    ] {
+        let csv = format!("fn main() -> Int {{\n  let v = read csv({child})\n  {tail}\n}}\n");
+        let sep =
+            format!("fn main() -> Int {{\n  let v = read sep(\",\", {child})\n  {tail}\n}}\n");
+        for (src, which) in [(&csv, "csv"), (&sep, "sep(\",\", …)")] {
+            let (runtime, result) = run_main_with_input(src, input);
+            assert!(
+                !runtime.has_pending_fault(),
+                "{label} ({which}) over {input:?} faulted: {:?}",
+                runtime.fault()
+            );
+            assert_eq!(
+                result.as_int(),
+                want,
+                "{label} ({which}) over {input:?} — one rule, two constructors"
+            );
+        }
+    }
+}
+
+/// **An interior blank line is structure, and no constructor gets to skip
+/// one.**
+///
+/// `matrix` did: `walk_matrix` skipped every line that trimmed to nothing, so
+/// `matrix(int)` over `"1 2\n  \n3 4\n"` silently answered a 2x2 grid while
+/// `lines(int)` and `grid(digit)` faulted on the identical shape. Three
+/// constructs, three answers, for the one rule they are all supposed to inherit
+/// — and the skip is precisely the per-constructor whitespace special case
+/// ADR-078's corollary tells a later contributor not to write.
+///
+/// The trailing case is the other half of the pair and is *not* a special case:
+/// a trailing blank line is offered, and belongs to nobody when the parser makes
+/// nothing of it.
+#[test]
+fn an_interior_blank_line_is_a_row_and_a_trailing_one_is_nobodys() {
+    let matrix =
+        "fn main() -> Int {\n  let g = read matrix(int)\n  g.width() * 10 + g.height()\n}\n";
+    let lines = "fn main() -> Int {\n  let v = read lines(int)\n  v.len()\n}\n";
+    let grid = "fn main() -> Int {\n  let g = read grid(digit)\n  g.width() * 10 + g.height()\n}\n";
+
+    // Interior: all three complain, none silently deletes a line.
+    let (runtime, _raw, _unit) = run_main_raw_with_input(matrix, "1 2\n  \n3 4\n");
+    assert_eq!(
+        runtime.fault(),
+        praxis_runtime::FaultKind::ParseFailed,
+        "a zero-token row is not two tokens wide"
+    );
+    let (runtime, _raw, _unit) = run_main_raw_with_input(lines, "1\n  \n2\n");
+    assert_eq!(runtime.fault(), praxis_runtime::FaultKind::ParseFailed);
+    let (runtime, _raw, _unit) = run_main_raw_with_input(grid, "12\n  \n34\n");
+    assert_eq!(runtime.fault(), praxis_runtime::FaultKind::ParseFailed);
+
+    // Trailing: all three read the same data, because none of their parsers
+    // makes anything of a line of spaces.
+    let (runtime, result) = run_main_with_input(matrix, "1 2\n3 4\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 22);
+    let (runtime, result) = run_main_with_input(lines, "1\n2\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 2);
+    let (runtime, result) = run_main_with_input(grid, "12\n34\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 22);
+
+    // **A child that succeeds vacuously has made something of the line**, and
+    // that is where `matrix(P)` and `lines(ws(P))` part company. `ws(int)`
+    // answers an all-whitespace region with an *empty* `Vec` rather than a
+    // failure, so it makes an element and `walk_lines` keeps the line — three
+    // elements over the bytes `matrix(int)` reads as a 2x2 grid, because
+    // `matrix` has no zero-token row to make. Same criterion, two children,
+    // and §7.5 says so rather than leaving a reader to find it: `matrix` is
+    // "lines containing whitespace-separated elements" and that is not a
+    // definition of `lines(ws(...))`.
+    let lines_ws = "fn main() -> Int {\n  let v = read lines(ws(int))\n  \
+                    v.len() * 10 + v.get(v.len() - 1).len()\n}\n";
+    let (runtime, result) = run_main_with_input(lines_ws, "1 2\n3 4\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        30,
+        "three elements, the last of them empty — `ws` made one of \"  \""
+    );
+    let (runtime, result) = run_main_with_input(matrix, "1 2\n3 4\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 22, "`matrix` made no row of \"  \"");
+    // A final *empty* line is a third answer again, and the reason is the other
+    // half of the rule: `split_lines` drops lines with no bytes to offer
+    // anyone, so `ws` is never asked.
+    let (runtime, result) = run_main_with_input(lines_ws, "1 2\n3 4\n\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        22,
+        "an empty final line is nobody's before any parser runs"
+    );
+    // `csv` is not in the vacuous-success list: it always makes at least one
+    // field, so `csv(int)` fails on a blank line and the line is dropped.
+    let lines_csv = "fn main() -> Int {\n  let v = read lines(csv(int))\n  v.len()\n}\n";
+    let (runtime, result) = run_main_with_input(lines_csv, "1,2\n3,4\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 2, "`csv(int)` made nothing of \"  \"");
+}
+
+/// **A whitespace-only template part is a bound too.**
+///
+/// The capture bound first looked only for a following literal with *non-empty*
+/// text, so a capture followed by a plain space run — the most ordinary
+/// template shape there is — was not bounded at all: `text` swallowed the rest
+/// of its region and the space run then had nothing left to match.
+/// `` lines(`{name:text} {v:int}`) `` over `"foo 3\n"` reported "expected
+/// whitespace" at the end of the line. §7.9 makes a run of whitespace a
+/// `Literal` whose text is empty and whose policy carries the requirement, and
+/// §7.4's "until the following template literal can match" does not exempt it.
+///
+/// All three spellings, and all three inputs end with a newline: this defect
+/// was found on a real file, and the same template inside `lines` is bounded
+/// per line while the bare one is bounded by the root region.
+#[test]
+fn a_capture_is_bounded_by_a_whitespace_only_template_part() {
+    // A plain space run. `text` is non-greedy, so the bound is the *earliest*
+    // position the space run can match — the same rule a literal bound follows.
+    let src =
+        "fn main() -> Text {\n  let r = read lines(`{name:text} {v:int}`)\n  r.get(1).name\n}\n";
+    let (runtime, result) = run_main_with_input(src, "foo 3\nbar 12\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_text(), "bar");
+
+    // `\s+`.
+    let src = "fn main() -> Int {\n  let r = read lines(`{name:text}\\s+{v:int}`)\n  var t = 0\n  for x in r { t = t + x.v }\n  t\n}\n";
+    let (runtime, result) = run_main_with_input(src, "foo 3\nbar 12\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 15);
+
+    // `\n`, which bounds a capture across a line ending.
+    let src = "fn main() -> Int {\n  let r = read `{name:text}\\n{v:int}`\n  r.v\n}\n";
+    let (runtime, result) = run_main_with_input(src, "foo\n3\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 3);
+
+    // `\s*` still constrains nothing, so it is still skipped: the scan looks
+    // past it for something that does. Nothing does here, so the capture is
+    // unbounded and `text` takes the line — which is the documented answer for
+    // a template that asks for zero-or-more.
+    let src = "fn main() -> Text {\n  let r = read lines(`{name:text}\\s*`)\n  r.get(0).name\n}\n";
+    let (runtime, result) = run_main_with_input(src, "foo 3\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_text(), "foo 3");
+
+    // A literal the template wrote with **nothing** in front of it carries
+    // `WsPolicy::None`, so it is not a run and it absorbs nothing. Both halves
+    // are pinned here because ADR-079 Decision 2 and `capture_bound`'s doc
+    // comment used to explain this case by crediting "the comma's `SpaceRun`"
+    // with eating the space, a mechanism two later decisions removed.
+    let src = "fn main() -> Int {\n  let r = read `{a:int},{b:int}`\n  r.a * 100 + r.b\n}\n";
+    // No space at all — which a one-or-more `SpaceRun` could not match.
+    let (runtime, result) = run_main_with_input(src, "12,34\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 1234);
+    // A space before the comma. The bound is where the run can start, so it is
+    // the comma at byte 3; `a` is handed "12 " and does NOT fill it. The space
+    // is forgiven by ADR-078's rule — whitespace the parser offered it did not
+    // read — which is the same rule `lines`, `grid` and `ws` answer from.
+    let (runtime, result) = run_main_with_input(src, "12 ,34\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 1234);
+}
+
+/// **`parse(t, rest)` is the identity on `t`.**
+///
+/// `run_plan` is the single body behind both `read <parser>` and the host
+/// `parse(text, P)`, and a repair pass trimmed the input file's trailing
+/// terminator inside it. That is a file convention, and the second caller has no
+/// file: the `\n` a *program* wrote into its own literal was deleted, so
+/// `parse("abc\n", rest)` and `parse("abc", rest)` answered the same `Text` and
+/// nothing could recover the difference. §7.4 defines `rest` as "consumes the
+/// remainder of the current region", and at the root the region is the text the
+/// caller handed in.
+///
+/// The trim is gone rather than narrowed to the `read` path: nothing needed it
+/// once trailing whitespace was left to nobody by rule (ADR-078). This is the
+/// property that says so, and it is the one a re-introduced trim of *any* size
+/// would break.
+#[test]
+fn a_parse_is_the_identity_on_the_text_it_was_given() {
+    let src = "fn main() -> Int {\n  \
+               let a = parse(\"abc\\n\", rest)\n  \
+               let b = parse(\"abc\", rest)\n  \
+               let c = parse(\"abc\\r\\n\", rest)\n  \
+               let d = parse(\"abc\\n\\n\", rest)\n  \
+               a.len() * 1000 + b.len() * 100 + c.len() * 10 + d.len()\n}\n";
+    let (runtime, result) = run_main_with_input(src, "unrelated stdin\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        4 * 1000 + 3 * 100 + 5 * 10 + 5,
+        "`parse` reads the Text it was handed, terminators included"
+    );
+
+    // The same at the `read` end, so the two callers are visibly one function:
+    // a root `rest` takes the whole input file, terminator included.
+    let src = "fn main() -> Int {\n  let t = read rest\n  t.len()\n}\n";
+    let (runtime, result) = run_main_with_input(src, "abc\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 4);
+}
+
+/// **Two spellings of one whitespace policy bound a capture alike.**
+///
+/// `` lines(`{a:text} bar`) `` read `"x y bar"` as `a = "x y"` while
+/// `` lines(`{a:text}\s+bar`) `` over the identical bytes faulted with
+/// `expected literal "bar"` at the interior space. §7.9 lowers `\s+` to its own
+/// empty-text part, and the bound was computed from the *first* following part
+/// that constrains anything — which for the escaped spelling is the space run
+/// alone, and a space run matches at the first space, where `bar` is not.
+///
+/// §7.4 says `text` "minimally consumes text until the following template
+/// literal can match". What has to be able to match is the whole run of parts
+/// before the next capture, which is the only reading under which two spellings
+/// of one policy agree. Both directions are pinned: the case that was already
+/// right must stay right.
+#[test]
+fn two_spellings_of_one_whitespace_policy_bound_a_capture_alike() {
+    let escaped = "fn main() -> Text {\n  let r = read lines(`{a:text}\\s+bar`)\n  r.get(0).a\n}\n";
+    let plain = "fn main() -> Text {\n  let r = read lines(`{a:text} bar`)\n  r.get(0).a\n}\n";
+
+    // Past an interior space — the half that faulted.
+    for src in [escaped, plain] {
+        let (runtime, result) = run_main_with_input(src, "x y bar\n");
+        assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+        assert_eq!(result.as_text(), "x y");
+    }
+    // No interior space — the half that already worked, and must keep working.
+    for src in [escaped, plain] {
+        let (runtime, result) = run_main_with_input(src, "x bar\n");
+        assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+        assert_eq!(result.as_text(), "x");
+    }
+
+    // The run is matched as a run, so a leading `\s*` that constrains nothing
+    // on its own still keeps the whitespace out of the capture: the bound is
+    // the earliest position where `\s*bar` matches, which is before the spaces.
+    let src = "fn main() -> Text {\n  let r = read lines(`{a:text}\\s*bar`)\n  r.get(0).a\n}\n";
+    let (runtime, result) = run_main_with_input(src, "x  bar\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_text(), "x");
+}
+
+/// **IPR-11 without growing `word`'s delimiter set.**
+///
+/// `word` stops on space, tab, `,`, `\n` and `\r` and nothing else, so
+/// `{w:word}-to-{x:word}` let the first `word` swallow the `-to-`. The audit's
+/// reading was that the delimiter set is too small. It is not: growing it to
+/// "every template delimiter" breaks `sep(" -> ", word)` and any `word` that
+/// legitimately contains a `-`. What was missing is the *region* — a capture
+/// bounded by the literal that follows it stops there whatever its own
+/// delimiter rule says, so the set stays minimal and documented.
+///
+/// Both halves are pinned here: the bounded `word` stops at the literal, and a
+/// bare `ws(word)` still reads `a-b` as one word.
+#[test]
+fn a_bounded_word_capture_stops_at_its_region_end() {
+    // The shape from tests/aoc-corpus/m9_almanac.px.
+    let src = "fn main() -> Text {\n  let r = read `{w:word}-to-{x:word} map:`\n  \
+               r.w\n}\n";
+    let (runtime, result) = run_main_with_input(src, "seed-to-soil map:");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_text(),
+        "seed",
+        "the following literal is the bound; `-` is not a word delimiter"
+    );
+
+    let src = "fn main() -> Text {\n  let r = read `{w:word}-to-{x:word} map:`\n  \
+               r.x\n}\n";
+    let (runtime, result) = run_main_with_input(src, "seed-to-soil map:");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_text(), "soil");
+
+    // Unbounded, `-` is an ordinary word character and must stay one.
+    let src = "fn main() -> Text {\n  let v = read ws(word)\n  v.get(0)\n}\n";
+    let (runtime, result) = run_main_with_input(src, "a-b c");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_text(),
+        "a-b",
+        "a bare `word` keeps its minimal delimiter set"
+    );
+}
+
+/// **IPR-07 and D-S20-A.** A collection's element descriptor and the objects it
+/// holds must be the same type.
+///
+/// AMENDED (S20). The declared return type was `Vec[Char]`, because
+/// `synthesize` hardcoded `chars(P, skip:) -> Vec[Char]` regardless of `P` —
+/// which is precisely the disagreement this test exists to catch, written into
+/// the test's own source. `chars(int, skip: none)` produces `Int` objects, so
+/// its type is `Vec[Int]`; the static type is derived from the child now, the
+/// runtime descriptor is derived from the same child, and the annotation says
+/// what the program actually returns. `chars(one_of("LR"))` is still
+/// `Vec[Char]`, because `one_of` synthesizes `Char`.
+#[test]
 fn chars_result_descriptor_matches_the_values_it_contains() {
-    let src = "fn main() -> Vec[Char] {\n  read chars(int, skip: none)\n}\n";
+    let src = "fn main() -> Vec[Int] {\n  read chars(int, skip: none)\n}\n";
     let (runtime, result) = run_main_with_input(src, "65");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     let payload = result.payload::<VecPayload>();

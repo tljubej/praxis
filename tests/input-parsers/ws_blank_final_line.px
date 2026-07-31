@@ -1,0 +1,16 @@
+// Input-parser fixture: a file that ends with a BLANK LINE.
+//
+// The round-two repair trimmed exactly one terminator off the buffer, so this
+// `.in` — one byte different from `ws_tokens.in` — reproduced the closed
+// blocker verbatim: `int` was handed the token `3\n` and asked to eat it. A
+// trim count is the wrong kind of answer. Trailing whitespace is left to nobody
+// by the rule instead: a `ws` token contains no whitespace, and a child that
+// leaves only whitespace has filled its bound.
+//
+// Reference state: PASSES at the pre-S20 base b2184c8, fails at e68ac0c (the
+// round-two repair). A regression fixture for a defect this branch introduced
+// and closed, not a gate for an audit finding.
+fn main() -> Int {
+    let v = read ws(int)
+    v.len() * 10 + v.get(2)
+}

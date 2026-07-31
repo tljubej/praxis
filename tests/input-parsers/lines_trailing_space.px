@@ -1,0 +1,18 @@
+// Input-parser fixture: every line ends with a space.
+//
+// §7.4 puts "surrounding horizontal space" on the caller, and `lines` is the
+// caller. It implemented only half of that: `lines(int)` accepted " 1" and
+// faulted on "1 ", while `grid(int)` over the identical bytes called the same
+// run padding — two constructs disagreeing about one byte. The rule is
+// `walk_exact`'s now, so every bounded construct inherits it.
+//
+// The last line also ends the file with a space before its newline, which is
+// the ending no fixture in this directory had.
+//
+// Reference state: PASSES at the pre-S20 base b2184c8, fails at e68ac0c. A
+// regression fixture for a defect this branch introduced and closed, not a gate
+// for an audit finding.
+fn main() -> Int {
+    let v = read lines(int)
+    v.len() * 10 + v.get(2)
+}

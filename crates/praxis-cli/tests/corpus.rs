@@ -56,9 +56,17 @@ fn every_corpus_program_runs_and_prints_the_answer_it_documents() {
     let programs = programs(&root);
     // A guard against the test silently covering nothing — a wrong `corpus_root`
     // would otherwise pass by finding no programs at all.
+    //
+    // **The floor is the actual count, not a comfortable margin below it.** At
+    // `>= 13` the gate agreed with a handoff that said "25 programs (17
+    // aoc-corpus, 8 input-parsers)" while the tree held 24 (18 and 6), and
+    // neither number was checkable against the other. Bumping this when a
+    // program lands is the price of the doc and the gate stating one fact.
+    // Today: 18 under `tests/aoc-corpus`, 8 under `tests/input-parsers`.
     assert!(
-        programs.len() >= 13,
-        "expected the corpus under {}, found {} programs",
+        programs.len() >= 26,
+        "expected at least 26 programs in the corpus under {}, found {}. \
+         If you added one, raise this floor; if you removed one, say why.",
         root.display(),
         programs.len()
     );

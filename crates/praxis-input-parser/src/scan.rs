@@ -339,7 +339,7 @@ pub(crate) fn scan_template_at(
     while let Some((at, c)) = cur.peek() {
         match c {
             '{' => {
-                flush(&mut lit, WsPolicy::SpaceRun, &mut parts);
+                flush(&mut lit, &mut parts);
                 let (name, body_text, body_at) = capture_extent(&mut cur, at)?;
                 let name = match name {
                     Some(raw) => Some(capture_name(raw, at)?),
@@ -365,7 +365,7 @@ pub(crate) fn scan_template_at(
                 cur.bump();
                 match escape(&mut cur, at)? {
                     Escape::Policy(ws) => {
-                        flush(&mut lit, WsPolicy::SpaceRun, &mut parts);
+                        flush(&mut lit, &mut parts);
                         parts.push(TemplatePart::Literal {
                             text: String::new(),
                             ws,
@@ -380,11 +380,12 @@ pub(crate) fn scan_template_at(
             }
         }
     }
-    flush(&mut lit, WsPolicy::SpaceRun, &mut parts);
+    flush(&mut lit, &mut parts);
     Ok(parts)
 }
 
-/// Flush the accumulated literal run with its policy.
+/// Flush the accumulated literal run, deriving its policy from what was
+/// stripped off the front of it.
 ///
 /// **A space/tab run at either end of a literal is flexible whitespace, not
 /// text** (REP-20). §7.2's rule is that an ordinary run of spaces or tabs is
@@ -402,17 +403,31 @@ pub(crate) fn scan_template_at(
 ///
 /// A run *inside* a literal is untouched — nothing else consumes it, so it stays
 /// exact — and `\x20` is the escape for a space that must be matched literally.
-fn flush(lit: &mut String, ws: WsPolicy, parts: &mut Vec<TemplatePart>) {
+/// **The policy is derived, not assumed** (IPR-12). Every literal used to be
+/// tagged `SpaceRun` unconditionally, including literals with no whitespace run
+/// anywhere near them — so the runtime could not distinguish "the template
+/// wrote a space here" from "it did not", and the only way to keep
+/// `{a:int},{b:int}` matching was to implement `SpaceRun` as zero-or-more,
+/// which is not what `SpaceRun` means. A literal that had a run stripped from
+/// its **front** carries `SpaceRun`; one that did not carries
+/// [`WsPolicy::None`], and then `SpaceRun` can require the one-or-more its own
+/// definition promises.
+fn flush(lit: &mut String, parts: &mut Vec<TemplatePart>) {
     if lit.is_empty() {
         return;
     }
     let text = std::mem::take(lit);
+    let had_leading_run = text.starts_with([' ', '\t']);
     let stripped = text.trim_matches([' ', '\t']);
     // A literal whose runs strip it to nothing is pure whitespace, and it is
     // still emitted: the policy is the part.
     parts.push(TemplatePart::Literal {
         text: stripped.to_string(),
-        ws,
+        ws: if had_leading_run {
+            WsPolicy::SpaceRun
+        } else {
+            WsPolicy::None
+        },
     });
 }
 
@@ -655,6 +670,16 @@ mod tests {
             .collect()
     }
 
+    fn policies(parts: &[TemplatePart]) -> Vec<WsPolicy> {
+        parts
+            .iter()
+            .filter_map(|p| match p {
+                TemplatePart::Literal { ws, .. } => Some(*ws),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn capture_kind(part: &TemplatePart) -> AtomicKind {
         match part {
             TemplatePart::Capture { parser, .. } => match parser.as_ref() {
@@ -718,6 +743,14 @@ mod tests {
         // §3.3's own template. The middle literal is `-> `, not ` -> `.
         let parts = scan_template("{x1:int},{y1:int} -> {x2:int},{y2:int}").unwrap();
         assert_eq!(literals(&parts), vec![",", "->", ","]);
+        // …and the policy says which of them had a run in front of it (IPR-12).
+        // A comma the template wrote with nothing before it must not match an
+        // input that has a space there.
+        assert_eq!(
+            policies(&parts),
+            vec![WsPolicy::None, WsPolicy::SpaceRun, WsPolicy::None],
+            "only the literal that was written with a leading run carries SpaceRun"
+        );
 
         // Both ends, and a run *inside* a literal, which stays exact — nothing else
         // consumes it, and `\\x20` is the escape for a space that must match.

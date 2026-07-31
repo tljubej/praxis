@@ -2802,17 +2802,92 @@ fn adv_read_against_non_text_input_faults_cleanly() {
 
 #[test]
 fn adv_csv_inside_sections_nonzero_offset() {
-    // PROBE (parser.rs walk_csv): the `walk_csv` path had a dead `token_end`
-    // and may mis-handle CSV inside a non-zero-offset region (CSV inside a
-    // section). `sections(csv(int))` parses each blank-line section as a CSV
-    // list starting at a non-zero byte offset. If the offset is wrong, the
-    // parse faults or drops elements. We count the sections (2) — this still
-    // exercises the non-zero-offset CSV path without hitting the inference gap
-    // on methods of Vec-element-typed locals.
-    let src = "fn main() -> Int {\n  let s = read sections(csv(int))\n  s.len()\n}\n";
+    // PROBE (parser.rs walk_csv): a CSV inside a section starts at a non-zero
+    // byte offset. The predecessor re-sliced the section and walked its child
+    // at offset 0, and recovered each field's offset by *searching* the region
+    // for the field's text (`region_offset_of`) rather than computing it, which
+    // also called `slice::windows(0)` — a panic inside `extern "C"` — for an
+    // empty field.
+    //
+    // REWRITTEN (S20/IPR-03, IPR-04). It used to read `sections(csv(int))` over
+    // `"1,2,3\n4,5,6\n\n7,8\n9,10\n"` and assert only that there were two
+    // sections. That input gives `csv` a region containing a newline, so one of
+    // its fields is the text `"3\n4"` — and the count passed only because `csv`
+    // walked its child against the whole remaining buffer and threw the cursor
+    // away, so `int` read the `3` and the `\n4` was silently nobody's. Under
+    // §7.5's full-consumption rule that region is a parse failure, correctly.
+    // `csv` describes one line; a section of several lines is
+    // `lines(csv(...))`, which is what day05 writes.
+    //
+    // **What this test can and cannot distinguish.** The `Int` assertion below
+    // is not a differential and is not claimed as one: the search finds text
+    // equal to the field's text, so a misresolved duplicate still parses to the
+    // same number, and the pre-S20 tree answers `8` too. The two halves that
+    // *are* observable follow it, and both were re-run against `b2184c8`:
+    //
+    //   * a `Text` read out of the *second* section — b2184c8 answers `"cc"`,
+    //     the FIRST section's second line's first field, because it re-sliced
+    //     the section and walked the child at offset 0 while allocating slices
+    //     against the whole input (IPR-03, the stage's P0);
+    //   * a field that trims to nothing — b2184c8 does not answer at all, it
+    //     panics with "window size must be non-zero" inside `extern "C"`.
+    //
+    // §7.5's full-consumption half is carried by
+    // `a_csv_field_the_child_does_not_consume_is_a_parse_failure` and
+    // `csv_rest_parser_is_bounded_to_each_token` (parser.rs), not by this test.
+    let src = "fn main() -> Int {\n  let s = read sections(lines(csv(int)))\n  \
+               s.get(1).get(0).get(1)\n}\n";
     let (rt, result) = run_main_with_input(src, "1,2,3\n4,5,6\n\n7,8\n9,10\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), 2);
+    assert_eq!(
+        result.as_int(),
+        8,
+        "the second section's first line's second field is 8, at byte 15 of the input"
+    );
+
+    // A `Text` field out of the second section. Every field text is distinct,
+    // so any offset that names the wrong field — a re-based-to-zero section
+    // walk, or a search that resolves inside the first section — answers with
+    // different bytes and this fails.
+    let src = "fn main() -> Text {\n  let s = read sections(lines(csv(word)))\n  \
+               s.get(1).get(1).get(0)\n}\n";
+    let (rt, result) = run_main_with_input(src, "aa,bb\ncc,dd\n\nee,ff\ngg,hh\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_text(),
+        "gg",
+        "the second section's second line's first field, at byte 19 — not `aa`"
+    );
+
+    // A field that trims to nothing, which is where `region_offset_of` reached
+    // `windows(0)`. `"10,20,"` was enough. The assertion is the empty field's
+    // own length: a panic here is not a failed assertion, it is undefined
+    // behaviour across the ABI (D12).
+    let src = "fn main() -> Int {\n  let s = read sections(lines(csv(rest)))\n  \
+               s.get(1).get(0).get(2).len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "1,2,3\n\n10,20,\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0, "a field that trims to nothing is empty");
+}
+
+/// **IPR-04.** A `csv` field whose region contains anything the child parser
+/// does not consume is a parse failure, not a silent truncation.
+///
+/// The predecessor computed each field's bounds and then walked the child
+/// against everything from the field's start to the end of the buffer, with the
+/// end explicitly discarded (`let _ = token_end;`). So `csv(int)` over a region
+/// with a stray newline in it "worked" by reading the digits it liked.
+#[test]
+fn a_csv_field_the_child_does_not_consume_is_a_parse_failure() {
+    let (rt, _result) = run_main_with_input(
+        "fn main() -> Int {\n  let v = read csv(int)\n  v.len()\n}\n",
+        "1,2x,3\n",
+    );
+    assert_eq!(
+        rt.fault(),
+        praxis_runtime::FaultKind::ParseFailed,
+        "`2x` is not an int, and a field the child leaves bytes in must not be accepted"
+    );
 }
 
 #[test]
@@ -6091,20 +6166,38 @@ fn a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names() {
     // A 2×2 grid read from input (a `Grid()` is 0×0, so it has no cell to name).
     // The written cell is deliberately **off the diagonal**: a store that reached
     // `praxis_grid_set(g, y, x, v)` would pass on a diagonal cell.
+    //
+    // ADAPTED (S20/D11) — the **input**, and this is not a gate for D11. It
+    // used to read `"12\n34\n"` and expect `g[0, 0] == 12`, which says a
+    // `grid(int)` cell is a whole token *and* that `"12"` is one such token per
+    // row. The first half is right and D11 confirms it; the second was an
+    // accident of the predecessor's behaviour, which measured width in bytes
+    // and answered the four cells `[12, 2, 34, 4]` — the token, and then the
+    // token's tail. `"1 2\n3 4\n"` is the input that stays legal under D11 and
+    // still gives this test a 2x2 grid; the subject is untouched, so the
+    // written cell is still off the diagonal and a store that reached
+    // `praxis_grid_set(g, y, x, v)` still fails.
+    //
+    // The change is an adaptation, not a differential: this test passes on the
+    // pre-S20 tree with the new input too, because its subject is subscript
+    // argument order and not grid cell semantics. D11 is gated by
+    // `a_grid_cell_is_whatever_its_cell_parser_reads` (parser.rs) and
+    // `a_grid_of_char_is_positional_so_a_space_is_a_cell`
+    // (adversarial_audit.rs).
     let (rt, result) = run_main_with_input(
         "fn main() -> Int {\n  let g = read grid(int)\n  g[1, 0] = 7\n  \
          g[1, 0] * 100 + g[0, 0] * 10 + g[0, 1]\n}\n",
-        "12\n34\n",
+        "1 2\n3 4\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
-    assert_eq!(result.as_int(), 700 + 120 + 34);
+    assert_eq!(result.as_int(), 700 + 10 + 3);
 
     // `.get`/`.set` and the subscript are the same cell, which is what says the
     // two spellings are one operation for a `Grid` (unlike a `Map`'s, §4.7).
     let (rt, result) = run_main_with_input(
         "fn main() -> Int {\n  let g = read grid(int)\n  g.set(1, 1, 5)\n  \
          g[1, 1] * 10 + g.get(1, 1)\n}\n",
-        "12\n34\n",
+        "1 2\n3 4\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 55);
@@ -6112,12 +6205,12 @@ fn a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names() {
     // Out of range faults rather than reading a neighbour, from either side.
     let (rt, _) = run_main_with_input(
         "fn main() -> Int {\n  let g = read grid(int)\n  g[99, 0]\n}\n",
-        "12\n34\n",
+        "1 2\n3 4\n",
     );
     assert!(rt.has_pending_fault(), "an out-of-range read faults");
     let (rt, _) = run_main_with_input(
         "fn main() -> Int {\n  let g = read grid(int)\n  g[0, 99] = 1\n  0\n}\n",
-        "12\n34\n",
+        "1 2\n3 4\n",
     );
     assert!(rt.has_pending_fault(), "an out-of-range store faults");
 }
@@ -6287,8 +6380,20 @@ fn a_template_literal_that_begins_with_a_space_matches() {
     assert_eq!(result.as_int(), 5);
 
     // The policy is still flexible, which is what stripping the run *into* it
-    // preserves: extra spaces and none at all both match.
-    for input in ["1 -> 2\n", "1    ->    2\n", "1->2\n"] {
+    // preserves: one space or many, tabs or spaces, all match.
+    //
+    // AMENDED (S20/IPR-12). `"1->2\n"` used to be in this list, asserting that
+    // a template written with a space run also matches an input with **no**
+    // whitespace at all. That is the contradiction IPR-12 names: `SpaceRun` is
+    // defined as "one or more spaces or tabs" and was implemented as
+    // zero-or-more, with a comment in `consume_ws` admitting it. The reason it
+    // had to be zero-or-more was that the scanner tagged *every* literal
+    // `SpaceRun`, including literals with no run in front of them, so requiring
+    // one would have broken `{a:int},{b:int}`. The scanner distinguishes them
+    // now (`WsPolicy::None`), so the policy can mean what it says — and
+    // `"1->2"` against a template that wrote ` -> ` is a mismatch, asserted
+    // just below.
+    for input in ["1 -> 2\n", "1    ->    2\n", "1\t->\t2\n"] {
         let (rt, result) = run_main_with_input(
             "fn main() -> Int {\n  let rs = read lines(`{a:int} -> {b:int}`)\n  \
              var t = 0\n  for r in rs { t = t + r.a + r.b }\n  t\n}\n",
@@ -6301,6 +6406,18 @@ fn a_template_literal_that_begins_with_a_space_matches() {
         );
         assert_eq!(result.as_int(), 3, "{input:?}");
     }
+
+    // And the other side of "one or more": a run the template asked for has to
+    // be there.
+    let (rt, _result) = run_main_with_input(
+        "fn main() -> Int {\n  let rs = read lines(`{a:int} -> {b:int}`)\n  rs.len()\n}\n",
+        "1->2\n",
+    );
+    assert_eq!(
+        rt.fault(),
+        praxis_runtime::FaultKind::ParseFailed,
+        "a template that wrote a space run does not match input that has none"
+    );
 
     // A literal with no leading space is untouched, and one that is *only* spaces
     // is a whitespace part.
@@ -7251,6 +7368,8 @@ fn a_wildcard_parameter_keeps_its_slot_so_later_parameters_do_not_shift() {
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 51);
 }
+
+// --- §7.4's atomic parsers, end to end (IP-11) ------------------------------
 
 /// **IP-11.** Four of §7.4's ten atomic parsers did not exist: `uint`, `float`,
 /// `byte`, `identifier`. A program that wrote one got "unknown atomic parser"

@@ -115,10 +115,19 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Result<Type, TypeCtorErro
             // `one_of("LR")` → Char (§7.5).
             db.char()
         }
-        ParserAst::Characters { .. } => {
-            // `chars(P, skip:)` → Vec[Char] (§7.5).
-            let ch = db.char();
-            db.vec(ch)
+        ParserAst::Characters { child, .. } => {
+            // `chars(P, skip:)` → `Vec[result(P)]` (§7.5, D-S20-A).
+            //
+            // This used to be `Vec[Char]` regardless of `P`, while the
+            // interpreter stored whatever `P` produced and tagged the payload
+            // `CHAR`. `chars(int, skip: none)` therefore advertised `Vec[Char]`
+            // statically, tagged the elements `Char`, and stored `Int` objects
+            // — a descriptor that disagrees with the values behind it, which is
+            // the class of defect P0-11 closed for collections generally.
+            // `chars(one_of("LR"))` is still `Vec[Char]`, because `one_of`
+            // synthesizes `Char`; it is derived now rather than assumed.
+            let elem = synthesize(child, db)?;
+            db.vec(elem)
         }
         ParserAst::Matrix { child, .. } | ParserAst::GridRagged { child, .. } => {
             // `matrix(P)` / ragged `grid(P)` → Grid[result(P)] (§7.5, ADR-030).

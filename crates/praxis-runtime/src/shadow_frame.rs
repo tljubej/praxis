@@ -23,6 +23,7 @@
 //! memory at fixed offsets. Each frame is `#[repr(C)]` so the slot offset
 //! seen by Cranelift is stable (Appendix B).
 
+use crate::abi::abi_guard;
 use crate::gc::{GcHeader, GcRef};
 use crate::roots::RootSet;
 
@@ -151,21 +152,23 @@ pub unsafe extern "C" fn praxis_push_shadow_frame(
     ctx: *mut crate::RuntimeContext,
     slot_count: u32,
 ) -> *mut ShadowFrame {
-    if ctx.is_null() {
-        return std::ptr::null_mut();
-    }
-    let frame = ShadowFrame::new(slot_count);
-    let raw = Box::into_raw(frame);
-    // SAFETY: `ctx` is live and wired; chaining reads/writes its `roots` field.
-    unsafe {
-        (*raw).parent = (*ctx).roots;
-        (*ctx).roots = raw;
-        // Bump the Praxis call depth; the prologue guard faults if it exceeds
-        // MAX_RECURSION_DEPTH. Saturating add so a runaway counter can't wrap.
-        let d = (*ctx).recursion_depth.saturating_add(1);
-        (*ctx).recursion_depth = d;
-    }
-    raw
+    abi_guard!("praxis_push_shadow_frame", ctx, {
+        if ctx.is_null() {
+            return std::ptr::null_mut();
+        }
+        let frame = ShadowFrame::new(slot_count);
+        let raw = Box::into_raw(frame);
+        // SAFETY: `ctx` is live and wired; chaining reads/writes its `roots` field.
+        unsafe {
+            (*raw).parent = (*ctx).roots;
+            (*ctx).roots = raw;
+            // Bump the Praxis call depth; the prologue guard faults if it exceeds
+            // MAX_RECURSION_DEPTH. Saturating add so a runaway counter can't wrap.
+            let d = (*ctx).recursion_depth.saturating_add(1);
+            (*ctx).recursion_depth = d;
+        }
+        raw
+    })
 }
 
 /// Pop the frame at `ctx.roots` (must be `frame`), restoring the parent as the
@@ -185,19 +188,21 @@ pub unsafe extern "C" fn praxis_pop_shadow_frame(
     ctx: *mut crate::RuntimeContext,
     frame: *mut ShadowFrame,
 ) {
-    if ctx.is_null() || frame.is_null() {
-        return;
-    }
-    // SAFETY: caller guarantees `frame` is the current top and is valid.
-    unsafe {
-        let parent = (*frame).parent;
-        (*ctx).roots = parent;
-        // Reclaim the Box. After this the slots are invalid.
-        let _ = Box::from_raw(frame);
-        // Balance the prologue's depth bump (saturating so a fault path can't
-        // underflow).
-        (*ctx).recursion_depth = (*ctx).recursion_depth.saturating_sub(1);
-    }
+    abi_guard!("praxis_pop_shadow_frame", ctx, {
+        if ctx.is_null() || frame.is_null() {
+            return;
+        }
+        // SAFETY: caller guarantees `frame` is the current top and is valid.
+        unsafe {
+            let parent = (*frame).parent;
+            (*ctx).roots = parent;
+            // Reclaim the Box. After this the slots are invalid.
+            let _ = Box::from_raw(frame);
+            // Balance the prologue's depth bump (saturating so a fault path can't
+            // underflow).
+            (*ctx).recursion_depth = (*ctx).recursion_depth.saturating_sub(1);
+        }
+    })
 }
 
 #[cfg(test)]

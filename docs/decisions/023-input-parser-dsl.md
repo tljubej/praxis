@@ -114,6 +114,19 @@ previous:
    `Char`, source-slice `Text`, `Vec`, `Grid`, `Record`). The host reaches it
    through the `praxis_run_parser(ctx, plan_index_gc, input_gc)` ABI wrapper.
 
+   > **Amended by S20 (2026-07-31).** How it walks is now a decision of its own,
+   > because the original left it open and every reading was taken somewhere in
+   > the file. A node is walked against an **absolute `ByteRegion` of one
+   > `Input`**, and it answers with the absolute position it stopped at; a child
+   > is given a *narrowing* of its parent's region, never a re-sliced buffer
+   > walked from zero. The owner of every source-slice `Text` is the `input`
+   > `GcRef` the interpreter was called with — which is what makes
+   > `parse(text, P)` produce views of `text` rather than of the process input.
+   > Whether a child must consume its whole region is the **parent's** decision,
+   > expressed by calling `walk_exact`, and it is the only place exhaustion is
+   > decided. See ADR-078 for the representation and ADR-079 for what the
+   > constructors mean.
+
 ## Reason
 
 - **Dependency direction is acyclic:**

@@ -281,16 +281,19 @@ impl Heap {
     ///
     /// The heap grows by this allocation and nothing here gives the collector a
     /// chance to reclaim; something else must pace, or the arena grows until it
-    /// does. Two callers legitimately cannot pace, and they are the only ones:
+    /// does. **One** caller legitimately cannot pace, and it is the only one:
+    /// the host's own `Runtime::alloc_*` helpers, which hold their results in
+    /// Rust locals that no root set can see, so a collection *here* would
+    /// reclaim the value being returned.
     ///
-    /// * the host's own `Runtime::alloc_*` helpers — the host holds their
-    ///   results in Rust locals that no root set can see, so a collection
-    ///   *here* would reclaim the value being returned;
-    /// * the parser interpreter (`parser.rs`), whose intermediates are still
-    ///   unrooted. IPR-14 (S20) gives them `NativeScope`s and moves it to the
-    ///   paced path in the same commit that adds its safepoints — until then,
-    ///   pacing the parser converts a memory-growth bug into a use-after-free
-    ///   (hazard H1).
+    /// The parser interpreter used to be the second. It held seventeen
+    /// `Vec<GcRef>` intermediates that no root set could see, so pacing it
+    /// would have reclaimed the values it was assembling — which is why the
+    /// back door had to exist and why the roots and the move to this path had
+    /// to be one commit (IPR-14, ADR-040 Decision 3, hazard H1). It has
+    /// `NativeScope`s now and allocates through [`Heap::alloc`]. Do not add a
+    /// third caller: the argument that justified this one is "no root set can
+    /// see my locals", and the answer to that is a `NativeScope`, not this.
     ///
     /// A `praxis_*` wrapper must never use this: generated code roots what it
     /// holds across a call the manifest declares `Allocates`, which is exactly

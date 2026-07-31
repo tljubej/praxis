@@ -199,9 +199,15 @@ pub fn build_call(
                             vec![ValidationError {
                                 span,
                                 code: DiagCode::InvalidConstructorArgument,
+                                // The three names alone are a trap: nothing in
+                                // them says `newlines` is the *broader* policy.
+                                // Each one states what it skips.
                                 message: format!(
-                                    "`skip: {value}` is not a skip policy — `none`, `whitespace` \
-                                     or `newlines` (§7.5)"
+                                    "`skip: {value}` is not a skip policy — `none` (skips {}), \
+                                     `whitespace` (skips {}) or `newlines` (skips {}) (§7.5)",
+                                    SkipPolicy::None.skips(),
+                                    SkipPolicy::Whitespace.skips(),
+                                    SkipPolicy::Newlines.skips(),
                                 ),
                             }]
                         })?;

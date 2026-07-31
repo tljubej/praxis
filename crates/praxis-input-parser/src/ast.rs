@@ -112,6 +112,16 @@ impl AtomicKind {
 /// How a template literal run of whitespace matches input (§7.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WsPolicy {
+    /// The literal had no whitespace run in front of it, so no whitespace is
+    /// consumed before matching it.
+    ///
+    /// Added by S20 (IPR-12). Before it, every literal was tagged
+    /// [`SpaceRun`](Self::SpaceRun) whether or not the template had written a
+    /// space run, so the interpreter could not tell "this literal had a leading
+    /// run" from "it did not" — and the only way to keep templates matching was
+    /// to implement `SpaceRun` as zero-or-more, contradicting its own
+    /// definition. This variant is what lets `SpaceRun` mean what it says.
+    None,
     /// A run of ordinary spaces matches one or more spaces or tabs (the default,
     /// flexible rule for AoC column alignment, §7.2).
     SpaceRun,
@@ -253,8 +263,12 @@ pub enum ParserAst {
     /// set. Result is `Char`.
     OneOf { chars: String, span: Span },
     /// `chars(P, skip:)` (M9, §7.5): apply a char-parser repeatedly. Result is
-    /// `Vec[Char]`. The `skip` policy trims between matches (`none`/`whitespace`/
-    /// `newlines`).
+    /// `Vec[result(P)]` (D-S20-A) — **not** `Vec[Char]` whatever `P` is, which
+    /// is what `synthesize` said while the runtime stored what `P` produced, so
+    /// `chars(int, skip: none)` advertised a `Vec[Char]` full of `Int` objects.
+    /// `chars(one_of("LR"))` is still `Vec[Char]`, because `one_of` is `Char`.
+    /// The `skip` policy trims between matches; see [`SkipPolicy`], and note
+    /// that `newlines` is the *broader* of the two non-`none` policies.
     Characters {
         child: Box<ParserAst>,
         skip: SkipPolicy,
@@ -330,13 +344,40 @@ impl std::fmt::Display for Separator {
 }
 
 /// How `chars(P, skip:)` trims between matches (§7.5).
+///
+/// **Read the two non-`None` variants as an inclusion, because the names do not
+/// say so.** `Whitespace` is *horizontal* whitespace; `Newlines` is horizontal
+/// whitespace **and** line endings. So `Newlines` skips strictly more than
+/// `Whitespace` — `whitespace` is the narrower policy despite being the broader
+/// English word, and `skip: newlines` means "newlines *as well*", not "newlines
+/// only".
+///
+/// That inversion is not academic: it is what made
+/// `chars(one_of("^v<>"), skip: whitespace)` — §7.5's own example — look like it
+/// should absorb an input file's trailing `\n`, and a stage shipped believing
+/// it. It does not, and it does not have to: the terminator is **inside** the
+/// root region — the root region is the whole buffer, and nothing is trimmed off
+/// it — and it is forgiven because it is whitespace the character parser
+/// declined (`walk_characters` asks the child first and accepts a
+/// whitespace-only leftover through `ByteRegion::is_all_whitespace`, the bound
+/// half of ADR-078's rule). No skip policy has to account for it. (An earlier
+/// version of this note said the terminator was *outside* the root region, which
+/// was round two's answer — a trim of exactly one terminator, deleted because a
+/// file ending `"\n\n"` defeated it.) The sets are kept as they are because they are the ones
+/// §7.5's example needs and swapping them would silently change what every
+/// existing `skip: newlines` program accepts; what was missing was this
+/// paragraph. `walk_characters`/`skip_chars` in `praxis-runtime` is the
+/// implementation, and `SkipPolicy::skips` below is the single description both
+/// the runtime comment and the `skip:` diagnostic quote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SkipPolicy {
-    /// No trimming between matches.
+    /// No trimming between matches: every byte of the region is the child's.
     None,
-    /// Skip horizontal whitespace (spaces/tabs) between matches.
+    /// Skip **horizontal** whitespace — spaces and tabs — between matches. Not
+    /// line endings: see the type's own documentation.
     Whitespace,
-    /// Skip any whitespace including newlines between matches.
+    /// Skip horizontal whitespace **and** line endings between matches. The
+    /// broader of the two policies.
     Newlines,
 }
 
@@ -350,6 +391,26 @@ impl SkipPolicy {
             _ => return None,
         })
     }
+
+    /// What this policy skips, in the words the `skip:` diagnostic uses.
+    ///
+    /// One description, quoted by the diagnostic and by the runtime, so a
+    /// reader who reaches either one is told that `newlines` is the broader
+    /// policy rather than left to infer it from the names.
+    pub fn skips(self) -> &'static str {
+        match self {
+            SkipPolicy::None => "nothing",
+            SkipPolicy::Whitespace => "spaces and tabs",
+            SkipPolicy::Newlines => "spaces, tabs and line endings",
+        }
+    }
+
+    /// Every policy, in §7.5's order. The list is **closed**: a test sweeps it.
+    pub const ALL: &'static [SkipPolicy] = &[
+        SkipPolicy::None,
+        SkipPolicy::Whitespace,
+        SkipPolicy::Newlines,
+    ];
 }
 
 /// One item in a `block(...)` (M9, §7.5).

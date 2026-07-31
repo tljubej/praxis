@@ -12,11 +12,15 @@
 //! `praxis_input_parser::plan`'s own doc is the authority; this line claimed a C
 //! layout the types never had.
 
+mod cursor;
+
 use crate::context::RuntimeContext;
 use crate::parse_detail::ParseFail;
+use crate::roots::{NativeScope, RuntimeRoots};
 use crate::scalars;
-use crate::text::{text_bytes, TextPayload};
+use crate::text::TextPayload;
 use crate::GcRef;
+use cursor::{split_lines, split_sections, trailing_blank_run, ByteRegion, Cursor, Input, Walked};
 use praxis_input_parser::{AtomicKind, ParserPlan, PlanNode};
 
 /// Run the parser plan named by `raw_id` against `input`, returning the parsed
@@ -50,20 +54,81 @@ pub unsafe fn run_plan_by_id(ctx: *mut RuntimeContext, raw_id: i64, input: GcRef
 /// # Safety
 /// `ctx` must be live and wired; `input` must be a valid `Text` GcRef.
 unsafe fn run_plan(ctx: *mut RuntimeContext, plan: &ParserPlan, input: GcRef) -> GcRef {
-    let payload = input.payload::<TextPayload>();
-    let bytes = unsafe { text_bytes(payload) };
+    // The buffer **and its owner** both come from the `input` argument. They
+    // used to come from two places — the bytes from here, the owner from
+    // `ctx.input_source` — so `parse(text, P)` produced `Text` values that were
+    // views of the stdin buffer at the offsets of a different string (IPR-03).
+    // SAFETY: the caller guarantees `input` is a valid Text GcRef.
+    let Some(i) = (unsafe { Input::new(input) }) else {
+        unsafe { clear_parse_detail(ctx) };
+        return unsafe { fault_sentinel(ctx) };
+    };
+    // **The root region is the whole buffer, and no terminator is trimmed off
+    // it.** Trailing whitespace is handled where it arises — `walk_exact` lets
+    // a child that leaves only whitespace fill its bound, `trailing_blank_run`
+    // lets a line-splitting construct leave a trailing blank line to nobody
+    // when its parser makes nothing of it, and `split_lines` does not end a
+    // region in empty lines — so nothing is left here to special-case. Two
+    // earlier attempts special-cased it anyway, first by applying the bound
+    // rule at a root region that still held the terminator and then by trimming
+    // exactly one terminator, and a file ending "\n\n" defeated the second the
+    // way the first was defeated by "\n". A trim count is the wrong kind of
+    // answer (ADR-078).
+    //
+    // It also matters *whose* buffer this is: `run_plan` is the single body
+    // behind both `read <parser>` and the host `parse(text, P)`, so a trim here
+    // deleted a byte from a Text the program wrote itself and `parse(t, rest)`
+    // stopped being the identity on `t`.
+    let region = i.whole();
+    // Root the input for the whole parse. `RuntimeRoots`'s `input` arm reads
+    // `ctx.input_source`, which for `parse(text, P)` is a *different* Text —
+    // and this one owns every source-slice the parse produces (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(ctx) };
+    let _input = scope.root(input);
     // Clear any stale detail from a prior parse, then run.
     unsafe { clear_parse_detail(ctx) };
-    let result = unsafe { walk(ctx, plan, plan.root, bytes, 0) };
+    let result = unsafe { walk(ctx, &i, plan, plan.root, region) };
     match result {
-        Ok((value, _consumed)) => value,
+        // The root does **not** require exhaustion. Every real input ends with
+        // a newline (`praxis-cli`'s runner reads the file verbatim), so a root
+        // that demanded its region be consumed would fault on every file in the
+        // corpus. Exhaustion is a *parent's* decision, made by `walk_exact`.
+        Ok(walked) => walked.value,
         Err(fail) => {
             // Record the deepest failure into the runtime's detail slot, then
             // raise the fault. The host reads the detail after `ParseFailed`.
-            unsafe { record_fail(ctx, fail, bytes) };
+            // The preview is taken against the **whole** buffer: failure
+            // offsets are absolute, and `i.whole()` is the region the parse
+            // ran against, so the two cannot drift.
+            unsafe { record_fail(ctx, fail, i.whole().bytes(&i)) };
             unsafe { fault_sentinel(ctx) }
         }
     }
+}
+
+/// Run `plan`'s root against `input` and hand back the value or the failure,
+/// with no fault raised and no detail recorded.
+///
+/// The interpreter's own unit tests used to call `walk` directly with a
+/// `(bytes, offset)` pair. That pair is exactly what this stage deleted, and
+/// the tests are gates for defects this stage closes, so they get a root entry
+/// rather than a rewrite against internals or a deletion.
+#[cfg(test)]
+unsafe fn run_root(
+    ctx: *mut RuntimeContext,
+    plan: &ParserPlan,
+    input: GcRef,
+) -> Result<GcRef, ParseFail> {
+    // SAFETY: the caller guarantees `input` is a valid Text GcRef.
+    let i = unsafe { Input::new(input) }.expect("the test's input is a Text");
+    // The same root region `run_plan` uses, for the same reason.
+    let region = i.whole();
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(ctx) };
+    let _input = scope.root(input);
+    // SAFETY: the caller guarantees ctx is live and wired.
+    unsafe { walk(ctx, &i, plan, plan.root, region) }.map(|w| w.value)
 }
 
 /// Set a `ParseFailed` fault and return the sentinel.
@@ -104,12 +169,13 @@ unsafe fn record_fail(ctx: *mut RuntimeContext, fail: ParseFail, input: &[u8]) {
     unsafe { (*(*ctx).parse_detail).consider(fail, input) };
 }
 
-/// The outcome of walking a node: a value + the number of bytes consumed, or an
-/// error carrying the §7.11 structured detail. The deepest (highest-offset)
-/// failure wins at the [`run_plan`] boundary; inner failures propagate up with
-/// their already-specific detail, so an outer constructor only overrides when
-/// it has *more* specific information (it generally does not).
-type WalkResult = Result<(GcRef, usize), ParseFail>;
+/// The outcome of walking a node: a value + **the absolute position parsing
+/// stopped at**, or an error carrying the §7.11 structured detail. The deepest
+/// (highest-offset) failure wins at the [`run_plan`] boundary; inner failures
+/// propagate up with their already-specific detail, so an outer constructor
+/// only overrides when it has *more* specific information (it generally does
+/// not).
+type WalkResult = Result<Walked, ParseFail>;
 
 /// The runtime, extracted from the context for allocation calls.
 struct Rt {
@@ -123,28 +189,47 @@ unsafe fn heap_ref<'a>(ctx: *mut RuntimeContext) -> &'a crate::Heap {
 }
 
 impl Rt {
+    /// Give the collector its chance, against the whole root set.
+    ///
+    /// Every allocation in this file goes through here now. It could not
+    /// before: the interpreter's `Vec<GcRef>` intermediates were invisible to
+    /// every root set, so a collection anywhere inside a parse would have
+    /// reclaimed the values it was in the middle of assembling. Pacing was
+    /// therefore the *only* thing keeping them alive, and adding a safepoint
+    /// before rooting them would have turned unbounded heap growth into a
+    /// use-after-free (ADR-040, hazard H1). The `NativeScope`s in the helpers
+    /// below are what make this line safe to write.
+    fn safepoint(&self) -> (&crate::Heap, crate::heap::Safepoint<'_>) {
+        // SAFETY: ctx is valid (caller upholds).
+        let heap = unsafe { heap_ref(self.ctx) };
+        // SAFETY: as above.
+        let roots = unsafe { RuntimeRoots::from_context(self.ctx) };
+        let safepoint = heap.pace(&roots);
+        (heap, safepoint)
+    }
+
     /// Allocate a boxed `Int`.
     fn alloc_int(&self, value: i64) -> GcRef {
-        // SAFETY: ctx is valid (caller upholds).
-        unsafe { heap_ref(self.ctx).alloc_unpaced(scalars::INT_PAYLOAD, value) }
+        let (heap, safepoint) = self.safepoint();
+        heap.alloc(safepoint, scalars::INT_PAYLOAD, value)
     }
 
     /// Allocate a boxed `Char` from a Unicode scalar.
     fn alloc_char(&self, value: u32) -> GcRef {
-        // SAFETY: ctx is valid.
-        unsafe { heap_ref(self.ctx).alloc_unpaced(scalars::CHAR_PAYLOAD, value) }
+        let (heap, safepoint) = self.safepoint();
+        heap.alloc(safepoint, scalars::CHAR_PAYLOAD, value)
     }
 
     /// Allocate a boxed `Float` (§7.4's `float` atomic).
     fn alloc_float(&self, value: f64) -> GcRef {
-        // SAFETY: ctx is valid.
-        unsafe { heap_ref(self.ctx).alloc_unpaced(scalars::FLOAT_PAYLOAD, value) }
+        let (heap, safepoint) = self.safepoint();
+        heap.alloc(safepoint, scalars::FLOAT_PAYLOAD, value)
     }
 
     /// Allocate a boxed `Byte` (§7.4's `byte` atomic).
     fn alloc_byte(&self, value: u8) -> GcRef {
-        // SAFETY: ctx is valid.
-        unsafe { heap_ref(self.ctx).alloc_unpaced(scalars::BYTE_PAYLOAD, value) }
+        let (heap, safepoint) = self.safepoint();
+        heap.alloc(safepoint, scalars::BYTE_PAYLOAD, value)
     }
 
     /// Allocate a source-slice `Text` pointing into `owner`, or `None` if the
@@ -159,14 +244,40 @@ impl Rt {
         let slice = unsafe { crate::text::SourceSlice::new(owner, start, len) }?;
         let payload = TextPayload::Slice(slice);
         // SAFETY: ctx is valid; payload matches TEXT's layout.
+        let (heap, safepoint) = self.safepoint();
+        // SAFETY: payload matches TEXT's layout.
         Some(unsafe {
-            heap_ref(self.ctx).alloc_with_unpaced(
+            heap.alloc_with(
+                safepoint,
                 &crate::text::TEXT,
                 std::mem::size_of::<TextPayload>(),
                 std::mem::align_of::<TextPayload>(),
                 |ptr| (ptr as *mut TextPayload).write(payload),
             )
         })
+    }
+
+    /// Allocate an **owned** `Text` holding a copy of `s`.
+    ///
+    /// Used only for a ragged grid's `fill` literal, which lives in plan
+    /// storage rather than in the input. Giving it a `Text` of its own is what
+    /// lets the cell parser slice it: the predecessor walked the fill's bytes
+    /// while allocating slices against the *input*, so a `Text` fill cell named
+    /// input bytes chosen by the fill's length (IPR-03).
+    fn alloc_text_owned(&self, s: &str) -> GcRef {
+        let payload = TextPayload::Owned(s.into());
+        // SAFETY: ctx is valid; payload matches TEXT's layout.
+        let (heap, safepoint) = self.safepoint();
+        // SAFETY: payload matches TEXT's layout.
+        unsafe {
+            heap.alloc_with(
+                safepoint,
+                &crate::text::TEXT,
+                std::mem::size_of::<TextPayload>(),
+                std::mem::align_of::<TextPayload>(),
+                |ptr| (ptr as *mut TextPayload).write(payload),
+            )
+        }
     }
 
     /// Allocate a `Vec` from element refs.
@@ -180,8 +291,11 @@ impl Rt {
             items,
         };
         // SAFETY: ctx is valid.
+        let (heap, safepoint) = self.safepoint();
+        // SAFETY: payload matches VEC's layout.
         unsafe {
-            heap_ref(self.ctx).alloc_with_unpaced(
+            heap.alloc_with(
+                safepoint,
                 &crate::collections::VEC,
                 std::mem::size_of::<crate::collections::VecPayload>(),
                 std::mem::align_of::<crate::collections::VecPayload>(),
@@ -202,8 +316,11 @@ impl Rt {
     ) -> GcRef {
         let payload = crate::enums::EnumPayload { schema, tag, items };
         // SAFETY: ctx is valid; payload matches ENUM's layout.
+        let (heap, safepoint) = self.safepoint();
+        // SAFETY: payload matches ENUM's layout.
         unsafe {
-            heap_ref(self.ctx).alloc_with_unpaced(
+            heap.alloc_with(
+                safepoint,
                 &crate::enums::ENUM,
                 std::mem::size_of::<crate::enums::EnumPayload>(),
                 std::mem::align_of::<crate::enums::EnumPayload>(),
@@ -213,225 +330,517 @@ impl Rt {
     }
 }
 
-/// Walk a plan node against `bytes` starting at `offset`, producing a value.
+/// Walk a plan node against `region`, producing a value and the absolute
+/// position where matching stopped.
+///
+/// The node begins at `region.start()` and may not read past `region.end()`.
+/// Whether it must *reach* `region.end()` is the parent's decision, made by
+/// [`walk_exact`]: `lines` requires it of each line, `scan` does not require it
+/// of a match. That is one rule in one place, which is what makes
+/// `scan(choice(…))` and `lines(choice(…))` both correct without `choice`
+/// itself having a policy.
 ///
 /// # Safety
 /// `ctx` must be live and wired.
 unsafe fn walk(
     ctx: *mut RuntimeContext,
+    i: &Input<'_>,
     plan: &ParserPlan,
     node: u32,
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
     let rt = Rt { ctx };
     let node = &plan.nodes[node as usize];
     match node {
-        PlanNode::Atomic { kind } => walk_atomic(&rt, *kind, bytes, offset),
-        PlanNode::Lines { child } => walk_lines(&rt, plan, *child, bytes, offset),
-        PlanNode::Sections { child } => walk_sections(&rt, plan, *child, bytes, offset),
+        PlanNode::Atomic { kind } => walk_atomic(&rt, i, *kind, region),
+        PlanNode::Lines { child } => walk_lines(&rt, i, plan, *child, region),
+        PlanNode::Sections { child } => walk_sections(&rt, i, plan, *child, region),
         PlanNode::SectionsNamed {
             fields,
             repeated_tail,
-        } => walk_sections_named(&rt, plan, fields, *repeated_tail, bytes, offset),
-        PlanNode::Block { items } => walk_block(&rt, plan, items, bytes, offset),
-        PlanNode::Choice { cases } => walk_choice(&rt, plan, cases, bytes, offset),
-        PlanNode::Optional { child } => walk_optional(&rt, plan, *child, bytes, offset),
-        PlanNode::Scan { child } => walk_scan(&rt, plan, *child, bytes, offset),
+        } => walk_sections_named(&rt, i, plan, fields, *repeated_tail, region),
+        PlanNode::Block { items } => walk_block(&rt, i, plan, items, region),
+        PlanNode::Choice { cases } => walk_choice(&rt, i, plan, cases, region),
+        PlanNode::Optional { child } => walk_optional(&rt, i, plan, *child, region),
+        PlanNode::Scan { child } => walk_scan(&rt, i, plan, *child, region),
         PlanNode::OneOf { chars_index } => {
             let chars = plan.literals[*chars_index as usize];
-            walk_one_of(&rt, chars, bytes, offset)
+            walk_one_of(&rt, i, chars, region)
         }
         PlanNode::Characters { child, skip } => {
-            walk_characters(&rt, plan, *child, *skip, bytes, offset)
+            walk_characters(&rt, i, plan, *child, *skip, region)
         }
-        PlanNode::Matrix { child } => walk_matrix(&rt, plan, *child, bytes, offset),
+        PlanNode::Matrix { child } => walk_matrix(&rt, i, plan, *child, region),
         PlanNode::GridRagged { child, fill_index } => {
             let fill = plan.literals[*fill_index as usize];
-            walk_grid_ragged(&rt, plan, *child, fill, bytes, offset)
+            walk_grid_ragged(&rt, i, plan, *child, fill, region)
         }
-        PlanNode::Csv { child } => walk_csv(&rt, plan, *child, bytes, offset),
-        PlanNode::Ws { child } => walk_ws(&rt, plan, *child, bytes, offset),
+        PlanNode::Csv { child } => walk_csv(&rt, i, plan, *child, region),
+        PlanNode::Ws { child } => walk_ws(&rt, i, plan, *child, region),
         PlanNode::Sep {
             separator_index,
             child,
         } => {
             let sep = plan.literals[*separator_index as usize];
-            walk_sep(&rt, plan, *child, sep, bytes, offset)
+            walk_sep(&rt, i, plan, *child, sep, region)
         }
-        PlanNode::Grid { child } => walk_grid(&rt, plan, *child, bytes, offset),
-        PlanNode::Template { parts } => walk_template(&rt, plan, parts, bytes, offset),
-        PlanNode::Tuple { elements } => walk_tuple(&rt, plan, elements, bytes, offset),
+        PlanNode::Grid { child } => walk_grid(&rt, i, plan, *child, region),
+        PlanNode::Template { parts } => walk_template(&rt, i, plan, parts, region),
+        PlanNode::Tuple { elements } => walk_tuple(&rt, i, plan, elements, region),
     }
 }
 
 // ---- atomics (§7.4) -------------------------------------------------------
 
-fn walk_atomic(rt: &Rt, kind: AtomicKind, bytes: &[u8], offset: usize) -> WalkResult {
-    let rest = &bytes[offset..];
+fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> WalkResult {
+    let rest = region.bytes(i);
+    // Every atomic starts by skipping horizontal whitespace; `at` is where the
+    // value itself begins, in the input's own coordinates.
+    let s = trim_leading_ws(rest);
+    let at = region.start().advance(rest.len() - s.len());
     match kind {
         AtomicKind::Int => {
-            // Parse a signed decimal integer. Skip leading whitespace.
-            let s = trim_leading_ws(rest);
+            // Parse a signed decimal integer.
             let (digits, len) = take_int_run(s);
             if digits.is_empty() {
-                return Err(ParseFail::at(offset + (rest.len() - s.len()), 0, "int"));
+                return Err(ParseFail::at(at.offset(), 0, "int"));
             }
             let value: i64 = digits
                 .parse()
-                .map_err(|_| ParseFail::at(offset + (rest.len() - s.len()), len, "int"))?;
-            Ok((rt.alloc_int(value), offset + (rest.len() - s.len()) + len))
+                .map_err(|_| ParseFail::at(at.offset(), len, "int"))?;
+            Ok(Walked {
+                value: rt.alloc_int(value),
+                next: at.advance(len),
+            })
         }
         AtomicKind::Digit => {
-            let s = trim_leading_ws(rest);
             let Some(&b) = s.first() else {
-                return Err(ParseFail::at(offset + (rest.len() - s.len()), 0, "digit"));
+                return Err(ParseFail::at(at.offset(), 0, "digit"));
             };
             if !b.is_ascii_digit() {
-                return Err(ParseFail::at(offset + (rest.len() - s.len()), 1, "digit"));
+                return Err(ParseFail::at(at.offset(), 1, "digit"));
             }
             let value = (b - b'0') as i64;
-            let consumed = rest.len() - s.len() + 1;
-            Ok((rt.alloc_int(value), offset + consumed))
+            Ok(Walked {
+                value: rt.alloc_int(value),
+                next: at.advance(1),
+            })
         }
         AtomicKind::Char => {
-            // One Unicode scalar value. Decode the first char of the (trimmed)
-            // remaining input.
-            let s = trim_leading_ws(rest);
-            let s_str =
-                std::str::from_utf8(s).map_err(|_| ParseFail::at(offset, rest.len(), "char"))?;
-            let ch = s_str
+            // One Unicode scalar value, stepped by the region rather than
+            // decoded out of an ad-hoc `from_utf8` of the tail.
+            //
+            // **A space is a character**, so `char` reads the scalar at the
+            // cursor and does not trim first. §7.4's "surrounding horizontal
+            // space handled by caller" is a rule for the *numeric* atomics; a
+            // character parser that skipped spaces cannot represent one. That
+            // is not a nicety: a `grid` column is positional, so with the trim
+            // in place `grid(char)` over `"ab\na b\n"` counted two cells in
+            // both rows and reported a genuinely ragged input as a clean 2x2
+            // grid with `b` shifted into the space's slot — a wrong answer
+            // where the byte-width predecessor at least gave a wrong shape.
+            let at = region.start();
+            let Some(next) = region.next_scalar(i, at) else {
+                return Err(ParseFail::at(at.offset(), 0, "char"));
+            };
+            let text = region
+                .subregion(at, next)
+                .str(i)
+                .ok_or_else(|| ParseFail::at(at.offset(), 0, "char"))?;
+            let ch = text
                 .chars()
                 .next()
-                .ok_or_else(|| ParseFail::at(offset + (rest.len() - s.len()), 0, "char"))?;
-            let consumed = rest.len() - s.len() + ch.len_utf8();
-            Ok((rt.alloc_char(ch as u32), offset + consumed))
+                .ok_or_else(|| ParseFail::at(at.offset(), 0, "char"))?;
+            Ok(Walked {
+                value: rt.alloc_char(ch as u32),
+                next,
+            })
         }
         AtomicKind::Word => {
-            let s = trim_leading_ws(rest);
             let (word, len) = take_word_run(s);
             if word.is_empty() {
-                return Err(ParseFail::at(offset + (rest.len() - s.len()), 0, "word"));
+                return Err(ParseFail::at(at.offset(), 0, "word"));
             }
-            let leading = rest.len() - s.len();
             let slice = rt
-                .alloc_text_slice(rt_owner(rt), offset + leading, len)
-                .ok_or_else(|| ParseFail::at(offset + leading, len, "word"))?;
-            Ok((slice, offset + leading + len))
+                .alloc_text_slice(i.owner(), i.owner_offset(at.offset()), len)
+                .ok_or_else(|| ParseFail::at(at.offset(), len, "word"))?;
+            Ok(Walked {
+                value: slice,
+                next: at.advance(len),
+            })
         }
         AtomicKind::UInt => {
             // §7.4's `uint`. Its **type** is `Int` (`ScalarType::UInt` is
             // reserved and has no runtime object); the non-negativity is this
             // rule: a leading `-` is not a `uint`, it is a parse failure.
-            let s = trim_leading_ws(rest);
-            let leading = rest.len() - s.len();
             if s.first() == Some(&b'-') {
-                return Err(ParseFail::at(offset + leading, 1, "uint"));
+                return Err(ParseFail::at(at.offset(), 1, "uint"));
             }
             let (digits, len) = take_int_run(s);
             if digits.is_empty() {
-                return Err(ParseFail::at(offset + leading, 0, "uint"));
+                return Err(ParseFail::at(at.offset(), 0, "uint"));
             }
             let value: i64 = digits
                 .parse()
-                .map_err(|_| ParseFail::at(offset + leading, len, "uint"))?;
-            Ok((rt.alloc_int(value), offset + leading + len))
+                .map_err(|_| ParseFail::at(at.offset(), len, "uint"))?;
+            Ok(Walked {
+                value: rt.alloc_int(value),
+                next: at.advance(len),
+            })
         }
         AtomicKind::Float => {
-            let s = trim_leading_ws(rest);
-            let leading = rest.len() - s.len();
             let (text, len) = take_float_run(s);
             if text.is_empty() {
-                return Err(ParseFail::at(offset + leading, 0, "float"));
+                return Err(ParseFail::at(at.offset(), 0, "float"));
             }
             let value: f64 = text
                 .parse()
-                .map_err(|_| ParseFail::at(offset + leading, len, "float"))?;
-            Ok((rt.alloc_float(value), offset + leading + len))
+                .map_err(|_| ParseFail::at(at.offset(), len, "float"))?;
+            Ok(Walked {
+                value: rt.alloc_float(value),
+                next: at.advance(len),
+            })
         }
         AtomicKind::Byte => {
             // A decimal integer in `0..=255`, not a raw input byte: a raw byte
             // cannot be re-sliced as `Text` without breaking the UTF-8
             // invariant every source-slice `Text` relies on.
-            let s = trim_leading_ws(rest);
-            let leading = rest.len() - s.len();
             let (digits, len) = take_int_run(s);
             if digits.is_empty() {
-                return Err(ParseFail::at(offset + leading, 0, "byte"));
+                return Err(ParseFail::at(at.offset(), 0, "byte"));
             }
             let value: u8 = digits
                 .parse()
-                .map_err(|_| ParseFail::at(offset + leading, len, "byte"))?;
-            Ok((rt.alloc_byte(value), offset + leading + len))
+                .map_err(|_| ParseFail::at(at.offset(), len, "byte"))?;
+            Ok(Walked {
+                value: rt.alloc_byte(value),
+                next: at.advance(len),
+            })
         }
         AtomicKind::Identifier => {
             // §4.1's identifier class, not a local ASCII rule (F3). §7.4 says
             // "ASCII-like … by default"; accepting fewer names than the
             // language itself declares would be the narrower mistake.
-            let s = trim_leading_ws(rest);
-            let leading = rest.len() - s.len();
             let len = take_ident_run(s);
             if len == 0 {
-                return Err(ParseFail::at(offset + leading, 0, "identifier"));
+                return Err(ParseFail::at(at.offset(), 0, "identifier"));
             }
             let slice = rt
-                .alloc_text_slice(rt_owner(rt), offset + leading, len)
-                .ok_or_else(|| ParseFail::at(offset + leading, len, "identifier"))?;
-            Ok((slice, offset + leading + len))
+                .alloc_text_slice(i.owner(), i.owner_offset(at.offset()), len)
+                .ok_or_else(|| ParseFail::at(at.offset(), len, "identifier"))?;
+            Ok(Walked {
+                value: slice,
+                next: at.advance(len),
+            })
         }
         AtomicKind::Text | AtomicKind::Rest => {
-            // `text`/`rest`: consume the remainder of the current region.
-            // For a standalone atomic, the region is the whole remaining input.
+            // `text`/`rest` consume the rest of **the region**, which is what
+            // the doc comment always claimed and the code never did: it ran to
+            // `bytes.len()`, so a `text` capture swallowed the literal that
+            // followed it and every `pre{body:text}post` template was
+            // unmatchable (IPR-10). Leading whitespace is part of the text.
+            let start = region.start();
+            let len = region.end().delta_from(start);
             let slice = rt
-                .alloc_text_slice(rt_owner(rt), offset, rest.len())
-                .ok_or_else(|| ParseFail::at(offset, rest.len(), "text"))?;
-            Ok((slice, bytes.len()))
+                .alloc_text_slice(i.owner(), i.owner_offset(start.offset()), len)
+                .ok_or_else(|| ParseFail::at(start.offset(), len, "text"))?;
+            Ok(Walked {
+                value: slice,
+                next: region.end(),
+            })
         }
     }
-}
-
-/// The owner GcRef for source-slice Texts (the original input buffer). Extracted
-/// from the runtime context's `input_source`.
-fn rt_owner(rt: &Rt) -> GcRef {
-    // SAFETY: ctx is valid.
-    unsafe { (*rt.ctx).input_source }
 }
 
 // ---- constructors (§7.5) --------------------------------------------------
 
-fn walk_lines(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
-    let region = &bytes[offset..];
+/// Walk `node` against `region` and require it to consume the region **exactly**.
+///
+/// §7.5's rule for a bounded construct is that "each application must consume
+/// the entire line" (and the same for a section, a CSV field, a
+/// whitespace-delimited token, a matrix cell). The predecessor computed those
+/// bounds and then walked the child against everything from the bound's start
+/// to the end of the buffer, discarding the child's cursor — five separate
+/// `let (value, _consumed) = …` and one explicit `let _ = token_end;`. So
+/// `lines(int)` accepted `12junk` and `csv(rest)` returned the whole remainder
+/// for its first field.
+///
+/// Returning a bare `GcRef` is the point: there is no cursor left for a caller
+/// to forget to check, so "I bounded the child but did not require it to fill
+/// the bound" stops being expressible.
+///
+/// **What the child leaves is whitespace, or it is a mismatch** — the *bound*
+/// half of the rule stated in [`cursor`]. §7.4 puts "surrounding horizontal
+/// space" on the caller, and this is the caller for every bounded construct
+/// there is: a line, a section, a CSV field, a `ws`/`sep` token, a matrix cell,
+/// a template capture. `lines(int)` over `"1 \n2 \n"` faulted on the space
+/// while `grid(int)` over the same bytes called it padding, which is two
+/// constructs disagreeing about one byte; the rule lives here now, so there is
+/// one answer and every construct inherits it.
+///
+/// It is deliberately the child's answer and not the region's. `int` cannot
+/// read `"1 "`'s trailing space, so the space is padding; `char` reads it as a
+/// cell, so `grid(char)` over `"ab\ncd \n"` is a **ragged grid** — a complaint
+/// about the data, not about a file convention. The same answer covers the
+/// shape next door: `grid(char)` over `"ab\ncd\n  \n"` is three rows, because a
+/// trailing line of spaces is offered too (`cursor::trailing_blank_run`) and
+/// `char` reads it. Round three answered those two shapes opposite ways.
+///
+/// And it is only what the child *leaves*: `lines(int)` over `"12junk"` still
+/// faults, because `"junk"` is not whitespace, which is the IPR-02 defect this
+/// check exists for.
+///
+/// # Safety
+/// `ctx` must be live and wired.
+unsafe fn walk_exact(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    node: u32,
+    region: ByteRegion,
+    what: &'static str,
+) -> Result<GcRef, ParseFail> {
+    // SAFETY: forwarded from this function's contract.
+    let walked = unsafe { walk(rt.ctx, i, plan, node, region)? };
+    if walked.next != region.end() && !region.from(walked.next).is_all_whitespace(i) {
+        return Err(ParseFail::at(
+            walked.next.offset(),
+            region.end().delta_from(walked.next),
+            what,
+        ));
+    }
+    Ok(walked.value)
+}
+
+/// The text a region spans, or a parse failure naming `what`.
+///
+/// The predecessor wrote `str::from_utf8(region).unwrap_or("")` in three
+/// places, which turned a region whose ends were not scalar boundaries into an
+/// *empty* one — a zero-row, zero-width `Grid` where there should have been a
+/// mismatch (IPR-05). A region of a validated [`Input`] can only fail this by
+/// splitting a scalar, which is an interpreter bug; it is reported as a parse
+/// failure rather than asserted, because this runs inside `extern "C"`.
+fn region_str<'a>(
+    i: &Input<'a>,
+    region: ByteRegion,
+    what: &'static str,
+) -> Result<&'a str, ParseFail> {
+    region
+        .str(i)
+        .ok_or_else(|| ParseFail::at(region.start().offset(), region.len(), what))
+}
+
+/// The whitespace-delimited tokens of `region`, whose text is `s`, as absolute
+/// subregions.
+///
+/// Bounds are computed while splitting rather than recovered afterwards by
+/// searching the region for the token's text — which is what `csv` did, so
+/// every duplicate field mapped to the first occurrence (IPR-04).
+fn whitespace_tokens(region: ByteRegion, s: &str) -> Vec<ByteRegion> {
+    let base = region.start();
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    for (idx, ch) in s.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(st) = start.take() {
+                out.push(region.subregion(base.advance(st), base.advance(idx)));
+            }
+        } else if start.is_none() {
+            start = Some(idx);
+        }
+    }
+    if let Some(st) = start {
+        out.push(region.subregion(base.advance(st), region.end()));
+    }
+    out
+}
+
+/// The comma-separated fields of `region`, whose text is `s`, as absolute
+/// subregions. A field runs from one comma to the next, **untrimmed**.
+///
+/// §7.5's csv entry says "ignore horizontal whitespace around each comma", and
+/// this used to implement that with `str::trim()` on every field — which
+/// decided about whitespace *without asking the field's parser*, the one thing
+/// §7.5's rule forbids. `csv` was the last construct that did: `csv(char)`
+/// faulted on `"a, ,c"` where `sep(",", char)`, `ws(char)` and `grid(char)` all
+/// read the space as a cell, and `csv(rest)` lost the terminator that
+/// `sep(",", rest)` keeps — `trim()` eats vertical whitespace too, which is
+/// more than the entry ever authorised.
+///
+/// The entry's promise survives, from the rule instead of from a trim:
+/// `walk_csv` hands each field to [`walk_exact`], `int` (like every atomic §7.4
+/// puts surrounding space on the caller for) skips leading horizontal
+/// whitespace itself, and the bound half forgives a leftover run that is all
+/// whitespace. So `csv(int)` over `" 1, 2, 3"` still reads three ints, and
+/// `csv(char)` over `"a, ,c"` reads three characters — one of them a space,
+/// because `char` reads spaces everywhere else too.
+///
+/// An empty field yields an **empty region**, not a search for an empty needle:
+/// `region_offset_of` used to call `hay.windows(0)`, which panics, and
+/// `"10,20,\n"` was enough to reach it — a panic inside `extern "C"`
+/// (IPR-04, D12).
+fn csv_tokens(region: ByteRegion, s: &str) -> Vec<ByteRegion> {
+    let base = region.start();
+    let mut out = Vec::new();
+    let mut field_start = 0usize;
+    for (idx, ch) in s.char_indices() {
+        if ch == ',' {
+            out.push(region.subregion(base.advance(field_start), base.advance(idx)));
+            field_start = idx + ch.len_utf8();
+        }
+    }
+    out.push(region.subregion(base.advance(field_start), region.end()));
+    out
+}
+
+/// Parse one grid row: apply the cell parser from the row's start until the row
+/// is consumed, appending each cell to `items`. Returns the row's cell count.
+///
+/// **A cell is whatever the cell parser reads** (D11). §7.5's `grid` examples
+/// are `grid(char)` and `grid(digit)`, and `digit` exists *for* the
+/// one-digit-per-cell case — if `grid(int)` meant that too, `digit` would name
+/// nothing. So a cell parser inside `grid` parses a cell exactly as it would
+/// parse anywhere else: `char` is one scalar, `digit` is one digit, `int` is an
+/// integer token.
+///
+/// The predecessor did neither. It measured width in **bytes** and walked the
+/// child once per byte against the whole remaining buffer, so over `"12\n34\n"`
+/// it answered the four cells `[12, 2, 34, 4]` — the token, and then the token's
+/// tail — and a row containing one `é` was two columns wide with a match
+/// attempted at a continuation byte (IPR-06).
+///
+/// The row is exactly consumed by construction: the cell is bounded to the row,
+/// so it cannot overshoot, and the loop only ends at the row's end or on the
+/// cell parser's own failure.
+///
+/// # Safety
+/// `ctx` must be live and wired.
+unsafe fn walk_grid_row(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    child: u32,
+    line: ByteRegion,
+    items: &mut Vec<GcRef>,
+    scope: &NativeScope<'_>,
+) -> Result<usize, ParseFail> {
+    let mut cells = 0usize;
+    let mut cursor = line.start();
+    while cursor < line.end() {
+        // SAFETY: forwarded from this function's contract.
+        let walked = match unsafe { walk(rt.ctx, i, plan, child, line.from(cursor)) } {
+            Ok(walked) => walked,
+            Err(fail) => {
+                // **A trailing run the cell parser cannot read is padding, not
+                // a cell** — `walk_exact`'s bound rule, in the second loop that
+                // is not `walk_exact`-shaped, through the same predicate.
+                // Trailing spaces are ordinary in real input, and `matrix(int)`
+                // already dropped them (`whitespace_tokens` never emits an
+                // empty token); without this rule `grid(int)` faulted on the
+                // very same file. §7.5 asks only that every row have the same
+                // cell count.
+                //
+                // A cell parser that *can* read the run never gets here:
+                // `grid(char)` reads a space as a space, which is what keeps a
+                // char grid positional — and is why `grid(char)` over
+                // `"ab\ncd \n"` is a ragged grid rather than a 2x2 one.
+                if line.from(cursor).is_all_whitespace(i) {
+                    break;
+                }
+                return Err(fail);
+            }
+        };
+        if walked.next <= cursor {
+            // A cell parser that reads nothing would loop forever. `text`/`rest`
+            // over an empty tail is the shape that gets here.
+            return Err(ParseFail::at(cursor.offset(), 0, "a cell that reads input"));
+        }
+        scope.root(walked.value);
+        items.push(walked.value);
+        cursor = walked.next;
+        cells += 1;
+    }
+    Ok(cells)
+}
+
+fn walk_lines(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    child: u32,
+    region: ByteRegion,
+) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
-    for line in split_lines(region) {
-        let line_offset = offset + line.start;
-        let (value, _consumed) = unsafe { walk(rt.ctx, plan, child, bytes, line_offset)? };
-        items.push(value);
+    let lines = split_lines(i, region);
+    // The trailing run of blank lines is *offered* like any other line; what
+    // happens to it is the child's answer (`cursor`'s rule, bound half).
+    let blank_run = trailing_blank_run(i, &lines);
+    for (n, line) in lines.iter().enumerate() {
+        // One line, consumed exactly. The predecessor walked the child against
+        // everything from the line's start to the end of the buffer and threw
+        // the cursor away, so `lines(int)` accepted `12junk` and `lines(rest)`
+        // handed every element the whole remaining input (IPR-02).
+        // SAFETY: ctx is valid (upheld by `walk`'s caller).
+        match unsafe { walk_exact(rt, i, plan, child, *line, "the rest of the line") } {
+            Ok(value) => {
+                scope.root(value);
+                items.push(value);
+            }
+            // A trailing line of nothing but whitespace the child makes nothing
+            // of belongs to nobody: `lines(int)` over `"1\n2\n  \n"` is two
+            // elements. `split_lines` used to delete that line before anyone
+            // was asked, which also deleted it for the children that *can* read
+            // it — `lines(rest)` lost a line, and `lines(rest)` losing a line is
+            // `rest`'s identity property failing one level up. The child is
+            // asked now, so `lines(rest)` and `lines(char)` keep it.
+            Err(fail) => {
+                if n < blank_run {
+                    return Err(fail);
+                }
+            }
+        }
     }
     let elem_desc = child_descriptor(plan, child);
-    let vec_ref = rt.alloc_vec(elem_desc, items);
-    Ok((vec_ref, bytes.len() - offset))
+    Ok(Walked {
+        value: rt.alloc_vec(elem_desc, items),
+        next: region.end(),
+    })
 }
 
 fn walk_sections(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     child: u32,
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    let region = &bytes[offset..];
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
-    for section in split_sections(region) {
-        // Parse each section against a bounded byte view (just that section's
-        // bytes), so a child like `block(...)` or `lines(...)` consumes only the
-        // section's content rather than running to the end of input.
-        let sec_offset = offset + section.start;
-        let sec_bytes = &bytes[sec_offset..sec_offset + section.len];
-        let (value, _consumed) = unsafe { walk(rt.ctx, plan, child, sec_bytes, 0)? };
+    for section in split_sections(i, region) {
+        // A **narrowing of the same buffer**, not a re-slice walked at offset
+        // zero. The predecessor handed the child `&bytes[sec..sec+len]` with an
+        // offset of 0 while its Texts were still allocated against the whole
+        // input, so a `word` in section 2 named bytes at the start of the file
+        // (IPR-03, the stage's P0).
+        // SAFETY: ctx is valid.
+        let value = unsafe { walk_exact(rt, i, plan, child, section, "the rest of the section")? };
+        scope.root(value);
         items.push(value);
     }
     let elem_desc = child_descriptor(plan, child);
-    Ok((rt.alloc_vec(elem_desc, items), bytes.len() - offset))
+    Ok(Walked {
+        value: rt.alloc_vec(elem_desc, items),
+        next: region.end(),
+    })
 }
 
 /// Walk named heterogeneous `sections(name: P, ..., tail: repeated(P))` (M9,
@@ -442,54 +851,60 @@ fn walk_sections(
 /// result is an anonymous record assembled via [`alloc_record`].
 fn walk_sections_named(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     fields: &'static [(&'static str, u32)],
     repeated_tail: Option<(&'static str, u32)>,
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    let region = &bytes[offset..];
-    let sections: Vec<ByteRange> = split_sections(region).collect();
+    let sections = split_sections(i, region);
     // Too few sections is a parse fault.
-    let min_needed = fields.len();
-    if sections.len() < min_needed {
-        return Err(ParseFail::at(offset, region.len(), "section header"));
+    if sections.len() < fields.len() {
+        return Err(ParseFail::at(
+            region.start().offset(),
+            region.len(),
+            "section header",
+        ));
     }
-    // Build the record captures: each named field parses its section, in order.
-    // The repeated tail (if any) parses every remaining section into a Vec.
-    //
-    // Each section is parsed against a *bounded* byte view (just that section's
-    // bytes), so a child like `lines(int)` consumes only the section's lines
-    // rather than running to the end of input. The owner reference for any
-    // source-slice Texts remains the original input owner (`rt_owner`), which
-    // the child walks recover via `rt_owner(rt)` — but here we pass absolute
-    // offsets into the full `bytes`, so source-slice Texts stay correct.
+    // Each section is a narrowing of the input, so the child's offsets are the
+    // input's own offsets and a source-slice `Text` is right by construction.
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut captures: Vec<(Option<&'static str>, u32, GcRef)> = Vec::new();
-    for (i, (name, child)) in fields.iter().enumerate() {
-        let sec = &sections[i];
-        let sec_offset = offset + sec.start;
-        let sec_bytes = &bytes[sec_offset..sec_offset + sec.len];
-        let (value, _consumed) = unsafe { walk(rt.ctx, plan, *child, sec_bytes, 0)? };
+    for (n, (name, child)) in fields.iter().enumerate() {
+        // SAFETY: ctx is valid.
+        let value =
+            unsafe { walk_exact(rt, i, plan, *child, sections[n], "the rest of the section")? };
+        scope.root(value);
         captures.push((Some(name), *child, value));
     }
     if let Some((tail_name, tail_child)) = repeated_tail {
         // The tail consumes every remaining section, parsed per-section by its
         // child into a Vec.
         let mut tail_items = Vec::new();
-        for sec in &sections[fields.len()..] {
-            let sec_offset = offset + sec.start;
-            let sec_bytes = &bytes[sec_offset..sec_offset + sec.len];
-            let (value, _consumed) = unsafe { walk(rt.ctx, plan, tail_child, sec_bytes, 0)? };
+        for section in &sections[fields.len()..] {
+            // SAFETY: ctx is valid.
+            let value = unsafe {
+                walk_exact(rt, i, plan, tail_child, *section, "the rest of the section")?
+            };
+            scope.root(value);
             tail_items.push(value);
         }
         let elem_desc = child_descriptor(plan, tail_child);
         let tail_vec = rt.alloc_vec(elem_desc, tail_items);
+        scope.root(tail_vec);
         // The tail field's "child" node for descriptor purposes is the tail
         // child; its value is the assembled Vec.
         captures.push((Some(tail_name), tail_child, tail_vec));
     }
     let record = alloc_record(rt, &captures);
-    Ok((record, bytes.len() - offset))
+    Ok(Walked {
+        value: record,
+        next: region.end(),
+    })
 }
 
 /// Walk `block(item, ...)` (M9, §7.5): apply sequential parsers within one
@@ -498,69 +913,86 @@ fn walk_sections_named(
 /// field. The result is a flattened anonymous record assembled via
 /// [`alloc_record`].
 ///
-/// Cursor model: each item is walked against the remaining region from the
-/// current cursor; the item's returned absolute offset becomes the next
-/// cursor. `walk_template` returns the real position where matching stopped, so
-/// a chain of line-anchored templates advances line by line.
+/// Cursor model: each item is walked against the region's tail from the current
+/// cursor, and the item's returned position becomes the next cursor. Every
+/// position in play is absolute, so a chain of line-anchored templates advances
+/// line by line.
 fn walk_block(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     items: &'static [praxis_input_parser::BlockItemNode],
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    let mut cursor = offset;
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
+    let mut cursor = region.start();
     // Captures collected as (name, child_node_for_descriptor, value). For a
     // flattened positional record, we expand its fields into separate entries.
     let mut captures: Vec<(Option<&'static str>, u32, GcRef)> = Vec::new();
-    for (i, item) in items.iter().enumerate() {
+    for (n, item) in items.iter().enumerate() {
         // Before every item after the first, skip the line boundary: any run of
         // horizontal whitespace plus one newline (§7.5 block items are
         // line-anchored). The first item starts at the region head.
-        if i > 0 {
-            cursor = skip_line_boundary(bytes, cursor);
+        if n > 0 {
+            cursor = skip_line_boundary(i, region, cursor);
         }
         match item {
             praxis_input_parser::BlockItemNode::Positional { child } => {
-                let (value, new_offset) = unsafe { walk(rt.ctx, plan, *child, bytes, cursor)? };
-                cursor = new_offset;
+                // SAFETY: ctx is valid.
+                let walked = unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
+                scope.root(walked.value);
+                cursor = walked.next;
                 // If the positional produced a record (named-capture template),
                 // flatten its fields into the block record. We detect a record
                 // by pointer-equality of its descriptor against RECORD.
-                if std::ptr::eq(value.descriptor(), &crate::records::RECORD) {
-                    flatten_record_into(rt, value, &mut captures);
+                if std::ptr::eq(walked.value.descriptor(), &crate::records::RECORD) {
+                    flatten_record_into(rt, walked.value, &mut captures);
                 }
                 // A non-record positional (scalar) was rejected by validation
                 // (I026); if we reach one here it contributes no field.
             }
             praxis_input_parser::BlockItemNode::Named { name, child } => {
-                let (value, new_offset) = unsafe { walk(rt.ctx, plan, *child, bytes, cursor)? };
-                cursor = new_offset;
-                captures.push((Some(name), *child, value));
+                // SAFETY: ctx is valid.
+                let walked = unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
+                scope.root(walked.value);
+                cursor = walked.next;
+                captures.push((Some(name), *child, walked.value));
             }
         }
     }
     let record = alloc_record(rt, &captures);
-    Ok((record, cursor))
+    Ok(Walked {
+        value: record,
+        next: cursor,
+    })
 }
 
 /// Skip the line boundary between sequential `block` items (§7.5): any run of
 /// horizontal whitespace, then an optional single line ending (`\n` or `\r\n`).
 /// Returns the new cursor. If no line ending is present (e.g. the items are on
 /// one line separated by spaces), only the horizontal whitespace is consumed.
-fn skip_line_boundary(bytes: &[u8], mut cursor: usize) -> usize {
-    // Horizontal whitespace (spaces/tabs).
-    while cursor < bytes.len() && (bytes[cursor] == b' ' || bytes[cursor] == b'\t') {
-        cursor += 1;
+///
+/// Byte-wise on purpose: space, tab, CR and LF are single-byte scalars and
+/// cannot occur inside a multi-byte one, so scanning bytes here can never land
+/// mid-scalar. (The cell and scan loops step by scalar because *they* can.)
+fn skip_line_boundary(i: &Input<'_>, region: ByteRegion, cursor: Cursor) -> Cursor {
+    let tail = region.from(cursor);
+    let bytes = tail.bytes(i);
+    let mut n = 0usize;
+    while n < bytes.len() && (bytes[n] == b' ' || bytes[n] == b'\t') {
+        n += 1;
     }
-    // One optional line ending.
-    if cursor < bytes.len() && bytes[cursor] == b'\r' {
-        cursor += 1;
+    if bytes.get(n) == Some(&b'\r') {
+        n += 1;
     }
-    if cursor < bytes.len() && bytes[cursor] == b'\n' {
-        cursor += 1;
+    if bytes.get(n) == Some(&b'\n') {
+        n += 1;
     }
-    cursor
+    cursor.advance(n)
 }
 
 /// Flatten a positional record's fields into the block captures (§7.5
@@ -581,18 +1013,23 @@ fn flatten_record_into(
     };
     // SAFETY: schema is a valid leaked RecordSchema pointer.
     let schema = unsafe { &*schema };
-    for (i, field) in schema.fields.iter().enumerate() {
-        if let Some(value) = items.get(i) {
+    for (n, field) in schema.fields.iter().enumerate() {
+        if let Some(value) = items.get(n) {
             captures.push((Some(field.name), u32::MAX, *value));
         }
     }
 }
 
 /// Walk `choice(Name: P, ...)` (M9, §7.5): try each case in source order from
-/// the current offset. The first case whose parser succeeds wins; its value
+/// the region's start. The first case whose parser succeeds wins; its value
 /// becomes the variant's payload and the cursor advances to where that parser
-/// stopped. If a case fails, the cursor is restored (backtracking) and the next
-/// case is tried. If no case matches, this is a parse fault.
+/// stopped. If a case fails, the next case is tried from the same start
+/// (backtracking). If no case matches, this is a parse fault.
+///
+/// `choice` does **not** require its region to be exhausted. Whether a match
+/// must fill its region is the bounded parent's question — `lines(choice(…))`
+/// requires it through `walk_exact`, `scan(choice(…))` matches fragments by
+/// design — and answering it in one place is what makes both correct.
 ///
 /// Backtracking note: a failed case may have allocated GC objects (since `walk`
 /// allocates eagerly); those are unreferenced and collected later. Only the
@@ -600,301 +1037,534 @@ fn flatten_record_into(
 /// failed allocations are simply garbage.
 fn walk_choice(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     cases: &'static [(&'static str, u32)],
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
+    let mut deepest: Option<ParseFail> = None;
     for (tag, (_name, child)) in cases.iter().enumerate() {
-        match unsafe { walk(rt.ctx, plan, *child, bytes, offset) } {
-            Ok((value, new_offset)) => {
+        // SAFETY: ctx is valid.
+        match unsafe { walk(rt.ctx, i, plan, *child, region) } {
+            Ok(walked) => {
                 // First match wins. Tag with this case's index; the value is
-                // the single payload slot.
+                // the single payload slot, rooted across `alloc_enum`.
+                scope.root(walked.value);
                 let schema = enum_schema_for(cases);
-                let enum_ref = rt.alloc_enum(schema, tag as u32, vec![value]);
-                return Ok((enum_ref, new_offset));
+                let enum_ref = rt.alloc_enum(schema, tag as u32, vec![walked.value]);
+                return Ok(Walked {
+                    value: enum_ref,
+                    next: walked.next,
+                });
             }
-            Err(_inner) => {
-                // Backtrack: try the next case from the same offset. We discard
-                // the inner failure here; if no case matches, the choice's own
-                // failure below is the user-visible one. (Recording the deepest
-                // inner failure across cases is a documented hardening
-                // follow-up.)
-                continue;
+            Err(inner) => {
+                // Backtrack, **keeping the deepest case failure** (IPR-09).
+                // Every case's failure used to be discarded and replaced with a
+                // generic "any choice case" at the choice's own offset, so
+                // §7.11's detail named the outermost construct and pointed at
+                // the position where nothing had gone wrong yet. The deepest
+                // failure is the most specific one — it is the same rule
+                // `ParseDetail::consider` applies across a whole parse — and a
+                // case that got further is the case the input was trying to be.
+                let deeper = match &deepest {
+                    None => true,
+                    Some(best) => inner.input_span.0 > best.input_span.0,
+                };
+                if deeper {
+                    deepest = Some(inner);
+                }
             }
         }
     }
-    Err(ParseFail::at(offset, 0, "any choice case"))
+    // A choice with no cases has no case failure to report; that is the only
+    // shape the generic message ever described honestly.
+    Err(deepest.unwrap_or_else(|| ParseFail::at(region.start().offset(), 0, "any choice case")))
 }
 
 /// Walk `optional(P)` (M9, §7.5): parse `P`; on success return `Some(value)`
 /// (Option tag 0) advancing the cursor, on failure return `None` (tag 1) and
-/// consume NO input (the cursor stays at `offset`). No fault is raised on a
-/// miss — this is parser-level optionality, not exception recovery.
+/// consume NO input (the cursor stays at the region's start). No fault is
+/// raised on a miss — this is parser-level optionality, not exception recovery.
 fn walk_optional(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     child: u32,
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    match unsafe { walk(rt.ctx, plan, child, bytes, offset) } {
-        Ok((value, new_offset)) => {
-            let some_ref = rt.alloc_enum(crate::enums::option_schema(), 0, vec![value]);
-            Ok((some_ref, new_offset))
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
+    // SAFETY: ctx is valid.
+    match unsafe { walk(rt.ctx, i, plan, child, region) } {
+        Ok(walked) => {
+            // Rooted across `alloc_enum`, which paces.
+            scope.root(walked.value);
+            let some_ref = rt.alloc_enum(crate::enums::option_schema(), 0, vec![walked.value]);
+            Ok(Walked {
+                value: some_ref,
+                next: walked.next,
+            })
         }
         Err(_) => {
             // Consume nothing; return None (tag 1, no payload). The inner
             // failure is intentionally swallowed — `optional` is parser-level
             // optionality, not exception recovery.
             let none_ref = rt.alloc_enum(crate::enums::option_schema(), 1, Vec::new());
-            Ok((none_ref, offset))
+            Ok(Walked {
+                value: none_ref,
+                next: region.start(),
+            })
         }
     }
 }
 
 /// Walk `scan(P)` (M9, §7.5): slide a cursor across the region; at each
 /// position try `P`. On success, push the value and advance past the match
-/// (so overlapping matches aren't found); on failure, advance one byte. All
-/// unmatched text is ignored. Returns `Vec[result(P)]` in source order.
-fn walk_scan(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
+/// (so overlapping matches aren't found); on failure, advance one position.
+/// All unmatched text is ignored. Returns `Vec[result(P)]` in source order.
+fn walk_scan(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    child: u32,
+    region: ByteRegion,
+) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
-    let mut cursor = offset;
-    while cursor < bytes.len() {
-        match unsafe { walk(rt.ctx, plan, child, bytes, cursor) } {
-            Ok((value, new_offset)) => {
+    let mut cursor = region.start();
+    while cursor < region.end() {
+        // SAFETY: ctx is valid.
+        match unsafe { walk(rt.ctx, i, plan, child, region.from(cursor)) } {
+            Ok(walked) => {
                 // A match must advance the cursor (otherwise we'd loop forever
-                // on a zero-width match). If it didn't, advance one byte.
-                items.push(value);
-                if new_offset > cursor {
-                    cursor = new_offset;
+                // on a zero-width match). If it didn't, step one position.
+                scope.root(walked.value);
+                items.push(walked.value);
+                cursor = if walked.next > cursor {
+                    walked.next
                 } else {
-                    cursor += 1;
-                }
+                    match region.next_scalar(i, cursor) {
+                        Some(next) => next,
+                        None => break,
+                    }
+                };
             }
             Err(_) => {
-                cursor += 1;
+                cursor = match region.next_scalar(i, cursor) {
+                    Some(next) => next,
+                    None => break,
+                };
             }
         }
     }
     let elem_desc = child_descriptor(plan, child);
-    Ok((rt.alloc_vec(elem_desc, items), bytes.len() - offset))
+    Ok(Walked {
+        value: rt.alloc_vec(elem_desc, items),
+        next: region.end(),
+    })
 }
 
 /// Walk `one_of("LR")` (M9, §7.5): match one character from a literal set.
-fn walk_one_of(rt: &Rt, chars: &str, bytes: &[u8], offset: usize) -> WalkResult {
-    let rest = &bytes[offset..];
-    let s = trim_leading_ws(rest);
-    let s_str = std::str::from_utf8(s).map_err(|_| ParseFail::at(offset, rest.len(), "char"))?;
-    let ch = s_str
-        .chars()
-        .next()
-        .ok_or_else(|| ParseFail::at(offset + (rest.len() - s.len()), 0, "char"))?;
+///
+/// Like [`AtomicKind::Char`], it reads the scalar **at** the cursor: it is a
+/// character class, and a class that skipped spaces before matching could not
+/// contain one — nor could `chars(one_of(…), skip: none)` mean what it says.
+/// A caller that wants leading space skipped has `skip:`, `walk_exact`'s token
+/// bounds, or a template's pre-capture skip.
+fn walk_one_of(rt: &Rt, i: &Input<'_>, chars: &str, region: ByteRegion) -> WalkResult {
+    let at = region.start();
+    let Some(next) = region.next_scalar(i, at) else {
+        return Err(ParseFail::at(at.offset(), 0, "char"));
+    };
+    let ch = region
+        .subregion(at, next)
+        .str(i)
+        .and_then(|t| t.chars().next())
+        .ok_or_else(|| ParseFail::at(at.offset(), 0, "char"))?;
     if !chars.contains(ch) {
         return Err(ParseFail::at(
-            offset + (rest.len() - s.len()),
+            at.offset(),
             ch.len_utf8(),
             format!("one of \"{chars}\""),
         ));
     }
-    let consumed = rest.len() - s.len() + ch.len_utf8();
-    Ok((rt.alloc_char(ch as u32), offset + consumed))
+    Ok(Walked {
+        value: rt.alloc_char(ch as u32),
+        next,
+    })
 }
 
 /// Walk `chars(P, skip:)` (M9, §7.5): apply a char-parser repeatedly, trimming
-/// between matches per the skip policy. Result is `Vec[Char]`.
+/// between matches per the skip policy.
 fn walk_characters(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     child: u32,
     skip: praxis_input_parser::SkipPolicy,
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
-    let mut cursor = offset;
+    let mut cursor = region.start();
     loop {
-        cursor = skip_chars(bytes, cursor, skip);
-        if cursor >= bytes.len() {
+        cursor = skip_chars(i, region, cursor, skip);
+        if cursor >= region.end() {
             break;
         }
-        match unsafe { walk(rt.ctx, plan, child, bytes, cursor) } {
-            Ok((value, new_offset)) => {
-                if new_offset <= cursor {
-                    cursor += 1;
-                } else {
-                    cursor = new_offset;
+        // **What is left is whitespace, or the child's failure is the parse's
+        // failure** (IPR-07). The failure half used to `break`, so `chars`
+        // returned `Ok` at the first mismatch and silently dropped the rest of
+        // the region — `chars(digit)` over `"12x34"` answered `[1, 2]` and
+        // reported nothing.
+        //
+        // The whitespace half is `walk_exact`'s bound rule, in the one loop
+        // that is not `walk_exact`-shaped: `chars` has no bound to fill, it
+        // consumes until the region runs out. Without it, whether §7.5's own
+        // `chars(one_of("^v<>"), skip: whitespace)` could read an ordinary file
+        // came down to whether its skip policy happened to include line endings
+        // — and `whitespace` is horizontal whitespace, so it did not. It is
+        // only what is *left*: `chars(digit, skip: none)` over `"1\n2"` still
+        // faults, because `"\n2"` is not whitespace. And it is asked *after*
+        // the child, so a character parser that can read whitespace still reads
+        // it — `chars(one_of(" "))` counts spaces rather than skipping them.
+        // SAFETY: ctx is valid.
+        let walked = match unsafe { walk(rt.ctx, i, plan, child, region.from(cursor)) } {
+            Ok(walked) => walked,
+            Err(fail) => {
+                if region.from(cursor).is_all_whitespace(i) {
+                    break;
                 }
-                items.push(value);
+                return Err(fail);
             }
-            Err(_) => break,
-        }
+        };
+        cursor = if walked.next > cursor {
+            walked.next
+        } else {
+            match region.next_scalar(i, cursor) {
+                Some(next) => next,
+                None => break,
+            }
+        };
+        scope.root(walked.value);
+        items.push(walked.value);
     }
-    Ok((rt.alloc_vec(&scalars::CHAR, items), bytes.len() - offset))
+    // The element descriptor is the child's, not a hardcoded `CHAR`. The Vec
+    // used to be tagged `Char` whatever it held, so `chars(int, …)` filled a
+    // `Vec[Char]` with `Int` objects and `vec_format`/`vec_equals`/`vec_hash`
+    // dispatched through the wrong callback (IPR-07, D-S20-A).
+    let elem_desc = child_descriptor(plan, child);
+    Ok(Walked {
+        value: rt.alloc_vec(elem_desc, items),
+        next: region.end(),
+    })
 }
 
 /// Skip bytes at `cursor` per the `chars` skip policy (§7.5).
-fn skip_chars(bytes: &[u8], mut cursor: usize, skip: praxis_input_parser::SkipPolicy) -> usize {
+///
+/// **`Newlines` is the broader policy, not the narrower one.** `Whitespace`
+/// skips spaces and tabs; `Newlines` skips those *and* line endings. The names
+/// do not say so and the arms below look backwards to a reader who assumes
+/// "whitespace" is the superset — which is exactly the assumption that made a
+/// stage believe `skip: whitespace` could absorb an input file's trailing
+/// newline. It cannot, and it does not have to. The terminator is **inside** the
+/// region — the root region is the whole buffer — and it is forgiven because it
+/// is whitespace no child read: [`walk_characters`] asks the child first and
+/// accepts a whitespace-only leftover through `ByteRegion::is_all_whitespace`,
+/// the bound half of `parser::cursor`'s rule. (An earlier comment here credited
+/// a deleted `Input::root_region` trim, which was round two's answer.)
+/// `SkipPolicy`'s own documentation in `praxis-input-parser` carries the full
+/// note, and
+/// `the_skip_policies_are_ordered_by_what_they_skip` pins the inclusion so the
+/// sets cannot be quietly swapped.
+///
+/// Byte-wise like [`skip_line_boundary`], and sound for the same reason: every
+/// byte it tests is ASCII whitespace, which cannot appear inside a multi-byte
+/// scalar.
+fn skip_chars(
+    i: &Input<'_>,
+    region: ByteRegion,
+    cursor: Cursor,
+    skip: praxis_input_parser::SkipPolicy,
+) -> Cursor {
     use praxis_input_parser::SkipPolicy;
+    let bytes = region.from(cursor).bytes(i);
+    let mut n = 0usize;
     match skip {
         SkipPolicy::None => {}
         SkipPolicy::Whitespace => {
-            while cursor < bytes.len() && (bytes[cursor] == b' ' || bytes[cursor] == b'\t') {
-                cursor += 1;
+            while n < bytes.len() && (bytes[n] == b' ' || bytes[n] == b'\t') {
+                n += 1;
             }
         }
         SkipPolicy::Newlines => {
-            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-                cursor += 1;
+            while n < bytes.len() && bytes[n].is_ascii_whitespace() {
+                n += 1;
             }
         }
     }
-    cursor
+    cursor.advance(n)
 }
 
 /// Walk `matrix(P)` (M9, §7.5, ADR-030): parse lines of whitespace-separated
 /// tokens into a rectangular `Grid[result(P)]`. Each row must have the same
 /// token count.
-fn walk_matrix(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
-    let region = &bytes[offset..];
-    let region_str = std::str::from_utf8(region).unwrap_or("");
-    let lines: Vec<&str> = region_str
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect();
-    let width = lines
-        .first()
-        .map(|l| l.split_whitespace().count())
-        .unwrap_or(0);
-    let mut items = Vec::with_capacity(lines.len() * width);
-    for line in &lines {
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        if tokens.len() != width {
+fn walk_matrix(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    child: u32,
+    region: ByteRegion,
+) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
+    let mut rows: Vec<Vec<ByteRegion>> = Vec::new();
+    let lines = split_lines(i, region);
+    let blank_run = trailing_blank_run(i, &lines);
+    for (n, line) in lines.iter().enumerate() {
+        let text = region_str(i, *line, "matrix row")?;
+        let tokens = whitespace_tokens(*line, text);
+        // A **trailing** blank line yields no tokens, so `matrix` makes nothing
+        // of it and it belongs to nobody — the same rule `grid` and `lines`
+        // answer from, not a `matrix` special case. The predecessor skipped
+        // *any* line that trimmed to nothing, interior ones included, which was
+        // exactly the per-constructor whitespace exception ADR-078's corollary
+        // warns against: `matrix(int)` silently dropped the middle of
+        // `"1 2\n  \n3 4\n"` while `lines(int)` and `grid(digit)` faulted on the
+        // identical shape. An interior blank line is structure, so it is a
+        // zero-token row and the width check below rejects it.
+        if tokens.is_empty() && n >= blank_run {
+            continue;
+        }
+        rows.push(tokens);
+    }
+    let width = rows.first().map(Vec::len).unwrap_or(0);
+    let mut items = Vec::with_capacity(rows.len() * width);
+    for row in &rows {
+        if row.len() != width {
             return Err(ParseFail::at(
-                offset,
+                region.start().offset(),
                 region.len(),
                 "rectangular matrix row",
             ));
         }
-        for token in tokens {
-            let token_bytes = token.as_bytes();
-            let (value, _) = unsafe { walk(rt.ctx, plan, child, token_bytes, 0)? };
+        for token in row {
+            // The token's own region, not its bytes copied into a fresh buffer
+            // walked at offset zero (IPR-03/IPR-05), and consumed exactly.
+            // SAFETY: ctx is valid.
+            let value = unsafe { walk_exact(rt, i, plan, child, *token, "the rest of the token")? };
+            scope.root(value);
             items.push(value);
         }
     }
     let elem_desc = child_descriptor(plan, child);
-    alloc_grid(rt, elem_desc, items, width, bytes.len() - offset)
+    alloc_grid(rt, elem_desc, items, width, region.end())
 }
 
 /// Walk ragged `grid(P, ragged, fill:)` (M9, §7.5): permit uneven rows and pad
 /// to the maximum width with the `fill` value (parsed by the cell parser).
 fn walk_grid_ragged(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     child: u32,
     fill: &str,
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    let region = &bytes[offset..];
-    let lines: Vec<_> = split_lines(region).collect();
-    let width = lines.iter().map(|l| l.len).max().unwrap_or(0);
-    let mut items = Vec::with_capacity(lines.len() * width);
-    let fill_bytes = fill.as_bytes();
-    let (fill_value, _) = unsafe { walk(rt.ctx, plan, child, fill_bytes, 0)? };
-    for line in &lines {
-        let line_bytes = &region[line.start..line.start + line.len];
-        for (i, _) in line_bytes.iter().enumerate() {
-            let cell_offset = offset + line.start + i;
-            let (value, _) = unsafe { walk(rt.ctx, plan, child, bytes, cell_offset)? };
-            items.push(value);
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
+    let lines = split_lines(i, region);
+    // **The fill is not a region of the input.** It is a plan literal, and the
+    // predecessor walked `fill.as_bytes()` at offset 0 while the cell parser
+    // allocated its Texts against the input — so a `Text` fill cell named input
+    // bytes with no relationship at all to the fill text (IPR-03). It gets its
+    // own owned `Text` and its own `Input`, which is what makes a sliced fill
+    // cell name the fill.
+    let fill_owner = rt.alloc_text_owned(fill);
+    // The fill's `Text` and the value parsed out of it are both live across
+    // every row: the value is a slice of the owner, and the padding cells all
+    // share it.
+    scope.root(fill_owner);
+    // SAFETY: `alloc_text_owned` just produced a live Text.
+    let fill_input = unsafe { Input::new(fill_owner) }
+        .ok_or_else(|| ParseFail::at(region.start().offset(), 0, "grid fill"))?;
+    let fill_region = fill_input.whole();
+    // SAFETY: ctx is valid.
+    let fill_value = unsafe {
+        walk_exact(
+            rt,
+            &fill_input,
+            plan,
+            child,
+            fill_region,
+            "the rest of the fill",
+        )?
+    };
+    scope.root(fill_value);
+    // Rows are parsed first and padded second: a ragged grid's width is the
+    // widest row's **cell count**, which is not known until the cell parser has
+    // read them.
+    let mut items = Vec::new();
+    let mut rows = Vec::with_capacity(lines.len());
+    let blank_run = trailing_blank_run(i, &lines);
+    for (n, line) in lines.iter().enumerate() {
+        // SAFETY: ctx is valid.
+        let cells = unsafe { walk_grid_row(rt, i, plan, child, *line, &mut items, &scope)? };
+        // The same rule uniform `grid` answers from: a trailing blank line the
+        // cell parser reads no cell in is nobody's, and would otherwise be a
+        // zero-cell row padded out to the full width with `fill`.
+        if cells == 0 && n >= blank_run {
+            continue;
         }
-        for _ in line_bytes.len()..width {
-            items.push(fill_value);
+        rows.push(cells);
+    }
+    let width = rows.iter().copied().max().unwrap_or(0);
+    // Pad each short row out to the width, from the back forwards so the
+    // earlier rows' offsets stay valid while we insert.
+    let mut at = items.len();
+    for (n, cells) in rows.iter().enumerate().rev() {
+        at -= cells;
+        for _ in *cells..width {
+            items.insert(at + cells, fill_value);
         }
+        let _ = n;
     }
     let elem_desc = child_descriptor(plan, child);
-    alloc_grid(rt, elem_desc, items, width, bytes.len() - offset)
+    alloc_grid(rt, elem_desc, items, width, region.end())
 }
 
 /// Allocate a `Grid` from element refs + width (shared by grid/matrix/ragged).
-/// `consumed` is the byte count the grid consumed (caller-supplied).
+/// `next` is the position the constructor stopped at.
 fn alloc_grid(
     rt: &Rt,
     elem_desc: &'static crate::TypeDescriptor,
     items: Vec<GcRef>,
     width: usize,
-    consumed: usize,
+    next: Cursor,
 ) -> WalkResult {
     let payload = crate::collections::GridPayload {
         element_descriptor: elem_desc,
         items,
         width,
     };
-    // SAFETY: ctx is valid.
+    let (heap, safepoint) = rt.safepoint();
+    // SAFETY: payload matches GRID's layout.
     let grid_ref = unsafe {
-        heap_ref(rt.ctx).alloc_with_unpaced(
+        heap.alloc_with(
+            safepoint,
             &crate::collections::GRID,
             std::mem::size_of::<crate::collections::GridPayload>(),
             std::mem::align_of::<crate::collections::GridPayload>(),
             |ptr| (ptr as *mut crate::collections::GridPayload).write(payload),
         )
     };
-    Ok((grid_ref, consumed))
+    Ok(Walked {
+        value: grid_ref,
+        next,
+    })
 }
 
-fn walk_csv(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
-    let region = &bytes[offset..];
-    let region_str = std::str::from_utf8(region).unwrap_or("");
+fn walk_csv(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    child: u32,
+    region: ByteRegion,
+) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
+    let text = region_str(i, region, "csv")?;
     let mut items = Vec::new();
-    for token in region_str.split(',') {
-        let token_trimmed = token.trim();
-        // Allocate a temporary owned Text for the token, then parse it.
-        // The offset within the original buffer:
-        let token_start = offset + region_offset_of(region, token_trimmed);
-        let token_end = token_start + token_trimmed.len();
-        // Create a sub-slice of the original bytes for this token.
-        let (value, _) = unsafe { walk(rt.ctx, plan, child, bytes, token_start)? };
-        let _ = token_end;
+    for token in csv_tokens(region, text) {
+        // The field's own region. `csv` used to hand the child everything from
+        // the field's start to the end of the input and discard the cursor —
+        // the discard was even written out, `let _ = token_end;` (IPR-04).
+        // SAFETY: ctx is valid.
+        let value = unsafe { walk_exact(rt, i, plan, child, token, "the rest of the field")? };
+        scope.root(value);
         items.push(value);
     }
     let elem_desc = child_descriptor(plan, child);
-    Ok((rt.alloc_vec(elem_desc, items), bytes.len() - offset))
+    Ok(Walked {
+        value: rt.alloc_vec(elem_desc, items),
+        next: region.end(),
+    })
 }
 
-fn walk_ws(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
-    let region = &bytes[offset..];
+/// Walk `ws(P)` (§7.5): split on whitespace and apply `P` to each token.
+///
+/// **A whitespace-delimited token contains no whitespace.** §7.5 says `ws`
+/// splits "on one or more spaces or tabs", which names the *separator*; it does
+/// not say a `\n` may sit inside a token, and nothing could want it to. The
+/// predecessor split on spaces and tabs alone, so a token ran through a line
+/// ending: `read ws(int)` over `"1 2\n3 4\n"` was three tokens — `1`, `2\n3`,
+/// `4\n` — and the middle one faulted. A line terminator is not `ws`'s
+/// separator but it is still a token terminator, which is the same rule
+/// [`whitespace_tokens`] has always applied for `matrix`; sharing that splitter
+/// is what stops the two whitespace-token constructors disagreeing about one
+/// file.
+fn walk_ws(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    child: u32,
+    region: ByteRegion,
+) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
+    let text = region_str(i, region, "whitespace-separated tokens")?;
     let mut items = Vec::new();
-    let mut pos = 0;
-    while pos < region.len() {
-        // Skip leading whitespace.
-        while pos < region.len() && is_ws(region[pos]) {
-            pos += 1;
-        }
-        if pos >= region.len() {
-            break;
-        }
-        let token_start = pos;
-        while pos < region.len() && !is_ws(region[pos]) {
-            pos += 1;
-        }
-        let (value, _) = unsafe { walk(rt.ctx, plan, child, bytes, offset + token_start)? };
+    for token in whitespace_tokens(region, text) {
+        // SAFETY: ctx is valid.
+        let value = unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? };
+        scope.root(value);
         items.push(value);
     }
     let elem_desc = child_descriptor(plan, child);
-    Ok((rt.alloc_vec(elem_desc, items), bytes.len() - offset))
+    Ok(Walked {
+        value: rt.alloc_vec(elem_desc, items),
+        next: region.end(),
+    })
 }
 
 fn walk_sep(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     child: u32,
     sep: &str,
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    let region = &bytes[offset..];
-    let region_str = std::str::from_utf8(region).unwrap_or("");
+    let bytes = region.bytes(i);
+    let base = region.start();
     let sep_bytes = sep.as_bytes();
     // The loop below advances by `sep_bytes.len()` on a match, and
     // `starts_with(&[])` is unconditionally true — so an empty separator is an
@@ -905,13 +1575,23 @@ fn walk_sep(
         !sep_bytes.is_empty(),
         "Separator::new refuses an empty separator (IP-10): the loop below cannot advance past one"
     );
+    if sep_bytes.is_empty() {
+        return Err(ParseFail::at(base.offset(), 0, "a non-empty separator"));
+    }
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
     let mut token_start = 0usize;
     let mut pos = 0usize;
-    while pos < region.len() {
-        if region[pos..].starts_with(sep_bytes) {
-            // Parse the token [token_start, pos).
-            let (value, _) = unsafe { walk(rt.ctx, plan, child, bytes, offset + token_start)? };
+    while pos < bytes.len() {
+        if bytes[pos..].starts_with(sep_bytes) {
+            let token = region.subregion(base.advance(token_start), base.advance(pos));
+            // SAFETY: ctx is valid.
+            let value = unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? };
+            scope.root(value);
             items.push(value);
             pos += sep_bytes.len();
             token_start = pos;
@@ -920,52 +1600,184 @@ fn walk_sep(
         }
     }
     // Parse the final token.
-    if (token_start < region.len() || !items.is_empty()) && token_start < region_str.len() {
-        let (value, _) = unsafe { walk(rt.ctx, plan, child, bytes, offset + token_start)? };
+    if token_start < bytes.len() {
+        let token = region.subregion(base.advance(token_start), region.end());
+        // SAFETY: ctx is valid.
+        let value = unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? };
+        scope.root(value);
         items.push(value);
     }
     let elem_desc = child_descriptor(plan, child);
-    Ok((rt.alloc_vec(elem_desc, items), bytes.len() - offset))
+    Ok(Walked {
+        value: rt.alloc_vec(elem_desc, items),
+        next: region.end(),
+    })
 }
 
-fn walk_grid(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
-    let region = &bytes[offset..];
-    let lines: Vec<_> = split_lines(region).collect();
-    let width = lines.first().map(|l| l.len).unwrap_or(0);
-    let mut items = Vec::with_capacity(lines.len() * width);
-    for line in &lines {
-        let line_bytes = &region[line.start..line.start + line.len];
-        if line_bytes.len() != width {
-            // Grid rows must be uniform (§7.5). Ragged grids are M9.
-            return Err(ParseFail::at(offset, region.len(), "uniform grid row"));
+fn walk_grid(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    child: u32,
+    region: ByteRegion,
+) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
+    let lines = split_lines(i, region);
+    let blank_run = trailing_blank_run(i, &lines);
+    let mut items = Vec::new();
+    let mut width: Option<usize> = None;
+    for (n, line) in lines.iter().enumerate() {
+        // SAFETY: ctx is valid.
+        let cells = unsafe { walk_grid_row(rt, i, plan, child, *line, &mut items, &scope)? };
+        // **A trailing blank line is a row if the cell parser reads cells in
+        // it.** `char` does, so `grid(char)` over `"ab\ncd\n  \n"` is 2x3 —
+        // which is the same answer that makes `"ab\ncd \n"` ragged, rather than
+        // an exception to it. `digit`/`int` read no cell there, so the line
+        // belongs to nobody and the grid is 2x2. `split_lines` used to delete
+        // the line before the cell parser was asked, so the two answers
+        // contradicted each other and `"  \n  \n"` was an *empty* grid.
+        if cells == 0 && n >= blank_run {
+            continue;
         }
-        for (i, _) in line_bytes.iter().enumerate() {
-            let cell_offset = offset + line.start + i;
-            let (value, _) = unsafe { walk(rt.ctx, plan, child, bytes, cell_offset)? };
-            items.push(value);
+        match width {
+            None => width = Some(cells),
+            // Grid rows must be uniform (§7.5). Ragged grids are M9. Uniform in
+            // **cells**, which is the only measure that means the same thing for
+            // every cell parser: `grid(char)` counts characters and `grid(int)`
+            // counts integer tokens.
+            Some(w) if w != cells => {
+                return Err(ParseFail::at(
+                    line.start().offset(),
+                    line.len(),
+                    "a grid row of the same cell count as the first",
+                ));
+            }
+            Some(_) => {}
         }
     }
+    let width = width.unwrap_or(0);
     let elem_desc = child_descriptor(plan, child);
-    let payload = crate::collections::GridPayload {
-        element_descriptor: elem_desc,
-        items,
-        width,
-    };
-    // SAFETY: ctx is valid.
-    let grid_ref = unsafe {
-        heap_ref(rt.ctx).alloc_with_unpaced(
-            &crate::collections::GRID,
-            std::mem::size_of::<crate::collections::GridPayload>(),
-            std::mem::align_of::<crate::collections::GridPayload>(),
-            |ptr| (ptr as *mut crate::collections::GridPayload).write(payload),
-        )
-    };
-    Ok((grid_ref, bytes.len() - offset))
+    alloc_grid(rt, elem_desc, items, width, region.end())
 }
 
 // ---- templates (§7.2, §7.3) -----------------------------------------------
 
-/// Interpret a backtick template against `bytes` from `offset` (§7.2, §7.3).
+/// The run of template parts a capture must stop before: every part from
+/// `index + 1` up to (not including) the next capture.
+///
+/// **The whole run, not its first constraining member.** Two spellings of one
+/// policy behaved differently while only the first was consulted:
+/// `` lines(`{a:text} bar`) `` read `"x y bar"` as `a = "x y"`, and
+/// `` lines(`{a:text}\\s+bar`) `` over the identical bytes faulted — because
+/// §7.9 lowers `\\s+` to its own empty-text part, and bounding the capture by
+/// that part alone stopped it at the first space, where `bar` is not. §7.4 says
+/// `text` "minimally consumes text until the following template literal can
+/// match"; what has to be able to match is everything before the next capture,
+/// which is the only reading under which the two spellings agree.
+///
+/// The predecessor before *that* looked only for a literal with **non-empty**
+/// text, so a capture followed by a whitespace-only part was not bounded at
+/// all: `` lines(`{name:text} {v:int}`) `` over `"foo 3"` reported "expected
+/// whitespace" at the end of the line, for the most ordinary template shape
+/// there is.
+///
+/// `None` means the run constrains nothing — it is empty (the next part is a
+/// capture), or every member matches the empty string (`\\s*` and a literal
+/// with no run in front of it: `WsPolicy::ZeroOrMore`, `WsPolicy::None`, with
+/// no text). A capture with nothing to stop before takes the rest of its
+/// region, which is the documented answer for a template that asks for
+/// zero-or-more.
+fn following_bound(
+    parts: &[praxis_input_parser::TemplatePartNode],
+    index: usize,
+) -> Option<&[praxis_input_parser::TemplatePartNode]> {
+    use praxis_input_parser::{TemplatePartNode, WsPolicy};
+    let rest = &parts[index + 1..];
+    let len = rest
+        .iter()
+        .take_while(|p| matches!(p, TemplatePartNode::Literal { .. }))
+        .count();
+    let run = &rest[..len];
+    let constrains = run.iter().any(|p| match p {
+        TemplatePartNode::Literal { text, ws } => {
+            !text.is_empty() || !matches!(ws, WsPolicy::None | WsPolicy::ZeroOrMore)
+        }
+        _ => false,
+    });
+    constrains.then_some(run)
+}
+
+/// Match the literal run `run` at `at`, returning where it ends, or `None`.
+///
+/// Exactly what `walk_template`'s own `Literal` arm does, in the form the bound
+/// scan needs: a lookahead that answers "could the rest of this template's
+/// fixed text start here?" without committing.
+fn match_literal_run(
+    i: &Input<'_>,
+    region: ByteRegion,
+    base: Cursor,
+    bytes: &[u8],
+    at: Cursor,
+    run: &[praxis_input_parser::TemplatePartNode],
+) -> Option<Cursor> {
+    let mut cursor = at;
+    for part in run {
+        let praxis_input_parser::TemplatePartNode::Literal { text, ws } = part else {
+            // `following_bound` only ever hands us literals.
+            return None;
+        };
+        cursor = base.advance(consume_ws(bytes, cursor.delta_from(base), *ws)?);
+        if !region.from(cursor).bytes(i).starts_with(text.as_bytes()) {
+            return None;
+        }
+        cursor = cursor.advance(text.len());
+    }
+    Some(cursor)
+}
+
+/// The earliest position at or after `cursor` where `run` can match — i.e.
+/// where the capture before it must stop.
+///
+/// "Earliest" is what makes `text` non-greedy, and taking the position *before*
+/// the run's leading whitespace policy runs is what keeps that whitespace out of
+/// the capture: `` `{name:text} {v:int}` `` on `"foo 3"` stops `name` at the
+/// space rather than inside it, because the run is a literal with empty text
+/// and `WsPolicy::SpaceRun` whose earliest match is byte 3.
+///
+/// It does **not** follow that the child fills its region. For
+/// `{a:int},{b:int}` on `"12 ,34"` the comma carries `WsPolicy::None` — a
+/// template that writes nothing in front of a literal gets no run in front of
+/// it — so the bound is the comma at byte 3, `a` is handed `"12 "`, and the
+/// space is forgiven by `walk_exact` because it is whitespace `int` did not
+/// read (ADR-078). An earlier version of this comment credited a `SpaceRun` on
+/// the comma with absorbing it; there is no such run, and removing
+/// `walk_exact`'s forgiveness makes that program fault at `2..3`.
+///
+/// `None` means the run does not occur in the rest of the region at all, which
+/// is a mismatch the parts themselves will report.
+fn capture_bound(
+    i: &Input<'_>,
+    region: ByteRegion,
+    base: Cursor,
+    cursor: Cursor,
+    run: &[praxis_input_parser::TemplatePartNode],
+) -> Option<Cursor> {
+    let bytes = region.bytes(i);
+    let mut at = cursor;
+    loop {
+        if match_literal_run(i, region, base, bytes, at, run).is_some() {
+            return Some(at);
+        }
+        // Step by scalar, so a bound never lands inside a multi-byte character.
+        at = region.next_scalar(i, at)?;
+    }
+}
+
+/// Interpret a backtick template against `region` (§7.2, §7.3).
 ///
 /// Walks the `parts` in order: a `Literal` part matches its bytes (honoring the
 /// whitespace policy), a `Capture` part recursively walks its child parser to
@@ -975,127 +1787,230 @@ fn walk_grid(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize
 /// - any named capture → a `Record` (schema built at runtime from the capture
 ///   names + the child result descriptors).
 ///
-/// Multi-anon-capture templates lower to a `Tuple` node (handled by
-/// [`walk_tuple`]); this function never sees that case.
+/// A multi-anon-capture template is assembled here too, by the last arm — the
+/// plan has a `Tuple` node for it and nothing ever emits one, so `walk_tuple`
+/// is unreachable from source. That gap is why `template_result_descriptor`
+/// answers `Unit` for this shape; it is registered as REP-54 and not fixed
+/// here.
 fn walk_template(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     parts: &[praxis_input_parser::TemplatePartNode],
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    let mut cursor = offset;
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
+    let base = region.start();
+    let bytes = region.bytes(i);
+    let mut cursor = base;
     // Capture values in field-index order. Each entry is (name, child_node,
     // value): the child node is kept so a multi-anon-capture tuple can build its
     // TupleSchema from the child result descriptors.
     let mut captures: Vec<(Option<&'static str>, u32, GcRef)> = Vec::new();
 
-    for part in parts {
+    for (index, part) in parts.iter().enumerate() {
         match part {
             praxis_input_parser::TemplatePartNode::Literal { text, ws } => {
                 // Honor the whitespace policy before matching the literal.
-                cursor = match consume_ws(bytes, cursor, *ws) {
-                    None => {
-                        return Err(ParseFail::at(cursor, 0, "whitespace"));
-                    }
-                    Some(c) => c,
+                let Some(after) = consume_ws(bytes, cursor.delta_from(base), *ws) else {
+                    return Err(ParseFail::at(cursor.offset(), 0, "whitespace"));
                 };
-                // Match the literal bytes verbatim.
+                cursor = base.advance(after);
+                // Match the literal bytes verbatim, within the region.
                 let lit = text.as_bytes();
-                if !bytes[cursor..].starts_with(lit) {
+                if !region.from(cursor).bytes(i).starts_with(lit) {
                     return Err(ParseFail::at(
-                        cursor,
+                        cursor.offset(),
                         lit.len(),
                         format!("literal {:?}", text),
                     ));
                 }
-                cursor += lit.len();
+                cursor = cursor.advance(lit.len());
             }
             praxis_input_parser::TemplatePartNode::Capture {
                 child,
                 field_index: _,
                 name,
             } => {
-                // Skip any flexible leading whitespace before a capture, then
-                // walk the child parser to extract one value.
-                cursor = match consume_ws(bytes, cursor, consume_ws_default()) {
-                    None => {
-                        return Err(ParseFail::at(cursor, 0, "whitespace"));
+                // **The child is offered the bytes at the cursor, whitespace
+                // and all** — a capture answers from the one rule like every
+                // other construct (ADR-078's amended §, §7.5). The cursor is
+                // *not* advanced past leading horizontal whitespace here: doing
+                // that decided about whitespace without asking the child, so
+                // the same child on the same bytes answered one way as
+                // `lines(char)` and another as ``lines(`{a:char}`)``, and a
+                // `{a:text}`/`{a:rest}` capture lost bytes its child reads.
+                // `walk_atomic` already puts §7.4's "surrounding horizontal
+                // space handled by caller" where it belongs — it trims for the
+                // numeric atomics and deliberately does not for `char`, `text`
+                // and `rest` — so the trim was being re-imposed one level up
+                // for exactly the children that forbid it.
+                //
+                // The skip survives as a *lookahead offset for the bound scan
+                // only* (`search`, below). That is a bound question, not a
+                // whitespace-reading one: a capture may not be bounded by its
+                // own leading whitespace, or `` `{a:text} {v:int}` `` over
+                // `"  foo 3"` would stop `a` at byte 0 — the following literal
+                // run is `SpaceRun` + empty text, which matches the indent
+                // itself — and hand `int` the word.
+                let search = base.advance(skip_capture_ws(bytes, cursor.delta_from(base)));
+                // **Bound the capture by the literal that follows it** (IPR-10).
+                // §7.4 says `text` "minimally consumes text until the following
+                // template literal can match", and the predecessor consumed to
+                // the end of the whole buffer — so `pre{body:text}post` ate its
+                // own suffix and no template with a trailing literal could ever
+                // match. Done here rather than in `walk_atomic` because it is
+                // uniform: every capture is bounded, not only the `text` ones,
+                // which is also what stops a `word` at a `-` without adding `-`
+                // to `word`'s delimiter set (IPR-11).
+                match following_bound(parts, index) {
+                    Some(bound) => {
+                        match capture_bound(i, region, base, search, bound) {
+                            Some(bound) => {
+                                // SAFETY: ctx is valid.
+                                let value = unsafe {
+                                    walk_exact(
+                                        rt,
+                                        i,
+                                        plan,
+                                        *child,
+                                        region.subregion(cursor, bound),
+                                        "the rest of the capture",
+                                    )?
+                                };
+                                scope.root(value);
+                                cursor = bound;
+                                captures.push((*name, *child, value));
+                            }
+                            None => {
+                                // The following part does not occur at all. Let
+                                // the capture parse naturally so *that part*
+                                // reports the mismatch, at the position where it
+                                // was actually looked for.
+                                // SAFETY: ctx is valid.
+                                let walked =
+                                    unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
+                                scope.root(walked.value);
+                                cursor = walked.next;
+                                captures.push((*name, *child, walked.value));
+                            }
+                        }
                     }
-                    Some(c) => c,
-                };
-                // `walk` returns the *absolute* new offset (not a delta), so
-                // assign rather than add.
-                let (value, new_offset) = unsafe { walk(rt.ctx, plan, *child, bytes, cursor)? };
-                cursor = new_offset;
-                captures.push((*name, *child, value));
+                    None => {
+                        // Nothing follows, so there is nothing to stop before:
+                        // the capture takes the rest of the region and keeps
+                        // its own cursor. Requiring exhaustion here would fault
+                        // every root-level template on its input's trailing
+                        // newline; whether the region must be filled is the
+                        // *parent's* question.
+                        // SAFETY: ctx is valid.
+                        let walked = unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
+                        scope.root(walked.value);
+                        cursor = walked.next;
+                        captures.push((*name, *child, walked.value));
+                    }
+                }
             }
         }
     }
 
-    // Assemble the result per §7.3. Return the *real* cursor position (the
-    // absolute offset where matching stopped) so a `block(...)` parent can
-    // advance item-by-item (§7.5). Nothing in the M6/M7 tree consumed this
-    // value, so changing from `bytes.len() - offset` to the true cursor is safe.
+    // Assemble the result per §7.3, returning the position where matching
+    // stopped so a `block(...)` parent can advance item by item (§7.5).
     let any_named = captures.iter().any(|(n, _, _)| n.is_some());
-    if any_named {
+    let value = if any_named {
         // Named captures → Record. Build the schema at runtime.
-        Ok((alloc_record(rt, &captures), cursor))
+        alloc_record(rt, &captures)
     } else if captures.len() == 1 {
         // Single anonymous capture → the scalar value.
-        Ok((captures.into_iter().next().unwrap().2, cursor))
+        captures.into_iter().next().unwrap().2
     } else if captures.is_empty() {
         // No captures → Unit.
-        Ok((alloc_unit(rt), cursor))
+        alloc_unit(rt)
     } else {
         // Multiple anonymous captures → Tuple. Build the schema from the child
         // result descriptors and fill the payload with the captured values.
         let children: Vec<u32> = captures.iter().map(|(_, c, _)| *c).collect();
         let values: Vec<GcRef> = captures.into_iter().map(|(_, _, v)| v).collect();
-        Ok((alloc_tuple(rt, &children, plan, values), cursor))
-    }
+        alloc_tuple(rt, &children, plan, values)
+    };
+    Ok(Walked {
+        value,
+        next: cursor,
+    })
 }
 
-/// Interpret a multi-anon-capture template lowered as a `Tuple` node (§7.3).
-/// Each element is walked against successive sub-regions; the values are
-/// assembled into a `Tuple`. The region is the whole remaining input split
-/// across the captures by the literals' boundaries.
+/// Interpret a `PlanNode::Tuple` (§7.3): each element against the region's tail
+/// from the current cursor, the cursor advancing to where that element stopped.
 ///
-/// In practice the lowering emits a `Tuple` only for a bare `{a},{b}` template
-/// (no surrounding literal context per capture), so each element parses the next
-/// chunk of input greedily up to the following element's literal boundary. For
-/// the M7 scope we walk each element against the full remaining region and
-/// advance by the consumed amount.
+/// **Unreachable from source.** `lower_template` emits `PlanNode::Template` for
+/// every template shape, multi-anon included, and `walk_template` assembles the
+/// tuple itself; nothing in `praxis-input-parser` ever pushes a `Tuple` node.
+/// Kept because the plan variant is public and a hand-built plan can name it —
+/// see REP-54, which is the descriptor half of the same gap.
+///
+/// Same model as [`walk_template`] and the same fix: the predecessor returned
+/// `bytes.len() - offset`, a *length*, where its caller wanted a position.
 fn walk_tuple(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     elements: &[u32],
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    let mut cursor = offset;
+    let mut cursor = region.start();
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut values: Vec<GcRef> = Vec::with_capacity(elements.len());
     for &elem in elements {
-        cursor = match consume_ws(bytes, cursor, consume_ws_default()) {
-            None => {
-                return Err(ParseFail::at(cursor, 0, "whitespace"));
-            }
-            Some(c) => c,
-        };
-        // `walk` returns the absolute new offset, not a delta.
-        let (value, new_offset) = unsafe { walk(rt.ctx, plan, elem, bytes, cursor)? };
-        cursor = new_offset;
-        values.push(value);
+        // The element is offered the bytes at the cursor, whitespace and all —
+        // the same rule [`walk_template`]'s captures answer from. There is no
+        // literal between two elements here to be bounded by, so there is not
+        // even a bound scan to offset: the child alone decides.
+        // SAFETY: ctx is valid.
+        let walked = unsafe { walk(rt.ctx, i, plan, elem, region.from(cursor))? };
+        scope.root(walked.value);
+        cursor = walked.next;
+        values.push(walked.value);
     }
     let tuple_ref = alloc_tuple(rt, elements, plan, values);
-    Ok((tuple_ref, bytes.len() - offset))
+    Ok(Walked {
+        value: tuple_ref,
+        next: cursor,
+    })
 }
 
-/// The default whitespace policy applied before a capture: a flexible run of
-/// spaces/tabs (the §7.2 SpaceRun rule, so AoC column alignment works). This
-/// matches `walk_atomic`'s `trim_leading_ws` behavior for atomics.
-fn consume_ws_default() -> praxis_input_parser::WsPolicy {
-    praxis_input_parser::WsPolicy::SpaceRun
+/// Where a capture's **bound scan** starts: past zero or more spaces or tabs.
+/// Returns that position as an offset into `bytes`.
+///
+/// This is **not** a [`WsPolicy`](praxis_input_parser::WsPolicy) and it used to
+/// be one — `SpaceRun`, which is the one-or-more policy. It only worked because
+/// `SpaceRun` was implemented as zero-or-more; making `SpaceRun` mean what it
+/// says would otherwise have made every capture demand leading whitespace.
+///
+/// It also used to move the **cursor**, which is what the child is offered, and
+/// that was a violation of the one rule in §7.5: it decided about whitespace
+/// without asking the child, and `walk_atomic` already answers that question
+/// per atomic — trimming for the numeric ones and deliberately not for `char`,
+/// `text` and `rest`. It offsets the bound scan and nothing else now: the
+/// earliest place the following literal run may match is *after* the capture's
+/// own leading whitespace, or a run that can match a space run would bound
+/// every indented capture at its first byte.
+fn skip_capture_ws(bytes: &[u8], cursor: usize) -> usize {
+    let Some(rest) = bytes.get(cursor..) else {
+        return cursor;
+    };
+    let mut i = 0;
+    while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
+        i += 1;
+    }
+    cursor + i
 }
 
 /// Consume bytes at `cursor` per `ws`, returning the new cursor or `None` if the
@@ -1105,14 +2020,23 @@ fn consume_ws(bytes: &[u8], cursor: usize, ws: praxis_input_parser::WsPolicy) ->
     let rest = bytes.get(cursor..)?;
     let mut i = 0;
     match ws {
+        WsPolicy::None => {
+            // The template wrote no run in front of this literal, so no run is
+            // consumed. Without this variant every literal claimed `SpaceRun`
+            // and `SpaceRun` had to accept an empty run to compensate.
+        }
         WsPolicy::SpaceRun => {
-            // One or more spaces or tabs (flexible; §7.2 default).
-            // Note: for a literal with leading SpaceRun we require ≥1; if the
-            // literal is the very first part the run may be empty — handled by
-            // allowing zero when cursor == 0. Practically, allow zero-or-more
-            // here so templates starting at offset 0 match.
+            // **One or more** spaces or tabs — the flexible §7.2 default, as
+            // `WsPolicy`'s own definition states it. It used to accept an empty
+            // run, with a comment admitting the contradiction, because the
+            // scanner tagged every literal `SpaceRun` and requiring one would
+            // have made a template starting with a literal unmatchable. The
+            // scanner distinguishes them now (IPR-12).
             while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
                 i += 1;
+            }
+            if i == 0 {
+                return None;
             }
         }
         WsPolicy::ZeroOrMore => {
@@ -1187,9 +2111,11 @@ fn alloc_record(rt: &Rt, captures: &[(Option<&'static str>, u32, GcRef)]) -> GcR
     let schema = record_schema_for(fields);
     let items: Vec<GcRef> = captures.iter().map(|(_, _, v)| *v).collect();
     let payload = crate::records::RecordPayload { schema, items };
-    // SAFETY: ctx is valid; payload matches RECORD's layout.
+    let (heap, safepoint) = rt.safepoint();
+    // SAFETY: payload matches RECORD's layout.
     unsafe {
-        heap_ref(rt.ctx).alloc_with_unpaced(
+        heap.alloc_with(
+            safepoint,
             &crate::records::RECORD,
             std::mem::size_of::<crate::records::RecordPayload>(),
             std::mem::align_of::<crate::records::RecordPayload>(),
@@ -1211,9 +2137,11 @@ fn alloc_tuple(rt: &Rt, elements: &[u32], plan: &ParserPlan, values: Vec<GcRef>)
         schema,
         items: values,
     };
-    // SAFETY: ctx is valid; payload matches TUPLE's layout.
+    let (heap, safepoint) = rt.safepoint();
+    // SAFETY: payload matches TUPLE's layout.
     unsafe {
-        heap_ref(rt.ctx).alloc_with_unpaced(
+        heap.alloc_with(
+            safepoint,
             &crate::tuples::TUPLE,
             std::mem::size_of::<crate::tuples::TuplePayload>(),
             std::mem::align_of::<crate::tuples::TuplePayload>(),
@@ -1431,100 +2359,15 @@ fn tuple_schema_for(
 }
 
 // ---- byte-splitting helpers -----------------------------------------------
-
-/// A byte range within a region.
-struct ByteRange {
-    start: usize,
-    len: usize,
-}
-
-/// Split a byte region into logical lines (stripping trailing `\r` and `\n`).
-fn split_lines(region: &[u8]) -> impl Iterator<Item = ByteRange> + '_ {
-    let mut pos = 0;
-    std::iter::from_fn(move || {
-        if pos >= region.len() {
-            return None;
-        }
-        let start = pos;
-        while pos < region.len() && region[pos] != b'\n' {
-            pos += 1;
-        }
-        let mut end = pos;
-        // Strip a trailing `\r`.
-        if end > start && region[end - 1] == b'\r' {
-            end -= 1;
-        }
-        let len = end - start;
-        if pos < region.len() {
-            pos += 1; // skip `\n`
-        }
-        // Skip empty trailing line.
-        if pos >= region.len() && len == 0 && start == region.len() {
-            return None;
-        }
-        Some(ByteRange { start, len })
-    })
-}
-
-/// Split a byte region on blank lines (one or more empty lines).
-fn split_sections(region: &[u8]) -> impl Iterator<Item = ByteRange> + '_ {
-    let mut pos = 0;
-    std::iter::from_fn(move || {
-        // Skip leading blank lines.
-        while pos < region.len() {
-            let line_start = pos;
-            while pos < region.len() && region[pos] != b'\n' {
-                pos += 1;
-            }
-            let line_end = if pos > line_start && region[pos - 1] == b'\r' {
-                pos - 1
-            } else {
-                pos
-            };
-            if pos < region.len() {
-                pos += 1;
-            }
-            if line_end > line_start {
-                // Found a non-empty line; this section starts here.
-                let section_start = line_start;
-                // Consume until the next blank line (two consecutive newlines).
-                while pos < region.len() {
-                    // Check for blank line.
-                    let peek = pos;
-                    let mut p = peek;
-                    while p < region.len() && region[p] != b'\n' {
-                        p += 1;
-                    }
-                    let blank = p == peek || (p == peek + 1 && region[peek] == b'\r');
-                    if blank {
-                        // This is the end of the section (before the blank line).
-                        return Some(ByteRange {
-                            start: section_start,
-                            len: peek - section_start,
-                        });
-                    }
-                    if p < region.len() {
-                        p += 1;
-                    }
-                    pos = p;
-                }
-                return Some(ByteRange {
-                    start: section_start,
-                    len: pos - section_start,
-                });
-            }
-        }
-        None
-    })
-}
-
-/// The byte offset of `needle` within `hay`, used to locate CSV tokens.
-fn region_offset_of(hay: &[u8], needle: &str) -> usize {
-    let needle_bytes = needle.as_bytes();
-    hay.windows(needle_bytes.len())
-        .position(|w| w == needle_bytes)
-        .unwrap_or(0)
-}
+//
+// `split_lines` and `split_sections` live in `cursor.rs` now, because they
+// produce positions and positions are that module's business. `region_offset_of`
+// is gone entirely: it located a CSV token by *searching the region for the
+// token's text*, so duplicate fields all mapped to the first occurrence, and it
+// called `hay.windows(0)` — a panic — for any token that was empty, which
+// `"10,20,\n"` was enough to reach. Inside `extern "C"` that is not a panic, it
+// is undefined behaviour. `csv_tokens` computes the bounds while it splits, so
+// there is nothing to search for and nothing to be empty.
 
 /// Skip leading horizontal whitespace (spaces and tabs).
 fn trim_leading_ws(bytes: &[u8]) -> &[u8] {
@@ -1687,7 +2530,7 @@ fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescri
         // A template's result is a scalar (single anon capture), a record (named
         // captures), or Unit (no captures). A tuple's result is a tuple. These
         // are uniform descriptors too (schema in the payload).
-        PlanNode::Template { parts } => template_result_descriptor(parts),
+        PlanNode::Template { parts } => template_result_descriptor(plan, parts),
         PlanNode::Tuple { .. } => &crate::tuples::TUPLE,
     }
 }
@@ -1708,33 +2551,55 @@ fn atomic_descriptor(kind: AtomicKind) -> &'static crate::TypeDescriptor {
 }
 
 /// The descriptor of a template's *result*: a scalar if it has exactly one
-/// anonymous capture, a record if it has named captures, Unit if none. (A
-/// multi-anon-capture template lowers to a `Tuple` node, handled above.)
+/// anonymous capture, a record if it has named captures, Unit if none.
+///
+/// **Two or more anonymous captures answer `Unit` and the value is a tuple**,
+/// which is ADR-079 Decision 5's own class of defect surviving in one shape:
+/// `read lines(`{int},{int}`)` renders `[Unit, Unit]`. The comment here used to
+/// say that shape "lowers to a `Tuple` node, handled above" — it does not;
+/// `lower_template` emits a `Template` node for every template and
+/// `walk_template` builds the tuple. Pre-existing (identical at the pre-S20
+/// base) and registered as **REP-54**: the fix wants a tuple descriptor built
+/// from the child descriptors, which is a wider change than this stage owns.
 fn template_result_descriptor(
+    plan: &ParserPlan,
     parts: &[praxis_input_parser::TemplatePartNode],
 ) -> &'static crate::TypeDescriptor {
+    let mut single_anonymous: Option<u32> = None;
     let mut captures = 0usize;
     let mut any_named = false;
     for p in parts {
-        if let praxis_input_parser::TemplatePartNode::Capture { name, .. } = p {
+        if let praxis_input_parser::TemplatePartNode::Capture { name, child, .. } = p {
             captures += 1;
             if name.is_some() {
                 any_named = true;
+            } else {
+                single_anonymous = Some(*child);
             }
         }
     }
     if any_named {
         &crate::records::RECORD
     } else if captures == 1 {
-        // Single anonymous capture → scalar. The exact scalar descriptor depends
-        // on the capture's child, but for descriptor-table purposes the element
-        // is a GC value; the per-value descriptor is read from the value's own
-        // header at trace/format/eq/hash time. Returning a generic GC scalar
-        // descriptor here would be more precise, but the collection wrappers
-        // (vec_equals etc.) dispatch through the value's own descriptor, so this
-        // is only consulted for the collection's *element* tag. Use INT as a
-        // sound default (the value's real descriptor governs tracing).
-        &scalars::INT
+        // Single anonymous capture → the child's own result descriptor.
+        //
+        // This used to be `&scalars::INT`, defended by a comment arguing it was
+        // "a sound default" because the per-value descriptor is read from the
+        // object's header at trace time. It is not a default at all: it is the
+        // tag a *collection* carries for its elements, and `vec_format`,
+        // `vec_equals` and `vec_hash` dispatch through exactly that tag. So
+        // `lines(`{word}`)` produced a `Vec` of `Text` objects whose element
+        // descriptor said `Int`, and rendering it read a `Text` payload through
+        // the `Int` callback (IPR-13).
+        //
+        // Deriving it is only correct because a capture names its own parser
+        // body (IP-05, S19). Before that, every capture in a template shared
+        // one guessed kind, and reading the child here would have shipped a
+        // green test asserting the wrong descriptor.
+        match single_anonymous {
+            Some(child) => child_descriptor(plan, child),
+            None => &scalars::UNIT,
+        }
     } else {
         &scalars::UNIT
     }
@@ -1753,32 +2618,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn split_lines_handles_crlf() {
-        let bytes = b"abc\r\ndef\nghi";
-        let lines: Vec<_> = split_lines(bytes)
-            .map(|r| &bytes[r.start..r.start + r.len])
-            .collect();
-        assert_eq!(lines, vec![b"abc".as_slice(), b"def", b"ghi"]);
-    }
-
-    #[test]
-    fn split_lines_drops_trailing_empty() {
-        let bytes = b"a\nb\n";
-        let lines: Vec<_> = split_lines(bytes)
-            .map(|r| &bytes[r.start..r.start + r.len])
-            .collect();
-        assert_eq!(lines, vec![b"a".as_slice(), b"b"]);
-    }
-
-    #[test]
-    fn split_sections_on_blank_lines() {
-        let bytes = b"a\nb\n\nc\nd";
-        let sections: Vec<_> = split_sections(bytes)
-            .map(|r| &bytes[r.start..r.start + r.len])
-            .collect();
-        assert_eq!(sections.len(), 2);
-    }
+    // `split_lines`/`split_sections` are covered by `cursor.rs`'s own tests
+    // now: they produce `ByteRegion`s over an `Input`, so their gates live
+    // beside the types whose invariants they establish.
 
     #[test]
     fn take_int_run_parses_negative() {
@@ -1804,9 +2646,9 @@ mod tests {
             let mut ctx = rt.context();
             ctx.input_source = text;
             let plan = test_plan(vec![PlanNode::Atomic { kind }], 0);
-            let bytes = text.as_text().as_bytes();
-            let out = unsafe { walk(&mut ctx, &plan, plan.root, bytes, 0) };
-            out.ok().map(|(v, consumed)| (rt, v, consumed))
+            let i = unsafe { Input::new(text) }.expect("a Text is UTF-8");
+            let out = unsafe { walk(&mut ctx, &i, &plan, plan.root, i.whole()) };
+            out.ok().map(|w| (rt, w.value, w.next.offset()))
         }
 
         // Every kind has a descriptor. Exhaustive by `ALL`, so a new atomic
@@ -1877,7 +2719,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: bounded section parsing loses the source's absolute offset"]
     fn text_slices_in_later_sections_point_at_their_actual_source_bytes() {
         let mut rt = crate::Runtime::new();
         let input = rt.alloc_text("first\n\nsecond");
@@ -1893,16 +2734,108 @@ mod tests {
             1,
         );
 
-        let (result, _) =
-            unsafe { walk(&mut ctx, &plan, plan.root, input.as_text().as_bytes(), 0) }
-                .expect("sections(word) should parse");
+        let result =
+            unsafe { run_root(&mut ctx, &plan, input) }.expect("sections(word) should parse");
         let values: Vec<&str> = result.as_vec().iter().map(GcRef::as_text).collect();
 
         assert_eq!(values, vec!["first", "second"]);
     }
 
+    /// The other half of IPR-03: the owner of a slice is the buffer that was
+    /// *parsed*, not whatever the context happens to call its input.
+    ///
+    /// `parse(text, P)` hands the interpreter a `Text` that is not
+    /// `ctx.input_source`. The predecessor read the bytes from the argument and
+    /// the owner from the context, so every `Text` a `parse` produced was a
+    /// view of the stdin buffer at offsets chosen by a different string.
     #[test]
-    #[ignore = "known bug: Grid width/iteration count UTF-8 bytes rather than scalar values"]
+    fn a_parse_of_a_non_input_text_owns_its_slices() {
+        let mut rt = crate::Runtime::new();
+        // The context's input is one buffer…
+        let stdin_buffer = rt.alloc_text("XXXXXXXXXXXXXXXX");
+        // …and the thing being parsed is a different one.
+        let subject = rt.alloc_text("alpha beta");
+        let mut ctx = rt.context();
+        ctx.input_source = stdin_buffer;
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Word,
+                },
+                PlanNode::Ws { child: 0 },
+            ],
+            1,
+        );
+
+        let result = unsafe { run_root(&mut ctx, &plan, subject) }.expect("ws(word) should parse");
+        let values: Vec<&str> = result.as_vec().iter().map(GcRef::as_text).collect();
+
+        assert_eq!(
+            values,
+            vec!["alpha", "beta"],
+            "a parse's slices must be views of the text it parsed, not of ctx.input_source"
+        );
+    }
+
+    /// **A parse of a slice does not extend the owner chain.**
+    ///
+    /// `parse(t, P)` takes its owner from the argument, and that argument may
+    /// itself be a slice. Naming it directly makes every produced `Text` one
+    /// link longer than the last, and `text_bytes` walks the chain on every
+    /// read — so `t = parse(t, rest)` in a loop went quadratic and eventually
+    /// overflowed the stack. `Input::new` resolves to the root owned `Text` and
+    /// carries the base offset, so a slice of a slice is not constructible from
+    /// here however deep the argument was.
+    #[test]
+    fn a_parse_of_a_slice_does_not_extend_the_owner_chain() {
+        let mut rt = crate::Runtime::new();
+        let owned = rt.alloc_text("XXalpha betaXX");
+        // The subject is a *slice* of the owned text: bytes [2, 12).
+        // SAFETY: `owned` is the live Text allocated above.
+        let subject = unsafe { rt.alloc_text_slice(owned, 2, 10) }.expect("[2, 12) is in range");
+        assert_eq!(subject.as_text(), "alpha beta");
+        let mut ctx = rt.context();
+        ctx.input_source = owned;
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Word,
+                },
+                PlanNode::Ws { child: 0 },
+            ],
+            1,
+        );
+
+        let result = unsafe { run_root(&mut ctx, &plan, subject) }.expect("ws(word) should parse");
+        let items: Vec<GcRef> = result.as_vec().to_vec();
+        let values: Vec<&str> = items.iter().map(GcRef::as_text).collect();
+        assert_eq!(
+            values,
+            vec!["alpha", "beta"],
+            "the base offset must be applied, or the slices name the wrong bytes"
+        );
+
+        for item in items {
+            // SAFETY: each item is a live Text produced by the parse.
+            let payload = unsafe {
+                &*(item.payload::<crate::text::TextPayload>() as *const crate::text::TextPayload)
+            };
+            let crate::text::TextPayload::Slice(slice) = payload else {
+                panic!("a `word` is a source slice");
+            };
+            // SAFETY: a slice's owner is a live Text.
+            let owner = unsafe {
+                &*(slice.owner().payload::<crate::text::TextPayload>()
+                    as *const crate::text::TextPayload)
+            };
+            assert!(
+                owner.is_owned(),
+                "a parse of a slice must still name the ROOT owned text, not another slice"
+            );
+        }
+    }
+
+    #[test]
     fn unicode_grid_cells_are_parsed_once_per_scalar() {
         let mut rt = crate::Runtime::new();
         let input = rt.alloc_text("é");
@@ -1918,7 +2851,7 @@ mod tests {
             1,
         );
 
-        let (grid, _) = unsafe { walk(&mut ctx, &plan, plan.root, input.as_text().as_bytes(), 0) }
+        let grid = unsafe { run_root(&mut ctx, &plan, input) }
             .expect("one Unicode scalar is one valid grid cell");
         let payload = unsafe { &*grid.payload::<crate::collections::GridPayload>() };
 
@@ -1927,7 +2860,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: csv does not bound child parsers to an individual token"]
     fn csv_rest_parser_is_bounded_to_each_token() {
         let mut rt = crate::Runtime::new();
         let input = rt.alloc_text("a,b");
@@ -1943,18 +2875,334 @@ mod tests {
             1,
         );
 
-        let (result, _) =
-            unsafe { walk(&mut ctx, &plan, plan.root, input.as_text().as_bytes(), 0) }
-                .expect("csv(rest) should parse");
+        let result = unsafe { run_root(&mut ctx, &plan, input) }.expect("csv(rest) should parse");
         let values: Vec<&str> = result.as_vec().iter().map(GcRef::as_text).collect();
 
         assert_eq!(values, vec!["a", "b"]);
     }
 
+    /// IPR-04's panic path, as a test that would have aborted the process.
+    ///
+    /// `csv` used to locate a token by searching the region for the token's
+    /// text; a token that trims to nothing made that `slice::windows(0)`, which
+    /// panics — inside `extern "C"`, where a panic is undefined behaviour.
+    /// `"10,20,"` is enough to reach it.
+    #[test]
+    fn an_empty_csv_field_does_not_panic() {
+        let mut rt = crate::Runtime::new();
+        let input = rt.alloc_text("10,20,");
+        let mut ctx = rt.context();
+        ctx.input_source = input;
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Rest,
+                },
+                PlanNode::Csv { child: 0 },
+            ],
+            1,
+        );
+
+        let result = unsafe { run_root(&mut ctx, &plan, input) }
+            .expect("an empty csv field is an empty Text, not an abort");
+        let values: Vec<&str> = result.as_vec().iter().map(GcRef::as_text).collect();
+        assert_eq!(
+            values,
+            vec!["10", "20", ""],
+            "the field after the last comma is empty, and being empty is not a panic"
+        );
+    }
+
     // --- M7-WS9: whitespace matcher (§7.2) -----------------------------------
 
+    /// **IPR-09.** A failed `choice` reports the deepest case failure, not a
+    /// generic one at its own offset.
+    ///
+    /// Every case's failure used to be dropped on the floor and replaced with
+    /// `"any choice case"` at the position where the choice *started* — so
+    /// §7.11's detail named the outermost construct and pointed at a byte where
+    /// nothing had gone wrong. The case that got furthest is the case the input
+    /// was trying to be, and its own message is the one worth showing.
     #[test]
-    #[ignore = "known bug: SpaceRun currently accepts an empty run"]
+    fn a_failed_choice_reports_the_deepest_case_failure() {
+        fn lit(text: &'static str) -> praxis_input_parser::TemplatePartNode {
+            praxis_input_parser::TemplatePartNode::Literal {
+                text,
+                ws: praxis_input_parser::WsPolicy::None,
+            }
+        }
+        fn capture(child: u32) -> praxis_input_parser::TemplatePartNode {
+            praxis_input_parser::TemplatePartNode::Capture {
+                child,
+                field_index: None,
+                name: None,
+            }
+        }
+
+        let mut rt = crate::Runtime::new();
+        // `a{int}` fails at byte 1; `ab{int}` gets one byte further and fails
+        // at byte 2. The second is the one to report.
+        let input = rt.alloc_text("abz");
+        let mut ctx = rt.context();
+        ctx.input_source = input;
+        let short: &'static [praxis_input_parser::TemplatePartNode] =
+            Box::leak(vec![lit("a"), capture(0)].into_boxed_slice());
+        let long: &'static [praxis_input_parser::TemplatePartNode] =
+            Box::leak(vec![lit("ab"), capture(0)].into_boxed_slice());
+        let cases: &'static [(&'static str, u32)] =
+            Box::leak(vec![("Short", 1u32), ("Long", 2u32)].into_boxed_slice());
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Int,
+                },
+                PlanNode::Template { parts: short },
+                PlanNode::Template { parts: long },
+                PlanNode::Choice { cases },
+            ],
+            3,
+        );
+
+        let fail = unsafe { run_root(&mut ctx, &plan, input) }
+            .expect_err("neither case can read `z` as an int");
+        assert_eq!(
+            fail.expected, "int",
+            "the deepest case's own expectation, not \"any choice case\""
+        );
+        assert_eq!(
+            fail.input_span.0, 2,
+            "byte 2 is where the case that got furthest actually broke"
+        );
+    }
+
+    /// **The `chars` skip policies, ordered by what they skip.**
+    ///
+    /// `Whitespace` is spaces and tabs; `Newlines` is those **and** line
+    /// endings. The names imply the opposite containment — "whitespace" reads
+    /// like the superset — and a stage acted on that reading, concluding that
+    /// `skip: whitespace` could absorb an input file's trailing newline. It
+    /// cannot. The sets are deliberately kept (they are the ones §7.5's
+    /// `chars(one_of("^v<>"), skip: whitespace)` example needs, and swapping
+    /// them would change what every existing `skip: newlines` program accepts),
+    /// so what has to exist instead is this: a test that states the inclusion,
+    /// and fails if anyone quietly swaps the arms to make the names read
+    /// straight.
+    #[test]
+    fn the_skip_policies_are_ordered_by_what_they_skip() {
+        use praxis_input_parser::SkipPolicy;
+        let rt = crate::Runtime::new();
+        let owner = rt.alloc_text(" \t\n\r x");
+        // SAFETY: `owner` is a Text allocated just above and `rt` outlives `i`.
+        let i = unsafe { Input::new(owner) }.expect("a Text is UTF-8");
+        let region = i.whole();
+        let skipped = |p| skip_chars(&i, region, region.start(), p).offset();
+
+        assert_eq!(skipped(SkipPolicy::None), 0, "`none` skips nothing");
+        assert_eq!(
+            skipped(SkipPolicy::Whitespace),
+            2,
+            "`whitespace` is HORIZONTAL whitespace: it stops at the newline"
+        );
+        assert_eq!(
+            skipped(SkipPolicy::Newlines),
+            5,
+            "`newlines` is horizontal whitespace AND line endings — the broader policy"
+        );
+        assert!(
+            skipped(SkipPolicy::Newlines) > skipped(SkipPolicy::Whitespace),
+            "`newlines` must skip a superset of `whitespace`, however the two are named"
+        );
+        // The one description both the diagnostic and the runtime comment
+        // quote, so the names are never the only thing a reader is given.
+        assert_eq!(SkipPolicy::Whitespace.skips(), "spaces and tabs");
+        assert_eq!(
+            SkipPolicy::Newlines.skips(),
+            "spaces, tabs and line endings"
+        );
+        // Sweep the closed list, so a fourth policy cannot arrive without a
+        // description and a position in the ordering.
+        let mut previous = 0usize;
+        for policy in SkipPolicy::ALL.iter().copied() {
+            assert!(
+                !policy.skips().is_empty(),
+                "every skip policy states what it skips"
+            );
+            let n = skipped(policy);
+            assert!(
+                n >= previous,
+                "SkipPolicy::ALL is ordered from narrowest to broadest; {policy:?} skips {n}"
+            );
+            previous = n;
+        }
+    }
+
+    /// **IPR-07.** `chars` returned `Ok` at the first child failure, so it
+    /// silently dropped the rest of its region: `chars(digit, skip: none)` over
+    /// `"12x34"` answered `[1, 2]` and reported nothing at all.
+    ///
+    /// The rule §7.5 wants falls out of running the skip policy once more after
+    /// the last match: whatever the skip does not absorb, the child must read.
+    #[test]
+    fn chars_that_cannot_read_the_whole_region_is_a_parse_failure() {
+        fn parse(input: &str, skip: praxis_input_parser::SkipPolicy) -> Option<Vec<i64>> {
+            let mut rt = crate::Runtime::new();
+            let text = rt.alloc_text(input);
+            let mut ctx = rt.context();
+            ctx.input_source = text;
+            let plan = test_plan(
+                vec![
+                    PlanNode::Atomic {
+                        kind: AtomicKind::Digit,
+                    },
+                    PlanNode::Characters { child: 0, skip },
+                ],
+                1,
+            );
+            unsafe { run_root(&mut ctx, &plan, text) }
+                .ok()
+                .map(|v| v.as_vec().iter().map(GcRef::as_int).collect())
+        }
+
+        use praxis_input_parser::SkipPolicy;
+        assert_eq!(parse("1234", SkipPolicy::None), Some(vec![1, 2, 3, 4]));
+        assert_eq!(
+            parse("12x34", SkipPolicy::None),
+            None,
+            "a child failure inside the region is the parse's failure, not a short answer"
+        );
+        // The skip policy is what a trailing run is for, and it is applied
+        // after the last match as well as between matches.
+        assert_eq!(
+            parse("1 2 3 \t", SkipPolicy::Whitespace),
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(parse("1 2\n", SkipPolicy::Newlines), Some(vec![1, 2]));
+        assert_eq!(
+            parse("1\n2", SkipPolicy::None),
+            None,
+            "`skip: none` absorbs nothing, so an interior newline is a mismatch"
+        );
+        // **Inverted by the S20 repair, deliberately** (plan §8.2). This line
+        // used to assert that `parse("12\n", None)` faults, on the reading that
+        // "`skip: none` absorbs nothing, so a trailing newline is a mismatch".
+        // The premise was wrong about *which* newline: the byte at the end of
+        // an input file is the file's terminator, not a byte the program asked
+        // any parser to read, and requiring `chars` to consume it faulted every
+        // newline-terminated file — §7.5's own
+        // `chars(one_of("^v<>"), skip: whitespace)` example included. The
+        // terminator IS inside the region — the root region is the whole
+        // buffer — and `walk_characters` forgives it because it is whitespace
+        // the child declined (`ByteRegion::is_all_whitespace`, the bound half of
+        // `cursor`'s rule). No skip policy has to absorb it, and no root trim
+        // has to hide it; a trim was round two's answer and is deleted.
+        // `parse("1\n2", None)` above keeps the half of the claim that was
+        // true: a newline *inside* the data is still a mismatch under
+        // `skip: none`.
+        assert_eq!(
+            parse("12\n", SkipPolicy::None),
+            Some(vec![1, 2]),
+            "the file's own terminator is whitespace the child declined"
+        );
+    }
+
+    /// **D11's answer to IPR-06, spelled out.** A `grid` cell is whatever the
+    /// cell parser reads, so `grid(int)` reads one integer **token** per cell
+    /// and `grid(digit)` reads one digit. §7.5's two examples are `grid(char)`
+    /// and `grid(digit)`, and `digit` exists *for* the one-digit case — if
+    /// `grid(int)` meant that too, `digit` would name nothing.
+    ///
+    /// This pins the shape the finding named: over `"12\n34\n"` the predecessor
+    /// answered **four** cells `[12, 2, 34, 4]`, because it measured width in
+    /// bytes and walked the child once per byte against the whole remaining
+    /// buffer — reading the token at cell 0 and then re-reading the token's tail
+    /// at cell 1. That is not either candidate semantics.
+    #[test]
+    fn a_grid_cell_is_whatever_its_cell_parser_reads() {
+        fn cells(kind: AtomicKind, input: &str) -> Option<(usize, Vec<i64>)> {
+            let mut rt = crate::Runtime::new();
+            let text = rt.alloc_text(input);
+            let mut ctx = rt.context();
+            ctx.input_source = text;
+            let plan = test_plan(
+                vec![PlanNode::Atomic { kind }, PlanNode::Grid { child: 0 }],
+                1,
+            );
+            let grid = unsafe { run_root(&mut ctx, &plan, text) }.ok()?;
+            let payload = unsafe { &*grid.payload::<crate::collections::GridPayload>() };
+            Some((
+                payload.width,
+                payload.items.iter().map(|r| r.as_int()).collect(),
+            ))
+        }
+
+        // `int` is an integer token, so each row of `"12\n34\n"` is one cell.
+        assert_eq!(
+            cells(AtomicKind::Int, "12\n34\n"),
+            Some((1, vec![12, 34])),
+            "one token per cell — not [12, 2, 34, 4], and not [1, 2, 3, 4] either"
+        );
+        // …and a row of several tokens is several cells.
+        assert_eq!(
+            cells(AtomicKind::Int, "1 2\n3 4\n"),
+            Some((2, vec![1, 2, 3, 4]))
+        );
+        // `digit` is the per-digit parser, which is what it is for.
+        assert_eq!(
+            cells(AtomicKind::Digit, "12\n34\n"),
+            Some((2, vec![1, 2, 3, 4])),
+            "`digit` names the one-digit-per-cell case, so `int` must not"
+        );
+        // Rows must agree in **cells**, which is the only measure that means
+        // the same thing for every cell parser.
+        assert_eq!(
+            cells(AtomicKind::Int, "1 2\n3\n"),
+            None,
+            "two cells then one is not a rectangle"
+        );
+    }
+
+    /// **IPR-08.** `scan` used to advance one *byte* at a time, so on a
+    /// multi-byte run it attempted a match at continuation bytes — positions
+    /// that are not characters at all.
+    ///
+    /// Over `"ééé"` there are exactly three scalar starts and three
+    /// continuation bytes. A byte-stepping `scan` visits six positions; a
+    /// scalar-stepping one visits three, and `one_of("é")` matches at each.
+    #[test]
+    fn scan_advances_by_scalar_across_a_multibyte_run() {
+        let mut rt = crate::Runtime::new();
+        let input = rt.alloc_text("ééé");
+        let mut ctx = rt.context();
+        ctx.input_source = input;
+        let literals: &'static [&'static str] = Box::leak(vec!["é"].into_boxed_slice());
+        let nodes: &'static [PlanNode] = Box::leak(
+            vec![
+                PlanNode::OneOf { chars_index: 0 },
+                PlanNode::Scan { child: 0 },
+            ]
+            .into_boxed_slice(),
+        );
+        let plan = ParserPlan {
+            nodes,
+            template_parts: &[],
+            literals,
+            root: 1,
+        };
+
+        let result = unsafe { run_root(&mut ctx, &plan, input) }.expect("scan never fails");
+        let chars: Vec<char> = result
+            .as_vec()
+            .iter()
+            .map(|r| char::from_u32(unsafe { *r.payload::<u32>() }).expect("a Char"))
+            .collect();
+        assert_eq!(
+            chars,
+            vec!['é', 'é', 'é'],
+            "three scalars, and no attempt at the three continuation bytes between them"
+        );
+    }
+
+    #[test]
     fn consume_ws_space_run_requires_one_or_more_spaces_or_tabs() {
         use praxis_input_parser::WsPolicy;
         assert_eq!(consume_ws(b"  ,x", 0, WsPolicy::SpaceRun), Some(2));
@@ -1989,7 +3237,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: single-capture templates hard-code the Int descriptor"]
     fn single_anonymous_template_capture_uses_its_child_descriptor() {
         let parts: &'static [praxis_input_parser::TemplatePartNode] = Box::leak(
             vec![praxis_input_parser::TemplatePartNode::Capture {

@@ -820,7 +820,7 @@ Semantics:
 - `int`: signed decimal integer, surrounding horizontal space handled by caller.
 - `word`: non-empty run excluding whitespace and parser-delimiter punctuation.
 - `identifier`: ASCII-like identifier syntax by default.
-- `text`: minimally consumes text until the following template literal can match.
+- `text`: minimally consumes text until the following template literal can match. "The following literal" is the whole run of literal parts up to the next capture, so `` `{a:text} bar` `` and `` `{a:text}\s+bar` `` are one policy in two spellings and read the same input the same way. A run that can match the empty string (`\s*`, or a literal with no whitespace run in front of it and no text) constrains nothing, and a capture with nothing to stop before takes the rest of its region.
 - `rest`: consumes the remainder of the current region.
 - `digit`: one decimal digit, returned as `Int` or `Byte`; choose `Int` for v1 consistency.
 
@@ -831,6 +831,70 @@ expression is a **sublanguage** and `read` (or `parse(text, ...)`) is where it
 begins — §7.1. That is what makes a labelled argument such as `skip:` or
 `ranges:` legal: it belongs to the parser-expression grammar and has no meaning
 in an ordinary call, where it is a parse error at the `:`.
+
+#### Whitespace is data when the parser offered it reads it
+
+One rule, stated once, that every constructor below inherits — `lines`,
+`sections`, `csv`, `sep`, `ws`, `chars`, `matrix`, `grid` and template captures
+alike. **A run of whitespace the parser offered it does not read is not data and
+not a mismatch.**
+
+There is one question — *does the parser offered these bytes read them?* — so
+there is one answer, and the half of the machinery that can ask it is the half
+that decides:
+
+- **The deciding half asks the child.** Wherever a construct requires its child
+  to consume a region exactly — a line, a section, a CSV field, a `ws`/`sep`
+  token, a matrix cell, a template capture — what the child leaves over is
+  forgiven if it is whitespace and is a mismatch otherwise. The same question
+  applied to a whole line: a **trailing** line of nothing but whitespace is
+  offered like any other, and belongs to nobody only when the parser makes
+  nothing of it — no element for `lines`, no cell for `grid`, no token for
+  `matrix`. A child that succeeds **vacuously** has made something of it:
+  `ws`, `sections` and a nested `lines` answer an all-whitespace region with an
+  *empty* collection, not a failure, so `lines(ws(int))` over
+  `"1 2\n3 4\n  \n"` is three elements — the last one empty — where
+  `matrix(int)` over the same bytes is a 2x2 grid, because `matrix` has no
+  zero-token row to make. `matrix(P)` is therefore **not** a synonym for
+  `lines(ws(P))`; it splits a row into tokens itself, and the two differ exactly
+  where a line has no tokens. (`csv` is not in that list: it always makes at
+  least one field, so `csv(int)` fails on a blank line and `lines(csv(int))`
+  drops it.)
+- **The other half decides nothing.** A region does not end in **empty** lines:
+  the trailing run of lines holding no bytes at all is not part of it — the
+  file's own terminator, the `"\n\n"` an editor leaves behind, any number of
+  them. That is decided before any parser runs, which is why it is restricted to
+  lines with nothing in them to decide about.
+
+Three facts follow, and they are one answer rather than an answer with
+exceptions:
+
+- *Trailing* whitespace — at the end of the input, of a region, or of a line —
+  is offered, and is nobody's only if nobody reads it. `int` cannot read the
+  space in `"1 "`, so it is padding, and `lines(int)` over `"1\n2\n  \n"` is two
+  elements.
+- Whitespace a parser **can** read is data. `char` reads a space as a cell, so
+  `grid(char)` over a file whose last row alone ends in a space is a **ragged
+  grid**, *and* `grid(char)` over `"ab\ncd\n  \n"` is three rows, *and*
+  `grid(char)` over `"  \n  \n"` is a 2x2 grid of spaces. `lines(rest)` is
+  lossless for the same reason.
+- An **interior** blank line is structure and no constructor skips one.
+  `lines(int)` over `"1\n  \n2\n"`, `grid(digit)` over `"12\n  \n34\n"` and
+  `matrix(int)` over `"1 2\n  \n3 4\n"` all fault, and they fault by the same
+  rule — a blank line is a zero-element, zero-cell, zero-token row, and the
+  count check rejects it like any other row of the wrong size. The *diagnostics*
+  differ: three messages and three spans, and only `grid`'s names the offending
+  line. `sections` is the one construct for which a blank line is *its own*
+  separator, interior or trailing, which is its definition and not an exception
+  to this rule.
+
+Only *trailing* runs are forgiven at all. An interior run is data: `lines(int)`
+over `"12junk"` is a mismatch, and so is `chars(digit, skip: none)` over
+`"1\n2"`.
+
+A root parse runs against the whole input with no terminator trimmed off it,
+which is why `parse(t, rest)` is the identity on `t`. There is no special case
+for the file's newline anywhere, and a new constructor must not grow one.
 
 #### `lines(parser)`
 
@@ -883,11 +947,22 @@ let bingo = read sections(
 
 #### `csv(parser)`
 
-Split the current region on commas. Ignore horizontal whitespace around each comma. Apply `parser` to each token.
+Split the current region on commas. Apply `parser` to each field.
+
+Horizontal whitespace around a comma is ignored, and it is ignored *by the rule
+above and not by a trim*: the field is handed to `parser` whole, `parser` skips
+what it does not read (§7.4 puts surrounding horizontal space on the caller for
+every numeric atomic), and a leftover run of whitespace is forgiven. So
+`csv(int)` over `" 1, 2, 3"` reads three ints — and `csv(char)` over `"a, ,c"`
+reads three characters, one of them a space, because `char` reads a space
+wherever it is offered one. `csv` is not `sep(",", …)` with a trim bolted on;
+the two answer the same way for the same reason.
 
 #### `ws(parser)`
 
-Split on one or more spaces or tabs.
+Split on one or more spaces or tabs. That names the *separator*; a token itself
+contains no whitespace of any kind, so a line ending terminates a token too —
+`ws(int)` over two lines of two numbers is four tokens, not three.
 
 #### `sep(separator, parser)`
 
@@ -899,11 +974,23 @@ read sep(" -> ", word)
 
 #### `chars(parser, skip: policy)`
 
-Apply a parser repeatedly to characters. Optional `skip` policies:
+Apply a parser repeatedly to characters. Optional `skip` policies, each stated
+by what it skips between matches:
 
-- `none`
-- `whitespace`
-- `newlines`
+- `none` — nothing; every byte of the region belongs to the character parser.
+- `whitespace` — spaces and tabs. **Horizontal whitespace only**; not line
+  endings.
+- `newlines` — spaces, tabs **and** line endings.
+
+`newlines` is therefore the *broader* policy: it skips everything `whitespace`
+skips and line endings besides. The names suggest the opposite containment, so
+they are spelled out here rather than left to be inferred.
+
+The policy governs the region's interior. A file's own trailing newline is
+whitespace the character parser declined, so no policy has to absorb it — which
+is why the example below reads a newline-terminated file without
+`skip: newlines`. An *interior* run is still the policy's business:
+`chars(digit, skip: none)` over `"1\n2"` is a mismatch.
 
 ```praxis
 read chars(one_of("^v<>"), skip: whitespace)
