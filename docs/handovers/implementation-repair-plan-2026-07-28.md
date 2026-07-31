@@ -1737,147 +1737,162 @@ the index.
 rather than by the audit. They are scheduled the same way and their stages are
 real; what differs is provenance, and that is why they are not mixed in below.
 
+**The Status column reads `<verdict> — done`.** The verdict is §1's — what the
+thirteen verifying readers returned about the *finding*, and it never changes.
+What `— done` adds is that the fix has landed: the row was in its stage's exit
+list and the stage is closed with the suite green. Every stage this plan
+schedules is closed, so the suffix is on every row, and it went on in **one
+pass** rather than stage by stage — a column with two conventions in it is worse
+than a column with none, which is why an earlier round declined to mark S20's
+rows alone.
+
+**One row is not done and says so: `MIR-10`.** Its verifier landed; the *rule*
+the finding is about — "a faulting instruction is followed by a `CheckFault`" —
+did not, and two §4.1 rows (**REP-52**, **REP-53**) are scheduled behind it. It
+reads `PARTIAL — part owed`. The three other `PARTIAL` verdicts (FE-08, IP-11,
+TY-24) landed as narrowed and read `— done`.
+
 | ID | Sev | Status | Effort | Stage | Subsystem |
 |---|---|---|---|---|---|
-| P0-01 | P0 | CONFIRMED | M | S1 | p0-identity |
-| P0-05 | P0 | CONFIRMED | S | S2 | p0-rooting |
-| P0-02 | P0 | CONFIRMED | XL | S3 | p0-identity |
-| P0-03 | P0 | CONFIRMED | M | S3 | p0-identity |
-| P0-04 | P0 | CONFIRMED | S | S3 | p0-identity |
-| P0-08 | P0 | CONFIRMED | L | S3 | p0-rooting |
-| P0-06 | P0 | CONFIRMED | L | S5 | p0-rooting |
-| P0-07 | P0 | CONFIRMED | XL | S5 | p0-rooting |
-| P0-11 | P0 | CONFIRMED | L | S7 | p0-layout |
-| RT-06 | P0 | CONFIRMED | M | S7 | rt |
-| RT-09 | P0 | CONFIRMED | S | S7 | rt |
-| MIR-01 | P0 | CONFIRMED | L | S9 | mir |
-| MIR-09 | P0 | CONFIRMED | M | S9 | mir |
-| P0-12 | P0 | CONFIRMED | L | S10 | p0-layout |
-| IPR-03 | P0 | CONFIRMED | M | S20 | ip-runtime |
-| FE-01 | P1 | CONFIRMED | M | S2 | fe-cli-dbg |
-| FE-05 | P1 | CONFIRMED | M | S2 | fe-cli-dbg |
-| MIR-11 | P1 | CONFIRMED | S | S2 | mir |
-| MIR-14 | P1 | CONFIRMED | S | S2 | mir |
-| P0-13 | P1 | CONFIRMED | L | S3 | p0-layout |
-| P0-10 | P1 | CONFIRMED | M | S4 | p0-layout |
-| DBG-04 | P1 | CONFIRMED | L | S5 | fe-cli-dbg |
-| P0-08b | P1 | CONFIRMED | M | S6 | p0-rooting |
-| RT-01 | P1 | CONFIRMED | L | S6 | rt |
-| RT-02 | P1 | CONFIRMED | S | S6 | rt |
-| RT-03 | P1 | CONFIRMED | M | S6 | rt |
-| RT-04 | P1 | CONFIRMED | L | S6 | rt |
-| RT-05 | P1 | CONFIRMED | S | S6 | rt |
-| RT-07 | P1 | CONFIRMED | M | S7 | rt |
-| RT-17 | P1 | CONFIRMED | M | S7 | rt |
-| RT-18 | P1 | CONFIRMED | S | S7 | rt |
-| DBG-05 | P1 | CONFIRMED | XL | S8 | fe-cli-dbg |
-| DBG-06 | P1 | CONFIRMED | M | S8 | fe-cli-dbg |
-| IP-12 | P1 | CONFIRMED | L | S8 | ip-compile |
-| MIR-12 | P1 | CONFIRMED | M | S8 | mir |
-| MIR-13 | P1 | CONFIRMED | L | S8 | mir |
-| MIR-02 | P1 | CONFIRMED | L | S9 | mir |
-| MIR-16 | P1 | CONFIRMED | L | S9 | mir |
-| DBG-01 | P1 | CONFIRMED | S | S10 | fe-cli-dbg |
-| DBG-02 | P1 | CONFIRMED | M | S10 | fe-cli-dbg |
-| RT-12 | P1 | CONFIRMED | L | S10 | rt |
-| TY-01 | P1 | CONFIRMED | L | S11 | ty-typedb |
-| TY-02 | P1 | CONFIRMED | S | S11 | ty-typedb |
-| TY-03 | P1 | CONFIRMED | L | S11 | ty-typedb |
-| TY-04 | P1 | CONFIRMED | M | S11 | ty-typedb |
-| TY-06 | P1 | CONFIRMED | XL | S11 | ty-typedb |
-| TY-07 | P1 | CONFIRMED | L | S11 | ty-typedb |
-| TY-22 | P1 | CONFIRMED | M | S11 | ty-flow |
-| FE-02 | P1 | CONFIRMED | S | S12 | fe-cli-dbg |
-| FE-04 | P1 | CONFIRMED | L | S12 | fe-cli-dbg |
-| FE-06 | P1 | CONFIRMED | M | S12 | fe-cli-dbg |
-| TY-08 | P1 | CONFIRMED | L | S13 | ty-scope |
-| TY-09 | P1 | CONFIRMED | S | S13 | ty-scope |
-| TY-10 | P1 | CONFIRMED | M | S13 | ty-scope |
-| TY-11 | P1 | CONFIRMED | S | S13 | ty-scope |
-| TY-13 | P1 | CONFIRMED | L | S13 | ty-scope |
-| TY-14 | P1 | CONFIRMED | S | S13 | ty-scope |
-| TY-15 | P1 | CONFIRMED | S | S13 | ty-scope |
-| TY-23 | P1 | CONFIRMED | S | S13 | ty-flow |
-| TY-24 | P1 | PARTIAL | S | S13 | ty-flow |
-| TY-16 | P1 | CONFIRMED | S | S14 | ty-flow |
-| TY-17 | P1 | CONFIRMED | M | S14 | ty-flow |
-| TY-18 | P1 | CONFIRMED | M | S14 | ty-flow |
-| TY-19 | P1 | CONFIRMED | L | S14 | ty-flow |
-| HIR-01 | P1 | CONFIRMED | XL | S15 | hir-mono |
-| HIR-08 | P1 | CONFIRMED | S | S15 | hir-mono |
-| MONO-01 | P1 | CONFIRMED | L | S15 | hir-mono |
-| MONO-02 | P1 | CONFIRMED | M | S15 | hir-mono |
-| MONO-03 | P1 | CONFIRMED | M | S15 | hir-mono |
-| HIR-03 | P1 | CONFIRMED | M | S16 | hir-mono |
-| HIR-04 | P1 | CONFIRMED | L | S16 | hir-mono |
-| HIR-05 | P1 | CONFIRMED | M | S16 | hir-mono |
-| HIR-06 | P1 | CONFIRMED | L | S16 | hir-mono |
-| HIR-07 | P1 | CONFIRMED | M | S16 | hir-mono |
-| RT-08 | P1 | CONFIRMED | L | S17 | rt |
-| TY-25 | P1 | CONFIRMED | S | S17 | ty-ops |
-| TY-27 | P1 | CONFIRMED | M | S17 | ty-ops |
-| TY-28 | P1 | CONFIRMED | M | S17 | ty-ops |
-| TY-29 | P1 | CONFIRMED | XL | S17 | ty-ops |
-| TY-31 | P1 | CONFIRMED | M | S17 | ty-ops |
-| TY-32 | P1 | CONFIRMED | L | S17 | ty-ops |
-| TY-33 | P1 | CONFIRMED | L | S17 | ty-ops |
-| RT-13 | P1 | CONFIRMED | L | S18 | rt |
-| RT-14 | P1 | CONFIRMED | L | S18 | rt |
-| RT-15 | P1 | CONFIRMED | M | S18 | rt |
-| IP-01 | P1 | CONFIRMED | S | S19 | ip-compile |
-| IP-05 | P1 | CONFIRMED | M | S19 | ip-compile |
-| IP-06 | P1 | CONFIRMED | S | S19 | ip-compile |
-| IP-07 | P1 | CONFIRMED | M | S19 | ip-compile |
-| IP-09 | P1 | CONFIRMED | M | S19 | ip-compile |
-| IP-10 | P1 | CONFIRMED | S | S19 | ip-compile |
-| IPR-01 | P1 | CONFIRMED | L | S20 | ip-runtime |
-| IPR-02 | P1 | CONFIRMED | M | S20 | ip-runtime |
-| IPR-04 | P1 | CONFIRMED | M | S20 | ip-runtime |
-| IPR-05 | P1 | CONFIRMED | M | S20 | ip-runtime |
-| IPR-06 | P1 | CONFIRMED | L | S20 | ip-runtime |
-| IPR-07 | P1 | CONFIRMED | S | S20 | ip-runtime |
-| IPR-08 | P1 | CONFIRMED | S | S20 | ip-runtime |
-| IPR-10 | P1 | CONFIRMED | M | S20 | ip-runtime |
-| IPR-12 | P1 | CONFIRMED | M | S20 | ip-runtime |
-| IPR-13 | P1 | CONFIRMED | M | S20 | ip-runtime |
-| IPR-14 | P1 | CONFIRMED | L | S20 | ip-runtime |
-| MIR-03 | P1 | CONFIRMED | M | S21 | mir |
-| MIR-04 | P1 | CONFIRMED | L | S21 | mir |
-| MIR-05 | P1 | CONFIRMED | M | S21 | mir |
-| MIR-06 | P1 | CONFIRMED | L | S21 | mir |
-| MIR-07 | P1 | CONFIRMED | M | S21 | mir |
-| MIR-08 | P1 | CONFIRMED | M | S21 | mir |
-| CLI | P2 | CONFIRMED | S | S2 | fe-cli-dbg |
-| FE-07 | P2 | CONFIRMED | M | S2 | fe-cli-dbg |
-| MIR-15 | P2 | CONFIRMED | S | S2 | mir |
-| P0-14 | P2 | CONFIRMED | S | S2 | p0-layout |
-| RT-19 | P2 | CONFIRMED | S | S2 | rt |
-| P0-09 | P2 | CONFIRMED | S | S4 | p0-layout |
-| P0-08c | P2 | CONFIRMED | M | S6 | p0-rooting |
-| RT-10 | P2 | CONFIRMED | M | S7 | rt |
-| RT-11 | P2 | CONFIRMED | S | S7 | rt |
-| MIR-10 | P2 | PARTIAL | L | S9 | mir |
-| RT-16 | P2 | CONFIRMED | M | S10 | rt |
-| TY-05 | P2 | CONFIRMED | M | S11 | ty-typedb |
-| DBG-03 | P2 | CONFIRMED | S | S12 | fe-cli-dbg |
-| TY-12 | P2 | CONFIRMED | S | S13 | ty-scope |
-| TY-20 | P2 | CONFIRMED | M | S14 | ty-flow |
-| TY-21 | P2 | CONFIRMED | L | S14 | ty-flow |
-| HIR-02 | P2 | CONFIRMED | S | S15 | hir-mono |
-| HIR-09 | P2 | CONFIRMED | S | S15 | hir-mono |
-| TY-26 | P2 | CONFIRMED | S | S17 | ty-ops |
-| TY-30 | P2 | CONFIRMED | L | S17 | ty-ops |
-| TY-34 | P2 | CONFIRMED | M | S17 | ty-ops |
-| IP-02 | P2 | CONFIRMED | S | S19 | ip-compile |
-| IP-03 | P2 | CONFIRMED | S | S19 | ip-compile |
-| IP-04 | P2 | CONFIRMED | S | S19 | ip-compile |
-| IP-08 | P2 | CONFIRMED | S | S19 | ip-compile |
-| IP-11 | P2 | PARTIAL | M | S19 | ip-compile |
-| IPR-09 | P2 | CONFIRMED | M | S20 | ip-runtime |
-| IPR-11 | P2 | CONFIRMED | S | S20 | ip-runtime |
-| FE-03 | P3 | CONFIRMED | S | S2 | fe-cli-dbg |
-| FE-08 | P3 | PARTIAL | S | S2 | fe-cli-dbg |
-| IP-13 | P3 | CONFIRMED | S | S2 | ip-compile |
+| P0-01 | P0 | CONFIRMED — done | M | S1 | p0-identity |
+| P0-05 | P0 | CONFIRMED — done | S | S2 | p0-rooting |
+| P0-02 | P0 | CONFIRMED — done | XL | S3 | p0-identity |
+| P0-03 | P0 | CONFIRMED — done | M | S3 | p0-identity |
+| P0-04 | P0 | CONFIRMED — done | S | S3 | p0-identity |
+| P0-08 | P0 | CONFIRMED — done | L | S3 | p0-rooting |
+| P0-06 | P0 | CONFIRMED — done | L | S5 | p0-rooting |
+| P0-07 | P0 | CONFIRMED — done | XL | S5 | p0-rooting |
+| P0-11 | P0 | CONFIRMED — done | L | S7 | p0-layout |
+| RT-06 | P0 | CONFIRMED — done | M | S7 | rt |
+| RT-09 | P0 | CONFIRMED — done | S | S7 | rt |
+| MIR-01 | P0 | CONFIRMED — done | L | S9 | mir |
+| MIR-09 | P0 | CONFIRMED — done | M | S9 | mir |
+| P0-12 | P0 | CONFIRMED — done | L | S10 | p0-layout |
+| IPR-03 | P0 | CONFIRMED — done | M | S20 | ip-runtime |
+| FE-01 | P1 | CONFIRMED — done | M | S2 | fe-cli-dbg |
+| FE-05 | P1 | CONFIRMED — done | M | S2 | fe-cli-dbg |
+| MIR-11 | P1 | CONFIRMED — done | S | S2 | mir |
+| MIR-14 | P1 | CONFIRMED — done | S | S2 | mir |
+| P0-13 | P1 | CONFIRMED — done | L | S3 | p0-layout |
+| P0-10 | P1 | CONFIRMED — done | M | S4 | p0-layout |
+| DBG-04 | P1 | CONFIRMED — done | L | S5 | fe-cli-dbg |
+| P0-08b | P1 | CONFIRMED — done | M | S6 | p0-rooting |
+| RT-01 | P1 | CONFIRMED — done | L | S6 | rt |
+| RT-02 | P1 | CONFIRMED — done | S | S6 | rt |
+| RT-03 | P1 | CONFIRMED — done | M | S6 | rt |
+| RT-04 | P1 | CONFIRMED — done | L | S6 | rt |
+| RT-05 | P1 | CONFIRMED — done | S | S6 | rt |
+| RT-07 | P1 | CONFIRMED — done | M | S7 | rt |
+| RT-17 | P1 | CONFIRMED — done | M | S7 | rt |
+| RT-18 | P1 | CONFIRMED — done | S | S7 | rt |
+| DBG-05 | P1 | CONFIRMED — done | XL | S8 | fe-cli-dbg |
+| DBG-06 | P1 | CONFIRMED — done | M | S8 | fe-cli-dbg |
+| IP-12 | P1 | CONFIRMED — done | L | S8 | ip-compile |
+| MIR-12 | P1 | CONFIRMED — done | M | S8 | mir |
+| MIR-13 | P1 | CONFIRMED — done | L | S8 | mir |
+| MIR-02 | P1 | CONFIRMED — done | L | S9 | mir |
+| MIR-16 | P1 | CONFIRMED — done | L | S9 | mir |
+| DBG-01 | P1 | CONFIRMED — done | S | S10 | fe-cli-dbg |
+| DBG-02 | P1 | CONFIRMED — done | M | S10 | fe-cli-dbg |
+| RT-12 | P1 | CONFIRMED — done | L | S10 | rt |
+| TY-01 | P1 | CONFIRMED — done | L | S11 | ty-typedb |
+| TY-02 | P1 | CONFIRMED — done | S | S11 | ty-typedb |
+| TY-03 | P1 | CONFIRMED — done | L | S11 | ty-typedb |
+| TY-04 | P1 | CONFIRMED — done | M | S11 | ty-typedb |
+| TY-06 | P1 | CONFIRMED — done | XL | S11 | ty-typedb |
+| TY-07 | P1 | CONFIRMED — done | L | S11 | ty-typedb |
+| TY-22 | P1 | CONFIRMED — done | M | S11 | ty-flow |
+| FE-02 | P1 | CONFIRMED — done | S | S12 | fe-cli-dbg |
+| FE-04 | P1 | CONFIRMED — done | L | S12 | fe-cli-dbg |
+| FE-06 | P1 | CONFIRMED — done | M | S12 | fe-cli-dbg |
+| TY-08 | P1 | CONFIRMED — done | L | S13 | ty-scope |
+| TY-09 | P1 | CONFIRMED — done | S | S13 | ty-scope |
+| TY-10 | P1 | CONFIRMED — done | M | S13 | ty-scope |
+| TY-11 | P1 | CONFIRMED — done | S | S13 | ty-scope |
+| TY-13 | P1 | CONFIRMED — done | L | S13 | ty-scope |
+| TY-14 | P1 | CONFIRMED — done | S | S13 | ty-scope |
+| TY-15 | P1 | CONFIRMED — done | S | S13 | ty-scope |
+| TY-23 | P1 | CONFIRMED — done | S | S13 | ty-flow |
+| TY-24 | P1 | PARTIAL — done | S | S13 | ty-flow |
+| TY-16 | P1 | CONFIRMED — done | S | S14 | ty-flow |
+| TY-17 | P1 | CONFIRMED — done | M | S14 | ty-flow |
+| TY-18 | P1 | CONFIRMED — done | M | S14 | ty-flow |
+| TY-19 | P1 | CONFIRMED — done | L | S14 | ty-flow |
+| HIR-01 | P1 | CONFIRMED — done | XL | S15 | hir-mono |
+| HIR-08 | P1 | CONFIRMED — done | S | S15 | hir-mono |
+| MONO-01 | P1 | CONFIRMED — done | L | S15 | hir-mono |
+| MONO-02 | P1 | CONFIRMED — done | M | S15 | hir-mono |
+| MONO-03 | P1 | CONFIRMED — done | M | S15 | hir-mono |
+| HIR-03 | P1 | CONFIRMED — done | M | S16 | hir-mono |
+| HIR-04 | P1 | CONFIRMED — done | L | S16 | hir-mono |
+| HIR-05 | P1 | CONFIRMED — done | M | S16 | hir-mono |
+| HIR-06 | P1 | CONFIRMED — done | L | S16 | hir-mono |
+| HIR-07 | P1 | CONFIRMED — done | M | S16 | hir-mono |
+| RT-08 | P1 | CONFIRMED — done | L | S17 | rt |
+| TY-25 | P1 | CONFIRMED — done | S | S17 | ty-ops |
+| TY-27 | P1 | CONFIRMED — done | M | S17 | ty-ops |
+| TY-28 | P1 | CONFIRMED — done | M | S17 | ty-ops |
+| TY-29 | P1 | CONFIRMED — done | XL | S17 | ty-ops |
+| TY-31 | P1 | CONFIRMED — done | M | S17 | ty-ops |
+| TY-32 | P1 | CONFIRMED — done | L | S17 | ty-ops |
+| TY-33 | P1 | CONFIRMED — done | L | S17 | ty-ops |
+| RT-13 | P1 | CONFIRMED — done | L | S18 | rt |
+| RT-14 | P1 | CONFIRMED — done | L | S18 | rt |
+| RT-15 | P1 | CONFIRMED — done | M | S18 | rt |
+| IP-01 | P1 | CONFIRMED — done | S | S19 | ip-compile |
+| IP-05 | P1 | CONFIRMED — done | M | S19 | ip-compile |
+| IP-06 | P1 | CONFIRMED — done | S | S19 | ip-compile |
+| IP-07 | P1 | CONFIRMED — done | M | S19 | ip-compile |
+| IP-09 | P1 | CONFIRMED — done | M | S19 | ip-compile |
+| IP-10 | P1 | CONFIRMED — done | S | S19 | ip-compile |
+| IPR-01 | P1 | CONFIRMED — done | L | S20 | ip-runtime |
+| IPR-02 | P1 | CONFIRMED — done | M | S20 | ip-runtime |
+| IPR-04 | P1 | CONFIRMED — done | M | S20 | ip-runtime |
+| IPR-05 | P1 | CONFIRMED — done | M | S20 | ip-runtime |
+| IPR-06 | P1 | CONFIRMED — done | L | S20 | ip-runtime |
+| IPR-07 | P1 | CONFIRMED — done | S | S20 | ip-runtime |
+| IPR-08 | P1 | CONFIRMED — done | S | S20 | ip-runtime |
+| IPR-10 | P1 | CONFIRMED — done | M | S20 | ip-runtime |
+| IPR-12 | P1 | CONFIRMED — done | M | S20 | ip-runtime |
+| IPR-13 | P1 | CONFIRMED — done | M | S20 | ip-runtime |
+| IPR-14 | P1 | CONFIRMED — done | L | S20 | ip-runtime |
+| MIR-03 | P1 | CONFIRMED — done | M | S21 | mir |
+| MIR-04 | P1 | CONFIRMED — done | L | S21 | mir |
+| MIR-05 | P1 | CONFIRMED — done | M | S21 | mir |
+| MIR-06 | P1 | CONFIRMED — done | L | S21 | mir |
+| MIR-07 | P1 | CONFIRMED — done | M | S21 | mir |
+| MIR-08 | P1 | CONFIRMED — done | M | S21 | mir |
+| CLI | P2 | CONFIRMED — done | S | S2 | fe-cli-dbg |
+| FE-07 | P2 | CONFIRMED — done | M | S2 | fe-cli-dbg |
+| MIR-15 | P2 | CONFIRMED — done | S | S2 | mir |
+| P0-14 | P2 | CONFIRMED — done | S | S2 | p0-layout |
+| RT-19 | P2 | CONFIRMED — done | S | S2 | rt |
+| P0-09 | P2 | CONFIRMED — done | S | S4 | p0-layout |
+| P0-08c | P2 | CONFIRMED — done | M | S6 | p0-rooting |
+| RT-10 | P2 | CONFIRMED — done | M | S7 | rt |
+| RT-11 | P2 | CONFIRMED — done | S | S7 | rt |
+| MIR-10 | P2 | PARTIAL — part owed | L | S9 | mir |
+| RT-16 | P2 | CONFIRMED — done | M | S10 | rt |
+| TY-05 | P2 | CONFIRMED — done | M | S11 | ty-typedb |
+| DBG-03 | P2 | CONFIRMED — done | S | S12 | fe-cli-dbg |
+| TY-12 | P2 | CONFIRMED — done | S | S13 | ty-scope |
+| TY-20 | P2 | CONFIRMED — done | M | S14 | ty-flow |
+| TY-21 | P2 | CONFIRMED — done | L | S14 | ty-flow |
+| HIR-02 | P2 | CONFIRMED — done | S | S15 | hir-mono |
+| HIR-09 | P2 | CONFIRMED — done | S | S15 | hir-mono |
+| TY-26 | P2 | CONFIRMED — done | S | S17 | ty-ops |
+| TY-30 | P2 | CONFIRMED — done | L | S17 | ty-ops |
+| TY-34 | P2 | CONFIRMED — done | M | S17 | ty-ops |
+| IP-02 | P2 | CONFIRMED — done | S | S19 | ip-compile |
+| IP-03 | P2 | CONFIRMED — done | S | S19 | ip-compile |
+| IP-04 | P2 | CONFIRMED — done | S | S19 | ip-compile |
+| IP-08 | P2 | CONFIRMED — done | S | S19 | ip-compile |
+| IP-11 | P2 | PARTIAL — done | M | S19 | ip-compile |
+| IPR-09 | P2 | CONFIRMED — done | M | S20 | ip-runtime |
+| IPR-11 | P2 | CONFIRMED — done | S | S20 | ip-runtime |
+| FE-03 | P3 | CONFIRMED — done | S | S2 | fe-cli-dbg |
+| FE-08 | P3 | PARTIAL — done | S | S2 | fe-cli-dbg |
+| IP-13 | P3 | CONFIRMED — done | S | S2 | ip-compile |
 
 ### 4.1 Findings discovered during the repair
 
@@ -1889,12 +1904,25 @@ evidence and a stage owner should re-reproduce before fixing.
 They are separated from the table above for provenance only. They are scheduled,
 they have owning stages, and a stage is not done until its rows are.
 
-**Nine rows are open: REP-33, REP-52, REP-53 and REP-54 … REP-59.** REP-33 is
-registered as a language feature §6.3 already defers; REP-52 and REP-53 came out
-of the REP-36 … REP-51 review and are scheduled with F17/MIR-10; REP-56/REP-57
-were registered by S20's repair pass, REP-58/REP-59 by its third review and
-REP-54/REP-55 by its fifth, and those six are **not done**. REP-46 is done with
-its own open half recorded in its row. Everything else is done.
+**The open rows are REP-33, REP-52, REP-53, REP-54, REP-55, REP-56, REP-57 and
+REP-58, plus the `_sub`/`_mul` half of REP-46.** No number is given here on
+purpose: the count has been wrong in this paragraph twice, because a count is a
+claim that goes stale every time a row moves and nothing makes it fail. The list
+is the claim. REP-33 is a language feature §6.3 already defers; REP-52 and
+REP-53 came out of the REP-36 … REP-51 review and are scheduled with F17/MIR-10;
+REP-56/REP-57 were registered by S20's repair pass, REP-58 by its third review
+and REP-54/REP-55 by its fifth. **Everything else in this register is done.**
+
+**Each of those was re-reproduced against `b557e0a`** in the close-out pass, not
+carried over on the strength of its row — which is what turned up **REP-59**.
+It was registered "not done" and it is **done**: `read grid(digit, ragged,
+fill: 0)` checks clean and answers `[1, 2, 3, 4, 5, 0]` over `"123\n45\n"`, and
+`fill: "."` works too. The row was measured on the S20 branch, whose base
+(`50c6914`) merged an *earlier* S19 than the one that reached `main` — S19's own
+`6648a72` ("a keyword argument's value survives both front ends") is not an
+ancestor of it. The defect was real where it was measured and already fixed
+where it was filed. **A row measured on a branch names the branch, or it is
+measuring a tree nobody will ever run.**
 
 **REP-15 and REP-19 are done** (ADR-066, ADR-067). REP-15 was the last P0 and
 never got a stage — it arrived after every stage that could own it was written —
@@ -1913,7 +1941,7 @@ from the review of that block; and REP-54 … REP-59 from S20's repair pass and 
 third and fifth reviews. Every row up to REP-51 is done except REP-33, which is
 registered as a language feature §6.3 already defers, and REP-46, which landed
 the three overflow alternatives §4.12 names and records the `_sub`/`_mul` family
-as an open language decision. The nine open rows are listed at the top of this
+as an open language decision. The open rows are listed at the top of this
 section.
 
 **REP-16 … REP-20 belong to S25 by subject** and were each found by measuring its
@@ -2056,10 +2084,10 @@ stage from an eager lowerer into `Step::FilterMap` and moved the defect with it.
 | REP-53 | P3 | S | **registered, not fixed** (belongs with F17/MIR-10, S9) | mir + stdlib | reviewer, REP-36 … REP-49 review | **`MethodEntry.can_fault` and the manifest's fault column are not what drive a method call's fault check.** `build.rs`'s `TypedExpr::MethodCall` arm emits `b.check_fault()` after **every** runtime method call, unconditionally — the comment beside it says "Method calls may fault (e.g. vec.get out of bounds); check after" — so neither `MethodEntry::can_fault` nor `RuntimeSymbol::faults()` is consulted on that path. Measured twice, independently: declaring `CounterInc` `Allocates` leaves REP-43's end-to-end fault gate green, which is only possible if the check is unconditional. The consequence is not a wrong answer today — the check being unconditional is *conservative*, and the fault is observed — it is that **the fault column is documentation with no consumer**, which is how REP-45's three rows drifted unnoticed for as long as they did, and it costs a check at every non-faulting method call. Two ends to fix and they belong together: F17's verifier rule (S9) gives the column a reader, and `MethodEntry::can_fault` should then either be wired to the manifest or deleted — the progress doc's own recommendation, which has called it dead metadata since M10. Registered here so the two ends arrive as one change rather than as a third hand-corrected table. |
 | REP-54 | P2 | M | **not done** | ip-plan | S20 review 5 | **A template with two or more anonymous captures is tagged `Unit` and holds tuples.** `read lines(\`{int},{int}\`)` over `"1,2\n3,4\n"` prints **`[Unit, Unit]`**: `walk_template`'s last arm builds a `Tuple` per element, and `template_result_descriptor` answers `&scalars::UNIT` for that shape, so the `Vec`'s element tag disagrees with every value in it and `vec_format` renders through the `Unit` callback. This is exactly ADR-078 Decision 5's class — "a collection's element descriptor is derived, never defaulted" — surviving in the one shape that decision did not reach. **Why it was invisible:** the function's own comment said a multi-anon template "lowers to a `Tuple` node, handled above", and `PlanNode::Tuple` **is never emitted by anything**: `lower_template` (crates/praxis-input-parser/src/plan.rs:566-606) pushes `PlanNode::Template` for every template shape, so `walk_tuple` is unreachable from source and the descriptor path had no "above" to defer to. **Pre-existing** — identical at the pre-S20 base `b2184c8` and at round four's HEAD `f5181f5`, so no part of this branch caused it. **Why S20 review 5 did not fix it:** the answer is a *tuple* descriptor built from the child descriptors, which is `alloc_tuple`'s runtime `TupleSchema` interner reached from a static-descriptor path that has no tuple constructor today — a wider change than a review round, and it wants deciding alongside whether `PlanNode::Tuple` should be emitted or deleted. The two stale comments are corrected in place and point here. |
 | REP-55 | P3 | S | **not done** | ip-runtime | S20 review 5 | **`matrix`'s ragged-row fault names the whole input instead of the offending line.** `read matrix(int)` over `"1 2\n  \n3 4\n"` reports `at input offset 0..11: expected rectangular matrix row`, where `grid(digit)` over the analogous `"12\n  \n34\n"` reports `at input offset 3..5` — the blank line itself. The source is `walk_matrix` reporting `region.start()`/`region.len()` (crates/praxis-runtime/src/parser.rs) where `walk_grid` reports `line.start()`/`line.len()`. §7.11 asks a detail to name the position parsing broke at, and ADR-078 Decision 4 already settled that principle for `choice`. **Not a wrong answer** — the three constructors fault by the same rule, and §7.5 now says the *diagnostics* differ rather than claiming they fault "in the same way" — so this is a diagnostic-quality row, not a correctness one. **Why S20 review 5 did not fix it:** the round's scope was the two majors and the documentation sweep, and a span change wants its own snapshot-assertion pass over the fault messages rather than a drive-by edit. |
-| REP-56 | P1 | M | **not done** | hir-mono | S20 repair (`afc6f3f`) | **A `choice` payload record's fields cannot be read, and `praxis check` does not say so.** A `choice` case whose template has named captures produces an anonymous record; binding it and reading a field off it does not infer. `fn main() -> Int {\n  let ms = read scan(choice(M: `mul({a:int},{b:int})`))\n  var t = 0\n  for m in ms { t = t + match m { M(p) => p.a } }\n  t\n}` over `"mul(3,4)"` is **`error[Y112]: no field 'a' on this type`** — and `praxis check` on the same file exits **0**, so this is REP-12's shape as well (the field is resolved at lowering, which `check` does not reach). `jit.rs` already documents the gap at the test named "the anon-record-as-payload field access inference gap" and works around it with scalar payloads. **Why S20 did not fix it:** it is an inference/lowering defect in the payload's *type*, not in the parser interpreter, and the parser produces the right record — S20's own IPR-14 pressure test reads its values through single-anonymous-capture templates for exactly this reason. It makes §7.5's most natural `scan(choice(template))` spelling unusable, which is the `m9_noisy_scan` shape. |
+| REP-56 | P1 | M | **not done** | hir-mono | S20 repair (`afc6f3f`) | **A `choice` payload record's fields cannot be read, and `praxis check` does not say so.** A `choice` case whose template has named captures produces an anonymous record; binding it and reading a field off it does not infer. `fn main() -> Int {\n  let ms = read scan(choice(M: `mul({a:int},{b:int})`))\n  var t = 0\n  for m in ms { t = t + match m { M(p) => p.a } }\n  t\n}` over `"mul(3,4)"` is **`error[Y112]: no field 'a' on this type`** — and `praxis check` on the same file exits **0**, so this is REP-12's shape as well (the field is resolved at lowering, which `check` does not reach). `jit.rs` already documents the gap at the test named "the anon-record-as-payload field access inference gap" and works around it with scalar payloads. **Re-measured at `b557e0a` and the symptom is worse than the row says:** `praxis check` still exits 0, and `praxis run` no longer reports `Y112` — it **aborts the host**, `rc=134`, with `assertion left == right failed: int_payload reads eight bytes; Unit is 0 wide` and then `internal error: a panic escaped the runtime wrapper praxis_int_load`. That is REP-37's width guard and ADR-080's `catch_unwind` doing exactly their jobs — the read is caught rather than performed — so it is not a second defect and not UB; it is this one's symptom now that the field read reaches lowering as a `Unit`. It does raise what the row costs a user: a program that passes `check` kills the process. Severity stays P1 because P0 in this register has meant a *silent* wrong answer. **Why S20 did not fix it:** it is an inference/lowering defect in the payload's *type*, not in the parser interpreter, and the parser produces the right record — S20's own IPR-14 pressure test reads its values through single-anonymous-capture templates for exactly this reason. It makes §7.5's most natural `scan(choice(template))` spelling unusable, which is the `m9_noisy_scan` shape. |
 | REP-57 | P2 | S | **not done** | fe-cli-dbg | S20 repair (`afc6f3f`) | **A record pattern nested inside an enum pattern has no grammar.** It is the obvious workaround for REP-56 and it does not parse: `match m { M({a, b}) => a * b }` is `error[P001]: expected a pattern` at the `{`, then `expected ')' to close variant pattern`, then `expected '=>' in match arm`, and the enclosing function is lost (a `Y001` "expected Int, found Unit" on top). ADR-069 made a record a pattern with one constructor and REP-25 made a `for` binding a pattern; a variant pattern's sub-patterns were evidently never routed through the same production. The fix is the sub-pattern position calling the pattern parser rather than `expect(Ident)` — the same change REP-25 made in binding position, at the other site. **Why S20 did not fix it:** it is a grammar change in `praxis-parser`, no part of the parser runtime, and it needs REP-56 answered first to be worth anything — with REP-56 open the workaround has nothing to work around to. |
 | REP-58 | P2 | M | **not done** | ip-plan | S20 review 3 | **§7.7's "repeated labeled blocks" example does not run: a nested-constructor capture inside a `block` swallows past its line when another block item follows.** praxis_technical_design.md:986-997 verbatim, over the AoC-2022-day-11 input, is `error: input parse mismatch at 34..149: expected the rest of the field`. Minimised: `let v = read block(\`items: {items:csv(int)}\`, \`op: {op:word}\`)` over `"items: 79, 98\nop: plus\n"`. **Pre-existing** — the pre-S20 base fails it too, differently (`expected literal "op:"`), so it is not S20's regression. Removing the second block item makes it pass on both, and swapping `csv(int)` for `int` passes on both, so the trigger is specifically a nested-constructor capture followed by a further block item: the capture is the template's last part, so it is unbounded and takes the rest of the block's region rather than the rest of its line. **Why S20 did not fix it:** it predates the S19 merge base and the answer is a language decision — either a `block` item is line-anchored for its captures too, or §7.7 is amended to the spelling that works. `tests/aoc-corpus/m9_repeated_labeled_blocks.px` does **not** cover it: it writes `items: lines(int)`, a named block field, and not §7.7's `{items:csv(int)}` capture. Add a corpus fixture for §7.7 as written whenever this is taken up. |
-| REP-59 | P3 | S | **not done** | ip-fe | S20 review 3 | **§7.5's `grid(cell_parser, ragged, fill: value)` cannot be spelled at all.** `read grid(digit, ragged, fill: 0)` is `error[P001]: expected a parser expression` at the `0`, because `build_call` re-parses `take_keyword_value`'s value as a parser expression (crates/praxis-input-parser/src/body.rs:319-328); `fill: "."` and `fill: 'x'` are rejected the same way, and dropping `fill:` is `I014` ("`ragged` and `fill:` come together or not at all"), so the ragged form is unreachable in both directions. **Pre-existing** — identical on the pre-S20 base. The runtime is ready: `walk_grid_ragged` parses the fill through the cell parser against its own owned `Text` (ADR-078 Decision 1). The fix is widening the `fill:` value grammar to accept a literal. Recorded until now only in a `jit.rs` comment, which is not where a reader looks for an unimplemented design form. |
+| REP-59 | P3 | S | **done** (by S19's `6648a72`, before the row was written) | ip-fe | S20 review 3 | **§7.5's `grid(cell_parser, ragged, fill: value)` cannot be spelled at all.** As filed: `read grid(digit, ragged, fill: 0)` is `error[P001]: expected a parser expression` at the `0`, because `build_call` re-parses `take_keyword_value`'s value as a parser expression; dropping `fill:` is `I014`, so the ragged form is unreachable in both directions. **Not reproducible on `main`.** At `b557e0a` that program checks clean and answers `[1, 2, 3, 4, 5, 0]` over `"123\n45\n"`; `grid(char, ragged, fill: ".")` answers `[a, b, c, d, e, .]`; `grid(digit, ragged)` is still `I014`, which is the rule and not the defect. (`fill: 'x'` is `I014` "needs a value" because **Praxis has no character literal** — a single-quoted form is nothing in this language, so that third of the row was never a spelling the fix could accept.) **The row was measured on the S20 branch**, whose base merge `50c6914` took an earlier S19 than `main` did: S19's `6648a72` — "a keyword argument's value survives both front ends", which *is* this fix — is not an ancestor of it. Closed by the close-out re-reproduction pass, not by a change. |
 
 ## 5. Stages
 
@@ -3412,7 +3440,17 @@ to §4.1's stages; they are at the end of this section.
 > (ADR-060 settles the graph representation D5 left owed), **D6**, **D7**/**D8**
 > (ADR-049), **D9** (ADR-042), **D10**, **D11**, **D12**, **D13** (ADR-051),
 > **D14** (ADR-040), **D15** (ADR-061), **D17** (ADR-063). Still open: **D16**
-> alone.
+> and **D18**.
+>
+> **D18 is not in the numbered text below** — it was registered after this
+> section was written, by S19's third review, and it lives in the progress doc's
+> §4. *May a backtick template span a raw newline?* §7.2 says `\n` **matches** a
+> line ending and does not say whether a raw one may appear in a template's
+> source. Nothing needs the answer until a template is left unclosed, and then it
+> decides the whole report: `` read `{int` `` is a truthful `T002` spanning the
+> rest of the file, because under D10 a backtick inside a capture opens a nested
+> template. It is D16's shape — a language question a bug fix would otherwise
+> answer by accident.
 >
 > **D1, D10, D11 and D12 were answered together (2026-07-31)**, in the session
 > that started S18. That is four of the five remaining questions in one sitting,
