@@ -724,8 +724,30 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                     cur
                 };
                 let rhs = lower_expr_gc(b, value);
-                let result = lower_int_binop(b, op_to_int_binop(*op), cur, rhs);
-                let materialized = lower_materialize(b, result, Some(*span));
+                // `s += "x"` on a `Text` binding is `s = s + "x"` (ADR-085), so
+                // it is the same runtime call `+` lowers to. Without this it
+                // fell into the `Int` arithmetic below and added two *pointers*
+                // — which is why inference had to refuse a non-numeric compound
+                // target in the first place.
+                let text_target = matches!(
+                    b.db.data(b.db.follow(expr_static_type(value))),
+                    praxis_types::data::TypeData::Scalar(praxis_types::ScalarType::Text)
+                );
+                let materialized = if text_target && *op == AssignOp::AddAssign {
+                    let joined =
+                        b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, Some(*span));
+                    b.push(Inst::Call {
+                        dst: joined,
+                        callee: CallTarget::Runtime(RuntimeSymbol::TextConcat),
+                        args: vec![cur, rhs],
+                        roots: RootSlots::unannotated(),
+                        debug: DebugSlots::unannotated(),
+                    });
+                    joined
+                } else {
+                    let result = lower_int_binop(b, op_to_int_binop(*op), cur, rhs);
+                    lower_materialize(b, result, Some(*span))
+                };
                 if escaping {
                     b.push(Inst::Call {
                         dst,
@@ -894,7 +916,9 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // error, and `..=Int::MAX` saturates (ADR-059 D3).
             dst
         }
-        TypedExpr::Bin { op, lhs, rhs, .. } => {
+        TypedExpr::Bin {
+            op, lhs, rhs, ty, ..
+        } => {
             // Short-circuit ops must not eagerly evaluate `rhs` — it is lowered
             // only on the path that needs it, inside `lower_short_circuit`.
             if let BinOp::LogicalOr | BinOp::LogicalAnd = op {
@@ -914,7 +938,38 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                         b.db.data(b.db.follow(operand_ty)),
                         praxis_types::data::TypeData::Scalar(praxis_types::ScalarType::Float)
                     );
-                    if is_float {
+                    let is_text = matches!(
+                        b.db.data(b.db.follow(operand_ty)),
+                        praxis_types::data::TypeData::Scalar(praxis_types::ScalarType::Text)
+                    );
+                    if is_text {
+                        // `+` on `Text` is concatenation (ADR-085), and it is a
+                        // runtime call rather than a scalar operation: a `Text`
+                        // payload is a pointer-and-length structure, not a
+                        // number, so the `lower_int_binop` path below would add
+                        // two *pointers*. The other four operators are `Y016` in
+                        // inference and cannot reach here — but `Add` is asked
+                        // for explicitly rather than assumed, so a subtree that
+                        // did reach here malformed builds nothing instead of
+                        // silently concatenating.
+                        if *op == BinOp::Add {
+                            let dst =
+                                b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
+                            b.push(Inst::Call {
+                                dst,
+                                callee: CallTarget::Runtime(RuntimeSymbol::TextConcat),
+                                args: vec![l, r],
+                                roots: RootSlots::unannotated(),
+                                debug: DebugSlots::unannotated(),
+                            });
+                            // `Allocates`, not `AllocatesAndFaults`: concatenating
+                            // two UTF-8 payloads cannot produce anything else, so
+                            // there is no fault to check for.
+                            dst
+                        } else {
+                            b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan)
+                        }
+                    } else if is_float {
                         // `%` is a type error for floats in inference; if it
                         // reaches here (e.g. from a malformed subtree), treat as
                         // Add defensively. binop_to_float maps Add/Sub/Mul/Div.

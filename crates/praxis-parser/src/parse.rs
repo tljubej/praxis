@@ -260,7 +260,7 @@ impl<'t> Parser<'t> {
     // --- entry point ---
 
     fn parse_source_file(&mut self) {
-        self.start_node(SyntaxKind::SOURCE_FILE);
+        self.start_root_node(SyntaxKind::SOURCE_FILE);
         while !self.at_end() {
             // Emit any trivia leading each statement into the root node.
             self.eat_trivia();
@@ -568,7 +568,30 @@ impl<'t> Parser<'t> {
 
     // --- green-tree helpers ---
 
+    /// Open a node **on its first meaningful token** — the trivia in front of it
+    /// is emitted first, so it lands in the enclosing node instead (REP-63).
+    ///
+    /// This is the whole of the rule "a node never begins with trivia", and it
+    /// belongs here rather than at 54 call sites. Before it, only the
+    /// `IntLit`/`FloatLit`/`TextLit`/`BacktickTemplate` arm of
+    /// [`parse_atom`](Self::parse_atom) ate trivia first — it had a comment
+    /// saying why — and everything else opened the node and then let
+    /// [`bump`](Self::bump)'s own sweep pull the whitespace *inside* it. So a
+    /// `PATH_EXPR` for `a` in `let c = a + b` spanned `" a"`, and the caret in
+    /// every diagnostic that underlines an expression started one column early
+    /// and ran one column wide — reading as if it pointed at the `=`.
+    ///
+    /// The root is the one node this cannot open ([`start_root_node`](Self::start_root_node)):
+    /// there is nothing to emit trivia into before it exists.
     fn start_node(&mut self, kind: SyntaxKind) {
+        self.eat_trivia();
+        self.builder.start_node(PraxisLanguage::kind_to_raw(kind));
+    }
+
+    /// Open the root node. The only node opened *before* its leading trivia,
+    /// because a token cannot be emitted with no node open — the root is where
+    /// a file's leading trivia goes.
+    fn start_root_node(&mut self, kind: SyntaxKind) {
         self.builder.start_node(PraxisLanguage::kind_to_raw(kind));
     }
 
@@ -1207,20 +1230,16 @@ impl<'t> Parser<'t> {
     fn parse_atom(&mut self, lit: StructLit) {
         let kind = self.peek();
         match kind {
+            // `true`/`false` are literals too, and used to be a separate arm
+            // *because* it was the one that did not eat leading trivia first —
+            // so `true` spanned `" true"` where `1` spanned `"1"`. `start_node`
+            // owns that rule now (REP-63), so there is one arm.
             SyntaxKind::IntLit
             | SyntaxKind::FloatLit
             | SyntaxKind::TextLit
-            | SyntaxKind::BacktickTemplate => {
-                // Eat leading trivia *before* opening the node, so it attaches
-                // to the enclosing context rather than nesting inside the literal.
-                self.eat_trivia();
-                self.start_node(SyntaxKind::LITERAL);
-                // After eat_trivia the cursor is on the literal token; emit it
-                // directly without another trivia sweep.
-                self.bump_meaningful();
-                self.finish_node();
-            }
-            SyntaxKind::KW_TRUE | SyntaxKind::KW_FALSE => {
+            | SyntaxKind::BacktickTemplate
+            | SyntaxKind::KW_TRUE
+            | SyntaxKind::KW_FALSE => {
                 self.start_node(SyntaxKind::LITERAL);
                 self.bump();
                 self.finish_node();
@@ -1964,7 +1983,14 @@ impl<'t> Parser<'t> {
     ///
     /// In a single-pass builder the checkpoint must be captured before the
     /// children are emitted, so we stash one at the start of each prefix/atom.
-    fn checkpoint_lhs(&self) -> rowan::Checkpoint {
+    ///
+    /// The trivia in front of the operand is emitted **first**, for
+    /// [`start_node`](Self::start_node)'s reason and by the same rule: a node
+    /// retroactively opened here — a `BIN_EXPR`, a `RANGE_EXPR`, a `CALL_EXPR`,
+    /// a parenthesized expression — would otherwise begin at a checkpoint taken
+    /// before the whitespace and swallow it (REP-63).
+    fn checkpoint_lhs(&mut self) -> rowan::Checkpoint {
+        self.eat_trivia();
         self.builder.checkpoint()
     }
 }
@@ -2154,6 +2180,88 @@ mod tests {
     /// comparison**. That is the whole reason the precedence had to be inserted
     /// rather than appended: every range in the corpus writes an arithmetic
     /// bound, and `0..n - 1` has to be `0..(n - 1)`.
+    /// **REP-63.** A node never begins with trivia, so an expression's
+    /// `text_range` is the expression and a caret under it underlines only that.
+    ///
+    /// `start_node` opened the node and let `bump`'s own trivia sweep pull the
+    /// whitespace *inside* it. Only the numeric/text-literal arm of `parse_atom`
+    /// worked around it, so the defect was invisible in exactly the shape most
+    /// tests reach for: `1 + "y"` underlined `"y"` correctly while `a + b`
+    /// underlined `" a"` and `" b"` — one column early and one column wide,
+    /// reading as if the caret pointed at the `=` and the `+`.
+    ///
+    /// Asserted as an invariant over whole trees rather than as another
+    /// snapshot: there are 54 `start_node` call sites and a snapshot pins the
+    /// handful a fixture happens to reach. The exception is the **root**, which
+    /// is where a file's leading trivia has to go — there is no node before it.
+    #[test]
+    fn a_node_never_begins_with_trivia() {
+        for src in [
+            "let c = a + b",
+            "  let c = ( a ) + 1  ",
+            "// a leading comment\nlet t = true && false",
+            "fn f(x) -> Int {\n    let y = -x\n    y * 2\n}",
+            "let v = read lines( `{a:int},{b:int}` )",
+            "let m = match t {\n    A => 1\n    _ => 2\n}",
+            "for i in 0..n {\n    out( i )\n}",
+            "let p = Point { x: 1, y: 2 }",
+            "let f = |a, b| a + b\nlet g = f ( 1 , 2 )",
+            "var s = 0\ns += grid [ 1 , 2 ]",
+            // Recovery paths open nodes too, and `PARSE_ERROR` is a node.
+            "let @ = 1\nlet ok = 2",
+            "let x = (",
+        ] {
+            let tree = parse_text(src).tree;
+            for node in tree.descendants() {
+                if node.kind() == SyntaxKind::SOURCE_FILE {
+                    continue;
+                }
+                let Some(first) = node.first_token() else {
+                    continue;
+                };
+                assert!(
+                    !first.kind().is_trivia(),
+                    "{:?}@{:?} begins with {:?} in {src:?}\n{}",
+                    node.kind(),
+                    node.text_range(),
+                    first.kind(),
+                    praxis_test_support::format_syntax_tree(&tree),
+                );
+            }
+        }
+    }
+
+    /// The consequence REP-63 is about, stated directly: an operand's range is
+    /// the operand, so `lhs.syntax().text_range()` is what a diagnostic can
+    /// point at.
+    #[test]
+    fn an_operands_range_is_the_operand_and_not_the_space_before_it() {
+        // `let c = a + b` — `a` at 8..9, `b` at 12..13.
+        let tree = parse_text("let c = a + b").tree;
+        let bin = tree
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::BIN_EXPR)
+            .expect("a BIN_EXPR");
+        assert_eq!(
+            bin.text_range(),
+            rowan::TextRange::new(8.into(), 13.into()),
+            "the binary expression is `a + b`, not `= a + b`"
+        );
+        let operands: Vec<_> = bin
+            .children()
+            .filter(|n| n.kind() == SyntaxKind::PATH_EXPR)
+            .map(|n| n.text_range())
+            .collect();
+        assert_eq!(
+            operands,
+            vec![
+                rowan::TextRange::new(8.into(), 9.into()),
+                rowan::TextRange::new(12.into(), 13.into()),
+            ],
+            "each operand's range is one character wide"
+        );
+    }
+
     #[test]
     fn a_range_binds_looser_than_the_arithmetic_in_its_bounds() {
         // The bound is the whole subtraction, so the RANGE_EXPR contains a
@@ -2166,8 +2274,8 @@ mod tests {
             Ident "r"@4..5
             Whitespace " "@5..6
             EQ "="@6..7
-            RANGE_EXPR@7..16
-              Whitespace " "@7..8
+            Whitespace " "@7..8
+            RANGE_EXPR@8..16
               LITERAL@8..9
                 IntLit "0"@8..9
               DOT2 ".."@9..11

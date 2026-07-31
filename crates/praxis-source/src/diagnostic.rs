@@ -955,7 +955,7 @@ mod tests {
         insta::assert_snapshot!(rendered, @r"
 error[Y012]: expected Int, found Text
 
-  day03.px:1:9
+  day03.px:1:10
   1 | total += line
     |          ^^^^ expected Int, found Text
 
@@ -982,13 +982,13 @@ help: parse it with the input parser
         insta::assert_snapshot!(rendered, @r"
 error[N001]: undefined name `value`
 
-  f.px:1:8
+  f.px:1:9
   1 | let a = value
     |         ^^^^^ undefined name `value`
 
 note: the name `a` is defined here
 
-  f.px:2:9
+  f.px:2:10
   2 | let b = a + 1
     |          ^
 ");

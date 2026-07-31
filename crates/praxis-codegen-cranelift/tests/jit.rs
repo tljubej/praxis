@@ -7584,3 +7584,83 @@ fn every_atomic_the_design_requires_runs_in_a_compiled_program() {
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
 }
+
+/// **ADR-085.** `Text + Text` is concatenation, end to end through the JIT.
+///
+/// Every assertion is on the *bytes*, not the length: `c.len()` alone passes for
+/// a wrapper that concatenates in the wrong order, and structural equality with
+/// a literal written the right way round does not. So each case compares against
+/// the answer and returns a length only to carry a distinguishable number back.
+///
+/// `praxis_text_concat` is the one new wrapper. It is declared `Allocates`, so
+/// the operands must be rooted across the call — the nested case
+/// (`(a + b) + (c + d)`) is what would collect a half-built temporary if they
+/// were not.
+#[test]
+fn text_concatenation_joins_two_texts() {
+    // The basic case, checked as bytes.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let c = \"ab\" + \"cde\"\n  \
+         if c == \"abcde\" { c.len() } else { 0 - 1 }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 5, "\"ab\" + \"cde\" is \"abcde\"");
+
+    // Order matters, and a length cannot see it.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  if \"ab\" + \"cde\" == \"cdeab\" { 1 } else { 0 }\n}\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0, "concatenation is not commutative");
+
+    // Left-associative chaining, and four live temporaries across an allocating
+    // call.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let a = \"1\"\n  let b = \"2\"\n  let c = \"3\"\n  let d = \"4\"\n  \
+         if (a + b) + (c + d) == \"1234\" { 1 } else { 0 }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1, "(a + b) + (c + d) is \"1234\"");
+
+    // The empty text is the identity, in both positions.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  if \"\" + \"x\" == \"x\" && \"x\" + \"\" == \"x\" { 1 } else { 0 }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1, "the empty Text is the identity");
+
+    // Multi-byte characters: `len()` counts chars (§4.3), and joining two valid
+    // UTF-8 payloads cannot split one — which is why the wrapper does not need
+    // the `InvalidText` fault `praxis_alloc_text` carries.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let c = \"héllo\" + \" wörld\"\n  \
+         if c == \"héllo wörld\" { c.len() } else { 0 - 1 }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 11, "eleven characters, thirteen bytes");
+
+    // `+=` on a `Text` binding is the same operator (ADR-085), including through
+    // the `VarCell` a captured `var` lives in (§4.2).
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var s = \"a\"\n  let read_it = || s\n  s += \"b\"\n  s += \"c\"\n  \
+         if s == \"abc\" && read_it() == \"abc\" { s.len() } else { 0 - 1 }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        3,
+        "a captured var observes each concatenation"
+    );
+
+    // A concatenation is an ordinary `Text`, so it hashes and compares
+    // structurally like any other (§5.5) — a `Map` keyed by one must find the
+    // entry a literal key inserted.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map()\n  m.insert(\"ab\", 7)\n  m[\"a\" + \"b\"]\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        7,
+        "a built Text keys the same entry a literal does"
+    );
+}

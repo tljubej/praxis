@@ -830,7 +830,7 @@ mod tests {
         insta::assert_snapshot!(rendered, @r"
 error[T003]: unexpected character in source
 
-  day.px:1:4
+  day.px:1:5
   1 | let @ = 1
     |     ^ unexpected character in source
 ");

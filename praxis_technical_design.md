@@ -256,7 +256,7 @@ All runtime language values are GC-managed objects. Variables, fields, tuple ele
 | `Float` | IEEE 754 binary64 payload | puzzle convenience |
 | `Byte` | unsigned 8-bit payload | byte-oriented input |
 | `Char` | Unicode scalar payload | validated scalar value |
-| `Text` | immutable UTF-8 payload or source-slice metadata | always referenced through `GcRef` |
+| `Text` | immutable UTF-8 payload or source-slice metadata | always referenced through `GcRef`; `+` concatenates (§4.13) |
 | `Unit` | no user payload | may be one immortal singleton object |
 | `Never` | no runtime value | diverging control flow |
 
@@ -469,6 +469,43 @@ distinction is worth stating because it is easy to get backwards:
 
 See ADR-037 for the implementation: floats ride the uniform `i64` scalar channel
 as their bit pattern, bit-casting to `f64` at arithmetic/comparison points.
+
+### 4.13 Text behavior
+
+**`+` on two `Text`s is concatenation** (ADR-085), and the result is a new
+immutable `Text` — §4.3 makes `Text` immutable, so neither operand is touched.
+
+```praxis
+let a = "asd"
+let b = "qwe"
+let c = a + b        // "asdqwe"
+
+var s = ""
+s += "one "          // `s = s + "one "`, the same operator
+s += "two"
+```
+
+This is §4.12's rule with a third type in it, not a second rule: **a `Text`
+operand makes the operation `Text`**, exactly as a `Float` operand makes it
+`Float`. So the mixed forms are type errors and not coercions:
+
+```praxis
+let bad = "count: " + 3    // error: expected Text, found Int
+```
+
+There is **no implicit conversion to `Text`**. A language whose `+` stringifies
+its other operand has no error left to report there, and what an expression
+means starts depending on its neighbours.
+
+**`+` is the only operator defined for `Text`.** `-`, `*`, `/` and `%` report
+`Y016` — the code §4.12's `%`-on-`Float` uses, for the same reason: both operands
+agree and the operation still has no meaning. `"ab" * 3` is repetition in some
+languages; it is not a spelling here, which keeps it available to mean that
+later.
+
+Two related gaps are open rather than answered: `Int` has no `to_text()` (only
+`Float` does, §4.12), and §8.1's interpolation is specified and unimplemented.
+Building a `Text` out of a number is not yet possible in any spelling.
 
 ---
 

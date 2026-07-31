@@ -299,6 +299,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
             crate::crash_snapshot::praxis_snapshot_debug_chain as *const ()
         }
         RuntimeSymbol::StructEq => praxis_struct_eq as *const (),
+        RuntimeSymbol::TextConcat => praxis_text_concat as *const (),
         RuntimeSymbol::TextGet => praxis_text_get as *const (),
         RuntimeSymbol::TextIsEmpty => praxis_text_is_empty as *const (),
         RuntimeSymbol::TextLen => praxis_text_len as *const (),
@@ -4480,6 +4481,46 @@ pub unsafe extern "C" fn praxis_text_is_empty(ctx: *mut RuntimeContext, text: Gc
         let s = unsafe { text_str(text) };
         // SAFETY: ctx/heap valid; Bool immortal path.
         unsafe { bool_ref(ctx, s.is_empty()) }
+    })
+}
+
+/// `a + b` on two `Text`s — a new owned `Text` holding their concatenation
+/// (ADR-085).
+///
+/// Declared `Allocates` rather than `AllocatesAndFaults`, which is
+/// `praxis_float_to_text`'s row and for the same reason: both payloads are
+/// UTF-8 by construction, so their concatenation is too, and there is nothing
+/// for the `InvalidText` fault to check. `praxis_alloc_text` validates because
+/// it is handed a raw byte buffer; this wrapper is handed two `Text`s.
+///
+/// The result is `Owned` and never a `Slice`: a concatenation has no single
+/// owner to point into, and a slice of one would be a lie about its extent.
+///
+/// # Safety
+/// `ctx` must be live and wired; `a` and `b` must be valid `Text` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_text_concat(ctx: *mut RuntimeContext, a: GcRef, b: GcRef) -> GcRef {
+    abi_guard!("praxis_text_concat", ctx, {
+        // SAFETY: caller guarantees both are Text.
+        let left = unsafe { text_str(a) };
+        let right = unsafe { text_str(b) };
+        let mut joined = String::with_capacity(left.len() + right.len());
+        joined.push_str(left);
+        joined.push_str(right);
+        // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
+        unsafe {
+            gc_alloc_with(
+                ctx,
+                &crate::text::TEXT,
+                std::mem::size_of::<crate::text::TextPayload>(),
+                std::mem::align_of::<crate::text::TextPayload>(),
+                |payload| {
+                    let owned: Box<str> = joined.clone().into_boxed_str();
+                    (payload as *mut crate::text::TextPayload)
+                        .write(crate::text::TextPayload::Owned(owned));
+                },
+            )
+        }
     })
 }
 

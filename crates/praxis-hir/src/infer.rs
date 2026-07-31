@@ -1411,7 +1411,14 @@ impl Inferer {
         let compound = stmt
             .op()
             .is_some_and(|t| !matches!(t.kind(), SyntaxKind::EQ));
-        if compound {
+        // …except `+=` on a `Text` target, which is concatenation and needs no
+        // number (ADR-085). `s += "x"` is `s = s + "x"`, so what it requires is
+        // what `+` requires. The other four compounds still need a numeric
+        // target, and so does `+=` on anything that is not `Text` — a `Text`
+        // target is *excused* here, not exempted from being checked.
+        let text_concat_assign = stmt.op().is_some_and(|t| t.kind() == SyntaxKind::PLUS_EQ)
+            && is_text_scalar(&self.db, existing);
+        if compound && !text_concat_assign {
             self.require_cap_as(
                 existing,
                 Capability::Kind(CapKind::Numeric),
@@ -2221,7 +2228,9 @@ impl Inferer {
         if let Some(text_expr) = p.text_expr() {
             let arg_ty = self.infer_expr(&text_expr);
             let text = self.db.text();
-            if let Err(e) = self.db.unify(arg_ty, text) {
+            // `text` first — `parse` requires it, `arg_ty` is what was passed
+            // (REP-61).
+            if let Err(e) = self.db.unify(text, arg_ty) {
                 let at = text_expr.syntax().text_range();
                 self.diag_unify(self.file_span(at), e);
             }
@@ -2340,7 +2349,9 @@ impl Inferer {
         let int_ty = self.db.int();
         for (bound, at) in [(st, start_range), (et, end_range)] {
             let Some(bound) = bound else { continue };
-            if let Err(e) = self.db.unify(bound, int_ty) {
+            // `int_ty` first — the range requires it, the bound is what was
+            // written (REP-61).
+            if let Err(e) = self.db.unify(int_ty, bound) {
                 self.diag_unify(self.file_span(at.unwrap_or(whole)), e);
             }
         }
@@ -2387,7 +2398,22 @@ impl Inferer {
                     .into_iter()
                     .flatten()
                     .any(|t| is_float_scalar(&self.db, t));
-                let target = if any_float_operand || any_float_type {
+                // A `Text` operand makes the operation `Text` (ADR-085) — the
+                // same rule, with a third type in it. So `"a" + 1` is a type
+                // error rather than a coercion, exactly as `1 + 2.5` is: there
+                // is no implicit conversion in either direction.
+                //
+                // `Text` is asked *first*. A `Text` and a `Float` cannot both be
+                // present without one of them being the mismatch this reports,
+                // and the order decides only which of the two gets named as the
+                // requirement.
+                let any_text_type = [lt, rt]
+                    .into_iter()
+                    .flatten()
+                    .any(|t| is_text_scalar(&self.db, t));
+                let target = if any_text_type {
+                    self.db.text()
+                } else if any_float_operand || any_float_type {
                     self.db.float()
                 } else {
                     self.db.int()
@@ -2396,10 +2422,14 @@ impl Inferer {
                     let whole = b.syntax().text_range();
                     let lhs_at = lhs_range.unwrap_or(whole);
                     let rhs_at = rhs_range.unwrap_or(whole);
-                    if let Err(e) = self.db.unify(l, target) {
+                    // `target` first: it is what the operator requires, and the
+                    // operand is what the program wrote. Reversed, `"a" + "b"`
+                    // read `expected Text, found Int` — the operand named as the
+                    // requirement (REP-61).
+                    if let Err(e) = self.db.unify(target, l) {
                         self.diag_unify(self.file_span(lhs_at), e);
                     }
-                    if let Err(e) = self.db.unify(r, target) {
+                    if let Err(e) = self.db.unify(target, r) {
                         self.diag_unify(self.file_span(rhs_at), e);
                     }
                 }
@@ -2414,6 +2444,26 @@ impl Inferer {
                             self.file_span(at),
                             "%",
                             "Float",
+                        ));
+                }
+                // `+` is the only operator defined for `Text` (ADR-085), and
+                // the other four report `Y016` for `%`-on-`Float`'s reason:
+                // both operands agree and the operation still has no meaning.
+                // Without this, `"ab" * 3` would reach MIR and lower as *integer
+                // multiplication of two pointers*.
+                if op_kind != Some(SyntaxKind::PLUS) && is_text_scalar(&self.db, target) {
+                    let at = b.syntax().text_range();
+                    let spelling = match op_kind {
+                        Some(SyntaxKind::MINUS) => "-",
+                        Some(SyntaxKind::STAR) => "*",
+                        Some(SyntaxKind::SLASH) => "/",
+                        _ => "%",
+                    };
+                    self.diagnostics
+                        .push(crate::diagnostics::operator_not_defined(
+                            self.file_span(at),
+                            spelling,
+                            "Text",
                         ));
                 }
                 target
@@ -2523,7 +2573,9 @@ impl Inferer {
                 .as_ref()
                 .map(|e| e.syntax().text_range())
                 .unwrap_or_else(|| u.syntax().text_range());
-            if let Err(e) = self.db.unify(o, result) {
+            // `result` first — it is the type the operator demands of its
+            // operand, so `!1` reads `expected Bool, found Int` (REP-61).
+            if let Err(e) = self.db.unify(result, o) {
                 self.diag_unify(self.file_span(at), e);
             }
         }
@@ -3305,6 +3357,14 @@ fn is_float_scalar(db: &TypeDb, t: Type) -> bool {
     matches!(
         db.data(db.follow(t)),
         praxis_types::TypeData::Scalar(ScalarType::Float)
+    )
+}
+
+/// Whether `t` resolves to `Text` — what makes `+` concatenation (ADR-085).
+fn is_text_scalar(db: &TypeDb, t: Type) -> bool {
+    matches!(
+        db.data(db.follow(t)),
+        praxis_types::TypeData::Scalar(ScalarType::Text)
     )
 }
 

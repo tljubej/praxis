@@ -1,0 +1,24 @@
+// ADR-085: `Text + Text` is concatenation, and `+` is the only operator
+// defined for `Text`. This runs the shapes a puzzle solution actually writes:
+// building a label out of parsed fields, accumulating into a `var`, and using a
+// built `Text` as a map key.
+//
+// No `Int` is concatenated anywhere, because there is nothing to concatenate it
+// with: `Int.to_text()` does not exist (ADR-085 records that as its own gap) and
+// `+` does not coerce. Every operand below is a `Text` already.
+let rows = read lines(`{first:word} {second:word}`)
+
+var report = ""
+let index = Map()
+
+for row in rows {
+    let label = row.first + "/" + row.second
+    report += label + " "
+    index[label] = row.first
+}
+
+out(report)
+out(index["beta/two"])
+out(("" + "").is_empty())
+out(("a" + "b" + "c" + "d").len())
+out("héllo" + " wörld")

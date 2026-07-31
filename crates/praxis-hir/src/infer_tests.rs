@@ -251,6 +251,104 @@ fn compound_assignment_type_checked() {
     assert!(has_type_error("var x = 0\nx += \"s\""));
 }
 
+/// **REP-61.** A mismatch names the *requirement* as `expected` and what the
+/// program wrote as `found` — at every site that reports one.
+///
+/// `TypeDb::unify` builds `Mismatch { expected, found }` in argument order, and
+/// five call sites passed the operand first. So `let c = a + b` over two `Text`
+/// bindings read `expected Text, found Int` **twice**: the operand named as the
+/// requirement, and `Int` — a type nobody wrote and no binding had — named as
+/// the mistake. Each row below reports its halves the other way round before the
+/// fix.
+///
+/// The last row is the control. `var` reassignment was already oriented
+/// correctly (`unify(existing, rhs)`), so a "fix" that flipped the orientation
+/// inside `unify` itself rather than at the five call sites turns this one red.
+#[test]
+fn a_mismatch_names_the_requirement_as_expected_and_the_program_as_found() {
+    for (src, want) in [
+        // Binary arithmetic: the operator requires Int, the operand is a Bool.
+        // Deliberately not a `Text` operand — a `Text` beside `+` is
+        // concatenation now (ADR-085), so it is no longer a mismatch at all.
+        ("let a = 1 + true", "expected Int, found Bool"),
+        // Range bounds are Int only (ADR-059).
+        ("let r = \"a\"..2", "expected Int, found Text"),
+        // Unary `!` requires Bool, unary `-` requires a number.
+        ("let c = !1", "expected Bool, found Int"),
+        ("let c = -\"x\"", "expected Int, found Text"),
+        // `parse(text, parser)` requires Text in its first argument.
+        ("let v = parse(1, int)", "expected Text, found Int"),
+        // The control — already correct before the fix.
+        ("var x = 0\nx = \"hi\"", "expected Int, found Text"),
+    ] {
+        let errors = errors_of(src);
+        assert!(
+            errors.iter().any(|e| e.contains(want)),
+            "`{src}` should report `{want}`, got {errors:?}"
+        );
+    }
+}
+
+/// **ADR-085.** A `Text` operand makes `+` concatenation, and makes every other
+/// arithmetic operator a `Y016`.
+///
+/// The rule is §4.12's own — "a Float operand makes the operation Float, an Int
+/// operand makes it Int" — with a third type in it, which is why the mixed cases
+/// are errors rather than coercions: `"a" + 1` gets the same answer `1 + 2.5`
+/// gets, and for the same reason.
+#[test]
+fn a_text_operand_makes_plus_concatenation_and_nothing_else_legal() {
+    // `+` on two Texts is a Text, in every spelling the operator has.
+    assert_eq!(expr_type("\"a\" + \"b\""), "Text");
+    assert_eq!(expr_type("\"a\" + \"b\" + \"c\""), "Text");
+    assert!(!has_type_error(
+        "let a = \"x\"\nlet b = \"y\"\nlet c = a + b"
+    ));
+    // …including through a binding whose type inference derived rather than read.
+    assert_eq!(
+        scheme_of("let a = \"x\"\nlet b = \"y\"\nlet c = a + b", "c").as_deref(),
+        Some("Text")
+    );
+    // `+=` is the same operator, so a Text target needs no number (the
+    // compound-assignment path requires `Numeric` for the other four).
+    assert!(!has_type_error("var s = \"a\"\ns += \"b\""));
+    assert!(has_type_error("var s = \"a\"\ns -= \"b\""));
+    assert!(has_type_error("var n = 0\nn += \"b\""));
+
+    // Nothing else is defined for Text. `Y016` is the code TY-27 added for
+    // `%` on `Float`: both operands agree and the operation has no meaning.
+    for src in [
+        "let x = \"a\" - \"b\"",
+        "let x = \"a\" * \"b\"",
+        "let x = \"a\" / \"b\"",
+        "let x = \"a\" % \"b\"",
+        // The repetition spelling other languages have. It is not one here, and
+        // refusing it now is what keeps it free.
+        "let x = \"ab\" * 3",
+    ] {
+        let errors = errors_of(src);
+        assert!(
+            errors.iter().any(|e| e.contains("Y016")),
+            "`{src}` should be a Y016, got {errors:?}"
+        );
+    }
+
+    // No implicit conversion, in either direction or either position.
+    assert!(has_type_error("let x = \"a\" + 1"));
+    assert!(has_type_error("let x = 1 + \"a\""));
+    assert!(has_type_error("let x = \"a\" + 1.5"));
+    assert!(has_type_error("let x = \"a\" + true"));
+
+    // The recorded limitation (ADR-085): two unconstrained operands still
+    // default to `Int`, because the target follows the operands' *known* types
+    // and a type variable is not `Text`. Pinned so the day it changes is
+    // deliberate rather than accidental.
+    assert_eq!(
+        scheme_of("fn f(a, b) { a + b }", "f").as_deref(),
+        Some("(Int, Int) -> Int")
+    );
+}
+
 // --- arithmetic & comparison typing ---------------------------------------
 
 #[test]
@@ -623,16 +721,37 @@ fn let_annotation_mismatch_points_at_initializer() {
 
 #[test]
 fn arithmetic_operand_mismatch_points_at_bad_operand() {
-    // `s + 1` where `s` is `Text`: the error underlines the operand `s` in
-    // `s + 1`, not the whole binary expression. `s` appears twice (in `let s`
-    // and in `s + 1`); the mismatch is at the second use.
-    let src = "fn main() -> Int {\n    let s = \"hi\"\n    s + 1\n}\n";
-    let use_start = src.find("s + 1").unwrap() as u32;
-    let expected = (use_start, use_start + 1);
+    // The error underlines the offending *operand*, not the whole binary
+    // expression — and the span is the operand exactly, with no leading
+    // whitespace in it (REP-63).
+    //
+    // **Which operand is offending flipped with ADR-085.** This case used to be
+    // `s + 1` with `s` at fault, because `+` was numeric and a `Text` operand
+    // was the mistake. A `Text` operand now makes the operation concatenation,
+    // so `s` is the one that fits and `1` is the one that does not — the same
+    // rule that makes `1` the offender in `1 + 2.5`. The subject of the test is
+    // unchanged; only the answer under the new rule is.
+    // Bound rather than left as the tail expression: a tail carries the
+    // function's return type too, and `-> Int` over a `Text` concatenation adds
+    // a *second* mismatch at the whole `s + 1`. That one is correct and is not
+    // this test's subject.
+    let src = "fn main() -> Int {\n    let s = \"hi\"\n    let t = s + 1\n    0\n}\n";
+    let expected = span_of(src, "1\n    0");
+    let expected = (expected.0, expected.0 + 1);
     let actual = first_mismatch_span(src).expect("expected a Y001 mismatch");
     assert_eq!(
         actual, expected,
-        "arithmetic mismatch should point at the bad operand `s`, got {actual:?}",
+        "the mismatch should point at `1`, the operand a concatenation cannot take, got {actual:?}",
+    );
+
+    // A shape no rule reinterprets: `+` on an Int and a Bool is Int arithmetic
+    // either way, and `true` is the operand at fault.
+    let src = "fn main() -> Int {\n    let n = 1\n    let t = n + true\n    0\n}\n";
+    let expected = span_of(src, "true");
+    let actual = first_mismatch_span(src).expect("expected a Y001 mismatch");
+    assert_eq!(
+        actual, expected,
+        "the mismatch should point at `true`, got {actual:?}",
     );
 }
 
@@ -1092,12 +1211,20 @@ fn only_a_var_may_be_assigned() {
 
 /// TY-15 past the exit test's `Bool`: the rule is "numeric", not "not Bool",
 /// and an unconstrained target is not yet a mistake.
+///
+/// **`Text` left this list with ADR-085.** `var name = "a"; name += "b"` was
+/// pinned here as a `Y010` and is now legal — `+=` on a `Text` is
+/// concatenation, so what it requires is what `+` requires, and no number is
+/// involved. The inversion is asserted below rather than merely dropped: a
+/// `Text` target is excused for `+=` **only**, and `-=` on one is still `Y010`.
 #[test]
 fn a_compound_assignment_needs_a_numeric_target() {
     for src in [
         "var flag = true\nflag += false",
-        "var name = \"a\"\nname += \"b\"",
         "fn f() -> Int { var pair = (1, 2); pair += (3, 4); 0 }",
+        // The half of the old `Text` row that survives ADR-085.
+        "var name = \"a\"\nname -= \"b\"",
+        "var name = \"a\"\nname *= \"b\"",
     ] {
         let codes: Vec<String> = analyze(src)
             .diagnostics
@@ -1113,10 +1240,19 @@ fn a_compound_assignment_needs_a_numeric_target() {
         !has_type_error("var n = 0\nn += 1\nn -= 1\nn *= 2\nn /= 2\nn %= 2"),
         "every compound operator is fine on Int"
     );
+    // …and on Float. **This is an inference assertion only** — `f += 0.5`
+    // type-checks and then *lowers wrong*, adding two bit patterns as integers
+    // (REP-64). Nothing here can see that; the gate for it is a run, and it does
+    // not exist yet.
     assert!(!has_type_error("var x = 1.5\nx += 0.5"), "…and on Float");
     assert!(
         !has_type_error("var n = 0\nn = 1"),
         "a plain `=` is not arithmetic and needs no numeric target"
+    );
+    // ADR-085: `+=` on a `Text` needs no number, because it is not arithmetic.
+    assert!(
+        !has_type_error("var name = \"a\"\nname += \"b\""),
+        "`+=` on a Text is concatenation"
     );
 }
 

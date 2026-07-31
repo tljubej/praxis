@@ -30,6 +30,13 @@
 //!   holding non-ASCII text was wrong. The conversion belongs here, not in
 //!   `LineMap`: `LineCol` round-trips through `linecol_to_offset` and is a byte
 //!   column on purpose.
+//! - **A header column is 1-based, like its line** (REP-62). `LineCol::col`
+//!   counts from zero so it can be inverted; the *header* printed that number
+//!   raw, so an error on a file's first character read `f.px:1:0` — a 1-based
+//!   line beside a 0-based column, and one off from every other compiler's
+//!   `line:col`. The `+ 1` is applied here, at the one place a column is
+//!   printed, and nothing about `LineMap` changed. The caret padding keeps the
+//!   0-based number: it is a count of characters to skip, not a position.
 
 use std::fmt::Write;
 
@@ -127,7 +134,15 @@ pub fn render_span_snippet_styled(
     // The header column is the printed one, so it agrees with the caret below
     // it. `byte_col` is the distance from the line start in bytes, which is how
     // the line start is recovered.
-    let col = char_width(text, BytePos(start.to_u32() - byte_col), start);
+    //
+    // **`+ 1` because a header column is 1-based** (REP-62). `LineCol::col`
+    // counts from zero — deliberately, so `linecol_to_offset` can invert it —
+    // and printing it raw put a 0-based column beside a 1-based line, so an
+    // error on a file's first character read `f.px:1:0` and every header
+    // disagreed with the caret drawn under it by one. The caret is unchanged:
+    // it is drawn from a *count* of characters to skip, which is the 0-based
+    // number.
+    let col = char_width(text, BytePos(start.to_u32() - byte_col), start) + 1;
 
     out.push('\n');
     let loc = palette.paint(
@@ -327,7 +342,7 @@ mod tests {
         );
         // The caret `|` lines up under the source line's `|` (both at column 4).
         insta::assert_snapshot!(out, @r#"
-  f.px:1:9
+  f.px:1:10
   1 | total += line
     |          ^^^^ this value is Text
 "#);
@@ -337,7 +352,7 @@ mod tests {
     fn single_line_span_plain() {
         let out = render("ab\ncd\n", 0, 1, CaretLabel::Plain);
         insta::assert_snapshot!(out, @r#"
-  f.px:1:0
+  f.px:1:1
   1 | ab
     | ^
 "#);
@@ -349,7 +364,7 @@ mod tests {
         let end = src.len() as u32;
         let out = render(src, 0, end, CaretLabel::Plain);
         insta::assert_snapshot!(out, @r#"
-  f.px:1:0
+  f.px:1:1
   1 | fn main() -> Int {
     | ^^^^^^^^^^^^^^^^^^...
   2 |     out("x")
@@ -365,7 +380,7 @@ mod tests {
         let end = src.len() as u32;
         let out = render(src, 0, end, CaretLabel::Plain);
         insta::assert_snapshot!(out, @r#"
-  f.px:1:0
+  f.px:1:1
   1 | a
     | ^...
   2 | b
@@ -386,7 +401,7 @@ mod tests {
         let src = "short\nnext line\n";
         let out = render(src, 2, 99, CaretLabel::Plain);
         insta::assert_snapshot!(out, @r#"
-  f.px:1:2
+  f.px:1:3
   1 | short
     |   ^^^...
   2 | next line
@@ -411,7 +426,7 @@ mod tests {
         assert_eq!(start, 15, "the byte offset is what a span carries");
         let out = render(src, start, start + 4, CaretLabel::Plain);
         insta::assert_snapshot!(out, @r#"
-  f.px:1:13
+  f.px:1:14
   1 | let y = λλ + name
     |              ^^^^
 "#);
@@ -419,7 +434,7 @@ mod tests {
         // And the run itself: two `λ` under the caret are two carets, not four.
         let out = render(src, 8, 12, CaretLabel::Plain);
         insta::assert_snapshot!(out, @r#"
-  f.px:1:8
+  f.px:1:9
   1 | let y = λλ + name
     |         ^^
 "#);
@@ -429,9 +444,63 @@ mod tests {
     fn empty_span_draws_single_caret() {
         let out = render("abc\n", 1, 1, CaretLabel::Plain);
         insta::assert_snapshot!(out, @r#"
-  f.px:1:1
+  f.px:1:2
   1 | abc
     |  ^
 "#);
+    }
+
+    /// **REP-62.** A header column is 1-based, like its line, and it names the
+    /// character the caret is drawn under.
+    ///
+    /// `LineCol::col` counts from zero so `linecol_to_offset` can invert it, and
+    /// the header printed that number raw — so a span on a file's very first
+    /// character read `f.px:1:0`: a 1-based line beside a 0-based column, one
+    /// off from the caret below it and from every other compiler's `line:col`.
+    ///
+    /// Asserted as a *relation* rather than as another literal snapshot: the
+    /// column is read back out of the header and used to index the source line,
+    /// so the property survives a reworded header, and the caret's own offset is
+    /// checked against it. The snapshots above pin the rendering; this pins what
+    /// the number means.
+    #[test]
+    fn a_header_column_is_one_based_and_lands_on_the_caret() {
+        for (src, start, len, expect_char) in [
+            ("abc\n", 0u32, 1u32, 'a'),
+            ("abc\n", 2, 1, 'c'),
+            ("total += line\n", 9, 4, 'l'),
+            // A multi-byte character earlier on the line: the column counts
+            // characters (REP-35), so the `+ 1` must not be applied to bytes.
+            ("let y = λλ + name\n", 15, 4, 'n'),
+        ] {
+            let out = render(src, start, start + len, CaretLabel::Plain);
+            let header = out.lines().find(|l| l.contains("f.px:")).expect("header");
+            let column: usize = header
+                .rsplit(':')
+                .next()
+                .expect("a column")
+                .trim()
+                .parse()
+                .expect("the column is a number");
+            assert!(
+                column >= 1,
+                "a column is 1-based, got {column} in {header:?}"
+            );
+            let line: Vec<char> = src.lines().next().expect("a line").chars().collect();
+            assert_eq!(
+                line[column - 1],
+                expect_char,
+                "column {column} of {src:?} should be {expect_char:?}"
+            );
+            // And the caret line skips exactly `column - 1` characters after the
+            // `    | ` gutter, so header and caret name the same character.
+            let caret_line = out.lines().find(|l| l.contains('^')).expect("a caret");
+            let carets_at = caret_line.find('^').expect("a caret") - "    | ".len();
+            assert_eq!(
+                carets_at,
+                column - 1,
+                "the caret in {caret_line:?} disagrees with the header {header:?}"
+            );
+        }
     }
 }

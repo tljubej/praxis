@@ -370,6 +370,7 @@ runtime_symbols! {
     SetRemove = "praxis_set_remove": (Ctx, Gc, Gc) -> GcUnit, Pure;
     SnapshotDebugChain = "praxis_snapshot_debug_chain": (Ctx) -> Void, Pure;
     StructEq = "praxis_struct_eq": (Ctx, Gc, Gc) -> RawI64, Pure;
+    TextConcat = "praxis_text_concat": (Ctx, Gc, Gc) -> Gc, Allocates;
     TextGet = "praxis_text_get": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     TextIsEmpty = "praxis_text_is_empty": (Ctx, Gc) -> Gc, Pure;
     TextLen = "praxis_text_len": (Ctx, Gc) -> Gc, Allocates;

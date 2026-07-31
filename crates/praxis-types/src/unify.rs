@@ -27,10 +27,23 @@ pub enum UnifyError {
 }
 
 impl TypeDb {
-    /// Make `a` and `b` equal, or return the reason they cannot be.
-    pub fn unify(&mut self, a: Type, b: Type) -> Result<(), UnifyError> {
-        let a = self.prune(a);
-        let b = self.prune(b);
+    /// Make `expected` and `found` equal, or return the reason they cannot be.
+    ///
+    /// **The unification is symmetric; the error is not.** A failure reports
+    /// `Mismatch { expected, found }` in argument order, and
+    /// `praxis_hir::diagnostics::type_mismatch` renders that as
+    /// `expected {expected}, found {found}`. So the caller passes **what the
+    /// context requires first** and **what the program wrote second**: an
+    /// annotation before its initializer, an operator's operand type before the
+    /// operand, a parameter before its argument.
+    ///
+    /// The parameters are named rather than positional (`a`/`b`) because the
+    /// orientation is invisible at a call site otherwise, and five call sites had
+    /// it backwards — `"a" + "b"` reported `expected Text, found Int`, naming the
+    /// operand as the requirement and the requirement as the mistake (REP-61).
+    pub fn unify(&mut self, expected: Type, found: Type) -> Result<(), UnifyError> {
+        let a = self.prune(expected);
+        let b = self.prune(found);
         if a == b {
             return Ok(());
         }
@@ -56,7 +69,10 @@ impl TypeDb {
     /// the bottom type, so it is absorbed — `join(Never, T)` and `join(T, Never)`
     /// are both `T` — and every other pair still has to unify (TY-19).
     ///
-    /// Returns the joined type, or the reason the two are incompatible.
+    /// Returns the joined type, or the reason the two are incompatible. It
+    /// delegates to [`unify`](Self::unify), so it inherits that orientation:
+    /// `a` is the type already established (the accumulator, or the first
+    /// branch) and `b` is the one being folded in.
     ///
     /// Note that this is deliberately *not* a subtyping relation in general:
     /// `Never` is the only type absorbed, because it is the only type with no

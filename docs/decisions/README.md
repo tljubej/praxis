@@ -89,3 +89,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-082: `find` answers the element, `position` answers the index, and a miss is `None`](./082-find-answers-the-element-and-a-miss-is-none.md)
 - [ADR-083: A `Float` prints as a `Float`](./083-a-float-prints-as-a-float.md)
 - [ADR-084: A backtick template is a parser expression, so in value position it is a diagnostic](./084-a-template-is-a-parser-expression-everywhere-or-nowhere.md)
+- [ADR-085: `Text + Text` is concatenation, and no other operator is defined for `Text`](./085-text-concatenation-is-plus-and-nothing-else-is.md)
