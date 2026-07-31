@@ -1447,6 +1447,38 @@ fn grid_rotate_right_changes_dimensions() {
     assert_eq!(result.as_int(), 23);
 }
 
+/// REP-36's gate. The two `*_changes_dimensions` tests above cannot tell the
+/// two rotations apart — a left and a right rotation of a 3×2 grid are both
+/// 2×3 — and neither can `grid_rotate_four_times_is_identity`, which is the
+/// identity whichever direction it turns. So this reads a **cell**.
+///
+/// `abc / def` is asymmetric in both axes, so no transpose, flip or 180° turn
+/// answers the same pair. With §6.4's convention (x rightward, y downward),
+/// turning counter-clockwise carries the rightmost column to the top row:
+/// `rotate_left()` is `cf / be / ad`, so its (0, 0) is the original (2, 0).
+/// Turning clockwise carries the leftmost column to the top row reversed:
+/// `rotate_right()` is `da / eb / fc`, so its (0, 0) is the original (0, 1).
+/// Both halves are asserted in one answer, because a fix that swapped the two
+/// bodies *again* would pass either half alone.
+#[test]
+fn grid_rotate_left_and_right_turn_in_opposite_directions() {
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let l = g.rotate_left()\n  let r = g.rotate_right()\n  var n = 0\n  if l.get(0, 0) == g.get(2, 0) { n = n + 1 }\n  if r.get(0, 0) == g.get(0, 1) { n = n + 10 }\n  n\n}\n";
+    let (rt, result) = run_main_with_input(src, "abc\ndef\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 11);
+}
+
+/// The composition half: turning left then right restores the *contents*, not
+/// merely the dimensions. This holds even when both directions are wrong in
+/// the same way, so it is a companion to the test above rather than a gate.
+#[test]
+fn grid_rotate_left_then_right_restores_the_contents() {
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let back = g.rotate_left().rotate_right()\n  if g == back { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main_with_input(src, "abc\ndef\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
 #[test]
 fn grid_rotate_four_times_is_identity() {
     // Rotating right 4× returns to the original dimensions (3×2).

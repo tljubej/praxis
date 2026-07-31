@@ -3765,14 +3765,16 @@ pub unsafe extern "C" fn praxis_grid_rotate_left(ctx: *mut RuntimeContext, grid:
     let p = unsafe { grid_payload(grid) };
     let height = grid_height(p.items.len(), p.width);
     // Rotate left (90° CCW): result is H×W (width=height, height=width).
-    // result[x, y] = original[y, height-1-x], for x in 0..height, y in 0..width.
+    // With x rightward and y downward, turning counter-clockwise carries the
+    // *rightmost* column to the top row, top-to-bottom:
+    // result[x, y] = original[width-1-y, x], for x in 0..height, y in 0..width.
     let new_width = height;
     let new_height = p.width;
     let mut cells = Vec::with_capacity(p.items.len());
     for y in 0..new_height {
         for x in 0..new_width {
-            let ox = y;
-            let oy = height - 1 - x;
+            let ox = p.width - 1 - y;
+            let oy = x;
             cells.push(p.items[oy * p.width + ox]);
         }
     }
@@ -3802,14 +3804,16 @@ pub unsafe extern "C" fn praxis_grid_rotate_right(ctx: *mut RuntimeContext, grid
     let p = unsafe { grid_payload(grid) };
     let height = grid_height(p.items.len(), p.width);
     // Rotate right (90° CW): result is H×W (width=height, height=width).
-    // result[x, y] = original[width-1-y, x], for x in 0..height, y in 0..width.
+    // With x rightward and y downward, turning clockwise carries the *leftmost*
+    // column to the top row, bottom-to-top:
+    // result[x, y] = original[y, height-1-x], for x in 0..height, y in 0..width.
     let new_width = height;
     let new_height = p.width;
     let mut cells = Vec::with_capacity(p.items.len());
     for y in 0..new_height {
         for x in 0..new_width {
-            let ox = p.width - 1 - y;
-            let oy = x;
+            let ox = y;
+            let oy = height - 1 - x;
             cells.push(p.items[oy * p.width + ox]);
         }
     }
