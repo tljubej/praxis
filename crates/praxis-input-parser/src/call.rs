@@ -41,9 +41,14 @@ impl CallArg {
             CallArg::Parser(_) => ArgKind::Parser,
             CallArg::String(_) => ArgKind::String,
             CallArg::Flag(f) => ArgKind::Flag(f.clone()),
-            CallArg::Named { name, .. } | CallArg::Keyword { name, .. } => {
-                ArgKind::Named(name.clone())
-            }
+            CallArg::Named { name, .. } => ArgKind::Named(name.clone()),
+            // **Not `Named`.** These two collapsed onto one `ArgKind` and
+            // `check_call` could not tell them apart, so `block`, `choice` and
+            // named `sections` accepted a `skip:`/`fill:` keyword as a
+            // well-shaped named argument and their builders then `filter_map`ed
+            // it away: a field named `fill` vanished from the record with no
+            // diagnostic.
+            CallArg::Keyword { name, .. } => ArgKind::Keyword(name.clone()),
             CallArg::RepeatedTail { name, .. } => ArgKind::RepeatedTail(name.clone()),
         }
     }
@@ -91,6 +96,22 @@ pub fn build_call(
             message: format!("`{}` {what} (§7.5)", ctor.keyword()),
         }]
     };
+    // **A `_ => {}` arm in a builder is how an argument disappears** (IP-07).
+    // Every arm below is exhaustive over what its shape admits, and an argument
+    // it does not know is *reported* rather than dropped. It should be
+    // unreachable — `check_call` has already run — and the point is precisely
+    // that if it ever is reachable, it is visible.
+    let unexpected = |arg: &CallArg| {
+        vec![ValidationError {
+            span,
+            code: DiagCode::InvalidConstructorArgument,
+            message: format!(
+                "`{}` does not take {} (§7.5)",
+                ctor.keyword(),
+                arg.kind().describe()
+            ),
+        }]
+    };
 
     match ctor {
         Constructor::Lines
@@ -131,7 +152,7 @@ pub fn build_call(
                 match arg {
                     CallArg::String(s) => separator = Some(s),
                     CallArg::Parser(p) => child = Some(p),
-                    _ => {}
+                    other => return Err(unexpected(&other)),
                 }
             }
             // A missing separator used to be laundered into `String::new()` by
@@ -152,14 +173,17 @@ pub fn build_call(
             })
         }
         Constructor::OneOf => {
-            let chars = args
-                .into_iter()
-                .find_map(|a| match a {
-                    CallArg::String(s) => Some(s),
-                    _ => None,
-                })
-                .ok_or_else(|| internal("needs a character set"))?;
-            Ok(ParserAst::OneOf { chars, span })
+            let mut chars = None;
+            for arg in args {
+                match arg {
+                    CallArg::String(s) => chars = Some(s),
+                    other => return Err(unexpected(&other)),
+                }
+            }
+            Ok(ParserAst::OneOf {
+                chars: chars.ok_or_else(|| internal("needs a character set"))?,
+                span,
+            })
         }
         Constructor::Chars => {
             let mut child = None;
@@ -182,7 +206,7 @@ pub fn build_call(
                             }]
                         })?;
                     }
-                    _ => {}
+                    other => return Err(unexpected(&other)),
                 }
             }
             Ok(ParserAst::Characters {
@@ -198,7 +222,12 @@ pub fn build_call(
                 match arg {
                     CallArg::Parser(p) => child = Some(p),
                     CallArg::Keyword { name, value } if name == "fill" => fill = Some(value),
-                    _ => {}
+                    // `ragged` carries nothing: it exists so the shape table
+                    // can *require* it beside `fill:`. Named here rather than
+                    // swept up by a wildcard, so it is a decision and not a
+                    // leak.
+                    CallArg::Flag(f) if f == "ragged" => {}
+                    other => return Err(unexpected(&other)),
                 }
             }
             let child = Box::new(child.ok_or_else(|| internal("needs a cell parser"))?);
@@ -208,24 +237,26 @@ pub fn build_call(
             })
         }
         Constructor::Block => {
-            let items = args
-                .into_iter()
-                .filter_map(|arg| match arg {
-                    CallArg::Parser(p) => Some(BlockItem::Positional(p)),
-                    CallArg::Named { name, parser } => Some(BlockItem::Named { name, parser }),
-                    _ => None,
-                })
-                .collect();
+            let mut items = Vec::with_capacity(args.len());
+            for arg in args {
+                match arg {
+                    CallArg::Parser(p) => items.push(BlockItem::Positional(p)),
+                    CallArg::Named { name, parser } => {
+                        items.push(BlockItem::Named { name, parser })
+                    }
+                    other => return Err(unexpected(&other)),
+                }
+            }
             Ok(ParserAst::Block { items, span })
         }
         Constructor::Choice => {
-            let cases = args
-                .into_iter()
-                .filter_map(|arg| match arg {
-                    CallArg::Named { name, parser } => Some((name, parser)),
-                    _ => None,
-                })
-                .collect();
+            let mut cases = Vec::with_capacity(args.len());
+            for arg in args {
+                match arg {
+                    CallArg::Named { name, parser } => cases.push((name, parser)),
+                    other => return Err(unexpected(&other)),
+                }
+            }
             Ok(ParserAst::Choice { cases, span })
         }
         // Refused at the top, before the shape check.
@@ -327,8 +358,19 @@ fn build_sections_named(args: Vec<CallArg>, span: Span) -> Result<ParserAst, Vec
             CallArg::RepeatedTail { name, parser } => {
                 repeated_tail = Some((name, Box::new(parser)));
             }
-            // `check_call` has already refused a positional or a string here.
-            _ => {}
+            // `check_call` has already refused a positional, a string or a
+            // keyword here — and this reports rather than drops, because a
+            // `_ => {}` is how a field vanishes from a record in silence.
+            other => {
+                return Err(vec![ValidationError {
+                    span,
+                    code: DiagCode::InvalidConstructorArgument,
+                    message: format!(
+                        "`sections` does not take {} (§7.5)",
+                        other.kind().describe()
+                    ),
+                }])
+            }
         }
     }
     Ok(ParserAst::SectionsNamed {

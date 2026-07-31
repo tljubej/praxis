@@ -247,8 +247,17 @@ pub enum ArgKind {
     String,
     /// A bare keyword flag, e.g. the `ragged` of `grid(P, ragged, fill: 0)`.
     Flag(String),
-    /// A named argument `name: value`.
+    /// A named argument `name: parser` — the value is a parser expression.
     Named(String),
+    /// A named argument `name: keyword` whose value is a **keyword, not a
+    /// parser**: `chars`'s `skip:`, `grid`'s `fill:`.
+    ///
+    /// This used to project onto [`ArgKind::Named`], so [`check_call`] could
+    /// not tell the two apart: `block`, `choice` and named `sections` accepted
+    /// a keyword as a well-shaped named argument and their builders then
+    /// `filter_map`ed it away. A projection that loses the distinction its
+    /// consumer needs is the bug, not the arm that fails to use it.
+    Keyword(String),
     /// A named `name: repeated(P)` tail.
     RepeatedTail(String),
 }
@@ -260,6 +269,7 @@ impl ArgKind {
             ArgKind::String => "a string literal".to_string(),
             ArgKind::Flag(f) => format!("the flag `{f}`"),
             ArgKind::Named(n) => format!("the named argument `{n}:`"),
+            ArgKind::Keyword(n) => format!("the keyword argument `{n}:`"),
             ArgKind::RepeatedTail(n) => format!("the repeated tail `{n}:`"),
         }
     }
@@ -350,7 +360,7 @@ pub fn check_call(ctor: Constructor, args: &[ArgKind], span: Span) -> Vec<Valida
             }
             for (i, a) in args.iter().enumerate().skip(1) {
                 match a {
-                    ArgKind::Named(n) if n == "skip" && i == 1 => {}
+                    ArgKind::Keyword(n) if n == "skip" && i == 1 => {}
                     other => bad_arg(&mut errs, i, other, "only `skip:` may follow the parser"),
                 }
             }
@@ -371,7 +381,7 @@ pub fn check_call(ctor: Constructor, args: &[ArgKind], span: Span) -> Vec<Valida
             for (i, a) in args.iter().enumerate().skip(1) {
                 match a {
                     ArgKind::Flag(f) if f == "ragged" && !ragged => ragged = true,
-                    ArgKind::Named(n) if n == "fill" && !fill => fill = true,
+                    ArgKind::Keyword(n) if n == "fill" && !fill => fill = true,
                     other => bad_arg(
                         &mut errs,
                         i,
@@ -410,9 +420,12 @@ pub fn check_call(ctor: Constructor, args: &[ArgKind], span: Span) -> Vec<Valida
                     }
                 }
             } else {
-                // Heterogeneous `sections(name: P, …)`: no positional at all.
+                // Heterogeneous `sections(name: P, …)`: named arguments only,
+                // and every one of them names a *parser*. `sections` has no
+                // keyword argument (`Constructor::keyword_arg`), so a keyword
+                // reaching here is one no constructor asked for.
                 for (i, a) in args.iter().enumerate() {
-                    if matches!(a, ArgKind::Parser | ArgKind::String | ArgKind::Flag(_)) {
+                    if !matches!(a, ArgKind::Named(_) | ArgKind::RepeatedTail(_)) {
                         bad_arg(
                             &mut errs,
                             i,
@@ -527,6 +540,74 @@ mod tests {
         let errs = check_call(Constructor::Sep, &[ArgKind::String], Span::at(0));
         assert!(!errs.is_empty());
         assert_eq!(errs[0].code, DiagCode::ConstructorArity);
+    }
+
+    /// **A keyword argument is not a named parser.**
+    ///
+    /// `CallArg::Keyword{name}` and `CallArg::Named{name}` used to project onto
+    /// the same `ArgKind::Named(name)`, so this function could not tell them
+    /// apart: `block`, `choice` and named `sections` accepted a `skip:`/`fill:`
+    /// keyword as a well-shaped named argument, and their builders then
+    /// `filter_map`ed it away. A projection that loses the distinction its
+    /// consumer needs is the bug.
+    ///
+    /// The last two assertions are the ones that make this a test of the
+    /// *distinction* rather than of a blanket refusal: the same position,
+    /// holding a named parser, is still accepted.
+    #[test]
+    fn a_keyword_argument_is_accepted_only_where_the_shape_has_one() {
+        let kw = |n: &str| ArgKind::Keyword(n.to_string());
+        let named = |n: &str| ArgKind::Named(n.to_string());
+
+        // The two constructors §7.5 gives a keyword argument.
+        assert!(check_call(
+            Constructor::Chars,
+            &[ArgKind::Parser, kw("skip")],
+            Span::at(0)
+        )
+        .is_empty());
+        assert!(check_call(
+            Constructor::Grid,
+            &[
+                ArgKind::Parser,
+                ArgKind::Flag("ragged".to_string()),
+                kw("fill")
+            ],
+            Span::at(0)
+        )
+        .is_empty());
+
+        // Everywhere else — including the *other* constructor's keyword.
+        for (ctor, args) in [
+            (Constructor::Block, vec![ArgKind::Parser, kw("fill")]),
+            (Constructor::Choice, vec![named("A"), kw("fill")]),
+            (Constructor::Sections, vec![named("rules"), kw("fill")]),
+            (Constructor::Lines, vec![kw("skip")]),
+            (Constructor::Chars, vec![ArgKind::Parser, kw("fill")]),
+        ] {
+            let errs = check_call(ctor, &args, Span::at(0));
+            assert!(
+                errs.iter()
+                    .any(|e| e.code == DiagCode::InvalidConstructorArgument),
+                "`{}` must refuse a keyword it does not have",
+                ctor.keyword()
+            );
+        }
+
+        // The same shape with a named *parser* there is fine — which is what
+        // the collapsed projection could not express.
+        assert!(check_call(
+            Constructor::Block,
+            &[ArgKind::Parser, named("fill")],
+            Span::at(0)
+        )
+        .is_empty());
+        assert!(check_call(
+            Constructor::Sections,
+            &[named("rules"), named("fill")],
+            Span::at(0)
+        )
+        .is_empty());
     }
 
     /// **The assertion is inverted on purpose (IP-10).**

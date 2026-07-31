@@ -122,7 +122,7 @@ fn parse_expr(cur: &mut Scan<'_>, base: usize, depth: usize) -> Result<ParserAst
             name: name.to_string(),
         });
     };
-    let args = parse_args(cur, base, depth)?;
+    let args = parse_args(cur, base, depth, ctor)?;
     let span = Span::new((base + start) as u32, (base + cur.pos()) as u32);
     build_call(ctor, args, span).map_err(|mut errs| {
         // `build_call` reports every problem; the scanner's channel carries one,
@@ -131,8 +131,16 @@ fn parse_expr(cur: &mut Scan<'_>, base: usize, depth: usize) -> Result<ParserAst
     })
 }
 
-/// The argument list of a constructor call. The cursor is on the `(`.
-fn parse_args(cur: &mut Scan<'_>, base: usize, depth: usize) -> Result<Vec<CallArg>, ScanError> {
+/// The argument list of `ctor(...)`. The cursor is on the `(`.
+///
+/// `ctor` is threaded through because whether a `name:` argument is a keyword
+/// or a named parser is **the constructor's** question, not the name's.
+fn parse_args(
+    cur: &mut Scan<'_>,
+    base: usize,
+    depth: usize,
+    ctor: Constructor,
+) -> Result<Vec<CallArg>, ScanError> {
     let open = cur.pos();
     cur.bump(); // `(`
     let mut args = Vec::new();
@@ -152,14 +160,19 @@ fn parse_args(cur: &mut Scan<'_>, base: usize, depth: usize) -> Result<Vec<CallA
             Some(',') => {
                 cur.bump();
             }
-            Some(_) => args.push(parse_arg(cur, base, depth)?),
+            Some(_) => args.push(parse_arg(cur, base, depth, ctor)?),
         }
     }
 }
 
 /// One argument: a string literal, a `name: value` pair, a bare flag, or a
 /// positional parser.
-fn parse_arg(cur: &mut Scan<'_>, base: usize, depth: usize) -> Result<CallArg, ScanError> {
+fn parse_arg(
+    cur: &mut Scan<'_>,
+    base: usize,
+    depth: usize,
+    ctor: Constructor,
+) -> Result<CallArg, ScanError> {
     skip_ws(cur);
     if cur.peek_char() == Some('"') {
         return Ok(CallArg::String(take_string(cur, base)?));
@@ -176,8 +189,12 @@ fn parse_arg(cur: &mut Scan<'_>, base: usize, depth: usize) -> Result<CallArg, S
         skip_ws(cur);
         let name = name.to_string();
 
-        // `skip:` and `fill:` take a keyword, not a parser.
-        if name == "skip" || name == "fill" {
+        // `skip:` and `fill:` take a keyword, not a parser — but only for the
+        // constructor that has one (`chars` and `grid`). Asking the *name*
+        // instead of the constructor is what made a `block` item or a
+        // `sections` field called `fill` into a keyword argument that the
+        // builder then dropped.
+        if Some(name.as_str()) == ctor.keyword_arg() {
             let value = take_keyword_value(cur);
             return Ok(CallArg::Keyword { name, value });
         }
@@ -197,7 +214,7 @@ fn parse_arg(cur: &mut Scan<'_>, base: usize, depth: usize) -> Result<CallArg, S
                     message: "`repeated` needs one parser argument (§7.5)".to_string(),
                 });
             }
-            let args = parse_args(cur, base, depth)?;
+            let args = parse_args(cur, base, depth, Constructor::Repeated)?;
             return build_repeated_tail(name, args, Span::at((base + at) as u32))
                 .map_err(|mut errs| ScanError::CallShape(errs.remove(0)));
         }

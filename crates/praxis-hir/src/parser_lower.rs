@@ -318,110 +318,112 @@ fn extract_call_args(
     file: FileId,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> (String, Vec<CallArg>, bool) {
-    let mut name = String::new();
+    // The constructor's name comes first, on purpose: whether a `name:`
+    // argument is a keyword (`chars`'s `skip:`, `grid`'s `fill:`) or a named
+    // parser is **the constructor's** question, and this used to be answered
+    // from the argument's name alone.
+    let name = parser_call
+        .children()
+        .find(|c| c.kind() == praxis_syntax::SyntaxKind::PATH_EXPR)
+        .map(|c| c.text().to_string())
+        .unwrap_or_default();
+    let keyword_arg = Constructor::from_keyword(&name).and_then(Constructor::keyword_arg);
     let mut args = Vec::new();
     let mut all_converted = true;
 
-    for child in parser_call.children() {
-        match child.kind() {
-            praxis_syntax::SyntaxKind::PATH_EXPR => {
-                name = child.text().to_string();
+    let Some(arg_list) = parser_call
+        .children()
+        .find(|c| c.kind() == praxis_syntax::SyntaxKind::PARSER_ARG_LIST)
+    else {
+        return (name, args, all_converted);
+    };
+    for arg in arg_list.children() {
+        match arg.kind() {
+            praxis_syntax::SyntaxKind::PARSER_EXPR | praxis_syntax::SyntaxKind::PARSER_TEMPLATE => {
+                if let Some(pe) = praxis_ast::ParserExpr::cast(arg.clone()) {
+                    // A bare keyword that is not a parser — today
+                    // only `grid(P, ragged, fill: v)`'s `ragged`.
+                    // It used to be *skipped*, so the shape table
+                    // could not require it and a lone `fill:`
+                    // silently produced the ragged parser.
+                    if pe.text().as_deref() == Some("ragged") {
+                        args.push(CallArg::Flag("ragged".to_string()));
+                        continue;
+                    }
+                    match convert_parser_expr(&pe, file, diagnostics) {
+                        Some(converted) => args.push(CallArg::Parser(converted)),
+                        None => all_converted = false,
+                    }
+                }
             }
-            praxis_syntax::SyntaxKind::PARSER_ARG_LIST => {
-                for arg in child.children() {
-                    match arg.kind() {
-                        praxis_syntax::SyntaxKind::PARSER_EXPR
-                        | praxis_syntax::SyntaxKind::PARSER_TEMPLATE => {
-                            if let Some(pe) = praxis_ast::ParserExpr::cast(arg.clone()) {
-                                // A bare keyword that is not a parser — today
-                                // only `grid(P, ragged, fill: v)`'s `ragged`.
-                                // It used to be *skipped*, so the shape table
-                                // could not require it and a lone `fill:`
-                                // silently produced the ragged parser.
-                                if pe.text().as_deref() == Some("ragged") {
-                                    args.push(CallArg::Flag("ragged".to_string()));
-                                    continue;
+            praxis_syntax::SyntaxKind::PARSER_NAMED_ARG => {
+                // A named argument `name: parser_expr` (M9, §7.5).
+                if let Some(na) = ParserNamedArg::cast(arg.clone()) {
+                    if let (Some(name), Some(value)) = (na.name(), na.value()) {
+                        let raw_text = value.text().unwrap_or_default();
+                        // Keyword args whose value isn't a real parser
+                        // expression (skip:/fill:) are captured as raw
+                        // text only — NOT converted, so no spurious
+                        // "unknown atomic parser" diagnostic fires.
+                        // Only for the constructor that has one: a
+                        // `block` item or a `sections` field called
+                        // `fill` is a field, and it used to be minted
+                        // as a keyword and then dropped in silence.
+                        if Some(name.as_str()) == keyword_arg {
+                            args.push(CallArg::Keyword {
+                                name,
+                                value: raw_text,
+                            });
+                            continue;
+                        }
+                        // `name: repeated(P)` is the named-sections
+                        // tail marker: consume all remaining sections.
+                        let is_repeated = value.constructor_name().as_deref() == Some("repeated");
+                        if is_repeated {
+                            // **The marker's whole argument list**,
+                            // not its first parser child. The rule
+                            // — exactly one argument, and it must
+                            // be a parser — is §7.5's and lives in
+                            // `build_repeated_tail`, which the
+                            // capture-body front end calls too.
+                            let tail_span = rowan_span(value.syntax());
+                            match repeated_call_args(&value, file, diagnostics) {
+                                Some(inner) => match build_repeated_tail(name, inner, tail_span) {
+                                    Ok(tail) => args.push(tail),
+                                    Err(errs) => {
+                                        for err in &errs {
+                                            diagnostics
+                                                .push(validation_error_to_diagnostic(err, file));
+                                        }
+                                        all_converted = false;
+                                    }
+                                },
+                                None => all_converted = false,
+                            }
+                        } else {
+                            match convert_parser_expr(&value, file, diagnostics) {
+                                Some(parser) => {
+                                    args.push(CallArg::Named { name, parser });
                                 }
-                                match convert_parser_expr(&pe, file, diagnostics) {
-                                    Some(converted) => args.push(CallArg::Parser(converted)),
-                                    None => all_converted = false,
-                                }
+                                None => all_converted = false,
                             }
                         }
-                        praxis_syntax::SyntaxKind::PARSER_NAMED_ARG => {
-                            // A named argument `name: parser_expr` (M9, §7.5).
-                            if let Some(na) = ParserNamedArg::cast(arg.clone()) {
-                                if let (Some(name), Some(value)) = (na.name(), na.value()) {
-                                    let raw_text = value.text().unwrap_or_default();
-                                    // Keyword args whose value isn't a real parser
-                                    // expression (skip:/fill:) are captured as raw
-                                    // text only — NOT converted, so no spurious
-                                    // "unknown atomic parser" diagnostic fires.
-                                    if name == "skip" || name == "fill" {
-                                        args.push(CallArg::Keyword {
-                                            name,
-                                            value: raw_text,
-                                        });
-                                        continue;
-                                    }
-                                    // `name: repeated(P)` is the named-sections
-                                    // tail marker: consume all remaining sections.
-                                    let is_repeated =
-                                        value.constructor_name().as_deref() == Some("repeated");
-                                    if is_repeated {
-                                        // **The marker's whole argument list**,
-                                        // not its first parser child. The rule
-                                        // — exactly one argument, and it must
-                                        // be a parser — is §7.5's and lives in
-                                        // `build_repeated_tail`, which the
-                                        // capture-body front end calls too.
-                                        let tail_span = rowan_span(value.syntax());
-                                        match repeated_call_args(&value, file, diagnostics) {
-                                            Some(inner) => {
-                                                match build_repeated_tail(name, inner, tail_span) {
-                                                    Ok(tail) => args.push(tail),
-                                                    Err(errs) => {
-                                                        for err in &errs {
-                                                            diagnostics.push(
-                                                                validation_error_to_diagnostic(
-                                                                    err, file,
-                                                                ),
-                                                            );
-                                                        }
-                                                        all_converted = false;
-                                                    }
-                                                }
-                                            }
-                                            None => all_converted = false,
-                                        }
-                                    } else {
-                                        match convert_parser_expr(&value, file, diagnostics) {
-                                            Some(parser) => {
-                                                args.push(CallArg::Named { name, parser });
-                                            }
-                                            None => all_converted = false,
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        praxis_syntax::SyntaxKind::LITERAL => {
-                            match unquote_parser_literal(&arg.text().to_string()) {
-                                Some(text) => args.push(CallArg::String(text)),
-                                None => {
-                                    diagnostics.push(err_diag(
-                                        file,
-                                        rowan_span(&arg),
-                                        DiagCode::InvalidConstructorArgument,
-                                        "a parser constructor's literal argument must be a text \
+                    }
+                }
+            }
+            praxis_syntax::SyntaxKind::LITERAL => {
+                match unquote_parser_literal(&arg.text().to_string()) {
+                    Some(text) => args.push(CallArg::String(text)),
+                    None => {
+                        diagnostics.push(err_diag(
+                            file,
+                            rowan_span(&arg),
+                            DiagCode::InvalidConstructorArgument,
+                            "a parser constructor's literal argument must be a text \
                                          literal"
-                                            .to_string(),
-                                    ));
-                                    all_converted = false;
-                                }
-                            }
-                        }
-                        _ => {}
+                                .to_string(),
+                        ));
+                        all_converted = false;
                     }
                 }
             }

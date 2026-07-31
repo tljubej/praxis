@@ -577,6 +577,27 @@ impl Constructor {
         Constructor::Repeated,
     ];
 
+    /// The one named argument this constructor takes whose value is a
+    /// **keyword and not a parser** — `chars(P, skip: policy)`'s `skip:` and
+    /// `grid(P, ragged, fill: value)`'s `fill:` (§7.5). `None` for every other
+    /// constructor.
+    ///
+    /// Both front ends used to decide this from the argument's *name* alone
+    /// (`if name == "skip" || name == "fill"`), with no reference to the
+    /// constructor being called. So a `block` item or a `sections` field
+    /// legitimately named `fill` or `skip` was minted as a keyword argument,
+    /// accepted by the shape check as a well-shaped named argument, and then
+    /// dropped by a `filter_map` — the field vanished from the record with no
+    /// diagnostic. A keyword belongs to a constructor, so the constructor is
+    /// what answers the question.
+    pub fn keyword_arg(self) -> Option<&'static str> {
+        match self {
+            Constructor::Chars => Some("skip"),
+            Constructor::Grid => Some("fill"),
+            _ => None,
+        }
+    }
+
     /// The shape of this constructor's argument list (§7.5).
     pub fn arg_shape(self) -> ArgShape {
         match self {

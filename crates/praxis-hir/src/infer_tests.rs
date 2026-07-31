@@ -3117,6 +3117,64 @@ fn a_repeated_tail_is_last_and_singular() {
     );
 }
 
+/// **IP-07's residue: `build_call` still dropped arguments.** `skip:` and
+/// `fill:` were minted as keyword arguments from the argument's *name alone*,
+/// with no reference to the constructor being called; `CallArg::Keyword` and
+/// `CallArg::Named` then projected onto the same `ArgKind::Named`, so
+/// `check_call` accepted the keyword as a well-shaped named argument and the
+/// builders' `filter_map` threw it away. A `sections` field or a `block` item
+/// named `fill` or `skip` vanished from the record with **no diagnostic**.
+///
+/// A keyword belongs to a constructor, so the constructor answers the question
+/// (`Constructor::keyword_arg`), and the two kinds no longer collapse.
+#[test]
+fn a_field_named_fill_or_skip_is_a_field_and_not_a_dropped_keyword() {
+    use praxis_input_parser::{BlockItem, ParserAst};
+
+    // `sections` has no keyword argument, so `fill:` is a field. This used to
+    // build `SectionsNamed { fields: [rules] }` and report nothing.
+    let src = "let v = read sections(rules: lines(int), fill: lines(int))";
+    assert!(!has_input_error(src), "`fill` is a section name here");
+    assert_eq!(
+        scheme_of(src, "v").as_deref(),
+        Some("{ rules: Vec[Int], fill: Vec[Int] }"),
+        "the `fill` field must be in the record"
+    );
+
+    // Same for a `block` item…
+    let src = "let v = read block(`{id:int}`, fill: lines(int))";
+    assert!(!has_input_error(src));
+    match parser_ast_of(src) {
+        ParserAst::Block { items, .. } => {
+            assert_eq!(items.len(), 2, "the `fill` item must survive");
+            assert!(matches!(&items[1], BlockItem::Named { name, .. } if name == "fill"));
+        }
+        other => panic!("expected Block, got {other:?}"),
+    }
+
+    // …and for a `choice` case.
+    match parser_ast_of("let v = read choice(A: int, skip: word)") {
+        ParserAst::Choice { cases, .. } => {
+            assert_eq!(cases.len(), 2, "the `skip` case must survive");
+            assert_eq!(cases[1].0, "skip");
+        }
+        other => panic!("expected Choice, got {other:?}"),
+    }
+
+    // And a keyword the constructor really does have still works, still
+    // reaches the builder, and a wrong one is still refused.
+    match parser_ast_of(r#"let v = read chars(one_of("ab"), skip: newlines)"#) {
+        ParserAst::Characters { skip, .. } => {
+            assert_eq!(skip, praxis_input_parser::SkipPolicy::Newlines);
+        }
+        other => panic!("expected Characters, got {other:?}"),
+    }
+    assert!(
+        has_input_error(r#"let v = read chars(one_of("ab"), fill: 0)"#),
+        "`chars` has no `fill:`"
+    );
+}
+
 /// **ADR-073's claim, made true for the `repeated(...)` tail marker.** The two
 /// front ends — the HIR bridge walking rowan, and the capture-body parser
 /// reading text — must apply *one* shape check, and for the tail marker they
