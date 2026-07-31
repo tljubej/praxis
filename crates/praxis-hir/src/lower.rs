@@ -1095,8 +1095,36 @@ impl<'a> Lowerer<'a> {
         pl.params().filter_map(|p| self.lower_param(&p)).collect()
     }
 
+    /// One lowered parameter — **or `None`**, and the `None` is load-bearing:
+    /// `lower_params` and `lower_closure` both `filter_map` this, so answering
+    /// `None` for a parameter that exists shortens the slot list and every
+    /// parameter after it takes the wrong argument. That is REP-32: a `_` had no
+    /// declaration to find, so `|_, b| b` returned the first argument and
+    /// `fn g(_, b)` lowered to a body whose arity disagreed with its signature.
+    /// `None` is now reserved for a parameter the *tree* does not have.
     fn lower_param(&mut self, p: &Param) -> Option<TypedParam> {
-        let name_tok = p.name()?;
+        // A **destructuring** closure parameter (REP-29) has no name of its own;
+        // its slot symbol was declared at the pattern's range, and the pattern is
+        // taken apart in the body by `destructure_pattern_params`.
+        let Some(name_tok) = p.name() else {
+            // A **wildcard** parameter (REP-32): an anonymous slot, at the `_`'s
+            // own range, holding an argument nothing in the body can name.
+            if let Some(tok) = p.wildcard() {
+                let symbol = self.resolve_decl_at(tok.text_range())?;
+                let ty = self.symbol_type(symbol);
+                return Some(TypedParam {
+                    symbol,
+                    name: "_".to_string(),
+                    ty,
+                });
+            }
+            let pat = p.pattern()?;
+            let range = pat.syntax().text_range();
+            let symbol = self.resolve_decl_at(range)?;
+            let ty = self.symbol_type(symbol);
+            let name = pat.syntax().text().to_string();
+            return Some(TypedParam { symbol, name, ty });
+        };
         let name = name_tok.text().to_string();
         let range = name_tok.text_range();
         let symbol = self.resolve_decl_at(range)?;
@@ -1422,6 +1450,10 @@ impl<'a> Lowerer<'a> {
                 ty: self.unit,
             },
         };
+        // A destructuring parameter takes its argument apart around the body
+        // (REP-29). Done here rather than in MIR because the language already has
+        // the construct that does it: a one-arm `match` on the parameter's slot.
+        let body = self.destructure_pattern_params(c, body, span);
         // The closure's `Func` type is inference's, not one rebuilt from the
         // lowered params and body: a closure whose body diverges has a `Never`
         // block tail, and inference joins that with the result the `return`s
@@ -1517,6 +1549,79 @@ impl<'a> Lowerer<'a> {
             ty: fn_type,
             span,
         }
+    }
+
+    /// Wrap `body` in one `match` per **destructuring** closure parameter, so each
+    /// pattern takes its own argument apart before the body runs (REP-29).
+    ///
+    /// A closure still takes one value per parameter — MIR gives each a slot and
+    /// binds it to the parameter's symbol — so a pattern parameter needs a slot for
+    /// the argument *and* somewhere to take it apart. The somewhere is a construct
+    /// the language already has: `match arg { pattern => body }`, one arm, over the
+    /// slot's own symbol. Record and tuple patterns have exactly one constructor
+    /// (ADR-069), so MIR emits the component reads with no tag to compare and no
+    /// arm to fall through to — the same instructions a hand-written destructuring
+    /// would need, and no new MIR.
+    ///
+    /// **A parameter has no second arm**, so a pattern that can fail is `Y125`,
+    /// which is REP-25's rule for the `for` binding at the third binding position:
+    /// `|Some(n)| n` would have no answer for a `None` argument.
+    ///
+    /// Parameters are wrapped in reverse so the first one's `match` ends up
+    /// outermost, which is the order the arguments arrive in.
+    fn destructure_pattern_params(
+        &mut self,
+        c: &praxis_ast::ClosureExpr,
+        body: TypedBlock,
+        span: (u32, u32),
+    ) -> TypedBlock {
+        let params: Vec<praxis_ast::Param> = c.params().collect();
+        let mut block = body;
+        for p in params.into_iter().rev() {
+            // A named parameter binds its whole argument and needs nothing.
+            if p.name().is_some() {
+                continue;
+            }
+            let Some(pat) = p.pattern() else { continue };
+            // `|_|` binds nothing (ADR-049 D7), so there is nothing to take apart.
+            if matches!(pat.kind(), praxis_ast::PatternKind::Wildcard) {
+                continue;
+            }
+            let range = pat.syntax().text_range();
+            let Some(symbol) = self.resolve_decl_at(range) else {
+                continue;
+            };
+            let param_ty = self.symbol_type(symbol);
+            let pattern = self.lower_pattern(&pat, param_ty);
+            if let Some(reason) = refutable_reason(&pattern) {
+                self.diag(
+                    range,
+                    DiagCode::RefutableBinding,
+                    format!("a closure parameter must match every argument, and {reason} does not"),
+                );
+            }
+            let ty = block.ty;
+            let scrutinee = TypedExpr::Path {
+                symbol,
+                ty: param_ty,
+                span,
+            };
+            let arm = TypedMatchArm {
+                pattern,
+                body: TypedExpr::Block(Box::new(block)),
+            };
+            block = TypedBlock {
+                stmts: Vec::new(),
+                tail: TypedExpr::Match {
+                    scrutinee: Box::new(scrutinee),
+                    arms: vec![arm],
+                    ty,
+                    span,
+                },
+                ty,
+            };
+        }
+        block
     }
 
     /// Mint a fresh, unique synthetic MIR function name for a closure.
@@ -2342,6 +2447,32 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// `r.field` — a record field read (M7, §4.5).
+    ///
+    /// A receiver whose type is **still a variable here** is not an error, and
+    /// that is REP-28's other half. It means no call site ever said what the
+    /// receiver is, which is the state §4.9's own fence is in:
+    ///
+    /// ```praxis
+    /// fn manhattan(a, b) {
+    ///     abs(a.x - b.x) + abs(a.y - b.y)
+    /// }
+    /// ```
+    ///
+    /// Nothing calls `manhattan`, so nothing pins `a`. Rejecting that read used to
+    /// make the design document's own example pass `praxis check` and then fail
+    /// under `praxis run` with four `Y112`s — a `check`/`run` divergence of exactly
+    /// the shape REP-12 and REP-01 closed elsewhere, and the reason this arm is now
+    /// silent. The same tolerance is what an uncalled `fn f(a) { a + 1 }` has always
+    /// had; a field read was singled out only because it needed a record definition
+    /// to produce an index.
+    ///
+    /// Silence here is affordable because it is no longer silence anywhere else:
+    /// `Inferer::infer_field_get` requires `HasField` of *every* receiver, so a
+    /// concrete one is rejected at the read and a deferred one is rejected when a
+    /// call site resolves it — both at `praxis check`. What is left for lowering is
+    /// only the receiver no pass can decide, and a function holding one has no
+    /// instantiation to generate code for.
     fn lower_field_get(&mut self, f: &FieldExpr) -> TypedExpr {
         let span = self.node_span(f.syntax());
         let receiver = match f.receiver() {
@@ -2358,7 +2489,14 @@ impl<'a> Lowerer<'a> {
             let name = f.field_name()?;
             self.db.record_field_of(def, &args, name.text())
         }) else {
-            // Not a record type, or unknown field — emit a Y1xx diagnostic.
+            // A receiver nothing ever pinned: see this function's doc comment.
+            // Inference has already reported every receiver it could decide.
+            if self.db.var_id_of(resolved).is_some() {
+                return self.error_expr();
+            }
+            // A concrete type with no such field. Inference reports this too, and
+            // `praxis run` stops before lowering when it does, so this is the
+            // report for the callers that lower without checking first.
             if let Some(tok) = f.field_name() {
                 self.diag(
                     tok.text_range(),

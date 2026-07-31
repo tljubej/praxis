@@ -43,6 +43,12 @@ Update this file at the end of every stage.
 | REP-24 — a declaration's members take a line break (no stage) | **done** | `33b386f` |
 | REP-21 — `min=`/`max=` map updates (no stage; ADR-070) | **done** | `8833cb7` |
 | REP-25 — a `for` binding is a pattern (no stage) | **done** | `0066a6f` |
+| REP-26 — a record literal's head is a `struct` (no stage; `N008`) | **done** | `ac1f437` |
+| REP-27 — a line-leading `(` begins something new (no stage; ADR-049 amended) | **done** | `bd3c34e` |
+| REP-28 — a field read constrains its receiver (no stage; ADR-057 extended) | **done** | `5b9bfd9` |
+| REP-29 — a closure parameter is a pattern (no stage) | **done** | `67642c4` |
+| REP-30 — `\|\|` is a zero-parameter closure where an expression begins (no stage) | **done** | `ded26de` |
+| REP-31 — a zero-argument accessor is a call (no stage; ADR-077) | **done** | `185fe43` |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
@@ -144,6 +150,126 @@ This stage's seven new gates and one ADR (**071**) — MIR-03…MIR-08:
 300 elements through `filter` + `enumerate` + `take`, because the new counters
 are `Gc` slots live across every `praxis_vec_get` safepoint in the loop and a
 slot the liveness pass misses is nulled (MIR-01/MIR-02), not merely stale.
+
+
+<!-- REP-26 … REP-34 block begins -->
+
+**The register runs to REP-34, and the second half of it is the design doc's own
+programs.** Six defects were found by a fresh-eyes sweep that read
+`praxis_technical_design.md`'s examples against the parser and the inferer at
+`d8179e1`. Three independent adversarial reviewers then went over the diff, and
+what they returned is the more useful half of this entry: **one of the six was
+signed off on a paraphrase and was not fixed**, one shipped a capability whose
+failure path could not be reached, and one of the gates was not a gate. They also
+found a P0 nobody had asked about. Three more rows — REP-32, REP-33, REP-34 — came
+out of that pass and are registered here with the original six.
+
+- **REP-26 (P0)** — a record literal whose head is not a `struct` lowered to
+  nothing. `let x = 1` / `let p = x { a: 1 }` passed `praxis check`, printed
+  `Unit`, and `p + 1` printed a raw pointer. **REP-01's shape**, and reported in
+  inference so `check` catches it: `N008`, decided on the symbol's **kind**
+  (REP-22's rule at another door). ADR-051 amended; `N009` is next free.
+- **REP-27 (P1)** — a `(` at the start of a line was read as the previous
+  expression's argument list, so a newline-separated `match` **silently lost every
+  arm after the first** when the next arm began with a tuple pattern. ADR-049
+  measured this exact trap and left it open because the workaround was to bind the
+  tuple to a name; REP-10 and REP-25 took that workaround away. ADR-049 is amended
+  in place — a `(` asked to *continue* an expression does not cross a line break,
+  a `[` still does (REP-16), and the Pratt loop is untouched.
+- **REP-28 (P1)** — a field read never constrained its receiver. **Landed twice.**
+  The first landing put `Capability::HasField` on the constraint channel, which
+  was right, and then copied ADR-057 Decision 5's *division of reports* across,
+  which was not: the failure was left to lowering, on the reasoning that `Y110` is
+  left to lowering. That reasoning does not transfer, and the reviewers proved it
+  from both ends. `infer_field_get` deferred only a *variable* receiver, so a
+  concrete one never reached `require_cap` and the rejection arm in
+  `capability.rs` was **unreachable dead code**; and a deferred receiver that
+  resolves to a non-record is one *lowering cannot see*, because by then the read
+  sits in a generic body whose parameter is still a variable. Leaving it to
+  lowering left it to no one, and §4.9's own fence still passed `check` and failed
+  under `run` with four `Y112`s, byte-identical to the pre-fix binary. Corrected:
+  the report is **inference's, at `check` time**, from both doors, and it names
+  the type. What lowering keeps is the opposite case and it is not a failure — a
+  receiver still a variable at lowering is one no call site pinned, and §4.9's
+  uncalled `manhattan` compiles as written. ADR-057, ADR-077 and ADR-051 all
+  stated the reversed division and are all corrected.
+- **REP-29 (P1)** — a closure parameter was a bare name. REP-25's job at the third
+  and last binding position, and **it needed no MIR change**: a destructuring
+  parameter gets a slot symbol and lowering wraps the body in a one-arm `match` on
+  it, which ADR-069's one-constructor patterns already lower with no tag test.
+  `Y125` carries over. Its close-out claim is now stated precisely (see REP-33):
+  Appendix D **parses and checks**; it does not run.
+- **REP-30 (P1)** — `|| expr` did not parse, so §4.2's shadowing example was a
+  `P001`. REP-07 making `||` a token is what removed the accident by which it used
+  to parse. Decided by **position**, as REP-21 decided `min=` and REP-09 decided
+  `[`: `parse_prefix` is only called where an expression must begin, and a binary
+  operator has no left operand there. The precedence table did not move.
+- **REP-31 (P2)** — the zero-argument accessors. Established that the tree has only
+  ever had the call form, decided that it stays that way, corrected four doc lines
+  and wrote **ADR-077**. **Doc-only: no code changed**, so its test is a
+  characterization test and not a gate — see the table below, and REP-31's own row
+  in the plan.
+- **REP-32 (P0, new)** — a wildcard parameter was dropped from the lowered
+  parameter list, so every parameter after it took the wrong argument.
+  `|_, b| b + 1` applied to `(9, 5)` answered `10`; `fn g(_, b)` died in the
+  Cranelift verifier. **Pre-existing** — identical at `d8179e1` — but REP-29
+  rewrote this path and its `|_|` gates count parse-tree nodes, so a parameter
+  that parses and then vanishes was invisible to them. ADR-049 D7's "introduces
+  nothing" is about **names**, not slots; a wildcard parameter now owns an
+  anonymous slot exactly as REP-29's destructuring parameter does.
+- **REP-33 (P2, new — registered, not fixed)** — Appendix D's demo parses and
+  type-checks and still does not run: eight `Y110`s for the missing `sorted` and
+  `frequencies` rows, after a clean `praxis check`. §6.3 already defers the five
+  barrier combinators and the stdlib crate is S18's, so implementing them is a
+  feature and not a repair. What is recorded is the second half: a clean `check`
+  followed by a `Y110` at run is the same divergence REP-28 just closed for
+  `Y112`, and `Y110`'s half is still open.
+- **REP-34 (P2, new)** — four `praxis` fences still did not parse, all §7.5
+  parser-constructor calls with a labelled argument. **The grammar was right**:
+  `PARSER_NAMED_ARG` exists and `parser_lower` consumes it, but only inside the
+  parser-expression sublanguage, which §7.1 enters at `read` / `parse(text, …)`.
+  Written bare those fences are ordinary calls, where `skip:` is not a syntax.
+  Doc-only, REP-31's shape; `crates/praxis-parser` is untouched.
+
+This session's **thirteen gates**, one new ADR (**077**) and three amended
+(**049**, **051**, **057**) — REP-26 … REP-34. A gate is listed here only if it
+**fails on the commit before its fix**; the two entries marked *characterization*
+do not, and are listed apart for that reason.
+
+| Test | File | Pins |
+|---|---|---|
+| `a_record_literals_head_must_name_a_struct` | `infer_tests.rs` | REP-26 — that `N008` comes out of **analysis alone** (so `praxis check` sees it), all seven non-`struct` kinds with the message naming each, that the literal no longer keeps the head's type, that an initializer's own mistake still reports, and that an *undefined* head is `N001` and only `N001` |
+| `a_line_leading_paren_begins_a_new_thing_and_a_same_line_one_is_a_call` | `parse.rs` | REP-27 — **both directions**: three arms surviving where one used to, the same after every arm-body shape a `(` could attach to (including `p.x`, which was a *method call*), six same-line callee shapes still calling, `[` still continuing across a line (REP-16), the Pratt loop and `.method()` chains untouched, and the cost stated as an assertion (`f\n(1)` is two expressions) |
+| `section_4_9s_function_example_checks_and_runs` | `praxis-cli/tests/design_doc.rs` | REP-28's blocker — §4.9's fence **extracted from the design doc at test time**, byte for byte, and driven through the real binary under both `check` and `run`. The first landing was gated on a paraphrase carrying a call site the fence does not have, which is how a four-`Y112` fence was signed off as a fixed two-`Y112` one. A test that quotes a document can drift from it |
+| `a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be` | `infer_tests.rs` | REP-28 — §4.9's uncalled fence clean through lowering, and **five `check`-only assertions** (plain `analyze`, no lowering, because lowering is the pass `praxis check` does not run): a concrete non-record, a concrete record missing the field, a call that pins the receiver to `Int`, a call that pins it to a record lacking the field, and the closure-channel shape `v.map(\|a\| a.x)`. Plus the parameter coming out at the record (`(P) -> Int`), the field's own type driving the result, a two-deep chained read, `Y001` for two call sites at two records, and the requirement riding a scheme through a second helper |
+| `a_field_read_on_an_unannotated_parameter_reads_that_records_field` | `jit.rs` | the half no type test can see — a field that is not the first, on a record with a `Text` between two `Int`s, so a wrong index is a different answer; a chained `o.inner.x`; a `Text` field used as one; the record arriving from a `Vec` rather than a literal; and the read surviving 200 allocations |
+| `a_closure_parameter_is_a_pattern` | `parse.rs` | REP-29's grammar — Appendix D's own line, nine header shapes with the param and pattern counts each holds, the annotation still belonging to the whole argument, a trailing comma, a record pattern's brace not being read as anything else, and four malformed shapes |
+| `a_closure_parameter_is_a_pattern_and_must_match_every_argument` | `infer_tests.rs` | each name at its *component's* type, a bare name still binding the whole argument, an annotation pinning the components, **`Y125` at any depth** in four spellings, six irrefutable shapes accepted, `Y001` for an argument the shape cannot have, and that a destructured name captures and is immutable (`Y009`) |
+| `a_destructuring_closure_parameter_reads_each_argument_apart` | `jit.rs` | the reads — every component weighted, a padded record row not shifting the fields it does name, several parameters in both orders (only some of them patterns), nesting through a record, a wildcard component, the names surviving 200 allocations and a nested closure's capture, and a bare-name parameter answering identically |
+| `a_double_pipe_is_a_closure_where_an_expression_begins_and_an_operator_between_two` | `parse.rs` | REP-30's rule — §4.2's own line plus seven positions an expression begins (including as an operand of `\|\|` itself and as its own body), `\| \|` with a space agreeing, and the precedence table **unmoved**: `&&` tighter, comparison tighter, `\|\|` still left-associative |
+| `a_zero_parameter_closure_runs_and_the_or_it_is_spelled_like_still_short_circuits` | `jit.rs` | the half a parse test cannot see — **short-circuiting measured by a side effect the skipped operand would leave**, `&&` from the other side, §4.2's shadowing capture answering `4`, `\|\| \|\| 7` nesting, and the closure surviving allocation pressure |
+| `a_wildcard_parameter_keeps_its_slot_so_later_parameters_do_not_shift` | `jit.rs` | REP-32 — every assertion a **value**, never a "did not crash", because the closure half of this defect *is* a value: `\|_, b\| b + 1` on `(9, 5)` answering `6` and not `10`, the `fn` spelling of the same, a wildcard in the middle with both sides weighted (`103`), two wildcards as two slots (`21`), a trailing wildcard, `\|_\| 7` through a `map`, a wildcard *component* still working, a wildcard beside a destructuring parameter, and the discarded argument still being **evaluated** |
+| `every_praxis_fence_in_the_design_doc_parses` | `praxis-cli/tests/design_doc.rs` | REP-34 — a **sweep**, not four assertions: every ```praxis fence extracted at test time (57 of them) with any `P0xx` a failure, so a fence added later is covered without anyone remembering to. Parse only — a fence is a fragment, so its `N0xx`/`Y0xx` are expected |
+| `all_lists_every_variant` (extended) | `praxis-source/src/diagnostic.rs` | the variant count, bumped for `N008`. It is the injectivity test's other half: a code left out of `ALL` is a code nothing checks |
+
+Characterization tests, listed apart because **no state of the tree makes them
+fail** — which is the finding, not a defect in them:
+
+| Test | File | Pins |
+|---|---|---|
+| `a_zero_argument_accessor_is_a_call_and_a_bare_name_is_a_field` | `infer_tests.rs` | REP-31/ADR-077 — the call form clean on three receivers, the property spelling `Y112` on three, a record **field** named `len` still a field while `p.len()` is `Y110`. REP-31 changed no code, so every one of these already held at `d8179e1`, and *that is the evidence* the doc was wrong and the tree was right. Its last assertion — REP-28's deferred read resolving to the field and not to a row — is a real gate and belongs to REP-28 |
+| `a_wildcard_binder_is_legal_and_declares_nothing` (rewritten) | `infer_tests.rs` | ADR-049 D7, **sharpened by REP-32**. It asserted that no symbol in the table is named `_`, which is a claim about the table rather than about the language — and it is the assertion that made a dropped wildcard parameter look intended. It now asserts what D7 states: nothing may *read* a `_` |
+
+`Vec[T].len -> Int` in §5.7, `let width = grid.width` in §4.2 and
+`grid.width`/`grid.height` in §6.4 are corrected to the call form, §5.7 now
+**states** the rule rather than leaving it to be read off which examples happen to
+have parentheses, and every §7.5 constructor example is written as
+`read constructor(...)` with the section saying why.
+
+Suite: **1470 passed, 0 failed, 38 ignored.** `just ci` green at each of the
+twelve commits (`git log --oneline 497ef35..`).
+
+<!-- REP-26 … REP-34 block ends -->
 
 This session's fourteen new gates and two ADRs (**069**, **070**) — REP-10,
 REP-24, REP-21 and REP-25:

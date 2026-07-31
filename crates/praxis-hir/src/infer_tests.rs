@@ -2693,6 +2693,16 @@ fn wildcard_pattern_does_not_bind_a_value_named_underscore() {
 
 /// D7's other three positions: a binding a program deliberately does not name
 /// is legal, introduces nothing, and still *runs* its initializer.
+///
+/// **The "introduces nothing" assertion was sharpened by REP-32.** It used to be
+/// "no symbol in the table is named `_`", which is a claim about the table and
+/// not about the language, and it was the reason a `_` *parameter* had no slot at
+/// all — so `|_, b| b` dropped the parameter and returned the first argument. D7's
+/// actual property is that `_` introduces nothing **a program can read**, and that
+/// is what is asserted now: no reference anywhere resolves to a `_` symbol. The
+/// resolver never binds one into a scope, so no name can reach it; a wildcard
+/// *parameter* additionally owns an anonymous slot, exactly as a destructuring
+/// parameter does, because the argument still has to arrive somewhere.
 #[test]
 fn a_wildcard_binder_is_legal_and_declares_nothing() {
     for src in [
@@ -2702,10 +2712,19 @@ fn a_wildcard_binder_is_legal_and_declares_nothing() {
     ] {
         assert!(is_clean_with_lower(src), "`{src}` should compile clean");
         let analysis = analyze(src);
+        let anonymous: Vec<_> = analysis
+            .names
+            .all()
+            .iter()
+            .filter(|s| s.name == "_")
+            .map(|s| s.id)
+            .collect();
         assert!(
-            !analysis.names.all().iter().any(|s| s.name == "_"),
-            "`{src}` declared a symbol named `_`: {:?}",
-            analysis.names.all().len()
+            !analysis
+                .refs
+                .values()
+                .any(|r| anonymous.contains(&r.symbol)),
+            "`{src}`: nothing may read a `_`"
         );
     }
 }
@@ -5104,4 +5123,386 @@ fn a_for_binding_is_a_pattern_and_must_match_every_item() {
     ] {
         assert!(is_clean_with_lower(src), "{src} must be accepted");
     }
+}
+
+/// **REP-26.** A record literal's head must name a `struct`.
+///
+/// `let x = 1` / `let p = x { a: 1 }` passed `praxis check`, printed `Unit`, and
+/// `p + 1` printed a raw pointer — REP-01's shape, a program the checker accepts
+/// whose value has no representation. `infer_record_lit` read the head symbol's
+/// type and never asked what the symbol *was*.
+#[test]
+fn a_record_literals_head_must_name_a_struct() {
+    // The reproduction, and it is `N008` in **inference** — so `praxis check`
+    // sees it, which is the whole point (REP-12).
+    let analysis = analyze("let x = 1\nlet p = x { a: 1 }\nout(p)\n");
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|d| d.code().to_string() == "N008"),
+        "expected N008 from analysis alone, got {:?}",
+        analysis.diagnostics
+    );
+
+    // Every kind of declaration that is not a `struct` answers the same way, and
+    // the message names the kind — an `enum` is a perfectly good *type* and still
+    // has no fields to initialize, so "not a type" would be a lie about it.
+    for (src, kind) in [
+        ("let x = 1\nlet p = x { a: 1 }\n", "a `let` binding"),
+        ("var x = 1\nlet p = x { a: 1 }\n", "a `var` binding"),
+        ("fn f() { 1 }\nlet p = f { a: 1 }\n", "a function"),
+        ("enum E { A }\nlet p = E { a: 1 }\n", "an enum type"),
+        ("enum E { A }\nlet p = A { a: 1 }\n", "an enum variant"),
+        ("let p = out { a: 1 }\n", "a built-in name"),
+        ("fn g(q) { q { a: 1 } }\n", "a parameter"),
+    ] {
+        let diags = analyze(src).diagnostics;
+        let n008 = diags
+            .iter()
+            .find(|d| d.code().to_string() == "N008")
+            .unwrap_or_else(|| panic!("expected N008 for {src}, got {diags:?}"));
+        assert!(
+            n008.message().contains(kind),
+            "the message must name `{kind}`: {}",
+            n008.message()
+        );
+    }
+
+    // The literal answers a fresh variable rather than the head's own type, so
+    // the arithmetic that used to print a pointer no longer has an `Int` to
+    // pretend to be.
+    assert_ne!(
+        scheme_of("let x = 1\nlet p = x { a: 1 }\n", "p").as_deref(),
+        Some("Int"),
+        "the literal must not keep the head's type"
+    );
+
+    // The initializers are still inferred, so a mistake inside one is still
+    // reported rather than swallowed with the literal.
+    let diags = analyze("let x = 1\nlet p = x { a: nope }\n").diagnostics;
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "N001"),
+        "an initializer's own mistake survives: {diags:?}"
+    );
+
+    // …and an actual `struct` head is untouched, including one whose field is
+    // initialized from an ordinary binding.
+    for src in [
+        "struct P { x: Int, y: Int }\nlet p = P { x: 1, y: 2 }\nout(p.x)\n",
+        "struct P { x: Int }\nlet q = 5\nlet p = P { x: q }\nout(p.x)\n",
+    ] {
+        assert!(is_clean_with_lower(src), "{src} must be accepted");
+    }
+
+    // A head that resolves to *nothing* is still `N001` and only `N001`: there is
+    // no symbol to have the wrong kind.
+    let diags = analyze("let p = Nope { a: 1 }\n").diagnostics;
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "N001")
+            && !diags.iter().any(|d| d.code().to_string() == "N008"),
+        "an undefined head is N001 alone: {diags:?}"
+    );
+}
+
+/// **REP-28.** A field read constrains its receiver, so §4.9's own example
+/// compiles.
+///
+/// `struct P { x: Int, y: Int }` / `fn dist(a) -> Int { a.x + a.y }` /
+/// `out(dist(P { x: 1, y: 2 }))` passed `praxis check` clean and then failed under
+/// `praxis run` with `Y112`: `infer_field_get` answered an unresolved receiver with
+/// a fresh variable and recorded nothing, so `a` was generalized with no
+/// requirement to re-ask at the call. This is TY-30 at the third door, through
+/// `require_cap` — a predicate called directly is TY-29 by another name.
+///
+/// **REP-28's second half** is that the requirement has to be able to *fail*. It
+/// was first landed with `infer_field_get` deferring only a variable receiver and
+/// `resolve_deferred_field` returning silently when the receiver turned out to
+/// have no such field, which left `Capability::HasField`'s rejection arm as dead
+/// code and every one of the programs below check-clean and run-broken — the very
+/// divergence the row exists to close. Each `check_diags` assertion here is that
+/// half; each is a plain `analyze`, with no lowering, because lowering is the pass
+/// `praxis check` does not run.
+#[test]
+fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
+    /// Only what `praxis check` sees: analysis, without lowering.
+    fn check_diags(text: &str) -> Vec<praxis_source::Diagnostic> {
+        analyze(text).diagnostics
+    }
+    fn has(diags: &[praxis_source::Diagnostic], code: &str) -> bool {
+        diags.iter().any(|d| d.code().to_string() == code)
+    }
+
+    // §4.9's own example, and it is clean through lowering — which is what
+    // "passed `check` and failed under `run`" means it was not.
+    assert!(is_clean_with_lower(
+        "struct P { x: Int, y: Int }\n\
+         fn dist(a) -> Int { a.x + a.y }\n\
+         out(dist(P { x: 1, y: 2 }))\n"
+    ));
+
+    // **§4.9's fence as the document actually writes it**: no `struct`, no call
+    // site, nothing to pin `a` or `b`. It has to compile, because an uncalled
+    // generic function is not an error — `fn f(a) { a + 1 }` has always been
+    // accepted, and a field read was singled out only because it needed a record
+    // definition to produce an index. Before this, lowering demanded that
+    // definition and answered with four `Y112`s that `praxis check` never saw.
+    // `crates/praxis-cli/tests/design_doc.rs` drives the byte-for-byte fence
+    // through the real binary; this is the same claim where the fix lives.
+    assert!(is_clean_with_lower(
+        "fn manhattan(a, b) {\n    abs(a.x - b.x) + abs(a.y - b.y)\n}\n"
+    ));
+
+    // A **concrete** receiver that is not a record is rejected at `check`, not at
+    // lowering. `require_cap_as` decides it on the spot through
+    // `crate::capability::check`, which is the only thing that ever reaches
+    // `Capability::HasField`'s rejection arm from that door.
+    assert!(
+        has(&check_diags("let n = 1\nout(n.x)\n"), "Y112"),
+        "a field of an `Int` is `check`'s to report"
+    );
+
+    // …and so is a concrete **record** that simply lacks the field: the other
+    // half of the same arm, and the reason `capability::check` inspects the
+    // record rather than stopping at "is it one".
+    assert!(
+        has(
+            &check_diags("struct P { x: Int }\nlet p = P { x: 1 }\nout(p.z)\n"),
+            "Y112"
+        ),
+        "a missing field of a known record is `check`'s to report"
+    );
+
+    // A **deferred** receiver that resolves to a non-record is rejected when the
+    // call site resolves it — the solver door into the same arm. Lowering could
+    // not have reported this one at all: by the time it runs, `a` is still a
+    // variable and REP-28's own rule says a variable is nobody's to reject.
+    assert!(
+        has(
+            &check_diags(
+                "struct P { x: Int, y: Int }\n\
+                 fn dist(a) -> Int { a.x + a.y }\nout(dist(3))\n"
+            ),
+            "Y112"
+        ),
+        "a call that pins the receiver to `Int` is `check`'s to report"
+    );
+
+    // …and one that resolves to a record **without** the field, likewise.
+    assert!(
+        has(
+            &check_diags(
+                "struct P { x: Int, y: Int }\nfn getz(a) { a.z }\nout(getz(P { x: 1, y: 2 }))\n"
+            ),
+            "Y112"
+        ),
+        "a call that pins the receiver to a record lacking the field is `check`'s"
+    );
+
+    // The shape the reviewers reproduced through the closure channel: the
+    // parameter defers a `HasField` and then unifies with `Int`.
+    assert!(
+        has(
+            &check_diags("let v = Vec[Int]()\nv.push(1)\nout(v.map(|a| a.x).sum())\n"),
+            "Y112"
+        ),
+        "a closure parameter pinned to `Int` is `check`'s to report"
+    );
+
+    // The call site is what says which record it is, and the parameter comes out
+    // at that record — not `forall T. (T) -> …`.
+    let src = "struct P { x: Int, y: Int }\n\
+               fn getx(a) { a.x }\n\
+               out(getx(P { x: 1, y: 2 }))\n";
+    assert_eq!(scheme_of(src, "getx").as_deref(), Some("(P) -> Int"));
+
+    // The field's own type is what the read produces, so the result follows the
+    // field and not the arithmetic that happens to use it.
+    let src = "struct N { name: Text, n: Int }\n\
+               fn label(v) { v.name }\n\
+               out(label(N { name: \"t\", n: 1 }))\n";
+    assert_eq!(scheme_of(src, "label").as_deref(), Some("(N) -> Text"));
+
+    // Chained: the outer read's discharge is what makes the inner one
+    // dischargeable, so a two-deep read on an unannotated parameter resolves.
+    assert!(is_clean_with_lower(
+        "struct Inner { x: Int }\nstruct Outer { inner: Inner }\n\
+         fn deep(o) -> Int { o.inner.x }\n\
+         out(deep(Outer { inner: Inner { x: 42 } }))\n"
+    ));
+
+    // **The receiver is pinned, not quantified** (ADR-057 decision 5's rule at
+    // this door): there is one lowered body per source function and
+    // `lower_field_get` reads one record definition for the field's index, so two
+    // call sites at two records are a disagreement about the signature.
+    let diags = analyze_and_lower_diags(
+        "struct P { x: Int, y: Int }\nstruct Q { x: Text }\n\
+         fn getx(a) { a.x }\nout(getx(P { x: 1, y: 2 }))\nout(getx(Q { x: \"t\" }))\n",
+    );
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y001"),
+        "two records at one field-read site is Y001, got {diags:?}"
+    );
+
+    // A concrete record's own field read is untouched — the fast path is still
+    // the fast path, and it never emits a requirement at all.
+    assert!(is_clean_with_lower(
+        "struct P { x: Int, y: Int }\nlet p = P { x: 1, y: 2 }\nout(p.x + p.y)\n"
+    ));
+
+    // The requirement rides the scheme rather than being decided once: a helper
+    // that reads a field of *another* helper's parameter resolves through both.
+    assert!(is_clean_with_lower(
+        "struct P { x: Int, y: Int }\n\
+         fn getx(a) { a.x }\nfn twice(b) { getx(b) + getx(b) }\n\
+         out(twice(P { x: 4, y: 0 }))\n"
+    ));
+}
+
+/// **REP-29.** A closure parameter is a pattern, and it must match **every**
+/// argument.
+///
+/// Appendix D's "first public demo" program writes `|(a, b)| abs(a - b)` and did
+/// not parse. REP-25 established the rule this reuses — destructuring in binding
+/// position *is* a pattern — and `Y125` is its rule too: a parameter has no second
+/// arm to send an argument that does not match.
+#[test]
+fn a_closure_parameter_is_a_pattern_and_must_match_every_argument() {
+    // Each name binds at its own component's type, which a parameter that named
+    // the whole argument could not do.
+    let src = "let v = Vec()\nv.push((1, \"a\"))\nlet s = v.map(|(n, t)| t).collect()\nout(s)\n";
+    assert_eq!(scheme_of(src, "n").as_deref(), Some("Int"));
+    assert_eq!(scheme_of(src, "t").as_deref(), Some("Text"));
+
+    // A record pattern, at the fields' own types.
+    let src = "struct P { x: Int, tag: Text }\n\
+               let f = |P { x, tag }| tag\nout(f(P { x: 1, tag: \"a\" }))\n";
+    assert_eq!(scheme_of(src, "x").as_deref(), Some("Int"));
+    assert_eq!(scheme_of(src, "tag").as_deref(), Some("Text"));
+
+    // A bare name still binds the whole argument — the shape every existing
+    // program is written with, and the one `Param::name` still answers for.
+    let src = "let v = Vec()\nv.push((1, 2))\nlet s = v.map(|kv| kv.0).collect()\nout(s)\n";
+    assert_eq!(scheme_of(src, "kv").as_deref(), Some("(Int, Int)"));
+
+    // The annotation belongs to the whole argument, and it pins the components.
+    let src = "let f = |(a, b): (Int, Text)| b\nout(f((1, \"z\")))\n";
+    assert_eq!(scheme_of(src, "a").as_deref(), Some("Int"));
+    assert_eq!(scheme_of(src, "b").as_deref(), Some("Text"));
+
+    // **A parameter has no second arm**, so a pattern that can fail is `Y125` —
+    // both spellings, and at any depth.
+    for src in [
+        "let f = |Some(n)| n\nout(f(Some(1)))\n",
+        "let f = |(1, b)| b\nout(f((1, 2)))\n",
+        "let f = |(a, (2, c))| c\nout(f((1, (2, 3))))\n",
+        "struct P { x: Int }\nlet f = |P { x: 1 }| 0\nout(f(P { x: 1 }))\n",
+    ] {
+        let diags = analyze_and_lower_diags(src);
+        assert!(
+            diags.iter().any(|d| d.code().to_string() == "Y125"),
+            "{src} must be Y125, got {diags:?}"
+        );
+    }
+
+    // …and the irrefutable shapes are all accepted, including a wildcard
+    // component, a partial record pattern, several parameters and nesting.
+    for src in [
+        "let f = |(a, b)| a + b\nout(f((1, 2)))\n",
+        "let f = |(a, _)| a\nout(f((1, 2)))\n",
+        "let f = |(a, b), c| a + b + c\nout(f((1, 2), 3))\n",
+        "let f = |a, (b, c)| a + b + c\nout(f(1, (2, 3)))\n",
+        "let f = |(a, (b, c))| a + b + c\nout(f((1, (2, 3))))\n",
+        "struct P { x: Int, y: Int }\nlet f = |P { x }| x\nout(f(P { x: 1, y: 2 }))\n",
+    ] {
+        assert!(is_clean_with_lower(src), "{src} must be accepted");
+    }
+
+    // The pattern is checked against the parameter's type like any other, so an
+    // argument the shape cannot have is the ordinary mismatch.
+    let diags = analyze_and_lower_diags("let f = |(a, b)| a\nout(f(1))\n");
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y001"),
+        "expected Y001, got {diags:?}"
+    );
+
+    // A destructured name is a binding like any other, so it captures and it
+    // cannot be assigned to.
+    assert!(is_clean_with_lower(
+        "let g = |(a, b)| { let h = |n| n + a + b\n h(1) }\nout(g((2, 3)))\n"
+    ));
+    let diags = analyze_and_lower_diags("let f = |(a, b)| { a = 5\n b }\nout(f((1, 2)))\n");
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y009"),
+        "a destructured name is immutable: {diags:?}"
+    );
+}
+
+/// **REP-31.** A zero-argument accessor is a **call**, and a bare `receiver.name`
+/// is a field read and only that (ADR-077).
+///
+/// The design doc wrote `grid.width`, `grid.height` and `Vec[T].len -> Int` as
+/// property reads in three places and as calls everywhere else. The tree has only
+/// ever had the call form — `len`, `width` and `height` are catalog rows of arity
+/// zero — so the doc was corrected and this pins the rule it now states.
+///
+/// The rule is load-bearing rather than merely tidy: REP-28 put a field read on
+/// the constraint channel, and a bare `.name` that could be *either* a field or a
+/// nullary row would emit a requirement with two possible discharges and no way to
+/// choose between them.
+///
+/// **This is a characterization test, not a gate, and the distinction is the
+/// finding's.** REP-31 changed no code — its commit touches
+/// `praxis_technical_design.md`, ADR-077 and the decisions index and nothing else
+/// — so there is no state of the tree in which these assertions fail. Every claim
+/// below already held at `d8179e1`, and *that is the evidence*: the doc was wrong
+/// and the tree was right, which is exactly what a doc-only row concludes. A test
+/// that pins a rule nobody may quietly change later is worth keeping; calling it a
+/// gate is not. The one assertion here that is a real gate is the last, and it
+/// belongs to REP-28.
+#[test]
+fn a_zero_argument_accessor_is_a_call_and_a_bare_name_is_a_field() {
+    // The call form is the one that works, on every receiver the doc writes it
+    // for.
+    assert!(is_clean_with_lower(
+        "let v = Vec()\nv.push(1)\nout(v.len())\n"
+    ));
+    assert!(is_clean_with_lower(
+        "let m = Map()\nm[1] = 2\nout(m.len())\n"
+    ));
+
+    // The property spelling is not a syntax this language has: it is a field read
+    // of a name no record declares, so it is `Y112`. Since REP-28's correction it
+    // comes from *inference* — the receiver is concrete, so `require_cap_as`
+    // decides it — which is why `analyze` alone is enough here and why the message
+    // now names the type.
+    for src in [
+        "let v = Vec()\nv.push(1)\nout(v.len)\n",
+        "let m = Map()\nm[1] = 2\nout(m.len)\n",
+        "let t = \"abc\"\nout(t.len)\n",
+    ] {
+        let diags = analyze(src).diagnostics;
+        assert!(
+            diags.iter().any(|d| d.code().to_string() == "Y112"),
+            "{src} must be Y112 at `check`, got {diags:?}"
+        );
+    }
+
+    // A **field** named like a catalog row is still a field, and the two spellings
+    // stay apart: `p.len` reads the field, `p.len()` looks for a row a record does
+    // not have.
+    assert!(is_clean_with_lower(
+        "struct P { len: Int }\nlet p = P { len: 7 }\nout(p.len)\n"
+    ));
+    let diags =
+        analyze_and_lower_diags("struct P { len: Int }\nlet p = P { len: 7 }\nout(p.len())\n");
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y110"),
+        "a record has no rows: {diags:?}"
+    );
+
+    // …and the deferred read REP-28 added resolves to the **field**, not to a row
+    // — which is the property this rule exists to protect.
+    let src = "struct P { len: Int }\nfn n(a) { a.len }\nout(n(P { len: 7 }))\n";
+    assert_eq!(scheme_of(src, "n").as_deref(), Some("(P) -> Int"));
 }

@@ -1,7 +1,9 @@
 # ADR-049: `_` is a wildcard that binds nothing, and a newline ends a statement but never an expression
 
 **Date:** 2026-07-29
-**Status:** Accepted — D7 and D8 both implemented
+**Status:** Accepted — D7 and D8 both implemented; amended 2026-07-31 for REP-27
+(a line-leading `(` no longer continues the expression before it) and for REP-32
+(a wildcard *parameter* keeps a slot, though still no name)
 **Milestone:** Repair (stage S12 — FE-02 and FE-04 landed)
 **Answers:** the plan's D7 and D8
 
@@ -41,6 +43,24 @@ expression`) at the token itself, which is a better report than the
 "unresolved name" the old lexing produced and is what
 `wildcard_pattern_does_not_bind_a_value_named_underscore` now asserts.
 
+**Amended by REP-32 (2026-07-31): "introduces nothing" is about *names*, not
+about slots.** A second consequence had to be written rather than inherited, and
+it was not — the same shape as `lower_let`'s, one binding position over. A
+wildcard *parameter* was read by `lower_param` as an absent **parameter**:
+`Param::name()` answered `None`, the resolver had minted nothing to find, and the
+caller is a `filter_map`, so the parameter vanished from the lowered slot list
+while the function's *type* still counted it. Every parameter after it then took
+the wrong argument — `|_, b| b + 1` applied to `(9, 5)` answered `10` — and the
+`fn` form, whose signature and body now disagreed on arity, died in the Cranelift
+verifier. So a wildcard parameter owns an **anonymous slot**, minted at the `_`'s
+own range and never bound into a scope, exactly as REP-29's destructuring
+parameter does: the argument has to arrive somewhere even when nothing can read
+it. `Param::wildcard()` is the accessor that makes it reachable, and it answers
+for both spellings — a `fn` parameter's bare `UNDERSCORE` token and a closure
+parameter's whole `PatternKind::Wildcard` pattern. A `_` *inside* a pattern
+(`|(a, _)|`) is unchanged and has no slot: the enclosing pattern owns the
+argument.
+
 ## Decision D8: a newline terminates a statement, never a subexpression
 
 A newline is consulted in exactly two places:
@@ -64,6 +84,11 @@ of `(a, b)` — but it makes a line-leading parenthesized continuation
 unwritable, and the trap has a workaround (bind the tuple to a name). Requiring
 explicit `;` everywhere rewrites the entire corpus.
 
+**Amended by REP-27 (2026-07-31):** half of the first alternative is taken after
+all. A `(` asked to continue an expression does not cross a line break; a `[`
+still does. See the amended consequence below for why the workaround stopped
+existing.
+
 ## Consequences
 
 - **`_` inside a name is untouched.** The split is on the whole run, not the
@@ -82,11 +107,31 @@ explicit `;` everywhere rewrites the entire corpus.
   separated" comment sat above a check that only asked whether a pattern could
   start here; it demands a comma or a line break, and `P002` is the one new
   diagnostic code the stage spends (the parse block, not D13's).
-- **The FE-04 trap is still open.** `let x = 1` followed by a line starting with
+- ~~**The FE-04 trap is still open.** `let x = 1` followed by a line starting with
   `(` still parses as a call — the progress doc records it as the reason
   `tuple_schema_uses_the_unit_descriptor_for_unit_elements` needed rewriting.
   D8's rule as chosen does not close it; the workaround stands (bind the tuple
-  to a name) until someone decides whether to revisit.
+  to a name) until someone decides whether to revisit.~~ **Closed by REP-27**, and
+  this is the revisit that sentence invited. The workaround the rejection rested
+  on — bind the tuple to a name — does not exist in the position that made the
+  trap reachable: REP-10 gave `match` arms tuple patterns and REP-25 gave `for`
+  bindings the same grammar, and a **match arm** cannot be renamed. So a
+  newline-separated arm list whose next arm began `(a, b) =>` had that arm read as
+  the previous arm's argument list, the arm loop found no pattern start, and every
+  arm after the first silently left the tree.
+
+  The rule is narrow and is D8's own: a `(` asked to **continue** an expression
+  does not do so across a line break. It is not consulted in the Pratt operator
+  loop, so `1 +\n2` and a `.method()` chain across lines are unchanged, and a `(`
+  that *opens* an expression is untouched. The three doors that ask are the postfix
+  loop, `parse_name_or_call`'s primary call form, and the field-vs-method decision
+  after a `.` — `p.x\n(a, b)` was a method call by the same trivia-skipping
+  lookahead.
+
+  `[` is deliberately exempt, which is the asymmetry: no statement and no pattern
+  begins with `[`, so a line-leading one can only continue the expression before
+  it (REP-16). The cost is the one the original rejection named, and it is now
+  written down as a test: `f\n(1)` is two expressions.
 - **The predicted churn did not arrive.** F8 is annotated "HIGHEST TEST CHURN of
   any foundation: ~40 insta snapshots in `parse.rs` plus every `.px` fixture";
   the whole suite passed unchanged. Every fixture and every snapshot already

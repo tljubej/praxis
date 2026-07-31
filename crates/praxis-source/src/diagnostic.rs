@@ -193,6 +193,13 @@ pub enum DiagCode {
     /// does not capture (§4.9/§4.10 — closures do, functions do not), so the
     /// binding has no storage the body can reach.
     FunctionReadsOuterBinding,
+    /// `N008` — a record literal whose head does not name a `struct` (REP-26).
+    ///
+    /// A declaration mistake in `N003`'s sense: a record literal's head is a type
+    /// position, and the name reaches the wrong sort of declaration. Reported in
+    /// inference and not at lowering, because a literal on a non-`struct` head used
+    /// to pass `praxis check` and produce a value with no representation.
+    NotARecordLiteralHead,
 
     // --- Type (`Y0xx`), the user block ---
     /// `Y001` — two types that could not be unified.
@@ -370,6 +377,7 @@ impl DiagCode {
             NestedFunction => DiagnosticCode::new(Name, 5),
             RecursiveTypeDeclaration => DiagnosticCode::new(Name, 6),
             FunctionReadsOuterBinding => DiagnosticCode::new(Name, 7),
+            NotARecordLiteralHead => DiagnosticCode::new(Name, 8),
 
             TypeMismatch => DiagnosticCode::new(Type, 1),
             InfiniteType => DiagnosticCode::new(Type, 2),
@@ -447,6 +455,7 @@ impl DiagCode {
             NestedFunction,
             RecursiveTypeDeclaration,
             FunctionReadsOuterBinding,
+            NotARecordLiteralHead,
             TypeMismatch,
             InfiniteType,
             AnnotationConflict,
@@ -856,7 +865,7 @@ mod tests {
         // `ALL` holds each variant once, so its length is the variant count.
         // Update both together; the exhaustive match in `code()` is what makes
         // adding a variant a compile error in the first place.
-        assert_eq!(DiagCode::ALL.len(), 65);
+        assert_eq!(DiagCode::ALL.len(), 66);
         let unique: std::collections::HashSet<_> = DiagCode::ALL.iter().collect();
         assert_eq!(
             unique.len(),

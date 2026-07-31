@@ -182,7 +182,7 @@ Every binding stores a `GcRef`, but bindings still have static source-language t
 `let` creates a binding that cannot be reassigned:
 
 ```praxis
-let width = grid.width
+let width = grid.width()
 ```
 
 `var` creates a binding that may be reassigned to another value of the same inferred static type:
@@ -541,12 +541,20 @@ Example entries:
 
 ```text
 Vec[T].push(T) -> Unit
-Vec[T].len -> Int
+Vec[T].len() -> Int
 Vec[T].map((T) -> U) -> Seq[U]
 Text.ints() -> Vec[Int]
 Map[K,V].get(K) -> Option[V]
 Grid[T].neighbors4(Point) -> Seq[Point]
 ```
+
+Every row is a method, including the ones that take no arguments, and every call
+site writes the parentheses: `v.len()`, `grid.width()`. There is no property form
+(ADR-077). A bare `receiver.name` is a **field** read and only that — the two
+constructs have different lowerings (a slot index against the record's definition,
+versus a call through the catalog), and a receiver whose type is not yet known
+cannot tell them apart, which is what REP-28's deferred field requirement depends
+on.
 
 The language server uses the same table for completion and signature help.
 
@@ -635,8 +643,8 @@ Coordinates use `(x, y)` with `x` increasing rightward and `y` increasing downwa
 Required API:
 
 ```text
-grid.width
-grid.height
+grid.width()
+grid.height()
 grid[x, y]
 grid.get(x, y)
 grid.contains(x, y)
@@ -792,6 +800,12 @@ Semantics:
 
 ### 7.5 Structural parser constructors
 
+Every example below is written as `read constructor(...)`, because a parser
+expression is a **sublanguage** and `read` (or `parse(text, ...)`) is where it
+begins — §7.1. That is what makes a labelled argument such as `skip:` or
+`ranges:` legal: it belongs to the parser-expression grammar and has no meaning
+in an ordinary call, where it is a parse error at the `:`.
+
 #### `lines(parser)`
 
 Split the current region into logical lines and apply `parser` to each line. Each application must consume the entire line.
@@ -854,7 +868,7 @@ Split on one or more spaces or tabs.
 Split on the exact string separator, with no implicit trimming unless the separator contains spaces.
 
 ```praxis
-sep(" -> ", word)
+read sep(" -> ", word)
 ```
 
 #### `chars(parser, skip: policy)`
@@ -866,7 +880,7 @@ Apply a parser repeatedly to characters. Optional `skip` policies:
 - `newlines`
 
 ```praxis
-chars(one_of("^v<>"), skip: whitespace)
+read chars(one_of("^v<>"), skip: whitespace)
 ```
 
 #### `grid(cell_parser)`
@@ -874,8 +888,8 @@ chars(one_of("^v<>"), skip: whitespace)
 Parse rectangular lines into `Grid[T]`. Every row must have the same cell count.
 
 ```praxis
-grid(char)
-grid(digit)
+read grid(char)
+read grid(digit)
 ```
 
 #### `grid(cell_parser, ragged, fill: value)`
@@ -891,7 +905,7 @@ Parse lines containing whitespace-separated elements into a rectangular `Matrix[
 Apply sequential parsers within one current region. A positional parser contributes its captures directly. A named argument contributes one field.
 
 ```praxis
-sections(
+read sections(
     block(
         `{source:word}-to-{destination:word} map:`,
         ranges: lines(`{destination:int} {source:int} {length:int}`),
@@ -920,7 +934,7 @@ A positional template with named captures is flattened into the enclosing block 
 Match one character from a literal character set.
 
 ```praxis
-chars(one_of("LR"))
+read chars(one_of("LR"))
 ```
 
 #### `optional(parser)`
@@ -932,7 +946,7 @@ Return `Option[T]`. Failure must consume no input. This is parser-level optional
 Parse one of several full alternatives and generate an anonymous enum.
 
 ```praxis
-choice(
+read choice(
     Number: `{name:word}: {value:int}`,
     Operation: `{name:word}: {left:word} {op:char} {right:word}`,
 )
@@ -945,7 +959,7 @@ Result cases are matched as `.Number { ... }` and `.Operation { ... }`.
 Find repeated parser matches inside otherwise irrelevant text. This supports puzzles that embed instructions in corrupted text.
 
 ```praxis
-scan(choice(
+read scan(choice(
     Multiply: `mul({left:int},{right:int})`,
     Enable: `do()`,
     Disable: `don't()`,

@@ -503,6 +503,81 @@ impl Inferer {
         );
     }
 
+    /// Require `receiver` to have a field `name` of type `ty` — the deferred half
+    /// of a field read (REP-28).
+    ///
+    /// This is TY-30's shape at the third door. A field read whose receiver was
+    /// still a variable constrained **nothing**: `infer_field_get` answered a fresh
+    /// variable and recorded no requirement, so the parameter was generalized and
+    /// the read failed later. §4.9's own example is the reproduction —
+    /// `struct P { x: Int, y: Int }` / `fn dist(a) -> Int { a.x + a.y }` /
+    /// `out(dist(P { x: 1, y: 2 }))` passed `praxis check` and then failed under
+    /// `praxis run` with `Y112` "no field `x` on this type".
+    ///
+    /// Going through [`require_cap`](Self::require_cap) rather than deciding here
+    /// is the discipline the progress doc names: a predicate called directly is
+    /// TY-29 by another name — the answer is thrown away at generalization and
+    /// never re-asked at the use site.
+    ///
+    /// **The receiver and the field's type are pinned to the declaration group's
+    /// level**, for ADR-057 Decision 5's reason and ADR-062 Decision 2's: there is
+    /// one lowered body per source function, and monomorphization substitutes from
+    /// the call site's argument types without running this channel. `lower_field_get`
+    /// reads the receiver's *record definition* to get the field's index, so one
+    /// field-read site carries one record type. Two call sites that disagree about
+    /// it are a disagreement about the function's signature, exactly as two
+    /// receivers at one method call site are.
+    fn require_field(&mut self, receiver: Type, name: String, ty: Type, at: TextRange) {
+        let site = self.decl_site;
+        self.db.pin_to_level(receiver, site);
+        self.db.pin_to_level(ty, site);
+        self.require_cap(receiver, Capability::HasField { name, ty }, at);
+    }
+
+    /// Answer a `HasField` requirement whose receiver has since resolved: ask that
+    /// record what the field holds and **unify** it with the type the read handed
+    /// back (REP-28).
+    ///
+    /// The third capability discharged by *producing* rather than by checking, and
+    /// for the same reason as the other two: the deferred read returned a bare
+    /// variable, and this is the only thing that ever says what it holds.
+    ///
+    /// A receiver that turns out to have **no such field** is reported here, and
+    /// that is a correction rather than a design choice. Leaving it to lowering is
+    /// what `HasMethod` does with `Y110`, and it only works because a `HasMethod`
+    /// call site survives into lowering with a concrete receiver to complain about.
+    /// A `HasField` one need not: the receiver may be a *parameter* that this
+    /// discharge is the first and last place to resolve — `fn dist(a) { a.x }` /
+    /// `out(dist(3))` — and lowering then sees a receiver that is still a variable
+    /// and, by REP-28's own rule, says nothing. Silence here was silence
+    /// everywhere: `praxis check` passed and `praxis run` failed, the exact
+    /// divergence REP-28 exists to close.
+    ///
+    /// So the failure goes through `report_cap_failure`, exactly as
+    /// [`resolve_deferred_iterable`](Self::resolve_deferred_iterable)'s does, with
+    /// the requirement's own span as the note.
+    fn resolve_deferred_field(&mut self, c: &Constraint, name: &str, ty: Type) {
+        let receiver = self.db.follow(c.var_type());
+        let field = match self.db.data(receiver) {
+            praxis_types::TypeData::Record { def, args } => {
+                let (def, args) = (*def, args.to_vec());
+                self.db.record_field_of(def, &args, name).map(|(_, t)| t)
+            }
+            _ => None,
+        };
+        let Some(field) = field else {
+            self.report_cap_failure(&c.cap, receiver, c.report_at(), c.origin_note());
+            return;
+        };
+        if let Err(e) = self.db.unify(ty, field) {
+            let mut diag = self.unify_diagnostic(c.report_at(), e);
+            if let Some(origin) = c.origin_note() {
+                diag = diag.with_note(origin, "this is the operation that requires it");
+            }
+            self.diagnostics.push(diag);
+        }
+    }
+
     /// Answer an `Iterable` requirement whose receiver has since resolved: get
     /// the item that receiver actually yields, and **unify** it with the one the
     /// constraint carries (REP-04).
@@ -648,6 +723,14 @@ impl Inferer {
                 self.resolve_deferred_iterable(&c, item);
                 continue;
             }
+            // `HasField` is the third, and it produces the field's type: the
+            // deferred read handed back a bare variable and nothing else ever
+            // says what it holds (REP-28).
+            if let Capability::HasField { ref name, ty } = c.cap {
+                let name = name.clone();
+                self.resolve_deferred_field(&c, &name, ty);
+                continue;
+            }
             let ty = c.var_type();
             if let Err(offender) = crate::capability::check(&mut self.db, self.catalog, ty, &c.cap)
             {
@@ -684,6 +767,17 @@ impl Inferer {
             // match is what keeps it honest if a second emitter appears.
             Capability::HasMethod { name, .. } => {
                 crate::diagnostics::unknown_method(at, name, &rendered)
+            }
+            // Live, and from both doors — unlike `HasMethod`'s arm above.
+            // `infer_field_get` requires the field of *every* receiver it cannot
+            // answer itself, so a concrete one fails in `require_cap_as` and is
+            // reported at the read; a deferred one that resolves to a non-record,
+            // or to a record without the field, is reported by
+            // [`Inferer::resolve_deferred_field`]. Both report at `praxis check`
+            // time, which is the point: lowering alone is a report `check` never
+            // runs.
+            Capability::HasField { name, .. } => {
+                crate::diagnostics::unknown_field(at, name, &rendered)
             }
         };
         if let Some(origin) = origin {
@@ -1233,6 +1327,32 @@ impl Inferer {
                     sym.scheme = Some(Scheme::monotype(ty));
                 }
             }
+            return ty;
+        }
+        // A **wildcard** parameter (REP-32). It names nothing, so there is nothing
+        // to look up — but its slot is a real slot and needs the parameter's type,
+        // or lowering reads a symbol with no scheme for a parameter that is
+        // certainly there.
+        if let Some(tok) = p.wildcard() {
+            if let Some(&id) = self.decls.get(&tok.text_range()) {
+                if let Some(sym) = self.names.get_mut(id) {
+                    sym.scheme = Some(Scheme::monotype(ty));
+                }
+            }
+            return ty;
+        }
+        // A **destructuring** closure parameter (REP-29). The argument's own slot
+        // takes the parameter type, and the pattern is checked against it by the
+        // same walk a match arm and a `for` binding go through — so each name comes
+        // out at its component's type rather than at the whole argument's.
+        if let Some(pat) = p.pattern() {
+            let range = pat.syntax().text_range();
+            if let Some(&id) = self.decls.get(&range) {
+                if let Some(sym) = self.names.get_mut(id) {
+                    sym.scheme = Some(Scheme::monotype(ty));
+                }
+            }
+            self.infer_pattern(&pat, ty);
         }
         ty
     }
@@ -1485,15 +1605,29 @@ impl Inferer {
     /// Infer the type of a record literal `Name { field: expr, … }` (M7, §4.5).
     /// Looks up the struct type, unifies each field initializer with the declared
     /// field type, and returns the struct type.
+    ///
+    /// **The head has to be a `struct`, and nothing asked (REP-26).** A head that
+    /// resolved to anything else kept that thing's type and lowered to nothing:
+    /// `let x = 1` / `let p = x { a: 1 }` passed `praxis check`, printed `Unit`,
+    /// and `p + 1` printed a raw pointer. That is REP-01's shape — a program the
+    /// checker accepts whose value has no representation — so the report is made
+    /// **here**, in inference, where `praxis check` sees it (REP-12).
+    ///
+    /// It is the symbol's **kind** that decides, which is REP-22's rule at another
+    /// door: the head names a declaration, and `SymbolKind::Struct` is the only one
+    /// a `{ … }` can build. Deciding on the head's *type* instead would let an
+    /// unresolved one (a parameter, whose type is a variable) look like a failure
+    /// and would say nothing useful about an `enum`, which is a perfectly good type
+    /// with no fields to initialize.
     fn infer_record_lit(&mut self, r: &RecordLitExpr) -> Type {
         // The literal's head is an ordinary name reference, so resolution
         // already decided which symbol it names — including under shadowing,
         // where a scope lookup here would answer differently.
-        let struct_ty = r
+        let resolved_head = r
             .name()
             .and_then(|p| p.name())
-            .and_then(|tok| self.refs.get(&tok.text_range()).copied())
-            .and_then(|resolved| self.type_env.ty(resolved.symbol));
+            .and_then(|tok| self.refs.get(&tok.text_range()).copied());
+        let struct_ty = resolved_head.and_then(|resolved| self.type_env.ty(resolved.symbol));
         // The head is a `PATH_EXPR` nothing evaluates; the type it names is its
         // type, and a head that names nothing is a fresh variable like any other
         // unresolved expression.
@@ -1501,18 +1635,36 @@ impl Inferer {
             let head_ty = struct_ty.unwrap_or_else(|| self.db.fresh_var());
             self.record_node_type(head.syntax(), head_ty);
         }
-        let Some(struct_ty) = struct_ty else {
-            // Unknown struct: infer each field for diagnostics, return a fresh var.
-            if let Some(fl) = r.field_list() {
-                for f in fl.fields() {
-                    if let Some(e) = f.expr() {
-                        self.infer_expr(&e);
-                    }
+        // A head that is not a `struct` (REP-26). Reported before the type is
+        // consulted, so an `enum`, a `fn`, a builtin and a binding all answer the
+        // same way and all of them stop here.
+        if let Some(resolved) = resolved_head {
+            if let Some(sym) = self.names.get(resolved.symbol) {
+                if sym.kind != SymbolKind::Struct {
+                    let at = r
+                        .name()
+                        .and_then(|p| p.name())
+                        .map(|tok| tok.text_range())
+                        .unwrap_or_else(|| r.syntax().text_range());
+                    let kind = describe_binding(sym.kind);
+                    let name = sym.name.clone();
+                    self.diagnostics
+                        .push(crate::diagnostics::not_a_record_literal_head(
+                            self.file_span(at),
+                            &name,
+                            kind,
+                        ));
+                    return self.infer_record_lit_fields_only(r);
                 }
             }
-            return self.db.fresh_var();
+        }
+        let Some(struct_ty) = struct_ty else {
+            // Unknown struct: infer each field for diagnostics, return a fresh var.
+            return self.infer_record_lit_fields_only(r);
         };
-        // Get the record def to look up declared field types.
+        // Get the record def to look up declared field types. A `struct` symbol
+        // whose type is not a record is a declaration that failed to register
+        // (`N006`); it has been reported and there is nothing here to check.
         let (def_id, def_args) = match self.db.data(self.db.follow(struct_ty)) {
             praxis_types::TypeData::Record { def, args } => (*def, args.clone()),
             _ => return struct_ty,
@@ -1588,8 +1740,49 @@ impl Inferer {
         struct_ty
     }
 
+    /// Infer a record literal's field initializers for their own diagnostics, and
+    /// answer a fresh variable.
+    ///
+    /// The two heads that cannot be checked — one that resolved to nothing
+    /// (`N001`) and one that is not a `struct` (`N008`, REP-26) — both take this
+    /// path: the initializers are expressions the program wrote, and dropping them
+    /// drops whatever else is wrong inside them.
+    fn infer_record_lit_fields_only(&mut self, r: &RecordLitExpr) -> Type {
+        if let Some(fl) = r.field_list() {
+            for f in fl.fields() {
+                if let Some(e) = f.expr() {
+                    self.infer_expr(&e);
+                }
+            }
+        }
+        self.db.fresh_var()
+    }
+
     /// Infer the type of a field access `receiver.field` (M7, §4.5). Returns the
     /// field's declared type.
+    ///
+    /// Every read that cannot be answered here goes through
+    /// [`require_field`](Self::require_field) — **including** one whose receiver is
+    /// already concrete (REP-28, corrected). That is not symmetry for its own sake,
+    /// it is what makes the requirement have teeth. A field read used to constrain
+    /// nothing at all: the read answered a fresh variable and recorded no
+    /// requirement, so `fn dist(a) -> Int { a.x + a.y }` / `out(dist(3))` passed
+    /// `praxis check` and then failed under `praxis run` with `Y112`. That is
+    /// TY-30's shape exactly, and this is TY-30's fix at the third door.
+    ///
+    /// The two receivers take the two arms [`require_cap_as`](Self::require_cap_as)
+    /// already has. A **variable** is deferred and answered by
+    /// [`resolve_deferred_field`](Self::resolve_deferred_field) when a call site
+    /// says what it is. A **concrete** receiver — `Int`, or a record with no such
+    /// field — is decided here and now, by `crate::capability::check`, and reported
+    /// at `praxis check` time. Routing the concrete case through the same door is
+    /// ADR-057's rule (a capability check goes through `require_cap`) and it is also
+    /// the only thing that makes `Capability::HasField`'s rejection arm reachable:
+    /// before this, that arm was dead code and `check` reported nothing at all.
+    ///
+    /// A receiver that is *still* a variable when lowering runs is the one case
+    /// nobody can decide — no call site ever pinned it — and `lower_field_get`
+    /// tolerates it for the reason `+` in an uncalled generic function is tolerated.
     fn infer_field_get(&mut self, f: &FieldExpr) -> Type {
         let receiver_ty = f
             .receiver()
@@ -1600,16 +1793,15 @@ impl Inferer {
         };
         let fname = field_tok.text().to_string();
         let resolved = self.db.follow(receiver_ty);
-        match self.db.data(resolved) {
-            praxis_types::TypeData::Record { def, args } => {
-                let (def, args) = (*def, args.clone());
-                self.db
-                    .record_field_of(def, &args, &fname)
-                    .map(|(_, t)| t)
-                    .unwrap_or_else(|| self.db.fresh_var())
+        if let praxis_types::TypeData::Record { def, args } = self.db.data(resolved) {
+            let (def, args) = (*def, args.clone());
+            if let Some((_, ty)) = self.db.record_field_of(def, &args, &fname) {
+                return ty;
             }
-            _ => self.db.fresh_var(),
         }
+        let result = self.db.fresh_var();
+        self.require_field(receiver_ty, fname, result, field_tok.text_range());
+        result
     }
 
     /// `p.0` — a tuple element, selected by position (REP-08, §4.4).

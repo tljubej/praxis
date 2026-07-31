@@ -334,7 +334,8 @@ impl TypeDb {
     /// for it directly when it has learned something about a variable that makes
     /// quantifying it *wrong* even though no link says so.
     ///
-    /// Both callers are the same fact about lowering, from two doors: **there is
+    /// All three callers are the same fact about lowering, from three doors:
+    /// **there is
     /// one lowered body per source function**, and monomorphization substitutes a
     /// clone's types from the call site's *argument types* — it does not run the
     /// constraint channel. So a variable only the channel can resolve must not be
@@ -351,6 +352,10 @@ impl TypeDb {
     ///   variable's slot. The **iterator** is deliberately *not* pinned: MIR picks
     ///   `len`/`get` from its static ctor, so one clone per iterable kind is what
     ///   makes those symbols right.
+    /// - **REP-28** — a variable a *field* was read from, and the field's own
+    ///   type. `lower_field_get` reads the receiver's record **definition** to get
+    ///   the field's index, so one field-read site carries one record type, for
+    ///   TY-30's reason at TY-30's door number three.
     pub fn pin_to_level(&mut self, t: Type, site: Level) {
         self.lower_levels(t, site);
     }
@@ -467,6 +472,10 @@ impl TypeDb {
                     .map(|p| crate::generalize::substitute(self, *p, binders, mapping))
                     .collect(),
                 result: crate::generalize::substitute(self, *result, binders, mapping),
+            },
+            Capability::HasField { name, ty } => Capability::HasField {
+                name: name.clone(),
+                ty: crate::generalize::substitute(self, *ty, binders, mapping),
             },
         }
     }

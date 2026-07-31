@@ -518,6 +518,15 @@ impl Resolver {
         }
     }
 
+    /// Bind whatever a parameter introduces.
+    ///
+    /// A name — a `fn` parameter, or a closure parameter whose pattern is a bare
+    /// name — is one `Param` symbol, exactly as before. A closure parameter that
+    /// **destructures** (REP-29) introduces the pattern's own names *and* a slot
+    /// symbol for the argument itself, because the lowered closure still takes one
+    /// value per parameter and something has to hold it before the pattern takes it
+    /// apart. The slot is declared at the pattern node's range and never bound into
+    /// a scope: no source name reaches it, and lowering finds it by range.
     fn bind_param(&mut self, scope: ScopeId, p: &Param) {
         if let Some(name_tok) = p.name() {
             self.bind(
@@ -526,7 +535,35 @@ impl Resolver {
                 name_tok.text().to_string(),
                 name_tok.text_range(),
             );
+            return;
         }
+        // A **wildcard** parameter (REP-32). `_` binds nothing — ADR-049 D7, and
+        // no scope entry is made here — but it is still a parameter, and it gets
+        // the same anonymous slot symbol a destructuring one gets. Without it
+        // `lower_param` found no declaration and dropped the parameter, and every
+        // parameter after it took the wrong argument: `|_, b| b` answered the
+        // first. Both spellings arrive here, `fn g(_, b)` and `|_, b|`.
+        if let Some(tok) = p.wildcard() {
+            let range = tok.text_range();
+            let span = range_to_span(range);
+            let id = self.mint(
+                SymbolKind::Param,
+                "_".to_string(),
+                Some(self.file_span(span)),
+            );
+            self.out.decls.insert(range, id);
+            return;
+        }
+        let Some(pat) = p.pattern() else { return };
+        let range = pat.syntax().text_range();
+        let span = range_to_span(range);
+        let id = self.mint(
+            SymbolKind::Param,
+            pat.syntax().text().to_string(),
+            Some(self.file_span(span)),
+        );
+        self.out.decls.insert(range, id);
+        self.resolve_pattern_bindings(scope, &pat);
     }
 
     fn resolve_assign(&mut self, scope: ScopeId, stmt: &AssignStmt) {

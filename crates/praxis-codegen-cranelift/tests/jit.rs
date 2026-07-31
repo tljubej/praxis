@@ -6757,3 +6757,300 @@ fn an_option_from_the_runtime_and_one_from_the_program_are_one_type() {
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
 }
+
+/// **REP-28.** A field read on an unannotated parameter reads the field, and the
+/// call site is what says which record it is.
+///
+/// The half no type test can see: §4.9's own example did not merely fail to
+/// typecheck — it passed `praxis check` and then failed at lowering, so what has
+/// to be shown is that the *index* is right, at each field, through each shape a
+/// record can be reached in.
+#[test]
+fn a_field_read_on_an_unannotated_parameter_reads_that_records_field() {
+    // §4.9's example, verbatim in shape: both fields, weighted so a swapped index
+    // is a different answer.
+    let (rt, result) = run_main(
+        "struct P { x: Int, y: Int }\n\
+         fn dist(a) -> Int { a.x * 10 + a.y }\n\
+         fn main() -> Int { dist(P { x: 3, y: 7 }) }\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 37);
+
+    // A field that is not the first, on a record with a `Text` between two `Int`s
+    // — the index is read from the definition and not from the order of use.
+    let (rt, result) = run_main(
+        "struct R { a: Int, tag: Text, b: Int }\n\
+         fn back(r) -> Int { r.b }\n\
+         fn main() -> Int { back(R { a: 1, tag: \"t\", b: 9 }) }\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 9);
+
+    // Chained through a second unannotated parameter: `outer.inner` is a deferred
+    // read whose result is itself a record, and `.x` on it is a second deferred
+    // read that only the first one's discharge can resolve.
+    let (rt, result) = run_main(
+        "struct Inner { x: Int }\n\
+         struct Outer { inner: Inner }\n\
+         fn deep(o) -> Int { o.inner.x }\n\
+         fn main() -> Int { deep(Outer { inner: Inner { x: 42 } }) }\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+
+    // The field's own type is what the read produces, so a `Text` field reached
+    // through an unannotated parameter is usable as a `Text`.
+    let (rt, result) = run_main(
+        "struct N { name: Text, n: Int }\n\
+         fn label(v) -> Int { v.name.len() }\n\
+         fn main() -> Int { label(N { name: \"abcd\", n: 0 }) }\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4);
+
+    // The record may arrive from a collection rather than a literal — the call
+    // site pins it either way.
+    let (rt, result) = run_main(
+        "struct P { x: Int, y: Int }\n\
+         fn sumx(p) -> Int { p.x }\n\
+         fn main() -> Int {\n  let ps = Vec()\n  ps.push(P { x: 5, y: 0 })\n  \
+         ps.push(P { x: 6, y: 0 })\n  var t = 0\n  \
+         for p in ps { t = t + sumx(p) }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 11);
+
+    // …and the read survives 200 allocations between the call and the use, so the
+    // receiver is a rooted value and not a stale view.
+    let (rt, result) = run_main(
+        "struct P { x: Int, y: Int }\n\
+         fn far(p) -> Int {\n  let scratch = Vec()\n  var i = 0\n  \
+         while i < 200 { scratch.push(P { x: i, y: i })\n i = i + 1 }\n  p.x + p.y\n}\n\
+         fn main() -> Int { far(P { x: 11, y: 22 }) }\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 33);
+}
+
+/// **REP-29.** A destructuring closure parameter reads the components it names,
+/// once per call — the half no type test can see.
+///
+/// The parameter still arrives as one value; the pattern takes it apart inside the
+/// closure, through a one-arm `match` on the parameter's own slot. Everything here
+/// is weighted so a swapped component or a dropped one is a different answer.
+#[test]
+fn a_destructuring_closure_parameter_reads_each_argument_apart() {
+    // Appendix D's shape: a pair destructured in a `map`.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push((1, 20))\n  v.push((3, 40))\n  \
+         v.map(|(a, b)| a * 100 + b).sum()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 120 + 340);
+
+    // A record pattern, with a field the pattern does not name — the padded row
+    // must not shift the ones it does.
+    let (rt, result) = run_main(
+        "struct P { x: Int, y: Int, z: Int }\n\
+         fn main() -> Int {\n  let f = |P { z, x }| x * 10 + z\n  \
+         f(P { x: 1, y: 2, z: 3 })\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 13);
+
+    // Several parameters, only some of them patterns, in both orders — each
+    // `match` wraps its own argument and none of them shifts another.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let f = |(a, b), c| a * 100 + b * 10 + c\n  f((1, 2), 3)\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 123);
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let f = |a, (b, c)| a * 100 + b * 10 + c\n  f(1, (2, 3))\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 123);
+
+    // Nested, and through a record — the reads chain.
+    let (rt, result) = run_main(
+        "struct P { at: (Int, Int), w: Int }\n\
+         fn main() -> Int {\n  let f = |P { at: (x, y), w }| x * 100 + y * 10 + w\n  \
+         f(P { at: (1, 2), w: 3 })\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 123);
+
+    // A wildcard component reads nothing, and the named one is still the one it
+    // names.
+    let (rt, result) = run_main("fn main() -> Int {\n  let f = |(_, b)| b\n  f((9, 4))\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4);
+
+    // The destructured names are real slots: they survive 200 allocations inside
+    // the body, and they capture into a nested closure.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let f = |(a, b)| {\n    let scratch = Vec()\n    var i = 0\n    \
+         while i < 200 { scratch.push((i, i))\n i = i + 1 }\n    let g = |n| n + a * 10 + b\n    \
+         g(0)\n  }\n  f((1, 2))\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 12);
+
+    // A bare-name parameter is untouched — same slot, same reads, same answer.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push((1, 20))\n  \
+         v.map(|kv| kv.0 * 100 + kv.1).sum()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 120);
+}
+
+/// **REP-30.** A zero-parameter closure runs, captures, and `||` still
+/// short-circuits.
+///
+/// The grammar change is one arm, but it moves a token that already had a meaning,
+/// so the half that matters is the half that must not change: `a || b` evaluates
+/// `b` only when `a` is false, and a program that observes the difference is the
+/// only thing that can say so.
+#[test]
+fn a_zero_parameter_closure_runs_and_the_or_it_is_spelled_like_still_short_circuits() {
+    // The closure itself: called, and called twice.
+    let (rt, result) = run_main("fn main() -> Int {\n  let f = || 5\n  f() + f()\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 10);
+
+    // §4.2's shadowing example: the closure keeps the binding it captured, and a
+    // zero-parameter closure is the shape §4.2 writes it in.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let a = 4\n  let show_old = || a\n  let a = 9\n  \
+         show_old() * 10 + a\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 49);
+
+    // **`||` still short-circuits**, measured by a side effect the skipped side
+    // would leave: `true || …` must not run the right operand, and `false || …`
+    // must. A `var` captured by cell is what makes the count visible.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var n = 0\n  let bump = || { n = n + 1\n true }\n  \
+         let a = true || bump()\n  let b = false || bump()\n  \
+         if a { 0 } else { 0 }\n  if b { n } else { 100 }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        1,
+        "only the `false ||` ran its right operand"
+    );
+
+    // …and `&&` is unaffected, from the other side of the precedence table.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var n = 0\n  let bump = || { n = n + 1\n true }\n  \
+         let a = false && bump()\n  if a { 100 } else { n }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+
+    // A zero-parameter closure nests inside another one — the body of a `||` is
+    // an ordinary expression, so `|| || 7` is a closure returning a closure.
+    let (rt, result) = run_main("fn main() -> Int {\n  let f = || || 7\n  f()()\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
+
+    // …and it survives allocation pressure between its creation and its call.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let n = 6\n  let f = || n * 7\n  let scratch = Vec()\n  \
+         var i = 0\n  while i < 200 { scratch.push(i)\n i = i + 1 }\n  f()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
+
+/// **REP-32.** A `_` parameter keeps its slot, so the parameter after it gets the
+/// argument the call actually passed.
+///
+/// `_` binds no name — ADR-049 D7 — and `lower_param` read that as "there is no
+/// parameter": `Param::name()` answered `None`, the resolver had minted no symbol
+/// to find, and the caller is a `filter_map`, so the parameter vanished from the
+/// slot list while the function's *type* still had it. The arity of the lowered
+/// body and the arity of its signature disagreed, and the two halves failed
+/// differently. A closure gave a **silently wrong answer** — `|_, b| b + 1`
+/// applied to `(9, 5)` printed `10`, because `b` was reading argument one. A `fn`
+/// died in the Cranelift verifier, which is the backend catching what the front
+/// end should never have emitted.
+///
+/// Every assertion below is a *value*, not a "does not crash": a shifted argument
+/// list has to come out as the wrong number, or the gate would pass on the very
+/// defect it is for. The digit-place encodings (`a * 100 + c`) are there so a
+/// swap, a drop and a duplication are three different failures.
+#[test]
+fn a_wildcard_parameter_keeps_its_slot_so_later_parameters_do_not_shift() {
+    // The reviewer's closure repro: `10` before the fix, `6` after.
+    let (rt, result) = run_main("fn main() -> Int {\n  let f = |_, b| b + 1\n  f(9, 5)\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 6, "`b` must be the *second* argument");
+
+    // The reviewer's `fn` repro: a Cranelift verifier error before the fix.
+    let (rt, result) = run_main("fn g(_, b) -> Int { b + 1 }\nfn main() -> Int { g(9, 5) }\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 6);
+
+    // A wildcard in the middle: the parameters on *both* sides of it stay put.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  let f = |a, _, c| a * 100 + c\n  f(1, 2, 3)\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 103);
+    let (rt, result) =
+        run_main("fn h(a, _, c) -> Int { a * 100 + c }\nfn main() -> Int { h(1, 2, 3) }\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 103);
+
+    // Two wildcards are two slots, not one: each `_` is minted at its own range,
+    // so they do not collide and the shift is two wide rather than one.
+    let (rt, result) = run_main("fn main() -> Int {\n  let f = |_, _, c| c * 7\n  f(1, 2, 3)\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 21);
+    let (rt, result) =
+        run_main("fn k(_, _, c) -> Int { c * 7 }\nfn main() -> Int { k(1, 2, 3) }\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 21);
+
+    // A trailing wildcard has nothing after it to shift, and must still be
+    // accepted rather than becoming an arity mismatch.
+    let (rt, result) = run_main("fn main() -> Int {\n  let f = |a, _| a * 2\n  f(21, 99)\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+
+    // ADR-049 D7's own spelling, `|_| 0`, through the pipeline the doc writes it
+    // for — the shape REP-29's gates covered only at the parse-tree level.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  \
+         v.map(|_| 7).sum()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 14);
+
+    // A wildcard *component* is a different thing and keeps working: the pattern
+    // owns the argument, and the `_` inside it has no slot of its own.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  let f = |(_, b), c| b * 10 + c\n  f((9, 4), 3)\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 43);
+
+    // A wildcard next to a destructuring parameter: two different anonymous
+    // slots, both at their own ranges, neither shifting the other.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  let f = |_, (a, b)| a * 10 + b\n  f(9, (1, 2))\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 12);
+
+    // The wildcard's argument is still *evaluated* — D7's rule that a binder a
+    // program does not name still runs what it is given.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  let bump = |n| { v.push(n)\n n }\n  \
+         let f = |_, b| b\n  let r = f(bump(1), 5)\n  r * 10 + v.len()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 51);
+}

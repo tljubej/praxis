@@ -110,6 +110,26 @@ pub fn check(
                 Ok(())
             }
         }
+        // Having a field is a yes/no about the receiver; *which* type that field
+        // holds is unified by `Inferer::resolve_deferred_field`, for the reason
+        // `Iterable`'s item is (REP-04, REP-28).
+        Capability::HasField { name, .. } => {
+            let resolved = db.follow(t);
+            if db.var_id_of(resolved).is_some() {
+                // Still a variable: optimistically yes, as everywhere else.
+                return Ok(());
+            }
+            match db.data(resolved) {
+                TypeData::Record { def, args } => {
+                    let (def, args) = (*def, args.to_vec());
+                    match db.record_field_of(def, &args, name) {
+                        Some(_) => Ok(()),
+                        None => Err(resolved),
+                    }
+                }
+                _ => Err(resolved),
+            }
+        }
     }
 }
 

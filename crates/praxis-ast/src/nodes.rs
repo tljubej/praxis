@@ -352,9 +352,57 @@ impl AstNode for Param {
     }
 }
 impl Param {
-    /// The parameter name.
+    /// The parameter name, when the parameter *is* one.
+    ///
+    /// A `fn` parameter is a binder token and answers directly. A **closure**
+    /// parameter is a pattern (REP-29), so a bare-name one answers through that
+    /// pattern — which is what keeps every existing closure lowering, resolution
+    /// and inference path untouched: `|x|` still has a name here, and a
+    /// destructuring one has none and is reached through [`Param::pattern`].
     pub fn name(&self) -> Option<SyntaxToken> {
-        name_token(&self.syntax)
+        if let Some(tok) = name_token(&self.syntax) {
+            return Some(tok);
+        }
+        let pat: Pattern = child(&self.syntax)?;
+        match pat.kind() {
+            PatternKind::Name(_) => pat.name_token(),
+            _ => None,
+        }
+    }
+    /// The parameter's pattern, for the position that has one (a closure, REP-29).
+    /// A `fn` parameter is a binder token and answers `None`.
+    pub fn pattern(&self) -> Option<Pattern> {
+        child(&self.syntax)
+    }
+    /// The `_` this parameter **is**, when it is one (REP-32).
+    ///
+    /// A wildcard parameter binds no name — that is ADR-049 D7, and it is why
+    /// [`Param::name`] answers `None` for it. It does not follow that there is no
+    /// parameter. `|_, y| y` takes two arguments and returns the second, and a
+    /// pipeline that reads the slot list rather than the type ran off the end of a
+    /// list one short: `|_, b| b` returned the *first* argument, and `fn g(_, b)`
+    /// lowered to a body whose arity disagreed with its own signature and died in
+    /// the Cranelift verifier. So the wildcard is reachable, and the pass that
+    /// needs a slot for it can find one.
+    ///
+    /// Both spellings answer here, because the parser writes them differently: a
+    /// `fn` parameter's `_` is a bare `UNDERSCORE` token (`expect_binder`), a
+    /// closure's is a whole `Pattern` of kind [`PatternKind::Wildcard`]. A `_`
+    /// *inside* a pattern — `|(a, _)|` — is a wildcard **component** and not this:
+    /// it has no slot of its own, and the enclosing pattern owns the argument.
+    pub fn wildcard(&self) -> Option<SyntaxToken> {
+        fn underscore(node: &SyntaxNode) -> Option<SyntaxToken> {
+            node.children_with_tokens().find_map(|e| match e {
+                rowan::NodeOrToken::Token(t) if t.kind() == K::UNDERSCORE => Some(t),
+                _ => None,
+            })
+        }
+        match self.pattern() {
+            // `PatternKind::Wildcard` is also what a pattern node the parser gave
+            // up on reports, so the token is the discriminator and not the kind.
+            Some(pat) => underscore(pat.syntax()),
+            None => underscore(&self.syntax),
+        }
     }
     /// The declared parameter type.
     pub fn ty(&self) -> Option<TypeRef> {
