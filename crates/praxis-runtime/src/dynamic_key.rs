@@ -343,16 +343,42 @@ mod tests {
     /// value's *contents*, so mutating a stored key really does move its
     /// bucket. `a_mutable_collection_is_not_a_key` (`infer_tests.rs`) is the
     /// compile-time half; this is why that half has to exist.
+    /// **The observation is rewritten** (REP-48). It used to insert the key into
+    /// a `HashSet`, mutate the `Vec` in place, and assert `!set.contains(&
+    /// wrapped)` — and it failed about once in five hundred runs. The reason is
+    /// that `wrapped` is the *same* `GcRef`, so `DynamicKey`'s equality is
+    /// trivially true and the whole assertion rested on the mutated key's new
+    /// hash not probing the stored entry's slot. A one-element hashbrown table
+    /// is a single 16-byte control group, so a new hash whose top seven bits
+    /// happen to match the stored tag lands on that slot, equality says yes, and
+    /// `contains` answers `true` — one time in about 128 across the two nested
+    /// chances. The rule being pinned is real; the way it was being *watched*
+    /// was a probability.
+    ///
+    /// So the hashes are compared directly, with the same `RandomState` a
+    /// `HashMap` builds its hasher from. Two 64-bit hashes colliding is not a
+    /// number this suite has to care about, and the assertion now measures the
+    /// property in the sentence rather than a consequence of it.
     #[test]
     fn a_structural_key_hashes_by_contents_so_mutating_it_moves_its_bucket() {
+        use std::collections::hash_map::RandomState;
         use std::collections::HashSet;
+        use std::hash::BuildHasher;
 
         let rt = Runtime::new();
+        let state = RandomState::new();
+        let hash_of = |k: &DynamicKey| state.hash_one(*k);
+
         let key = rt.alloc_vec(&crate::scalars::INT, Vec::new());
         let wrapped = DynamicKey::new(key);
+        let before = hash_of(&wrapped);
+
+        // Contents, not identity: a *different* empty `Vec` hashes the same.
+        let twin = DynamicKey::new(rt.alloc_vec(&crate::scalars::INT, Vec::new()));
+        assert_eq!(hash_of(&twin), before, "the hash is over the contents");
+
         let mut set = HashSet::new();
         assert!(set.insert(wrapped));
-        assert!(set.contains(&wrapped), "found before anything changes");
 
         // One push is enough: the hash is over the contents, and the contents
         // are different.
@@ -362,13 +388,15 @@ mod tests {
                 .items
                 .push(item);
         }
-        assert!(
-            !set.contains(&wrapped),
-            "a mutated key hashes to a different bucket — which is exactly why \
-             the type checker refuses one (D4, Y014)"
+        assert_ne!(
+            hash_of(&wrapped),
+            before,
+            "a mutated key hashes elsewhere — which is exactly why the type \
+             checker refuses one (D4, Y014)"
         );
-        // …and the entry is still in the table, unreachable. That is the shape
-        // of the corruption: not a lost value, an unfindable one.
+        // …and the entry is still in the table, filed under the hash it no
+        // longer has. That is the shape of the corruption: not a lost value, an
+        // unfindable one.
         assert_eq!(set.len(), 1);
     }
 }
