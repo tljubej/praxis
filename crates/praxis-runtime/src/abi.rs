@@ -634,24 +634,63 @@ unsafe fn read_scalar<T: Copy>(r: GcRef, handle: crate::descriptor::Payload<T>) 
 /// Read the `i64` payload of an `Int` `GcRef`. Used by every arithmetic wrapper.
 ///
 /// Prefer [`read_scalar`] for any value whose type is not already established:
-/// this reads eight bytes unconditionally, and a `debug_assert` is all that
-/// stands between it and a narrower payload (REP-37).
+/// this reads eight bytes, and the width check below is all that stands between
+/// it and a narrower payload (REP-37).
+///
+/// # The width check is a branch, not a `debug_assert` (REP-56)
+///
+/// It **was** a `debug_assert_eq!`, and a `debug_assert` is not a bound: it is
+/// compiled out of a release build, and what was left there was
+/// `unsafe { *r.payload::<i64>() }` against a descriptor **zero bytes wide**.
+/// REP-56 reaches this from a program that passes `praxis check` — a `choice`
+/// payload record's field read lowers as a `Unit` — so a release `praxis run`
+/// answered a different number on every run (an ASLR-varying pointer, `rc=0`,
+/// no diagnostic) off an 8-byte out-of-bounds heap read, while the same source
+/// in a debug build reported the assertion and aborted. Two profiles, two
+/// answers, and the wrong one was the one users get. `just ci` never builds
+/// release, so nothing in the gate could see it.
+///
+/// So the check is now an ordinary branch and it holds in every profile: the
+/// read cannot happen. What happens instead is ADR-080's defined panic path —
+/// `abi_guard` catches it, raises `RaisedFault::PANIC` with a message naming
+/// the wrapper, and either faults into the crash debugger (a wrapper the
+/// manifest declares faultable) or prints that message and aborts (one it does
+/// not, which is `praxis_int_load`'s case). A defined abort is not a *good*
+/// answer to REP-56 — the good answer is the payload record type REP-56 is
+/// filed for, and it is still owed — but it is a bounded one, and the release
+/// build now behaves like the debug build instead of reading past the object.
+///
+/// Its own call sites are unchanged: this stays `-> i64` rather than becoming
+/// fallible, because sixty-odd wrappers read through it and a `ctx`-threading
+/// signature change is a larger edit than the one memory-safety needs.
 #[inline]
 unsafe fn int_payload(r: GcRef) -> i64 {
-    debug_assert_eq!(
-        r.descriptor().size(),
-        std::mem::size_of::<i64>(),
-        "int_payload reads eight bytes; `{}` is {} wide — use `read_scalar` with \
-         that type's `Payload` handle instead (REP-37)",
-        r.descriptor().name,
-        r.descriptor().size(),
-    );
-    // SAFETY: the compiler only emits these calls with Int-typed operands; the
-    // payload follows the header and is an `i64`. Faults that would feed a
-    // non-`Int` (e.g. the Unit sentinel) into an arithmetic wrapper are diverted
-    // before reaching here by `Inst::CheckFault` branching to the fault block
-    // (§10.4), so operands on the normal path are always valid `Int`s.
+    let descriptor = r.descriptor();
+    if descriptor.size() != std::mem::size_of::<i64>() {
+        int_payload_width_mismatch(descriptor.name, descriptor.size());
+    }
+    // SAFETY: the width check above proves the object's payload is at least
+    // eight bytes, so the read is in bounds. The compiler only emits these
+    // calls with Int-typed operands; the payload follows the header and is an
+    // `i64`. Faults that would feed a non-`Int` (e.g. the Unit sentinel) into an
+    // arithmetic wrapper are diverted before reaching here by `Inst::CheckFault`
+    // branching to the fault block (§10.4), so operands on the normal path are
+    // always valid `Int`s.
     unsafe { *r.payload::<i64>() }
+}
+
+/// [`int_payload`]'s refusal, out of line so the check costs a
+/// never-taken branch on the hot path (REP-56).
+///
+/// `#[cold]` and `#[inline(never)]` are what let the check be unconditional
+/// without the message-building code landing in every arithmetic wrapper.
+#[cold]
+#[inline(never)]
+fn int_payload_width_mismatch(name: &'static str, size: usize) -> ! {
+    panic!(
+        "int_payload reads eight bytes; `{name}` is {size} wide — use `read_scalar` \
+         with that type's `Payload` handle instead (REP-37)"
+    );
 }
 
 /// The Unit sentinel GcRef from the context's input source slot. (Unit is an
@@ -5259,6 +5298,97 @@ mod tests {
         assert_abi_version();
     }
 
+    /// **REP-56's release half.** [`int_payload`]'s width check must be a real
+    /// branch, not a `debug_assert` — the read has to be bounded in the profile
+    /// users actually run.
+    ///
+    /// `debug_assert_eq!` is compiled out of a release build. What was left
+    /// there was `unsafe { *r.payload::<i64>() }` against a descriptor **zero
+    /// bytes wide**: an 8-byte out-of-bounds heap read, reachable from a program
+    /// that passes `praxis check` (REP-56), answering a different number on
+    /// every run with `rc=0` and no diagnostic. The debug build reported it and
+    /// aborted, so the two profiles disagreed and the wrong one shipped.
+    ///
+    /// **This is a source gate on purpose, and it is the only kind that works
+    /// here.** The defect is a difference *between profiles*, and `cargo test`
+    /// builds exactly one of them — a behavioural test is green under
+    /// `debug_assertions` whether the check is conditional or not, which is
+    /// precisely how this survived twenty-one stages of a green suite and a
+    /// `just ci` that never builds release. The companion below asserts the
+    /// branch actually refuses; this asserts it is still *there* at `-O`.
+    ///
+    /// It reads the file rather than the function because there is nothing in a
+    /// compiled artifact to ask. `every_no_mangle_wrapper_is_behind_the_panic_guard`
+    /// is the same technique for the same reason.
+    #[test]
+    fn int_payloads_width_check_is_not_compiled_out_of_release() {
+        let source = include_str!("abi.rs");
+        const SIGNATURE: &str = "unsafe fn int_payload(r: GcRef) -> i64 {";
+        let at = source
+            .find(SIGNATURE)
+            .expect("`int_payload`'s definition moved; this gate names it by signature");
+        let body_start = at + SIGNATURE.len();
+        // The function ends at the first `}` in the first column after it.
+        let body_len = source[body_start..]
+            .find("\n}")
+            .expect("`int_payload` has no closing brace in the first column");
+        let body = &source[body_start..body_start + body_len];
+
+        assert!(
+            !body.contains("debug_assert"),
+            "`int_payload`'s width check is a `debug_assert`, which is compiled out of \
+             a release build — and what is left is an unchecked eight-byte read off a \
+             payload that may be narrower (REP-56). Make it an ordinary branch.\n\
+             body was:{body}"
+        );
+        assert!(
+            body.contains("descriptor.size() != std::mem::size_of::<i64>()"),
+            "`int_payload` no longer checks the payload's width before reading eight \
+             bytes of it (REP-37, REP-56).\nbody was:{body}"
+        );
+    }
+
+    /// The companion to the source gate above: the branch it insists on is real,
+    /// and it refuses rather than reading.
+    ///
+    /// A `Unit` is zero bytes wide, which is exactly the shape REP-56 delivers
+    /// here. The refusal is a panic, which is ADR-080's defined path — inside a
+    /// wrapper `abi_guard!` turns it into a `Panic` fault (or a message and an
+    /// abort where the manifest makes that fault unobservable). What must not
+    /// happen, in any profile, is the read.
+    #[test]
+    fn int_payload_refuses_a_payload_narrower_than_eight_bytes() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx is wired to rt; the Unit immortal is a valid GcRef.
+        let unit = unsafe { praxis_alloc_unit(ctx) };
+        assert_eq!(unit.descriptor().size(), 0, "Unit is a zero-width payload");
+
+        // The panic is the refusal. `catch_unwind` here is the test standing in
+        // for `abi_guard!`, which is what catches it in a real wrapper.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        // `AssertUnwindSafe` for the same reason `abi_guard!` uses it: the
+        // capture is a `Copy` C type and nothing observes a half-finished read.
+        // SAFETY: `unit` is a valid GcRef into rt's live heap.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            int_payload(unit)
+        }));
+        std::panic::set_hook(previous);
+        unsafe { drop_ctx(ctx) };
+
+        let payload = outcome.expect_err("a zero-width payload must not be read as eight bytes");
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(
+            message.contains("int_payload reads eight bytes"),
+            "unexpected panic message: {message:?}"
+        );
+    }
+
     #[test]
     fn alloc_int_and_load_round_trip() {
         let mut rt = Runtime::new();
@@ -6579,8 +6709,9 @@ mod tests {
     /// is why the walk that stood here before passed with the fix removed.
     ///
     /// [`read_scalar`] is what makes both mistakes unspellable at the call
-    /// site, and `int_payload`'s width `debug_assert` is what stops the next
-    /// site from making them; `read_scalar_answers_none_for_a_foreign_descriptor`
+    /// site, and `int_payload`'s width check is what stops the next
+    /// site from making them — in every profile, since REP-56;
+    /// `read_scalar_answers_none_for_a_foreign_descriptor`
     /// pins the reader itself.
     #[test]
     fn a_graph_goal_predicate_reads_a_bool_at_a_bool_s_width() {
