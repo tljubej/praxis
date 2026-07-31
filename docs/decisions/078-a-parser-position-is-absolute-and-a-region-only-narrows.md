@@ -250,9 +250,39 @@ splits lines, take `trailing_blank_run` and drop a trailing blank line only when
 your parser made nothing of it. Anything that forgives whitespace per
 constructor is fixing this in the wrong place, N times, and will disagree with
 itself — which is how `csv` came to be the one constructor that survived round
-one, purely because `csv_tokens` calls `trim()`, and how `matrix` came to be the
+one, purely because `csv_tokens` called `trim()`, and how `matrix` came to be the
 one constructor that deleted an interior blank line, purely because
 `walk_matrix` called `trim()` too.
+
+**Amended: the two constructs that were still answering for their children.**
+This decision's list of what `walk_exact` covers has always named "a CSV field"
+and "a template capture", and neither reached its child with the bytes intact:
+
+* A **template capture** advanced its cursor past leading horizontal whitespace
+  before the child was offered anything (`skip_capture_ws`), so the same child
+  on the same file answered one way as `lines(char)` and another as
+  ``lines(`{a:char}`)`` — silently for `char`, as a hard fault at an interior
+  blank line, and as lost bytes for `{a:text}`/`{a:rest}`. The skip is now a
+  **bound-scan offset only** (ADR-079 Decision 4's amended §): a capture may not
+  be bounded by its own leading whitespace, but what the child is *offered*
+  starts at the cursor.
+* **`csv`** trimmed every field with `str::trim()`, so `csv(char)` faulted on
+  `"a, ,c"` where `sep(",", char)`, `ws(char)` and `grid(char)` all read the
+  space as a cell, and — because `trim()` eats vertical whitespace too, which
+  §7.5's csv entry never authorised — `csv(rest)` lost the terminator
+  `sep(",", rest)` keeps. `csv_tokens` splits on commas and nothing else now.
+  §7.5's "ignore horizontal whitespace around each comma" is *kept*, and kept by
+  the rule: `int` skips it (§7.4 puts surrounding horizontal space on the caller
+  for the numeric atomics, and `walk_atomic` is where that lives), the bound
+  half forgives what is left, and `csv(int)` over `" 1, 2, 3"` still reads three
+  ints. `csv` is not given `sections`' "this is its definition, not an
+  exception" paragraph, because after this it does not need one.
+
+Both trims were §7.4's caller rule re-imposed one level up, for exactly the
+children `walk_atomic` refuses to apply it to — `char`, `text` and `rest`. The
+gate is the capture/bare and csv/sep pairs at the end of
+`every_root_parser_reads_every_file_ending`, each spelling asserted beside the
+other so they cannot drift apart again.
 
 The gate is `every_root_parser_reads_every_file_ending` in
 `adversarial_audit.rs`: every root constructor §7.5 names, crossed with every

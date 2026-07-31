@@ -655,32 +655,41 @@ fn whitespace_tokens(region: ByteRegion, s: &str) -> Vec<ByteRegion> {
     out
 }
 
-/// The comma-separated fields of `region`, whose text is `s`, each trimmed of
-/// surrounding whitespace, as absolute subregions.
+/// The comma-separated fields of `region`, whose text is `s`, as absolute
+/// subregions. A field runs from one comma to the next, **untrimmed**.
 ///
-/// A field that trims to nothing yields an **empty region**, not a search for
-/// an empty needle: `region_offset_of` used to call `hay.windows(0)`, which
-/// panics, and `"10,20,\n"` was enough to reach it — a panic inside
-/// `extern "C"` (IPR-04, D12).
+/// §7.5's csv entry says "ignore horizontal whitespace around each comma", and
+/// this used to implement that with `str::trim()` on every field — which
+/// decided about whitespace *without asking the field's parser*, the one thing
+/// §7.5's rule forbids. `csv` was the last construct that did: `csv(char)`
+/// faulted on `"a, ,c"` where `sep(",", char)`, `ws(char)` and `grid(char)` all
+/// read the space as a cell, and `csv(rest)` lost the terminator that
+/// `sep(",", rest)` keeps — `trim()` eats vertical whitespace too, which is
+/// more than the entry ever authorised.
+///
+/// The entry's promise survives, from the rule instead of from a trim:
+/// `walk_csv` hands each field to [`walk_exact`], `int` (like every atomic §7.4
+/// puts surrounding space on the caller for) skips leading horizontal
+/// whitespace itself, and the bound half forgives a leftover run that is all
+/// whitespace. So `csv(int)` over `" 1, 2, 3"` still reads three ints, and
+/// `csv(char)` over `"a, ,c"` reads three characters — one of them a space,
+/// because `char` reads spaces everywhere else too.
+///
+/// An empty field yields an **empty region**, not a search for an empty needle:
+/// `region_offset_of` used to call `hay.windows(0)`, which panics, and
+/// `"10,20,\n"` was enough to reach it — a panic inside `extern "C"`
+/// (IPR-04, D12).
 fn csv_tokens(region: ByteRegion, s: &str) -> Vec<ByteRegion> {
     let base = region.start();
     let mut out = Vec::new();
     let mut field_start = 0usize;
-    let push = |field: &str, at: usize, out: &mut Vec<ByteRegion>| {
-        let lead = field.len() - field.trim_start().len();
-        let trimmed = field.trim();
-        out.push(region.subregion(
-            base.advance(at + lead),
-            base.advance(at + lead + trimmed.len()),
-        ));
-    };
     for (idx, ch) in s.char_indices() {
         if ch == ',' {
-            push(&s[field_start..idx], field_start, &mut out);
+            out.push(region.subregion(base.advance(field_start), base.advance(idx)));
             field_start = idx + ch.len_utf8();
         }
     }
-    push(&s[field_start..], field_start, &mut out);
+    out.push(region.subregion(base.advance(field_start), region.end()));
     out
 }
 
@@ -1824,9 +1833,28 @@ fn walk_template(
                 field_index: _,
                 name,
             } => {
-                // Skip any flexible leading whitespace before a capture, then
-                // walk the child parser to extract one value.
-                cursor = base.advance(skip_capture_ws(bytes, cursor.delta_from(base)));
+                // **The child is offered the bytes at the cursor, whitespace
+                // and all** — a capture answers from the one rule like every
+                // other construct (ADR-078's amended §, §7.5). The cursor is
+                // *not* advanced past leading horizontal whitespace here: doing
+                // that decided about whitespace without asking the child, so
+                // the same child on the same bytes answered one way as
+                // `lines(char)` and another as ``lines(`{a:char}`)``, and a
+                // `{a:text}`/`{a:rest}` capture lost bytes its child reads.
+                // `walk_atomic` already puts §7.4's "surrounding horizontal
+                // space handled by caller" where it belongs — it trims for the
+                // numeric atomics and deliberately does not for `char`, `text`
+                // and `rest` — so the trim was being re-imposed one level up
+                // for exactly the children that forbid it.
+                //
+                // The skip survives as a *lookahead offset for the bound scan
+                // only* (`search`, below). That is a bound question, not a
+                // whitespace-reading one: a capture may not be bounded by its
+                // own leading whitespace, or `` `{a:text} {v:int}` `` over
+                // `"  foo 3"` would stop `a` at byte 0 — the following literal
+                // run is `SpaceRun` + empty text, which matches the indent
+                // itself — and hand `int` the word.
+                let search = base.advance(skip_capture_ws(bytes, cursor.delta_from(base)));
                 // **Bound the capture by the literal that follows it** (IPR-10).
                 // §7.4 says `text` "minimally consumes text until the following
                 // template literal can match", and the predecessor consumed to
@@ -1838,7 +1866,7 @@ fn walk_template(
                 // to `word`'s delimiter set (IPR-11).
                 match following_bound(parts, index) {
                     Some(bound) => {
-                        match capture_bound(i, region, base, cursor, bound) {
+                        match capture_bound(i, region, base, search, bound) {
                             Some(bound) => {
                                 // SAFETY: ctx is valid.
                                 let value = unsafe {
@@ -1925,9 +1953,7 @@ fn walk_tuple(
     elements: &[u32],
     region: ByteRegion,
 ) -> WalkResult {
-    let base = region.start();
-    let bytes = region.bytes(i);
-    let mut cursor = base;
+    let mut cursor = region.start();
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
     // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
     // so a scope opened deeper covers everything its callers hold too (IPR-14).
@@ -1935,7 +1961,10 @@ fn walk_tuple(
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut values: Vec<GcRef> = Vec::with_capacity(elements.len());
     for &elem in elements {
-        cursor = base.advance(skip_capture_ws(bytes, cursor.delta_from(base)));
+        // The element is offered the bytes at the cursor, whitespace and all —
+        // the same rule [`walk_template`]'s captures answer from. There is no
+        // literal between two elements here to be bounded by, so there is not
+        // even a bound scan to offset: the child alone decides.
         // SAFETY: ctx is valid.
         let walked = unsafe { walk(rt.ctx, i, plan, elem, region.from(cursor))? };
         scope.root(walked.value);
@@ -1949,15 +1978,22 @@ fn walk_tuple(
     })
 }
 
-/// Skip the horizontal whitespace before a capture: zero or more spaces or
-/// tabs. Returns the number of bytes skipped.
+/// Where a capture's **bound scan** starts: past zero or more spaces or tabs.
+/// Returns that position as an offset into `bytes`.
 ///
 /// This is **not** a [`WsPolicy`](praxis_input_parser::WsPolicy) and it used to
 /// be one — `SpaceRun`, which is the one-or-more policy. It only worked because
 /// `SpaceRun` was implemented as zero-or-more; making `SpaceRun` mean what it
 /// says would otherwise have made every capture demand leading whitespace.
-/// §7.4 puts surrounding horizontal space on the caller, and this is the
-/// caller: it matches `walk_atomic`'s own `trim_leading_ws`.
+///
+/// It also used to move the **cursor**, which is what the child is offered, and
+/// that was a violation of the one rule in §7.5: it decided about whitespace
+/// without asking the child, and `walk_atomic` already answers that question
+/// per atomic — trimming for the numeric ones and deliberately not for `char`,
+/// `text` and `rest`. It offsets the bound scan and nothing else now: the
+/// earliest place the following literal run may match is *after* the capture's
+/// own leading whitespace, or a run that can match a space run would bound
+/// every indented capture at its first byte.
 fn skip_capture_ws(bytes: &[u8], cursor: usize) -> usize {
     let Some(rest) = bytes.get(cursor..) else {
         return cursor;
@@ -2320,10 +2356,10 @@ fn tuple_schema_for(
 // produce positions and positions are that module's business. `region_offset_of`
 // is gone entirely: it located a CSV token by *searching the region for the
 // token's text*, so duplicate fields all mapped to the first occurrence, and it
-// called `hay.windows(0)` — a panic — for any token that trimmed to nothing,
-// which `"10,20,\n"` was enough to reach. Inside `extern "C"` that is not a
-// panic, it is undefined behaviour. `csv_tokens` computes the bounds while it
-// splits, so there is nothing to search for and nothing to be empty.
+// called `hay.windows(0)` — a panic — for any token that was empty, which
+// `"10,20,\n"` was enough to reach. Inside `extern "C"` that is not a panic, it
+// is undefined behaviour. `csv_tokens` computes the bounds while it splits, so
+// there is nothing to search for and nothing to be empty.
 
 /// Skip leading horizontal whitespace (spaces and tabs).
 fn trim_leading_ws(bytes: &[u8]) -> &[u8] {

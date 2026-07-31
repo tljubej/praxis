@@ -231,9 +231,27 @@ complained about: a comma the template wrote with nothing in front of it no
 longer matches an input that has a space there.
 
 The pre-capture whitespace skip stops being a `WsPolicy` at all. It was
-`SpaceRun`, and worked only because `SpaceRun` was zero-or-more; §7.4 puts
-surrounding horizontal space on the caller, so it is `skip_capture_ws`, which is
-what it always was.
+`SpaceRun`, and worked only because `SpaceRun` was zero-or-more; so it is
+`skip_capture_ws`, which is what it always was.
+
+**Amended.** This decision first said that §7.4 "puts surrounding horizontal
+space on the caller, so it is `skip_capture_ws`" — the skip's own doc comment
+put it as "it matches `walk_atomic`'s own `trim_leading_ws`". Neither was true
+of `walk_atomic`, which trims for the *numeric* atomics and deliberately does
+not for `char`, `text` and `rest` — a space is a character and leading
+whitespace is part of a text. So the skip was that rule re-imposed one level up
+for exactly the children that forbid it, and it was the last construct deciding
+about whitespace without asking its child: the same child on the same file
+answered one way as `lines(char)` and another as ``lines(`{a:char}`)``.
+
+`skip_capture_ws` no longer moves the cursor. It offsets the **bound scan** and
+nothing else, which is a bound question rather than a whitespace-reading one: a
+capture may not be bounded by its own leading whitespace, or the `SpaceRun`
+plus empty text in front of `` `{a:text} {v:int}` `` matches the indent itself
+and `a` stops at byte 0. What the child is offered is the bytes at the cursor,
+whitespace and all — ADR-078's amended rule, which `csv` was the other survivor
+of (`csv_tokens` trimmed every field, so `csv(char)` faulted where
+`sep(",", char)` read a space).
 
 **Consequence acted on:** REP-20's gate asserted that a template written ` -> `
 also matches `1->2` — the contradiction itself, written into a test. That input

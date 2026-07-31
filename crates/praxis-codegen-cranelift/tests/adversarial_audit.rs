@@ -920,6 +920,155 @@ fn every_root_parser_reads_every_file_ending() {
     let (runtime, result) = run_main_with_input(src, "ab\ncd\n  \n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 32, "`rest` reads \"  \", so it is a line");
+
+    // **A capture answers from the rule too** — the last construct that did
+    // not. `skip_capture_ws` used to move the cursor before the child was ever
+    // offered the bytes, so the same child on the same file answered one way
+    // bare and another inside a template: silently for `char` (two elements,
+    // not three), as a hard fault for the interior blank line, and as lost
+    // bytes for `text`/`rest`. The only template row in the matrix above is
+    // `` `{n:int} x` ``, whose child cannot read whitespace, so the skip was
+    // invisible to the whole suite. Each pair is asserted together, so the two
+    // spellings cannot drift apart again.
+    let pairs: [(&str, &str, &str, i64); 4] = [
+        // A trailing line of two spaces is one `char` cell, so it is an element.
+        (
+            "lines(char) / lines(`{a:char}`) over a trailing blank line",
+            "read lines(char)",
+            "read lines(`{a:char}`)",
+            3,
+        ),
+        // The same rule at an *interior* blank line, where the skip did not
+        // merely lose an element — it faulted where the bare spelling read.
+        (
+            "lines(char) / lines(`{a:char}`) over an interior blank line",
+            "read lines(char)",
+            "read lines(`{a:char}`)",
+            3,
+        ),
+        // `lines(rest)` is lossless and so is the capture spelling of it.
+        (
+            "lines(rest) / lines(`{a:rest}`) last element bytes",
+            "read lines(rest)",
+            "read lines(`{a:rest}`)",
+            2,
+        ),
+        // Ditto `text`, which is `rest` with a bound and no bound here.
+        (
+            "lines(text) / lines(`{a:text}`) last element bytes",
+            "read lines(text)",
+            "read lines(`{a:text}`)",
+            2,
+        ),
+    ];
+    for (n, (label, bare, capture, want)) in pairs.iter().enumerate() {
+        let (input, bare_tail, capture_tail) = match n {
+            0 => ("x\ny\n  \n", "v.len()", "v.len()"),
+            1 => ("x\n  \ny\n", "v.len()", "v.len()"),
+            _ => (
+                "x\ny\n  \n",
+                "v.get(v.len() - 1).len()",
+                "v.get(v.len() - 1).a.len()",
+            ),
+        };
+        for (parser, tail, which) in [
+            (bare, bare_tail, "bare"),
+            (capture, capture_tail, "capture"),
+        ] {
+            let src = format!("fn main() -> Int {{\n  let v = {parser}\n  {tail}\n}}\n");
+            let (runtime, result) = run_main_with_input(&src, input);
+            assert!(
+                !runtime.has_pending_fault(),
+                "{label} ({which}) over {input:?} faulted: {:?}",
+                runtime.fault()
+            );
+            assert_eq!(
+                result.as_int(),
+                *want,
+                "{label} ({which}) over {input:?} — one child, one answer"
+            );
+        }
+    }
+    // A capture at the root, with no `lines` in the picture: `rest` and `text`
+    // read their leading whitespace, and wrapping them in a capture does not
+    // take it away.
+    for parser in ["rest", "text"] {
+        let bare = format!("fn main() -> Int {{\n  let t = read {parser}\n  t.len()\n}}\n");
+        let capture =
+            format!("fn main() -> Int {{\n  let r = read `{{a:{parser}}}`\n  r.a.len()\n}}\n");
+        for (src, which) in [(&bare, "bare"), (&capture, "capture")] {
+            let (runtime, result) = run_main_with_input(src, " ab\n");
+            assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+            assert_eq!(
+                result.as_int(),
+                4,
+                "`{parser}` ({which}) reads its leading space"
+            );
+        }
+    }
+    // The bound scan still starts past the capture's own leading whitespace,
+    // which is a bound question and not a whitespace-reading one. Without that
+    // offset the following literal run — `SpaceRun` plus empty text — matches
+    // the indent itself, `n` is bounded at byte 0 and `int` is handed the word.
+    let src =
+        "fn main() -> Int {\n  let v = read lines(`{n:int} x`)\n  v.len() * 10 + v.get(2).n\n}\n";
+    let (runtime, result) = run_main_with_input(src, " 1 x\n 2 x\n 3 x\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 33, "an indented template still matches");
+
+    // **A csv field answers from the rule too.** `csv_tokens` used to
+    // `str::trim()` every field, which decided about whitespace without asking
+    // the field's parser — and `trim()` eats vertical whitespace, so `csv(rest)`
+    // lost the terminator `sep(",", rest)` keeps. §7.5's "ignore horizontal
+    // whitespace around each comma" now falls out of the rule instead: `int`
+    // skips it, `char` reads it, and neither is told which.
+    for (label, child, input, tail, want) in [
+        (
+            "rest keeps the terminator",
+            "rest",
+            "a,b,c\n",
+            "v.get(2).len()",
+            2,
+        ),
+        (
+            "text keeps the leading space",
+            "text",
+            "a, b,c\n",
+            "v.get(1).len()",
+            2,
+        ),
+        (
+            "char reads a space as a field",
+            "char",
+            "a, ,c\n",
+            "v.len()",
+            3,
+        ),
+        (
+            "int still skips its padding",
+            "int",
+            " 1, 2, 3\n",
+            "v.len() * 10 + v.get(2)",
+            33,
+        ),
+    ] {
+        let csv = format!("fn main() -> Int {{\n  let v = read csv({child})\n  {tail}\n}}\n");
+        let sep =
+            format!("fn main() -> Int {{\n  let v = read sep(\",\", {child})\n  {tail}\n}}\n");
+        for (src, which) in [(&csv, "csv"), (&sep, "sep(\",\", …)")] {
+            let (runtime, result) = run_main_with_input(src, input);
+            assert!(
+                !runtime.has_pending_fault(),
+                "{label} ({which}) over {input:?} faulted: {:?}",
+                runtime.fault()
+            );
+            assert_eq!(
+                result.as_int(),
+                want,
+                "{label} ({which}) over {input:?} — one rule, two constructors"
+            );
+        }
+    }
 }
 
 /// **An interior blank line is structure, and no constructor gets to skip

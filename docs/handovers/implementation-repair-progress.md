@@ -1685,11 +1685,25 @@ the rule is enforced and therefore where it is stated):
 
 **Do not add a trailing-newline or blank-line special case to a constructor.**
 That is this fix in the wrong place, N times, and it is how `csv` came to be
-round one's only survivor — purely because `csv_tokens` calls `trim()` — and how
+round one's only survivor — purely because `csv_tokens` called `trim()` — and how
 `matrix` came to be the one constructor that deleted an *interior* blank line,
 purely because `walk_matrix` called `trim()` too. If your construct tokenizes to
 `region.end()`, bound its children with `walk_exact` and you have inherited the
 rule; if it splits lines, take `trailing_blank_run`.
+
+**The two constructs that answered the question themselves are the last two the
+rule reached, and both are done.** A template *capture* advanced its cursor past
+leading horizontal whitespace before its child was ever offered the bytes, so
+the same child on the same file answered one way as `lines(char)` and another as
+``lines(`{a:char}`)``; and `csv_tokens` `str::trim()`-ed every field, so
+`csv(char)` faulted where `sep(",", char)` read a space and `csv(rest)` lost the
+terminator `sep(",", rest)` keeps. Both are gone. `walk_atomic` is where §7.4's
+"surrounding horizontal space handled by caller" lives — it trims for the
+numeric atomics and deliberately does not for `char`, `text` and `rest` — so
+either trim was that rule re-imposed one level up, for exactly the children that
+forbid it. `skip_capture_ws` survives as a **bound-scan offset only**: a capture
+may not be bounded by its own leading whitespace, or `` `{a:text} {v:int}` ``
+over `"  foo 3"` stops `a` at byte 0.
 
 **`split_lines`/`split_sections` moved to `cursor.rs` and take `(Input,
 ByteRegion)`.** `split_sections` no longer includes a section's trailing
@@ -1698,7 +1712,9 @@ newline. That was invisible before and faults every `sections(word)` now.
 **`WsPolicy` has a `None` variant and `SpaceRun` means one-or-more.** Every
 match on `WsPolicy` is exhaustive, so a missing arm is a compile error. The
 pre-capture whitespace skip is `skip_capture_ws`, not a policy — if you make it
-one again you will make every capture demand leading whitespace.
+one again you will make every capture demand leading whitespace. It offsets the
+capture's **bound scan** and nothing else; it does not move the cursor the child
+is offered, and making it do that again reintroduces the divergence above.
 
 **`chars(P, skip:)` is `Vec[result(P)]`.** `chars(int, …)` is `Vec[Int]`. Any
 program or test annotating it `Vec[Char]` is now a type error.

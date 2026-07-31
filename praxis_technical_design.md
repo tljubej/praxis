@@ -895,7 +895,16 @@ let bingo = read sections(
 
 #### `csv(parser)`
 
-Split the current region on commas. Ignore horizontal whitespace around each comma. Apply `parser` to each token.
+Split the current region on commas. Apply `parser` to each field.
+
+Horizontal whitespace around a comma is ignored, and it is ignored *by the rule
+above and not by a trim*: the field is handed to `parser` whole, `parser` skips
+what it does not read (§7.4 puts surrounding horizontal space on the caller for
+every numeric atomic), and a leftover run of whitespace is forgiven. So
+`csv(int)` over `" 1, 2, 3"` reads three ints — and `csv(char)` over `"a, ,c"`
+reads three characters, one of them a space, because `char` reads a space
+wherever it is offered one. `csv` is not `sep(",", …)` with a trim bolted on;
+the two answer the same way for the same reason.
 
 #### `ws(parser)`
 
