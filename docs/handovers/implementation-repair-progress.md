@@ -345,7 +345,7 @@ no test body.
 | `every_no_mangle_wrapper_is_behind_the_panic_guard` | `praxis-runtime/src/abi.rs` | **NEW** — D12. Reads the source of the four files that declare entry points and names any `#[no_mangle]` whose body does not open with `abi_guard!`. The property is about the *set*; calling them one by one would test the ones somebody remembered |
 | `a_panic_inside_a_wrapper_becomes_a_fault_and_a_defined_dummy` | `abi.rs` | **NEW** — the guard's behaviour: transparent when nothing panics, and otherwise `FaultKind::Panic` with a message naming the wrapper plus the `Unit` sentinel |
 | `a_failure_offset_past_the_buffer_previews_rather_than_panicking` | `parse_detail.rs` | **NEW** — D12's second panic path. `preview_around` sliced `&input[start..end]` with `start > end` for any offset more than 24 bytes past the end |
-| `a_subregion_can_only_narrow`, `a_subregion_that_would_widen_is_a_bug_and_says_so`, `next_scalar_steps_one_unicode_scalar`, `a_section_region_excludes_its_trailing_line_ending`, `split_lines_and_split_sections_agree_on_a_single_line_region`, `split_lines_strips_crlf_and_drops_a_trailing_empty_line`, `a_line_region_of_a_section_names_the_inputs_own_bytes` | `parser/cursor.rs` | **NEW** — the substrate's own invariants, including the one that is a `debug_assert` rather than a value: widening is unrepresentable |
+| `a_subregion_can_only_narrow`, `a_subregion_that_would_widen_is_a_bug_and_says_so`, `next_scalar_steps_one_unicode_scalar`, `a_section_region_excludes_its_trailing_line_ending`, `split_lines_and_split_sections_agree_on_a_single_line_region`, `split_lines_strips_crlf_and_drops_a_trailing_empty_line`, `split_sections_on_blank_lines`, `a_line_region_of_a_section_names_the_inputs_own_bytes` | `parser/cursor.rs` | **NEW** — the substrate's own invariants, including the one that is a `debug_assert` rather than a value: widening is unrepresentable. `split_sections_on_blank_lines` is `parser.rs`'s deleted test of the same name, restored in the new signature |
 
 Three tests were amended rather than deleted, each with a comment saying what it
 used to assert and why that was wrong:
@@ -367,6 +367,28 @@ used to assert and why that was wrong:
   gate, asserted that a template written ` -> ` also matches `1->2` — the
   `SpaceRun` contradiction itself, written into a test. That input now faults,
   which the test asserts explicitly; the flexible half stays.
+
+Three `#[test]` functions were also **literally removed**, all three in
+`dc983ee` ("S20 step 2: one absolute cursor, one owner") and all three from
+`parser.rs`'s test module. One is restored below, so a name-level diff of the
+S20 range now finds exactly two — 1 555 test names at `50c6914`, 1 587 at HEAD,
+and `split_lines_handles_crlf` and `split_lines_drops_trailing_empty` the only
+names present at the base and absent at HEAD. Neither could survive verbatim:
+`split_lines`/`split_sections` took `&[u8]` and returned offsets into it, and
+now take `(&Input, ByteRegion)`. Both assertions live on, verbatim, under one
+name.
+
+- `split_lines_handles_crlf` asserted `"abc\r\ndef\nghi"` -> `["abc","def","ghi"]`.
+  Asserted verbatim, same input, by
+  `split_lines_strips_crlf_and_drops_a_trailing_empty_line` (`parser/cursor.rs`).
+- `split_lines_drops_trailing_empty` asserted `"a\nb\n"` -> `["a","b"]`.
+  Asserted verbatim by the second half of that same test, and generalised by
+  `a_region_does_not_end_in_empty_lines_however_many_there_are`, a 15-case table
+  covering `"1\n2\n\n\n\n"`, `"1\r\n2\r\n\r\n"` and the interior blank line.
+- `split_sections_on_blank_lines` asserted `"a\nb\n\nc\nd"` -> 2 sections. This
+  one is **restored**, under its own name, in `parser/cursor.rs`: its sections
+  are two lines long, which no other section test's are, and it now asserts the
+  section *text* rather than only the count.
 
 #### The repair passes — what the reviews found, and what closed it
 

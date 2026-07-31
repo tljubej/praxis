@@ -670,6 +670,23 @@ mod tests {
     }
 
     #[test]
+    fn split_sections_on_blank_lines() {
+        // Restored from `parser.rs`, where the S20 conversion deleted it
+        // because `split_sections` changed signature: it took `&[u8]` and
+        // returned offsets into it, and it now takes `(&Input, ByteRegion)`.
+        // Same input, same claim, and it is the only one of the section tests
+        // whose sections are more than one line long — the assertion the
+        // siblings here do not make.
+        let (_rt, owner) = input_over("a\nb\n\nc\nd");
+        let i = unsafe { Input::new(owner) }.expect("a Text is UTF-8");
+        let sections: Vec<&str> = split_sections(&i, i.whole())
+            .into_iter()
+            .map(|s| s.str(&i).expect("a section is a str"))
+            .collect();
+        assert_eq!(sections, vec!["a\nb", "c\nd"]);
+    }
+
+    #[test]
     fn a_blank_line_of_spaces_separates_sections() {
         // `split_sections` calls a line blank by the same predicate
         // `split_lines` uses to decide where the region ends, so a separator
