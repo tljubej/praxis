@@ -698,10 +698,12 @@ mod tests {
     /// `to_bits` is what tells the two zeros apart; `==` cannot, because
     /// IEEE-754 says they are equal.
     ///
-    /// **Not red on `main`**, therefore, and not REP-50's gate — that is
-    /// `run_pass_float_negative_zero`, which asks the *evaluator*. This is the
-    /// rule made checkable at the layer that owns the rendering, so a later
-    /// edit to `FLOAT.format` cannot quietly stop satisfying it.
+    /// It is **not REP-50's gate** — that is `run_pass_float_negative_zero`,
+    /// which asks the *evaluator*. It **is** REP-44's: before the rendering fix
+    /// a whole-numbered `Float` printed like an `Int`, so `-0.0` rendered as
+    /// `-0` and the last assertion below was red. Both halves are worth having,
+    /// because a later edit to `FLOAT.format` would otherwise stop satisfying
+    /// the round trip without any evaluator test noticing.
     #[test]
     fn a_rendered_float_reads_back_as_the_same_float() {
         let rendered = |v: FloatPayload| {
@@ -731,8 +733,12 @@ mod tests {
                 "`{text}` read back as a different Float"
             );
         }
-        // The signed zeros are distinct values (ADR-045 orders them apart) and
-        // render distinctly, which is the whole of REP-50's rule at this layer.
+        // The signed zeros are distinct *values* — different bit patterns — and
+        // so must render distinctly for the round trip above to mean anything.
+        // They are NOT distinct to a container: ADR-045's `compare` treats them
+        // as equal, and rejected `f64::total_cmp` precisely for splitting them,
+        // so a `Map` keyed on them holds one entry. Rendering and ordering
+        // disagree here on purpose; see §4.12.
         assert_eq!(rendered(-0.0), "-0.0");
         assert_ne!(rendered(-0.0), rendered(0.0));
     }

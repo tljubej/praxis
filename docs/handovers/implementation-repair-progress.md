@@ -410,9 +410,13 @@ the three companions it does not count.
 `0.0`, a text that does not read back as the Float it names, which is the one
 rule ADR-083 — REP-44's own ADR, from this block — exists to state. The
 formatter was right; a Float negation was lowered as `0.0 - x`, and `0.0 - 0.0`
-is `+0.0`. ADR-045 had already decided the two zeros are distinct for a
-container's ordering, so the language had taken a position and the evaluator was
-losing a value it admits. Landed as `Inst::FloatNeg` (Cranelift `fneg`) rather
+is `+0.0`. **Careful here — the first telling of this got ADR-045 backwards**,
+and the wrong claim reached three documents before a reviewer caught it: ADR-045
+decided the two zeros are **equal** to a container, and rejected
+`f64::total_cmp` precisely *for splitting them*, so a `Map` keyed on both holds
+one entry (measured). The position the language had taken is ADR-083's: a
+Float's rendered form must read back as the same Float, and `-0.0` and `0.0` are
+different Floats even though they compare equal. Landed as `Inst::FloatNeg` (Cranelift `fneg`) rather
 than a better constant, so "a negation is a subtraction from zero" is no longer
 spellable; §4.12 was silent on signed zero and now says it. **Pre-existing** —
 REP-44 is what made it visible, because before ADR-083 both zeros printed `0`.
@@ -429,6 +433,16 @@ is structural. `< /dev/null` is what hid this for a milestone and a half, and it
 is what `Command::output` binds stdin to — which is why 1500 tests never saw it.
 The gate binds stdin to a pipe it keeps open and **deadlines**, so a regression
 fails rather than wedging the suite.
+
+**One consequence of REP-51 is recorded and not fixed**, found in review: with
+`--debug always` and a non-terminal stdin, a program that never evaluates a
+`read` now leaves its stdin **un-consumed**, and the crash REPL inherits it — so
+the program's own input data is read as REPL commands. Before REP-51 the eager
+read had swallowed it. This is not a regression in the parser or the runtime; it
+is the §9.6 noninteractive fallback and the new laziness meeting, and deciding it
+belongs with whoever owns §9.6: either the REPL refuses a stdin the program could
+still have read, or the crash path drains it first. Nothing in the corpus reaches
+it, because the corpus never runs with `--debug always`.
 
 **Two corrections inside the block.** REP-42's honest null label had made an
 *empty* `Map`'s `values()` unequal to an equally-typed empty `Vec`; the fix is in
@@ -459,7 +473,7 @@ field. Round two moved one manifest row: `GetInput` from `Pure` to
 `praxis_alloc_text` faults `InvalidText` on input that is not UTF-8 (§4.3);
 `lower_read` gained the matching `check_fault`.
 
-**ADR-086 is not spent.** Neither new row needed a decision: REP-50 *applies* ADR-083 (a Float's rendering must read back as the same Float) and ADR-045 (the two zeros are distinct inside a container) — the language had already taken the position, and the evaluator was not honouring it — and REP-51 implements the sentence §7.1 and §7.10 already write. A gap in the ADR register costs nothing; an ADR that restates two existing ones costs a reader.
+**ADR-086 is not spent.** Neither new row needed a decision: REP-50 *applies* ADR-083 (a Float's rendering must read back as the same Float) — the language had already taken the position, and the evaluator was not honouring it; ADR-045 is **not** support for it and says the opposite, treating the two zeros as equal inside a container — and REP-51 implements the sentence §7.1 and §7.10 already write. A gap in the ADR register costs nothing; an ADR that restates two existing ones costs a reader.
 
 Round two's gates, every one verified red with its fix removed and the test
 untouched:

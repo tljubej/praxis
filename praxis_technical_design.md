@@ -450,13 +450,22 @@ are `abs`, `sqrt`, `floor`, `ceil`, `round`, `sign`, `to_int`, `to_text`,
 prelude free functions. `%` (remainder) is not defined for floats.
 
 **`-0.0` is a value, and unary `-` on a `Float` is IEEE-754 `negate`** — the
-sign bit flipped, nothing else — not a subtraction from zero. ADR-045 already
-decided the two zeros are distinct for a container's ordering, and §16.3 orders
-by the rendered form, so `-0.0` and `0.0` are two keys; the rendering rule above
-then requires `-0.0` to print as `-0.0`. `0.0 - x` is not that negation
-(`0.0 - 0.0` is `+0.0`), which is what REP-50 was. Note that `==` cannot observe
-the difference: IEEE-754 says `-0.0 == 0.0`, so `1.0 / x` is the observation
-that tells them apart.
+sign bit flipped, nothing else — not a subtraction from zero. `0.0 - x` is not
+that negation, because `0.0 - 0.0` is `+0.0`; that was REP-50.
+
+The two zeros are **one value to a container and two to a bit pattern**, and the
+distinction is worth stating because it is easy to get backwards:
+
+- `==` cannot see the difference. IEEE-754 says `-0.0 == 0.0`, and `FLOAT.equals`
+  agrees.
+- **A container treats them as one key.** ADR-045 decided exactly this: its
+  `compare` callback "treats `-0.0` and `+0.0` as equal", and `f64::total_cmp`
+  was *rejected* for splitting them. So `m[-0.0] = 1` followed by `m[0.0] = 2`
+  leaves a map of length one.
+- The **rendering** rule above still requires `-0.0` to print as `-0.0`, because
+  the rendered form must read back as the same `Float` — and `-0.0` and `0.0` are
+  different `Float`s even though they compare equal.
+- `1.0 / x` is the observation that tells them apart: `-inf` against `inf`.
 
 See ADR-037 for the implementation: floats ride the uniform `i64` scalar channel
 as their bit pattern, bit-casting to `f64` at arithmetic/comparison points.
