@@ -952,10 +952,22 @@ impl<'t> Parser<'t> {
             self.bump(); // `read`
             self.parse_parser_expr();
             self.finish_node();
-        } else if op == SyntaxKind::PIPE {
-            // `|params| expr` closure (M7, §4.10). Bare `PIPE` claims the `|`;
-            // the lexer's max-munch keeps `||` as logical-or (`PIPE2`, handled
-            // in the infix table), so the two never conflict.
+        } else if op == SyntaxKind::PIPE || op == SyntaxKind::PIPE2 {
+            // `|params| expr` closure (M7, §4.10) — and `|| expr`, the
+            // zero-parameter one (REP-30, §4.2).
+            //
+            // The comment that used to sit here said the lexer's max-munch keeps
+            // `||` as logical-or "so the two never conflict". It is the max-munch
+            // that *creates* the conflict: REP-07 made `||` one token (`PIPE2`),
+            // and §4.2's own shadowing example — `let show_old = || out(a)` — was
+            // `P001: expected an expression` at it.
+            //
+            // The tie is broken by **position**, which is the rule REP-21 used for
+            // `min=` and REP-09 for `[`: this function is only ever called where an
+            // expression must *begin*, and a binary operator has no left operand
+            // there. So a `||` here is the empty parameter list and nothing else,
+            // and a `||` between two operands is still logical-or — the infix loop
+            // reads it, and it never comes through here.
             self.parse_closure(lit);
         } else if let Some(bp) = prefix_binding_power(op) {
             self.start_node(SyntaxKind::UNARY_EXPR);
@@ -1153,6 +1165,16 @@ impl<'t> Parser<'t> {
     /// directly as an `if` condition has the same ambiguity a name does.
     fn parse_closure(&mut self, lit: StructLit) {
         self.start_node(SyntaxKind::CLOSURE_EXPR);
+        // `|| expr` — the zero-parameter closure (REP-30). One `PIPE2` token is
+        // *both* pipes: there is no parameter list between them to parse and no
+        // closing `|` to demand. The token stays whole rather than being split into
+        // two, because the tree's job is to round-trip the source and `||` is what
+        // the source says; the node kind is what carries the meaning.
+        if self.eat(SyntaxKind::PIPE2) {
+            self.parse_expr_bp(0, lit);
+            self.finish_node();
+            return;
+        }
         self.bump(); // `|`
                      // Zero or more `pattern` or `pattern: Type` params separated by commas.
         if !self.at(SyntaxKind::PIPE) {
@@ -3379,6 +3401,70 @@ mod tests {
         let split = "let a = f\n(1)";
         assert_eq!(count(split, SyntaxKind::CALL_EXPR), 0);
         assert_eq!(count(split, SyntaxKind::PAREN_EXPR), 1);
+    }
+
+    /// **REP-30.** `||` is an empty parameter list where an expression must begin,
+    /// and logical-or everywhere else.
+    ///
+    /// §4.2's shadowing example is `let show_old = || out(a)`, and it was
+    /// `P001: expected an expression` at the `||` plus a cascading `P002`: REP-07
+    /// made `||` one token, and only a bare `PIPE` reached `parse_closure`.
+    #[test]
+    fn a_double_pipe_is_a_closure_where_an_expression_begins_and_an_operator_between_two() {
+        let count = |src: &str, kind: SyntaxKind| -> usize {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            construct_names(&out.tree)
+                .into_iter()
+                .filter(|k| *k == kind)
+                .count()
+        };
+
+        // §4.2's own line, and the zero-parameter closure in every position an
+        // expression begins: a binding, an argument, a block tail, a `return`, an
+        // operand of the very operator it is spelled like, and its own body.
+        for src in [
+            "let show_old = || out(a)",
+            "let f = || 5",
+            "out(|| 5)",
+            "fn g() { || 5 }",
+            "fn g() { return || 5 }",
+            "let f = a || || 5",
+            "let f = || || 7",
+            "let f = if p { || 1 } else { || 2 }",
+        ] {
+            assert!(count(src, SyntaxKind::CLOSURE_EXPR) >= 1, "{src}");
+            assert_eq!(count(src, SyntaxKind::PARAM), 0, "{src}");
+        }
+
+        // `| |` with a space is the same closure — the two spellings differ only
+        // in how the lexer munched them.
+        assert_eq!(count("let f = | | 5", SyntaxKind::CLOSURE_EXPR), 1);
+
+        // The other direction: between two operands `||` is still logical-or, and
+        // nothing about its precedence moved (REP-07 put it at the bottom, below
+        // `..` and `&&`).
+        assert_eq!(count("let a = p || q", SyntaxKind::BIN_EXPR), 1);
+        assert_eq!(count("let a = p || q", SyntaxKind::CLOSURE_EXPR), 0);
+        assert_eq!(
+            shape("let a = p || q && r"),
+            shape("let a = p || (q && r)"),
+            "`&&` still binds tighter than `||`"
+        );
+        assert_eq!(
+            shape("let a = p == q || r == s"),
+            shape("let a = (p == q) || (r == s)"),
+            "comparison still binds tighter than `||`"
+        );
+        assert_eq!(
+            shape("let a = p || q || r"),
+            shape("let a = (p || q) || r"),
+            "`||` is still left-associative"
+        );
+
+        // A one-parameter closure is untouched, which is what says the new arm
+        // only fires on the two-pipe token.
+        assert_eq!(count("let f = |x| x", SyntaxKind::PARAM), 1);
     }
 
     /// **REP-29.** A closure parameter is a pattern, not a bare name.

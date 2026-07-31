@@ -6535,3 +6535,64 @@ fn a_destructuring_closure_parameter_reads_each_argument_apart() {
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 120);
 }
+
+/// **REP-30.** A zero-parameter closure runs, captures, and `||` still
+/// short-circuits.
+///
+/// The grammar change is one arm, but it moves a token that already had a meaning,
+/// so the half that matters is the half that must not change: `a || b` evaluates
+/// `b` only when `a` is false, and a program that observes the difference is the
+/// only thing that can say so.
+#[test]
+fn a_zero_parameter_closure_runs_and_the_or_it_is_spelled_like_still_short_circuits() {
+    // The closure itself: called, and called twice.
+    let (rt, result) = run_main("fn main() -> Int {\n  let f = || 5\n  f() + f()\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 10);
+
+    // §4.2's shadowing example: the closure keeps the binding it captured, and a
+    // zero-parameter closure is the shape §4.2 writes it in.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let a = 4\n  let show_old = || a\n  let a = 9\n  \
+         show_old() * 10 + a\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 49);
+
+    // **`||` still short-circuits**, measured by a side effect the skipped side
+    // would leave: `true || …` must not run the right operand, and `false || …`
+    // must. A `var` captured by cell is what makes the count visible.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var n = 0\n  let bump = || { n = n + 1\n true }\n  \
+         let a = true || bump()\n  let b = false || bump()\n  \
+         if a { 0 } else { 0 }\n  if b { n } else { 100 }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        1,
+        "only the `false ||` ran its right operand"
+    );
+
+    // …and `&&` is unaffected, from the other side of the precedence table.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var n = 0\n  let bump = || { n = n + 1\n true }\n  \
+         let a = false && bump()\n  if a { 100 } else { n }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+
+    // A zero-parameter closure nests inside another one — the body of a `||` is
+    // an ordinary expression, so `|| || 7` is a closure returning a closure.
+    let (rt, result) = run_main("fn main() -> Int {\n  let f = || || 7\n  f()()\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 7);
+
+    // …and it survives allocation pressure between its creation and its call.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let n = 6\n  let f = || n * 7\n  let scratch = Vec()\n  \
+         var i = 0\n  while i < 200 { scratch.push(i)\n i = i + 1 }\n  f()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
