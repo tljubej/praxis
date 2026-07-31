@@ -90,9 +90,7 @@ template with a trailing literal could match anything.
 
 The bound is computed in `walk_template`, not in `walk_atomic`, and it is applied
 to **every** capture rather than only the `text` ones. A capture is handed
-`region.subregion(cursor, bound)` and must fill it, where `bound` is the earliest
-position at which the next non-empty literal can match after its whitespace
-policy.
+`region.subregion(cursor, bound)` and must fill it.
 
 Uniformity is the decision, not an implementation convenience:
 
@@ -101,9 +99,40 @@ Uniformity is the decision, not an implementation convenience:
 - It is what bounds `{a:int}` to the comma in `{a:int},{b:int}`.
 - It closes IPR-11 without touching `word`'s delimiter set (Decision 3).
 
-The bound is taken **before** the following literal's whitespace policy runs, so
-for `{a:int},{b:int}` on `"12 ,34"` the comma's `SpaceRun` absorbs the space and
+The bound is taken **before** the following whitespace policy runs, so for
+`{a:int},{b:int}` on `"12 ,34"` the comma's `SpaceRun` absorbs the space and
 `int` still consumes its region exactly.
+
+### What the bound is
+
+**AMENDED.** This section said the bound was "the earliest position at which the
+next **non-empty literal** can match after its whitespace policy". That was the
+rule as first shipped, and it was the reported defect: a capture followed by a
+whitespace-only part was not bounded at all, because §7.9 lowers a run of
+whitespace to a `Literal` whose *text is empty* and whose policy carries the
+requirement. So `` lines(`{name:text} {v:int}`) `` over `"foo 3"` reported
+"expected whitespace" at the end of the line — for the most ordinary template
+shape there is — while `{a:text} -> {b:int}` worked, purely because `->` has
+bytes. Decisions 1 and 6 were amended in place when their code changed; this one
+was missed, and an ADR that describes code which no longer exists is worse than
+no ADR.
+
+The rule is:
+
+> The bound is the earliest position at which the next **constraining** part can
+> match.
+
+A part constrains when it demands at least one byte. A literal with text does; so
+does a whitespace-only part whose policy is `SpaceRun`, `OneOrMore`,
+`ExactSpace`, `Newline` or `Tab` — a plain space run, `\s+`, `\x20`, `\t`, `\n`.
+§7.4's "until the following template literal can match" does not exempt a part
+for having no text: a space run *is* that literal.
+
+`WsPolicy::None` and `WsPolicy::ZeroOrMore` match the empty string, so they
+constrain nothing and are skipped; the scan continues past them to whatever does.
+That is why `` `{a:text}\s*{v:int}` `` over `"foo 3"` leaves the capture unbounded
+and reports "expected int" — asking for zero-or-more is asking for no bound, and
+that is the answer.
 
 ## Decision 3: `word`'s delimiter set stays minimal
 
