@@ -25,13 +25,20 @@ use praxis_syntax::ident::{is_ident_continue, is_ident_start};
 
 use crate::ast::{shift_part_spans, AtomicKind, Constructor, ParserAst};
 use crate::call::{build_call, build_repeated_tail, CallArg};
-use crate::scan::{Scan, ScanError, MAX_NESTING};
+use crate::scan::{Scan, ScanError};
 
 /// Parse a capture body into its [`ParserAst`].
 ///
 /// `at` is the body's byte offset within the text the caller is scanning, so
-/// spans and error offsets are meaningful; `depth` is the current nesting depth
-/// (see [`MAX_NESTING`]).
+/// spans and error offsets are meaningful; `depth` is how many templates are
+/// already open (see [`crate::scan::MAX_NESTING`]), threaded through to the backtick arm of
+/// [`parse_expr`] and not re-checked here.
+///
+/// **The bound is checked in one place**, `scan_template_at`, because that is
+/// the one place a template level is entered. This function used to check it
+/// too, against a `depth` that its caller had already incremented — two guards
+/// counting the same recursion twice, so the effective limit was half the one
+/// the message named.
 ///
 /// # Errors
 /// [`ScanError`] for an unknown parser name, an unknown constructor, a
@@ -42,9 +49,6 @@ pub(crate) fn parse_capture_body(
     at: usize,
     depth: usize,
 ) -> Result<ParserAst, ScanError> {
-    if depth > MAX_NESTING {
-        return Err(ScanError::NestingTooDeep { byte_offset: at });
-    }
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err(ScanError::EmptyCapture { byte_offset: at });

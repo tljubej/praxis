@@ -62,7 +62,16 @@ pub enum ScanError {
     /// code and the message are the same ones a top-level call would report.
     CallShape(ValidationError),
     /// Nesting past [`MAX_NESTING`].
-    NestingTooDeep { byte_offset: usize },
+    ///
+    /// `what` is **which** nesting hit the bound — templates, `{`, or `(`. The
+    /// message named templates for all three, so `csv(` thirty-three deep was
+    /// reported as "template nesting is deeper than 32" for text with one
+    /// template in it. A diagnostic that states the wrong thing is worse than a
+    /// vague one.
+    NestingTooDeep {
+        byte_offset: usize,
+        what: &'static str,
+    },
 }
 
 impl ScanError {
@@ -77,7 +86,7 @@ impl ScanError {
             | ScanError::UnknownCaptureKind { byte_offset, .. }
             | ScanError::UnknownConstructor { byte_offset, .. }
             | ScanError::MalformedCaptureBody { byte_offset, .. }
-            | ScanError::NestingTooDeep { byte_offset } => *byte_offset,
+            | ScanError::NestingTooDeep { byte_offset, .. } => *byte_offset,
             ScanError::CallShape(err) => err.span.start().to_u32() as usize,
         }
     }
@@ -124,8 +133,9 @@ impl ScanError {
                 byte_offset: bump(byte_offset),
                 message,
             },
-            ScanError::NestingTooDeep { byte_offset } => ScanError::NestingTooDeep {
+            ScanError::NestingTooDeep { byte_offset, what } => ScanError::NestingTooDeep {
                 byte_offset: bump(byte_offset),
+                what,
             },
             ScanError::CallShape(mut err) => {
                 err.span = err.span.shifted(delta as u32);
@@ -192,9 +202,14 @@ impl std::fmt::Display for ScanError {
                 message,
             } => write!(f, "malformed capture body at byte {byte_offset}: {message}"),
             ScanError::CallShape(err) => f.write_str(&err.message),
-            ScanError::NestingTooDeep { byte_offset } => write!(
+            // **The number is the number that is enforced**, and `what` is
+            // what was counted. The message named templates and `MAX_NESTING`
+            // whatever tripped — including a parenthesis bound, and including a
+            // template bound that fired at half that depth because the two
+            // mutually recursive halves each added one per level.
+            ScanError::NestingTooDeep { byte_offset, what } => write!(
                 f,
-                "template nesting is deeper than {MAX_NESTING} at byte {byte_offset}"
+                "{what} nesting is deeper than {MAX_NESTING} at byte {byte_offset}"
             ),
         }
     }
@@ -296,12 +311,26 @@ pub fn scan_template(interior: &str) -> Result<Vec<TemplatePart>, ScanError> {
 }
 
 /// [`scan_template`] with the current nesting depth (D10).
+///
+/// `depth` is **how many templates are already open**, so the outermost is
+/// scanned at `0` and the bound is `MAX_NESTING` levels — the same count, and
+/// the same limit, as `praxis_syntax::template::template_end`, which is what
+/// decides how much text the lexer hands over in the first place.
+///
+/// It used to be incremented at *both* hops of the mutual recursion — here for
+/// the capture body, and again in `body::parse_expr` for the nested template —
+/// so one template level cost two, the scanner refused at seventeen levels, and
+/// the message still named thirty-two. A stricter inner bound would have been
+/// defensible; a diagnostic naming a limit nothing enforces is not.
 pub(crate) fn scan_template_at(
     interior: &str,
     depth: usize,
 ) -> Result<Vec<TemplatePart>, ScanError> {
-    if depth > MAX_NESTING {
-        return Err(ScanError::NestingTooDeep { byte_offset: 0 });
+    if depth >= MAX_NESTING {
+        return Err(ScanError::NestingTooDeep {
+            byte_offset: 0,
+            what: "template",
+        });
     }
     let mut parts = Vec::new();
     let mut lit = String::new();
@@ -316,7 +345,11 @@ pub(crate) fn scan_template_at(
                     Some(raw) => Some(capture_name(raw, at)?),
                     None => None,
                 };
-                let parser = crate::body::parse_capture_body(body_text, body_at, depth + 1)?;
+                // **Not `depth + 1`.** A capture body is inside *this*
+                // template, not inside a further one; the level is added where
+                // a level is entered, which is `body::parse_expr`'s backtick
+                // arm calling back into here.
+                let parser = crate::body::parse_capture_body(body_text, body_at, depth)?;
                 parts.push(TemplatePart::Capture {
                     name,
                     parser: Box::new(parser),
@@ -480,7 +513,10 @@ fn capture_extent<'a>(
             '{' => {
                 braces += 1;
                 if braces > MAX_NESTING {
-                    return Err(ScanError::NestingTooDeep { byte_offset: at });
+                    return Err(ScanError::NestingTooDeep {
+                        byte_offset: at,
+                        what: "`{`",
+                    });
                 }
                 cur.bump();
             }
@@ -494,7 +530,10 @@ fn capture_extent<'a>(
             '(' => {
                 parens += 1;
                 if parens > MAX_NESTING {
-                    return Err(ScanError::NestingTooDeep { byte_offset: at });
+                    return Err(ScanError::NestingTooDeep {
+                        byte_offset: at,
+                        what: "`(`",
+                    });
                 }
                 cur.bump();
             }
@@ -1035,5 +1074,96 @@ mod tests {
         );
         // The bound is far above what anyone writes: three levels is fine.
         assert!(scan_template("{a:optional(csv(int))}").is_ok());
+    }
+
+    /// The interior of a template nested `n` levels deep: `n = 1` is
+    /// `{a:int}`, and each further level wraps the last in a capture holding a
+    /// backtick template.
+    fn nested_interior(n: usize) -> String {
+        let mut interior = "{a:int}".to_string();
+        for _ in 1..n {
+            interior = format!("{{a:`{interior}`}}");
+        }
+        interior
+    }
+
+    /// **The number in the message is the number that is enforced, and it is
+    /// the lexer's number.**
+    ///
+    /// Two layers bound template nesting: `praxis_syntax::template::template_end`
+    /// decides how much text the lexer hands over, and the scanner's own
+    /// recursion refuses before it can overflow the stack. The scanner's guard
+    /// was incremented at *both* hops of the mutual recursion — once in
+    /// `scan_template_at` for the capture body and again in `body::parse_expr`
+    /// for the nested template — so one template level cost two and the
+    /// scanner refused at **17** levels. The message still said 32.
+    ///
+    /// A stricter inner bound would have been defensible. A diagnostic naming a
+    /// limit that nothing enforces is not, which is why this asserts the
+    /// *rendered* number and not only the behaviour.
+    #[test]
+    fn the_two_template_nesting_bounds_are_the_same_number_and_the_message_says_it() {
+        use praxis_syntax::template::{template_end, TemplateEnd};
+
+        // The deepest nest the scanner accepts, measured rather than assumed.
+        let deepest = (1..=MAX_NESTING + 4)
+            .take_while(|n| scan_template(&nested_interior(*n)).is_ok())
+            .last()
+            .expect("one level at least");
+        assert_eq!(
+            deepest, MAX_NESTING,
+            "the scanner's effective limit must be MAX_NESTING, not half of it"
+        );
+
+        // One past it refuses, and says so about *templates*.
+        let err = scan_template(&nested_interior(MAX_NESTING + 1)).expect_err("one too deep");
+        assert!(
+            matches!(
+                err,
+                ScanError::NestingTooDeep {
+                    what: "template",
+                    ..
+                }
+            ),
+            "the {}-level nest must be refused as template nesting, got {err}",
+            MAX_NESTING + 1
+        );
+        let rendered = err.to_string();
+        let named: usize = rendered
+            .split_whitespace()
+            .find_map(|w| w.parse().ok())
+            .expect("the message names a limit");
+        assert_eq!(
+            named, deepest,
+            "the message says {named} and the checker enforces {deepest}: {rendered}"
+        );
+
+        // And it is the lexer's number: `MAX_NESTING` *is*
+        // `MAX_TEMPLATE_NESTING`, and at exactly that depth both layers take
+        // the template whole — the lexer delivers one token spanning all of it
+        // and the scanner reads it.
+        //
+        // Past the bound the two are not symmetric, and the comment should not
+        // pretend otherwise: `template_end` stops treating a backtick as an
+        // *opener* rather than refusing, so it still hands over a token. The
+        // scanner is the layer that says no, which is why its number has to be
+        // this one and its message has to name it.
+        assert_eq!(MAX_NESTING, praxis_syntax::MAX_TEMPLATE_NESTING);
+        let at_the_bound = format!("`{}`", nested_interior(MAX_NESTING));
+        assert_eq!(
+            template_end(&at_the_bound, 0),
+            TemplateEnd::Closed(at_the_bound.len()),
+            "the lexer delivers a {MAX_NESTING}-level template whole"
+        );
+
+        // A `(` bound is not a template bound, and the message no longer says
+        // it is: `csv(` past the limit reported "template nesting is deeper
+        // than 32" for text holding exactly one template.
+        let parens = format!("{{a:{}int{}}}", "csv(".repeat(64), ")".repeat(64));
+        let err = scan_template(&parens).expect_err("too many parens");
+        assert!(
+            matches!(err, ScanError::NestingTooDeep { what: "`(`", .. }),
+            "a parenthesis bound must name parentheses, got {err}"
+        );
     }
 }
