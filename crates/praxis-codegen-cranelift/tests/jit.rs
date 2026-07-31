@@ -2607,17 +2607,51 @@ fn adv_read_against_non_text_input_faults_cleanly() {
 
 #[test]
 fn adv_csv_inside_sections_nonzero_offset() {
-    // PROBE (parser.rs walk_csv): the `walk_csv` path had a dead `token_end`
-    // and may mis-handle CSV inside a non-zero-offset region (CSV inside a
-    // section). `sections(csv(int))` parses each blank-line section as a CSV
-    // list starting at a non-zero byte offset. If the offset is wrong, the
-    // parse faults or drops elements. We count the sections (2) — this still
-    // exercises the non-zero-offset CSV path without hitting the inference gap
-    // on methods of Vec-element-typed locals.
-    let src = "fn main() -> Int {\n  let s = read sections(csv(int))\n  s.len()\n}\n";
+    // PROBE (parser.rs walk_csv): CSV inside a section starts at a non-zero
+    // byte offset, and the offset used to be recovered by *searching* the
+    // region for the token's text (`region_offset_of`) rather than computed —
+    // so a repeated field resolved to the first occurrence and an empty one
+    // panicked. This counts the sections and then reads a value out of the
+    // *second* one, which is the half a count alone cannot see.
+    //
+    // REWRITTEN (S20/IPR-04). It used to read `sections(csv(int))` over
+    // `"1,2,3\n4,5,6\n\n7,8\n9,10\n"` and assert only that there were two
+    // sections. That input gives `csv` a region containing a newline, so one
+    // of its fields is the text `"3\n4"` — and the assertion passed only
+    // because `csv` walked its child against the whole remaining buffer and
+    // threw the cursor away, so `int` read the `3` and the `\n4` was silently
+    // nobody's. Under §7.5's full-consumption rule that region is a parse
+    // failure, correctly. `csv` describes one line; a section of several lines
+    // is `lines(csv(...))`, which is what day05 writes.
+    let src = "fn main() -> Int {\n  let s = read sections(lines(csv(int)))\n  \
+               s.get(1).get(0).get(1)\n}\n";
     let (rt, result) = run_main_with_input(src, "1,2,3\n4,5,6\n\n7,8\n9,10\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), 2);
+    assert_eq!(
+        result.as_int(),
+        8,
+        "the second section's first line's second field is 8, at byte 15 of the input"
+    );
+}
+
+/// **IPR-04.** A `csv` field whose region contains anything the child parser
+/// does not consume is a parse failure, not a silent truncation.
+///
+/// The predecessor computed each field's bounds and then walked the child
+/// against everything from the field's start to the end of the buffer, with the
+/// end explicitly discarded (`let _ = token_end;`). So `csv(int)` over a region
+/// with a stray newline in it "worked" by reading the digits it liked.
+#[test]
+fn a_csv_field_the_child_does_not_consume_is_a_parse_failure() {
+    let (rt, _result) = run_main_with_input(
+        "fn main() -> Int {\n  let v = read csv(int)\n  v.len()\n}\n",
+        "1,2x,3\n",
+    );
+    assert_eq!(
+        rt.fault(),
+        praxis_runtime::FaultKind::ParseFailed,
+        "`2x` is not an int, and a field the child leaves bytes in must not be accepted"
+    );
 }
 
 #[test]

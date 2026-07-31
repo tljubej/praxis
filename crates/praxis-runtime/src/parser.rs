@@ -482,6 +482,43 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
 
 // ---- constructors (§7.5) --------------------------------------------------
 
+/// Walk `node` against `region` and require it to consume the region **exactly**.
+///
+/// §7.5's rule for a bounded construct is that "each application must consume
+/// the entire line" (and the same for a section, a CSV field, a
+/// whitespace-delimited token, a matrix cell). The predecessor computed those
+/// bounds and then walked the child against everything from the bound's start
+/// to the end of the buffer, discarding the child's cursor — five separate
+/// `let (value, _consumed) = …` and one explicit `let _ = token_end;`. So
+/// `lines(int)` accepted `12junk` and `csv(rest)` returned the whole remainder
+/// for its first field.
+///
+/// Returning a bare `GcRef` is the point: there is no cursor left for a caller
+/// to forget to check, so "I bounded the child but did not require it to fill
+/// the bound" stops being expressible.
+///
+/// # Safety
+/// `ctx` must be live and wired.
+unsafe fn walk_exact(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    node: u32,
+    region: ByteRegion,
+    what: &'static str,
+) -> Result<GcRef, ParseFail> {
+    // SAFETY: forwarded from this function's contract.
+    let walked = unsafe { walk(rt.ctx, i, plan, node, region)? };
+    if walked.next != region.end() {
+        return Err(ParseFail::at(
+            walked.next.offset(),
+            region.end().delta_from(walked.next),
+            what,
+        ));
+    }
+    Ok(walked.value)
+}
+
 /// The text a region spans, or a parse failure naming `what`.
 ///
 /// The predecessor wrote `str::from_utf8(region).unwrap_or("")` in three
@@ -563,9 +600,12 @@ fn walk_lines(
 ) -> WalkResult {
     let mut items = Vec::new();
     for line in split_lines(i, region) {
+        // One line, consumed exactly. The predecessor walked the child against
+        // everything from the line's start to the end of the buffer and threw
+        // the cursor away, so `lines(int)` accepted `12junk` and `lines(rest)`
+        // handed every element the whole remaining input (IPR-02).
         // SAFETY: ctx is valid (upheld by `walk`'s caller).
-        let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(line.start()))? };
-        items.push(walked.value);
+        items.push(unsafe { walk_exact(rt, i, plan, child, line, "the rest of the line")? });
     }
     let elem_desc = child_descriptor(plan, child);
     Ok(Walked {
@@ -589,8 +629,7 @@ fn walk_sections(
         // input, so a `word` in section 2 named bytes at the start of the file
         // (IPR-03, the stage's P0).
         // SAFETY: ctx is valid.
-        let walked = unsafe { walk(rt.ctx, i, plan, child, section)? };
-        items.push(walked.value);
+        items.push(unsafe { walk_exact(rt, i, plan, child, section, "the rest of the section")? });
     }
     let elem_desc = child_descriptor(plan, child);
     Ok(Walked {
@@ -627,8 +666,9 @@ fn walk_sections_named(
     let mut captures: Vec<(Option<&'static str>, u32, GcRef)> = Vec::new();
     for (n, (name, child)) in fields.iter().enumerate() {
         // SAFETY: ctx is valid.
-        let walked = unsafe { walk(rt.ctx, i, plan, *child, sections[n])? };
-        captures.push((Some(name), *child, walked.value));
+        let value =
+            unsafe { walk_exact(rt, i, plan, *child, sections[n], "the rest of the section")? };
+        captures.push((Some(name), *child, value));
     }
     if let Some((tail_name, tail_child)) = repeated_tail {
         // The tail consumes every remaining section, parsed per-section by its
@@ -636,8 +676,9 @@ fn walk_sections_named(
         let mut tail_items = Vec::new();
         for section in &sections[fields.len()..] {
             // SAFETY: ctx is valid.
-            let walked = unsafe { walk(rt.ctx, i, plan, tail_child, *section)? };
-            tail_items.push(walked.value);
+            tail_items.push(unsafe {
+                walk_exact(rt, i, plan, tail_child, *section, "the rest of the section")?
+            });
         }
         let elem_desc = child_descriptor(plan, tail_child);
         let tail_vec = rt.alloc_vec(elem_desc, tail_items);
@@ -1006,10 +1047,9 @@ fn walk_matrix(
         }
         for token in row {
             // The token's own region, not its bytes copied into a fresh buffer
-            // walked at offset zero (IPR-03/IPR-05).
+            // walked at offset zero (IPR-03/IPR-05), and consumed exactly.
             // SAFETY: ctx is valid.
-            let walked = unsafe { walk(rt.ctx, i, plan, child, *token)? };
-            items.push(walked.value);
+            items.push(unsafe { walk_exact(rt, i, plan, child, *token, "the rest of the token")? });
         }
     }
     let elem_desc = child_descriptor(plan, child);
@@ -1040,7 +1080,16 @@ fn walk_grid_ragged(
         .ok_or_else(|| ParseFail::at(region.start().offset(), 0, "grid fill"))?;
     let fill_region = fill_input.whole();
     // SAFETY: ctx is valid.
-    let fill_value = unsafe { walk(rt.ctx, &fill_input, plan, child, fill_region)? }.value;
+    let fill_value = unsafe {
+        walk_exact(
+            rt,
+            &fill_input,
+            plan,
+            child,
+            fill_region,
+            "the rest of the fill",
+        )?
+    };
     let mut items = Vec::with_capacity(lines.len() * width);
     for line in &lines {
         let mut cell = line.start();
@@ -1097,9 +1146,11 @@ fn walk_csv(
     let text = region_str(i, region, "csv")?;
     let mut items = Vec::new();
     for token in csv_tokens(region, text) {
+        // The field's own region. `csv` used to hand the child everything from
+        // the field's start to the end of the input and discard the cursor —
+        // the discard was even written out, `let _ = token_end;` (IPR-04).
         // SAFETY: ctx is valid.
-        let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(token.start()))? };
-        items.push(walked.value);
+        items.push(unsafe { walk_exact(rt, i, plan, child, token, "the rest of the field")? });
     }
     let elem_desc = child_descriptor(plan, child);
     Ok(Walked {
@@ -1133,8 +1184,7 @@ fn walk_ws(
         }
         let token = region.subregion(base.advance(token_start), base.advance(pos));
         // SAFETY: ctx is valid.
-        let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(token.start()))? };
-        items.push(walked.value);
+        items.push(unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? });
     }
     let elem_desc = child_descriptor(plan, child);
     Ok(Walked {
@@ -1173,8 +1223,7 @@ fn walk_sep(
         if bytes[pos..].starts_with(sep_bytes) {
             let token = region.subregion(base.advance(token_start), base.advance(pos));
             // SAFETY: ctx is valid.
-            let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(token.start()))? };
-            items.push(walked.value);
+            items.push(unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? });
             pos += sep_bytes.len();
             token_start = pos;
         } else {
@@ -1185,8 +1234,7 @@ fn walk_sep(
     if token_start < bytes.len() {
         let token = region.subregion(base.advance(token_start), region.end());
         // SAFETY: ctx is valid.
-        let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(token.start()))? };
-        items.push(walked.value);
+        items.push(unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? });
     }
     let elem_desc = child_descriptor(plan, child);
     Ok(Walked {
@@ -2115,7 +2163,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: csv does not bound child parsers to an individual token"]
     fn csv_rest_parser_is_bounded_to_each_token() {
         let mut rt = crate::Runtime::new();
         let input = rt.alloc_text("a,b");
@@ -2162,9 +2209,9 @@ mod tests {
         let result = unsafe { run_root(&mut ctx, &plan, input) }
             .expect("an empty csv field is an empty Text, not an abort");
         let values: Vec<&str> = result.as_vec().iter().map(GcRef::as_text).collect();
-        assert_eq!(values.len(), 3, "three commas' worth of fields");
         assert_eq!(
-            values[2], "",
+            values,
+            vec!["10", "20", ""],
             "the field after the last comma is empty, and being empty is not a panic"
         );
     }

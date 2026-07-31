@@ -469,7 +469,6 @@ fn sections_preserve_text_offsets_into_the_original_input() {
 }
 
 #[test]
-#[ignore = "known bug: lines accepts a child parser that consumed only a prefix"]
 fn lines_require_each_child_parser_to_consume_the_whole_line() {
     // `int` may consume the `12` prefix, but the trailing `junk` makes the line
     // invalid under §7.5 full-consumption semantics.
@@ -485,7 +484,6 @@ fn lines_require_each_child_parser_to_consume_the_whole_line() {
 }
 
 #[test]
-#[ignore = "known bug: lines(rest) receives the full remaining input, not one line"]
 fn lines_rest_is_bounded_to_each_line() {
     let src = "fn main() -> Text {\n  let values = read lines(rest)\n  values.get(1)\n}\n";
     let (runtime, result) = run_main_with_input(src, "alpha\nbeta\ngamma\n");
