@@ -1,10 +1,14 @@
 // Input-parser fixture: `ws(P)` at the ROOT, over a newline-terminated file.
 //
-// §7.5's `ws(parser)` splits on spaces or tabs. The input this reads is an
-// ordinary file, so it ends with `\n` — and the root region has to end where
-// the data ends, or the last token is `3\n` and `int` is asked to eat the
-// terminator. Every other `ws` test in the tree deliberately omits the newline,
-// which is how that got through.
+// §7.5's `ws(parser)` splits on spaces or tabs — that names the separator, and
+// a token contains no whitespace of any kind. The input this reads is an
+// ordinary file, so it ends with `\n`; a repair that made the last token `3\n`
+// and asked `int` to eat the terminator faulted here. Every other `ws` test in
+// the tree deliberately omits the newline, which is how that got through.
+//
+// Reference state: PASSES at the pre-S20 base b2184c8, fails at 9458fd5. The
+// defect was introduced and closed inside this branch — a regression fixture,
+// not a gate for an audit finding.
 fn main() -> Int {
     let v = read ws(int);
     var total = 0;

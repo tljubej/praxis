@@ -480,8 +480,18 @@ fn heavy_jit_loop_proves_that_automatic_collection_actually_ran() {
 /// The values must be compared and not merely counted: swept storage is reused
 /// (the free list is keyed on layout), so a reclaimed live intermediate
 /// surfaces as type confusion rather than a clean crash. And `live_count` has
-/// to be far below what was allocated, or no sweep ran and the test proves
-/// nothing.
+/// to be far below what was allocated, or nothing was reclaimed at all.
+///
+/// **What this test does and does not gate.** Its subject is that pacing and
+/// rooting are *consistent*: in a tree with only the two `scope.root(…)` calls
+/// in `walk_scan` and `walk_choice` deleted it answers 574840 against 449400,
+/// which is the number this commit reports. It is not a differential against
+/// the pre-S20 base — it passes at `b2184c8`, where the parser is unpaced and
+/// unrooted, so both assertions hold with no collection inside the parse at
+/// all. The `live_count` guard cannot tell a sweep that ran while the parse was
+/// assembling from one the generated code paced during the `for` loop
+/// afterwards; measuring the parse itself would need a collection counter
+/// sampled across a program that only does `read`.
 #[test]
 fn choice_backtracking_under_allocation_pressure_keeps_every_live_intermediate() {
     // 600 real matches; 15 allocate-then-fail attempts before each one.

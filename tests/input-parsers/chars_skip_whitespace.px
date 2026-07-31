@@ -2,11 +2,16 @@
 // example, verbatim, at the ROOT over a newline-terminated file.
 //
 // `skip: whitespace` is horizontal whitespace — spaces and tabs — so it cannot
-// absorb the file's trailing `\n`; the newline has to be outside the region
-// instead. The corpus already used this constructor, but only nested inside
-// `sections`, whose section regions exclude their line ending — so the one
-// fixture that exercised §7.5's example was exactly the shape where the defect
-// was invisible.
+// absorb the file's trailing `\n`, and it does not have to: the newline is
+// whitespace the character parser declined, which is nobody's and not an error.
+// The corpus already used this constructor, but only nested inside `sections`,
+// whose section regions exclude their line ending — so the one fixture that
+// exercised §7.5's example was exactly the shape where the defect was
+// invisible.
+//
+// Reference state: this fixture PASSES on the pre-S20 base b2184c8 and fails
+// at 9458fd5. The defect it pins was introduced and closed inside this branch,
+// so it is a regression fixture and not a gate for an audit finding.
 fn main() -> Int {
     let moves = read chars(one_of("^v<>"), skip: whitespace);
     moves.len()

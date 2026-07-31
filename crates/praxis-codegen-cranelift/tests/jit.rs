@@ -2607,22 +2607,39 @@ fn adv_read_against_non_text_input_faults_cleanly() {
 
 #[test]
 fn adv_csv_inside_sections_nonzero_offset() {
-    // PROBE (parser.rs walk_csv): CSV inside a section starts at a non-zero
-    // byte offset, and the offset used to be recovered by *searching* the
-    // region for the token's text (`region_offset_of`) rather than computed —
-    // so a repeated field resolved to the first occurrence and an empty one
-    // panicked. This counts the sections and then reads a value out of the
-    // *second* one, which is the half a count alone cannot see.
+    // PROBE (parser.rs walk_csv): a CSV inside a section starts at a non-zero
+    // byte offset. The predecessor re-sliced the section and walked its child
+    // at offset 0, and recovered each field's offset by *searching* the region
+    // for the field's text (`region_offset_of`) rather than computing it, which
+    // also called `slice::windows(0)` — a panic inside `extern "C"` — for a
+    // field that trimmed to nothing.
     //
-    // REWRITTEN (S20/IPR-04). It used to read `sections(csv(int))` over
+    // REWRITTEN (S20/IPR-03, IPR-04). It used to read `sections(csv(int))` over
     // `"1,2,3\n4,5,6\n\n7,8\n9,10\n"` and assert only that there were two
-    // sections. That input gives `csv` a region containing a newline, so one
-    // of its fields is the text `"3\n4"` — and the assertion passed only
-    // because `csv` walked its child against the whole remaining buffer and
-    // threw the cursor away, so `int` read the `3` and the `\n4` was silently
-    // nobody's. Under §7.5's full-consumption rule that region is a parse
-    // failure, correctly. `csv` describes one line; a section of several lines
-    // is `lines(csv(...))`, which is what day05 writes.
+    // sections. That input gives `csv` a region containing a newline, so one of
+    // its fields is the text `"3\n4"` — and the count passed only because `csv`
+    // walked its child against the whole remaining buffer and threw the cursor
+    // away, so `int` read the `3` and the `\n4` was silently nobody's. Under
+    // §7.5's full-consumption rule that region is a parse failure, correctly.
+    // `csv` describes one line; a section of several lines is
+    // `lines(csv(...))`, which is what day05 writes.
+    //
+    // **What this test can and cannot distinguish.** The `Int` assertion below
+    // is not a differential and is not claimed as one: the search finds text
+    // equal to the field's text, so a misresolved duplicate still parses to the
+    // same number, and the pre-S20 tree answers `8` too. The two halves that
+    // *are* observable follow it, and both were re-run against `b2184c8`:
+    //
+    //   * a `Text` read out of the *second* section — b2184c8 answers `"cc"`,
+    //     the FIRST section's second line's first field, because it re-sliced
+    //     the section and walked the child at offset 0 while allocating slices
+    //     against the whole input (IPR-03, the stage's P0);
+    //   * a field that trims to nothing — b2184c8 does not answer at all, it
+    //     panics with "window size must be non-zero" inside `extern "C"`.
+    //
+    // §7.5's full-consumption half is carried by
+    // `a_csv_field_the_child_does_not_consume_is_a_parse_failure` and
+    // `csv_rest_parser_is_bounded_to_each_token` (parser.rs), not by this test.
     let src = "fn main() -> Int {\n  let s = read sections(lines(csv(int)))\n  \
                s.get(1).get(0).get(1)\n}\n";
     let (rt, result) = run_main_with_input(src, "1,2,3\n4,5,6\n\n7,8\n9,10\n");
@@ -2632,6 +2649,30 @@ fn adv_csv_inside_sections_nonzero_offset() {
         8,
         "the second section's first line's second field is 8, at byte 15 of the input"
     );
+
+    // A `Text` field out of the second section. Every field text is distinct,
+    // so any offset that names the wrong field — a re-based-to-zero section
+    // walk, or a search that resolves inside the first section — answers with
+    // different bytes and this fails.
+    let src = "fn main() -> Text {\n  let s = read sections(lines(csv(word)))\n  \
+               s.get(1).get(1).get(0)\n}\n";
+    let (rt, result) = run_main_with_input(src, "aa,bb\ncc,dd\n\nee,ff\ngg,hh\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_text(),
+        "gg",
+        "the second section's second line's first field, at byte 19 — not `aa`"
+    );
+
+    // A field that trims to nothing, which is where `region_offset_of` reached
+    // `windows(0)`. `"10,20,"` was enough. The assertion is the empty field's
+    // own length: a panic here is not a failed assertion, it is undefined
+    // behaviour across the ABI (D12).
+    let src = "fn main() -> Int {\n  let s = read sections(lines(csv(rest)))\n  \
+               s.get(1).get(0).get(2).len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "1,2,3\n\n10,20,\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0, "a field that trims to nothing is empty");
 }
 
 /// **IPR-04.** A `csv` field whose region contains anything the child parser
@@ -5929,16 +5970,23 @@ fn a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names() {
     // The written cell is deliberately **off the diagonal**: a store that reached
     // `praxis_grid_set(g, y, x, v)` would pass on a diagonal cell.
     //
-    // AMENDED (S20/D11) — the **input**, not the rule this test is about. It
+    // ADAPTED (S20/D11) — the **input**, and this is not a gate for D11. It
     // used to read `"12\n34\n"` and expect `g[0, 0] == 12`, which says a
     // `grid(int)` cell is a whole token *and* that `"12"` is one such token per
     // row. The first half is right and D11 confirms it; the second was an
     // accident of the predecessor's behaviour, which measured width in bytes
     // and answered the four cells `[12, 2, 34, 4]` — the token, and then the
-    // token's tail. Under the rule the input has to spell two cells per row,
-    // which is what `"1 2\n3 4\n"` does. The subject is untouched: the written
-    // cell is still off the diagonal, so a store that reached
+    // token's tail. `"1 2\n3 4\n"` is the input that stays legal under D11 and
+    // still gives this test a 2x2 grid; the subject is untouched, so the
+    // written cell is still off the diagonal and a store that reached
     // `praxis_grid_set(g, y, x, v)` still fails.
+    //
+    // The change is an adaptation, not a differential: this test passes on the
+    // pre-S20 tree with the new input too, because its subject is subscript
+    // argument order and not grid cell semantics. D11 is gated by
+    // `a_grid_cell_is_whatever_its_cell_parser_reads` (parser.rs) and
+    // `a_grid_of_char_is_positional_so_a_space_is_a_cell`
+    // (adversarial_audit.rs).
     let (rt, result) = run_main_with_input(
         "fn main() -> Int {\n  let g = read grid(int)\n  g[1, 0] = 7\n  \
          g[1, 0] * 100 + g[0, 0] * 10 + g[0, 1]\n}\n",

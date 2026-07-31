@@ -3,6 +3,10 @@
 // §7.5's own spelling, `sep(" -> ", word)`. The final token runs to the end of
 // the region, so a root region that included the file's `\n` handed `word` a
 // token of `b\n`.
+//
+// Reference state: PASSES at the pre-S20 base b2184c8, fails at 9458fd5. The
+// defect was introduced and closed inside this branch — a regression fixture,
+// not a gate for an audit finding.
 fn main() -> Int {
     let v = read sep(" -> ", word);
     v.len()

@@ -8,6 +8,10 @@
 //
 // The last line also ends the file with a space before its newline, which is
 // the ending no fixture in this directory had.
+//
+// Reference state: PASSES at the pre-S20 base b2184c8, fails at e68ac0c. A
+// regression fixture for a defect this branch introduced and closed, not a gate
+// for an audit finding.
 fn main() -> Int {
     let v = read lines(int)
     v.len() * 10 + v.get(2)

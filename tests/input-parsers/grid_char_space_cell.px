@@ -8,6 +8,10 @@
 // genuinely ragged grid as a clean rectangle. `find_all` of the middle cell
 // finds the other row's middle cell, which is what says the space is a value
 // and not an absence.
+//
+// Reference state: PASSES at the pre-S20 base b2184c8 (which answers 322 for a
+// different reason), fails at 9458fd5 with 221. A regression fixture for a
+// defect this branch introduced and closed, not a gate for an audit finding.
 fn main() -> Int {
     let g = read grid(char);
     let middle = g.get(1, 0);

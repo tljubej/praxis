@@ -341,7 +341,7 @@ no test body.
 | `single_anonymous_template_capture_uses_its_child_descriptor` | `parser.rs` | IPR-13 — ``lines(`{word}`)`` carries `TEXT` |
 | `anonymous_word_template_vec_uses_the_text_element_descriptor` | `adversarial_audit.rs` | IPR-13 end to end, and it asserts the **rendering** as well as the tag, which is what proves the dispatch rather than the label |
 | `a_failed_choice_reports_the_deepest_case_failure` | `parser.rs` | **NEW** — IPR-09. `expected` is the inner atomic at the byte the furthest case broke at, not `"any choice case"` at the choice's own offset |
-| `choice_backtracking_under_allocation_pressure_keeps_every_live_intermediate` | `adversarial_audit.rs` | **NEW** — IPR-14, and the only test that can see it. 600 matches behind 9,000 attempts that allocate and then fail, so the collector runs several times *inside* the parse. Asserts the summed values (swept storage is reused, so a reclaimed intermediate is type confusion, not a crash) **and** that `live_count` is far below what was allocated, or no sweep ran and it proves nothing |
+| `choice_backtracking_under_allocation_pressure_keeps_every_live_intermediate` | `adversarial_audit.rs` | **NEW** — IPR-14's rooting invariant. 600 matches behind 9,000 attempts that allocate and then fail. Asserts the summed values (swept storage is reused, so a reclaimed intermediate is type confusion, not a crash) **and** that `live_count` is far below what was allocated. See class (b) below: it is not a differential against the pre-S20 base, and its `live_count` guard cannot prove the sweep ran *inside* the parse |
 | `every_no_mangle_wrapper_is_behind_the_panic_guard` | `praxis-runtime/src/abi.rs` | **NEW** — D12. Reads the source of the four files that declare entry points and names any `#[no_mangle]` whose body does not open with `abi_guard!`. The property is about the *set*; calling them one by one would test the ones somebody remembered |
 | `a_panic_inside_a_wrapper_becomes_a_fault_and_a_defined_dummy` | `abi.rs` | **NEW** — the guard's behaviour: transparent when nothing panics, and otherwise `FaultKind::Panic` with a message naming the wrapper plus the `Unit` sentinel |
 | `a_failure_offset_past_the_buffer_previews_rather_than_panicking` | `parse_detail.rs` | **NEW** — D12's second panic path. `preview_around` sliced `&input[start..end]` with `start > end` for any offset more than 24 bytes past the end |
@@ -370,36 +370,91 @@ used to assert and why that was wrong:
 
 #### The repair pass — what four adversarial reviews found, and what closed it
 
-The structural work above stood. What it broke was ordinary input, and all four
-reviews found the same theme: **a trailing newline is not an error**. Every real
-input file ends with one — the CLI reads the file verbatim, every `.in` in the
-corpus ends with `\n` — and the stage applied `walk_exact`'s "a bounded child
-must fill its bound" rule at the **root region**, where the bound included the
-terminator. The rule was right; its application at the root was wrong.
+The structural work above stood. What it broke was ordinary input, and every
+review found the same theme: **trailing whitespace is not an error**. It took
+three rounds to state it as a rule instead of a byte count, and the first two
+attempts are recorded here because the shape of the mistake is the useful part.
+
+*Round one* applied `walk_exact`'s "a bounded child must fill its bound" at a
+**root region** that ran to the end of the file, so the bound included the
+terminator. *Round two* trimmed exactly one terminator off the buffer — and a
+file ending `"\n\n"` reproduced round one verbatim, one byte later, with
+character-for-character the same three messages, while `lines(int)` over
+`"1 \n2 \n"` still faulted on an ordinary trailing space that `grid(int)` over
+the same bytes called padding. Both answers were a count of bytes.
+
+*Round three* states the rule: **a run of whitespace that no parser could read
+is not data and not a mismatch.** Whether a trailing run is data is not a
+property of the buffer, so it cannot be decided by trimming the buffer. It has
+two halves — a region does not end in blank lines (`split_lines`, decided before
+any parser runs), and a child that leaves only whitespace has filled its bound
+(`walk_exact`, one predicate, every bounded construct inheriting it). Together
+they leave the terminator to nobody, so the root region is simply the whole
+buffer and `Input::root_region` is deleted. ADR-078 carries the reasoning.
 
 | What was wrong | What closed it |
 |---|---|
-| **Blocker.** `read ws(int)` over `"1 2 3\n"` and `read sep(" -> ", word)` over `"a -> b\n"` faulted: the final token ran to `region.end()`, so the child was asked to eat the `\n`. Every `ws`/`sep` test in the tree used input with no trailing newline, so nothing saw it | `Input::root_region` — the root region is the buffer minus the file's line terminator. **One place**, not a forgiving special case per constructor: `csv` had survived only because `csv_tokens` calls `trim()`, which is what a per-constructor fix looks like |
-| **Major.** `read chars(P, skip: whitespace)` and `skip: none` faulted the same way, including §7.5's own `chars(one_of("^v<>"), skip: whitespace)` example. The corpus missed it because its one use nests inside `sections`, whose regions exclude their line ending | the same one line. `skip: whitespace` is horizontal whitespace and never could have absorbed a `\n` |
+| **Blocker.** `read ws(int)` over `"1 2 3\n"` and `read sep(" -> ", word)` over `"a -> b\n"` faulted: the final token ran to `region.end()`, so the child was asked to eat the `\n`. Every `ws`/`sep` test in the tree used input with no trailing newline, so nothing saw it | **round three.** A `ws` token contains no whitespace (`walk_ws` shares `whitespace_tokens` with `matrix`), and a `sep` token whose leftover is whitespace has filled its bound. Round two's `Input::root_region` trim is deleted: it was a count, and `"1 2 3\n\n"` defeated it |
+| **Major.** `read chars(P, skip: whitespace)` and `skip: none` faulted the same way, including §7.5's own `chars(one_of("^v<>"), skip: whitespace)` example. The corpus missed it because its one use nests inside `sections`, whose regions exclude their line ending | **round three.** `walk_characters` asks the child first and forgives what it leaves iff that is whitespace — the same predicate `walk_exact` uses. `skip: whitespace` is horizontal whitespace and never could have absorbed a `\n`, and does not have to |
+| **Major.** `lines(P)` faulted on any line ending in horizontal whitespace — a regression against the pre-S20 base — while `grid` over the identical run called it padding. Two constructs in one stage disagreeing about one byte | **round three.** The rule moved into `walk_exact`, so a line, a section, a CSV field, a token, a cell and a capture all get one answer, and it is the *child's*: `int` cannot read the space, `char` can |
 | **Major.** A capture followed by a **whitespace-only** template part was not bounded at all, so ``lines(`{name:text} {v:int}`)`` over `"foo 3\n"` reported "expected whitespace" — the most ordinary template shape there is. `{a:text} -> {b:int}` worked, purely because `->` has bytes | `following_literal` became `following_bound`, which returns a whitespace policy that demands ≥1 byte as a bound. `\s*` and a run-less literal still constrain nothing and are still skipped |
+| **Minor.** Two spellings of one policy disagreed: `` lines(`{a:text} bar`) `` read `"x y bar"` as `a = "x y"` and `` lines(`{a:text}\s+bar`) `` faulted, because `\s+` is its own empty-text part and the bound was the first constraining part in isolation | **round three.** The bound is the earliest position at which the **whole run** of parts before the next capture can match. `match_literal_run` is the lookahead |
+| **Minor.** `run_plan` is also the body behind the host `parse(text, P)`, so round two's trim deleted a byte from a Text the *program* wrote and `parse(t, rest)` stopped being the identity on `t` | **round three.** There is no trim to narrow — deleting it restores the identity, and the gate says so |
 | **Major.** `grid(char)` could not represent a space cell, so `"ab\na b\n"` was reported as a clean 2x2 grid with `b` shifted into the space's slot — a **wrong answer** where the byte-width predecessor gave a wrong shape | `char` and `one_of` read the scalar **at** the cursor; §7.4's "surrounding horizontal space handled by caller" is a rule for the numeric atomics. The ragged rejection comes back for free |
-| **Minor.** `grid(int)` faulted on a row ending in a space while `matrix(int)` over the same file succeeded | `walk_grid_row` treats a trailing run the cell parser cannot read as padding. A parser that *can* read it — `char` — never reaches that branch |
+| **Minor.** `grid(int)` faulted on a row ending in a space while `matrix(int)` over the same file succeeded | `walk_grid_row` treats a trailing run the cell parser cannot read as padding — the same predicate as `walk_exact` since round three. A parser that *can* read it — `char` — never reaches that branch, which is why `grid(char)` over `"ab\ncd \n"` is a **ragged grid** and says so |
 | **Minor.** The `chars` skip policies are named backwards: `newlines` is the **broader** policy. That is what made the major above possible | written down in the four places a reader reaches — `SkipPolicy`, `skip_chars`, §7.5, and the `skip:` diagnostic, which now says what each policy skips |
 | **Minor.** `SourceSlice`'s owner became a chain, which the plan's hazards said to prevent: `t = parse(t, rest)` in a loop was O(n²) and overflowed the stack at 100 000 links | `Input::new` resolves to the root owned `Text` once and rebases; `text_bytes` is iterative. 100 000 links: 64s and an abort → 0.31s |
 | **Minor.** D12's coverage gate read a hand-written four-file `include_str!` list | the file set is walked from `crates/`, covering every crate |
 | **Minor.** D12's backstop returned a defined dummy that generated code could consume without ever observing the fault (55 wrappers are `Effect::Pure`, and `CheckFault` only follows a faultable call) | the dummy is returned **iff** the manifest declares the symbol faulting; everything else prints the message and aborts, which is what it did before the guard existed |
 
+##### The tests, in three classes — because "every added test fails without the change" is not true
+
+A review checked it and found several of the branch's tests passing at the
+branch's own starting commit. That is not dishonest — a fixture that pins a rule
+is worth having — but they must not be counted as gates for the audit's
+findings. Three classes, kept apart:
+
+**(a) Gates for the audit's IPR findings.** Each fails at the pre-S20 base
+`b2184c8`, so "would it fail without the change" has a yes.
+
 | Test | File | Pins |
 |---|---|---|
-| `ws_tokens`, `sep_tokens`, `chars_skip_whitespace`, `template_space_bound`, `grid_char_space_cell` | `tests/input-parsers/*.px` | **NEW** — the blocker and all three majors through the **real CLI file-read path**, each with a newline-terminated `.in`. That sweep is what would have caught this |
-| `the_root_region_excludes_the_files_trailing_newline` | `parser/cursor.rs` | **NEW** — `\n`, `\r\n`, no terminator, and `"\n\n"` (exactly one is dropped: a blank final line is data) |
-| `a_capture_is_bounded_by_a_whitespace_only_template_part` | `adversarial_audit.rs` | **NEW** — a space run, `\s+` and `\n` as bounds, and `\s*` still not one |
-| `a_grid_of_char_is_positional_so_a_space_is_a_cell` | `adversarial_audit.rs` | **NEW** — the space column, leading and trailing space columns, and the ragged **rejection** |
-| `a_grid_row_may_end_in_horizontal_whitespace` | `adversarial_audit.rs` | **NEW** — and asserts `grid` and `matrix` agree on the same file, which is the disagreement that was the finding |
-| `the_skip_policies_are_ordered_by_what_they_skip` | `parser.rs` | **NEW** — each policy's byte set, that `newlines` is a strict superset, and a sweep of `SkipPolicy::ALL` |
-| `a_parse_of_a_slice_does_not_extend_the_owner_chain` | `parser.rs` | **NEW** — the base offset is applied *and* every produced slice's owner is the owned text |
-| `reading_a_deep_slice_chain_does_not_recurse` | `text.rs` | **NEW** — a 4 000-link chain on a 128 KiB stack. Verified to abort with the recursive read; its passing *is* the assertion |
-| `a_panic_dummy_is_only_returned_where_a_fault_check_can_follow` | `abi.rs` | **NEW** — sweeps every manifest row, and asserts both classes are non-empty so the rule cannot pass vacuously |
+| `template_space_bound` | `tests/input-parsers/` | the whitespace-only capture bound, through the **real CLI file-read path**. Fails at `b2184c8` *and* at `9458fd5`, so it gates the whole branch |
+| `a_capture_is_bounded_by_a_whitespace_only_template_part` | `adversarial_audit.rs` | a space run, `\s+` and `\n` as bounds, and `\s*` still not one |
+| `two_spellings_of_one_whitespace_policy_bound_a_capture_alike` | `adversarial_audit.rs` | **NEW (round three)** — `` `{a:text} bar` `` and `` `{a:text}\s+bar` `` over "x y bar" *and* over "x bar", so the half that already worked cannot be lost |
+| `a_grid_of_char_is_positional_so_a_space_is_a_cell` | `adversarial_audit.rs` | the space column, leading and trailing space columns, and the ragged **rejection** |
+| `adv_csv_inside_sections_nonzero_offset` | `jit.rs` | **rewritten twice.** Its `Int` assertion is *not* a differential and no longer claims to be. The two that are, both re-run against `b2184c8`: a `Text` out of the second section (the base answers `"cc"`, the first section's bytes — IPR-03) and a field that trims to nothing (the base **panics**, `windows(0)`, inside `extern "C"`) |
+| `a_parse_of_a_slice_does_not_extend_the_owner_chain` | `parser.rs` | the base offset is applied *and* every produced slice's owner is the owned text |
+| `reading_a_deep_slice_chain_does_not_recurse` | `text.rs` | a 4 000-link chain on a 128 KiB stack. Verified to abort with the recursive read; its passing *is* the assertion |
+| `a_panic_dummy_is_only_returned_where_a_fault_check_can_follow` | `abi.rs` | sweeps every manifest row, and asserts both classes are non-empty so the rule cannot pass vacuously |
+
+**(b) Regression fixtures for defects this branch introduced and closed.** Each
+**passes** at `b2184c8` and fails at the mid-branch commit named in its own
+comment. They pin rules that are worth pinning; they gate nothing the audit
+filed.
+
+| Test | File | Fails at | Pins |
+|---|---|---|---|
+| `ws_tokens`, `sep_tokens`, `chars_skip_whitespace` | `tests/input-parsers/` | `9458fd5` | the blocker and its `chars` half, through the CLI file-read path |
+| `grid_char_space_cell` | `tests/input-parsers/` | `9458fd5` (answers 221) | a `grid(char)` column is positional |
+| `ws_blank_final_line`, `lines_trailing_space` | `tests/input-parsers/` | `e68ac0c` | **NEW (round three)** — the two endings this directory did not have: a blank final line, and a trailing space on every line |
+| `every_root_parser_reads_every_file_ending` | `adversarial_audit.rs` | `e68ac0c` | **NEW (round three)** — the MATRIX. Every root constructor §7.5 names × every ending real input arrives with, asserting a **value** per cell. Verified to fail at the branch's own HEAD |
+| `a_parse_is_the_identity_on_the_text_it_was_given` | `adversarial_audit.rs` | `e68ac0c` (3334 vs 4355) | **NEW (round three)** — `parse(t, rest)` on `\n`, none, `\r\n`, `\n\n`, and `read rest` over the same bytes |
+| `a_grid_row_may_end_in_horizontal_whitespace` | `adversarial_audit.rs` | `9458fd5` | and asserts `grid` and `matrix` agree on the same file |
+| `choice_backtracking_under_allocation_pressure_keeps_every_live_intermediate` | `adversarial_audit.rs` | (see note) | IPR-14's **rooting** invariant: deleting the two `scope.root(walked.value)` calls gives 574840 against 449400. It passes at `b2184c8`, where the parser is unpaced and unrooted, so it does not distinguish HEAD from the base; and its `live_count < 6_000` guard cannot tell a sweep *inside* the parse from one after it. It is a gate for the fix's invariant, not for the pre-S20 defect |
+
+**(c) Tests of code the branch introduced, or of invariants it did not change.**
+"Would it fail without the production change" has no answer for these: without
+the change the code they call does not exist, or the behaviour they assert was
+already correct. They are worth having and they are not gates.
+
+| Test | File | Why it has no counterfactual |
+|---|---|---|
+| `a_subregion_can_only_narrow`, `a_subregion_that_would_widen_is_a_bug_and_says_so`, `next_scalar_steps_one_unicode_scalar`, `a_line_region_of_a_section_names_the_inputs_own_bytes`, `split_lines_and_split_sections_agree_on_a_single_line_region`, `split_lines_strips_crlf_and_drops_a_trailing_empty_line`, `a_section_region_excludes_its_trailing_line_ending` | `parser/cursor.rs` | the module is added whole by the branch; `Input`, `ByteRegion` and this `split_lines` signature do not exist at `b2184c8` |
+| `a_region_does_not_end_in_blank_lines_however_many_there_are`, `the_root_region_is_the_whole_buffer_and_no_terminator_is_trimmed`, `a_blank_line_of_spaces_separates_sections` | `parser/cursor.rs` | **NEW (round three)**, same reason — but each pins a half of the rule at the substrate level, and the first two replace `the_root_region_excludes_the_files_trailing_newline`, whose subject (a trim of exactly one terminator) no longer exists |
+| `the_skip_policies_are_ordered_by_what_they_skip` | `parser.rs` | the byte sets are identical at `b2184c8`; the branch changed documentation and added the `SkipPolicy::skips()`/`ALL` API this also exercises. An invariant test |
+| `every_atomic_the_design_requires_has_a_parser_and_a_type` | `parser.rs` | its diff is confined to the helper call; every assertion is unchanged exhaustiveness over `AtomicKind::ALL` |
+| `a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names` | `jit.rs` | its input was **adapted** to stay legal under D11, not amended into a gate. Its subject is subscript argument order. D11 is gated by `a_grid_cell_is_whatever_its_cell_parser_reads` and `a_grid_of_char_is_positional_so_a_space_is_a_cell`; the comment says so now |
 
 One test was **amended**, with the inversion recorded in place (plan §8.2):
 `chars_that_cannot_read_the_whole_region_is_a_parse_failure` asserted that
