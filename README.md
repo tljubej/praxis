@@ -19,7 +19,7 @@ concerns.
 > **ten open rows in that plan's §4.1** — two of them, `REP-52` and `REP-53`, are
 > that rule's two ends, and §4.1's list is the claim while this count is only a
 > convenience — and **two open language decisions**. See
-> [`docs/handovers/16-repair-s18-s21-and-the-second-register-handover.md`](./docs/handovers/16-repair-s18-s21-and-the-second-register-handover.md).
+> [`docs/handovers/17-what-is-left-handover.md`](./docs/handovers/17-what-is-left-handover.md).
 > (The suite's pass count lives in `implementation-repair-progress.md` §1 and
 > nowhere else, so it can only be stale in one place — which is why it is not
 > repeated here.)

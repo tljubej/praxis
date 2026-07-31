@@ -3814,6 +3814,12 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
+**Start with [`17-what-is-left-handover.md`](./17-what-is-left-handover.md).**
+It is the current statement of what remains, split into the five rows that
+need no decision and the six that are language questions wearing defect
+numbers. `16-repair-s18-s21-and-the-second-register-handover.md` is how the
+four stages landed, and is superseded only for "what is left".
+
 **No stage is left.** S18, S19, S20 and S21 all closed in the same session, and
 with them the plan's whole schedule. What is left is the §4.1 rows nobody has
 fixed and the two open decisions — nothing here blocks anything else, so this is

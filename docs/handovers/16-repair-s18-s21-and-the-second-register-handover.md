@@ -3,6 +3,15 @@
 **Date:** 2026-07-31
 **Tree:** `b557e0a` (everything below was measured there) · **0 ignored tests** · `just ci` green
 
+> **Superseded for "what is left" by
+> [`17-what-is-left-handover.md`](./17-what-is-left-handover.md).** Four commits
+> landed after `b557e0a`, and one of them changes this file's REP-56 row: the
+> claim below that the unsafe read "is now bounded in every profile" was true of
+> `int_payload` here and false of `float_payload`, `praxis_char_load` and
+> `praxis_bool_load` until `af9df6c`. This file is still the record of *how* the
+> four stages landed and its "worth not rediscovering" section still stands; read
+> 17 for the remaining work.
+
 The suite's pass count is deliberately *not* here. It lives in
 `implementation-repair-progress.md` §1 and nowhere else, which is the only thing
 that keeps it from being stale in two places; the tree above is what makes the
