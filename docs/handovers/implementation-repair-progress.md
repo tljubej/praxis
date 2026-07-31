@@ -11,7 +11,7 @@ Update this file at the end of every stage.
 
 **Every stage the plan schedules is closed** — S1 … S21 and S23 … S26, with S22
 struck as "no action" — and **138 of the audit's 139 findings** are addressed and
-marked so in the plan's §4. The suite is **1636 passed, 0 failed, 0 ignored**
+marked so in the plan's §4. The suite is **1645 passed, 0 failed, 0 ignored**
 (measured at `6d5c9bc`): the ignored suite the audit left behind is at **zero
 for the first time**, and `just ci` is green.
 
