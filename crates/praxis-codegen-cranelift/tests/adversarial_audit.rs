@@ -1115,6 +1115,44 @@ fn an_interior_blank_line_is_a_row_and_a_trailing_one_is_nobodys() {
     let (runtime, result) = run_main_with_input(grid, "12\n34\n  \n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 22);
+
+    // **A child that succeeds vacuously has made something of the line**, and
+    // that is where `matrix(P)` and `lines(ws(P))` part company. `ws(int)`
+    // answers an all-whitespace region with an *empty* `Vec` rather than a
+    // failure, so it makes an element and `walk_lines` keeps the line — three
+    // elements over the bytes `matrix(int)` reads as a 2x2 grid, because
+    // `matrix` has no zero-token row to make. Same criterion, two children,
+    // and §7.5 says so rather than leaving a reader to find it: `matrix` is
+    // "lines containing whitespace-separated elements" and that is not a
+    // definition of `lines(ws(...))`.
+    let lines_ws = "fn main() -> Int {\n  let v = read lines(ws(int))\n  \
+                    v.len() * 10 + v.get(v.len() - 1).len()\n}\n";
+    let (runtime, result) = run_main_with_input(lines_ws, "1 2\n3 4\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        30,
+        "three elements, the last of them empty — `ws` made one of \"  \""
+    );
+    let (runtime, result) = run_main_with_input(matrix, "1 2\n3 4\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 22, "`matrix` made no row of \"  \"");
+    // A final *empty* line is a third answer again, and the reason is the other
+    // half of the rule: `split_lines` drops lines with no bytes to offer
+    // anyone, so `ws` is never asked.
+    let (runtime, result) = run_main_with_input(lines_ws, "1 2\n3 4\n\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        22,
+        "an empty final line is nobody's before any parser runs"
+    );
+    // `csv` is not in the vacuous-success list: it always makes at least one
+    // field, so `csv(int)` fails on a blank line and the line is dropped.
+    let lines_csv = "fn main() -> Int {\n  let v = read lines(csv(int))\n  v.len()\n}\n";
+    let (runtime, result) = run_main_with_input(lines_csv, "1,2\n3,4\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 2, "`csv(int)` made nothing of \"  \"");
 }
 
 /// **A whitespace-only template part is a bound too.**

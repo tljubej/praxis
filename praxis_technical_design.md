@@ -810,7 +810,16 @@ that decides:
   applied to a whole line: a **trailing** line of nothing but whitespace is
   offered like any other, and belongs to nobody only when the parser makes
   nothing of it — no element for `lines`, no cell for `grid`, no token for
-  `matrix`.
+  `matrix`. A child that succeeds **vacuously** has made something of it:
+  `ws`, `sections` and a nested `lines` answer an all-whitespace region with an
+  *empty* collection, not a failure, so `lines(ws(int))` over
+  `"1 2\n3 4\n  \n"` is three elements — the last one empty — where
+  `matrix(int)` over the same bytes is a 2x2 grid, because `matrix` has no
+  zero-token row to make. `matrix(P)` is therefore **not** a synonym for
+  `lines(ws(P))`; it splits a row into tokens itself, and the two differ exactly
+  where a line has no tokens. (`csv` is not in that list: it always makes at
+  least one field, so `csv(int)` fails on a blank line and `lines(csv(int))`
+  drops it.)
 - **The other half decides nothing.** A region does not end in **empty** lines:
   the trailing run of lines holding no bytes at all is not part of it — the
   file's own terminator, the `"\n\n"` an editor leaves behind, any number of

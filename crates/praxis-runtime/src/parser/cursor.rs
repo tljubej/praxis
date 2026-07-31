@@ -433,6 +433,24 @@ pub(crate) fn split_lines(i: &Input<'_>, region: ByteRegion) -> Vec<ByteRegion> 
 /// Empty lines never reach here: [`split_lines`] has already dropped the
 /// trailing ones, and an interior empty line is blank, so it is inside any run
 /// this reports.
+///
+/// **A child that succeeds *vacuously* has made something of the line**, and
+/// that is the whole of why two spellings of one parse can disagree about a
+/// final blank line. `ws`, `sections` and a nested `lines` all answer an
+/// all-whitespace region with an **empty collection** rather than a failure, so
+/// they make an element and `walk_lines` keeps the line: `lines(ws(int))` over
+/// `"1 2\n3 4\n  \n"` is *three* elements, the last of them empty, where
+/// `matrix(int)` over the identical bytes is a 2x2 grid — `matrix` has no such
+/// thing as a zero-token row, so for it the line is no row at all. It is the
+/// same criterion answered by two different children, not an exception: the
+/// element/cell/token above is the *constructor's own unit*, and an empty `Vec`
+/// is a legal one. §7.5 calls `matrix` "lines containing whitespace-separated
+/// elements", which reads like a definition of `lines(ws(...))`; it is not, and
+/// §7.5 says so now.
+///
+/// The same difference at an *interior* blank line is louder and identical in
+/// kind: `lines(ws(int))` over `"1 2\n  \n3 4\n"` is three elements with an
+/// empty middle, and `matrix(int)` faults.
 pub(crate) fn trailing_blank_run(i: &Input<'_>, lines: &[ByteRegion]) -> usize {
     let mut start = lines.len();
     while start > 0 && lines[start - 1].is_all_whitespace(i) {
