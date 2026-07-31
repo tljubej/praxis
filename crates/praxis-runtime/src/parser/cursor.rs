@@ -221,6 +221,17 @@ impl ByteRegion {
     /// time, so a non-ASCII row was both the wrong width and matched at
     /// continuation bytes (IPR-06, IPR-08). Stepping is a scalar operation
     /// because §7.5's grid is a grid of characters.
+    /// The number of Unicode scalars in this region, or `None` if its ends are
+    /// not scalar boundaries.
+    ///
+    /// This is a `grid`'s width. It used to be the region's *byte* length, so
+    /// a row containing one `é` was two columns wide and was parsed twice —
+    /// once at the scalar and once at its continuation byte (IPR-06).
+    pub(crate) fn scalar_count(self, i: &Input<'_>) -> Option<usize> {
+        Some(self.str(i)?.chars().count())
+    }
+
+    /// The position one Unicode scalar past `at`, or `None` at the region's end.
     pub(crate) fn next_scalar(self, i: &Input<'_>, at: Cursor) -> Option<Cursor> {
         if at >= self.end {
             return None;

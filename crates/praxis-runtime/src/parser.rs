@@ -591,6 +591,12 @@ fn csv_tokens(region: ByteRegion, s: &str) -> Vec<ByteRegion> {
     out
 }
 
+/// A grid row's width in Unicode scalars.
+fn row_width(i: &Input<'_>, line: ByteRegion) -> Result<usize, ParseFail> {
+    line.scalar_count(i)
+        .ok_or_else(|| ParseFail::at(line.start().offset(), line.len(), "a grid row"))
+}
+
 fn walk_lines(
     rt: &Rt,
     i: &Input<'_>,
@@ -1067,7 +1073,14 @@ fn walk_grid_ragged(
     region: ByteRegion,
 ) -> WalkResult {
     let lines = split_lines(i, region);
-    let width = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+    // Widths are **scalar** counts, not byte counts (IPR-06, D11): a row is a
+    // row of characters, so a row holding one `é` is one column wide and not
+    // two.
+    let mut widths = Vec::with_capacity(lines.len());
+    for line in &lines {
+        widths.push(row_width(i, *line)?);
+    }
+    let width = widths.iter().copied().max().unwrap_or(0);
     // **The fill is not a region of the input.** It is a plan literal, and the
     // predecessor walked `fill.as_bytes()` at offset 0 while the cell parser
     // allocated its Texts against the input — so a `Text` fill cell named input
@@ -1091,15 +1104,26 @@ fn walk_grid_ragged(
         )?
     };
     let mut items = Vec::with_capacity(lines.len() * width);
-    for line in &lines {
+    for (line, row) in lines.iter().zip(&widths) {
         let mut cell = line.start();
-        while cell < line.end() {
+        while let Some(next) = line.next_scalar(i, cell) {
+            // One scalar, consumed exactly — which is D11's answer for
+            // `grid(int)`: a cell parser parses a cell exactly as it would
+            // anywhere else, and a cell is one character.
             // SAFETY: ctx is valid.
-            let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(cell))? };
-            items.push(walked.value);
-            cell = cell.advance(1);
+            items.push(unsafe {
+                walk_exact(
+                    rt,
+                    i,
+                    plan,
+                    child,
+                    line.subregion(cell, next),
+                    "the rest of the cell",
+                )?
+            });
+            cell = next;
         }
-        for _ in line.len()..width {
+        for _ in *row..width {
             items.push(fill_value);
         }
     }
@@ -1251,11 +1275,15 @@ fn walk_grid(
     region: ByteRegion,
 ) -> WalkResult {
     let lines = split_lines(i, region);
-    let width = lines.first().map(|l| l.len()).unwrap_or(0);
+    let width = match lines.first() {
+        Some(line) => row_width(i, *line)?,
+        None => 0,
+    };
     let mut items = Vec::with_capacity(lines.len() * width);
     for line in &lines {
-        if line.len() != width {
-            // Grid rows must be uniform (§7.5). Ragged grids are M9.
+        if row_width(i, *line)? != width {
+            // Grid rows must be uniform (§7.5). Ragged grids are M9. Uniform in
+            // **characters**: a row of `##é` and a row of `###` are both three.
             return Err(ParseFail::at(
                 region.start().offset(),
                 region.len(),
@@ -1263,11 +1291,19 @@ fn walk_grid(
             ));
         }
         let mut cell = line.start();
-        while cell < line.end() {
+        while let Some(next) = line.next_scalar(i, cell) {
             // SAFETY: ctx is valid.
-            let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(cell))? };
-            items.push(walked.value);
-            cell = cell.advance(1);
+            items.push(unsafe {
+                walk_exact(
+                    rt,
+                    i,
+                    plan,
+                    child,
+                    line.subregion(cell, next),
+                    "the rest of the cell",
+                )?
+            });
+            cell = next;
         }
     }
     let elem_desc = child_descriptor(plan, child);
@@ -2138,7 +2174,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: Grid width/iteration count UTF-8 bytes rather than scalar values"]
     fn unicode_grid_cells_are_parsed_once_per_scalar() {
         let mut rt = crate::Runtime::new();
         let input = rt.alloc_text("é");
@@ -2217,6 +2252,83 @@ mod tests {
     }
 
     // --- M7-WS9: whitespace matcher (§7.2) -----------------------------------
+
+    /// **D11's answer to IPR-06, spelled out.** A `grid` cell is one Unicode
+    /// scalar, so `grid(int)` reads one digit per cell — a cell parser parses a
+    /// cell exactly as it would anywhere else, and the cell is one character.
+    ///
+    /// This pins the shape the finding named: over `"12\n34\n"` the
+    /// predecessor answered **four** cells `[12, 2, 34, 4]`, because it read
+    /// the whole token at cell 0 and then read the token's tail again at cell
+    /// 1 as well. That is neither semantics. `matrix(int)` is the
+    /// whitespace-tokenized constructor, and it is a different one.
+    #[test]
+    fn a_grid_cell_is_one_scalar_so_grid_int_reads_one_digit_per_cell() {
+        let mut rt = crate::Runtime::new();
+        let input = rt.alloc_text("12\n34\n");
+        let mut ctx = rt.context();
+        ctx.input_source = input;
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Int,
+                },
+                PlanNode::Grid { child: 0 },
+            ],
+            1,
+        );
+
+        let grid = unsafe { run_root(&mut ctx, &plan, input) }.expect("digits are int cells");
+        let payload = unsafe { &*grid.payload::<crate::collections::GridPayload>() };
+        assert_eq!(payload.width, 2);
+        let cells: Vec<i64> = payload.items.iter().map(|r| r.as_int()).collect();
+        assert_eq!(
+            cells,
+            vec![1, 2, 3, 4],
+            "one whole token per cell would be [12, 34]; re-reading the tail was [12, 2, 34, 4]"
+        );
+    }
+
+    /// **IPR-08.** `scan` used to advance one *byte* at a time, so on a
+    /// multi-byte run it attempted a match at continuation bytes — positions
+    /// that are not characters at all.
+    ///
+    /// Over `"ééé"` there are exactly three scalar starts and three
+    /// continuation bytes. A byte-stepping `scan` visits six positions; a
+    /// scalar-stepping one visits three, and `one_of("é")` matches at each.
+    #[test]
+    fn scan_advances_by_scalar_across_a_multibyte_run() {
+        let mut rt = crate::Runtime::new();
+        let input = rt.alloc_text("ééé");
+        let mut ctx = rt.context();
+        ctx.input_source = input;
+        let literals: &'static [&'static str] = Box::leak(vec!["é"].into_boxed_slice());
+        let nodes: &'static [PlanNode] = Box::leak(
+            vec![
+                PlanNode::OneOf { chars_index: 0 },
+                PlanNode::Scan { child: 0 },
+            ]
+            .into_boxed_slice(),
+        );
+        let plan = ParserPlan {
+            nodes,
+            template_parts: &[],
+            literals,
+            root: 1,
+        };
+
+        let result = unsafe { run_root(&mut ctx, &plan, input) }.expect("scan never fails");
+        let chars: Vec<char> = result
+            .as_vec()
+            .iter()
+            .map(|r| char::from_u32(unsafe { *r.payload::<u32>() }).expect("a Char"))
+            .collect();
+        assert_eq!(
+            chars,
+            vec!['é', 'é', 'é'],
+            "three scalars, and no attempt at the three continuation bytes between them"
+        );
+    }
 
     #[test]
     #[ignore = "known bug: SpaceRun currently accepts an empty run"]

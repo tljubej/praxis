@@ -5928,13 +5928,24 @@ fn a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names() {
     // A 2×2 grid read from input (a `Grid()` is 0×0, so it has no cell to name).
     // The written cell is deliberately **off the diagonal**: a store that reached
     // `praxis_grid_set(g, y, x, v)` would pass on a diagonal cell.
+    //
+    // AMENDED (S20/D11). The expected value used to be `700 + 120 + 34`, which
+    // says `g[0, 0]` is `12` and `g[0, 1]` is `34` — i.e. that a `grid(int)`
+    // cell is a whole whitespace-delimited token. It is not, and it never
+    // consistently was: over this same input the predecessor answered the four
+    // cells `[12, 2, 34, 4]`, reading each token and then re-reading its tail.
+    // D11 settles it — a `grid` cell is one Unicode scalar, so `grid(int)` is
+    // one digit per cell and `matrix(int)` is the token-granular constructor.
+    // The grid is `[1, 2 / 3, 4]`, so `g[1, 0]` (written 7) + `g[0, 0]` = 1 +
+    // `g[0, 1]` = 3. The coordinate order this test exists for is unchanged:
+    // the off-diagonal cell is still the one that catches a swapped store.
     let (rt, result) = run_main_with_input(
         "fn main() -> Int {\n  let g = read grid(int)\n  g[1, 0] = 7\n  \
          g[1, 0] * 100 + g[0, 0] * 10 + g[0, 1]\n}\n",
         "12\n34\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
-    assert_eq!(result.as_int(), 700 + 120 + 34);
+    assert_eq!(result.as_int(), 700 + 10 + 3);
 
     // `.get`/`.set` and the subscript are the same cell, which is what says the
     // two spellings are one operation for a `Grid` (unlike a `Map`'s, §4.7).
