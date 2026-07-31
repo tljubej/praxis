@@ -1700,9 +1700,9 @@ there is no check by construction, so returning `unit_sentinel` would hand a
 message and abort. **Totality is therefore load-bearing, not merely primary, for
 an `Effect::Pure` wrapper**: the backstop's answer there is a dead process.
 
-**Three defects found in passing and deliberately not fixed** — they are not
-S20's and each would be a language decision. The first two are registered in the
-plan's §4.1 as **REP-48** and **REP-49**, both **not done**:
+**Five defects found in passing and deliberately not fixed** — they are not
+S20's and each would be a language decision. Four are registered in the plan's
+§4.1 as **REP-48**, **REP-49**, **REP-50** and **REP-51**, all **not done**:
 
 - **A `choice` payload record's fields cannot be read** — **registered as
   REP-48** (P1, not done). A `choice` case whose template has named captures
@@ -1721,9 +1721,25 @@ plan's §4.1 as **REP-48** and **REP-49**, both **not done**:
   same production. Out of scope because it is a `praxis-parser` grammar change,
   and because it is REP-48's workaround — with REP-48 open there is nothing to
   work around to.
+- **§7.7's "repeated labeled blocks" example does not run** — **registered as
+  REP-50** (P2, not done). A nested-constructor capture inside a `block`
+  swallows past its line when another block item follows it:
+  `` read block(`items: {items:csv(int)}`, `op: {op:word}`) `` over
+  `"items: 79, 98\nop: plus\n"` is "expected the rest of the field". Pre-existing
+  — the pre-S20 base fails it too, differently. Out of scope because the answer
+  is a language decision: either a `block` item is line-anchored for its captures
+  too, or §7.7 is amended to the spelling that works. The corpus fixture that
+  claims §7.7 writes a different construct (`items: lines(int)`, a named block
+  field), which is why nothing caught it.
+- **§7.5's `grid(cell_parser, ragged, fill: value)` cannot be spelled** —
+  **registered as REP-51** (P3, not done). Every literal `fill:` value is
+  `P001: expected a parser expression`, and dropping `fill:` is `I014`, so the
+  ragged form is unreachable in both directions. Pre-existing and identical on
+  the base. The runtime is ready; the front end's `fill:` value grammar is not.
+  It had been recorded only in a `jit.rs` comment.
 - **`WsPolicy::ZeroOrMore` and `OneOrMore` are documented as "spaces or tabs"
   and implemented as `is_ascii_whitespace`** (`parser.rs`, `consume_ws`), so
-  `\s*` in a template silently matches a newline. Untouched because narrowing
+  `\s*` in a template silently matches a newline. **Not registered**: narrowing
   them is a grammar change with no finding behind it, and IPR-12 was about
   `SpaceRun`.
 
