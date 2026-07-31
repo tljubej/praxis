@@ -56,10 +56,34 @@ usize` is replaced by `arg_shape() -> ArgShape`:
 
 `check_call(ctor, &[ArgKind], span)` returns **every** problem, and it runs
 before a single node is built — so by the time a builder arm executes, the
-argument list has exactly the shape §7.5 gives that constructor and there is
-nothing left for it to drop. The `_ => {}` arms in `build_block`, `build_choice`
-and `build_sections_named` are gone, not converted to `unreachable!()`: their
-inputs are already shaped.
+argument list has exactly the shape §7.5 gives that constructor.
+
+*Amended 2026-07-31.* This decision first claimed "there is nothing left for it
+to drop", and the claim was false in two ways at once.
+
+`CallArg::Keyword{name}` and `CallArg::Named{name}` projected onto the **same**
+`ArgKind::Named(name)`, so `check_call` could not tell a `skip:`/`fill:` keyword
+from a named parser; `block`, `choice` and named `sections` accepted the keyword
+as a well-shaped named argument and their builders' `filter_map` then threw it
+away. And both front ends minted a keyword from the argument's *name alone*
+(`if name == "skip" || name == "fill"`), with no reference to the constructor
+being called. So `read sections(rules: lines(int), fill: lines(int))` compiled
+to a record with one field, and reported nothing.
+
+A keyword belongs to a constructor, so the constructor answers the question:
+`Constructor::keyword_arg()` gives `chars` a `skip:` and `grid` a `fill:`, and
+nothing else has one. A `sections` field or a `block` item called `fill` is a
+field. `ArgKind::Keyword(String)` is then its own kind, accepted only by
+`ParserWithSkip` and `GridMaybeRagged` and refused everywhere else — including
+by named `sections`, whose rejection list was a positive list of three kinds and
+is now "anything that is not a named parser or the tail".
+
+The `_ => {}` and `filter_map` arms are gone from every builder, and where an
+argument still cannot be placed the builder **reports** it rather than dropping
+it. `grid`'s `ragged` flag carries nothing and has its own arm, so discarding it
+is a decision rather than a leak. A `_ => {}` in a builder is how an argument
+disappears; the property worth stating is not that the arm is unreachable but
+that if it ever is reached, it is visible.
 
 Three codes that ADR-051 had allocated and nothing constructed now fire:
 `UnknownConstructor` I013, `InvalidConstructorArgument` I014 (a wrong argument
@@ -82,6 +106,20 @@ Both produce a `CallArg` list and both call `call::build_call`. The alternative
 rules would drift the first time one of them was extended. `build_call` lives in
 `praxis-input-parser` because that is the crate both can reach; `praxis-hir`
 keeps only rowan→`CallArg`.
+
+*Amended 2026-07-31.* The claim held for every call **except** the one written
+as a `sections` tail marker, which is the one place the bridge did not go
+through `build_call` at all. It unwrapped `name: repeated(P)` with a `find_map`
+that returned the first parser-expr child of the argument list and ignored the
+rest, so `repeated(matrix(int), word, int)` lowered as `repeated(matrix(int))`
+with two arguments silently gone and `repeated()` produced no diagnostic at all
+— while the identical text inside a capture body was rejected with I022. §7.5's
+rule for the marker (exactly one argument, and it must be a parser) is now
+`call::build_repeated_tail`, beside `build_call` and called by both front ends;
+the bridge reads the marker's whole argument list through the same
+`extract_call_args` it uses for any other call. Pinned by
+`both_front_ends_apply_one_repeated_tail_rule`, which asserts every case through
+both spellings and on the same `DiagCode`.
 
 ## Decision 3: `repeated(...)` is the tail marker, and its position is checked
 

@@ -90,7 +90,7 @@ therefore adversarial input, and a compiler may not answer adversarial input
 with a stack overflow. `praxis_syntax::MAX_TEMPLATE_NESTING` (32) bounds it,
 with its own `ScanError` variant.
 
-## Decision 4: the lexer learns the same rule, and shares the same bound
+## Decision 4: the lexer and the scanner call **one function** for the extent of a template
 
 D10's answer does not mention the lexer, and the lexer is where it costs
 something. `Lexer::eat_template` ended the `BacktickTemplate` token at the first
@@ -101,14 +101,35 @@ read `{g:choice(Pt: `{x:int},{y:int}`, Name: word)}`
 ```
 
 lexed as three unrelated token runs and `scan_template` never saw the template
-the source wrote. A backtick now closes the token only at **brace depth 0**;
-inside a capture it opens a nested run.
+the source wrote. A backtick closes the token only at **brace depth 0**; inside
+a capture it opens a nested run.
 
-The nesting bound lives in `praxis-syntax`, which both crates already depend on,
-rather than being written twice. The lexer's run and the scanner's recursion are
-driven by the same file text: if they refused at different depths, one of them
-would accept input the other cannot read. `praxis-parser` gains **no** dependency
-on `praxis-input-parser`.
+*Amended 2026-07-31.* This decision first said "the lexer learns the same rule,
+and shares the same bound", and shared only the bound. Sharing a constant is not
+sharing a rule: the two implementations of the rule drifted immediately.
+
+The lexer's counted `{`/`}` everywhere; the scanner's `capture_extent` skipped
+string literals. So `` `{c:one_of("{")}` `` — a legal §7.5 program the scanner
+accepts — left the lexer's brace counter above zero at the closing backtick,
+which it then read as an *opener*: the rest of the file went into one
+`BacktickTemplate` token plus a false `T002`. That is a regression against what
+the predecessor lexer accepted. The two also bounded nesting at depths that
+differed by one (`depth >= MAX` against `depth > MAX`).
+
+So the rule itself lives in `praxis_syntax::template` — `template_end` and
+`string_end` — in the crate below both, where `ident` and `numeric` already live
+for exactly this reason and where `MAX_TEMPLATE_NESTING` already lived. It is
+called twice rather than written twice, so there is one brace rule, one string
+rule, one nested-template rule and one bound. `praxis-parser` gains **no**
+dependency on `praxis-input-parser`.
+
+The rule the two copies did not share, and which the shared one states: a `"`
+opens a string literal only **inside a capture**. In literal text a quote is a
+quote, so `` `He said "hi" {x:int}` `` is still a template.
+
+`praxis-hir` is the only crate that can see both layers, so the gate lives
+there: `the_lexer_and_the_scanner_agree_on_where_a_template_ends` drives the
+same strings through the lexer, the scanner and the pipeline.
 
 ## Decision 5: a capture name is the language's identifier, and there is no default kind
 
@@ -136,9 +157,17 @@ generic `TemplateScan` (`I030`) the way all of them used to.
   fails the compile.** Every `.px` under `tests/` is covered by
   `every_corpus_program_runs_and_prints_the_answer_it_documents`, which runs
   each one with its real input — `praxis check` alone would not have seen it.
-- **Spans are rebased, not invented.** The scanner works in offsets relative to
-  the template's interior; `Span::shifted` and `ParserAst::shift_spans` move the
-  tree onto the file by the token's start + 1, so a capture's diagnostic carets
-  the capture instead of the top of the file.
+- **Spans are rebased, not invented — at every level.** The scanner works in
+  offsets relative to the template's interior; `Span::shifted` and
+  `ParserAst::shift_spans` move the tree onto the file by the token's start + 1,
+  so a capture's diagnostic carets the capture instead of the top of the file.
+  *Amended 2026-07-31:* one uniform shift is right for one level and wrong for
+  two. A nested template's parts and errors are scanned in the **nested**
+  interior's offsets, so `body::parse_expr` rebases both channels
+  (`ast::shift_part_spans`, `ScanError::shifted`) onto the interior that holds
+  them before the HIR applies its single shift. Pinned by
+  `every_span_is_the_text_it_names_even_inside_a_nested_template`, which slices
+  the interior by each span and compares it with the text the node was built
+  from.
 - **No new diagnostic code.** I011, I012 and I013 were allocated by ADR-051 and
   constructed nowhere in the tree; they are constructed now.

@@ -58,8 +58,13 @@
 > dependency), because §7.4's `identifier` atomic parses with §4.1's character
 > class and a second copy of that rule is what F3 exists to prevent. The
 > workspace's one text-literal decoder moved to `praxis_syntax::literal` for the
-> same reason. `praxis-input-parser` still does **not** depend on `praxis-parser`,
-> and `praxis-parser` does not depend on `praxis-input-parser`.
+> same reason, and so did the one rule for **where a backtick template ends**
+> (`praxis_syntax::template`): the lexer decides the extent of the token and the
+> scanner decides the extent of every template inside it, and while those were
+> two implementations of one rule they disagreed about string literals and about
+> the nesting bound. `praxis-input-parser` still does **not** depend on
+> `praxis-parser`, and `praxis-parser` does not depend on `praxis-input-parser` —
+> which is why the shared rule sits *under* both rather than in either.
 
 ## Context
 
