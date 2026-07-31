@@ -112,6 +112,16 @@ impl AtomicKind {
 /// How a template literal run of whitespace matches input (§7.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WsPolicy {
+    /// The literal had no whitespace run in front of it, so no whitespace is
+    /// consumed before matching it.
+    ///
+    /// Added by S20 (IPR-12). Before it, every literal was tagged
+    /// [`SpaceRun`](Self::SpaceRun) whether or not the template had written a
+    /// space run, so the interpreter could not tell "this literal had a leading
+    /// run" from "it did not" — and the only way to keep templates matching was
+    /// to implement `SpaceRun` as zero-or-more, contradicting its own
+    /// definition. This variant is what lets `SpaceRun` mean what it says.
+    None,
     /// A run of ordinary spaces matches one or more spaces or tabs (the default,
     /// flexible rule for AoC column alignment, §7.2).
     SpaceRun,

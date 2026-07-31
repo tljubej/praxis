@@ -1412,11 +1412,7 @@ fn walk_template(
             } => {
                 // Skip any flexible leading whitespace before a capture, then
                 // walk the child parser to extract one value.
-                let Some(after) = consume_ws(bytes, cursor.delta_from(base), consume_ws_default())
-                else {
-                    return Err(ParseFail::at(cursor.offset(), 0, "whitespace"));
-                };
-                cursor = base.advance(after);
+                cursor = base.advance(skip_capture_ws(bytes, cursor.delta_from(base)));
                 // **Bound the capture by the literal that follows it** (IPR-10).
                 // §7.4 says `text` "minimally consumes text until the following
                 // template literal can match", and the predecessor consumed to
@@ -1517,10 +1513,7 @@ fn walk_tuple(
     let mut cursor = base;
     let mut values: Vec<GcRef> = Vec::with_capacity(elements.len());
     for &elem in elements {
-        let Some(after) = consume_ws(bytes, cursor.delta_from(base), consume_ws_default()) else {
-            return Err(ParseFail::at(cursor.offset(), 0, "whitespace"));
-        };
-        cursor = base.advance(after);
+        cursor = base.advance(skip_capture_ws(bytes, cursor.delta_from(base)));
         // SAFETY: ctx is valid.
         let walked = unsafe { walk(rt.ctx, i, plan, elem, region.from(cursor))? };
         cursor = walked.next;
@@ -1533,11 +1526,24 @@ fn walk_tuple(
     })
 }
 
-/// The default whitespace policy applied before a capture: a flexible run of
-/// spaces/tabs (the §7.2 SpaceRun rule, so AoC column alignment works). This
-/// matches `walk_atomic`'s `trim_leading_ws` behavior for atomics.
-fn consume_ws_default() -> praxis_input_parser::WsPolicy {
-    praxis_input_parser::WsPolicy::SpaceRun
+/// Skip the horizontal whitespace before a capture: zero or more spaces or
+/// tabs. Returns the number of bytes skipped.
+///
+/// This is **not** a [`WsPolicy`](praxis_input_parser::WsPolicy) and it used to
+/// be one — `SpaceRun`, which is the one-or-more policy. It only worked because
+/// `SpaceRun` was implemented as zero-or-more; making `SpaceRun` mean what it
+/// says would otherwise have made every capture demand leading whitespace.
+/// §7.4 puts surrounding horizontal space on the caller, and this is the
+/// caller: it matches `walk_atomic`'s own `trim_leading_ws`.
+fn skip_capture_ws(bytes: &[u8], cursor: usize) -> usize {
+    let Some(rest) = bytes.get(cursor..) else {
+        return cursor;
+    };
+    let mut i = 0;
+    while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
+        i += 1;
+    }
+    cursor + i
 }
 
 /// Consume bytes at `cursor` per `ws`, returning the new cursor or `None` if the
@@ -1547,14 +1553,23 @@ fn consume_ws(bytes: &[u8], cursor: usize, ws: praxis_input_parser::WsPolicy) ->
     let rest = bytes.get(cursor..)?;
     let mut i = 0;
     match ws {
+        WsPolicy::None => {
+            // The template wrote no run in front of this literal, so no run is
+            // consumed. Without this variant every literal claimed `SpaceRun`
+            // and `SpaceRun` had to accept an empty run to compensate.
+        }
         WsPolicy::SpaceRun => {
-            // One or more spaces or tabs (flexible; §7.2 default).
-            // Note: for a literal with leading SpaceRun we require ≥1; if the
-            // literal is the very first part the run may be empty — handled by
-            // allowing zero when cursor == 0. Practically, allow zero-or-more
-            // here so templates starting at offset 0 match.
+            // **One or more** spaces or tabs — the flexible §7.2 default, as
+            // `WsPolicy`'s own definition states it. It used to accept an empty
+            // run, with a comment admitting the contradiction, because the
+            // scanner tagged every literal `SpaceRun` and requiring one would
+            // have made a template starting with a literal unmatchable. The
+            // scanner distinguishes them now (IPR-12).
             while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
                 i += 1;
+            }
+            if i == 0 {
+                return None;
             }
         }
         WsPolicy::ZeroOrMore => {
@@ -2427,7 +2442,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: SpaceRun currently accepts an empty run"]
     fn consume_ws_space_run_requires_one_or_more_spaces_or_tabs() {
         use praxis_input_parser::WsPolicy;
         assert_eq!(consume_ws(b"  ,x", 0, WsPolicy::SpaceRun), Some(2));

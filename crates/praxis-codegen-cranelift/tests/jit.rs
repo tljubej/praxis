@@ -6135,8 +6135,20 @@ fn a_template_literal_that_begins_with_a_space_matches() {
     assert_eq!(result.as_int(), 5);
 
     // The policy is still flexible, which is what stripping the run *into* it
-    // preserves: extra spaces and none at all both match.
-    for input in ["1 -> 2\n", "1    ->    2\n", "1->2\n"] {
+    // preserves: one space or many, tabs or spaces, all match.
+    //
+    // AMENDED (S20/IPR-12). `"1->2\n"` used to be in this list, asserting that
+    // a template written with a space run also matches an input with **no**
+    // whitespace at all. That is the contradiction IPR-12 names: `SpaceRun` is
+    // defined as "one or more spaces or tabs" and was implemented as
+    // zero-or-more, with a comment in `consume_ws` admitting it. The reason it
+    // had to be zero-or-more was that the scanner tagged *every* literal
+    // `SpaceRun`, including literals with no run in front of them, so requiring
+    // one would have broken `{a:int},{b:int}`. The scanner distinguishes them
+    // now (`WsPolicy::None`), so the policy can mean what it says — and
+    // `"1->2"` against a template that wrote ` -> ` is a mismatch, asserted
+    // just below.
+    for input in ["1 -> 2\n", "1    ->    2\n", "1\t->\t2\n"] {
         let (rt, result) = run_main_with_input(
             "fn main() -> Int {\n  let rs = read lines(`{a:int} -> {b:int}`)\n  \
              var t = 0\n  for r in rs { t = t + r.a + r.b }\n  t\n}\n",
@@ -6149,6 +6161,18 @@ fn a_template_literal_that_begins_with_a_space_matches() {
         );
         assert_eq!(result.as_int(), 3, "{input:?}");
     }
+
+    // And the other side of "one or more": a run the template asked for has to
+    // be there.
+    let (rt, _result) = run_main_with_input(
+        "fn main() -> Int {\n  let rs = read lines(`{a:int} -> {b:int}`)\n  rs.len()\n}\n",
+        "1->2\n",
+    );
+    assert_eq!(
+        rt.fault(),
+        praxis_runtime::FaultKind::ParseFailed,
+        "a template that wrote a space run does not match input that has none"
+    );
 
     // A literal with no leading space is untouched, and one that is *only* spaces
     // is a whitespace part.
