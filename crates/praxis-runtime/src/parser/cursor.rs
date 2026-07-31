@@ -36,7 +36,7 @@
 // telling them apart, which is the current bug and harder to see). The very
 // next commit adopts every item here and this allowance goes with it.
 
-use crate::text::{text_bytes, TextPayload};
+use crate::text::{text_bytes, text_root, TextPayload};
 use crate::GcRef;
 
 /// An absolute byte offset into one [`Input`].
@@ -83,7 +83,10 @@ impl Cursor {
 /// (IPR-03).
 #[derive(Clone, Copy)]
 pub(crate) struct Input<'a> {
+    /// The **root owned** `Text`. Never a slice: see [`Input::new`].
     owner: GcRef,
+    /// Where this input's bytes begin inside `owner`.
+    base: usize,
     text: &'a str,
 }
 
@@ -96,19 +99,48 @@ impl<'a> Input<'a> {
     /// is still a `None` and not an `expect`: this runs inside `extern "C"` and
     /// a panic there is undefined behaviour (§10.4, D12).
     ///
+    /// **The owner chain is collapsed here, once.** `parse(t, P)` takes its
+    /// owner from the argument, and that argument may itself be a slice — of a
+    /// slice, of a slice. Naming it directly would make every `Text` the parse
+    /// produced one link longer than the last, and `text_bytes` walks the chain
+    /// on every read: `t = parse(t, rest)` in a loop went quadratic and then
+    /// overflowed the stack. Resolving to the root owned `Text` and carrying
+    /// the base offset keeps every slice the interpreter allocates exactly one
+    /// level deep, whatever it was handed.
+    ///
     /// # Safety
     /// `owner` must be a live `Text` `GcRef`.
     pub(crate) unsafe fn new(owner: GcRef) -> Option<Input<'a>> {
         // SAFETY: caller guarantees `owner` is a live Text.
         let bytes = unsafe { text_bytes(owner.payload::<TextPayload>() as *const TextPayload) };
         let text = std::str::from_utf8(bytes).ok()?;
-        Some(Input { owner, text })
+        // SAFETY: same guarantee; `text_root` only walks `owner` links.
+        let (root, base) = unsafe { text_root(owner) };
+        Some(Input {
+            owner: root,
+            base,
+            text,
+        })
     }
 
-    /// The reference every source-slice `Text` this parse produces is a view of.
+    /// The reference every source-slice `Text` this parse produces is a view of
+    /// — the **root** owned `Text`, so no slice this parse allocates names
+    /// another slice.
     #[inline]
     pub(crate) fn owner(&self) -> GcRef {
         self.owner
+    }
+
+    /// `at`, an offset into this input's bytes, as an offset into
+    /// [`owner`](Input::owner)'s bytes.
+    ///
+    /// The two differ exactly when the parse was handed a slice: the input's
+    /// byte 0 is `base` in the root. Every `alloc_text_slice` the interpreter
+    /// makes goes through this, which is what keeps "owner is the root" and
+    /// "offsets name real bytes" one statement rather than two that can drift.
+    #[inline]
+    pub(crate) fn owner_offset(&self, at: usize) -> usize {
+        self.base.saturating_add(at)
     }
 
     /// The whole buffer as one region — the root of every narrowing chain, and

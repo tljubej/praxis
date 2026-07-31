@@ -44,7 +44,9 @@ them.
   mints are `Input::whole` and `Cursor::advance`, both of which start from a
   position that is already absolute, so `bytes.len() - offset` cannot become one.
 - **`Input`** carries the `GcRef` its bytes belong to. Ownership stops being a
-  second opinion read from the context; `rt_owner` is deleted.
+  second opinion read from the context; `rt_owner` is deleted. The reference it
+  carries is the **root owned** `Text`, resolved once in `Input::new`, plus the
+  base offset at which the parsed bytes begin inside it — see below.
 - **`ByteRegion`** is a pair of cursors whose only derivation is `subregion`,
   which cannot widen — debug builds assert, release builds clamp. A child parser
   gets a *narrower window on the same buffer*, never a fresh buffer starting at
@@ -62,6 +64,22 @@ is harder to find.
 `str::from_utf8(..).unwrap_or("")` calls. Those turned a mis-computed region into
 a silently *empty* one — a zero-row `Grid` where there should have been a
 mismatch.
+
+### The owner is the root, and it is resolved once
+
+Taking the owner from the `input` argument is what makes `parse(t, P)` correct,
+and it introduced a second problem the first draft did not close: `t` may itself
+be a source slice, so each parse produced a slice **of a slice**. `text_bytes`
+follows the chain on every read, so `t = parse(t, rest)` in a loop was O(depth)
+per read, O(n²) over the loop, and at 100 000 links it overflowed the stack and
+aborted the process — inside `extern "C"`, the one outcome §10.4 rules out.
+
+`Input::new` resolves to the root owned `Text` once (`text_root`) and carries the
+base offset; `Input::owner_offset` rebases every allocation. So a slice the
+interpreter allocates is always exactly one level deep, whatever it was handed,
+and the loop above is linear (100 000 links: 64s and an abort, now 0.3s). A chain
+is still legal — the host can build one — so `text_bytes` is iterative as well,
+because a depth no validation bounds must not cost stack.
 
 **Alternative rejected: fix the twelve returns and keep the tuple.** It is the
 smaller diff and it leaves the defect. The two readings would still both be

@@ -105,19 +105,73 @@ impl TextPayload {
 /// `payload` must point at a fully initialized, validly-linked `TextPayload` —
 /// every `owner` along the chain must point at a live `Text` object.
 pub unsafe fn text_bytes(payload: *const TextPayload) -> &'static [u8] {
-    // SAFETY: caller guarantees `payload` points at a valid TextPayload.
-    match unsafe { &*payload } {
-        TextPayload::Owned(boxed) => boxed.as_bytes(),
-        TextPayload::Slice(slice) => {
-            // SAFETY: caller guarantees the owner chain is valid; non-moving GC.
-            let owner_payload = slice.owner.payload::<TextPayload>() as *const TextPayload;
-            let owner_bytes = unsafe { text_bytes(owner_payload) };
-            // In range by construction: `SourceSlice::new` is the only
-            // constructor and it rejects anything else. There used to be a
-            // clamp here — `&owner_bytes[start..]` when the end ran past —
-            // which turned a bad range into a *different, plausible* Text, and
-            // panicked anyway when `start` itself was out of range (RT-06).
-            &owner_bytes[slice.start..slice.start + slice.len]
+    // **Iterative, not recursive.** This used to recurse through `owner`, so a
+    // chain of depth n cost O(n) per read and a long enough one overflowed the
+    // stack and aborted the process — inside `extern "C"`, where an abort is
+    // the one outcome §10.4 rules out. Nothing about a chain is illegal, so the
+    // depth cannot be bounded by validation; the read just must not be
+    // recursive. (The parser also stops *building* chains: `Input::new`
+    // collapses to the root owner, see `text_root`.)
+    let mut payload = payload;
+    let mut start = 0usize;
+    // The window is the OUTERMOST slice's length: each step inward widens the
+    // owner, so only the first `len` describes the text being read.
+    let mut len: Option<usize> = None;
+    loop {
+        // SAFETY: caller guarantees `payload` points at a valid TextPayload and
+        // that every `owner` along the chain is a live Text.
+        match unsafe { &*payload } {
+            TextPayload::Owned(boxed) => {
+                let bytes = boxed.as_bytes();
+                // In range by construction: `SourceSlice::new` is the only
+                // constructor and it rejects anything else. There used to be a
+                // clamp here — `&owner_bytes[start..]` when the end ran past —
+                // which turned a bad range into a *different, plausible* Text,
+                // and panicked anyway when `start` itself was out of range
+                // (RT-06).
+                return match len {
+                    None => bytes,
+                    Some(len) => &bytes[start..start + len],
+                };
+            }
+            TextPayload::Slice(slice) => {
+                start += slice.start;
+                if len.is_none() {
+                    len = Some(slice.len);
+                }
+                // SAFETY: the owner is a live Text; the GC is non-moving
+                // (ADR-011) and the slice's `trace` keeps the owner reachable.
+                payload = slice.owner.payload::<TextPayload>() as *const TextPayload;
+            }
+        }
+    }
+}
+
+/// The root **owned** `Text` behind `text`, and the absolute offset at which
+/// `text`'s own bytes begin inside it.
+///
+/// A `SourceSlice` may name another `SourceSlice`, so "the owner" is in general
+/// a chain. The parser refuses to extend one: `parse(t, P)` over a `t` that is
+/// itself a slice would otherwise allocate slices of a slice, and every `Text`
+/// that parse produced would pay the chain's depth on every read. Resolving
+/// once, when the [`Input`](crate::parser::cursor::Input) is built, keeps every
+/// slice the interpreter allocates exactly one level deep.
+///
+/// # Safety
+/// `text` must be a live `Text` `GcRef`, and every `owner` along its chain must
+/// point at a live `Text`.
+#[must_use]
+pub unsafe fn text_root(text: GcRef) -> (GcRef, usize) {
+    let mut root = text;
+    let mut base = 0usize;
+    loop {
+        // SAFETY: caller guarantees the chain is live.
+        match unsafe { &*(root.payload::<TextPayload>() as *const TextPayload) } {
+            TextPayload::Owned(_) => return (root, base),
+            TextPayload::Slice(slice) => {
+                base += slice.start;
+                root = slice.owner;
+            }
         }
     }
 }
@@ -329,6 +383,53 @@ mod tests {
             "the rooted slice and its otherwise-unrooted owner must both survive"
         );
         assert_eq!(slice.as_text(), "ell");
+    }
+
+    /// **Reading a `Text` costs no stack, however deep its owner chain is.**
+    ///
+    /// `text_bytes` used to recurse through `owner`, so a chain of depth n cost
+    /// n frames per read and a long enough one overflowed the stack and
+    /// aborted the process — inside `extern "C"`, which is the one outcome
+    /// §10.4 rules out. A chain is not illegal, so the depth cannot be bounded
+    /// by validation; the read simply must not be recursive.
+    ///
+    /// The thread's stack is deliberately small: on the recursive read this
+    /// depth overflows it, and no assertion can catch that, so the test's
+    /// passing *is* the assertion. The parser separately refuses to build
+    /// chains at all (`Input::new` resolves to the root owner), which is why
+    /// this has to be built by hand to be tested.
+    #[test]
+    fn reading_a_deep_slice_chain_does_not_recurse() {
+        const DEPTH: usize = 4_000;
+        std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(|| {
+                let rt = crate::Runtime::new();
+                let mut text = rt.alloc_text("hello world");
+                let mut roots = crate::RootScope::new();
+                for _ in 0..DEPTH {
+                    // Each link is the whole of its owner, so the answer never
+                    // changes and only the depth grows.
+                    // SAFETY: `text` is the live Text from the previous step.
+                    text = unsafe { rt.alloc_text_slice(text, 0, 11) }.expect("the whole owner");
+                    roots.root(text);
+                }
+                assert_eq!(text.as_text(), "hello world");
+
+                // And the root resolution the parser relies on is iterative for
+                // the same reason, and lands on the owned text.
+                // SAFETY: `text` is live and its chain is live (all rooted).
+                let (root, base) = unsafe { text_root(text) };
+                assert_eq!(base, 0);
+                // SAFETY: `root` is a live Text.
+                assert!(
+                    unsafe { &*(root.payload::<TextPayload>() as *const TextPayload) }.is_owned(),
+                    "text_root resolves to the owned text, not to another slice"
+                );
+            })
+            .expect("spawn")
+            .join()
+            .expect("a deep chain must be readable without recursing");
     }
 
     /// The range is not a hint. A view past the owner's end, one whose length

@@ -453,7 +453,7 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
                 return Err(ParseFail::at(at.offset(), 0, "word"));
             }
             let slice = rt
-                .alloc_text_slice(i.owner(), at.offset(), len)
+                .alloc_text_slice(i.owner(), i.owner_offset(at.offset()), len)
                 .ok_or_else(|| ParseFail::at(at.offset(), len, "word"))?;
             Ok(Walked {
                 value: slice,
@@ -517,7 +517,7 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
                 return Err(ParseFail::at(at.offset(), 0, "identifier"));
             }
             let slice = rt
-                .alloc_text_slice(i.owner(), at.offset(), len)
+                .alloc_text_slice(i.owner(), i.owner_offset(at.offset()), len)
                 .ok_or_else(|| ParseFail::at(at.offset(), len, "identifier"))?;
             Ok(Walked {
                 value: slice,
@@ -533,7 +533,7 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
             let start = region.start();
             let len = region.end().delta_from(start);
             let slice = rt
-                .alloc_text_slice(i.owner(), start.offset(), len)
+                .alloc_text_slice(i.owner(), i.owner_offset(start.offset()), len)
                 .ok_or_else(|| ParseFail::at(start.offset(), len, "text"))?;
             Ok(Walked {
                 value: slice,
@@ -2607,6 +2607,64 @@ mod tests {
             vec!["alpha", "beta"],
             "a parse's slices must be views of the text it parsed, not of ctx.input_source"
         );
+    }
+
+    /// **A parse of a slice does not extend the owner chain.**
+    ///
+    /// `parse(t, P)` takes its owner from the argument, and that argument may
+    /// itself be a slice. Naming it directly makes every produced `Text` one
+    /// link longer than the last, and `text_bytes` walks the chain on every
+    /// read — so `t = parse(t, rest)` in a loop went quadratic and eventually
+    /// overflowed the stack. `Input::new` resolves to the root owned `Text` and
+    /// carries the base offset, so a slice of a slice is not constructible from
+    /// here however deep the argument was.
+    #[test]
+    fn a_parse_of_a_slice_does_not_extend_the_owner_chain() {
+        let mut rt = crate::Runtime::new();
+        let owned = rt.alloc_text("XXalpha betaXX");
+        // The subject is a *slice* of the owned text: bytes [2, 12).
+        // SAFETY: `owned` is the live Text allocated above.
+        let subject = unsafe { rt.alloc_text_slice(owned, 2, 10) }.expect("[2, 12) is in range");
+        assert_eq!(subject.as_text(), "alpha beta");
+        let mut ctx = rt.context();
+        ctx.input_source = owned;
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Word,
+                },
+                PlanNode::Ws { child: 0 },
+            ],
+            1,
+        );
+
+        let result = unsafe { run_root(&mut ctx, &plan, subject) }.expect("ws(word) should parse");
+        let items: Vec<GcRef> = result.as_vec().to_vec();
+        let values: Vec<&str> = items.iter().map(GcRef::as_text).collect();
+        assert_eq!(
+            values,
+            vec!["alpha", "beta"],
+            "the base offset must be applied, or the slices name the wrong bytes"
+        );
+
+        for item in items {
+            // SAFETY: each item is a live Text produced by the parse.
+            let payload = unsafe {
+                &*(item.payload::<crate::text::TextPayload>() as *const crate::text::TextPayload)
+            };
+            let crate::text::TextPayload::Slice(slice) = payload else {
+                panic!("a `word` is a source slice");
+            };
+            // SAFETY: a slice's owner is a live Text.
+            let owner = unsafe {
+                &*(slice.owner().payload::<crate::text::TextPayload>()
+                    as *const crate::text::TextPayload)
+            };
+            assert!(
+                owner.is_owned(),
+                "a parse of a slice must still name the ROOT owned text, not another slice"
+            );
+        }
     }
 
     #[test]
