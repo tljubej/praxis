@@ -355,8 +355,15 @@ impl std::fmt::Display for Separator {
 /// That inversion is not academic: it is what made
 /// `chars(one_of("^v<>"), skip: whitespace)` — §7.5's own example — look like it
 /// should absorb an input file's trailing `\n`, and a stage shipped believing
-/// it. (It does not; the file's terminator is outside the root region instead,
-/// ADR-078 Decision 3.) The sets are kept as they are because they are the ones
+/// it. It does not, and it does not have to: the terminator is **inside** the
+/// root region — the root region is the whole buffer, and nothing is trimmed off
+/// it — and it is forgiven because it is whitespace the character parser
+/// declined (`walk_characters` asks the child first and accepts a
+/// whitespace-only leftover through `ByteRegion::is_all_whitespace`, the bound
+/// half of ADR-078's rule). No skip policy has to account for it. (An earlier
+/// version of this note said the terminator was *outside* the root region, which
+/// was round two's answer — a trim of exactly one terminator, deleted because a
+/// file ending `"\n\n"` defeated it.) The sets are kept as they are because they are the ones
 /// §7.5's example needs and swapping them would silently change what every
 /// existing `skip: newlines` program accepts; what was missing was this
 /// paragraph. `walk_characters`/`skip_chars` in `praxis-runtime` is the

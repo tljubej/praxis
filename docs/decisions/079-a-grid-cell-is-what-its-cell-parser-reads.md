@@ -68,9 +68,15 @@ clean 2x2 grid with `b` shifted into the space's slot. That is a wrong answer
 where the byte-counted predecessor gave a wrong shape, and a wrong answer is
 worse. §7.4's "surrounding horizontal space handled by caller" is a rule for the
 numeric atomics; `char` and `one_of` are character classes and read the scalar
-at the cursor. A caller that wants leading space skipped has `chars`' `skip:`,
-`walk_exact`'s token bounds, and a template's pre-capture skip. With that,
-"every row has the same cell count" rejects a ragged char grid again.
+at the cursor. A caller that wants leading space skipped has `chars`' `skip:` and
+`walk_exact`'s token bounds. With that, "every row has the same cell count"
+rejects a ragged char grid again.
+
+(This list used to end "and a template's pre-capture skip", which was the same
+mistake one level up: a capture's skip deleted the space before `char` was
+offered it, so ``lines(`{a:char}`)`` and `lines(char)` disagreed about the same
+file. The skip bounds a capture now and does not feed it — Decision 4's amended
+§.)
 
 **A row's trailing whitespace is padding, not a cell — when the cell parser
 cannot read it.** `grid(int)` faulted on a row ending in a space while
@@ -297,10 +303,20 @@ therefore cannot absorb a `\n`. The claim was load-bearing for exactly the wrong
 case: the input file's own trailing newline. So §7.5's documented example,
 `read chars(one_of("^v<>"), skip: whitespace)`, faulted on every ordinary file.
 
-Nothing here changes to fix that, because nothing here was the problem: the
-file's terminator is not part of the data and is now not part of the root region
-(ADR-078 Decision 3). What this decision governs is a trailing run *inside* the
-data, and there the sentence above holds for each policy's own byte set.
+Nothing here changes to fix that, because nothing here was the problem — but the
+reason first written here was itself round two's deleted answer, and it survived
+three rounds because it spells the rule in prose rather than by API name. It
+said the terminator "is now not part of the root region". **The root region is
+the whole buffer and the terminator is inside it** (ADR-078 Decision 3's amended
+§; `run_plan` walks `i.whole()`, and `parse("abc\n", rest)` is 4 bytes because
+of it). What forgives the terminator is not a region boundary and not a skip
+policy: `walk_characters` asks the child first and accepts a whitespace-only
+leftover through `ByteRegion::is_all_whitespace`, the bound half of the rule. So
+`chars` needs no change here, and no policy has to account for a byte no child
+read.
+
+What this decision governs is a trailing run *inside* the data, and there the
+sentence above holds for each policy's own byte set.
 
 ## Consequences
 
