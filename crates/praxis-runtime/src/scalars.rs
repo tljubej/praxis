@@ -686,4 +686,54 @@ mod tests {
         assert_eq!(rendered(f64::NEG_INFINITY), "-inf");
         assert_eq!(rendered(f64::NAN), "NaN");
     }
+
+    /// **REP-50, and ADR-083's rule stated as a round trip.** The rendered form
+    /// of a `Float` is the text that reads back as *the same* `Float`, so the
+    /// check is a re-read and not a string comparison.
+    ///
+    /// `-0.0` is the case that made this worth writing: the formatter has
+    /// always been right about it, and the evaluator was not — a Float
+    /// negation was lowered as `0.0 - x`, so the literal `-0.0` produced
+    /// `+0.0` and the rendering of the *wrong value* round-tripped perfectly.
+    /// `to_bits` is what tells the two zeros apart; `==` cannot, because
+    /// IEEE-754 says they are equal.
+    ///
+    /// **Not red on `main`**, therefore, and not REP-50's gate — that is
+    /// `run_pass_float_negative_zero`, which asks the *evaluator*. This is the
+    /// rule made checkable at the layer that owns the rendering, so a later
+    /// edit to `FLOAT.format` cannot quietly stop satisfying it.
+    #[test]
+    fn a_rendered_float_reads_back_as_the_same_float() {
+        let rendered = |v: FloatPayload| {
+            let mut buf = String::new();
+            // SAFETY: `v` is a `FloatPayload` and `FLOAT` is its descriptor.
+            unsafe { (FLOAT.format)(std::ptr::addr_of!(v) as *const u8, &mut buf) };
+            buf
+        };
+        for v in [
+            0.0_f64,
+            -0.0,
+            1.0,
+            -7.0,
+            2.5,
+            1e10,
+            0.1 + 0.2,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+        ] {
+            let text = rendered(v);
+            let reread: f64 = text
+                .parse()
+                .unwrap_or_else(|e| panic!("`{text}` does not read back as a Float: {e}"));
+            assert_eq!(
+                reread.to_bits(),
+                v.to_bits(),
+                "`{text}` read back as a different Float"
+            );
+        }
+        // The signed zeros are distinct values (ADR-045 orders them apart) and
+        // render distinctly, which is the whole of REP-50's rule at this layer.
+        assert_eq!(rendered(-0.0), "-0.0");
+        assert_ne!(rendered(-0.0), rendered(0.0));
+    }
 }

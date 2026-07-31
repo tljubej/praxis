@@ -1076,6 +1076,18 @@ fn lower_inst<M: Module>(
             let result = f64_to_i64(builder, result_f);
             builder.def_var(vars[dst.0 as usize], result);
         }
+        Inst::FloatNeg { dst, src } => {
+            // IEEE-754 `negate`: flip the sign bit, change nothing else. A
+            // negation is not a subtraction from zero — `0.0 - x` answers
+            // `+0.0` at `x = +0.0`, which is what lost the `-0.0` literal
+            // (REP-50) — so the sign flip is the instruction and Cranelift's
+            // `fneg` is it.
+            let s_i = builder.use_var(vars[src.0 as usize]);
+            let s = i64_to_f64(builder, s_i);
+            let negated = builder.ins().fneg(s);
+            let result = f64_to_i64(builder, negated);
+            builder.def_var(vars[dst.0 as usize], result);
+        }
         Inst::FloatCmp { op, dst, lhs, rhs } => {
             // IEEE-754 comparison: bit-cast operands to f64, then `fcmp` with a
             // `FloatCC`. This gives NaN semantics for free (NaN compares unordered

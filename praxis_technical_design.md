@@ -449,6 +449,15 @@ are `abs`, `sqrt`, `floor`, `ceil`, `round`, `sign`, `to_int`, `to_text`,
 `is_nan`, `is_infinite`, `min(other)`, `max(other)`; `pi()` and `e()` are
 prelude free functions. `%` (remainder) is not defined for floats.
 
+**`-0.0` is a value, and unary `-` on a `Float` is IEEE-754 `negate`** — the
+sign bit flipped, nothing else — not a subtraction from zero. ADR-045 already
+decided the two zeros are distinct for a container's ordering, and §16.3 orders
+by the rendered form, so `-0.0` and `0.0` are two keys; the rendering rule above
+then requires `-0.0` to print as `-0.0`. `0.0 - x` is not that negation
+(`0.0 - 0.0` is `+0.0`), which is what REP-50 was. Note that `==` cannot observe
+the difference: IEEE-754 says `-0.0 == 0.0`, so `1.0 / x` is the observation
+that tells them apart.
+
 See ADR-037 for the implementation: floats ride the uniform `i64` scalar channel
 as their bit pattern, bit-casting to `f64` at arithmetic/comparison points.
 

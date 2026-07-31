@@ -126,6 +126,29 @@ fn run_pass_float_div_by_zero() {
     assert_passes("float_div_by_zero.px", "inf");
 }
 
+/// **REP-50's gate.** The `-0.0` literal, and the round trip ADR-083 states.
+///
+/// A Float negation was lowered as `0.0 - x`, and `0.0 - 0.0` is `+0.0`, so
+/// `-0.0` evaluated to `+0.0`: `out(-0.0)` printed `0.0`, and the text a Float
+/// rendered to did not read back as that Float — which is the one rule ADR-083
+/// exists to state. ADR-045 had already decided the two zeros are distinct
+/// values (§16.3 orders a container by the rendered form, and the two forms
+/// differ), so the sign was a value the language admits and the evaluator lost.
+///
+/// The observation is `1.0 / x` and **not** `x == 0.0`: IEEE-754 says
+/// `-0.0 == 0.0`, so equality is blind to precisely the bit this is about, and
+/// a gate written with `==` would pass before the fix. Lines 1–2 (the computed
+/// negative zero) were already right and are the companion; lines 3–6 are the
+/// literal and the same negation through a binding, and both answered `0.0` /
+/// `inf` before the fix.
+#[test]
+fn run_pass_float_negative_zero() {
+    assert_passes(
+        "float_negative_zero.px",
+        "-0.0\n-inf\n-0.0\n-inf\n-0.0\n-inf\ninf\ninf\n-2.5\n-2.5",
+    );
+}
+
 #[test]
 fn run_fault_float_to_int_nan() {
     // NaN → to_int faults with FloatToInt (§4.12), exit 1, no abort.

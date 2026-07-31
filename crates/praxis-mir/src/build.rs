@@ -1010,16 +1010,21 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             let o = lower_expr_gc(b, operand);
             match op {
                 UnaryOp::Neg => {
-                    // `0 - operand`. For a Float operand, this is `0.0 - x` as
-                    // unchecked float subtraction (no fault); for Int it is the
-                    // checked subtraction that faults on `Int::MIN` overflow.
+                    // A Float negation is IEEE-754 `negate` — the sign bit
+                    // flipped and nothing else — and **not** `0.0 - x`, which
+                    // is what this was: at `x = +0.0` that subtraction answers
+                    // `+0.0`, so `-0.0` evaluated to `+0.0` and printed `0.0`,
+                    // a rendering that does not read back as the Float it came
+                    // from (REP-50; ADR-083 states the rule, ADR-045 already
+                    // decided the two zeros are distinct values). An `Int`
+                    // negation *is* `0 - x`: it is the checked subtraction, and
+                    // faulting at `Int::MIN` is the right answer there.
                     let is_float = matches!(
                         b.db.data(b.db.follow(expr_static_type(operand))),
                         praxis_types::data::TypeData::Scalar(praxis_types::ScalarType::Float)
                     );
                     if is_float {
-                        let zero = lower_lit_gc(b, &Lit::Float(0.0), espan);
-                        let result = lower_float_binop(b, FloatBinOp::Sub, zero, o);
+                        let result = lower_float_neg(b, o);
                         lower_materialize_float(b, result, espan)
                     } else {
                         let zero = lower_lit_gc(b, &Lit::Int(0), espan);
@@ -1714,6 +1719,16 @@ fn lower_float_binop(
     let rhs = lower_extract_float(b, rhs_gc);
     let dst = b.alloc_scalar(ScalarKind::Float);
     b.push(Inst::FloatBinOp { op, dst, lhs, rhs });
+    dst
+}
+
+/// Lower a Float negation on a `GcRef` operand, returning the scalar
+/// (bit-pattern) result. IEEE-754 `negate`: no fault, and — unlike a
+/// subtraction from zero — exact at both zeros (REP-50).
+fn lower_float_neg(b: &mut Builder<'_>, operand_gc: LocalId) -> LocalId {
+    let src = lower_extract_float(b, operand_gc);
+    let dst = b.alloc_scalar(ScalarKind::Float);
+    b.push(Inst::FloatNeg { dst, src });
     dst
 }
 

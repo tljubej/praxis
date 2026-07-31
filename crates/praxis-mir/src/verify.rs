@@ -519,7 +519,8 @@ fn operands(inst: &Inst) -> Vec<LocalId> {
         | Inst::LoadTupleElem { dst, src, .. }
         | Inst::EnumTag { dst, src }
         | Inst::EnumPayloadGet { dst, src, .. }
-        | Inst::MoveGc { dst, src } => v.extend([*dst, *src]),
+        | Inst::MoveGc { dst, src }
+        | Inst::FloatNeg { dst, src } => v.extend([*dst, *src]),
         Inst::StoreScalar { dst_gc, src, .. } => v.extend([*dst_gc, *src]),
         Inst::IntBinOp { dst, lhs, rhs, .. }
         | Inst::FloatBinOp { dst, lhs, rhs, .. }

@@ -241,6 +241,20 @@ pub enum Inst {
         lhs: LocalId,
         rhs: LocalId,
     },
+    /// Negate a `Float` scalar: IEEE-754 `negate`, which flips the sign bit and
+    /// changes nothing else (§4.12). Never faults, like every other float
+    /// operation.
+    ///
+    /// This exists because a negation is **not** a subtraction from zero, and
+    /// spelling it that way is what REP-50 was: `0.0 - x` answers `+0.0` at
+    /// `x = +0.0`, so the literal `-0.0` evaluated to `+0.0` and printed
+    /// `0.0` — a rendering that does not read back as the value it came from,
+    /// which is the one rule ADR-083 states. ADR-045 had already decided the
+    /// two zeros are distinct values (a container orders them apart), so
+    /// losing the sign is losing a value the language admits.
+    /// Operand/result are bit-pattern `i64`s; the backend bit-casts and emits
+    /// an `fneg`.
+    FloatNeg { dst: LocalId, src: LocalId },
     /// A comparison of two `Float` scalars yielding a `Bool` scalar (§4.12).
     /// Uses IEEE-754 ordering: NaN compares unordered against everything (so
     /// `NaN == NaN` and `NaN < x` are both false). Operands are bit-pattern
