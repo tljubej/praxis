@@ -121,6 +121,43 @@ the bridge reads the marker's whole argument list through the same
 `both_front_ends_apply_one_repeated_tail_rule`, which asserts every case through
 both spellings and on the same `DiagCode`.
 
+*Amended again 2026-07-31.* Decision 2's claim held for the argument *list* and
+not for a keyword argument's **value**, and there the two front ends disagreed
+on identical source text.
+
+`grid(P, ragged, fill: <literal>)` is §7.5's own spelling. The rowan grammar had
+no shape for a literal after `name:` — it called `parse_parser_expr`, which
+cannot parse `0` — so the call reported `P001 expected a parser expression`, and
+the bridge, reading the value as `ParserExpr::text().unwrap_or_default()` (the
+first `Ident` in the subtree, of which a `PARSE_ERROR` over an `IntLit` has
+none), turned the absent value into `""`. A `GridRagged` padded with the empty
+string was built and registered in silence. The capture-body front end reads a
+keyword value as raw text and kept the `0`.
+
+A keyword argument's value is now a grammar shape of its own —
+`PARSER_KEYWORD_VALUE`, holding the raw literal token — and *whether the
+constructor has a keyword of that name* is still `Constructor::keyword_arg`'s
+question, asked where it already lives. `unwrap_or_default` is gone: a value the
+AST cannot read is reported (`I014`), not laundered.
+
+Two smaller disagreements fell out of measuring the pair, and both are fixed in
+the one shared place:
+
+- `fill:` was the only parser string literal nothing ever decoded, so `fill: "-"`
+  reached the plan as `"\"-\""`. `build_call` decodes it, beside decision 5's
+  one decoder.
+- `body::take_keyword_value` searched for the argument delimiter without
+  honouring quoting, so `fill: ","` ended at the comma **inside** the literal
+  and the scanner reported `unterminated string literal` for text that is not
+  malformed — while the rowan front end accepted the same call.
+
+And the value is now part of the shape. `check_call` answers from `ArgKind`s,
+which carry a keyword's name and not its value, so `grid(P, ragged, fill:)` was
+accepted by the capture-body front end with **zero** diagnostics. `chars`'s
+`skip:` has always checked its value; `fill:` checks its own now, in
+`build_call`, under decision 4's rule one field over — an empty pad fills
+nothing, exactly as an empty separator never advances.
+
 ## Decision 3: `repeated(...)` is the tail marker, and its position is checked
 
 §7.5: "`repeated(parser)` may appear only as the final named argument." Three

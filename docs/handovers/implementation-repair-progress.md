@@ -198,12 +198,9 @@ S19 itself**, and the first was a regression against `main`.
 One thing the reviews raised is **not** closed, deliberately: `read `{int``
 still swallows the rest of the file into one token. Under D10 a backtick inside
 a capture opens a template of its own, so that really is an unterminated
-template and `T002` really does cover it. Bounding the swallow means deciding
-whether a backtick template may span a raw newline — §7.2 says `\n` *matches* a
-line ending but not whether a raw one may appear in the source form — and the
-alternative recovery (end the run at the first inner backtick) turns one honest
-diagnostic into a cascade of them: `` `{g:choice(A: `{x:int}`)}`` `` would
-report `T002` twice. It is a language question, not a repair.
+template and `T002` really does cover it — truthful, and wide. It is a language
+question and not a repair, and it is **registered as D18** in §5, with both
+candidate rules and the measurement that rejected the second one.
 
 | Test | File | Pins |
 |---|---|---|
@@ -221,6 +218,24 @@ the lexer's nesting test now discriminates the bound (above), and
 `praxis-syntax`'s four `literal` tests are labelled in the module as
 characterization tests pinning a verbatim move, which is a legitimate thing to
 have and not a gate.
+
+##### Round three — what a fourth review found in the repair pass itself
+
+The re-review returned one major and three minors, and the major is the shape to
+remember: **the round-two gate for `grid(char, ragged, fill: 0)` asserted only
+that the call was accepted, and it looked at the wrong diagnostic category to do
+it.** `has_input_error` matches `DiagnosticCategory::Input`; the failure was
+`P001`, a `Parse`-category error, and the synthesized type `Grid[Char]` is the
+same whatever the fill is. So the gate passed while the value was dropped. A
+gate must assert the value or the behaviour, never the acceptance.
+
+| Test | File | Pins |
+|---|---|---|
+| `every_constructor_checks_its_arguments_before_it_builds_anything` (strengthened) | `praxis-hir/src/infer_tests.rs` | the major. Acceptance is now **every** error, lex and parse included (`errors_of`), and §7.5's ragged-grid row asserts the **fill the built AST carries** — five values, through both front ends, from identical text. Also that `fill:` with no value reports on both |
+| `a_keyword_argument_with_no_value_is_not_a_shape` | `praxis-input-parser/src/validate.rs` | the rule at the shared builder: an empty `fill:` is unbuildable, and a written one arrives decoded. `check_call` answers from `ArgKind`s, which carry a keyword's name and not its value, so this can only live at `build_call` |
+| `the_two_template_nesting_bounds_are_the_same_number_and_the_message_says_it` | `praxis-input-parser/src/scan.rs` | the scanner refused at **17** template levels and the message said 32, because both halves of the mutual recursion incremented `depth`. The gate **measures** the effective limit by sweep and parses the number back out of the *rendered message*, so a message that lies fails it |
+| `a_caret_under_a_nested_template_names_the_text_it_points_at` | `infer_tests.rs` | the file-level half of the nested-template span rebase. Deleting `shift_part_spans(parts, delta)` from `ParserAst::shift_spans`'s `Template` arm left the whole suite green; the branch's one span gate reaches the machinery through `body::parse_expr` only, where that arm never runs. This asserts the rendered caret's text at one level of nesting and at two |
+| `a_caret_counts_characters_and_not_bytes` | `praxis-source/src/snippet.rs` | **REP-35**, pre-existing and not S19's: the renderer read a byte offset as a display column, so every caret on a line holding non-ASCII text was wrong. Found while checking the span rebasing — the spans were right and the carets were not |
 
 This session's sixteen new gates and three rewrites (**ADR-066**, **ADR-067**,
 **ADR-068**):
@@ -3587,7 +3602,7 @@ resumes past the reported members now.
 
 **D1, D10, D11 and D12 are answered** (2026-07-31) — see the table at the end of
 this section for the answers and the plan's §7 for the reasoning under each
-heading. That leaves **D16 as the one decision still open**: does `assert` take a
+heading. That leaves **D16 and D18 open**. D16: does `assert` take a
 message, and more generally does the language get arity-based overloading or
 optional parameters? It belongs to **S25**, and the plan's warning is the important
 part — `assert`'s message is the cheapest possible motivating case, so answering it
@@ -3595,6 +3610,41 @@ in isolation would set the precedent by accident. (**REP-15 needed a decision to
 and never got a `D` number: the iteration protocol for the six unlowered iterables,
 and whether `for (k, v) in m` destructures. Both are answered in ADR-066 and by
 REP-25.)
+
+**D18 is open and is new (2026-07-31, S19 round 3): may a backtick template
+span a raw newline?** §7.2 says `\n` *matches* a line ending; it does not say
+whether a raw one may appear in the template's source form. Nothing in the
+language needs the answer until a template is left unclosed — and then it decides
+everything about the report.
+
+`` read `{int` `` today is `T002 unterminated backtick template` spanning the
+rest of the file, plus the `P001`/`Y001` cascade that follows from a block whose
+closing brace was eaten. **The diagnostic is true**: under D10 a backtick inside
+a capture opens a nested template, so the source really does leave one open, and
+the token really does run to EOF. It is truthful and *wide*, which is a
+different defect from the fabricated interior that was beside it (that half is
+fixed and gated by
+`an_unterminated_template_does_not_also_report_a_fabricated_interior`).
+
+Two rules would bound it, and **neither was taken**:
+
+1. **"A template may not span a raw newline."** The token then ends at the line
+   end and `T002` names one line. This is a *language* rule, not a repair: it
+   makes a legal-today multi-line template illegal, and §7.2's whitespace
+   policies (`\s*`, `\s+`, `\n`) are written as if a template describes a
+   region of input that may include line structure. Taking it as a bug fix
+   would decide a language question by accident, which is exactly what the plan
+   warns about under D16.
+2. **Error recovery: end an unclosed run at the first inner backtick.** Tried,
+   far enough to measure, and it makes the output worse:
+   `` `{g:choice(A: `{x:int}`)}` `` — a *well-formed* two-level template —
+   reports `T002` twice, because the recovery cannot tell an unclosed run from a
+   nested one without already knowing where the outer one ends. One honest wide
+   diagnostic became two dishonest narrow ones.
+
+So the swallow stays until D18 is answered. Whoever owns §7.2 should note that
+answering (1) makes (2) unnecessary: with a newline terminating a template, an
+unclosed run has a bound and recovery has nothing to guess.
 
 **D14 is answered** — see ADR-040. The `Safepoint` token shipped with a named,
 `pub(crate)` `Heap::alloc_unpaced` back door for the host helpers and the

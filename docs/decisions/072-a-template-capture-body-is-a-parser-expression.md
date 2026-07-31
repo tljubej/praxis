@@ -90,6 +90,26 @@ therefore adversarial input, and a compiler may not answer adversarial input
 with a stack overflow. `praxis_syntax::MAX_TEMPLATE_NESTING` (32) bounds it,
 with its own `ScanError` variant.
 
+*Amended 2026-07-31.* "`MAX_TEMPLATE_NESTING` (32) bounds it" was **not true of
+templates**, and the diagnostic said it was. Both halves of the mutual recursion
+incremented `depth` on their own hop — `scan_template_at` for the capture body
+and `body::parse_expr` for the nested template — so one template level cost two
+and the scanner refused at **17** levels while `ScanError::NestingTooDeep`'s
+message named 32. A stricter inner bound would have been defensible; a
+diagnostic naming a limit nothing enforces is not.
+
+The level is counted where a level is entered — `scan_template_at`, once — and
+the second guard is deleted rather than adjusted, because two guards counting
+one recursion is what produced the wrong number. Exactly
+`MAX_TEMPLATE_NESTING` levels are accepted, which is the count decision 4's
+shared `template_end` uses to decide how much text the lexer hands over.
+
+The variant also carries **what** was too deep. It reports three different
+bounds — template levels, `{` and `(` — and the message named templates for all
+three, so `csv(` past the paren bound was "template nesting is deeper than 32"
+for text holding exactly one template. The gate measures the effective limit by
+sweep and then parses the number back **out of the rendered message**.
+
 ## Decision 4: the lexer and the scanner call **one function** for the extent of a template
 
 D10's answer does not mention the lexer, and the lexer is where it costs
