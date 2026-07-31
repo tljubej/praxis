@@ -17,8 +17,9 @@ mod cursor;
 use crate::context::RuntimeContext;
 use crate::parse_detail::ParseFail;
 use crate::scalars;
-use crate::text::{text_bytes, TextPayload};
+use crate::text::TextPayload;
 use crate::GcRef;
+use cursor::{split_lines, split_sections, ByteRegion, Cursor, Input, Walked};
 use praxis_input_parser::{AtomicKind, ParserPlan, PlanNode};
 
 /// Run the parser plan named by `raw_id` against `input`, returning the parsed
@@ -52,20 +53,52 @@ pub unsafe fn run_plan_by_id(ctx: *mut RuntimeContext, raw_id: i64, input: GcRef
 /// # Safety
 /// `ctx` must be live and wired; `input` must be a valid `Text` GcRef.
 unsafe fn run_plan(ctx: *mut RuntimeContext, plan: &ParserPlan, input: GcRef) -> GcRef {
-    let payload = input.payload::<TextPayload>();
-    let bytes = unsafe { text_bytes(payload) };
+    // The buffer **and its owner** both come from the `input` argument. They
+    // used to come from two places — the bytes from here, the owner from
+    // `ctx.input_source` — so `parse(text, P)` produced `Text` values that were
+    // views of the stdin buffer at the offsets of a different string (IPR-03).
+    // SAFETY: the caller guarantees `input` is a valid Text GcRef.
+    let Some(i) = (unsafe { Input::new(input) }) else {
+        unsafe { clear_parse_detail(ctx) };
+        return unsafe { fault_sentinel(ctx) };
+    };
+    let region = i.whole();
     // Clear any stale detail from a prior parse, then run.
     unsafe { clear_parse_detail(ctx) };
-    let result = unsafe { walk(ctx, plan, plan.root, bytes, 0) };
+    let result = unsafe { walk(ctx, &i, plan, plan.root, region) };
     match result {
-        Ok((value, _consumed)) => value,
+        // The root does **not** require exhaustion. Every real input ends with
+        // a newline (`praxis-cli`'s runner reads the file verbatim), so a root
+        // that demanded its region be consumed would fault on every file in the
+        // corpus. Exhaustion is a *parent's* decision, made by `walk_exact`.
+        Ok(walked) => walked.value,
         Err(fail) => {
             // Record the deepest failure into the runtime's detail slot, then
             // raise the fault. The host reads the detail after `ParseFailed`.
-            unsafe { record_fail(ctx, fail, bytes) };
+            unsafe { record_fail(ctx, fail, region.bytes(&i)) };
             unsafe { fault_sentinel(ctx) }
         }
     }
+}
+
+/// Run `plan`'s root against `input` and hand back the value or the failure,
+/// with no fault raised and no detail recorded.
+///
+/// The interpreter's own unit tests used to call `walk` directly with a
+/// `(bytes, offset)` pair. That pair is exactly what this stage deleted, and
+/// the tests are gates for defects this stage closes, so they get a root entry
+/// rather than a rewrite against internals or a deletion.
+#[cfg(test)]
+unsafe fn run_root(
+    ctx: *mut RuntimeContext,
+    plan: &ParserPlan,
+    input: GcRef,
+) -> Result<GcRef, ParseFail> {
+    // SAFETY: the caller guarantees `input` is a valid Text GcRef.
+    let i = unsafe { Input::new(input) }.expect("the test's input is a Text");
+    let region = i.whole();
+    // SAFETY: the caller guarantees ctx is live and wired.
+    unsafe { walk(ctx, &i, plan, plan.root, region) }.map(|w| w.value)
 }
 
 /// Set a `ParseFailed` fault and return the sentinel.
@@ -106,12 +139,13 @@ unsafe fn record_fail(ctx: *mut RuntimeContext, fail: ParseFail, input: &[u8]) {
     unsafe { (*(*ctx).parse_detail).consider(fail, input) };
 }
 
-/// The outcome of walking a node: a value + the number of bytes consumed, or an
-/// error carrying the §7.11 structured detail. The deepest (highest-offset)
-/// failure wins at the [`run_plan`] boundary; inner failures propagate up with
-/// their already-specific detail, so an outer constructor only overrides when
-/// it has *more* specific information (it generally does not).
-type WalkResult = Result<(GcRef, usize), ParseFail>;
+/// The outcome of walking a node: a value + **the absolute position parsing
+/// stopped at**, or an error carrying the §7.11 structured detail. The deepest
+/// (highest-offset) failure wins at the [`run_plan`] boundary; inner failures
+/// propagate up with their already-specific detail, so an outer constructor
+/// only overrides when it has *more* specific information (it generally does
+/// not).
+type WalkResult = Result<Walked, ParseFail>;
 
 /// The runtime, extracted from the context for allocation calls.
 struct Rt {
@@ -171,6 +205,26 @@ impl Rt {
         })
     }
 
+    /// Allocate an **owned** `Text` holding a copy of `s`.
+    ///
+    /// Used only for a ragged grid's `fill` literal, which lives in plan
+    /// storage rather than in the input. Giving it a `Text` of its own is what
+    /// lets the cell parser slice it: the predecessor walked the fill's bytes
+    /// while allocating slices against the *input*, so a `Text` fill cell named
+    /// input bytes chosen by the fill's length (IPR-03).
+    fn alloc_text_owned(&self, s: &str) -> GcRef {
+        let payload = TextPayload::Owned(s.into());
+        // SAFETY: ctx is valid; payload matches TEXT's layout.
+        unsafe {
+            heap_ref(self.ctx).alloc_with_unpaced(
+                &crate::text::TEXT,
+                std::mem::size_of::<TextPayload>(),
+                std::mem::align_of::<TextPayload>(),
+                |ptr| (ptr as *mut TextPayload).write(payload),
+            )
+        }
+    }
+
     /// Allocate a `Vec` from element refs.
     fn alloc_vec(
         &self,
@@ -215,225 +269,334 @@ impl Rt {
     }
 }
 
-/// Walk a plan node against `bytes` starting at `offset`, producing a value.
+/// Walk a plan node against `region`, producing a value and the absolute
+/// position where matching stopped.
+///
+/// The node begins at `region.start()` and may not read past `region.end()`.
+/// Whether it must *reach* `region.end()` is the parent's decision, made by
+/// [`walk_exact`]: `lines` requires it of each line, `scan` does not require it
+/// of a match. That is one rule in one place, which is what makes
+/// `scan(choice(…))` and `lines(choice(…))` both correct without `choice`
+/// itself having a policy.
 ///
 /// # Safety
 /// `ctx` must be live and wired.
 unsafe fn walk(
     ctx: *mut RuntimeContext,
+    i: &Input<'_>,
     plan: &ParserPlan,
     node: u32,
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
     let rt = Rt { ctx };
     let node = &plan.nodes[node as usize];
     match node {
-        PlanNode::Atomic { kind } => walk_atomic(&rt, *kind, bytes, offset),
-        PlanNode::Lines { child } => walk_lines(&rt, plan, *child, bytes, offset),
-        PlanNode::Sections { child } => walk_sections(&rt, plan, *child, bytes, offset),
+        PlanNode::Atomic { kind } => walk_atomic(&rt, i, *kind, region),
+        PlanNode::Lines { child } => walk_lines(&rt, i, plan, *child, region),
+        PlanNode::Sections { child } => walk_sections(&rt, i, plan, *child, region),
         PlanNode::SectionsNamed {
             fields,
             repeated_tail,
-        } => walk_sections_named(&rt, plan, fields, *repeated_tail, bytes, offset),
-        PlanNode::Block { items } => walk_block(&rt, plan, items, bytes, offset),
-        PlanNode::Choice { cases } => walk_choice(&rt, plan, cases, bytes, offset),
-        PlanNode::Optional { child } => walk_optional(&rt, plan, *child, bytes, offset),
-        PlanNode::Scan { child } => walk_scan(&rt, plan, *child, bytes, offset),
+        } => walk_sections_named(&rt, i, plan, fields, *repeated_tail, region),
+        PlanNode::Block { items } => walk_block(&rt, i, plan, items, region),
+        PlanNode::Choice { cases } => walk_choice(&rt, i, plan, cases, region),
+        PlanNode::Optional { child } => walk_optional(&rt, i, plan, *child, region),
+        PlanNode::Scan { child } => walk_scan(&rt, i, plan, *child, region),
         PlanNode::OneOf { chars_index } => {
             let chars = plan.literals[*chars_index as usize];
-            walk_one_of(&rt, chars, bytes, offset)
+            walk_one_of(&rt, i, chars, region)
         }
         PlanNode::Characters { child, skip } => {
-            walk_characters(&rt, plan, *child, *skip, bytes, offset)
+            walk_characters(&rt, i, plan, *child, *skip, region)
         }
-        PlanNode::Matrix { child } => walk_matrix(&rt, plan, *child, bytes, offset),
+        PlanNode::Matrix { child } => walk_matrix(&rt, i, plan, *child, region),
         PlanNode::GridRagged { child, fill_index } => {
             let fill = plan.literals[*fill_index as usize];
-            walk_grid_ragged(&rt, plan, *child, fill, bytes, offset)
+            walk_grid_ragged(&rt, i, plan, *child, fill, region)
         }
-        PlanNode::Csv { child } => walk_csv(&rt, plan, *child, bytes, offset),
-        PlanNode::Ws { child } => walk_ws(&rt, plan, *child, bytes, offset),
+        PlanNode::Csv { child } => walk_csv(&rt, i, plan, *child, region),
+        PlanNode::Ws { child } => walk_ws(&rt, i, plan, *child, region),
         PlanNode::Sep {
             separator_index,
             child,
         } => {
             let sep = plan.literals[*separator_index as usize];
-            walk_sep(&rt, plan, *child, sep, bytes, offset)
+            walk_sep(&rt, i, plan, *child, sep, region)
         }
-        PlanNode::Grid { child } => walk_grid(&rt, plan, *child, bytes, offset),
-        PlanNode::Template { parts } => walk_template(&rt, plan, parts, bytes, offset),
-        PlanNode::Tuple { elements } => walk_tuple(&rt, plan, elements, bytes, offset),
+        PlanNode::Grid { child } => walk_grid(&rt, i, plan, *child, region),
+        PlanNode::Template { parts } => walk_template(&rt, i, plan, parts, region),
+        PlanNode::Tuple { elements } => walk_tuple(&rt, i, plan, elements, region),
     }
 }
 
 // ---- atomics (§7.4) -------------------------------------------------------
 
-fn walk_atomic(rt: &Rt, kind: AtomicKind, bytes: &[u8], offset: usize) -> WalkResult {
-    let rest = &bytes[offset..];
+fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> WalkResult {
+    let rest = region.bytes(i);
+    // Every atomic starts by skipping horizontal whitespace; `at` is where the
+    // value itself begins, in the input's own coordinates.
+    let s = trim_leading_ws(rest);
+    let at = region.start().advance(rest.len() - s.len());
     match kind {
         AtomicKind::Int => {
-            // Parse a signed decimal integer. Skip leading whitespace.
-            let s = trim_leading_ws(rest);
+            // Parse a signed decimal integer.
             let (digits, len) = take_int_run(s);
             if digits.is_empty() {
-                return Err(ParseFail::at(offset + (rest.len() - s.len()), 0, "int"));
+                return Err(ParseFail::at(at.offset(), 0, "int"));
             }
             let value: i64 = digits
                 .parse()
-                .map_err(|_| ParseFail::at(offset + (rest.len() - s.len()), len, "int"))?;
-            Ok((rt.alloc_int(value), offset + (rest.len() - s.len()) + len))
+                .map_err(|_| ParseFail::at(at.offset(), len, "int"))?;
+            Ok(Walked {
+                value: rt.alloc_int(value),
+                next: at.advance(len),
+            })
         }
         AtomicKind::Digit => {
-            let s = trim_leading_ws(rest);
             let Some(&b) = s.first() else {
-                return Err(ParseFail::at(offset + (rest.len() - s.len()), 0, "digit"));
+                return Err(ParseFail::at(at.offset(), 0, "digit"));
             };
             if !b.is_ascii_digit() {
-                return Err(ParseFail::at(offset + (rest.len() - s.len()), 1, "digit"));
+                return Err(ParseFail::at(at.offset(), 1, "digit"));
             }
             let value = (b - b'0') as i64;
-            let consumed = rest.len() - s.len() + 1;
-            Ok((rt.alloc_int(value), offset + consumed))
+            Ok(Walked {
+                value: rt.alloc_int(value),
+                next: at.advance(1),
+            })
         }
         AtomicKind::Char => {
-            // One Unicode scalar value. Decode the first char of the (trimmed)
-            // remaining input.
-            let s = trim_leading_ws(rest);
-            let s_str =
-                std::str::from_utf8(s).map_err(|_| ParseFail::at(offset, rest.len(), "char"))?;
-            let ch = s_str
+            // One Unicode scalar value, stepped by the region rather than
+            // decoded out of an ad-hoc `from_utf8` of the tail.
+            let Some(next) = region.next_scalar(i, at) else {
+                return Err(ParseFail::at(at.offset(), 0, "char"));
+            };
+            let text = region
+                .subregion(at, next)
+                .str(i)
+                .ok_or_else(|| ParseFail::at(at.offset(), 0, "char"))?;
+            let ch = text
                 .chars()
                 .next()
-                .ok_or_else(|| ParseFail::at(offset + (rest.len() - s.len()), 0, "char"))?;
-            let consumed = rest.len() - s.len() + ch.len_utf8();
-            Ok((rt.alloc_char(ch as u32), offset + consumed))
+                .ok_or_else(|| ParseFail::at(at.offset(), 0, "char"))?;
+            Ok(Walked {
+                value: rt.alloc_char(ch as u32),
+                next,
+            })
         }
         AtomicKind::Word => {
-            let s = trim_leading_ws(rest);
             let (word, len) = take_word_run(s);
             if word.is_empty() {
-                return Err(ParseFail::at(offset + (rest.len() - s.len()), 0, "word"));
+                return Err(ParseFail::at(at.offset(), 0, "word"));
             }
-            let leading = rest.len() - s.len();
             let slice = rt
-                .alloc_text_slice(rt_owner(rt), offset + leading, len)
-                .ok_or_else(|| ParseFail::at(offset + leading, len, "word"))?;
-            Ok((slice, offset + leading + len))
+                .alloc_text_slice(i.owner(), at.offset(), len)
+                .ok_or_else(|| ParseFail::at(at.offset(), len, "word"))?;
+            Ok(Walked {
+                value: slice,
+                next: at.advance(len),
+            })
         }
         AtomicKind::UInt => {
             // §7.4's `uint`. Its **type** is `Int` (`ScalarType::UInt` is
             // reserved and has no runtime object); the non-negativity is this
             // rule: a leading `-` is not a `uint`, it is a parse failure.
-            let s = trim_leading_ws(rest);
-            let leading = rest.len() - s.len();
             if s.first() == Some(&b'-') {
-                return Err(ParseFail::at(offset + leading, 1, "uint"));
+                return Err(ParseFail::at(at.offset(), 1, "uint"));
             }
             let (digits, len) = take_int_run(s);
             if digits.is_empty() {
-                return Err(ParseFail::at(offset + leading, 0, "uint"));
+                return Err(ParseFail::at(at.offset(), 0, "uint"));
             }
             let value: i64 = digits
                 .parse()
-                .map_err(|_| ParseFail::at(offset + leading, len, "uint"))?;
-            Ok((rt.alloc_int(value), offset + leading + len))
+                .map_err(|_| ParseFail::at(at.offset(), len, "uint"))?;
+            Ok(Walked {
+                value: rt.alloc_int(value),
+                next: at.advance(len),
+            })
         }
         AtomicKind::Float => {
-            let s = trim_leading_ws(rest);
-            let leading = rest.len() - s.len();
             let (text, len) = take_float_run(s);
             if text.is_empty() {
-                return Err(ParseFail::at(offset + leading, 0, "float"));
+                return Err(ParseFail::at(at.offset(), 0, "float"));
             }
             let value: f64 = text
                 .parse()
-                .map_err(|_| ParseFail::at(offset + leading, len, "float"))?;
-            Ok((rt.alloc_float(value), offset + leading + len))
+                .map_err(|_| ParseFail::at(at.offset(), len, "float"))?;
+            Ok(Walked {
+                value: rt.alloc_float(value),
+                next: at.advance(len),
+            })
         }
         AtomicKind::Byte => {
             // A decimal integer in `0..=255`, not a raw input byte: a raw byte
             // cannot be re-sliced as `Text` without breaking the UTF-8
             // invariant every source-slice `Text` relies on.
-            let s = trim_leading_ws(rest);
-            let leading = rest.len() - s.len();
             let (digits, len) = take_int_run(s);
             if digits.is_empty() {
-                return Err(ParseFail::at(offset + leading, 0, "byte"));
+                return Err(ParseFail::at(at.offset(), 0, "byte"));
             }
             let value: u8 = digits
                 .parse()
-                .map_err(|_| ParseFail::at(offset + leading, len, "byte"))?;
-            Ok((rt.alloc_byte(value), offset + leading + len))
+                .map_err(|_| ParseFail::at(at.offset(), len, "byte"))?;
+            Ok(Walked {
+                value: rt.alloc_byte(value),
+                next: at.advance(len),
+            })
         }
         AtomicKind::Identifier => {
             // §4.1's identifier class, not a local ASCII rule (F3). §7.4 says
             // "ASCII-like … by default"; accepting fewer names than the
             // language itself declares would be the narrower mistake.
-            let s = trim_leading_ws(rest);
-            let leading = rest.len() - s.len();
             let len = take_ident_run(s);
             if len == 0 {
-                return Err(ParseFail::at(offset + leading, 0, "identifier"));
+                return Err(ParseFail::at(at.offset(), 0, "identifier"));
             }
             let slice = rt
-                .alloc_text_slice(rt_owner(rt), offset + leading, len)
-                .ok_or_else(|| ParseFail::at(offset + leading, len, "identifier"))?;
-            Ok((slice, offset + leading + len))
+                .alloc_text_slice(i.owner(), at.offset(), len)
+                .ok_or_else(|| ParseFail::at(at.offset(), len, "identifier"))?;
+            Ok(Walked {
+                value: slice,
+                next: at.advance(len),
+            })
         }
         AtomicKind::Text | AtomicKind::Rest => {
-            // `text`/`rest`: consume the remainder of the current region.
-            // For a standalone atomic, the region is the whole remaining input.
+            // `text`/`rest` consume the rest of **the region**, which is what
+            // the doc comment always claimed and the code never did: it ran to
+            // `bytes.len()`, so a `text` capture swallowed the literal that
+            // followed it and every `pre{body:text}post` template was
+            // unmatchable (IPR-10). Leading whitespace is part of the text.
+            let start = region.start();
+            let len = region.end().delta_from(start);
             let slice = rt
-                .alloc_text_slice(rt_owner(rt), offset, rest.len())
-                .ok_or_else(|| ParseFail::at(offset, rest.len(), "text"))?;
-            Ok((slice, bytes.len()))
+                .alloc_text_slice(i.owner(), start.offset(), len)
+                .ok_or_else(|| ParseFail::at(start.offset(), len, "text"))?;
+            Ok(Walked {
+                value: slice,
+                next: region.end(),
+            })
         }
     }
-}
-
-/// The owner GcRef for source-slice Texts (the original input buffer). Extracted
-/// from the runtime context's `input_source`.
-fn rt_owner(rt: &Rt) -> GcRef {
-    // SAFETY: ctx is valid.
-    unsafe { (*rt.ctx).input_source }
 }
 
 // ---- constructors (§7.5) --------------------------------------------------
 
-fn walk_lines(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
-    let region = &bytes[offset..];
+/// The text a region spans, or a parse failure naming `what`.
+///
+/// The predecessor wrote `str::from_utf8(region).unwrap_or("")` in three
+/// places, which turned a region whose ends were not scalar boundaries into an
+/// *empty* one — a zero-row, zero-width `Grid` where there should have been a
+/// mismatch (IPR-05). A region of a validated [`Input`] can only fail this by
+/// splitting a scalar, which is an interpreter bug; it is reported as a parse
+/// failure rather than asserted, because this runs inside `extern "C"`.
+fn region_str<'a>(
+    i: &Input<'a>,
+    region: ByteRegion,
+    what: &'static str,
+) -> Result<&'a str, ParseFail> {
+    region
+        .str(i)
+        .ok_or_else(|| ParseFail::at(region.start().offset(), region.len(), what))
+}
+
+/// The whitespace-delimited tokens of `region`, whose text is `s`, as absolute
+/// subregions.
+///
+/// Bounds are computed while splitting rather than recovered afterwards by
+/// searching the region for the token's text — which is what `csv` did, so
+/// every duplicate field mapped to the first occurrence (IPR-04).
+fn whitespace_tokens(region: ByteRegion, s: &str) -> Vec<ByteRegion> {
+    let base = region.start();
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    for (idx, ch) in s.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(st) = start.take() {
+                out.push(region.subregion(base.advance(st), base.advance(idx)));
+            }
+        } else if start.is_none() {
+            start = Some(idx);
+        }
+    }
+    if let Some(st) = start {
+        out.push(region.subregion(base.advance(st), region.end()));
+    }
+    out
+}
+
+/// The comma-separated fields of `region`, whose text is `s`, each trimmed of
+/// surrounding whitespace, as absolute subregions.
+///
+/// A field that trims to nothing yields an **empty region**, not a search for
+/// an empty needle: `region_offset_of` used to call `hay.windows(0)`, which
+/// panics, and `"10,20,\n"` was enough to reach it — a panic inside
+/// `extern "C"` (IPR-04, D12).
+fn csv_tokens(region: ByteRegion, s: &str) -> Vec<ByteRegion> {
+    let base = region.start();
+    let mut out = Vec::new();
+    let mut field_start = 0usize;
+    let push = |field: &str, at: usize, out: &mut Vec<ByteRegion>| {
+        let lead = field.len() - field.trim_start().len();
+        let trimmed = field.trim();
+        out.push(region.subregion(
+            base.advance(at + lead),
+            base.advance(at + lead + trimmed.len()),
+        ));
+    };
+    for (idx, ch) in s.char_indices() {
+        if ch == ',' {
+            push(&s[field_start..idx], field_start, &mut out);
+            field_start = idx + ch.len_utf8();
+        }
+    }
+    push(&s[field_start..], field_start, &mut out);
+    out
+}
+
+fn walk_lines(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    child: u32,
+    region: ByteRegion,
+) -> WalkResult {
     let mut items = Vec::new();
-    for line in split_lines(region) {
-        let line_offset = offset + line.start;
-        let (value, _consumed) = unsafe { walk(rt.ctx, plan, child, bytes, line_offset)? };
-        items.push(value);
+    for line in split_lines(i, region) {
+        // SAFETY: ctx is valid (upheld by `walk`'s caller).
+        let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(line.start()))? };
+        items.push(walked.value);
     }
     let elem_desc = child_descriptor(plan, child);
-    let vec_ref = rt.alloc_vec(elem_desc, items);
-    Ok((vec_ref, bytes.len() - offset))
+    Ok(Walked {
+        value: rt.alloc_vec(elem_desc, items),
+        next: region.end(),
+    })
 }
 
 fn walk_sections(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     child: u32,
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    let region = &bytes[offset..];
     let mut items = Vec::new();
-    for section in split_sections(region) {
-        // Parse each section against a bounded byte view (just that section's
-        // bytes), so a child like `block(...)` or `lines(...)` consumes only the
-        // section's content rather than running to the end of input.
-        let sec_offset = offset + section.start;
-        let sec_bytes = &bytes[sec_offset..sec_offset + section.len];
-        let (value, _consumed) = unsafe { walk(rt.ctx, plan, child, sec_bytes, 0)? };
-        items.push(value);
+    for section in split_sections(i, region) {
+        // A **narrowing of the same buffer**, not a re-slice walked at offset
+        // zero. The predecessor handed the child `&bytes[sec..sec+len]` with an
+        // offset of 0 while its Texts were still allocated against the whole
+        // input, so a `word` in section 2 named bytes at the start of the file
+        // (IPR-03, the stage's P0).
+        // SAFETY: ctx is valid.
+        let walked = unsafe { walk(rt.ctx, i, plan, child, section)? };
+        items.push(walked.value);
     }
     let elem_desc = child_descriptor(plan, child);
-    Ok((rt.alloc_vec(elem_desc, items), bytes.len() - offset))
+    Ok(Walked {
+        value: rt.alloc_vec(elem_desc, items),
+        next: region.end(),
+    })
 }
 
 /// Walk named heterogeneous `sections(name: P, ..., tail: repeated(P))` (M9,
@@ -444,45 +607,37 @@ fn walk_sections(
 /// result is an anonymous record assembled via [`alloc_record`].
 fn walk_sections_named(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     fields: &'static [(&'static str, u32)],
     repeated_tail: Option<(&'static str, u32)>,
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    let region = &bytes[offset..];
-    let sections: Vec<ByteRange> = split_sections(region).collect();
+    let sections = split_sections(i, region);
     // Too few sections is a parse fault.
-    let min_needed = fields.len();
-    if sections.len() < min_needed {
-        return Err(ParseFail::at(offset, region.len(), "section header"));
+    if sections.len() < fields.len() {
+        return Err(ParseFail::at(
+            region.start().offset(),
+            region.len(),
+            "section header",
+        ));
     }
-    // Build the record captures: each named field parses its section, in order.
-    // The repeated tail (if any) parses every remaining section into a Vec.
-    //
-    // Each section is parsed against a *bounded* byte view (just that section's
-    // bytes), so a child like `lines(int)` consumes only the section's lines
-    // rather than running to the end of input. The owner reference for any
-    // source-slice Texts remains the original input owner (`rt_owner`), which
-    // the child walks recover via `rt_owner(rt)` — but here we pass absolute
-    // offsets into the full `bytes`, so source-slice Texts stay correct.
+    // Each section is a narrowing of the input, so the child's offsets are the
+    // input's own offsets and a source-slice `Text` is right by construction.
     let mut captures: Vec<(Option<&'static str>, u32, GcRef)> = Vec::new();
-    for (i, (name, child)) in fields.iter().enumerate() {
-        let sec = &sections[i];
-        let sec_offset = offset + sec.start;
-        let sec_bytes = &bytes[sec_offset..sec_offset + sec.len];
-        let (value, _consumed) = unsafe { walk(rt.ctx, plan, *child, sec_bytes, 0)? };
-        captures.push((Some(name), *child, value));
+    for (n, (name, child)) in fields.iter().enumerate() {
+        // SAFETY: ctx is valid.
+        let walked = unsafe { walk(rt.ctx, i, plan, *child, sections[n])? };
+        captures.push((Some(name), *child, walked.value));
     }
     if let Some((tail_name, tail_child)) = repeated_tail {
         // The tail consumes every remaining section, parsed per-section by its
         // child into a Vec.
         let mut tail_items = Vec::new();
-        for sec in &sections[fields.len()..] {
-            let sec_offset = offset + sec.start;
-            let sec_bytes = &bytes[sec_offset..sec_offset + sec.len];
-            let (value, _consumed) = unsafe { walk(rt.ctx, plan, tail_child, sec_bytes, 0)? };
-            tail_items.push(value);
+        for section in &sections[fields.len()..] {
+            // SAFETY: ctx is valid.
+            let walked = unsafe { walk(rt.ctx, i, plan, tail_child, *section)? };
+            tail_items.push(walked.value);
         }
         let elem_desc = child_descriptor(plan, tail_child);
         let tail_vec = rt.alloc_vec(elem_desc, tail_items);
@@ -491,7 +646,10 @@ fn walk_sections_named(
         captures.push((Some(tail_name), tail_child, tail_vec));
     }
     let record = alloc_record(rt, &captures);
-    Ok((record, bytes.len() - offset))
+    Ok(Walked {
+        value: record,
+        next: region.end(),
+    })
 }
 
 /// Walk `block(item, ...)` (M9, §7.5): apply sequential parsers within one
@@ -500,69 +658,79 @@ fn walk_sections_named(
 /// field. The result is a flattened anonymous record assembled via
 /// [`alloc_record`].
 ///
-/// Cursor model: each item is walked against the remaining region from the
-/// current cursor; the item's returned absolute offset becomes the next
-/// cursor. `walk_template` returns the real position where matching stopped, so
-/// a chain of line-anchored templates advances line by line.
+/// Cursor model: each item is walked against the region's tail from the current
+/// cursor, and the item's returned position becomes the next cursor. Every
+/// position in play is absolute, so a chain of line-anchored templates advances
+/// line by line.
 fn walk_block(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     items: &'static [praxis_input_parser::BlockItemNode],
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    let mut cursor = offset;
+    let mut cursor = region.start();
     // Captures collected as (name, child_node_for_descriptor, value). For a
     // flattened positional record, we expand its fields into separate entries.
     let mut captures: Vec<(Option<&'static str>, u32, GcRef)> = Vec::new();
-    for (i, item) in items.iter().enumerate() {
+    for (n, item) in items.iter().enumerate() {
         // Before every item after the first, skip the line boundary: any run of
         // horizontal whitespace plus one newline (§7.5 block items are
         // line-anchored). The first item starts at the region head.
-        if i > 0 {
-            cursor = skip_line_boundary(bytes, cursor);
+        if n > 0 {
+            cursor = skip_line_boundary(i, region, cursor);
         }
         match item {
             praxis_input_parser::BlockItemNode::Positional { child } => {
-                let (value, new_offset) = unsafe { walk(rt.ctx, plan, *child, bytes, cursor)? };
-                cursor = new_offset;
+                // SAFETY: ctx is valid.
+                let walked = unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
+                cursor = walked.next;
                 // If the positional produced a record (named-capture template),
                 // flatten its fields into the block record. We detect a record
                 // by pointer-equality of its descriptor against RECORD.
-                if std::ptr::eq(value.descriptor(), &crate::records::RECORD) {
-                    flatten_record_into(rt, value, &mut captures);
+                if std::ptr::eq(walked.value.descriptor(), &crate::records::RECORD) {
+                    flatten_record_into(rt, walked.value, &mut captures);
                 }
                 // A non-record positional (scalar) was rejected by validation
                 // (I026); if we reach one here it contributes no field.
             }
             praxis_input_parser::BlockItemNode::Named { name, child } => {
-                let (value, new_offset) = unsafe { walk(rt.ctx, plan, *child, bytes, cursor)? };
-                cursor = new_offset;
-                captures.push((Some(name), *child, value));
+                // SAFETY: ctx is valid.
+                let walked = unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
+                cursor = walked.next;
+                captures.push((Some(name), *child, walked.value));
             }
         }
     }
     let record = alloc_record(rt, &captures);
-    Ok((record, cursor))
+    Ok(Walked {
+        value: record,
+        next: cursor,
+    })
 }
 
 /// Skip the line boundary between sequential `block` items (§7.5): any run of
 /// horizontal whitespace, then an optional single line ending (`\n` or `\r\n`).
 /// Returns the new cursor. If no line ending is present (e.g. the items are on
 /// one line separated by spaces), only the horizontal whitespace is consumed.
-fn skip_line_boundary(bytes: &[u8], mut cursor: usize) -> usize {
-    // Horizontal whitespace (spaces/tabs).
-    while cursor < bytes.len() && (bytes[cursor] == b' ' || bytes[cursor] == b'\t') {
-        cursor += 1;
+///
+/// Byte-wise on purpose: space, tab, CR and LF are single-byte scalars and
+/// cannot occur inside a multi-byte one, so scanning bytes here can never land
+/// mid-scalar. (The cell and scan loops step by scalar because *they* can.)
+fn skip_line_boundary(i: &Input<'_>, region: ByteRegion, cursor: Cursor) -> Cursor {
+    let tail = region.from(cursor);
+    let bytes = tail.bytes(i);
+    let mut n = 0usize;
+    while n < bytes.len() && (bytes[n] == b' ' || bytes[n] == b'\t') {
+        n += 1;
     }
-    // One optional line ending.
-    if cursor < bytes.len() && bytes[cursor] == b'\r' {
-        cursor += 1;
+    if bytes.get(n) == Some(&b'\r') {
+        n += 1;
     }
-    if cursor < bytes.len() && bytes[cursor] == b'\n' {
-        cursor += 1;
+    if bytes.get(n) == Some(&b'\n') {
+        n += 1;
     }
-    cursor
+    cursor.advance(n)
 }
 
 /// Flatten a positional record's fields into the block captures (§7.5
@@ -583,18 +751,23 @@ fn flatten_record_into(
     };
     // SAFETY: schema is a valid leaked RecordSchema pointer.
     let schema = unsafe { &*schema };
-    for (i, field) in schema.fields.iter().enumerate() {
-        if let Some(value) = items.get(i) {
+    for (n, field) in schema.fields.iter().enumerate() {
+        if let Some(value) = items.get(n) {
             captures.push((Some(field.name), u32::MAX, *value));
         }
     }
 }
 
 /// Walk `choice(Name: P, ...)` (M9, §7.5): try each case in source order from
-/// the current offset. The first case whose parser succeeds wins; its value
+/// the region's start. The first case whose parser succeeds wins; its value
 /// becomes the variant's payload and the cursor advances to where that parser
-/// stopped. If a case fails, the cursor is restored (backtracking) and the next
-/// case is tried. If no case matches, this is a parse fault.
+/// stopped. If a case fails, the next case is tried from the same start
+/// (backtracking). If no case matches, this is a parse fault.
+///
+/// `choice` does **not** require its region to be exhausted. Whether a match
+/// must fill its region is the bounded parent's question — `lines(choice(…))`
+/// requires it through `walk_exact`, `scan(choice(…))` matches fragments by
+/// design — and answering it in one place is what makes both correct.
 ///
 /// Backtracking note: a failed case may have allocated GC objects (since `walk`
 /// allocates eagerly); those are unreferenced and collected later. Only the
@@ -602,231 +775,297 @@ fn flatten_record_into(
 /// failed allocations are simply garbage.
 fn walk_choice(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     cases: &'static [(&'static str, u32)],
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
     for (tag, (_name, child)) in cases.iter().enumerate() {
-        match unsafe { walk(rt.ctx, plan, *child, bytes, offset) } {
-            Ok((value, new_offset)) => {
+        // SAFETY: ctx is valid.
+        match unsafe { walk(rt.ctx, i, plan, *child, region) } {
+            Ok(walked) => {
                 // First match wins. Tag with this case's index; the value is
                 // the single payload slot.
                 let schema = enum_schema_for(cases);
-                let enum_ref = rt.alloc_enum(schema, tag as u32, vec![value]);
-                return Ok((enum_ref, new_offset));
+                let enum_ref = rt.alloc_enum(schema, tag as u32, vec![walked.value]);
+                return Ok(Walked {
+                    value: enum_ref,
+                    next: walked.next,
+                });
             }
             Err(_inner) => {
-                // Backtrack: try the next case from the same offset. We discard
-                // the inner failure here; if no case matches, the choice's own
-                // failure below is the user-visible one. (Recording the deepest
-                // inner failure across cases is a documented hardening
-                // follow-up.)
+                // Backtrack: try the next case from the same position. We
+                // discard the inner failure here; if no case matches, the
+                // choice's own failure below is the user-visible one.
                 continue;
             }
         }
     }
-    Err(ParseFail::at(offset, 0, "any choice case"))
+    Err(ParseFail::at(region.start().offset(), 0, "any choice case"))
 }
 
 /// Walk `optional(P)` (M9, §7.5): parse `P`; on success return `Some(value)`
 /// (Option tag 0) advancing the cursor, on failure return `None` (tag 1) and
-/// consume NO input (the cursor stays at `offset`). No fault is raised on a
-/// miss — this is parser-level optionality, not exception recovery.
+/// consume NO input (the cursor stays at the region's start). No fault is
+/// raised on a miss — this is parser-level optionality, not exception recovery.
 fn walk_optional(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     child: u32,
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    match unsafe { walk(rt.ctx, plan, child, bytes, offset) } {
-        Ok((value, new_offset)) => {
-            let some_ref = rt.alloc_enum(crate::enums::option_schema(), 0, vec![value]);
-            Ok((some_ref, new_offset))
+    // SAFETY: ctx is valid.
+    match unsafe { walk(rt.ctx, i, plan, child, region) } {
+        Ok(walked) => {
+            let some_ref = rt.alloc_enum(crate::enums::option_schema(), 0, vec![walked.value]);
+            Ok(Walked {
+                value: some_ref,
+                next: walked.next,
+            })
         }
         Err(_) => {
             // Consume nothing; return None (tag 1, no payload). The inner
             // failure is intentionally swallowed — `optional` is parser-level
             // optionality, not exception recovery.
             let none_ref = rt.alloc_enum(crate::enums::option_schema(), 1, Vec::new());
-            Ok((none_ref, offset))
+            Ok(Walked {
+                value: none_ref,
+                next: region.start(),
+            })
         }
     }
 }
 
 /// Walk `scan(P)` (M9, §7.5): slide a cursor across the region; at each
 /// position try `P`. On success, push the value and advance past the match
-/// (so overlapping matches aren't found); on failure, advance one byte. All
-/// unmatched text is ignored. Returns `Vec[result(P)]` in source order.
-fn walk_scan(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
+/// (so overlapping matches aren't found); on failure, advance one position.
+/// All unmatched text is ignored. Returns `Vec[result(P)]` in source order.
+fn walk_scan(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    child: u32,
+    region: ByteRegion,
+) -> WalkResult {
     let mut items = Vec::new();
-    let mut cursor = offset;
-    while cursor < bytes.len() {
-        match unsafe { walk(rt.ctx, plan, child, bytes, cursor) } {
-            Ok((value, new_offset)) => {
+    let mut cursor = region.start();
+    while cursor < region.end() {
+        // SAFETY: ctx is valid.
+        match unsafe { walk(rt.ctx, i, plan, child, region.from(cursor)) } {
+            Ok(walked) => {
                 // A match must advance the cursor (otherwise we'd loop forever
-                // on a zero-width match). If it didn't, advance one byte.
-                items.push(value);
-                if new_offset > cursor {
-                    cursor = new_offset;
+                // on a zero-width match). If it didn't, step one position.
+                items.push(walked.value);
+                cursor = if walked.next > cursor {
+                    walked.next
                 } else {
-                    cursor += 1;
-                }
+                    match region.next_scalar(i, cursor) {
+                        Some(next) => next,
+                        None => break,
+                    }
+                };
             }
             Err(_) => {
-                cursor += 1;
+                cursor = match region.next_scalar(i, cursor) {
+                    Some(next) => next,
+                    None => break,
+                };
             }
         }
     }
     let elem_desc = child_descriptor(plan, child);
-    Ok((rt.alloc_vec(elem_desc, items), bytes.len() - offset))
+    Ok(Walked {
+        value: rt.alloc_vec(elem_desc, items),
+        next: region.end(),
+    })
 }
 
 /// Walk `one_of("LR")` (M9, §7.5): match one character from a literal set.
-fn walk_one_of(rt: &Rt, chars: &str, bytes: &[u8], offset: usize) -> WalkResult {
-    let rest = &bytes[offset..];
+fn walk_one_of(rt: &Rt, i: &Input<'_>, chars: &str, region: ByteRegion) -> WalkResult {
+    let rest = region.bytes(i);
     let s = trim_leading_ws(rest);
-    let s_str = std::str::from_utf8(s).map_err(|_| ParseFail::at(offset, rest.len(), "char"))?;
-    let ch = s_str
-        .chars()
-        .next()
-        .ok_or_else(|| ParseFail::at(offset + (rest.len() - s.len()), 0, "char"))?;
+    let at = region.start().advance(rest.len() - s.len());
+    let Some(next) = region.next_scalar(i, at) else {
+        return Err(ParseFail::at(at.offset(), 0, "char"));
+    };
+    let ch = region
+        .subregion(at, next)
+        .str(i)
+        .and_then(|t| t.chars().next())
+        .ok_or_else(|| ParseFail::at(at.offset(), 0, "char"))?;
     if !chars.contains(ch) {
         return Err(ParseFail::at(
-            offset + (rest.len() - s.len()),
+            at.offset(),
             ch.len_utf8(),
             format!("one of \"{chars}\""),
         ));
     }
-    let consumed = rest.len() - s.len() + ch.len_utf8();
-    Ok((rt.alloc_char(ch as u32), offset + consumed))
+    Ok(Walked {
+        value: rt.alloc_char(ch as u32),
+        next,
+    })
 }
 
 /// Walk `chars(P, skip:)` (M9, §7.5): apply a char-parser repeatedly, trimming
-/// between matches per the skip policy. Result is `Vec[Char]`.
+/// between matches per the skip policy.
 fn walk_characters(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     child: u32,
     skip: praxis_input_parser::SkipPolicy,
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
     let mut items = Vec::new();
-    let mut cursor = offset;
+    let mut cursor = region.start();
     loop {
-        cursor = skip_chars(bytes, cursor, skip);
-        if cursor >= bytes.len() {
+        cursor = skip_chars(i, region, cursor, skip);
+        if cursor >= region.end() {
             break;
         }
-        match unsafe { walk(rt.ctx, plan, child, bytes, cursor) } {
-            Ok((value, new_offset)) => {
-                if new_offset <= cursor {
-                    cursor += 1;
+        // SAFETY: ctx is valid.
+        match unsafe { walk(rt.ctx, i, plan, child, region.from(cursor)) } {
+            Ok(walked) => {
+                cursor = if walked.next > cursor {
+                    walked.next
                 } else {
-                    cursor = new_offset;
-                }
-                items.push(value);
+                    match region.next_scalar(i, cursor) {
+                        Some(next) => next,
+                        None => break,
+                    }
+                };
+                items.push(walked.value);
             }
             Err(_) => break,
         }
     }
-    Ok((rt.alloc_vec(&scalars::CHAR, items), bytes.len() - offset))
+    Ok(Walked {
+        value: rt.alloc_vec(&scalars::CHAR, items),
+        next: region.end(),
+    })
 }
 
 /// Skip bytes at `cursor` per the `chars` skip policy (§7.5).
-fn skip_chars(bytes: &[u8], mut cursor: usize, skip: praxis_input_parser::SkipPolicy) -> usize {
+///
+/// Byte-wise like [`skip_line_boundary`], and sound for the same reason: every
+/// byte it tests is ASCII whitespace, which cannot appear inside a multi-byte
+/// scalar.
+fn skip_chars(
+    i: &Input<'_>,
+    region: ByteRegion,
+    cursor: Cursor,
+    skip: praxis_input_parser::SkipPolicy,
+) -> Cursor {
     use praxis_input_parser::SkipPolicy;
+    let bytes = region.from(cursor).bytes(i);
+    let mut n = 0usize;
     match skip {
         SkipPolicy::None => {}
         SkipPolicy::Whitespace => {
-            while cursor < bytes.len() && (bytes[cursor] == b' ' || bytes[cursor] == b'\t') {
-                cursor += 1;
+            while n < bytes.len() && (bytes[n] == b' ' || bytes[n] == b'\t') {
+                n += 1;
             }
         }
         SkipPolicy::Newlines => {
-            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-                cursor += 1;
+            while n < bytes.len() && bytes[n].is_ascii_whitespace() {
+                n += 1;
             }
         }
     }
-    cursor
+    cursor.advance(n)
 }
 
 /// Walk `matrix(P)` (M9, §7.5, ADR-030): parse lines of whitespace-separated
 /// tokens into a rectangular `Grid[result(P)]`. Each row must have the same
 /// token count.
-fn walk_matrix(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
-    let region = &bytes[offset..];
-    let region_str = std::str::from_utf8(region).unwrap_or("");
-    let lines: Vec<&str> = region_str
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect();
-    let width = lines
-        .first()
-        .map(|l| l.split_whitespace().count())
-        .unwrap_or(0);
-    let mut items = Vec::with_capacity(lines.len() * width);
-    for line in &lines {
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        if tokens.len() != width {
+fn walk_matrix(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    child: u32,
+    region: ByteRegion,
+) -> WalkResult {
+    let mut rows: Vec<Vec<ByteRegion>> = Vec::new();
+    for line in split_lines(i, region) {
+        let text = region_str(i, line, "matrix row")?;
+        if text.trim().is_empty() {
+            continue;
+        }
+        rows.push(whitespace_tokens(line, text));
+    }
+    let width = rows.first().map(Vec::len).unwrap_or(0);
+    let mut items = Vec::with_capacity(rows.len() * width);
+    for row in &rows {
+        if row.len() != width {
             return Err(ParseFail::at(
-                offset,
+                region.start().offset(),
                 region.len(),
                 "rectangular matrix row",
             ));
         }
-        for token in tokens {
-            let token_bytes = token.as_bytes();
-            let (value, _) = unsafe { walk(rt.ctx, plan, child, token_bytes, 0)? };
-            items.push(value);
+        for token in row {
+            // The token's own region, not its bytes copied into a fresh buffer
+            // walked at offset zero (IPR-03/IPR-05).
+            // SAFETY: ctx is valid.
+            let walked = unsafe { walk(rt.ctx, i, plan, child, *token)? };
+            items.push(walked.value);
         }
     }
     let elem_desc = child_descriptor(plan, child);
-    alloc_grid(rt, elem_desc, items, width, bytes.len() - offset)
+    alloc_grid(rt, elem_desc, items, width, region.end())
 }
 
 /// Walk ragged `grid(P, ragged, fill:)` (M9, §7.5): permit uneven rows and pad
 /// to the maximum width with the `fill` value (parsed by the cell parser).
 fn walk_grid_ragged(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     child: u32,
     fill: &str,
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    let region = &bytes[offset..];
-    let lines: Vec<_> = split_lines(region).collect();
-    let width = lines.iter().map(|l| l.len).max().unwrap_or(0);
+    let lines = split_lines(i, region);
+    let width = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+    // **The fill is not a region of the input.** It is a plan literal, and the
+    // predecessor walked `fill.as_bytes()` at offset 0 while the cell parser
+    // allocated its Texts against the input — so a `Text` fill cell named input
+    // bytes with no relationship at all to the fill text (IPR-03). It gets its
+    // own owned `Text` and its own `Input`, which is what makes a sliced fill
+    // cell name the fill.
+    let fill_owner = rt.alloc_text_owned(fill);
+    // SAFETY: `alloc_text_owned` just produced a live Text.
+    let fill_input = unsafe { Input::new(fill_owner) }
+        .ok_or_else(|| ParseFail::at(region.start().offset(), 0, "grid fill"))?;
+    let fill_region = fill_input.whole();
+    // SAFETY: ctx is valid.
+    let fill_value = unsafe { walk(rt.ctx, &fill_input, plan, child, fill_region)? }.value;
     let mut items = Vec::with_capacity(lines.len() * width);
-    let fill_bytes = fill.as_bytes();
-    let (fill_value, _) = unsafe { walk(rt.ctx, plan, child, fill_bytes, 0)? };
     for line in &lines {
-        let line_bytes = &region[line.start..line.start + line.len];
-        for (i, _) in line_bytes.iter().enumerate() {
-            let cell_offset = offset + line.start + i;
-            let (value, _) = unsafe { walk(rt.ctx, plan, child, bytes, cell_offset)? };
-            items.push(value);
+        let mut cell = line.start();
+        while cell < line.end() {
+            // SAFETY: ctx is valid.
+            let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(cell))? };
+            items.push(walked.value);
+            cell = cell.advance(1);
         }
-        for _ in line_bytes.len()..width {
+        for _ in line.len()..width {
             items.push(fill_value);
         }
     }
     let elem_desc = child_descriptor(plan, child);
-    alloc_grid(rt, elem_desc, items, width, bytes.len() - offset)
+    alloc_grid(rt, elem_desc, items, width, region.end())
 }
 
 /// Allocate a `Grid` from element refs + width (shared by grid/matrix/ragged).
-/// `consumed` is the byte count the grid consumed (caller-supplied).
+/// `next` is the position the constructor stopped at.
 fn alloc_grid(
     rt: &Rt,
     elem_desc: &'static crate::TypeDescriptor,
     items: Vec<GcRef>,
     width: usize,
-    consumed: usize,
+    next: Cursor,
 ) -> WalkResult {
     let payload = crate::collections::GridPayload {
         element_descriptor: elem_desc,
@@ -842,61 +1081,78 @@ fn alloc_grid(
             |ptr| (ptr as *mut crate::collections::GridPayload).write(payload),
         )
     };
-    Ok((grid_ref, consumed))
+    Ok(Walked {
+        value: grid_ref,
+        next,
+    })
 }
 
-fn walk_csv(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
-    let region = &bytes[offset..];
-    let region_str = std::str::from_utf8(region).unwrap_or("");
+fn walk_csv(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    child: u32,
+    region: ByteRegion,
+) -> WalkResult {
+    let text = region_str(i, region, "csv")?;
     let mut items = Vec::new();
-    for token in region_str.split(',') {
-        let token_trimmed = token.trim();
-        // Allocate a temporary owned Text for the token, then parse it.
-        // The offset within the original buffer:
-        let token_start = offset + region_offset_of(region, token_trimmed);
-        let token_end = token_start + token_trimmed.len();
-        // Create a sub-slice of the original bytes for this token.
-        let (value, _) = unsafe { walk(rt.ctx, plan, child, bytes, token_start)? };
-        let _ = token_end;
-        items.push(value);
+    for token in csv_tokens(region, text) {
+        // SAFETY: ctx is valid.
+        let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(token.start()))? };
+        items.push(walked.value);
     }
     let elem_desc = child_descriptor(plan, child);
-    Ok((rt.alloc_vec(elem_desc, items), bytes.len() - offset))
+    Ok(Walked {
+        value: rt.alloc_vec(elem_desc, items),
+        next: region.end(),
+    })
 }
 
-fn walk_ws(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
-    let region = &bytes[offset..];
+fn walk_ws(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    child: u32,
+    region: ByteRegion,
+) -> WalkResult {
+    let bytes = region.bytes(i);
+    let base = region.start();
     let mut items = Vec::new();
-    let mut pos = 0;
-    while pos < region.len() {
+    let mut pos = 0usize;
+    while pos < bytes.len() {
         // Skip leading whitespace.
-        while pos < region.len() && is_ws(region[pos]) {
+        while pos < bytes.len() && is_ws(bytes[pos]) {
             pos += 1;
         }
-        if pos >= region.len() {
+        if pos >= bytes.len() {
             break;
         }
         let token_start = pos;
-        while pos < region.len() && !is_ws(region[pos]) {
+        while pos < bytes.len() && !is_ws(bytes[pos]) {
             pos += 1;
         }
-        let (value, _) = unsafe { walk(rt.ctx, plan, child, bytes, offset + token_start)? };
-        items.push(value);
+        let token = region.subregion(base.advance(token_start), base.advance(pos));
+        // SAFETY: ctx is valid.
+        let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(token.start()))? };
+        items.push(walked.value);
     }
     let elem_desc = child_descriptor(plan, child);
-    Ok((rt.alloc_vec(elem_desc, items), bytes.len() - offset))
+    Ok(Walked {
+        value: rt.alloc_vec(elem_desc, items),
+        next: region.end(),
+    })
 }
 
 fn walk_sep(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     child: u32,
     sep: &str,
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    let region = &bytes[offset..];
-    let region_str = std::str::from_utf8(region).unwrap_or("");
+    let bytes = region.bytes(i);
+    let base = region.start();
     let sep_bytes = sep.as_bytes();
     // The loop below advances by `sep_bytes.len()` on a match, and
     // `starts_with(&[])` is unconditionally true — so an empty separator is an
@@ -907,14 +1163,18 @@ fn walk_sep(
         !sep_bytes.is_empty(),
         "Separator::new refuses an empty separator (IP-10): the loop below cannot advance past one"
     );
+    if sep_bytes.is_empty() {
+        return Err(ParseFail::at(base.offset(), 0, "a non-empty separator"));
+    }
     let mut items = Vec::new();
     let mut token_start = 0usize;
     let mut pos = 0usize;
-    while pos < region.len() {
-        if region[pos..].starts_with(sep_bytes) {
-            // Parse the token [token_start, pos).
-            let (value, _) = unsafe { walk(rt.ctx, plan, child, bytes, offset + token_start)? };
-            items.push(value);
+    while pos < bytes.len() {
+        if bytes[pos..].starts_with(sep_bytes) {
+            let token = region.subregion(base.advance(token_start), base.advance(pos));
+            // SAFETY: ctx is valid.
+            let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(token.start()))? };
+            items.push(walked.value);
             pos += sep_bytes.len();
             token_start = pos;
         } else {
@@ -922,52 +1182,53 @@ fn walk_sep(
         }
     }
     // Parse the final token.
-    if (token_start < region.len() || !items.is_empty()) && token_start < region_str.len() {
-        let (value, _) = unsafe { walk(rt.ctx, plan, child, bytes, offset + token_start)? };
-        items.push(value);
+    if token_start < bytes.len() {
+        let token = region.subregion(base.advance(token_start), region.end());
+        // SAFETY: ctx is valid.
+        let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(token.start()))? };
+        items.push(walked.value);
     }
     let elem_desc = child_descriptor(plan, child);
-    Ok((rt.alloc_vec(elem_desc, items), bytes.len() - offset))
+    Ok(Walked {
+        value: rt.alloc_vec(elem_desc, items),
+        next: region.end(),
+    })
 }
 
-fn walk_grid(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize) -> WalkResult {
-    let region = &bytes[offset..];
-    let lines: Vec<_> = split_lines(region).collect();
-    let width = lines.first().map(|l| l.len).unwrap_or(0);
+fn walk_grid(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    child: u32,
+    region: ByteRegion,
+) -> WalkResult {
+    let lines = split_lines(i, region);
+    let width = lines.first().map(|l| l.len()).unwrap_or(0);
     let mut items = Vec::with_capacity(lines.len() * width);
     for line in &lines {
-        let line_bytes = &region[line.start..line.start + line.len];
-        if line_bytes.len() != width {
+        if line.len() != width {
             // Grid rows must be uniform (§7.5). Ragged grids are M9.
-            return Err(ParseFail::at(offset, region.len(), "uniform grid row"));
+            return Err(ParseFail::at(
+                region.start().offset(),
+                region.len(),
+                "uniform grid row",
+            ));
         }
-        for (i, _) in line_bytes.iter().enumerate() {
-            let cell_offset = offset + line.start + i;
-            let (value, _) = unsafe { walk(rt.ctx, plan, child, bytes, cell_offset)? };
-            items.push(value);
+        let mut cell = line.start();
+        while cell < line.end() {
+            // SAFETY: ctx is valid.
+            let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(cell))? };
+            items.push(walked.value);
+            cell = cell.advance(1);
         }
     }
     let elem_desc = child_descriptor(plan, child);
-    let payload = crate::collections::GridPayload {
-        element_descriptor: elem_desc,
-        items,
-        width,
-    };
-    // SAFETY: ctx is valid.
-    let grid_ref = unsafe {
-        heap_ref(rt.ctx).alloc_with_unpaced(
-            &crate::collections::GRID,
-            std::mem::size_of::<crate::collections::GridPayload>(),
-            std::mem::align_of::<crate::collections::GridPayload>(),
-            |ptr| (ptr as *mut crate::collections::GridPayload).write(payload),
-        )
-    };
-    Ok((grid_ref, bytes.len() - offset))
+    alloc_grid(rt, elem_desc, items, width, region.end())
 }
 
 // ---- templates (§7.2, §7.3) -----------------------------------------------
 
-/// Interpret a backtick template against `bytes` from `offset` (§7.2, §7.3).
+/// Interpret a backtick template against `region` (§7.2, §7.3).
 ///
 /// Walks the `parts` in order: a `Literal` part matches its bytes (honoring the
 /// whitespace policy), a `Capture` part recursively walks its child parser to
@@ -981,12 +1242,14 @@ fn walk_grid(rt: &Rt, plan: &ParserPlan, child: u32, bytes: &[u8], offset: usize
 /// [`walk_tuple`]); this function never sees that case.
 fn walk_template(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     parts: &[praxis_input_parser::TemplatePartNode],
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    let mut cursor = offset;
+    let base = region.start();
+    let bytes = region.bytes(i);
+    let mut cursor = base;
     // Capture values in field-index order. Each entry is (name, child_node,
     // value): the child node is kept so a multi-anon-capture tuple can build its
     // TupleSchema from the child result descriptors.
@@ -996,22 +1259,20 @@ fn walk_template(
         match part {
             praxis_input_parser::TemplatePartNode::Literal { text, ws } => {
                 // Honor the whitespace policy before matching the literal.
-                cursor = match consume_ws(bytes, cursor, *ws) {
-                    None => {
-                        return Err(ParseFail::at(cursor, 0, "whitespace"));
-                    }
-                    Some(c) => c,
+                let Some(after) = consume_ws(bytes, cursor.delta_from(base), *ws) else {
+                    return Err(ParseFail::at(cursor.offset(), 0, "whitespace"));
                 };
-                // Match the literal bytes verbatim.
+                cursor = base.advance(after);
+                // Match the literal bytes verbatim, within the region.
                 let lit = text.as_bytes();
-                if !bytes[cursor..].starts_with(lit) {
+                if !region.from(cursor).bytes(i).starts_with(lit) {
                     return Err(ParseFail::at(
-                        cursor,
+                        cursor.offset(),
                         lit.len(),
                         format!("literal {:?}", text),
                     ));
                 }
-                cursor += lit.len();
+                cursor = cursor.advance(lit.len());
             }
             praxis_input_parser::TemplatePartNode::Capture {
                 child,
@@ -1020,77 +1281,76 @@ fn walk_template(
             } => {
                 // Skip any flexible leading whitespace before a capture, then
                 // walk the child parser to extract one value.
-                cursor = match consume_ws(bytes, cursor, consume_ws_default()) {
-                    None => {
-                        return Err(ParseFail::at(cursor, 0, "whitespace"));
-                    }
-                    Some(c) => c,
+                let Some(after) = consume_ws(bytes, cursor.delta_from(base), consume_ws_default())
+                else {
+                    return Err(ParseFail::at(cursor.offset(), 0, "whitespace"));
                 };
-                // `walk` returns the *absolute* new offset (not a delta), so
-                // assign rather than add.
-                let (value, new_offset) = unsafe { walk(rt.ctx, plan, *child, bytes, cursor)? };
-                cursor = new_offset;
-                captures.push((*name, *child, value));
+                cursor = base.advance(after);
+                // SAFETY: ctx is valid.
+                let walked = unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
+                cursor = walked.next;
+                captures.push((*name, *child, walked.value));
             }
         }
     }
 
-    // Assemble the result per §7.3. Return the *real* cursor position (the
-    // absolute offset where matching stopped) so a `block(...)` parent can
-    // advance item-by-item (§7.5). Nothing in the M6/M7 tree consumed this
-    // value, so changing from `bytes.len() - offset` to the true cursor is safe.
+    // Assemble the result per §7.3, returning the position where matching
+    // stopped so a `block(...)` parent can advance item by item (§7.5).
     let any_named = captures.iter().any(|(n, _, _)| n.is_some());
-    if any_named {
+    let value = if any_named {
         // Named captures → Record. Build the schema at runtime.
-        Ok((alloc_record(rt, &captures), cursor))
+        alloc_record(rt, &captures)
     } else if captures.len() == 1 {
         // Single anonymous capture → the scalar value.
-        Ok((captures.into_iter().next().unwrap().2, cursor))
+        captures.into_iter().next().unwrap().2
     } else if captures.is_empty() {
         // No captures → Unit.
-        Ok((alloc_unit(rt), cursor))
+        alloc_unit(rt)
     } else {
         // Multiple anonymous captures → Tuple. Build the schema from the child
         // result descriptors and fill the payload with the captured values.
         let children: Vec<u32> = captures.iter().map(|(_, c, _)| *c).collect();
         let values: Vec<GcRef> = captures.into_iter().map(|(_, _, v)| v).collect();
-        Ok((alloc_tuple(rt, &children, plan, values), cursor))
-    }
+        alloc_tuple(rt, &children, plan, values)
+    };
+    Ok(Walked {
+        value,
+        next: cursor,
+    })
 }
 
 /// Interpret a multi-anon-capture template lowered as a `Tuple` node (§7.3).
-/// Each element is walked against successive sub-regions; the values are
-/// assembled into a `Tuple`. The region is the whole remaining input split
-/// across the captures by the literals' boundaries.
 ///
-/// In practice the lowering emits a `Tuple` only for a bare `{a},{b}` template
-/// (no surrounding literal context per capture), so each element parses the next
-/// chunk of input greedily up to the following element's literal boundary. For
-/// the M7 scope we walk each element against the full remaining region and
-/// advance by the consumed amount.
+/// Each element is walked against the region's tail from the current cursor and
+/// the cursor advances to where that element stopped — the same model as
+/// [`walk_template`], and the same fix: the predecessor returned
+/// `bytes.len() - offset`, a *length*, where its caller wanted a position.
 fn walk_tuple(
     rt: &Rt,
+    i: &Input<'_>,
     plan: &ParserPlan,
     elements: &[u32],
-    bytes: &[u8],
-    offset: usize,
+    region: ByteRegion,
 ) -> WalkResult {
-    let mut cursor = offset;
+    let base = region.start();
+    let bytes = region.bytes(i);
+    let mut cursor = base;
     let mut values: Vec<GcRef> = Vec::with_capacity(elements.len());
     for &elem in elements {
-        cursor = match consume_ws(bytes, cursor, consume_ws_default()) {
-            None => {
-                return Err(ParseFail::at(cursor, 0, "whitespace"));
-            }
-            Some(c) => c,
+        let Some(after) = consume_ws(bytes, cursor.delta_from(base), consume_ws_default()) else {
+            return Err(ParseFail::at(cursor.offset(), 0, "whitespace"));
         };
-        // `walk` returns the absolute new offset, not a delta.
-        let (value, new_offset) = unsafe { walk(rt.ctx, plan, elem, bytes, cursor)? };
-        cursor = new_offset;
-        values.push(value);
+        cursor = base.advance(after);
+        // SAFETY: ctx is valid.
+        let walked = unsafe { walk(rt.ctx, i, plan, elem, region.from(cursor))? };
+        cursor = walked.next;
+        values.push(walked.value);
     }
     let tuple_ref = alloc_tuple(rt, elements, plan, values);
-    Ok((tuple_ref, bytes.len() - offset))
+    Ok(Walked {
+        value: tuple_ref,
+        next: cursor,
+    })
 }
 
 /// The default whitespace policy applied before a capture: a flexible run of
@@ -1433,100 +1693,15 @@ fn tuple_schema_for(
 }
 
 // ---- byte-splitting helpers -----------------------------------------------
-
-/// A byte range within a region.
-struct ByteRange {
-    start: usize,
-    len: usize,
-}
-
-/// Split a byte region into logical lines (stripping trailing `\r` and `\n`).
-fn split_lines(region: &[u8]) -> impl Iterator<Item = ByteRange> + '_ {
-    let mut pos = 0;
-    std::iter::from_fn(move || {
-        if pos >= region.len() {
-            return None;
-        }
-        let start = pos;
-        while pos < region.len() && region[pos] != b'\n' {
-            pos += 1;
-        }
-        let mut end = pos;
-        // Strip a trailing `\r`.
-        if end > start && region[end - 1] == b'\r' {
-            end -= 1;
-        }
-        let len = end - start;
-        if pos < region.len() {
-            pos += 1; // skip `\n`
-        }
-        // Skip empty trailing line.
-        if pos >= region.len() && len == 0 && start == region.len() {
-            return None;
-        }
-        Some(ByteRange { start, len })
-    })
-}
-
-/// Split a byte region on blank lines (one or more empty lines).
-fn split_sections(region: &[u8]) -> impl Iterator<Item = ByteRange> + '_ {
-    let mut pos = 0;
-    std::iter::from_fn(move || {
-        // Skip leading blank lines.
-        while pos < region.len() {
-            let line_start = pos;
-            while pos < region.len() && region[pos] != b'\n' {
-                pos += 1;
-            }
-            let line_end = if pos > line_start && region[pos - 1] == b'\r' {
-                pos - 1
-            } else {
-                pos
-            };
-            if pos < region.len() {
-                pos += 1;
-            }
-            if line_end > line_start {
-                // Found a non-empty line; this section starts here.
-                let section_start = line_start;
-                // Consume until the next blank line (two consecutive newlines).
-                while pos < region.len() {
-                    // Check for blank line.
-                    let peek = pos;
-                    let mut p = peek;
-                    while p < region.len() && region[p] != b'\n' {
-                        p += 1;
-                    }
-                    let blank = p == peek || (p == peek + 1 && region[peek] == b'\r');
-                    if blank {
-                        // This is the end of the section (before the blank line).
-                        return Some(ByteRange {
-                            start: section_start,
-                            len: peek - section_start,
-                        });
-                    }
-                    if p < region.len() {
-                        p += 1;
-                    }
-                    pos = p;
-                }
-                return Some(ByteRange {
-                    start: section_start,
-                    len: pos - section_start,
-                });
-            }
-        }
-        None
-    })
-}
-
-/// The byte offset of `needle` within `hay`, used to locate CSV tokens.
-fn region_offset_of(hay: &[u8], needle: &str) -> usize {
-    let needle_bytes = needle.as_bytes();
-    hay.windows(needle_bytes.len())
-        .position(|w| w == needle_bytes)
-        .unwrap_or(0)
-}
+//
+// `split_lines` and `split_sections` live in `cursor.rs` now, because they
+// produce positions and positions are that module's business. `region_offset_of`
+// is gone entirely: it located a CSV token by *searching the region for the
+// token's text*, so duplicate fields all mapped to the first occurrence, and it
+// called `hay.windows(0)` — a panic — for any token that trimmed to nothing,
+// which `"10,20,\n"` was enough to reach. Inside `extern "C"` that is not a
+// panic, it is undefined behaviour. `csv_tokens` computes the bounds while it
+// splits, so there is nothing to search for and nothing to be empty.
 
 /// Skip leading horizontal whitespace (spaces and tabs).
 fn trim_leading_ws(bytes: &[u8]) -> &[u8] {
@@ -1755,32 +1930,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn split_lines_handles_crlf() {
-        let bytes = b"abc\r\ndef\nghi";
-        let lines: Vec<_> = split_lines(bytes)
-            .map(|r| &bytes[r.start..r.start + r.len])
-            .collect();
-        assert_eq!(lines, vec![b"abc".as_slice(), b"def", b"ghi"]);
-    }
-
-    #[test]
-    fn split_lines_drops_trailing_empty() {
-        let bytes = b"a\nb\n";
-        let lines: Vec<_> = split_lines(bytes)
-            .map(|r| &bytes[r.start..r.start + r.len])
-            .collect();
-        assert_eq!(lines, vec![b"a".as_slice(), b"b"]);
-    }
-
-    #[test]
-    fn split_sections_on_blank_lines() {
-        let bytes = b"a\nb\n\nc\nd";
-        let sections: Vec<_> = split_sections(bytes)
-            .map(|r| &bytes[r.start..r.start + r.len])
-            .collect();
-        assert_eq!(sections.len(), 2);
-    }
+    // `split_lines`/`split_sections` are covered by `cursor.rs`'s own tests
+    // now: they produce `ByteRegion`s over an `Input`, so their gates live
+    // beside the types whose invariants they establish.
 
     #[test]
     fn take_int_run_parses_negative() {
@@ -1806,9 +1958,9 @@ mod tests {
             let mut ctx = rt.context();
             ctx.input_source = text;
             let plan = test_plan(vec![PlanNode::Atomic { kind }], 0);
-            let bytes = text.as_text().as_bytes();
-            let out = unsafe { walk(&mut ctx, &plan, plan.root, bytes, 0) };
-            out.ok().map(|(v, consumed)| (rt, v, consumed))
+            let i = unsafe { Input::new(text) }.expect("a Text is UTF-8");
+            let out = unsafe { walk(&mut ctx, &i, &plan, plan.root, i.whole()) };
+            out.ok().map(|w| (rt, w.value, w.next.offset()))
         }
 
         // Every kind has a descriptor. Exhaustive by `ALL`, so a new atomic
@@ -1879,7 +2031,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: bounded section parsing loses the source's absolute offset"]
     fn text_slices_in_later_sections_point_at_their_actual_source_bytes() {
         let mut rt = crate::Runtime::new();
         let input = rt.alloc_text("first\n\nsecond");
@@ -1895,12 +2046,47 @@ mod tests {
             1,
         );
 
-        let (result, _) =
-            unsafe { walk(&mut ctx, &plan, plan.root, input.as_text().as_bytes(), 0) }
-                .expect("sections(word) should parse");
+        let result =
+            unsafe { run_root(&mut ctx, &plan, input) }.expect("sections(word) should parse");
         let values: Vec<&str> = result.as_vec().iter().map(GcRef::as_text).collect();
 
         assert_eq!(values, vec!["first", "second"]);
+    }
+
+    /// The other half of IPR-03: the owner of a slice is the buffer that was
+    /// *parsed*, not whatever the context happens to call its input.
+    ///
+    /// `parse(text, P)` hands the interpreter a `Text` that is not
+    /// `ctx.input_source`. The predecessor read the bytes from the argument and
+    /// the owner from the context, so every `Text` a `parse` produced was a
+    /// view of the stdin buffer at offsets chosen by a different string.
+    #[test]
+    fn a_parse_of_a_non_input_text_owns_its_slices() {
+        let mut rt = crate::Runtime::new();
+        // The context's input is one buffer…
+        let stdin_buffer = rt.alloc_text("XXXXXXXXXXXXXXXX");
+        // …and the thing being parsed is a different one.
+        let subject = rt.alloc_text("alpha beta");
+        let mut ctx = rt.context();
+        ctx.input_source = stdin_buffer;
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Word,
+                },
+                PlanNode::Ws { child: 0 },
+            ],
+            1,
+        );
+
+        let result = unsafe { run_root(&mut ctx, &plan, subject) }.expect("ws(word) should parse");
+        let values: Vec<&str> = result.as_vec().iter().map(GcRef::as_text).collect();
+
+        assert_eq!(
+            values,
+            vec!["alpha", "beta"],
+            "a parse's slices must be views of the text it parsed, not of ctx.input_source"
+        );
     }
 
     #[test]
@@ -1920,7 +2106,7 @@ mod tests {
             1,
         );
 
-        let (grid, _) = unsafe { walk(&mut ctx, &plan, plan.root, input.as_text().as_bytes(), 0) }
+        let grid = unsafe { run_root(&mut ctx, &plan, input) }
             .expect("one Unicode scalar is one valid grid cell");
         let payload = unsafe { &*grid.payload::<crate::collections::GridPayload>() };
 
@@ -1945,12 +2131,42 @@ mod tests {
             1,
         );
 
-        let (result, _) =
-            unsafe { walk(&mut ctx, &plan, plan.root, input.as_text().as_bytes(), 0) }
-                .expect("csv(rest) should parse");
+        let result = unsafe { run_root(&mut ctx, &plan, input) }.expect("csv(rest) should parse");
         let values: Vec<&str> = result.as_vec().iter().map(GcRef::as_text).collect();
 
         assert_eq!(values, vec!["a", "b"]);
+    }
+
+    /// IPR-04's panic path, as a test that would have aborted the process.
+    ///
+    /// `csv` used to locate a token by searching the region for the token's
+    /// text; a token that trims to nothing made that `slice::windows(0)`, which
+    /// panics — inside `extern "C"`, where a panic is undefined behaviour.
+    /// `"10,20,"` is enough to reach it.
+    #[test]
+    fn a_csv_token_that_trims_to_empty_does_not_panic() {
+        let mut rt = crate::Runtime::new();
+        let input = rt.alloc_text("10,20,");
+        let mut ctx = rt.context();
+        ctx.input_source = input;
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Rest,
+                },
+                PlanNode::Csv { child: 0 },
+            ],
+            1,
+        );
+
+        let result = unsafe { run_root(&mut ctx, &plan, input) }
+            .expect("an empty csv field is an empty Text, not an abort");
+        let values: Vec<&str> = result.as_vec().iter().map(GcRef::as_text).collect();
+        assert_eq!(values.len(), 3, "three commas' worth of fields");
+        assert_eq!(
+            values[2], "",
+            "the field after the last comma is empty, and being empty is not a panic"
+        );
     }
 
     // --- M7-WS9: whitespace matcher (§7.2) -----------------------------------

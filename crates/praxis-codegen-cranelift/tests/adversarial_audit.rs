@@ -461,7 +461,6 @@ fn heavy_jit_loop_proves_that_automatic_collection_actually_ran() {
 }
 
 #[test]
-#[ignore = "known bug: nested sections lose their absolute source offsets"]
 fn sections_preserve_text_offsets_into_the_original_input() {
     let src = "fn main() -> Text {\n  let groups = read sections(lines(word))\n  groups.get(1).get(0)\n}\n";
     let (runtime, result) = run_main_with_input(src, "alpha\n\nbeta\n");

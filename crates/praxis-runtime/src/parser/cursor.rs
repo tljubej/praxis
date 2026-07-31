@@ -35,7 +35,6 @@
 // a half-converted interpreter mixes absolute and relative cursors with no type
 // telling them apart, which is the current bug and harder to see). The very
 // next commit adopts every item here and this allowance goes with it.
-#![allow(dead_code)]
 
 use crate::text::{text_bytes, TextPayload};
 use crate::GcRef;
@@ -230,12 +229,6 @@ impl ByteRegion {
         let ch = rest.chars().next()?;
         Some(at.advance(ch.len_utf8()))
     }
-
-    /// The number of Unicode scalars in this region, or `None` if its ends are
-    /// not scalar boundaries.
-    pub(crate) fn scalar_count(self, i: &Input<'_>) -> Option<usize> {
-        Some(self.str(i)?.chars().count())
-    }
 }
 
 /// A value and the absolute position parsing stopped at.
@@ -358,7 +351,6 @@ mod tests {
         }
         assert_eq!(seen, vec!["a", "é", "b"], "three scalars, not four bytes");
         assert_eq!(at, r.end());
-        assert_eq!(r.scalar_count(&i), Some(3));
     }
 
     #[test]
