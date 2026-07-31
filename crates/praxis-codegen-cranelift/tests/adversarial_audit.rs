@@ -677,9 +677,10 @@ fn a_grid_row_may_end_in_horizontal_whitespace() {
     assert_eq!(result.as_int(), 2 * 100 + 2 * 10 + 78);
 }
 
-/// **Trailing whitespace belongs to nobody, for every root parser and every
-/// file ending.** A matrix, not an example — because this class of defect has
-/// now been shipped twice, and each time the fix was checked against one.
+/// **Whitespace is data when the parser offered it reads it — for every root
+/// parser and every file ending.** A matrix, not an example, because this class
+/// of defect has now been shipped three times and each time the fix was checked
+/// against one example.
 ///
 /// Round one applied `walk_exact`'s "a bounded child must fill its bound" rule
 /// at a root region that ran to the end of the file, so `read ws(int)` over
@@ -689,11 +690,21 @@ fn a_grid_row_may_end_in_horizontal_whitespace() {
 /// with the identical messages, one byte later. Both treated a number of bytes
 /// rather than the rule.
 ///
-/// The rule is stated in `parser/cursor.rs` and has two halves: a region does
-/// not end in blank lines (`split_lines`, decided before any parser runs), and
-/// a child that leaves only whitespace has filled its bound (`walk_exact`,
-/// `walk_characters`, `walk_grid_row` — one predicate). Together they leave the
+/// The rule is stated in `parser/cursor.rs`: **whitespace is data when the
+/// parser offered it reads it.** The deciding half is the one that can ask —
+/// `walk_exact`, `walk_characters` and `walk_grid_row` forgive a leftover run
+/// through one predicate, and `trailing_blank_run` lets `lines`/`grid`/`matrix`
+/// drop a trailing blank *line* only when their parser makes nothing of it. The
+/// parser-independent half decides nothing any more: it drops a trailing run of
+/// **empty** lines, which have no bytes to offer anyone. Together they leave the
 /// terminator to nobody, so the root region is simply the whole buffer.
+///
+/// Round three had those two halves answering the same question differently:
+/// `split_lines` deleted a trailing line of *spaces* without asking, so
+/// `grid(char)` called `"ab\ncd \n"` ragged (a space is a cell) and silently
+/// answered a 2x2 grid for `"ab\ncd\n  \n"` (a line of spaces is not a line).
+/// The `grid(char)` block at the end of this test is the pair that disagreed,
+/// asserted together.
 ///
 /// Every root constructor §7.5 names is crossed with every ending real input
 /// arrives with. Each cell asserts a **value** and not merely the absence of a
@@ -819,12 +830,15 @@ fn every_root_parser_reads_every_file_ending() {
         );
     }
 
-    // `grid(char)` is positional, so a space is a cell (ADR-079). A trailing
-    // space is therefore *data* to `char` — the bound half of the rule is the
-    // child's answer, not the region's. Every ending that is not itself a cell
-    // reads the same 2x2 grid…
+    // `grid(char)` is positional, so a space is a cell (ADR-079) — and this is
+    // the block where the two halves of the rule used to contradict each other,
+    // seventeen lines apart, one asserting each answer. They are asserted
+    // together now.
+    //
+    // An ending with no bytes for `char` to read is nobody's, so it is the same
+    // 2x2 grid…
     let src = "fn main() -> Int {\n  let g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
-    for ending in ["", "\n", "\r\n", "\n\n", "\n  \n"] {
+    for ending in ["", "\n", "\r\n", "\n\n", "\n\n\n", "\r\n\r\n"] {
         let input = format!("ab\ncd{ending}");
         let (runtime, result) = run_main_with_input(src, &input);
         assert!(
@@ -834,6 +848,43 @@ fn every_root_parser_reads_every_file_ending() {
         );
         assert_eq!(result.as_int(), 22, "grid(char) over {input:?}");
     }
+    // …a final line of two spaces is a **row of two cells**, because `char`
+    // reads a space. This is the cell round three asserted as 22 while
+    // asserting six lines below that one space on a data row is a cell: a line
+    // of spaces was deleted by `split_lines` before `char` was asked. One
+    // question, one answer — the child's.
+    for ending in ["\n  \n", "\n  \n\n", "\n  "] {
+        let input = format!("ab\ncd{ending}");
+        let (runtime, result) = run_main_with_input(src, &input);
+        assert!(
+            !runtime.has_pending_fault(),
+            "grid(char) over {input:?} faulted: {:?}",
+            runtime.fault()
+        );
+        assert_eq!(
+            result.as_int(),
+            23,
+            "grid(char) over {input:?} — two spaces `char` reads are a third row"
+        );
+    }
+    // A grid of nothing but spaces is that grid, not an empty one. Round three
+    // answered width 0, height 0 here — four cells silently deleted.
+    let (runtime, result) = run_main_with_input(src, "  \n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        22,
+        "\"  \\n  \\n\" is a 2x2 grid of spaces"
+    );
+    // The children that cannot read a space read none of it, and for them the
+    // same file ending is nobody's: `grid(digit)`, `matrix(int)` and
+    // `lines(int)` are unmoved by it. That difference is the rule working, not
+    // the constructors disagreeing.
+    let digits =
+        "fn main() -> Int {\n  let g = read grid(digit)\n  g.width() * 10 + g.height()\n}\n";
+    let (runtime, result) = run_main_with_input(digits, "12\n34\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 22, "`digit` reads no cell in \"  \"");
     // …and a file whose last row alone carries a trailing space is a **ragged
     // grid**. That is a complaint about the data, and a different complaint
     // from "the rest of the line": put the space on every row and the grid is
@@ -847,6 +898,60 @@ fn every_root_parser_reads_every_file_ending() {
     let (runtime, result) = run_main_with_input(src, "ab \ncd \n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 32, "every row three cells wide");
+
+    // `lines(rest)` is lossless, which is `rest`'s identity property one level
+    // up: round three's extent trim deleted the third line for every child,
+    // including the children that read it.
+    let src =
+        "fn main() -> Int {\n  let v = read lines(rest)\n  v.len() * 10 + v.get(1).len()\n}\n";
+    let (runtime, result) = run_main_with_input(src, "ab\ncd\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 32, "`rest` reads \"  \", so it is a line");
+}
+
+/// **An interior blank line is structure, and no constructor gets to skip
+/// one.**
+///
+/// `matrix` did: `walk_matrix` skipped every line that trimmed to nothing, so
+/// `matrix(int)` over `"1 2\n  \n3 4\n"` silently answered a 2x2 grid while
+/// `lines(int)` and `grid(digit)` faulted on the identical shape. Three
+/// constructs, three answers, for the one rule they are all supposed to inherit
+/// — and the skip is precisely the per-constructor whitespace special case
+/// ADR-078's corollary tells a later contributor not to write.
+///
+/// The trailing case is the other half of the pair and is *not* a special case:
+/// a trailing blank line is offered, and belongs to nobody when the parser makes
+/// nothing of it.
+#[test]
+fn an_interior_blank_line_is_a_row_and_a_trailing_one_is_nobodys() {
+    let matrix =
+        "fn main() -> Int {\n  let g = read matrix(int)\n  g.width() * 10 + g.height()\n}\n";
+    let lines = "fn main() -> Int {\n  let v = read lines(int)\n  v.len()\n}\n";
+    let grid = "fn main() -> Int {\n  let g = read grid(digit)\n  g.width() * 10 + g.height()\n}\n";
+
+    // Interior: all three complain, none silently deletes a line.
+    let (runtime, _raw, _unit) = run_main_raw_with_input(matrix, "1 2\n  \n3 4\n");
+    assert_eq!(
+        runtime.fault(),
+        praxis_runtime::FaultKind::ParseFailed,
+        "a zero-token row is not two tokens wide"
+    );
+    let (runtime, _raw, _unit) = run_main_raw_with_input(lines, "1\n  \n2\n");
+    assert_eq!(runtime.fault(), praxis_runtime::FaultKind::ParseFailed);
+    let (runtime, _raw, _unit) = run_main_raw_with_input(grid, "12\n  \n34\n");
+    assert_eq!(runtime.fault(), praxis_runtime::FaultKind::ParseFailed);
+
+    // Trailing: all three read the same data, because none of their parsers
+    // makes anything of a line of spaces.
+    let (runtime, result) = run_main_with_input(matrix, "1 2\n3 4\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 22);
+    let (runtime, result) = run_main_with_input(lines, "1\n2\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 2);
+    let (runtime, result) = run_main_with_input(grid, "12\n34\n  \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 22);
 }
 
 /// **A whitespace-only template part is a bound too.**

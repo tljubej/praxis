@@ -117,11 +117,12 @@ A capture with no literal after it is unbounded for the same reason — there is
 nothing to stop before, and requiring exhaustion there would fault every
 root-level template on its input's trailing newline.
 
-### Trailing whitespace belongs to nobody, and that is not an error
+### Whitespace is data when the parser offered it reads it
 
-**AMENDED, twice.** This section stated a rule about the root *buffer* on both
-earlier attempts, and both were wrong in the same way. They are recorded here
-because the shape of the mistake is more useful than either answer.
+**AMENDED, three times.** This section stated a rule about the root *buffer* on
+the first two attempts, and both were wrong in the same way; the third split the
+question between two halves that then answered it differently. They are recorded
+here because the shape of the mistake is more useful than any of the answers.
 
 *Round one* applied the exhaustion rule at a root region that ran to the end of
 the file. So `read ws(int)` over `"1 2 3\n"` cut its last token as `3\n` and
@@ -144,30 +145,45 @@ two constructs in one stage disagreeing about one byte.
 
 Both answers were a **count of bytes**. The rule is not a count.
 
-> **A run of whitespace that no parser could read is not data and not a
-> mismatch.**
+*Round three* stopped counting and split the rule into a parser-independent
+*extent* half (`split_lines` drops a trailing run of lines holding nothing but
+whitespace) and a parser-dependent *bound* half (`walk_exact` forgives a
+leftover run the child declined). That is the right shape, and the two halves
+then gave **opposite answers to the one question the rule exists to settle**:
+is a trailing space a cell `char` could read? `grid(char)` over `"ab\ncd \n"`
+was a ragged grid, because the bound half asked `char` and `char` said yes;
+`grid(char)` over `"ab\ncd\n  \n"` silently answered a 2x2 grid, because the
+extent half deleted the line without asking, and `"  \n  \n"` was an *empty*
+grid — four cells deleted. `lines(rest)` lost a line the same way, which is
+`rest`'s identity property failing one level up. A parser-independent half
+cannot answer a parser-dependent question. That is the mistake this amendment
+fixes, and it is the same mistake as the first two in a new place: something
+other than the parser was deciding what the parser could read.
 
-The important word is *could*. Whether a trailing run is data is not a property
-of the buffer, so it cannot be decided by trimming the buffer; it is decided by
-what was asked of it. The rule therefore has exactly two halves, one at each end
-of that question, and neither of them is at the root:
+> **A run of whitespace the parser offered it does not read is not data and not
+> a mismatch.**
 
-* **Extent** — where a region stops, decided before any parser runs and so not
-  parser-dependent. *A region does not end in blank lines.* `split_lines` drops
-  the trailing run of lines that hold nothing but whitespace, however long it is
-  and whatever it is made of: the file's `\n`, an editor's `"\n\n"`, a final
-  line of spaces. This is the general form of the rule it always had for a
-  single terminator, and `lines`, `sections`, `grid` and `matrix` all inherit it
-  because they all split lines.
-* **Bound** — whether a child filled the region it was handed, decided by the
-  child. *A child that leaves only whitespace has filled its bound.*
-  `walk_exact` asks it once, so every bounded construct there is — a line, a
-  section, a CSV field, a `ws`/`sep` token, a matrix cell, a template capture —
-  gets the same answer. `walk_characters` and `walk_grid_row` are the two loops
-  that are not `walk_exact`-shaped and they call the same predicate,
-  `ByteRegion::is_all_whitespace`.
+There is **one question** — *does the parser offered these bytes read them?* —
+so there is one answer, and the half that can ask it is the half that decides:
 
-Two consequences worth stating, because they are the parts that look like
+* **Bound — the deciding half.** *Whitespace the parser offered it does not read
+  is nobody's.* `walk_exact` asks it once, so every bounded construct there is —
+  a line, a section, a CSV field, a `ws`/`sep` token, a matrix cell, a template
+  capture — gets the same answer. `walk_characters` and `walk_grid_row` are the
+  two loops that are not `walk_exact`-shaped and they call the same predicate,
+  `ByteRegion::is_all_whitespace`. The *same* question applied to a whole line
+  is `cursor::trailing_blank_run`: a **trailing** line of nothing but whitespace
+  is offered like any other, and `walk_lines`, `walk_grid` and `walk_matrix`
+  drop it only when their parser makes nothing of it — no element, no cell, no
+  token. `int` makes nothing of `"  "`; `char` makes two cells of it.
+* **Extent — the half that decides nothing.** *A region does not end in **empty**
+  lines.* `split_lines` drops the trailing run of lines holding no bytes at all,
+  however long it is: the file's `\n`, an editor's `"\n\n"`, `"\r\n\r\n"`. It
+  runs before any parser, so it is restricted to what has nothing in it to
+  decide about. It used to drop lines of *whitespace* too, which is exactly the
+  parser's answer being given by something that could not ask.
+
+Three consequences worth stating, because they are the parts that look like
 exceptions and are not:
 
 1. **The root region is the whole buffer.** There is no trim and no count. The
@@ -180,13 +196,29 @@ exceptions and are not:
    *program* wrote, and `parse(t, rest)` stopped being the identity on `t`. It
    is the identity again.
 2. **`grid(char)` over `"ab\ncd \n"` is a ragged grid, and that is the rule
-   working.** `char` reads a space as a cell (ADR-079), so it *could* read the
-   trailing run — the bound half asks the child, and the child said yes. The
-   fault names the real complaint, "a grid row of the same cell count as the
-   first", which is a statement about the data and not about a file convention.
-   Put the space on every row and the grid is one column wider. Compare
-   `grid(int)`, where `int` cannot read the run and it is padding: same rule,
-   different child.
+   working.** `char` reads a space as a cell (ADR-079), so it reads the trailing
+   run — the rule asks the child, and the child said yes. The fault names the
+   real complaint, "a grid row of the same cell count as the first", which is a
+   statement about the data and not about a file convention. Put the space on
+   every row and the grid is one column wider. Compare `grid(int)`, where `int`
+   reads no cell there and it is padding: same rule, different child.
+
+   The test of whether that is a rule or an exception is what it says about the
+   *neighbouring* shapes, and it now says the same thing about all of them:
+   `grid(char)` over `"ab\ncd\n  \n"` is **three rows** and over `"  \n  \n"` is
+   a **2x2 grid of spaces**, because `char` reads those bytes too. Round three
+   answered 2x2 and 0x0 for those, i.e. the exact opposite of the answer it gave
+   six lines away in the same test. Under one rule they are one answer.
+3. **An interior blank line is structure, and no constructor skips one.** The
+   forgiveness is for a *trailing* run and nothing else. `matrix` used to skip
+   any line that trimmed to nothing, so `matrix(int)` over `"1 2\n  \n3 4\n"`
+   silently deleted the middle line while `lines(int)` and `grid(digit)` faulted
+   on the identical shape — three constructs, three answers, for the rule they
+   are all supposed to inherit. It is a zero-token row now and the width check
+   rejects it, like everything else. `sections` is the one construct for which a
+   blank line is *its own* separator wherever it appears, because `sections` is
+   defined on blank lines the way `csv` is defined on commas; that is its
+   contract, stated at `split_sections`, and not an exception to this rule.
 
 Two smaller rules fall out of the same sentence and are stated with it, because
 they are the places where a token or a line was being asked to hold whitespace
@@ -199,8 +231,11 @@ it could not:
   constructors cannot disagree, and `read ws(int)` over `"1 2\n3 4\n"` is four
   tokens instead of three with the middle one faulting.
 * **A blank line is a line of whitespace, not only an empty one.**
-  `split_sections` calls a line blank by the same predicate `split_lines` uses
-  to decide where the region ends.
+  `split_sections` and `trailing_blank_run` call a line blank by the same
+  predicate, `ByteRegion::is_all_whitespace`. `split_lines` is the one place
+  where the narrower word *empty* is meant, because it is the one place that
+  decides without asking a parser, and `ByteRegion::is_empty` is a separate
+  method so the two cannot be confused for each other.
 
 An *interior* run is untouched by all of this and must stay so. `lines(int)`
 over `"12junk"` still faults; `chars(digit, skip: none)` over `"1\n2"` still
@@ -209,17 +244,25 @@ field really is `"2\n3"` and `sep` splits on the separator it was given — the
 multi-line spelling is `lines(sep(...))`. "Trailing" is load-bearing.
 
 The corollary for anyone adding a constructor: **do not write a trailing-newline
-special case.** If a construct tokenizes to `region.end()`, bound its children
-with `walk_exact` and it has already inherited the rule. Anything that forgives
-a terminator per constructor is fixing this in the wrong place, N times, and
-will disagree with itself — which is how `csv` came to be the one constructor
-that survived round one, purely because `csv_tokens` calls `trim()`.
+or blank-line special case.** If a construct tokenizes to `region.end()`, bound
+its children with `walk_exact` and it has already inherited the rule; if it
+splits lines, take `trailing_blank_run` and drop a trailing blank line only when
+your parser made nothing of it. Anything that forgives whitespace per
+constructor is fixing this in the wrong place, N times, and will disagree with
+itself — which is how `csv` came to be the one constructor that survived round
+one, purely because `csv_tokens` calls `trim()`, and how `matrix` came to be the
+one constructor that deleted an interior blank line, purely because
+`walk_matrix` called `trim()` too.
 
 The gate is `every_root_parser_reads_every_file_ending` in
 `adversarial_audit.rs`: every root constructor §7.5 names, crossed with every
 ending real input arrives with (none, `\n`, `\r\n`, `\n\n`, a trailing space, a
 final line of spaces). It is a matrix and not an example on purpose. This class
-of defect shipped twice, and each time the fix was checked against one example.
+of defect shipped twice as a byte count and once as two halves that disagreed,
+and each time the fix was checked against one example. Its `grid(char)` block
+asserts the shapes that used to disagree next to each other, and
+`an_interior_blank_line_is_a_row_and_a_trailing_one_is_nobodys` does the same
+for `matrix` against `lines` and `grid`.
 
 ## Decision 4: a failed `choice` reports the case that got furthest
 

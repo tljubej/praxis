@@ -792,27 +792,53 @@ Semantics:
 
 ### 7.5 Structural parser constructors
 
-#### Trailing whitespace belongs to nobody
+#### Whitespace is data when the parser offered it reads it
 
-One rule, stated once, that every constructor below inherits. **A run of
-whitespace that no parser could read is not data and not a mismatch.** It has
-two halves:
+One rule, stated once, that every constructor below inherits — `lines`,
+`sections`, `csv`, `sep`, `ws`, `chars`, `matrix`, `grid` and template captures
+alike. **A run of whitespace the parser offered it does not read is not data and
+not a mismatch.**
 
-- **A region does not end in blank lines.** The trailing run of lines holding
-  nothing but whitespace is not part of the region — the file's own terminator,
-  a blank final line, a final line of spaces, any number of them. A *blank* line
-  is one holding nothing but whitespace, not only an empty one.
-- **A child that leaves only whitespace has filled its bound.** Wherever a
-  construct requires its child to consume a region exactly — a line, a section,
-  a CSV field, a `ws`/`sep` token, a matrix cell, a template capture — what the
-  child leaves over is forgiven if it is whitespace and is a mismatch otherwise.
+There is one question — *does the parser offered these bytes read them?* — so
+there is one answer, and the half of the machinery that can ask it is the half
+that decides:
 
-Whether a trailing run is data is therefore the *child's* answer: `int` cannot
-read the space in `"1 "`, so it is padding, while `char` reads it as a cell, so
-`grid(char)` over a file whose last row alone ends in a space is a ragged grid.
+- **The deciding half asks the child.** Wherever a construct requires its child
+  to consume a region exactly — a line, a section, a CSV field, a `ws`/`sep`
+  token, a matrix cell, a template capture — what the child leaves over is
+  forgiven if it is whitespace and is a mismatch otherwise. The same question
+  applied to a whole line: a **trailing** line of nothing but whitespace is
+  offered like any other, and belongs to nobody only when the parser makes
+  nothing of it — no element for `lines`, no cell for `grid`, no token for
+  `matrix`.
+- **The other half decides nothing.** A region does not end in **empty** lines:
+  the trailing run of lines holding no bytes at all is not part of it — the
+  file's own terminator, the `"\n\n"` an editor leaves behind, any number of
+  them. That is decided before any parser runs, which is why it is restricted to
+  lines with nothing in them to decide about.
 
-Only *trailing* runs. An interior one is data: `lines(int)` over `"12junk"` is a
-mismatch, and so is `chars(digit, skip: none)` over `"1\n2"`.
+Three facts follow, and they are one answer rather than an answer with
+exceptions:
+
+- *Trailing* whitespace — at the end of the input, of a region, or of a line —
+  is offered, and is nobody's only if nobody reads it. `int` cannot read the
+  space in `"1 "`, so it is padding, and `lines(int)` over `"1\n2\n  \n"` is two
+  elements.
+- Whitespace a parser **can** read is data. `char` reads a space as a cell, so
+  `grid(char)` over a file whose last row alone ends in a space is a **ragged
+  grid**, *and* `grid(char)` over `"ab\ncd\n  \n"` is three rows, *and*
+  `grid(char)` over `"  \n  \n"` is a 2x2 grid of spaces. `lines(rest)` is
+  lossless for the same reason.
+- An **interior** blank line is structure and no constructor skips one.
+  `lines(int)` over `"1\n  \n2\n"`, `grid(digit)` over `"12\n  \n34\n"` and
+  `matrix(int)` over `"1 2\n  \n3 4\n"` all fault, and they fault in the same
+  way. `sections` is the one construct for which a blank line is *its own*
+  separator, interior or trailing, which is its definition and not an exception
+  to this rule.
+
+Only *trailing* runs are forgiven at all. An interior run is data: `lines(int)`
+over `"12junk"` is a mismatch, and so is `chars(digit, skip: none)` over
+`"1\n2"`.
 
 A root parse runs against the whole input with no terminator trimmed off it,
 which is why `parse(t, rest)` is the identity on `t`. There is no special case

@@ -20,7 +20,7 @@ use crate::roots::{NativeScope, RuntimeRoots};
 use crate::scalars;
 use crate::text::TextPayload;
 use crate::GcRef;
-use cursor::{split_lines, split_sections, ByteRegion, Cursor, Input, Walked};
+use cursor::{split_lines, split_sections, trailing_blank_run, ByteRegion, Cursor, Input, Walked};
 use praxis_input_parser::{AtomicKind, ParserPlan, PlanNode};
 
 /// Run the parser plan named by `raw_id` against `input`, returning the parsed
@@ -579,9 +579,14 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
 /// It is deliberately the child's answer and not the region's. `int` cannot
 /// read `"1 "`'s trailing space, so the space is padding; `char` reads it as a
 /// cell, so `grid(char)` over `"ab\ncd \n"` is a **ragged grid** — a complaint
-/// about the data, not about a file convention. And it is only what the child
-/// *leaves*: `lines(int)` over `"12junk"` still faults, because `"junk"` is not
-/// whitespace, which is the IPR-02 defect this check exists for.
+/// about the data, not about a file convention. The same answer covers the
+/// shape next door: `grid(char)` over `"ab\ncd\n  \n"` is three rows, because a
+/// trailing line of spaces is offered too (`cursor::trailing_blank_run`) and
+/// `char` reads it. Round three answered those two shapes opposite ways.
+///
+/// And it is only what the child *leaves*: `lines(int)` over `"12junk"` still
+/// faults, because `"junk"` is not whitespace, which is the IPR-02 defect this
+/// check exists for.
 ///
 /// # Safety
 /// `ctx` must be live and wired.
@@ -760,15 +765,34 @@ fn walk_lines(
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
-    for line in split_lines(i, region) {
+    let lines = split_lines(i, region);
+    // The trailing run of blank lines is *offered* like any other line; what
+    // happens to it is the child's answer (`cursor`'s rule, bound half).
+    let blank_run = trailing_blank_run(i, &lines);
+    for (n, line) in lines.iter().enumerate() {
         // One line, consumed exactly. The predecessor walked the child against
         // everything from the line's start to the end of the buffer and threw
         // the cursor away, so `lines(int)` accepted `12junk` and `lines(rest)`
         // handed every element the whole remaining input (IPR-02).
         // SAFETY: ctx is valid (upheld by `walk`'s caller).
-        let value = unsafe { walk_exact(rt, i, plan, child, line, "the rest of the line")? };
-        scope.root(value);
-        items.push(value);
+        match unsafe { walk_exact(rt, i, plan, child, *line, "the rest of the line") } {
+            Ok(value) => {
+                scope.root(value);
+                items.push(value);
+            }
+            // A trailing line of nothing but whitespace the child makes nothing
+            // of belongs to nobody: `lines(int)` over `"1\n2\n  \n"` is two
+            // elements. `split_lines` used to delete that line before anyone
+            // was asked, which also deleted it for the children that *can* read
+            // it — `lines(rest)` lost a line, and `lines(rest)` losing a line is
+            // `rest`'s identity property failing one level up. The child is
+            // asked now, so `lines(rest)` and `lines(char)` keep it.
+            Err(fail) => {
+                if n < blank_run {
+                    return Err(fail);
+                }
+            }
+        }
     }
     let elem_desc = child_descriptor(plan, child);
     Ok(Walked {
@@ -1298,12 +1322,24 @@ fn walk_matrix(
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut rows: Vec<Vec<ByteRegion>> = Vec::new();
-    for line in split_lines(i, region) {
-        let text = region_str(i, line, "matrix row")?;
-        if text.trim().is_empty() {
+    let lines = split_lines(i, region);
+    let blank_run = trailing_blank_run(i, &lines);
+    for (n, line) in lines.iter().enumerate() {
+        let text = region_str(i, *line, "matrix row")?;
+        let tokens = whitespace_tokens(*line, text);
+        // A **trailing** blank line yields no tokens, so `matrix` makes nothing
+        // of it and it belongs to nobody — the same rule `grid` and `lines`
+        // answer from, not a `matrix` special case. The predecessor skipped
+        // *any* line that trimmed to nothing, interior ones included, which was
+        // exactly the per-constructor whitespace exception ADR-078's corollary
+        // warns against: `matrix(int)` silently dropped the middle of
+        // `"1 2\n  \n3 4\n"` while `lines(int)` and `grid(digit)` faulted on the
+        // identical shape. An interior blank line is structure, so it is a
+        // zero-token row and the width check below rejects it.
+        if tokens.is_empty() && n >= blank_run {
             continue;
         }
-        rows.push(whitespace_tokens(line, text));
+        rows.push(tokens);
     }
     let width = rows.first().map(Vec::len).unwrap_or(0);
     let mut items = Vec::with_capacity(rows.len() * width);
@@ -1376,9 +1412,17 @@ fn walk_grid_ragged(
     // read them.
     let mut items = Vec::new();
     let mut rows = Vec::with_capacity(lines.len());
-    for line in &lines {
+    let blank_run = trailing_blank_run(i, &lines);
+    for (n, line) in lines.iter().enumerate() {
         // SAFETY: ctx is valid.
-        rows.push(unsafe { walk_grid_row(rt, i, plan, child, *line, &mut items, &scope)? });
+        let cells = unsafe { walk_grid_row(rt, i, plan, child, *line, &mut items, &scope)? };
+        // The same rule uniform `grid` answers from: a trailing blank line the
+        // cell parser reads no cell in is nobody's, and would otherwise be a
+        // zero-cell row padded out to the full width with `fill`.
+        if cells == 0 && n >= blank_run {
+            continue;
+        }
+        rows.push(cells);
     }
     let width = rows.iter().copied().max().unwrap_or(0);
     // Pad each short row out to the width, from the back forwards so the
@@ -1567,11 +1611,22 @@ fn walk_grid(
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let lines = split_lines(i, region);
+    let blank_run = trailing_blank_run(i, &lines);
     let mut items = Vec::new();
     let mut width: Option<usize> = None;
-    for line in &lines {
+    for (n, line) in lines.iter().enumerate() {
         // SAFETY: ctx is valid.
         let cells = unsafe { walk_grid_row(rt, i, plan, child, *line, &mut items, &scope)? };
+        // **A trailing blank line is a row if the cell parser reads cells in
+        // it.** `char` does, so `grid(char)` over `"ab\ncd\n  \n"` is 2x3 —
+        // which is the same answer that makes `"ab\ncd \n"` ragged, rather than
+        // an exception to it. `digit`/`int` read no cell there, so the line
+        // belongs to nobody and the grid is 2x2. `split_lines` used to delete
+        // the line before the cell parser was asked, so the two answers
+        // contradicted each other and `"  \n  \n"` was an *empty* grid.
+        if cells == 0 && n >= blank_run {
+            continue;
+        }
         match width {
             None => width = Some(cells),
             // Grid rows must be uniform (§7.5). Ragged grids are M9. Uniform in

@@ -30,26 +30,53 @@
 //! `str::from_utf8(..).unwrap_or("")` calls the interpreter used to make: a
 //! region that is not UTF-8 is now impossible rather than silently empty.
 //!
-//! # Trailing whitespace belongs to nobody, and that is not an error
+//! # Whitespace is data when the parser offered it reads it
 //!
 //! Real input is full of whitespace no parser was asked to read: the file's own
 //! terminator, a blank final line, a stray space before a newline. **A run of
-//! whitespace that no parser could read is not data and not a mismatch.** The
-//! rule is stated once and inherited; it is not a byte count, and it is not a
-//! special case at the root. It has exactly two halves, because a region has
-//! two ends of the question:
+//! whitespace the parser offered it does not read is not data and not a
+//! mismatch.** The rule is stated once and inherited; it is not a byte count,
+//! and it is not a special case at the root.
 //!
-//! * **Extent** — decided before any parser runs, so it cannot depend on one.
-//!   *A region does not end in blank lines.* [`split_lines`] drops the trailing
-//!   run of lines that hold nothing but whitespace, which is the general form of
-//!   the rule it always had for one terminator.
-//! * **Bound** — decided by the parser that was asked. *A child that leaves only
-//!   whitespace has filled its bound.* `walk_exact`, `walk_characters` and
-//!   `walk_grid_row` in the parent module share one predicate,
-//!   [`ByteRegion::is_all_whitespace`]. Whether a trailing run is data is the
-//!   child's answer: `int` cannot read `"1 "`'s space, so it is padding, while
-//!   `char` reads it as a cell, so `grid(char)` over `"ab\ncd \n"` is a *ragged
-//!   grid* — an error about the data, not about a file convention.
+//! There is **one question** — *does the parser offered these bytes read
+//! them?* — so there is one answer, and the half that can ask it is the half
+//! that decides. The rule still has two halves, but only because a region has
+//! an extent before it has a parser; they are not two opinions:
+//!
+//! * **Bound — the deciding half.** *Whitespace the parser offered it does not
+//!   read is nobody's.* One predicate, [`ByteRegion::is_all_whitespace`], asked
+//!   in two shapes: `walk_exact`, `walk_characters` and `walk_grid_row` forgive
+//!   a leftover run at the end of a region, and [`trailing_blank_run`] lets
+//!   `walk_lines`, `walk_grid` and `walk_matrix` drop a *trailing* line of
+//!   nothing but whitespace — but only when the parser offered it makes nothing
+//!   of it (no element, no cell, no token).
+//! * **Extent — the half that decides nothing.** *A region does not end in
+//!   empty lines.* [`split_lines`] drops the trailing run of lines that hold no
+//!   bytes at all: the file's own `\n`, the `"\n\n"` an editor leaves behind.
+//!   There is nothing there to offer anyone, so no parser is being spoken for.
+//!   It is deliberately weaker than it was — see below.
+//!
+//! The two halves used to answer the same question differently, and
+//! `grid(char)` showed it. The extent half deleted a trailing line of *spaces*
+//! without asking, while the bound half let `char` read a space as a cell: so
+//! `grid(char)` over `"ab\ncd \n"` was a ragged grid — one space, one cell —
+//! and `grid(char)` over `"ab\ncd\n  \n"` silently answered a 2x2 grid,
+//! deleting two cells `char` reads perfectly well. `"  \n  \n"` was an *empty*
+//! grid. `lines(rest)` lost a line the same way, which is the identity property
+//! of `rest` failing one level up. A parser-independent half cannot answer a
+//! parser-dependent question, so it stopped trying to.
+//!
+//! What is left is three facts a reader can apply without reading the code:
+//!
+//! * *Trailing* whitespace — at the end of the input, of a region, or of a line
+//!   — is **offered**, and belongs to nobody only if nobody reads it. `int`
+//!   cannot read `"1 "`'s space, so it is padding.
+//! * Whitespace a parser **can** read is data. `char` reads a space, so
+//!   `grid(char)` over `"ab\ncd \n"` is ragged *and* over `"ab\ncd\n  \n"` is
+//!   three rows. Those are one answer, not an answer and an exception.
+//! * An **interior** blank line is structure. Nobody drops one — not
+//!   [`split_sections`], which makes it a separator and says so, and no longer
+//!   `matrix`, which used to skip it.
 //!
 //! Together they leave the file's terminator to nobody, so **the root region is
 //! the whole buffer** and there is no root special case to get the count wrong
@@ -222,6 +249,18 @@ impl ByteRegion {
         self.end.delta_from(self.start)
     }
 
+    /// True when this region holds no bytes at all.
+    ///
+    /// Distinct from [`is_all_whitespace`](ByteRegion::is_all_whitespace),
+    /// which it implies, and the distinction is the module's rule: an empty
+    /// region has nothing to offer a parser, so [`split_lines`] may drop a
+    /// trailing run of empty lines without asking one. A region of spaces has
+    /// bytes some parsers read, so only a parser may drop it.
+    #[inline]
+    pub(crate) fn is_empty(self) -> bool {
+        self.end == self.start
+    }
+
     /// The bytes this region spans.
     #[inline]
     pub(crate) fn bytes<'a>(self, i: &Input<'a>) -> &'a [u8] {
@@ -322,23 +361,27 @@ pub(crate) struct Walked {
 /// Split `region` into logical lines, stripping a trailing `\r` and excluding
 /// the `\n`.
 ///
-/// **A region does not end in blank lines** — the *extent* half of the module's
-/// rule. The trailing run of lines holding nothing but whitespace is dropped,
-/// however long it is and whatever it is made of: the file's own `\n`, the
-/// `"\n\n"` an editor leaves behind, a final line of spaces. The predecessor
-/// dropped exactly one empty line, as a side effect of consuming the `\n` that
-/// ended the one before it, and so `lines(int)` faulted on `"1\n2\n\n"` and
-/// `grid(char)` called `"ab\ncd\n\n"` ragged.
+/// **A region does not end in empty lines** — the *extent* half of the module's
+/// rule, and the whole of it. The trailing run of lines holding **no bytes at
+/// all** is dropped, however long it is: the file's own `\n`, the `"\n\n"` an
+/// editor leaves behind, `"\r\n\r\n"`. The predecessor dropped exactly one, as
+/// a side effect of consuming the `\n` that ended the one before it, and so
+/// `lines(int)` faulted on `"1\n2\n\n"` and `grid(char)` called `"ab\ncd\n\n"`
+/// ragged.
 ///
-/// It is the *extent* and not a *bound*, so it is decided here, before any
-/// parser runs, and does not ask the child what it can read: a line with no
-/// content is not a line any parser was offered. A line *with* content keeps
-/// every byte it has, including a trailing space — whether that space is data is
-/// the child's answer, and `walk_exact` asks it.
+/// It is decided here, before any parser runs, so it may only remove what no
+/// parser could disagree about — and an empty line holds nothing to disagree
+/// about. A line holding whitespace is a different thing: it has bytes, and
+/// whether those bytes are data is the child's answer, not this function's.
+/// This routine used to drop those too, and that is the defect that made
+/// `grid(char)` self-contradictory (`"ab\ncd \n"` ragged because a space is a
+/// cell, `"ab\ncd\n  \n"` silently 2x2 because a line of spaces was not a
+/// line). The trailing run of *whitespace* lines is left in place and offered;
+/// [`trailing_blank_run`] marks it so the constructor can drop what its child
+/// makes nothing of.
 ///
-/// This is also what `sections` needs and does not have to be told: a section is
-/// a run of non-blank lines, so a region that does not end in blank lines ends
-/// with a section rather than with an empty one.
+/// A line *with* content likewise keeps every byte it has, trailing space
+/// included.
 ///
 /// Absolute by construction: each returned region is a narrowing of `region`,
 /// so a line's `Text` names the bytes the line actually occupies.
@@ -361,10 +404,40 @@ pub(crate) fn split_lines(i: &Input<'_>, region: ByteRegion) -> Vec<ByteRegion> 
         }
         out.push(region.subregion(base.advance(start), base.advance(end)));
     }
-    while out.last().is_some_and(|l| l.is_all_whitespace(i)) {
+    while out.last().is_some_and(|l| l.is_empty()) {
         out.pop();
     }
     out
+}
+
+/// The index at which `lines`' trailing run of blank lines begins — `lines.len()`
+/// when the last line has content.
+///
+/// The *bound* half of the module's rule applied to a whole line rather than to
+/// the tail of one. A line of nothing but whitespace at the end of a region is
+/// **offered** to the parser like any other; a constructor drops it only if its
+/// parser makes nothing of it — no element for `lines`, no cell for `grid`, no
+/// token for `matrix`. `int` cannot read `"  "`, so `lines(int)` over
+/// `"1\n2\n  \n"` is two elements; `char` reads two cells, so `grid(char)` over
+/// `"ab\ncd\n  \n"` is three rows, which is the same answer that makes
+/// `"ab\ncd \n"` ragged.
+///
+/// Only the *trailing* run, because that is the only run the rule is about. An
+/// interior blank line is structure: `lines(int)` over `"1\n  \n2\n"` faults,
+/// `grid(digit)` over `"12\n  \n34\n"` is ragged, and `matrix(int)` over
+/// `"1 2\n  \n3 4\n"` is ragged too — it used to skip the line, which was a
+/// per-constructor whitespace special case of exactly the kind ADR-078's
+/// corollary warns against.
+///
+/// Empty lines never reach here: [`split_lines`] has already dropped the
+/// trailing ones, and an interior empty line is blank, so it is inside any run
+/// this reports.
+pub(crate) fn trailing_blank_run(i: &Input<'_>, lines: &[ByteRegion]) -> usize {
+    let mut start = lines.len();
+    while start > 0 && lines[start - 1].is_all_whitespace(i) {
+        start -= 1;
+    }
+    start
 }
 
 /// Split `region` on blank lines into sections, **excluding** each section's
@@ -378,6 +451,14 @@ pub(crate) fn split_lines(i: &Input<'_>, region: ByteRegion) -> Vec<ByteRegion> 
 /// the span from its first non-blank line's start to its last non-blank line's
 /// content end, which is also what makes [`split_lines`] of a section agree
 /// with [`split_lines`] of the whole input.
+///
+/// **A blank line is this constructor's separator**, which is its own contract
+/// and not the module's trailing-whitespace rule: `sections` is *defined* on
+/// blank lines the way `csv` is defined on commas, so a blank line is structure
+/// here wherever it appears, interior or trailing, and no parser is asked about
+/// it. A trailing run of blank lines therefore closes the last section and
+/// opens no new one — which is why `sections` needs nothing from
+/// [`trailing_blank_run`].
 pub(crate) fn split_sections(i: &Input<'_>, region: ByteRegion) -> Vec<ByteRegion> {
     let mut out = Vec::new();
     let mut current: Option<(Cursor, Cursor)> = None;
@@ -501,13 +582,18 @@ mod tests {
     }
 
     #[test]
-    fn a_region_does_not_end_in_blank_lines_however_many_there_are() {
+    fn a_region_does_not_end_in_empty_lines_however_many_there_are() {
         // The extent half of the rule, at the substrate level. Two earlier
         // attempts wrote a *count* here — the bound rule applied to a region
         // that still held the terminator, then a trim of exactly one terminator
         // — and each was defeated by one more newline. There is no count now:
-        // the trailing run of blank lines is not part of the region, whatever
-        // it is made of.
+        // the trailing run of EMPTY lines is not part of the region, however
+        // long it is.
+        //
+        // A line of spaces is not empty, and this is where it stops being
+        // dropped: it has bytes, and whether bytes are data is the parser's
+        // answer. `split_lines` hands it over; `trailing_blank_run` below marks
+        // it; the constructor asks its child.
         for (text, want) in [
             ("1\n2\n", vec!["1", "2"]),
             ("1\n2", vec!["1", "2"]),
@@ -515,16 +601,21 @@ mod tests {
             // The ending that reproduced the closed blocker verbatim.
             ("1\n2\n\n", vec!["1", "2"]),
             ("1\n2\n\n\n\n", vec!["1", "2"]),
-            // A final line of nothing but spaces is a blank line.
-            ("1\n2\n   \n", vec!["1", "2"]),
-            ("1\n2\n\t\n \n", vec!["1", "2"]),
+            ("1\r\n2\r\n\r\n", vec!["1", "2"]),
+            // A final line of nothing but spaces IS a line. It is offered.
+            ("1\n2\n   \n", vec!["1", "2", "   "]),
+            ("1\n2\n\t\n \n", vec!["1", "2", "\t", " "]),
+            // …and the empty line after it still goes, because it is empty.
+            ("1\n2\n   \n\n", vec!["1", "2", "   "]),
             // A line WITH content keeps every byte it has, trailing space
             // included: whether that space is data is the child parser's
             // answer, not the region's.
             ("1 \n2 \n", vec!["1 ", "2 "]),
             // An INTERIOR blank line is structure, not trailing whitespace.
             ("1\n\n2\n", vec!["1", "", "2"]),
+            ("1\n  \n2\n", vec!["1", "  ", "2"]),
             ("\n\n", vec![]),
+            ("  \n  \n", vec!["  ", "  "]),
             ("", vec![]),
         ] {
             let (_rt, owner) = input_over(text);
@@ -534,6 +625,32 @@ mod tests {
                 .map(|l| l.str(&i).expect("a line is a str"))
                 .collect();
             assert_eq!(lines, want, "lines of {text:?}");
+        }
+    }
+
+    #[test]
+    fn the_trailing_blank_run_is_the_only_run_a_constructor_may_drop() {
+        // `trailing_blank_run` reports where the droppable run starts; whether
+        // any of it is actually dropped is the child parser's answer, one level
+        // up. Both halves of that are asserted here: the index, and that an
+        // interior blank line is never in it.
+        for (text, want) in [
+            ("1\n2\n", 2),
+            ("1\n2\n  \n", 2),
+            ("1\n2\n  \n \t\n", 2),
+            // An interior blank line is structure and stays out of the run.
+            ("1\n\n2\n", 3),
+            ("1\n  \n2\n", 3),
+            ("1\n  \n2\n  \n", 3),
+            // Everything blank: the run is the whole region, and `grid(char)`
+            // over "  \n  \n" still reads a 2x2 grid because `char` reads it.
+            ("  \n  \n", 0),
+            ("", 0),
+        ] {
+            let (_rt, owner) = input_over(text);
+            let i = unsafe { Input::new(owner) }.expect("a Text is UTF-8");
+            let lines = split_lines(&i, i.whole());
+            assert_eq!(trailing_blank_run(&i, &lines), want, "run of {text:?}");
         }
     }
 
