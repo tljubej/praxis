@@ -1329,6 +1329,18 @@ impl Inferer {
             }
             return ty;
         }
+        // A **wildcard** parameter (REP-32). It names nothing, so there is nothing
+        // to look up — but its slot is a real slot and needs the parameter's type,
+        // or lowering reads a symbol with no scheme for a parameter that is
+        // certainly there.
+        if let Some(tok) = p.wildcard() {
+            if let Some(&id) = self.decls.get(&tok.text_range()) {
+                if let Some(sym) = self.names.get_mut(id) {
+                    sym.scheme = Some(Scheme::monotype(ty));
+                }
+            }
+            return ty;
+        }
         // A **destructuring** closure parameter (REP-29). The argument's own slot
         // takes the parameter type, and the pattern is checked against it by the
         // same walk a match arm and a `for` binding go through — so each name comes

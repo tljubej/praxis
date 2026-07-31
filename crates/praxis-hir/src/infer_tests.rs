@@ -2694,6 +2694,16 @@ fn wildcard_pattern_does_not_bind_a_value_named_underscore() {
 
 /// D7's other three positions: a binding a program deliberately does not name
 /// is legal, introduces nothing, and still *runs* its initializer.
+///
+/// **The "introduces nothing" assertion was sharpened by REP-32.** It used to be
+/// "no symbol in the table is named `_`", which is a claim about the table and
+/// not about the language, and it was the reason a `_` *parameter* had no slot at
+/// all — so `|_, b| b` dropped the parameter and returned the first argument. D7's
+/// actual property is that `_` introduces nothing **a program can read**, and that
+/// is what is asserted now: no reference anywhere resolves to a `_` symbol. The
+/// resolver never binds one into a scope, so no name can reach it; a wildcard
+/// *parameter* additionally owns an anonymous slot, exactly as a destructuring
+/// parameter does, because the argument still has to arrive somewhere.
 #[test]
 fn a_wildcard_binder_is_legal_and_declares_nothing() {
     for src in [
@@ -2703,10 +2713,19 @@ fn a_wildcard_binder_is_legal_and_declares_nothing() {
     ] {
         assert!(is_clean_with_lower(src), "`{src}` should compile clean");
         let analysis = analyze(src);
+        let anonymous: Vec<_> = analysis
+            .names
+            .all()
+            .iter()
+            .filter(|s| s.name == "_")
+            .map(|s| s.id)
+            .collect();
         assert!(
-            !analysis.names.all().iter().any(|s| s.name == "_"),
-            "`{src}` declared a symbol named `_`: {:?}",
-            analysis.names.all().len()
+            !analysis
+                .refs
+                .values()
+                .any(|r| anonymous.contains(&r.symbol)),
+            "`{src}`: nothing may read a `_`"
         );
     }
 }

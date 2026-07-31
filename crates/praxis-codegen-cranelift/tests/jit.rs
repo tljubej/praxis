@@ -6596,3 +6596,91 @@ fn a_zero_parameter_closure_runs_and_the_or_it_is_spelled_like_still_short_circu
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
 }
+
+/// **REP-32.** A `_` parameter keeps its slot, so the parameter after it gets the
+/// argument the call actually passed.
+///
+/// `_` binds no name — ADR-049 D7 — and `lower_param` read that as "there is no
+/// parameter": `Param::name()` answered `None`, the resolver had minted no symbol
+/// to find, and the caller is a `filter_map`, so the parameter vanished from the
+/// slot list while the function's *type* still had it. The arity of the lowered
+/// body and the arity of its signature disagreed, and the two halves failed
+/// differently. A closure gave a **silently wrong answer** — `|_, b| b + 1`
+/// applied to `(9, 5)` printed `10`, because `b` was reading argument one. A `fn`
+/// died in the Cranelift verifier, which is the backend catching what the front
+/// end should never have emitted.
+///
+/// Every assertion below is a *value*, not a "does not crash": a shifted argument
+/// list has to come out as the wrong number, or the gate would pass on the very
+/// defect it is for. The digit-place encodings (`a * 100 + c`) are there so a
+/// swap, a drop and a duplication are three different failures.
+#[test]
+fn a_wildcard_parameter_keeps_its_slot_so_later_parameters_do_not_shift() {
+    // The reviewer's closure repro: `10` before the fix, `6` after.
+    let (rt, result) = run_main("fn main() -> Int {\n  let f = |_, b| b + 1\n  f(9, 5)\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 6, "`b` must be the *second* argument");
+
+    // The reviewer's `fn` repro: a Cranelift verifier error before the fix.
+    let (rt, result) = run_main("fn g(_, b) -> Int { b + 1 }\nfn main() -> Int { g(9, 5) }\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 6);
+
+    // A wildcard in the middle: the parameters on *both* sides of it stay put.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  let f = |a, _, c| a * 100 + c\n  f(1, 2, 3)\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 103);
+    let (rt, result) =
+        run_main("fn h(a, _, c) -> Int { a * 100 + c }\nfn main() -> Int { h(1, 2, 3) }\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 103);
+
+    // Two wildcards are two slots, not one: each `_` is minted at its own range,
+    // so they do not collide and the shift is two wide rather than one.
+    let (rt, result) = run_main("fn main() -> Int {\n  let f = |_, _, c| c * 7\n  f(1, 2, 3)\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 21);
+    let (rt, result) =
+        run_main("fn k(_, _, c) -> Int { c * 7 }\nfn main() -> Int { k(1, 2, 3) }\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 21);
+
+    // A trailing wildcard has nothing after it to shift, and must still be
+    // accepted rather than becoming an arity mismatch.
+    let (rt, result) = run_main("fn main() -> Int {\n  let f = |a, _| a * 2\n  f(21, 99)\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+
+    // ADR-049 D7's own spelling, `|_| 0`, through the pipeline the doc writes it
+    // for — the shape REP-29's gates covered only at the parse-tree level.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  \
+         v.map(|_| 7).sum()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 14);
+
+    // A wildcard *component* is a different thing and keeps working: the pattern
+    // owns the argument, and the `_` inside it has no slot of its own.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  let f = |(_, b), c| b * 10 + c\n  f((9, 4), 3)\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 43);
+
+    // A wildcard next to a destructuring parameter: two different anonymous
+    // slots, both at their own ranges, neither shifting the other.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  let f = |_, (a, b)| a * 10 + b\n  f(9, (1, 2))\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 12);
+
+    // The wildcard's argument is still *evaluated* — D7's rule that a binder a
+    // program does not name still runs what it is given.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  let bump = |n| { v.push(n)\n n }\n  \
+         let f = |_, b| b\n  let r = f(bump(1), 5)\n  r * 10 + v.len()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 51);
+}

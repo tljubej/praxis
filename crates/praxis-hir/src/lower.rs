@@ -1095,11 +1095,29 @@ impl<'a> Lowerer<'a> {
         pl.params().filter_map(|p| self.lower_param(&p)).collect()
     }
 
+    /// One lowered parameter — **or `None`**, and the `None` is load-bearing:
+    /// `lower_params` and `lower_closure` both `filter_map` this, so answering
+    /// `None` for a parameter that exists shortens the slot list and every
+    /// parameter after it takes the wrong argument. That is REP-32: a `_` had no
+    /// declaration to find, so `|_, b| b` returned the first argument and
+    /// `fn g(_, b)` lowered to a body whose arity disagreed with its signature.
+    /// `None` is now reserved for a parameter the *tree* does not have.
     fn lower_param(&mut self, p: &Param) -> Option<TypedParam> {
         // A **destructuring** closure parameter (REP-29) has no name of its own;
         // its slot symbol was declared at the pattern's range, and the pattern is
         // taken apart in the body by `destructure_pattern_params`.
         let Some(name_tok) = p.name() else {
+            // A **wildcard** parameter (REP-32): an anonymous slot, at the `_`'s
+            // own range, holding an argument nothing in the body can name.
+            if let Some(tok) = p.wildcard() {
+                let symbol = self.resolve_decl_at(tok.text_range())?;
+                let ty = self.symbol_type(symbol);
+                return Some(TypedParam {
+                    symbol,
+                    name: "_".to_string(),
+                    ty,
+                });
+            }
             let pat = p.pattern()?;
             let range = pat.syntax().text_range();
             let symbol = self.resolve_decl_at(range)?;

@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-29
 **Status:** Accepted — D7 and D8 both implemented; amended 2026-07-31 for REP-27
-(a line-leading `(` no longer continues the expression before it)
+(a line-leading `(` no longer continues the expression before it) and for REP-32
+(a wildcard *parameter* keeps a slot, though still no name)
 **Milestone:** Repair (stage S12 — FE-02 and FE-04 landed)
 **Answers:** the plan's D7 and D8
 
@@ -41,6 +42,24 @@ nothing. That is what makes the idiom a discard rather than a deletion.
 expression`) at the token itself, which is a better report than the
 "unresolved name" the old lexing produced and is what
 `wildcard_pattern_does_not_bind_a_value_named_underscore` now asserts.
+
+**Amended by REP-32 (2026-07-31): "introduces nothing" is about *names*, not
+about slots.** A second consequence had to be written rather than inherited, and
+it was not — the same shape as `lower_let`'s, one binding position over. A
+wildcard *parameter* was read by `lower_param` as an absent **parameter**:
+`Param::name()` answered `None`, the resolver had minted nothing to find, and the
+caller is a `filter_map`, so the parameter vanished from the lowered slot list
+while the function's *type* still counted it. Every parameter after it then took
+the wrong argument — `|_, b| b + 1` applied to `(9, 5)` answered `10` — and the
+`fn` form, whose signature and body now disagreed on arity, died in the Cranelift
+verifier. So a wildcard parameter owns an **anonymous slot**, minted at the `_`'s
+own range and never bound into a scope, exactly as REP-29's destructuring
+parameter does: the argument has to arrive somewhere even when nothing can read
+it. `Param::wildcard()` is the accessor that makes it reachable, and it answers
+for both spellings — a `fn` parameter's bare `UNDERSCORE` token and a closure
+parameter's whole `PatternKind::Wildcard` pattern. A `_` *inside* a pattern
+(`|(a, _)|`) is unchanged and has no slot: the enclosing pattern owns the
+argument.
 
 ## Decision D8: a newline terminates a statement, never a subexpression
 

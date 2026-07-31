@@ -537,11 +537,24 @@ impl Resolver {
             );
             return;
         }
-        let Some(pat) = p.pattern() else { return };
-        if matches!(pat.kind(), praxis_ast::PatternKind::Wildcard) {
-            // `|_|` binds nothing (ADR-049 D7), unchanged.
+        // A **wildcard** parameter (REP-32). `_` binds nothing — ADR-049 D7, and
+        // no scope entry is made here — but it is still a parameter, and it gets
+        // the same anonymous slot symbol a destructuring one gets. Without it
+        // `lower_param` found no declaration and dropped the parameter, and every
+        // parameter after it took the wrong argument: `|_, b| b` answered the
+        // first. Both spellings arrive here, `fn g(_, b)` and `|_, b|`.
+        if let Some(tok) = p.wildcard() {
+            let range = tok.text_range();
+            let span = range_to_span(range);
+            let id = self.mint(
+                SymbolKind::Param,
+                "_".to_string(),
+                Some(self.file_span(span)),
+            );
+            self.out.decls.insert(range, id);
             return;
         }
+        let Some(pat) = p.pattern() else { return };
         let range = pat.syntax().text_range();
         let span = range_to_span(range);
         let id = self.mint(
