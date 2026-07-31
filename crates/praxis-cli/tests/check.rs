@@ -162,3 +162,48 @@ fn unimplemented_commands_exit_two() {
         );
     }
 }
+
+/// **An unterminated template reports once, and about itself.**
+///
+/// Under D10 a backtick inside a capture opens a template of its own, so a
+/// capture with no closing brace — `` read `{int` `` — makes the run
+/// non-terminating and the token runs to the end of the file. `T002` is the
+/// truthful report of that.
+///
+/// What must not follow is a *second* diagnostic about the token's interior.
+/// There is no interior: the token has no closing backtick. `convert_template`
+/// used to fall back to `unwrap_or(&text)` and hand the scanner the whole token
+/// including its opening backtick, which answered "malformed capture body at
+/// byte 5: unterminated nested template" — a construct this file does not
+/// contain, at an offset that is not where anything is. That is the IP-03 class
+/// (a diagnostic describing something other than what was read), one layer up.
+///
+/// The scanner's own `unterminated_capture_errors` cannot see this: it calls
+/// `scan_template` directly and never goes through the lexer. This test is the
+/// user-facing path.
+#[test]
+fn an_unterminated_template_does_not_also_report_a_fabricated_interior() {
+    let output = Command::new(bin_path())
+        .arg("check")
+        .arg(fixture("unterminated_template.px"))
+        .output()
+        .expect("failed to run praxis");
+    assert_eq!(
+        output.status.code().expect("terminated by signal"),
+        1,
+        "an unterminated template must fail the check"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error[T002]") && stderr.contains("unterminated backtick template"),
+        "the truthful report is missing: {stderr}"
+    );
+    assert!(
+        !stderr.contains("nested template"),
+        "reported a nested template the source does not contain: {stderr}"
+    );
+    assert!(
+        !stderr.contains("error[I030]"),
+        "reported about an interior the token does not have: {stderr}"
+    );
+}

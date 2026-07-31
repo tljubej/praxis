@@ -714,6 +714,7 @@ dependencies = [
  "praxis-input-parser",
  "praxis-source",
  "praxis-stdlib",
+ "praxis-syntax",
 ]
 
 [[package]]

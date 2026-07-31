@@ -59,6 +59,34 @@ fn has_input_error(text: &str) -> bool {
         .any(|d| d.code().category() == DiagnosticCategory::Input)
 }
 
+/// The `ParserAst` the first `read`/`parse` body in `src` converts to.
+///
+/// Some of what S19 fixed is invisible in the synthesized *type*: a decoded
+/// separator, a capture's own parser, the shape of a `choice`'s cases. This is
+/// how those are asserted.
+fn parser_ast_of(src: &str) -> praxis_input_parser::ParserAst {
+    use praxis_ast::AstNode;
+    let map = SourceMap::new();
+    let id = map.intern("parser_ast_test.px", src);
+    let parsed = parse(id, src);
+    let pe = parsed
+        .tree
+        .descendants()
+        .find_map(praxis_ast::ParserExpr::cast)
+        .expect("a parser expression");
+    let mut diagnostics = Vec::new();
+    crate::parser_lower::convert_parser_expr_for_test(&pe, id, &mut diagnostics)
+        .unwrap_or_else(|| panic!("{src} converts: {diagnostics:?}"))
+}
+
+/// Whether `text` reports the given input-parser diagnostic. Stronger than
+/// [`has_input_error`]: it pins *which* rule fired, so a test cannot pass on
+/// some unrelated `I0xx` the change happened to provoke.
+fn reports_input_code(text: &str, code: praxis_source::DiagCode) -> bool {
+    let wanted = code.code();
+    analyze(text).diagnostics.iter().any(|d| d.code() == wanted)
+}
+
 /// Like [`has_type_error`] but also runs lowering, so diagnostics emitted during
 /// lowering (e.g. exhaustiveness Y120/Y121, which need the lowered patterns) are
 /// included. The exhaustiveness checker runs in `lower()`, not `analyze()`.
@@ -2750,7 +2778,6 @@ fn unknown_enum_variant_pattern_is_rejected() {
 // --- input-parser conversion preserves source structure ---------------------
 
 #[test]
-#[ignore = "known bug: every template capture reuses the first capture kind"]
 fn mixed_template_capture_kinds_are_preserved() {
     let src = "fn main() -> Int {\n\
                  let row = read `{name:word},{port:int}`\n\
@@ -2760,20 +2787,129 @@ fn mixed_template_capture_kinds_are_preserved() {
         !has_type_error(src),
         "the `port` capture is Int even when an earlier capture is Word"
     );
+    // The types themselves, not just the absence of a complaint: both captures
+    // used to collapse to the *first* recognizable kind, so this record was
+    // `{ name: Text, port: Text }` and `row.port + 1` was the only thing that
+    // noticed.
+    assert_eq!(
+        scheme_of("let row = read `{name:word},{port:int}`", "row").as_deref(),
+        Some("{ name: Text, port: Int }")
+    );
+}
+
+/// **D10, end to end.** A capture body is a full parser expression — nested
+/// calls and a nested template included — and the type it synthesizes is the
+/// body's own. §7.7's monkey line is the first case.
+#[test]
+fn a_capture_body_is_a_full_parser_expression() {
+    for (src, expected) in [
+        (
+            "let m = read `Starting items: {items:csv(int)}`",
+            "{ items: Vec[Int] }",
+        ),
+        ("let m = read `{x:optional(int)}`", "{ x: Option[Int] }"),
+        ("let m = read `{s:sep(\"-\", word)}`", "{ s: Vec[Text] }"),
+        ("let m = read `{c:one_of(\"^v<>\")}`", "{ c: Char }"),
+        // Anonymous captures keep §7.3's scalar/tuple rule, and the body's own
+        // type is what fills it.
+        ("let m = read `{csv(int)}`", "Vec[Int]"),
+        (
+            "let m = read `{a:int} {b:csv(word)}`",
+            "{ a: Int, b: Vec[Text] }",
+        ),
+    ] {
+        assert!(!has_input_error(src), "{src} must be accepted");
+        assert_eq!(
+            scheme_of(src, "m").as_deref(),
+            Some(expected),
+            "{src} must synthesize the body's own type"
+        );
+    }
+
+    // A capture body may hold a template of its own, which also needs D10's
+    // lexer half: closing the token at the first inner backtick made this
+    // source three unrelated token runs. Asserted on the AST rather than the
+    // rendered type, because an anonymous enum renders as `{ g:  }` today — a
+    // display gap that belongs to whoever owns `TypeDb::render`.
+    {
+        use praxis_input_parser::{ParserAst, TemplatePart};
+        let src = "let m = read `{g:choice(Pt: `{x:int},{y:int}`, Name: word)}`";
+        assert!(!has_input_error(src), "a nested template is a parser body");
+        match parser_ast_of(src) {
+            ParserAst::Template { parts, .. } => match &parts[0] {
+                TemplatePart::Capture { name, parser } => {
+                    assert_eq!(name.as_ref().map(|n| n.as_str()), Some("g"));
+                    match parser.as_ref() {
+                        ParserAst::Choice { cases, .. } => {
+                            assert_eq!(cases.len(), 2);
+                            assert_eq!(cases[0].0, "Pt");
+                            assert!(matches!(cases[0].1, ParserAst::Template { .. }));
+                            assert!(matches!(cases[1].1, ParserAst::Atomic { .. }));
+                        }
+                        other => panic!("expected Choice, got {other:?}"),
+                    }
+                }
+                other => panic!("expected a capture, got {other:?}"),
+            },
+            other => panic!("expected Template, got {other:?}"),
+        }
+    }
+
+    // And a malformed body reports rather than being read as something else.
+    for src in [
+        "let m = read `{x:csv(int, int)}`",
+        "let m = read `{x:frobnicate(int)}`",
+        "let m = read `{x:sep(\"\", int)}`",
+    ] {
+        assert!(has_input_error(src), "{src} must report");
+    }
 }
 
 #[test]
-#[ignore = "known bug: unknown template capture kinds silently default to Int"]
 fn unknown_template_capture_parser_is_diagnosed() {
     let src = "let value = read `{value:intr}`";
     assert!(
         has_input_error(src),
         "a misspelled capture parser must not silently default to Int"
     );
+    // Any `I0xx` satisfies the line above; only I012 satisfies ADR-051, which
+    // allocated `UnknownCaptureKind` for exactly this and had no constructor
+    // anywhere in the tree. Every `ScanError` used to be flattened into I030.
+    assert!(
+        reports_input_code(src, praxis_source::DiagCode::UnknownCaptureKind),
+        "the code ADR-051 allocated for this is I012, not the generic I030"
+    );
+}
+
+/// **IP-04 and IP-06 through the bridge**, which is where they are observable
+/// as *diagnostics*: `ScanError` used to be flattened into `TemplateScan`
+/// (I030) by one `err_diag` call, so I011, I012 and I013 were allocated in
+/// ADR-051 and constructed nowhere.
+#[test]
+fn a_template_scan_error_reports_the_code_its_own_rule_was_given() {
+    use praxis_source::DiagCode;
+
+    for (src, code) in [
+        ("let v = read `{9x:int}`", DiagCode::InvalidCaptureName),
+        ("let v = read `{value:intr}`", DiagCode::UnknownCaptureKind),
+        (
+            "let v = read `{x:frobnicate(int)}`",
+            DiagCode::UnknownConstructor,
+        ),
+        (
+            "let v = read `{x:csv(int, int)}`",
+            DiagCode::ConstructorArity,
+        ),
+        ("let v = read `prefix\\`", DiagCode::TemplateScan),
+    ] {
+        assert!(
+            reports_input_code(src, code),
+            "{src} must report {code:?}, not the generic template-scan code"
+        );
+    }
 }
 
 #[test]
-#[ignore = "known bug: unknown parser constructors are dropped without a diagnostic"]
 fn unknown_parser_constructor_is_diagnosed() {
     let src = "let value = read frobnicate(int)";
     assert!(
@@ -2783,13 +2919,409 @@ fn unknown_parser_constructor_is_diagnosed() {
 }
 
 #[test]
-#[ignore = "known bug: parser conversion discards extra constructor arguments"]
 fn optional_rejects_extra_arguments() {
     let src = "let value = read optional(int, word)";
     assert!(
         has_input_error(src),
         "special constructors must validate source arity before discarding arguments"
     );
+}
+
+/// **IP-07's sweep.** Eight of §7.5's fourteen constructors were dispatched by
+/// an `if ctor_name == "…"` chain that ran *before* the arity table, took
+/// `args.into_iter().next()`, and dropped everything else. So a wrong argument
+/// count was not an error, a wrong argument *kind* was not an error, and a name
+/// with no row at all was not an error either — it was `None` with no
+/// diagnostic.
+///
+/// Every name at its correct shape is clean; every mistake reports; and the
+/// accepted calls are checked for the AST they built, not merely for the
+/// absence of a complaint — a silent drop leaves no diagnostic behind.
+#[test]
+fn every_constructor_checks_its_arguments_before_it_builds_anything() {
+    use praxis_source::DiagCode;
+
+    // §7.5's table, each at the shape the design doc writes.
+    for (call, expected) in [
+        ("lines(int)", "Vec[Int]"),
+        ("sections(lines(int))", "Vec[Vec[Int]]"),
+        ("csv(int)", "Vec[Int]"),
+        ("ws(int)", "Vec[Int]"),
+        ("sep(\" -> \", word)", "Vec[Text]"),
+        ("grid(char)", "Grid[Char]"),
+        ("grid(char, ragged, fill: 0)", "Grid[Char]"),
+        ("matrix(int)", "Grid[Int]"),
+        ("chars(one_of(\"^v<>\"), skip: whitespace)", "Vec[Char]"),
+        ("one_of(\"LR\")", "Char"),
+        ("optional(int)", "Option[Int]"),
+        ("scan(int)", "Vec[Int]"),
+        (
+            "block(`{id:int}`, items: lines(int))",
+            "{ id: Int, items: Vec[Int] }",
+        ),
+    ] {
+        let src = format!("let value = read {call}");
+        assert!(
+            !has_input_error(&src),
+            "`{call}` is §7.5's own shape and must be accepted"
+        );
+        assert_eq!(
+            scheme_of(&src, "value").as_deref(),
+            Some(expected),
+            "`{call}` must build the parser it names, not a truncated one"
+        );
+    }
+
+    // A name with no row: `Constructor::from_keyword(&name)?` used to swallow
+    // this whole.
+    assert!(
+        reports_input_code("let v = read frobnicate(int)", DiagCode::UnknownConstructor),
+        "an unknown constructor is I013"
+    );
+
+    // Wrong count.
+    for call in [
+        "optional(int, word)",
+        "lines()",
+        "lines(int, int)",
+        "csv(int, int)",
+        "sep(\",\")",
+        "one_of(\"a\", \"b\")",
+    ] {
+        let src = format!("let v = read {call}");
+        assert!(
+            has_input_error(&src),
+            "`{call}` has the wrong number of arguments"
+        );
+    }
+
+    // Wrong *kind* — the half a count can never see.
+    for (call, why) in [
+        ("sep(int, int)", "a parser where the separator belongs"),
+        (
+            "sep(\",\", \",\")",
+            "a string where the element parser belongs",
+        ),
+        ("one_of(int)", "a parser where a character set belongs"),
+        ("choice(int)", "a positional in a named-only constructor"),
+        ("lines(\"x\")", "a string where a parser belongs"),
+        (
+            "sections(int, rules: lines(int))",
+            "a positional beside named sections",
+        ),
+        (
+            "chars(one_of(\"ab\"), fill: 0)",
+            "a keyword `chars` does not take",
+        ),
+        ("grid(char, fill: 0)", "`fill:` without `ragged`"),
+        ("grid(char, ragged)", "`ragged` without `fill:`"),
+        (
+            "chars(one_of(\"ab\"), skip: sideways)",
+            "a skip policy that does not exist",
+        ),
+    ] {
+        let src = format!("let v = read {call}");
+        assert!(has_input_error(&src), "`{call}` is {why}");
+    }
+
+    // `block()` with nothing in it has no fields and consumes nothing.
+    assert!(
+        has_input_error("let v = read block()"),
+        "a `block` needs at least one item"
+    );
+}
+
+/// **IP-08.** A parser constructor's string literal used to be decoded by
+/// `raw.trim_start_matches('"').trim_end_matches('"')` — a second decoder,
+/// beside `lower::unquote_text`, which never unescaped and which stripped
+/// *every* quote at each end rather than one.
+#[test]
+fn a_parser_string_literal_is_decoded_once_like_every_other_literal() {
+    use praxis_input_parser::ParserAst;
+
+    // `\t` is one tab, not the two characters `\` and `t`. This is the whole
+    // finding: `sep("\t", int)` split on a backslash.
+    match parser_ast_of(r#"let v = read sep("\t", int)"#) {
+        ParserAst::Sep { separator, .. } => assert_eq!(separator.as_str(), "\t"),
+        other => panic!("expected Sep, got {other:?}"),
+    }
+
+    // One quote, not zero: `trim_end_matches('"')` ate the escaped quote too.
+    match parser_ast_of(r#"let v = read one_of("\"")"#) {
+        ParserAst::OneOf { chars, .. } => assert_eq!(chars, "\""),
+        other => panic!("expected OneOf, got {other:?}"),
+    }
+
+    // Both real quotes survive. `trim_start_matches`/`trim_end_matches` strip a
+    // *run*, so this used to decode to the empty separator — the one IP-10 says
+    // cannot exist.
+    match parser_ast_of(r#"let v = read sep("\"\"", int)"#) {
+        ParserAst::Sep { separator, .. } => assert_eq!(separator.as_str(), "\"\""),
+        other => panic!("expected Sep, got {other:?}"),
+    }
+
+    // And an escape neither decoder knows is preserved exactly as
+    // `unquote_text` preserves it — which is how the two are shown to be one.
+    match parser_ast_of(r#"let v = read sep("\q", int)"#) {
+        ParserAst::Sep { separator, .. } => assert_eq!(separator.as_str(), r"\q"),
+        other => panic!("expected Sep, got {other:?}"),
+    }
+}
+
+/// **IP-09's second half.** §7.5: "`repeated(parser)` may appear only as the
+/// final named argument". Neither half of that was checked — a second tail
+/// silently overwrote the first, and a tail written before other fields was
+/// silently moved to the end, so the parser that ran was not the one written.
+#[test]
+fn a_repeated_tail_is_last_and_singular() {
+    use praxis_source::DiagCode;
+
+    // Misordered: `boards` consumes every remaining section, so `draws` after
+    // it can never match. This used to compile into the *reordered* parser.
+    assert!(
+        reports_input_code(
+            "let b = read sections(boards: repeated(matrix(int)), draws: csv(int))",
+            DiagCode::MisplacedRepeatedTail
+        ),
+        "a tail before another field silently reordered the call"
+    );
+
+    // Two tails: the second used to overwrite the first, so `a` vanished.
+    assert!(
+        reports_input_code(
+            "let b = read sections(a: repeated(int), b: repeated(int))",
+            DiagCode::MisplacedRepeatedTail
+        ),
+        "`sections` takes at most one tail"
+    );
+
+    // Outside `sections` there is nothing to repeat over. This used to fall
+    // through `Constructor::from_keyword`'s `?` and produce no diagnostic.
+    assert!(
+        reports_input_code(
+            "let b = read repeated(int)",
+            DiagCode::MisplacedRepeatedTail
+        ),
+        "a bare `repeated(...)` is not a parser"
+    );
+
+    // And the legal shape is still clean and still builds the tail last —
+    // `tests/aoc-corpus/m9_bingo.px`'s own call.
+    let legal = "let b = read sections(draws: csv(int), boards: repeated(matrix(int)))";
+    assert!(!has_input_error(legal), "the ordered form is legal");
+    assert_eq!(
+        scheme_of(legal, "b").as_deref(),
+        Some("{ draws: Vec[Int], boards: Vec[Grid[Int]] }"),
+        "the tail is the last field and it is a Vec of the repeated parser's result"
+    );
+}
+
+/// **IP-07's residue: `build_call` still dropped arguments.** `skip:` and
+/// `fill:` were minted as keyword arguments from the argument's *name alone*,
+/// with no reference to the constructor being called; `CallArg::Keyword` and
+/// `CallArg::Named` then projected onto the same `ArgKind::Named`, so
+/// `check_call` accepted the keyword as a well-shaped named argument and the
+/// builders' `filter_map` threw it away. A `sections` field or a `block` item
+/// named `fill` or `skip` vanished from the record with **no diagnostic**.
+///
+/// A keyword belongs to a constructor, so the constructor answers the question
+/// (`Constructor::keyword_arg`), and the two kinds no longer collapse.
+#[test]
+fn a_field_named_fill_or_skip_is_a_field_and_not_a_dropped_keyword() {
+    use praxis_input_parser::{BlockItem, ParserAst};
+
+    // `sections` has no keyword argument, so `fill:` is a field. This used to
+    // build `SectionsNamed { fields: [rules] }` and report nothing.
+    let src = "let v = read sections(rules: lines(int), fill: lines(int))";
+    assert!(!has_input_error(src), "`fill` is a section name here");
+    assert_eq!(
+        scheme_of(src, "v").as_deref(),
+        Some("{ rules: Vec[Int], fill: Vec[Int] }"),
+        "the `fill` field must be in the record"
+    );
+
+    // Same for a `block` item…
+    let src = "let v = read block(`{id:int}`, fill: lines(int))";
+    assert!(!has_input_error(src));
+    match parser_ast_of(src) {
+        ParserAst::Block { items, .. } => {
+            assert_eq!(items.len(), 2, "the `fill` item must survive");
+            assert!(matches!(&items[1], BlockItem::Named { name, .. } if name == "fill"));
+        }
+        other => panic!("expected Block, got {other:?}"),
+    }
+
+    // …and for a `choice` case.
+    match parser_ast_of("let v = read choice(A: int, skip: word)") {
+        ParserAst::Choice { cases, .. } => {
+            assert_eq!(cases.len(), 2, "the `skip` case must survive");
+            assert_eq!(cases[1].0, "skip");
+        }
+        other => panic!("expected Choice, got {other:?}"),
+    }
+
+    // And a keyword the constructor really does have still works, still
+    // reaches the builder, and a wrong one is still refused.
+    match parser_ast_of(r#"let v = read chars(one_of("ab"), skip: newlines)"#) {
+        ParserAst::Characters { skip, .. } => {
+            assert_eq!(skip, praxis_input_parser::SkipPolicy::Newlines);
+        }
+        other => panic!("expected Characters, got {other:?}"),
+    }
+    assert!(
+        has_input_error(r#"let v = read chars(one_of("ab"), fill: 0)"#),
+        "`chars` has no `fill:`"
+    );
+}
+
+/// **ADR-073's claim, made true for the `repeated(...)` tail marker.** The two
+/// front ends — the HIR bridge walking rowan, and the capture-body parser
+/// reading text — must apply *one* shape check, and for the tail marker they
+/// did not.
+///
+/// The bridge unwrapped `name: repeated(P)` with a `find_map` that returned the
+/// first parser-expr child of the argument list and ignored the rest. So
+/// `repeated(matrix(int), word, int)` lowered as `repeated(matrix(int))` with
+/// two arguments silently gone, and `repeated()` produced *no diagnostic at
+/// all* — while the identical text inside a capture body was rejected with
+/// I022. Both now call `praxis_input_parser::build_repeated_tail`.
+///
+/// Every case is asserted through **both** spellings, and on the same code, so
+/// the two cannot drift again without failing here.
+#[test]
+fn both_front_ends_apply_one_repeated_tail_rule() {
+    use praxis_input_parser::ParserAst;
+    use praxis_source::DiagCode;
+
+    for (call, code, why) in [
+        (
+            "sections(draws: csv(int), boards: repeated(matrix(int), word, int))",
+            DiagCode::ConstructorArity,
+            "the tail marker takes one argument; two were dropped in silence",
+        ),
+        (
+            "sections(draws: csv(int), boards: repeated())",
+            DiagCode::ConstructorArity,
+            "an empty tail marker reported nothing at all",
+        ),
+        (
+            r#"sections(a: lines(int), b: repeated("x"))"#,
+            DiagCode::InvalidConstructorArgument,
+            "the tail marker's argument must be a parser",
+        ),
+    ] {
+        assert!(
+            reports_input_code(&format!("let v = read {call}"), code),
+            "rowan front end: `{call}` — {why}"
+        );
+        assert!(
+            reports_input_code(&format!("let v = read `{{b:{call}}}`"), code),
+            "capture-body front end: `{call}` — {why}"
+        );
+    }
+
+    // And the legal call builds the tail it names, through both front ends —
+    // so "reject the bad one" was not bought by rejecting the good one.
+    let legal = "sections(draws: csv(int), boards: repeated(matrix(int)))";
+    for src in [
+        format!("let v = read {legal}"),
+        format!("let v = read `{{b:{legal}}}`"),
+    ] {
+        let ast = parser_ast_of(&src);
+        let sections = match &ast {
+            ParserAst::SectionsNamed { .. } => ast.clone(),
+            ParserAst::Template { parts, .. } => match &parts[0] {
+                praxis_input_parser::TemplatePart::Capture { parser, .. } => (**parser).clone(),
+                other => panic!("expected a capture, got {other:?}"),
+            },
+            other => panic!("expected SectionsNamed or Template, got {other:?}"),
+        };
+        match sections {
+            ParserAst::SectionsNamed {
+                fields,
+                repeated_tail,
+                ..
+            } => {
+                assert_eq!(fields.len(), 1, "{src}");
+                let (name, tail) = repeated_tail.expect("a tail");
+                assert_eq!(name, "boards", "{src}");
+                assert!(matches!(*tail, ParserAst::Matrix { .. }), "{src}");
+            }
+            other => panic!("expected SectionsNamed, got {other:?}"),
+        }
+    }
+}
+
+/// **The lexer and the template scanner must agree about where a template
+/// ends**, and the agreement is now structural: both call
+/// `praxis_syntax::template::template_end` instead of implementing one rule
+/// twice.
+///
+/// They had drifted the moment there were two copies. The lexer's counted
+/// `{`/`}` everywhere; the scanner's skipped string literals. So
+/// `` `{c:one_of("{")}` `` — legal §7.5, and accepted by the scanner — left the
+/// lexer's brace counter above zero at the closing backtick, which it read as
+/// an *opener*: the rest of the file went into one token, plus a false `T002`.
+///
+/// This test lives here because it is the only place the two layers meet.
+/// `praxis-input-parser` must not depend on `praxis-parser` (ADR-023 fixes that
+/// direction) and `praxis-parser` knows nothing of the scanner, so neither
+/// crate's own suite can drive both. This one drives the **same strings**
+/// through the lexer, the scanner, and the whole compile pipeline.
+#[test]
+fn the_lexer_and_the_scanner_agree_on_where_a_template_ends() {
+    use praxis_source::FileId;
+    use praxis_syntax::SyntaxKind;
+
+    for template in [
+        // A delimiter inside a string literal is text, not structure.
+        r#"`{c:one_of("{")}`"#,
+        r#"`{c:one_of("}")}`"#,
+        r#"`{s:sep("{", int)}`"#,
+        r#"`{c:one_of("`")}`"#,
+        // A nested template is part of the same token (D10).
+        "`{g:choice(A: `{x:int}`, B: word)}`",
+        "`{a:choice(A: `{b:choice(C: `{c:int}`)}`)}`",
+        // Ordinary shapes, so a rule that broke these would be caught too.
+        "`{name:word},{port:int}`",
+        r#"`He said "hi": {x:int}`"#,
+    ] {
+        // 1. The lexer: one token, covering exactly the template, no complaint.
+        let src = format!("let p = {template}\nlet q = 1\n");
+        let lexed = praxis_parser::lex(FileId::SYNTHETIC, &src);
+        assert!(
+            lexed.diagnostics.is_empty(),
+            "{template}: the lexer reported {:?}",
+            lexed.diagnostics
+        );
+        let tokens: Vec<_> = lexed
+            .tokens
+            .iter()
+            .filter(|t| t.kind == SyntaxKind::BacktickTemplate)
+            .collect();
+        assert_eq!(tokens.len(), 1, "{template}: not one template token");
+        let token_text = &src[tokens[0].span.start().to_usize()..tokens[0].span.end().to_usize()];
+        assert_eq!(
+            token_text, template,
+            "{template}: the token is not the template"
+        );
+
+        // 2. The scanner, on the interior the lexer just delimited.
+        let interior = token_text
+            .strip_prefix('`')
+            .and_then(|s| s.strip_suffix('`'))
+            .expect("the token is delimited by backticks");
+        assert!(
+            praxis_input_parser::scan_template(interior).is_ok(),
+            "{template}: the lexer accepts what the scanner refuses"
+        );
+
+        // 3. And end to end, which is what a user sees.
+        assert!(
+            !has_input_error(&format!("let v = read lines({template})")),
+            "{template}: rejected by the pipeline"
+        );
+    }
 }
 
 // --- closure escape analysis ------------------------------------------------

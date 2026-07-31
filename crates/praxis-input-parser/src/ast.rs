@@ -13,21 +13,50 @@
 
 use praxis_source::Span;
 
-/// One of the atomic parsers (§7.4). The M6 subset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One of the atomic parsers (§7.4).
+///
+/// **§7.4's list is closed, and this is all ten of it.** Four were missing
+/// (IP-11) — `uint`, `float`, `byte`, `identifier` — so a program that wrote
+/// one got "unknown atomic parser" for a name the design document requires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AtomicKind {
     /// Signed decimal integer → `Int`.
     Int,
+    /// Non-negative decimal integer → `Int`.
+    ///
+    /// **`Int`, not `ScalarType::UInt`.** `UInt` is reserved and has no runtime
+    /// object at all: `praxis_repr::builtin_for_type` answers `NoRuntimeRepr`
+    /// for it, and under D9 a JIT compile fails when a descriptor is missing —
+    /// so a `uint` capture typed `UInt` would make every program containing one
+    /// fail to compile. The non-negativity is enforced by the *parse rule*
+    /// (a leading `-` is refused), which is what §7.4 asks for.
+    UInt,
+    /// Decimal floating-point number → `Float`.
+    Float,
+    /// A decimal integer in `0..=255` → `Byte`.
+    ///
+    /// A decimal integer and not a raw input byte: a raw byte cannot be
+    /// re-sliced as `Text` without breaking the UTF-8 invariant every
+    /// source-slice `Text` relies on.
+    Byte,
     /// One Unicode scalar value → `Char`.
     Char,
+    /// One decimal digit → `Int`.
+    Digit,
     /// Non-empty run excluding whitespace and parser-delimiter punctuation → `Text`.
     Word,
+    /// An identifier run → `Text`.
+    ///
+    /// §7.4 says "ASCII-like identifier syntax by default"; this uses §4.1's
+    /// **one** identifier class (`praxis_syntax::ident`), which is a deliberate
+    /// widening. A parser that accepted a narrower set of names than the
+    /// language itself does would refuse identifiers a Praxis program can
+    /// declare, and F3 exists precisely so there is not a second rule.
+    Identifier,
     /// Minimally consumes text until the following template literal can match → `Text`.
     Text,
     /// The remainder of the current region → `Text`.
     Rest,
-    /// One decimal digit → `Int`.
-    Digit,
 }
 
 impl AtomicKind {
@@ -35,11 +64,15 @@ impl AtomicKind {
     pub fn keyword(self) -> &'static str {
         match self {
             AtomicKind::Int => "int",
+            AtomicKind::UInt => "uint",
+            AtomicKind::Float => "float",
+            AtomicKind::Byte => "byte",
             AtomicKind::Char => "char",
+            AtomicKind::Digit => "digit",
             AtomicKind::Word => "word",
+            AtomicKind::Identifier => "identifier",
             AtomicKind::Text => "text",
             AtomicKind::Rest => "rest",
-            AtomicKind::Digit => "digit",
         }
     }
 
@@ -47,14 +80,33 @@ impl AtomicKind {
     pub fn from_keyword(name: &str) -> Option<Self> {
         Some(match name {
             "int" => AtomicKind::Int,
+            "uint" => AtomicKind::UInt,
+            "float" => AtomicKind::Float,
+            "byte" => AtomicKind::Byte,
             "char" => AtomicKind::Char,
+            "digit" => AtomicKind::Digit,
             "word" => AtomicKind::Word,
+            "identifier" => AtomicKind::Identifier,
             "text" => AtomicKind::Text,
             "rest" => AtomicKind::Rest,
-            "digit" => AtomicKind::Digit,
             _ => return None,
         })
     }
+
+    /// Every atomic, in §7.4's order. The list is **closed**: a test sweeps it,
+    /// so a new atomic cannot be added without a type and a runtime rule.
+    pub const ALL: &'static [AtomicKind] = &[
+        AtomicKind::Int,
+        AtomicKind::UInt,
+        AtomicKind::Float,
+        AtomicKind::Byte,
+        AtomicKind::Char,
+        AtomicKind::Digit,
+        AtomicKind::Word,
+        AtomicKind::Identifier,
+        AtomicKind::Text,
+        AtomicKind::Rest,
+    ];
 }
 
 /// How a template literal run of whitespace matches input (§7.2).
@@ -75,14 +127,60 @@ pub enum WsPolicy {
     Tab,
 }
 
+/// The name of a template capture — **an identifier by construction** (IP-04).
+///
+/// §4.1 allows Unicode identifiers and F3 gave the workspace one character
+/// class for them. The scanner used to carry a private ASCII copy of the rule,
+/// so `{λ:int}` was not recognized as a *named* capture at all: the whole body
+/// `λ:int` was silently reinterpreted as the parser expression. A name a
+/// consumer cannot accept must be reported, never rewritten into a different
+/// name — see `praxis_syntax::ident::is_ident`, which is the predicate.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CaptureName(Box<str>);
+
+/// The one way [`CaptureName::parse`] fails: the text is not an identifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidCaptureName;
+
+impl CaptureName {
+    /// The **only** constructor.
+    ///
+    /// # Errors
+    /// [`InvalidCaptureName`] when `text` is not a §4.1 identifier.
+    pub fn parse(text: &str) -> Result<Self, InvalidCaptureName> {
+        if praxis_syntax::ident::is_ident(text) {
+            Ok(CaptureName(text.into()))
+        } else {
+            Err(InvalidCaptureName)
+        }
+    }
+
+    /// The name text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CaptureName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// One part of a backtick template (§7.9 `TemplatePart`).
 #[derive(Clone, Debug)]
 pub enum TemplatePart {
     /// A literal run: the raw matched bytes plus the whitespace policy.
     Literal { text: String, ws: WsPolicy },
     /// A capture `{name? : parser}`. `name` is `None` for anonymous captures.
+    ///
+    /// `parser` is the capture's **own** parser expression, parsed from its own
+    /// body (IP-05, D10). It used to be a placeholder `Atomic { Int }` that the
+    /// HIR overwrote by rescanning the whole template and taking the first
+    /// recognizable name — so every capture in a template shared one kind.
     Capture {
-        name: Option<String>,
+        name: Option<CaptureName>,
         parser: Box<ParserAst>,
     },
 }
@@ -120,9 +218,10 @@ pub enum ParserAst {
     Csv { child: Box<ParserAst>, span: Span },
     /// `ws(P)` → `Vec[result(P)]` (whitespace-separated).
     Ws { child: Box<ParserAst>, span: Span },
-    /// `sep(separator, P)` → `Vec[result(P)]`.
+    /// `sep(separator, P)` → `Vec[result(P)]`. The separator is a
+    /// [`Separator`], which cannot be empty (IP-10).
     Sep {
-        separator: String,
+        separator: Separator,
         child: Box<ParserAst>,
         span: Span,
     },
@@ -174,6 +273,60 @@ pub enum ParserAst {
         fill: String,
         span: Span,
     },
+}
+
+/// The separator of a `sep(separator, P)` call — **non-empty by construction**
+/// (IP-10).
+///
+/// An empty separator is not a parser that matches nothing: it is a cursor that
+/// never advances. `walk_sep` in `praxis-runtime` asks
+/// `region[pos..].starts_with(sep_bytes)`, which is *unconditionally true* for
+/// an empty needle, so `pos += sep_bytes.len()` is `pos += 0` and the loop
+/// pushes a freshly allocated value forever — an infinite loop that also grows
+/// the heap without bound.
+///
+/// A `validate` check would have caught the value only where someone remembered
+/// to call it; the type catches it at every construction site there will ever
+/// be, which is the house maxim (`AGENTS.md`: make illegal states
+/// unrepresentable).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Separator(Box<str>);
+
+/// The one way [`Separator::new`] fails: the text was empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EmptySeparator;
+
+impl std::fmt::Display for EmptySeparator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a `sep` separator may not be empty: it could never advance")
+    }
+}
+
+impl std::error::Error for EmptySeparator {}
+
+impl Separator {
+    /// The **only** constructor. Refuses the empty string.
+    ///
+    /// # Errors
+    /// [`EmptySeparator`] when `text` is empty.
+    pub fn new(text: &str) -> Result<Self, EmptySeparator> {
+        if text.is_empty() {
+            return Err(EmptySeparator);
+        }
+        Ok(Separator(text.into()))
+    }
+
+    /// The separator text. Never empty.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Separator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// How `chars(P, skip:)` trims between matches (§7.5).
@@ -234,11 +387,97 @@ impl ParserAst {
             | ParserAst::GridRagged { span, .. } => *span,
         }
     }
+
+    /// Shift every span in this subtree by `delta` bytes.
+    ///
+    /// The template scanner works in **interior-relative** offsets: it is given
+    /// the text between the backticks and knows nothing about where the token
+    /// sits in the file. The HIR bridge, which does know, rebases the tree by
+    /// the token's start + 1 (the opening backtick). Without this a capture
+    /// body's diagnostic caret would land near the top of the file.
+    pub fn shift_spans(&mut self, delta: u32) {
+        // Bind the span mutably in one place, then recurse into the children.
+        match self {
+            ParserAst::Atomic { span, .. } | ParserAst::OneOf { span, .. } => {
+                *span = span.shifted(delta);
+            }
+            ParserAst::Template { parts, span } => {
+                *span = span.shifted(delta);
+                shift_part_spans(parts, delta);
+            }
+            ParserAst::Lines { child, span }
+            | ParserAst::Sections { child, span }
+            | ParserAst::Csv { child, span }
+            | ParserAst::Ws { child, span }
+            | ParserAst::Grid { child, span }
+            | ParserAst::Sep { child, span, .. }
+            | ParserAst::Optional { child, span }
+            | ParserAst::Scan { child, span }
+            | ParserAst::Matrix { child, span }
+            | ParserAst::GridRagged { child, span, .. }
+            | ParserAst::Characters { child, span, .. } => {
+                *span = span.shifted(delta);
+                child.shift_spans(delta);
+            }
+            ParserAst::SectionsNamed {
+                fields,
+                repeated_tail,
+                span,
+            } => {
+                *span = span.shifted(delta);
+                for (_, p) in fields {
+                    p.shift_spans(delta);
+                }
+                if let Some((_, tail)) = repeated_tail {
+                    tail.shift_spans(delta);
+                }
+            }
+            ParserAst::Block { items, span } => {
+                *span = span.shifted(delta);
+                for item in items {
+                    match item {
+                        BlockItem::Positional(p) | BlockItem::Named { parser: p, .. } => {
+                            p.shift_spans(delta);
+                        }
+                    }
+                }
+            }
+            ParserAst::Choice { cases, span } => {
+                *span = span.shifted(delta);
+                for (_, p) in cases {
+                    p.shift_spans(delta);
+                }
+            }
+        }
+    }
 }
 
-/// The name of a structural constructor (for dispatch in the parser / validation).
-/// Maps an identifier like `"lines"` to its constructor kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Shift every span inside a template's parts by `delta` bytes.
+///
+/// Separate from [`ParserAst::shift_spans`] because the two callers need
+/// different halves: the `Template` arm of `shift_spans` rebases the node's own
+/// span *and* its parts, while [`crate::body`] — which has just scanned a
+/// nested template whose interior has its own offsets — has to rebase the parts
+/// **without** touching the enclosing span, which it already built in the outer
+/// text's offsets. Doing that with an open-coded loop is how the nested case
+/// came to be missed in the first place.
+pub fn shift_part_spans(parts: &mut [TemplatePart], delta: u32) {
+    for part in parts {
+        if let TemplatePart::Capture { parser, .. } = part {
+            parser.shift_spans(delta);
+        }
+    }
+}
+
+/// The name of a structural constructor — **the whole of §7.5**, not just the
+/// M6 six.
+///
+/// This table used to know six names, and the eight M9 constructors were
+/// dispatched ahead of it by an `if ctor_name == "…"` chain in `praxis-hir`
+/// that took `args.into_iter().next()` and dropped the rest (IP-07). A
+/// constructor with no row here had no arity, so it had no arity *error*
+/// either: an unknown name became `None` with no diagnostic at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Constructor {
     Lines,
     Sections,
@@ -246,10 +485,50 @@ pub enum Constructor {
     Ws,
     Sep,
     Grid,
+    Matrix,
+    Chars,
+    OneOf,
+    Block,
+    Choice,
+    Optional,
+    Scan,
+    /// `repeated(P)` — legal **only** as the final named argument of a
+    /// `sections` call (§7.5). It is in the table so that the name is known and
+    /// its misuse is `MisplacedRepeatedTail` rather than "unknown constructor".
+    Repeated,
+}
+
+/// The **shape** of a constructor call's argument list (§7.5).
+///
+/// A count was not enough: `sep` takes a string and then a parser, `choice`
+/// takes named arguments and no positional ones, `chars` takes a parser and an
+/// optional keyword. Checking only `positional_arity` is why
+/// `optional(int, word)` and `choice(int)` both passed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArgShape {
+    /// Exactly `n` positional parsers and nothing else.
+    Positional(usize),
+    /// `sep("s", P)` — one string literal, then one parser.
+    StringThenParser,
+    /// `one_of("LR")` — one string literal.
+    OneString,
+    /// `chars(P, skip: policy)` — one parser and an optional `skip:` keyword.
+    ParserWithSkip,
+    /// `grid(P)` or `grid(P, ragged, fill: value)` — the ragged flag and the
+    /// fill value come as a pair or not at all.
+    GridMaybeRagged,
+    /// `sections(P)` **or** `sections(name: P, …)` — the homogeneous and
+    /// heterogeneous forms are one name with two shapes.
+    OnePositionalOrNamed,
+    /// `block(item, …)` — one or more positional parsers and/or named items.
+    Items,
+    /// `choice(Name: P, …)` — named arguments only, at least `at_least` of them.
+    NamedOnly { at_least: usize },
 }
 
 impl Constructor {
-    /// Parse a constructor name, or `None` if unknown / not an M6 constructor.
+    /// Parse a constructor name, or `None` if no §7.5 constructor is spelled
+    /// that way.
     pub fn from_keyword(name: &str) -> Option<Self> {
         Some(match name {
             "lines" => Constructor::Lines,
@@ -258,17 +537,94 @@ impl Constructor {
             "ws" => Constructor::Ws,
             "sep" => Constructor::Sep,
             "grid" => Constructor::Grid,
+            "matrix" => Constructor::Matrix,
+            "chars" => Constructor::Chars,
+            "one_of" => Constructor::OneOf,
+            "block" => Constructor::Block,
+            "choice" => Constructor::Choice,
+            "optional" => Constructor::Optional,
+            "scan" => Constructor::Scan,
+            "repeated" => Constructor::Repeated,
             _ => return None,
         })
     }
 
-    /// The expected positional argument count for this constructor.
-    pub fn expected_arity(self) -> usize {
+    /// The source keyword for this constructor.
+    pub fn keyword(self) -> &'static str {
         match self {
-            Constructor::Lines | Constructor::Sections | Constructor::Csv | Constructor::Ws => 1,
-            // sep takes (separator, parser).
-            Constructor::Sep => 2,
-            Constructor::Grid => 1,
+            Constructor::Lines => "lines",
+            Constructor::Sections => "sections",
+            Constructor::Csv => "csv",
+            Constructor::Ws => "ws",
+            Constructor::Sep => "sep",
+            Constructor::Grid => "grid",
+            Constructor::Matrix => "matrix",
+            Constructor::Chars => "chars",
+            Constructor::OneOf => "one_of",
+            Constructor::Block => "block",
+            Constructor::Choice => "choice",
+            Constructor::Optional => "optional",
+            Constructor::Scan => "scan",
+            Constructor::Repeated => "repeated",
+        }
+    }
+
+    /// Every constructor, so a test can sweep the table.
+    pub const ALL: &'static [Constructor] = &[
+        Constructor::Lines,
+        Constructor::Sections,
+        Constructor::Csv,
+        Constructor::Ws,
+        Constructor::Sep,
+        Constructor::Grid,
+        Constructor::Matrix,
+        Constructor::Chars,
+        Constructor::OneOf,
+        Constructor::Block,
+        Constructor::Choice,
+        Constructor::Optional,
+        Constructor::Scan,
+        Constructor::Repeated,
+    ];
+
+    /// The one named argument this constructor takes whose value is a
+    /// **keyword and not a parser** — `chars(P, skip: policy)`'s `skip:` and
+    /// `grid(P, ragged, fill: value)`'s `fill:` (§7.5). `None` for every other
+    /// constructor.
+    ///
+    /// Both front ends used to decide this from the argument's *name* alone
+    /// (`if name == "skip" || name == "fill"`), with no reference to the
+    /// constructor being called. So a `block` item or a `sections` field
+    /// legitimately named `fill` or `skip` was minted as a keyword argument,
+    /// accepted by the shape check as a well-shaped named argument, and then
+    /// dropped by a `filter_map` — the field vanished from the record with no
+    /// diagnostic. A keyword belongs to a constructor, so the constructor is
+    /// what answers the question.
+    pub fn keyword_arg(self) -> Option<&'static str> {
+        match self {
+            Constructor::Chars => Some("skip"),
+            Constructor::Grid => Some("fill"),
+            _ => None,
+        }
+    }
+
+    /// The shape of this constructor's argument list (§7.5).
+    pub fn arg_shape(self) -> ArgShape {
+        match self {
+            Constructor::Lines
+            | Constructor::Csv
+            | Constructor::Ws
+            | Constructor::Matrix
+            | Constructor::Optional
+            | Constructor::Scan
+            | Constructor::Repeated => ArgShape::Positional(1),
+            Constructor::Sections => ArgShape::OnePositionalOrNamed,
+            Constructor::Sep => ArgShape::StringThenParser,
+            Constructor::OneOf => ArgShape::OneString,
+            Constructor::Chars => ArgShape::ParserWithSkip,
+            Constructor::Grid => ArgShape::GridMaybeRagged,
+            Constructor::Block => ArgShape::Items,
+            Constructor::Choice => ArgShape::NamedOnly { at_least: 1 },
         }
     }
 }
@@ -277,25 +633,78 @@ impl Constructor {
 mod tests {
     use super::*;
 
+    /// §7.4's list is a **closed set of ten**, and it used to be six: `uint`,
+    /// `float`, `byte` and `identifier` had no row at all, so a program that
+    /// wrote one of the design document's own atomic names got "unknown atomic
+    /// parser" (IP-11).
     #[test]
     fn atomic_round_trips_keywords() {
-        for kind in [
-            AtomicKind::Int,
-            AtomicKind::Char,
-            AtomicKind::Word,
-            AtomicKind::Text,
-            AtomicKind::Rest,
-            AtomicKind::Digit,
-        ] {
-            assert_eq!(AtomicKind::from_keyword(kind.keyword()), Some(kind));
+        for kind in AtomicKind::ALL {
+            assert_eq!(AtomicKind::from_keyword(kind.keyword()), Some(*kind));
         }
         assert_eq!(AtomicKind::from_keyword("nope"), None);
+
+        // §7.4 verbatim, in its own order.
+        let names: Vec<&str> = AtomicKind::ALL.iter().map(|k| k.keyword()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "int",
+                "uint",
+                "float",
+                "byte",
+                "char",
+                "digit",
+                "word",
+                "identifier",
+                "text",
+                "rest"
+            ]
+        );
+        // And nothing else is an atomic — an eleventh name would have to be
+        // added to §7.4 first.
+        for not_an_atomic in ["uint8", "integer", "string", "line", "lines", "sep"] {
+            assert_eq!(AtomicKind::from_keyword(not_an_atomic), None);
+        }
     }
 
+    /// **Rewritten (IP-07).** This used to assert three numbers out of
+    /// `expected_arity`, which was the whole of the constructor check — and a
+    /// count cannot say that `sep`'s first argument is a *string*, that
+    /// `choice` takes no positional argument at all, or that `optional` takes
+    /// one and not two. Eight of §7.5's fourteen constructors had no row here,
+    /// so they had no arity and therefore no arity error.
+    ///
+    /// The table now states the *shape*, and this asserts it for every name.
     #[test]
-    fn constructor_arity_table() {
-        assert_eq!(Constructor::Lines.expected_arity(), 1);
-        assert_eq!(Constructor::Sep.expected_arity(), 2);
-        assert_eq!(Constructor::Grid.expected_arity(), 1);
+    fn constructor_round_trips_keywords_and_states_its_shape() {
+        for ctor in Constructor::ALL {
+            assert_eq!(
+                Constructor::from_keyword(ctor.keyword()),
+                Some(*ctor),
+                "`{}` must round-trip through the table",
+                ctor.keyword()
+            );
+        }
+        assert_eq!(Constructor::from_keyword("frobnicate"), None);
+
+        // Every §7.5 name is spelled here, so a new constructor cannot be added
+        // without deciding what its arguments look like.
+        assert_eq!(Constructor::ALL.len(), 14);
+        assert_eq!(Constructor::Lines.arg_shape(), ArgShape::Positional(1));
+        assert_eq!(Constructor::Optional.arg_shape(), ArgShape::Positional(1));
+        assert_eq!(Constructor::Sep.arg_shape(), ArgShape::StringThenParser);
+        assert_eq!(Constructor::OneOf.arg_shape(), ArgShape::OneString);
+        assert_eq!(Constructor::Chars.arg_shape(), ArgShape::ParserWithSkip);
+        assert_eq!(Constructor::Grid.arg_shape(), ArgShape::GridMaybeRagged);
+        assert_eq!(
+            Constructor::Sections.arg_shape(),
+            ArgShape::OnePositionalOrNamed
+        );
+        assert_eq!(Constructor::Block.arg_shape(), ArgShape::Items);
+        assert_eq!(
+            Constructor::Choice.arg_shape(),
+            ArgShape::NamedOnly { at_least: 1 }
+        );
     }
 }

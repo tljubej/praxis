@@ -12,19 +12,25 @@
 //! `block`, `choice`, `scan` follow in Milestone 9.
 
 pub mod ast;
+pub mod body;
+pub mod call;
 pub mod plan;
 pub mod scan;
 pub mod synthesize;
 pub mod validate;
 
-pub use ast::{AtomicKind, BlockItem, Constructor, ParserAst, SkipPolicy, TemplatePart, WsPolicy};
+pub use ast::{
+    ArgShape, AtomicKind, BlockItem, CaptureName, Constructor, EmptySeparator, InvalidCaptureName,
+    ParserAst, Separator, SkipPolicy, TemplatePart, WsPolicy,
+};
+pub use call::{build_call, build_repeated_tail, CallArg};
 pub use plan::{
     get_plan, lower_to_plan, plan_count, register_plan, retire_all_plans, BlockItemNode,
     CompiledPlan, ParserPlan, PlanId, PlanNode, TemplatePartNode, TooManyPlans, MAX_PLANS,
 };
-pub use scan::{scan_template, ScanError};
+pub use scan::{scan_template, ScanError, MAX_NESTING};
 pub use synthesize::synthesize;
-pub use validate::{check_constructor_arity, validate, ValidationError};
+pub use validate::{check_call, validate, ArgKind, ValidationError};
 
 /// Marker documenting that this crate is filled at Milestone 6.
 pub const FILLED_AT_MILESTONE: u32 = 6;

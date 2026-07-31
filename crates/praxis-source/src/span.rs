@@ -120,6 +120,22 @@ impl Span {
         self.len == 0
     }
 
+    /// The same span, moved `delta` bytes later in the file.
+    ///
+    /// The length is preserved, so the invariant holds by construction. Used to
+    /// rebase spans produced against a *fragment* onto the file that contains
+    /// it: the input-parser's template scanner works in offsets relative to a
+    /// backtick template's interior, and the HIR bridge rebases the tree by the
+    /// token's start (IP-05).
+    #[inline]
+    #[must_use]
+    pub const fn shifted(self, delta: u32) -> Span {
+        Span {
+            start: BytePos(self.start.0.saturating_add(delta)),
+            len: self.len,
+        }
+    }
+
     /// True if `pos` lies within `[start, end)`.
     #[inline]
     pub fn contains(self, pos: BytePos) -> bool {

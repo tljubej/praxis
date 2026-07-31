@@ -4,8 +4,13 @@
 //! `Text` value), allocating GC results (`Int`, `Char`, source-slice `Text`,
 //! `Vec`, `Grid`, `Record`) and raising `FaultKind::ParseFailed` on mismatch.
 //!
-//! The plan type and global slab live in `praxis-input-parser`; this interpreter
-//! looks up plans by index and walks their `#[repr(C)]` node arena.
+//! The plan type and global arena live in `praxis-input-parser`; this
+//! interpreter looks up a plan by its [`PlanId`] and walks its node arena.
+//!
+//! **The arena is not `#[repr(C)]`.** It is ordinary Rust enums and slices, and
+//! nothing here crosses an FFI boundary — only the plan *id* is a JIT immediate.
+//! `praxis_input_parser::plan`'s own doc is the authority; this line claimed a C
+//! layout the types never had.
 
 use crate::context::RuntimeContext;
 use crate::parse_detail::ParseFail;
@@ -128,6 +133,18 @@ impl Rt {
     fn alloc_char(&self, value: u32) -> GcRef {
         // SAFETY: ctx is valid.
         unsafe { heap_ref(self.ctx).alloc_unpaced(scalars::CHAR_PAYLOAD, value) }
+    }
+
+    /// Allocate a boxed `Float` (§7.4's `float` atomic).
+    fn alloc_float(&self, value: f64) -> GcRef {
+        // SAFETY: ctx is valid.
+        unsafe { heap_ref(self.ctx).alloc_unpaced(scalars::FLOAT_PAYLOAD, value) }
+    }
+
+    /// Allocate a boxed `Byte` (§7.4's `byte` atomic).
+    fn alloc_byte(&self, value: u8) -> GcRef {
+        // SAFETY: ctx is valid.
+        unsafe { heap_ref(self.ctx).alloc_unpaced(scalars::BYTE_PAYLOAD, value) }
     }
 
     /// Allocate a source-slice `Text` pointing into `owner`, or `None` if the
@@ -300,6 +317,66 @@ fn walk_atomic(rt: &Rt, kind: AtomicKind, bytes: &[u8], offset: usize) -> WalkRe
             let slice = rt
                 .alloc_text_slice(rt_owner(rt), offset + leading, len)
                 .ok_or_else(|| ParseFail::at(offset + leading, len, "word"))?;
+            Ok((slice, offset + leading + len))
+        }
+        AtomicKind::UInt => {
+            // §7.4's `uint`. Its **type** is `Int` (`ScalarType::UInt` is
+            // reserved and has no runtime object); the non-negativity is this
+            // rule: a leading `-` is not a `uint`, it is a parse failure.
+            let s = trim_leading_ws(rest);
+            let leading = rest.len() - s.len();
+            if s.first() == Some(&b'-') {
+                return Err(ParseFail::at(offset + leading, 1, "uint"));
+            }
+            let (digits, len) = take_int_run(s);
+            if digits.is_empty() {
+                return Err(ParseFail::at(offset + leading, 0, "uint"));
+            }
+            let value: i64 = digits
+                .parse()
+                .map_err(|_| ParseFail::at(offset + leading, len, "uint"))?;
+            Ok((rt.alloc_int(value), offset + leading + len))
+        }
+        AtomicKind::Float => {
+            let s = trim_leading_ws(rest);
+            let leading = rest.len() - s.len();
+            let (text, len) = take_float_run(s);
+            if text.is_empty() {
+                return Err(ParseFail::at(offset + leading, 0, "float"));
+            }
+            let value: f64 = text
+                .parse()
+                .map_err(|_| ParseFail::at(offset + leading, len, "float"))?;
+            Ok((rt.alloc_float(value), offset + leading + len))
+        }
+        AtomicKind::Byte => {
+            // A decimal integer in `0..=255`, not a raw input byte: a raw byte
+            // cannot be re-sliced as `Text` without breaking the UTF-8
+            // invariant every source-slice `Text` relies on.
+            let s = trim_leading_ws(rest);
+            let leading = rest.len() - s.len();
+            let (digits, len) = take_int_run(s);
+            if digits.is_empty() {
+                return Err(ParseFail::at(offset + leading, 0, "byte"));
+            }
+            let value: u8 = digits
+                .parse()
+                .map_err(|_| ParseFail::at(offset + leading, len, "byte"))?;
+            Ok((rt.alloc_byte(value), offset + leading + len))
+        }
+        AtomicKind::Identifier => {
+            // §4.1's identifier class, not a local ASCII rule (F3). §7.4 says
+            // "ASCII-like … by default"; accepting fewer names than the
+            // language itself declares would be the narrower mistake.
+            let s = trim_leading_ws(rest);
+            let leading = rest.len() - s.len();
+            let len = take_ident_run(s);
+            if len == 0 {
+                return Err(ParseFail::at(offset + leading, 0, "identifier"));
+            }
+            let slice = rt
+                .alloc_text_slice(rt_owner(rt), offset + leading, len)
+                .ok_or_else(|| ParseFail::at(offset + leading, len, "identifier"))?;
             Ok((slice, offset + leading + len))
         }
         AtomicKind::Text | AtomicKind::Rest => {
@@ -819,6 +896,15 @@ fn walk_sep(
     let region = &bytes[offset..];
     let region_str = std::str::from_utf8(region).unwrap_or("");
     let sep_bytes = sep.as_bytes();
+    // The loop below advances by `sep_bytes.len()` on a match, and
+    // `starts_with(&[])` is unconditionally true — so an empty separator is an
+    // infinite loop that allocates a value per iteration. The compiler makes
+    // that unrepresentable (`praxis_input_parser::Separator`, IP-10); this
+    // records what the loop is relying on.
+    debug_assert!(
+        !sep_bytes.is_empty(),
+        "Separator::new refuses an empty separator (IP-10): the loop below cannot advance past one"
+    );
     let mut items = Vec::new();
     let mut token_start = 0usize;
     let mut pos = 0usize;
@@ -1464,6 +1550,84 @@ fn take_int_run(bytes: &[u8]) -> (&str, usize) {
     (s, end)
 }
 
+/// Take a run of decimal floating-point characters (optional `-`, digits, an
+/// optional `.` and fraction, an optional `e±NN` exponent), returning the text
+/// and the byte length consumed (§7.4 `float`).
+fn take_float_run(bytes: &[u8]) -> (&str, usize) {
+    let mut end = 0;
+    if end < bytes.len() && (bytes[end] == b'-' || bytes[end] == b'+') {
+        end += 1;
+    }
+    let int_start = end;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    let mut saw_digit = end > int_start;
+    if end < bytes.len() && bytes[end] == b'.' {
+        let after_dot = end + 1;
+        let mut frac = after_dot;
+        while frac < bytes.len() && bytes[frac].is_ascii_digit() {
+            frac += 1;
+        }
+        // A trailing `.` with no fraction is not part of the number: `1.` in
+        // `1.` is a `1` followed by a literal `.` the template may need.
+        if frac > after_dot {
+            saw_digit = true;
+            end = frac;
+        }
+    }
+    if !saw_digit {
+        return ("", 0);
+    }
+    // An exponent only counts if it is complete; `1e` is `1` followed by `e`.
+    if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
+        let mut exp = end + 1;
+        if exp < bytes.len() && (bytes[exp] == b'-' || bytes[exp] == b'+') {
+            exp += 1;
+        }
+        let digits_start = exp;
+        while exp < bytes.len() && bytes[exp].is_ascii_digit() {
+            exp += 1;
+        }
+        if exp > digits_start {
+            end = exp;
+        }
+    }
+    // SAFETY: every byte accepted above is ASCII.
+    let s = std::str::from_utf8(&bytes[..end]).unwrap_or("");
+    (s, end)
+}
+
+/// Take an identifier run under §4.1's **one** character class, returning the
+/// byte length consumed (§7.4 `identifier`).
+///
+/// Zero if the run does not start one. Invalid UTF-8 simply ends the run —
+/// `identifier` produces a source-slice `Text`, whose invariant is that its
+/// bytes are valid UTF-8.
+fn take_ident_run(bytes: &[u8]) -> usize {
+    // Scan as far as the input decodes; a bad byte simply ends the run.
+    let s = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => std::str::from_utf8(&bytes[..e.valid_up_to()]).unwrap_or_default(),
+    };
+    let mut chars = s.char_indices();
+    let Some((_, first)) = chars.next() else {
+        return 0;
+    };
+    if !praxis_syntax::ident::is_ident_start(first) {
+        return 0;
+    }
+    let mut end = first.len_utf8();
+    for (i, c) in chars {
+        if praxis_syntax::ident::is_ident_continue(c) {
+            end = i + c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    end
+}
+
 /// Take a run of word characters (non-whitespace, non-delimiter).
 fn take_word_run(bytes: &[u8]) -> (&str, usize) {
     let mut end = 0;
@@ -1531,9 +1695,15 @@ fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescri
 /// The scalar descriptor for an atomic kind.
 fn atomic_descriptor(kind: AtomicKind) -> &'static crate::TypeDescriptor {
     match kind {
-        AtomicKind::Int | AtomicKind::Digit => &scalars::INT,
+        // `uint` is an `Int` at runtime as well as in the type (§7.4, IP-11):
+        // `ScalarType::UInt` has no runtime object to describe.
+        AtomicKind::Int | AtomicKind::UInt | AtomicKind::Digit => &scalars::INT,
+        AtomicKind::Float => &scalars::FLOAT,
+        AtomicKind::Byte => &scalars::BYTE,
         AtomicKind::Char => &scalars::CHAR,
-        AtomicKind::Word | AtomicKind::Text | AtomicKind::Rest => &crate::text::TEXT,
+        AtomicKind::Word | AtomicKind::Identifier | AtomicKind::Text | AtomicKind::Rest => {
+            &crate::text::TEXT
+        }
     }
 }
 
@@ -1615,6 +1785,95 @@ mod tests {
         let (s, len) = take_int_run(b"-42abc");
         assert_eq!(s, "-42");
         assert_eq!(len, 3);
+    }
+
+    /// **IP-11.** §7.4 lists ten atomic parsers and four of them did not exist:
+    /// `uint`, `float`, `byte`, `identifier`. This is the runtime half — every
+    /// kind parses something and has a descriptor, and the four new rules mean
+    /// what §7.4 says they mean.
+    ///
+    /// The type half is in `praxis-input-parser`'s `synthesize`; the closed-set
+    /// half is `atomic_round_trips_keywords` in its `ast.rs`.
+    #[test]
+    fn every_atomic_the_design_requires_has_a_parser_and_a_type() {
+        /// Parse `input` with one atomic and return the consumed length, or
+        /// `None` on a parse failure.
+        fn parse_one(kind: AtomicKind, input: &str) -> Option<(crate::Runtime, GcRef, usize)> {
+            let mut rt = crate::Runtime::new();
+            let text = rt.alloc_text(input);
+            let mut ctx = rt.context();
+            ctx.input_source = text;
+            let plan = test_plan(vec![PlanNode::Atomic { kind }], 0);
+            let bytes = text.as_text().as_bytes();
+            let out = unsafe { walk(&mut ctx, &plan, plan.root, bytes, 0) };
+            out.ok().map(|(v, consumed)| (rt, v, consumed))
+        }
+
+        // Every kind has a descriptor. Exhaustive by `ALL`, so a new atomic
+        // cannot be added without one.
+        for kind in AtomicKind::ALL {
+            let _ = atomic_descriptor(*kind);
+        }
+
+        // `uint` is an Int and refuses a leading `-` — the non-negativity is
+        // the parse rule, because `ScalarType::UInt` has no runtime object.
+        let (_rt, v, consumed) = parse_one(AtomicKind::UInt, "42rest").expect("uint reads 42");
+        assert_eq!(v.as_int(), 42);
+        assert_eq!(consumed, 2);
+        assert!(
+            parse_one(AtomicKind::UInt, "-1").is_none(),
+            "`uint` refuses a negative"
+        );
+        // …and `int` still accepts it, so the two are different rules.
+        let (_rt, v, _) = parse_one(AtomicKind::Int, "-1").expect("int reads -1");
+        assert_eq!(v.as_int(), -1);
+
+        // `float`.
+        for (input, expected, consumed) in [
+            ("3.5", 3.5_f64, 3),
+            ("-0.25x", -0.25, 5),
+            ("2", 2.0, 1),
+            ("1e3", 1000.0, 3),
+            ("1.5e-2", 0.015, 6),
+            // A trailing `.` is not part of the number: the template may need it.
+            ("7.", 7.0, 1),
+        ] {
+            let (_rt, v, got) = parse_one(AtomicKind::Float, input)
+                .unwrap_or_else(|| panic!("float reads {input}"));
+            assert_eq!(v.as_float(), expected, "for {input}");
+            assert_eq!(got, consumed, "for {input}");
+        }
+        assert!(parse_one(AtomicKind::Float, "x").is_none());
+
+        // `byte` is a decimal integer in 0..=255 — not a raw input byte, which
+        // could not be re-sliced as Text without breaking the UTF-8 invariant.
+        let (_rt, v, _) = parse_one(AtomicKind::Byte, "255").expect("byte reads 255");
+        assert_eq!(v.as_byte(), 255);
+        assert!(
+            parse_one(AtomicKind::Byte, "256").is_none(),
+            "256 is not a byte"
+        );
+        assert!(
+            parse_one(AtomicKind::Byte, "-1").is_none(),
+            "-1 is not a byte"
+        );
+
+        // `identifier` uses §4.1's one class, so a Unicode name is a name, and
+        // the run stops where an identifier stops.
+        for (input, expected) in [
+            ("name rest", "name"),
+            ("λx-1", "λx"),
+            ("_x9=2", "_x9"),
+            ("日本語:", "日本語"),
+        ] {
+            let (_rt, v, _) = parse_one(AtomicKind::Identifier, input)
+                .unwrap_or_else(|| panic!("identifier reads {input}"));
+            assert_eq!(v.as_text(), expected, "for {input}");
+        }
+        assert!(
+            parse_one(AtomicKind::Identifier, "9x").is_none(),
+            "a digit does not start an identifier"
+        );
     }
 
     #[test]

@@ -80,3 +80,5 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-074: An enum value records which enum type it is](./074-an-enum-value-records-which-enum-type-it-is.md)
 - [ADR-075: The two owed fault kinds are paid, and one of the three debts is settled differently](./075-the-two-owed-fault-kinds-are-paid.md)
 - [ADR-076: Absence is an `Option`, and an empty `min` is a fault](./076-absence-is-an-option-and-an-empty-min-is-a-fault.md)
+- [ADR-072: A template capture body is a parser expression, and the scanner parses it](./072-a-template-capture-body-is-a-parser-expression.md)
+- [ADR-073: A parser constructor call is a shape, checked before anything is built](./073-a-constructor-call-is-a-shape-checked-before-it-is-built.md)
