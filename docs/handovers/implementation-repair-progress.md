@@ -458,7 +458,9 @@ field. Round two moved one manifest row: `GetInput` from `Pure` to
 `praxis_alloc_text` faults `InvalidText` on input that is not UTF-8 (§4.3);
 `lower_read` gained the matching `check_fault`.
 
-Round two's gates, all four verified red with their fix removed and the test
+**ADR-086 is not spent.** Neither new row needed a decision: REP-50 *applies* ADR-083 (a Float's rendering must read back as the same Float) and ADR-045 (the two zeros are distinct inside a container) — the language had already taken the position, and the evaluator was not honouring it — and REP-51 implements the sentence §7.1 and §7.10 already write. A gap in the ADR register costs nothing; an ADR that restates two existing ones costs a reader.
+
+Round two's gates, every one verified red with its fix removed and the test
 untouched:
 
 | Test | File | Pins |
