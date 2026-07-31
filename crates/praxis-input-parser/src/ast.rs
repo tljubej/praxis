@@ -263,8 +263,12 @@ pub enum ParserAst {
     /// set. Result is `Char`.
     OneOf { chars: String, span: Span },
     /// `chars(P, skip:)` (M9, §7.5): apply a char-parser repeatedly. Result is
-    /// `Vec[Char]`. The `skip` policy trims between matches (`none`/`whitespace`/
-    /// `newlines`).
+    /// `Vec[result(P)]` (D-S20-A) — **not** `Vec[Char]` whatever `P` is, which
+    /// is what `synthesize` said while the runtime stored what `P` produced, so
+    /// `chars(int, skip: none)` advertised a `Vec[Char]` full of `Int` objects.
+    /// `chars(one_of("LR"))` is still `Vec[Char]`, because `one_of` is `Char`.
+    /// The `skip` policy trims between matches; see [`SkipPolicy`], and note
+    /// that `newlines` is the *broader* of the two non-`none` policies.
     Characters {
         child: Box<ParserAst>,
         skip: SkipPolicy,
