@@ -236,6 +236,16 @@ the one-or-more. This also fixes the *other* direction, which nobody had
 complained about: a comma the template wrote with nothing in front of it no
 longer matches an input that has a space there.
 
+**Amended (REP-20's trailing half).** A literal has **one** policy slot and it
+sits in front of the text, so the paragraph above describes only what `flush`
+could express: the run at a literal's *leading* end. The run at its **trailing**
+end was stripped by the same `trim_matches` and represented nowhere — neither
+required nor consumed — so `` `x: {a:rest}` `` matched `x:hello`, and over
+`x: hello` it handed `rest` the space the template had written. `flush` emits
+the trailing run as **its own part** now: an empty literal carrying `SpaceRun`,
+which is the representation `` `{a:int} {b:int}` `` already lowered to. A
+literal that strips to nothing is one run and stays one part.
+
 The pre-capture whitespace skip stops being a `WsPolicy` at all. It was
 `SpaceRun`, and worked only because `SpaceRun` was zero-or-more; so it is
 `skip_capture_ws`, which is what it always was.
@@ -263,6 +273,13 @@ of (`csv_tokens` trimmed every field, so `csv(char)` faulted where
 also matches `1->2` — the contradiction itself, written into a test. That input
 now faults, which the test asserts explicitly; the flexible half it exists to
 protect (one space, many, tabs) is untouched.
+
+**Corrected.** As first written, that sentence held only for the **leading**
+spelling. A template written `` `{a:int}-> {b:int}` `` still matched `1->2`,
+because the trailing run had been scanned away and there was no policy left to
+require anything — the amendment above is what makes the claim true of both
+spellings, and `a_template_literals_trailing_space_run_is_its_policy_too`
+asserts the mirror of the same input.
 
 ## Decision 5: `chars(P, skip:)` is `Vec[result(P)]`
 
