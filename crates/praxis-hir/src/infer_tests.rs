@@ -3117,6 +3117,84 @@ fn a_repeated_tail_is_last_and_singular() {
     );
 }
 
+/// **ADR-073's claim, made true for the `repeated(...)` tail marker.** The two
+/// front ends — the HIR bridge walking rowan, and the capture-body parser
+/// reading text — must apply *one* shape check, and for the tail marker they
+/// did not.
+///
+/// The bridge unwrapped `name: repeated(P)` with a `find_map` that returned the
+/// first parser-expr child of the argument list and ignored the rest. So
+/// `repeated(matrix(int), word, int)` lowered as `repeated(matrix(int))` with
+/// two arguments silently gone, and `repeated()` produced *no diagnostic at
+/// all* — while the identical text inside a capture body was rejected with
+/// I022. Both now call `praxis_input_parser::build_repeated_tail`.
+///
+/// Every case is asserted through **both** spellings, and on the same code, so
+/// the two cannot drift again without failing here.
+#[test]
+fn both_front_ends_apply_one_repeated_tail_rule() {
+    use praxis_input_parser::ParserAst;
+    use praxis_source::DiagCode;
+
+    for (call, code, why) in [
+        (
+            "sections(draws: csv(int), boards: repeated(matrix(int), word, int))",
+            DiagCode::ConstructorArity,
+            "the tail marker takes one argument; two were dropped in silence",
+        ),
+        (
+            "sections(draws: csv(int), boards: repeated())",
+            DiagCode::ConstructorArity,
+            "an empty tail marker reported nothing at all",
+        ),
+        (
+            r#"sections(a: lines(int), b: repeated("x"))"#,
+            DiagCode::InvalidConstructorArgument,
+            "the tail marker's argument must be a parser",
+        ),
+    ] {
+        assert!(
+            reports_input_code(&format!("let v = read {call}"), code),
+            "rowan front end: `{call}` — {why}"
+        );
+        assert!(
+            reports_input_code(&format!("let v = read `{{b:{call}}}`"), code),
+            "capture-body front end: `{call}` — {why}"
+        );
+    }
+
+    // And the legal call builds the tail it names, through both front ends —
+    // so "reject the bad one" was not bought by rejecting the good one.
+    let legal = "sections(draws: csv(int), boards: repeated(matrix(int)))";
+    for src in [
+        format!("let v = read {legal}"),
+        format!("let v = read `{{b:{legal}}}`"),
+    ] {
+        let ast = parser_ast_of(&src);
+        let sections = match &ast {
+            ParserAst::SectionsNamed { .. } => ast.clone(),
+            ParserAst::Template { parts, .. } => match &parts[0] {
+                praxis_input_parser::TemplatePart::Capture { parser, .. } => (**parser).clone(),
+                other => panic!("expected a capture, got {other:?}"),
+            },
+            other => panic!("expected SectionsNamed or Template, got {other:?}"),
+        };
+        match sections {
+            ParserAst::SectionsNamed {
+                fields,
+                repeated_tail,
+                ..
+            } => {
+                assert_eq!(fields.len(), 1, "{src}");
+                let (name, tail) = repeated_tail.expect("a tail");
+                assert_eq!(name, "boards", "{src}");
+                assert!(matches!(*tail, ParserAst::Matrix { .. }), "{src}");
+            }
+            other => panic!("expected SectionsNamed, got {other:?}"),
+        }
+    }
+}
+
 /// **The lexer and the template scanner must agree about where a template
 /// ends**, and the agreement is now structural: both call
 /// `praxis_syntax::template::template_end` instead of implementing one rule

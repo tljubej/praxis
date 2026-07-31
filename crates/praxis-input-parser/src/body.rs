@@ -24,7 +24,7 @@ use praxis_source::Span;
 use praxis_syntax::ident::{is_ident_continue, is_ident_start};
 
 use crate::ast::{AtomicKind, Constructor, ParserAst};
-use crate::call::{build_call, CallArg};
+use crate::call::{build_call, build_repeated_tail, CallArg};
 use crate::scan::{Scan, ScanError, MAX_NESTING};
 
 /// Parse a capture body into its [`ParserAst`].
@@ -184,8 +184,9 @@ fn parse_arg(cur: &mut Scan<'_>, base: usize, depth: usize) -> Result<CallArg, S
         // `name: repeated(P)` is the named-sections tail marker (§7.5): the
         // field's parser is the `P`, and `repeated` says it consumes every
         // remaining section rather than one. `build_call` refuses a bare
-        // `repeated(...)` outright (IP-09), so the marker is unwrapped here
-        // instead of going through it.
+        // `repeated(...)` outright (IP-09), so the marker goes through
+        // `build_repeated_tail` — the same function the HIR bridge calls, so
+        // the two front ends cannot disagree about the marker's own shape.
         if peek_ident(cur) == Some("repeated") {
             let at = cur.pos();
             take_ident(cur);
@@ -196,22 +197,9 @@ fn parse_arg(cur: &mut Scan<'_>, base: usize, depth: usize) -> Result<CallArg, S
                     message: "`repeated` needs one parser argument (§7.5)".to_string(),
                 });
             }
-            let mut args = parse_args(cur, base, depth)?;
-            if args.len() != 1 {
-                return Err(ScanError::CallShape(crate::validate::ValidationError {
-                    span: Span::at((base + at) as u32),
-                    code: praxis_source::DiagCode::ConstructorArity,
-                    message: format!("`repeated` expects 1 argument, got {}", args.len()),
-                }));
-            }
-            let CallArg::Parser(parser) = args.remove(0) else {
-                return Err(ScanError::CallShape(crate::validate::ValidationError {
-                    span: Span::at((base + at) as u32),
-                    code: praxis_source::DiagCode::InvalidConstructorArgument,
-                    message: "`repeated`'s argument must be a parser (§7.5)".to_string(),
-                }));
-            };
-            return Ok(CallArg::RepeatedTail { name, parser });
+            let args = parse_args(cur, base, depth)?;
+            return build_repeated_tail(name, args, Span::at((base + at) as u32))
+                .map_err(|mut errs| ScanError::CallShape(errs.remove(0)));
         }
         let parser = parse_expr(cur, base, depth)?;
         return Ok(CallArg::Named { name, parser });

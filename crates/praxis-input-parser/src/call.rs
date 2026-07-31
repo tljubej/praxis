@@ -233,6 +233,51 @@ pub fn build_call(
     }
 }
 
+/// Build the `name: repeated(P)` tail marker of a named `sections` (§7.5).
+///
+/// `repeated(P)` is not a parser in its own right — it is the marker on the
+/// final named argument of a `sections` call, and the field's parser is the
+/// `P`. §7.5 gives the marker exactly one argument, and that argument must be a
+/// parser. That is the whole rule, and it lives here for the same reason
+/// [`build_call`] does: **both front ends must apply it**.
+///
+/// They did not. The capture-body parser checked it inline; the HIR bridge
+/// unwrapped the marker with a `find_map` that returned the *first* parser-expr
+/// child of the argument list and ignored the rest. So
+/// `repeated(matrix(int), word, int)` quietly became `repeated(matrix(int))`
+/// and `repeated()` produced no diagnostic at all — while the identical text
+/// written inside a capture body was rejected with I022. ADR-073 claims the two
+/// front ends share one shape check; this is the function that makes the claim
+/// true for the tail marker.
+///
+/// # Errors
+/// A non-empty [`ValidationError`] list: `ConstructorArity` (I022) for a wrong
+/// count, `InvalidConstructorArgument` (I014) for a wrong kind.
+pub fn build_repeated_tail(
+    name: String,
+    mut args: Vec<CallArg>,
+    span: Span,
+) -> Result<CallArg, Vec<ValidationError>> {
+    if args.len() != 1 {
+        return Err(vec![ValidationError {
+            span,
+            code: DiagCode::ConstructorArity,
+            message: format!("`repeated` expects 1 argument, got {}", args.len()),
+        }]);
+    }
+    match args.remove(0) {
+        CallArg::Parser(parser) => Ok(CallArg::RepeatedTail { name, parser }),
+        other => Err(vec![ValidationError {
+            span,
+            code: DiagCode::InvalidConstructorArgument,
+            message: format!(
+                "`repeated`'s argument must be a parser, but it is {} (§7.5)",
+                other.kind().describe()
+            ),
+        }]),
+    }
+}
+
 /// The single positional parser of a call `check_call` has already accepted.
 fn sole_parser(args: Vec<CallArg>) -> Option<ParserAst> {
     match args.into_iter().next() {

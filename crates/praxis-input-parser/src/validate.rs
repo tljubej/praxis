@@ -254,7 +254,7 @@ pub enum ArgKind {
 }
 
 impl ArgKind {
-    fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         match self {
             ArgKind::Parser => "a parser".to_string(),
             ArgKind::String => "a string literal".to_string(),

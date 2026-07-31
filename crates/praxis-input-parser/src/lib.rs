@@ -23,7 +23,7 @@ pub use ast::{
     ArgShape, AtomicKind, BlockItem, CaptureName, Constructor, EmptySeparator, InvalidCaptureName,
     ParserAst, Separator, SkipPolicy, TemplatePart, WsPolicy,
 };
-pub use call::{build_call, CallArg};
+pub use call::{build_call, build_repeated_tail, CallArg};
 pub use plan::{
     get_plan, lower_to_plan, plan_count, register_plan, retire_all_plans, BlockItemNode,
     CompiledPlan, ParserPlan, PlanId, PlanNode, TemplatePartNode, TooManyPlans, MAX_PLANS,

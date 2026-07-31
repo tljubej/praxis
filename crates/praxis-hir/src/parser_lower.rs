@@ -9,8 +9,8 @@
 use praxis_ast::{AstNode, ParserExpr, ParserExprKind, ParserNamedArg};
 use praxis_input_parser::ast::{AtomicKind, Constructor, ParserAst, TemplatePart};
 use praxis_input_parser::{
-    build_call, lower_to_plan, register_plan, scan_template, synthesize, validate, CallArg, PlanId,
-    ValidationError,
+    build_call, build_repeated_tail, lower_to_plan, register_plan, scan_template, synthesize,
+    validate, CallArg, PlanId, ValidationError,
 };
 use praxis_source::{DiagCode, Diagnostic, FileId, FileSpan, Severity, Span};
 use praxis_types::{Type, TypeDb};
@@ -242,11 +242,22 @@ fn convert_constructor_call(
     diagnostics: &mut Vec<Diagnostic>,
     span: Span,
 ) -> Option<ParserAst> {
-    // The PARSER_EXPR wraps a PARSER_CALL; descend to find it.
-    let parser_call = parser_expr
+    // The PARSER_EXPR wraps a PARSER_CALL; descend to find it. A `?` here was
+    // one more silent `None`: nothing downstream would have reported it.
+    let Some(parser_call) = parser_expr
         .syntax()
         .children()
-        .find(|c| c.kind() == praxis_syntax::SyntaxKind::PARSER_CALL)?;
+        .find(|c| c.kind() == praxis_syntax::SyntaxKind::PARSER_CALL)
+    else {
+        diagnostics.push(err_diag(
+            file,
+            span,
+            DiagCode::MalformedParserExpression,
+            "malformed parser constructor call".to_string(),
+        ));
+        return None;
+    };
+    let reported_before = diagnostics.len();
     let (ctor_name, args, all_args_converted) = extract_call_args(&parser_call, file, diagnostics);
 
     // An unknown constructor used to be `Constructor::from_keyword(&name)?` —
@@ -265,7 +276,22 @@ fn convert_constructor_call(
     // An argument that did not convert has already reported; building on top of
     // the shortened list would report a *second*, wrong thing — an arity error
     // naming an argument the source did write.
+    //
+    // "Has already reported" is an assumption, and it was **false**: the
+    // `repeated(...)` unwrapper answered `None` for an empty argument list
+    // without saying anything, so `sections(boards: repeated())` compiled to a
+    // `read` that produced nothing, with zero diagnostics. Every path that
+    // clears the flag now reports — and rather than trust that, this checks it,
+    // because a silent `None` here is invisible by construction.
     if !all_args_converted {
+        if diagnostics.len() == reported_before {
+            diagnostics.push(err_diag(
+                file,
+                span,
+                DiagCode::InvalidConstructorArgument,
+                format!("`{ctor_name}` has an argument that is not a parser expression (§7.5)"),
+            ));
+        }
         return None;
     }
 
@@ -343,11 +369,28 @@ fn extract_call_args(
                                     let is_repeated =
                                         value.constructor_name().as_deref() == Some("repeated");
                                     if is_repeated {
-                                        match unwrap_repeated_child(&value).and_then(|inner| {
-                                            convert_parser_expr(&inner, file, diagnostics)
-                                        }) {
-                                            Some(parser) => {
-                                                args.push(CallArg::RepeatedTail { name, parser });
+                                        // **The marker's whole argument list**,
+                                        // not its first parser child. The rule
+                                        // — exactly one argument, and it must
+                                        // be a parser — is §7.5's and lives in
+                                        // `build_repeated_tail`, which the
+                                        // capture-body front end calls too.
+                                        let tail_span = rowan_span(value.syntax());
+                                        match repeated_call_args(&value, file, diagnostics) {
+                                            Some(inner) => {
+                                                match build_repeated_tail(name, inner, tail_span) {
+                                                    Ok(tail) => args.push(tail),
+                                                    Err(errs) => {
+                                                        for err in &errs {
+                                                            diagnostics.push(
+                                                                validation_error_to_diagnostic(
+                                                                    err, file,
+                                                                ),
+                                                            );
+                                                        }
+                                                        all_converted = false;
+                                                    }
+                                                }
                                             }
                                             None => all_converted = false,
                                         }
@@ -411,28 +454,36 @@ fn rowan_span(node: &rowan::SyntaxNode<praxis_syntax::PraxisLanguage>) -> Span {
     Span::new(u32::from(range.start()), u32::from(range.end()))
 }
 
-/// Extract the single child parser expression from a `repeated(P)` call node.
-/// Returns the inner `ParserExpr` (the `P`), or `None` if the node is not a
-/// well-formed `repeated(...)` call with exactly one parser-expr child.
-fn unwrap_repeated_child(call: &ParserExpr) -> Option<ParserExpr> {
-    let parser_call = call
+/// The **whole** argument list of a `repeated(...)` tail marker, or `None` if
+/// something in it did not convert (which has already reported).
+///
+/// This used to be `unwrap_repeated_child`: a `find_map` over the argument
+/// list's children that returned the *first* parser expression and ignored
+/// everything else. So `repeated(matrix(int), word, int)` lowered as
+/// `repeated(matrix(int))` — two arguments silently gone — and `repeated()`
+/// produced no diagnostic at all, because "no first child" was `None` and
+/// `None` was assumed to have reported. The shape check is
+/// [`build_repeated_tail`]'s, and it needs the list it is checking.
+fn repeated_call_args(
+    call: &ParserExpr,
+    file: FileId,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Vec<CallArg>> {
+    let Some(parser_call) = call
         .syntax()
         .children()
-        .find(|c| c.kind() == praxis_syntax::SyntaxKind::PARSER_CALL)?;
-    let arg_list = parser_call
-        .children()
-        .find(|c| c.kind() == praxis_syntax::SyntaxKind::PARSER_ARG_LIST)?;
-    // The single child parser expression.
-    arg_list.children().find_map(|c| {
-        if matches!(
-            c.kind(),
-            praxis_syntax::SyntaxKind::PARSER_EXPR | praxis_syntax::SyntaxKind::PARSER_TEMPLATE
-        ) {
-            ParserExpr::cast(c)
-        } else {
-            None
-        }
-    })
+        .find(|c| c.kind() == praxis_syntax::SyntaxKind::PARSER_CALL)
+    else {
+        diagnostics.push(err_diag(
+            file,
+            rowan_span(call.syntax()),
+            DiagCode::MalformedParserExpression,
+            "malformed `repeated(...)` tail (§7.5)".to_string(),
+        ));
+        return None;
+    };
+    let (_name, args, all_converted) = extract_call_args(&parser_call, file, diagnostics);
+    all_converted.then_some(args)
 }
 
 // ---- diagnostic helpers ----------------------------------------------------
