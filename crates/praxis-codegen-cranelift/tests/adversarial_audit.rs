@@ -898,6 +898,19 @@ fn every_root_parser_reads_every_file_ending() {
     let (runtime, result) = run_main_with_input(src, "ab \ncd \n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 32, "every row three cells wide");
+    // A tab is a character exactly as a space is, so a final line of `" \t "`
+    // is a **three-cell row** and the grid is ragged — where the two-space
+    // ending five lines above is a two-cell row that fits. The commit that
+    // moved this cell named it and nothing end-to-end held it: the ragged
+    // direction was pinned only for the all-spaces shape and the tab only at
+    // the substrate, so a regression that made a tab behave unlike a space
+    // would have been caught only indirectly.
+    let (runtime, _raw, _unit) = run_main_raw_with_input(src, "ab\ncd\n \t \n");
+    assert_eq!(
+        runtime.fault(),
+        praxis_runtime::FaultKind::ParseFailed,
+        "\" \\t \" is three cells against a two-cell grid"
+    );
 
     // `lines(rest)` is lossless, which is `rest`'s identity property one level
     // up: round three's extent trim deleted the third line for every child,
