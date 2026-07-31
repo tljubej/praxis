@@ -30,7 +30,7 @@ Update this file at the end of every stage.
 | S17 — Constraint channel and capabilities | **done** | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c`, `e801e6a`, `b6ab8eb`, `fb82f79` |
 | S18 — Option contract and enum nominal identity | **done** — RT-13, RT-14, RT-15, D1 answered and implemented, the two owed fault kinds paid | `207f5d4`, `cf99f8e`, `35b68ce`, `9ad74ef`, `4ee1ad7` |
 | S19 — Input-parser compile pipeline | **done** | `93fc49b`, `f64e950`, `3f644de`, `c3fd726`, `f8b54b3`, `6664841`, `c3ec8cb`, plus the repair pass |
-| S20 — Parser runtime cursor and region ownership | **done** — IPR-01 … IPR-14, D11, D12 and D-S20-A answered and implemented, plus the repair pass that closed the blocker and three majors the review found | `b2184c8`, `fea3c8c`, `dc983ee`, `79ef068`, `62905bd`, `04a826c`, `0619e6f`, `9debb03`, `99785cb`, `705e734`, `2ff48c8`, `07b2862`, `9458fd5`, `afc6f3f`, `fe26720`, `635c8a1`, `eb9404b`, `c3e2cf1`, `556862d`, `1696885` |
+| S20 — Parser runtime cursor and region ownership | **done** — IPR-01 … IPR-14, D11, D12 and D-S20-A answered and implemented, plus three repair passes; the third states the trailing-whitespace rule the first two got wrong twice | `b2184c8`, `fea3c8c`, `dc983ee`, `79ef068`, `62905bd`, `04a826c`, `0619e6f`, `9debb03`, `99785cb`, `705e734`, `2ff48c8`, `07b2862`, `9458fd5`, `afc6f3f`, `fe26720`, `635c8a1`, `eb9404b`, `c3e2cf1`, `556862d`, `1696885`, `787595a`, `e68ac0c`, `2dd9e05`, `1ae8393`, `cf8d38b`, `c2923f3`, `fda5a7c`, `1bf3e86`, `c60653b` |
 | S21 — Pipeline plan representation and per-stage indices | **done** | `7a38a2a`, `7264de8`, `ac606ba`, `2f68e84`, `333ca4e`, `3151408` |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
@@ -368,7 +368,7 @@ used to assert and why that was wrong:
   `SpaceRun` contradiction itself, written into a test. That input now faults,
   which the test asserts explicitly; the flexible half stays.
 
-#### The repair pass — what four adversarial reviews found, and what closed it
+#### The repair passes — what the reviews found, and what closed it
 
 The structural work above stood. What it broke was ordinary input, and every
 review found the same theme: **trailing whitespace is not an error**. It took
