@@ -5444,6 +5444,16 @@ fn a_closure_parameter_is_a_pattern_and_must_match_every_argument() {
 /// the constraint channel, and a bare `.name` that could be *either* a field or a
 /// nullary row would emit a requirement with two possible discharges and no way to
 /// choose between them.
+///
+/// **This is a characterization test, not a gate, and the distinction is the
+/// finding's.** REP-31 changed no code — its commit touches
+/// `praxis_technical_design.md`, ADR-077 and the decisions index and nothing else
+/// — so there is no state of the tree in which these assertions fail. Every claim
+/// below already held at `d8179e1`, and *that is the evidence*: the doc was wrong
+/// and the tree was right, which is exactly what a doc-only row concludes. A test
+/// that pins a rule nobody may quietly change later is worth keeping; calling it a
+/// gate is not. The one assertion here that is a real gate is the last, and it
+/// belongs to REP-28.
 #[test]
 fn a_zero_argument_accessor_is_a_call_and_a_bare_name_is_a_field() {
     // The call form is the one that works, on every receiver the doc writes it
@@ -5456,17 +5466,19 @@ fn a_zero_argument_accessor_is_a_call_and_a_bare_name_is_a_field() {
     ));
 
     // The property spelling is not a syntax this language has: it is a field read
-    // of a name no record declares, so it is `Y112`. (From lowering's one emitter,
-    // which is the division REP-28 kept for `Y110`'s reason.)
+    // of a name no record declares, so it is `Y112`. Since REP-28's correction it
+    // comes from *inference* — the receiver is concrete, so `require_cap_as`
+    // decides it — which is why `analyze` alone is enough here and why the message
+    // now names the type.
     for src in [
         "let v = Vec()\nv.push(1)\nout(v.len)\n",
         "let m = Map()\nm[1] = 2\nout(m.len)\n",
         "let t = \"abc\"\nout(t.len)\n",
     ] {
-        let diags = analyze_and_lower_diags(src);
+        let diags = analyze(src).diagnostics;
         assert!(
             diags.iter().any(|d| d.code().to_string() == "Y112"),
-            "{src} must be Y112, got {diags:?}"
+            "{src} must be Y112 at `check`, got {diags:?}"
         );
     }
 

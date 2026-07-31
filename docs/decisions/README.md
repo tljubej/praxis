@@ -74,6 +74,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-066: A `for` iterates a snapshot, and the snapshot is where the order is decided](./066-a-for-iterates-a-snapshot.md)
 - [ADR-067: A file's top-level statements are its program, and `fn main` is the fallback](./067-a-files-top-level-statements-are-its-program.md)
 - [ADR-068: A function does not capture, and saying so is `N007`](./068-a-function-does-not-capture.md)
-- [ADR-069: A record and a tuple are patterns with one constructor](./069-a-record-and-a-tuple-are-patterns-with-one-constructor.md)
-- [ADR-070: An updating store is a row with a contextual operator](./070-an-updating-store-is-a-row-with-a-contextual-operator.md)
 - [ADR-077: A zero-argument accessor is a call, and a bare `.name` is a field](./077-a-zero-argument-accessor-is-a-call-and-a-bare-dot-name-is-a-field.md)
