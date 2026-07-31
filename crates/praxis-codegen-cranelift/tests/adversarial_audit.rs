@@ -562,10 +562,20 @@ fn a_bounded_word_capture_stops_at_its_region_end() {
     );
 }
 
+/// **IPR-07 and D-S20-A.** A collection's element descriptor and the objects it
+/// holds must be the same type.
+///
+/// AMENDED (S20). The declared return type was `Vec[Char]`, because
+/// `synthesize` hardcoded `chars(P, skip:) -> Vec[Char]` regardless of `P` —
+/// which is precisely the disagreement this test exists to catch, written into
+/// the test's own source. `chars(int, skip: none)` produces `Int` objects, so
+/// its type is `Vec[Int]`; the static type is derived from the child now, the
+/// runtime descriptor is derived from the same child, and the annotation says
+/// what the program actually returns. `chars(one_of("LR"))` is still
+/// `Vec[Char]`, because `one_of` synthesizes `Char`.
 #[test]
-#[ignore = "known bug: chars(int) advertises Char while storing Int objects"]
 fn chars_result_descriptor_matches_the_values_it_contains() {
-    let src = "fn main() -> Vec[Char] {\n  read chars(int, skip: none)\n}\n";
+    let src = "fn main() -> Vec[Int] {\n  read chars(int, skip: none)\n}\n";
     let (runtime, result) = run_main_with_input(src, "65");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     let payload = result.payload::<VecPayload>();

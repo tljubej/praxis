@@ -971,24 +971,33 @@ fn walk_characters(
         if cursor >= region.end() {
             break;
         }
+        // **A child failure is the parse's failure** (IPR-07). This used to
+        // `break`, so `chars` returned `Ok` at the first mismatch and silently
+        // dropped the rest of the region — `chars(digit)` over `"12x34"`
+        // answered `[1, 2]` and reported nothing. The loop's own shape is what
+        // implements §7.5's rule: the skip policy runs once more after the last
+        // match, so `skip: whitespace` / `skip: newlines` can absorb a trailing
+        // run, and under `skip: none` a trailing byte the child cannot read
+        // correctly faults.
         // SAFETY: ctx is valid.
-        match unsafe { walk(rt.ctx, i, plan, child, region.from(cursor)) } {
-            Ok(walked) => {
-                cursor = if walked.next > cursor {
-                    walked.next
-                } else {
-                    match region.next_scalar(i, cursor) {
-                        Some(next) => next,
-                        None => break,
-                    }
-                };
-                items.push(walked.value);
+        let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(cursor))? };
+        cursor = if walked.next > cursor {
+            walked.next
+        } else {
+            match region.next_scalar(i, cursor) {
+                Some(next) => next,
+                None => break,
             }
-            Err(_) => break,
-        }
+        };
+        items.push(walked.value);
     }
+    // The element descriptor is the child's, not a hardcoded `CHAR`. The Vec
+    // used to be tagged `Char` whatever it held, so `chars(int, …)` filled a
+    // `Vec[Char]` with `Int` objects and `vec_format`/`vec_equals`/`vec_hash`
+    // dispatched through the wrong callback (IPR-07, D-S20-A).
+    let elem_desc = child_descriptor(plan, child);
     Ok(Walked {
-        value: rt.alloc_vec(&scalars::CHAR, items),
+        value: rt.alloc_vec(elem_desc, items),
         next: region.end(),
     })
 }
@@ -2363,6 +2372,54 @@ mod tests {
     }
 
     // --- M7-WS9: whitespace matcher (§7.2) -----------------------------------
+
+    /// **IPR-07.** `chars` returned `Ok` at the first child failure, so it
+    /// silently dropped the rest of its region: `chars(digit, skip: none)` over
+    /// `"12x34"` answered `[1, 2]` and reported nothing at all.
+    ///
+    /// The rule §7.5 wants falls out of running the skip policy once more after
+    /// the last match: whatever the skip does not absorb, the child must read.
+    #[test]
+    fn chars_that_cannot_read_the_whole_region_is_a_parse_failure() {
+        fn parse(input: &str, skip: praxis_input_parser::SkipPolicy) -> Option<Vec<i64>> {
+            let mut rt = crate::Runtime::new();
+            let text = rt.alloc_text(input);
+            let mut ctx = rt.context();
+            ctx.input_source = text;
+            let plan = test_plan(
+                vec![
+                    PlanNode::Atomic {
+                        kind: AtomicKind::Digit,
+                    },
+                    PlanNode::Characters { child: 0, skip },
+                ],
+                1,
+            );
+            unsafe { run_root(&mut ctx, &plan, text) }
+                .ok()
+                .map(|v| v.as_vec().iter().map(GcRef::as_int).collect())
+        }
+
+        use praxis_input_parser::SkipPolicy;
+        assert_eq!(parse("1234", SkipPolicy::None), Some(vec![1, 2, 3, 4]));
+        assert_eq!(
+            parse("12x34", SkipPolicy::None),
+            None,
+            "a child failure inside the region is the parse's failure, not a short answer"
+        );
+        // The skip policy is what a trailing run is for, and it is applied
+        // after the last match as well as between matches.
+        assert_eq!(
+            parse("1 2 3 \t", SkipPolicy::Whitespace),
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(parse("1 2\n", SkipPolicy::Newlines), Some(vec![1, 2]));
+        assert_eq!(
+            parse("12\n", SkipPolicy::None),
+            None,
+            "`skip: none` absorbs nothing, so a trailing newline is a mismatch"
+        );
+    }
 
     /// **D11's answer to IPR-06, spelled out.** A `grid` cell is one Unicode
     /// scalar, so `grid(int)` reads one digit per cell — a cell parser parses a
