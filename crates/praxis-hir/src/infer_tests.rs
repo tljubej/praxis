@@ -5344,3 +5344,60 @@ fn a_closure_parameter_is_a_pattern_and_must_match_every_argument() {
         "a destructured name is immutable: {diags:?}"
     );
 }
+
+/// **REP-31.** A zero-argument accessor is a **call**, and a bare `receiver.name`
+/// is a field read and only that (ADR-077).
+///
+/// The design doc wrote `grid.width`, `grid.height` and `Vec[T].len -> Int` as
+/// property reads in three places and as calls everywhere else. The tree has only
+/// ever had the call form — `len`, `width` and `height` are catalog rows of arity
+/// zero — so the doc was corrected and this pins the rule it now states.
+///
+/// The rule is load-bearing rather than merely tidy: REP-28 put a field read on
+/// the constraint channel, and a bare `.name` that could be *either* a field or a
+/// nullary row would emit a requirement with two possible discharges and no way to
+/// choose between them.
+#[test]
+fn a_zero_argument_accessor_is_a_call_and_a_bare_name_is_a_field() {
+    // The call form is the one that works, on every receiver the doc writes it
+    // for.
+    assert!(is_clean_with_lower(
+        "let v = Vec()\nv.push(1)\nout(v.len())\n"
+    ));
+    assert!(is_clean_with_lower(
+        "let m = Map()\nm[1] = 2\nout(m.len())\n"
+    ));
+
+    // The property spelling is not a syntax this language has: it is a field read
+    // of a name no record declares, so it is `Y112`. (From lowering's one emitter,
+    // which is the division REP-28 kept for `Y110`'s reason.)
+    for src in [
+        "let v = Vec()\nv.push(1)\nout(v.len)\n",
+        "let m = Map()\nm[1] = 2\nout(m.len)\n",
+        "let t = \"abc\"\nout(t.len)\n",
+    ] {
+        let diags = analyze_and_lower_diags(src);
+        assert!(
+            diags.iter().any(|d| d.code().to_string() == "Y112"),
+            "{src} must be Y112, got {diags:?}"
+        );
+    }
+
+    // A **field** named like a catalog row is still a field, and the two spellings
+    // stay apart: `p.len` reads the field, `p.len()` looks for a row a record does
+    // not have.
+    assert!(is_clean_with_lower(
+        "struct P { len: Int }\nlet p = P { len: 7 }\nout(p.len)\n"
+    ));
+    let diags =
+        analyze_and_lower_diags("struct P { len: Int }\nlet p = P { len: 7 }\nout(p.len())\n");
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y110"),
+        "a record has no rows: {diags:?}"
+    );
+
+    // …and the deferred read REP-28 added resolves to the **field**, not to a row
+    // — which is the property this rule exists to protect.
+    let src = "struct P { len: Int }\nfn n(a) { a.len }\nout(n(P { len: 7 }))\n";
+    assert_eq!(scheme_of(src, "n").as_deref(), Some("(P) -> Int"));
+}

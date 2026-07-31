@@ -182,7 +182,7 @@ Every binding stores a `GcRef`, but bindings still have static source-language t
 `let` creates a binding that cannot be reassigned:
 
 ```praxis
-let width = grid.width
+let width = grid.width()
 ```
 
 `var` creates a binding that may be reassigned to another value of the same inferred static type:
@@ -541,12 +541,20 @@ Example entries:
 
 ```text
 Vec[T].push(T) -> Unit
-Vec[T].len -> Int
+Vec[T].len() -> Int
 Vec[T].map((T) -> U) -> Seq[U]
 Text.ints() -> Vec[Int]
 Map[K,V].get(K) -> Option[V]
 Grid[T].neighbors4(Point) -> Seq[Point]
 ```
+
+Every row is a method, including the ones that take no arguments, and every call
+site writes the parentheses: `v.len()`, `grid.width()`. There is no property form
+(ADR-077). A bare `receiver.name` is a **field** read and only that — the two
+constructs have different lowerings (a slot index against the record's definition,
+versus a call through the catalog), and a receiver whose type is not yet known
+cannot tell them apart, which is what REP-28's deferred field requirement depends
+on.
 
 The language server uses the same table for completion and signature help.
 
@@ -635,8 +643,8 @@ Coordinates use `(x, y)` with `x` increasing rightward and `y` increasing downwa
 Required API:
 
 ```text
-grid.width
-grid.height
+grid.width()
+grid.height()
 grid[x, y]
 grid.get(x, y)
 grid.contains(x, y)
