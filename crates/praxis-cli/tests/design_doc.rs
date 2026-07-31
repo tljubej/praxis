@@ -114,3 +114,84 @@ fn section_4_9s_function_example_checks_and_runs() {
         );
     }
 }
+
+/// **REP-34.** Every ```praxis fence in the design document **parses**.
+///
+/// Four did not, all of them §7.5 parser-constructor calls with a labelled
+/// argument: `chars(one_of("^v<>"), skip: whitespace)`, `sections(block(ranges:
+/// …))`, `choice(Number: …)` and `scan(choice(Multiply: …))`, each a `P001` at
+/// the `:`. The question the finding raised was which side was wrong, and the
+/// answer is the document's. A labelled argument *is* implemented — the parser
+/// emits `PARSER_NAMED_ARG` and `parser_lower` consumes it — but only inside the
+/// **parser-expression sublanguage**, which is entered by `read` or by
+/// `parse(text, …)` and nowhere else (§7.1). Written bare, those four fences were
+/// ordinary call expressions, where `skip:` is a syntax the language does not
+/// have. §7.5's own first four fences already wrote `read`; the rest did not, and
+/// three more of them parsed only by coincidence, as calls to undefined names.
+/// So every §7.5 fence says `read` now and §7.5 states why.
+///
+/// The sweep is the point, not the four. A per-fence assertion would have to be
+/// written once per fence and would cover the ones someone remembered; this
+/// covers the document, including fences added after it.
+///
+/// **Parse only.** A fence is a fragment — most of them name a `struct` declared
+/// three sections earlier, or a binding the surrounding prose supplies — so
+/// `N0xx` and `Y0xx` are expected and are not what this asserts. `P0xx` is
+/// different in kind: it means the text is not the language, whatever the
+/// context around it would have been.
+#[test]
+fn every_praxis_fence_in_the_design_doc_parses() {
+    let root = workspace_root();
+    let doc = std::fs::read_to_string(root.join("praxis_technical_design.md"))
+        .expect("praxis_technical_design.md at the workspace root");
+
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let mut fences = 0;
+    let mut failures = Vec::new();
+    let mut lines = doc.lines().enumerate();
+    while let Some((i, line)) = lines.next() {
+        if line.trim_end() != "```praxis" {
+            continue;
+        }
+        let mut body = String::new();
+        for (_, inner) in lines.by_ref() {
+            if inner.trim_end() == "```" {
+                break;
+            }
+            body.push_str(inner);
+            body.push('\n');
+        }
+        fences += 1;
+        let path = tmp.join(format!("design_doc_fence_{}.px", i + 1));
+        std::fs::write(&path, &body).expect("write the extracted fence");
+        let out = Command::new(bin_path())
+            .arg("check")
+            .arg(&path)
+            .output()
+            .expect("failed to run praxis");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let parse_errors: Vec<_> = codes(&stderr)
+            .into_iter()
+            .filter(|c| c.starts_with('P'))
+            .collect();
+        if !parse_errors.is_empty() {
+            failures.push(format!(
+                "praxis_technical_design.md:{}: {parse_errors:?}\n{body}",
+                i + 1
+            ));
+        }
+    }
+
+    // A guard against the sweep covering nothing — a fence-detection bug would
+    // otherwise pass by finding no fences at all.
+    assert!(
+        fences >= 57,
+        "expected the design doc's ```praxis fences, found {fences}"
+    );
+    assert!(
+        failures.is_empty(),
+        "{} of {fences} fences do not parse:\n\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
