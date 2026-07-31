@@ -6756,6 +6756,8 @@ fn an_option_from_the_runtime_and_one_from_the_program_are_one_type() {
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
+}
+
 // --- §7.4's atomic parsers, end to end (IP-11) ------------------------------
 
 /// **IP-11.** Four of §7.4's ten atomic parsers did not exist: `uint`, `float`,
