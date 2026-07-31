@@ -1394,21 +1394,33 @@ unsafe fn vec_payload_mut<'s>(r: Rooted<'s>) -> &'s mut VecPayload {
 /// place: `praxis_vec_new` allocates, and so may the caller's own iteration, so a
 /// collection between the allocation and the last push would reclaim it.
 ///
+/// `element_descriptor` may be **null**: the source collection's label is what
+/// its own construction site knew, and that may have been nothing (REP-41). A
+/// `Vec`'s null means "empty" — `vec_format` reads it that way — so a null label
+/// with members present would answer `[]`. The first member's own descriptor is
+/// what the `Vec` adopts instead, which is exactly what `praxis_vec_push` does.
+///
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid
-/// `'static TypeDescriptor`; every item must be a valid `GcRef` whose payload
-/// matches it.
+/// `'static TypeDescriptor` or null; every item must be a valid `GcRef` whose
+/// payload matches its own header.
 unsafe fn vec_of(
     ctx: *mut RuntimeContext,
-    element_descriptor: &'static TypeDescriptor,
+    element_descriptor: *const TypeDescriptor,
     items: impl Iterator<Item = GcRef>,
 ) -> GcRef {
+    let items: Vec<GcRef> = items.collect();
+    let element_descriptor = if element_descriptor.is_null() {
+        items
+            .first()
+            .map_or(std::ptr::null(), |first| first.descriptor() as *const _)
+    } else {
+        element_descriptor
+    };
     let result = unsafe { praxis_vec_new(ctx, element_descriptor) };
     let scope = unsafe { NativeScope::new(ctx) };
     let rp = unsafe { vec_payload_mut(scope.root(result)) };
-    for item in items {
-        rp.items.push(item);
-    }
+    rp.items.extend(items);
     result
 }
 
@@ -2323,9 +2335,10 @@ unsafe fn counter_payload_mut<'s>(r: Rooted<'s>) -> &'s mut CounterPayload {
     unsafe { &mut *r.get().payload::<CounterPayload>() }
 }
 
-/// Allocate an empty `Map[K, V]`. `key_descriptor` selects the structural
-/// hash/eq for `DynamicKey`; `value_descriptor` is recorded for format/trace.
-/// A null descriptor defaults to INT (matching `praxis_vec_new`).
+/// Allocate an empty `Map[K, V]`. `key_descriptor` is the key type the
+/// construction site knew, or **null** when it knew none — which is kept null
+/// (REP-41), the way `praxis_vec_new` keeps it. Spelling an unknown type `INT`
+/// is a claim, and every reader that believed it read the wrong type.
 ///
 /// # Safety
 /// `ctx` must be live and wired. `key_descriptor` must be a valid pointer to a
@@ -2335,17 +2348,10 @@ pub unsafe extern "C" fn praxis_map_new(
     ctx: *mut RuntimeContext,
     key_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    let key_descriptor = if key_descriptor.is_null() {
-        &scalars::INT
-    } else {
-        unsafe { &*key_descriptor }
-    };
-    // The value descriptor defaults to INT; the compiler will specialize this
-    // to pass the real value type as a second slot when Map construction
-    // carries both type args (a follow-up generalization). For now INT is
-    // sound: values are uniform GcRefs and format via the descriptor adopted
-    // from the first inserted value.
-    let value_descriptor = &scalars::INT;
+    // The value label is `INT` unconditionally, which is a lie about every
+    // `Map` whose values are not `Int`s; REP-42 is that half. Nothing dispatches
+    // through it any more (REP-41), so it is inert until then.
+    let value_descriptor: *const TypeDescriptor = &scalars::INT;
     unsafe {
         gc_alloc_with(
             ctx,
@@ -2381,7 +2387,9 @@ pub unsafe extern "C" fn praxis_map_insert(
     // Adopt the value's descriptor if the default is still in place, so nested
     // values format/trace correctly (mirrors the Vec push-descriptor adoption).
     let val_desc = value.descriptor();
-    if p.value_descriptor.id() == scalars::INT.id() && val_desc.id() != scalars::INT.id() {
+    if p.value().is_some_and(|d| std::ptr::eq(d, &scalars::INT))
+        && !std::ptr::eq(val_desc, &scalars::INT)
+    {
         p.value_descriptor = val_desc;
     }
     p.entries.insert(DynamicKey::new(key), value);
@@ -2590,7 +2598,8 @@ pub unsafe extern "C" fn praxis_map_update_max(
 
 // --- Set[T] -----------------------------------------------------------------
 
-/// Allocate an empty `Set[T]`. `element_descriptor` selects hash/eq.
+/// Allocate an empty `Set[T]`. `element_descriptor` is the element type the
+/// construction site knew, or **null** when it knew none — kept null (REP-41).
 ///
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
@@ -2600,11 +2609,6 @@ pub unsafe extern "C" fn praxis_set_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    let element_descriptor = if element_descriptor.is_null() {
-        &scalars::INT
-    } else {
-        unsafe { &*element_descriptor }
-    };
     unsafe {
         gc_alloc_with(
             ctx,
@@ -2709,7 +2713,8 @@ pub unsafe extern "C" fn praxis_set_items(ctx: *mut RuntimeContext, set: GcRef) 
 
 // --- Counter[T] -------------------------------------------------------------
 
-/// Allocate an empty `Counter[T]`. `key_descriptor` selects hash/eq.
+/// Allocate an empty `Counter[T]`. `key_descriptor` is the key type the
+/// construction site knew, or **null** when it knew none — kept null (REP-41).
 ///
 /// # Safety
 /// `ctx` must be live and wired; `key_descriptor` must be a valid pointer to a
@@ -2719,11 +2724,6 @@ pub unsafe extern "C" fn praxis_counter_new(
     ctx: *mut RuntimeContext,
     key_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    let key_descriptor = if key_descriptor.is_null() {
-        &scalars::INT
-    } else {
-        unsafe { &*key_descriptor }
-    };
     unsafe {
         gc_alloc_with(
             ctx,
@@ -2891,7 +2891,8 @@ unsafe fn min_heap_payload(r: GcRef) -> &'static MinHeapPayload {
     unsafe { &*r.payload::<MinHeapPayload>() }
 }
 
-/// Allocate an empty `MaxHeap[T]`.
+/// Allocate an empty `MaxHeap[T]`. A null `element_descriptor` — the codegen's
+/// "no static element type" — is kept null (REP-41).
 ///
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
@@ -2901,11 +2902,6 @@ pub unsafe extern "C" fn praxis_max_heap_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    let element_descriptor = if element_descriptor.is_null() {
-        &scalars::INT
-    } else {
-        unsafe { &*element_descriptor }
-    };
     unsafe {
         gc_alloc_with(
             ctx,
@@ -3017,7 +3013,8 @@ pub unsafe extern "C" fn praxis_max_heap_is_empty(
 
 // --- MinHeap (mirrors MaxHeap with Reverse wrapping) -----------------------
 
-/// Allocate an empty `MinHeap[T]`.
+/// Allocate an empty `MinHeap[T]`. A null `element_descriptor` — the codegen's
+/// "no static element type" — is kept null (REP-41).
 ///
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
@@ -3027,11 +3024,6 @@ pub unsafe extern "C" fn praxis_min_heap_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    let element_descriptor = if element_descriptor.is_null() {
-        &scalars::INT
-    } else {
-        unsafe { &*element_descriptor }
-    };
     unsafe {
         gc_alloc_with(
             ctx,
@@ -6236,5 +6228,72 @@ mod tests {
         let frame =
             unsafe { crate::shadow_frame::praxis_push_shadow_frame(std::ptr::null_mut(), 0) };
         assert!(frame.is_null());
+    }
+
+    // --- REP-41: a null element type stays unknown -------------------------
+
+    /// **REP-41.** A collection built with no static element type must not
+    /// claim to hold `Int`s, and what it holds must render as what it is.
+    ///
+    /// The codegen passes a **null** descriptor for `let c = Counter()` — its
+    /// contract above `collection_element_descriptor_for` says so, and says
+    /// every `praxis_*_new` wrapper reads it that way. Five did not: `Set`,
+    /// `Counter`, `Map`'s key and the two heaps each replaced the null with
+    /// `&INT`, which is not a default but a false claim, and unlike `Vec` none
+    /// of them ever corrected it. The label was then dispatched through — a
+    /// `Text` key hashed and printed as an `i64`, a `Float` element printed as
+    /// the integer its bits spell.
+    ///
+    /// Both halves are asserted because either alone passes a wrong fix: the
+    /// absent label is the representation, the rendering is the answer.
+    #[test]
+    fn a_collection_with_no_static_element_type_does_not_claim_int() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: `ctx` is wired; every argument below is a wrapper's own.
+        unsafe {
+            // Exactly what the codegen passes when the element type is still an
+            // inference variable.
+            let null = std::ptr::null::<TypeDescriptor>();
+            let counter = praxis_counter_new(ctx, null);
+            let set = praxis_set_new(ctx, null);
+            let map = praxis_map_new(ctx, null);
+            let min_heap = praxis_min_heap_new(ctx, null);
+            let max_heap = praxis_max_heap_new(ctx, null);
+
+            assert!(
+                counter_payload(counter).key().is_none(),
+                "a Counter with no static key type must not claim one"
+            );
+            assert!(set_payload(set).element().is_none());
+            assert!(map_payload(map).key().is_none());
+            assert!(min_heap_payload(min_heap).element().is_none());
+            assert!(max_heap_payload(max_heap).element().is_none());
+
+            // …and the values come back out as themselves. A `Text` key through
+            // a `Counter`, a `Float` through a `MinHeap`: neither is an `Int`,
+            // and both used to print as one.
+            let key = praxis_alloc_text(ctx, "ab".as_ptr(), 2);
+            praxis_counter_inc(ctx, counter, key);
+            let keys = praxis_counter_keys(ctx, counter);
+            let mut rendered = String::new();
+            keys.format(&mut rendered);
+            assert_eq!(rendered, "[ab]", "a Counter's keys are its keys");
+
+            let half = praxis_alloc_float(ctx, 1.5f64.to_bits() as i64);
+            praxis_min_heap_push(ctx, min_heap, half);
+            let mut rendered = String::new();
+            min_heap.format(&mut rendered);
+            assert_eq!(rendered, "[1.5]", "a MinHeap prints the elements it holds");
+
+            let member = praxis_alloc_text(ctx, "zz".as_ptr(), 2);
+            praxis_set_insert(ctx, set, member);
+            let items = praxis_set_items(ctx, set);
+            let mut rendered = String::new();
+            items.format(&mut rendered);
+            assert_eq!(rendered, "[zz]");
+        }
+        // SAFETY: the context was leaked by `wired_ctx` and is unused after this.
+        unsafe { drop_ctx(ctx) };
     }
 }

@@ -42,11 +42,14 @@ pub(crate) fn in_pop_order<T: Ord, F: Fn(&T) -> GcRef>(
 
 /// Write a heap's elements in [`in_pop_order`].
 ///
-/// # Safety
-/// Every element must match `elem_desc`.
+/// Each element formats through the descriptor in its **own** header, not
+/// through the heap's element label. The label is what the construction site
+/// knew and may be null (REP-41); `HeapEntry::cmp` has always ordered by the
+/// element's own descriptor, and this is the same rule for printing — a
+/// `MinHeap` built with no static element type used to render its `Float`s as
+/// the integers its `INT` label promised.
 unsafe fn write_in_pop_order<T: Ord, F: Fn(&T) -> GcRef>(
     out: &mut dyn fmt::Write,
-    elem_desc: &TypeDescriptor,
     items: &BinaryHeap<T>,
     value_of: F,
 ) {
@@ -56,8 +59,9 @@ unsafe fn write_in_pop_order<T: Ord, F: Fn(&T) -> GcRef>(
             let _ = out.write_str(", ");
         }
         let ep = value.payload::<u8>() as *const u8;
-        // SAFETY: the caller guarantees every element matches `elem_desc`.
-        unsafe { (elem_desc.format)(ep, out) };
+        // SAFETY: an object's payload always matches the descriptor in its own
+        // header.
+        unsafe { (value.descriptor().format)(ep, out) };
     }
     let _ = out.write_str("]");
 }
@@ -141,10 +145,24 @@ impl std::fmt::Debug for HeapEntry {
 /// The `MaxHeap[T]` payload (§11.2): a max-heap of `HeapEntry`.
 #[repr(C)]
 pub struct MaxHeapPayload {
-    /// The descriptor for every element (for trace/equals/hash/format).
-    pub element_descriptor: &'static TypeDescriptor,
+    /// The descriptor for every element, or null when the construction site had
+    /// no static element type (REP-41). A label: each element carries its own
+    /// descriptor, both on its `HeapEntry` and in its object header. Read it
+    /// through [`MaxHeapPayload::element`].
+    pub element_descriptor: *const TypeDescriptor,
     /// The elements, in max-heap order (largest surfaces first).
     pub items: BinaryHeap<HeapEntry>,
+}
+
+impl MaxHeapPayload {
+    /// The element label, or `None` when this heap was never told its element
+    /// type.
+    #[must_use]
+    pub fn element(&self) -> Option<&'static TypeDescriptor> {
+        // SAFETY: a non-null label is always a `&'static` written by the
+        // constructor.
+        (!self.element_descriptor.is_null()).then(|| unsafe { &*self.element_descriptor })
+    }
 }
 
 unsafe fn max_heap_trace(payload: *mut u8, tracer: &mut dyn Tracer) {
@@ -161,7 +179,7 @@ unsafe fn max_heap_drop(payload: *mut u8) {
 unsafe fn max_heap_format(payload: *const u8, out: &mut dyn fmt::Write) {
     let p = unsafe { &*(payload as *const MaxHeapPayload) };
     // SAFETY: every element matches the heap's element descriptor.
-    unsafe { write_in_pop_order(out, p.element_descriptor, &p.items, |e| e.value) };
+    unsafe { write_in_pop_order(out, &p.items, |e| e.value) };
 }
 
 /// Descriptor for `MaxHeap[T]` (§11.2, TypeId 17).
@@ -196,10 +214,22 @@ unsafe fn max_heap_owned_bytes(payload: *const u8) -> usize {
 /// The `MinHeap[T]` payload (§11.2): a min-heap via `Reverse<HeapEntry>`.
 #[repr(C)]
 pub struct MinHeapPayload {
-    /// The descriptor for every element (for trace/equals/hash/format).
-    pub element_descriptor: &'static TypeDescriptor,
+    /// The descriptor for every element, or null when the construction site had
+    /// no static element type (REP-41). See [`MaxHeapPayload::element_descriptor`].
+    pub element_descriptor: *const TypeDescriptor,
     /// The elements, wrapped in `Reverse` so the smallest surfaces first.
     pub items: BinaryHeap<Reverse<HeapEntry>>,
+}
+
+impl MinHeapPayload {
+    /// The element label, or `None` when this heap was never told its element
+    /// type.
+    #[must_use]
+    pub fn element(&self) -> Option<&'static TypeDescriptor> {
+        // SAFETY: a non-null label is always a `&'static` written by the
+        // constructor.
+        (!self.element_descriptor.is_null()).then(|| unsafe { &*self.element_descriptor })
+    }
 }
 
 unsafe fn min_heap_trace(payload: *mut u8, tracer: &mut dyn Tracer) {
@@ -217,7 +247,7 @@ unsafe fn min_heap_format(payload: *const u8, out: &mut dyn fmt::Write) {
     let p = unsafe { &*(payload as *const MinHeapPayload) };
     // SAFETY: every element matches the heap's element descriptor. The stored
     // entry is `Reverse<HeapEntry>`, so pop order is ascending by element.
-    unsafe { write_in_pop_order(out, p.element_descriptor, &p.items, |e| e.0.value) };
+    unsafe { write_in_pop_order(out, &p.items, |e| e.0.value) };
 }
 
 /// Descriptor for `MinHeap[T]` (§11.2, TypeId 18).

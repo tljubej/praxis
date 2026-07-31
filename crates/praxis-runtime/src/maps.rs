@@ -132,18 +132,45 @@ pub(crate) unsafe fn ordered_members(entries: &HashSet<DynamicKey>) -> Vec<GcRef
 // Map[K, V]
 // ===========================================================================
 
-/// The `Map[K, V]` payload (§11.3). The key descriptor selects structural
-/// `hash`/`equals` (via `DynamicKey`); the value descriptor is recorded for
-/// `format`/`trace` dispatch (values are uniform `GcRef`s, so the descriptor
-/// only matters for element-wise formatting and tracing).
+/// The `Map[K, V]` payload (§11.3). Both descriptors are **labels**: what the
+/// construction site knew about the type, or **null** when it knew nothing
+/// (REP-41). Neither is the authority for an element-wise operation — every key
+/// carries its own descriptor on its [`DynamicKey`] and every value carries one
+/// in its object header, and that is what `format`/`equals`/`hash` dispatch
+/// through. ADR-066 decision 5 is the rule: a null descriptor slot is legal and
+/// means "the value's own descriptor answers".
+///
+/// The label used to be non-nullable, so `praxis_map_new` had to spell an
+/// unknown key type `INT`, and every `Map`'s value label was `INT`
+/// unconditionally — which made a `Map[Text, Text]`'s value read as an `i64` by
+/// anything that trusted it.
 #[repr(C)]
 pub struct MapPayload {
-    /// The descriptor for every key (selects `DynamicKey`'s hash/eq).
-    pub key_descriptor: &'static TypeDescriptor,
-    /// The descriptor for every value (for format/trace dispatch).
-    pub value_descriptor: &'static TypeDescriptor,
+    /// The descriptor for every key, or null when the construction site had no
+    /// static key type. Read it through [`MapPayload::key`].
+    pub key_descriptor: *const TypeDescriptor,
+    /// The descriptor for every value, or null when unknown. Read it through
+    /// [`MapPayload::value`].
+    pub value_descriptor: *const TypeDescriptor,
     /// The entries. Keys are `DynamicKey`; values are `GcRef`.
     pub entries: HashMap<DynamicKey, GcRef>,
+}
+
+impl MapPayload {
+    /// The key label, or `None` when this map was never told its key type.
+    #[must_use]
+    pub fn key(&self) -> Option<&'static TypeDescriptor> {
+        // SAFETY: a non-null label is always a `&'static` written by the
+        // constructor.
+        (!self.key_descriptor.is_null()).then(|| unsafe { &*self.key_descriptor })
+    }
+
+    /// The value label, or `None` when this map was never told its value type.
+    #[must_use]
+    pub fn value(&self) -> Option<&'static TypeDescriptor> {
+        // SAFETY: as `key`.
+        (!self.value_descriptor.is_null()).then(|| unsafe { &*self.value_descriptor })
+    }
 }
 
 unsafe fn map_trace(payload: *mut u8, tracer: &mut dyn Tracer) {
@@ -163,16 +190,16 @@ unsafe fn map_drop(payload: *mut u8) {
 unsafe fn map_format(payload: *const u8, out: &mut dyn fmt::Write) {
     // SAFETY: caller guarantees `payload` points at an initialized MapPayload.
     let p = unsafe { &*(payload as *const MapPayload) };
-    let val_desc = p.value_descriptor;
     let entries = p.entries.iter().map(|(k, v)| {
         let mut s = String::new();
-        // SAFETY: the key's payload matches the descriptor it carries, and
-        // every value matches the map's value descriptor (homogeneous per the
-        // type checker).
+        // SAFETY: the key's payload matches the descriptor its `DynamicKey`
+        // carries, and the value's matches the one in its own header. Rendering
+        // through the *map's* value label is what printed a `Map[Text, Text]`
+        // as integers, because that label was `INT` unconditionally (REP-42).
         unsafe {
             render_into(&mut s, k.descriptor(), k.value());
             let _ = s.write_str(": ");
-            render_into(&mut s, val_desc, *v);
+            render_into(&mut s, v.descriptor(), *v);
         }
         s
     });
@@ -186,20 +213,25 @@ unsafe fn map_equals(a: *const u8, b: *const u8) -> bool {
     if pa.entries.len() != pb.entries.len() {
         return false;
     }
-    let Some(eq) = pa.value_descriptor.equals else {
-        return false;
-    };
-    // Two maps are equal iff they have the same keys with equal values. Compare
-    // value-wise through the value descriptor.
+    // Two maps are equal iff they have the same keys with equal values. Each
+    // pair compares through the *left* value's own descriptor, after checking
+    // the right value carries the same one: values of two different types are
+    // never equal, and dispatching one type's `equals` against the other's
+    // payload is precisely the wrong-type read a shared label licensed.
     for (k, va) in pa.entries.iter() {
         // `get` uses DynamicKey's PartialEq (structural, via the descriptor).
         let Some(vb) = pb.entries.get(k) else {
             return false;
         };
+        if !std::ptr::eq(va.descriptor(), vb.descriptor()) {
+            return false;
+        }
+        let Some(eq) = va.descriptor().equals else {
+            return false;
+        };
         let va_p = va.payload::<u8>() as *const u8;
         let vb_p = vb.payload::<u8>() as *const u8;
-        // SAFETY: both values match the value descriptor (homogeneous per the
-        // type checker).
+        // SAFETY: both values carry the descriptor `eq` came from.
         if !unsafe { eq(va_p, vb_p) } {
             return false;
         }
@@ -214,21 +246,21 @@ unsafe fn map_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     // pair and combine with a commutative accumulator (XOR). This matches the
     // set/map hashing convention where insertion order must not affect the hash.
     hasher.write_bytes(&(p.entries.len() as u64).to_le_bytes());
-    let Some(hash_val) = p.value_descriptor.hash else {
-        return;
-    };
-    let Some(hash_key) = p.key_descriptor.hash else {
-        return;
-    };
     let mut acc: u64 = 0;
     for (k, v) in p.entries.iter() {
+        // Each half hashes through its *own* descriptor rather than the map's
+        // label: equal values must hash equally, and only the value knows what
+        // it is.
+        let (Some(hash_key), Some(hash_val)) = (k.descriptor().hash, v.descriptor().hash) else {
+            return;
+        };
         let mut kh = crate::descriptor::StructHasher::new();
         let k_payload = k.value().payload::<u8>() as *const u8;
-        // SAFETY: key payload matches the key descriptor.
+        // SAFETY: key payload matches the descriptor its `DynamicKey` carries.
         unsafe { hash_key(k_payload, &mut kh) };
         let mut vh = crate::descriptor::StructHasher::new();
         let v_payload = v.payload::<u8>() as *const u8;
-        // SAFETY: value payload matches the value descriptor.
+        // SAFETY: value payload matches the descriptor in its own header.
         unsafe { hash_val(v_payload, &mut vh) };
         // Pair the key and value hashes together before XOR, so (k1:v2) ≠ (k2:v1).
         let pair = kh
@@ -271,14 +303,28 @@ unsafe fn map_owned_bytes(payload: *const u8) -> usize {
 // Set[T]
 // ===========================================================================
 
-/// The `Set[T]` payload (§11.3). The element descriptor selects structural
-/// `hash`/`equals` (via `DynamicKey`).
+/// The `Set[T]` payload (§11.3). The element descriptor is a **label** — what
+/// the construction site knew, or null when it knew nothing (REP-41). Each
+/// member's `DynamicKey` carries its own descriptor, which is what `hash` and
+/// `format` dispatch through.
 #[repr(C)]
 pub struct SetPayload {
-    /// The descriptor for every element (selects `DynamicKey`'s hash/eq).
-    pub element_descriptor: &'static TypeDescriptor,
+    /// The descriptor for every element, or null when the construction site had
+    /// no static element type. Read it through [`SetPayload::element`].
+    pub element_descriptor: *const TypeDescriptor,
     /// The elements, as `DynamicKey`s.
     pub entries: HashSet<DynamicKey>,
+}
+
+impl SetPayload {
+    /// The element label, or `None` when this set was never told its element
+    /// type.
+    #[must_use]
+    pub fn element(&self) -> Option<&'static TypeDescriptor> {
+        // SAFETY: a non-null label is always a `&'static` written by the
+        // constructor.
+        (!self.element_descriptor.is_null()).then(|| unsafe { &*self.element_descriptor })
+    }
 }
 
 unsafe fn set_trace(payload: *mut u8, tracer: &mut dyn Tracer) {
@@ -318,14 +364,16 @@ unsafe fn set_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     let p = unsafe { &*(payload as *const SetPayload) };
     // Order-independent: XOR all element hashes.
     hasher.write_bytes(&(p.entries.len() as u64).to_le_bytes());
-    let Some(hash_el) = p.element_descriptor.hash else {
-        return;
-    };
     let mut acc: u64 = 0;
     for k in p.entries.iter() {
+        // Through the member's own descriptor, not the set's label — `format`
+        // has always read `k.descriptor()` here and this is the same rule.
+        let Some(hash_el) = k.descriptor().hash else {
+            return;
+        };
         let mut h = crate::descriptor::StructHasher::new();
         let k_payload = k.value().payload::<u8>() as *const u8;
-        // SAFETY: element payload matches the element descriptor.
+        // SAFETY: element payload matches the descriptor its key carries.
         unsafe { hash_el(k_payload, &mut h) };
         acc ^= h.finish();
     }
@@ -367,10 +415,22 @@ unsafe fn set_owned_bytes(payload: *const u8) -> usize {
 /// where each value is a boxed `Int`; the key descriptor selects hash/eq.
 #[repr(C)]
 pub struct CounterPayload {
-    /// The descriptor for every key (selects `DynamicKey`'s hash/eq).
-    pub key_descriptor: &'static TypeDescriptor,
+    /// The descriptor for every key, or null when the construction site had no
+    /// static key type (REP-41). A label, not the authority: each key's
+    /// `DynamicKey` carries its own. Read it through [`CounterPayload::key`].
+    pub key_descriptor: *const TypeDescriptor,
     /// The entries: key → boxed Int value.
     pub entries: HashMap<DynamicKey, GcRef>,
+}
+
+impl CounterPayload {
+    /// The key label, or `None` when this counter was never told its key type.
+    #[must_use]
+    pub fn key(&self) -> Option<&'static TypeDescriptor> {
+        // SAFETY: a non-null label is always a `&'static` written by the
+        // constructor.
+        (!self.key_descriptor.is_null()).then(|| unsafe { &*self.key_descriptor })
+    }
 }
 
 unsafe fn counter_trace(payload: *mut u8, tracer: &mut dyn Tracer) {
@@ -429,11 +489,12 @@ unsafe fn counter_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     // SAFETY: caller guarantees `payload` points at an initialized CounterPayload.
     let p = unsafe { &*(payload as *const CounterPayload) };
     hasher.write_bytes(&(p.entries.len() as u64).to_le_bytes());
-    let Some(hash_key) = p.key_descriptor.hash else {
-        return;
-    };
     let mut acc: u64 = 0;
     for (k, v) in p.entries.iter() {
+        // Through the key's own descriptor, not the counter's label (REP-41).
+        let Some(hash_key) = k.descriptor().hash else {
+            return;
+        };
         let mut kh = crate::descriptor::StructHasher::new();
         let k_payload = k.value().payload::<u8>() as *const u8;
         // SAFETY: key payload matches the key descriptor.
