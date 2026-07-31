@@ -396,15 +396,43 @@ pub(crate) unsafe fn abi_panic_escaped<T: AbiSentinel>(
     }
     // SAFETY: the caller guarantees a live, wired context.
     unsafe { set_fault(ctx, RaisedFault::PANIC) };
+    let message = format!("internal error: a panic escaped the runtime wrapper `{wrapper}`");
     // SAFETY: as above.
-    unsafe {
-        set_fault_message(
-            ctx,
-            format!("internal error: a panic escaped the runtime wrapper `{wrapper}`"),
-        );
-    };
+    unsafe { set_fault_message(ctx, message.clone()) };
+    if !panic_fault_is_observable(wrapper) {
+        // **The dummy has to be unreachable where nobody will look at the
+        // fault.** Generated code tests the fault slot only where MIR emitted
+        // a `CheckFault`, and MIR emits one only after a call it classifies as
+        // faultable — so for a wrapper the manifest declares non-faulting there
+        // is *no* check by construction, and returning `unit_sentinel` would
+        // hand a `Unit` into a slot generated code believes holds a Record, a
+        // Tuple or a closure. That is the descriptor/payload confusion this
+        // repair has spent stages closing, and it would be *introduced* by the
+        // backstop meant to prevent worse. The pre-guard outcome for these was
+        // a process abort; it still is, with a message first, which is strictly
+        // more than the abort gave.
+        eprintln!("{message}");
+        std::process::abort();
+    }
     // SAFETY: as above.
     unsafe { T::sentinel(ctx) }
+}
+
+/// Whether generated code can be expected to observe a `Panic` fault raised by
+/// `wrapper` — i.e. whether the wrapper's defined dummy is ever consumed under
+/// a fault check rather than as a value.
+///
+/// The manifest is the authority: a symbol declared [`Effect::Pure`] or
+/// [`Effect::Allocates`] cannot be followed by a `CheckFault`, because MIR only
+/// emits one after a call it classifies as faultable. A wrapper the manifest
+/// does not name at all (the shadow-frame and debug entry points) is in the
+/// same position, and is treated the same way.
+///
+/// The converse is *not* claimed: a declared-faulting wrapper's call sites are
+/// MIR's business, and this only says the check is possible there. What it
+/// rules out is the class where it is impossible.
+fn panic_fault_is_observable(wrapper: &str) -> bool {
+    praxis_stdlib::abi::RuntimeSymbol::from_name(wrapper).is_some_and(|s| s.faults())
 }
 
 /// Wrap an `extern "C"` wrapper's body so a panic becomes a fault (D12).
@@ -6662,11 +6690,16 @@ mod tests {
         };
         assert_eq!(value, 7, "the guard is transparent when nothing panics");
 
+        // A **faulting** wrapper: its call sites can carry a `CheckFault`, so
+        // generated code will observe the fault before it looks at the value,
+        // and the defined dummy is the right answer. The name has to be a real
+        // manifest symbol now — see `panic_fault_is_observable`, which is what
+        // decides whether the dummy is returned at all.
         let mut runtime = crate::Runtime::new();
         let mut ctx = runtime.context();
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        let dummy: GcRef = abi_guard!("praxis_test_panics", &mut ctx as *mut RuntimeContext, {
+        let dummy: GcRef = abi_guard!("praxis_run_parser", &mut ctx as *mut RuntimeContext, {
             panic!("a wrapper that forgot to be total");
         });
         std::panic::set_hook(previous);
@@ -6679,13 +6712,68 @@ mod tests {
         assert!(
             runtime
                 .fault_message()
-                .is_some_and(|m| m.contains("praxis_test_panics")),
+                .is_some_and(|m| m.contains("praxis_run_parser")),
             "the fault names the wrapper it escaped, which a bare kind could not"
         );
         assert_eq!(
             dummy.descriptor().id(),
             crate::scalars::UNIT.id(),
             "the dummy is the Unit sentinel §10.4 already specifies"
+        );
+    }
+
+    /// **The dummy is only returned where the fault will be seen.**
+    ///
+    /// Generated code tests the fault slot only where MIR emitted a
+    /// `CheckFault`, and MIR emits one only after a call it classifies as
+    /// faultable. So for the wrappers the manifest declares non-faulting there
+    /// is no check *by construction*, and returning `unit_sentinel` there would
+    /// hand a `Unit` into a slot generated code believes holds a Record, a
+    /// Tuple or a closure — the descriptor/payload confusion this repair has
+    /// spent stages closing, introduced by the backstop meant to prevent worse.
+    /// Those abort instead, which is what they did before the guard existed.
+    ///
+    /// This test states the classification. The abort itself cannot be asserted
+    /// in-process, which is exactly why the rule has to be a total function of
+    /// the manifest rather than a case-by-case judgement.
+    #[test]
+    fn a_panic_dummy_is_only_returned_where_a_fault_check_can_follow() {
+        use praxis_stdlib::abi::RuntimeSymbol;
+
+        let mut pure = 0usize;
+        let mut faulting = 0usize;
+        for symbol in RuntimeSymbol::ALL.iter().copied() {
+            let observable = panic_fault_is_observable(symbol.name());
+            assert_eq!(
+                observable,
+                symbol.faults(),
+                "`{}` is declared {:?}; the panic dummy must be returned iff a \
+                 fault check can follow it",
+                symbol.name(),
+                symbol.sig().effect
+            );
+            if symbol.faults() {
+                faulting += 1;
+            } else {
+                pure += 1;
+            }
+        }
+        assert!(
+            pure > 0 && faulting > 0,
+            "the manifest must contain both classes for this rule to mean anything \
+             ({pure} non-faulting, {faulting} faulting)"
+        );
+
+        // A wrapper the manifest does not name — the shadow-frame and debug
+        // entry points — is in the same position as a non-faulting one: there
+        // is nothing that could have emitted a check after it.
+        assert!(
+            !panic_fault_is_observable("praxis_push_shadow_frame"),
+            "an unmanifested entry point has no fault check either"
+        );
+        assert!(
+            !panic_fault_is_observable("praxis_not_a_wrapper_at_all"),
+            "an unknown name is never treated as observable"
         );
     }
 }

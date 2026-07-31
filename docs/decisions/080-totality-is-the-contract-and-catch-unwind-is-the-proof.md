@@ -96,6 +96,31 @@ be an invalid reference, not a dummy), zero for an `i64`, null for a raw pointer
 A null context has no fault slot to write and no `Unit` to return, so it aborts —
 still better than unwinding into generated frames.
 
+### …but only where the fault will be observed
+
+The dummy is a defined answer only if somebody looks at the fault first, and
+generated code looks exactly where MIR emitted a `CheckFault` — which it emits
+only after a call it classifies as **faultable**. So for a symbol the manifest
+declares `Effect::Pure` or `Effect::Allocates` there is no check *by
+construction*, and handing back `unit_sentinel` would put a `Unit` into a slot
+generated code believes holds a Record, a Tuple or a closure. That is the
+descriptor/payload confusion this repair has spent stages closing, introduced by
+the backstop meant to prevent something worse.
+
+So the rule is: **a caught panic returns the dummy iff a fault check can follow
+the wrapper**, decided from the manifest by `panic_fault_is_observable`. For
+every other wrapper — the non-faulting ones, and the entry points the manifest
+does not name at all, such as the shadow-frame and debug symbols — the panic
+prints the same message and aborts, which is what those wrappers did before this
+ADR existed. The dummy is unreachable there; it is not a case anyone has to
+reason about.
+
+The converse is not claimed. Whether a *declared-faulting* wrapper's particular
+call site carries a check is MIR's business; this rule only rules out the class
+where a check is impossible. Totality therefore remains the contract for every
+wrapper, and for a non-faulting one it is load-bearing rather than merely
+primary: the backstop's answer there is a dead process, not a fault report.
+
 ## Consequences
 
 - **164 wrappers changed shape.** The bodies are unchanged; each is one
