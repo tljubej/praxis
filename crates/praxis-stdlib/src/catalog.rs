@@ -488,10 +488,15 @@ mod tests {
         // exactly what deriving the answer from the wrapper removes.
         assert!(e.allocates());
         assert!(vec_len().allocates());
-        assert!(
-            !e.can_fault(),
-            "praxis_vec_push is Allocates, not AllocatesAndFaults"
-        );
+        // **This assertion used to be `!e.can_fault()`** (REP-45, §8.2), with
+        // the reason "praxis_vec_push is Allocates, not AllocatesAndFaults" —
+        // which restated the manifest row rather than checking it against the
+        // wrapper. `praxis_vec_push` calls `adopt_or_reject`, which ends in
+        // `set_fault(ctx, TYPE_MISMATCH)`, so the row was wrong and the test
+        // was pinning it. `praxis_vec_len` is the contrast that keeps the
+        // assertion meaningful: it really cannot fault.
+        assert!(e.can_fault(), "praxis_vec_push raises TypeMismatch");
+        assert!(!vec_len().can_fault());
         assert_eq!(e.purity, Purity::Impure);
     }
 }

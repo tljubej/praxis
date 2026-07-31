@@ -252,8 +252,8 @@ runtime_symbols! {
     DequeNew = "praxis_deque_new": (Ctx, Ptr) -> Gc, Allocates;
     DequePopBack = "praxis_deque_pop_back": (Ctx, Gc) -> Gc, Faults;
     DequePopFront = "praxis_deque_pop_front": (Ctx, Gc) -> Gc, Faults;
-    DequePushBack = "praxis_deque_push_back": (Ctx, Gc, Gc) -> GcUnit, Allocates;
-    DequePushFront = "praxis_deque_push_front": (Ctx, Gc, Gc) -> GcUnit, Allocates;
+    DequePushBack = "praxis_deque_push_back": (Ctx, Gc, Gc) -> GcUnit, AllocatesAndFaults;
+    DequePushFront = "praxis_deque_push_front": (Ctx, Gc, Gc) -> GcUnit, AllocatesAndFaults;
     Dbg = "praxis_dbg": (Ctx, Gc) -> Gc, Pure;
     Dfs = "praxis_dfs": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     Dijkstra = "praxis_dijkstra": (Ctx, Gc, Gc, Gc) -> Gc, AllocatesAndFaults;
@@ -379,7 +379,7 @@ runtime_symbols! {
     VecIsEmpty = "praxis_vec_is_empty": (Ctx, Gc) -> Gc, Pure;
     VecLen = "praxis_vec_len": (Ctx, Gc) -> Gc, Allocates;
     VecNew = "praxis_vec_new": (Ctx, Ptr) -> Gc, Allocates;
-    VecPush = "praxis_vec_push": (Ctx, Gc, Gc) -> GcUnit, Allocates;
+    VecPush = "praxis_vec_push": (Ctx, Gc, Gc) -> GcUnit, AllocatesAndFaults;
     WriteStdout = "praxis_write_stdout": (Ctx, Gc) -> GcUnit, Pure;
 }
 
