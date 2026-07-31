@@ -2257,10 +2257,10 @@ fn seq_find_on_vec() -> MethodEntry {
         receiver: vec_of_t(),
         name: "find",
         params: vec![t_to_bool()],
-        result: TypePattern::Scalar(ScalarType::Int),
+        result: TypePattern::Option(Box::new(TypePattern::var("T"))),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_find"),
-        doc: "Index of the first matching element, or -1 on miss.",
+        doc: "The first matching element, or None.",
         stability: Stability::Stable,
     }
 }
@@ -2270,10 +2270,10 @@ fn seq_find_on_seq() -> MethodEntry {
         receiver: seq_of_t(),
         name: "find",
         params: vec![t_to_bool()],
-        result: TypePattern::Scalar(ScalarType::Int),
+        result: TypePattern::Option(Box::new(TypePattern::var("T"))),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_find"),
-        doc: "Index of the first matching element, or -1 on miss.",
+        doc: "The first matching element, or None.",
         stability: Stability::Stable,
     }
 }
@@ -2283,10 +2283,10 @@ fn seq_position_on_vec() -> MethodEntry {
         receiver: vec_of_t(),
         name: "position",
         params: vec![t_to_bool()],
-        result: TypePattern::Scalar(ScalarType::Int),
+        result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int))),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_position"),
-        doc: "Index of the first matching element, or -1 on miss (alias of find).",
+        doc: "The index of the first matching element, or None.",
         stability: Stability::Stable,
     }
 }
@@ -2296,10 +2296,10 @@ fn seq_position_on_seq() -> MethodEntry {
         receiver: seq_of_t(),
         name: "position",
         params: vec![t_to_bool()],
-        result: TypePattern::Scalar(ScalarType::Int),
+        result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int))),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_position"),
-        doc: "Index of the first matching element, or -1 on miss (alias of find).",
+        doc: "The index of the first matching element, or None.",
         stability: Stability::Stable,
     }
 }

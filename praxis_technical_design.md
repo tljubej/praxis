@@ -616,8 +616,8 @@ Initial operations:
 - `count`
 - `any`
 - `all`
-- `find`
-- `position`
+- `find` — the first matching **element**, as `Option[T]`
+- `position` — the first matching element's **index**, as `Option[Int]`
 - `enumerate`
 - `zip`
 - `chunks`

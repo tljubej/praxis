@@ -3300,18 +3300,42 @@ fn sink_alloc(
     sink_init_slot: Option<LocalId>,
 ) -> (Option<LocalId>, Option<LocalId>, Option<LocalId>) {
     match sink {
-        Sink::Sum | Sink::Product | Sink::Count | Sink::Find(_) | Sink::Position(_) => {
+        Sink::Sum | Sink::Product | Sink::Count => {
             let acc = b.alloc_scalar(ScalarKind::Int);
-            let init = match sink {
-                Sink::Product => 1,
-                Sink::Find(_) | Sink::Position(_) => -1, // miss sentinel
-                _ => 0,
-            };
+            let init = i64::from(matches!(sink, Sink::Product));
             b.push(Inst::ConstInt {
                 dst: acc,
                 value: init,
             });
             (Some(acc), None, None)
+        }
+        // **REP-39, ADR-082.** `find` answers the matching *element* and
+        // `position` its index — two different questions, which is why §6.3
+        // lists them as two operations. They shared one arm and one `-1`
+        // accumulator, which made `find` an exact duplicate of `position` and
+        // put an in-band sentinel under both: `-1` is a legal element of a
+        // `Vec[Int]` and a legal index of nothing, so a hit and a miss were
+        // indistinguishable. Both carry a seen-flag now and answer `Option`,
+        // and the accumulator differs because the answer does — a `Gc` slot for
+        // the element, a scalar for the index.
+        Sink::Find(_) => {
+            let acc = seeded_gc_accumulator(b);
+            let seen = b.alloc_scalar(ScalarKind::Bool);
+            b.push(Inst::ConstInt {
+                dst: seen,
+                value: 0,
+            });
+            (None, Some(acc), Some(seen))
+        }
+        Sink::Position(_) => {
+            let acc = b.alloc_scalar(ScalarKind::Int);
+            b.push(Inst::ConstInt { dst: acc, value: 0 });
+            let seen = b.alloc_scalar(ScalarKind::Bool);
+            b.push(Inst::ConstInt {
+                dst: seen,
+                value: 0,
+            });
+            (Some(acc), None, Some(seen))
         }
         Sink::Min | Sink::Max => {
             let acc = b.alloc_scalar(ScalarKind::Int);
@@ -3659,9 +3683,12 @@ fn emit_sink_body(
             jump_and_go_dead(b, pipeline_exit);
             b.cur = cont_blk;
         }
+        // **REP-39.** One search, two answers. Both stop at the first match and
+        // both raise the seen-flag; what they record differs, and that is the
+        // whole difference between the two operations §6.3 names.
         Sink::Find(_) | Sink::Position(_) => {
-            let acc = acc_scalar.unwrap();
             let count = position.expect("find/position carry a dense counter");
+            let seen = seen_flag.expect("find/position carry a seen flag");
             let pred = sink_closure_slot.unwrap();
             let keep = call_predicate(b, pred, item);
             let found_blk = b.func.new_block();
@@ -3671,16 +3698,31 @@ fn emit_sink_body(
                 then_block: found_blk,
                 else_block: cont_blk,
             };
-            // On a hit, the answer is the position in the sequence that reached
-            // the sink: the counter's value before this element was counted.
             b.cur = found_blk;
-            let position_scalar = b.alloc_scalar(ScalarKind::Int);
-            b.push(Inst::ExtractScalar {
-                dst: position_scalar,
-                src: count,
-                scalar: ScalarKind::Int,
+            match sink {
+                // `find` answers the element that matched.
+                Sink::Find(_) => {
+                    b.push(Inst::MoveGc {
+                        dst: acc_gc.unwrap(),
+                        src: item,
+                    });
+                }
+                // `position` answers where it was: the counter's value before
+                // this element was counted.
+                _ => {
+                    let position_scalar = b.alloc_scalar(ScalarKind::Int);
+                    b.push(Inst::ExtractScalar {
+                        dst: position_scalar,
+                        src: count,
+                        scalar: ScalarKind::Int,
+                    });
+                    move_scalar(b, acc_scalar.unwrap(), position_scalar);
+                }
+            }
+            b.push(Inst::ConstInt {
+                dst: seen,
+                value: 1,
             });
-            move_scalar(b, acc, position_scalar);
             jump_and_go_dead(b, pipeline_exit);
             // On a miss, count the element and go on. (There is no bump on the
             // hit path because that path leaves the pipeline.)
@@ -3778,7 +3820,7 @@ fn sink_finish(
     acc_gc: Option<LocalId>,
     seen_flag: Option<LocalId>,
     collect_vec: Option<LocalId>,
-    _result_ty: Type,
+    ty: Type,
 ) -> LocalId {
     match sink {
         Sink::Collect => collect_vec.unwrap(),
@@ -3825,9 +3867,9 @@ fn sink_finish(
             });
             dst
         }
-        // These five always have an answer on an empty sequence, and it is the
-        // right one: `0`, `1`, `0`, and the two miss sentinels.
-        Sink::Sum | Sink::Product | Sink::Count | Sink::Find(_) | Sink::Position(_) => {
+        // These three always have an answer on an empty sequence, and it is the
+        // right one: `0`, `1`, `0`.
+        Sink::Sum | Sink::Product | Sink::Count => {
             let acc = acc_scalar.unwrap();
             let dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
             b.push(Inst::Materialize {
@@ -3839,8 +3881,90 @@ fn sink_finish(
             });
             dst
         }
+        // **REP-39, ADR-082.** A search that found nothing answers `None`, not a
+        // number. `-1` was in band for both: a legal element of a `Vec[Int]` and
+        // a legal `Int` besides, so no program could tell a hit from a miss —
+        // and `find`, whose element type is `Text` as often as not, could not
+        // reach its answer at all.
+        Sink::Find(_) => {
+            let found = acc_gc.expect("find carries a Gc accumulator");
+            emit_option_of(b, seen_flag.expect("find carries a seen flag"), found, ty)
+        }
+        Sink::Position(_) => {
+            let acc = acc_scalar.expect("position carries a scalar accumulator");
+            let idx = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
+            b.push(Inst::Materialize {
+                dst: idx,
+                src: acc,
+                scalar: ScalarKind::Int,
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
+            });
+            emit_option_of(b, seen_flag.expect("position carries a seen flag"), idx, ty)
+        }
     }
 }
+
+/// `if seen { Some(value) } else { None }`, as the sink's `Option`-typed answer
+/// (REP-39, ADR-082).
+///
+/// `result_ty` is the sink's own static type — `Option[Text]`, not `Option` —
+/// because the backend resolves the `Some` payload's descriptor from it.
+///
+/// Both arms write one `Gc` slot rather than the two branches producing
+/// separate locals: MIR is not SSA, and this is the shape `Sink::Fold` already
+/// uses for an accumulator that several blocks assign.
+fn emit_option_of(b: &mut Builder<'_>, seen: LocalId, value: LocalId, result_ty: Type) -> LocalId {
+    let mir_ty = MirType::Known(result_ty);
+    let def = b.db.option_def().to_u32();
+    let dst = b.alloc_gc(mir_ty, None, LocalDebugKind::Temp, None);
+
+    let some_blk = b.func.new_block();
+    let none_blk = b.func.new_block();
+    let join_blk = b.func.new_block();
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+        cond: seen,
+        then_block: some_blk,
+        else_block: none_blk,
+    };
+
+    b.cur = some_blk;
+    b.push(Inst::Alloc {
+        dst,
+        alloc: AllocKind::Enum {
+            enum_def_id: def,
+            variant_idx: OPTION_SOME_VARIANT,
+            ty: mir_ty,
+            args: vec![value],
+        },
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
+    });
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join_blk };
+
+    b.cur = none_blk;
+    b.push(Inst::Alloc {
+        dst,
+        alloc: AllocKind::Enum {
+            enum_def_id: def,
+            variant_idx: OPTION_NONE_VARIANT,
+            ty: mir_ty,
+            args: Vec::new(),
+        },
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
+    });
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join_blk };
+
+    b.cur = join_blk;
+    dst
+}
+
+/// `Some`'s and `None`'s discriminants in the prelude's one `Option` def, which
+/// `TypeDb::new` registers in that order and the runtime's `OPTION_SOME_TAG` /
+/// `OPTION_NONE_TAG` agree with.
+const OPTION_SOME_VARIANT: u32 = praxis_runtime::enums::OPTION_SOME_TAG as u32;
+const OPTION_NONE_VARIANT: u32 = praxis_runtime::enums::OPTION_NONE_TAG as u32;
 
 /// Lower a pipeline combinator intrinsic (M8-WS8, §6.3) over a Vec receiver
 /// into a fused loop. Each combinator allocates its own loop here; true cross-

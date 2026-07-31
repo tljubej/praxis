@@ -1919,31 +1919,64 @@ fn pipeline_all_false_short_circuits() {
     assert_eq!(result.as_int(), 0);
 }
 
+/// **Rewritten** (plan §8.2, REP-39). It was `pipeline_find_returns_index_on_hit`
+/// and asserted `[10,20,30].find(|x| x == 20) == 1` — the *index*, which is what
+/// `position` answers. §6.3 lists `find` and `position` as two operations, and
+/// they were one: the same MIR arm, the same accumulator, the same result type.
+/// The old assertion was a true statement about the implementation and a false
+/// one about the language.
+///
+/// **This is REP-39's gate**, and the vector is chosen so that only the right
+/// answer passes: `20` is at index `1`, so a `find` that still answers an index
+/// answers `Some(1)`, which is not `Some(20)`.
 #[test]
-fn pipeline_find_returns_index_on_hit() {
-    // [10,20,30].find(|x| x == 20) = 1.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.find(|x| x == 20)\n}\n";
+fn find_answers_the_matching_element_not_its_index() {
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  match v.find(|x| x == 20) { Some(n) => n, None => 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), 1);
+    assert_eq!(result.as_int(), 20);
 }
 
+/// **Rewritten** (§8.2, REP-39). It was `pipeline_find_returns_neg1_on_miss` and
+/// asserted the `-1` miss sentinel. ADR-029 decision 5 chose that sentinel, and
+/// ADR-082 retires it: `-1` is a legal element of a `Vec[Int]` and a legal `Int`
+/// besides, so a `Vec[Int]` containing `-1` could not tell a hit from a miss.
+/// §4.7 already says absence is `Option`.
 #[test]
-fn pipeline_find_returns_neg1_on_miss() {
-    // [10,20,30].find(|x| x == 99) = -1.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.find(|x| x == 99)\n}\n";
+fn a_find_that_matches_nothing_answers_none() {
+    // The miss arm answers 7, a number no element could produce, so a `Some`
+    // sneaking through is visible rather than merely different.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  match v.find(|x| x == 99) { Some(n) => n, None => 7 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), -1);
+    assert_eq!(result.as_int(), 7);
 }
 
+/// **Rewritten** (§8.2, REP-39). It was `pipeline_position_is_alias_of_find`,
+/// and its *name* was the finding: an alias is exactly what §6.3 does not
+/// describe. `position` keeps the index — that is its question — and answers it
+/// as an `Option[Int]` for the same in-band-sentinel reason `find` does.
 #[test]
-fn pipeline_position_is_alias_of_find() {
-    // [10,20,30].position(|x| x == 30) = 2.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.position(|x| x == 30)\n}\n";
+fn position_answers_the_index_and_find_answers_the_element() {
+    // `[10,20,30]`: `position(== 30)` is 2 and `find(== 30)` is 30. Summing the
+    // two makes a swapped pair (30 + 2 the other way round) impossible to miss,
+    // and a `-1` sentinel on either side lands nowhere near 32.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  let p = match v.position(|x| x == 30) { Some(i) => i, None => 0 }\n  let f = match v.find(|x| x == 30) { Some(n) => n, None => 0 }\n  f * 10 + p\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), 2);
+    assert_eq!(result.as_int(), 302);
+}
+
+/// `find` reaches an element its old `Int` result could not name at all. This is
+/// the half of REP-39 that no arithmetic can express: the receiver's element
+/// type is `Text`, so before ADR-082 no program could get the answer out of
+/// `find` — the row's result was `Int` whatever the receiver held.
+#[test]
+fn find_reaches_a_non_int_element() {
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(\"alpha\")\n  v.push(\"beta\")\n  match v.find(|s| s == \"beta\") { Some(s) => s.len(), None => 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4);
 }
 
 #[test]
@@ -2109,7 +2142,9 @@ fn each_stage_counts_the_sequence_that_reaches_it() {
     // hit inside a `flat_map` ends only the inner loop. The inner Vecs here are
     // [0, 5] and [10]: flattened, the first element over 4 is at index 1;
     // per-inner, the first Vec answers 1 and the second overwrites it with 0.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let r = Vec()\n    if x == 1 { r.push(0) }\n    r.push(x * 5)\n    r\n  }).position(|p| p > 4)\n}\n";
+    // (The `match` is REP-39: the index arrives inside a `Some` now. What this
+    // measures — *which* index — is unchanged.)
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  match v.flat_map(|x| {\n    let r = Vec()\n    if x == 1 { r.push(0) }\n    r.push(x * 5)\n    r\n  }).position(|p| p > 4) { Some(i) => i, None => -1 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1, "the flattened stream's index, once");
@@ -2299,13 +2334,17 @@ fn pipeline_empty_vec_sum_is_zero() {
     assert_eq!(result.as_int(), 0);
 }
 
+/// **Rewritten** (§8.2, REP-39). It was `pipeline_empty_vec_find_is_neg1`. An
+/// empty source is a miss like any other, and a miss is `None` — the same
+/// answer, now spelled so that a caller can act on it. Note this is *not* the
+/// `EmptyCollection` fault: `find` has an answer for an empty sequence, which is
+/// exactly what distinguishes it from `min`/`reduce` (D1).
 #[test]
-fn pipeline_empty_vec_find_is_neg1() {
-    // Empty source → find returns the -1 miss sentinel.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.find(|x| x == 0)\n}\n";
+fn an_empty_source_makes_find_answer_none() {
+    let src = "fn main() -> Int {\n  let v = Vec()\n  match v.find(|x| x == 0) { Some(n) => n, None => 7 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), -1);
+    assert_eq!(result.as_int(), 7);
 }
 
 // ===========================================================================
@@ -3730,8 +3769,10 @@ fn adv_pipeline_collect_nested_vecs_then_count() {
 fn adv_pipeline_find_with_allocating_predicate() {
     // find's predicate allocates (creates an Int) before returning its bool.
     // If the fused loop doesn't root the current element across the predicate's
-    // allocation, find matches the wrong element or faults.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 100 { v.push(i); i = i + 1 }\n  v.find(|x| x + 0 == 50)\n}\n";
+    // allocation, find matches the wrong element or faults. REP-39 makes this
+    // stronger rather than weaker: the answer is now the *element*, which the
+    // loop has to have kept alive across that allocation to hand back at all.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 100 { v.push(i); i = i + 1 }\n  match v.find(|x| x + 0 == 50) { Some(n) => n, None => -1 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 50);
