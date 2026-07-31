@@ -6660,6 +6660,60 @@ mod tests {
     /// be a Rust parser, and anything looser — matching `fn` anywhere — reads
     /// the word out of doc comments and glues unrelated bodies together.
     fn functions_in_this_file() -> Vec<(String, String)> {
+        functions_in(include_str!("abi.rs"))
+    }
+
+    /// The code of one line, with any `//` comment removed.
+    ///
+    /// The sweep reads what the **compiler** sees, not what a reader wrote
+    /// beside it. Before this, `body` was the raw line and the fixed point
+    /// matched `set_fault(` as a plain substring, so a comment inside a wrapper
+    /// naming the helper — "this used to call `set_fault(…)`" — classified that
+    /// wrapper as faulting and failed the assertion for a wrapper that cannot
+    /// fault. A sweep a comment can fool is a sweep that gets edited around
+    /// rather than satisfied, which is the failure mode the whole invariant
+    /// exists to prevent. Currently only latent: no `praxis_*` body names the
+    /// helper in prose today.
+    ///
+    /// A `//` inside a string or `char` literal is **not** a comment — `"//"`
+    /// and `'/'` both occur in this file — so the scan tracks which it is in.
+    /// It is not a Rust lexer: a raw string's hashes and a block comment are
+    /// not modelled, because neither appears in a function body here and a
+    /// half-lexer that claimed to be one would be worse than a stated
+    /// limitation. It errs toward keeping code, never toward dropping it.
+    fn code_only(line: &str) -> &str {
+        let bytes = line.as_bytes();
+        let (mut in_str, mut in_char, mut escaped) = (false, false, false);
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' && (in_str || in_char) {
+                escaped = true;
+            } else if in_str {
+                in_str = c != b'"';
+            } else if in_char {
+                in_char = c != b'\'';
+            } else if c == b'"' {
+                in_str = true;
+            } else if c == b'\'' {
+                // A lifetime (`'a`) is not a `char` literal; a `char` literal's
+                // closing quote is at most three bytes away (`'\\n'`, `'\\''`).
+                in_char = bytes[i + 1..].iter().take(4).any(|b| *b == b'\'');
+            } else if c == b'/' && bytes.get(i + 1) == Some(&b'/') {
+                return &line[..i];
+            }
+            i += 1;
+        }
+        line
+    }
+
+    /// Every function defined in `src`, as `(name, code)` — the code only, with
+    /// comments stripped by [`code_only`]. Braces are counted on the code too,
+    /// so a comment holding an unbalanced brace cannot end a body early or run
+    /// two bodies together.
+    fn functions_in(src: &str) -> Vec<(String, String)> {
         const PREFIXES: [&str; 6] = [
             "fn ",
             "pub fn ",
@@ -6673,7 +6727,8 @@ mod tests {
         // a multi-line signature spends several lines at depth zero before its
         // `{`, and closing there would give every such wrapper a one-line body).
         let mut open: Option<(String, String, i32, bool)> = None;
-        for line in include_str!("abi.rs").lines() {
+        for raw in src.lines() {
+            let line = code_only(raw);
             let depth_change = |l: &str| -> i32 {
                 l.chars().filter(|c| *c == '{').count() as i32
                     - l.chars().filter(|c| *c == '}').count() as i32
@@ -6740,16 +6795,14 @@ mod tests {
     /// helper in another module. Those are false negatives — this test is weaker
     /// than the truth, never stricter — and the direction it does check is the
     /// one that produces wrong answers.
-    #[test]
-    fn a_wrapper_that_can_raise_a_fault_declares_that_it_faults() {
-        let defs = functions_in_this_file();
-        // Fixed point: a function faults if it calls `set_fault`, or calls
-        // something that does.
+    /// The fixed point of "can reach `set_fault`" over `defs`: a function
+    /// faults if it calls `set_fault`, or calls something that does.
+    fn faulting_functions(defs: &[(String, String)]) -> std::collections::HashSet<String> {
         let mut faulting: std::collections::HashSet<String> =
             ["set_fault".to_string()].into_iter().collect();
         loop {
             let mut grew = false;
-            for (name, body) in &defs {
+            for (name, body) in defs {
                 if faulting.contains(name) {
                     continue;
                 }
@@ -6762,6 +6815,13 @@ mod tests {
                 break;
             }
         }
+        faulting
+    }
+
+    #[test]
+    fn a_wrapper_that_can_raise_a_fault_declares_that_it_faults() {
+        let defs = functions_in_this_file();
+        let faulting = faulting_functions(&defs);
 
         let mut checked = 0usize;
         for (name, _) in &defs {
@@ -6798,5 +6858,72 @@ mod tests {
                  that cannot see that cannot hold the invariant"
             );
         }
+    }
+    /// **The sweep above reads code, not prose.** Its classification is a
+    /// substring match, so before [`code_only`] a *comment* inside a wrapper
+    /// naming the helper — the most natural thing to write while removing a
+    /// fault — classified that wrapper as faulting and failed the invariant for
+    /// a wrapper that cannot fault. A sweep a comment can fool is a sweep that
+    /// gets edited around rather than satisfied.
+    ///
+    /// Synthetic source, because the real file must not contain the shape: the
+    /// point is that it may, safely.
+    #[test]
+    fn the_manifest_sweep_reads_code_and_not_comments() {
+        let src = r#"
+pub unsafe extern "C" fn praxis_pretend_pure(ctx: *mut RuntimeContext) -> GcRef {
+    // It used to call set_fault(ctx, RaisedFault::TYPE_MISMATCH) here, and a
+    // later edit removed the only path that could. Prose, not code. }
+    let sep = "//";
+    let slash = '/';
+    let _ = (sep, slash);
+    unit_sentinel(ctx)
+}
+
+pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> GcRef {
+    set_fault(ctx, RaisedFault::TYPE_MISMATCH);
+    unit_sentinel(ctx)
+}
+"#;
+        let defs = functions_in(src);
+        let names: Vec<&str> = defs.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["praxis_pretend_pure", "praxis_pretend_faulting"]);
+        // The unbalanced `}` in that comment must not close the body early:
+        // braces are counted on the code too, so the whole function is read.
+        assert!(
+            defs[0].1.contains("unit_sentinel(ctx)"),
+            "a brace inside a comment ended the body early: {:?}",
+            defs[0].1
+        );
+
+        let faulting = faulting_functions(&defs);
+        assert!(
+            !faulting.contains("praxis_pretend_pure"),
+            "a comment naming `set_fault` is not a call to it"
+        );
+        assert!(
+            faulting.contains("praxis_pretend_faulting"),
+            "and a real call still is — stripping comments must not blind the sweep"
+        );
+    }
+
+    /// [`code_only`]'s own contract, both directions.
+    #[test]
+    fn code_only_keeps_a_slash_inside_a_literal() {
+        assert_eq!(code_only("let x = 1; // two"), "let x = 1; ");
+        assert_eq!(code_only(r#"let s = "a//b";"#), r#"let s = "a//b";"#);
+        assert_eq!(code_only(r"let c = '/'; // gone"), r"let c = '/'; ");
+        assert_eq!(
+            code_only(r#"let e = "\"//"; // gone"#),
+            r#"let e = "\"//"; "#
+        );
+        assert_eq!(code_only("    /// a doc comment"), "    ");
+        assert_eq!(code_only("no comment here"), "no comment here");
+        // A lifetime is not a `char` literal, so the comment after it is still
+        // a comment.
+        assert_eq!(
+            code_only("fn f<'a>(x: &'a str) {} // gone"),
+            "fn f<'a>(x: &'a str) {} "
+        );
     }
 }
