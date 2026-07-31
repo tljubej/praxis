@@ -191,8 +191,18 @@ and `a_compiled_plan_owns_its_interned_strings` build through `Separator::new` n
 
 #### S19's repair pass — what three adversarial reviews found, and what closed it
 
-Four defects, each its own commit and its own gate. All four were **shipped by
+Five defects, each its own commit and its own gate. All five were **shipped by
 S19 itself**, and the first was a regression against `main`.
+
+One thing the reviews raised is **not** closed, deliberately: `read `{int``
+still swallows the rest of the file into one token. Under D10 a backtick inside
+a capture opens a template of its own, so that really is an unterminated
+template and `T002` really does cover it. Bounding the swallow means deciding
+whether a backtick template may span a raw newline — §7.2 says `\n` *matches* a
+line ending but not whether a raw one may appear in the source form — and the
+alternative recovery (end the run at the first inner backtick) turns one honest
+diagnostic into a cascade of them: `` `{g:choice(A: `{x:int}`)}`` `` would
+report `T002` twice. It is a language question, not a repair.
 
 | Test | File | Pins |
 |---|---|---|
@@ -202,6 +212,7 @@ S19 itself**, and the first was a regression against `main`.
 | `both_front_ends_apply_one_repeated_tail_rule` | `infer_tests.rs` | ADR-073's claim, made true for the tail marker. The bridge unwrapped `name: repeated(P)` with a `find_map` over the first parser-expr child, so `repeated(matrix(int), word, int)` ran as `repeated(matrix(int))` (exit 0, wrong answer) and `repeated()` reported nothing — while the same text in a capture body was `I022`. Every case is asserted through **both** spellings on the same code |
 | `a_field_named_fill_or_skip_is_a_field_and_not_a_dropped_keyword` | `infer_tests.rs` | `skip:`/`fill:` were minted from the argument's *name* with no reference to the constructor, and `CallArg::Keyword`/`Named` projected onto one `ArgKind`, so a `sections` field or `block` item called `fill` was accepted and then `filter_map`ed away. `Constructor::keyword_arg()` decides; `ArgKind::Keyword` is its own kind |
 | `a_keyword_argument_is_accepted_only_where_the_shape_has_one` | `praxis-input-parser/src/validate.rs` | the split at `check_call` — including that the same position holding a named *parser* is still accepted, which is the distinction the collapsed projection could not express |
+| `an_unterminated_template_does_not_also_report_a_fabricated_interior` | `praxis-cli/tests/check.rs` | `convert_template` stripped the token's backticks with `.unwrap_or(&text)`, so an *unterminated* token — one with no closing backtick, which is what unterminated means — was scanned whole and answered "malformed capture body at byte 5: unterminated nested template": a construct the file does not contain, at an offset that is not where anything is. The IP-03 class, one layer up. `praxis-input-parser`'s `unterminated_capture_errors` calls `scan_template` directly and never sees the lexer, which is why it kept passing |
 | `every_span_is_the_text_it_names_even_inside_a_nested_template` | `praxis-input-parser/src/scan.rs` | a nested template's parts and errors kept **nested-interior** offsets and were never rebased, so every caret under one was short by that interior's offset. Nothing in the branch asserted any span at all; this slices the interior by each span and compares it with the text the node was built from, at one level and two, plus the error offset |
 
 Three tests the reviewers named as *not* gates were fixed rather than defended:
