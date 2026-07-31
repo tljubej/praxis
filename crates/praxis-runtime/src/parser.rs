@@ -827,6 +827,7 @@ fn walk_choice(
     cases: &'static [(&'static str, u32)],
     region: ByteRegion,
 ) -> WalkResult {
+    let mut deepest: Option<ParseFail> = None;
     for (tag, (_name, child)) in cases.iter().enumerate() {
         // SAFETY: ctx is valid.
         match unsafe { walk(rt.ctx, i, plan, *child, region) } {
@@ -840,15 +841,28 @@ fn walk_choice(
                     next: walked.next,
                 });
             }
-            Err(_inner) => {
-                // Backtrack: try the next case from the same position. We
-                // discard the inner failure here; if no case matches, the
-                // choice's own failure below is the user-visible one.
-                continue;
+            Err(inner) => {
+                // Backtrack, **keeping the deepest case failure** (IPR-09).
+                // Every case's failure used to be discarded and replaced with a
+                // generic "any choice case" at the choice's own offset, so
+                // §7.11's detail named the outermost construct and pointed at
+                // the position where nothing had gone wrong yet. The deepest
+                // failure is the most specific one — it is the same rule
+                // `ParseDetail::consider` applies across a whole parse — and a
+                // case that got further is the case the input was trying to be.
+                let deeper = match &deepest {
+                    None => true,
+                    Some(best) => inner.input_span.0 > best.input_span.0,
+                };
+                if deeper {
+                    deepest = Some(inner);
+                }
             }
         }
     }
-    Err(ParseFail::at(region.start().offset(), 0, "any choice case"))
+    // A choice with no cases has no case failure to report; that is the only
+    // shape the generic message ever described honestly.
+    Err(deepest.unwrap_or_else(|| ParseFail::at(region.start().offset(), 0, "any choice case")))
 }
 
 /// Walk `optional(P)` (M9, §7.5): parse `P`; on success return `Some(value)`
@@ -2386,6 +2400,66 @@ mod tests {
     }
 
     // --- M7-WS9: whitespace matcher (§7.2) -----------------------------------
+
+    /// **IPR-09.** A failed `choice` reports the deepest case failure, not a
+    /// generic one at its own offset.
+    ///
+    /// Every case's failure used to be dropped on the floor and replaced with
+    /// `"any choice case"` at the position where the choice *started* — so
+    /// §7.11's detail named the outermost construct and pointed at a byte where
+    /// nothing had gone wrong. The case that got furthest is the case the input
+    /// was trying to be, and its own message is the one worth showing.
+    #[test]
+    fn a_failed_choice_reports_the_deepest_case_failure() {
+        fn lit(text: &'static str) -> praxis_input_parser::TemplatePartNode {
+            praxis_input_parser::TemplatePartNode::Literal {
+                text,
+                ws: praxis_input_parser::WsPolicy::None,
+            }
+        }
+        fn capture(child: u32) -> praxis_input_parser::TemplatePartNode {
+            praxis_input_parser::TemplatePartNode::Capture {
+                child,
+                field_index: None,
+                name: None,
+            }
+        }
+
+        let mut rt = crate::Runtime::new();
+        // `a{int}` fails at byte 1; `ab{int}` gets one byte further and fails
+        // at byte 2. The second is the one to report.
+        let input = rt.alloc_text("abz");
+        let mut ctx = rt.context();
+        ctx.input_source = input;
+        let short: &'static [praxis_input_parser::TemplatePartNode] =
+            Box::leak(vec![lit("a"), capture(0)].into_boxed_slice());
+        let long: &'static [praxis_input_parser::TemplatePartNode] =
+            Box::leak(vec![lit("ab"), capture(0)].into_boxed_slice());
+        let cases: &'static [(&'static str, u32)] =
+            Box::leak(vec![("Short", 1u32), ("Long", 2u32)].into_boxed_slice());
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Int,
+                },
+                PlanNode::Template { parts: short },
+                PlanNode::Template { parts: long },
+                PlanNode::Choice { cases },
+            ],
+            3,
+        );
+
+        let fail = unsafe { run_root(&mut ctx, &plan, input) }
+            .expect_err("neither case can read `z` as an int");
+        assert_eq!(
+            fail.expected, "int",
+            "the deepest case's own expectation, not \"any choice case\""
+        );
+        assert_eq!(
+            fail.input_span.0, 2,
+            "byte 2 is where the case that got furthest actually broke"
+        );
+    }
 
     /// **IPR-07.** `chars` returned `Ok` at the first child failure, so it
     /// silently dropped the rest of its region: `chars(digit, skip: none)` over
