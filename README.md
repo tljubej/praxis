@@ -15,11 +15,10 @@ concerns.
 > **138 of the 139 findings are addressed.** The one that is not is `MIR-10`,
 > which the register carries as `PARTIAL — part owed`: its verifier landed and
 > the *rule* the finding is about — "a faulting instruction is followed by a
-> `CheckFault`" — did not. Three things are open, and they are lists rather than
-> a single number because that is what does not go stale: **MIR-10's owed rule**,
-> **ten open rows in that plan's §4.1** (two of them, `REP-52` and `REP-53`, are
-> that rule's two ends; §4.1 names them all and is the authority on the count),
-> and **two open language decisions**. See
+> `CheckFault`" — did not. Three things are open: **MIR-10's owed rule**, the
+> **ten open rows in that plan's §4.1** — two of them, `REP-52` and `REP-53`, are
+> that rule's two ends, and §4.1's list is the claim while this count is only a
+> convenience — and **two open language decisions**. See
 > [`docs/handovers/16-repair-s18-s21-and-the-second-register-handover.md`](./docs/handovers/16-repair-s18-s21-and-the-second-register-handover.md).
 > (The suite's pass count lives in `implementation-repair-progress.md` §1 and
 > nowhere else, so it can only be stale in one place — which is why it is not
