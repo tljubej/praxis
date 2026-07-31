@@ -6437,6 +6437,157 @@ fn a_template_literal_that_begins_with_a_space_matches() {
     assert_eq!(result.as_int(), 3);
 }
 
+/// **REP-20's trailing half.** A space/tab run at the *end* of a template
+/// literal is the whitespace policy too — required, and consumed by the policy
+/// rather than by the capture that follows.
+///
+/// The leading half landed and the trailing half did not: `flush` stripped both
+/// ends with one `trim_matches` and emitted a policy only for the leading run,
+/// so the trailing run was scanned away and belonged to nobody. It was neither
+/// required (`` `x: {a:rest}` `` matched `x:hello`) nor consumed (`a` was
+/// `" hello"`, with the space the template wrote). That is a silent wrong
+/// answer, and every assertion below is one the tree gave the wrong answer to.
+///
+/// The premise the old code cited for the strip — "every capture consumes
+/// leading whitespace before it walks" — is one S20 deleted: a capture is
+/// offered the bytes at the cursor, whitespace and all, and `walk_atomic`
+/// decides. So `rest`, `text` and `char` keep a space the policy did not take.
+#[test]
+fn a_template_literals_trailing_space_run_is_its_policy_too() {
+    // (1) The run is CONSUMED by the policy, not by the capture: `a` is the
+    // eleven bytes after the space, not twelve starting with it.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let rs = read lines(`x: {a:rest}`)\n  \
+         var t = 0\n  for r in rs { t = t + r.a.len() }\n  t\n}\n",
+        "x: hello world\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        11,
+        "the space after `x:` is the literal's policy, so `rest` starts at `h`"
+    );
+
+    // The same shape, asserting the bytes rather than their count — an AoC
+    // `Card {id:int}: {body:rest}` whose body is compared against what the file
+    // actually holds.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let rs = read lines(`Card {id:int}: {body:rest}`)\n  \
+         var t = 0\n  for r in rs { if r.body == \"41 48 83\" { t = t + r.id } }\n  t\n}\n",
+        "Card 1: 41 48 83\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        1,
+        "`body` is the text after `: `, so it equals the bytes the file wrote"
+    );
+
+    // `text` bounded by a following literal, same rule.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let rs = read lines(`x: {a:text} END`)\n  \
+         var t = 0\n  for r in rs { t = t + r.a.len() }\n  t\n}\n",
+        "x: hello END\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 5, "`a` is `hello`, not `\" hello\"`");
+
+    // (2) The run is REQUIRED — §7.2's ordinary run "matches one or more spaces
+    // or tabs", and that is the same one-or-more the leading half now enforces.
+    let (rt, _result) = run_main_with_input(
+        "fn main() -> Int {\n  let rs = read lines(`x: {a:rest}`)\n  rs.len()\n}\n",
+        "x:hello\n",
+    );
+    assert_eq!(
+        rt.fault(),
+        praxis_runtime::FaultKind::ParseFailed,
+        "a template that wrote a trailing run does not match input that has none"
+    );
+
+    // The mirror of the leading-run assertion in the test above: `-> ` and
+    // ` ->` are the same policy on opposite sides, and both refuse `1->2`.
+    let (rt, _result) = run_main_with_input(
+        "fn main() -> Int {\n  let rs = read lines(`{a:int}-> {b:int}`)\n  rs.len()\n}\n",
+        "1->2\n",
+    );
+    assert_eq!(
+        rt.fault(),
+        praxis_runtime::FaultKind::ParseFailed,
+        "the trailing spelling refuses `1->2` exactly as the leading one does"
+    );
+    // …and matches when the run is there, flexibly.
+    for input in ["1-> 2\n", "1->    2\n", "1->\t2\n"] {
+        let (rt, result) = run_main_with_input(
+            "fn main() -> Int {\n  let rs = read lines(`{a:int}-> {b:int}`)\n  \
+             var t = 0\n  for r in rs { t = t + r.a + r.b }\n  t\n}\n",
+            input,
+        );
+        assert!(
+            !rt.has_pending_fault(),
+            "{input:?} faulted: {:?}",
+            rt.fault()
+        );
+        assert_eq!(result.as_int(), 3, "{input:?}");
+    }
+
+    // (3) D10's flagship construct. A `choice` behind a literal with a trailing
+    // run could not match at all: the space was in the literal's text, the
+    // capture was offered it, and the alternative's own literal `plus` was
+    // looked for at the space.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  \
+         let rs = read lines(`op: {g:choice(Plus: `plus {n:int}`, Times: `times {n:int}`)}`)\n  \
+         rs.len()\n}\n",
+        "op: plus 3\nop: times 4\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+
+    // A nested template body behind the same literal, and `char`, which reads
+    // the space if it is handed one.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let rs = read lines(`op: {g:`plus {n:int}`}`)\n  \
+         var t = 0\n  for r in rs { t = t + r.g.n }\n  t\n}\n",
+        "op: plus 3\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let rs = read lines(`x: {a:char}`)\n  rs.len()\n}\n",
+        "x: A\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1, "`char` is handed `A`, not `\" A\"`");
+
+    // (4) The interaction with S20's rule — *whitespace the parser offered it
+    // does not read is nobody's*. A trailing run that is POLICY is required and
+    // consumed; a trailing run that is INPUT, past the last part, is still
+    // forgiven by `walk_exact`. `{a:int} ` has one policy part, not two, and it
+    // is satisfied by the line's own trailing space.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let rs = read lines(`{a:int},{b:int}`)\n  \
+         var t = 0\n  for r in rs { t = t + r.a + r.b }\n  t\n}\n",
+        "1,2 \n",
+    );
+    assert!(
+        !rt.has_pending_fault(),
+        "trailing input whitespace no part asked for is nobody's: {:?}",
+        rt.fault()
+    );
+    assert_eq!(result.as_int(), 3);
+
+    // A literal that is *only* a run stays one part: it must not be counted as
+    // a leading run and a trailing run and demand two.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let rs = read lines(`{a:int} {b:int}`)\n  \
+         var t = 0\n  for r in rs { t = t + r.a + r.b }\n  t\n}\n",
+        "1 2\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+}
+
 // ===========================================================================
 // REP-15: every iterable has a `for` lowering (ADR-066)
 // ===========================================================================

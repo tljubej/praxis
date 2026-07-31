@@ -1,0 +1,18 @@
+// Input-parser fixture: the whitespace run at the *end* of a template literal.
+//
+// `Card {id:int}: {body:rest}` — the AoC shape. The run after `:` is the
+// literal's whitespace policy (§7.2), so it is required of the input and
+// consumed by the policy; `body` is the bytes after it, not the space plus the
+// bytes. REP-20's first round derived a policy from the leading run only and
+// stripped the trailing one out of the text, so it was represented nowhere:
+// `body` came back as `" 41 48 83"` and this program printed 0.
+fn main() -> Int {
+    let rows = read lines(`Card {id:int}: {body:rest}`);
+    var total = 0;
+    for row in rows {
+        if row.body == "41 48 83" {
+            total = total + row.id;
+        }
+    }
+    total
+}

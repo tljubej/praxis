@@ -384,15 +384,14 @@ pub(crate) fn scan_template_at(
     Ok(parts)
 }
 
-/// Flush the accumulated literal run, deriving its policy from what was
-/// stripped off the front of it.
+/// Flush the accumulated literal run, turning a space/tab run at **either** end
+/// of it into a whitespace policy part.
 ///
 /// **A space/tab run at either end of a literal is flexible whitespace, not
 /// text** (REP-20). §7.2's rule is that an ordinary run of spaces or tabs is
-/// flexible, and both ends of a literal already have something that honours it:
-/// the interpreter applies the literal's own policy before matching its bytes,
-/// and every capture consumes leading whitespace before it walks. Leaving the
-/// runs in the text made them *also* exact, so they had to be matched twice:
+/// flexible, and a literal's own policy is applied before its bytes are
+/// matched. Leaving a run in the text made it *also* exact, so it had to be
+/// matched twice:
 ///
 ///   - The leading run could never match at all. §3.3's own
 ///     `` `{x1:int},{y1:int} -> {x2:int},{y2:int}` `` failed at the `-` of `->`
@@ -401,8 +400,36 @@ pub(crate) fn scan_template_at(
 ///   - The trailing run made the spacing rigid on one side only: `1 -> 2`
 ///     matched and `1->2` did not.
 ///
+/// # Each end is its own part (REP-20's trailing half)
+///
+/// A literal has one policy slot and it sits in front of the text, so one
+/// `Literal` part cannot carry a run on both sides. The predecessor stripped
+/// both ends with a single `trim_matches` and derived a policy from the leading
+/// end only — so the **trailing** run was scanned away and represented nowhere.
+/// It was neither required nor consumed: `` `x: {a:rest}` `` matched `x:hello`,
+/// and over `x: hello` it handed `rest` the space the template had written.
+/// A silent wrong answer, and REP-20's row claimed it fixed.
+///
+/// The trailing run therefore becomes **its own part** — an empty literal
+/// carrying `SpaceRun`, which is the representation `` `{a:int} {b:int}` ``
+/// already lowers to and every consumer already handles. `x: ` is
+/// `Literal{"x:", None}` then `Literal{"", SpaceRun}`.
+///
+/// The strip's old justification — "every capture consumes leading whitespace
+/// before it walks" — is a premise S20 deleted: a capture is offered the bytes
+/// at the cursor, whitespace and all, and `walk_atomic` decides. `int` and
+/// `word` still self-trim, which is why the defect stayed invisible; `char`,
+/// `text` and `rest` do not, and they are what it showed up in.
+///
+/// A literal that strips to **nothing** is one run, not two, and emits one
+/// part: counting it at both ends would make `` `{a:int} {b:int}` `` demand two
+/// separate whitespace runs between the captures.
+///
 /// A run *inside* a literal is untouched — nothing else consumes it, so it stays
 /// exact — and `\x20` is the escape for a space that must be matched literally.
+/// (`\x20` never reaches here as text: [`escape`] returns it as a policy part of
+/// its own, so an exact space cannot be mistaken for a run.)
+///
 /// **The policy is derived, not assumed** (IPR-12). Every literal used to be
 /// tagged `SpaceRun` unconditionally, including literals with no whitespace run
 /// anywhere near them — so the runtime could not distinguish "the template
@@ -411,7 +438,7 @@ pub(crate) fn scan_template_at(
 /// which is not what `SpaceRun` means. A literal that had a run stripped from
 /// its **front** carries `SpaceRun`; one that did not carries
 /// [`WsPolicy::None`], and then `SpaceRun` can require the one-or-more its own
-/// definition promises.
+/// definition promises — at both ends.
 fn flush(lit: &mut String, parts: &mut Vec<TemplatePart>) {
     if lit.is_empty() {
         return;
@@ -419,8 +446,11 @@ fn flush(lit: &mut String, parts: &mut Vec<TemplatePart>) {
     let text = std::mem::take(lit);
     let had_leading_run = text.starts_with([' ', '\t']);
     let stripped = text.trim_matches([' ', '\t']);
-    // A literal whose runs strip it to nothing is pure whitespace, and it is
-    // still emitted: the policy is the part.
+    // A literal whose runs strip it to nothing is pure whitespace: one run, one
+    // part, and the policy *is* the part. `had_leading_run` is true here by
+    // construction (a non-empty all-whitespace text starts with whitespace), so
+    // the single part carries the policy.
+    let had_trailing_run = !stripped.is_empty() && text.ends_with([' ', '\t']);
     parts.push(TemplatePart::Literal {
         text: stripped.to_string(),
         ws: if had_leading_run {
@@ -429,6 +459,14 @@ fn flush(lit: &mut String, parts: &mut Vec<TemplatePart>) {
             WsPolicy::None
         },
     });
+    if had_trailing_run {
+        // The trailing run has no slot on the literal it followed — the slot is
+        // in front of the text — so it gets a part of its own.
+        parts.push(TemplatePart::Literal {
+            text: String::new(),
+            ws: WsPolicy::SpaceRun,
+        });
+    }
 }
 
 /// What one escape sequence produced.
@@ -733,23 +771,32 @@ mod tests {
     }
 
     /// **REP-20 at the unit level.** A space/tab run at either end of a literal
-    /// becomes the whitespace policy and leaves the text.
+    /// becomes the whitespace policy and leaves the text — the leading run as
+    /// the literal's own `ws`, the trailing run as an empty literal of its own,
+    /// because a literal has one policy slot and it sits in front of the text.
     ///
     /// Here as well as in the JIT tests because this is the *scanner's* rule: the
     /// interpreter honours a policy it is given, and the defect was that the same
     /// spaces were also in the bytes it had to match.
     #[test]
     fn a_literals_edge_whitespace_is_its_policy_and_not_its_text() {
-        // §3.3's own template. The middle literal is `-> `, not ` -> `.
+        // §3.3's own template. The middle literal is `->`, not ` -> ` and not
+        // `-> `: the run on each side is a policy, and the trailing one is a
+        // part of its own.
         let parts = scan_template("{x1:int},{y1:int} -> {x2:int},{y2:int}").unwrap();
-        assert_eq!(literals(&parts), vec![",", "->", ","]);
+        assert_eq!(literals(&parts), vec![",", "->", "", ","]);
         // …and the policy says which of them had a run in front of it (IPR-12).
         // A comma the template wrote with nothing before it must not match an
         // input that has a space there.
         assert_eq!(
             policies(&parts),
-            vec![WsPolicy::None, WsPolicy::SpaceRun, WsPolicy::None],
-            "only the literal that was written with a leading run carries SpaceRun"
+            vec![
+                WsPolicy::None,
+                WsPolicy::SpaceRun,
+                WsPolicy::SpaceRun,
+                WsPolicy::None
+            ],
+            "only the literals a run was written against carry SpaceRun"
         );
 
         // Both ends, and a run *inside* a literal, which stays exact — nothing else
@@ -762,9 +809,29 @@ mod tests {
             }
             _ => panic!("expected literal"),
         }
+        // The trailing run of that same literal, as its own part.
+        match &parts[2] {
+            TemplatePart::Literal { text, ws } => {
+                assert!(text.is_empty());
+                assert_eq!(*ws, WsPolicy::SpaceRun);
+            }
+            _ => panic!("expected the trailing run's part"),
+        }
+
+        // **A trailing run with no leading one is still a policy** — this is the
+        // half REP-20's first round dropped. `x: ` is `"x:"` with no policy,
+        // then the run.
+        let parts = scan_template("x: {a:rest}").unwrap();
+        assert_eq!(literals(&parts), vec!["x:", ""]);
+        assert_eq!(
+            policies(&parts),
+            vec![WsPolicy::None, WsPolicy::SpaceRun],
+            "the run after `x:` is the policy, not text, and not nothing"
+        );
 
         // A literal that is only whitespace strips to nothing and is still emitted:
-        // the policy is the part.
+        // the policy is the part — **one** part. Counting it as a leading run and
+        // a trailing run would make this template demand two separate runs.
         let parts = scan_template("{a:int} {b:int}").unwrap();
         assert_eq!(parts.len(), 3);
         match &parts[1] {
@@ -951,8 +1018,10 @@ mod tests {
     /// example is `` `  Starting items: {items:csv(int)}` ``.
     #[test]
     fn a_capture_body_is_a_parser_expression() {
+        // `parts[2]`: `"Starting items: "` is the literal `"Starting items:"`
+        // and then the trailing run's own whitespace part (REP-20).
         let parts = scan_template("Starting items: {items:csv(int)}").unwrap();
-        match &parts[1] {
+        match &parts[2] {
             TemplatePart::Capture { parser, .. } => {
                 assert!(matches!(parser.as_ref(), ParserAst::Csv { .. }));
             }
@@ -1045,10 +1114,12 @@ mod tests {
         }
 
         // One level: the capture's parser span is the `int` that named it.
+        // `parts[2]`: `"x = "` is `"x ="` plus the trailing run's own
+        // whitespace part (REP-20).
         let interior = "x = {x:int}";
         let parts = scan_template(interior).unwrap();
         assert_eq!(
-            text_at(interior, capture_parser(&parts[1]).span()),
+            text_at(interior, capture_parser(&parts[2]).span()),
             "int",
             "a top-level capture's span"
         );
