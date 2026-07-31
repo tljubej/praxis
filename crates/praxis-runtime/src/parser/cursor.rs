@@ -29,6 +29,36 @@
 //! [`Input`] holds a validated `&str`, which is what retires the three
 //! `str::from_utf8(..).unwrap_or("")` calls the interpreter used to make: a
 //! region that is not UTF-8 is now impossible rather than silently empty.
+//!
+//! # Trailing whitespace belongs to nobody, and that is not an error
+//!
+//! Real input is full of whitespace no parser was asked to read: the file's own
+//! terminator, a blank final line, a stray space before a newline. **A run of
+//! whitespace that no parser could read is not data and not a mismatch.** The
+//! rule is stated once and inherited; it is not a byte count, and it is not a
+//! special case at the root. It has exactly two halves, because a region has
+//! two ends of the question:
+//!
+//! * **Extent** — decided before any parser runs, so it cannot depend on one.
+//!   *A region does not end in blank lines.* [`split_lines`] drops the trailing
+//!   run of lines that hold nothing but whitespace, which is the general form of
+//!   the rule it always had for one terminator.
+//! * **Bound** — decided by the parser that was asked. *A child that leaves only
+//!   whitespace has filled its bound.* `walk_exact`, `walk_characters` and
+//!   `walk_grid_row` in the parent module share one predicate,
+//!   [`ByteRegion::is_all_whitespace`]. Whether a trailing run is data is the
+//!   child's answer: `int` cannot read `"1 "`'s space, so it is padding, while
+//!   `char` reads it as a cell, so `grid(char)` over `"ab\ncd \n"` is a *ragged
+//!   grid* — an error about the data, not about a file convention.
+//!
+//! Together they leave the file's terminator to nobody, so **the root region is
+//! the whole buffer** and there is no root special case to get the count wrong
+//! in. Two earlier attempts made one: the first applied the bound rule at the
+//! root with the terminator inside it, the second trimmed exactly one
+//! terminator off the buffer — and a file ending `"\n\n"` reproduced the first
+//! verbatim. A trim count is the wrong kind of answer. `read <parser>` and
+//! `parse(text, P)` reach this module through one function over one buffer, so
+//! `parse(t, rest)` is the identity on `t` again (ADR-078).
 
 // The substrate lands before the interpreter that consumes it, because the
 // conversion of `walk` and its seventeen helpers has to be one commit (IPR-01:
@@ -153,41 +183,6 @@ impl<'a> Input<'a> {
         }
     }
 
-    /// The region a **root** parse runs against: the whole buffer minus the
-    /// line terminator the file ends with.
-    ///
-    /// A trailing newline is not data and it is not an error. Every real input
-    /// carries one — `praxis-cli`'s runner reads the file verbatim, and every
-    /// `.in` in the corpus ends with `\n` — so the byte after the last value is
-    /// a `\n` that no parser was asked to read.
-    ///
-    /// This is the one place that is handled. `walk_exact`'s rule ("a bounded
-    /// child must fill its bound") is right, and so is applying it to the
-    /// tokens `ws`, `sep`, `csv` and `chars` cut out of their region; what was
-    /// wrong was the *region*, because at the root it ran to the end of the
-    /// file and therefore glued the terminator onto the last token. Trimming it
-    /// here fixes `read ws(int)`, `read sep(s, P)` and
-    /// `read chars(P, skip: whitespace)` — and §7.5's own
-    /// `chars(one_of("^v<>"), skip: whitespace)` example — at once, rather than
-    /// teaching each constructor to forgive one byte.
-    ///
-    /// Exactly one terminator is dropped (`\r\n` or `\n`). A file ending in
-    /// `"\n\n"` really does have a blank final line, and `sections` splits on
-    /// it; swallowing the run would delete data rather than a convention.
-    #[inline]
-    pub(crate) fn root_region(&self) -> ByteRegion {
-        let whole = self.whole();
-        let bytes = self.text.as_bytes();
-        let mut end = bytes.len();
-        if end > 0 && bytes[end - 1] == b'\n' {
-            end -= 1;
-            if end > 0 && bytes[end - 1] == b'\r' {
-                end -= 1;
-            }
-        }
-        whole.subregion(whole.start(), whole.start().advance(end))
-    }
-
     /// The whole buffer's text. Regions read through this, never around it.
     #[inline]
     fn text(&self) -> &'a str {
@@ -227,12 +222,6 @@ impl ByteRegion {
         self.end.delta_from(self.start)
     }
 
-    /// True when the region spans no bytes.
-    #[inline]
-    pub(crate) fn is_empty(self) -> bool {
-        self.len() == 0
-    }
-
     /// The bytes this region spans.
     #[inline]
     pub(crate) fn bytes<'a>(self, i: &Input<'a>) -> &'a [u8] {
@@ -252,6 +241,25 @@ impl ByteRegion {
     #[inline]
     pub(crate) fn str<'a>(self, i: &Input<'a>) -> Option<&'a str> {
         i.text().get(self.start.offset()..self.end.offset())
+    }
+
+    /// True when this region holds nothing but whitespace (including when it
+    /// holds nothing at all).
+    ///
+    /// This is the *bound* half of the module's rule, in one place so that no
+    /// two constructors can disagree about one byte — which is exactly what
+    /// happened when `grid` learned to forgive a row's trailing run and `lines`
+    /// did not. Unicode whitespace, not an ASCII subset: a region's leftovers
+    /// are leftovers whatever encodes them, and `char::is_whitespace` is the
+    /// same predicate [`super::whitespace_tokens`] splits on.
+    #[inline]
+    pub(crate) fn is_all_whitespace(self, i: &Input<'_>) -> bool {
+        match self.str(i) {
+            Some(s) => s.chars().all(char::is_whitespace),
+            // A region whose ends split a scalar is an interpreter bug, and
+            // `region_str` reports it as a mismatch. It is not "whitespace".
+            None => false,
+        }
     }
 
     /// A narrower window on the same buffer.
@@ -312,7 +320,25 @@ pub(crate) struct Walked {
 }
 
 /// Split `region` into logical lines, stripping a trailing `\r` and excluding
-/// the `\n`. A trailing newline does not produce a final empty line.
+/// the `\n`.
+///
+/// **A region does not end in blank lines** — the *extent* half of the module's
+/// rule. The trailing run of lines holding nothing but whitespace is dropped,
+/// however long it is and whatever it is made of: the file's own `\n`, the
+/// `"\n\n"` an editor leaves behind, a final line of spaces. The predecessor
+/// dropped exactly one empty line, as a side effect of consuming the `\n` that
+/// ended the one before it, and so `lines(int)` faulted on `"1\n2\n\n"` and
+/// `grid(char)` called `"ab\ncd\n\n"` ragged.
+///
+/// It is the *extent* and not a *bound*, so it is decided here, before any
+/// parser runs, and does not ask the child what it can read: a line with no
+/// content is not a line any parser was offered. A line *with* content keeps
+/// every byte it has, including a trailing space — whether that space is data is
+/// the child's answer, and `walk_exact` asks it.
+///
+/// This is also what `sections` needs and does not have to be told: a section is
+/// a run of non-blank lines, so a region that does not end in blank lines ends
+/// with a section rather than with an empty one.
 ///
 /// Absolute by construction: each returned region is a narrowing of `region`,
 /// so a line's `Text` names the bytes the line actually occupies.
@@ -335,6 +361,9 @@ pub(crate) fn split_lines(i: &Input<'_>, region: ByteRegion) -> Vec<ByteRegion> 
         }
         out.push(region.subregion(base.advance(start), base.advance(end)));
     }
+    while out.last().is_some_and(|l| l.is_all_whitespace(i)) {
+        out.pop();
+    }
     out
 }
 
@@ -353,7 +382,11 @@ pub(crate) fn split_sections(i: &Input<'_>, region: ByteRegion) -> Vec<ByteRegio
     let mut out = Vec::new();
     let mut current: Option<(Cursor, Cursor)> = None;
     for line in split_lines(i, region) {
-        if line.is_empty() {
+        // "Blank" is the same word [`split_lines`] uses when it decides where
+        // the region ends: a line holding nothing but whitespace holds nothing.
+        // Testing emptiness instead made a separator of spaces part of the
+        // section on either side of it.
+        if line.is_all_whitespace(i) {
             if let Some((start, end)) = current.take() {
                 out.push(region.subregion(start, end));
             }
@@ -468,29 +501,69 @@ mod tests {
     }
 
     #[test]
-    fn the_root_region_excludes_the_files_trailing_newline() {
-        // The blocker this repair closes: the root region used to run to the
-        // end of the file, so every constructor that bounds a child against
-        // `region.end()` demanded the child eat the `\n`.
+    fn a_region_does_not_end_in_blank_lines_however_many_there_are() {
+        // The extent half of the rule, at the substrate level. Two earlier
+        // attempts wrote a *count* here — the bound rule applied to a region
+        // that still held the terminator, then a trim of exactly one terminator
+        // — and each was defeated by one more newline. There is no count now:
+        // the trailing run of blank lines is not part of the region, whatever
+        // it is made of.
         for (text, want) in [
-            ("1 2 3\n", "1 2 3"),
-            ("a -> b\r\n", "a -> b"),
-            ("^v<>\n", "^v<>"),
-            ("no terminator", "no terminator"),
-            ("\n", ""),
-            ("", ""),
-            // Exactly one terminator: a blank final line is data, and
-            // `sections` splits on it.
-            ("first\n\n", "first\n"),
+            ("1\n2\n", vec!["1", "2"]),
+            ("1\n2", vec!["1", "2"]),
+            ("1\r\n2\r\n", vec!["1", "2"]),
+            // The ending that reproduced the closed blocker verbatim.
+            ("1\n2\n\n", vec!["1", "2"]),
+            ("1\n2\n\n\n\n", vec!["1", "2"]),
+            // A final line of nothing but spaces is a blank line.
+            ("1\n2\n   \n", vec!["1", "2"]),
+            ("1\n2\n\t\n \n", vec!["1", "2"]),
+            // A line WITH content keeps every byte it has, trailing space
+            // included: whether that space is data is the child parser's
+            // answer, not the region's.
+            ("1 \n2 \n", vec!["1 ", "2 "]),
+            // An INTERIOR blank line is structure, not trailing whitespace.
+            ("1\n\n2\n", vec!["1", "", "2"]),
+            ("\n\n", vec![]),
+            ("", vec![]),
         ] {
             let (_rt, owner) = input_over(text);
             let i = unsafe { Input::new(owner) }.expect("a Text is UTF-8");
-            assert_eq!(
-                i.root_region().str(&i),
-                Some(want),
-                "root region of {text:?}"
-            );
+            let lines: Vec<&str> = split_lines(&i, i.whole())
+                .into_iter()
+                .map(|l| l.str(&i).expect("a line is a str"))
+                .collect();
+            assert_eq!(lines, want, "lines of {text:?}");
         }
+    }
+
+    #[test]
+    fn the_root_region_is_the_whole_buffer_and_no_terminator_is_trimmed() {
+        // `read <parser>` and `parse(text, P)` are one function over one
+        // buffer. Trimming here made them differ: `parse("abc\n", rest)` and
+        // `parse("abc", rest)` answered the same Text, and the `\n` the program
+        // wrote into its own literal could not be recovered. Nothing needs the
+        // trim — `split_lines` above and `walk_exact`'s bound rule leave a
+        // terminator to nobody without one.
+        for text in ["1 2 3\n", "a -> b\r\n", "^v<>\n", "no terminator", "\n", ""] {
+            let (_rt, owner) = input_over(text);
+            let i = unsafe { Input::new(owner) }.expect("a Text is UTF-8");
+            assert_eq!(i.whole().str(&i), Some(text), "root region of {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_blank_line_of_spaces_separates_sections() {
+        // `split_sections` calls a line blank by the same predicate
+        // `split_lines` uses to decide where the region ends, so a separator
+        // that carries a space is still a separator.
+        let (_rt, owner) = input_over("first\n   \nsecond\n\n");
+        let i = unsafe { Input::new(owner) }.expect("a Text is UTF-8");
+        let sections: Vec<&str> = split_sections(&i, i.whole())
+            .into_iter()
+            .map(|s| s.str(&i).expect("a section is a str"))
+            .collect();
+        assert_eq!(sections, vec!["first", "second"]);
     }
 
     #[test]

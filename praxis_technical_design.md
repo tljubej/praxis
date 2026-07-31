@@ -792,6 +792,32 @@ Semantics:
 
 ### 7.5 Structural parser constructors
 
+#### Trailing whitespace belongs to nobody
+
+One rule, stated once, that every constructor below inherits. **A run of
+whitespace that no parser could read is not data and not a mismatch.** It has
+two halves:
+
+- **A region does not end in blank lines.** The trailing run of lines holding
+  nothing but whitespace is not part of the region — the file's own terminator,
+  a blank final line, a final line of spaces, any number of them. A *blank* line
+  is one holding nothing but whitespace, not only an empty one.
+- **A child that leaves only whitespace has filled its bound.** Wherever a
+  construct requires its child to consume a region exactly — a line, a section,
+  a CSV field, a `ws`/`sep` token, a matrix cell, a template capture — what the
+  child leaves over is forgiven if it is whitespace and is a mismatch otherwise.
+
+Whether a trailing run is data is therefore the *child's* answer: `int` cannot
+read the space in `"1 "`, so it is padding, while `char` reads it as a cell, so
+`grid(char)` over a file whose last row alone ends in a space is a ragged grid.
+
+Only *trailing* runs. An interior one is data: `lines(int)` over `"12junk"` is a
+mismatch, and so is `chars(digit, skip: none)` over `"1\n2"`.
+
+A root parse runs against the whole input with no terminator trimmed off it,
+which is why `parse(t, rest)` is the identity on `t`. There is no special case
+for the file's newline anywhere, and a new constructor must not grow one.
+
 #### `lines(parser)`
 
 Split the current region into logical lines and apply `parser` to each line. Each application must consume the entire line.
@@ -847,7 +873,9 @@ Split the current region on commas. Ignore horizontal whitespace around each com
 
 #### `ws(parser)`
 
-Split on one or more spaces or tabs.
+Split on one or more spaces or tabs. That names the *separator*; a token itself
+contains no whitespace of any kind, so a line ending terminates a token too —
+`ws(int)` over two lines of two numbers is four tokens, not three.
 
 #### `sep(separator, parser)`
 
@@ -871,10 +899,11 @@ by what it skips between matches:
 skips and line endings besides. The names suggest the opposite containment, so
 they are spelled out here rather than left to be inferred.
 
-The policy governs the region's interior. A file's own trailing newline is not
-part of the region a root parse runs against, so no policy has to absorb it —
-which is why the example below reads a newline-terminated file without
-`skip: newlines`.
+The policy governs the region's interior. A file's own trailing newline is
+whitespace the character parser declined, so no policy has to absorb it — which
+is why the example below reads a newline-terminated file without
+`skip: newlines`. An *interior* run is still the policy's business:
+`chars(digit, skip: none)` over `"1\n2"` is a mismatch.
 
 ```praxis
 chars(one_of("^v<>"), skip: whitespace)

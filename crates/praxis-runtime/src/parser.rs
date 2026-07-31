@@ -63,14 +63,21 @@ unsafe fn run_plan(ctx: *mut RuntimeContext, plan: &ParserPlan, input: GcRef) ->
         unsafe { clear_parse_detail(ctx) };
         return unsafe { fault_sentinel(ctx) };
     };
-    // **The root region ends where the data ends** (S20 repair). It used to be
-    // the whole buffer, so the file's trailing newline was inside the region
-    // every root constructor bounds its children against — and `read ws(int)`,
-    // `read sep(" -> ", word)` and `read chars(P, skip: whitespace)` all built
-    // their final token up to `region.end()` and then required the child to eat
-    // a `\n`. That faulted on every real input file, including §7.5's own
-    // `chars(one_of("^v<>"), skip: whitespace)` example.
-    let region = i.root_region();
+    // **The root region is the whole buffer, and no terminator is trimmed off
+    // it.** Trailing whitespace is handled where it arises — `split_lines` does
+    // not end a region in blank lines, and `walk_exact` lets a child that
+    // leaves only whitespace fill its bound — so nothing is left here to
+    // special-case. Two earlier attempts special-cased it anyway, first by
+    // applying the bound rule at a root region that still held the terminator
+    // and then by trimming exactly one terminator, and a file ending "\n\n"
+    // defeated the second the way the first was defeated by "\n". A trim count
+    // is the wrong kind of answer (ADR-078).
+    //
+    // It also matters *whose* buffer this is: `run_plan` is the single body
+    // behind both `read <parser>` and the host `parse(text, P)`, so a trim here
+    // deleted a byte from a Text the program wrote itself and `parse(t, rest)`
+    // stopped being the identity on `t`.
+    let region = i.whole();
     // Root the input for the whole parse. `RuntimeRoots`'s `input` arm reads
     // `ctx.input_source`, which for `parse(text, P)` is a *different* Text —
     // and this one owns every source-slice the parse produces (IPR-14).
@@ -114,7 +121,7 @@ unsafe fn run_root(
     // SAFETY: the caller guarantees `input` is a valid Text GcRef.
     let i = unsafe { Input::new(input) }.expect("the test's input is a Text");
     // The same root region `run_plan` uses, for the same reason.
-    let region = i.root_region();
+    let region = i.whole();
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(ctx) };
     let _input = scope.root(input);
@@ -560,6 +567,22 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
 /// to forget to check, so "I bounded the child but did not require it to fill
 /// the bound" stops being expressible.
 ///
+/// **What the child leaves is whitespace, or it is a mismatch** — the *bound*
+/// half of the rule stated in [`cursor`]. §7.4 puts "surrounding horizontal
+/// space" on the caller, and this is the caller for every bounded construct
+/// there is: a line, a section, a CSV field, a `ws`/`sep` token, a matrix cell,
+/// a template capture. `lines(int)` over `"1 \n2 \n"` faulted on the space
+/// while `grid(int)` over the same bytes called it padding, which is two
+/// constructs disagreeing about one byte; the rule lives here now, so there is
+/// one answer and every construct inherits it.
+///
+/// It is deliberately the child's answer and not the region's. `int` cannot
+/// read `"1 "`'s trailing space, so the space is padding; `char` reads it as a
+/// cell, so `grid(char)` over `"ab\ncd \n"` is a **ragged grid** — a complaint
+/// about the data, not about a file convention. And it is only what the child
+/// *leaves*: `lines(int)` over `"12junk"` still faults, because `"junk"` is not
+/// whitespace, which is the IPR-02 defect this check exists for.
+///
 /// # Safety
 /// `ctx` must be live and wired.
 unsafe fn walk_exact(
@@ -572,7 +595,7 @@ unsafe fn walk_exact(
 ) -> Result<GcRef, ParseFail> {
     // SAFETY: forwarded from this function's contract.
     let walked = unsafe { walk(rt.ctx, i, plan, node, region)? };
-    if walked.next != region.end() {
+    if walked.next != region.end() && !region.from(walked.next).is_all_whitespace(i) {
         return Err(ParseFail::at(
             walked.next.offset(),
             region.end().delta_from(walked.next),
@@ -692,24 +715,20 @@ unsafe fn walk_grid_row(
         let walked = match unsafe { walk(rt.ctx, i, plan, child, line.from(cursor)) } {
             Ok(walked) => walked,
             Err(fail) => {
-                // **A run of horizontal whitespace at the end of a row that the
-                // cell parser cannot read is padding, not a cell.** Trailing
-                // spaces are ordinary in real input, and `matrix(int)` already
-                // dropped them (`whitespace_tokens` never emits an empty
-                // token); without this rule `grid(int)` faulted on the very
-                // same file, which is two whitespace-token constructors
-                // disagreeing about one input. §7.5 asks only that every row
-                // have the same cell count.
+                // **A trailing run the cell parser cannot read is padding, not
+                // a cell** — `walk_exact`'s bound rule, in the second loop that
+                // is not `walk_exact`-shaped, through the same predicate.
+                // Trailing spaces are ordinary in real input, and `matrix(int)`
+                // already dropped them (`whitespace_tokens` never emits an
+                // empty token); without this rule `grid(int)` faulted on the
+                // very same file. §7.5 asks only that every row have the same
+                // cell count.
                 //
                 // A cell parser that *can* read the run never gets here:
                 // `grid(char)` reads a space as a space, which is what keeps a
-                // char grid positional.
-                if line
-                    .from(cursor)
-                    .bytes(i)
-                    .iter()
-                    .all(|b| *b == b' ' || *b == b'\t')
-                {
+                // char grid positional — and is why `grid(char)` over
+                // `"ab\ncd \n"` is a ragged grid rather than a 2x2 one.
+                if line.from(cursor).is_all_whitespace(i) {
                     break;
                 }
                 return Err(fail);
@@ -1174,16 +1193,32 @@ fn walk_characters(
         if cursor >= region.end() {
             break;
         }
-        // **A child failure is the parse's failure** (IPR-07). This used to
-        // `break`, so `chars` returned `Ok` at the first mismatch and silently
-        // dropped the rest of the region — `chars(digit)` over `"12x34"`
-        // answered `[1, 2]` and reported nothing. The loop's own shape is what
-        // implements §7.5's rule: the skip policy runs once more after the last
-        // match, so `skip: whitespace` / `skip: newlines` can absorb a trailing
-        // run, and under `skip: none` a trailing byte the child cannot read
-        // correctly faults.
+        // **What is left is whitespace, or the child's failure is the parse's
+        // failure** (IPR-07). The failure half used to `break`, so `chars`
+        // returned `Ok` at the first mismatch and silently dropped the rest of
+        // the region — `chars(digit)` over `"12x34"` answered `[1, 2]` and
+        // reported nothing.
+        //
+        // The whitespace half is `walk_exact`'s bound rule, in the one loop
+        // that is not `walk_exact`-shaped: `chars` has no bound to fill, it
+        // consumes until the region runs out. Without it, whether §7.5's own
+        // `chars(one_of("^v<>"), skip: whitespace)` could read an ordinary file
+        // came down to whether its skip policy happened to include line endings
+        // — and `whitespace` is horizontal whitespace, so it did not. It is
+        // only what is *left*: `chars(digit, skip: none)` over `"1\n2"` still
+        // faults, because `"\n2"` is not whitespace. And it is asked *after*
+        // the child, so a character parser that can read whitespace still reads
+        // it — `chars(one_of(" "))` counts spaces rather than skipping them.
         // SAFETY: ctx is valid.
-        let walked = unsafe { walk(rt.ctx, i, plan, child, region.from(cursor))? };
+        let walked = match unsafe { walk(rt.ctx, i, plan, child, region.from(cursor)) } {
+            Ok(walked) => walked,
+            Err(fail) => {
+                if region.from(cursor).is_all_whitespace(i) {
+                    break;
+                }
+                return Err(fail);
+            }
+        };
         cursor = if walked.next > cursor {
             walked.next
         } else {
@@ -1421,6 +1456,18 @@ fn walk_csv(
     })
 }
 
+/// Walk `ws(P)` (§7.5): split on whitespace and apply `P` to each token.
+///
+/// **A whitespace-delimited token contains no whitespace.** §7.5 says `ws`
+/// splits "on one or more spaces or tabs", which names the *separator*; it does
+/// not say a `\n` may sit inside a token, and nothing could want it to. The
+/// predecessor split on spaces and tabs alone, so a token ran through a line
+/// ending: `read ws(int)` over `"1 2\n3 4\n"` was three tokens — `1`, `2\n3`,
+/// `4\n` — and the middle one faulted. A line terminator is not `ws`'s
+/// separator but it is still a token terminator, which is the same rule
+/// [`whitespace_tokens`] has always applied for `matrix`; sharing that splitter
+/// is what stops the two whitespace-token constructors disagreeing about one
+/// file.
 fn walk_ws(
     rt: &Rt,
     i: &Input<'_>,
@@ -1433,23 +1480,9 @@ fn walk_ws(
     // so a scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
-    let bytes = region.bytes(i);
-    let base = region.start();
+    let text = region_str(i, region, "whitespace-separated tokens")?;
     let mut items = Vec::new();
-    let mut pos = 0usize;
-    while pos < bytes.len() {
-        // Skip leading whitespace.
-        while pos < bytes.len() && is_ws(bytes[pos]) {
-            pos += 1;
-        }
-        if pos >= bytes.len() {
-            break;
-        }
-        let token_start = pos;
-        while pos < bytes.len() && !is_ws(bytes[pos]) {
-            pos += 1;
-        }
-        let token = region.subregion(base.advance(token_start), base.advance(pos));
+    for token in whitespace_tokens(region, text) {
         // SAFETY: ctx is valid.
         let value = unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? };
         scope.root(value);

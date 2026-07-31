@@ -667,6 +667,178 @@ fn a_grid_row_may_end_in_horizontal_whitespace() {
     assert_eq!(result.as_int(), 2 * 100 + 2 * 10 + 78);
 }
 
+/// **Trailing whitespace belongs to nobody, for every root parser and every
+/// file ending.** A matrix, not an example — because this class of defect has
+/// now been shipped twice, and each time the fix was checked against one.
+///
+/// Round one applied `walk_exact`'s "a bounded child must fill its bound" rule
+/// at a root region that ran to the end of the file, so `read ws(int)` over
+/// `"1 2 3\n"` asked `int` to eat the `\n`. Round two trimmed exactly one
+/// terminator off the buffer, and a file ending `"\n\n"` reproduced that
+/// verbatim — `read ws(P)`, `read sep(s, P)` and `read chars(P, skip:)` faulted
+/// with the identical messages, one byte later. Both treated a number of bytes
+/// rather than the rule.
+///
+/// The rule is stated in `parser/cursor.rs` and has two halves: a region does
+/// not end in blank lines (`split_lines`, decided before any parser runs), and
+/// a child that leaves only whitespace has filled its bound (`walk_exact`,
+/// `walk_characters`, `walk_grid_row` — one predicate). Together they leave the
+/// terminator to nobody, so the root region is simply the whole buffer.
+///
+/// Every root constructor §7.5 names is crossed with every ending real input
+/// arrives with. Each cell asserts a **value** and not merely the absence of a
+/// fault, so a rule that swallowed data instead of whitespace would fail here
+/// too.
+#[test]
+fn every_root_parser_reads_every_file_ending() {
+    // No terminator; the ordinary one; CRLF; a blank final line; a trailing
+    // space before the newline; and a final line of nothing but spaces.
+    const ENDINGS: [&str; 6] = ["", "\n", "\r\n", "\n\n", " \n", "\n  \n"];
+
+    // (label, program, input body without any terminator, the one answer every
+    // ending must give). The answers are shaped so a mis-split fails: a count
+    // *and* an element, or a width *and* a height.
+    let forms: [(&str, &str, &str, i64); 13] = [
+        ("ws(int)", "read ws(int)", "1 2 3", 33),
+        ("sep(\",\", int)", "read sep(\",\", int)", "1,2,3", 33),
+        ("csv(int)", "read csv(int)", "1,2,3", 33),
+        (
+            "chars(digit, skip: none)",
+            "read chars(digit, skip: none)",
+            "123",
+            33,
+        ),
+        (
+            "chars(digit, skip: whitespace)",
+            "read chars(digit, skip: whitespace)",
+            "1 2 3",
+            33,
+        ),
+        (
+            "chars(digit, skip: newlines)",
+            "read chars(digit, skip: newlines)",
+            "1\n2\n3",
+            33,
+        ),
+        ("lines(int)", "read lines(int)", "1\n2\n3", 33),
+        ("lines(csv(int))", "read lines(csv(int))", "1\n2\n3", 33),
+        // A template at the root, and the same template under `lines`: the
+        // capture bound is region-relative, so both have to be checked.
+        (
+            "lines(template)",
+            "read lines(`{n:int} x`)",
+            "1 x\n2 x\n3 x",
+            33,
+        ),
+        ("matrix(int)", "read matrix(int)", "1 2 3", 31),
+        ("grid(digit)", "read grid(digit)", "123", 31),
+        (
+            "sections(lines(int))",
+            "read sections(lines(int))",
+            "1\n2\n3",
+            33,
+        ),
+        (
+            "sep(\" -> \", word)",
+            "read sep(\" -> \", word)",
+            "a -> b -> c",
+            31,
+        ),
+    ];
+
+    for (label, parser, body, want) in forms {
+        // `len() * 10 + <a member>` for a Vec; `width() * 10 + height()` for a
+        // Grid; the trailing-`x` template Vec reads its last capture.
+        let tail = match label {
+            "matrix(int)" | "grid(digit)" => "v.width() * 10 + v.height()",
+            "lines(csv(int))" => "v.len() * 10 + v.get(2).get(0)",
+            "lines(template)" => "v.len() * 10 + v.get(2).n",
+            "sections(lines(int))" => "v.len() * 30 + v.get(0).get(2)",
+            "sep(\" -> \", word)" => "v.len() * 10 + v.get(2).len()",
+            _ => "v.len() * 10 + v.get(2)",
+        };
+        let src = format!("fn main() -> Int {{\n  let v = {parser}\n  {tail}\n}}\n");
+        for ending in ENDINGS {
+            let input = format!("{body}{ending}");
+            let (runtime, result) = run_main_with_input(&src, &input);
+            assert!(
+                !runtime.has_pending_fault(),
+                "{label} over {input:?} faulted: {:?}",
+                runtime.fault()
+            );
+            assert_eq!(
+                result.as_int(),
+                want,
+                "{label} over {input:?} — every ending is the same data"
+            );
+        }
+    }
+
+    // §7.5's own `chars(one_of("^v<>"), skip: whitespace)`, which is the
+    // spelling both earlier rounds broke. Its elements are `Char`s, so the
+    // measure is the count — enough here, because a terminator read as an
+    // element or a value dropped both change it.
+    let src = "fn main() -> Int {\n  let v = read chars(one_of(\"^v<>\"), skip: whitespace)\n  v.len()\n}\n";
+    for ending in ENDINGS {
+        let input = format!("^v<>{ending}");
+        let (runtime, result) = run_main_with_input(src, &input);
+        assert!(
+            !runtime.has_pending_fault(),
+            "§7.5's chars example over {input:?} faulted: {:?}",
+            runtime.fault()
+        );
+        assert_eq!(result.as_int(), 4, "four moves, whatever ends the file");
+    }
+
+    // Two rows the matrix states rather than shares, because their right answer
+    // genuinely differs — and saying so is the point of a matrix.
+    //
+    // `rest` consumes the remainder of its region, and at the root the region
+    // is the buffer. So it reads the terminator, which is what makes
+    // `parse(t, rest)` the identity on `t` — the property the round-two trim
+    // broke, and the reason the trim is gone rather than merely smaller.
+    let src = "fn main() -> Int {\n  let t = read rest\n  t.len()\n}\n";
+    for ending in ENDINGS {
+        let input = format!("abc{ending}");
+        let (runtime, result) = run_main_with_input(src, &input);
+        assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+        assert_eq!(
+            result.as_int(),
+            input.len() as i64,
+            "`rest` reads its whole region, terminator included: {input:?}"
+        );
+    }
+
+    // `grid(char)` is positional, so a space is a cell (ADR-079). A trailing
+    // space is therefore *data* to `char` — the bound half of the rule is the
+    // child's answer, not the region's. Every ending that is not itself a cell
+    // reads the same 2x2 grid…
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
+    for ending in ["", "\n", "\r\n", "\n\n", "\n  \n"] {
+        let input = format!("ab\ncd{ending}");
+        let (runtime, result) = run_main_with_input(src, &input);
+        assert!(
+            !runtime.has_pending_fault(),
+            "grid(char) over {input:?} faulted: {:?}",
+            runtime.fault()
+        );
+        assert_eq!(result.as_int(), 22, "grid(char) over {input:?}");
+    }
+    // …and a file whose last row alone carries a trailing space is a **ragged
+    // grid**. That is a complaint about the data, and a different complaint
+    // from "the rest of the line": put the space on every row and the grid is
+    // simply one column wider.
+    let (runtime, _raw, _unit) = run_main_raw_with_input(src, "ab\ncd \n");
+    assert_eq!(
+        runtime.fault(),
+        praxis_runtime::FaultKind::ParseFailed,
+        "a two-cell row and a three-cell row are not one grid, whatever the third cell is"
+    );
+    let (runtime, result) = run_main_with_input(src, "ab \ncd \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 32, "every row three cells wide");
+}
+
 /// **A whitespace-only template part is a bound too.**
 ///
 /// The capture bound first looked only for a following literal with *non-empty*
