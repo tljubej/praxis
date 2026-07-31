@@ -2,7 +2,9 @@
 
 **Date:** 2026-07-29
 **Status:** Accepted — implemented; Decision 5 extended 2026-07-31 by REP-28
-(`HasField`, the third capability discharged by resolving)
+(`HasField`, the third capability discharged by resolving), and its *division of
+reports* corrected the same day — a `HasField` failure is inference's, not
+lowering's
 **Milestone:** Repair (stage S17 — F10's constraint channel, TY-25…TY-32, RT-08)
 
 ## Context
@@ -276,19 +278,44 @@ unified — is a compile error to add halfway.
 - **`HasField` is the third capability, and the third discharged by resolving**
   (REP-28, 2026-07-31). A field read on a receiver that was still a variable
   constrained nothing at all — the same defect Decision 5 fixed for a method call,
-  at the other member syntax. §4.9's own example is the reproduction:
-  `fn dist(a) -> Int { a.x + a.y }` passed `praxis check` and failed under `praxis
-  run` with `Y112`. `Capability::HasField { name, ty }` rides the channel,
+  at the other member syntax. The reproduction is `fn dist(a) -> Int { a.x + a.y }`
+  **with a call site**: `out(dist(3))` passed `praxis check` and failed under
+  `praxis run` with `Y112`. `Capability::HasField { name, ty }` rides the channel,
   `Inferer::resolve_deferred_field` asks the resolved record what the field holds
   and **unifies** it with the type the read handed back, and the receiver and the
   field's type are `pin_to_level`'d for Decision 5's reason: `lower_field_get`
   reads one record definition for the field's index, so one read site carries one
   record type. `pin_to_level` has three callers now.
 
-  The division of reports is Decision 5's, unchanged: a receiver that resolves to a
-  record without the field is left to lowering, which owns `Y112` and has the
-  field-name span. So a never-called `fn dist(a) { a.x }` still reports there,
-  exactly as a never-called `fn total(v) { v.sum() }` reports `Y110` there.
+  **The division of reports is *not* Decision 5's, and that is the correction
+  (2026-07-31, same day).** `HasField` was first landed with Decision 5's division
+  copied across — the failure left to lowering, which owns `Y112` and has the
+  field-name span — and that made the whole requirement inert. Two things are true
+  of a field that are not true of a method:
+
+  - `infer_field_get` deferred **only** a variable receiver, so a concrete one that
+    is not a record never reached `require_cap` at all, and
+    `Capability::HasField`'s rejection arm in `capability::check` was unreachable
+    dead code from the day it was written.
+  - A deferred receiver that resolves to a non-record is a receiver **lowering
+    cannot see**: by the time lowering runs, the read is inside a generic body
+    whose parameter is still a variable, and REP-28's own rule says a variable is
+    nobody's to reject. Leaving it to lowering left it to no one.
+
+  So a `HasField` failure is reported **in inference, at `praxis check` time**,
+  from both doors: `infer_field_get` now requires the field of *every* receiver it
+  cannot answer itself, and `resolve_deferred_field` reports through
+  `report_cap_failure` exactly as `resolve_deferred_iterable` does.
+
+  What lowering keeps is the *opposite* case, and it is not a failure: a receiver
+  that is **still a variable** when lowering runs is one no call site ever pinned,
+  and `lower_field_get` accepts it. That is what lets §4.9's own fence —
+  `fn manhattan(a, b) { abs(a.x - b.x) + abs(a.y - b.y) }`, uncalled — compile as
+  written, which is the tolerance an uncalled `fn f(a) { a + 1 }` has always had. A
+  never-called `fn total(v) { v.sum() }` still reports `Y110` at lowering; the two
+  member syntaxes divide differently now, and the reason is that a method call
+  survives into lowering with something to complain about and a field read need
+  not.
 - **A `Bound::Cap` arm has no catalog row (Decision 6).** Nothing in the
   catalog needs one, because the receiver's type already answers those
   questions. The next row that genuinely does — a registered `sorted`, a

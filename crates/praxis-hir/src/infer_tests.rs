@@ -5189,8 +5189,25 @@ fn a_record_literals_head_must_name_a_struct() {
 /// a fresh variable and recorded nothing, so `a` was generalized with no
 /// requirement to re-ask at the call. This is TY-30 at the third door, through
 /// `require_cap` — a predicate called directly is TY-29 by another name.
+///
+/// **REP-28's second half** is that the requirement has to be able to *fail*. It
+/// was first landed with `infer_field_get` deferring only a variable receiver and
+/// `resolve_deferred_field` returning silently when the receiver turned out to
+/// have no such field, which left `Capability::HasField`'s rejection arm as dead
+/// code and every one of the programs below check-clean and run-broken — the very
+/// divergence the row exists to close. Each `check_diags` assertion here is that
+/// half; each is a plain `analyze`, with no lowering, because lowering is the pass
+/// `praxis check` does not run.
 #[test]
 fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
+    /// Only what `praxis check` sees: analysis, without lowering.
+    fn check_diags(text: &str) -> Vec<praxis_source::Diagnostic> {
+        analyze(text).diagnostics
+    }
+    fn has(diags: &[praxis_source::Diagnostic], code: &str) -> bool {
+        diags.iter().any(|d| d.code().to_string() == code)
+    }
+
     // §4.9's own example, and it is clean through lowering — which is what
     // "passed `check` and failed under `run`" means it was not.
     assert!(is_clean_with_lower(
@@ -5198,6 +5215,74 @@ fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
          fn dist(a) -> Int { a.x + a.y }\n\
          out(dist(P { x: 1, y: 2 }))\n"
     ));
+
+    // **§4.9's fence as the document actually writes it**: no `struct`, no call
+    // site, nothing to pin `a` or `b`. It has to compile, because an uncalled
+    // generic function is not an error — `fn f(a) { a + 1 }` has always been
+    // accepted, and a field read was singled out only because it needed a record
+    // definition to produce an index. Before this, lowering demanded that
+    // definition and answered with four `Y112`s that `praxis check` never saw.
+    // `crates/praxis-cli/tests/design_doc.rs` drives the byte-for-byte fence
+    // through the real binary; this is the same claim where the fix lives.
+    assert!(is_clean_with_lower(
+        "fn manhattan(a, b) {\n    abs(a.x - b.x) + abs(a.y - b.y)\n}\n"
+    ));
+
+    // A **concrete** receiver that is not a record is rejected at `check`, not at
+    // lowering. `require_cap_as` decides it on the spot through
+    // `crate::capability::check`, which is the only thing that ever reaches
+    // `Capability::HasField`'s rejection arm from that door.
+    assert!(
+        has(&check_diags("let n = 1\nout(n.x)\n"), "Y112"),
+        "a field of an `Int` is `check`'s to report"
+    );
+
+    // …and so is a concrete **record** that simply lacks the field: the other
+    // half of the same arm, and the reason `capability::check` inspects the
+    // record rather than stopping at "is it one".
+    assert!(
+        has(
+            &check_diags("struct P { x: Int }\nlet p = P { x: 1 }\nout(p.z)\n"),
+            "Y112"
+        ),
+        "a missing field of a known record is `check`'s to report"
+    );
+
+    // A **deferred** receiver that resolves to a non-record is rejected when the
+    // call site resolves it — the solver door into the same arm. Lowering could
+    // not have reported this one at all: by the time it runs, `a` is still a
+    // variable and REP-28's own rule says a variable is nobody's to reject.
+    assert!(
+        has(
+            &check_diags(
+                "struct P { x: Int, y: Int }\n\
+                 fn dist(a) -> Int { a.x + a.y }\nout(dist(3))\n"
+            ),
+            "Y112"
+        ),
+        "a call that pins the receiver to `Int` is `check`'s to report"
+    );
+
+    // …and one that resolves to a record **without** the field, likewise.
+    assert!(
+        has(
+            &check_diags(
+                "struct P { x: Int, y: Int }\nfn getz(a) { a.z }\nout(getz(P { x: 1, y: 2 }))\n"
+            ),
+            "Y112"
+        ),
+        "a call that pins the receiver to a record lacking the field is `check`'s"
+    );
+
+    // The shape the reviewers reproduced through the closure channel: the
+    // parameter defers a `HasField` and then unifies with `Int`.
+    assert!(
+        has(
+            &check_diags("let v = Vec[Int]()\nv.push(1)\nout(v.map(|a| a.x).sum())\n"),
+            "Y112"
+        ),
+        "a closure parameter pinned to `Int` is `check`'s to report"
+    );
 
     // The call site is what says which record it is, and the parameter comes out
     // at that record — not `forall T. (T) -> …`.
@@ -5234,25 +5319,8 @@ fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
         "two records at one field-read site is Y001, got {diags:?}"
     );
 
-    // A receiver the program pins to a record **without** the field is still
-    // `Y112` at lowering, from its one emitter — the same division `HasMethod`
-    // keeps with `Y110`, and the reason a never-called generic body reports there
-    // rather than here.
-    let diags = analyze_and_lower_diags(
-        "struct P { x: Int, y: Int }\nfn getz(a) { a.z }\nout(getz(P { x: 1, y: 2 }))\n",
-    );
-    assert!(
-        diags.iter().any(|d| d.code().to_string() == "Y112"),
-        "expected Y112, got {diags:?}"
-    );
-
-    // A concrete receiver that is not a record at all is unchanged, and so is a
-    // concrete record's own field read — the fast path is still the fast path.
-    let diags = analyze_and_lower_diags("let n = 1\nout(n.x)\n");
-    assert!(
-        diags.iter().any(|d| d.code().to_string() == "Y112"),
-        "expected Y112, got {diags:?}"
-    );
+    // A concrete record's own field read is untouched — the fast path is still
+    // the fast path, and it never emits a requirement at all.
     assert!(is_clean_with_lower(
         "struct P { x: Int, y: Int }\nlet p = P { x: 1, y: 2 }\nout(p.x + p.y)\n"
     ));

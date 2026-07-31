@@ -86,9 +86,13 @@ before allocating. Neither collides: both extended a contiguous block.
 
 `Y019`, for REP-08 — a `.n` on a receiver that is not a tuple, or an index past
 its arity. Not `Y112` ("no field on this type"): a tuple has no field *names*, so
-that message would name the wrong thing, and `Y112` is emitted at **lowering**,
+that message would name the wrong thing, and `Y112` was emitted at **lowering**,
 which `praxis check` does not run — `Y019` is emitted in inference for `Y018`'s
-reason. One code with two messages, because "you cannot index this" and "there is
+reason. (As of REP-28's correction, 2026-07-31, `Y112` has a second emitter in
+inference and is the one that fires for a receiver `check` can decide; lowering's
+now fires only for callers that lower without checking first. `Y019` is unchanged
+— it was right for the reason it was written, and it is right for the same reason
+now.) One code with two messages, because "you cannot index this" and "there is
 no element there" are one mistake at two receivers, and the arity is the useful
 thing to say when there is one.
 

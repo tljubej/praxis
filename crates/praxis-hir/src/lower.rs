@@ -2429,6 +2429,32 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// `r.field` — a record field read (M7, §4.5).
+    ///
+    /// A receiver whose type is **still a variable here** is not an error, and
+    /// that is REP-28's other half. It means no call site ever said what the
+    /// receiver is, which is the state §4.9's own fence is in:
+    ///
+    /// ```praxis
+    /// fn manhattan(a, b) {
+    ///     abs(a.x - b.x) + abs(a.y - b.y)
+    /// }
+    /// ```
+    ///
+    /// Nothing calls `manhattan`, so nothing pins `a`. Rejecting that read used to
+    /// make the design document's own example pass `praxis check` and then fail
+    /// under `praxis run` with four `Y112`s — a `check`/`run` divergence of exactly
+    /// the shape REP-12 and REP-01 closed elsewhere, and the reason this arm is now
+    /// silent. The same tolerance is what an uncalled `fn f(a) { a + 1 }` has always
+    /// had; a field read was singled out only because it needed a record definition
+    /// to produce an index.
+    ///
+    /// Silence here is affordable because it is no longer silence anywhere else:
+    /// `Inferer::infer_field_get` requires `HasField` of *every* receiver, so a
+    /// concrete one is rejected at the read and a deferred one is rejected when a
+    /// call site resolves it — both at `praxis check`. What is left for lowering is
+    /// only the receiver no pass can decide, and a function holding one has no
+    /// instantiation to generate code for.
     fn lower_field_get(&mut self, f: &FieldExpr) -> TypedExpr {
         let span = self.node_span(f.syntax());
         let receiver = match f.receiver() {
@@ -2445,7 +2471,14 @@ impl<'a> Lowerer<'a> {
             let name = f.field_name()?;
             self.db.record_field_of(def, &args, name.text())
         }) else {
-            // Not a record type, or unknown field — emit a Y1xx diagnostic.
+            // A receiver nothing ever pinned: see this function's doc comment.
+            // Inference has already reported every receiver it could decide.
+            if self.db.var_id_of(resolved).is_some() {
+                return self.error_expr();
+            }
+            // A concrete type with no such field. Inference reports this too, and
+            // `praxis run` stops before lowering when it does, so this is the
+            // report for the callers that lower without checking first.
             if let Some(tok) = f.field_name() {
                 self.diag(
                     tok.text_range(),

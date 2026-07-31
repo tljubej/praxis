@@ -59,15 +59,19 @@ pub enum Capability {
         params: Vec<Type>,
         result: Type,
     },
-    /// Has a field `name` of type `ty`. Emitted by a field read on a receiver
-    /// whose type is not yet known (REP-28) — the third capability discharged by
-    /// *resolving* rather than by answering a yes/no, because the field's type is
-    /// something the read produces and nothing else says.
+    /// Has a field `name` of type `ty`. Emitted by every field read a record
+    /// definition cannot answer on the spot (REP-28) — the third capability
+    /// discharged by *resolving* rather than by answering a yes/no, because the
+    /// field's type is something the read produces and nothing else says.
     ///
-    /// Without it `fn dist(a) -> Int { a.x + a.y }` constrained `a` not at all:
-    /// the read answered a fresh variable, `a` was generalized, and §4.9's own
-    /// example passed `praxis check` and then failed under `praxis run` with
-    /// `Y112`.
+    /// Without it a field read constrained its receiver not at all: the read
+    /// answered a fresh variable and recorded no requirement, so
+    /// `fn dist(a) -> Int { a.x + a.y }` / `out(dist(3))` passed `praxis check`
+    /// and then failed under `praxis run` with `Y112`. **The call site is part of
+    /// the reproduction**: an *uncalled* `dist` pins nothing, so there is no
+    /// receiver for anyone to reject, and it compiles — that is the same tolerance
+    /// an uncalled `fn f(a) { a + 1 }` gets, and it is what lets §4.9's own fence
+    /// stand as written.
     HasField { name: String, ty: Type },
 }
 

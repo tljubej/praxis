@@ -58,12 +58,14 @@ for completion and signature help — it would have to render one row two ways.
   accessor in those lists already had its parentheses. No implementation changes.
 - **§5.7 states the rule** rather than leaving it to be inferred from the examples,
   and says why a bare `.name` cannot be a call.
-- **`Y112` is what a property spelling gets**, from lowering's one emitter. That is
-  the same division REP-28 kept for a resolved receiver with no such field, and it
-  carries the same known asymmetry: `praxis check` does not run lowering, so
-  `v.len` is clean under `check` and reported under `run`. Moving `Y112` into
-  inference is the general fix for that asymmetry and belongs with `Y110`'s, not
-  here — the finding is the doc's, and a doc that spells a construct the language
-  does not have is what REP-31 was.
+- **`Y112` is what a property spelling gets.** When this was written it came only
+  from lowering's one emitter, and carried lowering's known asymmetry: `praxis
+  check` does not run lowering, so `v.len` was clean under `check` and reported
+  under `run`. **Amended 2026-07-31 (REP-28's correction):** `infer_field_get` now
+  requires `HasField` of every receiver it cannot answer itself, so a concrete one
+  fails in inference and `v.len` is `Y112` under `check` — and the message names
+  the type, `no field `len` on type `Vec[Int]``, which lowering's emitter could not
+  say. The asymmetry this bullet deferred is closed for fields; `Y110`'s is still
+  open (REP-33).
 - **A record field may be named `len`** and is unaffected: `p.len` reads the field,
   `p.len()` looks for a row. The gate pins both.

@@ -542,10 +542,20 @@ impl Inferer {
     /// for the same reason as the other two: the deferred read returned a bare
     /// variable, and this is the only thing that ever says what it holds.
     ///
-    /// A receiver that turns out to have no such field is left alone here, exactly
-    /// as `HasMethod` leaves `Y110` to lowering: `Y112` has one emitter, it has the
-    /// field-name span, and it fires for both shapes that reach it. Reporting here
-    /// as well would be the same mistake twice.
+    /// A receiver that turns out to have **no such field** is reported here, and
+    /// that is a correction rather than a design choice. Leaving it to lowering is
+    /// what `HasMethod` does with `Y110`, and it only works because a `HasMethod`
+    /// call site survives into lowering with a concrete receiver to complain about.
+    /// A `HasField` one need not: the receiver may be a *parameter* that this
+    /// discharge is the first and last place to resolve — `fn dist(a) { a.x }` /
+    /// `out(dist(3))` — and lowering then sees a receiver that is still a variable
+    /// and, by REP-28's own rule, says nothing. Silence here was silence
+    /// everywhere: `praxis check` passed and `praxis run` failed, the exact
+    /// divergence REP-28 exists to close.
+    ///
+    /// So the failure goes through `report_cap_failure`, exactly as
+    /// [`resolve_deferred_iterable`](Self::resolve_deferred_iterable)'s does, with
+    /// the requirement's own span as the note.
     fn resolve_deferred_field(&mut self, c: &Constraint, name: &str, ty: Type) {
         let receiver = self.db.follow(c.var_type());
         let field = match self.db.data(receiver) {
@@ -555,7 +565,10 @@ impl Inferer {
             }
             _ => None,
         };
-        let Some(field) = field else { return };
+        let Some(field) = field else {
+            self.report_cap_failure(&c.cap, receiver, c.report_at(), c.origin_note());
+            return;
+        };
         if let Err(e) = self.db.unify(ty, field) {
             let mut diag = self.unify_diagnostic(c.report_at(), e);
             if let Some(origin) = c.origin_note() {
@@ -755,10 +768,14 @@ impl Inferer {
             Capability::HasMethod { name, .. } => {
                 crate::diagnostics::unknown_method(at, name, &rendered)
             }
-            // Unreachable for the same reason `HasMethod`'s arm is: `require_field`
-            // only defers a receiver that is still a variable, and a deferred one is
-            // discharged by [`Inferer::resolve_deferred_field`], which leaves the
-            // failure to lowering (it owns `Y112` and has the field-name span).
+            // Live, and from both doors — unlike `HasMethod`'s arm above.
+            // `infer_field_get` requires the field of *every* receiver it cannot
+            // answer itself, so a concrete one fails in `require_cap_as` and is
+            // reported at the read; a deferred one that resolves to a non-record,
+            // or to a record without the field, is reported by
+            // [`Inferer::resolve_deferred_field`]. Both report at `praxis check`
+            // time, which is the point: lowering alone is a report `check` never
+            // runs.
             Capability::HasField { name, .. } => {
                 crate::diagnostics::unknown_field(at, name, &rendered)
             }
@@ -1732,17 +1749,28 @@ impl Inferer {
     /// Infer the type of a field access `receiver.field` (M7, §4.5). Returns the
     /// field's declared type.
     ///
-    /// A receiver that is still a **variable** goes on the constraint channel
-    /// (REP-28). It used to constrain nothing at all: the read answered a fresh
-    /// variable and recorded no requirement, so the parameter was generalized and
-    /// §4.9's own example — `fn dist(a) -> Int { a.x + a.y }` — passed `praxis
-    /// check` and then failed under `praxis run` with `Y112`. That is TY-30's shape
-    /// exactly, and [`require_field`](Self::require_field) is TY-30's fix at the
-    /// third door.
+    /// Every read that cannot be answered here goes through
+    /// [`require_field`](Self::require_field) — **including** one whose receiver is
+    /// already concrete (REP-28, corrected). That is not symmetry for its own sake,
+    /// it is what makes the requirement have teeth. A field read used to constrain
+    /// nothing at all: the read answered a fresh variable and recorded no
+    /// requirement, so `fn dist(a) -> Int { a.x + a.y }` / `out(dist(3))` passed
+    /// `praxis check` and then failed under `praxis run` with `Y112`. That is
+    /// TY-30's shape exactly, and this is TY-30's fix at the third door.
     ///
-    /// A **concrete** receiver with no such field is left to lowering, unchanged:
-    /// `Y112` has one emitter and it has the field-name span, which is the same
-    /// division `HasMethod` and `Y110` keep.
+    /// The two receivers take the two arms [`require_cap_as`](Self::require_cap_as)
+    /// already has. A **variable** is deferred and answered by
+    /// [`resolve_deferred_field`](Self::resolve_deferred_field) when a call site
+    /// says what it is. A **concrete** receiver — `Int`, or a record with no such
+    /// field — is decided here and now, by `crate::capability::check`, and reported
+    /// at `praxis check` time. Routing the concrete case through the same door is
+    /// ADR-057's rule (a capability check goes through `require_cap`) and it is also
+    /// the only thing that makes `Capability::HasField`'s rejection arm reachable:
+    /// before this, that arm was dead code and `check` reported nothing at all.
+    ///
+    /// A receiver that is *still* a variable when lowering runs is the one case
+    /// nobody can decide — no call site ever pinned it — and `lower_field_get`
+    /// tolerates it for the reason `+` in an uncalled generic function is tolerated.
     fn infer_field_get(&mut self, f: &FieldExpr) -> Type {
         let receiver_ty = f
             .receiver()
@@ -1760,9 +1788,7 @@ impl Inferer {
             }
         }
         let result = self.db.fresh_var();
-        if self.db.var_id_of(resolved).is_some() {
-            self.require_field(receiver_ty, fname, result, field_tok.text_range());
-        }
+        self.require_field(receiver_ty, fname, result, field_tok.text_range());
         result
     }
 
