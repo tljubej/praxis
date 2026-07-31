@@ -11,6 +11,7 @@
 //! spill (ADR-019) updates each local's `value` field at safepoints so a
 //! snapshot reflects live state.
 
+use crate::abi::abi_guard;
 use crate::context::{DebugFrame, DebugLocal, RuntimeContext};
 use crate::gc::GcRef;
 
@@ -83,52 +84,54 @@ pub unsafe extern "C" fn praxis_push_debug_frame(
     local_count: u32,
     local_metas: *const DebugLocalMeta,
 ) -> *mut DebugFrame {
-    if ctx.is_null() {
-        return std::ptr::null_mut();
-    }
-    let count = local_count as usize;
-    let locals: Vec<DebugLocal> = if count == 0 || local_metas.is_null() {
-        Vec::new()
-    } else {
-        // SAFETY: caller guarantees `local_metas` points at `count` valid entries.
-        let metas = unsafe { std::slice::from_raw_parts(local_metas, count) };
-        metas
-            .iter()
-            .map(|m| DebugLocal {
-                source_name: m.source_name,
-                name_len: m.name_len,
-                symbol_id: m.symbol_id,
-                descriptor: m.descriptor,
-                value: None,
-                type_id: m.type_id,
-                kind: m.kind,
-                span_start: m.span_start,
-                span_end: m.span_end,
-            })
-            .collect()
-    };
-    let mut locals_box = locals.into_boxed_slice();
-    let locals_ptr = locals_box.as_mut_ptr();
-    std::mem::forget(locals_box);
-    let frame = Box::new(DebugFrame {
-        parent: std::ptr::null_mut(),
-        func_name,
-        func_name_len,
-        locals: locals_ptr,
-        local_count,
-        // Reserved for M10b: source span and active-parser path are zeroed/null
-        // until the backend threads them from the AST/plan.
-        source_span: (0, 0),
-        parser_path: std::ptr::null(),
-        parser_path_len: 0,
-    });
-    let raw = Box::into_raw(frame);
-    // SAFETY: ctx is live; chain onto debug_top.
-    unsafe {
-        (*raw).parent = (*ctx).debug_top;
-        (*ctx).debug_top = raw;
-    }
-    raw
+    abi_guard!("praxis_push_debug_frame", ctx, {
+        if ctx.is_null() {
+            return std::ptr::null_mut();
+        }
+        let count = local_count as usize;
+        let locals: Vec<DebugLocal> = if count == 0 || local_metas.is_null() {
+            Vec::new()
+        } else {
+            // SAFETY: caller guarantees `local_metas` points at `count` valid entries.
+            let metas = unsafe { std::slice::from_raw_parts(local_metas, count) };
+            metas
+                .iter()
+                .map(|m| DebugLocal {
+                    source_name: m.source_name,
+                    name_len: m.name_len,
+                    symbol_id: m.symbol_id,
+                    descriptor: m.descriptor,
+                    value: None,
+                    type_id: m.type_id,
+                    kind: m.kind,
+                    span_start: m.span_start,
+                    span_end: m.span_end,
+                })
+                .collect()
+        };
+        let mut locals_box = locals.into_boxed_slice();
+        let locals_ptr = locals_box.as_mut_ptr();
+        std::mem::forget(locals_box);
+        let frame = Box::new(DebugFrame {
+            parent: std::ptr::null_mut(),
+            func_name,
+            func_name_len,
+            locals: locals_ptr,
+            local_count,
+            // Reserved for M10b: source span and active-parser path are zeroed/null
+            // until the backend threads them from the AST/plan.
+            source_span: (0, 0),
+            parser_path: std::ptr::null(),
+            parser_path_len: 0,
+        });
+        let raw = Box::into_raw(frame);
+        // SAFETY: ctx is live; chain onto debug_top.
+        unsafe {
+            (*raw).parent = (*ctx).debug_top;
+            (*ctx).debug_top = raw;
+        }
+        raw
+    })
 }
 
 /// Set the source span `[start, end)` (byte offsets into program source) on the
@@ -146,17 +149,19 @@ pub unsafe extern "C" fn praxis_set_frame_source_span(
     start: u32,
     end: u32,
 ) {
-    if ctx.is_null() {
-        return;
-    }
-    let top = unsafe { (*ctx).debug_top };
-    if top.is_null() {
-        return;
-    }
-    // SAFETY: caller guarantees debug_top is the frame just pushed.
-    unsafe {
-        (*top).source_span = (start, end);
-    }
+    abi_guard!("praxis_set_frame_source_span", ctx, {
+        if ctx.is_null() {
+            return;
+        }
+        let top = unsafe { (*ctx).debug_top };
+        if top.is_null() {
+            return;
+        }
+        // SAFETY: caller guarantees debug_top is the frame just pushed.
+        unsafe {
+            (*top).source_span = (start, end);
+        }
+    })
 }
 
 /// Pop the frame at `ctx.debug_top` (must be `frame`), restoring the parent,
@@ -166,22 +171,24 @@ pub unsafe extern "C" fn praxis_set_frame_source_span(
 /// `ctx` must be live and wired; `frame` must be the current top.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_pop_debug_frame(ctx: *mut RuntimeContext, frame: *mut DebugFrame) {
-    if ctx.is_null() || frame.is_null() {
-        return;
-    }
-    // SAFETY: caller guarantees frame is the current top and is valid.
-    unsafe {
-        let parent = (*frame).parent;
-        // Free the locals array.
-        if !(*frame).locals.is_null() && (*frame).local_count > 0 {
-            let count = (*frame).local_count as usize;
-            // SAFETY: locals was allocated via into_boxed_slice; reconstruct it.
-            let local_slice = std::ptr::slice_from_raw_parts_mut((*frame).locals, count);
-            let _ = Box::from_raw(local_slice);
+    abi_guard!("praxis_pop_debug_frame", ctx, {
+        if ctx.is_null() || frame.is_null() {
+            return;
         }
-        (*ctx).debug_top = parent;
-        let _ = Box::from_raw(frame);
-    }
+        // SAFETY: caller guarantees frame is the current top and is valid.
+        unsafe {
+            let parent = (*frame).parent;
+            // Free the locals array.
+            if !(*frame).locals.is_null() && (*frame).local_count > 0 {
+                let count = (*frame).local_count as usize;
+                // SAFETY: locals was allocated via into_boxed_slice; reconstruct it.
+                let local_slice = std::ptr::slice_from_raw_parts_mut((*frame).locals, count);
+                let _ = Box::from_raw(local_slice);
+            }
+            (*ctx).debug_top = parent;
+            let _ = Box::from_raw(frame);
+        }
+    })
 }
 
 impl DebugFrame {

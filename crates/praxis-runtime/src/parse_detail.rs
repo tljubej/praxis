@@ -150,8 +150,14 @@ const PREVIEW_RADIUS: usize = 24;
 /// Build a bounded, UTF-8-lossy, single-line preview of `input` around `offset`.
 /// Newlines are rendered as `⏎` so the preview stays on one line.
 fn preview_around(input: &[u8], offset: usize) -> String {
-    let start = offset.saturating_sub(PREVIEW_RADIUS);
+    // `start` is clamped to `end`, not merely to the radius. An offset past the
+    // end of the buffer gives `start > end`, and `&input[start..end]` panics on
+    // an inverted range — inside `extern "C"`, where a panic is undefined
+    // behaviour rather than a crash report (D12). It was reachable: a ragged
+    // grid's fill is parsed against its own buffer, so a failure there carries
+    // an offset that means nothing here.
     let end = (offset + PREVIEW_RADIUS).min(input.len());
+    let start = offset.saturating_sub(PREVIEW_RADIUS).min(end);
     let slice = &input[start..end];
     let lossy = String::from_utf8_lossy(slice);
     let mut out = String::with_capacity(lossy.len());
@@ -168,6 +174,24 @@ fn preview_around(input: &[u8], offset: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **D12's second panic path.** A failure offset past the end of the
+    /// buffer must not make the preview slice an inverted range.
+    ///
+    /// `start = offset - 24` and `end = min(offset + 24, len)`, so any offset
+    /// more than 24 bytes past the end gave `start > end` and
+    /// `&input[start..end]` panicked — inside `extern "C"`, where a panic is
+    /// undefined behaviour and not a crash report.
+    #[test]
+    fn a_failure_offset_past_the_buffer_previews_rather_than_panicking() {
+        let mut d = ParseDetail::new();
+        d.consider(ParseFail::here(10_000, "int"), b"short");
+        assert!(d.is_set());
+        assert_eq!(
+            d.actual_preview, "",
+            "there is nothing within 24 bytes of an offset past the end, and nothing is a preview"
+        );
+    }
 
     #[test]
     fn first_failure_sets_detail() {

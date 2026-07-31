@@ -22,6 +22,7 @@
 //! outer frames unwinding after the innermost already snapshotted) are no-ops.
 //! The slot is cleared at the start of each program run.
 
+use crate::abi::abi_guard;
 use crate::context::{DebugFrame, DebugLocal};
 use crate::gc::GcRef;
 use crate::roots::RootSet;
@@ -165,30 +166,32 @@ impl SnapshotSlot {
 /// valid `DebugFrame` whose parent chain is intact.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_snapshot_debug_chain(ctx: *mut crate::RuntimeContext) {
-    if ctx.is_null() {
-        return;
-    }
-    let slot_ptr = unsafe { (*ctx).crash_snapshot };
-    if slot_ptr.is_null() {
-        return;
-    }
-    // Idempotency: if a snapshot already exists this run, do nothing. The first
-    // (innermost) fault epilogue captures the intact chain; later frames skip.
-    // SAFETY: slot_ptr points at a live SnapshotSlot owned by the Runtime.
-    if unsafe { (*slot_ptr).is_set() } {
-        return;
-    }
-    let top = unsafe { (*ctx).debug_top };
-    if top.is_null() {
-        return;
-    }
-    // SAFETY: debug_top is null or a valid DebugFrame with an intact parent chain.
-    let snapshot = unsafe { copy_chain(top) };
-    let kind = unsafe { crate::context::current_fault_kind(ctx) };
-    let mut s = CrashSnapshot::new();
-    s.fault_kind = kind;
-    s.frames = snapshot;
-    unsafe { (*slot_ptr).snapshot = Some(s) };
+    abi_guard!("praxis_snapshot_debug_chain", ctx, {
+        if ctx.is_null() {
+            return;
+        }
+        let slot_ptr = unsafe { (*ctx).crash_snapshot };
+        if slot_ptr.is_null() {
+            return;
+        }
+        // Idempotency: if a snapshot already exists this run, do nothing. The first
+        // (innermost) fault epilogue captures the intact chain; later frames skip.
+        // SAFETY: slot_ptr points at a live SnapshotSlot owned by the Runtime.
+        if unsafe { (*slot_ptr).is_set() } {
+            return;
+        }
+        let top = unsafe { (*ctx).debug_top };
+        if top.is_null() {
+            return;
+        }
+        // SAFETY: debug_top is null or a valid DebugFrame with an intact parent chain.
+        let snapshot = unsafe { copy_chain(top) };
+        let kind = unsafe { crate::context::current_fault_kind(ctx) };
+        let mut s = CrashSnapshot::new();
+        s.fault_kind = kind;
+        s.frames = snapshot;
+        unsafe { (*slot_ptr).snapshot = Some(s) };
+    })
 }
 
 /// Deep-copy the frame chain starting at `top` into a `Vec<SnapshotFrame>`,
