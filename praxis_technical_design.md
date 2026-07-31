@@ -786,7 +786,7 @@ Semantics:
 - `int`: signed decimal integer, surrounding horizontal space handled by caller.
 - `word`: non-empty run excluding whitespace and parser-delimiter punctuation.
 - `identifier`: ASCII-like identifier syntax by default.
-- `text`: minimally consumes text until the following template literal can match.
+- `text`: minimally consumes text until the following template literal can match. "The following literal" is the whole run of literal parts up to the next capture, so `` `{a:text} bar` `` and `` `{a:text}\s+bar` `` are one policy in two spellings and read the same input the same way. A run that can match the empty string (`\s*`, or a literal with no whitespace run in front of it and no text) constrains nothing, and a capture with nothing to stop before takes the rest of its region.
 - `rest`: consumes the remainder of the current region.
 - `digit`: one decimal digit, returned as `Int` or `Byte`; choose `Int` for v1 consistency.
 

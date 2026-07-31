@@ -134,6 +134,33 @@ That is why `` `{a:text}\s*{v:int}` `` over `"foo 3"` leaves the capture unbound
 and reports "expected int" — asking for zero-or-more is asking for no bound, and
 that is the answer.
 
+### It is the whole run that has to match, not its first constraining member
+
+**AMENDED again**, for the reason two spellings of one policy behaved
+differently. `` lines(`{a:text} bar`) `` read `"x y bar"` as `a = "x y"`, and
+`` lines(`{a:text}\s+bar`) `` over the identical bytes faulted with
+`expected literal "bar"` at the interior space — because `\s+` is lowered to its
+own empty-text part, so "the first constraining part" is the space run alone, and
+a space run matches at the *first* space, where `bar` is not.
+
+Two spellings of one policy disagreeing is the same class of defect as `lines`
+and `grid` disagreeing about a trailing space (ADR-078), and it has the same
+kind of answer — state the rule so that neither spelling is a special case:
+
+> The bound is the earliest position at which the **whole run of parts up to the
+> next capture** can match.
+
+A run constrains when *any* of its members does; a run that is empty, or whose
+members all match the empty string, is no bound and the capture takes the rest of
+its region as before. `match_literal_run` is the lookahead: exactly what
+`walk_template`'s own `Literal` arm does, without committing.
+
+This subsumes the previous wording rather than contradicting it — a run of one
+constraining part is the same scan — and it is strictly more precise where the
+run is longer. `` `{a:text}\s*bar` `` over `"x  bar"` now stops the capture at
+`x` and lets the `\s*` take the spaces, where matching `bar` alone would have
+put them inside the capture.
+
 ## Decision 3: `word`'s delimiter set stays minimal
 
 `word` stops on space, tab, `,`, `\n` and `\r`. The audit read

@@ -1595,89 +1595,102 @@ fn walk_grid(
 
 // ---- templates (§7.2, §7.3) -----------------------------------------------
 
-/// What a capture must stop before: the first following template part that
-/// constrains anything at all.
-enum FollowingBound<'a> {
-    /// A literal with bytes to match, after its whitespace policy.
-    Literal(&'a str, praxis_input_parser::WsPolicy),
-    /// A **whitespace-only** part that demands at least one byte — a plain
-    /// space run, `\\s+`, `\\x20`, `\\t`, `\\n`. §7.9 makes a run of whitespace
-    /// in a template a `Literal` whose text is empty and whose policy carries
-    /// the requirement, and §7.4 says `text` "minimally consumes text until the
-    /// following template literal can match". A space run *is* that literal.
-    Whitespace(praxis_input_parser::WsPolicy),
-}
-
-/// The first part after `index` that a capture can be bounded by.
+/// The run of template parts a capture must stop before: every part from
+/// `index + 1` up to (not including) the next capture.
 ///
-/// The predecessor looked only for a literal with **non-empty** text, so a
-/// capture followed by a whitespace-only part was not bounded at all: `text`
-/// swallowed the rest of its region and the whitespace part then had nothing
-/// left to match. `` lines(`{name:text} {v:int}`) `` over `"foo 3"` reported
-/// "expected whitespace" at the end of the line — for the most ordinary
-/// template shape there is. `` `{a:text}\\s+{b:int}` `` and
-/// `` `{a:text}\\n{b:int}` `` failed the same way.
+/// **The whole run, not its first constraining member.** Two spellings of one
+/// policy behaved differently while only the first was consulted:
+/// `` lines(`{a:text} bar`) `` read `"x y bar"` as `a = "x y"`, and
+/// `` lines(`{a:text}\\s+bar`) `` over the identical bytes faulted — because
+/// §7.9 lowers `\\s+` to its own empty-text part, and bounding the capture by
+/// that part alone stopped it at the first space, where `bar` is not. §7.4 says
+/// `text` "minimally consumes text until the following template literal can
+/// match"; what has to be able to match is everything before the next capture,
+/// which is the only reading under which the two spellings agree.
 ///
-/// `\\s*` and a literal with no run in front of it (`WsPolicy::ZeroOrMore`,
-/// `WsPolicy::None`) match the empty string, so they constrain nothing and are
-/// skipped — the scan continues to whatever follows *them*.
+/// The predecessor before *that* looked only for a literal with **non-empty**
+/// text, so a capture followed by a whitespace-only part was not bounded at
+/// all: `` lines(`{name:text} {v:int}`) `` over `"foo 3"` reported "expected
+/// whitespace" at the end of the line, for the most ordinary template shape
+/// there is.
+///
+/// `None` means the run constrains nothing — it is empty (the next part is a
+/// capture), or every member matches the empty string (`\\s*` and a literal
+/// with no run in front of it: `WsPolicy::ZeroOrMore`, `WsPolicy::None`, with
+/// no text). A capture with nothing to stop before takes the rest of its
+/// region, which is the documented answer for a template that asks for
+/// zero-or-more.
 fn following_bound(
     parts: &[praxis_input_parser::TemplatePartNode],
     index: usize,
-) -> Option<FollowingBound<'_>> {
-    use praxis_input_parser::WsPolicy;
-    parts[index + 1..].iter().find_map(|p| match p {
-        praxis_input_parser::TemplatePartNode::Literal { text, ws } if !text.is_empty() => {
-            Some(FollowingBound::Literal(text, *ws))
+) -> Option<&[praxis_input_parser::TemplatePartNode]> {
+    use praxis_input_parser::{TemplatePartNode, WsPolicy};
+    let rest = &parts[index + 1..];
+    let len = rest
+        .iter()
+        .take_while(|p| matches!(p, TemplatePartNode::Literal { .. }))
+        .count();
+    let run = &rest[..len];
+    let constrains = run.iter().any(|p| match p {
+        TemplatePartNode::Literal { text, ws } => {
+            !text.is_empty() || !matches!(ws, WsPolicy::None | WsPolicy::ZeroOrMore)
         }
-        praxis_input_parser::TemplatePartNode::Literal { ws, .. } => match ws {
-            WsPolicy::None | WsPolicy::ZeroOrMore => None,
-            WsPolicy::SpaceRun
-            | WsPolicy::OneOrMore
-            | WsPolicy::ExactSpace
-            | WsPolicy::Newline
-            | WsPolicy::Tab => Some(FollowingBound::Whitespace(*ws)),
-        },
-        _ => None,
-    })
+        _ => false,
+    });
+    constrains.then_some(run)
 }
 
-/// The earliest position at or after `cursor` where `bound` can match — i.e.
+/// Match the literal run `run` at `at`, returning where it ends, or `None`.
+///
+/// Exactly what `walk_template`'s own `Literal` arm does, in the form the bound
+/// scan needs: a lookahead that answers "could the rest of this template's
+/// fixed text start here?" without committing.
+fn match_literal_run(
+    i: &Input<'_>,
+    region: ByteRegion,
+    base: Cursor,
+    bytes: &[u8],
+    at: Cursor,
+    run: &[praxis_input_parser::TemplatePartNode],
+) -> Option<Cursor> {
+    let mut cursor = at;
+    for part in run {
+        let praxis_input_parser::TemplatePartNode::Literal { text, ws } = part else {
+            // `following_bound` only ever hands us literals.
+            return None;
+        };
+        cursor = base.advance(consume_ws(bytes, cursor.delta_from(base), *ws)?);
+        if !region.from(cursor).bytes(i).starts_with(text.as_bytes()) {
+            return None;
+        }
+        cursor = cursor.advance(text.len());
+    }
+    Some(cursor)
+}
+
+/// The earliest position at or after `cursor` where `run` can match — i.e.
 /// where the capture before it must stop.
 ///
 /// "Earliest" is what makes `text` non-greedy, and taking the position *before*
-/// the whitespace policy runs is what keeps the whitespace out of the capture:
-/// for `{a:int},{b:int}` on `"12 ,34"` the comma's `SpaceRun` eats the space, so
-/// the bound is after `12` and `int` consumes its region exactly. The same
-/// applies to a whitespace-only bound: `` `{name:text} {v:int}` `` on
+/// the run's leading whitespace policy runs is what keeps the whitespace out of
+/// the capture: for `{a:int},{b:int}` on `"12 ,34"` the comma's `SpaceRun` eats
+/// the space, so the bound is after `12` and `int` consumes its region exactly.
+/// The same applies to a whitespace-only run: `` `{name:text} {v:int}` `` on
 /// `"foo 3"` stops `name` at the space rather than inside it.
 ///
-/// `None` means the bound does not occur in the rest of the region at all,
-/// which is a mismatch the part itself will report.
+/// `None` means the run does not occur in the rest of the region at all, which
+/// is a mismatch the parts themselves will report.
 fn capture_bound(
     i: &Input<'_>,
     region: ByteRegion,
     base: Cursor,
     cursor: Cursor,
-    bound: &FollowingBound<'_>,
+    run: &[praxis_input_parser::TemplatePartNode],
 ) -> Option<Cursor> {
     let bytes = region.bytes(i);
     let mut at = cursor;
     loop {
-        let matches_here = match bound {
-            FollowingBound::Literal(lit, ws) => consume_ws(bytes, at.delta_from(base), *ws)
-                .is_some_and(|after| {
-                    region
-                        .from(base.advance(after))
-                        .bytes(i)
-                        .starts_with(lit.as_bytes())
-                }),
-            // A whitespace-only bound is satisfied wherever its policy is:
-            // every policy that reaches here demands at least one byte, so
-            // `consume_ws` returning `Some` *is* the match.
-            FollowingBound::Whitespace(ws) => consume_ws(bytes, at.delta_from(base), *ws).is_some(),
-        };
-        if matches_here {
+        if match_literal_run(i, region, base, bytes, at, run).is_some() {
             return Some(at);
         }
         // Step by scalar, so a bound never lands inside a multi-byte character.
@@ -1755,7 +1768,7 @@ fn walk_template(
                 // to `word`'s delimiter set (IPR-11).
                 match following_bound(parts, index) {
                     Some(bound) => {
-                        match capture_bound(i, region, base, cursor, &bound) {
+                        match capture_bound(i, region, base, cursor, bound) {
                             Some(bound) => {
                                 // SAFETY: ctx is valid.
                                 let value = unsafe {

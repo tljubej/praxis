@@ -885,6 +885,47 @@ fn a_capture_is_bounded_by_a_whitespace_only_template_part() {
     assert_eq!(result.as_text(), "foo 3");
 }
 
+/// **Two spellings of one whitespace policy bound a capture alike.**
+///
+/// `` lines(`{a:text} bar`) `` read `"x y bar"` as `a = "x y"` while
+/// `` lines(`{a:text}\s+bar`) `` over the identical bytes faulted with
+/// `expected literal "bar"` at the interior space. §7.9 lowers `\s+` to its own
+/// empty-text part, and the bound was computed from the *first* following part
+/// that constrains anything — which for the escaped spelling is the space run
+/// alone, and a space run matches at the first space, where `bar` is not.
+///
+/// §7.4 says `text` "minimally consumes text until the following template
+/// literal can match". What has to be able to match is the whole run of parts
+/// before the next capture, which is the only reading under which two spellings
+/// of one policy agree. Both directions are pinned: the case that was already
+/// right must stay right.
+#[test]
+fn two_spellings_of_one_whitespace_policy_bound_a_capture_alike() {
+    let escaped = "fn main() -> Text {\n  let r = read lines(`{a:text}\\s+bar`)\n  r.get(0).a\n}\n";
+    let plain = "fn main() -> Text {\n  let r = read lines(`{a:text} bar`)\n  r.get(0).a\n}\n";
+
+    // Past an interior space — the half that faulted.
+    for src in [escaped, plain] {
+        let (runtime, result) = run_main_with_input(src, "x y bar\n");
+        assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+        assert_eq!(result.as_text(), "x y");
+    }
+    // No interior space — the half that already worked, and must keep working.
+    for src in [escaped, plain] {
+        let (runtime, result) = run_main_with_input(src, "x bar\n");
+        assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+        assert_eq!(result.as_text(), "x");
+    }
+
+    // The run is matched as a run, so a leading `\s*` that constrains nothing
+    // on its own still keeps the whitespace out of the capture: the bound is
+    // the earliest position where `\s*bar` matches, which is before the spaces.
+    let src = "fn main() -> Text {\n  let r = read lines(`{a:text}\\s*bar`)\n  r.get(0).a\n}\n";
+    let (runtime, result) = run_main_with_input(src, "x  bar\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_text(), "x");
+}
+
 /// **IPR-11 without growing `word`'s delimiter set.**
 ///
 /// `word` stops on space, tab, `,`, `\n` and `\r` and nothing else, so
