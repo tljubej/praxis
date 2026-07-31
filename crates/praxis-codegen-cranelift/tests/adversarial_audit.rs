@@ -885,6 +885,45 @@ fn a_capture_is_bounded_by_a_whitespace_only_template_part() {
     assert_eq!(result.as_text(), "foo 3");
 }
 
+/// **`parse(t, rest)` is the identity on `t`.**
+///
+/// `run_plan` is the single body behind both `read <parser>` and the host
+/// `parse(text, P)`, and a repair pass trimmed the input file's trailing
+/// terminator inside it. That is a file convention, and the second caller has no
+/// file: the `\n` a *program* wrote into its own literal was deleted, so
+/// `parse("abc\n", rest)` and `parse("abc", rest)` answered the same `Text` and
+/// nothing could recover the difference. §7.4 defines `rest` as "consumes the
+/// remainder of the current region", and at the root the region is the text the
+/// caller handed in.
+///
+/// The trim is gone rather than narrowed to the `read` path: nothing needed it
+/// once trailing whitespace was left to nobody by rule (ADR-078). This is the
+/// property that says so, and it is the one a re-introduced trim of *any* size
+/// would break.
+#[test]
+fn a_parse_is_the_identity_on_the_text_it_was_given() {
+    let src = "fn main() -> Int {\n  \
+               let a = parse(\"abc\\n\", rest)\n  \
+               let b = parse(\"abc\", rest)\n  \
+               let c = parse(\"abc\\r\\n\", rest)\n  \
+               let d = parse(\"abc\\n\\n\", rest)\n  \
+               a.len() * 1000 + b.len() * 100 + c.len() * 10 + d.len()\n}\n";
+    let (runtime, result) = run_main_with_input(src, "unrelated stdin\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        4 * 1000 + 3 * 100 + 5 * 10 + 5,
+        "`parse` reads the Text it was handed, terminators included"
+    );
+
+    // The same at the `read` end, so the two callers are visibly one function:
+    // a root `rest` takes the whole input file, terminator included.
+    let src = "fn main() -> Int {\n  let t = read rest\n  t.len()\n}\n";
+    let (runtime, result) = run_main_with_input(src, "abc\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 4);
+}
+
 /// **Two spellings of one whitespace policy bound a capture alike.**
 ///
 /// `` lines(`{a:text} bar`) `` read `"x y bar"` as `a = "x y"` while
