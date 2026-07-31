@@ -377,14 +377,106 @@ rewritten in this block, after `pipeline_filter_map_keeps_results` and
 instead of checking it, which is what pinning looks like when the bug is in a
 table.
 
+## Round two of this block — REP-50, REP-51, and what review cost
+
+Three reviewers read REP-36 … REP-49. Two returned COMPLETE, one returned a
+**major**, and between them they found two further defects. What the round
+produced:
+
+**The major was a gate that was not one.** `a_graph_goal_predicate_reads_a_bool_at_a_bool_s_width`
+was listed above as REP-37's gate and passed with REP-37's production fix fully
+removed — measured 0 failures in 300 runs. The reason is worth carrying: the
+arena *cannot* produce the shape the defect needs. A `Bool` block is
+`payload_offset + 1` bytes, bumpalo rounds the next base down to eight, and the
+seven bytes in between are slack nothing ever writes, so fresh pages read back
+zero and the eight-byte read answered correctly every time. The test's only
+failing configuration was a *partial* revert, in which the width `debug_assert`
+this fix added to `int_payload` aborts — a real guard, but a gate that needs
+half of its own fix present is not a gate for the defect it names. It now owns
+its operand: a `Bool` laid out the way `alloc_raw` lays one out, in the test's
+own memory, payload byte `0x00` and the next seven bytes `0xFF`, headed by a
+freshly minted `HeapId` so `Heap::mark`'s provenance check skips it. Red under
+both mutations — the eight-byte read, and a read one byte along.
+
+**Five tests in this session have now been labelled gates and were not.** The
+rule this ends on, and the one to carry into the next block: *a test is a gate
+only if it was observed red with its fix removed, and the observation is written
+down.* `counter_inc_below_the_ceiling_still_counts` was the other correction —
+a mutation companion, worth having, not a gate — and the table above now names
+the three companions it does not count.
+
+**REP-50 — the `-0.0` float literal evaluated to `+0.0`.** `out(-0.0)` printed
+`0.0`, a text that does not read back as the Float it names, which is the one
+rule ADR-083 — REP-44's own ADR, from this block — exists to state. The
+formatter was right; a Float negation was lowered as `0.0 - x`, and `0.0 - 0.0`
+is `+0.0`. ADR-045 had already decided the two zeros are distinct for a
+container's ordering, so the language had taken a position and the evaluator was
+losing a value it admits. Landed as `Inst::FloatNeg` (Cranelift `fneg`) rather
+than a better constant, so "a negation is a subtraction from zero" is no longer
+spellable; §4.12 was silent on signed zero and now says it. **Pre-existing** —
+REP-44 is what made it visible, because before ADR-083 both zeros printed `0`.
+
+**REP-51 — `praxis run` read standard input to EOF before the program started.**
+§7.10 says the *first* `read` does it. So a program with no `read` in it
+consumed stdin anyway, and against a pipe nobody closes — a terminal, a CI
+harness holding the descriptor — it hung forever. `run.rs`'s own doc comment had
+described the fix as already done: "The input is read lazily — only if the
+program contains a `read` expression — but for M6 we always read it upfront."
+The host now installs an `InputReader` rather than a buffer and
+`praxis_get_input` calls it once; `take_input_reader` **removes** it, so "once"
+is structural. `< /dev/null` is what hid this for a milestone and a half, and it
+is what `Command::output` binds stdin to — which is why 1500 tests never saw it.
+The gate binds stdin to a pipe it keeps open and **deadlines**, so a regression
+fails rather than wedging the suite.
+
+**Two corrections inside the block.** REP-42's honest null label had made an
+*empty* `Map`'s `values()` unequal to an equally-typed empty `Vec`; the fix is in
+`same_element` — a null slot agrees with anything, which is ADR-066 decision 5 —
+and not in a reinstated guess, which is the defect REP-41 and REP-42 both
+removed. REP-45's sweep matched `set_fault(` over raw text including comments,
+so a comment naming the helper could misclassify a wrapper; it reads code now.
+
+**Two out-of-scope defects registered, not fixed: REP-52 and REP-53.** A fused
+pipeline's `collect` pushes with no fault check, and a method call's fault check
+is unconditional — so `MethodEntry.can_fault` and the manifest's fault column
+have **no consumer**, which is how REP-45's three rows drifted unnoticed. Both
+belong with F17/MIR-10's verifier rule (S9), which is what the corrected column
+exists to feed. A third measurement — `praxis check` performs no method
+resolution, so REP-46's deliberately-absent `_sub`/`_mul` siblings are clean at
+`check` and `Y110` at `run` — went onto **REP-33's** row rather than a new one:
+it is the same check-does-not-run-lowering gap REP-28 closed for `Y112`.
+
 Diagnostic codes: **`Y023` is spent** (REP-47); ADR-051 amended. `Y022` is
 deliberately left free — this session's plan reserved `Y023` upward, and a gap in
 a registry costs nothing while a collision costs an identifier users have seen.
 `N009` is still the next free Name code. **No ABI bump and no new `FaultKind`**:
-REP-43 uses `IntOverflow`, which already meant exactly that condition.
+REP-43 uses `IntOverflow`, which already meant exactly that condition, and
+round two spent neither either — REP-50 added a MIR instruction (`FloatNeg`,
+which crosses no boundary) and REP-51 added a runtime module, not a context
+field. Round two moved one manifest row: `GetInput` from `Pure` to
+`AllocatesAndFaults`, because it now allocates the input buffer and
+`praxis_alloc_text` faults `InvalidText` on input that is not UTF-8 (§4.3);
+`lower_read` gained the matching `check_fault`.
 
-Suite: **1526 passed, 0 failed, 19 ignored.** The 19 all belong to S20. `just ci`
-green at each of the fourteen commits.
+Round two's gates, all four verified red with their fix removed and the test
+untouched:
+
+| Test | File | Pins |
+|---|---|---|
+| `a_graph_goal_predicate_reads_a_bool_at_a_bool_s_width` | `abi.rs` | REP-37, **rewritten** — see above. Red under two mutations: the eight-byte read, and a read one byte along |
+| `run_pass_float_negative_zero` | `praxis-cli/tests/run.rs` | REP-50 — the literal, the same negation through a binding (which a lexer-level constant fold would leave broken), the involution `-(-0.0)`, and two ordinary values. The observation is `1.0 / x` and **not** `x == 0.0`: IEEE-754 says `-0.0 == 0.0`, so a gate written with `==` passes before the fix |
+| `a_program_that_never_reads_does_not_wait_for_standard_input` | `praxis-cli/tests/run.rs` | REP-51 — stdin bound to a pipe the test keeps open, with a **deadline**, so a regression fails rather than wedging the suite. Companion: `a_program_that_reads_still_waits_for_its_input`, because the cheapest way to stop a hang is to stop reading at all |
+| `an_unlearned_element_label_does_not_make_two_empty_collections_unequal` | `abi.rs` | REP-42's collateral — a null slot agrees with anything, and RT-10's rule that two *learned* labels must agree is the last assertion, untouched |
+| `the_manifest_sweep_reads_code_and_not_comments` | `abi.rs` | REP-45's sweep, over synthetic source carrying the fooling shape: a comment naming `set_fault(`, and an unbalanced `}` in prose |
+
+`a_rendered_float_reads_back_as_the_same_float` (`scalars.rs`) and
+`a_graph_goal_predicate_that_is_false_everywhere_finds_nothing` (`abi.rs`) are
+**not** in that table and say so in their own comments: the first states
+ADR-083's rule as a `to_bits` round trip at the layer that owns the rendering
+and is not red on `main`, the second is the old REP-37 walk kept as a companion.
+
+Suite: **1537 passed, 0 failed, 19 ignored.** The 19 all belong to S20. `just ci`
+green at each of the nineteen commits.
 
 <!-- REP-36 … REP-49 block ends -->
 
