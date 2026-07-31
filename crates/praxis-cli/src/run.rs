@@ -26,9 +26,10 @@ use crate::diagnostic_render;
 /// Run the `run` command against `file`. Returns the process exit code.
 ///
 /// `input_file` optionally overrides the process input (§7.1): when `None`,
-/// stdin is read; when `Some(path)`, the file's contents are used. The input is
-/// read lazily — only if the program contains a `read` expression — but for M6
-/// we always read it upfront (a single read is the common case).
+/// standard input is read **by the program's first `read`** and not before
+/// (§7.10, REP-51 — see [`lazy_stdin`]); when `Some(path)`, the file is read
+/// up front, because a regular file cannot block and reporting an unreadable
+/// `--input` before the program runs is worth more than the symmetry.
 pub fn run(
     file: &str,
     input_file: Option<&str>,
@@ -154,41 +155,38 @@ pub fn run(
     let mut runtime = Runtime::new();
     let mut ctx = runtime.context();
 
-    // Read the process input (§7.10, M6). The first `read` expression lazily
-    // reads this buffer; we read it once here and install it as `input_source`.
-    // Empty input keeps the default (immortal Unit).
-    // An I/O failure is reported, never laundered into empty input: a program
-    // that reads a missing `--input` file would otherwise "succeed" against
-    // input the user never supplied, and a truncated stdin read would silently
-    // produce a wrong answer. Same exit code (2, usage/I-O) as an unreadable
-    // source file.
-    let input_text = match input_file {
+    // The process input (§7.10). An I/O failure is reported, never laundered
+    // into empty input: a program that reads a missing `--input` file would
+    // otherwise "succeed" against input the user never supplied, and a
+    // truncated read would silently produce a wrong answer. Same exit code
+    // (2, usage/I-O) as an unreadable source file.
+    //
+    // `--input FILE` is read here, before the program runs. A regular file
+    // cannot block, and an unreadable one is worth reporting before any output
+    // is printed.
+    //
+    // **Standard input is not.** §7.10: "The first `read` lazily reads standard
+    // input once into an immutable GC-managed source buffer." Reading it here
+    // meant a program with no `read` in it consumed stdin anyway, and against
+    // an open pipe — a terminal, a CI harness holding the descriptor — `praxis
+    // run` blocked forever waiting for an EOF nobody was going to send
+    // (REP-51). The reader below is installed, not called; `praxis_get_input`
+    // calls it the one time, from the program's first `read`.
+    match input_file {
         Some(path) => match std::fs::read_to_string(path) {
-            Ok(t) => t,
+            Ok(t) => {
+                if !t.is_empty() {
+                    let input_ref = runtime.alloc_text(&t);
+                    ctx.input_source = input_ref;
+                }
+                lazy_stdin::record(t);
+            }
             Err(err) => {
                 eprintln!("error: failed to read input file `{path}`: {err}");
                 return Ok(2);
             }
         },
-        None => {
-            // Read stdin if it's not a terminal (piped input); otherwise empty.
-            use std::io::IsTerminal;
-            if std::io::stdin().is_terminal() {
-                String::new()
-            } else {
-                match std::io::read_to_string(std::io::stdin()) {
-                    Ok(t) => t,
-                    Err(err) => {
-                        eprintln!("error: failed to read input from stdin: {err}");
-                        return Ok(2);
-                    }
-                }
-            }
-        }
-    };
-    if !input_text.is_empty() {
-        let input_ref = runtime.alloc_text(&input_text);
-        ctx.input_source = input_ref;
+        None => praxis_runtime::install_input_reader(lazy_stdin::read),
     }
 
     // SAFETY: `entry` was just finalized for `main_id`; the JIT outlives the
@@ -241,10 +239,20 @@ pub fn run(
                     analysis,
                     source_text: text.clone(),
                     source_path: path.to_path_buf(),
-                    input_text: input_text.clone(),
+                    // What the program actually read — empty if it never
+                    // evaluated a `read` (REP-51). The session re-installs it
+                    // directly on each re-run, which is §9.7's guarantee that a
+                    // restart sees the same input; `clear_input_reader` below
+                    // is what stops a second read of an exhausted stdin.
+                    input_text: lazy_stdin::text(),
                     input_path: input_file.map(Path::new).map(std::path::Path::to_path_buf),
                     eval_generation: std::rc::Rc::new(praxis_codegen_cranelift::Generation::new()),
                 };
+                // The session owns the input from here: every re-run
+                // installs `input_text` directly (§9.7 — a restart must see
+                // the same input), so the reader must not fire again against a
+                // stdin that is now at EOF.
+                praxis_runtime::clear_input_reader();
                 let mut repl = praxis_debugger::repl::Repl::new_session(snapshot, session);
                 let stdin = std::io::stdin();
                 let mut stdin = stdin.lock();
@@ -307,4 +315,68 @@ pub fn run(
     praxis_runtime::retire_parser_plans(&proof);
     jit.retire(proof);
     Ok(0)
+}
+
+/// Standard input, read by the program's **first** `read` and not before
+/// (§7.10, REP-51).
+///
+/// The runtime takes a plain `fn` — it is stored across the ABI boundary and
+/// called from generated code's stack, so it carries no captured state — which
+/// is why the source and the result live in thread-locals here rather than in a
+/// closure. The runtime is single-threaded (§12.1) and `praxis run` runs one
+/// program per process, so there is one of each.
+///
+/// [`record`] exists for the `--input FILE` path, which is still read up front:
+/// the crash debugger's session needs the text the program actually saw, and it
+/// needs it from one place regardless of where the input came from.
+mod lazy_stdin {
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// What the program read, for the crash debugger's re-runs (§9.7).
+        /// Empty until something reads, which for a `read`-free program is
+        /// never — and empty is then the truth.
+        static TEXT: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+
+    /// The input the program has seen so far.
+    pub(super) fn text() -> String {
+        TEXT.with(|slot| slot.borrow().clone())
+    }
+
+    /// Record an input the host read itself (the `--input FILE` path).
+    pub(super) fn record(input: String) {
+        TEXT.with(|slot| *slot.borrow_mut() = input);
+    }
+
+    /// Read standard input to EOF, once. Installed as the runtime's
+    /// [`praxis_runtime::InputReader`]; the runtime calls it from the first
+    /// `read` a program evaluates, and never otherwise.
+    ///
+    /// A terminal stdin reads as empty rather than blocking on a human who was
+    /// not asked for anything — the same rule the eager read used, kept here.
+    ///
+    /// An I/O failure exits the process with the same message and the same
+    /// code (2, usage/I-O) the eager read used. It cannot be returned instead:
+    /// the runtime's reader is infallible by design, because what an unreadable
+    /// stdin *means* is the host's question. Laundering it into empty input is
+    /// the one thing that would be wrong — a truncated read would silently
+    /// produce a wrong answer.
+    pub(super) fn read() -> Vec<u8> {
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            return Vec::new();
+        }
+        match std::io::read_to_string(std::io::stdin()) {
+            Ok(t) => {
+                let bytes = t.as_bytes().to_vec();
+                record(t);
+                bytes
+            }
+            Err(err) => {
+                eprintln!("error: failed to read input from stdin: {err}");
+                std::process::exit(2);
+            }
+        }
+    }
 }

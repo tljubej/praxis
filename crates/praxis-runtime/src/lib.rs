@@ -30,6 +30,7 @@ pub mod graph;
 pub mod heap;
 pub mod heaps;
 pub mod immortal;
+pub mod input;
 pub mod maps;
 pub mod parse_detail;
 pub mod parser;
@@ -60,6 +61,7 @@ pub use descriptor::{
 pub use gc::{GcHeader, GcRef, HeapId};
 pub use heap::{Heap, HeapStats};
 pub use immortal::Immortals;
+pub use input::{clear_input_reader, install_input_reader, InputReader};
 pub use parse_detail::{ParseDetail, ParseFail};
 pub use records::{RecordField, RecordPayload, RecordSchema, SchemaIdentity};
 pub use repr::{instance_repr, InstanceArg, InstanceRepr};

@@ -4243,13 +4243,44 @@ pub unsafe extern "C" fn praxis_range_get(
 // registered in a global slab; its index is passed as a boxed Int.
 // ---------------------------------------------------------------------------
 
-/// Return the process-input source buffer (§7.10). The CLI sets this from stdin
-/// before executing the entry function; if unset, the immortal Unit is returned.
+/// Return the process-input source buffer (§7.10), reading it the **first**
+/// time a program asks.
+///
+/// A `read` lowers to this call and then to `praxis_run_parser`, so this is
+/// where §7.10's "the first `read` lazily reads standard input once" happens.
+/// The host installs a [`crate::input::InputReader`] rather than a buffer; it
+/// is called at most once — [`crate::input::take_input_reader`] removes it, so
+/// "once" is structural rather than a flag — and the result is installed as
+/// `input_source`, which every later `read` reuses.
+///
+/// The host reading its input *up front* is what REP-51 was: a program with no
+/// `read` in it still consumed standard input, so `praxis run` against an open
+/// pipe blocked forever. Nothing before a program's first `read` touches the
+/// host's input now.
+///
+/// A host that installs no reader — every JIT test, and the crash debugger's
+/// re-run path, which installs the buffer directly to keep re-runs identical
+/// (§9.7) — reaches the same `input_source` read this always was.
+///
+/// Empty input leaves `input_source` at the immortal Unit, which is the state
+/// "no input" has always had; `praxis_run_parser` guards it (§6.3).
 ///
 /// # Safety
 /// `ctx` must be live and wired.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_get_input(ctx: *mut RuntimeContext) -> GcRef {
+    if let Some(read) = crate::input::take_input_reader() {
+        let bytes = read();
+        if !bytes.is_empty() {
+            // SAFETY: `bytes` is a live, initialized slice for this call, and
+            // `ctx` is the caller's live context. The result is stored into
+            // `input_source` — a root (`RuntimeRoots`) — with no allocation in
+            // between, so the collection this allocation paces cannot reclaim
+            // it.
+            let text = unsafe { praxis_alloc_text(ctx, bytes.as_ptr(), bytes.len()) };
+            unsafe { (*ctx).input_source = text };
+        }
+    }
     unsafe { (*ctx).input_source }
 }
 

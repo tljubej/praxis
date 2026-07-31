@@ -276,7 +276,7 @@ runtime_symbols! {
     FloatToInt = "praxis_float_to_int": (Ctx, Gc) -> Gc, AllocatesAndFaults;
     FloatToText = "praxis_float_to_text": (Ctx, Gc) -> Gc, Allocates;
     FloodFill = "praxis_flood_fill": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
-    GetInput = "praxis_get_input": (Ctx) -> Gc, Pure;
+    GetInput = "praxis_get_input": (Ctx) -> Gc, AllocatesAndFaults;
     GridCells = "praxis_grid_cells": (Ctx, Gc) -> Gc, Allocates;
     GridColumn = "praxis_grid_column": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     GridContains = "praxis_grid_contains": (Ctx, Gc, Gc, Gc) -> Gc, Pure;

@@ -1438,7 +1438,12 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
 
 /// Lower a `read parser_expr`: get the input buffer, then run the plan.
 fn lower_read(b: &mut Builder<'_>, plan: praxis_hir::PlanId, result_ty: Type) -> LocalId {
-    // 1. Get the input buffer from the runtime context.
+    // 1. Get the input buffer from the runtime context. This is where §7.10's
+    //    "the first `read` lazily reads standard input once" happens (REP-51):
+    //    the call reads the host's input if nothing has yet, so it allocates
+    //    and — through `praxis_alloc_text`, on input that is not UTF-8 (§4.3) —
+    //    it can fault. Its manifest row says both, and the check below is what
+    //    makes the fault land here rather than at the next unrelated one.
     let input = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: input,
@@ -1447,6 +1452,7 @@ fn lower_read(b: &mut Builder<'_>, plan: praxis_hir::PlanId, result_ty: Type) ->
         roots: RootSlots::unannotated(),
         debug: DebugSlots::unannotated(),
     });
+    b.check_fault();
     // 2. Run the parser plan against it.
     run_parser_plan(b, plan, input, result_ty)
 }
