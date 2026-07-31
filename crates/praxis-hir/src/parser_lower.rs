@@ -365,8 +365,29 @@ fn extract_call_args(
             praxis_syntax::SyntaxKind::PARSER_NAMED_ARG => {
                 // A named argument `name: parser_expr` (M9, §7.5).
                 if let Some(na) = ParserNamedArg::cast(arg.clone()) {
-                    if let (Some(name), Some(value)) = (na.name(), na.value()) {
-                        let raw_text = value.text().unwrap_or_default();
+                    let Some(name) = na.name() else { continue };
+                    // A **literal** value (`fill: 0`, `fill: "-"`): the grammar
+                    // kept the token instead of failing to parse it as a parser
+                    // expression. Only a constructor that has a keyword
+                    // argument of this name can take one.
+                    if let Some(literal) = na.keyword_value() {
+                        if Some(name.as_str()) == keyword_arg {
+                            args.push(CallArg::Keyword {
+                                name,
+                                value: literal,
+                            });
+                        } else {
+                            diagnostics.push(err_diag(
+                                file,
+                                rowan_span(&arg),
+                                DiagCode::InvalidConstructorArgument,
+                                format!("`{name}:` takes a parser, not a literal value"),
+                            ));
+                            all_converted = false;
+                        }
+                        continue;
+                    }
+                    if let Some(value) = na.value() {
                         // Keyword args whose value isn't a real parser
                         // expression (skip:/fill:) are captured as raw
                         // text only — NOT converted, so no spurious
@@ -376,6 +397,20 @@ fn extract_call_args(
                         // `fill` is a field, and it used to be minted
                         // as a keyword and then dropped in silence.
                         if Some(name.as_str()) == keyword_arg {
+                            // **Not `unwrap_or_default`.** A value the AST
+                            // cannot read is not the empty string; laundering
+                            // it into one is how `fill: 0` built a ragged grid
+                            // padded with `""` and said nothing.
+                            let Some(raw_text) = value.text() else {
+                                diagnostics.push(err_diag(
+                                    file,
+                                    rowan_span(&arg),
+                                    DiagCode::InvalidConstructorArgument,
+                                    format!("`{name}:` needs a value (§7.5)"),
+                                ));
+                                all_converted = false;
+                                continue;
+                            };
                             args.push(CallArg::Keyword {
                                 name,
                                 value: raw_text,

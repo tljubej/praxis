@@ -221,7 +221,14 @@ pub fn build_call(
             for arg in args {
                 match arg {
                     CallArg::Parser(p) => child = Some(p),
-                    CallArg::Keyword { name, value } if name == "fill" => fill = Some(value),
+                    CallArg::Keyword { name, value } if name == "fill" => {
+                        // The decode lives here, once, so both front ends
+                        // agree: `fill: "-"` reached the plan as `"\"-\""`,
+                        // quotes and all, because the value was carried as raw
+                        // text and nothing ever unquoted it (IP-08's rule for
+                        // every other parser string literal).
+                        fill = Some(praxis_syntax::literal::unquote_text(&value));
+                    }
                     // `ragged` carries nothing: it exists so the shape table
                     // can *require* it beside `fill:`. Named here rather than
                     // swept up by a wildcard, so it is a decision and not a

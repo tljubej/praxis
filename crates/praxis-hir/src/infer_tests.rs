@@ -59,6 +59,27 @@ fn has_input_error(text: &str) -> bool {
         .any(|d| d.code().category() == DiagnosticCategory::Input)
 }
 
+/// Every error `text` produces, **lex and parse included**.
+///
+/// [`has_input_error`] only sees the `Input` category, and [`analyze`] only
+/// runs the HIR pass — so a shape §7.5 documents could fail at the *grammar*
+/// (`P001 expected a parser expression` on `grid(char, ragged, fill: 0)`) and
+/// still pass an "is this accepted?" assertion written with either. "Accepted"
+/// means no compiler says no.
+fn errors_of(text: &str) -> Vec<String> {
+    use praxis_source::Severity;
+    let map = SourceMap::new();
+    let id = map.intern("infer_test.px", text);
+    let parsed = parse(id, text);
+    parsed
+        .diagnostics
+        .iter()
+        .chain(analyze_root(id, &parsed.tree).diagnostics.iter())
+        .filter(|d| d.severity() == Severity::Error)
+        .map(|d| format!("{}: {}", d.code(), d.message()))
+        .collect()
+}
+
 /// The `ParserAst` the first `read`/`parse` body in `src` converts to.
 ///
 /// Some of what S19 fixed is invisible in the synthesized *type*: a decoded
@@ -77,6 +98,20 @@ fn parser_ast_of(src: &str) -> praxis_input_parser::ParserAst {
     let mut diagnostics = Vec::new();
     crate::parser_lower::convert_parser_expr_for_test(&pe, id, &mut diagnostics)
         .unwrap_or_else(|| panic!("{src} converts: {diagnostics:?}"))
+}
+
+/// The `fill` of the first `GridRagged` anywhere in `ast`, including under a
+/// template capture — so one assertion covers both front ends.
+fn ragged_fill_of(ast: &praxis_input_parser::ParserAst) -> Option<String> {
+    use praxis_input_parser::{ParserAst, TemplatePart};
+    match ast {
+        ParserAst::GridRagged { fill, .. } => Some(fill.clone()),
+        ParserAst::Template { parts, .. } => parts.iter().find_map(|p| match p {
+            TemplatePart::Capture { parser, .. } => ragged_fill_of(parser),
+            TemplatePart::Literal { .. } => None,
+        }),
+        _ => None,
+    }
 }
 
 /// Whether `text` reports the given input-parser diagnostic. Stronger than
@@ -2962,8 +2997,11 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
         ),
     ] {
         let src = format!("let value = read {call}");
-        assert!(
-            !has_input_error(&src),
+        // **Every** error, not just the `Input` category: `fill: 0` failed at
+        // the grammar with `P001`, which an Input-only filter cannot see.
+        assert_eq!(
+            errors_of(&src),
+            Vec::<String>::new(),
             "`{call}` is §7.5's own shape and must be accepted"
         );
         assert_eq!(
@@ -2971,6 +3009,43 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
             Some(expected),
             "`{call}` must build the parser it names, not a truncated one"
         );
+    }
+
+    // **The value, not the acceptance.** `grid(P, ragged, fill: v)`'s synthesized
+    // type is `Grid[Char]` whatever `v` is, so the row above cannot see a fill
+    // that was dropped — and it was: the rowan front end built
+    // `GridRagged { fill: "" }` from `fill: 0`, while the capture-body front end
+    // kept `"0"` from the identical text. Both spellings §7.5 writes, both front
+    // ends, asserted on the built AST.
+    // A quoted fill arrives decoded (IP-08's rule for every other parser string
+    // literal, which `fill:` alone was exempt from), and one containing the
+    // argument separator is still one value — the capture-body front end's
+    // delimiter search was blind to quoting and cut `","` in half.
+    for (fill_src, expected_fill) in [
+        ("0", "0"),
+        ("9", "9"),
+        ("\"-\"", "-"),
+        ("\" \"", " "),
+        ("\",\"", ","),
+    ] {
+        let call = format!("grid(char, ragged, fill: {fill_src})");
+        for src in [
+            format!("let value = read {call}"),
+            // The capture-body front end reaches the same builder through a
+            // template, so identical text goes down both front ends.
+            format!("let value = read `{{v:{call}}}`"),
+        ] {
+            assert_eq!(
+                errors_of(&src),
+                Vec::<String>::new(),
+                "`{call}` is §7.5's own spelling of a ragged grid"
+            );
+            assert_eq!(
+                ragged_fill_of(&parser_ast_of(&src)).as_deref(),
+                Some(expected_fill),
+                "`{src}` must carry its fill value into the AST"
+            );
+        }
     }
 
     // A name with no row: `Constructor::from_keyword(&name)?` used to swallow

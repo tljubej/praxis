@@ -317,14 +317,35 @@ fn take_string(cur: &mut Scan<'_>, base: usize) -> Result<String, ScanError> {
 }
 
 /// The value of a `skip:`/`fill:` keyword argument: everything up to the next
-/// `,` or `)` at this level.
+/// `,` or `)` **outside a string literal**.
+///
+/// The delimiter search used to be blind to quoting, so `fill: ","` ended at
+/// the comma *inside* the literal and left a lone `"` behind — the scanner then
+/// reported `unterminated string literal` for text that is not malformed, while
+/// the rowan front end accepted the very same call. A quoted value is returned
+/// with its quotes; `build_call` decodes it, so both front ends get one answer
+/// from one place.
 fn take_keyword_value(cur: &mut Scan<'_>) -> String {
     let start = cur.pos();
     while let Some(c) = cur.peek_char() {
-        if c == ',' || c == ')' {
-            break;
+        match c {
+            ',' | ')' => break,
+            '"' => {
+                cur.bump();
+                while let Some((_, c)) = cur.bump() {
+                    match c {
+                        '\\' => {
+                            cur.bump();
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {
+                cur.bump();
+            }
         }
-        cur.bump();
     }
     cur.src()[start..cur.pos()].trim().to_string()
 }
