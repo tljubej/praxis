@@ -486,6 +486,48 @@ fn adv_int_min_mod_neg_one_overflows() {
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
 }
 
+/// **REP-46.** §4.12's three explicit overflow alternatives exist and opt out
+/// of the fault.
+///
+/// "Integer arithmetic is checked by default. Overflow faults and enters the
+/// crash debugger. Explicit alternatives: `a.wrapping_add(b)`,
+/// `a.saturating_add(b)`, `a.checked_add(b) // returns Option[Int]`." All three
+/// were `Y110: no method \`wrapping_add\` on this type taking 1 argument(s)`, so
+/// the section described checked arithmetic with no way to opt out.
+///
+/// Every assertion is at `i64::MAX`, where the ordinary `+` faults: a test that
+/// added two small numbers would pass against `praxis_int_add` itself and prove
+/// only that a name resolves.
+#[test]
+fn the_overflow_alternatives_answer_where_a_checked_add_faults() {
+    // MAX = 9223372036854775807. Wrapping lands on MIN; adding MAX back and one
+    // more brings it to 0, which is a number the harness can compare.
+    let src = "fn main() -> Int {\n  let m = 9223372036854775807\n  \
+               m.wrapping_add(1) + m + 1\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "wrapping_add must not fault");
+    assert_eq!(result.as_int(), 0, "MAX.wrapping_add(1) is MIN");
+
+    // Saturating stays at MAX, so subtracting MAX is zero.
+    let src = "fn main() -> Int {\n  let m = 9223372036854775807\n  \
+               m.saturating_add(1) - m\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "saturating_add must not fault");
+    assert_eq!(result.as_int(), 0, "MAX.saturating_add(1) is MAX");
+
+    // `checked_add` answers an `Option[Int]` — a real one (ADR-076), so a
+    // `match` reaches inside it. `None` on overflow, `Some` below it.
+    let src = "fn main() -> Int {\n  let m = 9223372036854775807\n  \
+               match m.checked_add(1) { Some(n) => n\n None => 7 }\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "checked_add must not fault");
+    assert_eq!(result.as_int(), 7, "MAX.checked_add(1) is None");
+
+    let src = "fn main() -> Int {\n  match 5.checked_add(7) { Some(n) => n\n None => 0 }\n}";
+    let (_rt, result) = run_main(src);
+    assert_eq!(result.as_int(), 12, "a sum that fits is Some(sum)");
+}
+
 /// **REP-43.** `Counter.inc` is arithmetic, and §4.12's arithmetic is checked.
 ///
 /// The wrapper's `cur + 1` was the one integer computation in the ABI file that

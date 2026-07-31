@@ -411,6 +411,10 @@ a.saturating_add(b)
 a.checked_add(b) // returns Option[Int]
 ```
 
+These three are the family: there are no `_sub`/`_mul` siblings, and whether
+there should be is undecided (REP-46). `checked_add` answers a real `Option[Int]`
+(§4.7), so a miss is matched, not sentinelled.
+
 Division by zero always faults.
 
 #### Float behavior

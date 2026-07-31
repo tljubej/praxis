@@ -296,6 +296,7 @@ runtime_symbols! {
     GridWidth = "praxis_grid_width": (Ctx, Gc) -> Gc, Allocates;
     IntAbs = "praxis_int_abs": (Ctx, Gc) -> Gc, AllocatesAndFaults;
     IntAdd = "praxis_int_add": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    IntCheckedAdd = "praxis_int_checked_add": (Ctx, Gc, Gc) -> Gc, Allocates;
     IntClamp = "praxis_int_clamp": (Ctx, Gc, Gc, Gc) -> Gc, Faults;
     IntDiv = "praxis_int_div": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     IntEq = "praxis_int_eq": (Ctx, Gc, Gc) -> Gc, Pure;
@@ -312,9 +313,11 @@ runtime_symbols! {
     IntNe = "praxis_int_ne": (Ctx, Gc, Gc) -> Gc, Pure;
     IntNeg = "praxis_int_neg": (Ctx, Gc) -> Gc, AllocatesAndFaults;
     IntRem = "praxis_int_rem": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    IntSaturatingAdd = "praxis_int_saturating_add": (Ctx, Gc, Gc) -> Gc, Allocates;
     IntSign = "praxis_int_sign": (Ctx, Gc) -> Gc, Allocates;
     IntSub = "praxis_int_sub": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     IntToFloat = "praxis_int_to_float": (Ctx, Gc) -> Gc, Allocates;
+    IntWrappingAdd = "praxis_int_wrapping_add": (Ctx, Gc, Gc) -> Gc, Allocates;
     MapContains = "praxis_map_contains": (Ctx, Gc, Gc) -> Gc, Pure;
     RangeGet = "praxis_range_get": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     RangeLen = "praxis_range_len": (Ctx, Gc) -> Gc, AllocatesAndFaults;

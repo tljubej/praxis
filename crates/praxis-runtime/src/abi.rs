@@ -219,6 +219,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::GridWidth => praxis_grid_width as *const (),
         RuntimeSymbol::IntAbs => praxis_int_abs as *const (),
         RuntimeSymbol::IntAdd => praxis_int_add as *const (),
+        RuntimeSymbol::IntCheckedAdd => praxis_int_checked_add as *const (),
         RuntimeSymbol::IntClamp => praxis_int_clamp as *const (),
         RuntimeSymbol::IntDiv => praxis_int_div as *const (),
         RuntimeSymbol::IntEq => praxis_int_eq as *const (),
@@ -235,9 +236,11 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::IntNe => praxis_int_ne as *const (),
         RuntimeSymbol::IntNeg => praxis_int_neg as *const (),
         RuntimeSymbol::IntRem => praxis_int_rem as *const (),
+        RuntimeSymbol::IntSaturatingAdd => praxis_int_saturating_add as *const (),
         RuntimeSymbol::IntSign => praxis_int_sign as *const (),
         RuntimeSymbol::IntSub => praxis_int_sub as *const (),
         RuntimeSymbol::IntToFloat => praxis_int_to_float as *const (),
+        RuntimeSymbol::IntWrappingAdd => praxis_int_wrapping_add as *const (),
         RuntimeSymbol::MapContains => praxis_map_contains as *const (),
         RuntimeSymbol::RangeGet => praxis_range_get as *const (),
         RuntimeSymbol::RangeLen => praxis_range_len as *const (),
@@ -1046,6 +1049,76 @@ pub unsafe extern "C" fn praxis_int_neg(ctx: *mut RuntimeContext, r: GcRef) -> G
             unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
             unsafe { unit_sentinel(ctx) }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §4.12's three explicit overflow alternatives (REP-46).
+//
+// "Integer arithmetic is checked by default. Overflow faults and enters the
+// crash debugger. Explicit alternatives: `a.wrapping_add(b)`,
+// `a.saturating_add(b)`, `a.checked_add(b) // returns Option[Int]`." Those are
+// the three the design document names, and the three that exist. `_sub` and
+// `_mul` siblings are a language decision nobody has made — see the catalog
+// rows, which say so where a reader looks for them.
+//
+// None of the three can fault: that is the whole point of them. They allocate,
+// like every other wrapper that answers a fresh number.
+// ---------------------------------------------------------------------------
+
+/// `a.wrapping_add(b)` (§4.12): two's-complement wraparound instead of a fault.
+///
+/// # Safety
+/// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_wrapping_add(
+    ctx: *mut RuntimeContext,
+    a: GcRef,
+    b: GcRef,
+) -> GcRef {
+    let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x.wrapping_add(y)) }
+}
+
+/// `a.saturating_add(b)` (§4.12): clamp to `Int`'s ends instead of faulting.
+///
+/// # Safety
+/// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_saturating_add(
+    ctx: *mut RuntimeContext,
+    a: GcRef,
+    b: GcRef,
+) -> GcRef {
+    let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x.saturating_add(y)) }
+}
+
+/// `a.checked_add(b)` (§4.12): `Option[Int]` — `None` where the checked `+`
+/// would fault.
+///
+/// It answers a real `Option` (S18/ADR-076): the absence is the *answer* here,
+/// not an error channel, which is exactly §4.7's distinction. Before S18 this
+/// row could not have been written at all, which is why §4.12 documented three
+/// alternatives and the catalog had none.
+///
+/// # Safety
+/// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_checked_add(
+    ctx: *mut RuntimeContext,
+    a: GcRef,
+    b: GcRef,
+) -> GcRef {
+    let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
+    match x.checked_add(y) {
+        Some(sum) => unsafe {
+            let scope = NativeScope::new(ctx);
+            let boxed = gc_alloc(ctx, scalars::INT_PAYLOAD, sum);
+            let rooted = scope.root(boxed);
+            option_some(ctx, rooted.get())
+        },
+        None => unsafe { option_none(ctx) },
     }
 }
 

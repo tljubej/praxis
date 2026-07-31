@@ -166,6 +166,9 @@ pub fn builtin_catalog() -> MethodCatalog {
         // The explicit Int→Float widening method (§4.12). The first Int-receiver
         // method; establishes the pattern for scalar-receiver methods.
         .entry(int_to_float())
+        .entry(int_wrapping_add())
+        .entry(int_saturating_add())
+        .entry(int_checked_add())
         // Subscripts (REP-16, §4.7/§6.2/§6.4). Six collections read; the three
         // that have a store at all also store. See the block comment above
         // `vec_index` for why these are catalog rows.
@@ -681,6 +684,58 @@ fn int_to_float() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntToFloat),
         doc: "Widen to Float (explicit Int→Float conversion, §4.12).",
+        stability: Stability::Stable,
+    }
+}
+
+// §4.12's three explicit overflow alternatives (REP-46). The design document
+// writes exactly these three spellings, and until now none of them existed:
+// §4.12 said "integer arithmetic is checked by default … explicit alternatives"
+// and then named three methods a program could not call, so the section
+// described a language with no way to opt out of a fault.
+//
+// **`_sub` and `_mul` siblings are deliberately absent.** §4.12 names only the
+// `_add` trio, so adding six more rows would be inventing surface rather than
+// implementing it, and the shape of the family — three rows or nine, and
+// whether `wrapping_neg`/`abs` join it — is a language decision. It is recorded
+// as REP-46's open half rather than guessed at here, because a half-invented
+// numeric tower is harder to remove than an honest gap.
+
+fn int_wrapping_add() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Int),
+        name: "wrapping_add",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntWrappingAdd),
+        doc: "Add with two's-complement wraparound instead of a fault (§4.12).",
+        stability: Stability::Stable,
+    }
+}
+
+fn int_saturating_add() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Int),
+        name: "saturating_add",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntSaturatingAdd),
+        doc: "Add, clamping to Int's ends instead of faulting (§4.12).",
+        stability: Stability::Stable,
+    }
+}
+
+fn int_checked_add() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Int),
+        name: "checked_add",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int))),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntCheckedAdd),
+        doc: "Add, answering None where the checked `+` would fault (§4.12).",
         stability: Stability::Stable,
     }
 }
