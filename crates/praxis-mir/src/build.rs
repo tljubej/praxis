@@ -1271,10 +1271,14 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // A method call lowers to a runtime-wrapper call. The receiver is
             // the first argument; the method's explicit args follow. The
             // catalog resolved `lowering_symbol` (e.g. `praxis_vec_push`); if
-            // empty (an intrinsic), dispatch to the pipeline lowering. M8-WS11
-            // first tries to recognize a *chain* and fuse it into one loop; if
-            // that declines, fall back to the per-combinator eager lowerer
-            // (M8-WS8) which handles single combinators and is the safe default.
+            // empty (an intrinsic), the pipeline recognizer owns it and fuses
+            // the whole chain into one loop (ADR-071).
+            //
+            // There is no fallback lowering (REP-40). Inference only types this
+            // call at all if a catalog row matched it, and every row lowered as
+            // an `Intrinsic` is classified by `classify_link`/`classify_sink` —
+            // so a decline here is a compiler bug, not a program's, and it says
+            // so instead of answering the Unit singleton.
             let Some(symbol) = *lowering_symbol else {
                 // Reconstruct the MethodCall node so the recognizer can walk
                 // the receiver chain.
@@ -1290,7 +1294,13 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 if let Some(plan) = recognize_pipeline(b.db, &call) {
                     return lower_pipeline(b, plan);
                 }
-                return lower_pipeline_combinator(b, receiver, name, args, *ty);
+                panic!(
+                    "internal compiler error: the pipeline recognizer declined \
+                     `{name}`, which the catalog lowers as an intrinsic. Every \
+                     intrinsic row must be classified by `classify_link` or \
+                     `classify_sink`; see \
+                     `intrinsics_are_all_recognized_so_there_is_no_second_lowering`."
+                );
             };
             let mut arg_locals: Vec<LocalId> = Vec::with_capacity(args.len() + 1);
             arg_locals.push(lower_expr_gc(b, receiver));
@@ -2276,19 +2286,20 @@ fn lower_return(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
 // that each stage advance it by exactly the right amount; a chain that got that
 // wrong would have mis-paired closures silently.
 //
-// The old per-combinator eager lowerers (`lower_pipeline_combinator` +
-// `lower_seq_*`) are kept verbatim below as a fallback for any chain the
-// recognizer declines, so a regression here can never break the eager path.
-//
-// Note for whoever comes next: since MIR-03 removed the literal-only `take`/
-// `skip` restriction, all **23** registered `MethodLowering::Intrinsic` names
-// are recognized by `classify_link`/`classify_sink`, so the fallback is
-// unreachable for a well-typed program — and its `_` arm answers the Unit
-// singleton, which is what MIR-03 was. It is deliberately kept (ADR-029
-// decision 1 names it the incremental-safety net, and deleting a 350-line net
-// in the same change that rewrites the thing it is a net for is the one edit
-// nobody could bisect). Deleting it is a reasonable later commit *on its own*,
-// with `emit_index_loop`/`alloc_empty_vec` following it out.
+// Design note — there is no second lowerer. The per-combinator eager lowerers
+// (`lower_pipeline_combinator` + the `lower_seq_*` family + `emit_index_loop`)
+// stood here as ADR-029 decision 1's incremental-safety net, kept "as a fallback
+// for any chain the recognizer declines". They are gone (REP-40). Every
+// registered `MethodLowering::Intrinsic` name is classified by `classify_link`
+// or `classify_sink` — `intrinsics_are_all_recognized_so_there_is_no_second_\
+// lowering` walks the catalog and asserts exactly that — so the net caught
+// nothing a well-typed program could fall into, and what it *did* hold was
+// wrong: `lower_seq_fold` returned the seed without ever invoking the closure,
+// and the `_` arm answered the Unit singleton. A net that gives a wrong answer
+// in silence is worse than no net, because the failure it converts a compiler
+// bug into is the program's. A declined chain is now an ICE that names the
+// method (`lower_expr_gc`'s `MethodCall` arm), which is a compiler bug report
+// rather than a wrong number.
 // ===========================================================================
 
 /// A streaming pipeline stage: transform *one* element, possibly skipping it or
@@ -3966,108 +3977,6 @@ fn emit_option_of(b: &mut Builder<'_>, seen: LocalId, value: LocalId, result_ty:
 const OPTION_SOME_VARIANT: u32 = praxis_runtime::enums::OPTION_SOME_TAG as u32;
 const OPTION_NONE_VARIANT: u32 = praxis_runtime::enums::OPTION_NONE_TAG as u32;
 
-/// Lower a pipeline combinator intrinsic (M8-WS8, §6.3) over a Vec receiver
-/// into a fused loop. Each combinator allocates its own loop here; true cross-
-/// combinator fusion (one loop for `v.map(f).filter(p).sum()`) is the next
-/// refinement — this single-combinator form already delivers the seamless
-/// experience for the common `v.sum()` / `v.count()` / `v.map(f)` cases.
-///
-/// `name` is the combinator; `args` are its explicit args (the closure/init).
-/// `ty` is the call's result type (used for the result slot's type id).
-fn lower_pipeline_combinator(
-    b: &mut Builder<'_>,
-    receiver: &TypedExpr,
-    name: &str,
-    args: &[TypedExpr],
-    ty: Type,
-) -> LocalId {
-    // Lower the receiver Vec once; it lives for the loop's duration.
-    let src = lower_expr_gc(b, receiver);
-    // A Gc Int index counter (persists across blocks, like the for-loop counter).
-    let idx = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
-    let zero = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ConstInt {
-        dst: zero,
-        value: 0,
-    });
-    b.push(Inst::Materialize {
-        dst: idx,
-        src: zero,
-        scalar: ScalarKind::Int,
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    match name {
-        "sum" => lower_seq_sum(b, src, idx, ty),
-        "count" => lower_seq_count(b, src, idx, ty),
-        "map" if !args.is_empty() => lower_seq_map(b, src, idx, &args[0], ty),
-        "filter" if !args.is_empty() => lower_seq_filter(b, src, idx, &args[0], ty),
-        "collect" => lower_seq_collect(b, src, idx, ty),
-        "fold" if args.len() >= 2 => lower_seq_fold(b, src, idx, &args[0], &args[1], ty),
-        _ => {
-            // Unknown intrinsic: defensively return Unit.
-            lower_lit_gc(b, &Lit::Unit, None)
-        }
-    }
-}
-
-/// `v.sum()`: loop, accumulate `acc += item`, materialize.
-fn lower_seq_sum(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -> LocalId {
-    let acc = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ConstInt { dst: acc, value: 0 });
-    emit_index_loop(b, src, idx, vec![acc], |b, item, locals| {
-        let item_scalar = b.alloc_scalar(ScalarKind::Int);
-        b.push(Inst::ExtractScalar {
-            dst: item_scalar,
-            src: item,
-            scalar: ScalarKind::Int,
-        });
-        b.push(Inst::IntBinOp {
-            dst: locals[0],
-            op: IntBinOp::Add,
-            lhs: locals[0],
-            rhs: item_scalar,
-            overflow: Overflow::Checked,
-        });
-    });
-    let result = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
-    b.push(Inst::Materialize {
-        dst: result,
-        src: acc,
-        scalar: ScalarKind::Int,
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    result
-}
-
-/// `v.count()`: loop, `acc += 1`, materialize.
-fn lower_seq_count(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -> LocalId {
-    let acc = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ConstInt { dst: acc, value: 0 });
-    emit_index_loop(b, src, idx, vec![acc], |b, _item, locals| {
-        let one = b.alloc_scalar(ScalarKind::Int);
-        b.push(Inst::ConstInt { dst: one, value: 1 });
-        // `count += 1`, bounded by the source collection's length.
-        b.push(Inst::IntBinOp {
-            dst: locals[0],
-            op: IntBinOp::Add,
-            lhs: locals[0],
-            rhs: one,
-            overflow: Overflow::Bounded,
-        });
-    });
-    let result = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
-    b.push(Inst::Materialize {
-        dst: result,
-        src: acc,
-        scalar: ScalarKind::Int,
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    result
-}
-
 /// Allocate the empty Vec a pipeline collects into. `result_ty` is the
 /// pipeline's own result type when the lowering has one.
 ///
@@ -4108,216 +4017,6 @@ fn alloc_empty_vec(b: &mut Builder<'_>, result_ty: MirType) -> LocalId {
     });
     b.check_fault();
     result
-}
-
-/// `v.map(f)`: allocate a result Vec, loop, push `f(item)` for each.
-fn lower_seq_map(
-    b: &mut Builder<'_>,
-    src: LocalId,
-    idx: LocalId,
-    closure: &TypedExpr,
-    ty: Type,
-) -> LocalId {
-    let f = lower_expr_gc(b, closure);
-    let result = alloc_empty_vec(b, MirType::Known(ty));
-    emit_index_loop(b, src, idx, vec![f, result], |b, item, locals| {
-        // Invoke f(item) via the closure (Inst::CallIndirect, M7).
-        let mapped = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
-        b.push(Inst::CallIndirect {
-            dst: mapped,
-            callee: locals[0],
-            args: vec![item],
-            roots: RootSlots::unannotated(),
-            debug: DebugSlots::unannotated(),
-        });
-        b.check_fault();
-        // Push the mapped value into the result Vec.
-        let unit = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
-        b.push(Inst::Call {
-            dst: unit,
-            callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
-            args: vec![locals[1], mapped],
-            roots: RootSlots::unannotated(),
-            debug: DebugSlots::unannotated(),
-        });
-    });
-    result
-}
-
-/// `v.filter(p)`: allocate a result Vec, loop, push `item` when `p(item)`.
-fn lower_seq_filter(
-    b: &mut Builder<'_>,
-    src: LocalId,
-    idx: LocalId,
-    closure: &TypedExpr,
-    ty: Type,
-) -> LocalId {
-    let p = lower_expr_gc(b, closure);
-    let result = alloc_empty_vec(b, MirType::Known(ty));
-    emit_index_loop(b, src, idx, vec![p, result], |b, item, locals| {
-        // Call p(item) → Bool via the closure.
-        let keep_gc = b.alloc_gc(MirType::Known(b.bool_ty), None, LocalDebugKind::Temp, None);
-        b.push(Inst::CallIndirect {
-            dst: keep_gc,
-            callee: locals[0],
-            args: vec![item],
-            roots: RootSlots::unannotated(),
-            debug: DebugSlots::unannotated(),
-        });
-        b.check_fault();
-        let keep = b.alloc_scalar(ScalarKind::Bool);
-        b.push(Inst::ExtractScalar {
-            dst: keep,
-            src: keep_gc,
-            scalar: ScalarKind::Bool,
-        });
-        let push_blk = b.func.new_block();
-        let cont_blk = b.func.new_block();
-        b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-            cond: keep,
-            then_block: push_blk,
-            else_block: cont_blk,
-        };
-        b.cur = push_blk;
-        let unit = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
-        b.push(Inst::Call {
-            dst: unit,
-            callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
-            args: vec![locals[1], item],
-            roots: RootSlots::unannotated(),
-            debug: DebugSlots::unannotated(),
-        });
-        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: cont_blk };
-        b.cur = cont_blk;
-    });
-    result
-}
-
-/// `v.collect()`: copy all elements into a fresh Vec (no predicate).
-fn lower_seq_collect(b: &mut Builder<'_>, src: LocalId, idx: LocalId, ty: Type) -> LocalId {
-    let result = alloc_empty_vec(b, MirType::Known(ty));
-    emit_index_loop(b, src, idx, vec![result], |b, item, locals| {
-        let unit = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
-        b.push(Inst::Call {
-            dst: unit,
-            callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
-            args: vec![locals[0], item],
-            roots: RootSlots::unannotated(),
-            debug: DebugSlots::unannotated(),
-        });
-    });
-    result
-}
-
-/// `v.fold(init, f)`: loop, threading an accumulator through `f(acc, item)`.
-fn lower_seq_fold(
-    b: &mut Builder<'_>,
-    _src: LocalId,
-    _idx: LocalId,
-    _init: &TypedExpr,
-    _closure: &TypedExpr,
-    _ty: Type,
-) -> LocalId {
-    // Fold requires closure invocation (CallIndirect); deferred to the closure-
-    // invocation refinement. Return the init value lowered for now.
-    lower_expr_gc(b, _init)
-}
-
-/// Emit an index loop over `src` (a Vec) calling `body(b, item_local, locals)`
-/// for each element, where `locals` are the caller-provided locals that persist
-/// across iterations (e.g. an accumulator or the result Vec). The `idx` Gc Int
-/// counter is incremented each iteration. Reuses the for-loop block structure.
-fn emit_index_loop<F>(
-    b: &mut Builder<'_>,
-    src: LocalId,
-    idx: LocalId,
-    locals: Vec<LocalId>,
-    body: F,
-) where
-    F: FnOnce(&mut Builder<'_>, LocalId, &[LocalId]),
-{
-    let header = b.func.new_block();
-    let body_blk = b.func.new_block();
-    let exit = b.func.new_block();
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
-    b.cur = header;
-
-    // `len = src.len()`
-    let mut roots = vec![src, idx];
-    roots.extend(locals.iter().copied());
-    let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
-    b.push(Inst::Call {
-        dst: len_dst,
-        callee: CallTarget::Runtime(RuntimeSymbol::VecLen),
-        args: vec![src],
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.check_fault();
-    let len_scalar = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ExtractScalar {
-        dst: len_scalar,
-        src: len_dst,
-        scalar: ScalarKind::Int,
-    });
-    let idx_scalar = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ExtractScalar {
-        dst: idx_scalar,
-        src: idx,
-        scalar: ScalarKind::Int,
-    });
-    let cond = b.alloc_scalar(ScalarKind::Bool);
-    b.push(Inst::IntCmp {
-        dst: cond,
-        op: CmpOp::Lt,
-        lhs: idx_scalar,
-        rhs: len_scalar,
-    });
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-        cond,
-        then_block: body_blk,
-        else_block: exit,
-    };
-
-    b.cur = body_blk;
-    // `item = src.get(idx)`
-    let item = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
-    b.push(Inst::Call {
-        dst: item,
-        callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
-        args: vec![src, idx],
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.check_fault();
-    body(b, item, &locals);
-    // `idx += 1`
-    let cur = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ExtractScalar {
-        dst: cur,
-        src: idx,
-        scalar: ScalarKind::Int,
-    });
-    let one = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ConstInt { dst: one, value: 1 });
-    let next = b.alloc_scalar(ScalarKind::Int);
-    // A loop index bump, bounded by the source collection's length.
-    b.push(Inst::IntBinOp {
-        dst: next,
-        op: IntBinOp::Add,
-        lhs: cur,
-        rhs: one,
-        overflow: Overflow::Bounded,
-    });
-    b.push(Inst::Materialize {
-        dst: idx,
-        src: next,
-        scalar: ScalarKind::Int,
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
-    b.cur = exit;
 }
 
 /// How a `for` reaches the members of the thing it iterates (REP-15, ADR-066).
@@ -6085,5 +5784,61 @@ mod tests {
         );
         assert_eq!(calls(compound, RuntimeSymbol::MapInsert), 2);
         assert_eq!(calls(compound, RuntimeSymbol::MapUpdateMin), 0);
+    }
+
+    /// **REP-40.** There is no second pipeline lowering, and this test is what
+    /// makes deleting the first one safe.
+    ///
+    /// The eager per-combinator lowerers stood beside the fused recognizer as
+    /// ADR-029's "safety net for any chain the recognizer declines". What the
+    /// net actually held was `lower_seq_fold`, which returned the seed and never
+    /// invoked the closure, and a `_` arm that answered the Unit singleton — so
+    /// a chain that reached it got a *wrong answer in silence*, which is the one
+    /// failure mode a net must not add. Deleting it moves the obligation here:
+    /// a row the catalog lowers as an intrinsic has no runtime symbol, so the
+    /// recognizer is its only lowering, and a row the recognizer does not
+    /// classify has none at all.
+    ///
+    /// The recognizer classifies on the name and arity, so the arguments are
+    /// stand-ins; what is under test is that no `Intrinsic` row falls through.
+    #[test]
+    fn intrinsics_are_all_recognized_so_there_is_no_second_lowering() {
+        let mut db = TypeDb::new();
+        let unit = db.unit();
+        let catalog = praxis_stdlib::builtin_catalog();
+        let dummy = || TypedExpr::Lit {
+            value: Lit::Unit,
+            ty: unit,
+            span: (0, 0),
+        };
+        let mut checked = 0usize;
+        for entry in catalog.entries() {
+            if !matches!(entry.lowering, praxis_stdlib::MethodLowering::Intrinsic(_)) {
+                continue;
+            }
+            let call = TypedExpr::MethodCall {
+                receiver: Box::new(dummy()),
+                name: entry.name.to_string(),
+                lowering_symbol: None,
+                args: (0..entry.arity()).map(|_| dummy()).collect(),
+                purity: entry.purity,
+                ty: unit,
+                span: (0, 0),
+            };
+            assert!(
+                recognize_pipeline(&db, &call).is_some(),
+                "`{}` at arity {} lowers as an intrinsic and no runtime symbol, \
+                 but the pipeline recognizer declines it — it has no lowering",
+                entry.name,
+                entry.arity(),
+            );
+            checked += 1;
+        }
+        // A catalog that stopped registering intrinsics would make the loop
+        // vacuous, and the assertion above would then prove nothing.
+        assert!(
+            checked >= 40,
+            "expected the pipeline combinators to be intrinsic rows; saw {checked}"
+        );
     }
 }
