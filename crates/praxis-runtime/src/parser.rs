@@ -64,14 +64,16 @@ unsafe fn run_plan(ctx: *mut RuntimeContext, plan: &ParserPlan, input: GcRef) ->
         return unsafe { fault_sentinel(ctx) };
     };
     // **The root region is the whole buffer, and no terminator is trimmed off
-    // it.** Trailing whitespace is handled where it arises — `split_lines` does
-    // not end a region in blank lines, and `walk_exact` lets a child that
-    // leaves only whitespace fill its bound — so nothing is left here to
-    // special-case. Two earlier attempts special-cased it anyway, first by
-    // applying the bound rule at a root region that still held the terminator
-    // and then by trimming exactly one terminator, and a file ending "\n\n"
-    // defeated the second the way the first was defeated by "\n". A trim count
-    // is the wrong kind of answer (ADR-078).
+    // it.** Trailing whitespace is handled where it arises — `walk_exact` lets
+    // a child that leaves only whitespace fill its bound, `trailing_blank_run`
+    // lets a line-splitting construct leave a trailing blank line to nobody
+    // when its parser makes nothing of it, and `split_lines` does not end a
+    // region in empty lines — so nothing is left here to special-case. Two
+    // earlier attempts special-cased it anyway, first by applying the bound
+    // rule at a root region that still held the terminator and then by trimming
+    // exactly one terminator, and a file ending "\n\n" defeated the second the
+    // way the first was defeated by "\n". A trim count is the wrong kind of
+    // answer (ADR-078).
     //
     // It also matters *whose* buffer this is: `run_plan` is the single body
     // behind both `read <parser>` and the host `parse(text, P)`, so a trim here
@@ -97,8 +99,8 @@ unsafe fn run_plan(ctx: *mut RuntimeContext, plan: &ParserPlan, input: GcRef) ->
             // Record the deepest failure into the runtime's detail slot, then
             // raise the fault. The host reads the detail after `ParseFailed`.
             // The preview is taken against the **whole** buffer: failure
-            // offsets are absolute, and showing the terminator the root region
-            // excludes is what makes "actual: 1 2 3⏎" readable.
+            // offsets are absolute, and `i.whole()` is the region the parse
+            // ran against, so the two cannot drift.
             unsafe { record_fail(ctx, fail, i.whole().bytes(&i)) };
             unsafe { fault_sentinel(ctx) }
         }
@@ -1272,9 +1274,14 @@ fn walk_characters(
 /// do not say so and the arms below look backwards to a reader who assumes
 /// "whitespace" is the superset — which is exactly the assumption that made a
 /// stage believe `skip: whitespace` could absorb an input file's trailing
-/// newline. It cannot, and it does not have to: the terminator is outside the
-/// root region (see `Input::root_region`). `SkipPolicy`'s own documentation in
-/// `praxis-input-parser` carries the full note, and
+/// newline. It cannot, and it does not have to. The terminator is **inside** the
+/// region — the root region is the whole buffer — and it is forgiven because it
+/// is whitespace no child read: [`walk_characters`] asks the child first and
+/// accepts a whitespace-only leftover through `ByteRegion::is_all_whitespace`,
+/// the bound half of `parser::cursor`'s rule. (An earlier comment here credited
+/// a deleted `Input::root_region` trim, which was round two's answer.)
+/// `SkipPolicy`'s own documentation in `praxis-input-parser` carries the full
+/// note, and
 /// `the_skip_policies_are_ordered_by_what_they_skip` pins the inclusion so the
 /// sets cannot be quietly swapped.
 ///
@@ -1727,11 +1734,19 @@ fn match_literal_run(
 /// where the capture before it must stop.
 ///
 /// "Earliest" is what makes `text` non-greedy, and taking the position *before*
-/// the run's leading whitespace policy runs is what keeps the whitespace out of
-/// the capture: for `{a:int},{b:int}` on `"12 ,34"` the comma's `SpaceRun` eats
-/// the space, so the bound is after `12` and `int` consumes its region exactly.
-/// The same applies to a whitespace-only run: `` `{name:text} {v:int}` `` on
-/// `"foo 3"` stops `name` at the space rather than inside it.
+/// the run's leading whitespace policy runs is what keeps that whitespace out of
+/// the capture: `` `{name:text} {v:int}` `` on `"foo 3"` stops `name` at the
+/// space rather than inside it, because the run is a literal with empty text
+/// and `WsPolicy::SpaceRun` whose earliest match is byte 3.
+///
+/// It does **not** follow that the child fills its region. For
+/// `{a:int},{b:int}` on `"12 ,34"` the comma carries `WsPolicy::None` — a
+/// template that writes nothing in front of a literal gets no run in front of
+/// it — so the bound is the comma at byte 3, `a` is handed `"12 "`, and the
+/// space is forgiven by `walk_exact` because it is whitespace `int` did not
+/// read (ADR-078). An earlier version of this comment credited a `SpaceRun` on
+/// the comma with absorbing it; there is no such run, and removing
+/// `walk_exact`'s forgiveness makes that program fault at `2..3`.
 ///
 /// `None` means the run does not occur in the rest of the region at all, which
 /// is a mismatch the parts themselves will report.
@@ -3022,16 +3037,19 @@ mod tests {
         // an input file is the file's terminator, not a byte the program asked
         // any parser to read, and requiring `chars` to consume it faulted every
         // newline-terminated file — §7.5's own
-        // `chars(one_of("^v<>"), skip: whitespace)` example included. The root
-        // region now ends where the data ends (`Input::root_region`), so the
-        // terminator is outside the region and no skip policy has to forgive
-        // it. `parse("1\n2", None)` above keeps the half of the claim that was
+        // `chars(one_of("^v<>"), skip: whitespace)` example included. The
+        // terminator IS inside the region — the root region is the whole
+        // buffer — and `walk_characters` forgives it because it is whitespace
+        // the child declined (`ByteRegion::is_all_whitespace`, the bound half of
+        // `cursor`'s rule). No skip policy has to absorb it, and no root trim
+        // has to hide it; a trim was round two's answer and is deleted.
+        // `parse("1\n2", None)` above keeps the half of the claim that was
         // true: a newline *inside* the data is still a mismatch under
         // `skip: none`.
         assert_eq!(
             parse("12\n", SkipPolicy::None),
             Some(vec![1, 2]),
-            "the file's own terminator is not inside the root region"
+            "the file's own terminator is whitespace the child declined"
         );
     }
 

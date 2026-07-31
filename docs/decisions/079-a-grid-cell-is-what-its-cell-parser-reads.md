@@ -108,9 +108,26 @@ Uniformity is the decision, not an implementation convenience:
 - It is what bounds `{a:int}` to the comma in `{a:int},{b:int}`.
 - It closes IPR-11 without touching `word`'s delimiter set (Decision 3).
 
-The bound is taken **before** the following whitespace policy runs, so for
-`{a:int},{b:int}` on `"12 ,34"` the comma's `SpaceRun` absorbs the space and
-`int` still consumes its region exactly.
+The bound is taken **before** the following run's whitespace policy runs, which
+is what keeps that whitespace out of the capture: for `` `{name:text} {v:int}` ``
+on `"foo 3"` the run is a literal with empty text and `WsPolicy::SpaceRun`, so
+the earliest position it matches is byte 3 — `name` stops *at* the space rather
+than inside it, and the policy eats it.
+
+**AMENDED.** This paragraph used to illustrate that with `{a:int},{b:int}` on
+`"12 ,34"`, crediting "the comma's `SpaceRun`" with absorbing the space and
+claiming `int` "still consumes its region exactly". Both halves are wrong, by
+two later decisions of this same ADR. The comma carries `WsPolicy::None`, not
+`SpaceRun` — a template that writes nothing in front of a literal gets no run in
+front of it (Decision 4), which is why the template still matches `"12,34"` with
+no space at all. And `int` does *not* fill its region: the bound is the position
+where the run can start, so on `"12 ,34"` it is the comma at byte 3, the capture
+is handed `"12 "`, and the trailing space is forgiven by ADR-078's rule —
+whitespace the parser offered it does not read is nobody's
+(`ByteRegion::is_all_whitespace` in `walk_exact`). Remove that forgiveness and
+the same program faults at `2..3`, which is how the mechanism was confirmed. A
+template capture is not an exception to ADR-078; it is one of the constructs
+that inherits it.
 
 ### What the bound is
 

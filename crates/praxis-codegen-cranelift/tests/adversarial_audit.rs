@@ -998,6 +998,24 @@ fn a_capture_is_bounded_by_a_whitespace_only_template_part() {
     let (runtime, result) = run_main_with_input(src, "foo 3\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_text(), "foo 3");
+
+    // A literal the template wrote with **nothing** in front of it carries
+    // `WsPolicy::None`, so it is not a run and it absorbs nothing. Both halves
+    // are pinned here because ADR-079 Decision 2 and `capture_bound`'s doc
+    // comment used to explain this case by crediting "the comma's `SpaceRun`"
+    // with eating the space, a mechanism two later decisions removed.
+    let src = "fn main() -> Int {\n  let r = read `{a:int},{b:int}`\n  r.a * 100 + r.b\n}\n";
+    // No space at all — which a one-or-more `SpaceRun` could not match.
+    let (runtime, result) = run_main_with_input(src, "12,34\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 1234);
+    // A space before the comma. The bound is where the run can start, so it is
+    // the comma at byte 3; `a` is handed "12 " and does NOT fill it. The space
+    // is forgiven by ADR-078's rule — whitespace the parser offered it did not
+    // read — which is the same rule `lines`, `grid` and `ws` answer from.
+    let (runtime, result) = run_main_with_input(src, "12 ,34\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 1234);
 }
 
 /// **`parse(t, rest)` is the identity on `t`.**

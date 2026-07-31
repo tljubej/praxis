@@ -383,14 +383,28 @@ character-for-character the same three messages, while `lines(int)` over
 `"1 \n2 \n"` still faulted on an ordinary trailing space that `grid(int)` over
 the same bytes called padding. Both answers were a count of bytes.
 
-*Round three* states the rule: **a run of whitespace that no parser could read
-is not data and not a mismatch.** Whether a trailing run is data is not a
-property of the buffer, so it cannot be decided by trimming the buffer. It has
-two halves — a region does not end in blank lines (`split_lines`, decided before
-any parser runs), and a child that leaves only whitespace has filled its bound
-(`walk_exact`, one predicate, every bounded construct inheriting it). Together
-they leave the terminator to nobody, so the root region is simply the whole
-buffer and `Input::root_region` is deleted. ADR-078 carries the reasoning.
+*Round three* stopped counting bytes and split the rule into a
+parser-independent *extent* half (`split_lines` drops a trailing run of blank
+lines) and a parser-dependent *bound* half (`walk_exact` forgives a leftover run
+the child declined). Right shape, and the two halves then answered the rule's own
+question opposite ways: `grid(char)` over `"ab\ncd \n"` was a ragged grid because
+the bound half asked `char` and `char` reads a space, while `grid(char)` over
+`"ab\ncd\n  \n"` silently answered 2x2 and `"  \n  \n"` an *empty* grid, because
+the extent half deleted those lines without asking. `lines(rest)` lost a line the
+same way.
+
+*Round four* states the rule as one question: **whitespace is data when the
+parser offered it reads it** — a run the parser offered it does not read is not
+data and not a mismatch. The half that can ask decides. The bound half asks
+through one predicate, `ByteRegion::is_all_whitespace`, in `walk_exact` /
+`walk_characters` / `walk_grid_row` for a leftover run, and through
+`cursor::trailing_blank_run` for a whole trailing line of whitespace, which
+`lines`/`grid`/`matrix` drop only when their parser makes nothing of it. The
+extent half decides nothing any more: `split_lines` drops a trailing run of
+**empty** lines, which have no bytes to offer anyone. Together they leave the
+terminator to nobody, so the root region is simply the whole buffer and
+`Input::root_region` is deleted. `matrix` also stopped skipping an *interior*
+blank line. ADR-078 carries the reasoning.
 
 | What was wrong | What closed it |
 |---|---|
@@ -451,7 +465,7 @@ already correct. They are worth having and they are not gates.
 | Test | File | Why it has no counterfactual |
 |---|---|---|
 | `a_subregion_can_only_narrow`, `a_subregion_that_would_widen_is_a_bug_and_says_so`, `next_scalar_steps_one_unicode_scalar`, `a_line_region_of_a_section_names_the_inputs_own_bytes`, `split_lines_and_split_sections_agree_on_a_single_line_region`, `split_lines_strips_crlf_and_drops_a_trailing_empty_line`, `a_section_region_excludes_its_trailing_line_ending` | `parser/cursor.rs` | the module is added whole by the branch; `Input`, `ByteRegion` and this `split_lines` signature do not exist at `b2184c8` |
-| `a_region_does_not_end_in_blank_lines_however_many_there_are`, `the_root_region_is_the_whole_buffer_and_no_terminator_is_trimmed`, `a_blank_line_of_spaces_separates_sections` | `parser/cursor.rs` | **NEW (round three)**, same reason — but each pins a half of the rule at the substrate level, and the first two replace `the_root_region_excludes_the_files_trailing_newline`, whose subject (a trim of exactly one terminator) no longer exists |
+| `a_region_does_not_end_in_empty_lines_however_many_there_are`, `the_trailing_blank_run_is_the_only_run_a_constructor_may_drop`, `the_root_region_is_the_whole_buffer_and_no_terminator_is_trimmed`, `a_blank_line_of_spaces_separates_sections` | `parser/cursor.rs` | **NEW (rounds three and four)**, same reason — but each pins a half of the rule at the substrate level, and they replace `the_root_region_excludes_the_files_trailing_newline`, whose subject (a trim of exactly one terminator) no longer exists. The first is round three's `a_region_does_not_end_in_blank_lines_however_many_there_are` narrowed to *empty* lines, and the second is the whitespace lines it stopped claiming, handed to the parser instead |
 | `the_skip_policies_are_ordered_by_what_they_skip` | `parser.rs` | the byte sets are identical at `b2184c8`; the branch changed documentation and added the `SkipPolicy::skips()`/`ALL` API this also exercises. An invariant test |
 | `every_atomic_the_design_requires_has_a_parser_and_a_type` | `parser.rs` | its diff is confined to the helper call; every assertion is unchanged exhaustiveness over `AtomicKind::ALL` |
 | `a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names` | `jit.rs` | its input was **adapted** to stay legal under D11, not amended into a gate. Its subject is subscript argument order. D11 is gated by `a_grid_cell_is_whatever_its_cell_parser_reads` and `a_grid_of_char_is_positional_so_a_space_is_a_cell`; the comment says so now |
@@ -1615,15 +1629,33 @@ while splitting.
 add an exhaustion rule to `choice` or to the root — `scan(choice(...))` and
 `lines(choice(...))` are both correct only because the rule lives at the bound.
 
-**The root region ends where the data ends.** `run_plan` walks
-`Input::root_region`, which is the buffer minus the file's trailing line
-terminator (exactly one, `\r\n` or `\n`). Not requiring exhaustion at the root
-was necessary and not sufficient: a parent's decision is made against a
-*region*, and while the root region was the whole file every constructor that
-tokenizes to `region.end()` glued the terminator onto its last token. **Do not
-add a trailing-newline special case to a constructor.** That is this fix in the
-wrong place, N times, and it is how `csv` came to be the only survivor — purely
-because `csv_tokens` calls `trim()`.
+**The root region is the whole buffer.** `run_plan` walks `i.whole()`. There is
+no trim and no `Input::root_region` — that API was round two's answer and is
+deleted; if you are reading a comment that names it, the comment is stale.
+Nothing needs it, because **whitespace is data when the parser offered it reads
+it** (ADR-078, §7.5, and the module doc of `parser/cursor.rs`, which is where
+the rule is enforced and therefore where it is stated):
+
+- The **deciding half asks the parser**. `walk_exact`, `walk_characters` and
+  `walk_grid_row` forgive a leftover run through one predicate,
+  `ByteRegion::is_all_whitespace`; `cursor::trailing_blank_run` is the same
+  question about a whole line, and `walk_lines`/`walk_grid`/`walk_matrix` drop a
+  *trailing* blank line only when their parser makes nothing of it (no element,
+  no cell, no token). So `lines(int)` over `"1\n2\n  \n"` is two elements and
+  `grid(char)` over `"ab\ncd\n  \n"` is three rows — one rule, two children.
+- The **other half decides nothing**: `split_lines` drops a trailing run of
+  *empty* lines, which have no bytes for anyone to read. It must stay that
+  narrow. It used to drop lines of whitespace too, which is a parser's answer
+  given by something that cannot ask a parser, and that is what made
+  `grid(char)` contradict itself.
+
+**Do not add a trailing-newline or blank-line special case to a constructor.**
+That is this fix in the wrong place, N times, and it is how `csv` came to be
+round one's only survivor — purely because `csv_tokens` calls `trim()` — and how
+`matrix` came to be the one constructor that deleted an *interior* blank line,
+purely because `walk_matrix` called `trim()` too. If your construct tokenizes to
+`region.end()`, bound its children with `walk_exact` and you have inherited the
+rule; if it splits lines, take `trailing_blank_run`.
 
 **`split_lines`/`split_sections` moved to `cursor.rs` and take `(Input,
 ByteRegion)`.** `split_sections` no longer includes a section's trailing
