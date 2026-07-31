@@ -2348,10 +2348,11 @@ pub unsafe extern "C" fn praxis_map_new(
     ctx: *mut RuntimeContext,
     key_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    // The value label is `INT` unconditionally, which is a lie about every
-    // `Map` whose values are not `Int`s; REP-42 is that half. Nothing dispatches
-    // through it any more (REP-41), so it is inert until then.
-    let value_descriptor: *const TypeDescriptor = &scalars::INT;
+    // The `Map` row carries one type argument, so the value type never reaches
+    // this wrapper at all — it is unknown here by construction, and says so
+    // (REP-42). `praxis_map_insert` adopts the first inserted value's own
+    // descriptor, which is how a `Vec` learns its element type.
+    let value_descriptor: *const TypeDescriptor = std::ptr::null();
     unsafe {
         gc_alloc_with(
             ctx,
@@ -2384,13 +2385,24 @@ pub unsafe extern "C" fn praxis_map_insert(
     unsafe { maybe_collect(ctx) };
     let scope = unsafe { NativeScope::new(ctx) };
     let p = unsafe { map_payload_mut(scope.root(map)) };
-    // Adopt the value's descriptor if the default is still in place, so nested
-    // values format/trace correctly (mirrors the Vec push-descriptor adoption).
+    // Learn the value type from the first value inserted, the way a `Vec` learns
+    // its element type from the first `push` (REP-42). The old rule was "adopt
+    // if the label still says `INT`", which could not tell a `Map` that really
+    // holds `Int`s from one that had never been told anything — because `INT`
+    // was what "never been told" was spelled as.
+    //
+    // A later value of a different type un-learns it rather than faulting: the
+    // type checker makes a `Map` homogeneous, so this is unreachable for a
+    // well-typed program, and `praxis_map_insert` is a non-faulting row (its
+    // caller emits no fault check). Null is now representable and means "the
+    // value's own descriptor answers", so forgetting is the safe direction.
     let val_desc = value.descriptor();
-    if p.value().is_some_and(|d| std::ptr::eq(d, &scalars::INT))
-        && !std::ptr::eq(val_desc, &scalars::INT)
-    {
-        p.value_descriptor = val_desc;
+    match p.value() {
+        None => p.value_descriptor = val_desc,
+        Some(known) if !std::ptr::eq(known, val_desc) => {
+            p.value_descriptor = std::ptr::null();
+        }
+        Some(_) => {}
     }
     p.entries.insert(DynamicKey::new(key), value);
     unsafe { unit_sentinel(ctx) }
@@ -6292,6 +6304,59 @@ mod tests {
             let mut rendered = String::new();
             items.format(&mut rendered);
             assert_eq!(rendered, "[zz]");
+        }
+        // SAFETY: the context was leaked by `wired_ctx` and is unused after this.
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **REP-42.** A `Map` does not claim its values are `Int`s.
+    ///
+    /// `praxis_map_new` takes one descriptor — the key's — because the `MapNew`
+    /// row carries one type argument, and it wrote `INT` into the value slot
+    /// unconditionally with a comment calling that "sound for now". It was not a
+    /// default but a claim, and it was the same word as "unknown", so the
+    /// adoption that followed could not tell a `Map` that really holds `Int`s
+    /// from one that had never been told anything. The progress doc records the
+    /// consequence that shaped REP-18: a `Map[Text, Text]`'s pair read its value
+    /// as an `i64`, which is why `keys()`/`values()` are built in MIR.
+    #[test]
+    fn a_map_does_not_claim_its_values_are_ints() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: `ctx` is wired; every argument below is a wrapper's own.
+        unsafe {
+            let empty = praxis_map_new(ctx, &crate::text::TEXT);
+            assert!(
+                map_payload(empty).value().is_none(),
+                "an empty Map has been told nothing about its values"
+            );
+            // …so the `Vec` its `values()` answers is not labelled `Int` either,
+            // which is what made an empty `Map[Text, Text]`'s values unequal to
+            // an empty `Vec[Text]` (`vec_equals` compares element labels).
+            let none_yet = praxis_map_values(ctx, empty);
+            assert!(vec_payload(none_yet).element().is_none());
+
+            // The first insert is what the map learns from.
+            let k = praxis_alloc_text(ctx, "k".as_ptr(), 1);
+            let v = praxis_alloc_text(ctx, "vv".as_ptr(), 2);
+            praxis_map_insert(ctx, empty, k, v);
+            assert!(
+                std::ptr::eq(map_payload(empty).value().unwrap(), &crate::text::TEXT),
+                "a Map learns its value type from the first value inserted"
+            );
+            let mut rendered = String::new();
+            praxis_map_values(ctx, empty).format(&mut rendered);
+            assert_eq!(rendered, "[vv]");
+
+            // A `Map` that really does hold `Int`s says so — the assertion the
+            // old spelling could not make, because `INT` was also its "unknown".
+            let ints = praxis_map_new(ctx, &crate::text::TEXT);
+            let ik = praxis_alloc_text(ctx, "n".as_ptr(), 1);
+            praxis_map_insert(ctx, ints, ik, praxis_alloc_int(ctx, 7));
+            assert!(std::ptr::eq(
+                map_payload(ints).value().unwrap(),
+                &scalars::INT
+            ));
         }
         // SAFETY: the context was leaked by `wired_ctx` and is unused after this.
         unsafe { drop_ctx(ctx) };
