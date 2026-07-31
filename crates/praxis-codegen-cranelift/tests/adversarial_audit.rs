@@ -513,12 +513,53 @@ fn anonymous_word_template_vec_uses_the_text_element_descriptor() {
 }
 
 #[test]
-#[ignore = "known bug: text captures consume literals that follow the capture"]
 fn template_text_capture_stops_before_the_following_literal() {
     let src = "fn main() -> Text {\n  let parsed = read `pre{body:text}post`\n  parsed.body\n}\n";
     let (runtime, result) = run_main_with_input(src, "premiddlepost");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_text(), "middle");
+}
+
+/// **IPR-11 without growing `word`'s delimiter set.**
+///
+/// `word` stops on space, tab, `,`, `\n` and `\r` and nothing else, so
+/// `{w:word}-to-{x:word}` let the first `word` swallow the `-to-`. The audit's
+/// reading was that the delimiter set is too small. It is not: growing it to
+/// "every template delimiter" breaks `sep(" -> ", word)` and any `word` that
+/// legitimately contains a `-`. What was missing is the *region* — a capture
+/// bounded by the literal that follows it stops there whatever its own
+/// delimiter rule says, so the set stays minimal and documented.
+///
+/// Both halves are pinned here: the bounded `word` stops at the literal, and a
+/// bare `ws(word)` still reads `a-b` as one word.
+#[test]
+fn a_bounded_word_capture_stops_at_its_region_end() {
+    // The shape from tests/aoc-corpus/m9_almanac.px.
+    let src = "fn main() -> Text {\n  let r = read `{w:word}-to-{x:word} map:`\n  \
+               r.w\n}\n";
+    let (runtime, result) = run_main_with_input(src, "seed-to-soil map:");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_text(),
+        "seed",
+        "the following literal is the bound; `-` is not a word delimiter"
+    );
+
+    let src = "fn main() -> Text {\n  let r = read `{w:word}-to-{x:word} map:`\n  \
+               r.x\n}\n";
+    let (runtime, result) = run_main_with_input(src, "seed-to-soil map:");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_text(), "soil");
+
+    // Unbounded, `-` is an ordinary word character and must stay one.
+    let src = "fn main() -> Text {\n  let v = read ws(word)\n  v.get(0)\n}\n";
+    let (runtime, result) = run_main_with_input(src, "a-b c");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_text(),
+        "a-b",
+        "a bare `word` keeps its minimal delimiter set"
+    );
 }
 
 #[test]

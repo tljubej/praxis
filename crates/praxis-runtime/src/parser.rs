@@ -1312,6 +1312,53 @@ fn walk_grid(
 
 // ---- templates (§7.2, §7.3) -----------------------------------------------
 
+/// The first literal part after `index` that has text to match, with its
+/// whitespace policy. A policy-only literal (`\\s*`, `\\n`) constrains nothing on
+/// its own, so it is not a bound.
+fn following_literal(
+    parts: &[praxis_input_parser::TemplatePartNode],
+    index: usize,
+) -> Option<(&str, praxis_input_parser::WsPolicy)> {
+    parts[index + 1..].iter().find_map(|p| match p {
+        praxis_input_parser::TemplatePartNode::Literal { text, ws } if !text.is_empty() => {
+            Some((&**text, *ws))
+        }
+        _ => None,
+    })
+}
+
+/// The earliest position at or after `cursor` where `lit` can match after its
+/// whitespace policy — i.e. where the capture before it must stop.
+///
+/// "Earliest" is what makes `text` non-greedy, and taking the position *before*
+/// the policy runs is what keeps the whitespace out of the capture: for
+/// `{a:int},{b:int}` on `"12 ,34"` the comma's `SpaceRun` eats the space, so
+/// the bound is after `12` and `int` consumes its region exactly.
+///
+/// `None` means the literal does not appear in the rest of the region at all,
+/// which is a mismatch the literal itself will report.
+fn capture_bound(
+    i: &Input<'_>,
+    region: ByteRegion,
+    base: Cursor,
+    cursor: Cursor,
+    lit: &str,
+    ws: praxis_input_parser::WsPolicy,
+) -> Option<Cursor> {
+    let bytes = region.bytes(i);
+    let mut at = cursor;
+    loop {
+        if let Some(after) = consume_ws(bytes, at.delta_from(base), ws) {
+            let q = base.advance(after);
+            if region.from(q).bytes(i).starts_with(lit.as_bytes()) {
+                return Some(at);
+            }
+        }
+        // Step by scalar, so a bound never lands inside a multi-byte character.
+        at = region.next_scalar(i, at)?;
+    }
+}
+
 /// Interpret a backtick template against `region` (§7.2, §7.3).
 ///
 /// Walks the `parts` in order: a `Literal` part matches its bytes (honoring the
@@ -1339,7 +1386,7 @@ fn walk_template(
     // TupleSchema from the child result descriptors.
     let mut captures: Vec<(Option<&'static str>, u32, GcRef)> = Vec::new();
 
-    for part in parts {
+    for (index, part) in parts.iter().enumerate() {
         match part {
             praxis_input_parser::TemplatePartNode::Literal { text, ws } => {
                 // Honor the whitespace policy before matching the literal.
@@ -1370,10 +1417,59 @@ fn walk_template(
                     return Err(ParseFail::at(cursor.offset(), 0, "whitespace"));
                 };
                 cursor = base.advance(after);
-                // SAFETY: ctx is valid.
-                let walked = unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
-                cursor = walked.next;
-                captures.push((*name, *child, walked.value));
+                // **Bound the capture by the literal that follows it** (IPR-10).
+                // §7.4 says `text` "minimally consumes text until the following
+                // template literal can match", and the predecessor consumed to
+                // the end of the whole buffer — so `pre{body:text}post` ate its
+                // own suffix and no template with a trailing literal could ever
+                // match. Done here rather than in `walk_atomic` because it is
+                // uniform: every capture is bounded, not only the `text` ones,
+                // which is also what stops a `word` at a `-` without adding `-`
+                // to `word`'s delimiter set (IPR-11).
+                match following_literal(parts, index) {
+                    Some((lit, lit_ws)) => {
+                        match capture_bound(i, region, base, cursor, lit, lit_ws) {
+                            Some(bound) => {
+                                // SAFETY: ctx is valid.
+                                let value = unsafe {
+                                    walk_exact(
+                                        rt,
+                                        i,
+                                        plan,
+                                        *child,
+                                        region.subregion(cursor, bound),
+                                        "the rest of the capture",
+                                    )?
+                                };
+                                cursor = bound;
+                                captures.push((*name, *child, value));
+                            }
+                            None => {
+                                // The following literal does not appear at all.
+                                // Let the capture parse naturally so the
+                                // *literal* reports the mismatch, at the
+                                // position where it was actually looked for.
+                                // SAFETY: ctx is valid.
+                                let walked =
+                                    unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
+                                cursor = walked.next;
+                                captures.push((*name, *child, walked.value));
+                            }
+                        }
+                    }
+                    None => {
+                        // Nothing follows, so there is nothing to stop before:
+                        // the capture takes the rest of the region and keeps
+                        // its own cursor. Requiring exhaustion here would fault
+                        // every root-level template on its input's trailing
+                        // newline; whether the region must be filled is the
+                        // *parent's* question.
+                        // SAFETY: ctx is valid.
+                        let walked = unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
+                        cursor = walked.next;
+                        captures.push((*name, *child, walked.value));
+                    }
+                }
             }
         }
     }
