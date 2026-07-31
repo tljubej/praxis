@@ -3122,6 +3122,47 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
     }
 }
 
+/// **D10, the file-level half of the nested-template span rebase.**
+///
+/// A capture body's spans are the scanner's, relative to the template's
+/// interior; `convert_template` rebases them onto the file by `token_start + 1`.
+/// A nested template's parts are two levels down — `shift_part_spans` reaches
+/// the capture's parser, and if that parser is itself a `Template`, the
+/// `Template` arm of `ParserAst::shift_spans` has to recurse into *its* parts.
+///
+/// Nothing depended on it. Deleting `shift_part_spans(parts, delta)` from that
+/// arm left the whole suite green, while every caret under a nested template in
+/// real source moved back by `token_start + 1`: the input-parser crate's own
+/// span gate reaches the shifting machinery through `body::parse_expr` only,
+/// where the shifted parts hold `Atomic` parsers and the `Template` arm never
+/// runs.
+///
+/// So this asserts a **rendered caret**, from `analyze`, on the file offsets —
+/// at one level of nesting and at two. With the recursion removed both spans
+/// come back short by exactly the base, naming `read `{a:` instead of the call.
+#[test]
+fn a_caret_under_a_nested_template_names_the_text_it_points_at() {
+    // A `choice` with a duplicate case is reported against the `choice` node's
+    // own span, which is the span the rebase has to reach.
+    let bad = "choice(P: int, P: word)";
+    for src in [
+        format!("let v = read `{{a:`{{b:{bad}}}`}}`"),
+        format!("let v = read `{{a:`{{b:`{{c:{bad}}}`}}`}}`"),
+    ] {
+        let d = analyze(&src)
+            .diagnostics
+            .into_iter()
+            .find(|d| d.code().category() == DiagnosticCategory::Input)
+            .unwrap_or_else(|| panic!("{src} must report the duplicate case"));
+        let span = d.primary().span;
+        assert_eq!(
+            &src[span.start().to_u32() as usize..span.end().to_u32() as usize],
+            bad,
+            "the caret must name the call it is about, in {src}"
+        );
+    }
+}
+
 /// **IP-08.** A parser constructor's string literal used to be decoded by
 /// `raw.trim_start_matches('"').trim_end_matches('"')` — a second decoder,
 /// beside `lower::unquote_text`, which never unescaped and which stripped
