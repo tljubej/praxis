@@ -55,10 +55,10 @@ them.
 `walk` returns `Walked { value, next }`. `next` is a `Cursor`, so "bytes
 consumed" is not a reading that exists.
 
-The conversion of `walk`, its seventeen helpers and every recursive call site was
-**one commit**, deliberately. A half-converted interpreter has both cursor kinds
-in play with no type telling them apart, which is the original bug in a form that
-is harder to find.
+The conversion of `walk`, every helper it dispatches to and every recursive call
+site was **one commit**, deliberately. A half-converted interpreter has both
+cursor kinds in play with no type telling them apart, which is the original bug
+in a form that is harder to find.
 
 `Input` also holds a validated `&str`, which retires three
 `str::from_utf8(..).unwrap_or("")` calls. Those turned a mis-computed region into
@@ -94,8 +94,10 @@ A bounded parent calls `walk_exact`, which errors unless the child stopped at
 
 The missing return value is the decision. There is no cursor left over for a
 caller to forget to check, so "I computed the bound and did not require the child
-to fill it" is no longer expressible. Combined with `subregion`, a child can
-neither read past its bound nor stop short of it.
+to fill it" is no longer expressible. Combined with `subregion`, a child cannot
+read past its bound, and it cannot stop short of it except where what it leaves
+is whitespace — round three's rule, stated under Decision 3: whitespace the
+parser offered it does not read is nobody's.
 
 ## Decision 3: exhaustion is decided by the parent, in one place
 
@@ -319,8 +321,17 @@ of `Text` objects tagged `Int`, and rendering it read a `Text` payload through
 the `Int` callback.
 
 It takes the plan now and returns `child_descriptor(plan, capture.child)`. So
-does `walk_characters`, which hardcoded `CHAR`. There are no hardcoded element
-descriptors left in the interpreter.
+does `walk_characters`, which hardcoded `CHAR`.
+
+**One hardcoded element descriptor is left, and it is registered.** A template
+with two or more anonymous captures still answers `&scalars::UNIT`
+(`template_result_descriptor`), so ``lines(`{int},{int}`)`` produces a `Vec` of
+`Tuple`s tagged `Unit` and renders through the `Unit` callback — this decision's
+own class, in the one shape it did not reach. It is **REP-54** (P2, not done):
+the fix is a tuple descriptor built from the child descriptors, which the
+static-descriptor path has no constructor for today. Read this decision as
+"derived, never defaulted" being the rule, with REP-54 the one place the rule is
+not yet kept.
 
 This decision depends on ADR-072 (S19): before a capture named its own parser
 body, `capture.child` was the wrong node and deriving from it would have shipped
@@ -332,8 +343,8 @@ ADR-040 Decision 3 named `parser.rs` as one of two legitimate callers of
 `Heap::alloc_unpaced`, and said the exemption ends when the interpreter's
 intermediates are rooted. It ends here.
 
-Seventeen `Vec<GcRef>` intermediates now live inside `NativeScope`s. Nothing is
-threaded through the interpreter: a scope links itself into `ctx.native_roots`
+The interpreter's `Vec<GcRef>` intermediates now live inside `NativeScope`s.
+Nothing is threaded through: a scope links itself into `ctx.native_roots`
 and `RuntimeRoots` walks the parent chain, so a scope opened deeper already
 covers everything its callers hold. `run_plan` roots the `input` itself, which no
 other arm covers — `RuntimeRoots`'s `input` arm reads `ctx.input_source`, and for

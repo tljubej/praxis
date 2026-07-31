@@ -2035,7 +2035,7 @@ none — none of them changes a `#[repr(C)]` type generated code reads.
 `Cursor` has no `usize` constructor: the only mints are `Input::whole` and
 `Cursor::advance`. If you find yourself wanting `bytes.len() - offset`, the
 answer is a region you have not narrowed yet. `parser/cursor.rs` is the whole
-substrate and it is 300 lines.
+substrate.
 
 **A child gets a `subregion`, never a re-sliced buffer.** `subregion` cannot
 widen — debug builds assert, release builds clamp — so the five sites that used
@@ -2169,9 +2169,10 @@ there is no check by construction, so returning `unit_sentinel` would hand a
 message and abort. **Totality is therefore load-bearing, not merely primary, for
 an `Effect::Pure` wrapper**: the backstop's answer there is a dead process.
 
-**Five defects found in passing and deliberately not fixed** — they are not
-S20's and each would be a language decision. Four are registered in the plan's
-§4.1 as **REP-56**, **REP-57**, **REP-58** and **REP-59**, all **not done**:
+**Seven defects found in passing and deliberately not fixed** — they are not
+S20's and each would be a language decision. Six are registered in the plan's
+§4.1 as **REP-54**, **REP-55**, **REP-56**, **REP-57**, **REP-58** and
+**REP-59**, all **not done**:
 
 - **A `choice` payload record's fields cannot be read** — **registered as
   REP-56** (P1, not done). A `choice` case whose template has named captures
@@ -2206,6 +2207,25 @@ S20's and each would be a language decision. Four are registered in the plan's
   ragged form is unreachable in both directions. Pre-existing and identical on
   the base. The runtime is ready; the front end's `fill:` value grammar is not.
   It had been recorded only in a `jit.rs` comment.
+- **A template with two or more anonymous captures is tagged `Unit`** —
+  **registered as REP-54** (P2, not done). `` read lines(`{int},{int}`) `` over
+  `"1,2\n3,4\n"` prints `[Unit, Unit]`: `walk_template`'s last arm builds a
+  `Tuple` per element and `template_result_descriptor` answers `&scalars::UNIT`
+  for that shape, so the `Vec`'s element tag disagrees with every value in it.
+  This is ADR-078 Decision 5's own class — *a collection's element descriptor is
+  derived, never defaulted* — surviving in the one shape that decision did not
+  reach, so **Decision 5's "no hardcoded element descriptors left" is not yet
+  true**. Pre-existing: identical at the pre-S20 base. Out of scope because the
+  answer is a tuple descriptor built from the child descriptors, reached from a
+  static-descriptor path that has no tuple constructor today, and it wants
+  deciding alongside whether `PlanNode::Tuple` should be emitted or deleted.
+- **`matrix`'s ragged-row fault names the whole input instead of the offending
+  line** — **registered as REP-55** (P3, not done). `read matrix(int)` over
+  `"1 2\n  \n3 4\n"` reports `at input offset 0..11`, where `grid(digit)` over
+  the analogous `"12\n  \n34\n"` reports `at input offset 3..5` — the blank
+  line itself. `walk_matrix` reports against the region it was given rather than
+  the row it rejected. Out of scope: a diagnostic-quality fix, not a wrong
+  answer.
 - **`WsPolicy::ZeroOrMore` and `OneOrMore` are documented as "spaces or tabs"
   and implemented as `is_ascii_whitespace`** (`parser.rs`, `consume_ws`), so
   `\s*` in a template silently matches a newline. **Not registered**: narrowing

@@ -896,6 +896,14 @@ A root parse runs against the whole input with no terminator trimmed off it,
 which is why `parse(t, rest)` is the identity on `t`. There is no special case
 for the file's newline anywhere, and a new constructor must not grow one.
 
+**A root parse does not require exhaustion.** Requiring a region to be filled is
+a *parent's* decision, made by whoever computed the bound — a line, a section, a
+CSV field, a token, a matrix cell, a template capture. Nobody bounded the root,
+so nothing requires it to be consumed, which is why `scan(...)` and a
+root-level `choice(...)` may match a fragment and stop. This is the same rule as
+`choice`'s, not an exception for the root: the combinator never decides, the
+bound does.
+
 #### `lines(parser)`
 
 Split the current region into logical lines and apply `parser` to each line. Each application must consume the entire line.
@@ -960,9 +968,12 @@ the two answer the same way for the same reason.
 
 #### `ws(parser)`
 
-Split on one or more spaces or tabs. That names the *separator*; a token itself
+Split on a run of **whitespace** — every whitespace character, a line ending
+included, not only spaces and tabs. That names the *separator*; a token itself
 contains no whitespace of any kind, so a line ending terminates a token too —
-`ws(int)` over two lines of two numbers is four tokens, not three.
+`ws(int)` over two lines of two numbers is four tokens, not three. §7.2's
+template whitespace policies are a separate rule with their own wording; this
+entry governs only what `ws` splits on.
 
 #### `sep(separator, parser)`
 

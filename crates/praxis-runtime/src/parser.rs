@@ -1181,8 +1181,12 @@ fn walk_scan(
 /// Like [`AtomicKind::Char`], it reads the scalar **at** the cursor: it is a
 /// character class, and a class that skipped spaces before matching could not
 /// contain one — nor could `chars(one_of(…), skip: none)` mean what it says.
-/// A caller that wants leading space skipped has `skip:`, `walk_exact`'s token
-/// bounds, or a template's pre-capture skip.
+/// A caller that wants leading space skipped has `skip:` or `walk_exact`'s token
+/// bounds. **Not** a template's pre-capture skip: that skip *bounds* a capture
+/// and does not feed it, so it deletes nothing before the child is offered the
+/// bytes. Offering it as a third way was the same mistake one level up — it made
+/// ``lines(`{a:char}`)`` and `lines(char)` disagree about the same file — and
+/// ADR-079 records the correction.
 fn walk_one_of(rt: &Rt, i: &Input<'_>, chars: &str, region: ByteRegion) -> WalkResult {
     let at = region.start();
     let Some(next) = region.next_scalar(i, at) else {
