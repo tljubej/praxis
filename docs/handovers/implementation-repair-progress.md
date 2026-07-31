@@ -40,6 +40,12 @@ Update this file at the end of every stage.
 | REP-24 — a declaration's members take a line break (no stage) | **done** | `33b386f` |
 | REP-21 — `min=`/`max=` map updates (no stage; ADR-070) | **done** | `8833cb7` |
 | REP-25 — a `for` binding is a pattern (no stage) | **done** | `0066a6f` |
+| REP-26 — a record literal's head is a `struct` (no stage; `N008`) | **done** | `ac1f437` |
+| REP-27 — a line-leading `(` begins something new (no stage; ADR-049 amended) | **done** | `bd3c34e` |
+| REP-28 — a field read constrains its receiver (no stage; ADR-057 extended) | **done** | `5b9bfd9` |
+| REP-29 — a closure parameter is a pattern (no stage) | **done** | `67642c4` |
+| REP-30 — `\|\|` is a zero-parameter closure where an expression begins (no stage) | **done** | `ded26de` |
+| REP-31 — a zero-argument accessor is a call (no stage; ADR-077) | **done** | `185fe43` |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
@@ -104,6 +110,79 @@ the repair is **S18…S21, which were never started**; S18 is `D1`-blocked.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
 Now: **1458 passed, 0 failed, 38 ignored**. `just ci` is green.
+
+<!-- REP-26 … REP-31 block begins -->
+
+**The register runs to REP-31, and the second half of it is the design doc's own
+programs.** Six defects were found by a fresh-eyes sweep that read
+`praxis_technical_design.md`'s examples against the parser and the inferer at
+`d8179e1`, and all six are fixed and gated. **Three of them mean the design doc
+does not compile**, which is how REP-24, REP-09 and REP-07 were found before:
+§4.9's field-reading function fails, §4.2's shadowing closure is a `P001`, and
+Appendix D's "first public demo" does not parse. A fourth — §4.2, §5.7 and §6.4
+spelling `grid.width` and `Vec[T].len` as property reads — turned out to be the
+doc's mistake and not the tree's.
+
+- **REP-26 (P0)** — a record literal whose head is not a `struct` lowered to
+  nothing. `let x = 1` / `let p = x { a: 1 }` passed `praxis check`, printed
+  `Unit`, and `p + 1` printed a raw pointer. **REP-01's shape**, and reported in
+  inference so `check` catches it: `N008`, decided on the symbol's **kind**
+  (REP-22's rule at another door). ADR-051 amended; `N009` is next free.
+- **REP-27 (P1)** — a `(` at the start of a line was read as the previous
+  expression's argument list, so a newline-separated `match` **silently lost every
+  arm after the first** when the next arm began with a tuple pattern. ADR-049
+  measured this exact trap and left it open because the workaround was to bind the
+  tuple to a name; REP-10 and REP-25 took that workaround away. ADR-049 is amended
+  in place — a `(` asked to *continue* an expression does not cross a line break,
+  a `[` still does (REP-16), and the Pratt loop is untouched.
+- **REP-28 (P1)** — a field read never constrained its receiver, so §4.9's own
+  example passed `check` and failed under `run` with `Y112`. **TY-30's defect at
+  the other member syntax**, fixed through the channel rather than by a direct
+  predicate call: `Capability::HasField` is the **third capability discharged by
+  resolving**, and `pin_to_level` has three callers now. ADR-057 Decision 5
+  extended in place.
+- **REP-29 (P1)** — a closure parameter was a bare name. REP-25's job at the third
+  and last binding position, and **it needed no MIR change**: a destructuring
+  parameter gets a slot symbol and lowering wraps the body in a one-arm `match` on
+  it, which ADR-069's one-constructor patterns already lower with no tag test.
+  `Y125` carries over.
+- **REP-30 (P1)** — `|| expr` did not parse, so §4.2's shadowing example was a
+  `P001`. REP-07 making `||` a token is what removed the accident by which it used
+  to parse. Decided by **position**, as REP-21 decided `min=` and REP-09 decided
+  `[`: `parse_prefix` is only called where an expression must begin, and a binary
+  operator has no left operand there. The precedence table did not move.
+- **REP-31 (P2)** — the zero-argument accessors. Established that the tree has only
+  ever had the call form, decided that it stays that way, corrected four doc lines
+  and wrote **ADR-077**. The rule is load-bearing because of REP-28: a bare
+  `.name` that could be either a field or a nullary row would put a requirement on
+  the channel with two possible discharges and no way to choose.
+
+This session's eleven new gates, one new ADR (**077**) and two amended
+(**049**, **057**) — REP-26 … REP-31:
+
+| Test | File | Pins |
+|---|---|---|
+| `a_record_literals_head_must_name_a_struct` | `infer_tests.rs` | REP-26 — that `N008` comes out of **analysis alone** (so `praxis check` sees it), all seven non-`struct` kinds with the message naming each, that the literal no longer keeps the head's type, that an initializer's own mistake still reports, and that an *undefined* head is `N001` and only `N001` |
+| `a_line_leading_paren_begins_a_new_thing_and_a_same_line_one_is_a_call` | `parse.rs` | REP-27 — **both directions**: three arms surviving where one used to, the same after every arm-body shape a `(` could attach to (including `p.x`, which was a *method call*), six same-line callee shapes still calling, `[` still continuing across a line (REP-16), the Pratt loop and `.method()` chains untouched, and the cost stated as an assertion (`f\n(1)` is two expressions) |
+| `a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be` | `infer_tests.rs` | REP-28 — §4.9's example clean **through lowering**, the parameter coming out at the record (`(P) -> Int`) rather than quantified, the field's own type driving the result, a two-deep chained read, `Y001` for two call sites at two records (the pin, not a coincidence), `Y112` still lowering's for a record without the field, and the requirement riding a scheme through a second helper |
+| `a_field_read_on_an_unannotated_parameter_reads_that_records_field` | `jit.rs` | the half no type test can see — a field that is not the first, on a record with a `Text` between two `Int`s, so a wrong index is a different answer; a chained `o.inner.x`; a `Text` field used as one; the record arriving from a `Vec` rather than a literal; and the read surviving 200 allocations |
+| `a_closure_parameter_is_a_pattern` | `parse.rs` | REP-29's grammar — Appendix D's own line, nine header shapes with the param and pattern counts each holds, the annotation still belonging to the whole argument, a trailing comma, a record pattern's brace not being read as anything else, and four malformed shapes |
+| `a_closure_parameter_is_a_pattern_and_must_match_every_argument` | `infer_tests.rs` | each name at its *component's* type, a bare name still binding the whole argument, an annotation pinning the components, **`Y125` at any depth** in four spellings, six irrefutable shapes accepted, `Y001` for an argument the shape cannot have, and that a destructured name captures and is immutable (`Y009`) |
+| `a_destructuring_closure_parameter_reads_each_argument_apart` | `jit.rs` | the reads — every component weighted, a padded record row not shifting the fields it does name, several parameters in both orders (only some of them patterns), nesting through a record, a wildcard component, the names surviving 200 allocations and a nested closure's capture, and a bare-name parameter answering identically |
+| `a_double_pipe_is_a_closure_where_an_expression_begins_and_an_operator_between_two` | `parse.rs` | REP-30's rule — §4.2's own line plus seven positions an expression begins (including as an operand of `\|\|` itself and as its own body), `\| \|` with a space agreeing, and the precedence table **unmoved**: `&&` tighter, comparison tighter, `\|\|` still left-associative |
+| `a_zero_parameter_closure_runs_and_the_or_it_is_spelled_like_still_short_circuits` | `jit.rs` | the half a parse test cannot see — **short-circuiting measured by a side effect the skipped operand would leave**, `&&` from the other side, §4.2's shadowing capture answering `4`, `\|\| \|\| 7` nesting, and the closure surviving allocation pressure |
+| `a_zero_argument_accessor_is_a_call_and_a_bare_name_is_a_field` | `infer_tests.rs` | REP-31/ADR-077 — the call form clean on three receivers, the property spelling `Y112` on three, a record **field** named `len` still a field while `p.len()` is `Y110`, and REP-28's deferred read resolving to the field and not to a row |
+| `all_lists_every_variant` (extended) | `praxis-source/src/diagnostic.rs` | the variant count, bumped for `N008`. It is the injectivity test's other half: a code left out of `ALL` is a code nothing checks |
+
+`Vec[T].len -> Int` in §5.7, `let width = grid.width` in §4.2 and
+`grid.width`/`grid.height` in §6.4 are corrected to the call form, and §5.7 now
+**states** the rule rather than leaving it to be read off which examples happen to
+have parentheses.
+
+Suite: **1467 passed, 0 failed, 38 ignored.** `just ci` green at each of the six
+commits.
+
+<!-- REP-26 … REP-31 block ends -->
 
 This session's fourteen new gates and two ADRs (**069**, **070**) — REP-10,
 REP-24, REP-21 and REP-25:
