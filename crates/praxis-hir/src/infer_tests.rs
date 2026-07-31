@@ -3105,6 +3105,21 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
         has_input_error("let v = read block()"),
         "a `block` needs at least one item"
     );
+
+    // **A keyword with no value at all.** The shape table sees `fill:` present
+    // and is satisfied; only the builder can see that nothing followed the
+    // colon. The capture-body front end accepted this with *zero* diagnostics
+    // and built a ragged grid padded with `""`.
+    for src in [
+        "let v = read grid(char, ragged, fill:)",
+        "let v = read `{g:grid(char, ragged, fill:)}`",
+        "let v = read `{g:grid(char, ragged, fill: \"\")}`",
+    ] {
+        assert!(
+            !errors_of(src).is_empty(),
+            "`{src}` gives `fill:` no value to pad with"
+        );
+    }
 }
 
 /// **IP-08.** A parser constructor's string literal used to be decoded by

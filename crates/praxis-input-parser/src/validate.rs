@@ -610,6 +610,55 @@ mod tests {
         .is_empty());
     }
 
+    /// **A keyword argument's *value* is part of its shape.**
+    ///
+    /// [`check_call`] answers from `ArgKind`s, which carry names and no values,
+    /// so the shape table can never see this — the check belongs to the
+    /// builder, and `fill:` was the one keyword that had none. `chars`'s
+    /// `skip:` refuses a policy it does not recognize; `grid`'s `fill:` took
+    /// whatever text preceded the delimiter, including none of it, and built a
+    /// ragged grid padded with `""` without a word. That is IP-10's rule one
+    /// field over: `Separator::new` refuses `""` because an empty separator
+    /// never advances, and an empty pad fills nothing.
+    ///
+    /// The builder is shared, so both front ends inherit whatever it decides —
+    /// which is the point of asserting it here rather than at either one.
+    #[test]
+    fn a_keyword_argument_with_no_value_is_not_a_shape() {
+        use crate::call::{build_call, CallArg};
+
+        let grid = |fill: &str| {
+            build_call(
+                Constructor::Grid,
+                vec![
+                    CallArg::Parser(ParserAst::Atomic {
+                        kind: crate::ast::AtomicKind::Char,
+                        span: Span::at(0),
+                    }),
+                    CallArg::Flag("ragged".to_string()),
+                    CallArg::Keyword {
+                        name: "fill".to_string(),
+                        value: fill.to_string(),
+                    },
+                ],
+                Span::at(0),
+            )
+        };
+
+        for empty in ["", "\"\""] {
+            let errs = grid(empty).expect_err("an empty fill pads nothing");
+            assert_eq!(errs[0].code, DiagCode::InvalidConstructorArgument);
+        }
+
+        // And the values that *are* values still build, decoded.
+        for (written, decoded) in [("0", "0"), ("\"-\"", "-"), ("\" \"", " ")] {
+            match grid(written).expect("a fill with a value") {
+                ParserAst::GridRagged { fill, .. } => assert_eq!(fill, decoded),
+                other => panic!("`fill: {written}` built a {other:?}"),
+            }
+        }
+    }
+
     /// **The assertion is inverted on purpose (IP-10).**
     ///
     /// This test used to build `ParserAst::Sep { separator: String::new(), … }`

@@ -227,7 +227,26 @@ pub fn build_call(
                         // quotes and all, because the value was carried as raw
                         // text and nothing ever unquoted it (IP-08's rule for
                         // every other parser string literal).
-                        fill = Some(praxis_syntax::literal::unquote_text(&value));
+                        let decoded = praxis_syntax::literal::unquote_text(&value);
+                        // **A keyword argument's value is part of its shape.**
+                        // `chars`'s `skip:` has always checked its value; this
+                        // one checked nothing, so `grid(P, ragged, fill:)` was
+                        // accepted with no diagnostic at all and built a ragged
+                        // grid padded with the empty string. That is the same
+                        // unrepresentable value IP-10 refuses one field over,
+                        // where `Separator::new` rejects an empty separator
+                        // because it never advances: a cell of no characters
+                        // pads nothing.
+                        if decoded.is_empty() {
+                            return Err(vec![ValidationError {
+                                span,
+                                code: DiagCode::InvalidConstructorArgument,
+                                message: "`fill:` needs a value to pad a short row with — an \
+                                          empty one fills nothing (§7.5)"
+                                    .to_string(),
+                            }]);
+                        }
+                        fill = Some(decoded);
                     }
                     // `ragged` carries nothing: it exists so the shape table
                     // can *require* it beside `fill:`. Named here rather than
