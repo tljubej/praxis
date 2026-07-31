@@ -12,6 +12,8 @@
 //! `praxis_input_parser::plan`'s own doc is the authority; this line claimed a C
 //! layout the types never had.
 
+mod cursor;
+
 use crate::context::RuntimeContext;
 use crate::parse_detail::ParseFail;
 use crate::scalars;
