@@ -115,10 +115,11 @@ comma-separated and the design doc writes them on separate lines. What is left o
 the repair is **S20** — S18, S19 and S21 all closed in the session after.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1478 passed, 0 failed, 24 ignored**, measured after S21 alone (the
-previous line read 1458/38; the tree it was measured on counts 1457, so read the
-delta rather than the absolute). `just ci` is green. The 24 that remain belong to
-S18, S19 and S20.
+Now: **1526 passed, 0 failed, 19 ignored**, measured after the REP-36 … REP-49
+block below (the line before it read 1478/24 after S21 alone, and the one before
+that 1458/38 on a tree that counts 1457 — read the deltas rather than the
+absolutes). `just ci` is green. **All 19 that remain belong to S20**, which is
+the last stage of the repair still open.
 
 **S21 is closed** (ADR-071). All six of its findings are fixed — MIR-06, MIR-08,
 MIR-03, MIR-04+MIR-07 (one commit, as the plan requires) and MIR-05 — and all
@@ -270,6 +271,106 @@ Suite: **1470 passed, 0 failed, 38 ignored.** `just ci` green at each of the
 twelve commits (`git log --oneline 497ef35..`).
 
 <!-- REP-26 … REP-34 block ends -->
+
+<!-- REP-36 … REP-49 block begins -->
+
+**The register runs to REP-49, and this block is thirteen defects three
+fresh-eyes sweeps found plus one the fix for another found.** A runtime+GC hunt,
+a front-end hunt and an end-to-end hunt that ran real Praxis programs produced
+REP-36 … REP-48; **REP-49 came out of REP-37's own fix**, on the first `cargo
+test` after it landed. Every row was re-reproduced against `9727b34` or later
+before being fixed, which mattered more than usual: `main` had already gained
+S18, S21 and REP-26 … REP-34, and REP-38's claim in particular had to be
+re-measured *after* S21 rewrote the whole block it lived in — S21 moved the stage
+from an eager lowerer into `Step::FilterMap` and moved the defect with it.
+
+Four of the thirteen were **wrong answers the suite already covered and could not
+see**, because every test in range asserted the wrong quantity. That is the
+pattern worth carrying forward:
+
+- the two grid rotations had three tests, and all three assert
+  `width() * 10 + height()` — both rotations of a 3×2 grid have *identical*
+  dimensions, and four turns is the identity whichever way it turns (REP-36);
+- `filter_map` was pinned by `pipeline_filter_map_keeps_results`, which asserted
+  `map`'s answer and passed **because** `filter_map` was `map`; its premise was
+  the comment admitting the gap (REP-38);
+- `find` was pinned by a test whose *name* was the finding,
+  `pipeline_position_is_alias_of_find` (REP-39);
+- the `Float` rendering was covered by a descriptor test whose one value is
+  `2.5`, which carries a `.` and passes under either rule (REP-44).
+
+Three were **a claim in the code that is false about this language**: `INT`
+written where "unknown" was meant, in five constructors (REP-41) and in every
+`Map`'s value slot (REP-42), and a comment about Rust's shortest round-trip form
+applied to a language in which `1` is not a `Float` (REP-44). Two were **an ABI
+rule broken in one place each** — an eight-byte read of a one-byte payload
+(REP-37, and REP-49 behind it) and an unchecked `+` inside `extern "C"`
+(REP-43). Two were the **manifest disagreeing with the code it describes**
+(REP-45) and the **design doc describing surface that was never built** (REP-46).
+One was a **silent reinterpretation where a report belonged** (REP-47). One was
+**dead code that would have been wrong if reached**, recorded at that size rather
+than inflated (REP-40). And one was a **test whose observation was a probability**
+(REP-48).
+
+Three of the fixes are structural rather than local, and each replaces a rule
+that was being restated at call sites:
+
+- REP-37 did not correct a literal width. `Payload<T>` takes the width from `T`
+  and proves at const-evaluation time that `T`'s layout is the descriptor's, so
+  `read_scalar(r, handle)` makes "wrong type" and "right type, wrong width"
+  both unspellable. `int_payload` keeps its eight-byte read for the arithmetic
+  wrappers and now `debug_assert`s the operand's width — **which is what found
+  REP-49**, twenty minutes later, in the `match` lowering.
+- REP-41 applied ADR-066 decision 5 instead of choosing a better default: a null
+  slot is legal and means "the value's own descriptor answers". Every
+  element-wise dispatch now reads the value's own descriptor, and the
+  collection's slot is a *label* recording what the construction site knew.
+- REP-45 did not hand-correct three manifest rows and stop. The invariant is a
+  sweep in S18's shape: `abi.rs` read through `include_str!`, the fixed point of
+  "can reach `set_fault`", asserted against every wrapper's row.
+
+This block's twelve new gates and two ADRs (**083**, **084**) — REP-36 … REP-49:
+
+| Test | File | Pins |
+|---|---|---|
+| `grid_rotate_left_and_right_turn_in_opposite_directions` | `jit.rs` | REP-36 — a grid **asymmetric in both axes**, so no transpose, flip or 180° turn reads the same, and both halves in one answer (`1` left, `10` right, `11` both) because a fix that swapped the two bodies again passes either half alone. Answers `0` before the fix |
+| `a_graph_goal_predicate_reads_a_bool_at_a_bool_s_width` | `abi.rs` | REP-37 — an end-to-end walk whose goal is `false` everywhere and whose answer must be `None`. Restoring the old reader aborts it **every** run rather than one in however-many, because `int_payload`'s new width assertion turns a padding-dependent wrong answer into a deterministic failure |
+| `a_bool_pattern_reads_its_scrutinee_at_a_bools_width` | `praxis-mir/src/build.rs` | REP-49 — the **instruction**, because the behaviour cannot say it: `match true` is right whenever the two immortals' padding differs, and comparing `true` against itself reads one address twice and is right for the wrong reason |
+| `filter_map_drops_the_nones_rather_than_carrying_them` | `jit.rs` | REP-38 — a sum a surviving `None` cannot even type-check, plus the all-`None` result and a `filter_map` between two other stages. Its predecessor asserted `map`'s answer and is **rewritten, not deleted** (§8.2) |
+| `find_answers_the_matching_element_not_its_index` + `find_reaches_a_non_int_element` | `jit.rs` | REP-39/ADR-082 — a vector where the element and its index are *different numbers*, and an element no arithmetic could have reached while `find`'s result type was `Int` |
+| `intrinsics_are_all_recognized_so_there_is_no_second_lowering` | `praxis-mir/src/build.rs` | REP-40 — every catalog row lowered as an `Intrinsic` is classified by the recognizer, which is the property that made the deleted fallback unnecessary. **Not red on `main`** — deleting unreachable code changes no behaviour — but red the moment `classify_sink` loses an arm |
+| `a_collection_with_no_static_element_type_does_not_claim_int` | `abi.rs` | REP-41 — **both** halves: the five labels absent, *and* a `Text` counter key, a `Float` heap element and a `Text` set member rendering as themselves. Only the label would pass a fix that left the dispatch wrong; suppressing the label half, the counter's keys come back `[0]` |
+| `a_map_does_not_claim_its_values_are_ints` | `abi.rs` | REP-42 — the empty map's value slot absent (red on the old spelling), the first insert teaching it `Text`, `values()` rendering `[vv]`, and a `Map` genuinely holding `Int`s reporting `Int` — the assertion the old spelling could not make, because `INT` was also its "unknown" |
+| `counter_inc_at_the_int_ceiling_faults_rather_than_wrapping` + `counter_inc_below_the_ceiling_still_counts` | `jit.rs` | REP-43 — the **fault kind**, not "the process survived": before the fix the test binary aborts. The second is the other half, so a fix that faulted on every `inc` does not pass |
+| `a_whole_numbered_float_renders_as_a_float` | `scalars.rs` | REP-44/ADR-083 — whole numbers, an exponent and the three non-finite values, which are the only places the two rendering rules differ. `run_pass_float_methods` asserted `"9"` and is **rewritten, not deleted** (§8.2) |
+| `a_wrapper_that_can_raise_a_fault_declares_that_it_faults` | `abi.rs` | REP-45 — the manifest checked against the code, by fixed point over `abi.rs`'s own text. **One direction only**: a row may declare a fault the scan cannot see (macro-generated wrappers have no textual definition), so it is weaker than the truth and never stricter |
+| `the_overflow_alternatives_answer_where_a_checked_add_faults` | `jit.rs` | REP-46 — every assertion at `i64::MAX`, where the ordinary `+` faults; two small numbers would pass against `praxis_int_add` itself and prove only that a name resolves. Values *and* the absence of a pending fault, which is the whole point of the three |
+| `a_parser_template_in_value_position_is_reported` | `infer_tests.rs` | REP-47/ADR-084 — `Y023`, ``read `n = {int}` `` still clean (the sublanguage is entered by the *word*), and **exactly one** error, which is the half that fails for a fresh variable with no report or a parser refusal with a cascade |
+
+`a_structural_key_hashes_by_contents_so_mutating_it_moves_its_bucket` is **not**
+in that table: REP-48 changed its *observation*, not its subject. It asked a
+one-element `HashSet` whether a probe landed, which is a 0.8% coin flip —
+measured, 163 false positives in 20000 iterations — and now compares the two
+hashes directly with the hasher a `HashMap` builds. It also gained the "by
+contents" half, which was never asserted at all.
+
+`entry_reports_capabilities` (`catalog.rs`) is the third **bug-pinning test**
+rewritten in this block, after `pipeline_filter_map_keeps_results` and
+`run_pass_float_methods`. It asserted `!vec_push().can_fault()` with the reason
+"praxis_vec_push is Allocates, not AllocatesAndFaults" — restating the row
+instead of checking it, which is what pinning looks like when the bug is in a
+table.
+
+Diagnostic codes: **`Y023` is spent** (REP-47); ADR-051 amended. `Y022` is
+deliberately left free — this session's plan reserved `Y023` upward, and a gap in
+a registry costs nothing while a collision costs an identifier users have seen.
+`N009` is still the next free Name code. **No ABI bump and no new `FaultKind`**:
+REP-43 uses `IntOverflow`, which already meant exactly that condition.
+
+Suite: **1526 passed, 0 failed, 19 ignored.** The 19 all belong to S20. `just ci`
+green at each of the fourteen commits.
+
+<!-- REP-36 … REP-49 block ends -->
 
 This session's fourteen new gates and two ADRs (**069**, **070**) — REP-10,
 REP-24, REP-21 and REP-25:
