@@ -1,0 +1,279 @@
+//! Where a backtick template ends — **one** answer, for both scanners (D10).
+//!
+//! Two hand-written scanners have to agree about the extent of a
+//! `` `…` `` run: [`praxis-parser`'s lexer], which turns it into one
+//! `BacktickTemplate` token, and `praxis-input-parser`'s template scanner,
+//! which re-reads that token's interior and has to find the same nested
+//! templates and the same closing backtick inside it. When they were two
+//! implementations of one rule they drifted immediately: the lexer counted
+//! `{`/`}` everywhere and the scanner skipped string literals, so
+//! `` `{c:one_of("{")}` `` — a legal §7.5 program, and one the scanner
+//! accepted — left the lexer's brace counter above zero at the closing
+//! backtick, which it then read as an *opener* and swallowed the rest of the
+//! file into one token.
+//!
+//! `praxis-syntax` is the crate below both (it is where [`crate::ident`] and
+//! [`crate::numeric`] already live for exactly this reason), so the rule lives
+//! here and is called twice rather than written twice.
+//!
+//! # The rule
+//!
+//! Scanning starts just past the opening backtick and, until the run closes:
+//!
+//! - `\` hides the next scalar, so an escaped backtick cannot terminate a run.
+//! - `{` opens a capture and `}` closes one — this is the only thing brace
+//!   depth is for.
+//! - `"` **inside a capture** opens a string literal, which is skipped whole:
+//!   `one_of("{")`, `sep("}", int)` and `one_of("`")` all hold delimiters that
+//!   are text, not structure. Outside a capture a quote is ordinary literal
+//!   text (`` `He said "hi" {x:int}` ``), which is why the rule is conditioned
+//!   on depth rather than applied everywhere.
+//! - `` ` `` closes the run at capture depth 0. Inside a capture it *opens* a
+//!   template of its own, because a capture body is a full parser expression
+//!   (D10) and `` `{g:choice(A: `{x:int}`)}` `` is one template containing
+//!   another.
+//!
+//! At most [`MAX_TEMPLATE_NESTING`] templates may nest; past that a backtick
+//! simply closes, so adversarial input lands on the ordinary
+//! unterminated/unexpected-token paths rather than on the stack. There is one
+//! bound because there is one function — the two copies of this rule disagreed
+//! about it by one level.
+//!
+//! [`praxis-parser`'s lexer]: https://docs.rs/praxis-parser
+
+use crate::MAX_TEMPLATE_NESTING;
+
+/// Where a `` `…` `` run ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemplateEnd {
+    /// The run closed. The index is **just past** the closing backtick, so
+    /// `&src[open..end]` is the whole token, backticks included.
+    Closed(usize),
+    /// The text ended before the run closed.
+    Unterminated,
+}
+
+/// Find the end of the backtick template whose opening backtick is at `open`.
+///
+/// `src[open]` must be `` ` ``.
+#[must_use]
+pub fn template_end(src: &str, open: usize) -> TemplateEnd {
+    debug_assert_eq!(src.as_bytes().get(open), Some(&b'`'));
+    match run(src.as_bytes(), open, 1) {
+        Some(end) => TemplateEnd::Closed(end),
+        None => TemplateEnd::Unterminated,
+    }
+}
+
+/// Find the end of the `"…"` literal whose opening quote is at `open`,
+/// returning the index **just past** the closing quote, or `None` if the text
+/// ends first. `\` hides the next scalar, so `"\""` is one literal.
+#[must_use]
+pub fn string_end(src: &str, open: usize) -> Option<usize> {
+    debug_assert_eq!(src.as_bytes().get(open), Some(&b'"'));
+    string_run(src.as_bytes(), open)
+}
+
+/// One `` `…` `` run. `level` is 1 for the outermost template.
+///
+/// Byte-wise scanning is safe here because every delimiter is ASCII and no
+/// UTF-8 continuation byte can be mistaken for one; the two places that step
+/// over something unconditionally ([`skip_scalar`]) step over a whole scalar so
+/// the returned index is always a character boundary.
+fn run(bytes: &[u8], open: usize, level: usize) -> Option<usize> {
+    let mut pos = open + 1; // past the opening backtick
+    let mut braces = 0usize;
+    while pos < bytes.len() {
+        match bytes[pos] {
+            b'\\' => pos = skip_scalar(bytes, pos + 1),
+            // A quote is structure only inside a capture; in literal text it is
+            // just a quote.
+            b'"' if braces > 0 => pos = string_run(bytes, pos)?,
+            b'{' => {
+                braces += 1;
+                pos += 1;
+            }
+            b'}' => {
+                braces = braces.saturating_sub(1);
+                pos += 1;
+            }
+            b'`' => {
+                if braces == 0 || level >= MAX_TEMPLATE_NESTING {
+                    return Some(pos + 1);
+                }
+                pos = run(bytes, pos, level + 1)?;
+            }
+            _ => pos = skip_scalar(bytes, pos),
+        }
+    }
+    None
+}
+
+/// One `"…"` run, honouring `\`. `bytes[open]` is the opening quote.
+fn string_run(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut pos = open + 1;
+    while pos < bytes.len() {
+        match bytes[pos] {
+            b'\\' => pos = skip_scalar(bytes, pos + 1),
+            b'"' => return Some(pos + 1),
+            _ => pos = skip_scalar(bytes, pos),
+        }
+    }
+    None
+}
+
+/// The index just past the whole UTF-8 scalar beginning at `pos`.
+fn skip_scalar(bytes: &[u8], pos: usize) -> usize {
+    if pos >= bytes.len() {
+        return bytes.len();
+    }
+    let mut next = pos + 1;
+    while next < bytes.len() && (bytes[next] & 0xC0) == 0x80 {
+        next += 1;
+    }
+    next
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `n` templates nested inside each other's captures, closed properly.
+    fn nested(n: usize) -> String {
+        let mut s = String::new();
+        for _ in 0..n {
+            s.push_str("`{a:");
+        }
+        s.push_str("int");
+        for _ in 0..n {
+            s.push_str("}`");
+        }
+        s
+    }
+
+    /// `n` nested templates whose innermost one holds a lone `"` as its literal
+    /// text.
+    ///
+    /// That quote is *text* only if the innermost template is really entered as
+    /// a template — at capture depth 0. If the bound stopped one level short,
+    /// the same byte sits inside the parent's capture instead, where a quote
+    /// opens a string literal that never closes. So this string closes at
+    /// exactly `n <= MAX_TEMPLATE_NESTING` and at no larger `n`, which is what
+    /// makes the bound observable.
+    fn nested_quote(n: usize) -> String {
+        let mut s = String::new();
+        for _ in 0..n - 1 {
+            s.push_str("`{a:");
+        }
+        s.push_str("`\"`");
+        for _ in 0..n - 1 {
+            s.push_str("}`");
+        }
+        s
+    }
+
+    fn closed(src: &str) -> bool {
+        template_end(src, 0) == TemplateEnd::Closed(src.len())
+    }
+
+    /// **The blocker.** A `{`, `}` or backtick inside a string literal is text,
+    /// not structure. The lexer's copy of this rule had no string arm, so
+    /// `one_of("{")` left its brace counter above zero and the closing backtick
+    /// read as an opener.
+    #[test]
+    fn a_delimiter_inside_a_string_is_text() {
+        for src in [
+            r#"`{c:one_of("{")}`"#,
+            r#"`{c:one_of("}")}`"#,
+            r#"`{s:sep("{", int)}`"#,
+            r#"`{c:one_of("`")}`"#,
+            r#"`{c:one_of("\"")}`"#,
+            r#"`{c:one_of("{{{")}`"#,
+        ] {
+            assert!(closed(src), "{src}");
+        }
+    }
+
+    /// Outside a capture a quote is ordinary literal text. Conditioning the
+    /// string rule on depth is what keeps `` `He said "hi"` `` a template.
+    #[test]
+    fn a_quote_in_literal_text_is_not_a_string() {
+        assert!(closed(r#"`He said "hi`"#));
+        assert!(closed(r#"`" {x:int}`"#));
+    }
+
+    #[test]
+    fn a_nested_template_is_part_of_the_run() {
+        assert!(closed("`{g:choice(A: `{x:int}`, B: word)}`"));
+        assert!(closed("`{a:choice(A: `{b:choice(C: `{c:int}`)}`)}`"));
+        // An escaped backtick terminates nothing, at either depth.
+        assert!(closed(r"`a\`b`"));
+        assert!(closed(r"`{a:choice(A: `x\`y`)}`"));
+    }
+
+    #[test]
+    fn a_run_that_never_closes_is_unterminated() {
+        assert_eq!(template_end("`never closes", 0), TemplateEnd::Unterminated);
+        assert_eq!(
+            template_end("`{g:choice(A: `{x:int}`)}", 0),
+            TemplateEnd::Unterminated
+        );
+        // An unterminated string swallows the rest, so the run cannot close.
+        assert_eq!(
+            template_end(r#"`{c:one_of("abc)}`"#, 0),
+            TemplateEnd::Unterminated
+        );
+    }
+
+    /// The bound is a bound, and it is exactly [`MAX_TEMPLATE_NESTING`]:
+    /// `MAX_TEMPLATE_NESTING` nested templates are all entered, and the
+    /// `MAX_TEMPLATE_NESTING + 1`-th is not.
+    ///
+    /// An *unbounded* implementation passes the first assertion and fails the
+    /// second; a bound one level shorter or longer fails one of them. This is
+    /// the assertion the predecessor test did not make: it fed the lexer 5,000
+    /// unclosed openers and asserted only that *something* was reported, which
+    /// a lexer with no nesting at all also does.
+    #[test]
+    fn nesting_is_bounded_at_max_template_nesting() {
+        let at_the_bound = nested(MAX_TEMPLATE_NESTING);
+        assert_eq!(
+            template_end(&at_the_bound, 0),
+            TemplateEnd::Closed(at_the_bound.len()),
+            "a run nested exactly to the bound still closes at its own backtick"
+        );
+
+        let entered = nested_quote(MAX_TEMPLATE_NESTING);
+        assert_eq!(
+            template_end(&entered, 0),
+            TemplateEnd::Closed(entered.len()),
+            "the {MAX_TEMPLATE_NESTING}th template is entered, so its `\"` is literal text"
+        );
+        let not_entered = nested_quote(MAX_TEMPLATE_NESTING + 1);
+        assert_eq!(
+            template_end(&not_entered, 0),
+            TemplateEnd::Unterminated,
+            "one past the bound that template is not entered, so its `\"` is a string"
+        );
+
+        // And the pathological case terminates rather than recursing.
+        let deep = "`{a:".repeat(5_000);
+        assert_eq!(template_end(&deep, 0), TemplateEnd::Unterminated);
+    }
+
+    #[test]
+    fn a_multibyte_scalar_after_a_backslash_is_stepped_over_whole() {
+        // The escape skips `λ` entirely; the run still closes at its backtick,
+        // and the returned index is a character boundary.
+        let src = "`a\\λb`";
+        assert_eq!(template_end(src, 0), TemplateEnd::Closed(src.len()));
+        assert!(src.is_char_boundary(src.len()));
+    }
+
+    #[test]
+    fn a_string_ends_at_its_own_unescaped_quote() {
+        assert_eq!(string_end(r#""ab" rest"#, 0), Some(4));
+        assert_eq!(string_end(r#""a\"b" rest"#, 0), Some(6));
+        assert_eq!(string_end(r#""unterminated"#, 0), None);
+    }
+}

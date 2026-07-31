@@ -3117,6 +3117,78 @@ fn a_repeated_tail_is_last_and_singular() {
     );
 }
 
+/// **The lexer and the template scanner must agree about where a template
+/// ends**, and the agreement is now structural: both call
+/// `praxis_syntax::template::template_end` instead of implementing one rule
+/// twice.
+///
+/// They had drifted the moment there were two copies. The lexer's counted
+/// `{`/`}` everywhere; the scanner's skipped string literals. So
+/// `` `{c:one_of("{")}` `` — legal §7.5, and accepted by the scanner — left the
+/// lexer's brace counter above zero at the closing backtick, which it read as
+/// an *opener*: the rest of the file went into one token, plus a false `T002`.
+///
+/// This test lives here because it is the only place the two layers meet.
+/// `praxis-input-parser` must not depend on `praxis-parser` (ADR-023 fixes that
+/// direction) and `praxis-parser` knows nothing of the scanner, so neither
+/// crate's own suite can drive both. This one drives the **same strings**
+/// through the lexer, the scanner, and the whole compile pipeline.
+#[test]
+fn the_lexer_and_the_scanner_agree_on_where_a_template_ends() {
+    use praxis_source::FileId;
+    use praxis_syntax::SyntaxKind;
+
+    for template in [
+        // A delimiter inside a string literal is text, not structure.
+        r#"`{c:one_of("{")}`"#,
+        r#"`{c:one_of("}")}`"#,
+        r#"`{s:sep("{", int)}`"#,
+        r#"`{c:one_of("`")}`"#,
+        // A nested template is part of the same token (D10).
+        "`{g:choice(A: `{x:int}`, B: word)}`",
+        "`{a:choice(A: `{b:choice(C: `{c:int}`)}`)}`",
+        // Ordinary shapes, so a rule that broke these would be caught too.
+        "`{name:word},{port:int}`",
+        r#"`He said "hi": {x:int}`"#,
+    ] {
+        // 1. The lexer: one token, covering exactly the template, no complaint.
+        let src = format!("let p = {template}\nlet q = 1\n");
+        let lexed = praxis_parser::lex(FileId::SYNTHETIC, &src);
+        assert!(
+            lexed.diagnostics.is_empty(),
+            "{template}: the lexer reported {:?}",
+            lexed.diagnostics
+        );
+        let tokens: Vec<_> = lexed
+            .tokens
+            .iter()
+            .filter(|t| t.kind == SyntaxKind::BacktickTemplate)
+            .collect();
+        assert_eq!(tokens.len(), 1, "{template}: not one template token");
+        let token_text = &src[tokens[0].span.start().to_usize()..tokens[0].span.end().to_usize()];
+        assert_eq!(
+            token_text, template,
+            "{template}: the token is not the template"
+        );
+
+        // 2. The scanner, on the interior the lexer just delimited.
+        let interior = token_text
+            .strip_prefix('`')
+            .and_then(|s| s.strip_suffix('`'))
+            .expect("the token is delimited by backticks");
+        assert!(
+            praxis_input_parser::scan_template(interior).is_ok(),
+            "{template}: the lexer accepts what the scanner refuses"
+        );
+
+        // 3. And end to end, which is what a user sees.
+        assert!(
+            !has_input_error(&format!("let v = read lines({template})")),
+            "{template}: rejected by the pipeline"
+        );
+    }
+}
+
 // --- closure escape analysis ------------------------------------------------
 
 #[test]

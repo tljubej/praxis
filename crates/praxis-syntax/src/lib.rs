@@ -11,6 +11,8 @@
 //! - [`ident`] — the one identifier character class (§4.1).
 //! - [`literal`] — the one text-literal decoder (§4.3, IP-08).
 //! - [`numeric`] — the one digit-separator rule for numeric literals (§4.3).
+//! - [`template`] — the one rule for where a backtick template ends (§7.2,
+//!   D10), shared by the lexer and the input parser's template scanner.
 //! - [`language`] — the rowan `Language` impl and node aliases.
 //! - [`span_bridge`] — `Span` ↔ `rowan::TextRange` conversions (the only place
 //!   the two offset worlds meet; Praxis `Span` stays the diagnostic source of
@@ -24,6 +26,7 @@ pub mod language;
 pub mod literal;
 pub mod numeric;
 pub mod span_bridge;
+pub mod template;
 
 pub use kind::SyntaxKind;
 pub use language::{PraxisLanguage, SyntaxElement, SyntaxNode, SyntaxToken};

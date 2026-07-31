@@ -77,7 +77,7 @@ fn parse_expr(cur: &mut Scan<'_>, base: usize, depth: usize) -> Result<ParserAst
     if c == '`' {
         // A nested backtick template (D10). Its own interior is scanned by the
         // same scanner, one level deeper.
-        let interior = crate::scan::take_template(cur, depth)?;
+        let interior = crate::scan::take_template(cur)?;
         let parts = crate::scan::scan_template_at(interior, depth + 1)?;
         return Ok(ParserAst::Template {
             parts,

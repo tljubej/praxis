@@ -213,6 +213,14 @@ impl<'a> Scan<'a> {
     pub(crate) fn src(&self) -> &'a str {
         self.src
     }
+
+    /// Advance to `byte`, which must be at or after the current position and on
+    /// a scalar boundary. This is how a run whose extent was decided by
+    /// [`praxis_syntax::template`] — one byte index — is handed back to a
+    /// cursor that walks scalars.
+    pub(crate) fn advance_to(&mut self, byte: usize) {
+        while self.pos < byte && self.bump().is_some() {}
+    }
 }
 
 // ===========================================================================
@@ -411,7 +419,7 @@ fn capture_extent<'a>(
         match c {
             '"' => skip_string(cur)?,
             '`' => {
-                take_template(cur, 0)?;
+                take_template(cur)?;
             }
             '\\' => {
                 cur.bump();
@@ -483,77 +491,45 @@ fn capture_extent<'a>(
 }
 
 /// Consume a `"…"` run, honouring `\\`. The cursor is on the opening quote.
+///
+/// The rule is [`praxis_syntax::template::string_end`]'s, not a second copy of
+/// it: the lexer has to skip the same literals when it decides where this
+/// template's token ends.
 fn skip_string(cur: &mut Scan<'_>) -> Result<(), ScanError> {
     let open = cur.pos();
-    cur.bump(); // the opening quote
-    loop {
-        match cur.bump() {
-            None => {
-                return Err(ScanError::MalformedCaptureBody {
-                    byte_offset: open,
-                    message: "unterminated string literal".to_string(),
-                })
-            }
-            Some((_, '\\')) => {
-                cur.bump();
-            }
-            Some((_, '"')) => return Ok(()),
-            Some(_) => {}
+    match praxis_syntax::template::string_end(cur.src(), open) {
+        Some(end) => {
+            cur.advance_to(end);
+            Ok(())
         }
+        None => Err(ScanError::MalformedCaptureBody {
+            byte_offset: open,
+            message: "unterminated string literal".to_string(),
+        }),
     }
 }
 
 /// Consume a nested `` `…` `` template run and return its **interior** (the
 /// text between the backticks). The cursor is on the opening backtick.
 ///
-/// A backtick inside a capture body opens a template of its own (D10), so
-/// "close at the first backtick" is not the rule here: a backtick is a closer
-/// only at brace depth zero, and one seen inside a capture opens a nested
-/// template that this function consumes recursively.
-pub(crate) fn take_template<'a>(cur: &mut Scan<'a>, depth: usize) -> Result<&'a str, ScanError> {
-    if depth > MAX_NESTING {
-        return Err(ScanError::NestingTooDeep {
-            byte_offset: cur.pos(),
-        });
-    }
+/// **The extent rule is [`praxis_syntax::template::template_end`]'s**, the same
+/// one the lexer applies when it decides where the enclosing token ends. This
+/// function used to be a second implementation of it — one that counted `{`/`}`
+/// but knew about strings, against a lexer that counted `{`/`}` and did not —
+/// and the two also bounded nesting at depths that differed by one. There is
+/// one bound because there is one function.
+pub(crate) fn take_template<'a>(cur: &mut Scan<'a>) -> Result<&'a str, ScanError> {
     let open = cur.pos();
-    cur.bump(); // the opening backtick
-    let interior_start = cur.pos();
-    let mut braces = 0usize;
-    loop {
-        let Some((at, c)) = cur.peek() else {
-            return Err(ScanError::MalformedCaptureBody {
+    match praxis_syntax::template::template_end(cur.src(), open) {
+        praxis_syntax::template::TemplateEnd::Closed(end) => {
+            cur.advance_to(end);
+            Ok(&cur.src()[open + 1..end - 1])
+        }
+        praxis_syntax::template::TemplateEnd::Unterminated => {
+            Err(ScanError::MalformedCaptureBody {
                 byte_offset: open,
                 message: "unterminated nested template".to_string(),
-            });
-        };
-        match c {
-            '\\' => {
-                cur.bump();
-                cur.bump();
-            }
-            '{' => {
-                braces += 1;
-                if braces > MAX_NESTING {
-                    return Err(ScanError::NestingTooDeep { byte_offset: at });
-                }
-                cur.bump();
-            }
-            '}' => {
-                braces = braces.saturating_sub(1);
-                cur.bump();
-            }
-            '`' => {
-                if braces == 0 {
-                    cur.bump();
-                    return Ok(&cur.src()[interior_start..at]);
-                }
-                // A backtick inside a capture opens a template of its own.
-                take_template(cur, depth + 1)?;
-            }
-            _ => {
-                cur.bump();
-            }
+            })
         }
     }
 }
@@ -881,15 +857,24 @@ mod tests {
             other => panic!("expected a capture, got {other:?}"),
         }
 
-        // A `}` inside a string does **not** end the capture. The old scan to
-        // the first `}` cut the body at the quote.
-        let parts = scan_template(r#"{c:one_of("}")}"#).unwrap();
-        match &parts[0] {
-            TemplatePart::Capture { parser, .. } => match parser.as_ref() {
-                ParserAst::OneOf { chars, .. } => assert_eq!(chars, "}"),
-                other => panic!("expected OneOf, got {other:?}"),
-            },
-            other => panic!("expected a capture, got {other:?}"),
+        // A brace inside a string does **not** end the capture. The old scan to
+        // the first `}` cut the body at the quote. Both braces are covered on
+        // purpose: `"}"` happens to keep a brace *counter* balanced, so a
+        // counter that ignores strings passes that case and fails this one —
+        // which is exactly how the lexer's copy of the rule drifted.
+        for (body, expect) in [
+            (r#"{c:one_of("}")}"#, "}"),
+            (r#"{c:one_of("{")}"#, "{"),
+            (r#"{c:one_of("`")}"#, "`"),
+        ] {
+            let parts = scan_template(body).unwrap();
+            match &parts[0] {
+                TemplatePart::Capture { parser, .. } => match parser.as_ref() {
+                    ParserAst::OneOf { chars, .. } => assert_eq!(chars, expect, "{body}"),
+                    other => panic!("expected OneOf, got {other:?}"),
+                },
+                other => panic!("expected a capture, got {other:?}"),
+            }
         }
 
         // A colon inside a nested call is not the name separator.

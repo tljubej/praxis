@@ -29,7 +29,7 @@
 use praxis_source::{DiagCode, Diagnostic, FileId, Severity, Span};
 use praxis_syntax::{SyntaxKind, Token};
 
-use praxis_syntax::MAX_TEMPLATE_NESTING;
+use praxis_syntax::template::TemplateEnd;
 
 /// The result of lexing one source file: the token stream and any diagnostics.
 ///
@@ -454,58 +454,26 @@ impl<'a> Lexer<'a> {
     /// predecessor closed at the first unescaped backtick, which cut that into
     /// three unrelated token runs and produced errors about the fragments.
     ///
-    /// The rule is brace depth: **a backtick closes the token only at depth 0**;
-    /// inside a capture it opens a nested template, which is consumed by the
-    /// same function one level down. `\\` still hides a backtick, so an escaped
-    /// one cannot terminate anything.
+    /// **The rule is not written here.** It lives in
+    /// [`praxis_syntax::template`], because the scanner that re-reads this
+    /// token's interior has to find the same nested templates and the same
+    /// closing backtick inside it. When this function had its own copy of the
+    /// rule the two disagreed at once: this one counted `{`/`}` inside string
+    /// literals, so `` `{c:one_of("{")}` `` — which the scanner accepted —
+    /// closed nowhere and swallowed the rest of the file.
     fn eat_template(&mut self, start: usize) {
-        let closed = self.eat_template_run(0);
-        if !closed {
-            self.diagnostic(
-                Span::new(start as u32, self.pos as u32),
-                DiagCode::UnterminatedTemplate,
-                "unterminated backtick template",
-            );
-        }
-        self.push(SyntaxKind::BacktickTemplate, start);
-    }
-
-    /// Consume one `` `…` `` run starting at the cursor's opening backtick.
-    /// Returns whether it was closed.
-    ///
-    /// `depth` bounds the nesting: a lexer walks whatever the file contains, so
-    /// `"`".repeat(100_000)` inside braces must not recurse without limit. Past
-    /// the bound a backtick simply closes, which lands on the ordinary
-    /// unterminated/unexpected-token paths rather than on the stack.
-    fn eat_template_run(&mut self, depth: usize) -> bool {
-        self.pos += 1; // opening backtick
-        let mut braces = 0usize;
-        while self.pos < self.src.len() {
-            match self.bytes()[self.pos] {
-                // Honour `\\` so an escaped backtick doesn't terminate the run.
-                b'\\' if self.pos + 1 < self.src.len() => self.pos += 2,
-                b'{' => {
-                    braces += 1;
-                    self.pos += 1;
-                }
-                b'}' => {
-                    braces = braces.saturating_sub(1);
-                    self.pos += 1;
-                }
-                b'`' => {
-                    if braces == 0 || depth >= MAX_TEMPLATE_NESTING {
-                        self.pos += 1; // closing backtick
-                        return true;
-                    }
-                    // Inside a capture: this opens a template of its own.
-                    if !self.eat_template_run(depth + 1) {
-                        return false;
-                    }
-                }
-                _ => self.pos += 1,
+        match praxis_syntax::template::template_end(self.src, start) {
+            TemplateEnd::Closed(end) => self.pos = end,
+            TemplateEnd::Unterminated => {
+                self.pos = self.src.len();
+                self.diagnostic(
+                    Span::new(start as u32, self.pos as u32),
+                    DiagCode::UnterminatedTemplate,
+                    "unterminated backtick template",
+                );
             }
         }
-        false
+        self.push(SyntaxKind::BacktickTemplate, start);
     }
 
     fn diagnose_unknown(&mut self, start: usize, len: usize) {
@@ -755,13 +723,96 @@ mod tests {
         assert_eq!(diags[0].kind(), DiagCode::UnterminatedTemplate);
     }
 
-    /// A lexer walks whatever the file contains. Past the nesting bound a
-    /// backtick simply closes, so adversarial input lands on the ordinary
-    /// diagnostic paths rather than on the stack (D10).
+    /// A brace inside a **string literal** is text, not structure.
+    ///
+    /// This is the regression the shared rule exists to prevent: the lexer's
+    /// own copy of the brace counter had no string arm, so `one_of("{")` — a
+    /// legal §7.5 program the input parser's scanner accepts — left the counter
+    /// above zero at the closing backtick, which then read as an *opener* and
+    /// swallowed the rest of the file into one token plus a false `T002`.
     #[test]
-    fn template_nesting_past_the_bound_does_not_recurse_without_limit() {
-        let src = format!("let p = {}", "`{a:".repeat(5_000));
-        let (_, diags) = lex_text(&src);
+    fn a_brace_inside_a_string_does_not_extend_the_template() {
+        for template in [
+            r#"`{c:one_of("{")}`"#,
+            r#"`{c:one_of("}")}`"#,
+            r#"`{s:sep("{", int)}`"#,
+            r#"`{c:one_of("`")}`"#,
+        ] {
+            let src = format!("let p = {template}\nlet q = 1\n");
+            let out = lex(FileId::SYNTHETIC, &src);
+            assert!(
+                out.diagnostics.is_empty(),
+                "{template}: {:?}",
+                out.diagnostics
+            );
+            let templates: Vec<&Token> = out
+                .tokens
+                .iter()
+                .filter(|t| t.kind == SyntaxKind::BacktickTemplate)
+                .collect();
+            assert_eq!(templates.len(), 1, "{template}");
+            assert_eq!(
+                &src[templates[0].span.start().to_usize()..templates[0].span.end().to_usize()],
+                template,
+                "the token is the template and nothing after it"
+            );
+        }
+    }
+
+    /// A lexer walks whatever the file contains, so nesting is bounded (D10) —
+    /// and the bound is *exactly* [`praxis_syntax::MAX_TEMPLATE_NESTING`].
+    ///
+    /// The predecessor of this test fed 5,000 unclosed openers and asserted
+    /// only that `UnterminatedTemplate` was reported somewhere, which the old
+    /// lexer — which had no nesting at all — also did. It discriminated
+    /// nothing. What only a bounded, nesting lexer produces is this: a properly
+    /// closed nest of `MAX_TEMPLATE_NESTING` templates is **one** token, and
+    /// one level deeper is not.
+    #[test]
+    fn template_nesting_is_bounded_at_exactly_max_template_nesting() {
+        use praxis_syntax::MAX_TEMPLATE_NESTING;
+
+        // `n` nested templates whose innermost holds a lone `"` as literal
+        // text. That quote is text only if the innermost template really is
+        // entered as a template, at capture depth 0; if the bound stopped one
+        // level short the same byte sits inside the parent's capture, where a
+        // quote opens a string literal that never closes.
+        fn nested(n: usize) -> String {
+            let mut s = String::new();
+            for _ in 0..n - 1 {
+                s.push_str("`{a:");
+            }
+            s.push_str("`\"`");
+            for _ in 0..n - 1 {
+                s.push_str("}`");
+            }
+            s
+        }
+
+        let at_the_bound = nested(MAX_TEMPLATE_NESTING);
+        let (kinds, diags) = lex_text(&format!("let p = {at_the_bound}\nlet q = 1\n"));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == SyntaxKind::BacktickTemplate)
+                .count(),
+            1,
+            "a nest exactly at the bound is one token"
+        );
+
+        let past = nested(MAX_TEMPLATE_NESTING + 1);
+        let (_, diags) = lex_text(&format!("let p = {past}\nlet q = 1\n"));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.kind() == DiagCode::UnterminatedTemplate),
+            "one level past the bound the innermost template is not entered — an \
+             unbounded lexer reports nothing here"
+        );
+
+        // And the pathological case reports rather than overflowing the stack.
+        let (_, diags) = lex_text(&format!("let p = {}", "`{a:".repeat(5_000)));
         assert!(
             diags
                 .iter()
