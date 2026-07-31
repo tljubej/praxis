@@ -57,8 +57,8 @@ handling somebody else's problem, and it is what turns a validated newtype into
 
 ## Decision 2: the coverage is gated by a test that reads the source
 
-`every_no_mangle_wrapper_is_behind_the_panic_guard` scans the four files that
-declare entry points and fails, naming the function, if any `#[no_mangle]`'s body
+`every_no_mangle_wrapper_is_behind_the_panic_guard` scans every Rust file in the
+workspace's crates and fails, naming the function, if any `#[no_mangle]`'s body
 does not open with `abi_guard!`.
 
 Read as source text on purpose. The property is "every entry point is wrapped",
@@ -66,6 +66,16 @@ which is a property of the *set* of entry points; a test that called them one by
 one would be a test of the ones somebody remembered. A new wrapper that forgets
 is now a failing test instead of a latent abort. (Verified by removing one guard
 and watching the test name it.)
+
+**The file set is discovered, not declared.** The first version listed four files
+as `include_str!`s, which quietly made the guarantee "every entry point in a file
+somebody remembered to list" — a wrapper in a new module was never scanned and
+the `wrappers > 100` floor still passed on the files that were, which is exactly
+the drift the test exists to prevent. The walk now covers every crate's sources,
+not only `praxis-runtime`'s: nothing says a future `#[no_mangle]` has to live
+there. A floor on the number of files walked catches a wrong root, so "found
+nothing" cannot pass either. (Verified by adding an unguarded `#[no_mangle]` to a
+different crate and watching the test name it and its file.)
 
 ## Decision 3: a caught panic is `FaultKind::Panic` with a message
 

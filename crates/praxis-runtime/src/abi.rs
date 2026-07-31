@@ -6543,18 +6543,55 @@ mod tests {
     /// Read as source text on purpose. The property is "every entry point is
     /// wrapped", which is a property of the *set* of entry points; a test that
     /// called them one by one would be a test of the ones somebody remembered.
+    ///
+    /// **The file set is discovered, not declared.** It used to be a
+    /// hand-written four-entry `include_str!` array, which made the guarantee
+    /// "every entry point in a file somebody remembered to list" — a wrapper in
+    /// a new module was never scanned, and the `wrappers > 100` floor still
+    /// passed on the files that were. That is precisely the drift this test
+    /// exists to prevent, so the walk covers **every crate's `src/`**, not only
+    /// this one: nothing says a future `#[no_mangle]` has to live here.
     #[test]
     fn every_no_mangle_wrapper_is_behind_the_panic_guard() {
-        const SOURCES: &[(&str, &str)] = &[
-            ("abi.rs", include_str!("abi.rs")),
-            ("debug.rs", include_str!("debug.rs")),
-            ("shadow_frame.rs", include_str!("shadow_frame.rs")),
-            ("crash_snapshot.rs", include_str!("crash_snapshot.rs")),
-        ];
+        /// Every `.rs` file under `dir`, recursively, in a stable order.
+        fn rust_sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            let entries =
+                std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+            let mut entries: Vec<_> = entries.map(|e| e.expect("dir entry").path()).collect();
+            entries.sort();
+            for path in entries {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                if name == "target" || name.starts_with('.') {
+                    continue;
+                }
+                if path.is_dir() {
+                    rust_sources(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path)
+                        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                    out.push((path.display().to_string(), text));
+                }
+            }
+        }
+
+        // `crates/`, from this crate's manifest directory.
+        let mut crates_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        crates_dir.pop();
+        let mut sources: Vec<(String, String)> = Vec::new();
+        rust_sources(&crates_dir, &mut sources);
+        // A guard against the walk silently covering nothing — a wrong root
+        // would otherwise pass by finding no `#[no_mangle]` at all, which is
+        // the same failure the declared list had.
+        assert!(
+            sources.len() > 50,
+            "the walk of {} found only {} Rust files, so it is not reading the workspace",
+            crates_dir.display(),
+            sources.len()
+        );
 
         let mut wrappers = 0usize;
         let mut unguarded: Vec<String> = Vec::new();
-        for (file, source) in SOURCES {
+        for (file, source) in &sources {
             let lines: Vec<&str> = source.lines().collect();
             for (n, line) in lines.iter().enumerate() {
                 if line.trim() != "#[no_mangle]" {
@@ -6567,7 +6604,11 @@ mod tests {
                 while k < lines.len() && !lines[k].trim_end().ends_with('{') {
                     k += 1;
                 }
-                let name = lines[n..k.min(lines.len())]
+                // Inclusive of `k`: a one-line signature puts `fn name(` on the
+                // very line that opens the body, and an exclusive range named
+                // it `<unnamed>` — the least useful thing to say in the message
+                // that tells someone which wrapper they forgot.
+                let name = lines[n..=k.min(lines.len() - 1)]
                     .iter()
                     .find_map(|l| l.split("fn ").nth(1))
                     .and_then(|l| l.split('(').next())
