@@ -271,6 +271,16 @@ pub enum DiagCode {
     /// which is about a *binding* that exists and may not be written. This one is
     /// about a left side that is not a place at all.
     NotAnAssignmentTarget,
+    /// `Y023` — a backtick parser template written where a value is expected
+    /// (REP-47, ADR-084). §7.1 says the parser-expression sublanguage is entered
+    /// at `read` or at `parse(text, …)` and nowhere else, so `` `n = {int}` ``
+    /// standing alone is a template with nothing to parse. It used to be typed
+    /// `Text` and lowered as a text literal containing its own braces.
+    ///
+    /// Reported from inference, not the parser, for REP-12's reason: `praxis
+    /// check` must see it. The token still parses to a `LITERAL` node so the
+    /// tree round-trips the source and one mistake produces one diagnostic.
+    ParserTemplateOutsideRead,
 
     // --- Type (`Y09x`), internal ---
     /// `Y099` — internal: a type the compiler expected was absent.
@@ -400,6 +410,7 @@ impl DiagCode {
             NoTupleElement => DiagnosticCode::new(Type, 19),
             NotIndexable => DiagnosticCode::new(Type, 20),
             NotAnAssignmentTarget => DiagnosticCode::new(Type, 21),
+            ParserTemplateOutsideRead => DiagnosticCode::new(Type, 23),
 
             InternalMissingType => DiagnosticCode::new(Type, 99),
 
@@ -477,6 +488,7 @@ impl DiagCode {
             NoTupleElement,
             NotIndexable,
             NotAnAssignmentTarget,
+            ParserTemplateOutsideRead,
             InternalMissingType,
             NoMethodOnType,
             NoFieldOnType,
@@ -865,7 +877,7 @@ mod tests {
         // `ALL` holds each variant once, so its length is the variant count.
         // Update both together; the exhaustive match in `code()` is what makes
         // adding a variant a compile error in the first place.
-        assert_eq!(DiagCode::ALL.len(), 66);
+        assert_eq!(DiagCode::ALL.len(), 67);
         let unique: std::collections::HashSet<_> = DiagCode::ALL.iter().collect();
         assert_eq!(
             unique.len(),

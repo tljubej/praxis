@@ -5506,3 +5506,36 @@ fn a_zero_argument_accessor_is_a_call_and_a_bare_name_is_a_field() {
     let src = "struct P { len: Int }\nfn n(a) { a.len }\nout(n(P { len: 7 }))\n";
     assert_eq!(scheme_of(src, "n").as_deref(), Some("(P) -> Int"));
 }
+
+/// **REP-47, ADR-084.** A backtick template outside `read`/`parse` is reported,
+/// not silently reinterpreted.
+///
+/// It used to be typed `Text` unconditionally and lowered as a text literal of
+/// the raw interior, so ``let t = `n = {int}` `` type-checked and `out(t)`
+/// printed `n = {int}` — the capture emitted as characters rather than
+/// reported. §7.1 enters the parser-expression sublanguage at `read` or
+/// `parse(text, …)` and nowhere else, which is the boundary REP-34 established
+/// from the other side for labelled arguments.
+#[test]
+fn a_parser_template_in_value_position_is_reported() {
+    let diags = analyze_and_lower_diags("let t = `n = {int}`\nout(t)\n");
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y023"),
+        "expected Y023 for a template in value position, got {diags:?}"
+    );
+
+    // The same template after `read` is the language, and is untouched: the
+    // sublanguage is entered by the *word*, so the fix must not be about the
+    // token.
+    assert!(is_clean_with_lower("let n = read `n = {int}`\nout(n)\n"));
+
+    // One mistake, one diagnostic. The template still parses to a literal node,
+    // so nothing cascades off an unconsumed token — and the type it gets is a
+    // fresh variable rather than `Text`, so no second error follows about the
+    // use of a value that does not exist.
+    let errors = diags
+        .iter()
+        .filter(|d| d.severity() == praxis_source::Severity::Error)
+        .count();
+    assert_eq!(errors, 1, "expected exactly one error, got {diags:?}");
+}

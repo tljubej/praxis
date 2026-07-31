@@ -2248,9 +2248,23 @@ impl Inferer {
             SyntaxKind::FloatLit => self.db.float(),
             SyntaxKind::TextLit => self.db.text(),
             SyntaxKind::KW_TRUE | SyntaxKind::KW_FALSE => self.db.bool(),
-            // Backtick templates are M6; treat as Text for now (a fresh var would
-            // be sounder but Text matches the eventual type).
-            SyntaxKind::BacktickTemplate => self.db.text(),
+            // A backtick template reaching *here* is one written in value
+            // position: the `read`/`parse` path lowers its template through
+            // `parse_parser_template` and never builds a `Literal` (REP-47).
+            // §7.1 enters the parser-expression sublanguage at those two words
+            // and nowhere else, so this template has nothing to parse and no
+            // meaning — it used to be typed `Text` and lowered as a text literal
+            // containing its own braces, so `` `n = {int}` `` printed itself.
+            //
+            // A fresh variable, not `Text`: the report is the answer, and
+            // claiming a type here would produce a second diagnostic about the
+            // use of a value that does not exist.
+            SyntaxKind::BacktickTemplate => {
+                let at = self.file_span(tok.text_range());
+                self.diagnostics
+                    .push(crate::diagnostics::parser_template_outside_read(at));
+                self.db.fresh_var()
+            }
             _ => self.db.fresh_var(),
         }
     }

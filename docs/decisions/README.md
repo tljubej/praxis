@@ -83,3 +83,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-077: A zero-argument accessor is a call, and a bare `.name` is a field](./077-a-zero-argument-accessor-is-a-call-and-a-bare-dot-name-is-a-field.md)
 - [ADR-082: `find` answers the element, `position` answers the index, and a miss is `None`](./082-find-answers-the-element-and-a-miss-is-none.md)
 - [ADR-083: A `Float` prints as a `Float`](./083-a-float-prints-as-a-float.md)
+- [ADR-084: A backtick template is a parser expression, so in value position it is a diagnostic](./084-a-template-is-a-parser-expression-everywhere-or-nowhere.md)

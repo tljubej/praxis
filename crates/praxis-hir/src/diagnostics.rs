@@ -280,6 +280,19 @@ fn not_index_updatable(at: FileSpan, ty: &str, indices: usize, op: &str) -> Diag
     )
 }
 
+/// `Y023` — a backtick parser template written where a value is expected
+/// (REP-47, ADR-084).
+pub(crate) fn parser_template_outside_read(at: FileSpan) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::ParserTemplateOutsideRead,
+        "a backtick template is a parser expression; write `read` before it, or \
+         pass it to `parse(text, ...)`"
+            .to_string(),
+        at,
+    )
+}
+
 /// `Y021` — an assignment whose left side names no storage (REP-16).
 pub(crate) fn not_an_assignment_target(at: FileSpan) -> Diagnostic {
     Diagnostic::new(
