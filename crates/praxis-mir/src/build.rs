@@ -2911,10 +2911,52 @@ fn emit_step(
             item
         }
         Step::FilterMap(f) => {
-            // filter_map is modeled as "keep everything": in the catalog it is
-            // typed `(T)->U` with non-Unit U, so there's no Unit to filter on.
-            // (A precise Unit-drop needs a runtime tag check — see ADR-029.)
-            invoke_closure(b, *f, vec![item])
+            // `filter_map(f)` is a `filter` and a `map` at once, and the thing
+            // it filters *on* is the closure's answer: `f` is `(T) -> Option[U]`
+            // (REP-38), a `None` drops the element and a `Some` carries its
+            // payload on down the chain.
+            //
+            // This used to be `invoke_closure` alone, with a comment saying
+            // there was no way to tell the two apart — the row typed the
+            // closure `(T) -> U` for an unconstrained `U`, so nothing at
+            // runtime distinguished "mapped to nothing" from "mapped to
+            // something". S18's `Option` is what closes that: the answer is a
+            // two-variant enum, so the test is a tag compare, and it is the
+            // same `EnumTag`/`EnumPayloadGet` pair a `match` on `Option`
+            // emits — `emit_pattern_test`'s `EnumVariant` arm, unrolled for the
+            // one variant set this stage knows statically.
+            let opt = invoke_closure(b, *f, vec![item]);
+            let tag = b.alloc_scalar(ScalarKind::Int);
+            b.push(Inst::EnumTag { dst: tag, src: opt });
+            let some_tag = b.alloc_scalar(ScalarKind::Int);
+            b.push(Inst::ConstInt {
+                dst: some_tag,
+                value: praxis_runtime::enums::OPTION_SOME_TAG,
+            });
+            let is_some = b.alloc_scalar(ScalarKind::Bool);
+            b.push(Inst::IntCmp {
+                op: CmpOp::Eq,
+                dst: is_some,
+                lhs: tag,
+                rhs: some_tag,
+            });
+            // `None` → advance the sequence without reaching the sink, exactly
+            // as `Step::Filter` does on a false predicate.
+            let keep_blk = b.func.new_block();
+            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
+                cond: is_some,
+                then_block: keep_blk,
+                else_block: continue_target,
+            };
+            b.cur = keep_blk;
+            // `Some(u)` → the element from here on is `u`, not the `Option`.
+            let inner = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+            b.push(Inst::EnumPayloadGet {
+                dst: inner,
+                src: opt,
+                idx: 0,
+            });
+            inner
         }
         Step::TakeWhile(p) => {
             let keep = call_predicate(b, *p, item);

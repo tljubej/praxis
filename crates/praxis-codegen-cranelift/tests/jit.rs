@@ -2217,14 +2217,56 @@ fn take_while_after_flat_map_stops_the_whole_stream() {
     assert_eq!(result.as_int(), 1, "the stream stops at the first 10");
 }
 
+/// **Rewritten** (plan §8.2, REP-38). It used to be
+/// `pipeline_filter_map_keeps_results` and assert that
+/// `[1,2,3].filter_map(|x| x * 2).sum()` is `12` — which is `map`'s answer, and
+/// it passed because `filter_map` *was* `map`. It cannot even compile now: the
+/// closure is `(Int) -> Int` and the row asks for `(Int) -> Option[U]`. What was
+/// wrong with it is not the number but the premise, which the comment stated
+/// outright — "no Unit to filter" — and which S18's `Option` retired.
+///
+/// **This is REP-38's gate.** The `None`s must not survive, and asserting a
+/// *sum* is what makes that measurable in one integer: keeping them would not
+/// merely change the number, it would fail to type-check at `sum`, which is
+/// exactly the second-order symptom the finding describes (`error[Y001]:
+/// expected Int, found Option[Int]` — the user is told their sum is wrong and
+/// never that `filter_map` did not filter).
 #[test]
-fn pipeline_filter_map_keeps_results() {
-    // filter_map is modeled as map-keep (no Unit to filter). [1,2,3].filter_map(*2)
-    // = [2,4,6].sum() = 12.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.filter_map(|x| x * 2).sum()\n}\n";
+fn filter_map_drops_the_nones_rather_than_carrying_them() {
+    // [1,2,3,4,5] |> Some(x*2) when x > 2 → [6, 8, 10], summing to 24. Under
+    // the old map-keep lowering the chain is [None, None, Some(6), Some(8),
+    // Some(10)] and `sum` has nothing to add.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter_map(|x| if x > 2 { Some(x * 2) } else { None }).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), 12);
+    assert_eq!(result.as_int(), 24);
+}
+
+/// The all-`None` end of the same range: a `filter_map` that keeps nothing
+/// answers an empty sequence, not a sequence of `None`s. `count()` is the
+/// measurement because it is the one sink that a surviving `None` would inflate
+/// without any type error to hide behind.
+#[test]
+fn a_filter_map_that_matches_nothing_yields_nothing() {
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.filter_map(|x| if x > 100 { Some(x) } else { None }).collect().len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+/// `filter_map` composes with the stages either side of it — a `None` has to
+/// leave by the *innermost* continue edge, not end the chain (MIR-08's
+/// distinction). Under the old lowering this answers `2 + 4 + 6 = 12` scaled
+/// through the later stages; under the fix only the two survivors reach them.
+#[test]
+fn filter_map_in_the_middle_of_a_chain_drops_only_its_own_element() {
+    // [1..6] .map(+1) = [2,3,4,5,6]
+    //        .filter_map(Some(x*10) when even) = [20, 40, 60]
+    //        .filter(> 20) = [40, 60] → 100
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.map(|x| x + 1).filter_map(|x| if x - x / 2 * 2 == 0 { Some(x * 10) } else { None }).filter(|x| x > 20).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 100);
 }
 
 #[test]

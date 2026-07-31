@@ -1576,6 +1576,22 @@ fn t_to_bool() -> TypePattern {
     }
 }
 
+/// `(T) -> Option[U]` — the shape of `filter_map`'s closure argument (REP-38).
+///
+/// It was `(T) -> U`, which is `map`'s shape and is why `filter_map` lowered as
+/// `map`: with an unconstrained `U` there is nothing at runtime that says "this
+/// element mapped to nothing", so no filtering was possible and the row's own
+/// doc admitted it ("modeled as map-keep"). §6.3 lists `filter_map` with no
+/// deferral note, and the row was `Stability::Stable`. S18's `Option` (ADR-076)
+/// is what makes the distinction representable: absence is a variant, so the
+/// drop test is a tag compare.
+fn t_to_option_u() -> TypePattern {
+    TypePattern::Function {
+        params: vec![TypePattern::var("T")],
+        result: Box::new(TypePattern::Option(Box::new(TypePattern::var("U")))),
+    }
+}
+
 /// `(Acc, T) -> Acc` — the shape of `fold`'s combining closure.
 fn acc_t_to_acc() -> TypePattern {
     TypePattern::Function {
@@ -2000,11 +2016,11 @@ fn seq_filter_map_on_vec() -> MethodEntry {
     MethodEntry {
         receiver: vec_of_t(),
         name: "filter_map",
-        params: vec![t_to_u()],
+        params: vec![t_to_option_u()],
         result: vec_of_u(),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_filter_map"),
-        doc: "Map and drop Unit results (modeled as map-keep for non-Unit results).",
+        doc: "Map each element to an Option and keep the Some payloads.",
         stability: Stability::Stable,
     }
 }
@@ -2013,11 +2029,11 @@ fn seq_filter_map_on_seq() -> MethodEntry {
     MethodEntry {
         receiver: seq_of_t(),
         name: "filter_map",
-        params: vec![t_to_u()],
+        params: vec![t_to_option_u()],
         result: vec_of_u(),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_filter_map"),
-        doc: "Map and drop Unit results (modeled as map-keep for non-Unit results).",
+        doc: "Map each element to an Option and keep the Some payloads.",
         stability: Stability::Stable,
     }
 }

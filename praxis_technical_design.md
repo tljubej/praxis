@@ -607,7 +607,7 @@ Initial operations:
 
 - `map`
 - `filter`
-- `filter_map`
+- `filter_map` — the closure answers `Option[U]`; a `None` drops the element
 - `flat_map`
 - `fold`
 - `reduce`
