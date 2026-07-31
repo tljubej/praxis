@@ -5,7 +5,18 @@ Advent of Code-style puzzle solving. It favors rapid iteration, concise data
 manipulation, practical parsing, and strong diagnostics over systems-programming
 concerns.
 
-> **Status:** Milestone 10 complete — the crash debugger (§9). A fault renders
+> **Status:** Milestone 10 complete, **and the implementation repair with it.**
+> The adversarial audit of 2026-07-28 raised 139 findings and shipped 149
+> `#[ignore]`d regressions as its acceptance gate; every stage of
+> [`docs/handovers/implementation-repair-plan-2026-07-28.md`](./docs/handovers/implementation-repair-plan-2026-07-28.md)
+> is now closed, every finding is addressed, and **`cargo test --workspace`
+> reports zero ignored tests**. What is left is recorded as open rows in that
+> plan's §4.1 and two open language decisions; see
+> [`docs/handovers/16-repair-s18-s21-and-the-second-register-handover.md`](./docs/handovers/16-repair-s18-s21-and-the-second-register-handover.md).
+> (The suite's pass count lives in `implementation-repair-progress.md` §1 and
+> nowhere else, so it can only be stale in one place.)
+>
+> Milestone 10 is the crash debugger (§9). A fault renders
 > a numbered backtrace + locals and (when attached to a terminal, or with
 > `--debug=always`) drops into an interactive crash REPL with all fifteen §9.4
 > commands: `bt`/`frame`/`up`/`down`/`locals` for navigation, `p EXPR`/`type
