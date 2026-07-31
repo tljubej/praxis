@@ -435,8 +435,12 @@ The sole faulting Float operation is the narrowing `Float.to_int()`: it faults
 64-bit range — these have no exact `Int` representation. (Integer division by
 zero faults; float division by zero does not.)
 
-`out()` and `to_text()` format finite values in the shortest round-trippable
-form, and the special values as `inf`, `-inf`, `NaN`. The stdlib Float methods
+`out()` and `to_text()` format finite values in the shortest form that reads
+back as **the same `Float`** — so a whole-numbered value keeps a fractional
+part: `1.0` prints `1.0`, not `1`, and `1e10` prints `10000000000.0`. `42` is an
+`Int` literal and the two types never mix, so a `Float` printed as `42` would
+not read back as a `Float` at all, and a `Vec[Float]` would print exactly like a
+`Vec[Int]`. The special values are `inf`, `-inf`, `NaN` (ADR-083). The stdlib Float methods
 are `abs`, `sqrt`, `floor`, `ceil`, `round`, `sign`, `to_int`, `to_text`,
 `is_nan`, `is_infinite`, `min(other)`, `max(other)`; `pi()` and `e()` are
 prelude free functions. `%` (remainder) is not defined for floats.

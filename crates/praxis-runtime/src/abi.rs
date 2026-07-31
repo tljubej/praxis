@@ -900,15 +900,21 @@ pub unsafe extern "C" fn praxis_float_max(
     unsafe { rebox_float(ctx, a.max(b)) }
 }
 
-/// `Float.to_text()` — format as a `Text` using Rust's shortest round-trip
-/// form (§4.12). `inf`/`-inf`/`NaN` render as those literals.
+/// `Float.to_text()` — the same text `out()` writes, which is the shortest form
+/// that reads back as the same Praxis `Float` (§4.12, ADR-083).
+///
+/// It goes through `scalars::write_float` rather than restating the rule,
+/// because `to_text()` and `out()` disagreeing is a defect in itself: a program
+/// that prints a value and a program that builds a string from it must produce
+/// the same characters.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_float_to_text(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     let f = unsafe { float_payload(r) };
-    let s = format!("{f}");
+    let mut s = String::new();
+    scalars::write_float(&mut s, f);
     // SAFETY: `s` is valid UTF-8 for the duration of the call; ctx/heap valid.
     unsafe {
         gc_alloc_with(

@@ -108,8 +108,16 @@ fn run_pass_float_arith() {
 
 #[test]
 fn run_pass_float_methods() {
-    // sqrt(16) + 5.to_float() = 4 + 5 = 9.
-    assert_passes("float_methods.px", "9");
+    // sqrt(16.0) + 5.to_float() = 4.0 + 5.0 = 9.0.
+    //
+    // **This assertion used to read `"9"`** (REP-44, §8.2). It was not wrong
+    // about the arithmetic and it was not wrong about the type — it was wrong
+    // that a `Float` may render as an `Int`. `9` is not a `Float` literal in
+    // this language (§4.12: `42` is strictly an `Int`, and the two never mix),
+    // so the text it asserted did not read back as the value it came from, and
+    // the same characters are what a `Vec[Int]` of `[9]` would print. ADR-083
+    // decided the rendering; the expected text moves with it.
+    assert_passes("float_methods.px", "9.0");
 }
 
 #[test]
