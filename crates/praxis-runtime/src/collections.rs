@@ -61,10 +61,34 @@ impl VecPayload {
 /// Whether two collections agree on their element type (RT-10).
 ///
 /// Descriptors are `static`, so pointer identity is the authoritative test
-/// (ADR-038). Two nulls agree — both collections are element-typeless, which
-/// means both are empty.
+/// where both sides *have* one (ADR-038).
+///
+/// **A null slot agrees with anything**, which is ADR-066 decision 5's rule
+/// applied here: a null slot is not the label `Unknown`, it is the *absence* of
+/// a label, and what answers instead is the value's own descriptor. A
+/// collection with no label has no elements — that is [`VecPayload::element`]'s
+/// documented invariant, and the constructors uphold it — so there is no
+/// element whose descriptor could disagree, and the length check every caller
+/// performs immediately afterwards is what makes the two collections equal or
+/// not. No element-wise dispatch can go wrong through a null: the side without
+/// a label contributes no elements to dispatch over.
+///
+/// REP-42 is why this is written down. Before it, `praxis_map_new` hardcoded
+/// `INT` as every `Map`'s value descriptor, so an empty `Map`'s `values()`
+/// carried the label `Int` whatever the map held; after it, the label is
+/// learned from the first insert and a never-inserted map's `values()` carries
+/// none. Comparing by pointer identity then made an empty `Map[Text, Int]`'s
+/// `values()` **unequal** to an equally-typed empty `Vec[Int]` — comparing an
+/// unlearned label against a learned one, which is the label being treated as
+/// the authority it is explicitly not (REP-41). The pre-REP-42 `true` was an
+/// accident of the hardcoded `INT` and not a rule: the same program over a
+/// `Map[Text, Text]` answered `false` both before and after.
+///
+/// What RT-10 asked for is untouched: two collections that have each been told
+/// their element type must agree, so an empty `Vec[Int]` is still not an empty
+/// `Vec[Text]`.
 pub(crate) fn same_element(a: *const TypeDescriptor, b: *const TypeDescriptor) -> bool {
-    std::ptr::eq(a, b)
+    a.is_null() || b.is_null() || std::ptr::eq(a, b)
 }
 
 unsafe fn vec_trace(payload: *mut u8, tracer: &mut dyn Tracer) {

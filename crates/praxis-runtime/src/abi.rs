@@ -6586,6 +6586,70 @@ mod tests {
         unsafe { drop_ctx(ctx) };
     }
 
+    /// **REP-42's collateral, and its gate.** An unlearned label is not a
+    /// label, so it cannot make two empty collections unequal.
+    ///
+    /// REP-42 made `praxis_map_new` stop hardcoding `INT`, which is right — but
+    /// `same_element` was pointer identity, so a never-inserted `Map`'s
+    /// `values()` (no label) stopped comparing equal to an equally-typed empty
+    /// `Vec[Int]` (label `Int`). A reviewer measured the change against the
+    /// merge base: `true` before, `false` after.
+    ///
+    /// The old `true` was an accident of the hardcoded `INT` rather than a
+    /// rule — the same program over a `Map[Text, Text]` answered `false` on
+    /// both — so this is not "restore the old answer". It is ADR-066 decision
+    /// 5: a null slot means the *value's own* descriptor answers, and a
+    /// collection with no label has no values, so nothing is left to disagree.
+    /// Reinstating a guessed descriptor is the fix this rejects; it is the
+    /// defect REP-41 and REP-42 both were.
+    ///
+    /// RT-10 is untouched, and the last case says so: two collections that have
+    /// each been told their element type must still agree.
+    #[test]
+    fn an_unlearned_element_label_does_not_make_two_empty_collections_unequal() {
+        use crate::collections::same_element;
+        let int: *const crate::descriptor::TypeDescriptor = &scalars::INT;
+        let text: *const crate::descriptor::TypeDescriptor = &crate::text::TEXT;
+        let unlearned: *const crate::descriptor::TypeDescriptor = std::ptr::null();
+
+        assert!(same_element(unlearned, int), "no label agrees with `Int`");
+        assert!(same_element(int, unlearned), "and in the other order");
+        assert!(same_element(unlearned, unlearned));
+        assert!(same_element(int, int));
+        // RT-10's rule, which this must not weaken: two *learned* labels that
+        // differ are two different collections, empty or not.
+        assert!(!same_element(int, text));
+
+        // End to end, at the shape the reviewer measured: a `Map` never
+        // inserted into has no value label, and its `values()` is an empty
+        // `Vec` that is equal to an empty `Vec` however that one was labelled.
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: `ctx` is wired; every argument below is a wrapper's own.
+        unsafe {
+            let never_inserted = praxis_map_new(ctx, &crate::text::TEXT);
+            let unlabelled = praxis_map_values(ctx, never_inserted);
+            assert!(vec_payload(unlabelled).element().is_none());
+
+            let labelled_ints = praxis_vec_new(ctx, &scalars::INT as *const _);
+            assert!(
+                praxis_struct_eq(ctx, unlabelled, labelled_ints) != 0,
+                "an empty Map's values are an empty Vec[Int]"
+            );
+            assert!(
+                praxis_struct_eq(ctx, labelled_ints, unlabelled) != 0,
+                "and equality is symmetric"
+            );
+
+            // A non-empty collection is still not an empty one: the length
+            // check behind `same_element` is what answers, and it must.
+            praxis_vec_push(ctx, labelled_ints, praxis_alloc_int(ctx, 1));
+            assert!(praxis_struct_eq(ctx, unlabelled, labelled_ints) == 0);
+        }
+        // SAFETY: the context was leaked by `wired_ctx` and is unused after this.
+        unsafe { drop_ctx(ctx) };
+    }
+
     // --- REP-45: the manifest's fault column is checked against the code ----
 
     /// Every function defined in this file, as `(name, body)`.
