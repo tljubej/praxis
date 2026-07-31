@@ -16,6 +16,7 @@ mod cursor;
 
 use crate::context::RuntimeContext;
 use crate::parse_detail::ParseFail;
+use crate::roots::{NativeScope, RuntimeRoots};
 use crate::scalars;
 use crate::text::TextPayload;
 use crate::GcRef;
@@ -63,6 +64,12 @@ unsafe fn run_plan(ctx: *mut RuntimeContext, plan: &ParserPlan, input: GcRef) ->
         return unsafe { fault_sentinel(ctx) };
     };
     let region = i.whole();
+    // Root the input for the whole parse. `RuntimeRoots`'s `input` arm reads
+    // `ctx.input_source`, which for `parse(text, P)` is a *different* Text —
+    // and this one owns every source-slice the parse produces (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(ctx) };
+    let _input = scope.root(input);
     // Clear any stale detail from a prior parse, then run.
     unsafe { clear_parse_detail(ctx) };
     let result = unsafe { walk(ctx, &i, plan, plan.root, region) };
@@ -97,6 +104,9 @@ unsafe fn run_root(
     // SAFETY: the caller guarantees `input` is a valid Text GcRef.
     let i = unsafe { Input::new(input) }.expect("the test's input is a Text");
     let region = i.whole();
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(ctx) };
+    let _input = scope.root(input);
     // SAFETY: the caller guarantees ctx is live and wired.
     unsafe { walk(ctx, &i, plan, plan.root, region) }.map(|w| w.value)
 }
@@ -159,28 +169,47 @@ unsafe fn heap_ref<'a>(ctx: *mut RuntimeContext) -> &'a crate::Heap {
 }
 
 impl Rt {
+    /// Give the collector its chance, against the whole root set.
+    ///
+    /// Every allocation in this file goes through here now. It could not
+    /// before: the interpreter's `Vec<GcRef>` intermediates were invisible to
+    /// every root set, so a collection anywhere inside a parse would have
+    /// reclaimed the values it was in the middle of assembling. Pacing was
+    /// therefore the *only* thing keeping them alive, and adding a safepoint
+    /// before rooting them would have turned unbounded heap growth into a
+    /// use-after-free (ADR-040, hazard H1). The `NativeScope`s in the helpers
+    /// below are what make this line safe to write.
+    fn safepoint(&self) -> (&crate::Heap, crate::heap::Safepoint<'_>) {
+        // SAFETY: ctx is valid (caller upholds).
+        let heap = unsafe { heap_ref(self.ctx) };
+        // SAFETY: as above.
+        let roots = unsafe { RuntimeRoots::from_context(self.ctx) };
+        let safepoint = heap.pace(&roots);
+        (heap, safepoint)
+    }
+
     /// Allocate a boxed `Int`.
     fn alloc_int(&self, value: i64) -> GcRef {
-        // SAFETY: ctx is valid (caller upholds).
-        unsafe { heap_ref(self.ctx).alloc_unpaced(scalars::INT_PAYLOAD, value) }
+        let (heap, safepoint) = self.safepoint();
+        heap.alloc(safepoint, scalars::INT_PAYLOAD, value)
     }
 
     /// Allocate a boxed `Char` from a Unicode scalar.
     fn alloc_char(&self, value: u32) -> GcRef {
-        // SAFETY: ctx is valid.
-        unsafe { heap_ref(self.ctx).alloc_unpaced(scalars::CHAR_PAYLOAD, value) }
+        let (heap, safepoint) = self.safepoint();
+        heap.alloc(safepoint, scalars::CHAR_PAYLOAD, value)
     }
 
     /// Allocate a boxed `Float` (§7.4's `float` atomic).
     fn alloc_float(&self, value: f64) -> GcRef {
-        // SAFETY: ctx is valid.
-        unsafe { heap_ref(self.ctx).alloc_unpaced(scalars::FLOAT_PAYLOAD, value) }
+        let (heap, safepoint) = self.safepoint();
+        heap.alloc(safepoint, scalars::FLOAT_PAYLOAD, value)
     }
 
     /// Allocate a boxed `Byte` (§7.4's `byte` atomic).
     fn alloc_byte(&self, value: u8) -> GcRef {
-        // SAFETY: ctx is valid.
-        unsafe { heap_ref(self.ctx).alloc_unpaced(scalars::BYTE_PAYLOAD, value) }
+        let (heap, safepoint) = self.safepoint();
+        heap.alloc(safepoint, scalars::BYTE_PAYLOAD, value)
     }
 
     /// Allocate a source-slice `Text` pointing into `owner`, or `None` if the
@@ -195,8 +224,11 @@ impl Rt {
         let slice = unsafe { crate::text::SourceSlice::new(owner, start, len) }?;
         let payload = TextPayload::Slice(slice);
         // SAFETY: ctx is valid; payload matches TEXT's layout.
+        let (heap, safepoint) = self.safepoint();
+        // SAFETY: payload matches TEXT's layout.
         Some(unsafe {
-            heap_ref(self.ctx).alloc_with_unpaced(
+            heap.alloc_with(
+                safepoint,
                 &crate::text::TEXT,
                 std::mem::size_of::<TextPayload>(),
                 std::mem::align_of::<TextPayload>(),
@@ -215,8 +247,11 @@ impl Rt {
     fn alloc_text_owned(&self, s: &str) -> GcRef {
         let payload = TextPayload::Owned(s.into());
         // SAFETY: ctx is valid; payload matches TEXT's layout.
+        let (heap, safepoint) = self.safepoint();
+        // SAFETY: payload matches TEXT's layout.
         unsafe {
-            heap_ref(self.ctx).alloc_with_unpaced(
+            heap.alloc_with(
+                safepoint,
                 &crate::text::TEXT,
                 std::mem::size_of::<TextPayload>(),
                 std::mem::align_of::<TextPayload>(),
@@ -236,8 +271,11 @@ impl Rt {
             items,
         };
         // SAFETY: ctx is valid.
+        let (heap, safepoint) = self.safepoint();
+        // SAFETY: payload matches VEC's layout.
         unsafe {
-            heap_ref(self.ctx).alloc_with_unpaced(
+            heap.alloc_with(
+                safepoint,
                 &crate::collections::VEC,
                 std::mem::size_of::<crate::collections::VecPayload>(),
                 std::mem::align_of::<crate::collections::VecPayload>(),
@@ -258,8 +296,11 @@ impl Rt {
     ) -> GcRef {
         let payload = crate::enums::EnumPayload { schema, tag, items };
         // SAFETY: ctx is valid; payload matches ENUM's layout.
+        let (heap, safepoint) = self.safepoint();
+        // SAFETY: payload matches ENUM's layout.
         unsafe {
-            heap_ref(self.ctx).alloc_with_unpaced(
+            heap.alloc_with(
+                safepoint,
                 &crate::enums::ENUM,
                 std::mem::size_of::<crate::enums::EnumPayload>(),
                 std::mem::align_of::<crate::enums::EnumPayload>(),
@@ -604,6 +645,11 @@ fn walk_lines(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
     for line in split_lines(i, region) {
         // One line, consumed exactly. The predecessor walked the child against
@@ -611,7 +657,9 @@ fn walk_lines(
         // the cursor away, so `lines(int)` accepted `12junk` and `lines(rest)`
         // handed every element the whole remaining input (IPR-02).
         // SAFETY: ctx is valid (upheld by `walk`'s caller).
-        items.push(unsafe { walk_exact(rt, i, plan, child, line, "the rest of the line")? });
+        let value = unsafe { walk_exact(rt, i, plan, child, line, "the rest of the line")? };
+        scope.root(value);
+        items.push(value);
     }
     let elem_desc = child_descriptor(plan, child);
     Ok(Walked {
@@ -627,6 +675,11 @@ fn walk_sections(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
     for section in split_sections(i, region) {
         // A **narrowing of the same buffer**, not a re-slice walked at offset
@@ -635,7 +688,9 @@ fn walk_sections(
         // input, so a `word` in section 2 named bytes at the start of the file
         // (IPR-03, the stage's P0).
         // SAFETY: ctx is valid.
-        items.push(unsafe { walk_exact(rt, i, plan, child, section, "the rest of the section")? });
+        let value = unsafe { walk_exact(rt, i, plan, child, section, "the rest of the section")? };
+        scope.root(value);
+        items.push(value);
     }
     let elem_desc = child_descriptor(plan, child);
     Ok(Walked {
@@ -669,11 +724,17 @@ fn walk_sections_named(
     }
     // Each section is a narrowing of the input, so the child's offsets are the
     // input's own offsets and a source-slice `Text` is right by construction.
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut captures: Vec<(Option<&'static str>, u32, GcRef)> = Vec::new();
     for (n, (name, child)) in fields.iter().enumerate() {
         // SAFETY: ctx is valid.
         let value =
             unsafe { walk_exact(rt, i, plan, *child, sections[n], "the rest of the section")? };
+        scope.root(value);
         captures.push((Some(name), *child, value));
     }
     if let Some((tail_name, tail_child)) = repeated_tail {
@@ -682,12 +743,15 @@ fn walk_sections_named(
         let mut tail_items = Vec::new();
         for section in &sections[fields.len()..] {
             // SAFETY: ctx is valid.
-            tail_items.push(unsafe {
+            let value = unsafe {
                 walk_exact(rt, i, plan, tail_child, *section, "the rest of the section")?
-            });
+            };
+            scope.root(value);
+            tail_items.push(value);
         }
         let elem_desc = child_descriptor(plan, tail_child);
         let tail_vec = rt.alloc_vec(elem_desc, tail_items);
+        scope.root(tail_vec);
         // The tail field's "child" node for descriptor purposes is the tail
         // child; its value is the assembled Vec.
         captures.push((Some(tail_name), tail_child, tail_vec));
@@ -716,6 +780,11 @@ fn walk_block(
     items: &'static [praxis_input_parser::BlockItemNode],
     region: ByteRegion,
 ) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut cursor = region.start();
     // Captures collected as (name, child_node_for_descriptor, value). For a
     // flattened positional record, we expand its fields into separate entries.
@@ -731,6 +800,7 @@ fn walk_block(
             praxis_input_parser::BlockItemNode::Positional { child } => {
                 // SAFETY: ctx is valid.
                 let walked = unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
+                scope.root(walked.value);
                 cursor = walked.next;
                 // If the positional produced a record (named-capture template),
                 // flatten its fields into the block record. We detect a record
@@ -744,6 +814,7 @@ fn walk_block(
             praxis_input_parser::BlockItemNode::Named { name, child } => {
                 // SAFETY: ctx is valid.
                 let walked = unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
+                scope.root(walked.value);
                 cursor = walked.next;
                 captures.push((Some(name), *child, walked.value));
             }
@@ -827,13 +898,19 @@ fn walk_choice(
     cases: &'static [(&'static str, u32)],
     region: ByteRegion,
 ) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut deepest: Option<ParseFail> = None;
     for (tag, (_name, child)) in cases.iter().enumerate() {
         // SAFETY: ctx is valid.
         match unsafe { walk(rt.ctx, i, plan, *child, region) } {
             Ok(walked) => {
                 // First match wins. Tag with this case's index; the value is
-                // the single payload slot.
+                // the single payload slot, rooted across `alloc_enum`.
+                scope.root(walked.value);
                 let schema = enum_schema_for(cases);
                 let enum_ref = rt.alloc_enum(schema, tag as u32, vec![walked.value]);
                 return Ok(Walked {
@@ -876,9 +953,16 @@ fn walk_optional(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     // SAFETY: ctx is valid.
     match unsafe { walk(rt.ctx, i, plan, child, region) } {
         Ok(walked) => {
+            // Rooted across `alloc_enum`, which paces.
+            scope.root(walked.value);
             let some_ref = rt.alloc_enum(crate::enums::option_schema(), 0, vec![walked.value]);
             Ok(Walked {
                 value: some_ref,
@@ -909,6 +993,11 @@ fn walk_scan(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
     let mut cursor = region.start();
     while cursor < region.end() {
@@ -917,6 +1006,7 @@ fn walk_scan(
             Ok(walked) => {
                 // A match must advance the cursor (otherwise we'd loop forever
                 // on a zero-width match). If it didn't, step one position.
+                scope.root(walked.value);
                 items.push(walked.value);
                 cursor = if walked.next > cursor {
                     walked.next
@@ -978,6 +1068,11 @@ fn walk_characters(
     skip: praxis_input_parser::SkipPolicy,
     region: ByteRegion,
 ) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
     let mut cursor = region.start();
     loop {
@@ -1003,6 +1098,7 @@ fn walk_characters(
                 None => break,
             }
         };
+        scope.root(walked.value);
         items.push(walked.value);
     }
     // The element descriptor is the child's, not a hardcoded `CHAR`. The Vec
@@ -1056,6 +1152,11 @@ fn walk_matrix(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut rows: Vec<Vec<ByteRegion>> = Vec::new();
     for line in split_lines(i, region) {
         let text = region_str(i, line, "matrix row")?;
@@ -1078,7 +1179,9 @@ fn walk_matrix(
             // The token's own region, not its bytes copied into a fresh buffer
             // walked at offset zero (IPR-03/IPR-05), and consumed exactly.
             // SAFETY: ctx is valid.
-            items.push(unsafe { walk_exact(rt, i, plan, child, *token, "the rest of the token")? });
+            let value = unsafe { walk_exact(rt, i, plan, child, *token, "the rest of the token")? };
+            scope.root(value);
+            items.push(value);
         }
     }
     let elem_desc = child_descriptor(plan, child);
@@ -1095,6 +1198,11 @@ fn walk_grid_ragged(
     fill: &str,
     region: ByteRegion,
 ) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let lines = split_lines(i, region);
     // Widths are **scalar** counts, not byte counts (IPR-06, D11): a row is a
     // row of characters, so a row holding one `é` is one column wide and not
@@ -1111,6 +1219,10 @@ fn walk_grid_ragged(
     // own owned `Text` and its own `Input`, which is what makes a sliced fill
     // cell name the fill.
     let fill_owner = rt.alloc_text_owned(fill);
+    // The fill's `Text` and the value parsed out of it are both live across
+    // every row: the value is a slice of the owner, and the padding cells all
+    // share it.
+    scope.root(fill_owner);
     // SAFETY: `alloc_text_owned` just produced a live Text.
     let fill_input = unsafe { Input::new(fill_owner) }
         .ok_or_else(|| ParseFail::at(region.start().offset(), 0, "grid fill"))?;
@@ -1126,6 +1238,7 @@ fn walk_grid_ragged(
             "the rest of the fill",
         )?
     };
+    scope.root(fill_value);
     let mut items = Vec::with_capacity(lines.len() * width);
     for (line, row) in lines.iter().zip(&widths) {
         let mut cell = line.start();
@@ -1134,7 +1247,7 @@ fn walk_grid_ragged(
             // `grid(int)`: a cell parser parses a cell exactly as it would
             // anywhere else, and a cell is one character.
             // SAFETY: ctx is valid.
-            items.push(unsafe {
+            let value = unsafe {
                 walk_exact(
                     rt,
                     i,
@@ -1143,7 +1256,9 @@ fn walk_grid_ragged(
                     line.subregion(cell, next),
                     "the rest of the cell",
                 )?
-            });
+            };
+            scope.root(value);
+            items.push(value);
             cell = next;
         }
         for _ in *row..width {
@@ -1168,9 +1283,11 @@ fn alloc_grid(
         items,
         width,
     };
-    // SAFETY: ctx is valid.
+    let (heap, safepoint) = rt.safepoint();
+    // SAFETY: payload matches GRID's layout.
     let grid_ref = unsafe {
-        heap_ref(rt.ctx).alloc_with_unpaced(
+        heap.alloc_with(
+            safepoint,
             &crate::collections::GRID,
             std::mem::size_of::<crate::collections::GridPayload>(),
             std::mem::align_of::<crate::collections::GridPayload>(),
@@ -1190,6 +1307,11 @@ fn walk_csv(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let text = region_str(i, region, "csv")?;
     let mut items = Vec::new();
     for token in csv_tokens(region, text) {
@@ -1197,7 +1319,9 @@ fn walk_csv(
         // the field's start to the end of the input and discard the cursor —
         // the discard was even written out, `let _ = token_end;` (IPR-04).
         // SAFETY: ctx is valid.
-        items.push(unsafe { walk_exact(rt, i, plan, child, token, "the rest of the field")? });
+        let value = unsafe { walk_exact(rt, i, plan, child, token, "the rest of the field")? };
+        scope.root(value);
+        items.push(value);
     }
     let elem_desc = child_descriptor(plan, child);
     Ok(Walked {
@@ -1213,6 +1337,11 @@ fn walk_ws(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let bytes = region.bytes(i);
     let base = region.start();
     let mut items = Vec::new();
@@ -1231,7 +1360,9 @@ fn walk_ws(
         }
         let token = region.subregion(base.advance(token_start), base.advance(pos));
         // SAFETY: ctx is valid.
-        items.push(unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? });
+        let value = unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? };
+        scope.root(value);
+        items.push(value);
     }
     let elem_desc = child_descriptor(plan, child);
     Ok(Walked {
@@ -1263,6 +1394,11 @@ fn walk_sep(
     if sep_bytes.is_empty() {
         return Err(ParseFail::at(base.offset(), 0, "a non-empty separator"));
     }
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
     let mut token_start = 0usize;
     let mut pos = 0usize;
@@ -1270,7 +1406,9 @@ fn walk_sep(
         if bytes[pos..].starts_with(sep_bytes) {
             let token = region.subregion(base.advance(token_start), base.advance(pos));
             // SAFETY: ctx is valid.
-            items.push(unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? });
+            let value = unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? };
+            scope.root(value);
+            items.push(value);
             pos += sep_bytes.len();
             token_start = pos;
         } else {
@@ -1281,7 +1419,9 @@ fn walk_sep(
     if token_start < bytes.len() {
         let token = region.subregion(base.advance(token_start), region.end());
         // SAFETY: ctx is valid.
-        items.push(unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? });
+        let value = unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? };
+        scope.root(value);
+        items.push(value);
     }
     let elem_desc = child_descriptor(plan, child);
     Ok(Walked {
@@ -1297,6 +1437,11 @@ fn walk_grid(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let lines = split_lines(i, region);
     let width = match lines.first() {
         Some(line) => row_width(i, *line)?,
@@ -1316,7 +1461,7 @@ fn walk_grid(
         let mut cell = line.start();
         while let Some(next) = line.next_scalar(i, cell) {
             // SAFETY: ctx is valid.
-            items.push(unsafe {
+            let value = unsafe {
                 walk_exact(
                     rt,
                     i,
@@ -1325,7 +1470,9 @@ fn walk_grid(
                     line.subregion(cell, next),
                     "the rest of the cell",
                 )?
-            });
+            };
+            scope.root(value);
+            items.push(value);
             cell = next;
         }
     }
@@ -1401,6 +1548,11 @@ fn walk_template(
     parts: &[praxis_input_parser::TemplatePartNode],
     region: ByteRegion,
 ) -> WalkResult {
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let base = region.start();
     let bytes = region.bytes(i);
     let mut cursor = base;
@@ -1460,6 +1612,7 @@ fn walk_template(
                                         "the rest of the capture",
                                     )?
                                 };
+                                scope.root(value);
                                 cursor = bound;
                                 captures.push((*name, *child, value));
                             }
@@ -1471,6 +1624,7 @@ fn walk_template(
                                 // SAFETY: ctx is valid.
                                 let walked =
                                     unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
+                                scope.root(walked.value);
                                 cursor = walked.next;
                                 captures.push((*name, *child, walked.value));
                             }
@@ -1485,6 +1639,7 @@ fn walk_template(
                         // *parent's* question.
                         // SAFETY: ctx is valid.
                         let walked = unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
+                        scope.root(walked.value);
                         cursor = walked.next;
                         captures.push((*name, *child, walked.value));
                     }
@@ -1534,11 +1689,17 @@ fn walk_tuple(
     let base = region.start();
     let bytes = region.bytes(i);
     let mut cursor = base;
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
+    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
+    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // SAFETY: ctx is live and outlives this scope.
+    let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut values: Vec<GcRef> = Vec::with_capacity(elements.len());
     for &elem in elements {
         cursor = base.advance(skip_capture_ws(bytes, cursor.delta_from(base)));
         // SAFETY: ctx is valid.
         let walked = unsafe { walk(rt.ctx, i, plan, elem, region.from(cursor))? };
+        scope.root(walked.value);
         cursor = walked.next;
         values.push(walked.value);
     }
@@ -1667,9 +1828,11 @@ fn alloc_record(rt: &Rt, captures: &[(Option<&'static str>, u32, GcRef)]) -> GcR
     let schema = record_schema_for(fields);
     let items: Vec<GcRef> = captures.iter().map(|(_, _, v)| *v).collect();
     let payload = crate::records::RecordPayload { schema, items };
-    // SAFETY: ctx is valid; payload matches RECORD's layout.
+    let (heap, safepoint) = rt.safepoint();
+    // SAFETY: payload matches RECORD's layout.
     unsafe {
-        heap_ref(rt.ctx).alloc_with_unpaced(
+        heap.alloc_with(
+            safepoint,
             &crate::records::RECORD,
             std::mem::size_of::<crate::records::RecordPayload>(),
             std::mem::align_of::<crate::records::RecordPayload>(),
@@ -1691,9 +1854,11 @@ fn alloc_tuple(rt: &Rt, elements: &[u32], plan: &ParserPlan, values: Vec<GcRef>)
         schema,
         items: values,
     };
-    // SAFETY: ctx is valid; payload matches TUPLE's layout.
+    let (heap, safepoint) = rt.safepoint();
+    // SAFETY: payload matches TUPLE's layout.
     unsafe {
-        heap_ref(rt.ctx).alloc_with_unpaced(
+        heap.alloc_with(
+            safepoint,
             &crate::tuples::TUPLE,
             std::mem::size_of::<crate::tuples::TuplePayload>(),
             std::mem::align_of::<crate::tuples::TuplePayload>(),

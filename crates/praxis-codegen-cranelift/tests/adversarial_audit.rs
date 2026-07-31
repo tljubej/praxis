@@ -460,6 +460,80 @@ fn heavy_jit_loop_proves_that_automatic_collection_actually_ran() {
     );
 }
 
+/// **IPR-14, and the one thing a result-only parser test cannot see.**
+///
+/// The interpreter's `Vec<GcRef>` intermediates were invisible to every root
+/// set. What kept them alive was that the parser never paced: `parser.rs` was
+/// the last caller of `Heap::alloc_unpaced`, so no collection ever ran *inside*
+/// a parse. That made the intermediates a memory-growth bug and nothing worse —
+/// and it is exactly why adding a safepoint before rooting them would have
+/// converted it into a use-after-free (ADR-040 Decision 3, hazard H1).
+///
+/// This is the shape that puts collections in the middle of the assembly.
+/// `scan(choice(...))` retries every case at every position, and the `mul(1,x)`
+/// junk makes the first case allocate an `Int` for its first capture and *then*
+/// fail — so the parse produces far more garbage than it keeps, which is what
+/// paces the collector. The live intermediates being tested are `scan`'s
+/// growing `items` vector and each `choice` payload held across `alloc_enum`.
+///
+/// Two assertions, because either alone would pass with the rooting removed.
+/// The values must be compared and not merely counted: swept storage is reused
+/// (the free list is keyed on layout), so a reclaimed live intermediate
+/// surfaces as type confusion rather than a clean crash. And `live_count` has
+/// to be far below what was allocated, or no sweep ran and the test proves
+/// nothing.
+#[test]
+fn choice_backtracking_under_allocation_pressure_keeps_every_live_intermediate() {
+    // 600 real matches; 15 allocate-then-fail attempts before each one.
+    const GROUPS: usize = 600;
+    const JUNK_PER_GROUP: usize = 15;
+    let mut input = String::new();
+    let mut expected: i64 = 0;
+    for n in 0..GROUPS {
+        for _ in 0..JUNK_PER_GROUP {
+            // `mul(` and the first `int` both match, so the case allocates
+            // before `x` defeats its second capture. That allocation is the
+            // garbage this test runs on.
+            input.push_str("mul(1,x) ");
+        }
+        if n % 2 == 0 {
+            writeln!(&mut input, "dbl({n})").unwrap();
+            expected += (n as i64) * 2;
+        } else {
+            writeln!(&mut input, "tpl({n})").unwrap();
+            expected += (n as i64) * 3;
+        }
+    }
+
+    let src = "fn main() -> Int {\n  \
+               let ms = read scan(choice(\n    \
+               M: `mul({a:int},{b:int})`,\n    \
+               D: `dbl({int})`,\n    \
+               T: `tpl({int})`,\n  ))\n  \
+               var total = 0\n  \
+               for m in ms {\n    \
+               total = total + match m {\n      \
+               M(p) => 0\n      \
+               D(n) => n * 2\n      \
+               T(n) => n * 3\n    }\n  }\n  total\n}\n";
+    let (runtime, result) = run_main_with_input(src, &input);
+
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        expected,
+        "every match's payload must survive the collections that ran during the parse"
+    );
+    // At least GROUPS * JUNK_PER_GROUP = 9000 objects were allocated and
+    // discarded inside the parse, on top of the ~600 that survive it. Without a
+    // sweep every one of them is still registered.
+    let stats = runtime.heap().stats();
+    assert!(
+        stats.live_count < 6_000,
+        "no sweep ran inside the parse, so this proves nothing about rooting: {stats:?}"
+    );
+}
+
 #[test]
 fn sections_preserve_text_offsets_into_the_original_input() {
     let src = "fn main() -> Text {\n  let groups = read sections(lines(word))\n  groups.get(1).get(0)\n}\n";
