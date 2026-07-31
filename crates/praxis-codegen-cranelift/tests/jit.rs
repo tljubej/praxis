@@ -486,6 +486,43 @@ fn adv_int_min_mod_neg_one_overflows() {
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
 }
 
+/// **REP-43.** `Counter.inc` is arithmetic, and §4.12's arithmetic is checked.
+///
+/// The wrapper's `cur + 1` was the one integer computation in the ABI file that
+/// was not: it panicked with "attempt to add with overflow" inside
+/// `#[no_mangle] extern "C"` in a debug build — the non-unwinding panic §10.4
+/// forbids, which aborts the host rather than reaching the fault epilogue — and
+/// wrapped silently to `i64::MIN` in release. A `Counter`'s values are ordinary
+/// `Int`s a program can store with `c[k] = n`, so the path is reachable from
+/// source; D12's answer (per-wrapper totality) is what makes faulting the only
+/// available behaviour.
+///
+/// The fault must be *observed*, which is why the assertion is `rt.fault()` and
+/// not merely "the program did not crash": marking the wrapper checked without
+/// marking its manifest row `AllocatesAndFaults` leaves the fault pending and
+/// the generated code running, so the next unrelated `CheckFault` reports it at
+/// the wrong place.
+#[test]
+fn counter_inc_at_the_int_ceiling_faults_rather_than_wrapping() {
+    let src = "fn main() -> Int {\n  let c = Counter()\n  c[\"k\"] = 9223372036854775807\n  \
+               c.inc(\"k\")\n  c[\"k\"]\n}";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault(), "inc past i64::MAX should fault");
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
+}
+
+/// The other side of REP-43: an increment that fits is still an increment, and
+/// a fresh key still starts at one. A "fix" that faulted on every `inc` would
+/// pass the gate above.
+#[test]
+fn counter_inc_below_the_ceiling_still_counts() {
+    let src = "fn main() -> Int {\n  let c = Counter()\n  c[\"k\"] = 9223372036854775806\n  \
+               c.inc(\"k\")\n  c.inc(\"fresh\")\n  c[\"k\"] - 9223372036854775806 + c[\"fresh\"]\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "no overflow here");
+    assert_eq!(result.as_int(), 2, "one increment on each key");
+}
+
 #[test]
 fn adv_modulo_by_zero_faults() {
     // % 0 was untested. Must fault as DivByZero.

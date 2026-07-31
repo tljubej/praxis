@@ -239,7 +239,7 @@ runtime_symbols! {
     ClosureFnPtr = "praxis_closure_fn_ptr": (Ctx, Gc) -> Ptr, Pure;
     ClosureSetCapture = "praxis_closure_set_capture": (Ctx, Gc, RawI64, Gc) -> Gc, Pure;
     CounterGet = "praxis_counter_get": (Ctx, Gc, Gc) -> Gc, Allocates;
-    CounterInc = "praxis_counter_inc": (Ctx, Gc, Gc) -> GcUnit, Allocates;
+    CounterInc = "praxis_counter_inc": (Ctx, Gc, Gc) -> GcUnit, AllocatesAndFaults;
     CounterKeys = "praxis_counter_keys": (Ctx, Gc) -> Gc, Allocates;
     CounterSet = "praxis_counter_set": (Ctx, Gc, Gc, Gc) -> GcUnit, Allocates;
     CounterValues = "praxis_counter_values": (Ctx, Gc) -> Gc, Allocates;

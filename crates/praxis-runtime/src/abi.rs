@@ -2787,8 +2787,18 @@ pub unsafe extern "C" fn praxis_counter_inc(
     match p.entries.get_mut(&dk) {
         Some(v) => {
             let cur = unsafe { int_payload(*v) };
+            // Checked, like every other integer computation in this file
+            // (§4.12): a raw `cur + 1` panics across `extern "C"` in debug — the
+            // non-unwinding panic §10.4 forbids — and wraps to `i64::MIN` in
+            // release, which is a silently wrong count. A `Counter`'s values are
+            // set to arbitrary `Int`s by `c[k] = n`, so this is reachable from
+            // source and not only from `i64::MAX` increments.
+            let Some(next) = cur.checked_add(1) else {
+                unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
+                return unsafe { unit_sentinel(ctx) };
+            };
             // SAFETY: ctx is wired; alloc a fresh Int for the incremented value.
-            *v = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, cur + 1) };
+            *v = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, next) };
         }
         None => {
             let one = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, 1_i64) };
