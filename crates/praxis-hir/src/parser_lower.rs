@@ -174,10 +174,17 @@ fn convert_template(
         return Vec::new();
     };
     let text = token.text().to_string();
-    let interior = text
-        .strip_prefix('`')
-        .and_then(|s| s.strip_suffix('`'))
-        .unwrap_or(&text);
+    // **An unterminated template has no interior**, and scanning one anyway is
+    // the IP-03 class: the lexer emits the token it managed to read, which for
+    // `` read `{int` `` runs to the end of the file, and `unwrap_or(&text)` then
+    // handed the scanner text whose offsets mean nothing. It answered with a
+    // second diagnostic — "malformed capture body at byte 5: unterminated
+    // nested template" — describing something the source does not contain, at a
+    // position that is not where anything is. The lexer has already reported
+    // `T002` and it is the truthful report; there is nothing to add.
+    let Some(interior) = text.strip_prefix('`').and_then(|s| s.strip_suffix('`')) else {
+        return Vec::new();
+    };
     // The scanner works in offsets relative to the interior; the file offset of
     // the interior is the token's start plus the opening backtick.
     let base = u32::from(token.text_range().start()) + 1;

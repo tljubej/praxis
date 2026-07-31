@@ -1,0 +1,11 @@
+// A capture with no closing brace — a common typo, and the one that makes a
+// backtick template non-terminating: under D10 a backtick inside a capture
+// opens a template of its own, so the second backtick here is an opener and the
+// run never closes.
+//
+// The lexer's `T002` is the truthful report. What must NOT also appear is a
+// second diagnostic about the *interior*: there is no interior to scan, and the
+// predecessor manufactured one out of the whole token and reported "unterminated
+// nested template" — a construct this file does not contain — at a byte offset
+// that means nothing.
+let v = read `{int`
