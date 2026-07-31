@@ -1131,10 +1131,22 @@ impl<'t> Parser<'t> {
         }
     }
 
-    /// `|params| expr` — a closure expression (M7, §4.10). Params are bare names
-    /// optionally annotated `: Type`, separated by commas, between two `|`. The
-    /// body is a single expression (which may be a `{ block }`). Closures capture
-    /// outer variables automatically (§4.10); the capture analysis is in HIR.
+    /// `|params| expr` — a closure expression (M7, §4.10). Each parameter is a
+    /// **pattern**, optionally annotated `: Type`, separated by commas, between two
+    /// `|`. The body is a single expression (which may be a `{ block }`). Closures
+    /// capture outer variables automatically (§4.10); the capture analysis is in
+    /// HIR.
+    ///
+    /// A parameter used to be a bare binder token, so Appendix D's "first public
+    /// demo" program — which destructures a pair in a `map` closure — did not
+    /// parse (REP-29). REP-25 did exactly this job for the `for` binding and gave
+    /// the reason: destructuring in binding position **is** a pattern, and there is
+    /// no reason for two grammars. This is the same grammar at the third and last
+    /// binding position, and it needed no new syntax either.
+    ///
+    /// Nothing here can be confused with the body: a parameter is followed by `,`,
+    /// `:` or `|`, never by an expression, so a record pattern's brace has nothing
+    /// else waiting for it.
     ///
     /// The body inherits the ambient suppression rather than resetting it: `|`
     /// is not a bracket the grammar can close over, so a closure written
@@ -1142,12 +1154,12 @@ impl<'t> Parser<'t> {
     fn parse_closure(&mut self, lit: StructLit) {
         self.start_node(SyntaxKind::CLOSURE_EXPR);
         self.bump(); // `|`
-                     // Zero or more `name` or `name: Type` params separated by commas.
+                     // Zero or more `pattern` or `pattern: Type` params separated by commas.
         if !self.at(SyntaxKind::PIPE) {
             loop {
                 let before = self.meaningful_index();
                 self.start_node(SyntaxKind::PARAM);
-                self.expect_binder("closure parameter name");
+                self.parse_pattern();
                 if self.eat(SyntaxKind::COLON) {
                     self.parse_type();
                 }
@@ -3367,6 +3379,77 @@ mod tests {
         let split = "let a = f\n(1)";
         assert_eq!(count(split, SyntaxKind::CALL_EXPR), 0);
         assert_eq!(count(split, SyntaxKind::PAREN_EXPR), 1);
+    }
+
+    /// **REP-29.** A closure parameter is a pattern, not a bare name.
+    ///
+    /// Appendix D's "first public demo" program is written with `|(a, b)| abs(a -
+    /// b)` and did not parse: the parameter loop could take only a binder token, so
+    /// the `(` was `expected closure parameter name`. REP-25 made the `for` binding
+    /// a pattern for the same reason; this is the third and last binding position.
+    #[test]
+    fn a_closure_parameter_is_a_pattern() {
+        let count = |src: &str, kind: SyntaxKind| -> usize {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            construct_names(&out.tree)
+                .into_iter()
+                .filter(|k| *k == kind)
+                .count()
+        };
+
+        // Appendix D's own line.
+        assert_eq!(
+            count(
+                "let d = left.zip(right).map(|(a, b)| abs(a - b)).sum()",
+                SyntaxKind::CLOSURE_EXPR
+            ),
+            1
+        );
+
+        // The shapes, and the pattern count each holds: the parameter's own, plus
+        // one per element or nested field.
+        for (src, params, patterns) in [
+            ("let f = |x| x", 1, 1),
+            ("let f = |_| 0", 1, 1),
+            ("let f = |(a, b)| a", 1, 3),
+            ("let f = |(a, (b, c))| a", 1, 5),
+            ("let f = |P { x, y }| x", 1, 1),
+            ("let f = |P { at: (x, y) }| x", 1, 4),
+            ("let f = |(a, b), c| a", 2, 4),
+            ("let f = |a, (b, c)| a", 2, 4),
+            ("let f = | | 0", 0, 0),
+        ] {
+            assert_eq!(count(src, SyntaxKind::PARAM), params, "{src}");
+            assert_eq!(count(src, SyntaxKind::PATTERN), patterns, "{src}");
+            assert_eq!(count(src, SyntaxKind::CLOSURE_EXPR), 1, "{src}");
+        }
+
+        // A pattern parameter still takes an annotation, and the annotation is the
+        // whole argument's — the `:` is what ends the pattern.
+        assert_eq!(
+            count("let f = |(a, b): (Int, Int)| a", SyntaxKind::TUPLE_TYPE),
+            1
+        );
+        assert_eq!(count("let f = |x: Int| x", SyntaxKind::TYPE_REF), 1);
+
+        // A trailing comma still closes the list (REP-17), and a record pattern's
+        // brace is not read as anything else: a parameter is followed by `,`, `:`
+        // or `|`, never by an expression.
+        for src in ["let f = |(a, b),| a", "let f = |P { x }| P { x: x }"] {
+            assert_eq!(count(src, SyntaxKind::CLOSURE_EXPR), 1, "{src}");
+        }
+
+        // The malformed shapes still report.
+        for bad in [
+            "let f = |(a, | a",
+            "let f = |(| a",
+            "let f = |+| a",
+            "let f = |a, | ",
+        ] {
+            let out = parse_text(bad);
+            assert!(!out.diagnostics.is_empty(), "{bad} must report");
+        }
     }
 
     /// The construct shape of `text` with parentheses erased, so two spellings

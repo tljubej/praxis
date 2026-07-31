@@ -6462,3 +6462,76 @@ fn a_field_read_on_an_unannotated_parameter_reads_that_records_field() {
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 33);
 }
+
+/// **REP-29.** A destructuring closure parameter reads the components it names,
+/// once per call — the half no type test can see.
+///
+/// The parameter still arrives as one value; the pattern takes it apart inside the
+/// closure, through a one-arm `match` on the parameter's own slot. Everything here
+/// is weighted so a swapped component or a dropped one is a different answer.
+#[test]
+fn a_destructuring_closure_parameter_reads_each_argument_apart() {
+    // Appendix D's shape: a pair destructured in a `map`.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push((1, 20))\n  v.push((3, 40))\n  \
+         v.map(|(a, b)| a * 100 + b).sum()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 120 + 340);
+
+    // A record pattern, with a field the pattern does not name — the padded row
+    // must not shift the ones it does.
+    let (rt, result) = run_main(
+        "struct P { x: Int, y: Int, z: Int }\n\
+         fn main() -> Int {\n  let f = |P { z, x }| x * 10 + z\n  \
+         f(P { x: 1, y: 2, z: 3 })\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 13);
+
+    // Several parameters, only some of them patterns, in both orders — each
+    // `match` wraps its own argument and none of them shifts another.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let f = |(a, b), c| a * 100 + b * 10 + c\n  f((1, 2), 3)\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 123);
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let f = |a, (b, c)| a * 100 + b * 10 + c\n  f(1, (2, 3))\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 123);
+
+    // Nested, and through a record — the reads chain.
+    let (rt, result) = run_main(
+        "struct P { at: (Int, Int), w: Int }\n\
+         fn main() -> Int {\n  let f = |P { at: (x, y), w }| x * 100 + y * 10 + w\n  \
+         f(P { at: (1, 2), w: 3 })\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 123);
+
+    // A wildcard component reads nothing, and the named one is still the one it
+    // names.
+    let (rt, result) = run_main("fn main() -> Int {\n  let f = |(_, b)| b\n  f((9, 4))\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4);
+
+    // The destructured names are real slots: they survive 200 allocations inside
+    // the body, and they capture into a nested closure.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let f = |(a, b)| {\n    let scratch = Vec()\n    var i = 0\n    \
+         while i < 200 { scratch.push((i, i))\n i = i + 1 }\n    let g = |n| n + a * 10 + b\n    \
+         g(0)\n  }\n  f((1, 2))\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 12);
+
+    // A bare-name parameter is untouched — same slot, same reads, same answer.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push((1, 20))\n  \
+         v.map(|kv| kv.0 * 100 + kv.1).sum()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 120);
+}

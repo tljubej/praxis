@@ -1310,6 +1310,20 @@ impl Inferer {
                     sym.scheme = Some(Scheme::monotype(ty));
                 }
             }
+            return ty;
+        }
+        // A **destructuring** closure parameter (REP-29). The argument's own slot
+        // takes the parameter type, and the pattern is checked against it by the
+        // same walk a match arm and a `for` binding go through — so each name comes
+        // out at its component's type rather than at the whole argument's.
+        if let Some(pat) = p.pattern() {
+            let range = pat.syntax().text_range();
+            if let Some(&id) = self.decls.get(&range) {
+                if let Some(sym) = self.names.get_mut(id) {
+                    sym.scheme = Some(Scheme::monotype(ty));
+                }
+            }
+            self.infer_pattern(&pat, ty);
         }
         ty
     }

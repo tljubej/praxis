@@ -1096,7 +1096,17 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_param(&mut self, p: &Param) -> Option<TypedParam> {
-        let name_tok = p.name()?;
+        // A **destructuring** closure parameter (REP-29) has no name of its own;
+        // its slot symbol was declared at the pattern's range, and the pattern is
+        // taken apart in the body by `destructure_pattern_params`.
+        let Some(name_tok) = p.name() else {
+            let pat = p.pattern()?;
+            let range = pat.syntax().text_range();
+            let symbol = self.resolve_decl_at(range)?;
+            let ty = self.symbol_type(symbol);
+            let name = pat.syntax().text().to_string();
+            return Some(TypedParam { symbol, name, ty });
+        };
         let name = name_tok.text().to_string();
         let range = name_tok.text_range();
         let symbol = self.resolve_decl_at(range)?;
@@ -1422,6 +1432,10 @@ impl<'a> Lowerer<'a> {
                 ty: self.unit,
             },
         };
+        // A destructuring parameter takes its argument apart around the body
+        // (REP-29). Done here rather than in MIR because the language already has
+        // the construct that does it: a one-arm `match` on the parameter's slot.
+        let body = self.destructure_pattern_params(c, body, span);
         // The closure's `Func` type is inference's, not one rebuilt from the
         // lowered params and body: a closure whose body diverges has a `Never`
         // block tail, and inference joins that with the result the `return`s
@@ -1517,6 +1531,79 @@ impl<'a> Lowerer<'a> {
             ty: fn_type,
             span,
         }
+    }
+
+    /// Wrap `body` in one `match` per **destructuring** closure parameter, so each
+    /// pattern takes its own argument apart before the body runs (REP-29).
+    ///
+    /// A closure still takes one value per parameter — MIR gives each a slot and
+    /// binds it to the parameter's symbol — so a pattern parameter needs a slot for
+    /// the argument *and* somewhere to take it apart. The somewhere is a construct
+    /// the language already has: `match arg { pattern => body }`, one arm, over the
+    /// slot's own symbol. Record and tuple patterns have exactly one constructor
+    /// (ADR-069), so MIR emits the component reads with no tag to compare and no
+    /// arm to fall through to — the same instructions a hand-written destructuring
+    /// would need, and no new MIR.
+    ///
+    /// **A parameter has no second arm**, so a pattern that can fail is `Y125`,
+    /// which is REP-25's rule for the `for` binding at the third binding position:
+    /// `|Some(n)| n` would have no answer for a `None` argument.
+    ///
+    /// Parameters are wrapped in reverse so the first one's `match` ends up
+    /// outermost, which is the order the arguments arrive in.
+    fn destructure_pattern_params(
+        &mut self,
+        c: &praxis_ast::ClosureExpr,
+        body: TypedBlock,
+        span: (u32, u32),
+    ) -> TypedBlock {
+        let params: Vec<praxis_ast::Param> = c.params().collect();
+        let mut block = body;
+        for p in params.into_iter().rev() {
+            // A named parameter binds its whole argument and needs nothing.
+            if p.name().is_some() {
+                continue;
+            }
+            let Some(pat) = p.pattern() else { continue };
+            // `|_|` binds nothing (ADR-049 D7), so there is nothing to take apart.
+            if matches!(pat.kind(), praxis_ast::PatternKind::Wildcard) {
+                continue;
+            }
+            let range = pat.syntax().text_range();
+            let Some(symbol) = self.resolve_decl_at(range) else {
+                continue;
+            };
+            let param_ty = self.symbol_type(symbol);
+            let pattern = self.lower_pattern(&pat, param_ty);
+            if let Some(reason) = refutable_reason(&pattern) {
+                self.diag(
+                    range,
+                    DiagCode::RefutableBinding,
+                    format!("a closure parameter must match every argument, and {reason} does not"),
+                );
+            }
+            let ty = block.ty;
+            let scrutinee = TypedExpr::Path {
+                symbol,
+                ty: param_ty,
+                span,
+            };
+            let arm = TypedMatchArm {
+                pattern,
+                body: TypedExpr::Block(Box::new(block)),
+            };
+            block = TypedBlock {
+                stmts: Vec::new(),
+                tail: TypedExpr::Match {
+                    scrutinee: Box::new(scrutinee),
+                    arms: vec![arm],
+                    ty,
+                    span,
+                },
+                ty,
+            };
+        }
+        block
     }
 
     /// Mint a fresh, unique synthetic MIR function name for a closure.

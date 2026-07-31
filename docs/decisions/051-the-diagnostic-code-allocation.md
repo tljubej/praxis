@@ -158,7 +158,13 @@ range they never were.
 | `Y122` | HIR-07 | S16 | a pattern names a variant the scrutinee's type does not have |
 | `Y123` | HIR-06 | S16 | a pattern's shape cannot match the scrutinee's type |
 | `Y124` | REP-05 | S26 | a pattern naming more sub-patterns than the variant holds (**amendment**) |
-| `Y125` | REP-25 | — | a pattern that must match every value but can fail, in a **binding** position (**amendment**) |
+| `Y125` | REP-25, REP-29 | — | a pattern that must match every value but can fail, in a **binding** position (**amendment**) |
+
+**REP-29 spent no code.** A closure parameter is the third binding position — a
+`let`, a `for` binding and a parameter — and a pattern that can fail there is the
+same mistake `Y125` already names, with the same fix. The message differs by what
+it says the pattern has to match: an *item* for a `for`, an *argument* for a
+parameter.
 
 **REP-10 spent no code** (ADR-069). A record *pattern* naming a field the record
 does not have, or naming one twice, is the literal's own mistake read in the other

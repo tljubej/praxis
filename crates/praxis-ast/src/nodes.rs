@@ -352,9 +352,27 @@ impl AstNode for Param {
     }
 }
 impl Param {
-    /// The parameter name.
+    /// The parameter name, when the parameter *is* one.
+    ///
+    /// A `fn` parameter is a binder token and answers directly. A **closure**
+    /// parameter is a pattern (REP-29), so a bare-name one answers through that
+    /// pattern — which is what keeps every existing closure lowering, resolution
+    /// and inference path untouched: `|x|` still has a name here, and a
+    /// destructuring one has none and is reached through [`Param::pattern`].
     pub fn name(&self) -> Option<SyntaxToken> {
-        name_token(&self.syntax)
+        if let Some(tok) = name_token(&self.syntax) {
+            return Some(tok);
+        }
+        let pat: Pattern = child(&self.syntax)?;
+        match pat.kind() {
+            PatternKind::Name(_) => pat.name_token(),
+            _ => None,
+        }
+    }
+    /// The parameter's pattern, for the position that has one (a closure, REP-29).
+    /// A `fn` parameter is a binder token and answers `None`.
+    pub fn pattern(&self) -> Option<Pattern> {
+        child(&self.syntax)
     }
     /// The declared parameter type.
     pub fn ty(&self) -> Option<TypeRef> {

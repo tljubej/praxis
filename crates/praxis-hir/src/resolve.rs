@@ -518,6 +518,15 @@ impl Resolver {
         }
     }
 
+    /// Bind whatever a parameter introduces.
+    ///
+    /// A name — a `fn` parameter, or a closure parameter whose pattern is a bare
+    /// name — is one `Param` symbol, exactly as before. A closure parameter that
+    /// **destructures** (REP-29) introduces the pattern's own names *and* a slot
+    /// symbol for the argument itself, because the lowered closure still takes one
+    /// value per parameter and something has to hold it before the pattern takes it
+    /// apart. The slot is declared at the pattern node's range and never bound into
+    /// a scope: no source name reaches it, and lowering finds it by range.
     fn bind_param(&mut self, scope: ScopeId, p: &Param) {
         if let Some(name_tok) = p.name() {
             self.bind(
@@ -526,7 +535,22 @@ impl Resolver {
                 name_tok.text().to_string(),
                 name_tok.text_range(),
             );
+            return;
         }
+        let Some(pat) = p.pattern() else { return };
+        if matches!(pat.kind(), praxis_ast::PatternKind::Wildcard) {
+            // `|_|` binds nothing (ADR-049 D7), unchanged.
+            return;
+        }
+        let range = pat.syntax().text_range();
+        let span = range_to_span(range);
+        let id = self.mint(
+            SymbolKind::Param,
+            pat.syntax().text().to_string(),
+            Some(self.file_span(span)),
+        );
+        self.out.decls.insert(range, id);
+        self.resolve_pattern_bindings(scope, &pat);
     }
 
     fn resolve_assign(&mut self, scope: ScopeId, stmt: &AssignStmt) {

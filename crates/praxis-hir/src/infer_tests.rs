@@ -5265,3 +5265,82 @@ fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
          out(twice(P { x: 4, y: 0 }))\n"
     ));
 }
+
+/// **REP-29.** A closure parameter is a pattern, and it must match **every**
+/// argument.
+///
+/// Appendix D's "first public demo" program writes `|(a, b)| abs(a - b)` and did
+/// not parse. REP-25 established the rule this reuses — destructuring in binding
+/// position *is* a pattern — and `Y125` is its rule too: a parameter has no second
+/// arm to send an argument that does not match.
+#[test]
+fn a_closure_parameter_is_a_pattern_and_must_match_every_argument() {
+    // Each name binds at its own component's type, which a parameter that named
+    // the whole argument could not do.
+    let src = "let v = Vec()\nv.push((1, \"a\"))\nlet s = v.map(|(n, t)| t).collect()\nout(s)\n";
+    assert_eq!(scheme_of(src, "n").as_deref(), Some("Int"));
+    assert_eq!(scheme_of(src, "t").as_deref(), Some("Text"));
+
+    // A record pattern, at the fields' own types.
+    let src = "struct P { x: Int, tag: Text }\n\
+               let f = |P { x, tag }| tag\nout(f(P { x: 1, tag: \"a\" }))\n";
+    assert_eq!(scheme_of(src, "x").as_deref(), Some("Int"));
+    assert_eq!(scheme_of(src, "tag").as_deref(), Some("Text"));
+
+    // A bare name still binds the whole argument — the shape every existing
+    // program is written with, and the one `Param::name` still answers for.
+    let src = "let v = Vec()\nv.push((1, 2))\nlet s = v.map(|kv| kv.0).collect()\nout(s)\n";
+    assert_eq!(scheme_of(src, "kv").as_deref(), Some("(Int, Int)"));
+
+    // The annotation belongs to the whole argument, and it pins the components.
+    let src = "let f = |(a, b): (Int, Text)| b\nout(f((1, \"z\")))\n";
+    assert_eq!(scheme_of(src, "a").as_deref(), Some("Int"));
+    assert_eq!(scheme_of(src, "b").as_deref(), Some("Text"));
+
+    // **A parameter has no second arm**, so a pattern that can fail is `Y125` —
+    // both spellings, and at any depth.
+    for src in [
+        "let f = |Some(n)| n\nout(f(Some(1)))\n",
+        "let f = |(1, b)| b\nout(f((1, 2)))\n",
+        "let f = |(a, (2, c))| c\nout(f((1, (2, 3))))\n",
+        "struct P { x: Int }\nlet f = |P { x: 1 }| 0\nout(f(P { x: 1 }))\n",
+    ] {
+        let diags = analyze_and_lower_diags(src);
+        assert!(
+            diags.iter().any(|d| d.code().to_string() == "Y125"),
+            "{src} must be Y125, got {diags:?}"
+        );
+    }
+
+    // …and the irrefutable shapes are all accepted, including a wildcard
+    // component, a partial record pattern, several parameters and nesting.
+    for src in [
+        "let f = |(a, b)| a + b\nout(f((1, 2)))\n",
+        "let f = |(a, _)| a\nout(f((1, 2)))\n",
+        "let f = |(a, b), c| a + b + c\nout(f((1, 2), 3))\n",
+        "let f = |a, (b, c)| a + b + c\nout(f(1, (2, 3)))\n",
+        "let f = |(a, (b, c))| a + b + c\nout(f((1, (2, 3))))\n",
+        "struct P { x: Int, y: Int }\nlet f = |P { x }| x\nout(f(P { x: 1, y: 2 }))\n",
+    ] {
+        assert!(is_clean_with_lower(src), "{src} must be accepted");
+    }
+
+    // The pattern is checked against the parameter's type like any other, so an
+    // argument the shape cannot have is the ordinary mismatch.
+    let diags = analyze_and_lower_diags("let f = |(a, b)| a\nout(f(1))\n");
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y001"),
+        "expected Y001, got {diags:?}"
+    );
+
+    // A destructured name is a binding like any other, so it captures and it
+    // cannot be assigned to.
+    assert!(is_clean_with_lower(
+        "let g = |(a, b)| { let h = |n| n + a + b\n h(1) }\nout(g((2, 3)))\n"
+    ));
+    let diags = analyze_and_lower_diags("let f = |(a, b)| { a = 5\n b }\nout(f((1, 2)))\n");
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y009"),
+        "a destructured name is immutable: {diags:?}"
+    );
+}
