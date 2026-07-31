@@ -4548,9 +4548,23 @@ fn emit_pattern_test(
             // native scalar compare; Text uses structural equality.
             let lit_gc = lower_lit_gc(b, value, None);
             match value {
+                // Both operands are read at the payload's *own* width. `Bool`
+                // used to share the `Int` arm, which emitted an
+                // `ExtractScalar { scalar: Int }` — `praxis_int_load`, an
+                // eight-byte read — against a **one**-byte `BoolPayload`. The
+                // other seven bytes are the block's alignment padding, so
+                // `true` and `false` were told apart by uninitialized memory
+                // and compared equal whenever two immortals happened to have
+                // matching padding (REP-49; REP-37 is the same defect in the
+                // graph oracle). `praxis_bool_load` reads the byte.
                 Lit::Int(_) | Lit::Bool(_) => {
-                    let si = lower_extract_int(b, scrut);
-                    let li = lower_extract_int(b, lit_gc);
+                    let kind = if matches!(value, Lit::Bool(_)) {
+                        ScalarKind::Bool
+                    } else {
+                        ScalarKind::Int
+                    };
+                    let si = lower_extract_scalar(b, scrut, kind);
+                    let li = lower_extract_scalar(b, lit_gc, kind);
                     let cmp = b.alloc_scalar(ScalarKind::Bool);
                     b.push(Inst::IntCmp {
                         op: CmpOp::Eq,
@@ -5795,6 +5809,57 @@ mod tests {
         assert_eq!(nested.payloads, 1);
         assert_eq!(nested.elems, 2);
         assert_eq!(nested.fields, vec![0, 1]);
+    }
+
+    /// **REP-49's gate.** A `Bool` pattern reads its scrutinee at a `Bool`'s
+    /// width.
+    ///
+    /// `Lit::Bool` shared the `Lit::Int` arm, so `match b { true => … }` emitted
+    /// `ExtractScalar { scalar: Int }` — `praxis_int_load`, an **eight**-byte
+    /// read — against a payload that is **one** byte. The other seven are the
+    /// block's alignment padding, which the allocator never writes, so the two
+    /// immortal singletons were told apart by whatever malloc had left there.
+    ///
+    /// This is the assertion a behavioural test cannot make. `match true`
+    /// answers correctly whenever the two paddings *differ*, and comparing
+    /// `true` against itself reads one address twice and is right for the wrong
+    /// reason — so the observable answer is right on most runs and wrong on the
+    /// ones where the padding happens to match. The instruction is the fact.
+    #[test]
+    fn a_bool_pattern_reads_its_scrutinee_at_a_bools_width() {
+        let extracts = |src: &str| -> Vec<ScalarKind> {
+            let (funcs, _) = lower_src_to_mir(src);
+            let main = funcs.iter().find(|f| f.name == "main").expect("main");
+            main.blocks
+                .iter()
+                .flat_map(|b| b.insts.iter())
+                .filter_map(|i| match i {
+                    Inst::ExtractScalar { scalar, .. } => Some(*scalar),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Two arms, two literals, four reads — scrutinee and literal per arm —
+        // and every one of them at `Bool`.
+        let bools =
+            extracts("fn main() -> Int {\n  let b = true\n  match b { true => 1, false => 0 }\n}");
+        assert!(
+            !bools.is_empty(),
+            "a Bool pattern compares payloads, so it extracts them"
+        );
+        assert!(
+            bools.iter().all(|k| *k == ScalarKind::Bool),
+            "a Bool payload is one byte and `praxis_int_load` reads eight: {bools:?}"
+        );
+
+        // The `Int` half of the same arm is unchanged — the fix is a width, not
+        // a rewrite of literal matching.
+        let ints = extracts("fn main() -> Int {\n  let n = 1\n  match n { 1 => 10, _ => 0 }\n}");
+        assert!(
+            ints.iter().all(|k| *k == ScalarKind::Int),
+            "an Int pattern still reads an Int: {ints:?}"
+        );
     }
 
     /// **REP-21.** An updating store is **one** call and no read.
