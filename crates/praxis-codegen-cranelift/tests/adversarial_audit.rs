@@ -593,6 +593,52 @@ fn template_text_capture_stops_before_the_following_literal() {
     assert_eq!(result.as_text(), "middle");
 }
 
+/// **A whitespace-only template part is a bound too.**
+///
+/// The capture bound first looked only for a following literal with *non-empty*
+/// text, so a capture followed by a plain space run — the most ordinary
+/// template shape there is — was not bounded at all: `text` swallowed the rest
+/// of its region and the space run then had nothing left to match.
+/// `` lines(`{name:text} {v:int}`) `` over `"foo 3\n"` reported "expected
+/// whitespace" at the end of the line. §7.9 makes a run of whitespace a
+/// `Literal` whose text is empty and whose policy carries the requirement, and
+/// §7.4's "until the following template literal can match" does not exempt it.
+///
+/// All three spellings, and all three inputs end with a newline: this defect
+/// was found on a real file, and the same template inside `lines` is bounded
+/// per line while the bare one is bounded by the root region.
+#[test]
+fn a_capture_is_bounded_by_a_whitespace_only_template_part() {
+    // A plain space run. `text` is non-greedy, so the bound is the *earliest*
+    // position the space run can match — the same rule a literal bound follows.
+    let src =
+        "fn main() -> Text {\n  let r = read lines(`{name:text} {v:int}`)\n  r.get(1).name\n}\n";
+    let (runtime, result) = run_main_with_input(src, "foo 3\nbar 12\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_text(), "bar");
+
+    // `\s+`.
+    let src = "fn main() -> Int {\n  let r = read lines(`{name:text}\\s+{v:int}`)\n  var t = 0\n  for x in r { t = t + x.v }\n  t\n}\n";
+    let (runtime, result) = run_main_with_input(src, "foo 3\nbar 12\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 15);
+
+    // `\n`, which bounds a capture across a line ending.
+    let src = "fn main() -> Int {\n  let r = read `{name:text}\\n{v:int}`\n  r.v\n}\n";
+    let (runtime, result) = run_main_with_input(src, "foo\n3\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 3);
+
+    // `\s*` still constrains nothing, so it is still skipped: the scan looks
+    // past it for something that does. Nothing does here, so the capture is
+    // unbounded and `text` takes the line — which is the documented answer for
+    // a template that asks for zero-or-more.
+    let src = "fn main() -> Text {\n  let r = read lines(`{name:text}\\s*`)\n  r.get(0).name\n}\n";
+    let (runtime, result) = run_main_with_input(src, "foo 3\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_text(), "foo 3");
+}
+
 /// **IPR-11 without growing `word`'s delimiter set.**
 ///
 /// `word` stops on space, tab, `,`, `\n` and `\r` and nothing else, so
