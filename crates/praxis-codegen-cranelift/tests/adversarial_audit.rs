@@ -628,9 +628,39 @@ fn grid_text_row_preserves_the_grid_cell_descriptor() {
     );
 }
 
+/// S18 exit criterion (RT-15). `Grid.find`'s static type is now
+/// `Option[(Int, Int)]`, so a miss is a `None` — a value of the type the
+/// program was promised — rather than the Unit sentinel wearing a tuple type.
+///
+/// The assertion was `== TUPLE.id()` while the test was ignored, which was the
+/// best a point-typed row could ask for: "whatever comes back, it must at least
+/// be the shape the signature claims". D1 changed the signature, so the test
+/// states the contract instead — the program matches on the answer, and both
+/// arms are reachable from source.
 #[test]
-#[ignore = "known bug: absent Grid.find returns Unit under a Tuple static type"]
 fn absent_grid_find_has_no_unit_under_a_tuple_type() {
+    let src = "fn main() -> Int {\n\
+               \x20 let g = read matrix(int)\n\
+               \x20 match g.find(99) {\n    Some(p) => 1,\n    None => 0,\n  }\n\
+               }\n";
+    let (runtime, result) = run_main_with_input(src, "1 2\n3 4\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        0,
+        "nothing matched, so the answer is `None`"
+    );
+
+    let src = "fn main() -> Int {\n\
+               \x20 let g = read matrix(int)\n\
+               \x20 match g.find(4) {\n    Some(p) => 1,\n    None => 0,\n  }\n\
+               }\n";
+    let (runtime, result) = run_main_with_input(src, "1 2\n3 4\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 1, "a hit is `Some((x, y))`");
+
+    // And the `Option` really is an enum value, not a tuple that happens to
+    // answer: the descriptor is what `format`/`equals`/`hash` dispatch through.
     let (runtime, result) = run_main_with_input(
         "fn main() {\n  let g = read matrix(int)\n  g.find(99)\n}\n",
         "1 2\n3 4\n",
@@ -638,21 +668,38 @@ fn absent_grid_find_has_no_unit_under_a_tuple_type() {
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(
         result.descriptor().id(),
-        praxis_runtime::tuples::TUPLE.id(),
-        "a value statically typed (Int, Int) cannot be the Unit sentinel"
+        praxis_runtime::enums::ENUM.id(),
+        "a value statically typed Option[(Int, Int)] cannot be the Unit sentinel"
     );
 }
 
+/// S18 exit criterion (RT-14). The same for `Map.get`, whose result type is now
+/// `Option[V]` (§5.7 spelled that signature all along).
+///
+/// The assertion was `== INT.id()` while the test was ignored, for the same
+/// reason as its `Grid.find` sibling; it is a source-level unwrap now, so what
+/// it pins is the language rule rather than a descriptor id.
 #[test]
-#[ignore = "known bug: absent Map.get returns Unit under its V static type"]
 fn absent_map_get_has_no_unit_under_the_value_type() {
+    let unwrap = "fn unwrap(o: Option[Int]) -> Int {\n  match o {\n    Some(v) => v,\n    None => 0 - 1,\n  }\n}\n";
+    let (runtime, result) = run_main(&format!(
+        "{unwrap}fn main() -> Int {{\n  let m = Map()\n  m.insert(1, 10)\n  unwrap(m.get(2))\n}}\n"
+    ));
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), -1);
+    let (runtime, result) = run_main(&format!(
+        "{unwrap}fn main() -> Int {{\n  let m = Map()\n  m.insert(1, 10)\n  unwrap(m.get(1))\n}}\n"
+    ));
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 10);
+
     let (runtime, result) =
         run_main("fn main() {\n  let m = Map()\n  m.insert(1, 10)\n  m.get(2)\n}\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(
         result.descriptor().id(),
-        praxis_runtime::scalars::INT.id(),
-        "a value statically typed Int cannot be the Unit sentinel"
+        praxis_runtime::enums::ENUM.id(),
+        "a value statically typed Option[Int] cannot be the Unit sentinel"
     );
 }
 

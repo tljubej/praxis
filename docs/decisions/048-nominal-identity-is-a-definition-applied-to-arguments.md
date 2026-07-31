@@ -130,6 +130,12 @@ walked.
   and `praxis_alloc_enum`'s new parameter are RT-13, which the plan schedules in
   S18 and which needs a `RUNTIME_ABI_VERSION` bump of its own. Nothing in
   `praxis-types` is `#[repr(C)]`, so this stage spends none.
+  > **Landed in S18 (ADR-074),** as anticipated: `SchemaIdentity::Nominal(&'static
+  > str)` plus a per-variant payload-descriptor list, `EnumPayload`'s leading
+  > schema pointer, `praxis_alloc_enum(ctx, schema, tag)` — which *dropped* its
+  > arity parameter rather than merely gaining one, reading it from the schema as
+  > `praxis_alloc_tuple` does — and ABI v14. `RecordSchema::same_type` is
+  > unchanged, as this predicted.
 - **A generic record fails the compile.** `record_schema_for` builds a schema
   from the def's field types, which for a generic def would resolve descriptors
   for its parameters. The language cannot declare one and `TypedExpr::RecordLit`
@@ -156,3 +162,10 @@ The runtime already landed `Nominal(&'static str)` with RT-12 (ADR-045's
 sibling), and comparing interned names by content cannot collide while needing
 no key registry. When the runtime half lands in S18 it can carry arguments
 alongside the name; nothing about `RecordSchema::same_type` changes here.
+
+> **S18 carried the arguments a different way** (ADR-074): the identity stayed
+> `Nominal(&'static str)` and the *shape* comparison next to it does the work —
+> `Option[Int]` and `Option[Text]` are told apart by their payload descriptors,
+> not by an argument list in the identity. Two producers of one `Option` schema
+> disagree about that slot on purpose (the runtime knows no static `V`), so the
+> slot is null-tolerant, which an argument-carrying identity could not have been.

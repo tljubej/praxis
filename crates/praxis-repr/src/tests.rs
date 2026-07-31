@@ -101,7 +101,22 @@ unsafe fn sample(rt: &Runtime, ctx: *mut RuntimeContext, builtin: BuiltinTypeId)
                     }));
                 praxis_alloc_record(ctx, schema as *const _)
             }
-            B::Enum => praxis_alloc_enum(ctx, 0, 0),
+            B::Enum => {
+                // Leaked for the same reason the record schema above is: an
+                // enum schema names its variants' payload descriptors and is
+                // therefore not `Sync`.
+                let variants: &'static [praxis_runtime::enums::EnumVariantShape] =
+                    Box::leak(Box::new([praxis_runtime::enums::EnumVariantShape {
+                        name: "Only",
+                        payload: &[],
+                    }]));
+                let schema: &'static praxis_runtime::enums::EnumSchema =
+                    Box::leak(Box::new(praxis_runtime::enums::EnumSchema {
+                        identity: praxis_runtime::SchemaIdentity::Anonymous,
+                        variants,
+                    }));
+                praxis_alloc_enum(ctx, schema as *const _, 0)
+            }
             B::Closure => praxis_alloc_closure(ctx, std::ptr::null(), 0),
             B::VarCell => praxis_alloc_var_cell(ctx, praxis_alloc_int(ctx, 1)),
         }

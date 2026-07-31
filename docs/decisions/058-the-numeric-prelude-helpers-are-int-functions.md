@@ -133,6 +133,10 @@ TY-34 is its natural owner: D6 answers a descending `a..b` as *empty*, which
 raises the same question about the same shape, and the two should get one kind
 between them.
 
+> **Paid in S18 (ADR-075).** `FaultKind::EmptyRange` exists and `clamp` raises
+> it. ADR-059 asked for `praxis_range_len`'s uncountable range to share the kind;
+> S18 declined and gave that one `IntOverflow` instead — ADR-075 says why.
+
 ## Consequences
 
 - **`RUNTIME_ABI_VERSION` stays 13.** Seven new symbols are additive — a row in

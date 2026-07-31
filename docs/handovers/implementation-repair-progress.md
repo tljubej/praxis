@@ -28,10 +28,10 @@ Update this file at the end of every stage.
 | S15 — Per-use types into HIR and MIR, then monomorphization | **done** (one exit criterion deferred; see §4) | `93c05ec`, `f3c76a8`, `77b2ad6`, `b560e67` |
 | S16 — Records, patterns, exhaustiveness, enum constructors | **done** | `57e2e5b`, `06f3c44`, `b8e2c7b`, `e918741` |
 | S17 — Constraint channel and capabilities | **done** | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c`, `e801e6a`, `b6ab8eb`, `fb82f79` |
-| S18 — Option contract and enum nominal identity | not started | |
-| S19 — Input-parser compile pipeline | not started | |
-| S20 — Parser runtime cursor and region ownership | not started | |
-| S21 — Pipeline plan representation and per-stage indices | **done** | `7a38a2a`, `7264de8`, `ac606ba`, `2f68e84`, `333ca4e`, + the ADR-071/docs commit |
+| S18 — Option contract and enum nominal identity | **done** — RT-13, RT-14, RT-15, D1 answered and implemented, the two owed fault kinds paid | `207f5d4`, `cf99f8e`, `35b68ce`, `9ad74ef`, `4ee1ad7` |
+| S19 — Input-parser compile pipeline | **done** | `93fc49b`, `f64e950`, `3f644de`, `c3fd726`, `f8b54b3`, `6664841` |
+| S20 — Parser runtime cursor and region ownership | in progress | |
+| S21 — Pipeline plan representation and per-stage indices | **done** | `7a38a2a`, `7264de8`, `ac606ba`, `2f68e84`, `333ca4e`, `3151408` |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
 | S25 — Grammar completion | **done** — its acceptance criterion is met **verbatim**, and all nine of its rows have landed (REP-07, REP-08, REP-17, REP-16, REP-09, REP-18, REP-20, REP-19, REP-10) | `c74e062`, `bb3bc43`, `11976cc`, `0ee29b1`, `2f9bcbd`, `b495e93`, `11e107c`, `ca7385e` |
@@ -80,9 +80,11 @@ doc's program shape puts bindings at the top level. **`N007` reports it**
 (ADR-068): §4.9/§4.10 already drew the line and only §4.10 says "capture".
 
 **The repair has no P0 left, and no scheduled row of any severity.** Every stage
-the plan schedules is closed except **S18, S19 and S20** (S21 closed after this
-paragraph was written); S18 is `D1`-blocked and D1 is still open. That is the
-next real decision.
+the plan schedules is closed except **S20**. **S18 is done** — D1 was answered
+and is implemented (ADR-076), and RT-13 gave a runtime enum its nominal identity
+(ADR-074). **S19 and S21 are done** (ADR-071, ADR-072, ADR-073). **No decision
+blocks a stage any more**; D16 is the one still open and it belongs to a stage
+that is already closed.
 
 **S23 is closed.** All four of its findings are fixed and gated — **REP-13**,
 **REP-11**, **REP-12** and **REP-02** — each as its own commit with the suite
@@ -104,7 +106,7 @@ record and tuple patterns (ADR-069) — and REP-21 (`min=`/`max=`, ADR-070) was 
 one unscheduled row. **REP-24 was found in between**: §4.5's and §4.6's own
 declaration examples do not parse, because a declaration's members had to be
 comma-separated and the design doc writes them on separate lines. What is left of
-the repair is **S18, S19 and S20** — S21 is closed below; S18 is `D1`-blocked.
+the repair is **S20** — S18, S19 and S21 all closed in the session after.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
 Now: **1478 passed, 0 failed, 24 ignored**, measured after S21 alone (the
@@ -167,6 +169,66 @@ REP-24, REP-21 and REP-25:
 the two updating rows: `Map` only, at the plain store's arity, and pointing at
 wrappers of their own — a row that reused `MapInsert` would spell `min=` and mean
 `=`.
+
+### S18 — the `Option` contract and enum nominal identity (RT-13, RT-14, RT-15, D1)
+
+Three ADRs (**074**, **075**, **076**), one ABI bump (13 → 14, S18's only one),
+five ignored exit-criterion tests un-ignored, and five defect-pinning tests
+rewritten rather than updated.
+
+**The headline is that a runtime enum now records which enum type it is.** A
+single `ENUM` descriptor serves every enum value, so the per-type knowledge has
+to live in the payload — as `RecordSchema` and `TupleSchema` already do — and for
+enums it lived nowhere: `Colour::Red` equalled `Light::Red`, they hashed alike,
+and `enum_format` could only write `<variant 0: 3>`. `EnumPayload` gains a leading
+`schema: *const EnumSchema`, which moved the tag to offset 8 and is why runtime
+and codegen had to land in one commit (H6). D1's answer needed it: `m.get(k)`'s
+`Option` is built by the **runtime**, whose only knowledge of `V` is the value it
+found, and it must match arms compiled from the **codegen's** `Option[Int]`.
+
+**D1's answer, implemented:** `Map.get` and `Grid.find` answer `Option[V]` (§5.7
+wrote that signature literally all along); an empty `min`/`max` **faults**, because
+`0` is a wrong answer and not a missing one; `Counter.get` keeps its zero default,
+which §6.2 says is deliberate.
+
+**The two owed fault kinds are paid.** `EmptyRange` and `NoAnswer` ride inside
+v14. One of the three debts is settled *differently* and the disagreement is
+written down (ADR-075): `praxis_range_len` raises `IntOverflow`, not the
+empty-range kind ADR-059 asked for, because the range it fires on is
+`Int::MIN..Int::MAX` — the fullest one expressible — and "empty range" would be a
+fault message that contradicts its own input.
+
+| Test | File | Pins |
+|---|---|---|
+| `two_enum_types_of_one_shape_are_not_one_type` | `praxis-runtime/src/enums.rs` | RT-13's core — a nominal enum is its declared type, an anonymous one is its shape, and a different variant of the same type is still unequal |
+| `one_enum_type_built_by_two_schema_allocations_is_one_type` | `enums.rs` | the other half: two JIT generations, or a generation and the parser registry, mint separate schemas for one type and their values must be equal **and hash equally** |
+| `one_enum_name_over_two_variant_lists_is_two_types` | `enums.rs` | the shape check that rides along with the name — a debugger session that reloaded a *changed* definition must not compare a stale value through the new descriptors |
+| `a_some_of_two_different_payload_types_is_not_equal` | `enums.rs` | the null-slot rule applied to enums: under one `Option` schema whose `Some` slot is unknown, `Some(1)` and `Some("1")` are unequal rather than one being read through the other's descriptor (P0-11) |
+| `a_known_payload_slot_and_an_unknown_one_describe_one_option_type` | `enums.rs` | the fact D1 rests on — the runtime's `option_schema` (null `Some` slot) and the codegen's `Option[Int]` (`INT` slot) are **one type**, in both directions, and their values are equal and hash equally |
+| `an_enum_renders_its_variant_name_and_payload` | `enums.rs` | `Some(3)` and `None`, replacing `<variant 0: 3>` |
+| `an_out_of_range_tag_answers_the_unit_sentinel` | `enums.rs` | `praxis_alloc_enum` reads the arity **from the schema**, so a tag with no variant has no arity to guess at; a null schema is the same answer `praxis_alloc_tuple` already gives |
+| `alloc_enum_round_trips_the_tag_and_the_schema` | `enums.rs` | the payload really carries the schema pointer it was handed, at every tag |
+| `run_pass_enum_renders_its_variant_name` | `praxis-cli/tests/run.rs` | RT-13 at the surface — a declared enum and the prelude `Option` render alike, through the CLI |
+| `an_option_from_the_runtime_and_one_from_the_program_are_one_type` | `jit.rs` | the same fact from source: `m.get(1) == Some(10)`, a differing payload unequal, `None` matching, and a `Text` payload staying a `Text` |
+| `an_absent_map_get_matches_none_and_a_present_one_matches_some` | `jit.rs` | **D1's end-to-end gate** — both arms reachable, a `Text` value read through `.len()`, and `m[7]` still faulting so §4.7's *other* half is unchanged |
+| `an_absent_grid_find_is_none_and_a_hit_is_some_of_the_point` | `jit.rs` | the same under a tuple payload, binding `Some((x, y))` |
+| `an_empty_min_or_max_faults_rather_than_answering_zero` | `jit.rs` | **rewrite** of `adv_pipeline_empty_source_min_is_zero`. Both sinks, a `Vec` that a `filter` empties (the case a real program hits), and non-empty answers still right — the `max` half with negative elements, where the seeded `0` was above every one |
+| `an_absent_map_get_answers_none_and_a_present_one_answers_some` | `jit.rs` | **rewrite** of `map_get_absent_returns_unit`, which asserted only that no fault occurred because there was nothing else it could look at |
+| `an_absent_map_get_is_a_none_the_program_can_match_on` | `jit.rs` | **rewrite** of `adv_map_get_absent_returns_unit`, which checked absence by comparing the answer against `Int 0` and expecting *false* |
+| `absent_map_get_does_not_return_an_untyped_unit_sentinel` | `praxis-runtime/src/abi.rs` | **un-ignored and strengthened** — the answer is `None` by tag, and a hit is `Some` carrying the value |
+| `absent_grid_find_does_not_return_an_untyped_unit_sentinel` | `abi.rs` | **un-ignored and strengthened** — the same, and a hit's payload is a real `TUPLE` |
+| `absent_map_get_has_no_unit_under_the_value_type` | `adversarial_audit.rs` | **un-ignored and rewritten** — it asserted `== INT.id()`, which was the best a `V`-typed row could ask for; it is a source-level unwrap now |
+| `absent_grid_find_has_no_unit_under_a_tuple_type` | `adversarial_audit.rs` | **un-ignored and rewritten** — same, from `== TUPLE.id()` |
+| `map_get_returns_option` | `infer_tests.rs` | **un-ignored**, unchanged: `fn lookup(map: Map[Text, Int]) -> Option[Int] { map.get("key") }` type-checks |
+| `a_subscript_reads_the_type_the_receiver_holds_at_that_key` | `infer_tests.rs` | **rewritten in part** — its last assertion was `!has_type_error("… -> Int { m.get(\"a\") }")`, which inverts; the `Option[Int]` spelling is the one that compiles now |
+| `a_non_faulting_row_with_a_value_result_cannot_answer_the_unit_sentinel` | `praxis-stdlib/src/builtins.rs` | **the stage's standing invariant** — every catalog row that lowers to a runtime symbol declares `Unit` iff its manifest row says `AbiRet::GcUnit`. Its doc says what it does **not** prove |
+| `map_get_and_grid_find_answer_an_option` | `builtins.rs` | D1's two rows by name, plus `Counter.get` still `Int` |
+| `a_range_whose_count_has_no_int_faults_rather_than_wrapping_negative` | `abi.rs` | `praxis_range_len` had **no fault test at all**; the re-pointed kind gets one, with a range one narrower to show the refusal is the edge and not the rule |
+
+`an_inverted_clamp_range_faults_rather_than_guessing` (`abi.rs`), the clamp
+assertion in `jit.rs`, and the graph walks' two negative-operand assertions were
+**re-pointed**, not rewritten: they asserted `InvalidSize`, which was a borrowed
+kind three ADRs recorded as owed.
 
 This session's sixteen new gates and three rewrites (**ADR-066**, **ADR-067**,
 **ADR-068**):
@@ -305,7 +367,7 @@ that denotes a value, so there are no phantom names left.** The graph-representa
 decision D5 said was "owed before the unit starts" is answered in ADR-060, and
 the answer was already written down — §6.5 asks for "closure-based algorithms
 that do not require materializing a graph object" and shows the exact spelling.
-See §4 for what S18 needs.
+See §4; S18 is done.
 
 Thirteen exit-criterion tests were un-ignored by S17, bringing the repair's
 running total to **ninety-seven** of the audit's ignored regressions un-ignored
@@ -1045,7 +1107,8 @@ deliberately:** the runtime half — `EnumSchema`, `EnumPayload`'s schema pointe
 `praxis_alloc_enum`'s new parameter — which is **RT-13 in S18** (plan §5 says so
 explicitly, and says RT-13 needs TY-06's canonical `Option` first). `SchemaIdentity`
 is untouched; nothing in `praxis-types` is `#[repr(C)]`, so **S11 spent no ABI
-bump and S12 starts fresh**.
+bump and S12 starts fresh**. **The runtime half landed in S18** (ADR-074), on
+TY-06's canonical `Option` exactly as predicted, and spent 13 → 14.
 
 **F10 — scheme-owned binders + `Level` + the constraint channel: landed
 whole.** The first half landed in S11: `VarState::Generalized` is deleted,
@@ -1222,7 +1285,53 @@ rewritten to say so — it used to blame a catalog defect TY-31 had fixed.
 sibling.** It dereferenced every schema slot unconditionally, which is UB on a
 null one; use `tuple_element_descriptor_slots` when a slot might be unknown.
 
-### From this session (REP-15, REP-19, REP-23)
+### From S18 (RT-13, RT-14, RT-15, D1)
+
+**`m.get(k)` is an `Option[V]` and no longer a `V`.** Every call site that used
+it as a bare value is a `Y001` now. The fix is almost always `m[k]` — §4.7's
+assertion-like half — because the key is known present; use `match` where it is
+not. `Grid.find` is the same. `Counter.get` is **unchanged** (§6.2's zero
+default), and so are `find`/`position` on a sequence, which answer an `Int` index
+with a `-1` miss sentinel.
+
+**`v.min()` and `v.max()` fault on an empty sequence** rather than answering `0`.
+They join `reduce`/`min_by`/`max_by`, which MIR-09 already gave
+`FaultKind::EmptyCollection`.
+
+**`EnumPayload`'s first field is a `*const EnumSchema`**, so the tag is at offset
+8, and `lower.rs` reads it through `ENUM_TAG_OFFSET =
+offset_of!(EnumPayload, tag)`. If you add a field, put it after `items` or expect
+every `match` in the language to read the wrong word. `praxis_alloc_enum` is
+`(ctx, schema, tag)` — the arity is **read from the schema**, not passed.
+
+**An `EnumSchema` payload slot may be null**, exactly as a `TupleSchema` slot may:
+"the producer had no static type here", and the value's own descriptor answers.
+This is not an optimisation — `option_schema`'s `Some` slot is null on purpose,
+and it is what makes a runtime-built `Some` the same type as a program-written
+one.
+
+**Hazard H15 covers a third schema pointer.** A live `EnumPayload` names a
+`*const EnumSchema` in a generation arena (`Generation::enum_schema`) or in the
+parser's `ParserSchemas`. `Generation::retire`'s `HeapDrained` proof and
+`retire_schemas` are what discharge it; nothing new is leaked.
+
+**`FaultKind` has two more variants**, `EmptyRange = 14` and `NoAnswer = 15`, and
+`InvalidSize` narrowed back to the `Grid`/`BitSet` extent cases. Four raises
+moved; `praxis_range_len` went to `IntOverflow` rather than to `EmptyRange`, and
+ADR-075 argues why.
+
+**`AbiRet::Gc` split into `Gc` and `GcUnit`.** Any exhaustive match over `AbiRet`
+gains an arm; codegen treats the two identically. Adding a "may be either" arm is
+the thing not to do — its absence is what makes RT-14 unrepresentable.
+
+**`AllocKind::Enum` carries a `ty: MirType`**, and `lower_inst` takes
+`&mut TypeDb` (it resolves a generic enum's payload through
+`variant_payload_of`, which interns).
+
+**`RUNTIME_ABI_VERSION` is 14.** S18 spent the bump; S19, S20 and S21 have
+none — none of them changes a `#[repr(C)]` type generated code reads.
+
+### From an earlier session (REP-15, REP-19, REP-23)
 
 **A `for` no longer indexes what it was given** (ADR-066). It indexes a
 **snapshot**: `IterPlan` decides, and only `Vec`/`Deque`/`Range`/`Seq` are walked
@@ -2043,8 +2152,10 @@ record and enum shapes take their names from user source, so a duplicate is user
 input.
 
 **A malformed method-catalog row panics.** `pattern_to_type`'s collection arm
-`expect`s, because the catalog is compiler-authored data. S18's RT-14/RT-15
-sweep is where that becomes a standing test.
+`expect`s, because the catalog is compiler-authored data. S18's sweep —
+`a_non_faulting_row_with_a_value_result_cannot_answer_the_unit_sentinel` — is the
+standing test, and what it checks is the *Unit* invariant rather than the arity
+one; a row whose argument count disagrees with its ctor still panics.
 
 **There is no `VarState::Generalized`.** `VarState` is `Unbound { level } |
 Linked { target }`. A `match` over it is one arm shorter, and "is this variable
@@ -2631,21 +2742,18 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**S18 is the answer, and it needs D1 answered first.** Every row the register
-holds is done and every stage the plan schedules is closed; what is left is
-**S18…S21, which were never started**. `15-repair-rep10-rep24-rep21-handover.md`
-is this session's note.
+**S19…S21 are what is left.** Every row the register holds is done, every stage
+the plan schedules is closed, and **S18 is now closed too** — D1 answered and
+implemented (ADR-076), RT-13 landed with the ABI bump 13 → 14 (ADR-074), and the
+two fault kinds three S17 ADRs recorded as owed are paid (ADR-075).
 
-- **D1 (plan §7)** — `Map.get`/`Grid.find` answering `Option[V]` versus
-  `V`-with-`Unit`, and with it `min`/`max` on an empty sequence (which answer `0`
-  today; `adv_pipeline_empty_source_min_is_zero` pins it). Two `#[ignore]`d tests
-  name it directly, in `praxis-runtime/src/abi.rs`.
-- **S18 also owns RT-13**, F12's runtime half — `EnumSchema`, `EnumPayload`'s
-  schema pointer, and `praxis_alloc_enum`'s new schema parameter — which must land
-  in **one** commit with codegen and spends the ABI bump 12 → 13 (H17). Whoever
-  spends it should also add the **two missing fault kinds** four raises currently
-  borrow `InvalidSize` for: an empty range (ADR-058, ADR-059) and "an argument
-  this algorithm has no answer for" (ADR-060).
+- ~~**D1 (plan §7)**~~ **answered and implemented.** `Map.get`/`Grid.find` answer
+  `Option[V]`; an empty `min`/`max` faults; `Counter.get` keeps its zero default.
+- ~~**S18 also owns RT-13**~~ **landed**, in one commit with codegen as required.
+  Note for anyone reading the old text: it says the bump is "12 → 13", which was
+  already stale — S17 spent 12 → 13 and S18 spent **13 → 14**.
+- **There is no ABI bump left in this round.** S19, S20 and S21 have none; H17 is
+  one per stage and S18 spent the one that was available.
 
 Two things this session found and did **not** chase — neither is registered,
 because neither was reproduced against a stated contract:
@@ -2792,8 +2900,8 @@ What S25 has delivered:
   text.** Both were also in the bytes the interpreter had to match, so the leading
   one could never match at all.
 
-**S18 is still `D1`-blocked** and D1 is still open, so it is not the answer to
-"what next" either — see the S18 block below for what it needs.
+~~**S18 is still `D1`-blocked**~~ **S18 is done** (2026-07-31), D1 with it — see
+the S18 block below.
 
 `14-repair-rep15-rep19-rep23-handover.md` is the previous session's note; read it
 for REP-22's detail and for the six things worth not rediscovering.
@@ -2914,18 +3022,16 @@ Things this session found — **now registered and scheduled** as **REP-01**,
   connectives that are missing. With REP-09 it is what stands between §3.3 and
   compiling, and **making §3.3 compile is S25's acceptance criterion**.
 
-### S18
+### S18 — **done**
 
-**S18 is `D1`-blocked and D1 is still open** (plan §7): `Map.get`/`Grid.find`
-
-**S18 is `D1`-blocked and D1 is still open** (plan §7): `Map.get`/`Grid.find`
-returning `Option[V]` versus `V`-with-`Unit`. Two `#[ignore]`d tests name it
-directly — `absent_map_get_does_not_return_an_untyped_unit_sentinel` and
-`absent_grid_find_does_not_return_an_untyped_unit_sentinel` in
-`praxis-runtime/src/abi.rs`. S18 also owns **RT-13**, F12's runtime half, which
-§2 records as deliberately unlanded and which needs an ABI bump of its own — the
-first one available, since S17 spent 12→13 and both ADR-058 and ADR-059 declined
-to spend a second (see below).
+RT-13, RT-14, RT-15 and D1 are all closed. `Map.get` and `Grid.find` answer
+`Option[V]`; an empty `min`/`max` faults; `Counter.get` is unchanged; a runtime
+enum carries an `EnumSchema` and so has a nominal identity, a variant name and a
+payload-descriptor list; `praxis_alloc_enum` takes `(ctx, schema, tag)` and reads
+the arity from the schema; `FaultKind` gained `EmptyRange` and `NoAnswer`; and
+`AbiRet` gained `GcUnit`, which is what makes RT-14 unrepresentable rather than
+merely fixed. ABI 13 → 14. ADRs **074**, **075**, **076**. The old text of this
+section (it was duplicated, and its bump number was stale) is replaced.
 
 Carried forward from S17's earlier sessions — **all four are registered and
 scheduled now** (plan §4.1):
@@ -3039,7 +3145,10 @@ Carried forward from S17's earlier sessions:
   The first two are cases of one missing kind — an **empty range**; the third is
   a second missing kind, "an argument this algorithm has no answer for".
   Whichever stage next spends a bump (S18's RT-13 is the first that must) should
-  add both and re-point those four raises. `BuiltinTypeId::Range` needed no bump:
+  add both and re-point those four raises. **Done in S18 (ADR-075)** —
+  `EmptyRange` and `NoAnswer`, with `praxis_range_len` going to `IntOverflow`
+  rather than to `EmptyRange`, against ADR-059's own request and with the
+  disagreement written down. `BuiltinTypeId::Range` needed no bump:
   it is appended, so no existing id or `#[repr(C)]` layout moved, and the same
   reasoning covered ADR-058's seven and ADR-060's six new symbols.
 
@@ -3325,8 +3434,9 @@ blocked on this stage. The ADR is **054**. Notes worth carrying:
   resetting it, because `|` is not a bracket the grammar closes over. See
   ADR-050; nothing in the corpus depends on either choice.
 
-**F12's runtime half is still owed, and it is S18's.** What did *not* land, on
-purpose:
+**F12's runtime half is still owed, and it is S18's.** *(Paid in S18, ADR-074 —
+the list below is kept as written, with what landed noted under each.)* What did
+*not* land at the time, on purpose:
 
 1. **`EnumSchema`, `EnumPayload`'s schema pointer, and
    `praxis_alloc_enum(ctx, tag, arity)`'s new schema parameter** — that is
@@ -3337,11 +3447,21 @@ purpose:
    exactly once (H17). §4's earlier reading of F12 as "one commit across codegen
    and runtime" merged the two halves; the plan does not, and RT-13's own entry
    says it depends on TY-06's canonical `Option` — which now exists.
+   > **Landed** in one commit as required. The bump was **13 → 14**, not 12 → 13
+   > (S17 had spent 12 → 13 in between). `praxis_alloc_enum` did not merely gain
+   > a schema parameter: it **lost** its arity one, which is now read from the
+   > schema as `praxis_alloc_tuple` already read its own.
 2. **`SchemaIdentity` is untouched.** RT-12 landed
    `Nominal(&'static str)` in S10 and nothing about `RecordSchema::same_type`
    changed here. When S18 gives a runtime enum an identity, the *record*
    identity can carry arguments alongside the name at the same time — see
    ADR-048's last alternative for why the name, not the plan's `Nominal(u64)`.
+   > **S18 reused `SchemaIdentity` unchanged** rather than minting a second copy
+   > for enums, and did **not** put arguments in it: `EnumSchema` tells
+   > `Option[Int]` from `Option[Text]` by its payload descriptors instead, which
+   > is what lets a slot be *null* where the producer has no static type. An
+   > argument-carrying identity could not have been null-tolerant, and
+   > `option_schema`'s `Some` slot has to be.
 3. **DBG-02's value-less half is still open.** A record object records its
    nominal name; turning that name back into a `Type` needs a
    name→`RecordDefId` lookup *and* field types the schema does not carry (it has
@@ -3435,28 +3555,32 @@ Two things S10 leaves for a later stage, both deliberate:
   sink. This is the residue of P0-08's open question; the verifier has no
   "every faulting instruction is observed" rule because the codebase does not
   satisfy one yet.
-- **`min`/`max` on an empty sequence still return `0`.** They share MIR-09's
-  empty case but not its defect — the accumulator is a scalar initialized to
-  `0`, so the answer is defined, if debatable. `adv_pipeline_empty_source_min_is_zero`
-  pins it. Whether `0` is right is **D1**'s question, and S18 is where it gets
-  settled alongside `Map.get` / `Grid.find`.
+- ~~**`min`/`max` on an empty sequence still return `0`.**~~ **Settled in S18**
+  (D1, ADR-076): they **fault** with `EmptyCollection`, joining the three seeded
+  sinks. `0` was a *wrong* answer, not a missing one — it is below every element
+  of `[3, 4]` and above every element of `[-3, -4]`.
+  `adv_pipeline_empty_source_min_is_zero` was a defect-pinning test and is
+  rewritten as `an_empty_min_or_max_faults_rather_than_answering_zero`.
 
 **What S8 deliberately left** (still true):
 
 - **`tuples::POINT` is still a process-static leak.** One `TupleSchema` for every
   grid position, minted by the runtime rather than by a compile, so there is no
   generation to hang it on. Bounded at one.
-- **Enum schemas have no generation home** because they do not exist yet
-  (RT-13/F12, S18). When they do, they belong in `Generation` beside the record
-  and tuple caches — the plan sketch already lists an `enum_schemas` field.
+- ~~**Enum schemas have no generation home**~~ **They do now** (S18): an
+  `enum_schemas` cache sits in `Generation` beside the record and tuple ones, as
+  the plan sketch said, keyed on `(generation, def_id, payload descriptors)`. The
+  third part of the key is what a record key does not need — `Option` is generic,
+  so one def id covers `Option[Int]` and `Option[Text]`.
 - **A plan is registered per compile and never deduplicated.** A debugger session
   that reloads a thousand times registers a thousand plans; `MAX_PLANS` (2^20)
   catches a runaway, and `retire_parser_plans` reclaims at teardown, but there is
   no interning as there is for JIT metadata. Keying on the `ParserAst` would give
   it; nothing needs it yet.
 
-Re-read §6 of the plan first. The hazards that still bind: **H17** (RT-13 spends
-S18's one bump — S11's went unspent, because the runtime half did not land), and
+Re-read §6 of the plan first. The hazards that still bind: ~~**H17** (RT-13
+spends S18's one bump)~~ — **spent**, 13 → 14, and there is none left in this
+round; and
 **H10** in its long form — the MIR verifier's "no `Opaque` in a
 descriptor-producing position" rule, which S15 could **not** turn on. It now
 waits on **S21** (MIR-05's per-stage item types) *and* on a catalog fix for
@@ -3674,7 +3798,7 @@ one. Settle both together.
 | D4 | Hashability of mutable collections as Map keys | S17 — **answered and implemented** (ADR-057) |
 | D5 | The 15 phantom prelude names: implement or delete | S17 — answered; units 1–2 implemented (ADR-056, ADR-058). **Unit 3's graph-representation sub-decision is still owed** |
 | D6 | `CollectionCtor::Range`: delete or implement | S17 — **answered and implemented, all four sub-decisions included** (ADR-059) |
-| D1 | `Map.get` / `Grid.find` — `Option[V]` or V-with-Unit; and `min`/`max` on an empty sequence. Source-visible | S18 — **answered** (2026-07-31): `Option[V]`, an empty `min`/`max` faults, `Counter.get` keeps its zero default |
+| D1 | `Map.get` / `Grid.find` — `Option[V]` or V-with-Unit; and `min`/`max` on an empty sequence. Source-visible | S18 — **answered and implemented** (2026-07-31, ADR-076): `Option[V]`, an empty `min`/`max` faults, `Counter.get` keeps its zero default |
 | D10 | How much parser-expression grammar a template capture body may contain | S19 — **answered** (2026-07-31): a full parser expression, nested |
 | D11 | `grid(int)` granularity; greediness of `text`/`word` | S20 — **answered** (2026-07-31): `grid(int)` is a whole token, `text`/`word` are non-greedy |
 | D12 | Panic-across-FFI policy — should precede RT-06, RT-07 and the parser findings | cross-cutting — **answered** (2026-07-31): per-wrapper totality plus one `catch_unwind` backstop |
@@ -3704,6 +3828,33 @@ the plan's §7 under each heading. The short version:
 ## 6. Corrections to the plan
 
 Things the plan states that are no longer or were not quite true.
+
+### From S18
+
+- **The plan's S18 line numbers are stale.** The two ignored runtime tests it
+  cites at `abi.rs:3544`/`:3564` were at `:5659`/`:5679` when S18 opened them, and
+  the `unit_sentinel` count it gives as "~56" was **94**. Most of those are
+  legitimate: 21 wrappers answer Unit as their whole result, and the rest use it
+  as the fault return.
+- **The plan's S18 block says the ABI bump is "12 → 13".** S17 spent 12 → 13.
+  S18 spent **13 → 14**.
+- **`infer.rs`'s fresh-`Option`-per-site minting was already fixed** by TY-06
+  before S18 opened; `TypeDb::option_def`/`option_of` are the single canonical
+  def, and S18 built on them rather than on the plan's description.
+- **RT-13 does not need `TypePattern` to grow a `Collection` ctor for `Option`.**
+  It grew an `Option(Box<TypePattern>)` arm of its own, because `Option` is an
+  *enum* def and a row spelling it must lower through `TypeDb::option_of`.
+- **ADR-059's own assignment was overruled**, deliberately and in writing.
+  `praxis_range_len` raises `IntOverflow`, not the empty-range kind ADR-059 asked
+  for; ADR-075 §Decision 3 argues it and ADR-059 carries a supersession note.
+- **`record_schema_for`'s generic-def refusal has no enum analogue and must not
+  grow one.** `Option` is the one generic def the language has; refusing it would
+  refuse `Map.get`, `Grid.find` and every graph walk.
+- **A source-level test cannot observe two *declared* enum types being unequal.**
+  The type checker refuses `Colour::Red == Light::Red` before the runtime sees
+  it, and variants are bare names, so the identity gate lives in `enums.rs` at
+  the unit level and the source-level gate is the `Option` one (a runtime-built
+  `Some` against a program-written one), which is the case that actually arises.
 
 - **The numeric prelude helpers do not "want TY-31's numeric constraint".** Plan
   §5's S17 unit 2 and §7's D5 both say they do, and sequence them after the

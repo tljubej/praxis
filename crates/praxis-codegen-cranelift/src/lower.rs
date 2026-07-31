@@ -48,6 +48,14 @@ const RECURSION_DEPTH_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, recurs
 /// Praxis function returns a valid `GcRef` — including when it unwinds.
 const UNIT_REF_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, unit_ref) as i64;
 
+/// The byte offset of `tag` within an `EnumPayload`. `match` reads it directly
+/// rather than through a wrapper call, so it is baked into emitted code — and
+/// it was baked in as a literal `0` until the payload gained a leading schema
+/// pointer (RT-13) and moved the tag to offset 8. Computed from the `#[repr(C)]`
+/// layout, like `SLOTS_OFFSET`, so the next reorder is a compile-time-derived
+/// constant rather than a silent miscompile of every enum in the language.
+const ENUM_TAG_OFFSET: i32 = core::mem::offset_of!(praxis_runtime::enums::EnumPayload, tag) as i32;
+
 /// Lower one MIR function into a Cranelift function and define it in `module`.
 pub(crate) fn lower_function<M: Module>(
     module: &mut M,
@@ -448,7 +456,7 @@ fn lower_inst<M: Module>(
     imports: &mut HashMap<RuntimeSymbol, FuncRef>,
     user_funcs: &HashMap<String, FuncId>,
     user_cache: &mut HashMap<String, FuncRef>,
-    db: &praxis_types::TypeDb,
+    db: &mut praxis_types::TypeDb,
     generation: &Generation,
 ) -> Result<()> {
     match inst {
@@ -587,18 +595,25 @@ fn lower_inst<M: Module>(
                     builder.def_var(vars[dst.0 as usize], record_ref);
                 }
                 AllocKind::Enum {
-                    enum_def_id: _,
+                    enum_def_id,
                     variant_idx,
+                    ty,
                     args,
                 } => {
-                    // praxis_alloc_enum(ctx, tag, arity) -> GcRef. Then fill in
-                    // each payload via praxis_enum_set_payload.
+                    // Build (or fetch a cached) 'static EnumSchema for this
+                    // enum type, embed its address, and call
+                    // praxis_alloc_enum(ctx, schema_ptr, tag) -> GcRef. The
+                    // arity is read from the schema rather than passed here, so
+                    // an allocation whose arity disagrees with its shape is not
+                    // expressible. Then fill in each payload via
+                    // praxis_enum_set_payload.
+                    let schema_ptr = enum_schema_for(db, *enum_def_id, *ty, generation)?;
+                    let schema_imm = builder.ins().iconst(GC, schema_ptr as i64);
                     let tag_val = builder.ins().iconst(GC, *variant_idx as i64);
-                    let arity_val = builder.ins().iconst(GC, args.len() as i64);
                     let enum_ref = call_symbol(
                         builder,
                         ctx_val,
-                        &[tag_val, arity_val],
+                        &[schema_imm, tag_val],
                         RuntimeSymbol::AllocEnum,
                         module,
                         imports,
@@ -1298,7 +1313,10 @@ fn lower_inst<M: Module>(
             // Read the tag directly from the EnumPayload. The payload starts at
             // gc_ref + GcHeader::payload_offset_for(align_of(EnumPayload)) —
             // the runtime's single object-layout authority, not a header size
-            // this file re-derives. The tag is a u32 at offset 0 of the payload.
+            // this file re-derives. The tag sits at `ENUM_TAG_OFFSET` within
+            // the payload — derived from the `#[repr(C)]` struct, not written
+            // out as a literal, because it moved when the payload gained its
+            // schema pointer (RT-13).
             let enum_ref = builder.use_var(vars[src.0 as usize]);
             let payload_offset =
                 praxis_runtime::gc::GcHeader::payload_offset_for(core::mem::align_of::<
@@ -1308,7 +1326,9 @@ fn lower_inst<M: Module>(
             // Read just the u32 tag (not a full I64 — the 4 bytes of padding
             // after the tag are uninitialized bumpalo memory). In Cranelift
             // 0.134, uload32 returns an I64 with the upper 32 bits zeroed.
-            let tag = builder.ins().uload32(MemFlags::trusted(), tag_ptr, 0);
+            let tag = builder
+                .ins()
+                .uload32(MemFlags::trusted(), tag_ptr, ENUM_TAG_OFFSET);
             builder.def_var(vars[dst.0 as usize], tag);
         }
         Inst::EnumPayloadGet { dst, src, idx } => {
@@ -1481,7 +1501,10 @@ fn signature_for<M: Module>(sym: RuntimeSymbol, module: &M) -> Signature {
         sig.params.push(AbiParam::new(abi_type(kind, pointer)));
     }
     match abi.ret {
-        AbiRet::Gc | AbiRet::Ptr => sig.returns.push(AbiParam::new(pointer)),
+        // `GcUnit` is a `GcRef` like any other at the machine level — the
+        // distinction it draws is about what the *value* means, not how it
+        // travels (RT-14).
+        AbiRet::Gc | AbiRet::GcUnit | AbiRet::Ptr => sig.returns.push(AbiParam::new(pointer)),
         AbiRet::RawI64 => sig.returns.push(AbiParam::new(types::I64)),
         AbiRet::Void => {}
     }
@@ -1673,6 +1696,82 @@ fn record_schema_for(
             })
             .collect::<Result<Vec<_>>>()
     })
+}
+
+/// Build (and cache) an `EnumSchema` for enum def `id` at the instantiation
+/// `ty` in this JIT generation, returning its address as a raw pointer the JIT
+/// embeds as an immediate.
+///
+/// The schema is what gives a runtime enum value its nominal identity (RT-13):
+/// without one, `Colour::Red` and `Light::Red` were the same value and no enum
+/// could render its variant name.
+///
+/// **`record_schema_for`'s refusal of a generic def is deliberately not copied
+/// here.** A record def with parameters cannot arrive at codegen — there is no
+/// `struct P[T]` syntax and a `RecordLit` carries no arguments to substitute —
+/// but `Option` *is* generic (F12) and is the one enum every `Map.get`,
+/// `Grid.find` and graph walk answers, so refusing it would refuse the feature.
+/// `variant_payload_of` substitutes the instance's arguments instead, which is
+/// what `ty` is carried through the MIR for.
+///
+/// A payload slot whose type is still an inference *variable* — or a whole
+/// instantiation the lowering had no type for — resolves to a **null**
+/// descriptor rather than failing the compile, the same exception
+/// `tuple_schema_for` makes for the same reason (HIR-01/MONO-01). The value's
+/// own descriptor answers for it, and it is read off the object's header, so it
+/// is never the wrong one.
+fn enum_schema_for(
+    db: &mut praxis_types::TypeDb,
+    id: u32,
+    ty: MirType,
+    generation: &Generation,
+) -> Result<*const praxis_runtime::enums::EnumSchema> {
+    use praxis_runtime::records::SchemaIdentity;
+    use praxis_types::data::{EnumDefId, TypeData};
+    let def_id = EnumDefId(id);
+    let def = db.enum_def(def_id).clone();
+    // A declared enum is its name; the input parser's `choice` (§7.5) produces
+    // an anonymous one, whose identity is its variant shape. The name is copied
+    // into the generation so the schema outlives this `TypeDb`.
+    let identity = match &def.name {
+        Some(name) => SchemaIdentity::Nominal(generation.alloc_str(name)),
+        None => SchemaIdentity::Anonymous,
+    };
+    // The instance's type arguments, when the lowering had a type for the
+    // value. `MirType::Opaque` and a non-enum type both mean "no arguments to
+    // substitute"; the def's own payload types are then resolved directly, and
+    // a generic def's parameters resolve to null slots.
+    let args: Vec<praxis_types::Type> = match ty.known().map(|t| db.data(db.follow(t))) {
+        Some(TypeData::Enum { def: d, args }) if *d == def_id => args.to_vec(),
+        _ => Vec::new(),
+    };
+    let mut variants: Vec<(
+        &'static str,
+        Vec<*const praxis_runtime::descriptor::TypeDescriptor>,
+    )> = Vec::with_capacity(def.variants.len());
+    for (idx, variant) in def.variants.iter().enumerate() {
+        let payload_types: Vec<praxis_types::Type> = if args.is_empty() {
+            variant.payload.clone()
+        } else {
+            db.variant_payload_of(def_id, &args, idx)
+        };
+        let descriptors = payload_types
+            .iter()
+            .enumerate()
+            .map(|(slot, t)| match praxis_repr::descriptor_for_type(db, *t) {
+                Ok(d) => Ok(d as *const _),
+                Err(e) if e.is_unresolved() => Ok(std::ptr::null()),
+                Err(e) => Err(anyhow!(
+                    "enum variant `{}` payload {slot}: cannot emit a runtime descriptor for `{}`: {}",
+                    variant.name,
+                    db.render(*t),
+                    e.reason
+                )),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        variants.push((generation.alloc_str(&variant.name), descriptors));
+    }
+    Ok(generation.enum_schema(id, identity, variants))
 }
 
 /// Build (and cache) a `TupleSchema` for the tuple type `ty` in this JIT

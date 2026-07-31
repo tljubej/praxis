@@ -7,3 +7,6 @@
 .idea/
 .DS_Store
 .zcode/
+
+# Agent worktrees (git worktree checkouts live here; never part of a commit)
+.claude/worktrees/

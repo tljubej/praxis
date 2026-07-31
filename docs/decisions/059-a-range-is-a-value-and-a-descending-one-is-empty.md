@@ -119,6 +119,13 @@ a `for` loop over every integer would have run zero times. The kind is
 about clamp: S17's one ABI bump is spent (H17). A dedicated empty-range kind is
 owed to whichever stage next spends one, and these two are its cases.
 
+> **Superseded in part by ADR-075.** S18 spent the bump and added
+> `FaultKind::EmptyRange`, but did **not** put `praxis_range_len` in it: the
+> range this fires on is `Int::MIN..Int::MAX`, the fullest one expressible, so
+> "empty range" would be a fault message that contradicts its own input. It
+> raises `IntOverflow`, which is what `gcd`, `lcm` and A\*'s path cost already
+> answer for a result with no `Int`. `clamp` alone is `EmptyRange`.
+
 `..=Int::MAX` is the one inclusive range whose exclusive end does not exist. It
 **saturates** rather than faulting, and the saturation costs one index at the very
 top: the range is perfectly well defined, and there is no `Int` above `Int::MAX`

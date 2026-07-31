@@ -28,7 +28,7 @@ fn main() -> Int {
     var found = -1
     while frontier.len() > 0 {
         let node = frontier.pop_front()
-        let d = dist.get(node)
+        let d = dist[node]
         if node == goal {
             found = d
             break

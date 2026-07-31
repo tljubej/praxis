@@ -85,7 +85,16 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// `fault_message` — the slot `praxis_panic`/`praxis_assert` write the
 /// program's message into. Appended after `false_ref`, so every
 /// generated-code-read offset is unchanged; the struct's size is not.
-pub const RUNTIME_ABI_VERSION: u32 = 13;
+/// v14 (repair S18): `EnumPayload` gained a leading `schema: *const EnumSchema`
+/// — an enum value now records which enum *type* it is (RT-13) — so the `tag`
+/// moved from offset 0 to offset 8 and generated code reads it through
+/// `offset_of!` rather than a literal. `praxis_alloc_enum` changed shape with
+/// it: `(ctx, schema, tag)`, with the arity read from the schema instead of
+/// passed beside it. `FaultKind` also gained `EmptyRange` and `NoAnswer`, the
+/// two kinds three S17 ADRs recorded as owed (ADR-058, ADR-059, ADR-060), and
+/// four raises that had been borrowing `InvalidSize` moved onto them. A runtime
+/// of the previous version would read an enum's schema pointer as its tag.
+pub const RUNTIME_ABI_VERSION: u32 = 14;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -107,7 +116,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 13;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 14;
 
 // ---------------------------------------------------------------------------
 // The runtime symbol table (F4).
@@ -1082,9 +1091,8 @@ pub unsafe extern "C" fn praxis_int_max(
 /// mistake in the program, not in the data, and TY-28 already settled that the
 /// repair reports those rather than inventing a number. (Rust's `Ord::clamp`
 /// panics on the same input; a panic across `extern "C"` is what §10.4 forbids,
-/// so it is a fault.) The kind is `InvalidSize` — an argument the runtime cannot
-/// honour — because S17's one ABI bump is spent (H17); ADR-058 says why, and a
-/// dedicated kind is owed to whichever stage next spends one.
+/// so it is a fault.) The kind is `EmptyRange` — the kind ADR-058 recorded as
+/// owed to whichever stage next spent an ABI bump, which S18 does.
 ///
 /// # Safety
 /// `ctx` must be live and wired; all three operands must be valid `Int`
@@ -1100,7 +1108,7 @@ pub unsafe extern "C" fn praxis_int_clamp(
     let lo = unsafe { int_payload(low) };
     let hi = unsafe { int_payload(high) };
     if lo > hi {
-        unsafe { set_fault(ctx, RaisedFault::INVALID_SIZE) };
+        unsafe { set_fault(ctx, RaisedFault::EMPTY_RANGE) };
         return unsafe { unit_sentinel(ctx) };
     }
     if v < lo {
@@ -1481,20 +1489,37 @@ pub unsafe extern "C" fn praxis_record_field(
         .unwrap_or_else(|| unsafe { unit_sentinel(ctx) })
 }
 
-/// Allocate an enum value (M7, §4.6) with variant `tag` and `arity` payload
-/// slots all initialized to Unit. Payload values are filled via
-/// [`praxis_enum_set_payload`] after allocation. Returns the enum `GcRef`.
+/// Allocate an enum value (M7, §4.6) of the type `schema_ptr` describes, with
+/// variant `tag` and every payload slot initialized to Unit. Payload values are
+/// filled via [`praxis_enum_set_payload`] after allocation. Returns the enum
+/// `GcRef`.
+///
+/// The arity is **read from the schema** rather than passed alongside it, as
+/// [`praxis_alloc_tuple`] already does: a schema and an arity that disagree is
+/// a state no caller can now reach. A null schema, or a tag the schema has no
+/// variant for, allocates nothing and answers the Unit sentinel — the same
+/// answer `praxis_alloc_tuple` gives a null schema.
 ///
 /// # Safety
-/// `ctx` must be live and wired.
+/// `ctx` must be live and wired; `schema_ptr` must be null or a valid
+/// `'static` pointer.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_enum(
     ctx: *mut RuntimeContext,
+    schema_ptr: *const crate::enums::EnumSchema,
     tag: i64,
-    arity: i64,
 ) -> GcRef {
-    let unit = unit_sentinel(ctx);
-    let items = vec![unit; arity as usize];
+    if schema_ptr.is_null() || tag < 0 {
+        return unsafe { unit_sentinel(ctx) };
+    }
+    // SAFETY: caller guarantees schema_ptr is a valid 'static pointer.
+    let schema = unsafe { &*schema_ptr };
+    if schema.variant_at(tag as usize).is_none() {
+        return unsafe { unit_sentinel(ctx) };
+    }
+    let arity = schema.arity_of(tag as usize);
+    let unit = unsafe { unit_sentinel(ctx) };
+    let items = vec![unit; arity];
     // SAFETY: EnumPayload matches ENUM's size/align and is fully initialized.
     unsafe {
         gc_alloc_with(
@@ -1504,10 +1529,50 @@ pub unsafe extern "C" fn praxis_alloc_enum(
             std::mem::align_of::<crate::enums::EnumPayload>(),
             |payload| {
                 (payload as *mut crate::enums::EnumPayload).write(crate::enums::EnumPayload {
+                    schema: schema_ptr,
                     tag: tag as u32,
                     items,
                 });
             },
+        )
+    }
+}
+
+/// Allocate `Some(value)` under the runtime's own [`option_schema`].
+///
+/// `value` is rooted across the enum allocation: the allocation is a safepoint,
+/// and a bare `GcRef` argument is not in anyone's root set.
+///
+/// [`option_schema`]: crate::enums::option_schema
+///
+/// # Safety
+/// `ctx` must be live and wired; `value` must be a valid `GcRef`.
+pub(crate) unsafe fn option_some(ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
+    // SAFETY: the caller upholds ctx/value validity.
+    unsafe {
+        let scope = NativeScope::new(ctx);
+        let rooted = scope.root(value);
+        let some = praxis_alloc_enum(
+            ctx,
+            crate::enums::option_schema(),
+            crate::enums::OPTION_SOME_TAG,
+        );
+        praxis_enum_set_payload(ctx, some, 0, rooted.get());
+        some
+    }
+}
+
+/// Allocate `None` under the runtime's own `option_schema`.
+///
+/// # Safety
+/// `ctx` must be live and wired.
+pub(crate) unsafe fn option_none(ctx: *mut RuntimeContext) -> GcRef {
+    // SAFETY: the caller upholds ctx validity.
+    unsafe {
+        praxis_alloc_enum(
+            ctx,
+            crate::enums::option_schema(),
+            crate::enums::OPTION_NONE_TAG,
         )
     }
 }
@@ -2282,18 +2347,32 @@ pub unsafe extern "C" fn praxis_map_insert(
     unsafe { unit_sentinel(ctx) }
 }
 
-/// The value for `key`, or Unit if absent (use `contains` to distinguish). A
-/// real `Option[V]` return is a follow-up; for now absent returns Unit.
+/// `Some(value)` for `key`, or `None` if absent (§4.7, §5.7).
+///
+/// §5.7 writes the signature `Map[K,V].get(K) -> Option[V]` and §4.7 opens
+/// "Option[T] represents normal domain-level absence. It is not an error
+/// channel." This used to answer the Unit sentinel under a `V` static type
+/// (RT-14): the program had a value it could not distinguish from a real one
+/// without `contains`, and the type system said it was a `V`.
+///
+/// The `Option` is built through the runtime's own `option_schema`, whose
+/// `Some` slot is unknown — `V` is learned from the value found, never from a
+/// static type — and which `EnumSchema::same_type` therefore recognizes as the
+/// same type as the codegen's `Option[Int]`. That is what lets the result match
+/// against arms the program wrote.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`; `key`
 /// must be a valid `GcRef`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_map_get(ctx: *mut RuntimeContext, map: GcRef, key: GcRef) -> GcRef {
-    let p = unsafe { map_payload(map) };
-    match p.entries.get(&DynamicKey::new(key)) {
-        Some(v) => *v,
-        None => unsafe { unit_sentinel(ctx) },
+    let found = {
+        let p = unsafe { map_payload(map) };
+        p.entries.get(&DynamicKey::new(key)).copied()
+    };
+    match found {
+        Some(v) => unsafe { option_some(ctx, v) },
+        None => unsafe { option_none(ctx) },
     }
 }
 
@@ -3572,7 +3651,12 @@ pub unsafe extern "C" fn praxis_grid_column(
     result
 }
 
-/// The first `(x, y)` position whose cell equals `value`, or Unit if none.
+/// `Some((x, y))` for the first position whose cell equals `value`, or `None`
+/// (§4.7).
+///
+/// This used to answer the Unit sentinel under a `(Int, Int)` static type
+/// (RT-15). `find_all` needs no equivalent: a `Vec` already encodes "nothing
+/// matched" as emptiness.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `grid` and `value` must be valid `GcRef`s.
@@ -3596,10 +3680,11 @@ pub unsafe extern "C" fn praxis_grid_find(
         };
         if matches {
             let (x, y) = grid_xy(i, p.width);
-            return unsafe { alloc_point(ctx, x, y) };
+            // `option_some` roots the point across the enum allocation.
+            return unsafe { option_some(ctx, alloc_point(ctx, x, y)) };
         }
     }
-    unsafe { unit_sentinel(ctx) }
+    unsafe { option_none(ctx) }
 }
 
 /// All `(x, y)` positions whose cell equals `value`, as a `Vec`.
@@ -3967,6 +4052,12 @@ pub unsafe extern "C" fn praxis_range_new_inclusive(
 /// wrapped negative length instead would be a `for` loop that ran zero times
 /// over every integer there is.
 ///
+/// The kind is `IntOverflow`, which is what `gcd`, `lcm` and A\*'s path cost
+/// already answer for a result with no `Int`. ADR-059 wanted it in the
+/// empty-range kind alongside `clamp`; S18 declined, because the range this
+/// fires on is the *fullest* one there is and "empty range" would be a fault
+/// message that lies about it. ADR-075 records the disagreement.
+///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Range` `GcRef`.
 #[no_mangle]
@@ -3976,7 +4067,7 @@ pub unsafe extern "C" fn praxis_range_len(ctx: *mut RuntimeContext, r: GcRef) ->
     match i64::try_from(range.len()) {
         Ok(len) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, len) },
         Err(_) => {
-            unsafe { set_fault(ctx, RaisedFault::INVALID_SIZE) };
+            unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
             unsafe { unit_sentinel(ctx) }
         }
     }
@@ -4471,20 +4562,13 @@ unsafe fn alloc_optional_int(ctx: *mut RuntimeContext, value: Option<i64>) -> Gc
     unsafe {
         match value {
             Some(n) => {
-                let scope = NativeScope::new(ctx);
-                let some = scope.root(praxis_alloc_enum(ctx, OPTION_SOME_TAG, 1));
                 let boxed = gc_alloc(ctx, scalars::INT_PAYLOAD, n);
-                praxis_enum_set_payload(ctx, some.get(), 0, boxed);
-                some.get()
+                option_some(ctx, boxed)
             }
-            None => praxis_alloc_enum(ctx, OPTION_NONE_TAG, 0),
+            None => option_none(ctx),
         }
     }
 }
-
-/// `Option`'s variant discriminants, in the order `TypeDb::new` declares them.
-const OPTION_SOME_TAG: i64 = 0;
-const OPTION_NONE_TAG: i64 = 1;
 
 #[cfg(test)]
 mod tests {
@@ -4520,8 +4604,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_thirteen_after_the_panic_message_slot() {
-        assert_eq!(RUNTIME_ABI_VERSION, 13);
+    fn version_is_fourteen_after_the_enum_schema_pointer() {
+        assert_eq!(RUNTIME_ABI_VERSION, 14);
     }
 
     #[test]
@@ -4790,7 +4874,7 @@ mod tests {
             let hi = praxis_alloc_int(ctx, 0);
             let r = praxis_int_clamp(ctx, v, lo, hi);
             assert!(rt.has_pending_fault());
-            assert_eq!(rt.fault(), FaultKind::InvalidSize);
+            assert_eq!(rt.fault(), FaultKind::EmptyRange);
             assert_eq!(r.as_ptr(), rt.immortals().unit().as_ptr());
         }
         let _ = rt.take_fault();
@@ -4802,6 +4886,45 @@ mod tests {
             let r = praxis_int_clamp(ctx, v, same, same);
             assert!(!rt.has_pending_fault());
             assert_eq!(r.as_ptr(), same.as_ptr());
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// A range whose member count has no `Int` faults with `IntOverflow`,
+    /// answering the Unit sentinel like every other faulting wrapper.
+    ///
+    /// There was no test for this at all until S18 re-pointed the kind. ADR-059
+    /// assigned the case to the empty-range kind it and ADR-058 were both owed;
+    /// S18 declined and gave it `IntOverflow` instead, because
+    /// `Int::MIN..Int::MAX` is the *widest* range expressible and "empty range"
+    /// would be a fault message that contradicts the input. `gcd`, `lcm` and
+    /// A\*'s path cost already answer `IntOverflow` for a result with no `Int`
+    /// (ADR-075).
+    #[test]
+    fn a_range_whose_count_has_no_int_faults_rather_than_wrapping_negative() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; both bounds are valid Ints.
+        unsafe {
+            let lo = praxis_alloc_int(ctx, i64::MIN);
+            let hi = praxis_alloc_int(ctx, i64::MAX);
+            let r = praxis_range_new(ctx, lo, hi);
+            let len = praxis_range_len(ctx, r);
+            assert!(rt.has_pending_fault());
+            assert_eq!(rt.fault(), FaultKind::IntOverflow);
+            assert_eq!(len.as_ptr(), rt.immortals().unit().as_ptr());
+        }
+        let _ = rt.take_fault();
+        // A range one narrower is countable, so the refusal is the edge and not
+        // the rule.
+        // SAFETY: ctx wired; both bounds are valid Ints.
+        unsafe {
+            let lo = praxis_alloc_int(ctx, 0);
+            let hi = praxis_alloc_int(ctx, i64::MAX);
+            let r = praxis_range_new(ctx, lo, hi);
+            let len = praxis_range_len(ctx, r);
+            assert!(!rt.has_pending_fault());
+            assert_eq!(praxis_int_load(ctx, len), i64::MAX);
         }
         unsafe { drop_ctx(ctx) };
     }
@@ -5614,7 +5737,7 @@ mod tests {
             praxis_map_insert(ctx, map, key, val);
             let present = int_payload(praxis_map_index(ctx, map, key));
             assert_eq!(rt.fault(), FaultKind::None, "a present key does not fault");
-            // `.get` on an absent key is the Unit sentinel and no fault…
+            // `.get` on an absent key is `None` and no fault…
             let other = praxis_alloc_int(ctx, 2);
             let absent_get = praxis_map_get(ctx, map, other);
             assert_eq!(rt.fault(), FaultKind::None, "`.get` does not fault");
@@ -5625,8 +5748,8 @@ mod tests {
         assert_eq!(present, 42);
         assert_eq!(
             absent_get.descriptor().id(),
-            crate::scalars::UNIT.id(),
-            "`.get` answers with absence"
+            crate::enums::ENUM.id(),
+            "`.get` answers with absence, and absence is an `Option` value"
         );
         assert_eq!(
             rt.fault(),
@@ -5656,45 +5779,83 @@ mod tests {
         assert_eq!(rt.fault(), FaultKind::None);
     }
 
+    /// S18 exit criterion (RT-14). `Map.get` is statically value-typed, so an
+    /// absent key cannot answer the Unit sentinel — a value whose static type is
+    /// `V` and whose runtime descriptor is `Unit` is exactly the confusion the
+    /// repair exists to close.
+    ///
+    /// Strengthened past the `!= UNIT` it was ignored with: the answer is an
+    /// `Option`, so the test says which one — the `None` variant of the
+    /// runtime's own `option_schema`, which is what makes it match a program's
+    /// `None` arm.
     #[test]
-    #[ignore = "known bug: absent Map.get returns Unit despite its value result type"]
     fn absent_map_get_does_not_return_an_untyped_unit_sentinel() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
-        let missing;
+        let (missing, found);
         unsafe {
             let map = praxis_map_new(ctx, &crate::scalars::INT as *const _);
             let key = praxis_alloc_int(ctx, 1);
             missing = praxis_map_get(ctx, map, key);
+            let value = praxis_alloc_int(ctx, 42);
+            praxis_map_insert(ctx, map, key, value);
+            found = praxis_map_get(ctx, map, key);
         }
-        unsafe { drop_ctx(ctx) };
 
         assert_ne!(
             missing.descriptor().id(),
             crate::scalars::UNIT.id(),
             "Map.get is statically value-typed; absence needs Option or a checked fault, not Unit"
         );
+        assert_eq!(missing.descriptor().id(), crate::enums::ENUM.id());
+        assert_eq!(
+            enum_tag_of(missing),
+            crate::enums::OPTION_NONE_TAG as u32,
+            "absence is `None`"
+        );
+        assert_eq!(enum_tag_of(found), crate::enums::OPTION_SOME_TAG as u32);
+        // …and the `Some` carries the value, rather than merely not being Unit.
+        let payload = unsafe { praxis_enum_payload(ctx, found, 0) };
+        assert_eq!(unsafe { praxis_int_load(ctx, payload) }, 42);
+        unsafe { drop_ctx(ctx) };
     }
 
+    /// The variant tag of an enum value, read the way the runtime's own
+    /// `enum_format` reads it.
+    fn enum_tag_of(value: GcRef) -> u32 {
+        // SAFETY: the caller passes an ENUM-descriptor object.
+        unsafe { (*(value.payload::<u8>() as *const crate::enums::EnumPayload)).tag }
+    }
+
+    /// S18 exit criterion (RT-15). The same rule under a *tuple* static type:
+    /// `Grid.find` answers `(Int, Int)`, so "nothing matched" cannot be the Unit
+    /// sentinel wearing that type.
     #[test]
-    #[ignore = "known bug: absent Grid.find returns Unit despite its point result type"]
     fn absent_grid_find_does_not_return_an_untyped_unit_sentinel() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
-        let missing;
+        let (missing, found);
         unsafe {
             let cell = praxis_alloc_int(ctx, 1);
             let sought = praxis_alloc_int(ctx, 2);
             let grid = rt.alloc_grid(&crate::scalars::INT, vec![cell], 1);
             missing = praxis_grid_find(ctx, grid, sought);
+            let present = praxis_alloc_int(ctx, 1);
+            found = praxis_grid_find(ctx, grid, present);
         }
-        unsafe { drop_ctx(ctx) };
 
         assert_ne!(
             missing.descriptor().id(),
             crate::scalars::UNIT.id(),
             "Grid.find is statically point-typed; absence needs Option or a checked fault, not Unit"
         );
+        assert_eq!(missing.descriptor().id(), crate::enums::ENUM.id());
+        assert_eq!(enum_tag_of(missing), crate::enums::OPTION_NONE_TAG as u32);
+        // …and a hit is `Some((x, y))`, still a real point inside the option.
+        assert_eq!(enum_tag_of(found), crate::enums::OPTION_SOME_TAG as u32);
+        let point = unsafe { praxis_enum_payload(ctx, found, 0) };
+        assert_eq!(point.descriptor().id(), crate::tuples::TUPLE.id());
+        unsafe { drop_ctx(ctx) };
     }
 
     // --- GC pacing (§12.4, ADR-019) ----------------------------------------

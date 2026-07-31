@@ -84,6 +84,18 @@ pub enum TypePattern {
     /// A tuple `(T, U, ...)`. Used by grid methods that return/accept `(x, y)`
     /// points (§6.4). Structural identity is the element-type sequence.
     Tuple(Vec<TypePattern>),
+    /// `Option[T]` — the prelude enum, applied to one argument (§4.7, F12).
+    ///
+    /// Its own arm rather than a `Collection` ctor because `Option` is not a
+    /// collection: it is the one *generic enum def* the language has, and a
+    /// catalog row spelling it has to lower to `TypeDb::option_of`, which names
+    /// the single canonical def every `Option[T]` in a program shares.
+    ///
+    /// §4.7: "Option[T] represents normal domain-level absence. It is not an
+    /// error channel." `Map.get` and `Grid.find` are what needed it — their
+    /// rows said `V` and `(Int, Int)` while their wrappers answered the Unit
+    /// sentinel on a miss (RT-14, RT-15).
+    Option(Box<TypePattern>),
     /// Opaque / unknown during early scaffolding. Catalog entries added before
     /// a full type pattern is worked out can use this placeholder; the type
     /// checker will reject it if it is still present at use time.
@@ -131,6 +143,7 @@ impl TypePattern {
                     a.collect_bounds(into);
                 }
             }
+            TypePattern::Option(inner) => inner.collect_bounds(into),
             TypePattern::Function { params, result } => {
                 for p in params {
                     p.collect_bounds(into);
@@ -238,6 +251,7 @@ impl fmt::Display for TypePattern {
                 }
                 f.write_str(")")
             }
+            TypePattern::Option(inner) => write!(f, "Option[{inner}]"),
             TypePattern::Opaque => f.write_str("_"),
             // The bound is not part of the type's spelling: it is a rule the
             // compiler enforces, and §5.4 forbids surfacing capability names to

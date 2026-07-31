@@ -100,6 +100,13 @@ fn pattern_matches(catalog_pat: &TypePattern, concrete_pat: &TypePattern) -> boo
         (TypePattern::Tuple(a1), TypePattern::Tuple(a2)) => {
             a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| pattern_matches(x, y))
         }
+        // `Option[T]` matches through its argument, for the same reason a
+        // collection does. Spelled out rather than left to the equality
+        // fallback below so a catalog `Option[V]` accepts a concrete
+        // `Option[Int]`; `type_to_pattern` never produces one today (an enum
+        // is never a method receiver), and stating the rule is what keeps that
+        // from being an accident.
+        (TypePattern::Option(a), TypePattern::Option(b)) => pattern_matches(a, b),
         _ => catalog_pat == concrete_pat,
     }
 }

@@ -833,20 +833,34 @@ fn map_insert_get_len_end_to_end() {
 
 #[test]
 fn map_get_returns_inserted_value() {
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(7, 42)\n  m.get(7)\n}\n";
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(7, 42)\n  m[7]\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
 }
 
+/// An absent `Map.get` answers `None`, and a present one answers `Some`.
+///
+/// This test used to be `map_get_absent_returns_unit`, and it asserted only
+/// that no fault occurred — because there was nothing else it *could* assert:
+/// `get` handed back the Unit sentinel under a `V` static type (RT-14), so the
+/// program had no way to tell absence from a value and the test had no way to
+/// look. §5.7 spells the signature `Map[K,V].get(K) -> Option[V]` and §4.7 says
+/// absence is `Option`; D1 settled that the implementation follows.
 #[test]
-fn map_get_absent_returns_unit() {
-    // An absent key returns Unit (a real Option[V] return is a follow-up; for
-    // now `get` is paired with `contains` to distinguish present/absent). The
-    // returned Unit is not an Int, so we only assert no fault occurred.
-    let src = "fn main() -> Int {\n  let m = Map()\n  let _ = m.get(99)\n  0\n}\n";
-    let (rt, _result) = run_main(src);
+fn an_absent_map_get_answers_none_and_a_present_one_answers_some() {
+    let unwrap = "fn unwrap(o: Option[Int]) -> Int {\n  match o {\n    Some(v) => v,\n    None => 0 - 1,\n  }\n}\n";
+    let (rt, result) = run_main(&format!(
+        "{unwrap}fn main() -> Int {{\n  let m = Map()\n  m.insert(1, 10)\n  unwrap(m.get(99))\n}}\n"
+    ));
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), -1, "an absent key is `None`");
+
+    let (rt, result) = run_main(&format!(
+        "{unwrap}fn main() -> Int {{\n  let m = Map()\n  m.insert(1, 10)\n  unwrap(m.get(1))\n}}\n"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 10, "a present key is `Some(value)`");
 }
 
 #[test]
@@ -867,7 +881,8 @@ fn map_remove_drops_entry() {
 
 #[test]
 fn map_insert_overwrites_prior_value() {
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  m.insert(1, 99)\n  m.get(1)\n}\n";
+    let src =
+        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  m.insert(1, 99)\n  m[1]\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 99);
@@ -877,7 +892,7 @@ fn map_insert_overwrites_prior_value() {
 fn map_with_tuple_keys_end_to_end() {
     // The headline §19.7 criterion: tuples as map keys. Two structurally-equal
     // tuples must hit the same entry.
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert((1, 2), 100)\n  m.get((1, 2))\n}\n";
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert((1, 2), 100)\n  m[(1, 2)]\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 100);
@@ -895,8 +910,7 @@ fn map_with_distinct_tuple_keys() {
 #[test]
 fn map_with_text_keys_end_to_end() {
     // Text keys: two equal strings hit the same entry.
-    let src =
-        "fn main() -> Int {\n  let m = Map()\n  m.insert(\"hello\", 1)\n  m.get(\"hello\")\n}\n";
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"hello\", 1)\n  m[\"hello\"]\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1021,7 +1035,7 @@ fn adv_map_text_key_distinct_alloc_lookup() {
     // Map insert with a literal Text key, then look up with a structurally-
     // equal Text from a different source (a Vec). Must find the entry via
     // structural eq, not pointer identity.
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"hello\", 42)\n  let keys = Vec()\n  keys.push(\"hello\")\n  m.get(keys.get(0))\n}\n";
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"hello\", 42)\n  let keys = Vec()\n  keys.push(\"hello\")\n  m[keys.get(0)]\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
@@ -1031,7 +1045,7 @@ fn adv_map_text_key_distinct_alloc_lookup() {
 fn adv_map_text_key_from_read_lookup() {
     // Map keyed by source-slice Text from `read`. Insert all, then look up one
     // by a literal of equal value.
-    let src = "fn main() -> Int {\n  let words = read lines(word)\n  let m = Map()\n  var i = 0\n  while i < words.len() { m.insert(words.get(i), i); i = i + 1 }\n  m.get(\"pear\")\n}\n";
+    let src = "fn main() -> Int {\n  let words = read lines(word)\n  let m = Map()\n  var i = 0\n  while i < words.len() { m.insert(words.get(i), i); i = i + 1 }\n  m[\"pear\"]\n}\n";
     let (rt, result) = run_main_with_input(src, "apple\npear\nkiwi\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // "pear" was inserted at index 1
@@ -1062,7 +1076,7 @@ fn adv_set_dedupes_distinct_alloc_equal_text() {
 fn adv_map_tuple_key_distinct_alloc() {
     // Tuple keys built from distinct allocations. Two (1,2) tuples from
     // different construction sites must map to the same entry.
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert((1, 2), 100)\n  let pairs = Vec()\n  pairs.push((1, 2))\n  m.get(pairs.get(0))\n}\n";
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert((1, 2), 100)\n  let pairs = Vec()\n  pairs.push((1, 2))\n  m[pairs.get(0)]\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 100);
@@ -1072,7 +1086,7 @@ fn adv_map_tuple_key_distinct_alloc() {
 fn adv_map_large_under_gc_pressure() {
     // Insert 500 entries under GC pressure, then look up a mid-range key.
     // Verifies map entries (keys + values) survive GC via map_trace.
-    let src = "fn main() -> Int {\n  let m = Map()\n  var i = 0\n  while i < 500 { m.insert(i, i * 2); i = i + 1 }\n  m.get(250)\n}\n";
+    let src = "fn main() -> Int {\n  let m = Map()\n  var i = 0\n  while i < 500 { m.insert(i, i * 2); i = i + 1 }\n  m[250]\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 500);
@@ -1105,16 +1119,27 @@ fn adv_map_overwrite_then_get() {
     assert_eq!(result.as_int(), 1);
 }
 
+/// `None` is a value the program can *name*, which the Unit sentinel was not.
+///
+/// This test used to be `adv_map_get_absent_returns_unit`, and it pinned the
+/// defect: its comment read "§4.7: indexing a missing map key faults, but
+/// `.get` returns Unit (absent sentinel)", and it checked absence by comparing
+/// the result against `Int 0` and expecting the comparison to be *false* —
+/// which is a test of the fact that two different runtime types are unequal,
+/// not of the map. §4.7 never said `.get` returns Unit; it said absence is
+/// `Option`. The rewrite matches on the answer instead of probing it.
 #[test]
-fn adv_map_get_absent_returns_unit() {
-    // §4.7: indexing a missing map key faults, but `.get` returns Unit (absent
-    // sentinel). Verify the value is the Unit sentinel (distinct from Int 0).
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"a\", 1)\n  let v = m.get(\"missing\")\n  if v == 0 { 1 } else { 0 }\n}\n";
+fn an_absent_map_get_is_a_none_the_program_can_match_on() {
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"a\", 1)\n  match m.get(\"missing\") {\n    Some(v) => v,\n    None => 7,\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    // Unit sentinel compared to Int 0 — they differ, so == is false → 0.
-    // (If get returned Int(0) instead of Unit, this would be 1.)
-    assert_eq!(result.as_int(), 0);
+    assert_eq!(result.as_int(), 7, "the `None` arm ran");
+
+    // And a `Some` binds the value rather than merely being "not Unit".
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"a\", 1)\n  match m.get(\"a\") {\n    Some(v) => v,\n    None => 7,\n  }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
 }
 
 #[test]
@@ -1137,10 +1162,15 @@ fn adv_map_index_of_a_missing_key_faults_where_get_answers() {
 
     // …and `.get` on the same absent key does not, so the fault is the
     // subscript's choice and not the map's.
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"a\", 1)\n  let v = m.get(\"missing\")\n  if v == 0 { 1 } else { 0 }\n}\n";
+    //
+    // This half used to end `assert_eq!(result.as_int(), 0, "Unit is not Int
+    // 0")` — it asserted that the sentinel `.get` handed back was not an `Int`,
+    // which pinned RT-14 rather than stating §4.7's rule. What §4.7 actually
+    // says is that `.get` answers `Option`, so the arm is what the test reads.
+    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"a\", 1)\n  match m.get(\"missing\") {\n    Some(v) => v,\n    None => 0,\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), 0, "Unit is not Int 0");
+    assert_eq!(result.as_int(), 0, "explicit absence, not a fault");
 
     // A present key is the value, through the subscript.
     let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"a\", 7)\n  m[\"a\"]\n}\n";
@@ -3723,14 +3753,51 @@ fn adv_pipeline_empty_source_collect_is_empty_vec() {
     assert_eq!(result.as_int(), 0);
 }
 
+/// **D1.** An empty `min`/`max` faults; it does not answer `0`.
+///
+/// This test used to be `adv_pipeline_empty_source_min_is_zero`, and its
+/// comment called the behaviour "a known edge — document current behavior".
+/// Documenting it is what made it a defect-pinning test: `0` is not a *missing*
+/// answer, it is a **wrong** one. It is below every element of `[3, 4]` and
+/// above every element of `[-3, -4]`, so nothing at the call site can tell it
+/// from a real minimum, and the accumulator was seeded rather than derived from
+/// the data at all.
+///
+/// `reduce`, `min_by` and `max_by` already faulted here (MIR-09); D1 settled
+/// that `min`/`max` join them rather than becoming `Option`, because an empty
+/// `min` is a mistake in the program and not the domain-level absence §4.7
+/// reserves `Option` for.
 #[test]
-fn adv_pipeline_empty_source_min_is_zero() {
-    // Empty source → min. The accumulator is seeded to 0 and never updated.
-    // (min/max on empty is a known edge — document current behavior.)
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.min()\n}\n";
-    let (rt, result) = run_main(src);
+fn an_empty_min_or_max_faults_rather_than_answering_zero() {
+    for sink in ["min", "max"] {
+        let src = format!("fn main() -> Int {{\n  let v = Vec()\n  v.{sink}()\n}}\n");
+        let (rt, _result) = run_main(&src);
+        assert_eq!(
+            rt.fault(),
+            praxis_runtime::FaultKind::EmptyCollection,
+            "an empty `{sink}` has no answer"
+        );
+    }
+
+    // A source that a `filter` empties is the same case, and is the one a real
+    // program hits: the Vec is non-empty and nothing survives the predicate.
+    let (rt, _result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  \
+         v.filter(|x| x > 100).min()\n}\n",
+    );
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
+
+    // …and a non-empty one still answers, so the guard is the empty case and
+    // not a new refusal.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  let v = Vec()\n  v.push(3)\n  v.push(4)\n  v.min()\n}\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), 0);
+    assert_eq!(result.as_int(), 3);
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(0 - 3)\n  v.push(0 - 4)\n  v.max()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), -3, "the seeded 0 was above every element");
 }
 
 #[test]
@@ -4929,11 +4996,11 @@ fn a_numeric_helper_faults_rather_than_wrapping() {
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
 
     // An inverted `clamp` range is empty, so there is no value to return.
-    // ADR-058: the kind is `InvalidSize` until a stage spends an ABI bump on one
-    // of its own.
+    // ADR-058 borrowed `InvalidSize` for it and recorded a dedicated kind as
+    // owed; S18 spent a bump and paid it (ADR-075).
     let (rt, _r) = run_main("fn main() -> Int { clamp(5, 10, 0) }");
     assert!(rt.has_pending_fault());
-    assert_eq!(rt.fault(), praxis_runtime::FaultKind::InvalidSize);
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyRange);
 
     // …and the total three are total at the same edges.
     let (rt, result) = run_main("fn main() -> Int { sign(0 - 9223372036854775807 - 1) }");
@@ -5114,7 +5181,7 @@ fn a_cost_table_holds_the_least_cost_to_every_reachable_state() {
                  }\n";
 
     let (rt, result) = run_main(&format!(
-        "{graph}fn main() -> Int {{ dijkstra(1, |n| steps(n), |a, b| cost(a, b)).get(4) }}"
+        "{graph}fn main() -> Int {{ dijkstra(1, |n| steps(n), |a, b| cost(a, b))[4] }}"
     ));
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(
@@ -5125,7 +5192,7 @@ fn a_cost_table_holds_the_least_cost_to_every_reachable_state() {
 
     // The start is in the table at zero, and every reachable state is in it once.
     let (rt, result) = run_main(&format!(
-        "{graph}fn main() -> Int {{ dijkstra(1, |n| steps(n), |a, b| cost(a, b)).get(1) }}"
+        "{graph}fn main() -> Int {{ dijkstra(1, |n| steps(n), |a, b| cost(a, b))[1] }}"
     ));
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -5141,7 +5208,7 @@ fn a_cost_table_holds_the_least_cost_to_every_reachable_state() {
         "{graph}fn main() -> Int {{ dijkstra(1, |n| steps(n), |a, b| 0 - 1).len() }}"
     ));
     assert!(rt.has_pending_fault());
-    assert_eq!(rt.fault(), praxis_runtime::FaultKind::InvalidSize);
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::NoAnswer);
 }
 
 /// `a_star` answers the cheapest cost to a goal, and the heuristic changes only
@@ -5205,7 +5272,7 @@ fn a_star_finds_the_cheapest_goal_and_the_heuristic_does_not_change_it() {
          {{ unwrap(a_star(1, |n| steps(n), |a, b| cost(a, b), |n| 0 - 5, |n| n == 4)) }}"
     ));
     assert!(rt.has_pending_fault());
-    assert_eq!(rt.fault(), praxis_runtime::FaultKind::InvalidSize);
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::NoAnswer);
 }
 
 /// A state is a **value**, not an integer the walk happens to understand. A
@@ -5252,7 +5319,7 @@ fn a_state_may_be_any_value_that_can_be_remembered() {
     let (rt, result) = run_main(&format!(
         "{grid}fn main() -> Int {{\n\
          \x20 let costs = dijkstra(P {{ x: 0, y: 0 }}, |p| steps(p), |a, b| 1)\n\
-         \x20 costs.get(P {{ x: 2, y: 2 }})\n\
+         \x20 costs[P {{ x: 2, y: 2 }}]\n\
          }}"
     ));
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -5285,7 +5352,7 @@ fn a_walk_roots_the_states_it_is_holding_across_its_own_allocations() {
          \x20 if n < 400 { v.push(n + 1) }\n\
          \x20 v\n\
          }\n\
-         fn main() -> Int { dijkstra(0, |n| steps(n), |a, b| 2).get(400) }",
+         fn main() -> Int { dijkstra(0, |n| steps(n), |a, b| 2)[400] }",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 800);
@@ -5386,16 +5453,15 @@ fn a_range_is_a_value_that_outlives_its_expression() {
 
     // As a `Map` key: hashable *and* immutable, so it is findable again by an
     // equal range built separately (ADR-057 D4, ADR-059).
-    let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map()\n  m.insert(0..3, 41)\n  m.get(0..3) + 1\n}\n",
-    );
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  let m = Map()\n  m.insert(0..3, 41)\n  m[0..3] + 1\n}\n");
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 42);
 
     // …and `1..=4` really is `1..5`, which is what normalizing at construction
     // means: the two spellings are one key and one rendering.
     let (rt, result) =
-        run_main("fn main() -> Int {\n  let m = Map()\n  m.insert(1..=4, 5)\n  m.get(1..5)\n}\n");
+        run_main("fn main() -> Int {\n  let m = Map()\n  m.insert(1..=4, 5)\n  m[1..5]\n}\n");
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 5);
 }
@@ -6576,4 +6642,118 @@ fn a_destructuring_for_binding_reads_each_item_apart() {
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 12 + 34);
+}
+
+// ---------------------------------------------------------------------------
+// S18: the `Option` contract, end to end (D1, RT-14/RT-15).
+// ---------------------------------------------------------------------------
+
+/// D1's headline gate. `Map.get` answers `Option[V]` (§5.7 writes that
+/// signature literally), so a program tells absence from a value by *matching*
+/// rather than by comparing the answer against something it is not.
+///
+/// The runtime builds the `Option` through its own `option_schema`, whose
+/// `Some` slot is unknown, and the program's arms were compiled against the
+/// codegen's `Option[Int]` schema. That the two meet at all is
+/// `EnumSchema::same_type`'s null-slot rule (RT-13); this is where it earns its
+/// keep.
+#[test]
+fn an_absent_map_get_matches_none_and_a_present_one_matches_some() {
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  \
+         match m.get(1) {\n    Some(v) => v,\n    None => 0 - 1,\n  }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 10);
+
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  \
+         match m.get(2) {\n    Some(v) => v,\n    None => 0 - 1,\n  }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), -1);
+
+    // The value inside the `Some` is the real one, whatever its type: a `Text`
+    // value comes back as a `Text`, not as an `i64` read of its buffer pointer.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, \"abc\")\n  \
+         match m.get(1) {\n    Some(v) => v.len(),\n    None => 0 - 1,\n  }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+
+    // …and `map[key]` is still the other half of §4.7's sentence: the
+    // assertion-like spelling, which faults rather than answering `None`.
+    let (rt, _) = run_main("fn main() -> Int {\n  let m = Map()\n  m[7]\n}\n");
+    assert!(
+        rt.has_pending_fault(),
+        "§4.7: indexing a missing key faults"
+    );
+}
+
+/// The same contract under a *tuple* payload: `Grid.find` answers
+/// `Option[(Int, Int)]`, and the point survives being carried inside the enum.
+#[test]
+fn an_absent_grid_find_is_none_and_a_hit_is_some_of_the_point() {
+    let src = "fn main() -> Int {\n  let g = read matrix(int)\n  \
+               match g.find(4) {\n    Some((x, y)) => x * 10 + y,\n    None => 0 - 1,\n  }\n}\n";
+    let (rt, result) = run_main_with_input(src, "1 2\n3 4\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 11, "4 is at (1, 1)");
+
+    let src = "fn main() -> Int {\n  let g = read matrix(int)\n  \
+               match g.find(99) {\n    Some((x, y)) => x * 10 + y,\n    None => 0 - 1,\n  }\n}\n";
+    let (rt, result) = run_main_with_input(src, "1 2\n3 4\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), -1);
+}
+
+/// RT-13 from source, at the one place a program can observe an enum's identity:
+/// **equality against a value the two producers built independently**.
+///
+/// The static type system already keeps two *declared* enum types apart, so
+/// `Colour == Light` never reaches the runtime. What does reach it is one
+/// `Option` type built twice — the runtime makes `m.get(k)`'s answer through
+/// its own schema, whose `Some` slot is unknown, and the program makes
+/// `Some(10)` through the codegen's `Option[Int]` schema. Those must be one
+/// type, or absolutely nothing about `Map.get` works; and the payloads must
+/// still decide, or a `Some("x")` would be read as a `Some(int)`.
+#[test]
+fn an_option_from_the_runtime_and_one_from_the_program_are_one_type() {
+    // Same type, same payload: equal.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  \
+         if m.get(1) == Some(10) { 1 } else { 0 }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        1,
+        "a runtime-built Some and a program-written one are one type"
+    );
+
+    // Same type, different payload: not equal.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  \
+         if m.get(1) == Some(11) { 1 } else { 0 }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+
+    // Absence is `None`, and `None` is not `Some` of anything.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  \
+         if m.get(2) == None { 1 } else { 0 }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+
+    // A `Text` payload stays a `Text`: the schema slot the runtime filled is
+    // unknown, so the value's own descriptor decides, and it is never wrong.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, \"x\")\n  \
+         if m.get(1) == Some(\"x\") { 1 } else { 0 }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
 }

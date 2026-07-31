@@ -1,0 +1,12 @@
+// RT-13: an enum value renders its variant name. Before the runtime carried an
+// `EnumSchema`, every enum printed as `<variant N: …>` — the tag was the whole
+// of its identity, and nothing in the runtime knew the variant was called
+// `Number`.
+enum Tile { Empty, Wall, Number(Int) }
+
+out(Empty)
+out(Wall)
+out(Number(7))
+out(Some(3))
+out(None)
+out(Some("x"))
