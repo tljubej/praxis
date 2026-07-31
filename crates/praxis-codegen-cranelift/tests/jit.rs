@@ -2611,8 +2611,8 @@ fn adv_csv_inside_sections_nonzero_offset() {
     // byte offset. The predecessor re-sliced the section and walked its child
     // at offset 0, and recovered each field's offset by *searching* the region
     // for the field's text (`region_offset_of`) rather than computing it, which
-    // also called `slice::windows(0)` — a panic inside `extern "C"` — for a
-    // field that trimmed to nothing.
+    // also called `slice::windows(0)` — a panic inside `extern "C"` — for an
+    // empty field.
     //
     // REWRITTEN (S20/IPR-03, IPR-04). It used to read `sections(csv(int))` over
     // `"1,2,3\n4,5,6\n\n7,8\n9,10\n"` and assert only that there were two

@@ -173,9 +173,10 @@ so there is one answer, and the half that can ask it is the half that decides:
   two loops that are not `walk_exact`-shaped and they call the same predicate,
   `ByteRegion::is_all_whitespace`. The *same* question applied to a whole line
   is `cursor::trailing_blank_run`: a **trailing** line of nothing but whitespace
-  is offered like any other, and `walk_lines`, `walk_grid` and `walk_matrix`
-  drop it only when their parser makes nothing of it — no element, no cell, no
-  token. `int` makes nothing of `"  "`; `char` makes two cells of it.
+  is offered like any other, and `trailing_blank_run`'s four callers —
+  `walk_lines`, `walk_grid`, `walk_grid_ragged` and `walk_matrix` — drop it only
+  when their parser makes nothing of it — no element, no cell, no token. `int`
+  makes nothing of `"  "`; `char` makes two cells of it.
 * **Extent — the half that decides nothing.** *A region does not end in **empty**
   lines.* `split_lines` drops the trailing run of lines holding no bytes at all,
   however long it is: the file's `\n`, an editor's `"\n\n"`, `"\r\n\r\n"`. It

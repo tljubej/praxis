@@ -2872,7 +2872,7 @@ mod tests {
     /// panics — inside `extern "C"`, where a panic is undefined behaviour.
     /// `"10,20,"` is enough to reach it.
     #[test]
-    fn a_csv_token_that_trims_to_empty_does_not_panic() {
+    fn an_empty_csv_field_does_not_panic() {
         let mut rt = crate::Runtime::new();
         let input = rt.alloc_text("10,20,");
         let mut ctx = rt.context();

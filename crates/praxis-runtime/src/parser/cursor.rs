@@ -47,7 +47,8 @@
 //!   read is nobody's.* One predicate, [`ByteRegion::is_all_whitespace`], asked
 //!   in two shapes: `walk_exact`, `walk_characters` and `walk_grid_row` forgive
 //!   a leftover run at the end of a region, and [`trailing_blank_run`] lets
-//!   `walk_lines`, `walk_grid` and `walk_matrix` drop a *trailing* line of
+//!   `walk_lines`, `walk_grid`, `walk_grid_ragged` and `walk_matrix` — every
+//!   caller there is — drop a *trailing* line of
 //!   nothing but whitespace — but only when the parser offered it makes nothing
 //!   of it (no element, no cell, no token).
 //! * **Extent — the half that decides nothing.** *A region does not end in

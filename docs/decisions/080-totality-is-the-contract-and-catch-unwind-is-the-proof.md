@@ -20,7 +20,7 @@ The damage does not surface at the wrapper; it surfaces later, somewhere else,
 as something that looks like a different bug.
 
 S20 found two live instances while doing other work. `region_offset_of` called
-`slice::windows(0)` for any CSV field that trimmed to nothing, which `"10,20,"`
+`slice::windows(0)` for any empty CSV field, which `"10,20,"`
 reaches. `preview_around` computed `start = offset - 24` and `end = min(offset +
 24, len)` and sliced `&input[start..end]`, an inverted range for any offset past
 the end of the buffer — reachable because a ragged grid's fill is parsed against

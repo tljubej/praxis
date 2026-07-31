@@ -327,7 +327,7 @@ no test body.
 | `lines_require_each_child_parser_to_consume_the_whole_line` | `adversarial_audit.rs` | IPR-02 — `lines(int)` over `"12junk"` faults |
 | `lines_rest_is_bounded_to_each_line` | `adversarial_audit.rs` | IPR-02 + IPR-10 — `lines(rest)` gives element 1 the *second line* |
 | `csv_rest_parser_is_bounded_to_each_token` | `parser.rs` | IPR-04 — `csv(rest)` over `"a,b"` is `["a", "b"]` |
-| `a_csv_token_that_trims_to_empty_does_not_panic` | `parser.rs` | **NEW** — IPR-04's panic path. `region_offset_of` called `slice::windows(0)` for a field that trimmed to nothing, inside `extern "C"`; `"10,20,"` reached it |
+| `an_empty_csv_field_does_not_panic` | `parser.rs` | **NEW** — IPR-04's panic path. `region_offset_of` called `slice::windows(0)` for an empty field, inside `extern "C"`; `"10,20,"` reached it. (Renamed from `a_csv_token_that_trims_to_empty_does_not_panic` when the trim it named was deleted; the field is empty because nothing follows the last comma, not because it trimmed away.) |
 | `a_csv_field_the_child_does_not_consume_is_a_parse_failure` | `jit.rs` | **NEW** — the positive form of the same rule end to end: `csv(int)` over `"1,2x,3"` faults instead of reading the digits it likes |
 | `unicode_grid_cells_are_parsed_once_per_scalar` | `parser.rs` | IPR-06 — `"é"` is one cell, not two |
 | `a_grid_cell_is_whatever_its_cell_parser_reads` | `parser.rs` | **NEW** — D11 in the shape the finding named. `grid(int)` over `"12\n34\n"` is `[12, 34]` at width 1 and `grid(digit)` is `[1, 2, 3, 4]` at width 2; the predecessor said `[12, 2, 34, 4]`, which is neither candidate semantics. Also that a row of two cells and a row of one is not a rectangle |
@@ -337,7 +337,7 @@ no test body.
 | `consume_ws_space_run_requires_one_or_more_spaces_or_tabs` | `parser.rs` | IPR-12 — the policy means what `ast.rs` says it means |
 | `a_literals_edge_whitespace_is_its_policy_and_not_its_text` | `praxis-input-parser/src/scan.rs` | **extended** — it asserted the literal *texts*; it now asserts the policies too, which is the half that could not be asserted before because they were all `SpaceRun` |
 | `chars_result_descriptor_matches_the_values_it_contains` | `adversarial_audit.rs` | IPR-07 + D-S20-A. **Its own source is amended**: it declared `-> Vec[Char]` for `chars(int, …)`, which is the disagreement it exists to catch, written into the test |
-| `chars_that_cannot_read_the_whole_region_is_a_parse_failure` | `parser.rs` | **NEW** — IPR-07, across all four skip policies: `skip: whitespace`/`newlines` absorb a trailing run, `skip: none` does not, and a child failure inside the region is never a short answer |
+| `chars_that_cannot_read_the_whole_region_is_a_parse_failure` | `parser.rs` | **NEW** — IPR-07, across all three skip policies (`SkipPolicy::ALL` is `None`, `Whitespace`, `Newlines`): each absorbs a trailing run *inside the data* from its own byte set, an interior newline under `skip: none` is still a mismatch, the file's **own** terminator is forgiven under every policy — including `skip: none` — because it is whitespace the child declined, and a child failure inside the region is never a short answer. The last of those inverts what this row first claimed, and the test says so in place |
 | `single_anonymous_template_capture_uses_its_child_descriptor` | `parser.rs` | IPR-13 — ``lines(`{word}`)`` carries `TEXT` |
 | `anonymous_word_template_vec_uses_the_text_element_descriptor` | `adversarial_audit.rs` | IPR-13 end to end, and it asserts the **rendering** as well as the tag, which is what proves the dispatch rather than the label |
 | `a_failed_choice_reports_the_deepest_case_failure` | `parser.rs` | **NEW** — IPR-09. `expected` is the inner atomic at the byte the furthest case broke at, not `"any choice case"` at the choice's own offset |
@@ -1673,7 +1673,8 @@ the rule is enforced and therefore where it is stated):
 - The **deciding half asks the parser**. `walk_exact`, `walk_characters` and
   `walk_grid_row` forgive a leftover run through one predicate,
   `ByteRegion::is_all_whitespace`; `cursor::trailing_blank_run` is the same
-  question about a whole line, and `walk_lines`/`walk_grid`/`walk_matrix` drop a
+  question about a whole line, and its four callers —
+  `walk_lines`/`walk_grid`/`walk_grid_ragged`/`walk_matrix` — drop a
   *trailing* blank line only when their parser makes nothing of it (no element,
   no cell, no token). So `lines(int)` over `"1\n2\n  \n"` is two elements and
   `grid(char)` over `"ab\ncd\n  \n"` is three rows — one rule, two children.
@@ -1754,7 +1755,7 @@ the root owned `Text` and carries the base offset; allocate through
 `text_bytes` is iterative for the same reason — a chain a host builds is legal
 and its depth must not cost stack.
 
-**`parser.rs` paces.** All ten allocation sites go through `Heap::alloc`/
+**`parser.rs` paces.** Every allocation site goes through `Heap::alloc`/
 `alloc_with`, and every helper opens a `NativeScope` and roots each `GcRef` as it
 takes it. Nothing is threaded: a scope links into `ctx.native_roots` and
 `RuntimeRoots` walks the parent chain, so opening one deeper already covers the

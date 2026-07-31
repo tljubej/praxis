@@ -693,8 +693,9 @@ fn a_grid_row_may_end_in_horizontal_whitespace() {
 /// The rule is stated in `parser/cursor.rs`: **whitespace is data when the
 /// parser offered it reads it.** The deciding half is the one that can ask —
 /// `walk_exact`, `walk_characters` and `walk_grid_row` forgive a leftover run
-/// through one predicate, and `trailing_blank_run` lets `lines`/`grid`/`matrix`
-/// drop a trailing blank *line* only when their parser makes nothing of it. The
+/// through one predicate, and `trailing_blank_run` lets `lines`, `grid` — both
+/// forms, uniform and ragged — and `matrix` drop a trailing blank *line* only
+/// when their parser makes nothing of it. The
 /// parser-independent half decides nothing any more: it drops a trailing run of
 /// **empty** lines, which have no bytes to offer anyone. Together they leave the
 /// terminator to nobody, so the root region is simply the whole buffer.

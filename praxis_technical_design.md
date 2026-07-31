@@ -831,8 +831,11 @@ exceptions:
   lossless for the same reason.
 - An **interior** blank line is structure and no constructor skips one.
   `lines(int)` over `"1\n  \n2\n"`, `grid(digit)` over `"12\n  \n34\n"` and
-  `matrix(int)` over `"1 2\n  \n3 4\n"` all fault, and they fault in the same
-  way. `sections` is the one construct for which a blank line is *its own*
+  `matrix(int)` over `"1 2\n  \n3 4\n"` all fault, and they fault by the same
+  rule — a blank line is a zero-element, zero-cell, zero-token row, and the
+  count check rejects it like any other row of the wrong size. The *diagnostics*
+  differ: three messages and three spans, and only `grid`'s names the offending
+  line. `sections` is the one construct for which a blank line is *its own*
   separator, interior or trailing, which is its definition and not an exception
   to this rule.
 
