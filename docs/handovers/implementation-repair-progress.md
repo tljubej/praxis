@@ -441,20 +441,23 @@ findings. Three classes, kept apart:
 | `a_parse_of_a_slice_does_not_extend_the_owner_chain` | `parser.rs` | the base offset is applied *and* every produced slice's owner is the owned text |
 | `reading_a_deep_slice_chain_does_not_recurse` | `text.rs` | a 4 000-link chain on a 128 KiB stack. Verified to abort with the recursive read; its passing *is* the assertion |
 | `a_panic_dummy_is_only_returned_where_a_fault_check_can_follow` | `abi.rs` | sweeps every manifest row, and asserts both classes are non-empty so the rule cannot pass vacuously |
+| `every_root_parser_reads_every_file_ending` | `adversarial_audit.rs` | **MOVED HERE from (b) in round four**, which had it under a header claiming it passes at the base. It does not: at `b2184c8`, `ws(int)` over `"1 2 3 \n"` faults (`at input offset 6..6: expected int`), so the matrix fails there for the pre-S20 defect and not only for a mid-branch one. Every root constructor §7.5 names × every ending real input arrives with, asserting a **value** per cell. Also fails at `e68ac0c` |
+| `a_grid_row_may_end_in_horizontal_whitespace` | `adversarial_audit.rs` | **MOVED HERE from (b) in round four**, same reason: at `b2184c8`, `grid(int)` over `"12 34 \n56 78 \n"` faults (`at input offset 6..6: expected int`) — the trailing space, on top of D11's byte-counted width. Also fails at `9458fd5`, and asserts `grid` and `matrix` agree on the same file |
+| `an_interior_blank_line_is_a_row_and_a_trailing_one_is_nobodys` | `adversarial_audit.rs` | **NEW (round four)** — a differential in its trailing half: at `b2184c8`, `lines(int)` over `"1\n2\n  \n"` and `grid(digit)` over `"12\n34\n  \n"` both fault. Its interior half is *not* one — `matrix(int)` over `"1 2\n  \n3 4\n"` answers 22 at the base too, because the base has the same `trim()` skip; that half pins the three constructors giving one answer to one shape, which is what round four changed |
 
 **(b) Regression fixtures for defects this branch introduced and closed.** Each
 **passes** at `b2184c8` and fails at the mid-branch commit named in its own
 comment. They pin rules that are worth pinning; they gate nothing the audit
-filed.
+filed. Round three's version of this table listed two rows that fail at the
+base — they were class (a) differentials being *under*-claimed, and they have
+been moved up.
 
 | Test | File | Fails at | Pins |
 |---|---|---|---|
 | `ws_tokens`, `sep_tokens`, `chars_skip_whitespace` | `tests/input-parsers/` | `9458fd5` | the blocker and its `chars` half, through the CLI file-read path |
 | `grid_char_space_cell` | `tests/input-parsers/` | `9458fd5` (answers 221) | a `grid(char)` column is positional |
 | `ws_blank_final_line`, `lines_trailing_space` | `tests/input-parsers/` | `e68ac0c` | **NEW (round three)** — the two endings this directory did not have: a blank final line, and a trailing space on every line |
-| `every_root_parser_reads_every_file_ending` | `adversarial_audit.rs` | `e68ac0c` | **NEW (round three)** — the MATRIX. Every root constructor §7.5 names × every ending real input arrives with, asserting a **value** per cell. Verified to fail at the branch's own HEAD |
 | `a_parse_is_the_identity_on_the_text_it_was_given` | `adversarial_audit.rs` | `e68ac0c` (3334 vs 4355) | **NEW (round three)** — `parse(t, rest)` on `\n`, none, `\r\n`, `\n\n`, and `read rest` over the same bytes |
-| `a_grid_row_may_end_in_horizontal_whitespace` | `adversarial_audit.rs` | `9458fd5` | and asserts `grid` and `matrix` agree on the same file |
 | `choice_backtracking_under_allocation_pressure_keeps_every_live_intermediate` | `adversarial_audit.rs` | (see note) | IPR-14's **rooting** invariant: deleting the two `scope.root(walked.value)` calls gives 574840 against 449400. It passes at `b2184c8`, where the parser is unpaced and unrooted, so it does not distinguish HEAD from the base; and its `live_count < 6_000` guard cannot tell a sweep *inside* the parse from one after it. It is a gate for the fix's invariant, not for the pre-S20 defect |
 
 **(c) Tests of code the branch introduced, or of invariants it did not change.**
