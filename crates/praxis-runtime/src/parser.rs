@@ -632,10 +632,53 @@ fn csv_tokens(region: ByteRegion, s: &str) -> Vec<ByteRegion> {
     out
 }
 
-/// A grid row's width in Unicode scalars.
-fn row_width(i: &Input<'_>, line: ByteRegion) -> Result<usize, ParseFail> {
-    line.scalar_count(i)
-        .ok_or_else(|| ParseFail::at(line.start().offset(), line.len(), "a grid row"))
+/// Parse one grid row: apply the cell parser from the row's start until the row
+/// is consumed, appending each cell to `items`. Returns the row's cell count.
+///
+/// **A cell is whatever the cell parser reads** (D11). §7.5's `grid` examples
+/// are `grid(char)` and `grid(digit)`, and `digit` exists *for* the
+/// one-digit-per-cell case — if `grid(int)` meant that too, `digit` would name
+/// nothing. So a cell parser inside `grid` parses a cell exactly as it would
+/// parse anywhere else: `char` is one scalar, `digit` is one digit, `int` is an
+/// integer token.
+///
+/// The predecessor did neither. It measured width in **bytes** and walked the
+/// child once per byte against the whole remaining buffer, so over `"12\n34\n"`
+/// it answered the four cells `[12, 2, 34, 4]` — the token, and then the token's
+/// tail — and a row containing one `é` was two columns wide with a match
+/// attempted at a continuation byte (IPR-06).
+///
+/// The row is exactly consumed by construction: the cell is bounded to the row,
+/// so it cannot overshoot, and the loop only ends at the row's end or on the
+/// cell parser's own failure.
+///
+/// # Safety
+/// `ctx` must be live and wired.
+unsafe fn walk_grid_row(
+    rt: &Rt,
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    child: u32,
+    line: ByteRegion,
+    items: &mut Vec<GcRef>,
+    scope: &NativeScope<'_>,
+) -> Result<usize, ParseFail> {
+    let mut cells = 0usize;
+    let mut cursor = line.start();
+    while cursor < line.end() {
+        // SAFETY: forwarded from this function's contract.
+        let walked = unsafe { walk(rt.ctx, i, plan, child, line.from(cursor))? };
+        if walked.next <= cursor {
+            // A cell parser that reads nothing would loop forever. `text`/`rest`
+            // over an empty tail is the shape that gets here.
+            return Err(ParseFail::at(cursor.offset(), 0, "a cell that reads input"));
+        }
+        scope.root(walked.value);
+        items.push(walked.value);
+        cursor = walked.next;
+        cells += 1;
+    }
+    Ok(cells)
 }
 
 fn walk_lines(
@@ -1204,14 +1247,6 @@ fn walk_grid_ragged(
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let lines = split_lines(i, region);
-    // Widths are **scalar** counts, not byte counts (IPR-06, D11): a row is a
-    // row of characters, so a row holding one `é` is one column wide and not
-    // two.
-    let mut widths = Vec::with_capacity(lines.len());
-    for line in &lines {
-        widths.push(row_width(i, *line)?);
-    }
-    let width = widths.iter().copied().max().unwrap_or(0);
     // **The fill is not a region of the input.** It is a plan literal, and the
     // predecessor walked `fill.as_bytes()` at offset 0 while the cell parser
     // allocated its Texts against the input — so a `Text` fill cell named input
@@ -1239,31 +1274,25 @@ fn walk_grid_ragged(
         )?
     };
     scope.root(fill_value);
-    let mut items = Vec::with_capacity(lines.len() * width);
-    for (line, row) in lines.iter().zip(&widths) {
-        let mut cell = line.start();
-        while let Some(next) = line.next_scalar(i, cell) {
-            // One scalar, consumed exactly — which is D11's answer for
-            // `grid(int)`: a cell parser parses a cell exactly as it would
-            // anywhere else, and a cell is one character.
-            // SAFETY: ctx is valid.
-            let value = unsafe {
-                walk_exact(
-                    rt,
-                    i,
-                    plan,
-                    child,
-                    line.subregion(cell, next),
-                    "the rest of the cell",
-                )?
-            };
-            scope.root(value);
-            items.push(value);
-            cell = next;
+    // Rows are parsed first and padded second: a ragged grid's width is the
+    // widest row's **cell count**, which is not known until the cell parser has
+    // read them.
+    let mut items = Vec::new();
+    let mut rows = Vec::with_capacity(lines.len());
+    for line in &lines {
+        // SAFETY: ctx is valid.
+        rows.push(unsafe { walk_grid_row(rt, i, plan, child, *line, &mut items, &scope)? });
+    }
+    let width = rows.iter().copied().max().unwrap_or(0);
+    // Pad each short row out to the width, from the back forwards so the
+    // earlier rows' offsets stay valid while we insert.
+    let mut at = items.len();
+    for (n, cells) in rows.iter().enumerate().rev() {
+        at -= cells;
+        for _ in *cells..width {
+            items.insert(at + cells, fill_value);
         }
-        for _ in *row..width {
-            items.push(fill_value);
-        }
+        let _ = n;
     }
     let elem_desc = child_descriptor(plan, child);
     alloc_grid(rt, elem_desc, items, width, region.end())
@@ -1443,39 +1472,28 @@ fn walk_grid(
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let lines = split_lines(i, region);
-    let width = match lines.first() {
-        Some(line) => row_width(i, *line)?,
-        None => 0,
-    };
-    let mut items = Vec::with_capacity(lines.len() * width);
+    let mut items = Vec::new();
+    let mut width: Option<usize> = None;
     for line in &lines {
-        if row_width(i, *line)? != width {
+        // SAFETY: ctx is valid.
+        let cells = unsafe { walk_grid_row(rt, i, plan, child, *line, &mut items, &scope)? };
+        match width {
+            None => width = Some(cells),
             // Grid rows must be uniform (§7.5). Ragged grids are M9. Uniform in
-            // **characters**: a row of `##é` and a row of `###` are both three.
-            return Err(ParseFail::at(
-                region.start().offset(),
-                region.len(),
-                "uniform grid row",
-            ));
-        }
-        let mut cell = line.start();
-        while let Some(next) = line.next_scalar(i, cell) {
-            // SAFETY: ctx is valid.
-            let value = unsafe {
-                walk_exact(
-                    rt,
-                    i,
-                    plan,
-                    child,
-                    line.subregion(cell, next),
-                    "the rest of the cell",
-                )?
-            };
-            scope.root(value);
-            items.push(value);
-            cell = next;
+            // **cells**, which is the only measure that means the same thing for
+            // every cell parser: `grid(char)` counts characters and `grid(int)`
+            // counts integer tokens.
+            Some(w) if w != cells => {
+                return Err(ParseFail::at(
+                    line.start().offset(),
+                    line.len(),
+                    "a grid row of the same cell count as the first",
+                ));
+            }
+            Some(_) => {}
         }
     }
+    let width = width.unwrap_or(0);
     let elem_desc = child_descriptor(plan, child);
     alloc_grid(rt, elem_desc, items, width, region.end())
 }
@@ -2674,39 +2692,59 @@ mod tests {
         );
     }
 
-    /// **D11's answer to IPR-06, spelled out.** A `grid` cell is one Unicode
-    /// scalar, so `grid(int)` reads one digit per cell — a cell parser parses a
-    /// cell exactly as it would anywhere else, and the cell is one character.
+    /// **D11's answer to IPR-06, spelled out.** A `grid` cell is whatever the
+    /// cell parser reads, so `grid(int)` reads one integer **token** per cell
+    /// and `grid(digit)` reads one digit. §7.5's two examples are `grid(char)`
+    /// and `grid(digit)`, and `digit` exists *for* the one-digit case — if
+    /// `grid(int)` meant that too, `digit` would name nothing.
     ///
-    /// This pins the shape the finding named: over `"12\n34\n"` the
-    /// predecessor answered **four** cells `[12, 2, 34, 4]`, because it read
-    /// the whole token at cell 0 and then read the token's tail again at cell
-    /// 1 as well. That is neither semantics. `matrix(int)` is the
-    /// whitespace-tokenized constructor, and it is a different one.
+    /// This pins the shape the finding named: over `"12\n34\n"` the predecessor
+    /// answered **four** cells `[12, 2, 34, 4]`, because it measured width in
+    /// bytes and walked the child once per byte against the whole remaining
+    /// buffer — reading the token at cell 0 and then re-reading the token's tail
+    /// at cell 1. That is not either candidate semantics.
     #[test]
-    fn a_grid_cell_is_one_scalar_so_grid_int_reads_one_digit_per_cell() {
-        let mut rt = crate::Runtime::new();
-        let input = rt.alloc_text("12\n34\n");
-        let mut ctx = rt.context();
-        ctx.input_source = input;
-        let plan = test_plan(
-            vec![
-                PlanNode::Atomic {
-                    kind: AtomicKind::Int,
-                },
-                PlanNode::Grid { child: 0 },
-            ],
-            1,
-        );
+    fn a_grid_cell_is_whatever_its_cell_parser_reads() {
+        fn cells(kind: AtomicKind, input: &str) -> Option<(usize, Vec<i64>)> {
+            let mut rt = crate::Runtime::new();
+            let text = rt.alloc_text(input);
+            let mut ctx = rt.context();
+            ctx.input_source = text;
+            let plan = test_plan(
+                vec![PlanNode::Atomic { kind }, PlanNode::Grid { child: 0 }],
+                1,
+            );
+            let grid = unsafe { run_root(&mut ctx, &plan, text) }.ok()?;
+            let payload = unsafe { &*grid.payload::<crate::collections::GridPayload>() };
+            Some((
+                payload.width,
+                payload.items.iter().map(|r| r.as_int()).collect(),
+            ))
+        }
 
-        let grid = unsafe { run_root(&mut ctx, &plan, input) }.expect("digits are int cells");
-        let payload = unsafe { &*grid.payload::<crate::collections::GridPayload>() };
-        assert_eq!(payload.width, 2);
-        let cells: Vec<i64> = payload.items.iter().map(|r| r.as_int()).collect();
+        // `int` is an integer token, so each row of `"12\n34\n"` is one cell.
         assert_eq!(
-            cells,
-            vec![1, 2, 3, 4],
-            "one whole token per cell would be [12, 34]; re-reading the tail was [12, 2, 34, 4]"
+            cells(AtomicKind::Int, "12\n34\n"),
+            Some((1, vec![12, 34])),
+            "one token per cell — not [12, 2, 34, 4], and not [1, 2, 3, 4] either"
+        );
+        // …and a row of several tokens is several cells.
+        assert_eq!(
+            cells(AtomicKind::Int, "1 2\n3 4\n"),
+            Some((2, vec![1, 2, 3, 4]))
+        );
+        // `digit` is the per-digit parser, which is what it is for.
+        assert_eq!(
+            cells(AtomicKind::Digit, "12\n34\n"),
+            Some((2, vec![1, 2, 3, 4])),
+            "`digit` names the one-digit-per-cell case, so `int` must not"
+        );
+        // Rows must agree in **cells**, which is the only measure that means
+        // the same thing for every cell parser.
+        assert_eq!(
+            cells(AtomicKind::Int, "1 2\n3\n"),
+            None,
+            "two cells then one is not a rectangle"
         );
     }
 

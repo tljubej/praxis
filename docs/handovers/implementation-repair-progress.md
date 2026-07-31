@@ -30,7 +30,7 @@ Update this file at the end of every stage.
 | S17 — Constraint channel and capabilities | **done** | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c`, `e801e6a`, `b6ab8eb`, `fb82f79` |
 | S18 — Option contract and enum nominal identity | **done** — RT-13, RT-14, RT-15, D1 answered and implemented, the two owed fault kinds paid | `207f5d4`, `cf99f8e`, `35b68ce`, `9ad74ef`, `4ee1ad7` |
 | S19 — Input-parser compile pipeline | **done** | `93fc49b`, `f64e950`, `3f644de`, `c3fd726`, `f8b54b3`, `6664841`, `c3ec8cb`, plus the repair pass |
-| S20 — Parser runtime cursor and region ownership | in progress | |
+| S20 — Parser runtime cursor and region ownership | **done** — IPR-01 … IPR-14, D11, D12 and D-S20-A answered and implemented | `b2184c8`, `fea3c8c`, `dc983ee`, `79ef068`, `62905bd`, `04a826c`, `0619e6f`, `9debb03`, `99785cb`, `705e734`, `2ff48c8`, `07b2862` |
 | S21 — Pipeline plan representation and per-stage indices | **done** | `7a38a2a`, `7264de8`, `ac606ba`, `2f68e84`, `333ca4e`, `3151408` |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
@@ -299,6 +299,74 @@ the lexer's nesting test now discriminates the bound (above), and
 `praxis-syntax`'s four `literal` tests are labelled in the module as
 characterization tests pinning a verbatim move, which is a legitimate thing to
 have and not a gate.
+
+### S20 — the parser runtime's cursor and region ownership (IPR-01 … IPR-14)
+
+The last stage of the repair. Eleven ignored exit-criterion tests un-ignored,
+ten new gates, four rewritten or amended, three ADRs (**078**, **079**, **080**)
+and amendments to **ADR-023** and **ADR-040**. **D11**, **D-S20-A** and **D12**
+are answered and implemented; no open decision is left.
+
+Fourteen findings, three defects. A `usize` that was a length to twelve
+producers and a position to four consumers; an owner read from the context while
+the bytes came from an argument; and six constructors that computed a bound and
+then did not require anything to fill it. ADR-078 is the record.
+
+**The base was not green when the stage opened.** The S19 merge (`50c6914`)
+resolved a conflict in `jit.rs` by splicing the IP-11 block in where the closing
+brace of `an_option_from_the_runtime_and_one_from_the_program_are_one_type`
+belonged, so `cargo fmt --check` reported an unclosed delimiter and nothing
+compiled. Both merge parents have the brace. `b2184c8` restores it and changes
+no test body.
+
+| Test | File | Pins |
+|---|---|---|
+| `text_slices_in_later_sections_point_at_their_actual_source_bytes` | `praxis-runtime/src/parser.rs` | IPR-03 at the unit level — `sections(word)` over `"first\n\nsecond"` answers `["first", "second"]`. Rewritten onto the private `run_root` entry, because its body called `walk` with the `(bytes, offset)` pair the stage deleted |
+| `sections_preserve_text_offsets_into_the_original_input` | `adversarial_audit.rs` | the same through the JIT, so it also proves the owner is right across `praxis_run_parser` |
+| `a_parse_of_a_non_input_text_owns_its_slices` | `parser.rs` | **NEW** — IPR-03's other half, which no `read`-driven test can reach. `parse` reads its bytes from its argument and used to read its owner from `ctx.input_source`, so every `Text` it produced was a view of the stdin buffer at offsets chosen by a different string |
+| `lines_require_each_child_parser_to_consume_the_whole_line` | `adversarial_audit.rs` | IPR-02 — `lines(int)` over `"12junk"` faults |
+| `lines_rest_is_bounded_to_each_line` | `adversarial_audit.rs` | IPR-02 + IPR-10 — `lines(rest)` gives element 1 the *second line* |
+| `csv_rest_parser_is_bounded_to_each_token` | `parser.rs` | IPR-04 — `csv(rest)` over `"a,b"` is `["a", "b"]` |
+| `a_csv_token_that_trims_to_empty_does_not_panic` | `parser.rs` | **NEW** — IPR-04's panic path. `region_offset_of` called `slice::windows(0)` for a field that trimmed to nothing, inside `extern "C"`; `"10,20,"` reached it |
+| `a_csv_field_the_child_does_not_consume_is_a_parse_failure` | `jit.rs` | **NEW** — the positive form of the same rule end to end: `csv(int)` over `"1,2x,3"` faults instead of reading the digits it likes |
+| `unicode_grid_cells_are_parsed_once_per_scalar` | `parser.rs` | IPR-06 — `"é"` is one cell, not two |
+| `a_grid_cell_is_whatever_its_cell_parser_reads` | `parser.rs` | **NEW** — D11 in the shape the finding named. `grid(int)` over `"12\n34\n"` is `[12, 34]` at width 1 and `grid(digit)` is `[1, 2, 3, 4]` at width 2; the predecessor said `[12, 2, 34, 4]`, which is neither candidate semantics. Also that a row of two cells and a row of one is not a rectangle |
+| `scan_advances_by_scalar_across_a_multibyte_run` | `parser.rs` | **NEW** — IPR-08. `scan` over `"ééé"` attempts a match at three scalar starts and never at a continuation byte |
+| `template_text_capture_stops_before_the_following_literal` | `adversarial_audit.rs` | IPR-10 — `` `pre{body:text}post` `` on `"premiddlepost"` gives `"middle"` |
+| `a_bounded_word_capture_stops_at_its_region_end` | `adversarial_audit.rs` | **NEW** — IPR-11 **without** growing `word`'s delimiter set. Both halves: `{w:word}-to-{x:word}` splits at the literal, and a bare `ws(word)` still reads `a-b` as one word |
+| `consume_ws_space_run_requires_one_or_more_spaces_or_tabs` | `parser.rs` | IPR-12 — the policy means what `ast.rs` says it means |
+| `a_literals_edge_whitespace_is_its_policy_and_not_its_text` | `praxis-input-parser/src/scan.rs` | **extended** — it asserted the literal *texts*; it now asserts the policies too, which is the half that could not be asserted before because they were all `SpaceRun` |
+| `chars_result_descriptor_matches_the_values_it_contains` | `adversarial_audit.rs` | IPR-07 + D-S20-A. **Its own source is amended**: it declared `-> Vec[Char]` for `chars(int, …)`, which is the disagreement it exists to catch, written into the test |
+| `chars_that_cannot_read_the_whole_region_is_a_parse_failure` | `parser.rs` | **NEW** — IPR-07, across all four skip policies: `skip: whitespace`/`newlines` absorb a trailing run, `skip: none` does not, and a child failure inside the region is never a short answer |
+| `single_anonymous_template_capture_uses_its_child_descriptor` | `parser.rs` | IPR-13 — ``lines(`{word}`)`` carries `TEXT` |
+| `anonymous_word_template_vec_uses_the_text_element_descriptor` | `adversarial_audit.rs` | IPR-13 end to end, and it asserts the **rendering** as well as the tag, which is what proves the dispatch rather than the label |
+| `a_failed_choice_reports_the_deepest_case_failure` | `parser.rs` | **NEW** — IPR-09. `expected` is the inner atomic at the byte the furthest case broke at, not `"any choice case"` at the choice's own offset |
+| `choice_backtracking_under_allocation_pressure_keeps_every_live_intermediate` | `adversarial_audit.rs` | **NEW** — IPR-14, and the only test that can see it. 600 matches behind 9,000 attempts that allocate and then fail, so the collector runs several times *inside* the parse. Asserts the summed values (swept storage is reused, so a reclaimed intermediate is type confusion, not a crash) **and** that `live_count` is far below what was allocated, or no sweep ran and it proves nothing |
+| `every_no_mangle_wrapper_is_behind_the_panic_guard` | `praxis-runtime/src/abi.rs` | **NEW** — D12. Reads the source of the four files that declare entry points and names any `#[no_mangle]` whose body does not open with `abi_guard!`. The property is about the *set*; calling them one by one would test the ones somebody remembered |
+| `a_panic_inside_a_wrapper_becomes_a_fault_and_a_defined_dummy` | `abi.rs` | **NEW** — the guard's behaviour: transparent when nothing panics, and otherwise `FaultKind::Panic` with a message naming the wrapper plus the `Unit` sentinel |
+| `a_failure_offset_past_the_buffer_previews_rather_than_panicking` | `parse_detail.rs` | **NEW** — D12's second panic path. `preview_around` sliced `&input[start..end]` with `start > end` for any offset more than 24 bytes past the end |
+| `a_subregion_can_only_narrow`, `a_subregion_that_would_widen_is_a_bug_and_says_so`, `next_scalar_steps_one_unicode_scalar`, `a_section_region_excludes_its_trailing_line_ending`, `split_lines_and_split_sections_agree_on_a_single_line_region`, `split_lines_strips_crlf_and_drops_a_trailing_empty_line`, `a_line_region_of_a_section_names_the_inputs_own_bytes` | `parser/cursor.rs` | **NEW** — the substrate's own invariants, including the one that is a `debug_assert` rather than a value: widening is unrepresentable |
+
+Three tests were amended rather than deleted, each with a comment saying what it
+used to assert and why that was wrong:
+
+- `adv_csv_inside_sections_nonzero_offset` (`jit.rs`) read `sections(csv(int))`
+  over a section spanning two lines, so one of `csv`'s fields was the text
+  `"3\n4"`. It passed only because the child's cursor was discarded and the
+  `\n4` became nobody's. `csv` describes one line; a section of several is
+  `lines(csv(...))`, which is what day05 writes. The rewrite keeps the subject
+  (a CSV at a non-zero offset) and reads a value out of the second section,
+  which a count could not check.
+- `a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names`
+  (`jit.rs`) read `grid(int)` over `"12\n34\n"` and expected `g[0, 0] == 12` —
+  a whole token per cell (which D11 confirms) *and* one such cell per row
+  (which was an artefact of the byte-counted width). Its **input** is amended
+  to `"1 2\n3 4\n"`; its subject, x-then-y caught by an off-diagonal store, is
+  untouched.
+- `a_template_literal_that_begins_with_a_space_matches` (`jit.rs`), REP-20's
+  gate, asserted that a template written ` -> ` also matches `1->2` — the
+  `SpaceRun` contradiction itself, written into a test. That input now faults,
+  which the test asserts explicitly; the flexible half stays.
 
 This session's sixteen new gates and three rewrites (**ADR-066**, **ADR-067**,
 **ADR-068**):
@@ -1402,6 +1470,84 @@ the thing not to do — its absence is what makes RT-14 unrepresentable.
 none — none of them changes a `#[repr(C)]` type generated code reads.
 
 ### From an earlier session (REP-15, REP-19, REP-23)
+
+### From S20 (the parser runtime) — read this if you touch `parser.rs` or any `extern "C"` wrapper
+
+**`walk` takes an `Input` and a `ByteRegion` and returns a `Walked`.** The
+`(GcRef, usize)` pair is gone and so is every "bytes consumed" reading. A
+`Cursor` has no `usize` constructor: the only mints are `Input::whole` and
+`Cursor::advance`. If you find yourself wanting `bytes.len() - offset`, the
+answer is a region you have not narrowed yet. `parser/cursor.rs` is the whole
+substrate and it is 300 lines.
+
+**A child gets a `subregion`, never a re-sliced buffer.** `subregion` cannot
+widen — debug builds assert, release builds clamp — so the five sites that used
+to hand a child `&bytes[a..b]` with an offset of 0 have no successor spelling.
+`rt_owner` and `region_offset_of` are **deleted**; the owner comes from
+`Input::owner()`, which is the `input` argument, and CSV bounds are computed
+while splitting.
+
+**Whether a child must fill its region is the parent's decision.** Call
+`walk_exact`; it returns a bare `GcRef` so there is no cursor to forget. Do not
+add an exhaustion rule to `choice` or to the root — `scan(choice(...))` and
+`lines(choice(...))` are both correct only because the rule lives at the bound.
+
+**`split_lines`/`split_sections` moved to `cursor.rs` and take `(Input,
+ByteRegion)`.** `split_sections` no longer includes a section's trailing
+newline. That was invisible before and faults every `sections(word)` now.
+
+**`WsPolicy` has a `None` variant and `SpaceRun` means one-or-more.** Every
+match on `WsPolicy` is exhaustive, so a missing arm is a compile error. The
+pre-capture whitespace skip is `skip_capture_ws`, not a policy — if you make it
+one again you will make every capture demand leading whitespace.
+
+**`chars(P, skip:)` is `Vec[result(P)]`.** `chars(int, …)` is `Vec[Int]`. Any
+program or test annotating it `Vec[Char]` is now a type error.
+
+**A `grid` cell is whatever the cell parser reads** (D11). `grid(char)` is one
+scalar, `grid(digit)` is one digit, `grid(int)` is an integer token, and a row's
+width is its **cell count** — not a byte count and not a scalar count. `matrix`
+still splits a row into whitespace-delimited tokens itself; `grid` lets the cell
+parser decide. Any expected value computed against the old behaviour is wrong
+twice over, because the old behaviour read the token *and* re-read its tail.
+
+**`parser.rs` paces.** All ten allocation sites go through `Heap::alloc`/
+`alloc_with`, and every helper opens a `NativeScope` and roots each `GcRef` as it
+takes it. Nothing is threaded: a scope links into `ctx.native_roots` and
+`RuntimeRoots` walks the parent chain, so opening one deeper already covers the
+callers. **If you add a `GcRef` local that lives across an allocation, root it.**
+The failure mode is not a crash — swept storage is reused, so it is type
+confusion at some later, unrelated site.
+
+**`Heap::alloc_unpaced` has one legitimate caller left**, the host's own
+`Runtime::alloc_*`. Do not become the second. The argument that justified the
+parser's exemption — "no root set can see my locals" — is answered by a
+`NativeScope`.
+
+**Every `#[no_mangle] extern "C" fn` body is inside `abi_guard!`,** and
+`every_no_mangle_wrapper_is_behind_the_panic_guard` fails by name if a new one
+is not. The guard is a backstop, not a licence: a *reachable* panic is still a
+bug to fix in the wrapper. A caught panic is `FaultKind::Panic` with a message
+naming the wrapper — deliberately not a new `FaultKind`, which would cost an ABI
+bump (ADR-080 Decision 3).
+
+**Three defects found in passing and deliberately not fixed** — they are not
+S20's and each would be a language decision:
+
+- **A `choice` payload record's fields cannot be read.** A `choice` case whose
+  template has named captures produces an anonymous record, and
+  `match m { M(p) => p.a }` is `Y112: no field 'a' on this type`. `jit.rs:4455` already documents it as
+  "the anon-record-as-payload field access inference gap"; it is why the IPR-14
+  pressure test uses single-anonymous-capture templates for the values it reads.
+- **A record pattern nested inside an enum pattern does not bind.**
+  `match m { M({a, b}) => a * b }` reports `N001: 'b' is not defined` and then
+  loses the rest of the function. ADR-069 made a record a pattern; nesting one
+  inside a variant pattern was evidently not wired.
+- **`WsPolicy::ZeroOrMore` and `OneOrMore` are documented as "spaces or tabs"
+  and implemented as `is_ascii_whitespace`** (`parser.rs`, `consume_ws`), so
+  `\s*` in a template silently matches a newline. Untouched because narrowing
+  them is a grammar change with no finding behind it, and IPR-12 was about
+  `SpaceRun`.
 
 ### From S19 (the input-parser compile pipeline)
 

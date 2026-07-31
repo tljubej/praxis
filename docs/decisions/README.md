@@ -82,3 +82,6 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-076: Absence is an `Option`, and an empty `min` is a fault](./076-absence-is-an-option-and-an-empty-min-is-a-fault.md)
 - [ADR-072: A template capture body is a parser expression, and the scanner parses it](./072-a-template-capture-body-is-a-parser-expression.md)
 - [ADR-073: A parser constructor call is a shape, checked before anything is built](./073-a-constructor-call-is-a-shape-checked-before-it-is-built.md)
+- [ADR-078: A parser position is absolute, a region only narrows, and exhaustion is the parent's decision](./078-a-parser-position-is-absolute-and-a-region-only-narrows.md)
+- [ADR-079: A grid cell is what its cell parser reads, a capture is non-greedy, and a collection's type is its child's](./079-a-grid-cell-is-what-its-cell-parser-reads.md)
+- [ADR-080: Totality is the contract at the ABI boundary, and `catch_unwind` is the proof](./080-totality-is-the-contract-and-catch-unwind-is-the-proof.md)
