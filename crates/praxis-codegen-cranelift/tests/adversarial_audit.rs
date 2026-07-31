@@ -110,7 +110,11 @@ fn tuple_items(value: GcRef) -> Vec<GcRef> {
     unsafe { (*payload).items.clone() }
 }
 
-fn tuple_element_descriptor_ids(value: GcRef) -> Vec<praxis_runtime::descriptor::TypeId> {
+/// Each schema slot's descriptor id, or `None` for a **null** slot — "the
+/// compiler had no static type here", which is a legal answer (ADR-066
+/// decision 5) and the one thing that distinguishes a real element type from
+/// the runtime falling back to the value's own header.
+fn tuple_element_descriptor_slots(value: GcRef) -> Vec<Option<praxis_runtime::descriptor::TypeId>> {
     assert_eq!(
         value.descriptor().id(),
         praxis_runtime::tuples::TUPLE.id(),
@@ -123,8 +127,21 @@ fn tuple_element_descriptor_ids(value: GcRef) -> Vec<praxis_runtime::descriptor:
     schema
         .descriptors
         .iter()
-        // SAFETY: schema entries are pointers to process-static descriptors.
-        .map(|descriptor| unsafe { &**descriptor }.id())
+        .map(|descriptor| {
+            if descriptor.is_null() {
+                None
+            } else {
+                // SAFETY: a non-null schema entry is a process-static descriptor.
+                Some(unsafe { &**descriptor }.id())
+            }
+        })
+        .collect()
+}
+
+fn tuple_element_descriptor_ids(value: GcRef) -> Vec<praxis_runtime::descriptor::TypeId> {
+    tuple_element_descriptor_slots(value)
+        .into_iter()
+        .map(|slot| slot.expect("every slot of this tuple should carry a static type"))
         .collect()
 }
 
@@ -143,7 +160,6 @@ fn fault_epilogue_returns_the_valid_unit_sentinel() {
 }
 
 #[test]
-#[ignore = "known bug: enumerate tuples use an empty opaque schema"]
 fn enumerate_materializes_index_and_element_tuple_payloads() {
     // The older enumerate test only counted results. Inspect the claimed
     // `(index, element)` values themselves so an empty TupleSchema cannot pass.
@@ -160,8 +176,58 @@ fn enumerate_materializes_index_and_element_tuple_payloads() {
     assert_eq!((second[0].as_int(), second[1].as_int()), (1, 20));
 }
 
+/// **MIR-05.** The pair a fused `enumerate`/`zip` builds carries the type the
+/// method catalog already declares, so its schema slots name real descriptors.
+///
+/// This is the only assertion that separates MIR-05 from REP-23's fallback.
+/// REP-23 made a typeless pair keep its *arity*, so the values survive and
+/// `enumerate_materializes_index_and_element_tuple_payloads` passes either way;
+/// what it cannot see is that every slot said "no static type" and formatting,
+/// hashing and equality were dispatching through the values' own headers rather
+/// than through the compiler's answer.
 #[test]
-#[ignore = "known bug: zip tuples use an empty opaque schema"]
+fn a_fused_pairs_schema_names_its_element_types() {
+    let int = praxis_runtime::scalars::INT.id();
+    let text = praxis_runtime::text::TEXT.id();
+
+    // `enumerate` on a Vec[Int] is Vec[(Int, Int)].
+    let (runtime, result) =
+        run_main("fn main() {\n  let v = Vec()\n  v.push(10)\n  v.enumerate()\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        tuple_element_descriptor_slots(result.as_vec()[0]),
+        vec![Some(int), Some(int)],
+        "enumerate's pair is (Int, T), and both halves are named"
+    );
+
+    // `zip` pairs two *different* element types, so a schema that echoed the
+    // receiver's element type for both slots would fail here and not above.
+    let (runtime, result) = run_main(
+        "fn main() {\n  let a = Vec()\n  a.push(1)\n  let b = Vec()\n  b.push(\"s\")\n  a.zip(b)\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        tuple_element_descriptor_slots(result.as_vec()[0]),
+        vec![Some(int), Some(text)],
+        "zip's pair is (T, U), and the two halves differ"
+    );
+
+    // The mirror case, which must stay reachable: a receiver whose element type
+    // is still an inference variable compiles, and its unresolved half becomes a
+    // null slot rather than a compile error (ADR-066 decision 5). This is why
+    // the verifier's `OpaqueAtDescriptorSite` rule stays off — turning it on
+    // would refuse a program that works.
+    let (runtime, result) =
+        run_main("fn main() -> Int {\n  let v = Vec()\n  v.enumerate().count()\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(
+        result.as_int(),
+        0,
+        "an unpushed Vec still enumerates to empty"
+    );
+}
+
+#[test]
 fn zip_materializes_both_tuple_elements() {
     // Counting zipped values does not prove that either tuple element was
     // stored. Read both payload slots.
@@ -180,7 +246,6 @@ fn zip_materializes_both_tuple_elements() {
 }
 
 #[test]
-#[ignore = "known bug: take counts source indices after a filter"]
 fn take_after_filter_counts_filtered_elements_not_source_indices() {
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter(|x| x % 2 == 0).take(2).sum()\n}\n",
@@ -190,7 +255,6 @@ fn take_after_filter_counts_filtered_elements_not_source_indices() {
 }
 
 #[test]
-#[ignore = "known bug: skip counts source indices after a filter"]
 fn skip_after_filter_counts_filtered_elements_not_source_indices() {
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(6)\n  v.filter(|x| x % 2 == 0).skip(1).sum()\n}\n",
@@ -200,7 +264,6 @@ fn skip_after_filter_counts_filtered_elements_not_source_indices() {
 }
 
 #[test]
-#[ignore = "known bug: zip indexes the rhs with sparse pre-filter indices"]
 fn zip_after_filter_uses_dense_filtered_positions() {
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  let rhs = Vec()\n  rhs.push(10)\n  rhs.push(20)\n  v.filter(|x| x % 2 == 0).zip(rhs).count()\n}\n",
@@ -214,7 +277,6 @@ fn zip_after_filter_uses_dense_filtered_positions() {
 }
 
 #[test]
-#[ignore = "known bug: position reports the sparse source index after filter"]
 fn position_after_filter_reports_the_filtered_sequence_index() {
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.filter(|x| x % 2 == 0).position(|x| x == 4)\n}\n",
@@ -228,7 +290,6 @@ fn position_after_filter_reports_the_filtered_sequence_index() {
 }
 
 #[test]
-#[ignore = "known bug: a second flat_map reaches an unreachable MIR arm"]
 fn two_flat_map_stages_compose_without_a_compiler_panic() {
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let a = Vec()\n    a.push(x)\n    a\n  }).flat_map(|x| {\n    let b = Vec()\n    b.push(x)\n    b\n  }).count()\n}\n",
@@ -238,7 +299,6 @@ fn two_flat_map_stages_compose_without_a_compiler_panic() {
 }
 
 #[test]
-#[ignore = "known bug: take inside flat_map resets for every inner sequence"]
 fn take_after_flat_map_counts_the_global_flattened_stream() {
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let inner = Vec()\n    inner.push(x)\n    inner\n  }).take(1).count()\n}\n",
@@ -248,7 +308,6 @@ fn take_after_flat_map_counts_the_global_flattened_stream() {
 }
 
 #[test]
-#[ignore = "known bug: position inside flat_map reports a per-inner index"]
 fn position_after_flat_map_uses_the_global_flattened_index() {
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let inner = Vec()\n    inner.push(x)\n    inner\n  }).position(|x| x == 2)\n}\n",
@@ -258,7 +317,6 @@ fn position_after_flat_map_uses_the_global_flattened_index() {
 }
 
 #[test]
-#[ignore = "known bug: flat_map any short-circuits only the current inner loop"]
 fn any_after_flat_map_short_circuits_the_whole_pipeline() {
     let (runtime, result) = run_main(
         "fn main() -> Bool {\n  let v = Vec()\n  v.push(1)\n  v.push(0)\n  v.flat_map(|x| {\n    let inner = Vec()\n    inner.push(x)\n    inner\n  }).any(|x| x == 1 || 10 / x > 0)\n}\n",

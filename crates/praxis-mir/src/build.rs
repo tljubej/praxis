@@ -2245,26 +2245,59 @@ fn lower_return(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
 // The whole pipeline chain is already visible as a tree at MIR-lowering time:
 // each combinator's `receiver` is itself a `TypedExpr::MethodCall` (or a
 // collection leaf). `recognize_pipeline` walks that tree to build a
-// `PipelinePlan` of streaming `Stage`s terminated by a `Sink`; `lower_pipeline`
-// emits *one* fused loop over the source threading each element through the
-// stages and into the sink. `v.map(f).filter(p).sum()` → one loop, zero
-// intermediate Vecs.
+// `PipelinePlan` whose body is a *recursive* `Chain` of streaming stages
+// terminated by a `Sink`; `lower_pipeline` emits *one* fused loop over the
+// source threading each element through the chain and into the sink.
+// `v.map(f).filter(p).sum()` → one loop, zero intermediate Vecs.
 //
-// Design note — inline emission. Each stage emits its branches directly into the
-// current block rather than returning a control-flow enum. A stage returns
-// `(item_after_stage, still_live)`: `still_live == false` means the stage
-// already emitted a jump to the loop's continue/break target (e.g. `filter`
-// dropped the element, `take_while` stopped the loop), so the caller must not
-// lower anything more into the now-dead `b.cur` block. This keeps conditional
-// behavior real (a Rust `bool` can't branch for us), and mirrors how the rest
-// of the builder (if/while/match) emits straight-line MIR.
+// Design note — the chain is recursive because the semantics are (MIR-06). A
+// `flat_map` does not transform an element, it replaces the element with a
+// *sequence*, and everything after it runs once per inner element. A flat
+// `Vec<Stage>` cannot say that, so the emitter used to special-case the first
+// `flat_map` and re-enter the element-wise stage loop for the remainder — which
+// meant a *second* `flat_map` arrived at a stage arm that could not exist and
+// panicked the compiler. `Chain::Splice { f, rest }` holds the remainder
+// *inside* the splice and `emit_plan` recurses into it, so there is no
+// element-wise arm left for a splice to fall into.
+//
+// Design note — inline emission. Each step emits its branches directly into the
+// current block rather than returning a control-flow enum: a step that drops
+// the element (`filter`) or stops the stream (`take`) emits its own jump and
+// leaves `b.cur` on a dead block, which the caller then never appends to
+// because `emit_plan` recurses *from* the live continuation. This keeps
+// conditional behavior real (a Rust `bool` can't branch for us), and mirrors
+// how the rest of the builder (if/while/match) emits straight-line MIR.
+//
+// Design note — an argument is a field, not a side channel. Every closure and
+// second source is lowered once, before the loop, and stored *on* its `Plan`
+// node. The emitter used to carry them in one positional iterator shared
+// between the outer stage loop and the flat_map splice, with a written contract
+// that each stage advance it by exactly the right amount; a chain that got that
+// wrong would have mis-paired closures silently.
 //
 // The old per-combinator eager lowerers (`lower_pipeline_combinator` +
 // `lower_seq_*`) are kept verbatim below as a fallback for any chain the
 // recognizer declines, so a regression here can never break the eager path.
+//
+// Note for whoever comes next: since MIR-03 removed the literal-only `take`/
+// `skip` restriction, all **23** registered `MethodLowering::Intrinsic` names
+// are recognized by `classify_link`/`classify_sink`, so the fallback is
+// unreachable for a well-typed program — and its `_` arm answers the Unit
+// singleton, which is what MIR-03 was. It is deliberately kept (ADR-029
+// decision 1 names it the incremental-safety net, and deleting a 350-line net
+// in the same change that rewrites the thing it is a net for is the one edit
+// nobody could bisect). Deleting it is a reasonable later commit *on its own*,
+// with `emit_index_loop`/`alloc_empty_vec` following it out.
 // ===========================================================================
 
-/// A streaming pipeline stage (transform the element, possibly skip or stop).
+/// A streaming pipeline stage: transform *one* element, possibly skipping it or
+/// stopping the stream.
+///
+/// `flat_map` is deliberately not a variant. It does not transform an element,
+/// it replaces the element with a sequence and runs the rest of the chain once
+/// per member — a nesting, which is [`Chain::Splice`]. Keeping it out of `Stage`
+/// is what makes "a splice reached the element-wise emitter" unrepresentable
+/// rather than an `unreachable!` (MIR-06).
 #[derive(Clone)]
 enum Stage {
     /// `(T) -> U` — replace the element with the closure's result.
@@ -2273,36 +2306,32 @@ enum Stage {
     Filter(Box<TypedExpr>),
     /// `(T) -> U` — map, then drop the result if it is Unit.
     FilterMap(Box<TypedExpr>),
-    /// `(T) -> Vec<U>` — splice the closure's Vec into the sink element by
-    /// element, then continue the outer loop.
-    FlatMap(Box<TypedExpr>),
-    /// Keep at most `n` leading elements, then stop.
-    Take(i64),
-    /// Drop the first `n` elements.
-    Skip(i64),
+    /// Keep at most `n` leading elements, then stop. `n` is any `Int`
+    /// expression; the catalog types the parameter `Int` and says nothing about
+    /// literals, so neither does this (MIR-03).
+    Take(Box<TypedExpr>),
+    /// Drop the first `n` elements. `n` is any `Int` expression.
+    Skip(Box<TypedExpr>),
     /// Stop at the first element that fails the predicate.
     TakeWhile(Box<TypedExpr>),
-    /// Replace the element with `(index, element)` tuples.
-    Enumerate,
+    /// Replace the element with `(index, element)` tuples. `pair_ty` is the pair
+    /// type, read off the call node (MIR-05).
+    Enumerate { pair_ty: MirType },
     /// Pair each element with the corresponding element of `other`, stopping at
-    /// the shorter length.
-    Zip(Box<TypedExpr>),
+    /// the shorter length. `pair_ty` is the pair type.
+    Zip {
+        other: Box<TypedExpr>,
+        pair_ty: MirType,
+    },
 }
 
-impl Stage {
-    /// Whether this stage carries a closure (or second source) that must be
-    /// lowered once, outside the loop.
-    fn has_arg(&self) -> bool {
-        matches!(
-            self,
-            Stage::Map(_)
-                | Stage::Filter(_)
-                | Stage::FilterMap(_)
-                | Stage::FlatMap(_)
-                | Stage::TakeWhile(_)
-                | Stage::Zip(_)
-        )
-    }
+/// One recognized link in a pipeline chain: an element-wise [`Stage`], or a
+/// `flat_map` splice, which nests the rest of the chain inside itself.
+enum Link {
+    Stage(Stage),
+    /// `(T) -> Vec[U]` — the rest of the chain runs once per member of the Vec
+    /// the closure returns.
+    Splice(Box<TypedExpr>),
 }
 
 /// A terminal pipeline sink — produces the chain's final value.
@@ -2329,45 +2358,97 @@ enum Sink {
     Collect,
 }
 
-/// A recognized pipeline: a source collection, zero or more streaming stages,
-/// and a terminal sink. The whole chain lowers to a single fused loop.
+/// A recognized pipeline chain, source-first. `Then` is one element-wise stage
+/// followed by the rest of the chain; `Splice` is a `flat_map` whose `rest` runs
+/// once per member of the inner Vec; `Sink` terminates.
+///
+/// The nesting is the point (MIR-06): what follows a `flat_map` is *inside* it,
+/// which is exactly what the emitter needs to know and what a flat list of
+/// stages could not express.
+enum Chain {
+    Then(Stage, Box<Chain>),
+    Splice { f: Box<TypedExpr>, rest: Box<Chain> },
+    Sink(Sink),
+}
+
+impl Chain {
+    /// The sink every chain ends in. A `Chain` is finite and `Sink` is its only
+    /// leaf, so this is total.
+    fn sink(&self) -> &Sink {
+        let mut cur = self;
+        loop {
+            cur = match cur {
+                Chain::Then(_, rest) => rest,
+                Chain::Splice { rest, .. } => rest,
+                Chain::Sink(sink) => return sink,
+            };
+        }
+    }
+}
+
+/// A recognized pipeline: a source collection and the chain applied to it. The
+/// whole chain lowers to a single fused loop (plus one nested loop per splice).
 struct PipelinePlan {
     source: Box<TypedExpr>,
-    /// The element type flowing out of the source (before any stage). Used only
-    /// as a slot-allocation hint, and unknown until MIR-05 carries per-stage
-    /// item types, so it is [`MirType::Opaque`] for every recognized chain.
+    /// The element type flowing out of the source (before any stage). Used as
+    /// the source item slot's type; `Known` whenever the source is a typed
+    /// single-element collection (F15) and [`MirType::Opaque`] otherwise — a
+    /// `Map`/`Counter` source, or one whose element type is still an inference
+    /// variable.
     source_item_ty: MirType,
-    stages: Vec<Stage>,
-    sink: Sink,
+    chain: Chain,
     /// The chain's overall result type (carried on the outermost `MethodCall`).
     result_ty: Type,
 }
 
-/// Classify a single `MethodCall` node as a streaming stage. `None` means "not a
-/// recognized streaming op" — the recognizer treats the receiver eagerly.
-fn classify_stage(name: &str, args: &[TypedExpr]) -> Option<Stage> {
+/// Classify a single `MethodCall` node as one link of a streaming chain. `None`
+/// means "not a recognized streaming op" — the recognizer treats the receiver
+/// eagerly.
+///
+/// `ty` is the call node's own result type, which only the two pair-building
+/// stages read (MIR-05): `enumerate`'s is `Vec[(Int, T)]` and `zip`'s is
+/// `Vec[(T, U)]`, so the pair type they allocate is one element-of away.
+fn classify_link(
+    db: &praxis_types::TypeDb,
+    name: &str,
+    args: &[TypedExpr],
+    ty: Type,
+) -> Option<Link> {
     Some(match (name, args) {
-        ("map", [f]) => Stage::Map(Box::new(f.clone())),
-        ("filter", [p]) => Stage::Filter(Box::new(p.clone())),
-        ("filter_map", [f]) => Stage::FilterMap(Box::new(f.clone())),
-        ("flat_map", [f]) => Stage::FlatMap(Box::new(f.clone())),
-        ("take_while", [p]) => Stage::TakeWhile(Box::new(p.clone())),
-        ("enumerate", []) => Stage::Enumerate,
-        ("zip", [other]) => Stage::Zip(Box::new(other.clone())),
-        (
-            "take",
-            [TypedExpr::Lit {
-                value: Lit::Int(n), ..
-            }],
-        ) => Stage::Take(*n),
-        (
-            "skip",
-            [TypedExpr::Lit {
-                value: Lit::Int(n), ..
-            }],
-        ) => Stage::Skip(*n),
+        ("map", [f]) => Link::Stage(Stage::Map(Box::new(f.clone()))),
+        ("filter", [p]) => Link::Stage(Stage::Filter(Box::new(p.clone()))),
+        ("filter_map", [f]) => Link::Stage(Stage::FilterMap(Box::new(f.clone()))),
+        ("flat_map", [f]) => Link::Splice(Box::new(f.clone())),
+        ("take_while", [p]) => Link::Stage(Stage::TakeWhile(Box::new(p.clone()))),
+        ("enumerate", []) => Link::Stage(Stage::Enumerate {
+            pair_ty: pair_ty_of(db, ty),
+        }),
+        ("zip", [other]) => Link::Stage(Stage::Zip {
+            other: Box::new(other.clone()),
+            pair_ty: pair_ty_of(db, ty),
+        }),
+        ("take", [n]) => Link::Stage(Stage::Take(Box::new(n.clone()))),
+        ("skip", [n]) => Link::Stage(Stage::Skip(Box::new(n.clone()))),
         _ => return None,
     })
+}
+
+/// The pair type a fused `enumerate`/`zip` allocates: the element of the call's
+/// own `Vec[(…, …)]` result type (MIR-05).
+///
+/// [`MirType::Opaque`] when the call's result is not a single-argument
+/// collection — which the catalog's rows make impossible for these two, but the
+/// fallback is not decoration: a *half* of a `Known` pair may still be an
+/// inference variable (a `Vec` that was never pushed to), and the backend
+/// answers that with a **null schema slot** so the runtime reads the value's own
+/// header. ADR-066 decision 5. It is also why the verifier's
+/// `OpaqueAtDescriptorSite` rule stays off: refusing to compile an unresolved
+/// element type would reject working programs.
+fn pair_ty_of(db: &praxis_types::TypeDb, ty: Type) -> MirType {
+    match b_db_element_of(db, ty) {
+        Some(t) => MirType::Known(t),
+        None => MirType::Opaque,
+    }
 }
 
 /// Classify a single `MethodCall` node as a terminal sink, or `None` if it's a
@@ -2422,45 +2503,59 @@ fn recognize_pipeline(db: &praxis_types::TypeDb, expr: &TypedExpr) -> Option<Pip
     // so it is recognized as that pair rather than as a sink of its own. No new
     // sink lowering, and it fuses into the same single loop the two-call spelling
     // does.
-    let (outermost_stage, sink) = match (name.as_str(), args.as_slice()) {
-        ("count", [pred]) => (Some(Stage::Filter(Box::new(pred.clone()))), Sink::Count),
+    let (outermost_link, sink) = match (name.as_str(), args.as_slice()) {
+        ("count", [pred]) => (
+            Some(Link::Stage(Stage::Filter(Box::new(pred.clone())))),
+            Sink::Count,
+        ),
         _ => match classify_sink(name, args) {
             Some(s) => (None, s),
             None => {
-                let stage = classify_stage(name, args)?;
-                (Some(stage), Sink::Collect)
+                let link = classify_link(db, name, args, *result_ty)?;
+                (Some(link), Sink::Collect)
             }
         },
     };
-    // Walk the receiver chain collecting stages, outermost-first. `cur` is the
+    // Walk the receiver chain collecting links, outermost-first. `cur` is the
     // node under inspection; once it stops being a streaming `MethodCall` it is
     // the source leaf (whatever it is — `lower_expr_gc` will lower it).
-    let mut stages: Vec<Stage> = Vec::new();
-    if let Some(stage) = outermost_stage {
-        stages.push(stage);
+    let mut links: Vec<Link> = Vec::new();
+    if let Some(link) = outermost_link {
+        links.push(link);
     }
     let mut cur: &TypedExpr = receiver;
     while let TypedExpr::MethodCall {
         receiver: inner_recv,
         name: inner_name,
         args: inner_args,
+        ty: inner_ty,
         ..
     } = cur
     {
-        match classify_stage(inner_name, inner_args) {
-            Some(stage) => {
-                stages.push(stage);
+        match classify_link(db, inner_name, inner_args, *inner_ty) {
+            Some(link) => {
+                links.push(link);
                 cur = inner_recv;
             }
             None => break, // Not a streaming stage — `cur` is our source.
         }
     }
-    // Stages were collected outermost-first; reverse so the source-side stage
-    // runs first inside the loop body.
-    stages.reverse();
+    // Links were collected outermost-first, i.e. last-applied first, so wrapping
+    // the sink in them one at a time yields the chain in execution order with no
+    // reverse: the last link wrapped is the one nearest the source, and it ends
+    // up outermost in the `Chain`.
+    let mut chain = Chain::Sink(sink);
+    for link in links {
+        chain = match link {
+            Link::Stage(stage) => Chain::Then(stage, Box::new(chain)),
+            Link::Splice(f) => Chain::Splice {
+                f,
+                rest: Box::new(chain),
+            },
+        };
+    }
     // The item flowing *out of the source* is the source collection's element
-    // type, which the typed tree now carries (F15) — the chain's later stages
-    // are what still have no item type until MIR-05 (S21).
+    // type, which the typed tree now carries (F15).
     let source_item_ty = match b_db_element_of(db, praxis_hir::expr_ty(cur)) {
         Some(t) => MirType::Known(t),
         None => MirType::Opaque,
@@ -2468,8 +2563,7 @@ fn recognize_pipeline(db: &praxis_types::TypeDb, expr: &TypedExpr) -> Option<Pip
     Some(PipelinePlan {
         source: Box::new(cur.clone()),
         source_item_ty,
-        stages,
-        sink,
+        chain,
         result_ty: *result_ty,
     })
 }
@@ -2493,47 +2587,20 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     let PipelinePlan {
         source,
         source_item_ty,
-        stages,
-        sink,
+        chain,
         result_ty,
     } = plan;
+    let sink = chain.sink().clone();
 
     // Lower the source Vec once; it lives for the loop's duration.
     let src = lower_expr_gc(b, &source);
     // A Gc Int index counter (persists across blocks, like the for-loop counter).
-    let idx = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
-    let zero = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ConstInt {
-        dst: zero,
-        value: 0,
-    });
-    b.push(Inst::Materialize {
-        dst: idx,
-        src: zero,
-        scalar: ScalarKind::Int,
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
+    let idx = alloc_zeroed_counter(b);
 
-    // Lower every stage/sink closure or second-source once, outside the loop.
-    // `stage_args[i]` is the lowered Gc local for `stages[i]`'s argument (only
-    // when `stages[i].has_arg()`); they're pulled in order via `arg_iter`.
-    let mut stage_args: Vec<LocalId> = Vec::new();
-    for stage in &stages {
-        if stage.has_arg() {
-            let arg_expr: &TypedExpr = match stage {
-                Stage::Map(f)
-                | Stage::Filter(f)
-                | Stage::FilterMap(f)
-                | Stage::FlatMap(f)
-                | Stage::TakeWhile(f) => f,
-                Stage::Zip(other) => other,
-                _ => unreachable!(),
-            };
-            let local = lower_expr_gc(b, arg_expr);
-            stage_args.push(local);
-        }
-    }
+    // Lower every stage closure / second source once, outside the loop, into the
+    // `Plan` node that consumes it.
+    let steps = lower_chain(b, &chain);
+
     // Sink closure/init, lowered once.
     let (sink_init_slot, sink_closure_slot) = match &sink {
         Sink::Fold { init, f } => {
@@ -2566,7 +2633,23 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
         _ => None,
     };
 
+    // `find`/`position` report a position, so like the stages that consume one
+    // they get a dense counter — allocated here, before the scaffold, so a
+    // splice cannot re-zero it (MIR-04, MIR-07).
+    let sink_position = match &sink {
+        Sink::Find(_) | Sink::Position(_) => Some(alloc_zeroed_counter(b)),
+        _ => None,
+    };
+
     // ---- The loop scaffold: header / body / increment / exit ---------------
+    //
+    // `exit` is *the* pipeline exit, and there is exactly one however deeply the
+    // chain nests: a splice adds an inner header/body/increment, but never an
+    // inner place to stop the stream (MIR-08). No `LoopCtx` is pushed for either
+    // loop — a user `break`/`continue` cannot appear in a fused body, because
+    // every expression the chain contains is lowered above this line (a closure
+    // body is a separate MIR function), so a loop stack here would only be a
+    // second, weaker way to name the targets the emitter already carries.
     let header = b.func.new_block();
     let body_blk = b.func.new_block();
     let incr_blk = b.func.new_block();
@@ -2577,13 +2660,8 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     // Header: `if idx < src.len() { body } else { exit }`.
     emit_bounds_check(b, src, idx, body_blk, exit);
 
-    // Body: load the element, thread it through the stages, run the sink.
+    // Body: load the element, thread it through the chain, run the sink.
     b.cur = body_blk;
-    b.loop_stack.push(LoopCtx {
-        continue_target: incr_blk, // filter-skip / flat-map-tail → increment
-        break_target: exit,        // take / take_while / any / all / find → exit
-        result: None,              // a fused pipeline loop yields through its sink
-    });
     let item = b.alloc_gc(source_item_ty, None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
         dst: item,
@@ -2594,71 +2672,16 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     });
     b.check_fault();
 
-    // Run the stages in order. Each stage either replaces the element and
-    // leaves `b.cur` live, or emits a skip/stop and leaves a dead `b.cur`.
-    // `FlatMap` is special: it produces a Vec whose elements must be spliced
-    // into the *remainder* of the stage chain (all stages after flat_map) and
-    // then the sink, consuming the outer element.
-    let mut cur_item = item;
-    let mut arg_iter = stage_args.into_iter();
-    let mut alive = true;
-    for (stage_idx, stage) in stages.iter().enumerate() {
-        if !alive {
-            break;
-        }
-        if let Stage::FlatMap(_) = stage {
-            // f(cur_item) -> Vec<U>; for each inner element, run the remaining
-            // stages (those after flat_map) and then the sink. The outer
-            // element is fully consumed by the flat_map.
-            let f = arg_iter.next().unwrap();
-            let inner = invoke_closure(b, f, vec![cur_item]);
-            let remaining: Vec<Stage> = stages[stage_idx + 1..].to_vec();
-            emit_flat_map_inner(
-                b,
-                inner,
-                &remaining,
-                &mut arg_iter,
-                &sink,
-                idx,
-                acc_scalar,
-                acc_gc,
-                seen_flag,
-                collect_vec,
-                sink_closure_slot,
-                incr_blk,
-                exit,
-            );
-            // After splicing, continue to the next outer iteration.
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: incr_blk };
-            b.cur = b.func.new_block(); // dead — nothing else lowers for this element
-            alive = false;
-            continue;
-        }
-        let (new_item, still_live) =
-            run_stage(b, stage, &mut arg_iter, cur_item, idx, incr_blk, exit);
-        cur_item = new_item;
-        alive = still_live;
-    }
-
-    // If we're still on a live block, feed the element to the sink.
-    if alive {
-        emit_sink_body(
-            b,
-            &sink,
-            cur_item,
-            idx,
-            acc_scalar,
-            acc_gc,
-            seen_flag,
-            collect_vec,
-            sink_closure_slot,
-        );
-        // Normal sink completion: fall through to the increment block. (Sinks
-        // that short-circuit — any/all/find — emit their own break and leave
-        // `b.cur` dead, in which case this jump goes into a dead block, harm.)
-        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: incr_blk };
-    }
-    b.loop_stack.pop();
+    let sink_plan = SinkPlan {
+        sink: &sink,
+        acc_scalar,
+        acc_gc,
+        seen_flag,
+        collect_vec,
+        closure: sink_closure_slot,
+        position: sink_position,
+    };
+    emit_plan(b, &steps, item, &sink_plan, incr_blk, exit);
 
     // Increment block: `idx += 1`, jump to header.
     b.cur = incr_blk;
@@ -2678,127 +2701,304 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     )
 }
 
-/// Run one streaming stage in-place. Emits branches directly into `b.cur` and
-/// returns `(item_after_stage, still_live)`. `still_live == false` means the
-/// stage emitted a jump to `incr_blk` (skip) or `exit` (stop) and left `b.cur`
-/// on a dead block — the caller must not lower anything more.
+/// A pipeline stage with everything it needs already lowered to slots: the
+/// closure or second source is a `LocalId`, not a position in a shared
+/// iterator, and a stage that needs a position owns the counter that gives it
+/// one.
 ///
-/// `arg_iter` yields this stage's pre-lowered argument local (closure or second
-/// source) in stage order, advancing only for stages with an argument.
-#[allow(clippy::too_many_arguments)]
-fn run_stage(
-    b: &mut Builder<'_>,
-    stage: &Stage,
-    arg_iter: &mut std::vec::IntoIter<LocalId>,
-    item: LocalId,
-    idx: LocalId,
-    incr_blk: BlockId,
-    exit: BlockId,
-) -> (LocalId, bool) {
-    match stage {
-        Stage::Map(_) => {
-            let f = arg_iter.next().unwrap();
-            (invoke_closure(b, f, vec![item]), true)
+/// **A stage's index is the sequence that reaches it** (MIR-04). Four stages
+/// ask "which element is this?" and the honest answer is different for each of
+/// them: after a `filter`, `take(2)` means the first two *surviving* elements,
+/// and `enumerate` numbers 0, 1, 2 without gaps. There used to be one index —
+/// the source cursor — and all four read it, so `v.filter(even).take(2)` took
+/// whatever survived among source positions 0 and 1. Each of them carries its
+/// own `count` slot now, bumped once per element that arrives, and the source
+/// cursor is not in scope here at all.
+enum Step {
+    Map(LocalId),
+    Filter(LocalId),
+    FilterMap(LocalId),
+    Take {
+        bound: LocalId,
+        count: LocalId,
+    },
+    Skip {
+        bound: LocalId,
+        count: LocalId,
+    },
+    TakeWhile(LocalId),
+    Enumerate {
+        count: LocalId,
+        pair_ty: MirType,
+    },
+    Zip {
+        other: LocalId,
+        count: LocalId,
+        pair_ty: MirType,
+    },
+}
+
+/// The lowered mirror of [`Chain`]: the same shape, with every argument
+/// resolved to the slot holding it.
+enum Plan {
+    Step(Step, Box<Plan>),
+    Splice { f: LocalId, rest: Box<Plan> },
+    Sink,
+}
+
+/// Everything the sink needs, allocated once before the loop. Passed by
+/// reference through the recursive emitter so a splice's inner loop feeds the
+/// *same* accumulators the outer loop does.
+#[derive(Clone, Copy)]
+struct SinkPlan<'a> {
+    sink: &'a Sink,
+    acc_scalar: Option<LocalId>,
+    acc_gc: Option<LocalId>,
+    seen_flag: Option<LocalId>,
+    collect_vec: Option<LocalId>,
+    closure: Option<LocalId>,
+    /// `find`/`position` report an index, so they are position-consuming like
+    /// the four stages that are, and they get a dense counter for the same
+    /// reason: the answer is the position in the sequence that reached the
+    /// sink, not in the source (MIR-04).
+    position: Option<LocalId>,
+}
+
+/// Allocate a zeroed `Gc` Int slot: a loop cursor or a stage's dense counter.
+/// `Gc` rather than `Scalar` because it is live across the `praxis_vec_get`
+/// safepoints in the loop body and the collector has to see a real value there
+/// (ADR-015 §10.3).
+fn alloc_zeroed_counter(b: &mut Builder<'_>) -> LocalId {
+    let slot = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
+    let zero = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ConstInt {
+        dst: zero,
+        value: 0,
+    });
+    b.push(Inst::Materialize {
+        dst: slot,
+        src: zero,
+        scalar: ScalarKind::Int,
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
+    });
+    slot
+}
+
+/// Lower every argument the chain evaluates outside the loop — each stage's
+/// closure or second source — into a [`Plan`] of the same shape, and allocate
+/// the dense counter of each stage that needs a position.
+///
+/// Order matters and is the chain's own: source-side stages first, exactly as
+/// the eager spelling would evaluate them.
+///
+/// The counters are allocated **here**, which is before the loop scaffold, and
+/// that placement is MIR-07 (there is nothing else to it). A counter zeroed
+/// inside the outer loop body would restart for every inner Vec of a
+/// `flat_map`, which is what the old inner index did: `take(1)` after a
+/// `flat_map` kept the first element of *each* inner sequence. Zeroed once, a
+/// counter counts the flattened stream by construction.
+fn lower_chain(b: &mut Builder<'_>, chain: &Chain) -> Plan {
+    match chain {
+        Chain::Then(stage, rest) => {
+            let step = match stage {
+                Stage::Map(f) => Step::Map(lower_expr_gc(b, f)),
+                Stage::Filter(p) => Step::Filter(lower_expr_gc(b, p)),
+                Stage::FilterMap(f) => Step::FilterMap(lower_expr_gc(b, f)),
+                Stage::TakeWhile(p) => Step::TakeWhile(lower_expr_gc(b, p)),
+                Stage::Zip { other, pair_ty } => Step::Zip {
+                    other: lower_expr_gc(b, other),
+                    count: alloc_zeroed_counter(b),
+                    pair_ty: *pair_ty,
+                },
+                Stage::Take(n) => Step::Take {
+                    bound: lower_expr_gc(b, n),
+                    count: alloc_zeroed_counter(b),
+                },
+                Stage::Skip(n) => Step::Skip {
+                    bound: lower_expr_gc(b, n),
+                    count: alloc_zeroed_counter(b),
+                },
+                Stage::Enumerate { pair_ty } => Step::Enumerate {
+                    count: alloc_zeroed_counter(b),
+                    pair_ty: *pair_ty,
+                },
+            };
+            Plan::Step(step, Box::new(lower_chain(b, rest)))
         }
-        Stage::Filter(_) => {
-            let p = arg_iter.next().unwrap();
-            let keep = call_predicate(b, p, item);
-            // On false → jump to incr_blk (skip this element); on true → fall
-            // through to a fresh continuation block.
+        Chain::Splice { f, rest } => Plan::Splice {
+            f: lower_expr_gc(b, f),
+            rest: Box::new(lower_chain(b, rest)),
+        },
+        Chain::Sink(_) => Plan::Sink,
+    }
+}
+
+/// Emit the rest of the pipeline for one element.
+///
+/// Every path out of `plan` is terminated by the time this returns — to
+/// `continue_target` (this element is done), to `exit` (the stream is done), or
+/// into a splice's inner loop — so `b.cur` is left on a fresh dead block and the
+/// caller appends nothing to it.
+///
+/// `continue_target` is the *innermost* increment block: a `Splice` rebinds it
+/// to its own, because while a splice is running "advance to the next element"
+/// means the next inner element.
+///
+/// Note what is **not** a parameter: the loop's index. A source cursor is the
+/// business of the loop that owns it — the header's bounds check and the
+/// `praxis_vec_get` that loads the element — and no stage may read it. Each
+/// stage that needs a position carries its own dense counter (MIR-04), and
+/// making the cursor unreachable from here is what keeps it that way.
+fn emit_plan(
+    b: &mut Builder<'_>,
+    plan: &Plan,
+    item: LocalId,
+    sink: &SinkPlan<'_>,
+    continue_target: BlockId,
+    pipeline_exit: BlockId,
+) {
+    match plan {
+        Plan::Step(step, rest) => {
+            let next = emit_step(b, step, item, continue_target, pipeline_exit);
+            emit_plan(b, rest, next, sink, continue_target, pipeline_exit);
+        }
+        Plan::Splice { f, rest } => {
+            // f(item) -> Vec[U]; the rest of the chain runs once per member.
+            let inner = invoke_closure(b, *f, vec![item]);
+            emit_splice(b, inner, rest, sink, continue_target, pipeline_exit);
+        }
+        Plan::Sink => {
+            emit_sink_body(b, sink, item, continue_target, pipeline_exit);
+            // Normal sink completion: fall through to the increment block. (A
+            // sink that short-circuits — any/all/find — emitted its own jump to
+            // the pipeline exit and left `b.cur` dead, in which case this jump
+            // lands in a dead block, harmlessly.)
+            jump_and_go_dead(b, continue_target);
+        }
+    }
+}
+
+/// Emit one element-wise step. Returns the element flowing out of it, with
+/// `b.cur` on the live continuation: a step that drops (`filter`, `skip`) or
+/// stops (`take`, `take_while`, `zip` past the shorter length) has already
+/// branched those paths away.
+///
+/// The two targets are different things, and MIR-08 is what happens when they
+/// are conflated: `continue_target` advances the *innermost* sequence (a splice
+/// rebinds it), while `pipeline_exit` ends the whole chain from any depth.
+fn emit_step(
+    b: &mut Builder<'_>,
+    step: &Step,
+    item: LocalId,
+    continue_target: BlockId,
+    pipeline_exit: BlockId,
+) -> LocalId {
+    match step {
+        Step::Map(f) => invoke_closure(b, *f, vec![item]),
+        Step::Filter(p) => {
+            let keep = call_predicate(b, *p, item);
+            // On false → jump to the continue target (skip this element); on
+            // true → fall through to a fresh continuation block.
             let keep_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: keep,
                 then_block: keep_blk,
-                else_block: incr_blk,
+                else_block: continue_target,
             };
             b.cur = keep_blk;
-            (item, true)
+            item
         }
-        Stage::FilterMap(_) => {
-            let f = arg_iter.next().unwrap();
-            let mapped = invoke_closure(b, f, vec![item]);
+        Step::FilterMap(f) => {
             // filter_map is modeled as "keep everything": in the catalog it is
             // typed `(T)->U` with non-Unit U, so there's no Unit to filter on.
             // (A precise Unit-drop needs a runtime tag check — see ADR-029.)
-            (mapped, true)
+            invoke_closure(b, *f, vec![item])
         }
-        Stage::FlatMap(_) => {
-            // Handled inline in `lower_pipeline` before this function is called
-            // (flat_map consumes the outer element by splicing an inner Vec
-            // into the sink). This arm is unreachable; consume the arg to keep
-            // `arg_iter` aligned for any (impossible) subsequent stage.
-            let _ = arg_iter.next();
-            let _ = (incr_blk, exit);
-            unreachable!("flat_map is handled inline in lower_pipeline")
-        }
-        Stage::TakeWhile(_) => {
-            let p = arg_iter.next().unwrap();
-            let keep = call_predicate(b, p, item);
+        Step::TakeWhile(p) => {
+            let keep = call_predicate(b, *p, item);
             let keep_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: keep,
                 then_block: keep_blk,
-                else_block: exit, // predicate false → stop the loop
+                else_block: pipeline_exit, // predicate false → stop the stream
             };
             b.cur = keep_blk;
-            (item, true)
+            item
         }
-        Stage::Take(n) => {
-            // If idx >= n → stop (jump to exit); else fall through.
-            let stop = idx_cmp_const(b, idx, *n, CmpOp::Ge);
+        Step::Take { bound, count } => {
+            // If this stage has already passed `n` elements → stop the stream;
+            // else fall through. A bound of zero or less stops before the first
+            // element, and a negative `skip` drops nothing: same comparison the
+            // literal-only path used, so the edge cases are the ones it had.
+            let seen = take_position(b, *count);
+            let stop = position_cmp_bound(b, seen, *bound, CmpOp::Ge);
             let keep_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: stop,
-                then_block: exit,
+                then_block: pipeline_exit,
                 else_block: keep_blk,
             };
             b.cur = keep_blk;
-            (item, true)
+            item
         }
-        Stage::Skip(n) => {
-            // If idx < n → skip (jump to incr_blk); else fall through.
-            let skip = idx_cmp_const(b, idx, *n, CmpOp::Lt);
+        Step::Skip { bound, count } => {
+            // If this is among the first `n` elements to reach the stage → drop
+            // it (jump to the continue target); else fall through.
+            let seen = take_position(b, *count);
+            let skip = position_cmp_bound(b, seen, *bound, CmpOp::Lt);
             let keep_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: skip,
-                then_block: incr_blk,
+                then_block: continue_target,
                 else_block: keep_blk,
             };
             b.cur = keep_blk;
-            (item, true)
+            item
         }
-        Stage::Enumerate => {
-            // Replace item with (idx, item). idx is already a Gc Int slot; copy
-            // it so the tuple owns a stable value.
+        Step::Enumerate { count, pair_ty } => {
+            // Replace item with (n, item), where n is this element's position in
+            // the sequence that reached `enumerate` — dense, so a `filter` in
+            // front of it numbers 0, 1, 2 rather than leaving gaps. The counter
+            // is a Gc Int slot already; copy it so the tuple owns a stable value.
             let idx_copy = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
             b.push(Inst::MoveGc {
                 dst: idx_copy,
-                src: idx,
+                src: *count,
             });
-            let tup = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+            emit_increment(b, *count);
+            let tup = b.alloc_gc(*pair_ty, None, LocalDebugKind::Temp, None);
             b.push(Inst::Alloc {
                 dst: tup,
                 alloc: AllocKind::Tuple {
-                    // A fused `enumerate` has no tuple type until MIR-05 carries
-                    // per-stage item types (S21); saying so explicitly is what
-                    // keeps the backend from building a schema out of whichever
-                    // type the arena happened to intern first.
-                    ty: MirType::Opaque,
+                    // The catalog declares `enumerate`'s result `Vec[(Int, T)]`,
+                    // so the pair's type is a fact the chain already carries and
+                    // the backend can resolve a real element descriptor for each
+                    // half (MIR-05). `Opaque` here now means only "the element
+                    // type is still an inference variable", which ADR-066
+                    // decision 5 answers with a null schema slot.
+                    ty: *pair_ty,
                     elements: vec![idx_copy, item],
                 },
                 roots: RootSlots::unannotated(),
                 debug: DebugSlots::unannotated(),
             });
-            (tup, true)
+            tup
         }
-        Stage::Zip(_) => {
-            let other = arg_iter.next().unwrap();
-            // Stop if idx >= other.len(); else pair (item, other.get(idx)).
-            let stop = idx_ge_len(b, other, idx);
+        Step::Zip {
+            other,
+            count,
+            pair_ty,
+        } => {
+            // Pair the nth element to reach `zip` with `other[n]`, stopping at
+            // the shorter length. `n` is dense: after a `filter`, the surviving
+            // elements pair with `other[0]`, `other[1]`, … rather than with
+            // whatever the source positions happened to be.
+            let stop = idx_ge_len(b, *other, *count);
             let pair_blk = b.func.new_block();
             b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
                 cond: stop,
-                then_block: exit,
+                then_block: pipeline_exit,
                 else_block: pair_blk,
             };
             b.cur = pair_blk;
@@ -2806,51 +3006,145 @@ fn run_stage(
             b.push(Inst::Call {
                 dst: other_item,
                 callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
-                args: vec![other, idx],
+                args: vec![*other, *count],
                 roots: RootSlots::unannotated(),
                 debug: DebugSlots::unannotated(),
             });
             b.check_fault();
-            let tup = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+            emit_increment(b, *count);
+            let tup = b.alloc_gc(*pair_ty, None, LocalDebugKind::Temp, None);
             b.push(Inst::Alloc {
                 dst: tup,
                 alloc: AllocKind::Tuple {
-                    // As for `enumerate` above: no tuple type here until MIR-05.
-                    ty: MirType::Opaque,
+                    // As for `enumerate` above: the catalog declares `zip`'s
+                    // result `Vec[(T, U)]`, so the pair's type is known.
+                    ty: *pair_ty,
                     elements: vec![item, other_item],
                 },
                 roots: RootSlots::unannotated(),
                 debug: DebugSlots::unannotated(),
             });
-            (tup, true)
+            tup
         }
     }
 }
 
-/// Emit `idx <op> n` as a Bool scalar and return it. Used by Take/Skip.
-fn idx_cmp_const(b: &mut Builder<'_>, idx: LocalId, n: i64, op: CmpOp) -> LocalId {
-    let idx_scalar = b.alloc_scalar(ScalarKind::Int);
+/// Emit a `flat_map` splice: an inner index loop over `inner_vec`, with the rest
+/// of the chain — stages *and* sink — emitted inside its body.
+///
+/// The recursion is the whole point (MIR-06). `rest` may itself begin with
+/// another splice, and it lands here again with its own inner loop; nothing in
+/// the emitter special-cases "the first flat_map" and nothing has to claim that
+/// a second one cannot occur.
+///
+/// When the inner loop runs out, control falls to `outer_continue` — the next
+/// element of whatever sequence is feeding this splice.
+fn emit_splice(
+    b: &mut Builder<'_>,
+    inner_vec: LocalId,
+    rest: &Plan,
+    sink: &SinkPlan<'_>,
+    outer_continue: BlockId,
+    pipeline_exit: BlockId,
+) {
+    let inner_idx = alloc_zeroed_counter(b);
+
+    let header = b.func.new_block();
+    let body_blk = b.func.new_block();
+    let inner_incr = b.func.new_block();
+    let inner_exit = b.func.new_block();
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.cur = header;
+    emit_bounds_check(b, inner_vec, inner_idx, body_blk, inner_exit);
+
+    b.cur = body_blk;
+    let inner_item = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+    b.push(Inst::Call {
+        dst: inner_item,
+        callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
+        args: vec![inner_vec, inner_idx],
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
+    });
+    b.check_fault();
+    // The rest of the chain, per inner element. "Continue" now means the inner
+    // increment — the element that advances is the inner one — but the exit is
+    // still the pipeline's: a `take` or an `any` that fires in here has answered
+    // for the whole chain, not for this inner Vec (MIR-08). `inner_idx` is this
+    // loop's own cursor and goes no further than its bounds check and its
+    // `praxis_vec_get`; the stages downstream count the flattened stream through
+    // counters that were zeroed before the outer loop (MIR-07).
+    emit_plan(b, rest, inner_item, sink, inner_incr, pipeline_exit);
+
+    // Inner increment block: `inner_idx += 1`, jump to the inner header. (NOT
+    // the header directly from the body — jumping there skips the increment and
+    // spins the loop, the same M8-WS11 bug the outer loop guards against.)
+    b.cur = inner_incr;
+    emit_increment(b, inner_idx);
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+
+    // The splice is done with this outer element: advance the sequence feeding
+    // it.
+    b.cur = inner_exit;
+    jump_and_go_dead(b, outer_continue);
+}
+
+/// Read a stage's dense counter and bump it, returning the value *before* the
+/// bump as an Int scalar: the number of elements that reached this stage ahead
+/// of this one, which is this element's position in the stage's own input
+/// sequence (MIR-04).
+///
+/// Read-then-increment, so the first element to arrive is at position zero.
+fn take_position(b: &mut Builder<'_>, count: LocalId) -> LocalId {
+    let seen = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ExtractScalar {
-        dst: idx_scalar,
-        src: idx,
+        dst: seen,
+        src: count,
         scalar: ScalarKind::Int,
     });
-    let n_scalar = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ConstInt {
-        dst: n_scalar,
-        value: n,
+    emit_increment(b, count);
+    seen
+}
+
+/// Emit `position <op> bound` as a Bool scalar and return it. Used by
+/// Take/Skip.
+///
+/// `bound` is a `Gc` Int slot written once before the loop, and the payload is
+/// re-extracted here on every iteration rather than hoisted into a scalar the
+/// loop carries: a scalar live across the body's safepoints is exactly what
+/// ADR-015 §10.3 says not to build, and the extract is a load.
+///
+/// This replaced an `idx <op> <literal>` helper, twice over. The bound used to
+/// have to *be* a literal — `classify_stage` matched `take`/`skip` only against
+/// `Lit::Int`, and any other well-typed `Int` expression made the recognizer
+/// decline the whole chain, which fell through to an eager lowerer with no
+/// `take` arm and returned the Unit singleton for the enclosing chain to
+/// misread as a Vec (MIR-03). And the left-hand side used to be the source
+/// cursor rather than the stage's own count (MIR-04).
+fn position_cmp_bound(
+    b: &mut Builder<'_>,
+    position: LocalId,
+    bound: LocalId,
+    op: CmpOp,
+) -> LocalId {
+    let bound_scalar = b.alloc_scalar(ScalarKind::Int);
+    b.push(Inst::ExtractScalar {
+        dst: bound_scalar,
+        src: bound,
+        scalar: ScalarKind::Int,
     });
     let dst = b.alloc_scalar(ScalarKind::Bool);
     b.push(Inst::IntCmp {
         dst,
         op,
-        lhs: idx_scalar,
-        rhs: n_scalar,
+        lhs: position,
+        rhs: bound_scalar,
     });
     dst
 }
 
-/// Emit `idx >= other.len()` as a Bool scalar (used by Zip's stop condition).
+/// Emit `idx >= other.len()` as a Bool scalar (used by Zip's stop condition,
+/// where `idx` is `zip`'s own dense counter rather than the source cursor).
 fn idx_ge_len(b: &mut Builder<'_>, other: LocalId, idx: LocalId) -> LocalId {
     let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     b.push(Inst::Call {
@@ -3093,7 +3387,8 @@ fn emit_empty_collection_guard(b: &mut Builder<'_>, seen: LocalId) {
     b.cur = have;
 }
 
-/// Emit `idx += 1` (extract, add, re-materialize into the Gc slot).
+/// Emit `slot += 1` (extract, add, re-materialize into the Gc slot). Used for a
+/// loop cursor and for a stage's dense counter alike.
 fn emit_increment(b: &mut Builder<'_>, idx: LocalId) {
     let cur = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ExtractScalar {
@@ -3104,7 +3399,12 @@ fn emit_increment(b: &mut Builder<'_>, idx: LocalId) {
     let one = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ConstInt { dst: one, value: 1 });
     let next = b.alloc_scalar(ScalarKind::Int);
-    // A loop index bump, bounded by the source collection's length.
+    // A bump of one per element the loop visits, and `Bounded` is a claim about
+    // this site (ADR-044 decision 6): a cursor is bounded by its collection's
+    // length, and a stage's dense counter by the number of elements the loop can
+    // deliver — which a `flat_map` makes the length of the *flattened* stream,
+    // still bounded by what the process can allocate. Making these `Checked`
+    // would buy nothing and cost a fault test per element.
     b.push(Inst::IntBinOp {
         dst: next,
         op: IntBinOp::Add,
@@ -3140,18 +3440,31 @@ fn move_scalar(b: &mut Builder<'_>, dst: LocalId, src: LocalId) {
 }
 
 /// Emit the sink's per-element update into the current (live) body block.
-#[allow(clippy::too_many_arguments)]
+///
+/// `pipeline_exit` is where a sink that has its answer goes — `any` once true,
+/// `all` once false, `find`/`position` on a hit. It is the *whole* chain's exit
+/// even when this element arrived through a splice: a sink that stopped only the
+/// inner loop would go on evaluating its predicate on elements after the answer
+/// was decided, and would let a later match overwrite `find`'s (MIR-08).
+/// `continue_target` is the innermost increment, which is where `reduce`'s
+/// first-element seed goes: seeding advances the stream by one element, it does
+/// not end it.
 fn emit_sink_body(
     b: &mut Builder<'_>,
-    sink: &Sink,
+    plan: &SinkPlan<'_>,
     item: LocalId,
-    idx: LocalId,
-    acc_scalar: Option<LocalId>,
-    acc_gc: Option<LocalId>,
-    seen_flag: Option<LocalId>,
-    collect_vec: Option<LocalId>,
-    sink_closure_slot: Option<LocalId>,
+    continue_target: BlockId,
+    pipeline_exit: BlockId,
 ) {
+    let SinkPlan {
+        sink,
+        acc_scalar,
+        acc_gc,
+        seen_flag,
+        collect_vec,
+        closure: sink_closure_slot,
+        position,
+    } = *plan;
     match sink {
         Sink::Sum | Sink::Product => {
             let acc = acc_scalar.unwrap();
@@ -3293,18 +3606,19 @@ fn emit_sink_body(
                 then_block: trip_blk,
                 else_block: cont_blk,
             };
-            // trip: set acc, break out of the loop.
+            // trip: set acc, end the pipeline.
             b.cur = trip_blk;
             let val = if matches!(sink, Sink::Any(_)) { 1 } else { 0 };
             b.push(Inst::ConstInt {
                 dst: acc,
                 value: val,
             });
-            break_loop(b);
+            jump_and_go_dead(b, pipeline_exit);
             b.cur = cont_blk;
         }
         Sink::Find(_) | Sink::Position(_) => {
             let acc = acc_scalar.unwrap();
+            let count = position.expect("find/position carry a dense counter");
             let pred = sink_closure_slot.unwrap();
             let keep = call_predicate(b, pred, item);
             let found_blk = b.func.new_block();
@@ -3314,16 +3628,21 @@ fn emit_sink_body(
                 then_block: found_blk,
                 else_block: cont_blk,
             };
+            // On a hit, the answer is the position in the sequence that reached
+            // the sink: the counter's value before this element was counted.
             b.cur = found_blk;
-            let idx_scalar = b.alloc_scalar(ScalarKind::Int);
+            let position_scalar = b.alloc_scalar(ScalarKind::Int);
             b.push(Inst::ExtractScalar {
-                dst: idx_scalar,
-                src: idx,
+                dst: position_scalar,
+                src: count,
                 scalar: ScalarKind::Int,
             });
-            move_scalar(b, acc, idx_scalar);
-            break_loop(b);
+            move_scalar(b, acc, position_scalar);
+            jump_and_go_dead(b, pipeline_exit);
+            // On a miss, count the element and go on. (There is no bump on the
+            // hit path because that path leaves the pipeline.)
             b.cur = cont_blk;
+            emit_increment(b, count);
         }
         Sink::Fold { .. } => {
             let acc = acc_gc.unwrap();
@@ -3355,7 +3674,7 @@ fn emit_sink_body(
                 dst: acc,
                 src: item,
             });
-            continue_loop(b);
+            jump_and_go_dead(b, continue_target);
             b.cur = fold_blk;
             let new_acc = invoke_closure(b, f, vec![acc, item]);
             b.push(Inst::MoveGc {
@@ -3377,131 +3696,6 @@ fn emit_sink_body(
     }
 }
 
-/// Emit the inner iteration for a `flat_map` stage: for each element of
-/// `inner_vec`, run the remaining stages (those after the flat_map in the
-/// chain) and then the sink body. The inner loop has its own index, header,
-/// and exit (which falls through to the outer loop's continuation, set by the
-/// caller). A nested `LoopCtx` is pushed so any stage `continue`/`break` or
-/// sink short-circuit (`any`/`all`/`find`) scopes to this inner loop.
-///
-/// `remaining_args` yields the pre-lowered argument local for each remaining
-/// stage that carries one, in stage order (same contract as the outer loop's
-/// `arg_iter`). It is advanced only for stages with an argument.
-#[allow(clippy::too_many_arguments)]
-fn emit_flat_map_inner(
-    b: &mut Builder<'_>,
-    inner_vec: LocalId,
-    remaining: &[Stage],
-    remaining_args: &mut std::vec::IntoIter<LocalId>,
-    sink: &Sink,
-    outer_idx: LocalId,
-    acc_scalar: Option<LocalId>,
-    acc_gc: Option<LocalId>,
-    seen_flag: Option<LocalId>,
-    collect_vec: Option<LocalId>,
-    sink_closure_slot: Option<LocalId>,
-    incr_blk: BlockId,
-    exit: BlockId,
-) {
-    let inner_idx = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
-    let zero = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ConstInt {
-        dst: zero,
-        value: 0,
-    });
-    b.push(Inst::Materialize {
-        dst: inner_idx,
-        src: zero,
-        scalar: ScalarKind::Int,
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-
-    let header = b.func.new_block();
-    let body_blk = b.func.new_block();
-    let inner_incr = b.func.new_block();
-    let inner_exit = b.func.new_block();
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
-    b.cur = header;
-    emit_bounds_check(b, inner_vec, inner_idx, body_blk, inner_exit);
-
-    b.cur = body_blk;
-    b.loop_stack.push(LoopCtx {
-        continue_target: inner_incr,
-        break_target: inner_exit,
-        result: None, // a fused pipeline loop yields through its sink
-    });
-    let inner_item = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
-    b.push(Inst::Call {
-        dst: inner_item,
-        callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
-        args: vec![inner_vec, inner_idx],
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.check_fault();
-
-    // Run the remaining stages on the inner element. Each stage emits its
-    // branches inline; a stage that drops the element (filter) jumps to the
-    // inner increment (continue), and one that stops (take/take_while) jumps to
-    // the inner exit (break). A nested flat_map here is not supported (it would
-    // require recursive emission); the recognizer does not produce nested
-    // flat_maps within one chain because each flat_map consumes its outer
-    // element, so `remaining` contains only non-flat_map stages.
-    let mut cur_item = inner_item;
-    let mut alive = true;
-    for stage in remaining {
-        if !alive {
-            break;
-        }
-        let (new_item, still_live) = run_stage(
-            b,
-            stage,
-            remaining_args,
-            cur_item,
-            inner_idx,
-            inner_incr,
-            inner_exit,
-        );
-        cur_item = new_item;
-        alive = still_live;
-    }
-
-    // If still live, feed the inner element to the sink. The index reported to
-    // the sink is the inner index (the position within the flat_map's output);
-    // find/position thus report the inner position, matching eager semantics
-    // where flat_map produces a flat sequence.
-    if alive {
-        emit_sink_body(
-            b,
-            sink,
-            cur_item,
-            inner_idx,
-            acc_scalar,
-            acc_gc,
-            seen_flag,
-            collect_vec,
-            sink_closure_slot,
-        );
-        // Normal sink completion: fall through to the inner increment block
-        // (NOT the header — jumping to the header skips the increment and
-        // spins the loop, the same M8-WS11 bug that the outer loop guards
-        // against).
-        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: inner_incr };
-    }
-    b.loop_stack.pop();
-
-    // Inner increment block: `inner_idx += 1`, jump to header.
-    b.cur = inner_incr;
-    emit_increment(b, inner_idx);
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
-    b.cur = inner_exit;
-    // The outer_idx, incr_blk, exit, and outer sink machinery are not used
-    // here; they are parameters for signature symmetry with a future nested-
-    // flat_map path. Suppress unused warnings.
-    let _ = (outer_idx, incr_blk, exit);
-}
-
 /// Emit `!bool` as a fresh Bool scalar (Bool is `i8`; `== 0` inverts it).
 fn invert_bool(b: &mut Builder<'_>, x: LocalId) -> LocalId {
     let zero = b.alloc_scalar(ScalarKind::Int);
@@ -3519,29 +3713,16 @@ fn invert_bool(b: &mut Builder<'_>, x: LocalId) -> LocalId {
     not_x
 }
 
-/// Jump to the enclosing loop's break target and leave `b.cur` on a fresh dead
-/// block so subsequent lowering has somewhere to append.
-fn break_loop(b: &mut Builder<'_>) {
-    let ctx = *b
-        .loop_stack
-        .last()
-        .expect("a pipeline stage runs inside the loop context the fusion pushed");
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
-        target: ctx.break_target,
-    };
-    b.cur = b.func.new_block();
-}
-
-/// Jump to the enclosing loop's continue target and leave `b.cur` on a fresh
-/// dead block.
-fn continue_loop(b: &mut Builder<'_>) {
-    let ctx = *b
-        .loop_stack
-        .last()
-        .expect("a pipeline stage runs inside the loop context the fusion pushed");
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
-        target: ctx.continue_target,
-    };
+/// Terminate the current block with a jump to `target` and leave `b.cur` on a
+/// fresh dead block, so a caller that keeps emitting has somewhere to append.
+///
+/// This replaced a pair of `break_loop`/`continue_loop` helpers that read
+/// `b.loop_stack.last()`. Reading the *innermost* loop is exactly what a
+/// pipeline must not do: a chain has one exit however deeply it nests, and the
+/// innermost stack frame inside a `flat_map` splice named the inner loop's exit
+/// (MIR-08). The emitter carries both targets explicitly now.
+fn jump_and_go_dead(b: &mut Builder<'_>, target: BlockId) {
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target };
     b.cur = b.func.new_block();
 }
 
@@ -3720,13 +3901,22 @@ fn lower_seq_count(b: &mut Builder<'_>, src: LocalId, idx: LocalId, _ty: Type) -
 /// into the same null descriptor the wrapper already expects: the result Vec
 /// adopts each pushed value's descriptor on first push.
 ///
-/// It is *not* derived from `result_ty`, though `result_ty` is `Known` at every
-/// call site now. A chain ending in `enumerate` or `zip` has a result type the
-/// method catalog gets wrong — both rows declare `result: Vec[T]`, the
-/// receiver's own element type, so `v.enumerate()` on a `Vec[Int]` is
-/// `Vec[Int]` rather than `Vec[(Int, Int)]`. Reading it would swap an honest
-/// null descriptor for a wrong one, which is strictly worse: the runtime knows
-/// what to do with absence. See `praxis_mir::verify`'s note on H10.
+/// The *reason* it is not derived from `result_ty` has changed, twice. S15
+/// could not read it because the method catalog described `enumerate` and `zip`
+/// wrongly — both rows declared `result: Vec[T]`, the receiver's own element
+/// type — so a chain ending in either had a result type that would have named
+/// the wrong element descriptor. TY-31 fixed the rows and S21's MIR-05 made the
+/// fused lowering read them, so `result_ty` is both `Known` and *right* at every
+/// call site now.
+///
+/// What is left is a smaller claim: the null descriptor is not a gap, it is how
+/// a `Vec` is built. `praxis_vec_new` adopts the first pushed value's
+/// descriptor, so an empty collect-target has no descriptor to state and the
+/// element type would only be re-derived at the first push. Deriving it here
+/// would be a change to collection construction — one that has to answer what
+/// happens when the two disagree — and belongs with whatever makes the element
+/// descriptor authoritative rather than adopted. See `praxis_mir::verify`'s
+/// note on H10.
 fn alloc_empty_vec(b: &mut Builder<'_>, result_ty: MirType) -> LocalId {
     let result = b.alloc_gc(result_ty, None, LocalDebugKind::Temp, None);
     b.push(Inst::Alloc {
@@ -4997,7 +5187,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: dynamic take arguments fall through to a Unit intrinsic stub"]
     fn dynamic_take_argument_does_not_silently_lower_to_unit() {
         // `take` is typed to accept any Int expression, not literals only. The
         // intrinsic fallback must preserve that contract instead of returning
@@ -5028,7 +5217,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: dynamic skip arguments fall through to a Unit intrinsic stub"]
     fn dynamic_skip_argument_does_not_silently_lower_to_unit() {
         let (funcs, _analysis) = lower_src_to_mir(
             "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let n = 2\n  v.skip(n).sum()\n}\n",
@@ -5053,6 +5241,53 @@ mod tests {
             unit_fallbacks.is_empty(),
             "a well-typed `skip(n)` pipeline must not lower through a Unit fallback"
         );
+    }
+
+    /// **MIR-03's evaluation order.** A `take`/`skip` bound is an expression, so
+    /// *when* it runs is part of the contract: once, before the loop, like every
+    /// other pipeline argument — not once per element.
+    ///
+    /// No behavioural test can see this for a pure bound, which is why it is
+    /// asserted on the MIR: one call to the user function, and it is emitted
+    /// before the loop's first `praxis_vec_len` (the header's bounds check), so
+    /// it cannot be inside the body.
+    #[test]
+    fn a_take_bound_is_evaluated_once_before_the_loop() {
+        for method in ["take", "skip"] {
+            let (funcs, _analysis) = lower_src_to_mir(&format!(
+                "fn bound() -> Int {{ 2 }}\nfn main() -> Int {{\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.{method}(bound()).sum()\n}}\n"
+            ));
+            let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+            // Blocks are appended in emission order, and so are the instructions
+            // in each, so a flat walk is the emission sequence.
+            let calls: Vec<&str> = main
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter_map(|inst| match inst {
+                    Inst::Call {
+                        callee: CallTarget::User(name),
+                        ..
+                    } if name == "bound" => Some("bound"),
+                    Inst::Call {
+                        callee: CallTarget::Runtime(RuntimeSymbol::VecLen),
+                        ..
+                    } => Some("len"),
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(
+                calls.iter().filter(|c| **c == "bound").count(),
+                1,
+                "`{method}(bound())` must evaluate its bound exactly once, got {calls:?}"
+            );
+            assert_eq!(
+                calls.first(),
+                Some(&"bound"),
+                "the bound must be evaluated before the loop's bounds check, got {calls:?}"
+            );
+        }
     }
 
     #[test]
@@ -5197,7 +5432,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: enumerate emits an opaque tuple type (MIR-05, S21)"]
     fn enumerate_tuple_allocation_carries_a_real_two_element_type() {
         // Codegen builds TupleSchema from AllocKind::Tuple.ty. `MirType::Opaque`
         // does not make codegen infer a schema from runtime values; it creates a
@@ -5232,7 +5466,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug: zip emits an opaque tuple type (MIR-05, S21)"]
     fn zip_tuple_allocation_carries_a_real_two_element_type() {
         let (funcs, analysis) = lower_src_to_mir(
             "fn main() {\n  let lhs = Vec()\n  lhs.push(10)\n  let rhs = Vec()\n  rhs.push(20)\n  lhs.zip(rhs)\n}\n",

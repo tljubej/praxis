@@ -1733,6 +1733,18 @@ fn pipeline_fused_chain_survives_gc_stress() {
     // (since 2*i > 100 ⟺ i > 50): 2 * (sum(1..=299) - sum(1..=50))
     // = 2 * (44850 - 1275) = 2 * 43575 = 87150.
     assert_eq!(result.as_int(), 87150);
+
+    // The same stress over stages that own a *dense counter* (MIR-04). Each
+    // counter is a `Gc` Int slot live across every `praxis_vec_get` safepoint in
+    // the loop, exactly like the source cursor, so a root set that did not cover
+    // them would hand the collector a stale word — and after MIR-01/MIR-02, a
+    // slot the liveness pass misses is nulled rather than merely stale.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  var t = 0\n  for p in v.filter(|x| x > 100).enumerate().take(3).collect() { t = t + p.0 * 1000 + p.1 }\n  t\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    // Filtered is 101..=299; enumerate numbers it densely from zero; take(3)
+    // keeps (0,101), (1,102), (2,103) → 101 + 1102 + 2103 = 3306.
+    assert_eq!(result.as_int(), 3306);
 }
 
 #[test]
@@ -1908,6 +1920,40 @@ fn pipeline_take_then_map_then_sum() {
     assert_eq!(result.as_int(), 60);
 }
 
+/// **MIR-03.** The bound of a `take`/`skip` is an `Int` expression, not an `Int`
+/// literal. The catalog types the parameter `Int` and says nothing about
+/// literals; a chain whose bound was anything else used to be declined by the
+/// recognizer, fall through to a combinator lowerer with no `take` arm, and
+/// answer the Unit singleton — which the enclosing chain then read as a Vec.
+#[test]
+fn a_take_or_skip_bound_is_any_int_expression() {
+    let five = "  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n";
+    let answer = |tail: &str| {
+        let (rt, result) = run_main(&format!("fn main() -> Int {{\n{five}  {tail}\n}}\n"));
+        assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+        result.as_int()
+    };
+
+    // A binding, the shape the ignored regressions used.
+    assert_eq!(answer("let n = 3\n  v.take(n).sum()"), 6);
+    assert_eq!(answer("let n = 2\n  v.skip(n).sum()"), 12);
+    // An arithmetic expression, and one that calls back into the receiver.
+    assert_eq!(answer("let n = 1\n  v.take(n + n).sum()"), 3);
+    assert_eq!(answer("v.skip(v.len() - 2).sum()"), 9);
+    // The bound still composes with the stages around it.
+    assert_eq!(answer("let n = 4\n  v.take(n).map(|x| x * 10).sum()"), 100);
+    assert_eq!(answer("let n = 4\n  v.take(n).filter(|x| x > 2).sum()"), 7);
+    // Degenerate bounds keep the meaning the literal spelling had: `take` of
+    // nothing is empty, `skip` of nothing drops nothing, and a negative bound is
+    // the same comparison rather than a special case.
+    assert_eq!(answer("let n = 0\n  v.take(n).sum()"), 0);
+    assert_eq!(answer("let n = 0\n  v.skip(n).sum()"), 15);
+    assert_eq!(answer("let n = 0 - 1\n  v.take(n).sum()"), 0);
+    assert_eq!(answer("let n = 0 - 1\n  v.skip(n).sum()"), 15);
+    assert_eq!(answer("let n = 99\n  v.take(n).sum()"), 15);
+    assert_eq!(answer("let n = 99\n  v.skip(n).sum()"), 0);
+}
+
 #[test]
 fn pipeline_take_while_stops_at_predicate() {
     // [1,2,3,4,1].take_while(<4) = [1,2,3] (stops at first 4, does NOT resume
@@ -1937,6 +1983,76 @@ fn pipeline_enumerate_count() {
     assert_eq!(result.as_int(), 3);
 }
 
+/// **MIR-04's `enumerate` half.** The audit's row named take/skip/zip/find/
+/// position and omitted `enumerate`, and the one test that reads an enumerate
+/// pair's payloads has no `filter` in front of it — so nothing covered the
+/// numbering itself.
+///
+/// `enumerate` numbers the sequence that reaches it. After a `filter` that is a
+/// dense 0, 1, 2 …, not the surviving source positions.
+#[test]
+fn enumerate_after_filter_numbers_the_filtered_sequence() {
+    // [1,2,3,4] -filter(even)-> [2,4] -enumerate-> (0,2), (1,4).
+    // Weighted 100*index + value: 2 + 104 = 106. Reading source indices would
+    // give (1,2), (3,4) → 406, and a swap of the halves gives something else
+    // again.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var t = 0\n  for p in v.filter(|x| x % 2 == 0).enumerate().collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 106);
+
+    // And after a `skip`, which drops from the front: [1,2,3,4].skip(2) is
+    // [3,4], numbered (0,3), (1,4) → 3 + 104 = 107.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var t = 0\n  for p in v.skip(2).enumerate().collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 107);
+}
+
+/// **The rule S21 is named for.** Every stage that asks "which element is this?"
+/// is asking about *its own* input sequence — the one that reaches it — not
+/// about the source.
+///
+/// One shared counter answers all the single-stage cases correctly, which is
+/// why the audit's per-stage regressions do not force the general rule. These
+/// are the shapes that do: two position-consuming stages with a `filter`
+/// between them, where one counter and two counters disagree.
+#[test]
+fn each_stage_counts_the_sequence_that_reaches_it() {
+    // [1..6].skip(1) = [2,3,4,5,6]; filter(even) = [2,4,6]; take(2) = [2,4].
+    // Sum 6. With one source cursor, `take` stops once the *source* index
+    // reaches 2, so only the 2 survives and the answer is 2.
+    let six = "  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.push(6)\n";
+    let answer = |tail: &str| {
+        let (rt, result) = run_main(&format!("fn main() -> Int {{\n{six}  {tail}\n}}\n"));
+        assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+        result.as_int()
+    };
+    assert_eq!(answer("v.skip(1).filter(|x| x % 2 == 0).take(2).sum()"), 6);
+    // Two `skip`s around a filter: [1..6] -skip(1)-> [2..6] -filter(even)->
+    // [2,4,6] -skip(1)-> [4,6], sum 10.
+    assert_eq!(answer("v.skip(1).filter(|x| x % 2 == 0).skip(1).sum()"), 10);
+    // A `zip` behind a filter pairs by the filtered position, and a `take`
+    // behind the zip counts the pairs: [2,4,6] zipped with [10,20,30] is three
+    // pairs, of which two are taken.
+    assert_eq!(
+        answer(
+            "let rhs = Vec()\n  rhs.push(10)\n  rhs.push(20)\n  rhs.push(30)\n  v.filter(|x| x % 2 == 0).zip(rhs).take(2).count()"
+        ),
+        2
+    );
+
+    // `position` reports the position in the sequence that reached the sink, and
+    // it must not be overwritten by a later match — which is what happens when a
+    // hit inside a `flat_map` ends only the inner loop. The inner Vecs here are
+    // [0, 5] and [10]: flattened, the first element over 4 is at index 1;
+    // per-inner, the first Vec answers 1 and the second overwrites it with 0.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let r = Vec()\n    if x == 1 { r.push(0) }\n    r.push(x * 5)\n    r\n  }).position(|p| p > 4)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1, "the flattened stream's index, once");
+}
+
 #[test]
 fn pipeline_zip_count_pairs_to_shorter() {
     // [1,2,3].zip([10,20]) = 2 pairs (shorter length). count() = 2.
@@ -1963,6 +2079,80 @@ fn pipeline_flat_map_sum() {
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 66);
+}
+
+/// **MIR-06's semantics.** A `flat_map` inside a `flat_map` flattens *both*
+/// levels, in order, with everything between them applied once per element of
+/// the level it sits in.
+///
+/// The exit-criterion test (`two_flat_map_stages_compose_without_a_compiler_panic`)
+/// only asserts that the compiler survives, and it asserts a count — which a
+/// wrong-but-non-panicking nesting could also produce. These weight every level
+/// so that dropping one, running one at the wrong depth, or ordering the two
+/// backwards all answer a different number.
+#[test]
+fn a_flat_map_inside_a_flat_map_flattens_both_levels() {
+    // [1,2] -flat_map(x -> [x, x*10])-> [1,10,2,20]
+    //       -flat_map(y -> [y, y*100])-> [1,100,10,1000,2,200,20,2000]
+    // sum = 101 * (1 + 10 + 2 + 20) = 3333, and there are eight elements.
+    let outer = "  let v = Vec()\n  v.push(1)\n  v.push(2)\n";
+    let two_levels = "v.flat_map(|x| {\n    let a = Vec()\n    a.push(x)\n    a.push(x * 10)\n    a\n  }).flat_map(|y| {\n    let c = Vec()\n    c.push(y)\n    c.push(y * 100)\n    c\n  })";
+    let (rt, result) = run_main(&format!(
+        "fn main() -> Int {{\n{outer}  {two_levels}.sum()\n}}\n"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3333, "both levels must be flattened");
+
+    let (rt, result) = run_main(&format!(
+        "fn main() -> Int {{\n{outer}  {two_levels}.count()\n}}\n"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 8, "two doublings over two elements");
+
+    // A stage *between* the two splices runs once per element of the first
+    // level, not once per outer element:
+    // [1,2] -> [1,10,2,20] -map(*2)-> [2,20,4,40] -flat_map(y -> [y, y+1])->
+    // [2,3,20,21,4,5,40,41], sum = 136.
+    let (rt, result) = run_main(&format!(
+        "fn main() -> Int {{\n{outer}  v.flat_map(|x| {{\n    let a = Vec()\n    a.push(x)\n    a.push(x * 10)\n    a\n  }}).map(|y| y * 2).flat_map(|z| {{\n    let c = Vec()\n    c.push(z)\n    c.push(z + 1)\n    c\n  }}).sum()\n}}\n"
+    ));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        136,
+        "a stage between two splices runs at the depth it was written at"
+    );
+}
+
+/// **MIR-08's `take_while` half.** A stage that stops the stream stops the
+/// *stream*, not the inner Vec it happened to be looking at.
+///
+/// The exit-criterion test covers `any`; nothing covered `take_while`, and its
+/// failure mode inside a splice is worse than an early stop: applied per inner
+/// Vec, `take_while` silently becomes a `filter`, so elements after the stop
+/// point are processed and can fault.
+#[test]
+fn take_while_after_flat_map_stops_the_whole_stream() {
+    // [3,1,5] -flat_map(x -> [x])-> [3,1,5] -take_while(> 2)-> [3], and
+    // 100 / (3 - 5) = -50. Per inner Vec, `1` is merely dropped and `5` goes on
+    // to divide by zero — which is the assertion, because a wrong answer here
+    // would be indistinguishable from a right one for a total mapper.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(3)\n  v.push(1)\n  v.push(5)\n  v.flat_map(|x| {\n    let a = Vec()\n    a.push(x)\n    a\n  }).take_while(|y| y > 2).map(|y| 100 / (y - 5)).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(
+        !rt.has_pending_fault(),
+        "nothing after the stop point may run: {:?}",
+        rt.fault()
+    );
+    assert_eq!(result.as_int(), -50);
+
+    // The same with inner Vecs of length two, so the stop lands *inside* an
+    // inner sequence rather than at its start: [1,2] -> [1,10,2,20],
+    // take_while(< 5) -> [1].
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let a = Vec()\n    a.push(x)\n    a.push(x * 10)\n    a\n  }).take_while(|y| y < 5).count()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1, "the stream stops at the first 10");
 }
 
 #[test]

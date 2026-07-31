@@ -410,10 +410,14 @@ pub enum AllocKind {
     /// positional order. Unlike records, tuples have no def-id — their shape is
     /// the element-type sequence alone, so the schema is keyed by the `Type`.
     ///
-    /// [`MirType::Opaque`] means the lowering has no tuple type (the fused
-    /// `enumerate`/`zip` pipelines, whose item types arrive with MIR-05); the
-    /// backend then emits the degenerate zero-element schema rather than the
-    /// schema of whatever type slot 0 happened to hold.
+    /// [`MirType::Opaque`] means the lowering has no tuple type at all. Every
+    /// site that builds a tuple has one now — a fused `enumerate`/`zip` pair
+    /// reads it off the call node (MIR-05), which was the last exception — so
+    /// the case that remains is a *half* of a known pair whose element type is
+    /// still an inference variable. The backend answers either with a schema of
+    /// `elements.len()` slots, filling in the descriptors it can resolve and
+    /// leaving the rest **null** for the runtime to read off each value's own
+    /// header (REP-23, ADR-066 decision 5).
     Tuple { ty: MirType, elements: Vec<LocalId> },
     /// A boxed closure value (M7, §4.10). `fn_name` is the synthetic MIR
     /// function's name (the codegen takes its address via `func_addr`); `captures`
