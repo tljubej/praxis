@@ -1619,17 +1619,26 @@ message and abort. **Totality is therefore load-bearing, not merely primary, for
 an `Effect::Pure` wrapper**: the backstop's answer there is a dead process.
 
 **Three defects found in passing and deliberately not fixed** — they are not
-S20's and each would be a language decision:
+S20's and each would be a language decision. The first two are registered in the
+plan's §4.1 as **REP-48** and **REP-49**, both **not done**:
 
-- **A `choice` payload record's fields cannot be read.** A `choice` case whose
-  template has named captures produces an anonymous record, and
-  `match m { M(p) => p.a }` is `Y112: no field 'a' on this type`. `jit.rs:4455` already documents it as
-  "the anon-record-as-payload field access inference gap"; it is why the IPR-14
-  pressure test uses single-anonymous-capture templates for the values it reads.
-- **A record pattern nested inside an enum pattern does not bind.**
-  `match m { M({a, b}) => a * b }` reports `N001: 'b' is not defined` and then
-  loses the rest of the function. ADR-069 made a record a pattern; nesting one
-  inside a variant pattern was evidently not wired.
+- **A `choice` payload record's fields cannot be read** — **registered as
+  REP-48** (P1, not done). A `choice` case whose template has named captures
+  produces an anonymous record, and `match m { M(p) => p.a }` is `Y112: no field
+  'a' on this type`. `praxis check` on the same file exits **0**, so it is
+  REP-12's shape too. `jit.rs` already documents it as "the anon-record-as-payload
+  field access inference gap"; it is why the IPR-14 pressure test uses
+  single-anonymous-capture templates for the values it reads. Out of scope
+  because it is an inference/lowering defect in the payload's type — the parser
+  produces the right record.
+- **A record pattern nested inside an enum pattern has no grammar** —
+  **registered as REP-49** (P2, not done). `match m { M({a, b}) => a * b }` is
+  `P001: expected a pattern` at the `{`, then two more `P001`s, and the enclosing
+  function is lost. ADR-069 made a record a pattern and REP-25 made a `for`
+  binding one; a variant pattern's sub-patterns were never routed through the
+  same production. Out of scope because it is a `praxis-parser` grammar change,
+  and because it is REP-48's workaround — with REP-48 open there is nothing to
+  work around to.
 - **`WsPolicy::ZeroOrMore` and `OneOrMore` are documented as "spaces or tabs"
   and implemented as `is_ascii_whitespace`** (`parser.rs`, `consume_ws`), so
   `\s*` in a template silently matches a newline. Untouched because narrowing
