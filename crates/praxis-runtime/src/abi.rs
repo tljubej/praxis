@@ -5995,31 +5995,115 @@ mod tests {
         unsafe { praxis_vec_new(ctx, &crate::scalars::INT as *const _) }
     }
 
+    /// A `Bool` object laid out exactly the way [`Heap::alloc_raw`] lays one
+    /// out — a `GcHeader` followed by its payload at
+    /// `GcHeader::payload_offset_for(1)` — but in memory *this module* owns,
+    /// and with the seven bytes after the one-byte payload set to `0xFF`.
+    ///
+    /// The arena cannot be asked for this shape. A `Bool`'s block is
+    /// `payload_offset + 1` bytes, bumpalo rounds the next block's base down to
+    /// eight, and the seven bytes in between are slack that nothing ever
+    /// writes — fresh arena pages read back as zero, so the eight-byte read
+    /// REP-37 removed answered *correctly* in every measurement of the real
+    /// allocator. Owning the storage turns the padding from an accident into a
+    /// fixture, which is the only way the read can be measured rather than
+    /// sampled.
+    ///
+    /// The header carries a **freshly minted** `HeapId`, so the collector's
+    /// provenance check (`Heap::mark`) skips this object instead of colouring
+    /// it: the oracle roots every closure result, and a root the heap did not
+    /// allocate is not the heap's to touch.
+    #[repr(C)]
+    struct DirtyPaddedBool {
+        header: crate::gc::GcHeader,
+        /// Byte 0 is the `BoolPayload`; bytes 1..8 are the neighbours a
+        /// wrong-width or wrong-offset read would consume.
+        payload: [u8; 8],
+    }
+
+    /// A `false` whose seven following bytes are `0xFF`, leaked once per thread
+    /// so a closure entry point can answer it. See [`DirtyPaddedBool`].
+    fn dirty_padded_false() -> GcRef {
+        thread_local! {
+            static CELL: std::cell::Cell<*mut crate::gc::GcHeader> =
+                const { std::cell::Cell::new(std::ptr::null_mut()) };
+        }
+        CELL.with(|cell| {
+            if cell.get().is_null() {
+                let object = Box::leak(Box::new(DirtyPaddedBool {
+                    header: crate::gc::GcHeader::new(
+                        &scalars::BOOL,
+                        scalars::BOOL.size() as u32,
+                        crate::gc::GcHeader::payload_offset_for(scalars::BOOL.align()) as u16,
+                        crate::gc::HeapId::mint(),
+                    ),
+                    payload: [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+                }));
+                cell.set(&mut object.header as *mut crate::gc::GcHeader);
+            }
+            // SAFETY: the pointer heads a leaked, correctly-laid-out `Bool`
+            // object that lives for the rest of the process.
+            unsafe { GcRef::from_raw(cell.get()) }
+        })
+    }
+
+    /// As [`always_false`], but answering the [`dirty_padded_false`] fixture.
+    ///
+    /// # Safety
+    /// As [`always_false`].
+    unsafe extern "C" fn always_dirty_false(
+        _ctx: *mut RuntimeContext,
+        _closure: GcRef,
+        _state: GcRef,
+    ) -> GcRef {
+        dirty_padded_false()
+    }
+
     /// **REP-37's gate.** `ClosureOracle::is_goal` read the closure's `Bool`
     /// answer with `int_payload` — an eight-byte read — but a `Bool`'s payload
-    /// is **one** byte (`BoolPayload = u8`, and `BOOL` is built from it). The
-    /// other seven bytes are the block's alignment padding, which the bump
-    /// allocator never initializes, so `false` read as an `i64` was whatever
-    /// malloc had left there and the answer could differ between runs.
+    /// is **one** byte (`BoolPayload = u8`, and `BOOL` is built from it), so
+    /// the answer took seven further bytes from past the object.
     ///
     /// Every `bfs_distance` / `a_star` / `flood_fill` goal predicate goes
-    /// through that read, so this walk is the whole class: the goal says
-    /// `false` at the only reachable state, and the answer must be `None`. Read
-    /// eight bytes and a non-zero padding byte makes it `Some(0)`.
+    /// through that read, so this walk is the whole class: the goal answers
+    /// `false` at the only reachable state, and the answer must be `None`.
     ///
-    /// The failure is **deterministic** rather than padding-dependent because
-    /// the same fix teaches `int_payload` to `debug_assert` that its operand is
-    /// eight bytes wide — tests are a debug build, which is the CI profile —
-    /// so restoring the old reader fails here every run instead of one in
-    /// however-many. That assertion is the durable half: the next site that
-    /// reaches for `int_payload` on a narrower payload fails loudly rather than
-    /// reading past the object.
+    /// The `false` it answers is [`dirty_padded_false`], whose payload byte is
+    /// `0x00` and whose next seven bytes are `0xFF`. That is what makes this a
+    /// gate rather than a walk: an eight-byte read answers
+    /// `0xFFFF_FFFF_FFFF_FF00`, which is "goal reached at the start state" and
+    /// therefore `Some(0)`; a read at *any* offset past byte zero answers
+    /// `0xFF`, likewise `Some(0)`. Only one byte at offset zero answers `None`,
+    /// so the test fails if either the width or the offset is wrong. Asking the
+    /// allocator for this shape does not work — see [`DirtyPaddedBool`] — which
+    /// is why the walk that stood here before passed with the fix removed.
+    ///
+    /// [`read_scalar`] is what makes both mistakes unspellable at the call
+    /// site, and `int_payload`'s width `debug_assert` is what stops the next
+    /// site from making them; `read_scalar_answers_none_for_a_foreign_descriptor`
+    /// pins the reader itself.
     #[test]
     fn a_graph_goal_predicate_reads_a_bool_at_a_bool_s_width() {
+        // The fixture is only a gate while its padding is dirty: state that
+        // here, so a later edit that zeroes it fails loudly rather than
+        // silently turning this back into the walk it replaced.
+        let fixture = dirty_padded_false();
+        assert!(std::ptr::eq(fixture.descriptor(), &scalars::BOOL));
+        assert_eq!(
+            unsafe { read_scalar(fixture, scalars::BOOL_PAYLOAD) },
+            Some(0u8),
+            "the fixture is `false` at a Bool's width"
+        );
+        assert_ne!(
+            unsafe { *fixture.payload::<i64>() },
+            0,
+            "…and non-zero at an Int's, which is what the wrong read consumed"
+        );
+
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         let answer = unsafe {
-            let goal = praxis_alloc_closure(ctx, always_false as *const u8, 0);
+            let goal = praxis_alloc_closure(ctx, always_dirty_false as *const u8, 0);
             let neighbours = praxis_alloc_closure(ctx, no_neighbours as *const u8, 0);
             let start = praxis_alloc_int(ctx, 0);
             praxis_bfs_distance(ctx, start, neighbours, goal)
@@ -6031,6 +6115,26 @@ mod tests {
             crate::enums::OPTION_NONE_TAG as u32,
             "the goal answered `false` at every state, so no distance was found"
         );
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// The same walk against the immortal `false` every real program's closure
+    /// answers — a companion, not a gate: it passes with REP-37's fix removed,
+    /// because the arena leaves a `Bool`'s slack bytes zero. It rules out a
+    /// "fix" that only reads the fixture correctly.
+    #[test]
+    fn a_graph_goal_predicate_that_is_false_everywhere_finds_nothing() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let answer = unsafe {
+            let goal = praxis_alloc_closure(ctx, always_false as *const u8, 0);
+            let neighbours = praxis_alloc_closure(ctx, no_neighbours as *const u8, 0);
+            let start = praxis_alloc_int(ctx, 0);
+            praxis_bfs_distance(ctx, start, neighbours, goal)
+        };
+        assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+        assert_eq!(answer.descriptor().id(), crate::enums::ENUM.id());
+        assert_eq!(enum_tag_of(answer), crate::enums::OPTION_NONE_TAG as u32);
         unsafe { drop_ctx(ctx) };
     }
 

@@ -329,23 +329,39 @@ that was being restated at call sites:
   sweep in S18's shape: `abi.rs` read through `include_str!`, the fixed point of
   "can reach `set_fault`", asserted against every wrapper's row.
 
-This block's twelve new gates and two ADRs (**083**, **084**) — REP-36 … REP-49:
+This block's new gates and two ADRs (**083**, **084**) — REP-36 … REP-49. The
+table is **fourteen tests in thirteen rows**, and thirteen of the fourteen are
+gates: `intrinsics_are_all_recognized_so_there_is_no_second_lowering` is a
+structural invariant, not red on `main`, and says so in its own row. Companions
+— tests that rule out a *wrong* fix rather than failing without the right one —
+are named below the table and are **not** counted here, which is the correction
+a reviewer had to make twice:
 
 | Test | File | Pins |
 |---|---|---|
 | `grid_rotate_left_and_right_turn_in_opposite_directions` | `jit.rs` | REP-36 — a grid **asymmetric in both axes**, so no transpose, flip or 180° turn reads the same, and both halves in one answer (`1` left, `10` right, `11` both) because a fix that swapped the two bodies again passes either half alone. Answers `0` before the fix |
-| `a_graph_goal_predicate_reads_a_bool_at_a_bool_s_width` | `abi.rs` | REP-37 — an end-to-end walk whose goal is `false` everywhere and whose answer must be `None`. Restoring the old reader aborts it **every** run rather than one in however-many, because `int_payload`'s new width assertion turns a padding-dependent wrong answer into a deterministic failure |
+| `a_graph_goal_predicate_reads_a_bool_at_a_bool_s_width` | `abi.rs` | REP-37 — an end-to-end walk whose goal answers a `Bool` **this test owns**: payload byte `0x00`, next seven bytes `0xFF`. An eight-byte read answers `0xFFFF_FFFF_FFFF_FF00` and a read at any offset past byte zero answers `0xFF`, so both are "goal reached" and `Some(0)`; only one byte at offset zero answers `None`. The arena cannot be asked for this shape — a `Bool` block leaves exactly seven bytes of slack nothing writes, and fresh pages read zero — which is why the walk that stood here first passed with the fix removed |
 | `a_bool_pattern_reads_its_scrutinee_at_a_bools_width` | `praxis-mir/src/build.rs` | REP-49 — the **instruction**, because the behaviour cannot say it: `match true` is right whenever the two immortals' padding differs, and comparing `true` against itself reads one address twice and is right for the wrong reason |
 | `filter_map_drops_the_nones_rather_than_carrying_them` | `jit.rs` | REP-38 — a sum a surviving `None` cannot even type-check, plus the all-`None` result and a `filter_map` between two other stages. Its predecessor asserted `map`'s answer and is **rewritten, not deleted** (§8.2) |
 | `find_answers_the_matching_element_not_its_index` + `find_reaches_a_non_int_element` | `jit.rs` | REP-39/ADR-082 — a vector where the element and its index are *different numbers*, and an element no arithmetic could have reached while `find`'s result type was `Int` |
 | `intrinsics_are_all_recognized_so_there_is_no_second_lowering` | `praxis-mir/src/build.rs` | REP-40 — every catalog row lowered as an `Intrinsic` is classified by the recognizer, which is the property that made the deleted fallback unnecessary. **Not red on `main`** — deleting unreachable code changes no behaviour — but red the moment `classify_sink` loses an arm |
 | `a_collection_with_no_static_element_type_does_not_claim_int` | `abi.rs` | REP-41 — **both** halves: the five labels absent, *and* a `Text` counter key, a `Float` heap element and a `Text` set member rendering as themselves. Only the label would pass a fix that left the dispatch wrong; suppressing the label half, the counter's keys come back `[0]` |
 | `a_map_does_not_claim_its_values_are_ints` | `abi.rs` | REP-42 — the empty map's value slot absent (red on the old spelling), the first insert teaching it `Text`, `values()` rendering `[vv]`, and a `Map` genuinely holding `Int`s reporting `Int` — the assertion the old spelling could not make, because `INT` was also its "unknown" |
-| `counter_inc_at_the_int_ceiling_faults_rather_than_wrapping` + `counter_inc_below_the_ceiling_still_counts` | `jit.rs` | REP-43 — the **fault kind**, not "the process survived": before the fix the test binary aborts. The second is the other half, so a fix that faulted on every `inc` does not pass |
+| `counter_inc_at_the_int_ceiling_faults_rather_than_wrapping` | `jit.rs` | REP-43 — the **fault kind**, not "the process survived": before the fix the test binary aborts. Its companion `counter_inc_below_the_ceiling_still_counts` is **not** a gate — it passes on `main` — but a mutation companion, ruling out a fix that faults on every `inc` |
 | `a_whole_numbered_float_renders_as_a_float` | `scalars.rs` | REP-44/ADR-083 — whole numbers, an exponent and the three non-finite values, which are the only places the two rendering rules differ. `run_pass_float_methods` asserted `"9"` and is **rewritten, not deleted** (§8.2) |
 | `a_wrapper_that_can_raise_a_fault_declares_that_it_faults` | `abi.rs` | REP-45 — the manifest checked against the code, by fixed point over `abi.rs`'s own text. **One direction only**: a row may declare a fault the scan cannot see (macro-generated wrappers have no textual definition), so it is weaker than the truth and never stricter |
 | `the_overflow_alternatives_answer_where_a_checked_add_faults` | `jit.rs` | REP-46 — every assertion at `i64::MAX`, where the ordinary `+` faults; two small numbers would pass against `praxis_int_add` itself and prove only that a name resolves. Values *and* the absence of a pending fault, which is the whole point of the three |
 | `a_parser_template_in_value_position_is_reported` | `infer_tests.rs` | REP-47/ADR-084 — `Y023`, ``read `n = {int}` `` still clean (the sublanguage is entered by the *word*), and **exactly one** error, which is the half that fails for a fresh variable with no report or a parser refusal with a cascade |
+
+**The companions.** Three tests in this block pass on `main` by design, and each
+one says so in its own doc comment: `grid_rotate_left_then_right_restores_the_contents`
+(REP-36), `counter_inc_below_the_ceiling_still_counts` (REP-43) and
+`a_graph_goal_predicate_that_is_false_everywhere_finds_nothing` (REP-37). They
+are worth having — each rules out a fix that breaks the ordinary path, which is
+the failure mode a single one-sided gate invites — but a companion is not a
+gate, and counting one as a gate is the bookkeeping error a reviewer caught
+here twice. The rule this block ends on: **a test is a gate only if it was
+observed red with its fix removed, and the observation is written down.**
 
 `a_structural_key_hashes_by_contents_so_mutating_it_moves_its_bucket` is **not**
 in that table: REP-48 changed its *observation*, not its subject. It asked a

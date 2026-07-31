@@ -553,9 +553,12 @@ fn counter_inc_at_the_int_ceiling_faults_rather_than_wrapping() {
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
 }
 
-/// The other side of REP-43: an increment that fits is still an increment, and
-/// a fresh key still starts at one. A "fix" that faulted on every `inc` would
-/// pass the gate above.
+/// REP-43's **mutation companion, not a gate** — it passes unchanged on `main`,
+/// which is the point of it. An increment that fits is still an increment and a
+/// fresh key still starts at one, so a "fix" that faulted on every `inc` would
+/// pass the gate above and fail here. `grid_rotate_left_then_right_restores_the_contents`
+/// is the same role for REP-36. A companion is worth having and is not counted
+/// among the block's gates.
 #[test]
 fn counter_inc_below_the_ceiling_still_counts() {
     let src = "fn main() -> Int {\n  let c = Counter()\n  c[\"k\"] = 9223372036854775806\n  \
