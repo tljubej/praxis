@@ -72,14 +72,23 @@ at the cursor. A caller that wants leading space skipped has `chars`' `skip:`,
 `walk_exact`'s token bounds, and a template's pre-capture skip. With that,
 "every row has the same cell count" rejects a ragged char grid again.
 
-**A row's trailing horizontal whitespace is padding, not a cell.** `grid(int)`
-faulted on a row ending in a space while `matrix(int)` over the identical file
-succeeded — `whitespace_tokens` never emits an empty token, so `matrix` had
-always dropped it. §7.5 asks only for equal cell counts, so `walk_grid_row`
-stops when the cell parser fails and the rest of the row is spaces and tabs. A
-cell parser that *can* read the run never reaches that branch, which is why the
-rule does not undo the paragraph above: `grid(char)` reads a trailing space as a
-trailing cell.
+**A row's trailing whitespace is padding, not a cell — when the cell parser
+cannot read it.** `grid(int)` faulted on a row ending in a space while
+`matrix(int)` over the identical file succeeded — `whitespace_tokens` never
+emits an empty token, so `matrix` had always dropped it. §7.5 asks only for
+equal cell counts, so `walk_grid_row` stops when the cell parser fails and what
+is left of the row is whitespace.
+
+This is not a `grid` rule. It is ADR-078's bound rule — *a child that leaves
+only whitespace has filled its bound* — reached through the same predicate,
+`ByteRegion::is_all_whitespace`; `grid` is simply one of the two loops that are
+not `walk_exact`-shaped. Stating it once is what stopped `lines` and `grid`
+disagreeing about the identical run, which they did for a whole round.
+
+A cell parser that *can* read the run never reaches that branch, which is why
+this does not undo the paragraph above: `grid(char)` reads a trailing space as a
+trailing cell, so `grid(char)` over `"ab\ncd \n"` is a **ragged grid** and says
+so. Same rule, different child.
 
 ## Decision 2: `text` is non-greedy, and *every* capture is bounded
 
