@@ -1787,8 +1787,11 @@ fn capture_bound(
 /// - any named capture → a `Record` (schema built at runtime from the capture
 ///   names + the child result descriptors).
 ///
-/// Multi-anon-capture templates lower to a `Tuple` node (handled by
-/// [`walk_tuple`]); this function never sees that case.
+/// A multi-anon-capture template is assembled here too, by the last arm — the
+/// plan has a `Tuple` node for it and nothing ever emits one, so `walk_tuple`
+/// is unreachable from source. That gap is why `template_result_descriptor`
+/// answers `Unit` for this shape; it is registered as REP-54 and not fixed
+/// here.
 fn walk_template(
     rt: &Rt,
     i: &Input<'_>,
@@ -1940,11 +1943,16 @@ fn walk_template(
     })
 }
 
-/// Interpret a multi-anon-capture template lowered as a `Tuple` node (§7.3).
+/// Interpret a `PlanNode::Tuple` (§7.3): each element against the region's tail
+/// from the current cursor, the cursor advancing to where that element stopped.
 ///
-/// Each element is walked against the region's tail from the current cursor and
-/// the cursor advances to where that element stopped — the same model as
-/// [`walk_template`], and the same fix: the predecessor returned
+/// **Unreachable from source.** `lower_template` emits `PlanNode::Template` for
+/// every template shape, multi-anon included, and `walk_template` assembles the
+/// tuple itself; nothing in `praxis-input-parser` ever pushes a `Tuple` node.
+/// Kept because the plan variant is public and a hand-built plan can name it —
+/// see REP-54, which is the descriptor half of the same gap.
+///
+/// Same model as [`walk_template`] and the same fix: the predecessor returned
 /// `bytes.len() - offset`, a *length*, where its caller wanted a position.
 fn walk_tuple(
     rt: &Rt,
@@ -2543,8 +2551,16 @@ fn atomic_descriptor(kind: AtomicKind) -> &'static crate::TypeDescriptor {
 }
 
 /// The descriptor of a template's *result*: a scalar if it has exactly one
-/// anonymous capture, a record if it has named captures, Unit if none. (A
-/// multi-anon-capture template lowers to a `Tuple` node, handled above.)
+/// anonymous capture, a record if it has named captures, Unit if none.
+///
+/// **Two or more anonymous captures answer `Unit` and the value is a tuple**,
+/// which is ADR-079 Decision 5's own class of defect surviving in one shape:
+/// `read lines(`{int},{int}`)` renders `[Unit, Unit]`. The comment here used to
+/// say that shape "lowers to a `Tuple` node, handled above" — it does not;
+/// `lower_template` emits a `Template` node for every template and
+/// `walk_template` builds the tuple. Pre-existing (identical at the pre-S20
+/// base) and registered as **REP-54**: the fix wants a tuple descriptor built
+/// from the child descriptors, which is a wider change than this stage owns.
 fn template_result_descriptor(
     plan: &ParserPlan,
     parts: &[praxis_input_parser::TemplatePartNode],
