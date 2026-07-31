@@ -90,6 +90,15 @@ this does not undo the paragraph above: `grid(char)` reads a trailing space as a
 trailing cell, so `grid(char)` over `"ab\ncd \n"` is a **ragged grid** and says
 so. Same rule, different child.
 
+The same sentence decides the shapes next door, and it has to, or "ragged" is an
+exception rather than a rule: a trailing *line* of spaces is offered to the cell
+parser too (`cursor::trailing_blank_run`), so `grid(char)` over `"ab\ncd\n  \n"`
+is **three rows** and `grid(char)` over `"  \n  \n"` is a **2x2 grid of
+spaces**, while `grid(digit)` and `grid(int)` read no cell there and the line is
+nobody's. Until round four of the S20 repair those two answered 2x2 and 0x0 —
+the extent half deleting the line before `char` was asked — which is the
+contradiction ADR-078's amendment records.
+
 ## Decision 2: `text` is non-greedy, and *every* capture is bounded
 
 §7.4 already decides this, verbatim: "`text`: minimally consumes text until the

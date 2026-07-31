@@ -30,7 +30,7 @@ Update this file at the end of every stage.
 | S17 — Constraint channel and capabilities | **done** | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c`, `e801e6a`, `b6ab8eb`, `fb82f79` |
 | S18 — Option contract and enum nominal identity | **done** — RT-13, RT-14, RT-15, D1 answered and implemented, the two owed fault kinds paid | `207f5d4`, `cf99f8e`, `35b68ce`, `9ad74ef`, `4ee1ad7` |
 | S19 — Input-parser compile pipeline | **done** | `93fc49b`, `f64e950`, `3f644de`, `c3fd726`, `f8b54b3`, `6664841`, `c3ec8cb`, plus the repair pass |
-| S20 — Parser runtime cursor and region ownership | **done** — IPR-01 … IPR-14, D11, D12 and D-S20-A answered and implemented, plus three repair passes; the third states the trailing-whitespace rule the first two got wrong twice | `b2184c8`, `fea3c8c`, `dc983ee`, `79ef068`, `62905bd`, `04a826c`, `0619e6f`, `9debb03`, `99785cb`, `705e734`, `2ff48c8`, `07b2862`, `9458fd5`, `afc6f3f`, `fe26720`, `635c8a1`, `eb9404b`, `c3e2cf1`, `556862d`, `1696885`, `787595a`, `e68ac0c`, `2dd9e05`, `1ae8393`, `cf8d38b`, `c2923f3`, `fda5a7c`, `1bf3e86`, `c60653b` |
+| S20 — Parser runtime cursor and region ownership | **done** — IPR-01 … IPR-14, D11, D12 and D-S20-A answered and implemented, plus four repair passes; the fourth makes the whitespace rule one question with one answer, which the third split between two halves that disagreed | `b2184c8`, `fea3c8c`, `dc983ee`, `79ef068`, `62905bd`, `04a826c`, `0619e6f`, `9debb03`, `99785cb`, `705e734`, `2ff48c8`, `07b2862`, `9458fd5`, `afc6f3f`, `fe26720`, `635c8a1`, `eb9404b`, `c3e2cf1`, `556862d`, `1696885`, `787595a`, `e68ac0c`, `2dd9e05`, `1ae8393`, `cf8d38b`, `c2923f3`, `fda5a7c`, `1bf3e86`, `c60653b`, `8d26278`, `7161521`, `efa6d30`, `cc37f81`, `c02b5f4`, `88c65ce`, `36736d3` |
 | S21 — Pipeline plan representation and per-stage indices | **done** | `7a38a2a`, `7264de8`, `ac606ba`, `2f68e84`, `333ca4e`, `3151408` |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
@@ -394,8 +394,9 @@ name.
 
 The structural work above stood. What it broke was ordinary input, and every
 review found the same theme: **trailing whitespace is not an error**. It took
-three rounds to state it as a rule instead of a byte count, and the first two
-attempts are recorded here because the shape of the mistake is the useful part.
+four rounds to state it as one rule with one answer — two counting bytes, one
+splitting the question between halves that disagreed — and every attempt is
+recorded here because the shape of the mistake is the useful part.
 
 *Round one* applied `walk_exact`'s "a bounded child must fill its bound" at a
 **root region** that ran to the end of the file, so the bound included the
@@ -438,6 +439,7 @@ blank line. ADR-078 carries the reasoning.
 | **Minor.** `run_plan` is also the body behind the host `parse(text, P)`, so round two's trim deleted a byte from a Text the *program* wrote and `parse(t, rest)` stopped being the identity on `t` | **round three.** There is no trim to narrow — deleting it restores the identity, and the gate says so |
 | **Major.** `grid(char)` could not represent a space cell, so `"ab\na b\n"` was reported as a clean 2x2 grid with `b` shifted into the space's slot — a **wrong answer** where the byte-width predecessor gave a wrong shape | `char` and `one_of` read the scalar **at** the cursor; §7.4's "surrounding horizontal space handled by caller" is a rule for the numeric atomics. The ragged rejection comes back for free |
 | **Minor.** `grid(int)` faulted on a row ending in a space while `matrix(int)` over the same file succeeded | `walk_grid_row` treats a trailing run the cell parser cannot read as padding — the same predicate as `walk_exact` since round three. A parser that *can* read it — `char` — never reaches that branch, which is why `grid(char)` over `"ab\ncd \n"` is a **ragged grid** and says so |
+| **Major (round three's own).** The two halves of the rule answered its question opposite ways: `grid(char)` called one trailing space a cell (ragged fault) and a whole trailing line of spaces not-a-line (silently 2x2; `"  \n  \n"` silently *empty*), because the parser-independent extent half deleted the line without asking. `lines(rest)` lost a line the same way | **round four.** One question — does the parser offered these bytes read them? — and the half that can ask decides. `cursor::trailing_blank_run` hands a trailing blank line to the constructor's own parser, which drops it only if it makes nothing of it; `split_lines` drops only *empty* lines. `matrix` also stopped skipping an **interior** blank one, which is what made it disagree with `lines` and `grid` on the same shape |
 | **Minor.** The `chars` skip policies are named backwards: `newlines` is the **broader** policy. That is what made the major above possible | written down in the four places a reader reaches — `SkipPolicy`, `skip_chars`, §7.5, and the `skip:` diagnostic, which now says what each policy skips |
 | **Minor.** `SourceSlice`'s owner became a chain, which the plan's hazards said to prevent: `t = parse(t, rest)` in a loop was O(n²) and overflowed the stack at 100 000 links | `Input::new` resolves to the root owned `Text` once and rebases; `text_bytes` is iterative. 100 000 links: 64s and an abort → 0.31s |
 | **Minor.** D12's coverage gate read a hand-written four-file `include_str!` list | the file set is walked from `crates/`, covering every crate |
