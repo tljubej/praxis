@@ -859,11 +859,22 @@ sep(" -> ", word)
 
 #### `chars(parser, skip: policy)`
 
-Apply a parser repeatedly to characters. Optional `skip` policies:
+Apply a parser repeatedly to characters. Optional `skip` policies, each stated
+by what it skips between matches:
 
-- `none`
-- `whitespace`
-- `newlines`
+- `none` — nothing; every byte of the region belongs to the character parser.
+- `whitespace` — spaces and tabs. **Horizontal whitespace only**; not line
+  endings.
+- `newlines` — spaces, tabs **and** line endings.
+
+`newlines` is therefore the *broader* policy: it skips everything `whitespace`
+skips and line endings besides. The names suggest the opposite containment, so
+they are spelled out here rather than left to be inferred.
+
+The policy governs the region's interior. A file's own trailing newline is not
+part of the region a root parse runs against, so no policy has to absorb it —
+which is why the example below reads a newline-terminated file without
+`skip: newlines`.
 
 ```praxis
 chars(one_of("^v<>"), skip: whitespace)

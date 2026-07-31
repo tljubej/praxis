@@ -340,13 +340,33 @@ impl std::fmt::Display for Separator {
 }
 
 /// How `chars(P, skip:)` trims between matches (§7.5).
+///
+/// **Read the two non-`None` variants as an inclusion, because the names do not
+/// say so.** `Whitespace` is *horizontal* whitespace; `Newlines` is horizontal
+/// whitespace **and** line endings. So `Newlines` skips strictly more than
+/// `Whitespace` — `whitespace` is the narrower policy despite being the broader
+/// English word, and `skip: newlines` means "newlines *as well*", not "newlines
+/// only".
+///
+/// That inversion is not academic: it is what made
+/// `chars(one_of("^v<>"), skip: whitespace)` — §7.5's own example — look like it
+/// should absorb an input file's trailing `\n`, and a stage shipped believing
+/// it. (It does not; the file's terminator is outside the root region instead,
+/// ADR-078 Decision 3.) The sets are kept as they are because they are the ones
+/// §7.5's example needs and swapping them would silently change what every
+/// existing `skip: newlines` program accepts; what was missing was this
+/// paragraph. `walk_characters`/`skip_chars` in `praxis-runtime` is the
+/// implementation, and `SkipPolicy::skips` below is the single description both
+/// the runtime comment and the `skip:` diagnostic quote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SkipPolicy {
-    /// No trimming between matches.
+    /// No trimming between matches: every byte of the region is the child's.
     None,
-    /// Skip horizontal whitespace (spaces/tabs) between matches.
+    /// Skip **horizontal** whitespace — spaces and tabs — between matches. Not
+    /// line endings: see the type's own documentation.
     Whitespace,
-    /// Skip any whitespace including newlines between matches.
+    /// Skip horizontal whitespace **and** line endings between matches. The
+    /// broader of the two policies.
     Newlines,
 }
 
@@ -360,6 +380,26 @@ impl SkipPolicy {
             _ => return None,
         })
     }
+
+    /// What this policy skips, in the words the `skip:` diagnostic uses.
+    ///
+    /// One description, quoted by the diagnostic and by the runtime, so a
+    /// reader who reaches either one is told that `newlines` is the broader
+    /// policy rather than left to infer it from the names.
+    pub fn skips(self) -> &'static str {
+        match self {
+            SkipPolicy::None => "nothing",
+            SkipPolicy::Whitespace => "spaces and tabs",
+            SkipPolicy::Newlines => "spaces, tabs and line endings",
+        }
+    }
+
+    /// Every policy, in §7.5's order. The list is **closed**: a test sweeps it.
+    pub const ALL: &'static [SkipPolicy] = &[
+        SkipPolicy::None,
+        SkipPolicy::Whitespace,
+        SkipPolicy::Newlines,
+    ];
 }
 
 /// One item in a `block(...)` (M9, §7.5).

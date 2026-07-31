@@ -1208,6 +1208,17 @@ fn walk_characters(
 
 /// Skip bytes at `cursor` per the `chars` skip policy (§7.5).
 ///
+/// **`Newlines` is the broader policy, not the narrower one.** `Whitespace`
+/// skips spaces and tabs; `Newlines` skips those *and* line endings. The names
+/// do not say so and the arms below look backwards to a reader who assumes
+/// "whitespace" is the superset — which is exactly the assumption that made a
+/// stage believe `skip: whitespace` could absorb an input file's trailing
+/// newline. It cannot, and it does not have to: the terminator is outside the
+/// root region (see `Input::root_region`). `SkipPolicy`'s own documentation in
+/// `praxis-input-parser` carries the full note, and
+/// `the_skip_policies_are_ordered_by_what_they_skip` pins the inclusion so the
+/// sets cannot be quietly swapped.
+///
 /// Byte-wise like [`skip_line_boundary`], and sound for the same reason: every
 /// byte it tests is ASCII whitespace, which cannot appear inside a multi-byte
 /// scalar.
@@ -2736,6 +2747,67 @@ mod tests {
             fail.input_span.0, 2,
             "byte 2 is where the case that got furthest actually broke"
         );
+    }
+
+    /// **The `chars` skip policies, ordered by what they skip.**
+    ///
+    /// `Whitespace` is spaces and tabs; `Newlines` is those **and** line
+    /// endings. The names imply the opposite containment — "whitespace" reads
+    /// like the superset — and a stage acted on that reading, concluding that
+    /// `skip: whitespace` could absorb an input file's trailing newline. It
+    /// cannot. The sets are deliberately kept (they are the ones §7.5's
+    /// `chars(one_of("^v<>"), skip: whitespace)` example needs, and swapping
+    /// them would change what every existing `skip: newlines` program accepts),
+    /// so what has to exist instead is this: a test that states the inclusion,
+    /// and fails if anyone quietly swaps the arms to make the names read
+    /// straight.
+    #[test]
+    fn the_skip_policies_are_ordered_by_what_they_skip() {
+        use praxis_input_parser::SkipPolicy;
+        let rt = crate::Runtime::new();
+        let owner = rt.alloc_text(" \t\n\r x");
+        // SAFETY: `owner` is a Text allocated just above and `rt` outlives `i`.
+        let i = unsafe { Input::new(owner) }.expect("a Text is UTF-8");
+        let region = i.whole();
+        let skipped = |p| skip_chars(&i, region, region.start(), p).offset();
+
+        assert_eq!(skipped(SkipPolicy::None), 0, "`none` skips nothing");
+        assert_eq!(
+            skipped(SkipPolicy::Whitespace),
+            2,
+            "`whitespace` is HORIZONTAL whitespace: it stops at the newline"
+        );
+        assert_eq!(
+            skipped(SkipPolicy::Newlines),
+            5,
+            "`newlines` is horizontal whitespace AND line endings — the broader policy"
+        );
+        assert!(
+            skipped(SkipPolicy::Newlines) > skipped(SkipPolicy::Whitespace),
+            "`newlines` must skip a superset of `whitespace`, however the two are named"
+        );
+        // The one description both the diagnostic and the runtime comment
+        // quote, so the names are never the only thing a reader is given.
+        assert_eq!(SkipPolicy::Whitespace.skips(), "spaces and tabs");
+        assert_eq!(
+            SkipPolicy::Newlines.skips(),
+            "spaces, tabs and line endings"
+        );
+        // Sweep the closed list, so a fourth policy cannot arrive without a
+        // description and a position in the ordering.
+        let mut previous = 0usize;
+        for policy in SkipPolicy::ALL.iter().copied() {
+            assert!(
+                !policy.skips().is_empty(),
+                "every skip policy states what it skips"
+            );
+            let n = skipped(policy);
+            assert!(
+                n >= previous,
+                "SkipPolicy::ALL is ordered from narrowest to broadest; {policy:?} skips {n}"
+            );
+            previous = n;
+        }
     }
 
     /// **IPR-07.** `chars` returned `Ok` at the first child failure, so it
