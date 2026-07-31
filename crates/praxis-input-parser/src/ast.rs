@@ -396,11 +396,6 @@ impl ParserAst {
     /// the token's start + 1 (the opening backtick). Without this a capture
     /// body's diagnostic caret would land near the top of the file.
     pub fn shift_spans(&mut self, delta: u32) {
-        fn shift_part(part: &mut TemplatePart, delta: u32) {
-            if let TemplatePart::Capture { parser, .. } = part {
-                parser.shift_spans(delta);
-            }
-        }
         // Bind the span mutably in one place, then recurse into the children.
         match self {
             ParserAst::Atomic { span, .. } | ParserAst::OneOf { span, .. } => {
@@ -408,9 +403,7 @@ impl ParserAst {
             }
             ParserAst::Template { parts, span } => {
                 *span = span.shifted(delta);
-                for part in parts {
-                    shift_part(part, delta);
-                }
+                shift_part_spans(parts, delta);
             }
             ParserAst::Lines { child, span }
             | ParserAst::Sections { child, span }
@@ -455,6 +448,23 @@ impl ParserAst {
                     p.shift_spans(delta);
                 }
             }
+        }
+    }
+}
+
+/// Shift every span inside a template's parts by `delta` bytes.
+///
+/// Separate from [`ParserAst::shift_spans`] because the two callers need
+/// different halves: the `Template` arm of `shift_spans` rebases the node's own
+/// span *and* its parts, while [`crate::body`] — which has just scanned a
+/// nested template whose interior has its own offsets — has to rebase the parts
+/// **without** touching the enclosing span, which it already built in the outer
+/// text's offsets. Doing that with an open-coded loop is how the nested case
+/// came to be missed in the first place.
+pub fn shift_part_spans(parts: &mut [TemplatePart], delta: u32) {
+    for part in parts {
+        if let TemplatePart::Capture { parser, .. } = part {
+            parser.shift_spans(delta);
         }
     }
 }

@@ -7,7 +7,9 @@
 //! type-synthesized, and lowered to a `ParserPlan`.
 
 use praxis_ast::{AstNode, ParserExpr, ParserExprKind, ParserNamedArg};
-use praxis_input_parser::ast::{AtomicKind, Constructor, ParserAst, TemplatePart};
+use praxis_input_parser::ast::{
+    shift_part_spans, AtomicKind, Constructor, ParserAst, TemplatePart,
+};
 use praxis_input_parser::{
     build_call, build_repeated_tail, lower_to_plan, register_plan, scan_template, synthesize,
     validate, CallArg, PlanId, ValidationError,
@@ -181,16 +183,13 @@ fn convert_template(
     let base = u32::from(token.text_range().start()) + 1;
 
     match scan_template(interior) {
-        Ok(parts) => parts
-            .into_iter()
-            .map(|part| match part {
-                TemplatePart::Literal { text, ws } => TemplatePart::Literal { text, ws },
-                TemplatePart::Capture { name, mut parser } => {
-                    parser.shift_spans(base);
-                    TemplatePart::Capture { name, parser }
-                }
-            })
-            .collect(),
+        // One uniform shift is right *here*, because the scanner's offsets are
+        // all relative to this one interior — including those under a nested
+        // template, which `body::parse_expr` has already rebased onto it.
+        Ok(mut parts) => {
+            shift_part_spans(&mut parts, base);
+            parts
+        }
         Err(e) => {
             // **The code comes from the error** (IP-06). Every `ScanError` used
             // to be flattened into `TemplateScan` (I030) here, so the codes

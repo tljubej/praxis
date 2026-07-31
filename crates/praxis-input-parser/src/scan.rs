@@ -82,6 +82,58 @@ impl ScanError {
         }
     }
 
+    /// The same error, anchored `delta` bytes later.
+    ///
+    /// A nested template's interior is scanned in **its own** offsets: the
+    /// scanner is handed the text between the backticks and knows nothing about
+    /// where that text sits in the template that contains it. The caller does
+    /// know, and this is how the two are joined. Without it every caret under a
+    /// nested template lands short by the nested interior's own offset — the
+    /// error for `` `{a:sections(x: `{y:csv(int, int)}`)}` `` pointed at
+    /// `sections`.
+    #[must_use]
+    pub fn shifted(self, delta: usize) -> ScanError {
+        let bump = |at: usize| at + delta;
+        match self {
+            ScanError::InvalidEscape { byte_offset, seq } => ScanError::InvalidEscape {
+                byte_offset: bump(byte_offset),
+                seq,
+            },
+            ScanError::UnterminatedCapture { byte_offset } => ScanError::UnterminatedCapture {
+                byte_offset: bump(byte_offset),
+            },
+            ScanError::EmptyCapture { byte_offset } => ScanError::EmptyCapture {
+                byte_offset: bump(byte_offset),
+            },
+            ScanError::InvalidCaptureName { byte_offset, name } => ScanError::InvalidCaptureName {
+                byte_offset: bump(byte_offset),
+                name,
+            },
+            ScanError::UnknownCaptureKind { byte_offset, name } => ScanError::UnknownCaptureKind {
+                byte_offset: bump(byte_offset),
+                name,
+            },
+            ScanError::UnknownConstructor { byte_offset, name } => ScanError::UnknownConstructor {
+                byte_offset: bump(byte_offset),
+                name,
+            },
+            ScanError::MalformedCaptureBody {
+                byte_offset,
+                message,
+            } => ScanError::MalformedCaptureBody {
+                byte_offset: bump(byte_offset),
+                message,
+            },
+            ScanError::NestingTooDeep { byte_offset } => ScanError::NestingTooDeep {
+                byte_offset: bump(byte_offset),
+            },
+            ScanError::CallShape(mut err) => {
+                err.span = err.span.shifted(delta as u32);
+                ScanError::CallShape(err)
+            }
+        }
+    }
+
     /// The diagnostic this error is reported under.
     ///
     /// **Exhaustive on purpose** (IP-06). Every `ScanError` used to be
@@ -894,6 +946,81 @@ mod tests {
         assert!(scan_template("{x:csv(int}").is_err());
         assert!(scan_template("{x:csv(int, int)}").is_err());
         assert!(scan_template("{x:frobnicate(int)}").is_err());
+    }
+
+    /// **A span is the text it names**, at every depth of nesting.
+    ///
+    /// `ParserAst::shift_spans` and `Span::shifted` are recursive span
+    /// arithmetic that nothing asserted, and the one place the shift was *not*
+    /// applied was the one D10 made reachable: a nested template's parts kept
+    /// offsets relative to the **nested** interior and were never rebased onto
+    /// the enclosing one, so `convert_template`'s single uniform shift — right
+    /// for one level — left every caret under a nested template short by that
+    /// interior's own offset.
+    ///
+    /// The assertion is the strongest available one: slice the interior by the
+    /// span and compare it to the source text the node was built from.
+    #[test]
+    fn every_span_is_the_text_it_names_even_inside_a_nested_template() {
+        fn text_at(interior: &str, span: praxis_source::Span) -> &str {
+            &interior[span.start().to_usize()..span.end().to_usize()]
+        }
+        fn capture_parser(part: &TemplatePart) -> &ParserAst {
+            match part {
+                TemplatePart::Capture { parser, .. } => parser,
+                other => panic!("expected a capture, got {other:?}"),
+            }
+        }
+
+        // One level: the capture's parser span is the `int` that named it.
+        let interior = "x = {x:int}";
+        let parts = scan_template(interior).unwrap();
+        assert_eq!(
+            text_at(interior, capture_parser(&parts[1]).span()),
+            "int",
+            "a top-level capture's span"
+        );
+
+        // Two levels. `int` lives inside the *nested* interior, and its span
+        // must still name it in the text `scan_template` was handed.
+        let interior = "{g:choice(A: `{x:int}`, B: word)}";
+        let parts = scan_template(interior).unwrap();
+        let ParserAst::Choice { cases, span } = capture_parser(&parts[0]) else {
+            panic!("expected a choice");
+        };
+        assert_eq!(
+            text_at(interior, *span),
+            "choice(A: `{x:int}`, B: word)",
+            "the choice call's own span"
+        );
+        let ParserAst::Template {
+            parts: inner,
+            span: inner_span,
+        } = &cases[0].1
+        else {
+            panic!("expected a nested template");
+        };
+        assert_eq!(text_at(interior, *inner_span), "`{x:int}`");
+        assert_eq!(
+            text_at(interior, capture_parser(&inner[0]).span()),
+            "int",
+            "a capture inside a nested template — this is what was never rebased"
+        );
+        assert_eq!(
+            text_at(interior, cases[1].1.span()),
+            "word",
+            "the un-nested sibling, which was always right"
+        );
+
+        // And the error channel is rebased too: the caret for a bad call inside
+        // a nested template pointed at the *enclosing* call.
+        let interior = "{g:choice(A: `{x:csv(int, int)}`)}";
+        let err = scan_template(interior).unwrap_err();
+        assert_eq!(
+            err.byte_offset(),
+            interior.find("csv").unwrap(),
+            "the offset must name the `csv` that is wrong, not the `choice` around it"
+        );
     }
 
     /// A compiler must not answer adversarial input with a stack overflow

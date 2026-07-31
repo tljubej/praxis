@@ -23,7 +23,7 @@
 use praxis_source::Span;
 use praxis_syntax::ident::{is_ident_continue, is_ident_start};
 
-use crate::ast::{AtomicKind, Constructor, ParserAst};
+use crate::ast::{shift_part_spans, AtomicKind, Constructor, ParserAst};
 use crate::call::{build_call, build_repeated_tail, CallArg};
 use crate::scan::{Scan, ScanError, MAX_NESTING};
 
@@ -76,9 +76,24 @@ fn parse_expr(cur: &mut Scan<'_>, base: usize, depth: usize) -> Result<ParserAst
 
     if c == '`' {
         // A nested backtick template (D10). Its own interior is scanned by the
-        // same scanner, one level deeper.
+        // same scanner, one level deeper — and **in its own offsets**, which is
+        // the whole of the next three lines.
+        //
+        // `scan_template_at` is handed the text between the backticks and knows
+        // nothing about where that text sits here, so every span and every
+        // error offset it returns is relative to the nested interior. The outer
+        // `Template` node's span was rebased and the parts underneath it were
+        // not, so a diagnostic inside `` `{a:sections(x: `{y:int}`)}` ``
+        // pointed at the wrong bytes and `convert_template`'s single uniform
+        // `shift_spans` could not repair it: that shift is right for one level
+        // and wrong for two.
+        //
+        // The nested interior begins one byte past the backtick at `start`.
+        let inner_base = base + start + 1;
         let interior = crate::scan::take_template(cur)?;
-        let parts = crate::scan::scan_template_at(interior, depth + 1)?;
+        let mut parts = crate::scan::scan_template_at(interior, depth + 1)
+            .map_err(|e| e.shifted(inner_base))?;
+        shift_part_spans(&mut parts, inner_base as u32);
         return Ok(ParserAst::Template {
             parts,
             span: Span::new((base + start) as u32, (base + cur.pos()) as u32),
