@@ -1,7 +1,12 @@
 # Repair session handover — every stage closed, and the register that is left
 
 **Date:** 2026-07-31
-**Tree:** `b557e0a` (everything below was measured there) · **Suite:** 1632 passed, 0 failed, **0 ignored** · `just ci` green
+**Tree:** `b557e0a` (everything below was measured there) · **0 ignored tests** · `just ci` green
+
+The suite's pass count is deliberately *not* here. It lives in
+`implementation-repair-progress.md` §1 and nowhere else, which is the only thing
+that keeps it from being stale in two places; the tree above is what makes the
+measurement re-runnable.
 
 `implementation-repair-progress.md` is still the living status and this file does
 not replace it — read §1 and §4 there first. This is the session-scoped note:
@@ -21,13 +26,18 @@ rediscovered.
 
 ## What the repair is now
 
-**It is finished.** Every stage the plan schedules is closed: **S1 … S21**, which
-are the audit's, and **S23 … S26**, which the repair added for §4.1's own rows.
-S22 is struck as "no action". All **139** of the audit's
-findings are addressed and the plan's §4 says so on every row, in one convention.
-And the acceptance gate the audit actually shipped is at zero: **`cargo test
---workspace` reports 0 ignored**, against a baseline of 149. That has never been
-true before.
+**Every stage the plan schedules is closed:** **S1 … S21**, which are the
+audit's, and **S23 … S26**, which the repair added for §4.1's own rows. S22 is
+struck as "no action". And the acceptance gate the audit actually shipped is at
+zero: **`cargo test --workspace` reports 0 ignored**, against a baseline of 149.
+That has never been true before.
+
+**138 of the audit's 139 findings are addressed, and the plan's §4 says so on
+every row but one, in one convention.** The exception is **MIR-10**, which reads
+`PARTIAL — part owed` — its verifier landed and its *rule* did not — and it is a
+live code gap rather than bookkeeping: `REP-52` and `REP-53` are that rule's two
+ends and are scheduled behind it. An earlier version of this section said "all
+139", which contradicted its own "What is left" list two screens down.
 
 Do not run `cargo test --workspace -- --ignored`. There is nothing left for it to
 run, and §8.1's rule stands anyway — the ignored suite was never safe to batch.
@@ -42,7 +52,7 @@ close-out pass rather than carried over on the strength of their rows:
 
 | Row | Sev | What, in one line |
 |---|---|---|
-| **REP-56** | P1 | A `choice` payload record's fields cannot be read; `praxis check` exits 0 and `praxis run` **aborts the host** (`rc=134`) on REP-37's width guard |
+| **REP-56** | **P0** | A `choice` payload record's fields cannot be read; `praxis check` exits 0 and the field read reaches lowering as a `Unit`. **Re-severitied by the final audit**: in a *release* build this was a silent, nondeterministic wrong answer off an 8-byte out-of-bounds heap read, because `int_payload`'s width guard was a `debug_assert`. That read is now bounded in every profile; the row itself — the payload record's type — is still open |
 | **REP-57** | P2 | A record pattern nested in a variant pattern has no grammar — REP-56's workaround, worth nothing without it |
 | **REP-52** | P2 | A fused `collect` pushes with no fault check |
 | **REP-53** | P3 | A method call checks unconditionally, so the manifest's fault column has no reader |
@@ -51,6 +61,7 @@ close-out pass rather than carried over on the strength of their rows:
 | **REP-55** | P3 | `matrix`'s ragged-row fault names the whole input where `grid`'s names the line |
 | **REP-33** | P2 | Appendix D checks clean and does not run: eight `Y110`s for `sorted`, `zip`, `map`, `sum`, `frequencies` |
 | **REP-46**, half | P2 | `wrapping_sub`/`saturating_mul`/`checked_mul` beside the three `_add` forms that landed |
+| **REP-60**, half | P2 | Empty *stdin* still faults with a diagnostic carrying no offset, no `expected` and no `actual`; the `--input` half is fixed |
 
 REP-52 and REP-53 are one job with **MIR-10**, the single §4 row still marked
 `PARTIAL — part owed`: its verifier landed, its rule — *a faulting instruction is
@@ -143,7 +154,10 @@ does not have**. They are not repairs and should not be taken as ones.
    `check`-clean corpus can hide a `run`-broken one — that is REP-12's shape,
    REP-33's, and REP-56's. And every `read`-driven program faults `ParseFailed`
    against an empty stdin, so a sweep piping `/dev/null` into all of them proves
-   only that `read` needs input. `< /dev/null` is also what `Command::output`
+   only that `read` needs input. (**That fault is itself a defect** — it carries
+   no offset, no `expected` and no `actual`, because no input source is
+   installed at all. Registered as **REP-60**; the `--input` half is fixed and
+   the stdin half is the row that is left.) `< /dev/null` is also what `Command::output`
    binds, which is why 1500 tests never noticed that the host read stdin before
    the program started (REP-51) — for a milestone and a half. **Both commands,
    each program's own `.in`, or the sweep is theatre.**
@@ -151,11 +165,22 @@ does not have**. They are not repairs and should not be taken as ones.
 5. **The runtime's guards convert this class of defect into an abort, and that is
    the design.** REP-56 no longer reports `Y112`; it kills the process with
    `int_payload reads eight bytes; Unit is 0 wide` and `internal error: a panic
-   escaped the runtime wrapper praxis_int_load`. That is REP-37's width assertion
+   escaped the runtime wrapper praxis_int_load`. That is REP-37's width check
    plus ADR-080's `catch_unwind` doing exactly their jobs — the eight-byte read of
    a zero-width payload is *caught*, not performed. So an abort with one of those
    two messages in it is a **front-end** bug wearing runtime clothing: read it as
    "a value reached lowering as `Unit`", and look at inference, not at the ABI.
+
+   **Corrected, and it is the rule this section is really about.** That was
+   measured in a **debug** build, and every measurement in this repair round was.
+   The width check was a `debug_assert`, which a release build compiles out — so
+   in release nothing was caught, the eight bytes *were* read, and REP-56's
+   program printed a different pointer-shaped number on every run with `rc=0`.
+   Two profiles, two answers, and `just ci` builds only the one that behaves. The
+   check is an ordinary branch now and holds at `-O` too, so the paragraph above
+   is true where it used to be true only under `cargo test`. **A guard whose
+   presence depends on the profile is not a guard, and a gate that never builds
+   the profile users run cannot tell you that.**
 
 ## The bookkeeping rule this session cost the most
 

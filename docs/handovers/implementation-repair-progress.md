@@ -9,19 +9,27 @@ Update this file at the end of every stage.
 
 ## 1. Status
 
-**The repair is finished.** Every stage the plan schedules is closed — S1 … S21
-and S23 … S26, with S22 struck as "no action" — and every one of the audit's
-**139 findings** is addressed and marked so in the plan's §4. The suite is
-**1632 passed, 0 failed, 0 ignored**: the ignored suite the audit left behind is
-at **zero for the first time**, and `just ci` is green.
+**Every stage the plan schedules is closed** — S1 … S21 and S23 … S26, with S22
+struck as "no action" — and **138 of the audit's 139 findings** are addressed and
+marked so in the plan's §4. The suite is **1632 passed, 0 failed, 0 ignored**:
+the ignored suite the audit left behind is at **zero for the first time**, and
+`just ci` is green.
 
-What is left is not a stage. It is the plan's **§4.1** rows that were registered
-and deliberately not fixed — REP-33, REP-52, REP-53, REP-54, REP-55, REP-56,
-REP-57, REP-58 and the `_sub`/`_mul` half of REP-46 — and **two open language
-decisions, D16 and D18**. Each of those rows was re-reproduced against `b557e0a`
-in the close-out pass; **REP-59 was not reproducible and is closed there** (it
-was fixed by S19's `6648a72` before the S20 branch that filed it ever saw that
-commit). §4 of this file says where to start with them.
+The finding that is not addressed is **MIR-10**, the one §4 row reading
+`PARTIAL — part owed`: its verifier landed and the *rule* it is about — "a
+faulting instruction is followed by a `CheckFault`" — did not, and REP-52 and
+REP-53 are that rule's two ends. It is a live code gap, not bookkeeping, and an
+earlier version of this paragraph said "every one of the audit's 139 findings",
+which contradicted the §4 row and this file's own §4.
+
+What else is left is not a stage. It is the plan's **§4.1** rows that were
+registered and deliberately not fixed — REP-33, REP-52, REP-53, REP-54, REP-55,
+REP-56, REP-57, REP-58, REP-60's stdin half and the `_sub`/`_mul` half of
+REP-46 — and **two open language decisions, D16 and D18**. Each of those rows was
+re-reproduced against `b557e0a` in the close-out pass; **REP-59 was not
+reproducible and is closed there** (it was fixed by S19's `6648a72` before the
+S20 branch that filed it ever saw that commit). §4 of this file says where to
+start with them.
 
 | Stage | State | Commits |
 |---|---|---|
@@ -134,11 +142,12 @@ that used to end "and so is the register" was true of the register *as it stood
 that day*, and of no day since: it has reopened at every sweep and every review,
 and it runs to REP-59 now.
 
-Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
-Now: **1632 passed, 0 failed, 0 ignored**, measured on the S20 merge (the line
-before it read 1526/19 after the REP-36 … REP-49 block, 1478/24 after S21 alone,
-and 1458/38 on a tree that counts 1457 — read the deltas rather than the
-absolutes). `just ci` is green. **Nothing in `crates/` is `#[ignore]`d any
+Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**. The current
+numbers are the ones at the top of this section and are **not restated here** —
+one file, one statement of them, which is what the README's parenthetical
+promises. The line before the S20 merge read 1526/19 after the REP-36 … REP-49
+block, 1478/24 after S21 alone, and 1458/38 on a tree that counts 1457: read the
+deltas rather than the absolutes. `just ci` is green. **Nothing in `crates/` is `#[ignore]`d any
 more**: the last nineteen belonged to S20 and S20 un-ignored them.
 
 ### The corpus triage at close-out
@@ -385,8 +394,11 @@ that was being restated at call sites:
   and proves at const-evaluation time that `T`'s layout is the descriptor's, so
   `read_scalar(r, handle)` makes "wrong type" and "right type, wrong width"
   both unspellable. `int_payload` keeps its eight-byte read for the arithmetic
-  wrappers and now `debug_assert`s the operand's width — **which is what found
-  REP-49**, twenty minutes later, in the `match` lowering.
+  wrappers and now checks the operand's width first — **which is what found
+  REP-49**, twenty minutes later, in the `match` lowering. (That check was a
+  `debug_assert` as REP-37 shipped it, which is not a bound: the final audit
+  found it compiled out of the release build with the unchecked read left behind,
+  and it is an ordinary branch now. See REP-56.)
 - REP-41 applied ADR-066 decision 5 instead of choosing a better default: a null
   slot is legal and means "the value's own descriptor answers". Every
   element-wise dispatch now reads the value's own descriptor, and the
@@ -456,7 +468,7 @@ arena *cannot* produce the shape the defect needs. A `Bool` block is
 `payload_offset + 1` bytes, bumpalo rounds the next base down to eight, and the
 seven bytes in between are slack nothing ever writes, so fresh pages read back
 zero and the eight-byte read answered correctly every time. The test's only
-failing configuration was a *partial* revert, in which the width `debug_assert`
+failing configuration was a *partial* revert, in which the width check
 this fix added to `int_payload` aborts — a real guard, but a gate that needs
 half of its own fix present is not a gate for the defect it names. It now owns
 its operand: a `Bool` laid out the way `alloc_raw` lays one out, in the test's
@@ -797,7 +809,10 @@ used to assert and why that was wrong:
 - `a_template_literal_that_begins_with_a_space_matches` (`jit.rs`), REP-20's
   gate, asserted that a template written ` -> ` also matches `1->2` — the
   `SpaceRun` contradiction itself, written into a test. That input now faults,
-  which the test asserts explicitly; the flexible half stays.
+  which the test asserts explicitly; the flexible half stays. (It was true of the
+  **leading** spelling only until REP-20's trailing half landed;
+  `a_template_literals_trailing_space_run_is_its_policy_too` is the mirror, and
+  refuses `1->2` against `` `{a:int}-> {b:int}` ``.)
 
 Three `#[test]` functions were also **literally removed**, all three in
 `dc983ee` ("S20 step 2: one absolute cursor, one owner") and all three from
@@ -1055,7 +1070,8 @@ S25's second half added ten gates and replaced one (**ADR-064**, **ADR-065**):
 | `a_keyed_collection_enumerates_in_a_deterministic_order` | `jit.rs` | REP-18 — `count(pred)` agreeing with `filter(pred).count()`, `keys()`/`values()` index-aligned, and the order asserted twice |
 | `a_keyed_collection_enumerates_and_count_has_two_arities` | `builtins.rs` | the rows, and that a `Counter`'s values are counts where a `Map`'s are its value type |
 | `a_template_literal_that_begins_with_a_space_matches` | `jit.rs` | REP-20 — §3.3's own template, and the policy still flexible in both directions |
-| `a_literals_edge_whitespace_is_its_policy_and_not_its_text` | `scan.rs` | the same rule at the scanner, where it lives |
+| `a_template_literals_trailing_space_run_is_its_policy_too` | `jit.rs` | REP-20's trailing half — the exact bytes a `rest`/`text` capture gets, `1->2` refused by the trailing spelling, `choice` behind a trailing run, and the two shapes that must **not** change |
+| `a_literals_edge_whitespace_is_its_policy_and_not_its_text` | `scan.rs` | the same rule at the scanner, where it lives — both ends |
 
 `adv_map_index_missing_key_does_not_fault_current_behavior` was **replaced** by
 `adv_map_index_of_a_missing_key_faults_where_get_answers`. It asserted that
@@ -2240,7 +2256,8 @@ S20's and each would be a language decision. Six are registered in the plan's
 **REP-59**, all **not done**:
 
 - **A `choice` payload record's fields cannot be read** — **registered as
-  REP-56** (P1, not done). A `choice` case whose template has named captures
+  REP-56** (filed P1; **re-severitied P0** by the final audit, which measured it
+  in a release build — see §1 and the row). A `choice` case whose template has named captures
   produces an anonymous record, and `match m { M(p) => p.a }` is `Y112: no field
   'a' on this type`. `praxis check` on the same file exits **0**, so it is
   REP-12's shape too. `jit.rs` already documents it as "the anon-record-as-payload
@@ -3803,12 +3820,20 @@ a menu and not a queue.
 
 **The open §4.1 rows, in the order they are worth taking:**
 
-- **REP-56 (P1)** — a `choice` payload record's fields cannot be read, and
+- **REP-56 (P0)** — a `choice` payload record's fields cannot be read, and
   `praxis check` says nothing. It is the highest-severity row left and the only
   one that costs a user a working program: `scan(choice(template))` is §7.5's
   most natural spelling and the `m9_noisy_scan` shape. On `b557e0a` it does not
   report — it **aborts the host** (`rc=134`) on REP-37's width guard, because the
-  field read reaches lowering as a `Unit`. **REP-57 (P2) is its workaround and
+  field read reaches lowering as a `Unit`. **Re-severitied P1 → P0 by the final
+  audit**: that measurement was a *debug* build, and in **release** the guard was
+  a `debug_assert` and therefore absent — the same program printed a different
+  pointer-shaped number on every run, `rc=0`, off an 8-byte out-of-bounds heap
+  read. A silent wrong answer from a program that passes `check` is this
+  register's definition of P0, and the read is memory-unsafe besides. **The read
+  is now bounded in every profile** (`int_payload`'s width check is an ordinary
+  branch); the row stays open because the *type* is what it is about.
+  **REP-57 (P2) is its workaround and
   wants doing with it**: a record pattern nested inside a variant pattern has no
   grammar, because `parse_pattern` handles `Ident {` and a bare `{` reaches its
   `_` arm. Fixing REP-57 alone buys nothing; fixing REP-56 alone leaves the

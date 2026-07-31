@@ -7,14 +7,23 @@ concerns.
 
 > **Status:** Milestone 10 complete, **and the implementation repair with it.**
 > The adversarial audit of 2026-07-28 raised 139 findings and shipped 149
-> `#[ignore]`d regressions as its acceptance gate; every stage of
+> `#[ignore]`d regressions as its acceptance gate. Every stage of
 > [`docs/handovers/implementation-repair-plan-2026-07-28.md`](./docs/handovers/implementation-repair-plan-2026-07-28.md)
-> is now closed, every finding is addressed, and **`cargo test --workspace`
-> reports zero ignored tests**. What is left is recorded as open rows in that
-> plan's §4.1 and two open language decisions; see
+> is closed and **`cargo test --workspace` reports zero ignored tests**, against
+> a baseline of 149.
+>
+> **138 of the 139 findings are addressed.** The one that is not is `MIR-10`,
+> which the register carries as `PARTIAL — part owed`: its verifier landed and
+> the *rule* the finding is about — "a faulting instruction is followed by a
+> `CheckFault`" — did not. Three things are open, and they are lists rather than
+> a single number because that is what does not go stale: **MIR-10's owed rule**,
+> **ten open rows in that plan's §4.1** (two of them, `REP-52` and `REP-53`, are
+> that rule's two ends; §4.1 names them all and is the authority on the count),
+> and **two open language decisions**. See
 > [`docs/handovers/16-repair-s18-s21-and-the-second-register-handover.md`](./docs/handovers/16-repair-s18-s21-and-the-second-register-handover.md).
 > (The suite's pass count lives in `implementation-repair-progress.md` §1 and
-> nowhere else, so it can only be stale in one place.)
+> nowhere else, so it can only be stale in one place — which is why it is not
+> repeated here.)
 >
 > Milestone 10 is the crash debugger (§9). A fault renders
 > a numbered backtrace + locals and (when attached to a terminal, or with
