@@ -21,8 +21,9 @@ rediscovered.
 
 ## What the repair is now
 
-**It is finished.** All twenty-one stages the plan schedules are closed — S1 …
-S21 and S23 … S26, with S22 struck as "no action". All **139** of the audit's
+**It is finished.** Every stage the plan schedules is closed: **S1 … S21**, which
+are the audit's, and **S23 … S26**, which the repair added for §4.1's own rows.
+S22 is struck as "no action". All **139** of the audit's
 findings are addressed and the plan's §4 says so on every row, in one convention.
 And the acceptance gate the audit actually shipped is at zero: **`cargo test
 --workspace` reports 0 ignored**, against a baseline of 149. That has never been
@@ -120,14 +121,17 @@ does not have**. They are not repairs and should not be taken as ones.
    this repo, grep for the **old** names, not just for failures.
 
 3. **The recurring gate failure is a test that asserts an operation was
-   *accepted*.** It has now cost four separate rows. Three tests covered
+   *accepted*.** It has cost this repair a finding at a time, in every subsystem
+   that has one. Three tests covered
    `Grid.rotate_left`/`rotate_right` and all three asserted `width() * 10 +
    height()` — and both rotations of a 3×2 grid have identical dimensions, so the
    two functions could perform each other's rotation undisturbed (REP-36).
    `filter_map` was pinned by a test asserting `map`'s answer (REP-38). `find` was
    pinned by a test whose *name* was the finding, `pipeline_position_is_alias_of_find`
-   (REP-39). S21's own exit-criterion test for `flat_map` asserts that the
-   compiler survives and a count a wrong nesting also produces (MIR-06). The rule
+   (REP-39). The `Float` rendering was covered by a descriptor test whose one
+   value is `2.5`, which carries a `.` and passes under either rule (REP-44). And
+   S21's own exit-criterion test for `flat_map` asserts that the compiler
+   survives, plus a count a wrong nesting also produces (MIR-06). The rule
    this session ended on is in the progress doc and is worth repeating: **a test is
    a gate only if it was observed red with its fix removed, and the observation is
    written down.** A test that passes on `main` before the fix is a *companion* —
