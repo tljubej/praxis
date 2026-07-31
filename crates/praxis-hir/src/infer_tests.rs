@@ -4534,6 +4534,47 @@ fn float_remainder_has_no_operation_to_lower() {
     }
 }
 
+/// **REP-64's inference half.** `%=` is the same operation as `%`, so it is the
+/// same `Y016` — in both spellings a compound assignment has.
+///
+/// The numeric requirement beside it does not cover this: a `Float` *is*
+/// numeric, so `f %= 2.0` passed `praxis check` while `f % 2.0` was refused, and
+/// MIR was then asked for a float remainder that does not exist. It answered by
+/// taking the `Int` channel and doing integer arithmetic on two IEEE-754 bit
+/// patterns.
+#[test]
+fn a_compound_remainder_on_a_float_is_the_same_y016_the_binary_one_is() {
+    for src in [
+        // The binding target.
+        "var f = 5.0\nf %= 2.0",
+        "fn bad(x: Float) -> Float { var f = x\nf %= 2.0\nf }",
+        // The subscript target (REP-21, ADR-064).
+        "var m = Map()\nm[\"k\"] = 5.0\nm[\"k\"] %= 2.0",
+    ] {
+        let errors = errors_of(src);
+        assert!(
+            errors.iter().any(|e| e.contains("Y016")),
+            "`{src}` should be a Y016 — `%` is not defined for Float (§4.12), \
+             and `%=` is the same operation.\ngot {errors:?}"
+        );
+    }
+    // The four operators that *are* defined stay defined, in both spellings…
+    for op in ["+", "-", "*", "/"] {
+        let binding = format!("var f = 5.0\nf {op}= 2.0");
+        assert!(!has_type_error(&binding), "Float `{op}=` is defined");
+        let subscript = format!("var m = Map()\nm[\"k\"] = 5.0\nm[\"k\"] {op}= 2.0");
+        assert!(
+            !has_type_error(&subscript),
+            "Float `{op}=` through a subscript"
+        );
+    }
+    // …and `%=` on an `Int` is untouched, which is the whole of what it was.
+    assert!(!has_type_error("var n = 7\nn %= 4"));
+    assert!(!has_type_error(
+        "var m = Map()\nm[\"k\"] = 7\nm[\"k\"] %= 4"
+    ));
+}
+
 /// TY-28: an `Int` is signed 64-bit (§4.3), so a literal outside that range
 /// names a value the language cannot represent. It became `i64::MAX` silently,
 /// on the theory that the arithmetic would fault — but a saturated literal is a

@@ -1,0 +1,106 @@
+// REP-64's gate: a compound assignment on a `Float` is Float arithmetic.
+//
+// A `Float` rides the uniform `i64` scalar channel as its IEEE-754 **bit
+// pattern** (ADR-037), so every arithmetic site has to bit-cast to `f64` and
+// back. Both compound-assignment paths in MIR forgot: they extracted the bit
+// pattern as an `Int`, did integer arithmetic on it, and boxed the result back
+// as a `Float`. The plain binary `+` had never forgotten, so `f = f + 2.0` was
+// right while `f += 2.0` was not.
+//
+// The operands are chosen so that the integer arithmetic is a **silent wrong
+// answer** rather than a crash — a program that passes `praxis check` and
+// prints a number nobody asked for, `rc=0`. The pre-fix answers are in the
+// comments; `*=` gets the two zeros because multiplying two *normal* bit
+// patterns is the one case that overflows `i64` and faults instead.
+
+// ---- a bare `var`, all four operators ----
+var a = 1.0
+a += 2.0
+out(a)                  // was 9218868437227405312
+
+var b = 5.0
+b -= 2.0
+out(b)                  // was 5629499534213120
+
+var c = 5.0
+c /= 2.0
+out(c)                  // was 1
+
+// `*=`, observed through the sign of zero: `1.0 / x` and not `x == 0.0`,
+// because IEEE-754 says `-0.0 == 0.0` and equality is blind to exactly the bit
+// this is about (§4.12, ADR-045, REP-50). Integer `0 * bits(-2.0)` is `0`, so
+// the old path answered `+0.0` where IEEE-754 answers `-0.0`.
+var d = 0.0
+d *= -2.0
+out(d)                  // was 0
+out(1.0 / d)            // was inf
+
+// ---- values whose bit patterns read as *negative* integers ----
+// A negative `Float` has the sign bit set, so the payload read sees a negative
+// `i64`. Mixed signs keep the integer result inside `i64` — two negative
+// patterns added would overflow and fault, which is the crash this is meant to
+// print past rather than hit.
+var e = -1.5
+e += 2.5
+out(e)                  // was -1125899906842624
+
+var f = -1.5
+f -= -2.5
+out(f)                  // was -3377699720527872
+
+var q = -6.0
+q /= -2.0
+out(q)                  // was 0
+
+// ---- the other zero ----
+var g = -0.0
+g += 0.0
+out(g)                  // +0.0 by IEEE-754; was -9223372036854775808
+out(1.0 / g)            // was -inf (integer `i64::MIN + 0`)
+
+// ---- a `var` captured by a closure: the slot is a `VarCell` (ADR-027) ----
+// Twice, so the cell is proved to round-trip a `Float` and not just to be
+// written once. Subtracting keeps the integer result inside `i64`; adding twice
+// overflows, and a fault is the answer this gate is written to look past.
+var h = 1.0
+let bump = || { h -= 0.5 }
+bump()
+bump()
+out(h)                  // was -4598175219545276416
+
+// ---- a subscript store: `TypedStmt::IndexAssign` (REP-21, ADR-064) ----
+var m = Map()
+m["k"] = 1.0
+m["k"] += 2.0
+out(m["k"])             // was 9218868437227405312
+
+m["k"] = 5.0
+m["k"] -= 2.0
+out(m["k"])             // was 5629499534213120
+
+m["k"] = 5.0
+m["k"] /= 2.0
+out(m["k"])             // was 1
+
+m["k"] = 0.0
+m["k"] *= -2.0
+out(1.0 / m["k"])       // was inf
+
+m["k"] = -1.5
+m["k"] += 2.5
+out(m["k"])             // was -1125899906842624
+
+// ---- the neighbours this must not have changed ----
+var n = 1
+n += 2
+out(n)                  // Int arithmetic is still Int arithmetic
+
+var p = 7
+p %= 4
+out(p)                  // and `%=` still means remainder there
+
+var s = "a"
+s += "b"
+out(s)                  // `+=` on Text is concatenation (ADR-085)
+
+out(1.0 + 2.0)          // the binary operator that was always right

@@ -1426,6 +1426,42 @@ impl Inferer {
                 Some(crate::diagnostics::compound_assign_non_numeric),
             );
         }
+        // `%` is defined for integers only (§4.12), and a compound `%=` is that
+        // same operation — so it is the same `Y016`. The numeric requirement
+        // above does not cover it: a `Float` *is* numeric, so `f %= 2.0` passed
+        // `praxis check` while `f % 2.0` was refused, and MIR then had no float
+        // remainder to lower it to (REP-64).
+        self.reject_float_remainder(
+            stmt.op().map(|t| t.kind()) == Some(SyntaxKind::PERCENT_EQ),
+            existing,
+            at,
+            "%=",
+        );
+    }
+
+    /// Report `Y016` when a remainder operator is applied to a `Float` (§4.12).
+    ///
+    /// Shared by the binary `%` and both compound `%=` forms — the statement's
+    /// and the subscript store's — because it is one rule and three spellings.
+    /// An operand still under inference answers `false` here and is left alone:
+    /// pinning it would narrow every unannotated numeric parameter, which is the
+    /// reason the numeric requirement beside it goes through the deferred
+    /// channel (TY-31).
+    fn reject_float_remainder(
+        &mut self,
+        is_remainder: bool,
+        operand: Type,
+        at: TextRange,
+        spelling: &str,
+    ) {
+        if is_remainder && is_float_scalar(&self.db, operand) {
+            self.diagnostics
+                .push(crate::diagnostics::operator_not_defined(
+                    self.file_span(at),
+                    spelling,
+                    "Float",
+                ));
+        }
     }
 
     /// Attach a scheme to the symbol declared at `name_tok`'s site. Uses the
@@ -1975,6 +2011,14 @@ impl Inferer {
                 Some(crate::diagnostics::compound_assign_non_numeric),
             );
         }
+        // …and `%=` is not one of the operations a `Float` value accepts, for
+        // the binary `%`'s reason (§4.12, REP-64).
+        self.reject_float_remainder(
+            op == praxis_ast::PlaceAssignOp::Rem,
+            value_ty,
+            stmt.syntax().text_range(),
+            "%=",
+        );
     }
 
     /// Infer the type of a `match scrutinee { pattern => body, … }` expression
@@ -2437,15 +2481,12 @@ impl Inferer {
                 // remainder: its `lower_bin` fell through to *addition*, so
                 // `5.0 % 2.0` computed `7.0` (TY-27). There is no operation to
                 // lower, so there is nothing to accept.
-                if op_kind == Some(SyntaxKind::PERCENT) && is_float_scalar(&self.db, target) {
-                    let at = b.syntax().text_range();
-                    self.diagnostics
-                        .push(crate::diagnostics::operator_not_defined(
-                            self.file_span(at),
-                            "%",
-                            "Float",
-                        ));
-                }
+                self.reject_float_remainder(
+                    op_kind == Some(SyntaxKind::PERCENT),
+                    target,
+                    b.syntax().text_range(),
+                    "%",
+                );
                 // `+` is the only operator defined for `Text` (ADR-085), and
                 // the other four report `Y016` for `%`-on-`Float`'s reason:
                 // both operands agree and the operation still has no meaning.

@@ -705,7 +705,9 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                     b.push(Inst::MoveGc { dst, src: v });
                 }
             } else {
-                // Compound assignment: dst = dst <op> value (Int arithmetic).
+                // Compound assignment: `dst = dst <op> value`. Which arithmetic
+                // that is follows the operand type, and the answer comes from
+                // `arith_kind` — the same one the binary operators ask (REP-64).
                 let cur = if escaping {
                     // Read the cell's current value.
                     let cur = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, Some(*span));
@@ -724,29 +726,11 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                     cur
                 };
                 let rhs = lower_expr_gc(b, value);
-                // `s += "x"` on a `Text` binding is `s = s + "x"` (ADR-085), so
-                // it is the same runtime call `+` lowers to. Without this it
-                // fell into the `Int` arithmetic below and added two *pointers*
-                // — which is why inference had to refuse a non-numeric compound
-                // target in the first place.
-                let text_target = matches!(
-                    b.db.data(b.db.follow(expr_static_type(value))),
-                    praxis_types::data::TypeData::Scalar(praxis_types::ScalarType::Text)
-                );
-                let materialized = if text_target && *op == AssignOp::AddAssign {
-                    let joined =
-                        b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, Some(*span));
-                    b.push(Inst::Call {
-                        dst: joined,
-                        callee: CallTarget::Runtime(RuntimeSymbol::TextConcat),
-                        args: vec![cur, rhs],
-                        roots: RootSlots::unannotated(),
-                        debug: DebugSlots::unannotated(),
-                    });
-                    joined
-                } else {
-                    let result = lower_int_binop(b, op_to_int_binop(*op), cur, rhs);
-                    lower_materialize(b, result, Some(*span))
+                let operand_ty = expr_static_type(value);
+                let Some(materialized) =
+                    lower_compound_arith(b, *op, cur, rhs, operand_ty, Some(*span))
+                else {
+                    return;
                 };
                 if escaping {
                     b.push(Inst::Call {
@@ -789,9 +773,10 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                 lower_expr_gc(b, value)
             } else {
                 // Read-modify-write. `get` is `Some` for every compound operator
-                // (HIR drops the statement otherwise), and the arithmetic is
-                // `Int`'s — the same operation, and the same restriction, a
-                // compound assignment to a local has.
+                // (HIR drops the statement otherwise), and the arithmetic is the
+                // same operation, under the same restriction, that a compound
+                // assignment to a local has — which is why both go through
+                // `lower_compound_arith` rather than each choosing (REP-64).
                 let Some(get) = *get else { return };
                 let cur = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, Some(*span));
                 let mut args = Vec::with_capacity(index_locals.len() + 1);
@@ -806,8 +791,12 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                 });
                 b.check_fault();
                 let rhs = lower_expr_gc(b, value);
-                let result = lower_int_binop(b, op_to_int_binop(*op), cur, rhs);
-                lower_materialize(b, result, Some(*span))
+                let operand_ty = expr_static_type(value);
+                let Some(stored) = lower_compound_arith(b, *op, cur, rhs, operand_ty, Some(*span))
+                else {
+                    return;
+                };
+                stored
             };
             // The store's arguments are the receiver, the indices, then the value
             // — the catalog row's parameter order.
@@ -933,16 +922,11 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 // are checked (fault on overflow/div-by-zero); Float ops are
                 // unchecked (IEEE-754 inf/nan), so no fault check follows.
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
-                    let operand_ty = expr_static_type(lhs);
-                    let is_float = matches!(
-                        b.db.data(b.db.follow(operand_ty)),
-                        praxis_types::data::TypeData::Scalar(praxis_types::ScalarType::Float)
-                    );
-                    let is_text = matches!(
-                        b.db.data(b.db.follow(operand_ty)),
-                        praxis_types::data::TypeData::Scalar(praxis_types::ScalarType::Text)
-                    );
-                    if is_text {
+                    // Which arithmetic, from the one place that answers that —
+                    // the same `arith_kind` the compound-assignment paths ask
+                    // (REP-64), so the two cannot drift apart again.
+                    let via = arith_kind(b, expr_static_type(lhs));
+                    if via == ArithVia::Text {
                         // `+` on `Text` is concatenation (ADR-085), and it is a
                         // runtime call rather than a scalar operation: a `Text`
                         // payload is a pointer-and-length structure, not a
@@ -969,7 +953,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                         } else {
                             b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan)
                         }
-                    } else if is_float {
+                    } else if via == ArithVia::Float {
                         // `%` is a type error for floats in inference; if it
                         // reaches here (e.g. from a malformed subtree), treat as
                         // Add defensively. binop_to_float maps Add/Sub/Mul/Div.
@@ -1074,11 +1058,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     // decided the two zeros are distinct values). An `Int`
                     // negation *is* `0 - x`: it is the checked subtraction, and
                     // faulting at `Int::MIN` is the right answer there.
-                    let is_float = matches!(
-                        b.db.data(b.db.follow(expr_static_type(operand))),
-                        praxis_types::data::TypeData::Scalar(praxis_types::ScalarType::Float)
-                    );
-                    if is_float {
+                    if arith_kind(b, expr_static_type(operand)) == ArithVia::Float {
                         let result = lower_float_neg(b, o);
                         lower_materialize_float(b, result, espan)
                     } else {
@@ -1687,6 +1667,104 @@ fn compare_kind(b: &Builder<'_>, ty: praxis_types::Type) -> CompareVia {
         // it at its own width.
         TypeData::Scalar(ScalarType::Byte) => CompareVia::Descriptor,
         _ => CompareVia::Descriptor,
+    }
+}
+
+/// Which arithmetic `+ - * / %` on values of a given type lower to (§4.12,
+/// ADR-085).
+///
+/// The sibling of [`compare_kind`], and it exists for that function's reason:
+/// the answer is a property of the operand *type*, so it belongs in one place
+/// rather than being re-derived at each site that needs it. REP-64 is what the
+/// second half of that rule not being followed cost — the binary operators
+/// asked and the two compound-assignment paths did not, so `f += 2.0` added two
+/// IEEE-754 **bit patterns** as integers and boxed the sum back as a `Float`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ArithVia {
+    /// Checked `i64` arithmetic on the scalar channel: faults on overflow and
+    /// on division or remainder by zero.
+    Int,
+    /// IEEE-754 binary64 on the scalar channel, unchecked (inf/NaN, never a
+    /// fault). A `Float` rides the uniform `i64` scalar channel as its bit
+    /// pattern (ADR-037), so an arithmetic site must bit-cast to `f64` and back
+    /// — [`lower_extract_float`] and [`lower_materialize_float`] are that cast.
+    /// A site that reaches for [`ArithVia::Int`] instead does integer arithmetic
+    /// on two bit patterns and answers a number no program asked for.
+    Float,
+    /// `praxis_text_concat`, for `+` and nothing else (ADR-085). A `Text`
+    /// payload is a pointer-and-length structure rather than a number, so the
+    /// `Int` channel here would add two *pointers*.
+    Text,
+}
+
+/// Which arithmetic lowering `ty`'s values take.
+///
+/// A type that is not one of the three named scalars answers `Int`, which is
+/// the fallback the language's own typing rules make unreachable: inference
+/// requires a `Numeric` operand of every arithmetic site, so anything else has
+/// already been refused and no MIR is built for it.
+fn arith_kind(b: &Builder<'_>, ty: praxis_types::Type) -> ArithVia {
+    use praxis_types::data::TypeData;
+    use praxis_types::ScalarType;
+    match b.db.data(b.db.follow(ty)) {
+        TypeData::Scalar(ScalarType::Float) => ArithVia::Float,
+        TypeData::Scalar(ScalarType::Text) => ArithVia::Text,
+        _ => ArithVia::Int,
+    }
+}
+
+/// The arithmetic half of a compound assignment: `cur <op> rhs`, materialized
+/// into a fresh `GcRef` ready to be stored back.
+///
+/// **One function for both compound-assignment paths** — `x += …` on a binding
+/// and `m[k] += …` through a subscript ([`TypedStmt::IndexAssign`], ADR-064).
+/// The choice the two make is the same choice, and REP-64 is what making it
+/// twice cost: neither copy asked whether the operands were `Float`, so both
+/// took the `Int` channel and `var f = 1.0; f += 2.0` printed
+/// `9218868437227405312` — `f64::to_bits(1.0) + f64::to_bits(2.0)`, reinterpreted
+/// as a `Float`. Every operator and both target shapes were affected; the plain
+/// binary `+` was not, because it had asked since §4.12 landed.
+///
+/// `None` means there is nothing to lower and the statement is dropped: `%` is
+/// not defined for `Float` (§4.12), and neither is any operator but `+` for
+/// `Text` (ADR-085). Both are `Y016` before MIR is built, so this is the
+/// defensive arm of a case inference has already refused — and answering `None`
+/// is what keeps it from quietly becoming a *different* operation, which is the
+/// mistake `binop_to_float`'s `_ => Add` fallback would make here.
+fn lower_compound_arith(
+    b: &mut Builder<'_>,
+    op: AssignOp,
+    cur: LocalId,
+    rhs: LocalId,
+    operand_ty: praxis_types::Type,
+    span: Option<(u32, u32)>,
+) -> Option<LocalId> {
+    match arith_kind(b, operand_ty) {
+        ArithVia::Int => {
+            let result = lower_int_binop(b, op_to_int_binop(op), cur, rhs);
+            Some(lower_materialize(b, result, span))
+        }
+        ArithVia::Float => {
+            let result = lower_float_binop(b, op_to_float_binop(op)?, cur, rhs);
+            Some(lower_materialize_float(b, result, span))
+        }
+        // `s += "x"` is `s = s + "x"` (ADR-085): the same runtime call `+`
+        // lowers to, and the reason inference *excuses* a `Text` target from the
+        // numeric requirement instead of exempting it from being checked.
+        ArithVia::Text => {
+            if op != AssignOp::AddAssign {
+                return None;
+            }
+            let joined = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, span);
+            b.push(Inst::Call {
+                dst: joined,
+                callee: CallTarget::Runtime(RuntimeSymbol::TextConcat),
+                args: vec![cur, rhs],
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
+            });
+            Some(joined)
+        }
     }
 }
 
@@ -4223,6 +4301,22 @@ fn op_to_int_binop(op: AssignOp) -> IntBinOp {
     }
 }
 
+/// Map a compound operator to its Float equivalent (§4.12).
+///
+/// `%=` answers `None`: `%` is not defined for `Float`, there is no MIR
+/// instruction for it, and inference reports `Y016` before this is reached. The
+/// `Assign` arm answers `None` for a different reason — a plain `=` is not an
+/// arithmetic operation and is handled before any of this.
+fn op_to_float_binop(op: AssignOp) -> Option<FloatBinOp> {
+    Some(match op {
+        AssignOp::AddAssign => FloatBinOp::Add,
+        AssignOp::SubAssign => FloatBinOp::Sub,
+        AssignOp::MulAssign => FloatBinOp::Mul,
+        AssignOp::DivAssign => FloatBinOp::Div,
+        AssignOp::RemAssign | AssignOp::Assign => return None,
+    })
+}
+
 fn binop_to_int(op: BinOp) -> IntBinOp {
     match op {
         BinOp::Add => IntBinOp::Add,
@@ -5519,6 +5613,112 @@ mod tests {
             })
             .count();
         assert_eq!(map_index, 0, "`m[k] = v` performs no read");
+    }
+
+    /// **REP-64's MIR shape.** A compound assignment whose operands are
+    /// `Float`s emits `FloatBinOp`, never `IntBinOp` — at every operator and
+    /// through every target shape the language has.
+    ///
+    /// The instruction kind is the assertion, and it is the one a behavioural
+    /// test states only indirectly: a `Float` rides the uniform `i64` scalar
+    /// channel as its **bit pattern** (ADR-037), so an `IntBinOp` here is not a
+    /// type error anywhere downstream — it is arithmetic on the pattern, and the
+    /// answer is a perfectly well-formed `Float` that no program asked for.
+    /// `Materialize` moves with it: an `Int` materialization boxes the result
+    /// with `Int`'s descriptor, so the value was mislabelled as well as wrong.
+    #[test]
+    fn a_float_compound_assignment_lowers_to_float_arithmetic() {
+        // (source, the target shape it exercises)
+        let shapes = [
+            ("var f = 1.0\nf {}= 2.0\nout(f)", "a binding"),
+            (
+                "var f = 1.0\nlet c = || {{ f {}= 2.0 }}\nc()\nout(f)",
+                "a captured binding (VarCell)",
+            ),
+            (
+                "var m = Map()\nm[\"k\"] = 1.0\nm[\"k\"] {}= 2.0\nout(m[\"k\"])",
+                "a subscript store",
+            ),
+        ];
+        for op in ['+', '-', '*', '/'] {
+            for (template, shape) in shapes {
+                let src = template.replace("{}", &op.to_string());
+                let (funcs, _) = lower_src_to_mir(&src);
+                let insts: Vec<&Inst> = funcs
+                    .iter()
+                    .flat_map(|f| f.blocks.iter())
+                    .flat_map(|b| b.insts.iter())
+                    .collect();
+                assert!(
+                    insts.iter().any(|i| matches!(i, Inst::FloatBinOp { .. })),
+                    "`{op}=` through {shape} must lower to FloatBinOp\nsrc: {src}"
+                );
+                assert!(
+                    !insts.iter().any(|i| matches!(i, Inst::IntBinOp { .. })),
+                    "`{op}=` through {shape} lowered to IntBinOp — that is \
+                     integer arithmetic on two IEEE-754 bit patterns \
+                     (REP-64)\nsrc: {src}"
+                );
+                assert!(
+                    insts.iter().any(|i| matches!(
+                        i,
+                        Inst::Materialize {
+                            scalar: ScalarKind::Float,
+                            ..
+                        }
+                    )),
+                    "`{op}=` through {shape} must box its result as a Float\nsrc: {src}"
+                );
+                assert!(
+                    !insts.iter().any(|i| matches!(
+                        i,
+                        Inst::Materialize {
+                            scalar: ScalarKind::Int,
+                            ..
+                        }
+                    )),
+                    "`{op}=` through {shape} boxed an Int (REP-64)\nsrc: {src}"
+                );
+            }
+        }
+
+        // The control: the same shapes on `Int` operands are still `IntBinOp`,
+        // and `+=` on a `Text` binding is still the concatenation call.
+        for (template, shape) in shapes {
+            let src = template
+                .replace("{}", "+")
+                .replace("1.0", "1")
+                .replace("2.0", "2");
+            let (funcs, _) = lower_src_to_mir(&src);
+            let has_int = funcs
+                .iter()
+                .flat_map(|f| f.blocks.iter())
+                .flat_map(|b| b.insts.iter())
+                .any(|i| matches!(i, Inst::IntBinOp { .. }));
+            assert!(
+                has_int,
+                "Int `+=` through {shape} is Int arithmetic\nsrc: {src}"
+            );
+        }
+        let (funcs, _) = lower_src_to_mir("var s = \"a\"\ns += \"b\"\nout(s)");
+        let concats = funcs
+            .iter()
+            .flat_map(|f| f.blocks.iter())
+            .flat_map(|b| b.insts.iter())
+            .filter(|i| {
+                matches!(
+                    i,
+                    Inst::Call {
+                        callee: CallTarget::Runtime(RuntimeSymbol::TextConcat),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            concats, 1,
+            "`s += \"b\"` is one `praxis_text_concat` (ADR-085)"
+        );
     }
 
     /// **REP-15's MIR shape** (ADR-066). A `for` over a collection that cannot

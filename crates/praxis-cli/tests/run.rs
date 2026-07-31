@@ -326,6 +326,40 @@ fn run_pass_float_negative_zero() {
     );
 }
 
+/// **REP-64's gate.** A compound assignment on a `Float` is Float arithmetic —
+/// at every operator, through every target shape the language has.
+///
+/// A `Float` rides the uniform `i64` scalar channel as its IEEE-754 **bit
+/// pattern** (ADR-037), so every arithmetic site has to bit-cast to `f64` and
+/// back. Both compound-assignment paths in MIR — `x += …` on a binding and
+/// `m[k] += …` through a subscript — forgot, and did integer arithmetic on the
+/// pattern instead: `var f = 1.0; f += 2.0; out(f)` printed
+/// `9218868437227405312`, which is `f64::to_bits(1.0) + f64::to_bits(2.0)`. The
+/// plain binary `+` had never forgotten, so `f = f + 2.0` was right in the same
+/// program.
+///
+/// Every operand is picked so the old path is a **silent wrong answer** with
+/// `rc=0` rather than a crash — an integer overflow would have been caught by
+/// any test that ran the program at all, and the fixture's comments carry the
+/// pre-fix value line by line. `-0.0` is observed through `1.0 / x` and not
+/// `x == 0.0`, because IEEE-754 says `-0.0 == 0.0` and equality is blind to
+/// exactly the bit those two lines are about (REP-50).
+#[test]
+fn run_pass_float_compound_assign() {
+    let expected = [
+        // A binding: `+=`, `-=`, `/=`, then `*=` read through the sign of zero.
+        "3.0", "3.0", "2.5", "-0.0", "-inf",
+        // Operands whose bit patterns read as negative integers, then `-0.0`.
+        "1.0", "1.0", "3.0", "0.0", "inf",
+        // A binding captured by a closure, so the slot is a `VarCell`.
+        "0.0", // A subscript store: `+=`, `-=`, `/=`, `*=` (via `1/x`), mixed signs.
+        "3.0", "3.0", "2.5", "-inf", "1.0", // The neighbours this must not have changed.
+        "3", "3", "ab", "3.0",
+    ]
+    .join("\n");
+    assert_passes("float_compound_assign.px", &expected);
+}
+
 #[test]
 fn run_fault_float_to_int_nan() {
     // NaN → to_int faults with FloatToInt (§4.12), exit 1, no abort.
