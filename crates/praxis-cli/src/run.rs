@@ -172,13 +172,23 @@ pub fn run(
     // run` blocked forever waiting for an EOF nobody was going to send
     // (REP-51). The reader below is installed, not called; `praxis_get_input`
     // calls it the one time, from the program's first `read`.
+    //
+    // **A zero-byte file is input, not the absence of input** (REP-60). The
+    // buffer used to be installed only `if !t.is_empty()`, so `--input` on an
+    // empty file left `ctx.input_source` at the immortal Unit — and `Input::new`
+    // answers `None` for a non-Text source and takes the "no detail was
+    // recorded" path, so every `read` faulted with `input parse mismatch` and
+    // no offset, no `expected` and no `actual`. Nothing about "the file is
+    // empty" was in the message. Installing a zero-length `Text` unconditionally
+    // makes `read` run against a zero-length buffer, which the constructors
+    // already have answers for: `lines(int)` over it is `[]` under
+    // `split_lines`'s own rule, and a constructor that requires content faults
+    // at offset `0..0` naming what it expected.
     match input_file {
         Some(path) => match std::fs::read_to_string(path) {
             Ok(t) => {
-                if !t.is_empty() {
-                    let input_ref = runtime.alloc_text(&t);
-                    ctx.input_source = input_ref;
-                }
+                let input_ref = runtime.alloc_text(&t);
+                ctx.input_source = input_ref;
                 lazy_stdin::record(t);
             }
             Err(err) => {

@@ -225,6 +225,45 @@ fn a_second_read_sees_the_same_buffer() {
     assert_passes_with_stdin("reads_lines_of_int.px", "1\n2\n3\n", "3\n3");
 }
 
+/// **REP-60.** A zero-byte `--input` file is *empty input*, not the absence of
+/// input.
+///
+/// The buffer was installed only `if !t.is_empty()`, so an empty file left
+/// `ctx.input_source` at the immortal Unit. `Input::new` answers `None` for a
+/// non-Text source and takes the "no detail was recorded" path, so every `read`
+/// faulted with `program faulted: input parse mismatch` and **nothing else** —
+/// no offset, no `expected`, no `actual`, and no mention of the file being
+/// empty. §7.11 asks a parse detail to name where parsing broke; the one shape
+/// that could not say anything at all was the one the message was least able to
+/// be guessed from.
+///
+/// `lines(int)` over a zero-length buffer is `[]` by `split_lines`'s own rule,
+/// so the program answers rather than faults. That is also what makes the gate
+/// red before the fix without asserting on message text: it exits 1 today.
+#[test]
+fn a_zero_byte_input_file_is_empty_input_and_not_a_contentless_fault() {
+    let empty = std::env::temp_dir().join("praxis-rep60-empty.in");
+    std::fs::write(&empty, b"").expect("write the empty input file");
+    let output = Command::new(bin_path())
+        .args(["run", "--debug=never", "--input"])
+        .arg(&empty)
+        .arg(fixture("reads_lines_of_int.px"))
+        .output()
+        .expect("failed to run praxis");
+    let code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let _ = std::fs::remove_file(&empty);
+
+    assert_eq!(
+        code, 0,
+        "`read lines(int)` over an empty file is the empty list, not a fault\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    // The fixture reads twice and prints each length.
+    assert_eq!(stdout.trim(), "0\n0", "stderr: {stderr}");
+}
+
 #[test]
 fn run_pass_arithmetic() {
     // 1 + 2 * 3 = 7 (precedence respected).
