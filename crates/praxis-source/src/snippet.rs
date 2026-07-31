@@ -20,6 +20,16 @@
 //!   capped so a pathological whole-file span stays readable.
 //! - The `message` (when non-empty) trails the carets on the *first* underlined
 //!   line, matching §8.2 (`^^^^ this value is Text`).
+//! - **A column is a count of characters, not of bytes** (REP-35). Spans are
+//!   byte ranges — that is what every other layer needs — but a rendered column
+//!   is a position in the line as it is *printed*, and the two only coincide in
+//!   ASCII. The renderer used the byte offset directly for the header column,
+//!   for the caret padding and for the caret run, so one `λ` earlier on the
+//!   line pushed the caret one column right, and a `λ` under the caret drew two
+//!   carets for one character. Every caret in every diagnostic on a line
+//!   holding non-ASCII text was wrong. The conversion belongs here, not in
+//!   `LineMap`: `LineCol` round-trips through `linecol_to_offset` and is a byte
+//!   column on purpose.
 
 use std::fmt::Write;
 
@@ -112,8 +122,12 @@ pub fn render_span_snippet_styled(
     let end = span.span.end();
     let LineCol {
         line: start_line,
-        col,
+        col: byte_col,
     } = line_map.offset_to_linecol(start);
+    // The header column is the printed one, so it agrees with the caret below
+    // it. `byte_col` is the distance from the line start in bytes, which is how
+    // the line start is recovered.
+    let col = char_width(text, BytePos(start.to_u32() - byte_col), start);
 
     out.push('\n');
     let loc = palette.paint(
@@ -156,6 +170,7 @@ pub fn render_span_snippet_styled(
 
         render_caret_line(
             out,
+            text,
             line,
             last_line,
             start,
@@ -178,6 +193,7 @@ pub fn render_span_snippet_styled(
 #[allow(clippy::too_many_arguments)]
 fn render_caret_line(
     out: &mut String,
+    text: &str,
     line: u32,
     last_line: u32,
     start: BytePos,
@@ -208,14 +224,16 @@ fn render_caret_line(
     let pad: String = " ".repeat(gutter_width);
     let gutter = palette.paint(Style::Location, &format!("  {pad} | "));
     let _ = write!(out, "{gutter}");
-    let caret_col = seg_start.to_u32().saturating_sub(line_start.to_u32());
+    // **Characters, not bytes** (REP-35). The padding has to be as wide as the
+    // line's text is *printed*, and the caret run as wide as what it underlines.
+    let caret_col = char_width(text, line_start, seg_start);
     for _ in 0..caret_col {
         out.push(' ');
     }
     let count = if end == start {
         1
     } else {
-        (seg_end.to_u32().saturating_sub(seg_start.to_u32()) as usize).max(1)
+        char_width(text, seg_start, seg_end).max(1)
     };
     let carets = "^".repeat(count);
     let carets = match sev {
@@ -233,6 +251,19 @@ fn render_caret_line(
         let _ = write!(out, "...");
     }
     out.push('\n');
+}
+
+/// How many **characters** `text[from..to]` holds — the printed width of a byte
+/// range, which is what a column and a caret run are measured in.
+///
+/// Out-of-range or non-boundary offsets fall back to the byte count: a caret
+/// that is one column off is better than a panic, and every caller here passes
+/// offsets that came from a span, which are boundaries.
+fn char_width(text: &str, from: BytePos, to: BytePos) -> usize {
+    let lo = from.to_u32() as usize;
+    let hi = (to.to_u32() as usize).max(lo);
+    text.get(lo..hi)
+        .map_or_else(|| hi - lo, |slice| slice.chars().count())
 }
 
 /// The trimmed text of `line` (1-based) and its `[line_start, content_end)`
@@ -360,6 +391,37 @@ mod tests {
     |   ^^^...
   2 | next line
     | ^^^^^^^^^
+"#);
+    }
+
+    /// **REP-35.** A column is a count of characters, not of bytes.
+    ///
+    /// The renderer used the span's byte offset as the display column, so every
+    /// multi-byte character earlier on the line pushed the caret one column
+    /// right per *extra* UTF-8 byte — and a multi-byte character under the
+    /// caret drew one caret per byte. Every caret in every diagnostic on a line
+    /// holding non-ASCII text was wrong, on this branch and on `main`.
+    ///
+    /// `λ` is two bytes, so `name` sits at **byte** 15 and **column** 13 — and
+    /// the caret used to be drawn at column 15, two past the `n`.
+    #[test]
+    fn a_caret_counts_characters_and_not_bytes() {
+        let src = "let y = λλ + name\n";
+        let start = src.find("name").expect("the needle") as u32;
+        assert_eq!(start, 15, "the byte offset is what a span carries");
+        let out = render(src, start, start + 4, CaretLabel::Plain);
+        insta::assert_snapshot!(out, @r#"
+  f.px:1:13
+  1 | let y = λλ + name
+    |              ^^^^
+"#);
+
+        // And the run itself: two `λ` under the caret are two carets, not four.
+        let out = render(src, 8, 12, CaretLabel::Plain);
+        insta::assert_snapshot!(out, @r#"
+  f.px:1:8
+  1 | let y = λλ + name
+    |         ^^
 "#);
     }
 

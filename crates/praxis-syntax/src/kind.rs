@@ -346,6 +346,18 @@ pub enum SyntaxKind {
     /// `sections`, or `skip: whitespace` in `chars`. Holds the name ident, the
     /// `:`, and the parser-expr value.
     PARSER_NAMED_ARG,
+    /// The **literal** value of a keyword argument inside a parser constructor
+    /// call: the `0` of `grid(char, ragged, fill: 0)` or the `"-"` of
+    /// `fill: "-"` (§7.5).
+    ///
+    /// A keyword argument's value is not a parser expression, so it cannot be
+    /// parsed as one. It used to be handed to `parse_parser_expr` anyway, which
+    /// reported `P001 expected a parser expression` and emitted a `PARSE_ERROR`
+    /// — and the HIR bridge, reading the value as "the first `Ident` in the
+    /// subtree", then found none and quietly used the empty string. So §7.5's
+    /// own documented spelling built a ragged grid padded with `""` on the
+    /// rowan front end while the capture-body front end kept the `0`.
+    PARSER_KEYWORD_VALUE,
 }
 
 impl SyntaxKind {
@@ -388,7 +400,7 @@ impl SyntaxKind {
     /// discriminants, so its values are consecutive from zero — which
     /// [`SyntaxKind::from_raw_u16`] relies on and
     /// `every_raw_value_in_range_round_trips` checks.
-    const LAST: u16 = SyntaxKind::PARSER_NAMED_ARG as u16;
+    const LAST: u16 = SyntaxKind::PARSER_KEYWORD_VALUE as u16;
 
     /// Total conversion from a raw `u16`. Out-of-range values become
     /// [`SyntaxKind::ERROR`] — the safe rowan `Language` boundary must never

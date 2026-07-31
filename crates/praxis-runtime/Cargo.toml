@@ -11,6 +11,11 @@ bumpalo.workspace = true
 praxis-source.workspace = true
 praxis-input-parser.workspace = true
 praxis-stdlib.workspace = true
+# For §4.1's one identifier character class, which §7.4's `identifier` atomic
+# parses with (F3, IP-11). Already an indirect dependency via
+# `praxis-input-parser`; named here because this crate uses it directly, and a
+# second copy of the rule is exactly what F3 exists to prevent.
+praxis-syntax.workspace = true
 
 # Doctests are not run (see the justfile and README): rustdoc has to analyze the
 # whole crate before it can find out there are none, and the result is never

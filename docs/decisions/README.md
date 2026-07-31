@@ -81,3 +81,5 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-075: The two owed fault kinds are paid, and one of the three debts is settled differently](./075-the-two-owed-fault-kinds-are-paid.md)
 - [ADR-076: Absence is an `Option`, and an empty `min` is a fault](./076-absence-is-an-option-and-an-empty-min-is-a-fault.md)
 - [ADR-077: A zero-argument accessor is a call, and a bare `.name` is a field](./077-a-zero-argument-accessor-is-a-call-and-a-bare-dot-name-is-a-field.md)
+- [ADR-072: A template capture body is a parser expression, and the scanner parses it](./072-a-template-capture-body-is-a-parser-expression.md)
+- [ADR-073: A parser constructor call is a shape, checked before anything is built](./073-a-constructor-call-is-a-shape-checked-before-it-is-built.md)

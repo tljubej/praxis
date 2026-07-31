@@ -1834,7 +1834,7 @@ impl<'t> Parser<'t> {
                     self.eat_trivia();
                     self.expect(SyntaxKind::COLON, "`:` after a named argument");
                     self.eat_trivia();
-                    self.parse_parser_expr();
+                    self.parse_parser_named_arg_value();
                     self.finish_node(); // PARSER_NAMED_ARG
                 } else {
                     self.parse_parser_expr();
@@ -1854,6 +1854,38 @@ impl<'t> Parser<'t> {
         self.finish_node(); // PARSER_ARG_LIST
         self.finish_node(); // PARSER_CALL
         self.finish_node(); // PARSER_EXPR
+    }
+
+    /// Parse the value after `name:` in a parser call's argument list.
+    ///
+    /// Two shapes live here, and only the grammar can tell them apart by
+    /// looking:
+    /// - a **literal** (`fill: 0`, `fill: "-"`) — the value of a keyword
+    ///   argument, which is not a parser expression at all. It becomes a
+    ///   `PARSER_KEYWORD_VALUE` node holding the raw token, and whether the
+    ///   constructor actually has a keyword argument of that name is decided
+    ///   later, by `Constructor::keyword_arg`, where that rule already lives.
+    /// - anything else (`rules: lines(int)`, `skip: whitespace`) — a parser
+    ///   expression.
+    ///
+    /// `fill: 0` used to take the second branch unconditionally, so §7.5's own
+    /// documented spelling of a ragged grid reported `P001 expected a parser
+    /// expression` and then lost its fill value entirely (the HIR bridge read
+    /// the value as the first `Ident` under the node, and a `PARSE_ERROR`
+    /// wrapping an `IntLit` has none). The capture-body front end, which reads
+    /// the keyword value as raw text, kept it — so the two front ends
+    /// disagreed on identical source.
+    fn parse_parser_named_arg_value(&mut self) {
+        if matches!(
+            self.peek(),
+            SyntaxKind::IntLit | SyntaxKind::FloatLit | SyntaxKind::TextLit
+        ) {
+            self.start_node(SyntaxKind::PARSER_KEYWORD_VALUE);
+            self.bump(); // the literal token
+            self.finish_node();
+        } else {
+            self.parse_parser_expr();
+        }
     }
 
     // -----------------------------------------------------------------------

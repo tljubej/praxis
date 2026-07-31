@@ -7054,3 +7054,66 @@ fn a_wildcard_parameter_keeps_its_slot_so_later_parameters_do_not_shift() {
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 51);
 }
+
+/// **IP-11.** Four of §7.4's ten atomic parsers did not exist: `uint`, `float`,
+/// `byte`, `identifier`. A program that wrote one got "unknown atomic parser"
+/// for a name the design document requires.
+///
+/// This is the half neither the type test nor the runtime unit test can see: a
+/// compiled program reading real input through the real ABI, so the value's
+/// descriptor has to be right as well as its type.
+#[test]
+fn every_atomic_the_design_requires_runs_in_a_compiled_program() {
+    // `uint` is an Int, and arithmetic on it works.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let n = read uint\n  n + 1\n}\n",
+        "41",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+
+    // A leading `-` is not a `uint`: §7.4's non-negativity is the parse rule,
+    // because `ScalarType::UInt` has no runtime object to be typed with.
+    let (rt, _) = run_main_with_input(
+        "fn main() -> Int {\n  let n = read uint\n  n + 1\n}\n",
+        "-1",
+    );
+    assert!(rt.has_pending_fault(), "`uint` must refuse a negative");
+
+    // `float` is a Float, and it reads a fraction.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Float {\n  let x = read float\n  x + 0.5\n}\n",
+        "3.25",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_float(), 3.75);
+
+    // `byte` is a Byte in 0..=255.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let bs = read csv(byte)\n  bs.len()\n}\n",
+        "0,127,255",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+    let (rt, _) = run_main_with_input("fn main() -> Int {\n  let b = read byte\n  1\n}\n", "256");
+    assert!(rt.has_pending_fault(), "256 is not a byte");
+
+    // `identifier` is a Text under §4.1's one character class, so a Unicode
+    // name is a name — a deliberate widening of §7.4's "ASCII-like by default".
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let names = read lines(identifier)\n  names.len()\n}\n",
+        "alpha\nλx\n_beta9\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+
+    // And in a template capture, which is the shape they will actually be
+    // written in.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let rows = read lines(`{name:identifier}={n:uint}`)\n  \
+         var t = 0\n  for r in rows { t = t + r.n }\n  t\n}\n",
+        "a=1\nb=2\nc=39\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}

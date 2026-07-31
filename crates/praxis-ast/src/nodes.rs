@@ -1761,6 +1761,21 @@ impl ParserNamedArg {
     pub fn value(&self) -> Option<ParserExpr> {
         self.syntax.children().find_map(ParserExpr::cast)
     }
+
+    /// The argument's **literal** value, if it has one: the raw token text of a
+    /// `PARSER_KEYWORD_VALUE` child (`0`, `"-"`), quotes and all.
+    ///
+    /// A keyword argument's value is not a parser expression, so
+    /// [`ParserNamedArg::value`] is `None` exactly when this is `Some` — the
+    /// two are the grammar's two alternatives for what follows `name:`.
+    /// Decoding a quoted value is `praxis_input_parser`'s job, so that both
+    /// front ends get one answer from one place.
+    pub fn keyword_value(&self) -> Option<String> {
+        self.syntax
+            .children()
+            .find(|c| c.kind() == K::PARSER_KEYWORD_VALUE)
+            .map(|c| c.text().to_string())
+    }
 }
 
 /// A `receiver.method(args)` method-call expression (M5, §16.2). The receiver

@@ -49,6 +49,7 @@ Update this file at the end of every stage.
 | REP-29 — a closure parameter is a pattern (no stage) | **done** | `67642c4` |
 | REP-30 — `\|\|` is a zero-parameter closure where an expression begins (no stage) | **done** | `ded26de` |
 | REP-31 — a zero-argument accessor is a call (no stage; ADR-077) | **done** | `185fe43` |
+| REP-35 — a caret column counts characters, not bytes (no stage) | **done** | S19 round 3 |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
@@ -355,6 +356,91 @@ fault message that contradicts its own input.
 assertion in `jit.rs`, and the graph walks' two negative-operand assertions were
 **re-pointed**, not rewritten: they asserted `InvalidSize`, which was a borrowed
 kind three ADRs recorded as owed.
+
+### S19 — the input-parser compile pipeline (IP-01 … IP-11)
+
+Eight ignored exit-criterion tests un-ignored, ten new gates, two rewritten, two
+ADRs (**072**, **073**) and an amendment to **ADR-023**.
+
+| Test | File | Pins |
+|---|---|---|
+| `empty_separator_is_rejected_before_plan_construction` | `praxis-input-parser/src/validate.rs` | **REWRITTEN** (§8.2). It used to build `Sep { separator: String::new() }` and ask whether `validate` reported it — a question that presumes the value exists, and the *value* is the hazard. It now asks whether the value can be built at all; the `String::new()` no longer compiles |
+| `repeated_section_tail_cannot_reuse_a_fixed_field_name` | `validate.rs` | IP-09 — the tail's name is a field name, so `sections(items: …, items: repeated(…))` is `I024`. Passes verbatim |
+| `regression_unicode_literal_text_is_preserved` | `scan.rs` | IP-01 — `λ=` is `λ=`, not `Î»=`. The scalar cursor, at the one place `char::from(u8)` used to be |
+| `regression_trailing_backslash_is_an_invalid_escape` | `scan.rs` | IP-02 — a terminal `\` is an invalid escape **anchored at the backslash**, not literal text |
+| `mixed_template_capture_kinds_are_preserved` | `infer_tests.rs` | IP-05 — and the *type*, not just the absence of a complaint: `{name:word},{port:int}` is `{ name: Text, port: Int }` |
+| `unknown_template_capture_parser_is_diagnosed` | `infer_tests.rs` | IP-06 — no `Int` default, **and `I012`**: any `I0xx` satisfies the original assertion, only I012 satisfies ADR-051 |
+| `unknown_parser_constructor_is_diagnosed` | `infer_tests.rs` | IP-07 — `read frobnicate(int)` is `I013`, not a silent `?` on an `Option` |
+| `optional_rejects_extra_arguments` | `infer_tests.rs` | IP-07 — a dropped argument is an error before it is a drop |
+| `an_invalid_escape_reports_the_sequence_the_source_actually_wrote` | `scan.rs` | IP-03 — `\sq` reports `\sq` not `\ss`, `\x2` reports `\x2` not `\x`, and each `seq` is compared against **the source's own substring at `byte_offset`**, so the message and the text are one thing |
+| `a_capture_name_is_the_languages_own_identifier` | `scan.rs` | IP-04 — `{λ:int}` names `λ`; `{9x:int}` and `{a b:int}` are `InvalidCaptureName` rather than being silently reread as anonymous captures over the whole body; `{int}` is still anonymous |
+| `every_capture_keeps_its_own_parser` | `scan.rs` | IP-05/IP-06 at the scanner — each capture's own kind, anonymous ones too, and no `Int` for a name that means nothing |
+| `a_capture_body_is_a_parser_expression` | `scan.rs` | D10 — `csv(int)`, `optional(int)`, `sep("-", int)`, a `}` **inside a string** not ending the capture, a colon inside a nested call not being the name split, and three malformed bodies |
+| `a_capture_body_is_a_full_parser_expression` | `infer_tests.rs` | D10 end to end — §7.7's monkey line and five more, each asserted at the type it synthesizes, plus a nested backtick template asserted on the AST |
+| `nesting_past_the_bound_is_an_error_and_not_a_stack_overflow` | `scan.rs` | the bound D10 makes necessary — `scan_template` and `parse_capture_body` are mutually recursive now, and the old scan could not recurse at all |
+| `a_nested_backtick_template_is_one_token` | `praxis-parser/src/lex.rs` | D10's lexer half — two levels, two siblings, an escaped backtick still terminating nothing, and an unclosed outer template still `T002` |
+| `template_nesting_is_bounded_at_exactly_max_template_nesting` | `lex.rs` | **REWRITTEN in the repair pass.** Its predecessor, `template_nesting_past_the_bound_does_not_recurse_without_limit`, fed 5,000 unclosed openers and asserted only that `UnterminatedTemplate` fired somewhere — which the *predecessor lexer*, with no nesting at all, also did. It discriminated nothing. This one asserts what only a bounded, nesting lexer gives: a closed nest of exactly `MAX_TEMPLATE_NESTING` templates is **one** token, and one level deeper is not |
+| `every_constructor_checks_its_arguments_before_it_builds_anything` | `infer_tests.rs` | IP-07's sweep — §7.5's thirteen shapes each asserted at **the AST they build**, six wrong counts, ten wrong *kinds*, and `block()` |
+| `a_repeated_tail_is_last_and_singular` | `infer_tests.rs` | IP-09's other half — misordered, doubled, and outside `sections`, all `I028`; the legal form still `{ draws: Vec[Int], boards: Vec[Grid[Int]] }` |
+| `a_template_scan_error_reports_the_code_its_own_rule_was_given` | `infer_tests.rs` | the exhaustive `ScanError → DiagCode` map — I011, I012, I013, I022 and I030 each from the rule that means it, instead of everything flattening to I030 |
+| `a_parser_string_literal_is_decoded_once_like_every_other_literal` | `infer_tests.rs` | IP-08 — `"\t"` is a tab, `"\""` is one quote, `"\"\""` keeps **both**, and an unknown escape survives exactly as `unquote_text` leaves it, which is how the two decoders are shown to be one |
+| `constructor_round_trips_keywords_and_states_its_shape` | `praxis-input-parser/src/ast.rs` | **REWRITTEN**. It used to assert three numbers out of `expected_arity`; a count cannot say `sep`'s first argument is a string. All fourteen §7.5 names, each at its `ArgShape` |
+| `atomic_round_trips_keywords` | `ast.rs` | **extended** — §7.4's ten names verbatim **in its own order**, and that no eleventh exists |
+| `every_atomic_the_design_requires_has_a_type` | `synthesize.rs` | IP-11 — each of the ten at its scalar, and that **none** is `ScalarType::UInt` |
+| `every_atomic_the_design_requires_has_a_parser_and_a_type` | `praxis-runtime/src/parser.rs` | IP-11's runtime half — `uint` refusing `-1` while `int` accepts it, `float` on six inputs including `7.` consuming only the `7`, `byte` refusing `256`, `identifier` reading `λx` and stopping at `-` |
+| `every_atomic_the_design_requires_runs_in_a_compiled_program` | `jit.rs` | the half neither can see — the four new atomics through the real ABI with real input, and in a template capture, which is how they will be written |
+| `a_sections_tail_is_last_and_singular_here_too` | `praxis-input-parser/src/body.rs` | that the capture-body parser applies **the same** tail rules, because it is the same `build_call` |
+| `one_quote_comes_off_each_end`, `the_six_escapes_decode`, `an_unknown_escape_is_preserved_verbatim`, `a_non_literal_is_not_a_literal` | `praxis-syntax/src/literal.rs` | the decoder that is now the workspace's only one. **These four are characterization tests, not gates** — the function moved here verbatim, so all four pass against the predecessor too. The module carries a note saying so. IP-08's gate is `a_parser_string_literal_is_decoded_once_like_every_other_literal`, which does not |
+
+`arity_mismatch_reported` was rewritten onto `check_call`; `sep_lower_interns_separator`
+and `a_compiled_plan_owns_its_interned_strings` build through `Separator::new` now.
+
+#### S19's repair pass — what three adversarial reviews found, and what closed it
+
+Five defects, each its own commit and its own gate. All five were **shipped by
+S19 itself**, and the first was a regression against `main`.
+
+One thing the reviews raised is **not** closed, deliberately: `read `{int``
+still swallows the rest of the file into one token. Under D10 a backtick inside
+a capture opens a template of its own, so that really is an unterminated
+template and `T002` really does cover it — truthful, and wide. It is a language
+question and not a repair, and it is **registered as D18** in §5, with both
+candidate rules and the measurement that rejected the second one.
+
+| Test | File | Pins |
+|---|---|---|
+| `a_delimiter_inside_a_string_is_text`, `a_quote_in_literal_text_is_not_a_string`, `nesting_is_bounded_at_max_template_nesting` | `praxis-syntax/src/template.rs` | **the blocker.** The lexer counted `{`/`}` inside string literals and the scanner's `capture_extent` skipped them, so `` `{c:one_of("{")}` `` — legal §7.5, accepted by the scanner — left the lexer's counter above zero and swallowed the rest of the file into one token plus a false `T002`. Two implementations of one rule is the defect; `praxis_syntax::template::{template_end, string_end}` is now the one, called by both, with one nesting bound (they had disagreed by a level) |
+| `a_brace_inside_a_string_does_not_extend_the_template` | `praxis-parser/src/lex.rs` | the same, at the token: the token is the template and nothing after it |
+| `the_lexer_and_the_scanner_agree_on_where_a_template_ends` | `praxis-hir/src/infer_tests.rs` | the agreement itself, driven through **both** layers on the same strings. It lives in `praxis-hir` because ADR-023 forbids `praxis-input-parser` depending on `praxis-parser`, so no other crate can see both |
+| `both_front_ends_apply_one_repeated_tail_rule` | `infer_tests.rs` | ADR-073's claim, made true for the tail marker. The bridge unwrapped `name: repeated(P)` with a `find_map` over the first parser-expr child, so `repeated(matrix(int), word, int)` ran as `repeated(matrix(int))` (exit 0, wrong answer) and `repeated()` reported nothing — while the same text in a capture body was `I022`. Every case is asserted through **both** spellings on the same code |
+| `a_field_named_fill_or_skip_is_a_field_and_not_a_dropped_keyword` | `infer_tests.rs` | `skip:`/`fill:` were minted from the argument's *name* with no reference to the constructor, and `CallArg::Keyword`/`Named` projected onto one `ArgKind`, so a `sections` field or `block` item called `fill` was accepted and then `filter_map`ed away. `Constructor::keyword_arg()` decides; `ArgKind::Keyword` is its own kind |
+| `a_keyword_argument_is_accepted_only_where_the_shape_has_one` | `praxis-input-parser/src/validate.rs` | the split at `check_call` — including that the same position holding a named *parser* is still accepted, which is the distinction the collapsed projection could not express |
+| `an_unterminated_template_does_not_also_report_a_fabricated_interior` | `praxis-cli/tests/check.rs` | `convert_template` stripped the token's backticks with `.unwrap_or(&text)`, so an *unterminated* token — one with no closing backtick, which is what unterminated means — was scanned whole and answered "malformed capture body at byte 5: unterminated nested template": a construct the file does not contain, at an offset that is not where anything is. The IP-03 class, one layer up. `praxis-input-parser`'s `unterminated_capture_errors` calls `scan_template` directly and never sees the lexer, which is why it kept passing |
+| `every_span_is_the_text_it_names_even_inside_a_nested_template` | `praxis-input-parser/src/scan.rs` | a nested template's parts and errors kept **nested-interior** offsets and were never rebased, so every caret under one was short by that interior's offset. Nothing in the branch asserted any span at all; this slices the interior by each span and compares it with the text the node was built from, at one level and two, plus the error offset |
+
+Three tests the reviewers named as *not* gates were fixed rather than defended:
+the lexer's nesting test now discriminates the bound (above), and
+`praxis-syntax`'s four `literal` tests are labelled in the module as
+characterization tests pinning a verbatim move, which is a legitimate thing to
+have and not a gate.
+
+##### Round three — what a fourth review found in the repair pass itself
+
+The re-review returned one major and three minors, and the major is the shape to
+remember: **the round-two gate for `grid(char, ragged, fill: 0)` asserted only
+that the call was accepted, and it looked at the wrong diagnostic category to do
+it.** `has_input_error` matches `DiagnosticCategory::Input`; the failure was
+`P001`, a `Parse`-category error, and the synthesized type `Grid[Char]` is the
+same whatever the fill is. So the gate passed while the value was dropped. A
+gate must assert the value or the behaviour, never the acceptance.
+
+| Test | File | Pins |
+|---|---|---|
+| `every_constructor_checks_its_arguments_before_it_builds_anything` (strengthened) | `praxis-hir/src/infer_tests.rs` | the major. Acceptance is now **every** error, lex and parse included (`errors_of`), and §7.5's ragged-grid row asserts the **fill the built AST carries** — five values, through both front ends, from identical text. Also that `fill:` with no value reports on both |
+| `a_keyword_argument_with_no_value_is_not_a_shape` | `praxis-input-parser/src/validate.rs` | the rule at the shared builder: an empty `fill:` is unbuildable, and a written one arrives decoded. `check_call` answers from `ArgKind`s, which carry a keyword's name and not its value, so this can only live at `build_call` |
+| `the_two_template_nesting_bounds_are_the_same_number_and_the_message_says_it` | `praxis-input-parser/src/scan.rs` | the scanner refused at **17** template levels and the message said 32, because both halves of the mutual recursion incremented `depth`. The gate **measures** the effective limit by sweep and parses the number back out of the *rendered message*, so a message that lies fails it |
+| `a_caret_under_a_nested_template_names_the_text_it_points_at` | `infer_tests.rs` | the file-level half of the nested-template span rebase. Deleting `shift_part_spans(parts, delta)` from `ParserAst::shift_spans`'s `Template` arm left the whole suite green; the branch's one span gate reaches the machinery through `body::parse_expr` only, where that arm never runs. This asserts the rendered caret's text at one level of nesting and at two |
+| `a_caret_counts_characters_and_not_bytes` | `praxis-source/src/snippet.rs` | **REP-35**, pre-existing and not S19's: the renderer read a byte offset as a display column, so every caret on a line holding non-ASCII text was wrong. Found while checking the span rebasing — the spans were right and the carets were not |
 
 This session's sixteen new gates and three rewrites (**ADR-066**, **ADR-067**,
 **ADR-068**):
@@ -1458,6 +1544,96 @@ the thing not to do — its absence is what makes RT-14 unrepresentable.
 none — none of them changes a `#[repr(C)]` type generated code reads.
 
 ### From an earlier session (REP-15, REP-19, REP-23)
+
+### From S19 (the input-parser compile pipeline)
+
+**`scan_template` returns finished parts.** Each `TemplatePart::Capture` carries
+the parser its **own** body names. The placeholder `Atomic { Int }` and
+`parser_lower::extract_capture_kind` are gone. If you are S20: this is the input
+IPR-13's descriptor derivation was waiting for — it is real, not stubbed.
+
+**Three AST shapes changed, and they break every construction site.**
+`ParserAst::Sep::separator` is a `Separator` (`Separator::new(&str)` is the only
+constructor and it refuses `""`); `TemplatePart::Capture::name` is an
+`Option<CaptureName>` (`CaptureName::parse` is the only constructor and it asks
+`praxis_syntax::ident::is_ident`); `AtomicKind` has ten variants, not six, and
+every match on it is exhaustive.
+
+**Constructor calls do not go through `praxis-hir` any more.** The `if ctor_name
+== "…"` chain is deleted. `praxis_input_parser::build_call(ctor, args, span)` is
+the one builder, `check_call` is the one shape check, `build_repeated_tail` is
+the one rule for a `sections` tail marker, and `Constructor::ALL` is all fourteen
+of §7.5. `check_constructor_arity` and `Constructor::expected_arity` no longer
+exist. `praxis-hir`'s job is rowan → `Vec<CallArg>` and nothing else.
+
+**Whether `skip:`/`fill:` is a keyword is `Constructor::keyword_arg()`'s
+answer, not the argument name's.** Only `chars` (`skip:`) and `grid` (`fill:`)
+have one. Anywhere else a `fill:` or `skip:` argument is an ordinary named
+parser — a `sections` field, a `block` item, a `choice` case — and
+`ArgKind::Keyword` is a separate kind from `ArgKind::Named` so `check_call` can
+refuse one where the shape has none. No builder has a `_ => {}` arm: an argument
+a builder cannot place is reported, never dropped.
+
+**`ScanError` carries its own `DiagCode`.** `ScanError::code()` is an exhaustive
+match with **no wildcard**; a new variant must decide. Do not add an
+`err_diag(..., DiagCode::TemplateScan, ...)` for a scan error — that flattening
+is what IP-06 was.
+
+**The scanner's spans are interior-relative.** `convert_template` rebases the
+whole subtree with `ast::shift_part_spans(parts, token_start + 1)`. If you
+produce a `ParserAst` from template text anywhere else, rebase it or its
+diagnostics will caret the wrong place. `Span::shifted` is new in
+`praxis-source`, and `ScanError::shifted` does the same for the error channel.
+**One uniform shift is right for one level and wrong for two**: a nested
+template's parts are scanned in the *nested* interior's offsets, so
+`body::parse_expr` rebases them onto the enclosing interior before they reach
+the HIR.
+
+**`unquote_text` moved to `praxis_syntax::literal`.** It is the workspace's one
+text-literal decoder; `praxis-hir`'s is a one-line forwarder. `is_text_literal`
+is beside it.
+
+**Where a backtick template ends is `praxis_syntax::template`, and you must not
+write it again.** `template_end`/`string_end` are the rule; the lexer calls them
+to size its `BacktickTemplate` token and `praxis-input-parser` calls them to find
+a nested template and a string literal inside a capture. A backtick closes a run
+only at brace depth 0 — `` `{g:choice(A: `{x:int}`)}` `` is one token — a `"`
+opens a string literal only *inside* a capture, and `MAX_TEMPLATE_NESTING` (32)
+bounds the nesting **once**. This started as a shared constant with the rule
+written twice, and the two copies disagreed about strings and about the bound
+within a single stage; if you need to know where a template ends, call the
+function.
+
+**`praxis-runtime` names `praxis-syntax` directly.** §7.4's `identifier` atomic
+parses with §4.1's character class, and a second copy of that rule is what F3
+exists to prevent. It was already an indirect dependency.
+
+**`uint` is `Int`.** Not `ScalarType::UInt`, which has no runtime object —
+`praxis_repr::builtin_for_type` refuses it. The non-negativity is the parse rule
+(`walk_atomic` refuses a leading `-`). Same file: `byte` means a decimal integer
+in `0..=255`, and `identifier` uses §4.1's Unicode class, not §7.4's
+"ASCII-like". Both are recorded in ADR-023's amendment.
+
+**For S20, one thing S19 made reachable and did not fix.** A template capture is
+still handed the **whole** remaining input rather than a region bounded by the
+literal that follows it — `walk_template` passes `bytes` and the child's own
+cursor decides where to stop (`crates/praxis-runtime/src/parser.rs`, the
+`Capture` arm). That was invisible while every capture was an atomic, because
+`int` and `word` stop at a delimiter on their own. Now that a capture body is a
+full parser expression, `` read lines(`Monkey {id:int}: {items:csv(int)}`) ``
+over `"Monkey 0: 1,2,3\nMonkey 1: 4,5\n"` gives the first row **four** items:
+the `csv` runs past the end of its line. It is the same defect as the ignored
+`csv does not bound child parsers to an individual token` and
+`lines accepts a child parser that consumed only a prefix`, reached from a new
+direction. It belongs to S20's region ownership, not to the compile pipeline.
+
+**A `read`/`parse` that used to compile may now report.** An unrecognized capture
+kind used to mean `int` and a surplus constructor argument used to be dropped.
+`every_corpus_program_runs_and_prints_the_answer_it_documents` runs every `.px`
+under `tests/` with its real input, so the corpus is covered — `praxis check`
+alone would not be.
+
+### From this session (REP-15, REP-19, REP-23)
 
 **A `for` no longer indexes what it was given** (ADR-066). It indexes a
 **snapshot**: `IterPlan` decides, and only `Vec`/`Deque`/`Range`/`Seq` are walked
@@ -3751,7 +3927,7 @@ resumes past the reported members now.
 
 **D1, D10, D11 and D12 are answered** (2026-07-31) — see the table at the end of
 this section for the answers and the plan's §7 for the reasoning under each
-heading. That leaves **D16 as the one decision still open**: does `assert` take a
+heading. That leaves **D16 and D18 open**. D16: does `assert` take a
 message, and more generally does the language get arity-based overloading or
 optional parameters? It belongs to **S25**, and the plan's warning is the important
 part — `assert`'s message is the cheapest possible motivating case, so answering it
@@ -3759,6 +3935,41 @@ in isolation would set the precedent by accident. (**REP-15 needed a decision to
 and never got a `D` number: the iteration protocol for the six unlowered iterables,
 and whether `for (k, v) in m` destructures. Both are answered in ADR-066 and by
 REP-25.)
+
+**D18 is open and is new (2026-07-31, S19 round 3): may a backtick template
+span a raw newline?** §7.2 says `\n` *matches* a line ending; it does not say
+whether a raw one may appear in the template's source form. Nothing in the
+language needs the answer until a template is left unclosed — and then it decides
+everything about the report.
+
+`` read `{int` `` today is `T002 unterminated backtick template` spanning the
+rest of the file, plus the `P001`/`Y001` cascade that follows from a block whose
+closing brace was eaten. **The diagnostic is true**: under D10 a backtick inside
+a capture opens a nested template, so the source really does leave one open, and
+the token really does run to EOF. It is truthful and *wide*, which is a
+different defect from the fabricated interior that was beside it (that half is
+fixed and gated by
+`an_unterminated_template_does_not_also_report_a_fabricated_interior`).
+
+Two rules would bound it, and **neither was taken**:
+
+1. **"A template may not span a raw newline."** The token then ends at the line
+   end and `T002` names one line. This is a *language* rule, not a repair: it
+   makes a legal-today multi-line template illegal, and §7.2's whitespace
+   policies (`\s*`, `\s+`, `\n`) are written as if a template describes a
+   region of input that may include line structure. Taking it as a bug fix
+   would decide a language question by accident, which is exactly what the plan
+   warns about under D16.
+2. **Error recovery: end an unclosed run at the first inner backtick.** Tried,
+   far enough to measure, and it makes the output worse:
+   `` `{g:choice(A: `{x:int}`)}` `` — a *well-formed* two-level template —
+   reports `T002` twice, because the recovery cannot tell an unclosed run from a
+   nested one without already knowing where the outer one ends. One honest wide
+   diagnostic became two dishonest narrow ones.
+
+So the swallow stays until D18 is answered. Whoever owns §7.2 should note that
+answering (1) makes (2) unnecessary: with a newline terminating a template, an
+unclosed run has a bound and recovery has nothing to guess.
 
 **D14 is answered** — see ADR-040. The `Safepoint` token shipped with a named,
 `pub(crate)` `Heap::alloc_unpaced` back door for the host helpers and the
@@ -3981,6 +4192,46 @@ Things the plan states that are no longer or were not quite true.
   it, and variants are bare names, so the identity gate lives in `enums.rs` at
   the unit level and the source-level gate is the `Option` one (a runtime-built
   `Some` against a program-written one), which is the case that actually arises.
+
+- **D10's answer needed a change the answer does not mention: the lexer.**
+  `Lexer::eat_template` closed the `BacktickTemplate` token at the first
+  unescaped backtick, so `` `{g:choice(A: `{x:int}`)}` `` lexed as three
+  unrelated token runs and `scan_template` never saw the template the source
+  wrote. "The scanner learns brace-, paren- and backtick-aware depth tracking"
+  is necessary and not sufficient; the token has to reach the scanner first. It
+  is ~25 lines in `lex.rs` and it landed as its own commit (ADR-072 decision 4).
+- **S19's exit list says "un-ignore and pass"
+  `empty_separator_is_rejected_before_plan_construction`, but the plan's own F14
+  makes that impossible to do literally.** The test constructs
+  `ParserAst::Sep { separator: String::new(), … }`; a `Separator` newtype means
+  that line does not compile. The two requirements cannot both hold, and the
+  newtype is the one the plan names twice — so the body was **rewritten** (§8.2)
+  and the name kept. The inversion is the point: the question changes from "does
+  `validate` report it?" to "can the value be built at all?".
+- **The plan says S19 needs no new diagnostic code, and that is right — but for a
+  different reason than "every case maps to an allocated code".** Four of the six
+  codes ADR-051 allocated for S19 (I011, I012, I013, I014) plus I023 and I028
+  were *constructed nowhere in the tree*. The finding is not that codes were
+  missing; it is that six allocated codes had no constructor, because every scan
+  error flattened into I030 and every constructor error into nothing. No code was
+  spent; six started being used.
+- **IP-11's `TypeId(5)` collision is genuinely gone and `uint` is still not
+  shippable as spelled.** S1 derived `BuiltinTypeId` from its discriminants
+  (`Float = 5`, `Text = 6`), so a `float` atomic is safe. `uint` is a *different*
+  problem the audit's PARTIAL narrowing names correctly:
+  `praxis_repr::builtin_for_type` answers `NoRuntimeRepr` for `ScalarType::UInt`,
+  so it synthesizes `Int` and enforces non-negativity in the parse rule.
+- **`TemplatePart::Capture` did not gain a `span`.** The recon plan asks for one,
+  for §8.3's caret. It is unnecessary: the capture's *parser* already carries a
+  span, and that span now covers the body — which is what a caret wants to point
+  at — once `ParserAst::shift_spans` rebases it. Adding a second span to a part
+  that is not a `ParserAst` node would have been one more thing to keep in sync.
+- **The plan's S19 file map says `praxis-parser` is only a dev-dependency of
+  `praxis-hir`, and takes that as the reason the capture-body parser must live in
+  `praxis-input-parser`.** The conclusion is right and the reason is ADR-023's
+  dependency direction, not the dev-dependency: `praxis-parser` is a real
+  dependency of `praxis-ast`, `praxis-cli`, `praxis-mir`, `praxis-debugger` and
+  `praxis-codegen-cranelift` — it is a dev-dependency of `praxis-hir` only.
 
 - **The numeric prelude helpers do not "want TY-31's numeric constraint".** Plan
   §5's S17 unit 2 and §7's D5 both say they do, and sequence them after the
