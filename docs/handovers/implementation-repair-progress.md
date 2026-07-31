@@ -30,7 +30,7 @@ Update this file at the end of every stage.
 | S17 — Constraint channel and capabilities | **done** | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c`, `e801e6a`, `b6ab8eb`, `fb82f79` |
 | S18 — Option contract and enum nominal identity | **done** — RT-13, RT-14, RT-15, D1 answered and implemented, the two owed fault kinds paid | `207f5d4`, `cf99f8e`, `35b68ce`, `9ad74ef`, `4ee1ad7` |
 | S19 — Input-parser compile pipeline | **done** | `93fc49b`, `f64e950`, `3f644de`, `c3fd726`, `f8b54b3`, `6664841`, `c3ec8cb`, plus the repair pass |
-| S20 — Parser runtime cursor and region ownership | **done** — IPR-01 … IPR-14, D11, D12 and D-S20-A answered and implemented, plus four repair passes; the fourth makes the whitespace rule one question with one answer, which the third split between two halves that disagreed | `b2184c8`, `fea3c8c`, `dc983ee`, `79ef068`, `62905bd`, `04a826c`, `0619e6f`, `9debb03`, `99785cb`, `705e734`, `2ff48c8`, `07b2862`, `9458fd5`, `afc6f3f`, `fe26720`, `635c8a1`, `eb9404b`, `c3e2cf1`, `556862d`, `1696885`, `787595a`, `e68ac0c`, `2dd9e05`, `1ae8393`, `cf8d38b`, `c2923f3`, `fda5a7c`, `1bf3e86`, `c60653b`, `8d26278`, `7161521`, `efa6d30`, `cc37f81`, `c02b5f4`, `88c65ce`, `36736d3` |
+| S20 — Parser runtime cursor and region ownership | **done** — IPR-01 … IPR-14, D11, D12 and D-S20-A answered and implemented, plus five repair passes; the fourth makes the whitespace rule one question with one answer, which the third split between two halves that disagreed, and the fifth brings the last two constructs — a template capture and a csv field — inside it | `b2184c8`, `fea3c8c`, `dc983ee`, `79ef068`, `62905bd`, `04a826c`, `0619e6f`, `9debb03`, `99785cb`, `705e734`, `2ff48c8`, `07b2862`, `9458fd5`, `afc6f3f`, `fe26720`, `635c8a1`, `eb9404b`, `c3e2cf1`, `556862d`, `1696885`, `787595a`, `e68ac0c`, `2dd9e05`, `1ae8393`, `cf8d38b`, `c2923f3`, `fda5a7c`, `1bf3e86`, `c60653b`, `8d26278`, `7161521`, `efa6d30`, `cc37f81`, `c02b5f4`, `88c65ce`, `36736d3`, `f5181f5`, `abb6c8d`, `dfb3f9e`, `049bb85`, `335345f`, `93c9fa8`, `f36e04f` |
 | S21 — Pipeline plan representation and per-stage indices | **done** | `7a38a2a`, `7264de8`, `ac606ba`, `2f68e84`, `333ca4e`, `3151408` |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
@@ -395,8 +395,9 @@ name.
 The structural work above stood. What it broke was ordinary input, and every
 review found the same theme: **trailing whitespace is not an error**. It took
 four rounds to state it as one rule with one answer — two counting bytes, one
-splitting the question between halves that disagreed — and every attempt is
-recorded here because the shape of the mistake is the useful part.
+splitting the question between halves that disagreed — and a fifth to reach the
+last two constructs that were not answering from it. Every attempt is recorded
+here because the shape of the mistake is the useful part.
 
 *Round one* applied `walk_exact`'s "a bounded child must fill its bound" at a
 **root region** that ran to the end of the file, so the bound included the
@@ -429,6 +430,21 @@ terminator to nobody, so the root region is simply the whole buffer and
 `Input::root_region` is deleted. `matrix` also stopped skipping an *interior*
 blank line. ADR-078 carries the reasoning.
 
+*Round five* found the rule stated and two constructs still outside it, both
+deciding before their child was ever offered the bytes. A **template capture**
+skipped leading horizontal whitespace (`skip_capture_ws`), so `lines(char)` and
+``lines(`{a:char}`)`` disagreed about the same file — silently at a trailing
+blank line, as a hard fault at an interior one, as lost bytes for
+`{a:text}`/`{a:rest}`. **`csv`** trimmed every field, so `csv(char)` faulted
+where `sep(",", char)` read a space and `csv(rest)` lost the terminator
+`sep(",", rest)` keeps. Both were §7.4's caller rule re-imposed one level up on
+exactly the children `walk_atomic` refuses to apply it to, and both are gone;
+`skip_capture_ws` survives as a bound-scan offset only. Nothing else moved: the
+266-cell file-ending matrix is **byte-identical** across round five, because its
+only template row has an `int` child and its only csv row has no whitespace in a
+field — which is precisely why the whole suite was indifferent to the skip. The
+matrix is extended to 378 cells (27 forms) so that blind spot is gone.
+
 | What was wrong | What closed it |
 |---|---|
 | **Blocker.** `read ws(int)` over `"1 2 3\n"` and `read sep(" -> ", word)` over `"a -> b\n"` faulted: the final token ran to `region.end()`, so the child was asked to eat the `\n`. Every `ws`/`sep` test in the tree used input with no trailing newline, so nothing saw it | **round three.** A `ws` token contains no whitespace (`walk_ws` shares `whitespace_tokens` with `matrix`), and a `sep` token whose leftover is whitespace has filled its bound. Round two's `Input::root_region` trim is deleted: it was a count, and `"1 2 3\n\n"` defeated it |
@@ -444,6 +460,10 @@ blank line. ADR-078 carries the reasoning.
 | **Minor.** `SourceSlice`'s owner became a chain, which the plan's hazards said to prevent: `t = parse(t, rest)` in a loop was O(n²) and overflowed the stack at 100 000 links | `Input::new` resolves to the root owned `Text` once and rebases; `text_bytes` is iterative. 100 000 links: 64s and an abort → 0.31s |
 | **Minor.** D12's coverage gate read a hand-written four-file `include_str!` list | the file set is walked from `crates/`, covering every crate |
 | **Minor.** D12's backstop returned a defined dummy that generated code could consume without ever observing the fault (55 wrappers are `Effect::Pure`, and `CheckFault` only follows a faultable call) | the dummy is returned **iff** the manifest declares the symbol faulting; everything else prints the message and aborts, which is what it did before the guard existed |
+| **Major (round four's own blind spot).** A template capture did not answer from the rule: `skip_capture_ws` moved the cursor past leading horizontal whitespace before the child was offered anything, so `lines(char)` over `"x\ny\n  \n"` was 3 and ``lines(`{a:char}`)`` was 2; over `"x\n  \ny\n"` the capture **faulted** where the bare child read; and ``lines(`{a:rest}`)``/``lines(`{a:text}`)`` lost bytes `lines(rest)`/`lines(text)` keep. At the root, `` read `{a:rest}` `` over `" ab\n"` was 3 where `read rest` was 4 | **round five.** The cursor is not advanced; the child is offered the bytes and `walk_atomic` decides, as it already does per atomic. `skip_capture_ws` offsets the **bound scan** only — a capture may not be bounded by its own leading whitespace. Gated as pairs: every capture spelling asserted beside its bare child |
+| **Minor (the same defect, second violator).** `csv_tokens` `str::trim()`-ed every field, so `csv(char)` over `"a, ,c"` faulted where `sep(",", char)`, `ws(char)` and `grid(char)` all read the space as a cell, and `csv(rest)` lost the terminator `sep(",", rest)` keeps — `trim()` eats vertical whitespace, which §7.5's csv entry never authorised | **round five.** `csv_tokens` splits on commas and nothing else. §7.5's "ignore horizontal whitespace around each comma" is kept *by the rule*: `int` skips its own padding, so `csv(int)` over `" 1, 2, 3"` still reads three ints, and the csv/sep pair is asserted on the same bytes |
+| **Minor.** Four counted claims were wrong — `trailing_blank_run` has four callers (`walk_grid_ragged` is the fourth), `SkipPolicy` has three variants, `parser.rs` has eleven allocation sites, and §7.5 claimed three constructors fault "in the same way" on an interior blank line when they fault by the same *rule* with three messages and three spans | **round five.** All four corrected, and the allocation count dropped rather than fixed because a number drifts |
+| **Minor.** ADR-079 Decision 6 and `SkipPolicy`'s doc comment still taught round two's deleted rule — "the file's terminator is not part of the root region" — in the two documents `skip_chars` sends a reader to. They survived three sweeps because they spell the rule in prose, not by API name | **round five.** Both say the live mechanism: the terminator is **inside** the whole-buffer root region and `walk_characters` forgives it because the child declined it. Swept for `root_region`, for the prose form, and by reading ADR-078 and ADR-079 end to end against the code |
 
 ##### The tests, in three classes — because "every added test fails without the change" is not true
 
@@ -465,9 +485,9 @@ findings. Three classes, kept apart:
 | `a_parse_of_a_slice_does_not_extend_the_owner_chain` | `parser.rs` | the base offset is applied *and* every produced slice's owner is the owned text |
 | `reading_a_deep_slice_chain_does_not_recurse` | `text.rs` | a 4 000-link chain on a 128 KiB stack. Verified to abort with the recursive read; its passing *is* the assertion |
 | `a_panic_dummy_is_only_returned_where_a_fault_check_can_follow` | `abi.rs` | sweeps every manifest row, and asserts both classes are non-empty so the rule cannot pass vacuously |
-| `every_root_parser_reads_every_file_ending` | `adversarial_audit.rs` | **MOVED HERE from (b) in round four**, which had it under a header claiming it passes at the base. It does not: at `b2184c8`, `ws(int)` over `"1 2 3 \n"` faults (`at input offset 6..6: expected int`), so the matrix fails there for the pre-S20 defect and not only for a mid-branch one. Every root constructor §7.5 names × every ending real input arrives with, asserting a **value** per cell. Also fails at `e68ac0c` |
+| `every_root_parser_reads_every_file_ending` | `adversarial_audit.rs` | **MOVED HERE from (b) in round four**, which had it under a header claiming it passes at the base. It does not: at `b2184c8`, `ws(int)` over `"1 2 3 \n"` faults (`at input offset 6..6: expected int`), so the matrix fails there for the pre-S20 defect and not only for a mid-branch one. Every root constructor §7.5 names × every ending real input arrives with, asserting a **value** per cell. Also fails at `e68ac0c`. **Extended in round five** with the pairs its one template row (`` `{n:int} x` ``, an `int` child) could not see: every capture spelling beside its bare child (``lines(`{a:char}`)``/`lines(char)`, ``lines(`{a:rest}`)``/`lines(rest)`, ``lines(`{a:text}`)``/`lines(text)`, `` `{a:rest}` ``/`rest` at the root), every csv spelling beside `sep(",", …)`, the indented-template bound, and the tab shape `"ab\ncd\n \t \n" `— the tenth cell `efa6d30`'s message named and nothing gated |
 | `a_grid_row_may_end_in_horizontal_whitespace` | `adversarial_audit.rs` | **MOVED HERE from (b) in round four**, same reason: at `b2184c8`, `grid(int)` over `"12 34 \n56 78 \n"` faults (`at input offset 6..6: expected int`) — the trailing space, on top of D11's byte-counted width. Also fails at `9458fd5`, and asserts `grid` and `matrix` agree on the same file |
-| `an_interior_blank_line_is_a_row_and_a_trailing_one_is_nobodys` | `adversarial_audit.rs` | **NEW (round four)** — a differential in its trailing half: at `b2184c8`, `lines(int)` over `"1\n2\n  \n"` and `grid(digit)` over `"12\n34\n  \n"` both fault. Its interior half is *not* one — `matrix(int)` over `"1 2\n  \n3 4\n"` answers 22 at the base too, because the base has the same `trim()` skip; that half pins the three constructors giving one answer to one shape, which is what round four changed |
+| `an_interior_blank_line_is_a_row_and_a_trailing_one_is_nobodys` | `adversarial_audit.rs` | **NEW (round four)** — a differential in its trailing half: at `b2184c8`, `lines(int)` over `"1\n2\n  \n"` and `grid(digit)` over `"12\n34\n  \n"` both fault. Its interior half is *not* one — `matrix(int)` over `"1 2\n  \n3 4\n"` answers 22 at the base too, because the base has the same `trim()` skip; that half pins the three constructors giving one answer to one shape, which is what round four changed. **Extended in round five** with `lines(ws(int))` beside `matrix(int)` over the same bytes: a child that succeeds *vacuously* makes an element of a blank line, so the two spellings differ by the criterion rather than despite it, plus the empty-final-line and `lines(csv(int))` shapes that complete the picture |
 
 **(b) Regression fixtures for defects this branch introduced and closed.** Each
 **passes** at `b2184c8` and fails at the mid-branch commit named in its own
