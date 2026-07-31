@@ -420,6 +420,17 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
         AtomicKind::Char => {
             // One Unicode scalar value, stepped by the region rather than
             // decoded out of an ad-hoc `from_utf8` of the tail.
+            //
+            // **A space is a character**, so `char` reads the scalar at the
+            // cursor and does not trim first. §7.4's "surrounding horizontal
+            // space handled by caller" is a rule for the *numeric* atomics; a
+            // character parser that skipped spaces cannot represent one. That
+            // is not a nicety: a `grid` column is positional, so with the trim
+            // in place `grid(char)` over `"ab\na b\n"` counted two cells in
+            // both rows and reported a genuinely ragged input as a clean 2x2
+            // grid with `b` shifted into the space's slot — a wrong answer
+            // where the byte-width predecessor at least gave a wrong shape.
+            let at = region.start();
             let Some(next) = region.next_scalar(i, at) else {
                 return Err(ParseFail::at(at.offset(), 0, "char"));
             };
@@ -678,7 +689,32 @@ unsafe fn walk_grid_row(
     let mut cursor = line.start();
     while cursor < line.end() {
         // SAFETY: forwarded from this function's contract.
-        let walked = unsafe { walk(rt.ctx, i, plan, child, line.from(cursor))? };
+        let walked = match unsafe { walk(rt.ctx, i, plan, child, line.from(cursor)) } {
+            Ok(walked) => walked,
+            Err(fail) => {
+                // **A run of horizontal whitespace at the end of a row that the
+                // cell parser cannot read is padding, not a cell.** Trailing
+                // spaces are ordinary in real input, and `matrix(int)` already
+                // dropped them (`whitespace_tokens` never emits an empty
+                // token); without this rule `grid(int)` faulted on the very
+                // same file, which is two whitespace-token constructors
+                // disagreeing about one input. §7.5 asks only that every row
+                // have the same cell count.
+                //
+                // A cell parser that *can* read the run never gets here:
+                // `grid(char)` reads a space as a space, which is what keeps a
+                // char grid positional.
+                if line
+                    .from(cursor)
+                    .bytes(i)
+                    .iter()
+                    .all(|b| *b == b' ' || *b == b'\t')
+                {
+                    break;
+                }
+                return Err(fail);
+            }
+        };
         if walked.next <= cursor {
             // A cell parser that reads nothing would loop forever. `text`/`rest`
             // over an empty tail is the shape that gets here.
@@ -1087,10 +1123,14 @@ fn walk_scan(
 }
 
 /// Walk `one_of("LR")` (M9, §7.5): match one character from a literal set.
+///
+/// Like [`AtomicKind::Char`], it reads the scalar **at** the cursor: it is a
+/// character class, and a class that skipped spaces before matching could not
+/// contain one — nor could `chars(one_of(…), skip: none)` mean what it says.
+/// A caller that wants leading space skipped has `skip:`, `walk_exact`'s token
+/// bounds, or a template's pre-capture skip.
 fn walk_one_of(rt: &Rt, i: &Input<'_>, chars: &str, region: ByteRegion) -> WalkResult {
-    let rest = region.bytes(i);
-    let s = trim_leading_ws(rest);
-    let at = region.start().advance(rest.len() - s.len());
+    let at = region.start();
     let Some(next) = region.next_scalar(i, at) else {
         return Err(ParseFail::at(at.offset(), 0, "char"));
     };

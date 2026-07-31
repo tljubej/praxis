@@ -593,6 +593,80 @@ fn template_text_capture_stops_before_the_following_literal() {
     assert_eq!(result.as_text(), "middle");
 }
 
+/// **A `grid(char)` column is positional, so a space is a cell.**
+///
+/// D11 made a grid's width a *cell count*, which is right; combined with
+/// `walk_atomic`'s unconditional leading-horizontal-whitespace trim it meant
+/// `char` skipped every space in a row and the space vanished as a cell. So
+/// `grid(char)` over `"ab\na b\n"` counted two cells in both rows and answered
+/// a clean 2x2 grid with `b` shifted left into the space's slot — a **wrong
+/// answer** where the byte-width predecessor gave a wrong shape. A silently
+/// misaligned grid is the worse of the two.
+///
+/// `char` now reads the scalar at the cursor. §7.4's "surrounding horizontal
+/// space handled by caller" is a rule for the numeric atomics; a character
+/// parser that skips spaces cannot represent one.
+///
+/// Every input here ends with a newline, which is the case the stage got wrong
+/// everywhere else.
+#[test]
+fn a_grid_of_char_is_positional_so_a_space_is_a_cell() {
+    // A space occupies its own column.
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
+    let (runtime, result) = run_main_with_input(src, "a b\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 31, "\"a b\" is three columns, not two");
+
+    // And it is readable at the column it occupies.
+    let src = "fn main() -> Char {\n  let g = read grid(char)\n  g.get(1, 0)\n}\n";
+    let (runtime, result) = run_main_with_input(src, "a b\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_char(), ' ');
+
+    // Trailing and leading spaces are cells too, for the same reason.
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
+    let (runtime, result) = run_main_with_input(src, "ab \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 31);
+    let (runtime, result) = run_main_with_input(src, " a\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 21);
+
+    // A genuinely ragged grid is rejected again, which is the point: §7.5 says
+    // every row has the same cell count, and this input does not.
+    let (runtime, _raw, _unit) = run_main_raw_with_input(
+        "fn main() -> Int {\n  let g = read grid(char)\n  g.width()\n}\n",
+        "ab\na b\n",
+    );
+    assert_eq!(
+        runtime.fault(),
+        praxis_runtime::FaultKind::ParseFailed,
+        "a two-cell row and a three-cell row are not one grid"
+    );
+}
+
+/// **A row's trailing horizontal whitespace is padding, not a cell.**
+///
+/// `grid(int)` faulted on a row ending in a space while `matrix(int)` over the
+/// identical file succeeded — two whitespace-token constructors disagreeing
+/// about one ordinary input. §7.5 requires only that every row have the same
+/// cell count.
+#[test]
+fn a_grid_row_may_end_in_horizontal_whitespace() {
+    let src =
+        "fn main() -> Int {\n  let g = read grid(int)\n  g.width() * 100 + g.height() * 10 + g[1, 1]\n}\n";
+    let (runtime, result) = run_main_with_input(src, "12 34 \n56 78 \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 2 * 100 + 2 * 10 + 78);
+
+    // The same file through `matrix`, which never had the defect: the two
+    // constructors agree now, and that agreement is the assertion.
+    let src = "fn main() -> Int {\n  let g = read matrix(int)\n  g.width() * 100 + g.height() * 10 + g[1, 1]\n}\n";
+    let (runtime, result) = run_main_with_input(src, "12 34 \n56 78 \n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 2 * 100 + 2 * 10 + 78);
+}
+
 /// **A whitespace-only template part is a bound too.**
 ///
 /// The capture bound first looked only for a following literal with *non-empty*

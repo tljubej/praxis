@@ -55,6 +55,32 @@ decision; the second was an artefact of the byte-counted width. Its **input** is
 amended to `"1 2\n3 4\n"`, which spells two cells per row; its subject, that a
 subscript is x-then-y and an off-diagonal store catches a swap, is untouched.
 
+### A `char` cell is positional, and a row's trailing spaces are padding
+
+Two things this decision did not say, and had to be added after it shipped a
+worse defect than the one it replaced.
+
+**A space is a character.** `walk_atomic` opened every atomic by skipping
+horizontal whitespace, so `char` inside a `grid` never produced a space cell:
+`grid(char)` over `"a b"` was two columns, and `grid(char)` over `"ab\na b"`
+counted two cells in *both* rows and reported a genuinely ragged input as a
+clean 2x2 grid with `b` shifted into the space's slot. That is a wrong answer
+where the byte-counted predecessor gave a wrong shape, and a wrong answer is
+worse. §7.4's "surrounding horizontal space handled by caller" is a rule for the
+numeric atomics; `char` and `one_of` are character classes and read the scalar
+at the cursor. A caller that wants leading space skipped has `chars`' `skip:`,
+`walk_exact`'s token bounds, and a template's pre-capture skip. With that,
+"every row has the same cell count" rejects a ragged char grid again.
+
+**A row's trailing horizontal whitespace is padding, not a cell.** `grid(int)`
+faulted on a row ending in a space while `matrix(int)` over the identical file
+succeeded — `whitespace_tokens` never emits an empty token, so `matrix` had
+always dropped it. §7.5 asks only for equal cell counts, so `walk_grid_row`
+stops when the cell parser fails and the rest of the row is spaces and tabs. A
+cell parser that *can* read the run never reaches that branch, which is why the
+rule does not undo the paragraph above: `grid(char)` reads a trailing space as a
+trailing cell.
+
 ## Decision 2: `text` is non-greedy, and *every* capture is bounded
 
 §7.4 already decides this, verbatim: "`text`: minimally consumes text until the

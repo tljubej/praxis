@@ -1,0 +1,15 @@
+// Input-parser fixture: a `grid(char)` column is positional, so a space is a
+// cell. Read from a real newline-terminated file, because that is the path the
+// in-process tests do not take.
+//
+// Row 0 is "a b" and row 1 is "c d": three columns each, the middle one a
+// space. A `char` that skipped leading horizontal whitespace would count two
+// columns and shift `b` into the space's slot — and would then accept a
+// genuinely ragged grid as a clean rectangle. `find_all` of the middle cell
+// finds the other row's middle cell, which is what says the space is a value
+// and not an absence.
+fn main() -> Int {
+    let g = read grid(char);
+    let middle = g.get(1, 0);
+    g.width() * 100 + g.height() * 10 + g.find_all(middle).len()
+}
