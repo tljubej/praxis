@@ -456,9 +456,50 @@ unsafe fn bool_ref(ctx: *mut RuntimeContext, value: bool) -> GcRef {
     }
 }
 
+/// Read `r`'s payload through a [`Payload`] handle, first checking that `r`
+/// really is that handle's type.
+///
+/// This is the reader to reach for whenever a wrapper receives a `GcRef` it did
+/// not itself allocate — a value handed back by a program's closure, most of
+/// all. Two mistakes are impossible through it and were both possible without
+/// it: reading a value of the wrong *type* (the identity check answers `None`,
+/// and the caller decides whether that is a `TypeMismatch` fault), and reading
+/// the right type at the wrong *width* (the width is `size_of::<T>()`, which
+/// [`Payload::new`] proved is the descriptor's width when the handle was
+/// declared).
+///
+/// REP-37 is why it exists: `ClosureOracle::is_goal` read a `Bool` — a
+/// **one**-byte payload — with `int_payload`, an eight-byte read, so every
+/// graph goal predicate consumed seven bytes of arena padding past the object
+/// and answered whatever the allocator had left there.
+///
+/// # Safety
+/// `r` must be a valid `GcRef` into a live heap.
+#[inline]
+unsafe fn read_scalar<T: Copy>(r: GcRef, handle: crate::descriptor::Payload<T>) -> Option<T> {
+    if !std::ptr::eq(r.descriptor(), handle.descriptor()) {
+        return None;
+    }
+    // SAFETY: the identity check proves `r`'s payload is this handle's type, and
+    // the handle's own construction proved `T` is that type's layout.
+    Some(unsafe { handle.read(r.payload::<u8>()) })
+}
+
 /// Read the `i64` payload of an `Int` `GcRef`. Used by every arithmetic wrapper.
+///
+/// Prefer [`read_scalar`] for any value whose type is not already established:
+/// this reads eight bytes unconditionally, and a `debug_assert` is all that
+/// stands between it and a narrower payload (REP-37).
 #[inline]
 unsafe fn int_payload(r: GcRef) -> i64 {
+    debug_assert_eq!(
+        r.descriptor().size(),
+        std::mem::size_of::<i64>(),
+        "int_payload reads eight bytes; `{}` is {} wide — use `read_scalar` with \
+         that type's `Payload` handle instead (REP-37)",
+        r.descriptor().name,
+        r.descriptor().size(),
+    );
     // SAFETY: the compiler only emits these calls with Int-typed operands; the
     // payload follows the header and is an `i64`. Faults that would feed a
     // non-`Int` (e.g. the Unit sentinel) into an arithmetic wrapper are diverted
@@ -4300,11 +4341,19 @@ impl crate::graph::GraphOracle for ClosureOracle<'_, '_> {
         // `Bool` is an immortal singleton pair (RT-03), so the answer is which
         // singleton came back — but the payload is what the descriptor
         // describes, and reading it is what a non-`Bool` would corrupt.
-        if !std::ptr::eq(result.descriptor(), &scalars::BOOL) {
-            return Err(self.abort(crate::context::FaultKind::TypeMismatch));
+        //
+        // A `Bool`'s payload is **one byte**. Reading it as an `i64` — which is
+        // what this did — takes seven further bytes of the block's alignment
+        // padding, which the bump allocator never initialized, so the answer
+        // was whatever malloc had left there and could differ between runs.
+        // `read_scalar` checks the descriptor and takes the width from
+        // `BOOL_PAYLOAD`'s own type, so neither half is written here any more.
+        //
+        // SAFETY: `result` is a `GcRef` the oracle's own call just produced.
+        match unsafe { read_scalar(result, scalars::BOOL_PAYLOAD) } {
+            Some(b) => Ok(b != 0),
+            None => Err(self.abort(crate::context::FaultKind::TypeMismatch)),
         }
-        // SAFETY: the descriptor check proves the payload is a `Bool`'s `i64`.
-        Ok(unsafe { int_payload(result) } != 0)
     }
 
     fn retain(&mut self, state: GcRef) {
@@ -5822,6 +5871,96 @@ mod tests {
         let payload = unsafe { praxis_enum_payload(ctx, found, 0) };
         assert_eq!(unsafe { praxis_int_load(ctx, payload) }, 42);
         unsafe { drop_ctx(ctx) };
+    }
+
+    /// A goal predicate that is `false` at every state, as a closure entry
+    /// point. Rust-side `extern "C"` stands in for a JIT'd closure body: the
+    /// oracle only cares that the pointer has the closure calling convention.
+    ///
+    /// # Safety
+    /// Called only through [`ClosureOracle::call`], which upholds the ABI.
+    unsafe extern "C" fn always_false(
+        ctx: *mut RuntimeContext,
+        _closure: GcRef,
+        _state: GcRef,
+    ) -> GcRef {
+        // SAFETY: the oracle passes its own wired ctx.
+        unsafe { bool_ref(ctx, false) }
+    }
+
+    /// A neighbour function with no neighbours: the walk visits the start and
+    /// stops, so the only thing that can decide the answer is the goal test.
+    ///
+    /// # Safety
+    /// As [`always_false`].
+    unsafe extern "C" fn no_neighbours(
+        ctx: *mut RuntimeContext,
+        _closure: GcRef,
+        _state: GcRef,
+    ) -> GcRef {
+        // SAFETY: the oracle passes its own wired ctx.
+        unsafe { praxis_vec_new(ctx, &crate::scalars::INT as *const _) }
+    }
+
+    /// **REP-37's gate.** `ClosureOracle::is_goal` read the closure's `Bool`
+    /// answer with `int_payload` — an eight-byte read — but a `Bool`'s payload
+    /// is **one** byte (`BoolPayload = u8`, and `BOOL` is built from it). The
+    /// other seven bytes are the block's alignment padding, which the bump
+    /// allocator never initializes, so `false` read as an `i64` was whatever
+    /// malloc had left there and the answer could differ between runs.
+    ///
+    /// Every `bfs_distance` / `a_star` / `flood_fill` goal predicate goes
+    /// through that read, so this walk is the whole class: the goal says
+    /// `false` at the only reachable state, and the answer must be `None`. Read
+    /// eight bytes and a non-zero padding byte makes it `Some(0)`.
+    ///
+    /// The failure is **deterministic** rather than padding-dependent because
+    /// the same fix teaches `int_payload` to `debug_assert` that its operand is
+    /// eight bytes wide — tests are a debug build, which is the CI profile —
+    /// so restoring the old reader fails here every run instead of one in
+    /// however-many. That assertion is the durable half: the next site that
+    /// reaches for `int_payload` on a narrower payload fails loudly rather than
+    /// reading past the object.
+    #[test]
+    fn a_graph_goal_predicate_reads_a_bool_at_a_bool_s_width() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let answer = unsafe {
+            let goal = praxis_alloc_closure(ctx, always_false as *const u8, 0);
+            let neighbours = praxis_alloc_closure(ctx, no_neighbours as *const u8, 0);
+            let start = praxis_alloc_int(ctx, 0);
+            praxis_bfs_distance(ctx, start, neighbours, goal)
+        };
+        assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+        assert_eq!(answer.descriptor().id(), crate::enums::ENUM.id());
+        assert_eq!(
+            enum_tag_of(answer),
+            crate::enums::OPTION_NONE_TAG as u32,
+            "the goal answered `false` at every state, so no distance was found"
+        );
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// The reader itself, both directions. `read_scalar` is what makes the two
+    /// mistakes `is_goal` made unspellable, so its own contract is pinned here:
+    /// the right type reads at the right width, and a foreign type answers
+    /// `None` instead of reinterpreting the bytes.
+    #[test]
+    fn read_scalar_answers_none_for_a_foreign_descriptor() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        unsafe {
+            let t = bool_ref(ctx, true);
+            let f = bool_ref(ctx, false);
+            assert_eq!(read_scalar(t, crate::scalars::BOOL_PAYLOAD), Some(1u8));
+            assert_eq!(read_scalar(f, crate::scalars::BOOL_PAYLOAD), Some(0u8));
+            // An `Int` is not a `Bool`, and the answer is absence rather than
+            // the first byte of the `i64`.
+            let n = praxis_alloc_int(ctx, 1);
+            assert_eq!(read_scalar(n, crate::scalars::BOOL_PAYLOAD), None);
+            assert_eq!(read_scalar(n, crate::scalars::INT_PAYLOAD), Some(1i64));
+            drop_ctx(ctx);
+        }
     }
 
     /// The variant tag of an enum value, read the way the runtime's own

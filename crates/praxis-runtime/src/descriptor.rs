@@ -480,6 +480,32 @@ impl<T: Copy> Payload<T> {
     pub const fn descriptor(self) -> &'static TypeDescriptor {
         self.descriptor
     }
+
+    /// Read the payload at `payload` as this handle's `T`.
+    ///
+    /// The **width is the compiler's**: it is `size_of::<T>()`, and
+    /// [`Payload::new`] proved during const evaluation that that is exactly the
+    /// descriptor's declared width. A caller therefore cannot pick a width, and
+    /// cannot pick the wrong one — which is what REP-37 did by hand, reading a
+    /// one-byte `Bool` through an `i64` and consuming seven bytes of arena
+    /// padding the allocator never initialized.
+    ///
+    /// This is the read half of what `Payload<T>` already does for allocation.
+    /// It does **not** check the object's descriptor — a handle names a type but
+    /// a raw payload pointer carries no header — so callers that hold a `GcRef`
+    /// should reach for the wrapper that checks identity first.
+    ///
+    /// # Safety
+    /// `payload` must point at an initialized payload of this handle's type,
+    /// aligned for `T`.
+    #[must_use]
+    #[inline]
+    pub unsafe fn read(self, payload: *const u8) -> T {
+        // SAFETY: the caller guarantees `payload` is an initialized, aligned
+        // payload of this descriptor's type, and `Payload::new` already proved
+        // `T`'s layout is that type's layout.
+        unsafe { payload.cast::<T>().read() }
+    }
 }
 
 impl<T: Copy> fmt::Debug for Payload<T> {
