@@ -9,6 +9,20 @@ Update this file at the end of every stage.
 
 ## 1. Status
 
+**The repair is finished.** Every stage the plan schedules is closed — S1 … S21
+and S23 … S26, with S22 struck as "no action" — and every one of the audit's
+**139 findings** is addressed and marked so in the plan's §4. The suite is
+**1632 passed, 0 failed, 0 ignored**: the ignored suite the audit left behind is
+at **zero for the first time**, and `just ci` is green.
+
+What is left is not a stage. It is the plan's **§4.1** rows that were registered
+and deliberately not fixed — REP-33, REP-52, REP-53, REP-54, REP-55, REP-56,
+REP-57, REP-58 and the `_sub`/`_mul` half of REP-46 — and **two open language
+decisions, D16 and D18**. Each of those rows was re-reproduced against `b557e0a`
+in the close-out pass; **REP-59 was not reproducible and is closed there** (it
+was fixed by S19's `6648a72` before the S20 branch that filed it ever saw that
+commit). §4 of this file says where to start with them.
+
 | Stage | State | Commits |
 |---|---|---|
 | S1 — Runtime identity registry | **done** | `055e894` |
@@ -28,10 +42,10 @@ Update this file at the end of every stage.
 | S15 — Per-use types into HIR and MIR, then monomorphization | **done** (one exit criterion deferred; see §4) | `93c05ec`, `f3c76a8`, `77b2ad6`, `b560e67` |
 | S16 — Records, patterns, exhaustiveness, enum constructors | **done** | `57e2e5b`, `06f3c44`, `b8e2c7b`, `e918741` |
 | S17 — Constraint channel and capabilities | **done** | `e04fcf7`, `6268888`, `260786f`, `f87e6ab`, `c7de662`, `c87a299`, `b8e156c`, `e801e6a`, `b6ab8eb`, `fb82f79` |
-| S18 — Option contract and enum nominal identity | **done** — RT-13, RT-14, RT-15, D1 answered and implemented, the two owed fault kinds paid | `207f5d4`, `cf99f8e`, `35b68ce`, `9ad74ef`, `4ee1ad7` |
-| S19 — Input-parser compile pipeline | **done** | `93fc49b`, `f64e950`, `3f644de`, `c3fd726`, `f8b54b3`, `6664841`, `c3ec8cb`, plus the repair pass |
+| S18 — Option contract and enum nominal identity | **done** — RT-13, RT-14, RT-15, D1 answered and implemented (ADR-074, ADR-075, ADR-076), the two owed fault kinds paid, ABI 13 → 14 | `207f5d4`, `cf99f8e`, `35b68ce`, `9ad74ef`, `4ee1ad7`, `88d9ab3` |
+| S19 — Input-parser compile pipeline | **done** — IP-01 … IP-11 and D10 answered and implemented, plus three repair passes; the third registered D18 and REP-35, and `6648a72` is the commit that closed REP-59 before REP-59 was written | `93fc49b`, `f64e950`, `3f644de`, `c3fd726`, `f8b54b3`, `6664841`, `c3ec8cb`, `7844b7f`, `b7615eb`, `fa6c04b`, `ecd3f25`, `caea763`, `a9782ca`, `9db523d`, `8259bc0`, `90c9460`, `6648a72`, `cc6ecc2`, `cdd54db`, `00a6547`, `2bbb82d`, `2925892` |
 | S20 — Parser runtime cursor and region ownership | **done** — IPR-01 … IPR-14, D11, D12 and D-S20-A answered and implemented, plus five repair passes; the fourth makes the whitespace rule one question with one answer, which the third split between two halves that disagreed, and the fifth brings the last two constructs — a template capture and a csv field — inside it | `b2184c8`, `fea3c8c`, `dc983ee`, `79ef068`, `62905bd`, `04a826c`, `0619e6f`, `9debb03`, `99785cb`, `705e734`, `2ff48c8`, `07b2862`, `9458fd5`, `afc6f3f`, `fe26720`, `635c8a1`, `eb9404b`, `c3e2cf1`, `556862d`, `1696885`, `787595a`, `e68ac0c`, `2dd9e05`, `1ae8393`, `cf8d38b`, `c2923f3`, `fda5a7c`, `1bf3e86`, `c60653b`, `8d26278`, `7161521`, `efa6d30`, `cc37f81`, `c02b5f4`, `88c65ce`, `36736d3`, `f5181f5`, `abb6c8d`, `dfb3f9e`, `049bb85`, `335345f`, `93c9fa8`, `f36e04f` |
-| S21 — Pipeline plan representation and per-stage indices | **done** | `7a38a2a`, `7264de8`, `ac606ba`, `2f68e84`, `333ca4e`, `3151408` |
+| S21 — Pipeline plan representation and per-stage indices | **done** — MIR-03 … MIR-08 fixed and gated, all fourteen exit-criterion regressions un-ignored (ADR-071) | `7a38a2a`, `7264de8`, `ac606ba`, `2f68e84`, `333ca4e`, `3151408` |
 | S23 — Independent hardening, round two | **done** | `9ea5495`, `809d138`, `c64f0d6`, `2a1fa57` |
 | S24 — Function values | **done** | `ce5f323` |
 | S25 — Grammar completion | **done** — its acceptance criterion is met **verbatim**, and all nine of its rows have landed (REP-07, REP-08, REP-17, REP-16, REP-09, REP-18, REP-20, REP-19, REP-10) | `c74e062`, `bb3bc43`, `11976cc`, `0ee29b1`, `2f9bcbd`, `b495e93`, `11e107c`, `ca7385e` |
@@ -56,12 +70,14 @@ S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
 TY-06 rather than waiting for the stage that owns it. **DBG-02** is closed in
 part (see §6).
 
-**Twenty-five defects found while executing the plan are registered** as
-**REP-01 … REP-25** in the plan's **§4.1**, and **every one of them is done.**
-REP-01…REP-14 are owned by four new stages (**S23**–**S26**) and three new
-decisions (**D15**–**D17**), two of which are now answered. **REP-24 and REP-25
-are this session's own**: §4.5's and §4.6's declaration examples did not parse,
-and `for (k, v) in m` had no binding position to be written in.
+**The defects found while executing the plan are registered as REP-01 … REP-59**
+in the plan's **§4.1**, and that register **runs to REP-59 and is not empty**:
+the open rows are listed at the top of this section and in §4.1 itself. The list
+is deliberately not a count — this paragraph used to say "twenty-five … and every
+one of them is done", which was true for about a day and then wrong for weeks,
+because nothing makes a stale count fail. REP-01…REP-14 are owned by four new
+stages (**S23**–**S26**) and three new decisions (**D15**–**D17**), of which
+D15 and D17 are answered.
 
 **§3.3's representative program now runs verbatim from the design doc** —
 top-level `let`, top-level `out`s and no `fn main` anywhere.
@@ -90,8 +106,8 @@ doc's program shape puts bindings at the top level. **`N007` reports it**
 the plan schedules is closed, **S20 included**. **S18 is done** — D1 was answered
 and is implemented (ADR-076), and RT-13 gave a runtime enum its nominal identity
 (ADR-074). **S19 and S21 are done** (ADR-071, ADR-072, ADR-073). **No decision
-blocks a stage any more**; D16 is the one still open and it belongs to a stage
-that is already closed.
+blocks a stage any more**: **D16** and **D18** are the two still open, and both
+belong to stages that are already closed.
 
 **S23 is closed.** All four of its findings are fixed and gated — **REP-13**,
 **REP-11**, **REP-12** and **REP-02** — each as its own commit with the suite
@@ -108,12 +124,15 @@ passed `praxis check` and aborted the host with a SIGBUS — is fixed and gated.
 main event and landed together as one commit, which the plan requires; **ADR-062**
 is their decision.
 
-**S25 is closed and so is the register.** REP-10 was its last scheduled row —
+**S25 is closed, and its schedule with it.** REP-10 was its last scheduled row —
 record and tuple patterns (ADR-069) — and REP-21 (`min=`/`max=`, ADR-070) was the
 one unscheduled row. **REP-24 was found in between**: §4.5's and §4.6's own
 declaration examples do not parse, because a declaration's members had to be
 comma-separated and the design doc writes them on separate lines. **S20 closed
-last** — S18, S19 and S21 closed alongside it in the same session.
+last** — S18, S19 and S21 closed alongside it in the same session. The sentence
+that used to end "and so is the register" was true of the register *as it stood
+that day*, and of no day since: it has reopened at every sweep and every review,
+and it runs to REP-59 now.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**.
 Now: **1632 passed, 0 failed, 0 ignored**, measured on the S20 merge (the line
@@ -121,6 +140,52 @@ before it read 1526/19 after the REP-36 … REP-49 block, 1478/24 after S21 alon
 and 1458/38 on a tree that counts 1457 — read the deltas rather than the
 absolutes). `just ci` is green. **Nothing in `crates/` is `#[ignore]`d any
 more**: the last nineteen belonged to S20 and S20 un-ignored them.
+
+### The corpus triage at close-out
+
+Both commands over every `.px` in the tree, each program driven with **its own
+`.in`** where one exists. Measured at `b557e0a`.
+
+| Directory | Programs | `check` | `run` | Against `.out` |
+|---|---|---|---|---|
+| `tests/aoc-corpus` | 18 | all rc=0 | all rc=0 | all match |
+| `tests/input-parsers` | 8 | all rc=0 | all rc=0 | all match |
+| `crates/praxis-cli/tests/fixtures` | 30 | 26 rc=0, 4 report | 20 rc=0, 10 by design | no `.out` by design |
+
+`tests/` is 26 programs and every one of them answers what its `.out` says.
+The fixtures have no `.out` because nothing walks them: they are driven by
+`crates/praxis-cli/tests/{check,run}.rs` with the expectation written in Rust
+beside the call, and ten of them exist to fail.
+
+- **Four report at `check`** and their run is the same report: `bad_byte.px`
+  (`T003` + `P001`), `parse_error.px` (three `P001`), `type_error.px` (`Y001`),
+  `unterminated_template.px` (`T002` — this is D18's program).
+- **Five fault at run** with a clean `check`, which is the split the whole
+  repair is about: `overflow.px` and `debug_temps.px` (integer overflow),
+  `div_by_zero.px`, `float_to_int_nan.px` (float-to-int out of range) and
+  `debug_backtrace.px` (index out of bounds). `float_div_by_zero.px` is **not**
+  among them and must not be: it prints `inf`, because IEEE division is not the
+  integer rule.
+- **One is refused by the host rather than faulting**:
+  `no_statements_and_no_main.px` → `error: no statements to run and no 'main'
+  function`. ADR-067's other end.
+
+**Two corpus programs have no `.in`, and that is correct**:
+`day07_closure_pipeline.px` and `day10_bfs_shortest_distance.px` contain no
+`read` — the first inlines its value, the second hand-encodes its adjacency.
+`.in` is required only of a program that reads.
+
+**One fixture reads and has no `.in`**: `reads_lines_of_int.px`, which
+`run.rs:225` drives with the stdin `"1\n2\n3\n"` and expects `3\n3`. Given that
+input it answers `3` and `3`, rc=0. **Given `/dev/null` it faults `ParseFailed`,
+and that answer is worth nothing** — a sweep that pipes `/dev/null` into every
+program proves only that `read` needs input. This file records the cost twice
+already: `< /dev/null` is what hid **REP-51** "for a milestone and a half"
+(`Command::output` binds stdin to it, which is why 1500 tests never saw a host
+that read stdin before the program started), and a `check`-only sweep is what
+let `day02_grid_of_char.px`'s `Y110` sit across several S17 sessions, because
+`Y110` is reported at lowering and `check` does not reach it. **Both commands,
+and each program's own input, or the sweep is theatre.**
 
 **S21 is closed** (ADR-071). All six of its findings are fixed — MIR-06, MIR-08,
 MIR-03, MIR-04+MIR-07 (one commit, as the plan requires) and MIR-05 — and all
@@ -3731,18 +3796,63 @@ run. Leave it alone unless the flag is threaded into the green tree.
 
 ## 4. Where to start
 
-**S19…S21 are what is left.** Every row the register holds is done, every stage
-the plan schedules is closed, and **S18 is now closed too** — D1 answered and
-implemented (ADR-076), RT-13 landed with the ABI bump 13 → 14 (ADR-074), and the
-two fault kinds three S17 ADRs recorded as owed are paid (ADR-075).
+**No stage is left.** S18, S19, S20 and S21 all closed in the same session, and
+with them the plan's whole schedule. What is left is the §4.1 rows nobody has
+fixed and the two open decisions — nothing here blocks anything else, so this is
+a menu and not a queue.
+
+**The open §4.1 rows, in the order they are worth taking:**
+
+- **REP-56 (P1)** — a `choice` payload record's fields cannot be read, and
+  `praxis check` says nothing. It is the highest-severity row left and the only
+  one that costs a user a working program: `scan(choice(template))` is §7.5's
+  most natural spelling and the `m9_noisy_scan` shape. On `b557e0a` it does not
+  report — it **aborts the host** (`rc=134`) on REP-37's width guard, because the
+  field read reaches lowering as a `Unit`. **REP-57 (P2) is its workaround and
+  wants doing with it**: a record pattern nested inside a variant pattern has no
+  grammar, because `parse_pattern` handles `Ident {` and a bare `{` reaches its
+  `_` arm. Fixing REP-57 alone buys nothing; fixing REP-56 alone leaves the
+  spelling ADR-069 would suggest still unparseable.
+- **REP-52 (P2) and REP-53 (P3)** — both are **F17/MIR-10's** verifier rule, "a
+  faulting instruction is followed by a `CheckFault`", from its two ends: a fused
+  `collect` that pushes without a check, and a method-call path that checks
+  unconditionally and so reads neither `MethodEntry::can_fault` nor the
+  manifest's fault column. MIR-10 is the one §4 row still marked `PARTIAL — part
+  owed`, and these two are why. Take all three together or none.
+- **REP-54 (P2)** — a template with two or more anonymous captures is tagged
+  `Unit` and holds tuples: `read lines(\`{int},{int}\`)` prints `[Unit, Unit]`.
+  The answer is a tuple descriptor built from the child descriptors, and it wants
+  deciding alongside whether `PlanNode::Tuple` is emitted or deleted (nothing
+  emits it today).
+- **REP-58 (P2)** — §7.7's own "repeated labeled blocks" example does not run; a
+  nested-constructor capture inside a `block` is the template's last part, so it
+  is unbounded and swallows past its line. Pre-existing, and the answer is a
+  language decision: either a `block` item is line-anchored for its captures too,
+  or §7.7 is amended. Add a corpus fixture for §7.7 as written when it is taken.
+- **REP-55 (P3)** — `matrix`'s ragged-row fault names the whole input where
+  `grid`'s names the offending line. Diagnostic quality, not correctness.
+- **REP-33 (P2)** and **REP-46's open half (P2)** — both are *features* the
+  design doc writes and the language does not have: Appendix D's `sorted`,
+  `frequencies`, `zip`, `map`-on-a-pipeline and `sum` (a clean `praxis check`
+  then eight `Y110`s at run), and `wrapping_sub`/`saturating_mul`/`checked_mul`
+  beside the three `_add` forms §4.12 got. Neither is a repair.
+
+**The two open decisions, both belonging to closed stages:**
+
+- **D16 (S25)** — does `assert` take a message, and does the language get
+  arity-based overloading or optional parameters? The plan's warning is the
+  load-bearing part: `assert`'s message is the cheapest possible motivating case,
+  so answering it in isolation sets the precedent by accident.
+- **D18 (S19 round 3)** — may a backtick template span a raw newline? It decides
+  what an unterminated template reports; the reasoning and the two candidate
+  rules are in this section, below.
+
+**There is no ABI bump left in this round.** S19, S20 and S21 had none; H17 is
+one per stage and S18 spent the one that was available (13 → 14, with RT-13, in
+one commit with codegen as required).
 
 - ~~**D1 (plan §7)**~~ **answered and implemented.** `Map.get`/`Grid.find` answer
   `Option[V]`; an empty `min`/`max` faults; `Counter.get` keeps its zero default.
-- ~~**S18 also owns RT-13**~~ **landed**, in one commit with codegen as required.
-  Note for anyone reading the old text: it says the bump is "12 → 13", which was
-  already stale — S17 spent 12 → 13 and S18 spent **13 → 14**.
-- **There is no ABI bump left in this round.** S19, S20 and S21 have none; H17 is
-  one per stage and S18 spent the one that was available.
 
 Two things this session found and did **not** chase — neither is registered,
 because neither was reproduced against a stated contract:
