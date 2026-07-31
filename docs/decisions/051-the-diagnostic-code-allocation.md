@@ -76,6 +76,7 @@ shape). **`N009` is the next free Name code.**
 | `Y019` | REP-08 | S25 | a `.n` element access on something with no such element (**amendment**) |
 | `Y020` | REP-16 | S25 | a subscript on a type that has none, in either direction (**amendment**) |
 | `Y021` | REP-16 | S25 | an assignment whose left side names no storage (**amendment**) |
+| `Y023` | REP-47 | — | a backtick parser template written where a value is expected (**amendment**) |
 
 **Amendment (2026-07-30).** Four codes, two of them allocated here and two
 **recorded late**. `Y018` (REP-01, S24 — ADR-061) and `Y124` (REP-05, S26 —
@@ -116,8 +117,20 @@ about a binding that exists and may not be written; `Y021` is about a left side
 that is not a place at all — `f() = 1`, `p.x = 1`. Both are in inference, for
 `Y019`'s reason.
 
-**`Y022` and `N009` are the next free codes.** The `Y0xx` user block is contiguous
-through `Y021` and the `N0xx` block through `N008` (REP-26's amendment above).
+**Amendment (2026-07-31, REP-47).** `Y023` — a backtick parser template written
+where a value is expected. §7.1 says the parser-expression sublanguage is entered
+at `read` or at `parse(text, …)` and nowhere else (REP-34 established that
+boundary from the other side, for labelled arguments), so a template standing
+alone is grammar the design does not write; it used to be typed `Text` and
+lowered as a text literal containing its own braces. Emitted in **inference**,
+for `Y019`'s reason: `praxis check` must see it. ADR-084 is the decision.
+
+It is `Y023` and not `Y022` because this session's plan reserved the block from
+`Y023` upward for its own use, and a gap in a registry costs nothing while two
+sessions colliding on one number costs the identifier. **`Y022` and `Y024` are
+free; `N009` is still the next free Name code.** The `Y0xx` user block is
+otherwise contiguous through `Y021` and the `N0xx` block through `N008`
+(REP-26's amendment above).
 
 `TY-20` gets two codes rather than the one the plan lists: "`return` with no
 function" and "`break` with no loop" are different mistakes with different fixes,

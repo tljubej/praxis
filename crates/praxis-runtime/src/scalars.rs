@@ -253,12 +253,33 @@ pub static CHAR_PAYLOAD: Payload<CharPayload> = Payload::new(&CHAR);
 
 unsafe fn float_trace(_: *mut u8, _: &mut dyn Tracer) {}
 unsafe fn float_drop(_: *mut u8) {}
+/// Render a `Float` the way §4.12 asks: in the shortest form that reads back as
+/// **the same Praxis `Float`** (ADR-083, REP-44).
+///
+/// Rust's `{}` is shortest-round-trippable for Rust, where a bare `1` re-reads
+/// as an `f64`. Praxis is not Rust here: §4.12's typing rule is that `42` is
+/// strictly an `Int` literal and that `Float` and `Int` never mix, so a `Float`
+/// rendered `1` does not read back as a `Float` at all — and, printed inside a
+/// collection, a `Vec[Float]` of `[3.0, 5.0]` was indistinguishable from a
+/// `Vec[Int]`. So a finite value with no `.` and no exponent in its digits gets
+/// a `.0`, and everything else — including `inf`/`-inf`/`NaN`, which §4.12 names
+/// as those literals — is Rust's rendering unchanged.
+pub(crate) fn write_float(out: &mut dyn fmt::Write, v: FloatPayload) {
+    let rendered = format!("{v}");
+    let is_a_float_literal = rendered
+        .bytes()
+        .any(|b| b == b'.' || b == b'e' || b == b'E');
+    if v.is_finite() && !is_a_float_literal {
+        let _ = write!(out, "{rendered}.0");
+    } else {
+        let _ = out.write_str(&rendered);
+    }
+}
+
 unsafe fn float_format(payload: *const u8, out: &mut dyn fmt::Write) {
     // SAFETY: caller guarantees `payload` points at a `FloatPayload`.
     let v = unsafe { *(payload as *const FloatPayload) };
-    // Rust's default `{}` formatting renders finite values in the shortest
-    // round-trippable form, and `inf`/`-inf`/`NaN` as those literals (§4.12).
-    let _ = write!(out, "{v}");
+    write_float(out, v);
 }
 unsafe fn float_equals(a: *const u8, b: *const u8) -> bool {
     // SAFETY: caller guarantees both pointers point at `FloatPayload`s.
@@ -635,5 +656,84 @@ mod tests {
                 'A' as u32
             );
         }
+    }
+
+    /// **REP-44, ADR-083.** A `Float` renders as a Praxis `Float` literal.
+    ///
+    /// The descriptor test above could not catch this: its one value is `2.5`,
+    /// which already carries a `.`, so it passes whichever rule is in force.
+    /// Every case here is a whole-numbered value, an exponent, or a non-finite
+    /// one — the three places the two rules differ.
+    #[test]
+    fn a_whole_numbered_float_renders_as_a_float() {
+        let rendered = |v: FloatPayload| {
+            let mut buf = String::new();
+            // SAFETY: `v` is a `FloatPayload` and `FLOAT` is its descriptor.
+            unsafe { (FLOAT.format)(std::ptr::addr_of!(v) as *const u8, &mut buf) };
+            buf
+        };
+        // The defect: identical to an `Int`'s rendering, so `[3.0, 5.0]` and
+        // `[3, 5]` printed the same and neither read back as the other's type.
+        assert_eq!(rendered(1.0), "1.0");
+        assert_eq!(rendered(0.0), "0.0");
+        assert_eq!(rendered(-7.0), "-7.0");
+        assert_eq!(rendered(1e10), "10000000000.0");
+        // Already a literal: untouched, and no second `.0`.
+        assert_eq!(rendered(2.5), "2.5");
+        assert_eq!(rendered(0.1 + 0.2), "0.30000000000000004");
+        // §4.12 names these three, and none of them takes a `.0`.
+        assert_eq!(rendered(f64::INFINITY), "inf");
+        assert_eq!(rendered(f64::NEG_INFINITY), "-inf");
+        assert_eq!(rendered(f64::NAN), "NaN");
+    }
+
+    /// **REP-50, and ADR-083's rule stated as a round trip.** The rendered form
+    /// of a `Float` is the text that reads back as *the same* `Float`, so the
+    /// check is a re-read and not a string comparison.
+    ///
+    /// `-0.0` is the case that made this worth writing: the formatter has
+    /// always been right about it, and the evaluator was not — a Float
+    /// negation was lowered as `0.0 - x`, so the literal `-0.0` produced
+    /// `+0.0` and the rendering of the *wrong value* round-tripped perfectly.
+    /// `to_bits` is what tells the two zeros apart; `==` cannot, because
+    /// IEEE-754 says they are equal.
+    ///
+    /// **Not red on `main`**, therefore, and not REP-50's gate — that is
+    /// `run_pass_float_negative_zero`, which asks the *evaluator*. This is the
+    /// rule made checkable at the layer that owns the rendering, so a later
+    /// edit to `FLOAT.format` cannot quietly stop satisfying it.
+    #[test]
+    fn a_rendered_float_reads_back_as_the_same_float() {
+        let rendered = |v: FloatPayload| {
+            let mut buf = String::new();
+            // SAFETY: `v` is a `FloatPayload` and `FLOAT` is its descriptor.
+            unsafe { (FLOAT.format)(std::ptr::addr_of!(v) as *const u8, &mut buf) };
+            buf
+        };
+        for v in [
+            0.0_f64,
+            -0.0,
+            1.0,
+            -7.0,
+            2.5,
+            1e10,
+            0.1 + 0.2,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+        ] {
+            let text = rendered(v);
+            let reread: f64 = text
+                .parse()
+                .unwrap_or_else(|e| panic!("`{text}` does not read back as a Float: {e}"));
+            assert_eq!(
+                reread.to_bits(),
+                v.to_bits(),
+                "`{text}` read back as a different Float"
+            );
+        }
+        // The signed zeros are distinct values (ADR-045 orders them apart) and
+        // render distinctly, which is the whole of REP-50's rule at this layer.
+        assert_eq!(rendered(-0.0), "-0.0");
+        assert_ne!(rendered(-0.0), rendered(0.0));
     }
 }

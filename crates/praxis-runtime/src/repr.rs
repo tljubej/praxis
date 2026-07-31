@@ -93,21 +93,21 @@ pub unsafe fn instance_repr(value: GcRef) -> InstanceRepr {
             BuiltinTypeId::Set => {
                 let p = &*value.payload::<crate::maps::SetPayload>();
                 InstanceRepr::Args(vec![InstanceArg {
-                    descriptor: Some(p.element_descriptor),
+                    descriptor: nullable(p.element_descriptor),
                     sample: p.entries.iter().next().map(|k| k.value()),
                 }])
             }
             BuiltinTypeId::MinHeap => {
                 let p = &*value.payload::<crate::heaps::MinHeapPayload>();
                 InstanceRepr::Args(vec![InstanceArg {
-                    descriptor: Some(p.element_descriptor),
+                    descriptor: nullable(p.element_descriptor),
                     sample: p.items.peek().map(|e| e.0.value),
                 }])
             }
             BuiltinTypeId::MaxHeap => {
                 let p = &*value.payload::<crate::heaps::MaxHeapPayload>();
                 InstanceRepr::Args(vec![InstanceArg {
-                    descriptor: Some(p.element_descriptor),
+                    descriptor: nullable(p.element_descriptor),
                     sample: p.items.peek().map(|e| e.value),
                 }])
             }
@@ -116,11 +116,11 @@ pub unsafe fn instance_repr(value: GcRef) -> InstanceRepr {
                 let entry = p.entries.iter().next();
                 InstanceRepr::Args(vec![
                     InstanceArg {
-                        descriptor: Some(p.key_descriptor),
+                        descriptor: nullable(p.key_descriptor),
                         sample: entry.map(|(k, _)| k.value()),
                     },
                     InstanceArg {
-                        descriptor: Some(p.value_descriptor),
+                        descriptor: nullable(p.value_descriptor),
                         sample: entry.map(|(_, v)| *v),
                     },
                 ])
@@ -129,7 +129,7 @@ pub unsafe fn instance_repr(value: GcRef) -> InstanceRepr {
             BuiltinTypeId::Counter => {
                 let p = &*value.payload::<crate::maps::CounterPayload>();
                 InstanceRepr::Args(vec![InstanceArg {
-                    descriptor: Some(p.key_descriptor),
+                    descriptor: nullable(p.key_descriptor),
                     sample: p.entries.keys().next().map(|k| k.value()),
                 }])
             }

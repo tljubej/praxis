@@ -486,6 +486,88 @@ fn adv_int_min_mod_neg_one_overflows() {
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
 }
 
+/// **REP-46.** §4.12's three explicit overflow alternatives exist and opt out
+/// of the fault.
+///
+/// "Integer arithmetic is checked by default. Overflow faults and enters the
+/// crash debugger. Explicit alternatives: `a.wrapping_add(b)`,
+/// `a.saturating_add(b)`, `a.checked_add(b) // returns Option[Int]`." All three
+/// were `Y110: no method \`wrapping_add\` on this type taking 1 argument(s)`, so
+/// the section described checked arithmetic with no way to opt out.
+///
+/// Every assertion is at `i64::MAX`, where the ordinary `+` faults: a test that
+/// added two small numbers would pass against `praxis_int_add` itself and prove
+/// only that a name resolves.
+#[test]
+fn the_overflow_alternatives_answer_where_a_checked_add_faults() {
+    // MAX = 9223372036854775807. Wrapping lands on MIN; adding MAX back and one
+    // more brings it to 0, which is a number the harness can compare.
+    let src = "fn main() -> Int {\n  let m = 9223372036854775807\n  \
+               m.wrapping_add(1) + m + 1\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "wrapping_add must not fault");
+    assert_eq!(result.as_int(), 0, "MAX.wrapping_add(1) is MIN");
+
+    // Saturating stays at MAX, so subtracting MAX is zero.
+    let src = "fn main() -> Int {\n  let m = 9223372036854775807\n  \
+               m.saturating_add(1) - m\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "saturating_add must not fault");
+    assert_eq!(result.as_int(), 0, "MAX.saturating_add(1) is MAX");
+
+    // `checked_add` answers an `Option[Int]` — a real one (ADR-076), so a
+    // `match` reaches inside it. `None` on overflow, `Some` below it.
+    let src = "fn main() -> Int {\n  let m = 9223372036854775807\n  \
+               match m.checked_add(1) { Some(n) => n\n None => 7 }\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "checked_add must not fault");
+    assert_eq!(result.as_int(), 7, "MAX.checked_add(1) is None");
+
+    let src = "fn main() -> Int {\n  match 5.checked_add(7) { Some(n) => n\n None => 0 }\n}";
+    let (_rt, result) = run_main(src);
+    assert_eq!(result.as_int(), 12, "a sum that fits is Some(sum)");
+}
+
+/// **REP-43.** `Counter.inc` is arithmetic, and §4.12's arithmetic is checked.
+///
+/// The wrapper's `cur + 1` was the one integer computation in the ABI file that
+/// was not: it panicked with "attempt to add with overflow" inside
+/// `#[no_mangle] extern "C"` in a debug build — the non-unwinding panic §10.4
+/// forbids, which aborts the host rather than reaching the fault epilogue — and
+/// wrapped silently to `i64::MIN` in release. A `Counter`'s values are ordinary
+/// `Int`s a program can store with `c[k] = n`, so the path is reachable from
+/// source; D12's answer (per-wrapper totality) is what makes faulting the only
+/// available behaviour.
+///
+/// The fault must be *observed*, which is why the assertion is `rt.fault()` and
+/// not merely "the program did not crash": marking the wrapper checked without
+/// marking its manifest row `AllocatesAndFaults` leaves the fault pending and
+/// the generated code running, so the next unrelated `CheckFault` reports it at
+/// the wrong place.
+#[test]
+fn counter_inc_at_the_int_ceiling_faults_rather_than_wrapping() {
+    let src = "fn main() -> Int {\n  let c = Counter()\n  c[\"k\"] = 9223372036854775807\n  \
+               c.inc(\"k\")\n  c[\"k\"]\n}";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault(), "inc past i64::MAX should fault");
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
+}
+
+/// REP-43's **mutation companion, not a gate** — it passes unchanged on `main`,
+/// which is the point of it. An increment that fits is still an increment and a
+/// fresh key still starts at one, so a "fix" that faulted on every `inc` would
+/// pass the gate above and fail here. `grid_rotate_left_then_right_restores_the_contents`
+/// is the same role for REP-36. A companion is worth having and is not counted
+/// among the block's gates.
+#[test]
+fn counter_inc_below_the_ceiling_still_counts() {
+    let src = "fn main() -> Int {\n  let c = Counter()\n  c[\"k\"] = 9223372036854775806\n  \
+               c.inc(\"k\")\n  c.inc(\"fresh\")\n  c[\"k\"] - 9223372036854775806 + c[\"fresh\"]\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "no overflow here");
+    assert_eq!(result.as_int(), 2, "one increment on each key");
+}
+
 #[test]
 fn adv_modulo_by_zero_faults() {
     // % 0 was untested. Must fault as DivByZero.
@@ -1447,6 +1529,38 @@ fn grid_rotate_right_changes_dimensions() {
     assert_eq!(result.as_int(), 23);
 }
 
+/// REP-36's gate. The two `*_changes_dimensions` tests above cannot tell the
+/// two rotations apart — a left and a right rotation of a 3×2 grid are both
+/// 2×3 — and neither can `grid_rotate_four_times_is_identity`, which is the
+/// identity whichever direction it turns. So this reads a **cell**.
+///
+/// `abc / def` is asymmetric in both axes, so no transpose, flip or 180° turn
+/// answers the same pair. With §6.4's convention (x rightward, y downward),
+/// turning counter-clockwise carries the rightmost column to the top row:
+/// `rotate_left()` is `cf / be / ad`, so its (0, 0) is the original (2, 0).
+/// Turning clockwise carries the leftmost column to the top row reversed:
+/// `rotate_right()` is `da / eb / fc`, so its (0, 0) is the original (0, 1).
+/// Both halves are asserted in one answer, because a fix that swapped the two
+/// bodies *again* would pass either half alone.
+#[test]
+fn grid_rotate_left_and_right_turn_in_opposite_directions() {
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let l = g.rotate_left()\n  let r = g.rotate_right()\n  var n = 0\n  if l.get(0, 0) == g.get(2, 0) { n = n + 1 }\n  if r.get(0, 0) == g.get(0, 1) { n = n + 10 }\n  n\n}\n";
+    let (rt, result) = run_main_with_input(src, "abc\ndef\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 11);
+}
+
+/// The composition half: turning left then right restores the *contents*, not
+/// merely the dimensions. This holds even when both directions are wrong in
+/// the same way, so it is a companion to the test above rather than a gate.
+#[test]
+fn grid_rotate_left_then_right_restores_the_contents() {
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let back = g.rotate_left().rotate_right()\n  if g == back { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main_with_input(src, "abc\ndef\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1);
+}
+
 #[test]
 fn grid_rotate_four_times_is_identity() {
     // Rotating right 4× returns to the original dimensions (3×2).
@@ -1887,31 +2001,64 @@ fn pipeline_all_false_short_circuits() {
     assert_eq!(result.as_int(), 0);
 }
 
+/// **Rewritten** (plan §8.2, REP-39). It was `pipeline_find_returns_index_on_hit`
+/// and asserted `[10,20,30].find(|x| x == 20) == 1` — the *index*, which is what
+/// `position` answers. §6.3 lists `find` and `position` as two operations, and
+/// they were one: the same MIR arm, the same accumulator, the same result type.
+/// The old assertion was a true statement about the implementation and a false
+/// one about the language.
+///
+/// **This is REP-39's gate**, and the vector is chosen so that only the right
+/// answer passes: `20` is at index `1`, so a `find` that still answers an index
+/// answers `Some(1)`, which is not `Some(20)`.
 #[test]
-fn pipeline_find_returns_index_on_hit() {
-    // [10,20,30].find(|x| x == 20) = 1.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.find(|x| x == 20)\n}\n";
+fn find_answers_the_matching_element_not_its_index() {
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  match v.find(|x| x == 20) { Some(n) => n, None => 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), 1);
+    assert_eq!(result.as_int(), 20);
 }
 
+/// **Rewritten** (§8.2, REP-39). It was `pipeline_find_returns_neg1_on_miss` and
+/// asserted the `-1` miss sentinel. ADR-029 decision 5 chose that sentinel, and
+/// ADR-082 retires it: `-1` is a legal element of a `Vec[Int]` and a legal `Int`
+/// besides, so a `Vec[Int]` containing `-1` could not tell a hit from a miss.
+/// §4.7 already says absence is `Option`.
 #[test]
-fn pipeline_find_returns_neg1_on_miss() {
-    // [10,20,30].find(|x| x == 99) = -1.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.find(|x| x == 99)\n}\n";
+fn a_find_that_matches_nothing_answers_none() {
+    // The miss arm answers 7, a number no element could produce, so a `Some`
+    // sneaking through is visible rather than merely different.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  match v.find(|x| x == 99) { Some(n) => n, None => 7 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), -1);
+    assert_eq!(result.as_int(), 7);
 }
 
+/// **Rewritten** (§8.2, REP-39). It was `pipeline_position_is_alias_of_find`,
+/// and its *name* was the finding: an alias is exactly what §6.3 does not
+/// describe. `position` keeps the index — that is its question — and answers it
+/// as an `Option[Int]` for the same in-band-sentinel reason `find` does.
 #[test]
-fn pipeline_position_is_alias_of_find() {
-    // [10,20,30].position(|x| x == 30) = 2.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.position(|x| x == 30)\n}\n";
+fn position_answers_the_index_and_find_answers_the_element() {
+    // `[10,20,30]`: `position(== 30)` is 2 and `find(== 30)` is 30. Summing the
+    // two makes a swapped pair (30 + 2 the other way round) impossible to miss,
+    // and a `-1` sentinel on either side lands nowhere near 32.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  let p = match v.position(|x| x == 30) { Some(i) => i, None => 0 }\n  let f = match v.find(|x| x == 30) { Some(n) => n, None => 0 }\n  f * 10 + p\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), 2);
+    assert_eq!(result.as_int(), 302);
+}
+
+/// `find` reaches an element its old `Int` result could not name at all. This is
+/// the half of REP-39 that no arithmetic can express: the receiver's element
+/// type is `Text`, so before ADR-082 no program could get the answer out of
+/// `find` — the row's result was `Int` whatever the receiver held.
+#[test]
+fn find_reaches_a_non_int_element() {
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(\"alpha\")\n  v.push(\"beta\")\n  match v.find(|s| s == \"beta\") { Some(s) => s.len(), None => 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4);
 }
 
 #[test]
@@ -2077,7 +2224,9 @@ fn each_stage_counts_the_sequence_that_reaches_it() {
     // hit inside a `flat_map` ends only the inner loop. The inner Vecs here are
     // [0, 5] and [10]: flattened, the first element over 4 is at index 1;
     // per-inner, the first Vec answers 1 and the second overwrites it with 0.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let r = Vec()\n    if x == 1 { r.push(0) }\n    r.push(x * 5)\n    r\n  }).position(|p| p > 4)\n}\n";
+    // (The `match` is REP-39: the index arrives inside a `Some` now. What this
+    // measures — *which* index — is unchanged.)
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  match v.flat_map(|x| {\n    let r = Vec()\n    if x == 1 { r.push(0) }\n    r.push(x * 5)\n    r\n  }).position(|p| p > 4) { Some(i) => i, None => -1 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1, "the flattened stream's index, once");
@@ -2185,14 +2334,56 @@ fn take_while_after_flat_map_stops_the_whole_stream() {
     assert_eq!(result.as_int(), 1, "the stream stops at the first 10");
 }
 
+/// **Rewritten** (plan §8.2, REP-38). It used to be
+/// `pipeline_filter_map_keeps_results` and assert that
+/// `[1,2,3].filter_map(|x| x * 2).sum()` is `12` — which is `map`'s answer, and
+/// it passed because `filter_map` *was* `map`. It cannot even compile now: the
+/// closure is `(Int) -> Int` and the row asks for `(Int) -> Option[U]`. What was
+/// wrong with it is not the number but the premise, which the comment stated
+/// outright — "no Unit to filter" — and which S18's `Option` retired.
+///
+/// **This is REP-38's gate.** The `None`s must not survive, and asserting a
+/// *sum* is what makes that measurable in one integer: keeping them would not
+/// merely change the number, it would fail to type-check at `sum`, which is
+/// exactly the second-order symptom the finding describes (`error[Y001]:
+/// expected Int, found Option[Int]` — the user is told their sum is wrong and
+/// never that `filter_map` did not filter).
 #[test]
-fn pipeline_filter_map_keeps_results() {
-    // filter_map is modeled as map-keep (no Unit to filter). [1,2,3].filter_map(*2)
-    // = [2,4,6].sum() = 12.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.filter_map(|x| x * 2).sum()\n}\n";
+fn filter_map_drops_the_nones_rather_than_carrying_them() {
+    // [1,2,3,4,5] |> Some(x*2) when x > 2 → [6, 8, 10], summing to 24. Under
+    // the old map-keep lowering the chain is [None, None, Some(6), Some(8),
+    // Some(10)] and `sum` has nothing to add.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter_map(|x| if x > 2 { Some(x * 2) } else { None }).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), 12);
+    assert_eq!(result.as_int(), 24);
+}
+
+/// The all-`None` end of the same range: a `filter_map` that keeps nothing
+/// answers an empty sequence, not a sequence of `None`s. `count()` is the
+/// measurement because it is the one sink that a surviving `None` would inflate
+/// without any type error to hide behind.
+#[test]
+fn a_filter_map_that_matches_nothing_yields_nothing() {
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.filter_map(|x| if x > 100 { Some(x) } else { None }).collect().len()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+/// `filter_map` composes with the stages either side of it — a `None` has to
+/// leave by the *innermost* continue edge, not end the chain (MIR-08's
+/// distinction). Under the old lowering this answers `2 + 4 + 6 = 12` scaled
+/// through the later stages; under the fix only the two survivors reach them.
+#[test]
+fn filter_map_in_the_middle_of_a_chain_drops_only_its_own_element() {
+    // [1..6] .map(+1) = [2,3,4,5,6]
+    //        .filter_map(Some(x*10) when even) = [20, 40, 60]
+    //        .filter(> 20) = [40, 60] → 100
+    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.map(|x| x + 1).filter_map(|x| if x - x / 2 * 2 == 0 { Some(x * 10) } else { None }).filter(|x| x > 20).sum()\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 100);
 }
 
 #[test]
@@ -2225,13 +2416,17 @@ fn pipeline_empty_vec_sum_is_zero() {
     assert_eq!(result.as_int(), 0);
 }
 
+/// **Rewritten** (§8.2, REP-39). It was `pipeline_empty_vec_find_is_neg1`. An
+/// empty source is a miss like any other, and a miss is `None` — the same
+/// answer, now spelled so that a caller can act on it. Note this is *not* the
+/// `EmptyCollection` fault: `find` has an answer for an empty sequence, which is
+/// exactly what distinguishes it from `min`/`reduce` (D1).
 #[test]
-fn pipeline_empty_vec_find_is_neg1() {
-    // Empty source → find returns the -1 miss sentinel.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.find(|x| x == 0)\n}\n";
+fn an_empty_source_makes_find_answer_none() {
+    let src = "fn main() -> Int {\n  let v = Vec()\n  match v.find(|x| x == 0) { Some(n) => n, None => 7 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), -1);
+    assert_eq!(result.as_int(), 7);
 }
 
 // ===========================================================================
@@ -3656,8 +3851,10 @@ fn adv_pipeline_collect_nested_vecs_then_count() {
 fn adv_pipeline_find_with_allocating_predicate() {
     // find's predicate allocates (creates an Int) before returning its bool.
     // If the fused loop doesn't root the current element across the predicate's
-    // allocation, find matches the wrong element or faults.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 100 { v.push(i); i = i + 1 }\n  v.find(|x| x + 0 == 50)\n}\n";
+    // allocation, find matches the wrong element or faults. REP-39 makes this
+    // stronger rather than weaker: the answer is now the *element*, which the
+    // loop has to have kept alive across that allocation to hand back at all.
+    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 100 { v.push(i); i = i + 1 }\n  match v.find(|x| x + 0 == 50) { Some(n) => n, None => -1 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 50);

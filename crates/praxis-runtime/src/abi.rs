@@ -219,6 +219,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::GridWidth => praxis_grid_width as *const (),
         RuntimeSymbol::IntAbs => praxis_int_abs as *const (),
         RuntimeSymbol::IntAdd => praxis_int_add as *const (),
+        RuntimeSymbol::IntCheckedAdd => praxis_int_checked_add as *const (),
         RuntimeSymbol::IntClamp => praxis_int_clamp as *const (),
         RuntimeSymbol::IntDiv => praxis_int_div as *const (),
         RuntimeSymbol::IntEq => praxis_int_eq as *const (),
@@ -235,9 +236,11 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::IntNe => praxis_int_ne as *const (),
         RuntimeSymbol::IntNeg => praxis_int_neg as *const (),
         RuntimeSymbol::IntRem => praxis_int_rem as *const (),
+        RuntimeSymbol::IntSaturatingAdd => praxis_int_saturating_add as *const (),
         RuntimeSymbol::IntSign => praxis_int_sign as *const (),
         RuntimeSymbol::IntSub => praxis_int_sub as *const (),
         RuntimeSymbol::IntToFloat => praxis_int_to_float as *const (),
+        RuntimeSymbol::IntWrappingAdd => praxis_int_wrapping_add as *const (),
         RuntimeSymbol::MapContains => praxis_map_contains as *const (),
         RuntimeSymbol::RangeGet => praxis_range_get as *const (),
         RuntimeSymbol::RangeLen => praxis_range_len as *const (),
@@ -456,9 +459,50 @@ unsafe fn bool_ref(ctx: *mut RuntimeContext, value: bool) -> GcRef {
     }
 }
 
+/// Read `r`'s payload through a [`Payload`] handle, first checking that `r`
+/// really is that handle's type.
+///
+/// This is the reader to reach for whenever a wrapper receives a `GcRef` it did
+/// not itself allocate — a value handed back by a program's closure, most of
+/// all. Two mistakes are impossible through it and were both possible without
+/// it: reading a value of the wrong *type* (the identity check answers `None`,
+/// and the caller decides whether that is a `TypeMismatch` fault), and reading
+/// the right type at the wrong *width* (the width is `size_of::<T>()`, which
+/// [`Payload::new`] proved is the descriptor's width when the handle was
+/// declared).
+///
+/// REP-37 is why it exists: `ClosureOracle::is_goal` read a `Bool` — a
+/// **one**-byte payload — with `int_payload`, an eight-byte read, so every
+/// graph goal predicate consumed seven bytes of arena padding past the object
+/// and answered whatever the allocator had left there.
+///
+/// # Safety
+/// `r` must be a valid `GcRef` into a live heap.
+#[inline]
+unsafe fn read_scalar<T: Copy>(r: GcRef, handle: crate::descriptor::Payload<T>) -> Option<T> {
+    if !std::ptr::eq(r.descriptor(), handle.descriptor()) {
+        return None;
+    }
+    // SAFETY: the identity check proves `r`'s payload is this handle's type, and
+    // the handle's own construction proved `T` is that type's layout.
+    Some(unsafe { handle.read(r.payload::<u8>()) })
+}
+
 /// Read the `i64` payload of an `Int` `GcRef`. Used by every arithmetic wrapper.
+///
+/// Prefer [`read_scalar`] for any value whose type is not already established:
+/// this reads eight bytes unconditionally, and a `debug_assert` is all that
+/// stands between it and a narrower payload (REP-37).
 #[inline]
 unsafe fn int_payload(r: GcRef) -> i64 {
+    debug_assert_eq!(
+        r.descriptor().size(),
+        std::mem::size_of::<i64>(),
+        "int_payload reads eight bytes; `{}` is {} wide — use `read_scalar` with \
+         that type's `Payload` handle instead (REP-37)",
+        r.descriptor().name,
+        r.descriptor().size(),
+    );
     // SAFETY: the compiler only emits these calls with Int-typed operands; the
     // payload follows the header and is an `i64`. Faults that would feed a
     // non-`Int` (e.g. the Unit sentinel) into an arithmetic wrapper are diverted
@@ -859,15 +903,21 @@ pub unsafe extern "C" fn praxis_float_max(
     unsafe { rebox_float(ctx, a.max(b)) }
 }
 
-/// `Float.to_text()` — format as a `Text` using Rust's shortest round-trip
-/// form (§4.12). `inf`/`-inf`/`NaN` render as those literals.
+/// `Float.to_text()` — the same text `out()` writes, which is the shortest form
+/// that reads back as the same Praxis `Float` (§4.12, ADR-083).
+///
+/// It goes through `scalars::write_float` rather than restating the rule,
+/// because `to_text()` and `out()` disagreeing is a defect in itself: a program
+/// that prints a value and a program that builds a string from it must produce
+/// the same characters.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_float_to_text(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     let f = unsafe { float_payload(r) };
-    let s = format!("{f}");
+    let mut s = String::new();
+    scalars::write_float(&mut s, f);
     // SAFETY: `s` is valid UTF-8 for the duration of the call; ctx/heap valid.
     unsafe {
         gc_alloc_with(
@@ -999,6 +1049,76 @@ pub unsafe extern "C" fn praxis_int_neg(ctx: *mut RuntimeContext, r: GcRef) -> G
             unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
             unsafe { unit_sentinel(ctx) }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §4.12's three explicit overflow alternatives (REP-46).
+//
+// "Integer arithmetic is checked by default. Overflow faults and enters the
+// crash debugger. Explicit alternatives: `a.wrapping_add(b)`,
+// `a.saturating_add(b)`, `a.checked_add(b) // returns Option[Int]`." Those are
+// the three the design document names, and the three that exist. `_sub` and
+// `_mul` siblings are a language decision nobody has made — see the catalog
+// rows, which say so where a reader looks for them.
+//
+// None of the three can fault: that is the whole point of them. They allocate,
+// like every other wrapper that answers a fresh number.
+// ---------------------------------------------------------------------------
+
+/// `a.wrapping_add(b)` (§4.12): two's-complement wraparound instead of a fault.
+///
+/// # Safety
+/// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_wrapping_add(
+    ctx: *mut RuntimeContext,
+    a: GcRef,
+    b: GcRef,
+) -> GcRef {
+    let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x.wrapping_add(y)) }
+}
+
+/// `a.saturating_add(b)` (§4.12): clamp to `Int`'s ends instead of faulting.
+///
+/// # Safety
+/// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_saturating_add(
+    ctx: *mut RuntimeContext,
+    a: GcRef,
+    b: GcRef,
+) -> GcRef {
+    let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
+    unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x.saturating_add(y)) }
+}
+
+/// `a.checked_add(b)` (§4.12): `Option[Int]` — `None` where the checked `+`
+/// would fault.
+///
+/// It answers a real `Option` (S18/ADR-076): the absence is the *answer* here,
+/// not an error channel, which is exactly §4.7's distinction. Before S18 this
+/// row could not have been written at all, which is why §4.12 documented three
+/// alternatives and the catalog had none.
+///
+/// # Safety
+/// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_checked_add(
+    ctx: *mut RuntimeContext,
+    a: GcRef,
+    b: GcRef,
+) -> GcRef {
+    let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
+    match x.checked_add(y) {
+        Some(sum) => unsafe {
+            let scope = NativeScope::new(ctx);
+            let boxed = gc_alloc(ctx, scalars::INT_PAYLOAD, sum);
+            let rooted = scope.root(boxed);
+            option_some(ctx, rooted.get())
+        },
+        None => unsafe { option_none(ctx) },
     }
 }
 
@@ -1353,21 +1473,33 @@ unsafe fn vec_payload_mut<'s>(r: Rooted<'s>) -> &'s mut VecPayload {
 /// place: `praxis_vec_new` allocates, and so may the caller's own iteration, so a
 /// collection between the allocation and the last push would reclaim it.
 ///
+/// `element_descriptor` may be **null**: the source collection's label is what
+/// its own construction site knew, and that may have been nothing (REP-41). A
+/// `Vec`'s null means "empty" — `vec_format` reads it that way — so a null label
+/// with members present would answer `[]`. The first member's own descriptor is
+/// what the `Vec` adopts instead, which is exactly what `praxis_vec_push` does.
+///
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid
-/// `'static TypeDescriptor`; every item must be a valid `GcRef` whose payload
-/// matches it.
+/// `'static TypeDescriptor` or null; every item must be a valid `GcRef` whose
+/// payload matches its own header.
 unsafe fn vec_of(
     ctx: *mut RuntimeContext,
-    element_descriptor: &'static TypeDescriptor,
+    element_descriptor: *const TypeDescriptor,
     items: impl Iterator<Item = GcRef>,
 ) -> GcRef {
+    let items: Vec<GcRef> = items.collect();
+    let element_descriptor = if element_descriptor.is_null() {
+        items
+            .first()
+            .map_or(std::ptr::null(), |first| first.descriptor() as *const _)
+    } else {
+        element_descriptor
+    };
     let result = unsafe { praxis_vec_new(ctx, element_descriptor) };
     let scope = unsafe { NativeScope::new(ctx) };
     let rp = unsafe { vec_payload_mut(scope.root(result)) };
-    for item in items {
-        rp.items.push(item);
-    }
+    rp.items.extend(items);
     result
 }
 
@@ -2282,9 +2414,10 @@ unsafe fn counter_payload_mut<'s>(r: Rooted<'s>) -> &'s mut CounterPayload {
     unsafe { &mut *r.get().payload::<CounterPayload>() }
 }
 
-/// Allocate an empty `Map[K, V]`. `key_descriptor` selects the structural
-/// hash/eq for `DynamicKey`; `value_descriptor` is recorded for format/trace.
-/// A null descriptor defaults to INT (matching `praxis_vec_new`).
+/// Allocate an empty `Map[K, V]`. `key_descriptor` is the key type the
+/// construction site knew, or **null** when it knew none — which is kept null
+/// (REP-41), the way `praxis_vec_new` keeps it. Spelling an unknown type `INT`
+/// is a claim, and every reader that believed it read the wrong type.
 ///
 /// # Safety
 /// `ctx` must be live and wired. `key_descriptor` must be a valid pointer to a
@@ -2294,17 +2427,11 @@ pub unsafe extern "C" fn praxis_map_new(
     ctx: *mut RuntimeContext,
     key_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    let key_descriptor = if key_descriptor.is_null() {
-        &scalars::INT
-    } else {
-        unsafe { &*key_descriptor }
-    };
-    // The value descriptor defaults to INT; the compiler will specialize this
-    // to pass the real value type as a second slot when Map construction
-    // carries both type args (a follow-up generalization). For now INT is
-    // sound: values are uniform GcRefs and format via the descriptor adopted
-    // from the first inserted value.
-    let value_descriptor = &scalars::INT;
+    // The `Map` row carries one type argument, so the value type never reaches
+    // this wrapper at all — it is unknown here by construction, and says so
+    // (REP-42). `praxis_map_insert` adopts the first inserted value's own
+    // descriptor, which is how a `Vec` learns its element type.
+    let value_descriptor: *const TypeDescriptor = std::ptr::null();
     unsafe {
         gc_alloc_with(
             ctx,
@@ -2337,11 +2464,24 @@ pub unsafe extern "C" fn praxis_map_insert(
     unsafe { maybe_collect(ctx) };
     let scope = unsafe { NativeScope::new(ctx) };
     let p = unsafe { map_payload_mut(scope.root(map)) };
-    // Adopt the value's descriptor if the default is still in place, so nested
-    // values format/trace correctly (mirrors the Vec push-descriptor adoption).
+    // Learn the value type from the first value inserted, the way a `Vec` learns
+    // its element type from the first `push` (REP-42). The old rule was "adopt
+    // if the label still says `INT`", which could not tell a `Map` that really
+    // holds `Int`s from one that had never been told anything — because `INT`
+    // was what "never been told" was spelled as.
+    //
+    // A later value of a different type un-learns it rather than faulting: the
+    // type checker makes a `Map` homogeneous, so this is unreachable for a
+    // well-typed program, and `praxis_map_insert` is a non-faulting row (its
+    // caller emits no fault check). Null is now representable and means "the
+    // value's own descriptor answers", so forgetting is the safe direction.
     let val_desc = value.descriptor();
-    if p.value_descriptor.id() == scalars::INT.id() && val_desc.id() != scalars::INT.id() {
-        p.value_descriptor = val_desc;
+    match p.value() {
+        None => p.value_descriptor = val_desc,
+        Some(known) if !std::ptr::eq(known, val_desc) => {
+            p.value_descriptor = std::ptr::null();
+        }
+        Some(_) => {}
     }
     p.entries.insert(DynamicKey::new(key), value);
     unsafe { unit_sentinel(ctx) }
@@ -2549,7 +2689,8 @@ pub unsafe extern "C" fn praxis_map_update_max(
 
 // --- Set[T] -----------------------------------------------------------------
 
-/// Allocate an empty `Set[T]`. `element_descriptor` selects hash/eq.
+/// Allocate an empty `Set[T]`. `element_descriptor` is the element type the
+/// construction site knew, or **null** when it knew none — kept null (REP-41).
 ///
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
@@ -2559,11 +2700,6 @@ pub unsafe extern "C" fn praxis_set_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    let element_descriptor = if element_descriptor.is_null() {
-        &scalars::INT
-    } else {
-        unsafe { &*element_descriptor }
-    };
     unsafe {
         gc_alloc_with(
             ctx,
@@ -2668,7 +2804,8 @@ pub unsafe extern "C" fn praxis_set_items(ctx: *mut RuntimeContext, set: GcRef) 
 
 // --- Counter[T] -------------------------------------------------------------
 
-/// Allocate an empty `Counter[T]`. `key_descriptor` selects hash/eq.
+/// Allocate an empty `Counter[T]`. `key_descriptor` is the key type the
+/// construction site knew, or **null** when it knew none — kept null (REP-41).
 ///
 /// # Safety
 /// `ctx` must be live and wired; `key_descriptor` must be a valid pointer to a
@@ -2678,11 +2815,6 @@ pub unsafe extern "C" fn praxis_counter_new(
     ctx: *mut RuntimeContext,
     key_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    let key_descriptor = if key_descriptor.is_null() {
-        &scalars::INT
-    } else {
-        unsafe { &*key_descriptor }
-    };
     unsafe {
         gc_alloc_with(
             ctx,
@@ -2734,8 +2866,18 @@ pub unsafe extern "C" fn praxis_counter_inc(
     match p.entries.get_mut(&dk) {
         Some(v) => {
             let cur = unsafe { int_payload(*v) };
+            // Checked, like every other integer computation in this file
+            // (§4.12): a raw `cur + 1` panics across `extern "C"` in debug — the
+            // non-unwinding panic §10.4 forbids — and wraps to `i64::MIN` in
+            // release, which is a silently wrong count. A `Counter`'s values are
+            // set to arbitrary `Int`s by `c[k] = n`, so this is reachable from
+            // source and not only from `i64::MAX` increments.
+            let Some(next) = cur.checked_add(1) else {
+                unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
+                return unsafe { unit_sentinel(ctx) };
+            };
             // SAFETY: ctx is wired; alloc a fresh Int for the incremented value.
-            *v = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, cur + 1) };
+            *v = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, next) };
         }
         None => {
             let one = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, 1_i64) };
@@ -2850,7 +2992,8 @@ unsafe fn min_heap_payload(r: GcRef) -> &'static MinHeapPayload {
     unsafe { &*r.payload::<MinHeapPayload>() }
 }
 
-/// Allocate an empty `MaxHeap[T]`.
+/// Allocate an empty `MaxHeap[T]`. A null `element_descriptor` — the codegen's
+/// "no static element type" — is kept null (REP-41).
 ///
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
@@ -2860,11 +3003,6 @@ pub unsafe extern "C" fn praxis_max_heap_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    let element_descriptor = if element_descriptor.is_null() {
-        &scalars::INT
-    } else {
-        unsafe { &*element_descriptor }
-    };
     unsafe {
         gc_alloc_with(
             ctx,
@@ -2976,7 +3114,8 @@ pub unsafe extern "C" fn praxis_max_heap_is_empty(
 
 // --- MinHeap (mirrors MaxHeap with Reverse wrapping) -----------------------
 
-/// Allocate an empty `MinHeap[T]`.
+/// Allocate an empty `MinHeap[T]`. A null `element_descriptor` — the codegen's
+/// "no static element type" — is kept null (REP-41).
 ///
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
@@ -2986,11 +3125,6 @@ pub unsafe extern "C" fn praxis_min_heap_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
-    let element_descriptor = if element_descriptor.is_null() {
-        &scalars::INT
-    } else {
-        unsafe { &*element_descriptor }
-    };
     unsafe {
         gc_alloc_with(
             ctx,
@@ -3765,14 +3899,16 @@ pub unsafe extern "C" fn praxis_grid_rotate_left(ctx: *mut RuntimeContext, grid:
     let p = unsafe { grid_payload(grid) };
     let height = grid_height(p.items.len(), p.width);
     // Rotate left (90° CCW): result is H×W (width=height, height=width).
-    // result[x, y] = original[y, height-1-x], for x in 0..height, y in 0..width.
+    // With x rightward and y downward, turning counter-clockwise carries the
+    // *rightmost* column to the top row, top-to-bottom:
+    // result[x, y] = original[width-1-y, x], for x in 0..height, y in 0..width.
     let new_width = height;
     let new_height = p.width;
     let mut cells = Vec::with_capacity(p.items.len());
     for y in 0..new_height {
         for x in 0..new_width {
-            let ox = y;
-            let oy = height - 1 - x;
+            let ox = p.width - 1 - y;
+            let oy = x;
             cells.push(p.items[oy * p.width + ox]);
         }
     }
@@ -3802,14 +3938,16 @@ pub unsafe extern "C" fn praxis_grid_rotate_right(ctx: *mut RuntimeContext, grid
     let p = unsafe { grid_payload(grid) };
     let height = grid_height(p.items.len(), p.width);
     // Rotate right (90° CW): result is H×W (width=height, height=width).
-    // result[x, y] = original[width-1-y, x], for x in 0..height, y in 0..width.
+    // With x rightward and y downward, turning clockwise carries the *leftmost*
+    // column to the top row, bottom-to-top:
+    // result[x, y] = original[y, height-1-x], for x in 0..height, y in 0..width.
     let new_width = height;
     let new_height = p.width;
     let mut cells = Vec::with_capacity(p.items.len());
     for y in 0..new_height {
         for x in 0..new_width {
-            let ox = p.width - 1 - y;
-            let oy = x;
+            let ox = y;
+            let oy = height - 1 - x;
             cells.push(p.items[oy * p.width + ox]);
         }
     }
@@ -4105,13 +4243,44 @@ pub unsafe extern "C" fn praxis_range_get(
 // registered in a global slab; its index is passed as a boxed Int.
 // ---------------------------------------------------------------------------
 
-/// Return the process-input source buffer (§7.10). The CLI sets this from stdin
-/// before executing the entry function; if unset, the immortal Unit is returned.
+/// Return the process-input source buffer (§7.10), reading it the **first**
+/// time a program asks.
+///
+/// A `read` lowers to this call and then to `praxis_run_parser`, so this is
+/// where §7.10's "the first `read` lazily reads standard input once" happens.
+/// The host installs a [`crate::input::InputReader`] rather than a buffer; it
+/// is called at most once — [`crate::input::take_input_reader`] removes it, so
+/// "once" is structural rather than a flag — and the result is installed as
+/// `input_source`, which every later `read` reuses.
+///
+/// The host reading its input *up front* is what REP-51 was: a program with no
+/// `read` in it still consumed standard input, so `praxis run` against an open
+/// pipe blocked forever. Nothing before a program's first `read` touches the
+/// host's input now.
+///
+/// A host that installs no reader — every JIT test, and the crash debugger's
+/// re-run path, which installs the buffer directly to keep re-runs identical
+/// (§9.7) — reaches the same `input_source` read this always was.
+///
+/// Empty input leaves `input_source` at the immortal Unit, which is the state
+/// "no input" has always had; `praxis_run_parser` guards it (§6.3).
 ///
 /// # Safety
 /// `ctx` must be live and wired.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_get_input(ctx: *mut RuntimeContext) -> GcRef {
+    if let Some(read) = crate::input::take_input_reader() {
+        let bytes = read();
+        if !bytes.is_empty() {
+            // SAFETY: `bytes` is a live, initialized slice for this call, and
+            // `ctx` is the caller's live context. The result is stored into
+            // `input_source` — a root (`RuntimeRoots`) — with no allocation in
+            // between, so the collection this allocation paces cannot reclaim
+            // it.
+            let text = unsafe { praxis_alloc_text(ctx, bytes.as_ptr(), bytes.len()) };
+            unsafe { (*ctx).input_source = text };
+        }
+    }
     unsafe { (*ctx).input_source }
 }
 
@@ -4296,11 +4465,19 @@ impl crate::graph::GraphOracle for ClosureOracle<'_, '_> {
         // `Bool` is an immortal singleton pair (RT-03), so the answer is which
         // singleton came back — but the payload is what the descriptor
         // describes, and reading it is what a non-`Bool` would corrupt.
-        if !std::ptr::eq(result.descriptor(), &scalars::BOOL) {
-            return Err(self.abort(crate::context::FaultKind::TypeMismatch));
+        //
+        // A `Bool`'s payload is **one byte**. Reading it as an `i64` — which is
+        // what this did — takes seven further bytes of the block's alignment
+        // padding, which the bump allocator never initialized, so the answer
+        // was whatever malloc had left there and could differ between runs.
+        // `read_scalar` checks the descriptor and takes the width from
+        // `BOOL_PAYLOAD`'s own type, so neither half is written here any more.
+        //
+        // SAFETY: `result` is a `GcRef` the oracle's own call just produced.
+        match unsafe { read_scalar(result, scalars::BOOL_PAYLOAD) } {
+            Some(b) => Ok(b != 0),
+            None => Err(self.abort(crate::context::FaultKind::TypeMismatch)),
         }
-        // SAFETY: the descriptor check proves the payload is a `Bool`'s `i64`.
-        Ok(unsafe { int_payload(result) } != 0)
     }
 
     fn retain(&mut self, state: GcRef) {
@@ -5820,6 +5997,200 @@ mod tests {
         unsafe { drop_ctx(ctx) };
     }
 
+    /// A goal predicate that is `false` at every state, as a closure entry
+    /// point. Rust-side `extern "C"` stands in for a JIT'd closure body: the
+    /// oracle only cares that the pointer has the closure calling convention.
+    ///
+    /// # Safety
+    /// Called only through [`ClosureOracle::call`], which upholds the ABI.
+    unsafe extern "C" fn always_false(
+        ctx: *mut RuntimeContext,
+        _closure: GcRef,
+        _state: GcRef,
+    ) -> GcRef {
+        // SAFETY: the oracle passes its own wired ctx.
+        unsafe { bool_ref(ctx, false) }
+    }
+
+    /// A neighbour function with no neighbours: the walk visits the start and
+    /// stops, so the only thing that can decide the answer is the goal test.
+    ///
+    /// # Safety
+    /// As [`always_false`].
+    unsafe extern "C" fn no_neighbours(
+        ctx: *mut RuntimeContext,
+        _closure: GcRef,
+        _state: GcRef,
+    ) -> GcRef {
+        // SAFETY: the oracle passes its own wired ctx.
+        unsafe { praxis_vec_new(ctx, &crate::scalars::INT as *const _) }
+    }
+
+    /// A `Bool` object laid out exactly the way [`Heap::alloc_raw`] lays one
+    /// out — a `GcHeader` followed by its payload at
+    /// `GcHeader::payload_offset_for(1)` — but in memory *this module* owns,
+    /// and with the seven bytes after the one-byte payload set to `0xFF`.
+    ///
+    /// The arena cannot be asked for this shape. A `Bool`'s block is
+    /// `payload_offset + 1` bytes, bumpalo rounds the next block's base down to
+    /// eight, and the seven bytes in between are slack that nothing ever
+    /// writes — fresh arena pages read back as zero, so the eight-byte read
+    /// REP-37 removed answered *correctly* in every measurement of the real
+    /// allocator. Owning the storage turns the padding from an accident into a
+    /// fixture, which is the only way the read can be measured rather than
+    /// sampled.
+    ///
+    /// The header carries a **freshly minted** `HeapId`, so the collector's
+    /// provenance check (`Heap::mark`) skips this object instead of colouring
+    /// it: the oracle roots every closure result, and a root the heap did not
+    /// allocate is not the heap's to touch.
+    #[repr(C)]
+    struct DirtyPaddedBool {
+        header: crate::gc::GcHeader,
+        /// Byte 0 is the `BoolPayload`; bytes 1..8 are the neighbours a
+        /// wrong-width or wrong-offset read would consume.
+        payload: [u8; 8],
+    }
+
+    /// A `false` whose seven following bytes are `0xFF`, leaked once per thread
+    /// so a closure entry point can answer it. See [`DirtyPaddedBool`].
+    fn dirty_padded_false() -> GcRef {
+        thread_local! {
+            static CELL: std::cell::Cell<*mut crate::gc::GcHeader> =
+                const { std::cell::Cell::new(std::ptr::null_mut()) };
+        }
+        CELL.with(|cell| {
+            if cell.get().is_null() {
+                let object = Box::leak(Box::new(DirtyPaddedBool {
+                    header: crate::gc::GcHeader::new(
+                        &scalars::BOOL,
+                        scalars::BOOL.size() as u32,
+                        crate::gc::GcHeader::payload_offset_for(scalars::BOOL.align()) as u16,
+                        crate::gc::HeapId::mint(),
+                    ),
+                    payload: [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+                }));
+                cell.set(&mut object.header as *mut crate::gc::GcHeader);
+            }
+            // SAFETY: the pointer heads a leaked, correctly-laid-out `Bool`
+            // object that lives for the rest of the process.
+            unsafe { GcRef::from_raw(cell.get()) }
+        })
+    }
+
+    /// As [`always_false`], but answering the [`dirty_padded_false`] fixture.
+    ///
+    /// # Safety
+    /// As [`always_false`].
+    unsafe extern "C" fn always_dirty_false(
+        _ctx: *mut RuntimeContext,
+        _closure: GcRef,
+        _state: GcRef,
+    ) -> GcRef {
+        dirty_padded_false()
+    }
+
+    /// **REP-37's gate.** `ClosureOracle::is_goal` read the closure's `Bool`
+    /// answer with `int_payload` — an eight-byte read — but a `Bool`'s payload
+    /// is **one** byte (`BoolPayload = u8`, and `BOOL` is built from it), so
+    /// the answer took seven further bytes from past the object.
+    ///
+    /// Every `bfs_distance` / `a_star` / `flood_fill` goal predicate goes
+    /// through that read, so this walk is the whole class: the goal answers
+    /// `false` at the only reachable state, and the answer must be `None`.
+    ///
+    /// The `false` it answers is [`dirty_padded_false`], whose payload byte is
+    /// `0x00` and whose next seven bytes are `0xFF`. That is what makes this a
+    /// gate rather than a walk: an eight-byte read answers
+    /// `0xFFFF_FFFF_FFFF_FF00`, which is "goal reached at the start state" and
+    /// therefore `Some(0)`; a read at *any* offset past byte zero answers
+    /// `0xFF`, likewise `Some(0)`. Only one byte at offset zero answers `None`,
+    /// so the test fails if either the width or the offset is wrong. Asking the
+    /// allocator for this shape does not work — see [`DirtyPaddedBool`] — which
+    /// is why the walk that stood here before passed with the fix removed.
+    ///
+    /// [`read_scalar`] is what makes both mistakes unspellable at the call
+    /// site, and `int_payload`'s width `debug_assert` is what stops the next
+    /// site from making them; `read_scalar_answers_none_for_a_foreign_descriptor`
+    /// pins the reader itself.
+    #[test]
+    fn a_graph_goal_predicate_reads_a_bool_at_a_bool_s_width() {
+        // The fixture is only a gate while its padding is dirty: state that
+        // here, so a later edit that zeroes it fails loudly rather than
+        // silently turning this back into the walk it replaced.
+        let fixture = dirty_padded_false();
+        assert!(std::ptr::eq(fixture.descriptor(), &scalars::BOOL));
+        assert_eq!(
+            unsafe { read_scalar(fixture, scalars::BOOL_PAYLOAD) },
+            Some(0u8),
+            "the fixture is `false` at a Bool's width"
+        );
+        assert_ne!(
+            unsafe { *fixture.payload::<i64>() },
+            0,
+            "…and non-zero at an Int's, which is what the wrong read consumed"
+        );
+
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let answer = unsafe {
+            let goal = praxis_alloc_closure(ctx, always_dirty_false as *const u8, 0);
+            let neighbours = praxis_alloc_closure(ctx, no_neighbours as *const u8, 0);
+            let start = praxis_alloc_int(ctx, 0);
+            praxis_bfs_distance(ctx, start, neighbours, goal)
+        };
+        assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+        assert_eq!(answer.descriptor().id(), crate::enums::ENUM.id());
+        assert_eq!(
+            enum_tag_of(answer),
+            crate::enums::OPTION_NONE_TAG as u32,
+            "the goal answered `false` at every state, so no distance was found"
+        );
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// The same walk against the immortal `false` every real program's closure
+    /// answers — a companion, not a gate: it passes with REP-37's fix removed,
+    /// because the arena leaves a `Bool`'s slack bytes zero. It rules out a
+    /// "fix" that only reads the fixture correctly.
+    #[test]
+    fn a_graph_goal_predicate_that_is_false_everywhere_finds_nothing() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let answer = unsafe {
+            let goal = praxis_alloc_closure(ctx, always_false as *const u8, 0);
+            let neighbours = praxis_alloc_closure(ctx, no_neighbours as *const u8, 0);
+            let start = praxis_alloc_int(ctx, 0);
+            praxis_bfs_distance(ctx, start, neighbours, goal)
+        };
+        assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+        assert_eq!(answer.descriptor().id(), crate::enums::ENUM.id());
+        assert_eq!(enum_tag_of(answer), crate::enums::OPTION_NONE_TAG as u32);
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// The reader itself, both directions. `read_scalar` is what makes the two
+    /// mistakes `is_goal` made unspellable, so its own contract is pinned here:
+    /// the right type reads at the right width, and a foreign type answers
+    /// `None` instead of reinterpreting the bytes.
+    #[test]
+    fn read_scalar_answers_none_for_a_foreign_descriptor() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        unsafe {
+            let t = bool_ref(ctx, true);
+            let f = bool_ref(ctx, false);
+            assert_eq!(read_scalar(t, crate::scalars::BOOL_PAYLOAD), Some(1u8));
+            assert_eq!(read_scalar(f, crate::scalars::BOOL_PAYLOAD), Some(0u8));
+            // An `Int` is not a `Bool`, and the answer is absence rather than
+            // the first byte of the `i64`.
+            let n = praxis_alloc_int(ctx, 1);
+            assert_eq!(read_scalar(n, crate::scalars::BOOL_PAYLOAD), None);
+            assert_eq!(read_scalar(n, crate::scalars::INT_PAYLOAD), Some(1i64));
+            drop_ctx(ctx);
+        }
+    }
+
     /// The variant tag of an enum value, read the way the runtime's own
     /// `enum_format` reads it.
     fn enum_tag_of(value: GcRef) -> u32 {
@@ -6093,5 +6464,466 @@ mod tests {
         let frame =
             unsafe { crate::shadow_frame::praxis_push_shadow_frame(std::ptr::null_mut(), 0) };
         assert!(frame.is_null());
+    }
+
+    // --- REP-41: a null element type stays unknown -------------------------
+
+    /// **REP-41.** A collection built with no static element type must not
+    /// claim to hold `Int`s, and what it holds must render as what it is.
+    ///
+    /// The codegen passes a **null** descriptor for `let c = Counter()` — its
+    /// contract above `collection_element_descriptor_for` says so, and says
+    /// every `praxis_*_new` wrapper reads it that way. Five did not: `Set`,
+    /// `Counter`, `Map`'s key and the two heaps each replaced the null with
+    /// `&INT`, which is not a default but a false claim, and unlike `Vec` none
+    /// of them ever corrected it. The label was then dispatched through — a
+    /// `Text` key hashed and printed as an `i64`, a `Float` element printed as
+    /// the integer its bits spell.
+    ///
+    /// Both halves are asserted because either alone passes a wrong fix: the
+    /// absent label is the representation, the rendering is the answer.
+    #[test]
+    fn a_collection_with_no_static_element_type_does_not_claim_int() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: `ctx` is wired; every argument below is a wrapper's own.
+        unsafe {
+            // Exactly what the codegen passes when the element type is still an
+            // inference variable.
+            let null = std::ptr::null::<TypeDescriptor>();
+            let counter = praxis_counter_new(ctx, null);
+            let set = praxis_set_new(ctx, null);
+            let map = praxis_map_new(ctx, null);
+            let min_heap = praxis_min_heap_new(ctx, null);
+            let max_heap = praxis_max_heap_new(ctx, null);
+
+            assert!(
+                counter_payload(counter).key().is_none(),
+                "a Counter with no static key type must not claim one"
+            );
+            assert!(set_payload(set).element().is_none());
+            assert!(map_payload(map).key().is_none());
+            assert!(min_heap_payload(min_heap).element().is_none());
+            assert!(max_heap_payload(max_heap).element().is_none());
+
+            // …and the values come back out as themselves. A `Text` key through
+            // a `Counter`, a `Float` through a `MinHeap`: neither is an `Int`,
+            // and both used to print as one.
+            let key = praxis_alloc_text(ctx, "ab".as_ptr(), 2);
+            praxis_counter_inc(ctx, counter, key);
+            let keys = praxis_counter_keys(ctx, counter);
+            let mut rendered = String::new();
+            keys.format(&mut rendered);
+            assert_eq!(rendered, "[ab]", "a Counter's keys are its keys");
+
+            let half = praxis_alloc_float(ctx, 1.5f64.to_bits() as i64);
+            praxis_min_heap_push(ctx, min_heap, half);
+            let mut rendered = String::new();
+            min_heap.format(&mut rendered);
+            assert_eq!(rendered, "[1.5]", "a MinHeap prints the elements it holds");
+
+            let member = praxis_alloc_text(ctx, "zz".as_ptr(), 2);
+            praxis_set_insert(ctx, set, member);
+            let items = praxis_set_items(ctx, set);
+            let mut rendered = String::new();
+            items.format(&mut rendered);
+            assert_eq!(rendered, "[zz]");
+        }
+        // SAFETY: the context was leaked by `wired_ctx` and is unused after this.
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **REP-42.** A `Map` does not claim its values are `Int`s.
+    ///
+    /// `praxis_map_new` takes one descriptor — the key's — because the `MapNew`
+    /// row carries one type argument, and it wrote `INT` into the value slot
+    /// unconditionally with a comment calling that "sound for now". It was not a
+    /// default but a claim, and it was the same word as "unknown", so the
+    /// adoption that followed could not tell a `Map` that really holds `Int`s
+    /// from one that had never been told anything. The progress doc records the
+    /// consequence that shaped REP-18: a `Map[Text, Text]`'s pair read its value
+    /// as an `i64`, which is why `keys()`/`values()` are built in MIR.
+    #[test]
+    fn a_map_does_not_claim_its_values_are_ints() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: `ctx` is wired; every argument below is a wrapper's own.
+        unsafe {
+            let empty = praxis_map_new(ctx, &crate::text::TEXT);
+            assert!(
+                map_payload(empty).value().is_none(),
+                "an empty Map has been told nothing about its values"
+            );
+            // …so the `Vec` its `values()` answers is not labelled `Int` either,
+            // which is what made an empty `Map[Text, Text]`'s values unequal to
+            // an empty `Vec[Text]` (`vec_equals` compares element labels).
+            let none_yet = praxis_map_values(ctx, empty);
+            assert!(vec_payload(none_yet).element().is_none());
+
+            // The first insert is what the map learns from.
+            let k = praxis_alloc_text(ctx, "k".as_ptr(), 1);
+            let v = praxis_alloc_text(ctx, "vv".as_ptr(), 2);
+            praxis_map_insert(ctx, empty, k, v);
+            assert!(
+                std::ptr::eq(map_payload(empty).value().unwrap(), &crate::text::TEXT),
+                "a Map learns its value type from the first value inserted"
+            );
+            let mut rendered = String::new();
+            praxis_map_values(ctx, empty).format(&mut rendered);
+            assert_eq!(rendered, "[vv]");
+
+            // A `Map` that really does hold `Int`s says so — the assertion the
+            // old spelling could not make, because `INT` was also its "unknown".
+            let ints = praxis_map_new(ctx, &crate::text::TEXT);
+            let ik = praxis_alloc_text(ctx, "n".as_ptr(), 1);
+            praxis_map_insert(ctx, ints, ik, praxis_alloc_int(ctx, 7));
+            assert!(std::ptr::eq(
+                map_payload(ints).value().unwrap(),
+                &scalars::INT
+            ));
+        }
+        // SAFETY: the context was leaked by `wired_ctx` and is unused after this.
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **REP-42's collateral, and its gate.** An unlearned label is not a
+    /// label, so it cannot make two empty collections unequal.
+    ///
+    /// REP-42 made `praxis_map_new` stop hardcoding `INT`, which is right — but
+    /// `same_element` was pointer identity, so a never-inserted `Map`'s
+    /// `values()` (no label) stopped comparing equal to an equally-typed empty
+    /// `Vec[Int]` (label `Int`). A reviewer measured the change against the
+    /// merge base: `true` before, `false` after.
+    ///
+    /// The old `true` was an accident of the hardcoded `INT` rather than a
+    /// rule — the same program over a `Map[Text, Text]` answered `false` on
+    /// both — so this is not "restore the old answer". It is ADR-066 decision
+    /// 5: a null slot means the *value's own* descriptor answers, and a
+    /// collection with no label has no values, so nothing is left to disagree.
+    /// Reinstating a guessed descriptor is the fix this rejects; it is the
+    /// defect REP-41 and REP-42 both were.
+    ///
+    /// RT-10 is untouched, and the last case says so: two collections that have
+    /// each been told their element type must still agree.
+    #[test]
+    fn an_unlearned_element_label_does_not_make_two_empty_collections_unequal() {
+        use crate::collections::same_element;
+        let int: *const crate::descriptor::TypeDescriptor = &scalars::INT;
+        let text: *const crate::descriptor::TypeDescriptor = &crate::text::TEXT;
+        let unlearned: *const crate::descriptor::TypeDescriptor = std::ptr::null();
+
+        assert!(same_element(unlearned, int), "no label agrees with `Int`");
+        assert!(same_element(int, unlearned), "and in the other order");
+        assert!(same_element(unlearned, unlearned));
+        assert!(same_element(int, int));
+        // RT-10's rule, which this must not weaken: two *learned* labels that
+        // differ are two different collections, empty or not.
+        assert!(!same_element(int, text));
+
+        // End to end, at the shape the reviewer measured: a `Map` never
+        // inserted into has no value label, and its `values()` is an empty
+        // `Vec` that is equal to an empty `Vec` however that one was labelled.
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: `ctx` is wired; every argument below is a wrapper's own.
+        unsafe {
+            let never_inserted = praxis_map_new(ctx, &crate::text::TEXT);
+            let unlabelled = praxis_map_values(ctx, never_inserted);
+            assert!(vec_payload(unlabelled).element().is_none());
+
+            let labelled_ints = praxis_vec_new(ctx, &scalars::INT as *const _);
+            assert!(
+                praxis_struct_eq(ctx, unlabelled, labelled_ints) != 0,
+                "an empty Map's values are an empty Vec[Int]"
+            );
+            assert!(
+                praxis_struct_eq(ctx, labelled_ints, unlabelled) != 0,
+                "and equality is symmetric"
+            );
+
+            // A non-empty collection is still not an empty one: the length
+            // check behind `same_element` is what answers, and it must.
+            praxis_vec_push(ctx, labelled_ints, praxis_alloc_int(ctx, 1));
+            assert!(praxis_struct_eq(ctx, unlabelled, labelled_ints) == 0);
+        }
+        // SAFETY: the context was leaked by `wired_ctx` and is unused after this.
+        unsafe { drop_ctx(ctx) };
+    }
+
+    // --- REP-45: the manifest's fault column is checked against the code ----
+
+    /// Every function defined in this file, as `(name, body)`.
+    ///
+    /// Line-based on purpose: a definition is a line whose first tokens are one
+    /// of Rust's `fn` spellings, and its body runs to the line where the brace
+    /// depth opened by that definition returns to zero. Anything cleverer would
+    /// be a Rust parser, and anything looser — matching `fn` anywhere — reads
+    /// the word out of doc comments and glues unrelated bodies together.
+    fn functions_in_this_file() -> Vec<(String, String)> {
+        functions_in(include_str!("abi.rs"))
+    }
+
+    /// The code of one line, with any `//` comment removed.
+    ///
+    /// The sweep reads what the **compiler** sees, not what a reader wrote
+    /// beside it. Before this, `body` was the raw line and the fixed point
+    /// matched `set_fault(` as a plain substring, so a comment inside a wrapper
+    /// naming the helper — "this used to call `set_fault(…)`" — classified that
+    /// wrapper as faulting and failed the assertion for a wrapper that cannot
+    /// fault. A sweep a comment can fool is a sweep that gets edited around
+    /// rather than satisfied, which is the failure mode the whole invariant
+    /// exists to prevent. Currently only latent: no `praxis_*` body names the
+    /// helper in prose today.
+    ///
+    /// A `//` inside a string or `char` literal is **not** a comment — `"//"`
+    /// and `'/'` both occur in this file — so the scan tracks which it is in.
+    /// It is not a Rust lexer: a raw string's hashes and a block comment are
+    /// not modelled, because neither appears in a function body here and a
+    /// half-lexer that claimed to be one would be worse than a stated
+    /// limitation. It errs toward keeping code, never toward dropping it.
+    fn code_only(line: &str) -> &str {
+        let bytes = line.as_bytes();
+        let (mut in_str, mut in_char, mut escaped) = (false, false, false);
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' && (in_str || in_char) {
+                escaped = true;
+            } else if in_str {
+                in_str = c != b'"';
+            } else if in_char {
+                in_char = c != b'\'';
+            } else if c == b'"' {
+                in_str = true;
+            } else if c == b'\'' {
+                // A lifetime (`'a`) is not a `char` literal; a `char` literal's
+                // closing quote is at most three bytes away (`'\\n'`, `'\\''`).
+                in_char = bytes[i + 1..].iter().take(4).any(|b| *b == b'\'');
+            } else if c == b'/' && bytes.get(i + 1) == Some(&b'/') {
+                return &line[..i];
+            }
+            i += 1;
+        }
+        line
+    }
+
+    /// Every function defined in `src`, as `(name, code)` — the code only, with
+    /// comments stripped by [`code_only`]. Braces are counted on the code too,
+    /// so a comment holding an unbalanced brace cannot end a body early or run
+    /// two bodies together.
+    fn functions_in(src: &str) -> Vec<(String, String)> {
+        const PREFIXES: [&str; 6] = [
+            "fn ",
+            "pub fn ",
+            "pub(crate) fn ",
+            "unsafe fn ",
+            "pub unsafe fn ",
+            "pub unsafe extern \"C\" fn ",
+        ];
+        let mut out: Vec<(String, String)> = Vec::new();
+        // (name, body so far, brace depth, whether the body has opened at all —
+        // a multi-line signature spends several lines at depth zero before its
+        // `{`, and closing there would give every such wrapper a one-line body).
+        let mut open: Option<(String, String, i32, bool)> = None;
+        for raw in src.lines() {
+            let line = code_only(raw);
+            let depth_change = |l: &str| -> i32 {
+                l.chars().filter(|c| *c == '{').count() as i32
+                    - l.chars().filter(|c| *c == '}').count() as i32
+            };
+            if let Some((name, body, depth, opened)) = open.as_mut() {
+                body.push_str(line);
+                body.push('\n');
+                *depth += depth_change(line);
+                *opened |= line.contains('{');
+                if *opened && *depth <= 0 {
+                    out.push((std::mem::take(name), std::mem::take(body)));
+                    open = None;
+                }
+                continue;
+            }
+            let trimmed = line.trim_start();
+            let Some(rest) = PREFIXES
+                .iter()
+                .find_map(|p| trimmed.strip_prefix(p).filter(|_| trimmed.starts_with(p)))
+            else {
+                continue;
+            };
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            let depth = depth_change(line);
+            let opened = line.contains('{');
+            // A one-line definition has already opened and closed its body.
+            if opened && depth <= 0 {
+                out.push((name, line.to_string()));
+            } else {
+                open = Some((name, format!("{line}\n"), depth, opened));
+            }
+        }
+        out
+    }
+
+    /// **REP-45.** A wrapper that can raise a fault says so in the manifest.
+    ///
+    /// `VecPush` and the two `DequePush*` rows were declared `Allocates` — which
+    /// makes `RuntimeSymbol::faults()` answer `false` — while all three call
+    /// `adopt_or_reject`, which ends in `set_fault(ctx, TYPE_MISMATCH)`. The
+    /// identical wrapper `praxis_grid_set` makes the same call and *is* declared
+    /// `Faults`, so the manifest was internally inconsistent about one
+    /// operation. The consequence is not cosmetic: on a rejection the element is
+    /// silently dropped, the wrapper answers the Unit sentinel, and the fault is
+    /// observed by some later unrelated check — at the wrong source location,
+    /// after the program has computed and possibly printed an answer from a
+    /// collection that quietly lost a value.
+    ///
+    /// A hand-corrected row drifts again, so this is the invariant instead, in
+    /// the shape S18 used for the catalog: the file is read at compile time,
+    /// each `praxis_*` wrapper's body is walked, and any body that can reach
+    /// `set_fault` — directly or through a helper defined here, transitively —
+    /// must belong to a symbol whose row says `faults()`.
+    ///
+    /// One direction only. A row may declare a fault the reader cannot see: the
+    /// arithmetic wrappers are generated by `checked_int_binop!` and have no
+    /// textual definition at all, and a future wrapper may fault through a
+    /// helper in another module. Those are false negatives — this test is weaker
+    /// than the truth, never stricter — and the direction it does check is the
+    /// one that produces wrong answers.
+    /// The fixed point of "can reach `set_fault`" over `defs`: a function
+    /// faults if it calls `set_fault`, or calls something that does.
+    fn faulting_functions(defs: &[(String, String)]) -> std::collections::HashSet<String> {
+        let mut faulting: std::collections::HashSet<String> =
+            ["set_fault".to_string()].into_iter().collect();
+        loop {
+            let mut grew = false;
+            for (name, body) in defs {
+                if faulting.contains(name) {
+                    continue;
+                }
+                if faulting.iter().any(|f| body.contains(&format!("{f}("))) {
+                    faulting.insert(name.clone());
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        faulting
+    }
+
+    #[test]
+    fn a_wrapper_that_can_raise_a_fault_declares_that_it_faults() {
+        let defs = functions_in_this_file();
+        let faulting = faulting_functions(&defs);
+
+        let mut checked = 0usize;
+        for (name, _) in &defs {
+            let Some(sym) = praxis_stdlib::abi::RuntimeSymbol::from_name(name) else {
+                continue;
+            };
+            if !faulting.contains(name) {
+                continue;
+            }
+            assert!(
+                sym.faults(),
+                "{name} can reach `set_fault`, but its manifest row says it \
+                 cannot fault — so no `CheckFault` follows the call and the \
+                 fault is observed somewhere else entirely"
+            );
+            checked += 1;
+        }
+        // If the scan stopped finding wrappers, the assertion above would be
+        // vacuous and this test would pass while saying nothing.
+        assert!(
+            checked >= 20,
+            "expected the fault-raising wrappers to be found; saw {checked}"
+        );
+        // And the three rows this test was written for must be among the
+        // wrappers it can see, or it would have been green on the defect.
+        for name in [
+            "praxis_vec_push",
+            "praxis_deque_push_front",
+            "praxis_deque_push_back",
+        ] {
+            assert!(
+                faulting.contains(name),
+                "{name} reaches `set_fault` through `adopt_or_reject`; a scan \
+                 that cannot see that cannot hold the invariant"
+            );
+        }
+    }
+    /// **The sweep above reads code, not prose.** Its classification is a
+    /// substring match, so before [`code_only`] a *comment* inside a wrapper
+    /// naming the helper — the most natural thing to write while removing a
+    /// fault — classified that wrapper as faulting and failed the invariant for
+    /// a wrapper that cannot fault. A sweep a comment can fool is a sweep that
+    /// gets edited around rather than satisfied.
+    ///
+    /// Synthetic source, because the real file must not contain the shape: the
+    /// point is that it may, safely.
+    #[test]
+    fn the_manifest_sweep_reads_code_and_not_comments() {
+        let src = r#"
+pub unsafe extern "C" fn praxis_pretend_pure(ctx: *mut RuntimeContext) -> GcRef {
+    // It used to call set_fault(ctx, RaisedFault::TYPE_MISMATCH) here, and a
+    // later edit removed the only path that could. Prose, not code. }
+    let sep = "//";
+    let slash = '/';
+    let _ = (sep, slash);
+    unit_sentinel(ctx)
+}
+
+pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> GcRef {
+    set_fault(ctx, RaisedFault::TYPE_MISMATCH);
+    unit_sentinel(ctx)
+}
+"#;
+        let defs = functions_in(src);
+        let names: Vec<&str> = defs.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["praxis_pretend_pure", "praxis_pretend_faulting"]);
+        // The unbalanced `}` in that comment must not close the body early:
+        // braces are counted on the code too, so the whole function is read.
+        assert!(
+            defs[0].1.contains("unit_sentinel(ctx)"),
+            "a brace inside a comment ended the body early: {:?}",
+            defs[0].1
+        );
+
+        let faulting = faulting_functions(&defs);
+        assert!(
+            !faulting.contains("praxis_pretend_pure"),
+            "a comment naming `set_fault` is not a call to it"
+        );
+        assert!(
+            faulting.contains("praxis_pretend_faulting"),
+            "and a real call still is — stripping comments must not blind the sweep"
+        );
+    }
+
+    /// [`code_only`]'s own contract, both directions.
+    #[test]
+    fn code_only_keeps_a_slash_inside_a_literal() {
+        assert_eq!(code_only("let x = 1; // two"), "let x = 1; ");
+        assert_eq!(code_only(r#"let s = "a//b";"#), r#"let s = "a//b";"#);
+        assert_eq!(code_only(r"let c = '/'; // gone"), r"let c = '/'; ");
+        assert_eq!(
+            code_only(r#"let e = "\"//"; // gone"#),
+            r#"let e = "\"//"; "#
+        );
+        assert_eq!(code_only("    /// a doc comment"), "    ");
+        assert_eq!(code_only("no comment here"), "no comment here");
+        // A lifetime is not a `char` literal, so the comment after it is still
+        // a comment.
+        assert_eq!(
+            code_only("fn f<'a>(x: &'a str) {} // gone"),
+            "fn f<'a>(x: &'a str) {} "
+        );
     }
 }

@@ -279,7 +279,10 @@ fn zip_after_filter_uses_dense_filtered_positions() {
 #[test]
 fn position_after_filter_reports_the_filtered_sequence_index() {
     let (runtime, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.filter(|x| x % 2 == 0).position(|x| x == 4)\n}\n",
+        // The `match` is REP-39: `position` answers `Option[Int]` now, so the
+        // index this test is about arrives inside a `Some`. The measurement is
+        // unchanged.
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  match v.filter(|x| x % 2 == 0).position(|x| x == 4) { Some(i) => i, None => -1 }\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(
@@ -310,7 +313,8 @@ fn take_after_flat_map_counts_the_global_flattened_stream() {
 #[test]
 fn position_after_flat_map_uses_the_global_flattened_index() {
     let (runtime, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let inner = Vec()\n    inner.push(x)\n    inner\n  }).position(|x| x == 2)\n}\n",
+        // As above: the index is inside a `Some` (REP-39).
+        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  match v.flat_map(|x| {\n    let inner = Vec()\n    inner.push(x)\n    inner\n  }).position(|x| x == 2) { Some(i) => i, None => -1 }\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 1);

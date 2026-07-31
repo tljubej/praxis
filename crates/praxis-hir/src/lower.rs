@@ -1698,19 +1698,19 @@ impl<'a> Lowerer<'a> {
                     span,
                 }
             }
-            SyntaxKind::BacktickTemplate => {
-                let raw = tok.text();
-                // Backtick templates are M6; treat the inner text as a Text lit.
-                let inner = raw
-                    .trim_start_matches('`')
-                    .trim_end_matches('`')
-                    .to_string();
-                TypedExpr::Lit {
-                    value: Lit::Text(inner),
-                    ty,
-                    span,
-                }
-            }
+            // A template in value position is `Y023` (REP-47), reported in
+            // inference, so a well-formed program never reaches this arm — and
+            // an ill-formed one is not lowered at all. It answers `Unit` rather
+            // than the old `Lit::Text` of the raw interior, which is what made
+            // `` `n = {int}` `` *print itself*: a Text literal is a plausible
+            // value, and a plausible value is what turned a mistake into an
+            // answer. Lowering after a reported error is a compiler bug, and
+            // this is the value that is hardest to mistake for a program's.
+            SyntaxKind::BacktickTemplate => TypedExpr::Lit {
+                value: Lit::Unit,
+                ty,
+                span,
+            },
             SyntaxKind::KW_TRUE => TypedExpr::Lit {
                 value: Lit::Bool(true),
                 ty,

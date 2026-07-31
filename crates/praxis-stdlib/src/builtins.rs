@@ -166,6 +166,9 @@ pub fn builtin_catalog() -> MethodCatalog {
         // The explicit Int→Float widening method (§4.12). The first Int-receiver
         // method; establishes the pattern for scalar-receiver methods.
         .entry(int_to_float())
+        .entry(int_wrapping_add())
+        .entry(int_saturating_add())
+        .entry(int_checked_add())
         // Subscripts (REP-16, §4.7/§6.2/§6.4). Six collections read; the three
         // that have a store at all also store. See the block comment above
         // `vec_index` for why these are catalog rows.
@@ -681,6 +684,58 @@ fn int_to_float() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntToFloat),
         doc: "Widen to Float (explicit Int→Float conversion, §4.12).",
+        stability: Stability::Stable,
+    }
+}
+
+// §4.12's three explicit overflow alternatives (REP-46). The design document
+// writes exactly these three spellings, and until now none of them existed:
+// §4.12 said "integer arithmetic is checked by default … explicit alternatives"
+// and then named three methods a program could not call, so the section
+// described a language with no way to opt out of a fault.
+//
+// **`_sub` and `_mul` siblings are deliberately absent.** §4.12 names only the
+// `_add` trio, so adding six more rows would be inventing surface rather than
+// implementing it, and the shape of the family — three rows or nine, and
+// whether `wrapping_neg`/`abs` join it — is a language decision. It is recorded
+// as REP-46's open half rather than guessed at here, because a half-invented
+// numeric tower is harder to remove than an honest gap.
+
+fn int_wrapping_add() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Int),
+        name: "wrapping_add",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntWrappingAdd),
+        doc: "Add with two's-complement wraparound instead of a fault (§4.12).",
+        stability: Stability::Stable,
+    }
+}
+
+fn int_saturating_add() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Int),
+        name: "saturating_add",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntSaturatingAdd),
+        doc: "Add, clamping to Int's ends instead of faulting (§4.12).",
+        stability: Stability::Stable,
+    }
+}
+
+fn int_checked_add() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Int),
+        name: "checked_add",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int))),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntCheckedAdd),
+        doc: "Add, answering None where the checked `+` would fault (§4.12).",
         stability: Stability::Stable,
     }
 }
@@ -1576,6 +1631,22 @@ fn t_to_bool() -> TypePattern {
     }
 }
 
+/// `(T) -> Option[U]` — the shape of `filter_map`'s closure argument (REP-38).
+///
+/// It was `(T) -> U`, which is `map`'s shape and is why `filter_map` lowered as
+/// `map`: with an unconstrained `U` there is nothing at runtime that says "this
+/// element mapped to nothing", so no filtering was possible and the row's own
+/// doc admitted it ("modeled as map-keep"). §6.3 lists `filter_map` with no
+/// deferral note, and the row was `Stability::Stable`. S18's `Option` (ADR-076)
+/// is what makes the distinction representable: absence is a variant, so the
+/// drop test is a tag compare.
+fn t_to_option_u() -> TypePattern {
+    TypePattern::Function {
+        params: vec![TypePattern::var("T")],
+        result: Box::new(TypePattern::Option(Box::new(TypePattern::var("U")))),
+    }
+}
+
 /// `(Acc, T) -> Acc` — the shape of `fold`'s combining closure.
 fn acc_t_to_acc() -> TypePattern {
     TypePattern::Function {
@@ -2000,11 +2071,11 @@ fn seq_filter_map_on_vec() -> MethodEntry {
     MethodEntry {
         receiver: vec_of_t(),
         name: "filter_map",
-        params: vec![t_to_u()],
+        params: vec![t_to_option_u()],
         result: vec_of_u(),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_filter_map"),
-        doc: "Map and drop Unit results (modeled as map-keep for non-Unit results).",
+        doc: "Map each element to an Option and keep the Some payloads.",
         stability: Stability::Stable,
     }
 }
@@ -2013,11 +2084,11 @@ fn seq_filter_map_on_seq() -> MethodEntry {
     MethodEntry {
         receiver: seq_of_t(),
         name: "filter_map",
-        params: vec![t_to_u()],
+        params: vec![t_to_option_u()],
         result: vec_of_u(),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_filter_map"),
-        doc: "Map and drop Unit results (modeled as map-keep for non-Unit results).",
+        doc: "Map each element to an Option and keep the Some payloads.",
         stability: Stability::Stable,
     }
 }
@@ -2241,10 +2312,10 @@ fn seq_find_on_vec() -> MethodEntry {
         receiver: vec_of_t(),
         name: "find",
         params: vec![t_to_bool()],
-        result: TypePattern::Scalar(ScalarType::Int),
+        result: TypePattern::Option(Box::new(TypePattern::var("T"))),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_find"),
-        doc: "Index of the first matching element, or -1 on miss.",
+        doc: "The first matching element, or None.",
         stability: Stability::Stable,
     }
 }
@@ -2254,10 +2325,10 @@ fn seq_find_on_seq() -> MethodEntry {
         receiver: seq_of_t(),
         name: "find",
         params: vec![t_to_bool()],
-        result: TypePattern::Scalar(ScalarType::Int),
+        result: TypePattern::Option(Box::new(TypePattern::var("T"))),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_find"),
-        doc: "Index of the first matching element, or -1 on miss.",
+        doc: "The first matching element, or None.",
         stability: Stability::Stable,
     }
 }
@@ -2267,10 +2338,10 @@ fn seq_position_on_vec() -> MethodEntry {
         receiver: vec_of_t(),
         name: "position",
         params: vec![t_to_bool()],
-        result: TypePattern::Scalar(ScalarType::Int),
+        result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int))),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_position"),
-        doc: "Index of the first matching element, or -1 on miss (alias of find).",
+        doc: "The index of the first matching element, or None.",
         stability: Stability::Stable,
     }
 }
@@ -2280,10 +2351,10 @@ fn seq_position_on_seq() -> MethodEntry {
         receiver: seq_of_t(),
         name: "position",
         params: vec![t_to_bool()],
-        result: TypePattern::Scalar(ScalarType::Int),
+        result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int))),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_position"),
-        doc: "Index of the first matching element, or -1 on miss (alias of find).",
+        doc: "The index of the first matching element, or None.",
         stability: Stability::Stable,
     }
 }

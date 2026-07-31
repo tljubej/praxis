@@ -87,6 +87,144 @@ fn run_pass_constant() {
     assert_passes("constant.px", "42");
 }
 
+// ---- Lazy standard input (§7.10, REP-51) ----
+
+/// Run a fixture with stdin bound to a pipe this test **keeps open**, writing
+/// `stdin` into it but never sending EOF until the deadline. Returns the exit
+/// code and stdout, or `None` if the child was still running after `deadline`.
+///
+/// A never-closed pipe is the shape a terminal and a CI harness both have, and
+/// it is the only shape that can tell an eager read from a lazy one: against
+/// `/dev/null` — which `Command::output` uses by default, and which is why no
+/// existing test here noticed — an eager read returns immediately.
+///
+/// The deadline is what keeps a regression a *failure*: without it, restoring
+/// the eager read would wedge this test process rather than fail it.
+fn run_with_open_stdin(
+    name: &str,
+    stdin: &str,
+    deadline: std::time::Duration,
+) -> Option<(i32, String)> {
+    use std::io::Write;
+    let mut child = Command::new(bin_path())
+        .arg("run")
+        .arg(fixture(name))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn praxis");
+    // Written, then *held*: the pipe stays open, so a read to EOF blocks.
+    let mut pipe = child.stdin.take().expect("piped stdin");
+    if !stdin.is_empty() {
+        pipe.write_all(stdin.as_bytes()).expect("write to child");
+        pipe.flush().expect("flush to child");
+    }
+
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(status) => break Some(status),
+            None if start.elapsed() >= deadline => break None,
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    };
+    match status {
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+        Some(status) => {
+            drop(pipe);
+            let out = child.wait_with_output().expect("wait_with_output");
+            Some((
+                status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+            ))
+        }
+    }
+}
+
+/// **REP-51's gate.** A program with no `read` never touches standard input.
+///
+/// §7.10: "The first `read` lazily reads standard input once into an immutable
+/// GC-managed source buffer." The host read it to EOF *before* calling the
+/// entry function instead, so a `read`-free program consumed stdin anyway — and
+/// against a pipe nobody closes, which is what a terminal and a CI harness both
+/// are, `praxis run` blocked forever waiting for an EOF that was not coming.
+/// Every `praxis run` of a `read`-free program from a terminal hung.
+///
+/// The open pipe is the whole test. Every other test in this file goes through
+/// `Command::output`, which binds stdin to `/dev/null`, where an eager read
+/// returns instantly — which is exactly why the defect survived a suite this
+/// size. Without the fix this call returns `None` at the deadline.
+#[test]
+fn a_program_that_never_reads_does_not_wait_for_standard_input() {
+    let deadline = std::time::Duration::from_secs(10);
+    let outcome = run_with_open_stdin("constant.px", "", deadline);
+    let (code, stdout) = outcome.expect(
+        "`praxis run` blocked on standard input for a program with no `read` \
+         (§7.10: the *first* `read` reads it)",
+    );
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert_eq!(stdout.trim(), "42");
+}
+
+/// The other half, and it is a **mutation companion, not a gate**: it passes on
+/// `main`, where the read is eager. Laziness must not become "never" — the
+/// cheapest way to stop the hang is to stop reading standard input at all, and
+/// that would pass the gate above.
+///
+/// So: the *same* open pipe, a program that does `read`, and the child must
+/// still be running at the deadline. A `read` reads to EOF (§7.10 — the buffer
+/// is the whole input, not a stream), and this test deliberately withholds the
+/// EOF, so "still waiting" is the correct behaviour and "exited" would mean the
+/// input was never read.
+#[test]
+fn a_program_that_reads_still_waits_for_its_input() {
+    let outcome = run_with_open_stdin(
+        "reads_lines_of_int.px",
+        "1\n2\n3\n",
+        std::time::Duration::from_secs(2),
+    );
+    assert!(
+        outcome.is_none(),
+        "a `read` reads to EOF; this pipe has sent none, so the program \
+         cannot have finished — laziness must not mean the input is skipped, \
+         got {outcome:?}"
+    );
+}
+
+/// Run a fixture with `stdin` piped and closed, and assert stdout.
+fn assert_passes_with_stdin(name: &str, stdin: &str, expected: &str) {
+    use std::io::Write;
+    let mut child = Command::new(bin_path())
+        .arg("run")
+        .arg(fixture(name))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn praxis");
+    {
+        let mut pipe = child.stdin.take().expect("piped stdin");
+        pipe.write_all(stdin.as_bytes()).expect("write to child");
+    }
+    let out = child.wait_with_output().expect("wait_with_output");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert_eq!(stdout.trim(), expected);
+}
+
+/// Reading twice reuses the buffer rather than consuming a stream (§7.10), and
+/// the lazy read is what installs it.
+#[test]
+fn a_second_read_sees_the_same_buffer() {
+    assert_passes_with_stdin("reads_lines_of_int.px", "1\n2\n3\n", "3\n3");
+}
+
 #[test]
 fn run_pass_arithmetic() {
     // 1 + 2 * 3 = 7 (precedence respected).
@@ -108,14 +246,45 @@ fn run_pass_float_arith() {
 
 #[test]
 fn run_pass_float_methods() {
-    // sqrt(16) + 5.to_float() = 4 + 5 = 9.
-    assert_passes("float_methods.px", "9");
+    // sqrt(16.0) + 5.to_float() = 4.0 + 5.0 = 9.0.
+    //
+    // **This assertion used to read `"9"`** (REP-44, §8.2). It was not wrong
+    // about the arithmetic and it was not wrong about the type — it was wrong
+    // that a `Float` may render as an `Int`. `9` is not a `Float` literal in
+    // this language (§4.12: `42` is strictly an `Int`, and the two never mix),
+    // so the text it asserted did not read back as the value it came from, and
+    // the same characters are what a `Vec[Int]` of `[9]` would print. ADR-083
+    // decided the rendering; the expected text moves with it.
+    assert_passes("float_methods.px", "9.0");
 }
 
 #[test]
 fn run_pass_float_div_by_zero() {
     // 1.0 / 0.0 = inf (IEEE-754); Float division never faults (§4.12).
     assert_passes("float_div_by_zero.px", "inf");
+}
+
+/// **REP-50's gate.** The `-0.0` literal, and the round trip ADR-083 states.
+///
+/// A Float negation was lowered as `0.0 - x`, and `0.0 - 0.0` is `+0.0`, so
+/// `-0.0` evaluated to `+0.0`: `out(-0.0)` printed `0.0`, and the text a Float
+/// rendered to did not read back as that Float — which is the one rule ADR-083
+/// exists to state. ADR-045 had already decided the two zeros are distinct
+/// values (§16.3 orders a container by the rendered form, and the two forms
+/// differ), so the sign was a value the language admits and the evaluator lost.
+///
+/// The observation is `1.0 / x` and **not** `x == 0.0`: IEEE-754 says
+/// `-0.0 == 0.0`, so equality is blind to precisely the bit this is about, and
+/// a gate written with `==` would pass before the fix. Lines 1–2 (the computed
+/// negative zero) were already right and are the companion; lines 3–6 are the
+/// literal and the same negation through a binding, and both answered `0.0` /
+/// `inf` before the fix.
+#[test]
+fn run_pass_float_negative_zero() {
+    assert_passes(
+        "float_negative_zero.px",
+        "-0.0\n-inf\n-0.0\n-inf\n-0.0\n-inf\ninf\ninf\n-2.5\n-2.5",
+    );
 }
 
 #[test]
