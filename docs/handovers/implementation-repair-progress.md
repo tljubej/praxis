@@ -41,6 +41,7 @@ Update this file at the end of every stage.
 | REP-24 — a declaration's members take a line break (no stage) | **done** | `33b386f` |
 | REP-21 — `min=`/`max=` map updates (no stage; ADR-070) | **done** | `8833cb7` |
 | REP-25 — a `for` binding is a pattern (no stage) | **done** | `0066a6f` |
+| REP-35 — a caret column counts characters, not bytes (no stage) | **done** | S19 round 3 |
 
 Also closed out of order: **DBG-01** (`3836b74`), a P0 the plan schedules in
 S10, and **MONO-03** (S15) — F12's `TypeKey` *is* its fix, so it closed with
