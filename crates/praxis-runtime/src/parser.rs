@@ -1689,6 +1689,15 @@ fn walk_grid(
 /// whitespace" at the end of the line, for the most ordinary template shape
 /// there is.
 ///
+/// **A literal's trailing run is one of those parts** (REP-20). The scanner
+/// emits the run at a literal's *trailing* end as an empty literal carrying
+/// `SpaceRun` — a literal has one policy slot and it sits in front of the text —
+/// so `` `Card {id:int}: {body:rest}` `` bounds `id` by the two-part run
+/// `[":" with no policy, "" with `SpaceRun`]`, and `body` starts after the
+/// space rather than on it. Taking the *whole* run is what makes that work:
+/// bounding by the `":"` alone would stop `id` in the right place and then hand
+/// `body` the space the template wrote.
+///
 /// `None` means the run constrains nothing — it is empty (the next part is a
 /// capture), or every member matches the empty string (`\\s*` and a literal
 /// with no run in front of it: `WsPolicy::ZeroOrMore`, `WsPolicy::None`, with

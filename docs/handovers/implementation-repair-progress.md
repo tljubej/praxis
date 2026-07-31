@@ -11,9 +11,9 @@ Update this file at the end of every stage.
 
 **Every stage the plan schedules is closed** — S1 … S21 and S23 … S26, with S22
 struck as "no action" — and **138 of the audit's 139 findings** are addressed and
-marked so in the plan's §4. The suite is **1632 passed, 0 failed, 0 ignored**:
-the ignored suite the audit left behind is at **zero for the first time**, and
-`just ci` is green.
+marked so in the plan's §4. The suite is **1636 passed, 0 failed, 0 ignored**
+(measured at `6d5c9bc`): the ignored suite the audit left behind is at **zero
+for the first time**, and `just ci` is green.
 
 The finding that is not addressed is **MIR-10**, the one §4 row reading
 `PARTIAL — part owed`: its verifier landed and the *rule* it is about — "a
@@ -140,14 +140,15 @@ comma-separated and the design doc writes them on separate lines. **S20 closed
 last** — S18, S19 and S21 closed alongside it in the same session. The sentence
 that used to end "and so is the register" was true of the register *as it stood
 that day*, and of no day since: it has reopened at every sweep and every review,
-and it runs to REP-59 now.
+and it runs to REP-60 now.
 
 Baseline at `136ce4b` was **928 passed, 0 failed, 149 ignored**. The current
 numbers are the ones at the top of this section and are **not restated here** —
 one file, one statement of them, which is what the README's parenthetical
 promises. The line before the S20 merge read 1526/19 after the REP-36 … REP-49
 block, 1478/24 after S21 alone, and 1458/38 on a tree that counts 1457: read the
-deltas rather than the absolutes. `just ci` is green. **Nothing in `crates/` is `#[ignore]`d any
+deltas rather than the absolutes. `just ci` is green. **Nothing in `crates/` is
+`#[ignore]`d any
 more**: the last nineteen belonged to S20 and S20 un-ignored them.
 
 ### The corpus triage at close-out
@@ -3861,6 +3862,11 @@ a menu and not a queue.
   `frequencies`, `zip`, `map`-on-a-pipeline and `sum` (a clean `praxis check`
   then eight `Y110`s at run), and `wrapping_sub`/`saturating_mul`/`checked_mul`
   beside the three `_add` forms §4.12 got. Neither is a repair.
+- **REP-60's open half (P2)** — empty *stdin* still faults with a diagnostic
+  carrying no offset, no `expected` and no `actual`, because `praxis_get_input`
+  installs no buffer for it. The `--input` half is fixed; this one is a runtime
+  contract with an ABI-boundary guard behind it, and taking it is the pass that
+  decides whether "no input at all" and "empty input" are one state or two.
 
 **The two open decisions, both belonging to closed stages:**
 
