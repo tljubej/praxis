@@ -505,7 +505,14 @@ touch both.
 
 `praxis check` **and** `praxis run` over every `.px` under `tests/` and every
 fixture under `crates/praxis-cli/tests/fixtures`, each with its `.in` where one
-exists, each compared against its `.out` where one exists:
+exists, each compared against its `.out` where one exists.
+
+`tests/` holds 26 programs and 24 `.in` files. The two without one are
+`tests/aoc-corpus/day07_closure_pipeline.px` and
+`tests/aoc-corpus/day10_bfs_shortest_distance.px`, and that is correct rather
+than two programs skipped: neither contains the word `read`, so neither consumes
+input. Both were run with stdin closed, both exited 0, and both matched their
+`.out`. Say it here so a later re-run does not read 24-against-26 as a gap:
 
 | Where | Programs | `check` rc=0 | `run` rc=0 | `.out` compared | mismatches |
 |---|---|---|---|---|---|
