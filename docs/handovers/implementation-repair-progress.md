@@ -456,6 +456,33 @@ already correct. They are worth having and they are not gates.
 | `every_atomic_the_design_requires_has_a_parser_and_a_type` | `parser.rs` | its diff is confined to the helper call; every assertion is unchanged exhaustiveness over `AtomicKind::ALL` |
 | `a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names` | `jit.rs` | its input was **adapted** to stay legal under D11, not amended into a gate. Its subject is subscript argument order. D11 is gated by `a_grid_cell_is_whatever_its_cell_parser_reads` and `a_grid_of_char_is_positional_so_a_space_is_a_cell`; the comment says so now |
 
+##### The corpus triage, recounted
+
+The round-two report said "25 programs under `tests/` (17 aoc-corpus, 8
+input-parsers)". The tree held 24 (18 and 6), and nothing could tell the two
+numbers apart because `corpus.rs`'s floor was `>= 13`. The floor is the real
+count now, so the doc and the gate state one fact and adding a program has to
+touch both.
+
+`praxis check` **and** `praxis run` over every `.px` under `tests/` and every
+fixture under `crates/praxis-cli/tests/fixtures`, each with its `.in` where one
+exists, each compared against its `.out` where one exists:
+
+| Where | Programs | `check` rc=0 | `run` rc=0 | `.out` compared | mismatches |
+|---|---|---|---|---|---|
+| `tests/aoc-corpus` | 18 | 18 | 18 | 18 | 0 |
+| `tests/input-parsers` | 8 | 8 | 8 | 8 | 0 |
+| `crates/praxis-cli/tests/fixtures` | 28 | 24 | 18 | 0 | — |
+| **total** | **54** | **50** | **44** | **26** | **0** |
+
+The four `check` non-zeros are the four fixtures that exist to be rejected
+(`bad_byte`, `parse_error`, `type_error`, `unterminated_template`); the six
+further `run` non-zeros are the fault fixtures (`debug_backtrace`,
+`debug_temps`, `div_by_zero`, `float_to_int_nan`, `overflow`, and
+`no_statements_and_no_main`). None of the CLI fixtures carries a `.out` — their
+expectations live in `crates/praxis-cli/tests/run.rs`, which is why the `.out`
+column is 26 and not 54.
+
 One test was **amended**, with the inversion recorded in place (plan §8.2):
 `chars_that_cannot_read_the_whole_region_is_a_parse_failure` asserted that
 `chars(digit, skip: none)` must fault on `"12\n"`, on the reading that
