@@ -271,6 +271,11 @@ mod tests {
         assert_eq!(BytePos(3).saturating_sub(BytePos(10)), 0); // clamped
     }
 
+    // Only in debug: the assertion this test is about is compiled out when
+    // `debug_assertions` is off, so under `cargo test --release` there is
+    // nothing to panic and `should_panic` fails on a *correct* build. The name
+    // already said `_in_debug`; this makes the build agree with it.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "inverted range")]
     fn inverted_span_is_rejected_in_debug() {

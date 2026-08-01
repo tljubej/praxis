@@ -570,6 +570,10 @@ mod tests {
         assert_eq!(innermost.str(&i), Some("wor"));
     }
 
+    // Only in debug: `subregion`'s containment check is a `debug_assert!`, so a
+    // release build clamps instead of panicking (that is the documented
+    // behaviour, not a gap) and `should_panic` would fail on a correct build.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "a subregion can only narrow")]
     fn a_subregion_that_would_widen_is_a_bug_and_says_so() {

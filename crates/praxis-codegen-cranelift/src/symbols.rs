@@ -26,9 +26,55 @@ pub fn resolve(name: &str) -> Option<*const u8> {
 mod tests {
     use super::*;
 
-    /// Every symbol in the manifest resolves to a real, distinct address. This
-    /// is what makes "declared in the manifest" and "callable from JIT'd code"
-    /// the same statement.
+    /// Wrappers whose compiled bodies are **byte-identical**, and which an
+    /// optimized build is therefore allowed to collapse onto one address.
+    ///
+    /// rustc defaults to `-Zmerge-functions=aliases`, so at any `opt-level > 0`
+    /// LLVM emits one body for a set of identical functions and makes the other
+    /// `#[no_mangle]` names aliases of it. Rust has never promised that two
+    /// functions have two addresses, and this is where that shows: in a release
+    /// build the 186 `praxis_*` symbols occupy 179 addresses. Nothing is broken
+    /// by it — merging happens *because* the instructions already agree, so
+    /// every alias computes the answer its own name promises.
+    ///
+    /// Listing the sets is what keeps the copy-paste guard below meaningful: an
+    /// address shared by two wrappers that are *not* listed here is a table
+    /// entry pointing at the wrong function, because two different bodies never
+    /// merge. Merging is permitted, never required — a build that folds none of
+    /// these still passes.
+    const MAY_SHARE_AN_ADDRESS: &[&[RuntimeSymbol]] = &[
+        // `is_empty` over a `VecDeque`, a `HashSet` and a `Counter`'s `HashMap`:
+        // each reads a length at the same payload offset and selects the boxed
+        // `True` or `False`. Nine instructions, and the same nine.
+        &[
+            RuntimeSymbol::CounterIsEmpty,
+            RuntimeSymbol::DequeIsEmpty,
+            RuntimeSymbol::SetIsEmpty,
+        ],
+        // The two heaps differ only in the `Reverse` wrapper on their entries,
+        // which is a comparison detail and absent from both of these.
+        &[RuntimeSymbol::MaxHeapIsEmpty, RuntimeSymbol::MinHeapIsEmpty],
+        &[RuntimeSymbol::MaxHeapPeek, RuntimeSymbol::MinHeapPeek],
+        // A closure's captures and a tuple's elements are the same slot array
+        // under two names, so a bounds-checked read and write of slot `i` are
+        // one body each.
+        &[RuntimeSymbol::ClosureCapture, RuntimeSymbol::TupleGet],
+        &[RuntimeSymbol::ClosureSetCapture, RuntimeSymbol::TupleSet],
+        // Both load one word from the front of the payload and return it raw:
+        // a closure's function pointer, a `Float`'s bits.
+        &[RuntimeSymbol::ClosureFnPtr, RuntimeSymbol::FloatLoad],
+    ];
+
+    /// Whether `a` and `b` are known to compile to the same instructions.
+    fn bodies_are_known_identical(a: RuntimeSymbol, b: RuntimeSymbol) -> bool {
+        MAY_SHARE_AN_ADDRESS
+            .iter()
+            .any(|set| set.contains(&a) && set.contains(&b))
+    }
+
+    /// Every symbol in the manifest resolves to a real address, and no two
+    /// unrelated symbols resolve to the same one. This is what makes "declared
+    /// in the manifest" and "callable from JIT'd code" the same statement.
     #[test]
     fn every_manifest_symbol_resolves_to_a_distinct_address() {
         let mut seen = std::collections::HashMap::new();
@@ -37,7 +83,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("{sym} is in the manifest but does not resolve"));
             assert!(!addr.is_null(), "{sym} resolved to null");
             if let Some(other) = seen.insert(addr, sym) {
-                panic!("{sym} and {other} share an address — a copy-paste in the address table");
+                assert!(
+                    bodies_are_known_identical(sym, other),
+                    "{sym} and {other} share an address. Either the address table \
+                     maps one of them to the other's function — a copy-paste — or \
+                     their bodies have become identical and the optimizer merged \
+                     them. Read both before deciding; only the second one belongs \
+                     in MAY_SHARE_AN_ADDRESS."
+                );
             }
         }
     }

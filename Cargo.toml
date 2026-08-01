@@ -63,5 +63,24 @@ praxis-types = { path = "crates/praxis-types" }
 # Faster from-scratch dev builds; link time matters more than codegen here.
 debug = 1
 
+# Third-party dependencies only — cargo excludes workspace members from `"*"`,
+# so every Praxis crate is still built unoptimized and still debuggable.
+#
+# This is here for **Cranelift**, which a `praxis run` spends nearly all of its
+# time inside and which is unusably slow when built without optimization. The
+# corpus test (`crates/praxis-cli/tests/corpus.rs`) runs the binary once per
+# program, so it pays that cost 36 times over:
+#
+#     dev, deps unoptimized        rep15 246ms    whole corpus 1.05s
+#     dev, deps at opt-level 3     rep15  33ms    whole corpus 0.27s
+#     release                      rep15  21ms    whole corpus 0.18s
+#
+# Optimizing the Cranelift crates alone measured the same as optimizing every
+# dependency, so this is one dependency's cost and not a general debug tax —
+# `praxis check`, which never reaches Cranelift, was ~6ms either way. The price
+# is a slower first build of the dependency graph; it is cached thereafter.
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 debug = 0
