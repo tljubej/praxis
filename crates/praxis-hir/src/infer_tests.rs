@@ -289,6 +289,59 @@ fn a_mismatch_names_the_requirement_as_expected_and_the_program_as_found() {
     }
 }
 
+/// **D16 / ADR-089.** A call with the wrong argument count names the counts.
+///
+/// A name in Praxis has exactly one signature — no arity-based overloading, no
+/// optional or default parameters — so a count mismatch is never a candidate
+/// for another overload and can be reported as the arithmetic mistake it is.
+///
+/// It used to come back as `Y001`: `assert(cond, "why")` read *expected
+/// `(Bool) -> Unit`, found `(Bool, Text) -> ?T`*, two whole function types to
+/// diff by eye, sitting beside a `Y007` that names collection arity and a
+/// `Y110` that names method arity. `TypeDb::unify` already compared the two
+/// lengths and threw the fact away.
+///
+/// **`assert` is the first row because it is D16's own motivating case** — the
+/// question was whether it should take a message, and the answer is that the
+/// language does not have the mechanism a second signature would need. This is
+/// what the compiler says instead of `Y001`.
+///
+/// Observed red with `UnifyError::Arity` reverted to `Mismatch`: every row
+/// reports `expected …, found …` with two function types and none contains the
+/// word "argument(s)".
+#[test]
+fn a_call_with_the_wrong_argument_count_names_the_counts() {
+    for (src, want) in [
+        // D16's motivating case: `assert` takes a condition, and the name that
+        // carries words is `panic` (ADR-089 decision 2).
+        (
+            "assert(1 == 1, \"why\")",
+            "this function takes 1 argument(s), but 2 were given",
+        ),
+        // A user function, both directions.
+        (
+            "fn add(a, b) { a + b }\nlet n = add(1)",
+            "this function takes 2 argument(s), but 1 were given",
+        ),
+        (
+            "fn one(a) { a }\nlet n = one(1, 2)",
+            "this function takes 1 argument(s), but 2 were given",
+        ),
+        // A closure, which reaches the same `Func`-vs-`Func` unification — the
+        // reason the error is raised in `unify` and not in `infer_call`.
+        (
+            "let f = |a, b| a + b\nlet n = f(1)",
+            "this function takes 2 argument(s), but 1 were given",
+        ),
+    ] {
+        let errors = errors_of(src);
+        assert!(
+            errors.iter().any(|e| e.contains(want)),
+            "`{src}` should report `{want}`, got {errors:?}"
+        );
+    }
+}
+
 /// **ADR-085.** A `Text` operand makes `+` concatenation, and makes every other
 /// arithmetic operator a `Y016`.
 ///
@@ -2381,31 +2434,279 @@ fn a_deferred_method_still_carries_its_receivers_own_requirements() {
     assert!(!has_type_error_with_lower(ok));
 }
 
-/// A method the receiver does not have is reported **once**, by lowering.
+/// **ADR-093.** A method that cannot resolve is reported by **inference**, and
+/// only once.
 ///
-/// TY-30 adds a second place that knows about the call, and a capability channel
-/// that reports as well as resolves would say the same thing twice. It resolves
-/// only: `Y110` has one emitter, it has the method-name span, and both shapes
-/// that reach it — a receiver the program pinned, and a receiver nothing ever
-/// pinned — produce exactly one diagnostic.
+/// This test replaces `a_method_the_receiver_does_not_have_is_reported_once`,
+/// which asserted the opposite division — "reported once, **by lowering**" —
+/// and which was deliberate and wrong. `praxis check` runs inference and stops;
+/// only `praxis run` runs lowering. So a `Y110` that only lowering emits is a
+/// `Y110` `praxis check` cannot see, and every one of the four shapes below was
+/// `check` exit 0 and silent, then `run` exit 1. Appendix D — the design
+/// document's own first demo target — was the largest instance.
+///
+/// The two assertions are a pair and neither is redundant:
+///
+/// * `analyze` **alone** yields exactly one `Y110`. RED before ADR-093 for all
+///   four shapes, which yielded **zero** — that is the finding.
+/// * `analyze` + `lower` still yields exactly one. RED against the tempting
+///   half-fix that adds inference's report and keeps lowering's as a backstop:
+///   that variant yields two, and only this assertion catches it. Observed: with
+///   lowering's `self.diag(…NoMethodOnType…)` restored, the first three shapes
+///   report twice here.
+///
+/// Both of inference's doors are covered, because they are different code and
+/// each was silent for its own reason.
 #[test]
-fn a_method_the_receiver_does_not_have_is_reported_once() {
+fn a_method_that_cannot_resolve_is_reported_by_inference_and_only_once() {
     for src in [
-        // Pinned by the call site, and `Int` has no `nope`.
+        // Concrete receiver, no such row — the call-site door.
+        "let v = Vec[Int]()\nv.push(1)\nout(v.nope())",
+        // Receiver a parameter the call site pins. `nope` is in no catalog row
+        // at any receiver, so the call-site door refuses it without waiting.
         "fn f(x) { x.nope() }\nfn main() -> Unit { f(1) }",
-        // Never pinned at all: nothing resolves, and lowering still reports.
+        // Never pinned at all. Same door, same reason — and this is the shape
+        // that could not have been reported any other way: the constraint would
+        // sit in `pending_constraints` forever, because `take_dischargeable`
+        // only ever returns constraints whose variable has resolved.
         "fn f(x) { x.nope() }\nfn main() -> Unit { }",
+        // The **deferred** door: `push` exists (on `Vec[T]`, at arity 1), so the
+        // requirement is made and rides the channel; the call site then pins the
+        // receiver to `Int`, which has no such row. Reported at discharge.
+        "fn f(x) -> Unit { x.push(1) }\nfn main() -> Unit { f(3) }",
     ] {
-        let codes: Vec<String> = analyze_and_lower_diags(src)
+        let from_inference: Vec<String> = analyze(src)
+            .diagnostics
             .iter()
             .map(|d| d.code().to_string())
             .collect();
         assert_eq!(
-            codes,
+            from_inference,
             vec!["Y110".to_string()],
-            "one report per missing method, got {codes:?} for {src:?}"
+            "`praxis check` must report it, got {from_inference:?} for {src:?}"
+        );
+        let with_lowering: Vec<String> = analyze_and_lower_diags(src)
+            .iter()
+            .map(|d| d.code().to_string())
+            .collect();
+        assert_eq!(
+            with_lowering,
+            vec!["Y110".to_string()],
+            "one emitter, not two: got {with_lowering:?} for {src:?}"
         );
     }
+}
+
+/// **ADR-093.** The report names the receiver type *and* the arity.
+///
+/// This is how "one emitter" becomes observable rather than asserted. There were
+/// two builders and each said half of it: lowering's said the arity and "on this
+/// type", inference's said the type and no arity. Neither text below can be
+/// produced by either old builder, so a fix that quietly left one in place fails
+/// here.
+///
+/// RED before ADR-093 on both counts — the text was ``no method `nope` on this
+/// type taking 0 argument(s)``, and it arrived from `lower`, not from `analyze`.
+#[test]
+fn the_report_names_the_receiver_type() {
+    let diags = analyze("let v = Vec[Int]()\nv.push(1)\nout(v.nope())").diagnostics;
+    assert_eq!(
+        diags.iter().map(|d| d.message()).collect::<Vec<_>>(),
+        vec!["no method `nope` on type `Vec[Int]` taking 0 argument(s)"],
+    );
+
+    // The deferred door names the type the call site pinned, which is the whole
+    // reason the report moved: lowering saw a receiver that was still a variable
+    // here and could only have said "this type".
+    let diags = analyze("fn f(x) -> Unit { x.push(1) }\nfn main() -> Unit { f(3) }").diagnostics;
+    assert_eq!(
+        diags.iter().map(|d| d.message()).collect::<Vec<_>>(),
+        vec!["no method `push` on type `Int` taking 1 argument(s)"],
+    );
+
+    // And the one shape with no receiver to name gets its own wording rather
+    // than printing `?a` into a message §5.4 requires to be concrete.
+    let diags = analyze("fn f(x) { x.nope() }\nfn main() -> Unit { }").diagnostics;
+    assert_eq!(
+        diags.iter().map(|d| d.message()).collect::<Vec<_>>(),
+        vec!["no type has a method `nope` taking 0 argument(s)"],
+    );
+}
+
+/// **ADR-093's boundary.** A name the catalog *does* hold is still deferred, and
+/// the generic still generalizes.
+///
+/// The new rule refuses a method call whose name no catalog row holds at that
+/// arity, before anything says what the receiver is. The spelling of that
+/// predicate is the whole difference between a repair and a regression, and this
+/// is the test that makes the difference visible.
+///
+/// HOW IT GOES RED: write `has_name_at_arity` as "no row matches this receiver"
+/// instead of "no row holds this name at this arity" and §5.2's own example —
+/// `fn total(values) { values.sum() }`, which the document prints as `(Vec[Int])
+/// -> Int` — is rejected outright with a `Y110`, uncalled, with `sum`
+/// implemented and working.
+///
+/// The `run` half is asserted too, and it is a small improvement ADR-093 made by
+/// deleting lowering's report: this program used to be clean at `check` and
+/// `Y110` at `run`, because lowering met the unresolved receiver and complained.
+/// Both commands accept it now.
+#[test]
+fn a_name_the_catalog_holds_is_still_deferred() {
+    let src = "fn total(values) { values.sum() }\nfn main() -> Unit { }";
+    assert!(
+        analyze(src).diagnostics.is_empty(),
+        "an uncalled generic over a real catalog name must check clean: {:?}",
+        analyze(src).diagnostics
+    );
+    assert!(
+        is_clean_with_lower(src),
+        "…and must stay clean once lowering runs, which it did not before ADR-093"
+    );
+    // The requirement is still on the channel, unchanged by ADR-093: the
+    // receiver is pinned to the declaration group's level (`require_method`), so
+    // `total` is a signature with an open receiver and an open result rather
+    // than a scheme, and a call site is what closes both. A rule that reported
+    // here would have had to answer this differently.
+    assert_eq!(scheme_of(src, "total").as_deref(), Some("(?T) -> ?U"));
+    // With a call site, the deferred requirement resolves exactly as before.
+    let called = "fn total(values) { values.sum() }\n\
+                  fn main() -> Unit { let v = Vec[Int]()\nv.push(1)\nout(total(v)) }";
+    assert!(is_clean_with_lower(called));
+}
+
+/// **REP-33 half (a).** A barrier combinator declares what its element must be,
+/// and `analyze` **alone** enforces it — so `praxis check` sees it.
+///
+/// `sorted` orders through the element descriptor's `compare` callback and
+/// `frequencies` builds a `Counter` whose keys go through `hash`/`equals`.
+/// Neither callback exists for every type, and neither rule is enforced anywhere
+/// else for these rows: `require_collection_invariants` asks the key rule of a
+/// method's **receiver**, and the receiver here is an ordinary `Vec` that is
+/// entitled to hold anything at all. The rule belongs to the row, which is what
+/// `Bound::Kind` is.
+///
+/// HOW IT GOES RED, OBSERVED: delete the `TypePattern::of_kind` on
+/// `seq_sorted_on_vec`'s receiver (leaving `vec_of_t()`) and rebuild. This test
+/// fails with `[]` where it wants `["Y006"]`, and the whole program goes
+/// through: `praxis check` is silent and exits 0, and `praxis run` exits 1 with
+/// `error: program faulted: value does not have the declared type` — the
+/// `TypeMismatch` `praxis_vec_sorted` raises when the element descriptor has no
+/// `compare`. A fault from a program the checker accepted is the thing the bound
+/// exists to prevent. The same deletion on `seq_frequencies_on_vec` accepts a
+/// `Vec[Vec[Int]]` key, which is exactly what D4 forbids.
+///
+/// **Two** closures, not one, and that is not padding: the wrapper returns early
+/// when there is nothing to compare, so a one-element `Vec` sorts happily
+/// without ever reaching the missing callback and the deletion above looks
+/// harmless.
+///
+/// The diagnostics are the language's own ordering and key wording, not `Y110`:
+/// the method exists, and what is wrong is the element.
+#[test]
+fn a_barrier_declares_what_its_element_must_be() {
+    // A closure is the canonical unorderable value (§5.5: function values have
+    // no structural identity).
+    let unorderable = "let v = Vec()\nv.push(|x| x + 1)\nv.push(|x| x + 2)\nout(v.sorted())";
+    let codes: Vec<String> = analyze(unorderable)
+        .diagnostics
+        .iter()
+        .map(|d| d.code().to_string())
+        .collect();
+    assert_eq!(
+        codes,
+        vec!["Y006".to_string()],
+        "`sorted` on an unorderable element is the ordering diagnostic, at `check`"
+    );
+
+    // A `Vec` element can change after it is stored, so it cannot be a key —
+    // and `frequencies`' result is keyed on exactly it.
+    let unstable = "let inner = Vec[Int]()\ninner.push(1)\n\
+                    let v = Vec()\nv.push(inner)\nout(v.frequencies())";
+    let codes: Vec<String> = analyze(unstable)
+        .diagnostics
+        .iter()
+        .map(|d| d.code().to_string())
+        .collect();
+    assert_eq!(
+        codes,
+        vec!["Y014".to_string()],
+        "`frequencies` of a mutable element is the key diagnostic, at `check`"
+    );
+
+    // `unique` carries the same bound for the same reason — sameness is the
+    // descriptor's `hash`/`equals`, so an element that changes is not found
+    // again on the second pass.
+    let unstable_unique = "let inner = Vec[Int]()\ninner.push(1)\n\
+                           let v = Vec()\nv.push(inner)\nout(v.unique())";
+    assert!(has_type_error(unstable_unique));
+
+    // And the ordinary shapes are accepted, so the bounds refuse rather than
+    // reject: a `Vec[Text]` sorts, a `Vec[Int]` counts.
+    assert!(is_clean_with_lower(
+        "let v = Vec[Text]()\nv.push(\"b\")\nout(v.sorted())"
+    ));
+    assert!(is_clean_with_lower(
+        "let v = Vec[Int]()\nv.push(1)\nout(v.frequencies()[1])"
+    ));
+    assert!(is_clean_with_lower(
+        "let v = Vec[Int]()\nv.push(1)\nout(v.unique())"
+    ));
+}
+
+/// **REP-33 half (a).** The barrier's bound rides the **constraint channel**, so
+/// an element the program has not named yet is answered when something names it.
+///
+/// This is why `Bound::Kind` goes through `require_cap` rather than calling
+/// `capability::check` directly, and the difference is only visible in one
+/// shape: `let v = Vec()` mints `Vec[?T]`, which is a *concrete* receiver with
+/// an *open* element, so `v.sorted()` resolves its row immediately and asks
+/// about `?T` before any `push` has said what `?T` is. `capability::check`
+/// answers **yes** to every unresolved variable by design — deciding otherwise
+/// would break polymorphic inference everywhere — so a direct call accepts the
+/// program and nothing ever asks again.
+///
+/// HOW IT GOES RED, OBSERVED: replace the `require_cap` in `apply_bounds`'s
+/// `Bound::Kind` arm with `capability::check` + `report_cap_failure`, and the
+/// first case below is accepted with no diagnostic. (The generic-function shape
+/// is *not* the discriminator, and it was the first thing tried: a deferred
+/// `HasMethod` is discharged only after the receiver resolves, so `apply_bounds`
+/// there already sees a concrete element and a direct check catches it too.)
+#[test]
+fn a_barrier_bound_is_checked_at_the_call_site_that_pins_it() {
+    // Ordered before it is populated: the bound is asked about `?T` and has to
+    // wait for the `push` two lines later.
+    let later = "let v = Vec()\nlet s = v.sorted()\nv.push(|x| x + 1)\nout(1)";
+    let codes: Vec<String> = analyze(later)
+        .diagnostics
+        .iter()
+        .map(|d| d.code().to_string())
+        .collect();
+    assert_eq!(
+        codes,
+        vec!["Y006".to_string()],
+        "an element pinned after the `sorted()` still has to satisfy the bound"
+    );
+
+    // The same shape with an orderable element is clean, so the refusal is the
+    // bound and not "an open element cannot be sorted".
+    assert!(is_clean_with_lower(
+        "let v = Vec()\nlet s = v.sorted()\nv.push(7)\nout(s.len())"
+    ));
+
+    // And through a generic function, where the receiver itself is deferred.
+    let ok = "fn top(v) { v.sorted() }\n\
+              fn main() -> Unit { let v = Vec[Int]()\nv.push(2)\nout(top(v)) }";
+    assert!(
+        is_clean_with_lower(ok),
+        "an orderable instantiation is fine"
+    );
+    let bad = "fn top(v) { v.sorted() }\n\
+               fn main() -> Unit { let v = Vec()\nv.push(|x| x + 1)\nout(top(v)) }";
+    assert!(
+        has_type_error(bad),
+        "the bound has to be answered where the call site pins the element"
+    );
 }
 
 #[test]
@@ -3090,7 +3391,19 @@ fn a_template_scan_error_reports_the_code_its_own_rule_was_given() {
             "let v = read `{x:csv(int, int)}`",
             DiagCode::ConstructorArity,
         ),
-        ("let v = read `prefix\\`", DiagCode::TemplateScan),
+        // The `I030` rows are the ones with no code of their own, which is what
+        // makes them the control for the four above.
+        //
+        // **This row used to be `` read `prefix\` `` — an escaped closing
+        // backtick, so the run never closed.** ADR-094 took that program away
+        // from the scanner: a template ends at the line it opens on, so the
+        // lexer answers `T002` and the interior is never scanned at all. The
+        // row is replaced rather than deleted because what it was here to prove
+        // — that a `ScanError` with no allocated code still reports `I030`
+        // rather than being flattened with the four that do — is unchanged, and
+        // these two reach it through a *closed* template.
+        ("let v = read `{}`", DiagCode::TemplateScan),
+        ("let v = read `bad\\q escape`", DiagCode::TemplateScan),
     ] {
         assert!(
             reports_input_code(src, code),
@@ -6334,8 +6647,11 @@ fn a_zero_argument_accessor_is_a_call_and_a_bare_name_is_a_field() {
     assert!(is_clean_with_lower(
         "struct P { len: Int }\nlet p = P { len: 7 }\nout(p.len)\n"
     ));
-    let diags =
-        analyze_and_lower_diags("struct P { len: Int }\nlet p = P { len: 7 }\nout(p.len())\n");
+    // Asked of `analyze` alone, not of `analyze` + `lower`. It used to be the
+    // latter, which stopped proving anything the moment ADR-093 moved `Y110`
+    // into inference — the point of this half is that a record carries no
+    // catalog rows, and `check` is where the user finds that out.
+    let diags = analyze("struct P { len: Int }\nlet p = P { len: 7 }\nout(p.len())\n").diagnostics;
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y110"),
         "a record has no rows: {diags:?}"
@@ -6378,4 +6694,262 @@ fn a_parser_template_in_value_position_is_reported() {
         .filter(|d| d.severity() == praxis_source::Severity::Error)
         .count();
     assert_eq!(errors, 1, "expected exactly one error, got {diags:?}");
+}
+
+/// **REP-56.** A `choice(...)` payload record's fields are readable, because a
+/// variant pattern's enum is the **scrutinee's**.
+///
+/// Inference reached the enum only through the constructor's resolved *symbol*,
+/// and an anonymous enum has no declaration and therefore no symbol. The arm was
+/// skipped whole: the scrutinee was never unified, the payload never asked for,
+/// and `p` in `Mul(p)` kept an unbound variable — so `p.a` took `infer_field_get`'s
+/// REP-28 tolerance and lowered to `Unit`.
+///
+/// **Observed red with the scrutinee-first rule removed** (`infer_variant_pattern`
+/// reverted to `ctor.and_then(lookup_enum_variant)`): this test reports "expected
+/// Y112 from analysis alone, got []" — `praxis check` says nothing at all about a
+/// field read that does not exist. The same program under `praxis run` prints
+/// `Unit` for `out(p.a)`, and once the value is used arithmetically it aborts the
+/// process: `int_payload wants a `Int` payload; this value is a `Unit` (REP-56)`,
+/// rc=134. The gate asserts the **rendered type** in the message, not
+/// merely that some diagnostic fired: naming `{ a: Int, b: Int }` is what proves
+/// the anonymous payload record reached inference rather than that inference
+/// tripped over something else.
+#[test]
+fn a_bad_field_on_a_choice_payload_is_reported_at_check() {
+    const READ: &str = "let ms = read scan(choice(Mul: `mul({a:int},{b:int})`, Do: `do()`))\n";
+
+    // The reproduction: a field the payload record does not have. Reported by
+    // `analyze` alone, so `praxis check` sees it (REP-12).
+    let diags = analyze(&format!(
+        "{READ}for m in ms {{ match m {{ Mul(p) => out(p.zzz), Do(_) => {{}} }} }}\n"
+    ))
+    .diagnostics;
+    let y112 = diags
+        .iter()
+        .find(|d| d.code().to_string() == "Y112")
+        .unwrap_or_else(|| panic!("expected Y112 from analysis alone, got {diags:?}"));
+    assert!(
+        y112.message().contains("{ a: Int, b: Int }"),
+        "the message must name the payload record type: {}",
+        y112.message()
+    );
+
+    // …and the field that *is* there types as the capture's own kind, which is
+    // the positive half: a binding left at an unbound variable would render `?T`.
+    let src = format!("{READ}for m in ms {{ match m {{ Mul(p) => out(p.a), Do(_) => {{}} }} }}\n");
+    assert_eq!(
+        scheme_of(&src, "p").as_deref(),
+        Some("{ a: Int, b: Int }"),
+        "the payload binding is the anonymous record, not a fresh variable"
+    );
+}
+
+/// **REP-57, ADR-091.** A record pattern needs no head, and a headless one pins
+/// its record from the scrutinee.
+///
+/// A `choice(...)` payload record is *anonymous*, so no head can name it —
+/// `Mul({a, b})` is the only spelling there is. The grammar had no headless form
+/// at all.
+///
+/// **Observed red with the parser's `L_BRACE` arm removed**: 23 diagnostics on
+/// the two-line program below, the first being `P001 expected a pattern` at the
+/// `{`, followed by "expected `)` to close variant pattern" and "expected `=>` in
+/// match arm" — the arm list and everything after it disintegrate from that one
+/// token, down to `N001: `a` is not defined` for bindings that no longer exist.
+#[test]
+fn a_record_pattern_needs_no_head_and_pins_from_the_scrutinee() {
+    // Nested inside a variant pattern, over an anonymous payload record: the
+    // shape the row exists for.
+    let src = "let ms = read scan(choice(Mul: `mul({a:int},{b:int})`, Do: `do()`))\n\
+               for m in ms { match m { Mul({a, b}) => out(a * b), Do(_) => {} } }\n";
+    assert!(
+        errors_of(src).is_empty(),
+        "the headless form must parse and check: {:?}",
+        errors_of(src)
+    );
+    assert_eq!(scheme_of(src, "a").as_deref(), Some("Int"));
+    assert_eq!(scheme_of(src, "b").as_deref(), Some("Int"));
+
+    // One production, so every pattern position gets it: a top-level match arm,
+    // a `for` header (REP-25), and a closure parameter. Against a *nominal*
+    // record too — the head is optional, not forbidden.
+    const DECL: &str = "struct P { x: Int, tag: Text }\n";
+    let src =
+        format!("{DECL}let p = P {{ x: 1, tag: \"a\" }}\nlet r = match p {{ {{x, tag}} => x }}\n");
+    assert_eq!(scheme_of(&src, "x").as_deref(), Some("Int"));
+    assert_eq!(scheme_of(&src, "tag").as_deref(), Some("Text"));
+    let src = format!(
+        "{DECL}let ps = Vec()\nps.push(P {{ x: 1, tag: \"a\" }})\n\
+         for {{x, tag}} in ps {{ out(x) out(tag) }}\n"
+    );
+    assert_eq!(scheme_of(&src, "x").as_deref(), Some("Int"));
+    assert_eq!(scheme_of(&src, "tag").as_deref(), Some("Text"));
+    let src = format!("{DECL}let f = |q: P| match q {{ {{x, tag}} => x }}\n");
+    assert_eq!(scheme_of(&src, "x").as_deref(), Some("Int"));
+
+    // The mistakes inside it are the headed form's, unchanged: a field the
+    // record does not have, and one named twice.
+    for (arm, code) in [("{x, zzz}", "Y114"), ("{x, x: q}", "Y115")] {
+        let src =
+            format!("{DECL}let p = P {{ x: 1, tag: \"a\" }}\nlet r = match p {{ {arm} => 1 }}\n");
+        let diags = analyze_and_lower_diags(&src);
+        assert!(
+            diags.iter().any(|d| d.code().to_string() == code),
+            "{arm} must be {code}, got {diags:?}"
+        );
+    }
+}
+
+/// **ADR-091 Decision 2.** A headless record pattern against a scrutinee nothing
+/// has pinned is reported, and a non-record scrutinee is `Y123`.
+///
+/// The plan for this row proposed *silence* against an open scrutinee, by
+/// analogy with `infer_field_get`'s REP-28 tolerance. It was measured and it is
+/// not the same trade. **Observed red with this arm silent** (the `Var` case
+/// falling through to `infer_record_pattern_fields_only` with no diagnostic):
+/// `let f = |{x, y}| x + y` / `out(f(Point { x: 10, y: 20 }))` passed
+/// `praxis check` with rc=0 and then died under `praxis run` with
+/// `int_payload wants a `Int` payload; this value is a `Unit` (REP-56)`, rc=134.
+/// Inference had bound `x` and `y` to fresh variables while lowering — which
+/// reads the record off the scrutinee and by then knows it — stored the fields at
+/// `Int`. A field *read* can be silent because lowering answers `Unit` too,
+/// consistently; a *binding* cannot, and that divergence is the very shape REP-56
+/// is about.
+#[test]
+fn a_headless_record_pattern_needs_a_record_it_can_see() {
+    const DECL: &str = "struct P { x: Int, y: Int }\n";
+
+    // Nothing pins the closure parameter or the unannotated function parameter,
+    // and field names alone cannot construct a record type — the language has no
+    // row variables. Reported in **inference**, so `praxis check` sees it.
+    for src in [
+        format!("{DECL}let f = |{{x, y}}| x + y\nout(f(P {{ x: 1, y: 2 }}))\n"),
+        format!(
+            "{DECL}fn g(q) {{ match q {{ {{x, y}} => x + y }} }}\nout(g(P {{ x: 1, y: 2 }}))\n"
+        ),
+    ] {
+        let diags = analyze(&src).diagnostics;
+        assert!(
+            diags.iter().any(|d| d.code().to_string() == "Y123"),
+            "{src} must be Y123 from analysis alone, got {diags:?}"
+        );
+    }
+
+    // Naming the record, or annotating the value, is the answer the message
+    // gives — and both are accepted.
+    for src in [
+        format!("{DECL}let f = |P {{x, y}}| x + y\nout(f(P {{ x: 1, y: 2 }}))\n"),
+        format!(
+            "{DECL}let f = |q: P| match q {{ {{x, y}} => x + y }}\nout(f(P {{ x: 1, y: 2 }}))\n"
+        ),
+    ] {
+        assert!(is_clean_with_lower(&src), "{src} must be accepted");
+    }
+
+    // A scrutinee that is not a record at all is the shape error, `Y123`, and the
+    // message spells the headless pattern as `{ … }` rather than interpolating a
+    // head it does not have.
+    let diags = analyze("let n = 1\nlet r = match n { {a, b} => a + b }\n").diagnostics;
+    let y123 = diags
+        .iter()
+        .find(|d| d.code().to_string() == "Y123")
+        .unwrap_or_else(|| panic!("expected Y123, got {diags:?}"));
+    assert!(
+        y123.message()
+            .contains("`{ … }` is not a pattern for `Int`"),
+        "the message must name the headless shape: {}",
+        y123.message()
+    );
+}
+
+/// **REP-66.** `P {}` is a record pattern, not a binding named `P`.
+///
+/// `Pattern::kind()` decided the record shape from the presence of a
+/// `PATTERN_FIELD` child. `P {}` has none, so it fell through to
+/// `PatternKind::Name("P")` — a **binding**, which matches anything.
+///
+/// **Observed red with the brace test in `Pattern::kind()` removed**: this test
+/// reports "expected Y001, got []" — analysis and lowering together say *nothing*
+/// about a pattern for the wrong record. On the binary as it stood before this
+/// row, the same program (`struct Q { z: Int }` / `struct P { a: Int }` /
+/// `match q { P {} => 1 }` with `q` a `Q`) was rc=0 at `praxis check` and printed
+/// `1` under `praxis run`. A record pattern naming the wrong record silently
+/// covered every value — HIR-07's defect at the one pattern shape HIR-07 did not
+/// reach.
+#[test]
+fn a_record_pattern_with_a_head_and_no_fields_is_still_a_record_pattern() {
+    const DECL: &str = "struct Q { z: Int }\nstruct P { a: Int }\nlet q = Q { z: 1 }\n";
+
+    // The reproduction: the head names another record, so it is the ordinary
+    // mismatch — and it is a mismatch at all only because the pattern is read as
+    // a record pattern.
+    let diags = analyze_and_lower_diags(&format!("{DECL}let r = match q {{ P {{}} => 1 }}\n"));
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y001"),
+        "expected Y001, got {diags:?}"
+    );
+
+    // …and against its *own* record it is legal and binds nothing: `P {}` is
+    // `Some` beside `Some(_)`, one test with no names taken out of it.
+    assert!(is_clean_with_lower(&format!(
+        "{DECL}let p = P {{ a: 1 }}\nlet r = match p {{ P {{}} => 1 }}\n"
+    )));
+
+    // The headless `{}` is a *parse* error instead (ADR-091 Decision 3): it binds
+    // nothing and names no record, so it tests nothing and covers everything.
+    let errors = errors_of(&format!("{DECL}let r = match q {{ {{}} => 1 }}\n"));
+    assert!(
+        errors.iter().any(|e| e.starts_with("P001")),
+        "an empty headless record pattern is a parse error: {errors:?}"
+    );
+}
+
+/// **REP-56; ADR-091 Decision 5.** A variant a concrete enum does not have is `Y122` at
+/// **inference**, not only at lowering.
+///
+/// **Observed red before this report was added**: `praxis check` on the program
+/// below exits 0 with no output while `praxis run` on the same file exits 1 with
+/// `Y122` — REP-12's asymmetry, and for *every* enum rather than only the
+/// anonymous ones this row is about. `praxis check` is the command that is
+/// supposed to know.
+#[test]
+fn an_unknown_variant_is_reported_at_check() {
+    // A nominal enum…
+    let diags = analyze(
+        "enum Move { Step(Int), Stay }\nlet m = Stay\nlet r = match m { Bogus(n) => n, _ => 0 }\n",
+    )
+    .diagnostics;
+    assert!(
+        diags.iter().any(|d| d.code().to_string() == "Y122"),
+        "expected Y122 from analysis alone, got {diags:?}"
+    );
+
+    // …and an anonymous one, whose rendering is what makes the message readable
+    // at all (ADR-091 Decision 4).
+    let diags = analyze(
+        "let ms = read scan(choice(Mul: `mul({a:int},{b:int})`, Do: `do()`))\n\
+         for m in ms { match m { Bogus(p) => out(1), _ => {} } }\n",
+    )
+    .diagnostics;
+    let y122 = diags
+        .iter()
+        .find(|d| d.code().to_string() == "Y122")
+        .unwrap_or_else(|| panic!("expected Y122 from analysis alone, got {diags:?}"));
+    assert!(
+        y122.message()
+            .contains("`{ Mul({ a: Int, b: Int }) | Do(Unit) }` has no variant `Bogus`"),
+        "the anonymous enum must render its variants: {}",
+        y122.message()
+    );
+
+    // The constructor symbol is still consulted when the scrutinee is *not*
+    // pinned — it is the only thing that can pin it, and this is what makes an
+    // unannotated parameter matched against a nominal enum infer at all.
+    let scheme = scheme_of(
+        "enum Move { Step(Int), Stay }\nfn score(m) { match m { Step(n) => n, Stay => 0 } }\n",
+        "score",
+    )
+    .expect("score has a scheme");
+    assert_eq!(scheme, "(Move) -> Int");
 }

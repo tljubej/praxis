@@ -960,6 +960,14 @@ impl Pattern {
     /// apart: a tuple pattern's elements and a record pattern's field names are
     /// nested one node deeper, so `(_, x)` is not a wildcard, `(1, 2)` is not a
     /// literal, and `P { x }` names `P` and not `x`.
+    ///
+    /// A pattern is a *record* pattern because of its brace, not because it has
+    /// fields (ADR-091 Decision 3). Deciding it from the fields instead was two
+    /// silent catch-alls at once: `P {}` had no `PATTERN_FIELD` child, so it fell
+    /// through to a **binding** named `P` that matched every value — `match q {
+    /// P {} => 1 }` where `q` is a `Q` ran the arm (REP-66) — and a headless
+    /// `{ a, b }` has no direct `Ident` either, so it would have reached the
+    /// final `Wildcard` below and become an irrefutable arm (HIR-07's class).
     pub fn kind(&self) -> PatternKind {
         let syntax = &self.syntax;
         // Check for wildcard.
@@ -981,13 +989,18 @@ impl Pattern {
             rowan::NodeOrToken::Token(t) if t.kind() == K::Ident => Some(t),
             _ => None,
         });
+        // `Name { … }` or a headless `{ … }` — a record pattern (REP-10,
+        // ADR-091). Decided *before* the name, and from the brace: the head is
+        // optional, and a head with empty braces is still a record pattern. The
+        // `PATTERN_FIELD` half stays as a second witness, so a tree whose brace
+        // the parser lost still reads as the record it was written as.
+        let has_brace = syntax
+            .children_with_tokens()
+            .any(|e| matches!(e, rowan::NodeOrToken::Token(t) if t.kind() == K::L_BRACE));
+        if has_brace || syntax.children().any(|c| c.kind() == K::PATTERN_FIELD) {
+            return PatternKind::Record(name_tok.map(|t| t.text().to_string()));
+        }
         if let Some(tok) = name_tok {
-            // `Name { … }` — a record pattern (REP-10). Its fields are
-            // `PATTERN_FIELD`s, so it never collides with a variant's
-            // sub-patterns.
-            if syntax.children().any(|c| c.kind() == K::PATTERN_FIELD) {
-                return PatternKind::Record(tok.text().to_string());
-            }
             // If followed by `(`, it's a variant with sub-patterns.
             let has_parens = syntax.children().any(|c| c.kind() == K::PATTERN);
             if has_parens {
@@ -1084,9 +1097,13 @@ pub enum PatternKind {
     Variant(String),
     /// A tuple: `(a, b)` — matches by position (§4.4).
     Tuple,
-    /// A record: `P { x, y: p }` — matches by field name (§4.5). The string is
-    /// the record's name.
-    Record(String),
+    /// A record: `P { x, y: p }` or a headless `{ x, y: p }` — matches by field
+    /// name (§4.5, ADR-091). The string is the record's name when the pattern
+    /// names one; a headless pattern pins its record from the *scrutinee*, the
+    /// way a tuple pattern always has (ADR-069 Decision 4), which is what lets an
+    /// anonymous `choice(...)` payload — a record with no name to write — be
+    /// taken apart at all.
+    Record(Option<String>),
 }
 
 /// A literal: `IntLit`, `TextLit`, `true`/`false`, backtick template.

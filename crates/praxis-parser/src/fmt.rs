@@ -432,4 +432,33 @@ mod tests {
         let twice = format(&once);
         assert_eq!(once, twice, "\n--once--\n{once}\n--twice--\n{twice}");
     }
+
+    /// **REP-57, ADR-091.** The headless record pattern round-trips, in each of
+    /// the three positions a pattern appears.
+    ///
+    /// ADR-005 asks for this whenever the grammar grows: the formatter walks the
+    /// tree, so a new production that produces a shape it cannot lay out is a
+    /// source file the tool rewrites into a different program.
+    ///
+    /// **Observed red with the parser's `L_BRACE` pattern arm removed**: none of
+    /// these sources parses, `assert_clean` fails on the first with "expected a
+    /// pattern", and there is no tree for the formatter to be idempotent over.
+    #[test]
+    fn format_is_idempotent_on_a_headless_record_pattern() {
+        for src in [
+            "let r=match p{{x,y}=>x+y}",
+            "for {x,y} in ps{out(x)}",
+            "let f=|{x,y}|x+y",
+            // Nested in a variant's payload — the shape a `choice(...)` payload
+            // record needs, and the one the row was filed for.
+            "let r=match m{Mul({a,b})=>a*b,Do(_)=>0}",
+            // The head is optional, not gone.
+            "let r=match p{P{x,y}=>x+y}",
+        ] {
+            assert_clean(src);
+            let once = format(src);
+            let twice = format(&once);
+            assert_eq!(once, twice, "\n--once--\n{once}\n--twice--\n{twice}");
+        }
+    }
 }

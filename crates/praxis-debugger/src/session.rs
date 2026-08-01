@@ -95,9 +95,22 @@ impl DebugSession {
         // before re-running so the new fault (if any) captures a fresh chain.
         self.runtime.clear_for_rerun();
         let mut ctx: RuntimeContext = self.runtime.context();
-        if !self.input_text.is_empty() {
-            ctx.input_source = self.runtime.alloc_text(&self.input_text);
-        }
+        // Installed unconditionally, including when it is empty: a zero-length
+        // buffer is empty input, not the absence of input, and the rule is
+        // stated at `praxis_get_input` (ADR-087). The guard that used to stand
+        // here is why a `restart` after a zero-byte-input fault re-ran with no
+        // buffer at all — the second banner was contentless and `input` answered
+        // "(no input context — not a parse failure)" about a run that had failed
+        // to parse, which is not the "same input" §9.7 promises.
+        //
+        // What stays true and is worth saying: `input_text` is the source of
+        // truth from here, because `praxis-cli`'s `clear_input_reader` disarms
+        // the reader before the REPL starts. For a program that faulted *before*
+        // its first `read`, that text is empty because nothing was read — so a
+        // `reload` that moves the `read` earlier sees empty input rather than the
+        // original stdin. That is a property of an exhausted stdin, not of this
+        // line.
+        ctx.input_source = self.runtime.alloc_text(&self.input_text);
         // SAFETY: caller guarantees main_entry is a finalized entry in self.jit.
         unsafe { (self.main_entry)(&mut ctx as *mut RuntimeContext) }
     }

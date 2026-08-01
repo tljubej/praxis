@@ -281,6 +281,20 @@ pub enum DiagCode {
     /// check` must see it. The token still parses to a `LITERAL` node so the
     /// tree round-trips the source and one mistake produces one diagnostic.
     ParserTemplateOutsideRead,
+    /// `Y024` — a call whose argument count does not match the function's
+    /// (D16, ADR-089).
+    ///
+    /// A name in Praxis has exactly one signature — no arity-based overloading,
+    /// no optional or default parameters — so a count mismatch is never a
+    /// candidate for some other overload and can be reported as the mistake it
+    /// is. Before this code it came back as `Y001` showing two whole function
+    /// types to diff by eye, next to a `Y007` that names collection arity and a
+    /// `Y110` that names method arity.
+    ///
+    /// Raised from `TypeDb::unify`, where the two lengths were already compared
+    /// and the fact discarded, so every function-to-function unification
+    /// benefits rather than just a direct call.
+    CallArityMismatch,
 
     // --- Type (`Y09x`), internal ---
     /// `Y099` — internal: a type the compiler expected was absent.
@@ -411,6 +425,7 @@ impl DiagCode {
             NotIndexable => DiagnosticCode::new(Type, 20),
             NotAnAssignmentTarget => DiagnosticCode::new(Type, 21),
             ParserTemplateOutsideRead => DiagnosticCode::new(Type, 23),
+            CallArityMismatch => DiagnosticCode::new(Type, 24),
 
             InternalMissingType => DiagnosticCode::new(Type, 99),
 

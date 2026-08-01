@@ -563,6 +563,56 @@ fn a_collection_with_no_type_arguments_renders_without_brackets() {
     assert_eq!(db.render(map), "Map[BitSet, Int]");
 }
 
+/// **REP-56, ADR-091 Decision 4.** An anonymous enum renders its variants.
+///
+/// It used to render as **nothing at all** — the arm wrote the name when there
+/// was one and fell off the end when there was not — so every diagnostic about a
+/// `choice(...)` type named a type that looked absent.
+///
+/// **Observed red before the arm was written**: `let x: Int = read choice(A:
+/// `{a:int}`, B: int)` reported "error[Y001]: expected Int, found " with the
+/// message stopping mid-sentence, and a misspelled variant reported "error[Y122]:
+/// `` has no variant `Bogus`". The rendering is *total* — every variant, every
+/// payload — because the anonymous record beside it is total for the same reason:
+/// a type a message cannot name is a type the reader cannot fix.
+#[test]
+fn an_anonymous_enum_renders_its_variants() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let u = db.unit();
+    let payload = anon_record(&mut db, vec![("a".into(), i), ("b".into(), i)]);
+
+    // C.9's own type. Braces say "structural, no name", matching the anonymous
+    // record's own form; `|` and the payload parens keep the two apart, so
+    // `{ A({ a: Int }) }` cannot be misread as a record with a field `A`.
+    let t = anon_enum(
+        &mut db,
+        vec![
+            ("Mul".into(), vec![payload]),
+            ("Do".into(), vec![u]),
+            ("Dont".into(), vec![u]),
+        ],
+    );
+    assert_eq!(
+        db.render(t),
+        "{ Mul({ a: Int, b: Int }) | Do(Unit) | Dont(Unit) }"
+    );
+
+    // A payload-less variant writes no parentheses — the parens belong to the
+    // payload, which is REP-13's rule at a third shape.
+    let bare = anon_enum(&mut db, vec![("A".into(), vec![]), ("B".into(), vec![i])]);
+    assert_eq!(db.render(bare), "{ A | B(Int) }");
+
+    // A *nominal* enum is untouched: it has a name, and the name is the answer.
+    let named = enum_ty(&mut db, "Move", vec![("Stay".into(), vec![])]);
+    assert_eq!(db.render(named), "Move");
+
+    // …and an anonymous enum nested inside another type still prints, which is
+    // what "total" buys — `Vec[]` of nothing was the shape REP-13 closed.
+    let v = db.vec(bare);
+    assert_eq!(db.render(v), "Vec[{ A | B(Int) }]");
+}
+
 // --- record & enum types (M7, ADR-025) --------------------------------------
 //
 // Records and enums use def-id indirection: the heavy field/variant data lives

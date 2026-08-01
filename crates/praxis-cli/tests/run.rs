@@ -19,6 +19,30 @@ fn fixture(name: &str) -> PathBuf {
     p
 }
 
+/// A scratch directory this **process** owns, for the tests that must write a
+/// file for the binary to read.
+///
+/// Five tests wrote fixed names straight into `std::env::temp_dir()`
+/// (`praxis-rep60-empty.in`, `m10b_ws6_reload.px`, …). Within one run that is
+/// fine, and one helper even says so — "named after the calling test so two
+/// tests cannot race for it". Between runs it is not: **two concurrent
+/// `cargo test` processes share `/tmp` and clobber each other's fixtures**, so
+/// one rewrites a source file while the other's REPL is reading it. That is not
+/// hypothetical — it was measured while two agents ran the suite at once, and
+/// four different tests in this file failed across four runs while every one of
+/// them passed in isolation. A test that fails only when something else is
+/// running is worse than a failing test: it teaches you to re-run instead of to
+/// look.
+///
+/// `CARGO_TARGET_TMPDIR` alone does not fix it — it is the same path for both
+/// processes. The pid is what makes it exclusive.
+fn scratch_dir() -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("run-tests-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create this process's scratch directory");
+    dir
+}
+
 /// Run a fixture and return (exit_code, stdout, stderr). Panics if the process
 /// can't be spawned.
 fn run_fixture(name: &str) -> (i32, String, String) {
@@ -242,7 +266,7 @@ fn a_second_read_sees_the_same_buffer() {
 /// red before the fix without asserting on message text: it exits 1 today.
 #[test]
 fn a_zero_byte_input_file_is_empty_input_and_not_a_contentless_fault() {
-    let empty = std::env::temp_dir().join("praxis-rep60-empty.in");
+    let empty = scratch_dir().join("praxis-rep60-empty.in");
     std::fs::write(&empty, b"").expect("write the empty input file");
     let output = Command::new(bin_path())
         .args(["run", "--debug=never", "--input"])
@@ -262,6 +286,155 @@ fn a_zero_byte_input_file_is_empty_input_and_not_a_contentless_fault() {
     );
     // The fixture reads twice and prints each length.
     assert_eq!(stdout.trim(), "0\n0", "stderr: {stderr}");
+}
+
+/// Run a fixture under `--debug=never` with `stdin` piped and then **closed**,
+/// returning `(exit code, stdout, stderr)`.
+///
+/// The closed empty pipe is the shape that matters here and it is not the same
+/// shape as `run_with_open_stdin`'s: this one sends EOF, so a `read` completes
+/// with whatever arrived — for `stdin = ""`, zero bytes. It is also not
+/// `Command::output`'s default, which binds stdin to `/dev/null`; both reach the
+/// reader with an empty answer, and a test that means "the user piped nothing"
+/// should say so rather than lean on a default.
+fn run_with_closed_stdin(name: &str, stdin: &str) -> (i32, String, String) {
+    use std::io::Write;
+    let mut child = Command::new(bin_path())
+        .args(["run", "--debug=never"])
+        .arg(fixture(name))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn praxis");
+    {
+        let mut pipe = child.stdin.take().expect("piped stdin");
+        pipe.write_all(stdin.as_bytes()).expect("write to child");
+    }
+    let out = child.wait_with_output().expect("wait_with_output");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// Run a fixture under `--debug=never` with `--input` pointed at a file holding
+/// `contents`, returning `(exit code, stdout, stderr)`. The file is named after
+/// the calling test so two tests cannot race for it.
+fn run_with_input_file(name: &str, contents: &str, tag: &str) -> (i32, String, String) {
+    let path = scratch_dir().join(format!("praxis-{tag}.in"));
+    std::fs::write(&path, contents).expect("write the input file");
+    let output = Command::new(bin_path())
+        .args(["run", "--debug=never", "--input"])
+        .arg(&path)
+        .arg(fixture(name))
+        .output()
+        .expect("failed to run praxis");
+    let _ = std::fs::remove_file(&path);
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// **REP-60's stdin half, and the twin of the `--input` gate above.** A reader
+/// that answers zero bytes has given *empty input*, not no input.
+///
+/// `praxis_get_input` installed the buffer only `if !bytes.is_empty()`, so
+/// standard input with nothing in it left `ctx.input_source` at the immortal
+/// Unit and `praxis_run_parser`'s §6.3 descriptor guard faulted before the
+/// parser ran — `program faulted: input parse mismatch` and nothing else. The
+/// `--input` half of REP-60 had already dropped the same guard, so the two
+/// spellings of "run this with no input" gave different answers: `--input` on an
+/// empty file printed `0\n0` and exited 0 while `< /dev/null` exited 1 with a
+/// contentless fault. ADR-087 is the record; the rule lives at
+/// `praxis_get_input`.
+///
+/// **Observed red** with step 1 of the repair reverted (the `if
+/// !bytes.is_empty()` wrapper restored in `praxis_get_input`): rc=1 with
+/// `error: program faulted: input parse mismatch` on stderr instead of `0\n0` on
+/// stdout.
+#[test]
+fn empty_standard_input_is_empty_input_and_not_a_contentless_fault() {
+    assert_passes_with_stdin("reads_lines_of_int.px", "", "0\n0");
+}
+
+/// The field assertion, and the reason the row was worth opening: a program that
+/// *requires* content still faults on empty input, and now the fault carries
+/// §7.11's fields.
+///
+/// §7.11: "A mismatch creates a runtime fault containing: input span / parser
+/// span / expected description / actual preview / parser path / partial root
+/// value." A fault raised *before* any buffer existed can carry none of them —
+/// it has no input span to name — which is why the contentless message was not
+/// merely terse but unfixable in place. With a zero-length buffer installed, the
+/// parse actually runs and fails where it should: at `0..0`, wanting an `int`.
+///
+/// This is deliberately not "the program succeeds": a repair that only made
+/// `reads_lines_of_int.px` pass would leave this one contentless.
+///
+/// **Observed red** with step 1 reverted: rc was 1 (correctly), but stderr held
+/// neither `at input offset 0..0` nor `expected int`.
+#[test]
+fn empty_standard_input_faults_with_an_offset_and_an_expectation() {
+    let (code, stdout, stderr) = run_with_closed_stdin("reads_an_int.px", "");
+    assert_eq!(
+        code, 1,
+        "`read int` over an empty buffer is a mismatch\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("at input offset 0..0"),
+        "the mismatch must name where it happened (§7.11 input span): {stderr}"
+    );
+    assert!(
+        stderr.contains("expected int"),
+        "the mismatch must name what it wanted (§7.11 expected description): {stderr}"
+    );
+}
+
+/// **A mutation companion, not a gate** — it is green today and stays green.
+///
+/// It pins the one §7.11 field the test above legitimately cannot assert: a
+/// zero-length buffer has no bytes to preview, so `actual:` is correctly absent
+/// from an empty-input mismatch. Assert it here, on a non-empty failing input,
+/// so "no `actual` line" stays a property of the empty buffer rather than
+/// becoming a property of the renderer.
+#[test]
+fn a_failing_read_names_what_it_saw() {
+    let (code, stdout, stderr) = run_with_closed_stdin("reads_an_int.px", "x\n");
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("at input offset 0..0") && stderr.contains("expected int"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("actual: x⏎"),
+        "a non-empty failing input previews what was there (§7.11 actual preview): {stderr}"
+    );
+}
+
+/// **The "one rule" gate.** The two spellings of "run this with no input" must
+/// answer identically — not merely both plausibly.
+///
+/// Asserting the two behaviours separately would let them drift apart again the
+/// next time one path is touched; asserting they are *equal* is what makes the
+/// rule checkable. A user cannot be expected to know that `< /dev/null` and
+/// `--input /dev/null` are different questions.
+///
+/// **Observed red** with step 1 reverted: both exited 1, but the stderrs
+/// differed — the `--input` run carried `at input offset 0..0: expected int`
+/// and the stdin run carried no detail lines at all.
+#[test]
+fn empty_stdin_and_a_zero_byte_input_file_answer_the_same() {
+    let piped = run_with_closed_stdin("reads_an_int.px", "");
+    let filed = run_with_input_file("reads_an_int.px", "", "rep60-same-answer");
+    assert_eq!(
+        piped, filed,
+        "empty standard input and a zero-byte `--input` file are the same \
+         question and must get the same answer (REP-60, ADR-087)"
+    );
 }
 
 #[test]
@@ -797,13 +970,57 @@ fn m10b_ws6_restart_refaults_deterministically() {
     );
 }
 
+/// **REP-60's §9.7 half.** A `restart` against empty input must see the *same*
+/// empty input — which means the same zero-length buffer, not no buffer.
+///
+/// `rerun_main` re-installed the session's input only `if
+/// !self.input_text.is_empty()`, the same guard the `--input` path had already
+/// shed. So the first fault carried `at input offset 0..0: expected int` and the
+/// restarted one carried nothing, and `input` in the REPL answered `(no input
+/// context — not a parse failure)` about a run that had failed to parse. §9.7
+/// promises a restart is the same run; for zero-byte input it was not, and that
+/// was true on the `--input` path that REP-60's first half was supposed to have
+/// finished.
+///
+/// `--input /dev/null` is the zero-byte file (`run_repl_with_cmds` passes it).
+///
+/// **What this asserts, and why not the banner.** `restart`'s banner prints the
+/// fault *kind* and the frame count and never the parse detail — for empty and
+/// non-empty input alike (`Repl::do_restart_or_reload`). So "the detail line
+/// appears twice" is not this row's property; it is not true of any input and
+/// asserting it would fail for a reason that has nothing to do with REP-60. The
+/// property that genuinely differed is what the REPL's `input` command can
+/// answer *about the restarted run*, so that is what is asserted, together with
+/// the empty/non-empty equivalence that is the whole point of ADR-087.
+///
+/// **Observed red** with step 4 of the repair reverted (the
+/// `if !self.input_text.is_empty()` guard restored in
+/// `DebugSession::rerun_main`): `input` after `restart` answered
+/// `(no input context — not a parse failure)` — about a run that had failed to
+/// parse — where the same drive over a non-empty failing file answered
+/// `input at offset 0..0:`.
+#[test]
+fn a_restart_with_empty_input_sees_the_same_empty_input() {
+    let (_code, out) = run_repl_with_cmds("reads_an_int.px", "restart\ninput\nquit\n");
+    assert!(
+        out.contains("input at offset 0..0:"),
+        "after `restart`, the REPL's `input` must describe the same zero-length \
+         buffer the first run parsed against (§9.7): {out}"
+    );
+    assert!(
+        !out.contains("no input context"),
+        "the restarted run *did* fail to parse, so `input` has a context to \
+         report: {out}"
+    );
+}
+
 #[test]
 fn m10b_ws6_reload_after_edit_changes_result() {
     // Write a faulting fixture to a temp file, then `reload` after rewriting it
     // to a clean program. The reload re-reads the source, recompiles, and the
     // re-run completes (no fault).
     use std::io::{Read, Write};
-    let dir = std::env::temp_dir();
+    let dir = scratch_dir();
     let src_path = dir.join("m10b_ws6_reload.px");
     {
         let mut f = std::fs::File::create(&src_path).unwrap();
@@ -875,7 +1092,7 @@ fn m10b_ws6_reload_on_malformed_source_keeps_session() {
     // after rewriting it to malformed source. The reload must error and the old
     // snapshot stays inspectable.
     use std::io::{Read, Write};
-    let dir = std::env::temp_dir();
+    let dir = scratch_dir();
     let src_path = dir.join("m10b_ws6_reload_bad.px");
     {
         let mut f = std::fs::File::create(&src_path).unwrap();
@@ -1003,7 +1220,7 @@ fn a_declared_main_is_the_entry_point_only_when_nothing_else_is() {
 /// theirs.
 #[test]
 fn the_entry_points_name_is_not_one_a_program_can_spell() {
-    let dir = std::env::temp_dir().join("praxis_rep19_entry_name");
+    let dir = scratch_dir().join("praxis_rep19_entry_name");
     std::fs::create_dir_all(&dir).unwrap();
     let src_path = dir.join("entry.px");
 

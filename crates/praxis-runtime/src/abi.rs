@@ -157,6 +157,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::BitsetRemove => praxis_bitset_remove as *const (),
         RuntimeSymbol::BoolLoad => praxis_bool_load as *const (),
         RuntimeSymbol::CharLoad => praxis_char_load as *const (),
+        RuntimeSymbol::CharToInt => praxis_char_to_int as *const (),
         RuntimeSymbol::CheckFault => praxis_check_fault as *const (),
         RuntimeSymbol::ClosureCapture => praxis_closure_capture as *const (),
         RuntimeSymbol::ClosureFnPtr => praxis_closure_fn_ptr as *const (),
@@ -220,6 +221,8 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::IntAbs => praxis_int_abs as *const (),
         RuntimeSymbol::IntAdd => praxis_int_add as *const (),
         RuntimeSymbol::IntCheckedAdd => praxis_int_checked_add as *const (),
+        RuntimeSymbol::IntCheckedMul => praxis_int_checked_mul as *const (),
+        RuntimeSymbol::IntCheckedSub => praxis_int_checked_sub as *const (),
         RuntimeSymbol::IntClamp => praxis_int_clamp as *const (),
         RuntimeSymbol::IntDiv => praxis_int_div as *const (),
         RuntimeSymbol::IntEq => praxis_int_eq as *const (),
@@ -237,10 +240,15 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::IntNeg => praxis_int_neg as *const (),
         RuntimeSymbol::IntRem => praxis_int_rem as *const (),
         RuntimeSymbol::IntSaturatingAdd => praxis_int_saturating_add as *const (),
+        RuntimeSymbol::IntSaturatingMul => praxis_int_saturating_mul as *const (),
+        RuntimeSymbol::IntSaturatingSub => praxis_int_saturating_sub as *const (),
         RuntimeSymbol::IntSign => praxis_int_sign as *const (),
         RuntimeSymbol::IntSub => praxis_int_sub as *const (),
+        RuntimeSymbol::IntToChar => praxis_int_to_char as *const (),
         RuntimeSymbol::IntToFloat => praxis_int_to_float as *const (),
         RuntimeSymbol::IntWrappingAdd => praxis_int_wrapping_add as *const (),
+        RuntimeSymbol::IntWrappingMul => praxis_int_wrapping_mul as *const (),
+        RuntimeSymbol::IntWrappingSub => praxis_int_wrapping_sub as *const (),
         RuntimeSymbol::MapContains => praxis_map_contains as *const (),
         RuntimeSymbol::RangeGet => praxis_range_get as *const (),
         RuntimeSymbol::RangeLen => praxis_range_len as *const (),
@@ -308,11 +316,14 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::ValueCmp => praxis_value_cmp as *const (),
         RuntimeSymbol::VarCellGet => praxis_var_cell_get as *const (),
         RuntimeSymbol::VarCellSet => praxis_var_cell_set as *const (),
+        RuntimeSymbol::VecFrequencies => praxis_vec_frequencies as *const (),
         RuntimeSymbol::VecGet => praxis_vec_get as *const (),
         RuntimeSymbol::VecIsEmpty => praxis_vec_is_empty as *const (),
         RuntimeSymbol::VecLen => praxis_vec_len as *const (),
         RuntimeSymbol::VecNew => praxis_vec_new as *const (),
         RuntimeSymbol::VecPush => praxis_vec_push as *const (),
+        RuntimeSymbol::VecSorted => praxis_vec_sorted as *const (),
+        RuntimeSymbol::VecUnique => praxis_vec_unique as *const (),
         RuntimeSymbol::WriteStdout => praxis_write_stdout as *const (),
     };
     ptr as *const u8
@@ -427,14 +438,19 @@ pub(crate) unsafe fn abi_panic_escaped<T: AbiSentinel>(
 /// a fault check rather than as a value.
 ///
 /// The manifest is the authority: a symbol declared [`Effect::Pure`] or
-/// [`Effect::Allocates`] cannot be followed by a `CheckFault`, because MIR only
-/// emits one after a call it classifies as faultable. A wrapper the manifest
-/// does not name at all (the shadow-frame and debug entry points) is in the
-/// same position, and is treated the same way.
+/// [`Effect::Allocates`] cannot be followed by a `CheckFault`. **That is
+/// `praxis_mir::verify`'s rule, not a claim restated here** — its
+/// `RedundantFaultCheck` variant rejects a check after an instruction that
+/// cannot fault, so this function's premise is enforced rather than assumed
+/// (MIR-10, ADR-088). Before that rule existed, lowering emitted a check after
+/// *everything*, and this premise was simply false for `Allocates` wrappers
+/// like `praxis_vec_len`. A wrapper the manifest does not name at all (the
+/// shadow-frame and debug entry points) is in the same position and is treated
+/// the same way.
 ///
-/// The converse is *not* claimed: a declared-faulting wrapper's call sites are
-/// MIR's business, and this only says the check is possible there. What it
-/// rules out is the class where it is impossible.
+/// The converse is *not* claimed here: a declared-faulting wrapper's call sites
+/// are MIR's business. What this rules out is the class where the check is
+/// impossible.
 fn panic_fault_is_observable(wrapper: &str) -> bool {
     praxis_stdlib::abi::RuntimeSymbol::from_name(wrapper).is_some_and(|s| s.faults())
 }
@@ -657,9 +673,11 @@ unsafe fn read_scalar<T: Copy>(r: GcRef, handle: crate::descriptor::Payload<T>) 
 /// the wrapper, and either faults into the crash debugger (a wrapper the
 /// manifest declares faultable) or prints that message and aborts (one it does
 /// not, which is `praxis_int_load`'s case). A defined abort is not a *good*
-/// answer to REP-56 — the good answer is the payload record type REP-56 is
-/// filed for, and it is still owed — but it is a bounded one, and the release
-/// build now behaves like the debug build instead of reading past the object.
+/// answer to REP-56 — the good answer is that the payload record's type reaches
+/// the field read, and since ADR-091 it does — but it is the right *backstop*,
+/// and the release build now behaves like the debug build instead of reading
+/// past the object. The guard stays because it is a memory-safety check on a raw
+/// read, not a stand-in for a type system.
 ///
 /// Its own call sites are unchanged: this stays `-> i64` rather than becoming
 /// fallible, because sixty-odd wrappers read through it and a `ctx`-threading
@@ -689,8 +707,9 @@ unsafe fn int_payload(r: GcRef) -> i64 {
 /// A panic here is ADR-080's defined path: `abi_guard!` catches it, raises
 /// `RaisedFault::PANIC` naming the wrapper, and either faults into the crash
 /// debugger or prints the message and aborts. A defined abort is not a *good*
-/// answer to REP-56 — the good answer is the payload record type REP-56 is
-/// filed for, and it is still owed — but it is a bounded one.
+/// answer to REP-56 — the good answer is that the payload record's type reaches
+/// the field read, and since ADR-091 it does — but it is the right backstop: a
+/// raw scalar read must prove its own width whatever the type system believes.
 #[cold]
 #[inline(never)]
 fn scalar_type_mismatch(what: &'static str, want: &'static str, found: &'static str) -> ! {
@@ -774,23 +793,37 @@ pub unsafe extern "C" fn praxis_alloc_unit(ctx: *mut RuntimeContext) -> GcRef {
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_char(ctx: *mut RuntimeContext, value: i64) -> GcRef {
     abi_guard!("praxis_alloc_char", ctx, {
-        // Range-check the `i64` *before* narrowing it. `value as u32` truncates, so
-        // `0x1_0000_0041` became `0x41` and a program that computed a nonsense code
-        // point silently got `'A'` (RT-18). The scalar ABI is 64 bits wide; a code
-        // point is not, and the conversion has to say so rather than wrap.
-        let Ok(code) = u32::try_from(value) else {
-            unsafe { set_fault(ctx, RaisedFault::INVALID_CHAR) };
-            return unsafe { unit_sentinel(ctx) };
-        };
-        if !crate::scalars::is_valid_char(code) {
-            // Defensive: the parser validates scalars, but a malformed code point must
-            // not panic across the ABI.
-            unsafe { set_fault(ctx, RaisedFault::INVALID_CHAR) };
-            return unsafe { unit_sentinel(ctx) };
-        }
-        // SAFETY: caller upholds ctx/heap validity; code is a validated scalar.
-        unsafe { gc_alloc(ctx, scalars::CHAR_PAYLOAD, code) }
+        // SAFETY: caller upholds ctx/heap validity.
+        unsafe { checked_alloc_char(ctx, value) }
     })
+}
+
+/// Box an `i64` as a `Char`, or raise `InvalidChar` and answer the Unit sentinel.
+///
+/// The one place the `i64`-to-code-point rule is enforced, because there are two
+/// doors into it — `praxis_alloc_char` (the parser and codegen's `AllocKind::Char`)
+/// and `praxis_int_to_char` (`Int.to_char()`, ADR-086) — and a rule stated at both
+/// goes stale at one.
+///
+/// **Range-check before narrowing.** `value as u32` truncates, so `0x1_0000_0041`
+/// became `0x41` and a program that computed a nonsense code point silently got
+/// `'A'` (RT-18). The scalar ABI is 64 bits wide; a code point is not, and the
+/// conversion has to say so rather than wrap. The surrogate range is rejected for
+/// the same reason: `char::from_u32` is what decides, not a width.
+///
+/// # Safety
+/// `ctx` must point at a live, wired `RuntimeContext`.
+unsafe fn checked_alloc_char(ctx: *mut RuntimeContext, value: i64) -> GcRef {
+    let Ok(code) = u32::try_from(value) else {
+        unsafe { set_fault(ctx, RaisedFault::INVALID_CHAR) };
+        return unsafe { unit_sentinel(ctx) };
+    };
+    if !crate::scalars::is_valid_char(code) {
+        unsafe { set_fault(ctx, RaisedFault::INVALID_CHAR) };
+        return unsafe { unit_sentinel(ctx) };
+    }
+    // SAFETY: caller upholds ctx/heap validity; code is a validated scalar.
+    unsafe { gc_alloc(ctx, scalars::CHAR_PAYLOAD, code) }
 }
 
 /// Allocate an owned `Text` from a UTF-8 byte buffer (§4.3, ADR-013).
@@ -948,6 +981,47 @@ pub unsafe extern "C" fn praxis_int_to_float(ctx: *mut RuntimeContext, r: GcRef)
         let i = unsafe { int_payload(r) };
         // SAFETY: ctx/heap valid; every widened int is a valid Float payload.
         unsafe { gc_alloc(ctx, scalars::FLOAT_PAYLOAD, i as f64) }
+    })
+}
+
+/// `Char.to_int()` — the Unicode scalar value, as an `Int` (ADR-086). Never
+/// faults: every valid scalar fits an `i64`.
+///
+/// This reads through [`read_scalar`] with the `Char` handle rather than
+/// `int_payload`, because a `Char` payload is **four** bytes and an `i64` read
+/// would take eight of them (REP-37).
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Char` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_char_to_int(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    abi_guard!("praxis_char_to_int", ctx, {
+        // SAFETY: caller guarantees `r` is a valid `GcRef`; `read_scalar` proves
+        // the descriptor is `CHAR` before reading its four bytes.
+        let code = unsafe { read_scalar(r, scalars::CHAR_PAYLOAD) }.unwrap_or_else(|| {
+            scalar_type_mismatch("praxis_char_to_int", "Char", r.descriptor().name)
+        });
+        // SAFETY: ctx/heap valid; every scalar value is a valid Int payload.
+        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, i64::from(code)) }
+    })
+}
+
+/// `Int.to_char()` — the `Char` with this Unicode scalar value (ADR-086).
+/// Faults (`InvalidChar`) on a negative value, one above `0x10FFFF`, or one in
+/// the surrogate range: those are not scalar values and have no `Char`.
+///
+/// It is `Char.to_int()`'s partial half exactly as `Float.to_int()` is
+/// `Int.to_float()`'s — the narrowing direction is the one that can fail. The
+/// check lives in [`checked_alloc_char`] and is not restated here.
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Int` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_to_char(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    abi_guard!("praxis_int_to_char", ctx, {
+        let value = unsafe { int_payload(r) };
+        // SAFETY: caller upholds ctx/heap validity.
+        unsafe { checked_alloc_char(ctx, value) }
     })
 }
 
@@ -1298,17 +1372,18 @@ pub unsafe extern "C" fn praxis_int_neg(ctx: *mut RuntimeContext, r: GcRef) -> G
 }
 
 // ---------------------------------------------------------------------------
-// §4.12's three explicit overflow alternatives (REP-46).
+// §4.12's explicit overflow alternatives (REP-46): three modes —
+// `wrapping_`, `saturating_`, `checked_` — over `add`, `sub` and `mul`.
 //
-// "Integer arithmetic is checked by default. Overflow faults and enters the
-// crash debugger. Explicit alternatives: `a.wrapping_add(b)`,
-// `a.saturating_add(b)`, `a.checked_add(b) // returns Option[Int]`." Those are
-// the three the design document names, and the three that exist. `_sub` and
-// `_mul` siblings are a language decision nobody has made — see the catalog
-// rows, which say so where a reader looks for them.
+// §4.12 states the family and its two closures (no `_div`/`_rem`, no
+// `_neg`/`_abs`) and is the only place that rule is written; the catalog test
+// `the_overflow_alternative_family_is_three_modes_over_three_operators` is what
+// enforces it. Do not restate it here.
 //
-// None of the three can fault: that is the whole point of them. They allocate,
-// like every other wrapper that answers a fresh number.
+// **None of the nine can fault, and that is the whole point of them** — their
+// manifest rows are `Allocates`, so ADR-088's verifier rule means no
+// `CheckFault` follows the call. They allocate, like every other wrapper that
+// answers a fresh number.
 // ---------------------------------------------------------------------------
 
 /// `a.wrapping_add(b)` (§4.12): two's-complement wraparound instead of a fault.
@@ -1365,6 +1440,125 @@ pub unsafe extern "C" fn praxis_int_checked_add(
             Some(sum) => unsafe {
                 let scope = NativeScope::new(ctx);
                 let boxed = gc_alloc(ctx, scalars::INT_PAYLOAD, sum);
+                let rooted = scope.root(boxed);
+                option_some(ctx, rooted.get())
+            },
+            None => unsafe { option_none(ctx) },
+        }
+    })
+}
+
+/// `a.wrapping_sub(b)` (§4.12): two's-complement wraparound instead of a fault.
+///
+/// # Safety
+/// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_wrapping_sub(
+    ctx: *mut RuntimeContext,
+    a: GcRef,
+    b: GcRef,
+) -> GcRef {
+    abi_guard!("praxis_int_wrapping_sub", ctx, {
+        let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
+        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x.wrapping_sub(y)) }
+    })
+}
+
+/// `a.saturating_sub(b)` (§4.12): clamp to `Int`'s ends instead of faulting.
+///
+/// # Safety
+/// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_saturating_sub(
+    ctx: *mut RuntimeContext,
+    a: GcRef,
+    b: GcRef,
+) -> GcRef {
+    abi_guard!("praxis_int_saturating_sub", ctx, {
+        let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
+        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x.saturating_sub(y)) }
+    })
+}
+
+/// `a.checked_sub(b)` (§4.12): `Option[Int]` — `None` where the checked `-`
+/// would fault.
+///
+/// # Safety
+/// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_checked_sub(
+    ctx: *mut RuntimeContext,
+    a: GcRef,
+    b: GcRef,
+) -> GcRef {
+    abi_guard!("praxis_int_checked_sub", ctx, {
+        let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
+        match x.checked_sub(y) {
+            Some(difference) => unsafe {
+                let scope = NativeScope::new(ctx);
+                let boxed = gc_alloc(ctx, scalars::INT_PAYLOAD, difference);
+                let rooted = scope.root(boxed);
+                option_some(ctx, rooted.get())
+            },
+            None => unsafe { option_none(ctx) },
+        }
+    })
+}
+
+/// `a.wrapping_mul(b)` (§4.12): two's-complement wraparound instead of a fault.
+///
+/// This is the one of the nine a program could not write for itself: with every
+/// arithmetic operator checked and no bitwise operators in the language, there
+/// is no in-language spelling of modular multiplication. That is the measurement
+/// that decided REP-46 (see §4.12).
+///
+/// # Safety
+/// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_wrapping_mul(
+    ctx: *mut RuntimeContext,
+    a: GcRef,
+    b: GcRef,
+) -> GcRef {
+    abi_guard!("praxis_int_wrapping_mul", ctx, {
+        let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
+        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x.wrapping_mul(y)) }
+    })
+}
+
+/// `a.saturating_mul(b)` (§4.12): clamp to `Int`'s ends instead of faulting.
+///
+/// # Safety
+/// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_saturating_mul(
+    ctx: *mut RuntimeContext,
+    a: GcRef,
+    b: GcRef,
+) -> GcRef {
+    abi_guard!("praxis_int_saturating_mul", ctx, {
+        let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
+        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x.saturating_mul(y)) }
+    })
+}
+
+/// `a.checked_mul(b)` (§4.12): `Option[Int]` — `None` where the checked `*`
+/// would fault.
+///
+/// # Safety
+/// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_checked_mul(
+    ctx: *mut RuntimeContext,
+    a: GcRef,
+    b: GcRef,
+) -> GcRef {
+    abi_guard!("praxis_int_checked_mul", ctx, {
+        let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
+        match x.checked_mul(y) {
+            Some(product) => unsafe {
+                let scope = NativeScope::new(ctx);
+                let boxed = gc_alloc(ctx, scalars::INT_PAYLOAD, product);
                 let rooted = scope.root(boxed);
                 option_some(ctx, rooted.get())
             },
@@ -2527,6 +2721,173 @@ pub unsafe extern "C" fn praxis_vec_is_empty(ctx: *mut RuntimeContext, vec: GcRe
         let empty = p.items.is_empty();
         // SAFETY: ctx/heap valid; Bool immortal path.
         unsafe { bool_ref(ctx, empty) }
+    })
+}
+
+// --- the §6.3 barrier combinators ------------------------------------------
+//
+// A *barrier* is a pipeline stage that cannot be fused into the loop feeding it
+// because it needs the whole sequence before it can answer its first element:
+// `sorted` has to see the largest element before it knows the smallest is first.
+// So each is a real runtime call over a materialized `Vec` rather than an
+// intrinsic the MIR fuser expands, and the fuser's own recognizer already knows
+// to end a chain at one and start a fresh chain from its result.
+//
+// All three rebuild through [`vec_of`] rather than mutating the receiver, which
+// is the shape `praxis_set_items` and `praxis_counter_keys` already use.
+// `v.sorted()` is an expression, not a statement: §6.3 lists it beside `map` and
+// `filter`, and a caller that also holds `v` must still see `v`'s own order.
+
+/// `v.sorted()` — the elements of `vec` in ascending order, as a **new** `Vec`
+/// (§6.3). The receiver is not touched.
+///
+/// Ordering goes through the element descriptor's `compare` callback — the same
+/// callback [`praxis_value_cmp`] uses, and for the same reason (P0-12): a `Text`
+/// is a pointer-and-length structure, so ordering one by its first eight payload
+/// bytes compares *addresses*. That sorts `Vec[Int]` correctly and `Vec[Text]`
+/// into allocation order, which is the failure that looks like it works.
+///
+/// The sort is **stable**, so equal elements keep their input order and the
+/// answer is a function of the input alone.
+///
+/// Raises `FaultKind::TypeMismatch` and answers Unit when the elements are not
+/// all one type, or when that type has no ordering. The catalog row's `Ord`
+/// bound (ADR-093, `Bound::Kind`) rejects both at `praxis check`, so reaching
+/// either is a compiler bug — reported as a fault rather than as a callback
+/// dispatched on a foreign layout.
+///
+/// # Safety
+/// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_sorted(ctx: *mut RuntimeContext, vec: GcRef) -> GcRef {
+    abi_guard!("praxis_vec_sorted", ctx, {
+        // SAFETY: caller guarantees `vec` is a valid Vec.
+        let p = unsafe { vec_payload(vec) };
+        let mut items: Vec<GcRef> = p.items.clone();
+        // Nothing to order, and nothing to check: a zero- or one-element Vec has
+        // no pair to compare, so an empty `Vec[fn(Int) -> Int]` sorts rather than
+        // faulting on a `compare` it would never have called.
+        if items.len() > 1 {
+            // The elements' *own* descriptors decide, not the Vec's label: the
+            // label may be null (the construction site knew no element type —
+            // REP-41) while every member is a perfectly good `Text`.
+            let desc = items[0].descriptor();
+            if !items.iter().all(|i| std::ptr::eq(i.descriptor(), desc)) {
+                unsafe { set_fault(ctx, RaisedFault::TYPE_MISMATCH) };
+                return unsafe { unit_sentinel(ctx) };
+            }
+            let Some(compare) = desc.compare else {
+                unsafe { set_fault(ctx, RaisedFault::TYPE_MISMATCH) };
+                return unsafe { unit_sentinel(ctx) };
+            };
+            items.sort_by(|a, b| {
+                // SAFETY: every element carries `desc` (checked above), so both
+                // payloads are values of its type; the non-moving GC keeps them
+                // stable, and `sort_by` allocates nothing that could collect.
+                unsafe {
+                    compare(
+                        a.payload::<u8>() as *const u8,
+                        b.payload::<u8>() as *const u8,
+                    )
+                }
+            });
+        }
+        unsafe { vec_of(ctx, p.element_descriptor, items.into_iter()) }
+    })
+}
+
+/// `v.unique()` — the elements of `vec` with later duplicates dropped, as a
+/// **new** `Vec`, in first-occurrence order (§6.3). The receiver is not touched.
+///
+/// First-occurrence order rather than sorted-and-deduped: `unique` is listed
+/// separately from `sorted` in §6.3, so composing them has to be the user's
+/// choice, and an order that depends on a hash map's iteration would make the
+/// same program answer differently on two runs (RT-16, and here the order is the
+/// program's *answer*, not only its printing).
+///
+/// Sameness is [`DynamicKey`]'s — the descriptor's `hash` and `equals`
+/// callbacks, which is what "the same value" means everywhere else in this
+/// runtime (§5.5, §11.3). The catalog row's `HashStable` bound is what keeps a
+/// mutable element out; a key that can change after it is stored cannot be found
+/// again (D4).
+///
+/// # Safety
+/// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_unique(ctx: *mut RuntimeContext, vec: GcRef) -> GcRef {
+    abi_guard!("praxis_vec_unique", ctx, {
+        // SAFETY: caller guarantees `vec` is a valid Vec.
+        let p = unsafe { vec_payload(vec) };
+        let mut seen: std::collections::HashSet<DynamicKey> = std::collections::HashSet::new();
+        let mut kept: Vec<GcRef> = Vec::new();
+        for item in &p.items {
+            if seen.insert(DynamicKey::new(*item)) {
+                kept.push(*item);
+            }
+        }
+        unsafe { vec_of(ctx, p.element_descriptor, kept.into_iter()) }
+    })
+}
+
+/// `v.frequencies()` — a `Counter[T]` holding how many times each element of
+/// `vec` occurs (§6.3, §6.2).
+///
+/// The first combinator whose result is a **keyed** collection, which is why the
+/// catalog row carries a `HashStable` bound of its own:
+/// `require_collection_invariants` is applied to a method's *receiver*, and the
+/// receiver here is an ordinary `Vec` that may legitimately hold anything. It is
+/// the result that has a key rule.
+///
+/// The counter's key descriptor is the source `Vec`'s element label, which may
+/// be null when the construction site knew no element type (REP-41) — the same
+/// null [`praxis_counter_new`] already accepts and means "not told yet".
+///
+/// # Safety
+/// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_frequencies(ctx: *mut RuntimeContext, vec: GcRef) -> GcRef {
+    abi_guard!("praxis_vec_frequencies", ctx, {
+        let scope = unsafe { NativeScope::new(ctx) };
+        // The receiver is rooted **explicitly**, unlike the one-allocation
+        // wrappers around it. The keys below are `GcRef`s into this `Vec`'s
+        // items and they are held across one allocation *per distinct element*,
+        // which is a much longer window than `praxis_set_items`' single
+        // `vec_of`; relying on the caller's shadow frame alone for that long is
+        // an assumption worth not making.
+        let _receiver = scope.root(vec);
+        // SAFETY: caller guarantees `vec` is a valid Vec.
+        let p = unsafe { vec_payload(vec) };
+        // Count first, with no allocation at all, so the tally cannot be
+        // disturbed by a collection mid-loop. The tally is a `Vec` with a side
+        // index rather than a bare map so the counts come out in
+        // first-occurrence order, which makes the *allocation* order a function
+        // of the input; the `Counter` itself is unordered either way.
+        let mut counts: Vec<(DynamicKey, i64)> = Vec::new();
+        let mut index: std::collections::HashMap<DynamicKey, usize> =
+            std::collections::HashMap::new();
+        for item in &p.items {
+            let key = DynamicKey::new(*item);
+            match index.get(&key) {
+                Some(at) => counts[*at].1 += 1,
+                None => {
+                    index.insert(key, counts.len());
+                    counts.push((key, 1));
+                }
+            }
+        }
+        let counter = unsafe { praxis_counter_new(ctx, p.element_descriptor) };
+        let rooted = scope.root(counter);
+        for (key, count) in counts {
+            // Allocate first, then take the payload borrow — the boxed `Int`
+            // allocation can collect, and the counter has to be reachable
+            // through the native root frame rather than through a `&mut` this
+            // frame is holding across it.
+            let boxed = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, count) };
+            unsafe { counter_payload_mut(rooted) }
+                .entries
+                .insert(key, boxed);
+        }
+        counter
     })
 }
 
@@ -4528,8 +4889,8 @@ pub unsafe extern "C" fn praxis_text_concat(ctx: *mut RuntimeContext, a: GcRef, 
     })
 }
 
-/// The Unicode scalar value (as a boxed `Int`) of the char at `index`, or an
-/// `IndexOutOfBounds` fault if out of range.
+/// The `Char` at `index`, or an `IndexOutOfBounds` fault if out of range
+/// (ADR-086). `index` counts Unicode scalar values, not bytes.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `text` must be a valid `Text` `GcRef`; `index`
@@ -4551,8 +4912,11 @@ pub unsafe extern "C" fn praxis_text_get(
         }
         match s.chars().nth(idx as usize) {
             Some(ch) => {
-                // Return the scalar value as an Int (Char is reserved; M5 uses Int).
-                unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, ch as i64) }
+                // No validity check, and none belongs here: `ch` is a Rust `char`,
+                // so `ch as u32` is a valid Unicode scalar by construction. The
+                // check `praxis_int_to_char` needs is for the values that did not
+                // come from one.
+                unsafe { gc_alloc(ctx, scalars::CHAR_PAYLOAD, ch as u32) }
             }
             None => {
                 unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
@@ -4799,8 +5163,19 @@ pub unsafe extern "C" fn praxis_range_get(
 /// re-run path, which installs the buffer directly to keep re-runs identical
 /// (§9.7) — reaches the same `input_source` read this always was.
 ///
-/// Empty input leaves `input_source` at the immortal Unit, which is the state
-/// "no input" has always had; `praxis_run_parser` guards it (§6.3).
+/// **A reader that answers zero bytes has given empty input, not no input.** Its
+/// answer is installed as `input_source` whatever its length, so `read` runs
+/// against a zero-length buffer and the parser constructors answer from their own
+/// rules — `lines(int)` over it is `[]` by `split_lines`'s rule, and one that
+/// requires content faults at `0..0` naming what it expected. That is what §7.11
+/// asks a mismatch to carry, and a fault raised before any buffer existed can
+/// carry none of it: it has no input span to name. A zero-byte `--input` file is
+/// the same decision, made at `praxis-cli/src/run.rs` (REP-60, ADR-087).
+///
+/// The one remaining Unit-source state belongs to a host that installs **neither**
+/// a buffer nor a reader — every JIT test, every embedder. `praxis_run_parser`'s
+/// descriptor guard (§6.3) is what keeps that state survivable; no `praxis run`
+/// reaches it.
 ///
 /// # Safety
 /// `ctx` must be live and wired.
@@ -4809,15 +5184,14 @@ pub unsafe extern "C" fn praxis_get_input(ctx: *mut RuntimeContext) -> GcRef {
     abi_guard!("praxis_get_input", ctx, {
         if let Some(read) = crate::input::take_input_reader() {
             let bytes = read();
-            if !bytes.is_empty() {
-                // SAFETY: `bytes` is a live, initialized slice for this call, and
-                // `ctx` is the caller's live context. The result is stored into
-                // `input_source` — a root (`RuntimeRoots`) — with no allocation in
-                // between, so the collection this allocation paces cannot reclaim
-                // it.
-                let text = unsafe { praxis_alloc_text(ctx, bytes.as_ptr(), bytes.len()) };
-                unsafe { (*ctx).input_source = text };
-            }
+            // SAFETY: `bytes` is a live, initialized slice for this call, and
+            // `ctx` is the caller's live context. The result is stored into
+            // `input_source` — a root (`RuntimeRoots`) — with no allocation in
+            // between, so the collection this allocation paces cannot reclaim
+            // it. `praxis_alloc_text` takes `&[]` for `len == 0`, so the empty
+            // answer needs no special case here and must not get one.
+            let text = unsafe { praxis_alloc_text(ctx, bytes.as_ptr(), bytes.len()) };
+            unsafe { (*ctx).input_source = text };
         }
         unsafe { (*ctx).input_source }
     })
@@ -4838,6 +5212,14 @@ pub unsafe extern "C" fn praxis_get_input(ctx: *mut RuntimeContext) -> GcRef {
 /// is an arbitrary expression) funnel through here, so guarding at this ABI
 /// boundary closes the gap regardless of how the input was produced.
 ///
+/// The guard **clears** the parse detail and records none of its own. It runs no
+/// parse, so it has nothing to report — and fabricating a [`ParseFail`] there
+/// would be worse than silence: with no buffer there is no input span, and an
+/// invented `expected` would make an embedder's host bug read as a parse failure
+/// at an offset that does not exist. Clearing is what stops it reporting a
+/// *previous* parse's offset, which is what it did before (REP-60): it was the
+/// one entry into the parser that skipped `run_plan`'s clear.
+///
 /// # Safety
 /// `ctx` must be live and wired; `plan_index_gc` must be a valid `Int`; `input`
 /// must be a valid `GcRef` (any descriptor — a non-Text descriptor faults cleanly
@@ -4853,6 +5235,7 @@ pub unsafe extern "C" fn praxis_run_parser(
         // `run_plan` with a non-Text payload would reinterpret foreign bytes as a
         // TextPayload and segfault; fault cleanly instead.
         if input.descriptor().id() != crate::text::TEXT.id() {
+            unsafe { crate::parser::clear_parse_detail(ctx) };
             unsafe { set_fault(ctx, RaisedFault::PARSE_FAILED) };
             return unsafe { unit_sentinel(ctx) };
         }
@@ -6254,6 +6637,82 @@ mod tests {
             assert_eq!(rt.fault(), FaultKind::IndexOutOfBounds);
         }
         let _ = rt.take_fault();
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-086, the runtime half.** `praxis_text_get` allocates a `Char`.
+    ///
+    /// The catalog's twin (`the_two_text_reads_answer_a_char`) is pure data and
+    /// cannot see this; this is pure runtime and cannot see that. Both halves
+    /// are needed, and they must land together: a tree with one and not the
+    /// other routes a `Char`-typed value into `praxis_char_load`, whose
+    /// `read_scalar` answers `None` against the `INT` descriptor and panics.
+    ///
+    /// Observed red with the fix removed: the object carries the `INT`
+    /// descriptor, so `ptr::eq` fails and `as_char`'s own descriptor assertion
+    /// panics.
+    #[test]
+    fn text_get_answers_a_char_object() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            // The user's report: `"sddddd"[4]` printed `100`, the code point of
+            // `d`, because the value was right and the type was wrong.
+            let s = "sddddd";
+            let text = praxis_alloc_text(ctx, s.as_ptr(), s.len());
+            let four = praxis_alloc_int(ctx, 4);
+            let got = praxis_text_get(ctx, text, four);
+            assert!(!rt.has_pending_fault());
+            assert!(
+                std::ptr::eq(got.descriptor(), &crate::scalars::CHAR),
+                "ADR-086: the read answers a Char, not the char's scalar value"
+            );
+            assert_eq!(got.as_char(), 'd');
+
+            // Scalar-not-byte indexing, pinned at the runtime level too: `é` is
+            // one scalar and two UTF-8 bytes, so a byte index would answer 0xC3.
+            let u = "héllo";
+            let utext = praxis_alloc_text(ctx, u.as_ptr(), u.len());
+            let one = praxis_alloc_int(ctx, 1);
+            let got = praxis_text_get(ctx, utext, one);
+            assert!(!rt.has_pending_fault());
+            assert_eq!(got.as_char(), 'é');
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-086's narrowing half.** `Int.to_char()` reaches the same
+    /// range check `praxis_alloc_char` does, because they share one helper.
+    ///
+    /// Observed red against a wrapper that forwards `value as u32` without the
+    /// check: `0x1_0000_0041` answers `'A'` instead of faulting — the exact
+    /// RT-18 regression the guard was added for. That is the case that proves
+    /// the new door reaches the existing guard rather than restating it.
+    #[test]
+    fn int_to_char_rejects_what_is_not_a_scalar_value() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            for bad in [-1_i64, 0xD800, 0x11_0000, 0x1_0000_0041] {
+                let n = praxis_alloc_int(ctx, bad);
+                let got = praxis_int_to_char(ctx, n);
+                assert!(rt.has_pending_fault(), "{bad} must not answer a Char");
+                assert_eq!(rt.fault(), FaultKind::InvalidChar, "{bad}");
+                assert!(std::ptr::eq(got.descriptor(), &crate::scalars::UNIT));
+                let _ = rt.take_fault();
+            }
+
+            // …and the round trip holds for one that is.
+            let n = praxis_alloc_int(ctx, 233);
+            let got = praxis_int_to_char(ctx, n);
+            assert!(!rt.has_pending_fault());
+            assert_eq!(got.as_char(), 'é');
+            let back = praxis_char_to_int(ctx, got);
+            assert!(!rt.has_pending_fault());
+            assert_eq!(back.as_int(), 233);
+        }
         unsafe { drop_ctx(ctx) };
     }
 
@@ -7789,9 +8248,12 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
     /// **The dummy is only returned where the fault will be seen.**
     ///
     /// Generated code tests the fault slot only where MIR emitted a
-    /// `CheckFault`, and MIR emits one only after a call it classifies as
-    /// faultable. So for the wrappers the manifest declares non-faulting there
-    /// is no check *by construction*, and returning `unit_sentinel` there would
+    /// `CheckFault`, and **`praxis_mir::verify` is what makes that true of a
+    /// non-faulting wrapper** — its `RedundantFaultCheck` rule rejects a check
+    /// after an instruction that cannot fault (MIR-10, ADR-088). Until that
+    /// rule landed, lowering checked after everything and the "by construction"
+    /// below was aspiration. So for the wrappers the manifest declares
+    /// non-faulting there is no check, and returning `unit_sentinel` there would
     /// hand a `Unit` into a slot generated code believes holds a Record, a
     /// Tuple or a closure — the descriptor/payload confusion this repair has
     /// spent stages closing, introduced by the backstop meant to prevent worse.
@@ -7839,5 +8301,161 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
             !panic_fault_is_observable("praxis_not_a_wrapper_at_all"),
             "an unknown name is never treated as observable"
         );
+    }
+
+    // ---- Process input (§7.10, REP-60) ----
+
+    /// A reader that answers nothing. A `fn` and not a closure because
+    /// [`crate::input::InputReader`] is a plain `fn` pointer.
+    fn no_bytes() -> Vec<u8> {
+        Vec::new()
+    }
+
+    /// Read the bytes behind a `Text` `GcRef`.
+    ///
+    /// # Safety
+    /// `r` must be a live `Text`.
+    unsafe fn text_bytes_of(r: GcRef) -> &'static [u8] {
+        // SAFETY: the caller guarantees `r` is a live Text, so its payload is a
+        // validly-linked `TextPayload`.
+        unsafe { crate::text::text_bytes(r.payload::<crate::text::TextPayload>() as *const _) }
+    }
+
+    /// **REP-60's gate at the enforcement site.** A reader that answers zero
+    /// bytes has given *empty input*, not no input, so its answer is installed
+    /// as `input_source` whatever its length.
+    ///
+    /// `praxis_get_input` allocated the buffer only `if !bytes.is_empty()`, so
+    /// empty standard input left `input_source` at the immortal Unit and
+    /// `praxis_run_parser`'s §6.3 descriptor guard faulted *before* the parser
+    /// ran — a `ParseFailed` with no input span, no `expected` and no `actual`,
+    /// which is none of the six fields §7.11 says a mismatch carries. A fault
+    /// raised before any buffer exists cannot carry them; the buffer is what
+    /// makes the diagnostic possible at all (ADR-087).
+    ///
+    /// Nothing exercised `praxis_get_input` directly before this, which is part
+    /// of why the guard survived: the only witness was a CLI end-to-end run, and
+    /// the `--input` path had already been repaired.
+    ///
+    /// **Observed red** before the repair: the returned descriptor was Unit's,
+    /// not `TEXT`'s.
+    #[test]
+    fn a_reader_that_answers_zero_bytes_installs_an_empty_text() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        crate::input::install_input_reader(no_bytes);
+        // SAFETY: ctx is wired to rt and live for this call.
+        let source = unsafe { praxis_get_input(ctx) };
+        assert_eq!(
+            source.descriptor().id(),
+            crate::text::TEXT.id(),
+            "a zero-byte answer is still an input buffer"
+        );
+        // SAFETY: the assertion above proves `source` is a Text.
+        assert!(
+            unsafe { text_bytes_of(source) }.is_empty(),
+            "and the buffer holds exactly what the reader answered"
+        );
+        // SAFETY: ctx is wired to rt and live for this call.
+        assert_eq!(
+            unsafe { (*ctx).input_source }.as_ptr(),
+            source.as_ptr(),
+            "the buffer is installed, not merely returned — §7.10's later \
+             `read`s reuse it"
+        );
+        // SAFETY: ctx came from `wired_ctx` and is not used again.
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **A mutation companion, not a gate** — green before the repair and green
+    /// after, and its job is to stay that way.
+    ///
+    /// The cheapest wrong repair is to allocate a `Text` unconditionally in
+    /// `praxis_get_input`, which passes the gate above and quietly deletes the
+    /// one state the §6.3 descriptor guard exists for. A host that installs
+    /// **neither** a buffer nor a reader — every JIT test, every embedder — must
+    /// still reach `praxis_run_parser` with the Unit source, because
+    /// `adv_read_against_non_text_input_faults_cleanly` in the codegen crate's
+    /// `jit.rs` is the probe that a `read` there faults instead of
+    /// reinterpreting Unit's payload as a `TextPayload` and segfaulting.
+    ///
+    /// That is the boundary ADR-087 draws: a reader answering zero bytes is a
+    /// program state (empty input); no reader at all is a host state (no input),
+    /// and no `praxis run` reaches it.
+    #[test]
+    fn a_host_that_installs_no_reader_keeps_the_unit_source() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        crate::input::clear_input_reader();
+        // SAFETY: ctx is wired to rt and live for these calls.
+        let before = unsafe { (*ctx).input_source };
+        // SAFETY: as above.
+        let source = unsafe { praxis_get_input(ctx) };
+        assert_eq!(
+            source.as_ptr(),
+            before.as_ptr(),
+            "with no reader installed there is nothing to call and nothing to \
+             install; `input_source` is answered untouched"
+        );
+        assert_ne!(
+            source.descriptor().id(),
+            crate::text::TEXT.id(),
+            "and it is still the Unit the §6.3 guard is the net under"
+        );
+        // SAFETY: ctx came from `wired_ctx` and is not used again.
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **The guard must not report a parse that never ran.**
+    ///
+    /// `praxis_run_parser` returns early for a non-Text `input` (§6.3), which is
+    /// correct — `run_plan` would reinterpret the payload as a `TextPayload` —
+    /// but the early return skipped the `clear_parse_detail` every other entry
+    /// into the parser performs. So a host that reached the guard after an
+    /// earlier mismatch printed *that* mismatch's offset and expectation for a
+    /// parse that never started.
+    ///
+    /// Not reproducible end to end: a fault is terminal within one `praxis run`,
+    /// so the reachable shape is an embedder calling `main` twice (or the crash
+    /// debugger's `restart`). This test is the reproduction, at the level where
+    /// the hazard exists.
+    ///
+    /// Fabricating a `ParseFail` here instead would be worse than clearing: with
+    /// no buffer there is no input span, and an invented `expected` would make
+    /// an embedder's host bug read as a parse failure at an offset that does not
+    /// exist.
+    ///
+    /// **Observed red** before the repair: the fault was `ParseFailed`
+    /// (correctly), and `parse_detail().is_set()` was `true` with
+    /// `input_span == (7, 7)` and `expected == "int"` — the seeded failure,
+    /// surviving into a parse that never ran.
+    #[test]
+    fn the_non_text_guard_does_not_report_a_previous_parses_failure() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        rt.parse_detail_mut()
+            .consider(ParseFail::here(7, "int"), b"0123456789");
+        assert!(rt.parse_detail().is_set(), "the seed is in place");
+        // SAFETY: ctx is wired to rt; the plan index is never read, because the
+        // descriptor guard returns before it.
+        unsafe {
+            let plan = praxis_alloc_int(ctx, 1);
+            let unit = (*ctx).unit_ref;
+            let result = praxis_run_parser(ctx, plan, unit);
+            assert_eq!(
+                result.descriptor().id(),
+                crate::scalars::UNIT.id(),
+                "the guard answers the sentinel"
+            );
+        }
+        assert!(rt.has_pending_fault());
+        assert_eq!(rt.fault(), FaultKind::ParseFailed);
+        assert!(
+            !rt.parse_detail().is_set(),
+            "the §6.3 guard runs no parse, so it has no detail to report — and \
+             it must not report the previous parse's"
+        );
+        // SAFETY: ctx came from `wired_ctx` and is not used again.
+        unsafe { drop_ctx(ctx) };
     }
 }

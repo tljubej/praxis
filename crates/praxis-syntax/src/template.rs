@@ -49,19 +49,41 @@ pub enum TemplateEnd {
     /// The run closed. The index is **just past** the closing backtick, so
     /// `&src[open..end]` is the whole token, backticks included.
     Closed(usize),
-    /// The text ended before the run closed.
-    Unterminated,
+    /// The line ended, or the text did, before the run closed.
+    ///
+    /// The index is where the run **stopped** — at the newline, or at the end
+    /// of the text — so `&src[open..end]` is still a bounded token. That bound
+    /// is the whole point of ADR-094: an unterminated template used to run to
+    /// EOF, so `T002` covered the rest of the file and the `}` closing the
+    /// enclosing block was swallowed inside the token, which produced a `P001`
+    /// and a `Y001` after it. Three errors for one typo.
+    Unterminated(usize),
 }
 
 /// Find the end of the backtick template whose opening backtick is at `open`.
 ///
 /// `src[open]` must be `` ` ``.
+///
+/// # A template ends at the line it opens on (ADR-094)
+///
+/// A raw newline may not appear inside a template; `\n` is how §7.2 says a
+/// template matches a line ending, and it is the only way. This is the rule a
+/// `"…"` literal already follows — the backtick template was the one delimited
+/// literal in the language that could silently span a line.
+///
+/// A raw newline never had a meaning here in any case. §7.2 lists literal text,
+/// a space run, `\s*`, `\s+`, `\n`, `\t`, `\x20` and the ordinary escapes; a raw
+/// newline is whitespace but is not a space, so it matched none of them and fell
+/// through to *literal text*. Measured consequence: `` `{a:int}X⏎Y{b:int}` ``
+/// matched LF input and **failed on CRLF**, while the `\n` escape matches both.
+/// The multi-line template was a strictly weaker, silently CRLF-hostile shadow
+/// of the construct §7.2 specifies.
 #[must_use]
 pub fn template_end(src: &str, open: usize) -> TemplateEnd {
     debug_assert_eq!(src.as_bytes().get(open), Some(&b'`'));
     match run(src.as_bytes(), open, 1) {
-        Some(end) => TemplateEnd::Closed(end),
-        None => TemplateEnd::Unterminated,
+        Ok(end) => TemplateEnd::Closed(end),
+        Err(stopped) => TemplateEnd::Unterminated(stopped),
     }
 }
 
@@ -71,7 +93,7 @@ pub fn template_end(src: &str, open: usize) -> TemplateEnd {
 #[must_use]
 pub fn string_end(src: &str, open: usize) -> Option<usize> {
     debug_assert_eq!(src.as_bytes().get(open), Some(&b'"'));
-    string_run(src.as_bytes(), open)
+    string_run(src.as_bytes(), open).ok()
 }
 
 /// One `` `…` `` run. `level` is 1 for the outermost template.
@@ -80,12 +102,30 @@ pub fn string_end(src: &str, open: usize) -> Option<usize> {
 /// UTF-8 continuation byte can be mistaken for one; the two places that step
 /// over something unconditionally ([`skip_scalar`]) step over a whole scalar so
 /// the returned index is always a character boundary.
-fn run(bytes: &[u8], open: usize, level: usize) -> Option<usize> {
+/// `Ok(end)` is just past the closing backtick; `Err(stopped)` is where the run
+/// gave up — at the newline that ended its line, or at the end of the text.
+fn run(bytes: &[u8], open: usize, level: usize) -> Result<usize, usize> {
     let mut pos = open + 1; // past the opening backtick
     let mut braces = 0usize;
     while pos < bytes.len() {
         match bytes[pos] {
-            b'\\' => pos = skip_scalar(bytes, pos + 1),
+            // **A template ends at the line it opens on** (ADR-094). A `\r` is
+            // taken with the `\n` it precedes so the token does not end mid-CRLF
+            // and leave a stray `\r` for the next token to puzzle over.
+            b'\n' => return Err(pos),
+            b'\r' if bytes.get(pos + 1) == Some(&b'\n') => return Err(pos),
+            // An escape hides the next scalar, but it cannot hide a line break:
+            // `\` at the end of a line is a dangling escape, not a continuation,
+            // and letting it swallow the newline would reintroduce exactly the
+            // multi-line token this rule removes.
+            b'\\' => {
+                if matches!(bytes.get(pos + 1), Some(b'\n') | None)
+                    || (bytes.get(pos + 1) == Some(&b'\r') && bytes.get(pos + 2) == Some(&b'\n'))
+                {
+                    return Err(pos + 1);
+                }
+                pos = skip_scalar(bytes, pos + 1);
+            }
             // A quote is structure only inside a capture; in literal text it is
             // just a quote.
             b'"' if braces > 0 => pos = string_run(bytes, pos)?,
@@ -99,27 +139,41 @@ fn run(bytes: &[u8], open: usize, level: usize) -> Option<usize> {
             }
             b'`' => {
                 if braces == 0 || level >= MAX_TEMPLATE_NESTING {
-                    return Some(pos + 1);
+                    return Ok(pos + 1);
                 }
+                // A nested run that hits the line end ends the outer run too,
+                // and at the same place: one line, one token.
                 pos = run(bytes, pos, level + 1)?;
             }
             _ => pos = skip_scalar(bytes, pos),
         }
     }
-    None
+    Err(bytes.len())
 }
 
 /// One `"…"` run, honouring `\`. `bytes[open]` is the opening quote.
-fn string_run(bytes: &[u8], open: usize) -> Option<usize> {
+///
+/// A string literal inside a capture is bounded by the same line rule as the
+/// template holding it — the lexer already refuses a raw newline inside a `"…"`
+/// literal, and there is no reason for one nested in a capture to be different.
+/// `Err(stopped)` therefore propagates straight out of [`run`].
+fn string_run(bytes: &[u8], open: usize) -> Result<usize, usize> {
     let mut pos = open + 1;
     while pos < bytes.len() {
         match bytes[pos] {
-            b'\\' => pos = skip_scalar(bytes, pos + 1),
-            b'"' => return Some(pos + 1),
+            b'\n' => return Err(pos),
+            b'\r' if bytes.get(pos + 1) == Some(&b'\n') => return Err(pos),
+            b'\\' => {
+                if matches!(bytes.get(pos + 1), Some(b'\n') | None) {
+                    return Err(pos + 1);
+                }
+                pos = skip_scalar(bytes, pos + 1);
+            }
+            b'"' => return Ok(pos + 1),
             _ => pos = skip_scalar(bytes, pos),
         }
     }
-    None
+    Err(bytes.len())
 }
 
 /// The index just past the whole UTF-8 scalar beginning at `pos`.
@@ -213,15 +267,62 @@ mod tests {
 
     #[test]
     fn a_run_that_never_closes_is_unterminated() {
-        assert_eq!(template_end("`never closes", 0), TemplateEnd::Unterminated);
+        // The index is where the run stopped, which with no newline in the text
+        // is its end — so `&src[open..end]` is still a bounded token.
+        assert_eq!(
+            template_end("`never closes", 0),
+            TemplateEnd::Unterminated("`never closes".len())
+        );
         assert_eq!(
             template_end("`{g:choice(A: `{x:int}`)}", 0),
-            TemplateEnd::Unterminated
+            TemplateEnd::Unterminated("`{g:choice(A: `{x:int}`)}".len())
         );
         // An unterminated string swallows the rest, so the run cannot close.
         assert_eq!(
             template_end(r#"`{c:one_of("abc)}`"#, 0),
-            TemplateEnd::Unterminated
+            TemplateEnd::Unterminated(r#"`{c:one_of("abc)}`"#.len())
+        );
+    }
+
+    /// **ADR-094.** A template ends at the line it opens on, so an unterminated
+    /// run stops at the newline instead of swallowing the rest of the file.
+    ///
+    /// That bound is the whole decision: `read \`{int\`` used to produce a
+    /// `T002` covering everything after it, and because the `}` closing the
+    /// enclosing block was inside the token, a `P001` and a `Y001` after that.
+    ///
+    /// Observed red without the `b'\n'` arm in `run`: every assertion here
+    /// reports the length of the whole input instead of the first line's end.
+    #[test]
+    fn a_template_ends_at_the_line_it_opens_on() {
+        // The run stops *at* the newline, so the token is `` `{int` `` and the
+        // `}` on the next line is still the block's.
+        assert_eq!(
+            template_end("`{int\n}\n", 0),
+            TemplateEnd::Unterminated(5),
+            "the token is the first line's template, not the rest of the file"
+        );
+        // A closed template on one line is untouched.
+        assert_eq!(template_end("`{a:int}`\nrest", 0), TemplateEnd::Closed(9));
+        // CRLF: the run stops before the `\r`, so no token ends mid-sequence.
+        assert_eq!(template_end("`{int\r\n}", 0), TemplateEnd::Unterminated(5));
+        // A trailing backslash cannot swallow the line break — a dangling
+        // escape is not a continuation, and treating it as one would reopen
+        // exactly the multi-line token this rule removes.
+        assert_eq!(
+            template_end("`abc\\\ndef`", 0),
+            TemplateEnd::Unterminated(5)
+        );
+        // A nested run that hits the line end ends the outer run too, at the
+        // same place: one line, one token.
+        assert_eq!(
+            template_end("`{g:choice(A: `{x:int}\n)}`", 0),
+            TemplateEnd::Unterminated(22)
+        );
+        // …and a string literal inside a capture is bounded by the same rule.
+        assert_eq!(
+            template_end("`{c:one_of(\"ab\n)}`", 0),
+            TemplateEnd::Unterminated(14)
         );
     }
 
@@ -252,13 +353,16 @@ mod tests {
         let not_entered = nested_quote(MAX_TEMPLATE_NESTING + 1);
         assert_eq!(
             template_end(&not_entered, 0),
-            TemplateEnd::Unterminated,
+            TemplateEnd::Unterminated(not_entered.len()),
             "one past the bound that template is not entered, so its `\"` is a string"
         );
 
         // And the pathological case terminates rather than recursing.
         let deep = "`{a:".repeat(5_000);
-        assert_eq!(template_end(&deep, 0), TemplateEnd::Unterminated);
+        assert_eq!(
+            template_end(&deep, 0),
+            TemplateEnd::Unterminated(deep.len())
+        );
     }
 
     #[test]

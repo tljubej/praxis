@@ -533,17 +533,11 @@ fn lower_fn_value_adapter(adapter: &FnValueAdapter, db: &mut TypeDb) -> Function
 
     let ret = b.alloc_gc(MirType::Known(result_ty), None, LocalDebugKind::Temp, None);
     b.func.return_local = ret;
-    b.push(Inst::Call {
-        dst: ret,
-        callee: CallTarget::User(adapter.target.clone()),
-        args: forwarded,
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
     // The target may fault, and the adapter is on the fault path's way out: a
     // fault raised inside it has to reach this frame's `Terminator::Fault`
-    // rather than be carried past as a Unit sentinel.
-    b.check_fault();
+    // rather than be carried past as a Unit sentinel. `call_user` always
+    // checks, for exactly that reason.
+    b.call_user(ret, adapter.target.clone(), forwarded);
     b.func.blocks[b.cur.0 as usize].term = Terminator::Return { value: ret };
 
     b.func
@@ -592,6 +586,76 @@ impl<'a> Builder<'a> {
 
     fn push(&mut self, inst: Inst) {
         self.func.blocks[self.cur.0 as usize].insts.push(inst);
+    }
+
+    /// Push an instruction and, iff it can fault, the check that observes it.
+    ///
+    /// **The one place lowering decides whether a fault check is emitted**
+    /// (MIR-10, ADR-088). Before this the decision was made ~34 times, once per
+    /// emit site, and about half of them were wrong: the fused `collect` sink
+    /// pushed with no check (REP-52) while every method call checked whether or
+    /// not its wrapper could fault (REP-53). [`Inst::can_fault`] derives the
+    /// answer from the ABI manifest through the same instruction→symbol mapping
+    /// the backend uses, and [`crate::verify`] rejects a body that disagrees in
+    /// either direction — so a site that stops going through here fails the
+    /// build rather than going quiet.
+    ///
+    /// The sites that still call [`Builder::check_fault`] by hand are the ones
+    /// whose instruction is not built here (`Inst::IntBinOp`, `Inst::ValueCmp`),
+    /// and they are checked by the same rule.
+    fn emit(&mut self, inst: Inst) {
+        let faults = inst.can_fault();
+        self.push(inst);
+        if faults {
+            self.check_fault();
+        }
+    }
+
+    /// Emit a call to a runtime wrapper (and its fault check, if its manifest
+    /// row says it can fault).
+    fn call_runtime(&mut self, dst: LocalId, sym: RuntimeSymbol, args: Vec<LocalId>) {
+        self.emit(Inst::Call {
+            dst,
+            callee: CallTarget::Runtime(sym),
+            args,
+            roots: RootSlots::unannotated(),
+            debug: DebugSlots::unannotated(),
+        });
+    }
+
+    /// Emit a call to a user function. Always checked: a callee's body may
+    /// raise any fault and there is no manifest row for a Praxis function.
+    fn call_user(&mut self, dst: LocalId, name: String, args: Vec<LocalId>) {
+        self.emit(Inst::Call {
+            dst,
+            callee: CallTarget::User(name),
+            args,
+            roots: RootSlots::unannotated(),
+            debug: DebugSlots::unannotated(),
+        });
+    }
+
+    /// Emit an indirect call through a closure value. Always checked, for
+    /// [`Builder::call_user`]'s reason.
+    fn call_indirect(&mut self, dst: LocalId, callee: LocalId, args: Vec<LocalId>) {
+        self.emit(Inst::CallIndirect {
+            dst,
+            callee,
+            args,
+            roots: RootSlots::unannotated(),
+            debug: DebugSlots::unannotated(),
+        });
+    }
+
+    /// Emit an allocation (and its fault check, if any wrapper it reaches can
+    /// fault — `praxis_alloc_text`, `praxis_alloc_char`, `praxis_grid_new`).
+    fn alloc(&mut self, dst: LocalId, alloc: AllocKind) {
+        self.emit(Inst::Alloc {
+            dst,
+            alloc,
+            roots: RootSlots::unannotated(),
+            debug: DebugSlots::unannotated(),
+        });
     }
 
     /// Emit a fault check after a faultable instruction.
@@ -654,14 +718,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                     LocalDebugKind::User,
                     Some(*span),
                 );
-                b.push(Inst::Call {
-                    dst: cell,
-                    callee: CallTarget::Runtime(RuntimeSymbol::AllocVarCell),
-                    args: vec![v],
-                    roots: RootSlots::unannotated(),
-                    debug: DebugSlots::unannotated(),
-                });
-                b.check_fault();
+                b.call_runtime(cell, RuntimeSymbol::AllocVarCell, vec![v]);
                 b.locals.insert(*symbol, cell);
             } else {
                 let slot = b.alloc_gc(
@@ -693,14 +750,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
             if *op == AssignOp::Assign {
                 let v = lower_expr_gc(b, value);
                 if escaping {
-                    b.push(Inst::Call {
-                        dst,
-                        callee: CallTarget::Runtime(RuntimeSymbol::VarCellSet),
-                        args: vec![dst, v],
-                        roots: RootSlots::unannotated(),
-                        debug: DebugSlots::unannotated(),
-                    });
-                    b.check_fault();
+                    b.call_runtime(dst, RuntimeSymbol::VarCellSet, vec![dst, v]);
                 } else {
                     b.push(Inst::MoveGc { dst, src: v });
                 }
@@ -711,14 +761,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                 let cur = if escaping {
                     // Read the cell's current value.
                     let cur = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, Some(*span));
-                    b.push(Inst::Call {
-                        dst: cur,
-                        callee: CallTarget::Runtime(RuntimeSymbol::VarCellGet),
-                        args: vec![dst],
-                        roots: RootSlots::unannotated(),
-                        debug: DebugSlots::unannotated(),
-                    });
-                    b.check_fault();
+                    b.call_runtime(cur, RuntimeSymbol::VarCellGet, vec![dst]);
                     cur
                 } else {
                     let cur = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, Some(*span));
@@ -733,14 +776,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                     return;
                 };
                 if escaping {
-                    b.push(Inst::Call {
-                        dst,
-                        callee: CallTarget::Runtime(RuntimeSymbol::VarCellSet),
-                        args: vec![dst, materialized],
-                        roots: RootSlots::unannotated(),
-                        debug: DebugSlots::unannotated(),
-                    });
-                    b.check_fault();
+                    b.call_runtime(dst, RuntimeSymbol::VarCellSet, vec![dst, materialized]);
                 } else {
                     b.push(Inst::MoveGc {
                         dst,
@@ -782,14 +818,10 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                 let mut args = Vec::with_capacity(index_locals.len() + 1);
                 args.push(recv);
                 args.extend(index_locals.iter().copied());
-                b.push(Inst::Call {
-                    dst: cur,
-                    callee: CallTarget::Runtime(get),
-                    args,
-                    roots: RootSlots::unannotated(),
-                    debug: DebugSlots::unannotated(),
-                });
-                b.check_fault();
+                // Which of these faults is the *symbol's* answer, not the
+                // shape's: `VecGet`/`MapIndex`/`GridGet`/`TextGet` do,
+                // `CounterGet` does not (a missing key counts zero).
+                b.call_runtime(cur, get, args);
                 let rhs = lower_expr_gc(b, value);
                 let operand_ty = expr_static_type(value);
                 let Some(stored) = lower_compound_arith(b, *op, cur, rhs, operand_ty, Some(*span))
@@ -805,14 +837,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
             args.push(recv);
             args.extend(index_locals);
             args.push(stored);
-            b.push(Inst::Call {
-                dst,
-                callee: CallTarget::Runtime(*set),
-                args,
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
-            b.check_fault();
+            b.call_runtime(dst, *set, args);
         }
         TypedStmt::Expr(e) => {
             let _ = lower_expr_gc(b, e);
@@ -833,14 +858,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     // An escaping `var`'s slot holds a `VarCell`; deref it.
                     if b.escaping_vars.contains(symbol) {
                         let value = b.alloc_temp(MirType::Known(*ty), e);
-                        b.push(Inst::Call {
-                            dst: value,
-                            callee: CallTarget::Runtime(RuntimeSymbol::VarCellGet),
-                            args: vec![slot],
-                            roots: RootSlots::unannotated(),
-                            debug: DebugSlots::unannotated(),
-                        });
-                        b.check_fault();
+                        b.call_runtime(value, RuntimeSymbol::VarCellGet, vec![slot]);
                         value
                     } else {
                         slot
@@ -863,16 +881,13 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             callee_name, ty, ..
         } => {
             let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
-            b.push(Inst::Alloc {
+            b.alloc(
                 dst,
-                alloc: AllocKind::Closure {
+                AllocKind::Closure {
                     fn_name: FnValueAdapter::name(callee_name),
                     captures: Vec::new(),
                 },
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
-            b.check_fault();
+            );
             dst
         }
         // `a..b` / `a..=b` (§4.11, ADR-059). One runtime call per form: the
@@ -894,15 +909,10 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 RuntimeSymbol::RangeNew
             };
             let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
-            b.push(Inst::Call {
-                dst,
-                callee: CallTarget::Runtime(sym),
-                args: vec![lo, hi],
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
             // Neither form faults: a descending range is empty rather than an
-            // error, and `..=Int::MAX` saturates (ADR-059 D3).
+            // error, and `..=Int::MAX` saturates (ADR-059 D3). Both rows say
+            // `Effect::Allocates`, so `call_runtime` emits no check.
+            b.call_runtime(dst, sym, vec![lo, hi]);
             dst
         }
         TypedExpr::Bin {
@@ -939,16 +949,10 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                         if *op == BinOp::Add {
                             let dst =
                                 b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
-                            b.push(Inst::Call {
-                                dst,
-                                callee: CallTarget::Runtime(RuntimeSymbol::TextConcat),
-                                args: vec![l, r],
-                                roots: RootSlots::unannotated(),
-                                debug: DebugSlots::unannotated(),
-                            });
                             // `Allocates`, not `AllocatesAndFaults`: concatenating
                             // two UTF-8 payloads cannot produce anything else, so
                             // there is no fault to check for.
+                            b.call_runtime(dst, RuntimeSymbol::TextConcat, vec![l, r]);
                             dst
                         } else {
                             b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan)
@@ -1132,14 +1136,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 let callee_local = lower_expr_gc(b, ce);
                 let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
                 let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, None);
-                b.push(Inst::CallIndirect {
-                    dst,
-                    callee: callee_local,
-                    args: arg_locals,
-                    roots: RootSlots::unannotated(),
-                    debug: DebugSlots::unannotated(),
-                });
-                b.check_fault();
+                b.call_indirect(dst, callee_local, arg_locals);
                 return dst;
             }
             // Collection construction: `Vec[T]()`, `Deque[T]()`, etc. (M8 WS1,
@@ -1150,13 +1147,11 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // through to the generic call path below.
             if let Some(alloc) = collection_alloc_kind(b, callee_name, *ty) {
                 let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, None);
-                b.push(Inst::Alloc {
-                    dst,
-                    alloc,
-                    roots: RootSlots::unannotated(),
-                    debug: DebugSlots::unannotated(),
-                });
-                b.check_fault();
+                // Only `Grid()` faults here: `praxis_grid_new` validates its
+                // dimensions. The other eight `praxis_*_new` wrappers are
+                // `Effect::Allocates`, and `alloc` reads that rather than
+                // checking after all nine.
+                b.alloc(dst, alloc);
                 return dst;
             }
             // The `out(x)` builtin writes x to stdout via praxis_write_stdout.
@@ -1169,14 +1164,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 // so its type is the call's — which F15 now records at the call
                 // site rather than re-instantiating from the callee's scheme.
                 let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
-                b.push(Inst::Call {
-                    dst,
-                    callee: CallTarget::Runtime(RuntimeSymbol::WriteStdout),
-                    args: vec![arg_local],
-                    roots: RootSlots::unannotated(),
-                    debug: DebugSlots::unannotated(),
-                });
-                // out does not fault; no check_fault needed.
+                // `praxis_write_stdout` is `Effect::Pure`: no check.
+                b.call_runtime(dst, RuntimeSymbol::WriteStdout, vec![arg_local]);
                 return dst;
             }
             // `dbg(x)`, `panic(x)` and `assert(c)` — the rest of §16.1's
@@ -1191,16 +1180,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     .map(|a| lower_expr_gc(b, a))
                     .unwrap_or_else(|| lower_lit_gc(b, &Lit::Unit, espan));
                 let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
-                b.push(Inst::Call {
-                    dst,
-                    callee: CallTarget::Runtime(sym),
-                    args: vec![arg_local],
-                    roots: RootSlots::unannotated(),
-                    debug: DebugSlots::unannotated(),
-                });
-                if sym.faults() {
-                    b.check_fault();
-                }
+                b.call_runtime(dst, sym, vec![arg_local]);
                 return dst;
             }
             // The §16.1 numeric helpers: `abs`, `sign`, `min`, `max`, `clamp`,
@@ -1213,16 +1193,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             if let Some(helper) = praxis_stdlib::numeric_helper(callee_name) {
                 let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
                 let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
-                b.push(Inst::Call {
-                    dst,
-                    callee: CallTarget::Runtime(helper.symbol),
-                    args: arg_locals,
-                    roots: RootSlots::unannotated(),
-                    debug: DebugSlots::unannotated(),
-                });
-                if helper.symbol.faults() {
-                    b.check_fault();
-                }
+                b.call_runtime(dst, helper.symbol, arg_locals);
                 return dst;
             }
             // §6.5's graph helpers: `bfs`, `bfs_distance`, `dfs`, `dijkstra`,
@@ -1236,14 +1207,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             if let Some(helper) = praxis_stdlib::graph_helper(callee_name) {
                 let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
                 let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
-                b.push(Inst::Call {
-                    dst,
-                    callee: CallTarget::Runtime(helper.symbol),
-                    args: arg_locals,
-                    roots: RootSlots::unannotated(),
-                    debug: DebugSlots::unannotated(),
-                });
-                b.check_fault();
+                b.call_runtime(dst, helper.symbol, arg_locals);
                 return dst;
             }
             // Float constants `pi()`/`e()` (§4.12): direct runtime calls that
@@ -1255,13 +1219,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     RuntimeSymbol::FloatE
                 };
                 let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, None);
-                b.push(Inst::Call {
-                    dst,
-                    callee: CallTarget::Runtime(sym),
-                    args: vec![],
-                    roots: RootSlots::unannotated(),
-                    debug: DebugSlots::unannotated(),
-                });
+                b.call_runtime(dst, sym, vec![]);
                 return dst;
             }
             let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
@@ -1272,14 +1230,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // two soundly.
             if let Some(callee_local) = b.locals.get(callee).copied() {
                 let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
-                b.push(Inst::CallIndirect {
-                    dst,
-                    callee: callee_local,
-                    args: arg_locals,
-                    roots: RootSlots::unannotated(),
-                    debug: DebugSlots::unannotated(),
-                });
-                b.check_fault();
+                b.call_indirect(dst, callee_local, arg_locals);
                 return dst;
             }
             // The call's result temp materializes `e` (the whole call expr).
@@ -1289,14 +1240,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 LocalDebugKind::Temp,
                 Some(praxis_hir::expr_span(e)),
             );
-            b.push(Inst::Call {
-                dst,
-                callee: CallTarget::User(callee_name.clone()),
-                args: arg_locals,
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
-            b.check_fault();
+            b.call_user(dst, callee_name.clone(), arg_locals);
             dst
         }
         TypedExpr::MethodCall {
@@ -1334,12 +1278,26 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 if let Some(plan) = recognize_pipeline(b.db, &call) {
                     return lower_pipeline(b, plan);
                 }
+                // Two ways to get here, and both are compiler bugs rather than
+                // user errors — which is why this is an ICE and not a
+                // diagnostic (ADR-093 deleted lowering's `Y110`; a wrong answer
+                // or a type error at this point would misattribute a compiler
+                // fault to the program).
+                //
+                // Either the catalog lowers `{name}` as an intrinsic and no
+                // `classify_link`/`classify_sink` arm claims it, or inference
+                // never resolved the call at all — in which case it reported
+                // `Y110` and the front end should have stopped, or the receiver
+                // was one no call site pinned and `monomorphize` should have
+                // dropped the uncalled polymorphic original before MIR.
                 panic!(
                     "internal compiler error: the pipeline recognizer declined \
-                     `{name}`, which the catalog lowers as an intrinsic. Every \
-                     intrinsic row must be classified by `classify_link` or \
-                     `classify_sink`; see \
-                     `intrinsics_are_all_recognized_so_there_is_no_second_lowering`."
+                     `{name}`, and it carries no runtime symbol. Every intrinsic \
+                     row must be classified by `classify_link` or \
+                     `classify_sink` (see \
+                     `intrinsics_are_all_recognized_so_there_is_no_second_lowering`), \
+                     and every unresolved method call must have been reported by \
+                     inference and dropped before here (ADR-093)."
                 );
             };
             let mut arg_locals: Vec<LocalId> = Vec::with_capacity(args.len() + 1);
@@ -1356,15 +1314,15 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 LocalDebugKind::Temp,
                 Some(praxis_hir::expr_span(e)),
             );
-            b.push(Inst::Call {
-                dst,
-                callee: CallTarget::Runtime(symbol),
-                args: arg_locals,
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
-            // Method calls may fault (e.g. vec.get out of bounds); check after.
-            b.check_fault();
+            // **REP-53.** Some method calls fault (`v.get(i)` out of bounds);
+            // most do not. This site used to check after *all* of them, which
+            // put a `praxis_check_fault` call and a branch after every
+            // `v.len()` — and made `praxis_runtime::abi`'s
+            // `panic_fault_is_observable` premise false, since it reasons that
+            // a `Pure`/`Allocates` wrapper is never followed by a check. The
+            // symbol is in hand and its manifest row is the answer;
+            // `call_runtime` reads it.
+            b.call_runtime(dst, symbol, arg_locals);
             dst
         }
         TypedExpr::Tuple { elements, ty, .. } => {
@@ -1381,15 +1339,13 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 LocalDebugKind::Temp,
                 Some(praxis_hir::expr_span(e)),
             );
-            b.push(Inst::Alloc {
+            b.alloc(
                 dst,
-                alloc: AllocKind::Tuple {
+                AllocKind::Tuple {
                     ty: MirType::Known(*ty),
                     elements: element_locals,
                 },
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
+            );
             dst
         }
         // M6: `read`/`parse` lower to a runtime call against the parser plan.
@@ -1456,16 +1412,13 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // The closure value temp materializes `e` (the whole closure expr),
             // whose type is its `Func`.
             let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
-            b.push(Inst::Alloc {
+            b.alloc(
                 dst,
-                alloc: AllocKind::Closure {
+                AllocKind::Closure {
                     fn_name: fn_name.clone(),
                     captures: cap_locals,
                 },
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
-            b.check_fault();
+            );
             dst
         }
     }
@@ -1480,14 +1433,7 @@ fn lower_read(b: &mut Builder<'_>, plan: praxis_hir::PlanId, result_ty: Type) ->
     //    it can fault. Its manifest row says both, and the check below is what
     //    makes the fault land here rather than at the next unrelated one.
     let input = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
-    b.push(Inst::Call {
-        dst: input,
-        callee: CallTarget::Runtime(RuntimeSymbol::GetInput),
-        args: vec![],
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.check_fault();
+    b.call_runtime(input, RuntimeSymbol::GetInput, vec![]);
     // 2. Run the parser plan against it.
     run_parser_plan(b, plan, input, result_ty)
 }
@@ -1520,23 +1466,11 @@ fn run_parser_plan(
         value: i64::from(plan.get()),
     });
     let idx_gc = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
-    b.push(Inst::Alloc {
-        dst: idx_gc,
-        alloc: AllocKind::Int { value: idx_scalar },
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
+    b.alloc(idx_gc, AllocKind::Int { value: idx_scalar });
     // Call praxis_run_parser(ctx, idx, input) -> result. The result's type is
     // the one the parser plan synthesizes, which the typed tree carries.
     let dst = b.alloc_gc(MirType::Known(result_ty), None, LocalDebugKind::Temp, None);
-    b.push(Inst::Call {
-        dst,
-        callee: CallTarget::Runtime(RuntimeSymbol::RunParser),
-        args: vec![idx_gc, input],
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.check_fault();
+    b.call_runtime(dst, RuntimeSymbol::RunParser, vec![idx_gc, input]);
     dst
 }
 
@@ -1552,12 +1486,7 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
                 value: *n,
             });
             let dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, span);
-            b.push(Inst::Alloc {
-                dst,
-                alloc: AllocKind::Int { value: scalar },
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
+            b.alloc(dst, AllocKind::Int { value: scalar });
             dst
         }
         Lit::Bool(v) => {
@@ -1567,22 +1496,24 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
                 value: if *v { 1 } else { 0 },
             });
             let dst = b.alloc_gc(MirType::Known(b.bool_ty), None, LocalDebugKind::Temp, span);
-            b.push(Inst::Alloc {
-                dst,
-                alloc: AllocKind::Bool { value: scalar },
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
+            b.alloc(dst, AllocKind::Bool { value: scalar });
             dst
         }
         Lit::Text(s) => {
             let dst = b.alloc_gc(MirType::Known(b.text_ty), None, LocalDebugKind::Temp, span);
-            b.push(Inst::Alloc {
-                dst,
-                alloc: AllocKind::Text { value: s.clone() },
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
+            // **The rule has no carve-out here, on purpose (ADR-088, D-A).**
+            // `praxis_alloc_text` is `AllocatesAndFaults`: it validates its
+            // bytes and sets `INVALID_TEXT`. The bytes a *literal* hands it came
+            // from a Rust `String`, so the fault cannot fire at this call site —
+            // but claiming that in the verifier would put the exception in the
+            // very first arm of a rule whose whole content is that it has none,
+            // and nothing but the verifier would read the claim. The cost is one
+            // check per text-literal evaluation. Moving the validation out of
+            // the wrapper (so its row becomes `Allocates` and the instruction
+            // genuinely cannot fault) is the right long-term answer and is
+            // registered as its own row — it changes what a violated compiler
+            // precondition *does*, which is ADR-017 territory.
+            b.alloc(dst, AllocKind::Text { value: s.clone() });
             dst
         }
         Lit::Char(c) => {
@@ -1593,12 +1524,11 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
                 value: *c as i64,
             });
             let dst = b.alloc_gc(MirType::Known(b.char_ty), None, LocalDebugKind::Temp, span);
-            b.push(Inst::Alloc {
-                dst,
-                alloc: AllocKind::Char { value: scalar },
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
+            // `praxis_alloc_char` validates the Unicode scalar
+            // (`INVALID_CHAR`), so this checks for `AllocKind::Text`'s reason.
+            // There is no char-literal syntax today, so this arm is reached
+            // only from a synthesized `Lit::Char`.
+            b.alloc(dst, AllocKind::Char { value: scalar });
             dst
         }
         Lit::Float(f) => {
@@ -1610,23 +1540,13 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
                 bits: f.to_bits() as i64,
             });
             let dst = b.alloc_gc(MirType::Known(b.float_ty), None, LocalDebugKind::Temp, span);
-            b.push(Inst::Alloc {
-                dst,
-                alloc: AllocKind::Float { value: scalar },
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
+            b.alloc(dst, AllocKind::Float { value: scalar });
             dst
         }
         Lit::Unit => {
             // The Unit value (§4.3): allocate the immortal Unit singleton.
             let dst = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, span);
-            b.push(Inst::Alloc {
-                dst,
-                alloc: AllocKind::Unit,
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
+            b.alloc(dst, AllocKind::Unit);
             dst
         }
     }
@@ -1756,13 +1676,7 @@ fn lower_compound_arith(
                 return None;
             }
             let joined = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, span);
-            b.push(Inst::Call {
-                dst: joined,
-                callee: CallTarget::Runtime(RuntimeSymbol::TextConcat),
-                args: vec![cur, rhs],
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
+            b.call_runtime(joined, RuntimeSymbol::TextConcat, vec![cur, rhs]);
             Some(joined)
         }
     }
@@ -2159,14 +2073,9 @@ fn lower_for(
     // `len = iter.len()`.
     let len_sym = plan.len_symbol();
     let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
-    b.push(Inst::Call {
-        dst: len_dst,
-        callee: CallTarget::Runtime(len_sym),
-        args: vec![iter_local],
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.check_fault();
+    // Only `praxis_range_len` faults among the three the plan can name; a
+    // `Vec`/`Deque`/snapshot length does not, and this ran once per iteration.
+    b.call_runtime(len_dst, len_sym, vec![iter_local]);
     let len_scalar = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ExtractScalar {
         dst: len_scalar,
@@ -2206,14 +2115,9 @@ fn lower_for(
     // typed tree carries on the `For` node (`item_ty`). Both slots used to be
     // `Opaque`, so the debugger showed a `for` binding with no type at all.
     let item_gc = b.alloc_gc(MirType::Known(item_ty), None, LocalDebugKind::Temp, None);
-    b.push(Inst::Call {
-        dst: item_gc,
-        callee: CallTarget::Runtime(get_sym),
-        args: vec![iter_local, idx_gc],
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.check_fault();
+    // All three accessors an `IterPlan` can name fault on an out-of-range
+    // index, so this check stays — but it is the row that says so, not the site.
+    b.call_runtime(item_gc, get_sym, vec![iter_local, idx_gc]);
     // A keyed collection's member is the `(K, V)` pair `item_ty` names, and the
     // two halves arrive from two index-aligned snapshots. The pair is built
     // *here* rather than in the runtime because the tuple's schema is the
@@ -2224,24 +2128,15 @@ fn lower_for(
         None => item_gc,
         Some(values) => {
             let value_gc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
-            b.push(Inst::Call {
-                dst: value_gc,
-                callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
-                args: vec![values, idx_gc],
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
-            b.check_fault();
+            b.call_runtime(value_gc, RuntimeSymbol::VecGet, vec![values, idx_gc]);
             let pair = b.alloc_gc(MirType::Known(item_ty), None, LocalDebugKind::Temp, None);
-            b.push(Inst::Alloc {
-                dst: pair,
-                alloc: AllocKind::Tuple {
+            b.alloc(
+                pair,
+                AllocKind::Tuple {
                     ty: MirType::Known(item_ty),
                     elements: vec![item_gc, value_gc],
                 },
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
+            );
             pair
         }
     };
@@ -2829,14 +2724,7 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     // Body: load the element, thread it through the chain, run the sink.
     b.cur = body_blk;
     let item = b.alloc_gc(source_item_ty, None, LocalDebugKind::Temp, None);
-    b.push(Inst::Call {
-        dst: item,
-        callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
-        args: vec![src, idx],
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.check_fault();
+    b.call_runtime(item, RuntimeSymbol::VecGet, vec![src, idx]);
 
     let sink_plan = SinkPlan {
         sink: &sink,
@@ -3176,9 +3064,9 @@ fn emit_step(
             });
             emit_increment(b, *count);
             let tup = b.alloc_gc(*pair_ty, None, LocalDebugKind::Temp, None);
-            b.push(Inst::Alloc {
-                dst: tup,
-                alloc: AllocKind::Tuple {
+            b.alloc(
+                tup,
+                AllocKind::Tuple {
                     // The catalog declares `enumerate`'s result `Vec[(Int, T)]`,
                     // so the pair's type is a fact the chain already carries and
                     // the backend can resolve a real element descriptor for each
@@ -3188,9 +3076,7 @@ fn emit_step(
                     ty: *pair_ty,
                     elements: vec![idx_copy, item],
                 },
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
+            );
             tup
         }
         Step::Zip {
@@ -3211,27 +3097,18 @@ fn emit_step(
             };
             b.cur = pair_blk;
             let other_item = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
-            b.push(Inst::Call {
-                dst: other_item,
-                callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
-                args: vec![*other, *count],
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
-            b.check_fault();
+            b.call_runtime(other_item, RuntimeSymbol::VecGet, vec![*other, *count]);
             emit_increment(b, *count);
             let tup = b.alloc_gc(*pair_ty, None, LocalDebugKind::Temp, None);
-            b.push(Inst::Alloc {
-                dst: tup,
-                alloc: AllocKind::Tuple {
+            b.alloc(
+                tup,
+                AllocKind::Tuple {
                     // As for `enumerate` above: the catalog declares `zip`'s
                     // result `Vec[(T, U)]`, so the pair's type is known.
                     ty: *pair_ty,
                     elements: vec![item, other_item],
                 },
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
+            );
             tup
         }
     }
@@ -3267,14 +3144,11 @@ fn emit_splice(
 
     b.cur = body_blk;
     let inner_item = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
-    b.push(Inst::Call {
-        dst: inner_item,
-        callee: CallTarget::Runtime(RuntimeSymbol::VecGet),
-        args: vec![inner_vec, inner_idx],
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.check_fault();
+    b.call_runtime(
+        inner_item,
+        RuntimeSymbol::VecGet,
+        vec![inner_vec, inner_idx],
+    );
     // The rest of the chain, per inner element. "Continue" now means the inner
     // increment — the element that advances is the inner one — but the exit is
     // still the pipeline's: a `take` or an `any` that fires in here has answered
@@ -3355,14 +3229,7 @@ fn position_cmp_bound(
 /// where `idx` is `zip`'s own dense counter rather than the source cursor).
 fn idx_ge_len(b: &mut Builder<'_>, other: LocalId, idx: LocalId) -> LocalId {
     let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
-    b.push(Inst::Call {
-        dst: len_dst,
-        callee: CallTarget::Runtime(RuntimeSymbol::VecLen),
-        args: vec![other],
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.check_fault();
+    b.call_runtime(len_dst, RuntimeSymbol::VecLen, vec![other]);
     let len_scalar = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ExtractScalar {
         dst: len_scalar,
@@ -3394,14 +3261,10 @@ fn emit_bounds_check(
     els_blk: BlockId,
 ) {
     let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
-    b.push(Inst::Call {
-        dst: len_dst,
-        callee: CallTarget::Runtime(RuntimeSymbol::VecLen),
-        args: vec![src],
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.check_fault();
+    // `praxis_vec_len` is `Effect::Allocates` — it boxes its answer and cannot
+    // fault. The check this used to emit ran once per element, and it is what
+    // observed a fused `sum`'s overflow *one iteration late* (ADR-088).
+    b.call_runtime(len_dst, RuntimeSymbol::VecLen, vec![src]);
     let len_scalar = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ExtractScalar {
         dst: len_scalar,
@@ -3431,14 +3294,7 @@ fn emit_bounds_check(
 /// Invoke a closure `f(args)` via `CallIndirect` and return the result slot.
 fn invoke_closure(b: &mut Builder<'_>, f: LocalId, args: Vec<LocalId>) -> LocalId {
     let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
-    b.push(Inst::CallIndirect {
-        dst,
-        callee: f,
-        args,
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.check_fault();
+    b.call_indirect(dst, f, args);
     dst
 }
 
@@ -3578,12 +3434,7 @@ fn sink_alloc(
 /// a first element" into an answer.
 fn seeded_gc_accumulator(b: &mut Builder<'_>) -> LocalId {
     let acc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
-    b.push(Inst::Alloc {
-        dst: acc,
-        alloc: AllocKind::Unit,
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
+    b.alloc(acc, AllocKind::Unit);
     acc
 }
 
@@ -3606,14 +3457,7 @@ fn emit_empty_collection_guard(b: &mut Builder<'_>, seen: LocalId) {
 
     b.cur = empty;
     let sentinel = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
-    b.push(Inst::Call {
-        dst: sentinel,
-        callee: CallTarget::Runtime(RuntimeSymbol::RaiseEmptyCollection),
-        args: Vec::new(),
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.check_fault();
+    b.call_runtime(sentinel, RuntimeSymbol::RaiseEmptyCollection, Vec::new());
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: have };
 
     b.cur = have;
@@ -3717,6 +3561,16 @@ fn emit_sink_body(
                 rhs: item_scalar,
                 overflow: Overflow::Checked,
             });
+            // **The accumulator ADR-044 named as the reason this rule could not
+            // exist.** It is `Checked` — a `sum` genuinely can overflow — and it
+            // had no check, so the fault was observed one iteration later, by
+            // the loop header's `praxis_vec_len` check, which REP-53 has now
+            // deleted. Per-element is what §10.4's "immediately after" means,
+            // and it is what makes the overflow divert *at the addition*: the
+            // crash snapshot then shows the operands that overflowed rather than
+            // the next element's. The cost is roughly the check just deleted
+            // from the same loop's header.
+            b.check_fault();
         }
         Sink::Count => {
             let acc = acc_scalar.unwrap();
@@ -3933,15 +3787,22 @@ fn emit_sink_body(
             });
         }
         Sink::Collect => {
+            // **REP-52.** `praxis_vec_push` is `AllocatesAndFaults`: it raises
+            // `TYPE_MISMATCH` through `adopt_or_reject` when the pushed value's
+            // descriptor disagrees with the Vec's. Every sibling sink arm and
+            // the eager `v.push(x)` path checked; this one did not, and the
+            // fault would have been observed at whatever the next check happened
+            // to be. `call_runtime` reads the row.
+            //
+            // No source program reaches that fault today: `alloc_empty_vec`
+            // gives the collect target a null element descriptor, so it adopts
+            // the first pushed value's, and inference refuses a heterogeneous
+            // chain (`Y001`). The gate for this is therefore the verifier rule,
+            // not an end-to-end fault — see
+            // `a_fused_collect_observes_its_push`.
             let result = collect_vec.unwrap();
             let unit = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
-            b.push(Inst::Call {
-                dst: unit,
-                callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
-                args: vec![result, item],
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            });
+            b.call_runtime(unit, RuntimeSymbol::VecPush, vec![result, item]);
         }
     }
 }
@@ -4094,31 +3955,27 @@ fn emit_option_of(b: &mut Builder<'_>, seen: LocalId, value: LocalId, result_ty:
     };
 
     b.cur = some_blk;
-    b.push(Inst::Alloc {
+    b.alloc(
         dst,
-        alloc: AllocKind::Enum {
+        AllocKind::Enum {
             enum_def_id: def,
             variant_idx: OPTION_SOME_VARIANT,
             ty: mir_ty,
             args: vec![value],
         },
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
+    );
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join_blk };
 
     b.cur = none_blk;
-    b.push(Inst::Alloc {
+    b.alloc(
         dst,
-        alloc: AllocKind::Enum {
+        AllocKind::Enum {
             enum_def_id: def,
             variant_idx: OPTION_NONE_VARIANT,
             ty: mir_ty,
             args: Vec::new(),
         },
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
+    );
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join_blk };
 
     b.cur = join_blk;
@@ -4160,16 +4017,13 @@ const OPTION_NONE_VARIANT: u32 = praxis_runtime::enums::OPTION_NONE_TAG as u32;
 /// note on H10.
 fn alloc_empty_vec(b: &mut Builder<'_>, result_ty: MirType) -> LocalId {
     let result = b.alloc_gc(result_ty, None, LocalDebugKind::Temp, None);
-    b.push(Inst::Alloc {
-        dst: result,
-        alloc: AllocKind::Collection {
+    b.alloc(
+        result,
+        AllocKind::Collection {
             ctor: praxis_types::CollectionCtor::Vec,
             args: vec![MirType::Opaque],
         },
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.check_fault();
+    );
     result
 }
 
@@ -4277,14 +4131,9 @@ fn iter_plan(db: &TypeDb, iter: &TypedExpr) -> IterPlan {
 /// for the loop's duration — which it must be, since the body allocates.
 fn snapshot(b: &mut Builder<'_>, source: LocalId, sym: RuntimeSymbol) -> LocalId {
     let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
-    b.push(Inst::Call {
-        dst,
-        callee: CallTarget::Runtime(sym),
-        args: vec![source],
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
-    b.check_fault();
+    // All nine member-list wrappers are `Effect::Allocates`: materializing a
+    // collection's members into a `Vec` cannot fail. `call_runtime` says so.
+    b.call_runtime(dst, sym, vec![source]);
     dst
 }
 
@@ -4455,15 +4304,13 @@ fn lower_record_lit(
     // HIR lowerer).
     let field_locals: Vec<LocalId> = fields.iter().map(|(_, e)| lower_expr_gc(b, e)).collect();
     let dst = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
-    b.push(Inst::Alloc {
+    b.alloc(
         dst,
-        alloc: AllocKind::Record {
+        AllocKind::Record {
             record_def_id: record_def_id.to_u32(),
             fields: field_locals,
         },
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
+    );
     dst
 }
 
@@ -4492,17 +4339,15 @@ fn lower_enum_variant(
     let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
     let mir_ty = MirType::Known(ty);
     let dst = b.alloc_gc(mir_ty, None, LocalDebugKind::Temp, None);
-    b.push(Inst::Alloc {
+    b.alloc(
         dst,
-        alloc: AllocKind::Enum {
+        AllocKind::Enum {
             enum_def_id: enum_def_id.to_u32(),
             variant_idx,
             ty: mir_ty,
             args: arg_locals,
         },
-        roots: RootSlots::unannotated(),
-        debug: DebugSlots::unannotated(),
-    });
+    );
     dst
 }
 

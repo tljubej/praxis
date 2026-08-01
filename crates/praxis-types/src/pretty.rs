@@ -127,11 +127,42 @@ impl TypeDb {
                 }
             }
             TypeData::Enum { def, args } => {
-                // An anonymous enum (`choice(...)`) has no name to write, which
-                // is what the synthetic `""` name meant before it became `None`.
-                if let Some(name) = &self.enum_def(*def).name {
-                    let _ = out.write_str(name);
-                    self.write_type_args(args, out, names, binders);
+                let edef = self.enum_def(*def);
+                match &edef.name {
+                    Some(name) => {
+                        let _ = out.write_str(name);
+                        self.write_type_args(args, out, names, binders);
+                    }
+                    // An anonymous enum (`choice(...)`) has no name to write —
+                    // and used to write *nothing at all*, so every diagnostic
+                    // about one read as though the type were missing: `Y001`
+                    // said "expected `Int`, found " and `Y122` said "`` has no
+                    // variant `Bogus`" (REP-56). It renders like the anonymous
+                    // record it sits beside (§5.6): braces for "structural, no
+                    // name", `|` between the variants, and each payload in
+                    // parentheses so `{ A({ x: Int }) }` cannot be misread as a
+                    // record. Every payload is written, so the rendering is
+                    // total and no variant is silently invisible.
+                    None => {
+                        out.write_str("{ ").ok();
+                        for (i, v) in edef.variants.iter().enumerate() {
+                            if i > 0 {
+                                out.write_str(" | ").ok();
+                            }
+                            let _ = out.write_str(&v.name);
+                            if !v.payload.is_empty() {
+                                out.push('(');
+                                for (j, p) in v.payload.iter().enumerate() {
+                                    if j > 0 {
+                                        out.write_str(", ").ok();
+                                    }
+                                    self.write_type(*p, out, names, binders);
+                                }
+                                out.push(')');
+                            }
+                        }
+                        out.write_str(" }").ok();
+                    }
                 }
             }
             TypeData::Var(state) => match state {

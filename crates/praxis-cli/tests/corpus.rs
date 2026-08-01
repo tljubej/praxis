@@ -62,10 +62,10 @@ fn every_corpus_program_runs_and_prints_the_answer_it_documents() {
     // aoc-corpus, 8 input-parsers)" while the tree held 24 (18 and 6), and
     // neither number was checkable against the other. Bumping this when a
     // program lands is the price of the doc and the gate stating one fact.
-    // Today: 19 under `tests/aoc-corpus`, 9 under `tests/input-parsers`.
+    // Today: 24 under `tests/aoc-corpus`, 12 under `tests/input-parsers`.
     assert!(
-        programs.len() >= 28,
-        "expected at least 28 programs in the corpus under {}, found {}. \
+        programs.len() >= 36,
+        "expected at least 36 programs in the corpus under {}, found {}. \
          If you added one, raise this floor; if you removed one, say why.",
         root.display(),
         programs.len()
@@ -87,7 +87,11 @@ fn every_corpus_program_runs_and_prints_the_answer_it_documents() {
             cmd.arg("--input").arg(&input);
         }
         // Never inherit the harness's stdin: a `read` program with no `.in`
-        // must fault on empty input, not block on a terminal.
+        // must run against *empty* input rather than block on a terminal. It no
+        // longer faults there — a zero-byte buffer is empty input, and the
+        // constructors answer from their own rules (ADR-087) — so this line
+        // buys determinism, not a fault. Every corpus program that reads has an
+        // `.in` anyway.
         cmd.stdin(std::process::Stdio::null());
         let output = cmd.output().expect("failed to run praxis");
 

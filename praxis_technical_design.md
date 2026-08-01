@@ -375,6 +375,16 @@ fn factorial(n: Int) -> Int {
 }
 ```
 
+**A name has exactly one signature** (ADR-089). There is no arity-based
+overloading, no optional or default parameters, and no named arguments — a call
+with the wrong number of arguments is `Y024`, which names the counts. The
+labelled and optional arguments in §7.5 (`skip:`, `fill:`, `ragged`, variadic
+`block`) belong to the parser-expression grammar and are not ordinary calls; §7.5
+says so, and that boundary is what this rule keeps.
+
+Where another language would overload, Praxis uses a second name. §6.3 already
+does: `min`/`min_by`, `max`/`max_by`, `find`/`position`.
+
 ### 4.10 Closures
 
 ```praxis
@@ -409,11 +419,24 @@ Explicit alternatives:
 a.wrapping_add(b)
 a.saturating_add(b)
 a.checked_add(b) // returns Option[Int]
+a.wrapping_sub(b)
+a.checked_mul(b) // returns Option[Int]
 ```
 
-These three are the family: there are no `_sub`/`_mul` siblings, and whether
-there should be is undecided (REP-46). `checked_add` answers a real `Option[Int]`
-(§4.7), so a miss is matched, not sentinelled.
+**The family is three modes — `wrapping_`, `saturating_`, `checked_` — over the
+three operators that overflow without a divisor: `add`, `sub` and `mul`.** Nine
+rows. `checked_*` answers a real `Option[Int]` (§4.7), so a miss is matched, not
+sentinelled.
+
+There is **no `_div` or `_rem` form**: "Division by zero always faults" below is
+that closure, and a `checked_div` answering `None` for a zero divisor would
+contradict it. Division's one overflowing case, `Int::MIN / -1`, is guardable by
+two comparisons that cannot themselves fault. There is **no `_neg` or `_abs`
+form** either — `0.wrapping_sub(x)` and `0.checked_sub(x)` already spell them.
+
+`wrapping_mul` is the row this family exists for: every arithmetic operator is
+checked and the language has no bitwise operators, so modular multiplication has
+no other spelling (REP-46).
 
 Division by zero always faults.
 
@@ -503,9 +526,24 @@ agree and the operation still has no meaning. `"ab" * 3` is repetition in some
 languages; it is not a spelling here, which keeps it available to mean that
 later.
 
+**`t[i]` and `t.get(i)` answer a `Char`** (§4.3), indexing by Unicode scalar
+value and not by byte, and faulting if `i` is out of range. They are one row and
+one answer in two spellings. `Char` and `Int` convert explicitly in both
+directions — `Char.to_int()` never faults, and `Int.to_char()` faults
+(`InvalidChar`) on a value that is not a Unicode scalar — which is §4.12's
+`Float`/`Int` rule with a third type in it, exactly as `+` above is §4.12's
+operand rule with a third type in it (ADR-086).
+
+There is no character literal (that is open decision **D19**), so **`"#"[0]` is
+how a program names a particular character**. That spelling is what makes a
+`Grid[Char]` cell comparable to a character a program chose, rather than only to
+another cell.
+
 Two related gaps are open rather than answered: `Int` has no `to_text()` (only
 `Float` does, §4.12), and §8.1's interpolation is specified and unimplemented.
-Building a `Text` out of a number is not yet possible in any spelling.
+Building a `Text` out of a number is not yet possible in any spelling. `Char`
+deliberately has no `to_text()` either, for that reason: the `to_text` family is
+one decision and wants taking whole (ADR-086).
 
 ---
 
@@ -697,7 +735,7 @@ Initial operations:
 - `max_by`
 - `collect`
 
-The compiler lowers pipelines into concrete internal adapters, then fuses common chains into loops. As of M8-WS11, the 22 non-barrier combinators (all of the above except `sorted`/`unique`/`frequencies`/`chunks`/`windows`) fuse into a single loop over the source — `v.map(f).filter(p).sum()` compiles to one loop with zero intermediate Vecs (ADR-029). The five barriers need the whole sequence and require new runtime sort/dedup helpers; they remain deferred.
+The compiler lowers pipelines into concrete internal adapters, then fuses common chains into loops. Every non-barrier combinator fuses into a single loop over the source — `v.map(f).filter(p).sum()` compiles to one loop with zero intermediate Vecs (ADR-029). A **barrier** needs the whole sequence before it can answer anything, so it is a runtime call rather than a fused stage: a chain ends at one and begins again from its result. `sorted`, `unique` and `frequencies` are implemented as barriers (REP-33). `chunks` and `windows` remain deferred — they answer `Vec[Vec[T]]`, which needs a rule for what the outer vector's element type is labelled with, and nothing in this document forces one.
 
 ### 6.4 Grid
 
@@ -810,6 +848,14 @@ Inside a backtick template:
 - Backticks and backslashes use ordinary escapes.
 
 The flexible ordinary-space rule is intentional because AoC inputs frequently align columns with variable spacing.
+
+**A template ends at the line it opens on** (ADR-094). A raw newline may not
+appear inside one; `\n` above is how a template matches a line ending, and it is
+the only way. This is the rule a `"…"` literal already follows, and it is what
+bounds the report when a template is left unclosed — an unterminated template
+names its own line rather than the rest of the file. A raw newline never had a
+meaning here in any case: it is whitespace but not a space, so it fell through to
+"literal text" and matched LF while failing on CRLF, where `\n` matches both.
 
 ### 7.3 Captures
 
@@ -1090,6 +1136,14 @@ Vec[{
 
 A positional template with named captures is flattened into the enclosing block result. A positional parser returning a scalar must be explicitly named to avoid an unclear field name.
 
+**A block item is offered its own lines** (ADR-090). A *template* item gets the
+line it starts on, plus one more line for each `\n` the template itself writes;
+any other item is offered the rest of the region, because `lines`, `sections`,
+`grid` and `matrix` compute their own extent. This is why
+`` `  Starting items: {items:csv(int)}` `` in §7.7 stops at the end of its line
+even though its capture is the template's last part, and why the
+`ranges: lines(...)` item above still takes every line that is left.
+
 #### `one_of(chars)`
 
 Match one character from a literal character set.
@@ -1113,7 +1167,23 @@ read choice(
 )
 ```
 
-Result cases are matched as `.Number { ... }` and `.Operation { ... }`.
+**Result cases are matched with an ordinary variant pattern** (ADR-091). There is
+no leading-dot form and no flattening of the payload's fields into the variant's
+own braces — the sentence this replaces named a surface the language never had. A
+case whose template has named captures carries an **anonymous record** as its
+payload (§5.6), and two spellings reach its fields:
+
+```praxis
+match r {
+    Number(p) => p.value
+    Operation({ left, op, right }) => 0
+}
+```
+
+`Number(p)` binds the whole payload record and reads it with `p.value`.
+`Operation({ left, op, right })` takes it apart in the pattern — and that record
+pattern has **no head** because the payload record is anonymous: there is no name
+a head could write.
 
 #### `scan(parser)`
 

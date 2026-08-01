@@ -65,7 +65,9 @@ for completion and signature help — it would have to render one row two ways.
   requires `HasField` of every receiver it cannot answer itself, so a concrete one
   fails in inference and `v.len` is `Y112` under `check` — and the message names
   the type, `no field `len` on type `Vec[Int]``, which lowering's emitter could not
-  say. The asymmetry this bullet deferred is closed for fields; `Y110`'s is still
-  open (REP-33).
+  say. The asymmetry this bullet deferred is closed for fields — and **for
+  methods too, as of 2026-08-01 (ADR-093, REP-33)**: `Y110` moved into inference
+  at both doors and lowering's emitter is gone, so `v.nosuchmethod()` is reported
+  under `check`, with the receiver type named.
 - **A record field may be named `len`** and is unaffected: `p.len` reads the field,
   `p.len()` looks for a row. The gate pins both.

@@ -323,15 +323,16 @@ the `Int` callback.
 It takes the plan now and returns `child_descriptor(plan, capture.child)`. So
 does `walk_characters`, which hardcoded `CHAR`.
 
-**One hardcoded element descriptor is left, and it is registered.** A template
-with two or more anonymous captures still answers `&scalars::UNIT`
-(`template_result_descriptor`), so ``lines(`{int},{int}`)`` produces a `Vec` of
-`Tuple`s tagged `Unit` and renders through the `Unit` callback — this decision's
-own class, in the one shape it did not reach. It is **REP-54** (P2, not done):
-the fix is a tuple descriptor built from the child descriptors, which the
-static-descriptor path has no constructor for today. Read this decision as
-"derived, never defaulted" being the rule, with REP-54 the one place the rule is
-not yet kept.
+**No hardcoded element descriptor is left.** The last one — a template with two
+or more anonymous captures answering `&scalars::UNIT`, so ``lines(`{int},{int}`)``
+produced a `Vec` of `Tuple`s tagged `Unit` — was **REP-54**, and it is fixed
+(ADR-092). Worth recording that this paragraph mispredicted the fix: it expected
+"a tuple descriptor built from the child descriptors, which the static-descriptor
+path has no constructor for". There was nothing to construct. `TUPLE` is a
+uniform descriptor like `VEC` and `RECORD`, the per-shape `TupleSchema` lives in
+the payload, and `VecPayload::element_descriptor` is a `*const TypeDescriptor`
+that could not hold a schema in any case. "Derived, never defaulted" is now the
+rule with no exception.
 
 This decision depends on ADR-072 (S19): before a capture named its own parser
 body, `capture.child` was the wrong node and deriving from it would have shipped

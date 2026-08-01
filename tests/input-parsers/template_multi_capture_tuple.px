@@ -1,0 +1,30 @@
+// Input-parser fixture: a template with two anonymous captures is a tuple, and
+// the collection that holds it says so (ADR-092, REP-54).
+//
+// This is §7.8's own type-derivation row — ``lines(`{int},{int}`)`` is
+// `Vec[(Int, Int)]` — which no corpus program covered, which is how the defect
+// survived thirty-three of them. The static type was already right; the *Vec's
+// element tag* was `Unit`, so `vec_format` rendered every element through
+// `unit_format`, which prints the literal string "Unit" and ignores its
+// payload.
+//
+// OBSERVED RED at 6e74642 (the fix removed): line 1 printed `[Unit, Unit]` and
+// line 2 printed `false`.
+//
+// **The `pairs == same` line is the load-bearing half.** Rendering is the
+// visible symptom; the wrong `Bool` is the silent one. `vec_equals` compares
+// the two element descriptors by pointer and bails before it compares a single
+// element, so a parsed `Vec[(Int, Int)]` compared unequal to an identical one
+// built with `push` — and its `false` sibling also answered `false`, so both
+// spellings agreed with each other and with nothing. Comparing a parser-built
+// Vec against a codegen-built one is the point: it gates ADR-042's two
+// descriptor producers answering the same tag for the same type.
+fn main() -> Int {
+    let pairs = read lines(`{int},{int}`);
+    out(pairs);
+    let same = Vec();
+    same.push((1, 2));
+    same.push((3, 4));
+    out(pairs == same);
+    pairs.len()
+}

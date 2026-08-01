@@ -159,6 +159,46 @@ pub enum ScalarKind {
     Float,
 }
 
+impl ScalarKind {
+    /// The wrapper an [`Inst::Materialize`] of this payload calls to re-box it.
+    ///
+    /// **This is the one statement of the mapping** (MIR-10). It used to live
+    /// inline in the Cranelift backend's `Materialize` arm and nowhere else,
+    /// which meant [`Inst::can_fault`] would have had to restate it — and the
+    /// verifier's answer and the call the backend emits would then be two
+    /// statements of one fact, drifting the first time someone changed a symbol
+    /// in `lower_inst`. The backend reads this function now.
+    #[inline]
+    #[must_use]
+    pub const fn alloc_symbol(self) -> RuntimeSymbol {
+        match self {
+            ScalarKind::Int => RuntimeSymbol::AllocInt,
+            ScalarKind::Bool => RuntimeSymbol::AllocBool,
+            ScalarKind::Char => RuntimeSymbol::AllocChar,
+            // Float's bit pattern is boxed by `praxis_alloc_float`.
+            ScalarKind::Float => RuntimeSymbol::AllocFloat,
+            // Byte is reserved and not yet wired; box as Int defensively.
+            ScalarKind::Byte => RuntimeSymbol::AllocInt,
+        }
+    }
+
+    /// The wrapper an [`Inst::ExtractScalar`] of this payload calls to read it.
+    /// The sibling of [`ScalarKind::alloc_symbol`], and here for its reason.
+    #[inline]
+    #[must_use]
+    pub const fn load_symbol(self) -> RuntimeSymbol {
+        match self {
+            ScalarKind::Int => RuntimeSymbol::IntLoad,
+            ScalarKind::Bool => RuntimeSymbol::BoolLoad,
+            ScalarKind::Char => RuntimeSymbol::CharLoad,
+            // Float's payload is read as its f64 bit pattern (i64 channel).
+            ScalarKind::Float => RuntimeSymbol::FloatLoad,
+            // Byte is reserved and not yet wired; read as Int defensively.
+            ScalarKind::Byte => RuntimeSymbol::IntLoad,
+        }
+    }
+}
+
 /// A basic block: a straight-line list of instructions and one terminator.
 #[derive(Debug)]
 pub struct Block {
@@ -384,6 +424,94 @@ pub enum Inst {
     },
 }
 
+impl Inst {
+    /// Whether this instruction can set `pending_fault`, and therefore must be
+    /// followed immediately by an [`Inst::CheckFault`] (§10.4, ADR-088).
+    ///
+    /// [`crate::verify`] enforces both directions of that. This is the *one*
+    /// answer both it and the sites in [`crate::build`] read, and it derives
+    /// from the ABI manifest — [`RuntimeSymbol::faults`] — through the same
+    /// instruction→symbol mapping the Cranelift backend uses to emit the call.
+    /// Before it, "can this instruction fault" was ~34 local judgements in the
+    /// builder, and about half of them were wrong in one direction or the other
+    /// (REP-52 forgot a check the fused `collect` needed; REP-53 emitted one
+    /// after every method call, including the `Effect::Allocates` ones).
+    #[inline]
+    #[must_use]
+    pub fn can_fault(&self) -> bool {
+        self.fault_reason().is_some()
+    }
+
+    /// *Why* this instruction can fault — the wrapper it calls, or the
+    /// operation whose overflow the runtime reports — or `None` when it cannot.
+    ///
+    /// One function rather than a `can_fault` predicate plus a separate
+    /// diagnostic string: the verifier names the reason in its error, and a
+    /// second answer to "which symbol is this" is exactly the drift this
+    /// mapping exists to prevent.
+    #[must_use]
+    pub fn fault_reason(&self) -> Option<&'static str> {
+        let faulting = |sym: RuntimeSymbol| sym.faults().then(|| sym.name());
+        match self {
+            // An allocation is one constructor call plus, for a composite, one
+            // filler call per slot. `praxis_alloc_text` and `praxis_alloc_char`
+            // validate their payload (`INVALID_TEXT`/`INVALID_CHAR`) and
+            // `praxis_grid_new` its dimensions; the rest only allocate.
+            Inst::Alloc { alloc, .. } => alloc.symbols().find_map(faulting),
+            // Re-boxing a payload: `Char`'s wrapper validates the Unicode
+            // scalar, the others do not.
+            Inst::Materialize { scalar, .. } => faulting(scalar.alloc_symbol()),
+            // Every `praxis_*_load` is `Effect::Pure`; the arm is here so a
+            // future width that validates is not silently unobserved.
+            Inst::ExtractScalar { scalar, .. } => faulting(scalar.load_symbol()),
+            // Checked arithmetic reports overflow (and, for `Div`/`Rem`, a zero
+            // divisor) through `praxis_raise_*_if`. `Overflow::Bounded` is a
+            // claim about the *site* (ADR-044 decision 6): the backend emits the
+            // bare instruction, so there is nothing to observe and a check after
+            // one is rejected as redundant.
+            Inst::IntBinOp { overflow, .. } => {
+                matches!(overflow, Overflow::Checked).then_some("checked Int arithmetic")
+            }
+            // `praxis_value_cmp` faults when the operands' runtime types
+            // disagree, or the type has no ordering (ADR-045).
+            Inst::ValueCmp { .. } => faulting(RuntimeSymbol::ValueCmp),
+            // `praxis_struct_eq` dispatches to the descriptor's `equals`
+            // callback, which answers a `bool` for every pair: `Effect::Pure`.
+            Inst::StructEq { .. } => faulting(RuntimeSymbol::StructEq),
+            Inst::LoadCapture { .. } => faulting(RuntimeSymbol::ClosureCapture),
+            Inst::LoadField { .. } => faulting(RuntimeSymbol::RecordField),
+            Inst::LoadTupleElem { .. } => faulting(RuntimeSymbol::TupleGet),
+            Inst::EnumPayloadGet { .. } => faulting(RuntimeSymbol::EnumPayload),
+            // The backend reads the tag inline out of the payload — no call, so
+            // no manifest row applies and nothing can fault.
+            Inst::EnumTag { .. } => None,
+            Inst::Call {
+                callee: CallTarget::Runtime(sym),
+                ..
+            } => faulting(*sym),
+            // A callee's *body* may raise any fault, and there is no manifest
+            // row for a Praxis function. The fault reaches this frame as the
+            // Unit sentinel in `dst`, and only the check turns that back into a
+            // diversion — which is what makes a deep `StackOverflow` observable
+            // before the caller feeds the sentinel to an arithmetic wrapper.
+            Inst::Call {
+                callee: CallTarget::User(_),
+                ..
+            } => Some("a called function's body may raise any fault"),
+            Inst::CallIndirect { .. } => Some("a called closure's body may raise any fault"),
+            Inst::ConstInt { .. }
+            | Inst::ConstFloat { .. }
+            | Inst::StoreScalar { .. }
+            | Inst::IntCmp { .. }
+            | Inst::FloatBinOp { .. }
+            | Inst::FloatNeg { .. }
+            | Inst::FloatCmp { .. }
+            | Inst::MoveGc { .. }
+            | Inst::CheckFault { .. } => None,
+        }
+    }
+}
+
 /// What to allocate, for [`Inst::Alloc`].
 #[derive(Debug)]
 pub enum AllocKind {
@@ -467,6 +595,84 @@ pub enum AllocKind {
         ctor: praxis_types::CollectionCtor,
         args: Vec<MirType>,
     },
+}
+
+impl AllocKind {
+    /// The wrapper that creates the object.
+    ///
+    /// `None` only for a [`AllocKind::Collection`] whose constructor has no
+    /// `praxis_*_new` wrapper — `Range` and `Seq`, which the backend refuses
+    /// (they are unreachable from source: `collection_from_name` resolves the
+    /// *type*, but no construction lowering exists).
+    #[inline]
+    #[must_use]
+    pub const fn constructor(&self) -> Option<RuntimeSymbol> {
+        match self {
+            AllocKind::Int { .. } => Some(RuntimeSymbol::AllocInt),
+            AllocKind::Bool { .. } => Some(RuntimeSymbol::AllocBool),
+            AllocKind::Unit => Some(RuntimeSymbol::AllocUnit),
+            AllocKind::Text { .. } => Some(RuntimeSymbol::AllocText),
+            AllocKind::Char { .. } => Some(RuntimeSymbol::AllocChar),
+            AllocKind::Float { .. } => Some(RuntimeSymbol::AllocFloat),
+            AllocKind::Record { .. } => Some(RuntimeSymbol::AllocRecord),
+            AllocKind::Enum { .. } => Some(RuntimeSymbol::AllocEnum),
+            AllocKind::Tuple { .. } => Some(RuntimeSymbol::AllocTuple),
+            AllocKind::Closure { .. } => Some(RuntimeSymbol::AllocClosure),
+            AllocKind::Collection { ctor, .. } => collection_new_symbol(*ctor),
+        }
+    }
+
+    /// The wrapper that fills one slot of a composite, for the four allocations
+    /// the backend builds in two phases (allocate, then set each slot).
+    /// `None` for a scalar box or a collection, which have no slots to fill.
+    #[inline]
+    #[must_use]
+    pub const fn filler(&self) -> Option<RuntimeSymbol> {
+        match self {
+            AllocKind::Record { .. } => Some(RuntimeSymbol::RecordSetField),
+            AllocKind::Enum { .. } => Some(RuntimeSymbol::EnumSetPayload),
+            AllocKind::Tuple { .. } => Some(RuntimeSymbol::TupleSet),
+            AllocKind::Closure { .. } => Some(RuntimeSymbol::ClosureSetCapture),
+            _ => None,
+        }
+    }
+
+    /// Every runtime wrapper this one [`Inst::Alloc`] calls — the constructor
+    /// and, for a composite, the filler it calls once per slot.
+    ///
+    /// One `Alloc` is more than one call, which is why the fault question is
+    /// asked of the whole set rather than of the constructor: an allocation
+    /// faults if *any* wrapper it reaches can.
+    pub fn symbols(&self) -> impl Iterator<Item = RuntimeSymbol> {
+        self.constructor().into_iter().chain(self.filler())
+    }
+}
+
+/// The `praxis_*_new` wrapper for a collection constructor, or `None` when
+/// there is none.
+///
+/// `Range` and `Seq` have no construction wrapper: a range is built by
+/// `praxis_range_new` from its endpoints (an [`Inst::Call`], not an `Alloc`),
+/// and `Seq` is the compiler-internal lazy sequence a fused pipeline never
+/// materializes. The backend errors on either, and the verifier's fault rule
+/// answers "cannot fault" for them, which is consistent: an allocation the
+/// backend refuses to lower emits no call at all.
+#[inline]
+#[must_use]
+pub const fn collection_new_symbol(ctor: praxis_types::CollectionCtor) -> Option<RuntimeSymbol> {
+    use praxis_types::CollectionCtor as C;
+    match ctor {
+        C::Vec => Some(RuntimeSymbol::VecNew),
+        C::Deque => Some(RuntimeSymbol::DequeNew),
+        C::Map => Some(RuntimeSymbol::MapNew),
+        C::Set => Some(RuntimeSymbol::SetNew),
+        C::Counter => Some(RuntimeSymbol::CounterNew),
+        C::MinHeap => Some(RuntimeSymbol::MinHeapNew),
+        C::MaxHeap => Some(RuntimeSymbol::MaxHeapNew),
+        C::BitSet => Some(RuntimeSymbol::BitsetNew),
+        C::Grid => Some(RuntimeSymbol::GridNew),
+        C::Range | C::Seq => None,
+    }
 }
 
 /// A call target. M4 resolves user functions by name; the backend mints a symbol.

@@ -178,6 +178,15 @@ receiver the program pinned to a type without the method, and a receiver nothing
 ever pinned. Reporting from the channel as well would be the same mistake twice.
 So `HasMethod` resolves or stays silent; it never vetoes.
 
+**Amended 2026-08-01 (ADR-093, REP-33).** Corrected, by the same argument REP-28
+used against this ADR's `HasField` half: `praxis check` does not run lowering, so
+a `Y110` only lowering emits is one `check` cannot see, and every missing method
+was a silent `check` followed by a failing `run` — Appendix D included. `Y110`
+still has one emitter and it is now **inference's**, at both doors; lowering
+emits nothing. A name the catalog holds nowhere at that arity is refused before
+the receiver is known, because the catalog is the complete method universe. So
+`HasMethod` resolves *or reports*.
+
 ## Decision 6: a catalog type variable may be bounded, and the bound is a scalar identity, not a capability (TY-31)
 
 `Vec[Bool].sum()` typechecked. So did `Vec[Float].sum()`, which returned
@@ -315,9 +324,16 @@ unified — is a compile error to add halfway.
   never-called `fn total(v) { v.sum() }` still reports `Y110` at lowering; the two
   member syntaxes divide differently now, and the reason is that a method call
   survives into lowering with something to complain about and a field read need
-  not.
+  not. **Amended 2026-08-01 (ADR-093):** they no longer divide differently. An
+  uncalled `fn total(v) { v.sum() }` is clean at both commands — `sum` exists in
+  the catalog, so the requirement is still deferred, and lowering no longer
+  reports — while an uncalled `fn f(x) { x.nope() }` reports at `check`, because
+  no receiver in the catalog has a `nope`.
 - **A `Bound::Cap` arm has no catalog row (Decision 6).** Nothing in the
   catalog needs one, because the receiver's type already answers those
   questions. The next row that genuinely does — a registered `sorted`, a
   `unique`, a `Vec.contains` — adds the arm and the `require_cap` route
   together.
+  **That row landed 2026-08-01 (REP-33 half (a)), exactly as predicted:**
+  `sorted`, `unique` and `frequencies` are registered, `Bound::Kind(CapKind)` is
+  the arm, and `apply_bounds` routes it through `require_cap`.

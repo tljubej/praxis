@@ -54,7 +54,32 @@ pub enum SyntaxKind {
     /// A backtick-delimited parser template, e.g. `` `{x:int}` ``. The whole
     /// template is one token in Milestone 1; its interior is re-scanned by the
     /// input-parser lexer in Milestone 6 (§7).
+    ///
+    /// **This kind means the template closed.** A run that did not is
+    /// [`SyntaxKind::UnterminatedBacktickTemplate`], so a `BacktickTemplate`'s
+    /// text is a complete template *by construction* and no consumer has to
+    /// re-derive that (ADR-094).
     BacktickTemplate,
+    /// A backtick run that did not close before its line ended (ADR-094).
+    ///
+    /// Two kinds rather than one predicate, because the question "is this token
+    /// terminated" had grown a third hand-rolled answer:
+    /// `praxis-hir`'s `parser_lower` asked it with
+    /// `strip_prefix('`').and_then(strip_suffix('`'))`, which was correct only
+    /// while an unterminated token ran to EOF and therefore could not end in a
+    /// backtick. Once a template ends at its line, the common unterminated token
+    /// *is* `` `{int` `` — the strip succeeds, the interior scanner is handed
+    /// `{int`, and `I030` comes back describing an interior nobody wrote. That
+    /// is the fabricated-interior class
+    /// `an_unterminated_template_does_not_also_report_a_fabricated_interior`
+    /// exists to forbid.
+    ///
+    /// So the state is made unrepresentable instead: the lexer decides once,
+    /// and a consumer that receives this kind knows there is nothing to scan.
+    /// It also means such a token can be typed with a fresh variable rather than
+    /// drawing `Y023` ("write `read` before it") — advice that cannot close a
+    /// template.
+    UnterminatedBacktickTemplate,
 
     // ---- Keywords (§4). All are lexed; only a subset is parsed in M1. ----
     KW_LET,      // `let`

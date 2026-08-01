@@ -107,9 +107,11 @@ pub enum PlanNode {
     /// `grid(P)`.
     Grid { child: u32 },
     /// A backtick template. `parts` are indices into [`ParserPlan::template_parts`].
+    ///
+    /// **Every template shape lowers to this**, multi-anonymous-capture tuples
+    /// included; see [`TemplateShape`]. There is deliberately no `Tuple` node
+    /// beside it — see that type's doc for why one cannot exist.
     Template { parts: &'static [TemplatePartNode] },
-    /// A tuple of captures (anonymous, ≥2) — the result is assembled element-wise.
-    Tuple { elements: &'static [u32] },
 }
 
 /// One part of a template, in plan form.
@@ -124,6 +126,80 @@ pub enum TemplatePartNode {
         field_index: Option<u16>,
         name: Option<&'static str>,
     },
+}
+
+/// What a lowered template's parts add up to (§7.3).
+///
+/// §7.3: named captures produce an anonymous record; anonymous captures produce
+/// a scalar when there is one and a tuple when there are several. A template
+/// with no captures matches literally and produces `Unit`.
+///
+/// **Stated here, next to the parts it classifies, because it was previously
+/// stated in four places and three of them had gone stale.** The static type
+/// (`synthesize::template_type`), this lowering, the interpreter's assembly of
+/// the value, and the interpreter's *element tag* each answered the same
+/// question separately, and the tag answered `Unit` for the tuple shape: so
+/// ``read lines(`{int},{int}`)`` printed `[Unit, Unit]` and compared unequal to
+/// an identical `Vec` built with `push`, while `praxis check` typed it
+/// `Vec[(Int, Int)]` throughout. That is REP-54; ADR-092 has the whole story.
+/// The value and its tag now ask this one function.
+///
+/// **There is no `PlanNode::Tuple`, and that is not an omission.** A variant
+/// carrying only child indices cannot represent a multi-capture template,
+/// because the template's separators are `TemplatePartNode::Literal`s between
+/// the captures — `` `{int},{int}` `` would lose its comma. Widening it to hold
+/// the literals makes it `PlanNode::Template` again. So the tuple shape is a
+/// property of a `Template`'s parts, which is what this type reads, and the
+/// state "a tuple node" is unnameable rather than merely unreachable.
+///
+/// `synthesize::template_type` answers the same question for the *type*, over
+/// AST `TemplatePart`s rather than lowered ones. Keep the two in step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateShape {
+    /// No captures: the template matches literally and produces `Unit`.
+    Unit,
+    /// One anonymous capture: the result is that capture's value, and its type
+    /// is the child parser's own result type. `child` is the child node index.
+    Scalar { child: u32 },
+    /// At least one named capture: an anonymous record, one field per capture.
+    /// Mixing named and anonymous captures in one template is rejected before
+    /// lowering (§7.3), so "any named" and "all named" are the same set here.
+    Record,
+    /// Two or more captures, none named: a tuple, one element per capture in
+    /// source order.
+    Tuple,
+}
+
+impl TemplateShape {
+    /// Classify a lowered template's parts.
+    pub fn of(parts: &[TemplatePartNode]) -> TemplateShape {
+        let mut captures = 0usize;
+        let mut any_named = false;
+        let mut sole_anonymous: Option<u32> = None;
+        for part in parts {
+            if let TemplatePartNode::Capture { child, name, .. } = part {
+                captures += 1;
+                match name {
+                    Some(_) => any_named = true,
+                    None => sole_anonymous = Some(*child),
+                }
+            }
+        }
+        match (any_named, captures) {
+            (true, _) => TemplateShape::Record,
+            (false, 0) => TemplateShape::Unit,
+            (false, 1) => match sole_anonymous {
+                Some(child) => TemplateShape::Scalar { child },
+                // Not reachable: one capture with none named *is* that one
+                // anonymous capture. Answering `Unit` rather than panicking
+                // keeps this total, which matters because the interpreter that
+                // calls it runs under `extern "C"`, where a panic is undefined
+                // behaviour.
+                None => TemplateShape::Unit,
+            },
+            (false, _) => TemplateShape::Tuple,
+        }
+    }
 }
 
 /// One item of a `block(...)` (M9, §7.5), in plan form.
@@ -561,49 +637,32 @@ fn lower_node(b: &mut PlanBuilder<'_>, ast: &ParserAst) -> u32 {
     }
 }
 
-/// Lower a template: collect its parts, possibly build a record schema for
-/// named captures, and emit a `PlanNode::Template` (or a scalar/tuple).
+/// Lower a template into a `PlanNode::Template`.
+///
+/// **Every shape, one node.** Scalar, tuple and record templates all lower to
+/// this, because all three need the literal parts between the captures kept —
+/// they are the separators the runtime matches, and they are what makes
+/// `` `{int},{int}` `` a pair rather than a comma-less run of digits. Which of
+/// the three a given template *is* is [`TemplateShape::of`]'s answer, read from
+/// these same parts by the interpreter; this function no longer decides it.
+///
+/// It used to look as though it did. There were two trailing branches here,
+/// byte-identical `push_node(PlanNode::Template { .. })` calls distinguished
+/// only by their comments — one for "named", one for "scalar or tuple" — which
+/// read as a lowering-time classification and was not one. `captures` is still
+/// collected, for the field indices [`lower_template_parts`] assigns.
 fn lower_template(b: &mut PlanBuilder<'_>, parts: &[TemplatePart]) -> u32 {
-    // Collect captures to decide scalar / tuple / record.
+    // Capture positions, which is what assigns each capture its field index in
+    // the resulting record or tuple.
     let captures: Vec<(usize, &TemplatePart)> = parts
         .iter()
         .enumerate()
         .filter(|(_, p)| matches!(p, TemplatePart::Capture { .. }))
         .collect();
-
-    if captures.is_empty() {
-        // No captures → the template matches literally, producing Unit. We still
-        // emit the parts so the runtime can match them.
-        let part_indices = lower_template_parts(b, parts, &[]);
-        return b.push_node(PlanNode::Template {
-            parts: part_indices,
-        });
-    }
-
-    let any_named = captures
-        .iter()
-        .any(|(_, p)| matches!(p, TemplatePart::Capture { name: Some(_), .. }));
-
-    // Lower each capture's child parser and record its node index.
     let part_indices = lower_template_parts(b, parts, &captures);
-
-    if any_named {
-        // Named captures → record. The record schema (field names + descriptors)
-        // is built at runtime by the interpreter, which knows the child result
-        // types. The plan stores field names in the capture parts.
-        b.push_node(PlanNode::Template {
-            parts: part_indices,
-        })
-    } else {
-        // Single anonymous capture → scalar; multiple anonymous captures → tuple.
-        // Both lower to a `Template` node (preserving the literal parts between
-        // captures, so the runtime can match the separators). The interpreter
-        // assembles a scalar (1 capture) or a tuple (≥2 captures) from the
-        // captured values.
-        b.push_node(PlanNode::Template {
-            parts: part_indices,
-        })
-    }
+    b.push_node(PlanNode::Template {
+        parts: part_indices,
+    })
 }
 
 /// Lower template parts into the `template_parts` arena, returning a static
@@ -791,6 +850,17 @@ mod tests {
         assert_eq!(compiled.plan().literals, &[" -> "]);
     }
 
+    /// Two anonymous captures lower to a `Template` node — **not** to a tuple
+    /// node, because there is none and cannot be one (ADR-092).
+    ///
+    /// This assertion is what makes deleting `PlanNode::Tuple` safe rather than
+    /// hopeful: the deleted variant was documented as "reserved" for nine
+    /// milestones and nothing ever pushed one, and this test is the standing
+    /// proof that the shape it was reserved for takes the `Template` path.
+    /// The literals between the captures are preserved on that path, which is
+    /// exactly what a `Tuple { elements: &[u32] }` had nowhere to put; the
+    /// interpreter reads the shape back off the parts with
+    /// [`TemplateShape::of`] and assembles the tuple from the captured values.
     #[test]
     fn template_literal_lower_to_plan() {
         let ast = ParserAst::Template {
@@ -818,13 +888,12 @@ mod tests {
         };
         let compiled = lower_to_plan(&ast);
         let plan = compiled.plan();
-        // Two anonymous captures → a Template node at root (the literals between
-        // captures are preserved so the runtime can match the separators; the
-        // interpreter assembles a tuple from the captured values). The root is
-        // the last-pushed node.
-        assert!(matches!(
-            plan.nodes[plan.root as usize],
-            PlanNode::Template { .. }
-        ));
+        // The root is the last-pushed node.
+        let PlanNode::Template { parts } = &plan.nodes[plan.root as usize] else {
+            panic!("a two-anonymous-capture template lowers to a Template node");
+        };
+        // And the shape the interpreter reads back off those parts is the tuple
+        // one, which is the half the node kind alone does not say.
+        assert_eq!(TemplateShape::of(parts), TemplateShape::Tuple);
     }
 }

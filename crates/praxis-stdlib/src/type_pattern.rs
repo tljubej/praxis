@@ -15,7 +15,7 @@ use std::fmt;
 /// *and* `Vec[Float]` — the first a nonsense addition of booleans, the second a
 /// silent reinterpretation of float bits as an integer.
 ///
-/// # Why the one shape is not a capability
+/// # Why the scalar shape is not a capability, and why the other one is
 ///
 /// The plan expected these bounds to be [`CapKind`](crate::CapKind)s, and the
 /// finding is worded that way ("numeric/orderable element types"). Writing them
@@ -31,11 +31,17 @@ use std::fmt;
 /// built, not only when a particular method is called
 /// (`Inferer::require_collection_invariants`, ADR-057 Decision 3).
 ///
-/// So there is one arm. The match on it in `praxis_hir`'s `apply_bounds` is
-/// exhaustive, so a capability arm — which would route through the constraint
-/// channel rather than through unification, because a capability about an
-/// unresolved variable has to be *deferred* — is a compile error to add
-/// halfway rather than a silent omission.
+/// So the scalar arm is not a capability. The **second** arm is, and it was
+/// added when the first row appeared that needed one: `sorted` orders its
+/// elements through the element descriptor's `compare` callback, and a `Vec[T]`
+/// whose `T` is a function value has none. That is `CapKind::Ord`, it is a fact
+/// about the row rather than about the receiver's *type* — a `Vec` is a
+/// perfectly good `Vec` of unorderable things right up until someone sorts it —
+/// so `require_collection_invariants` is the wrong door for it and the row has
+/// to say it itself.
+///
+/// The match on this enum in `praxis_hir`'s `apply_bounds` is exhaustive, so a
+/// third arm is a compile error to add halfway rather than a silent omission.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Bound {
     /// Exactly one scalar, and nothing else. Discharged by **unification**, so a
@@ -43,6 +49,12 @@ pub enum Bound {
     /// name, and an element type nothing has named yet is *pinned* rather than
     /// merely permitted — which is what `v.map(f).sum()` needs.
     Is(ScalarType),
+    /// One capability, and any type that has it. Discharged through the
+    /// **constraint channel**, not by unification: a bound on a variable nothing
+    /// has pinned yet cannot be answered, and `fn top(v) { v.sorted() }` is
+    /// exactly that shape until a call site says what `v` holds. That is the
+    /// whole reason this arm is not spelled as a set of scalars.
+    Kind(crate::CapKind),
 }
 
 /// A pattern describing a type shape in a catalog entry.
@@ -126,6 +138,15 @@ impl TypePattern {
     #[must_use]
     pub const fn is_scalar(name: &'static str, scalar: ScalarType) -> TypePattern {
         TypePattern::bounded(name, Bound::Is(scalar))
+    }
+
+    /// A type variable required to have `kind` — the barrier combinators, whose
+    /// runtime wrappers read a descriptor callback the element may not have
+    /// (`sorted` needs `compare`, `frequencies` and `unique` need a key that
+    /// stays findable after it is stored).
+    #[must_use]
+    pub const fn of_kind(name: &'static str, kind: crate::CapKind) -> TypePattern {
+        TypePattern::bounded(name, Bound::Kind(kind))
     }
 
     /// Append every `(name, bound)` this pattern declares, recursing into

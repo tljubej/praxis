@@ -127,10 +127,24 @@ for `Y019`'s reason: `praxis check` must see it. ADR-084 is the decision.
 
 It is `Y023` and not `Y022` because this session's plan reserved the block from
 `Y023` upward for its own use, and a gap in a registry costs nothing while two
-sessions colliding on one number costs the identifier. **`Y022` and `Y024` are
-free; `N009` is still the next free Name code.** The `Y0xx` user block is
+sessions colliding on one number costs the identifier. The `Y0xx` user block is
 otherwise contiguous through `Y021` and the `N0xx` block through `N008`
 (REP-26's amendment above).
+
+**Amendment (2026-08-01, D16).** `Y024` — a call whose argument count does not
+match the function's. ADR-089 decides that a name has exactly one signature, and
+this is the code that says so when one is broken. Before it, `assert(cond, "why")`
+and every other arity mistake came back as `Y001` showing two whole function
+types to diff by eye — an inference accident to read, sitting beside a `Y007`
+that names collection arity and a `Y110` that names method arity.
+
+It is raised from **`TypeDb::unify`**, not from `infer_call`, because that is
+where the knowledge already was: the `Func`-vs-`Func` arm compares
+`ps_a.len() != ps_b.len()` and discarded the fact. Raising it there means every
+function unification benefits, not just direct calls. There is no
+`assert`-specific message — a rule stated in four places goes stale in three.
+
+**`Y022` is still free; `N009` is still the next free Name code.**
 
 `TY-20` gets two codes rather than the one the plan lists: "`return` with no
 function" and "`break` with no loop" are different mistakes with different fixes,

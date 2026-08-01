@@ -730,6 +730,11 @@ impl Resolver {
             // `P { x, y: p }` — the head is a *type* name, so it resolves like a
             // record literal's head and an undefined one is `N001`. A punned
             // field binds the field's own name; an explicit one recurses.
+            //
+            // A headless `{ x, y }` (ADR-091) has no head token to resolve, and
+            // that is all this arm has to know about it: `name_token()` answers
+            // `None`, the fields bind exactly as they do under a head, and the
+            // record itself comes from the scrutinee at inference.
             praxis_ast::PatternKind::Record(_) => {
                 if let Some(tok) = pat.name_token() {
                     self.resolve_name_ref(scope, &tok);

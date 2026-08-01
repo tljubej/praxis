@@ -1,0 +1,49 @@
+// Input-parser fixture: the window a `block` item is offered (ADR-090).
+//
+// **One template, driven twice, asserted as a pair on purpose.** The pair is
+// the whole point: before ADR-090, `` `items: {items:csv(int)}` `` read two
+// ints as a `lines` element and swallowed the following line as a `block`
+// item, faulting `at input offset 13..23: expected the rest of the field`.
+// `lines` had narrowed to a line and `block` had narrowed to nothing, so the
+// same template over the same bytes had two answers. A gate that measured only
+// one side is what let that survive, so both sides are measured here and
+// compared to each other rather than to a constant.
+//
+// The rest of the file covers the parts of the rule the pair does not reach:
+// a template that writes `\n` reaches exactly as many lines as it writes, a
+// non-template item still gets the rest of the region, and a trailing `rest`
+// no longer keeps the line terminator it used to.
+fn main() {
+    // The pair. Same template, same bytes, same answer.
+    let under_lines = parse("items: 79, 98\nitems: 54, 65, 75, 74\n", lines(`items: {items:csv(int)}`))
+    let under_block = parse("items: 79, 98\nop: plus\n", block(
+        `items: {items:csv(int)}`,
+        `op: {op:word}`,
+    ))
+    out(under_lines.get(0).items.len() == under_block.items.len())
+    out(under_block.items.len())
+    out(under_block.items.get(1))
+    // The item after the greedy one is still there to be read, which is what
+    // "swallowed" cost.
+    out(under_block.op)
+
+    // A template says how many lines it spans by writing `\n` (§7.2), and the
+    // window is exactly that many. With the `\n` count dropped this faults at
+    // `expected whitespace`: the template's own `\n` part has no terminator
+    // left inside a one-line window.
+    let spans = parse("1,2\n3\nabcd\n", block(`{x:int},{y:int}\n{z:int}`, `{w:rest}`))
+    out(spans.x + spans.y + spans.z)
+    // 4 and not 5: a final `rest` is bounded to its own line and no longer
+    // keeps the terminator, which is the answer ``lines(`{w:rest}`)`` already
+    // gave. It is the one shape whose answer ADR-090 changes silently.
+    out(spans.w.len())
+    out(spans.w)
+
+    // A *named* item's parser computes its own extent, so it is offered the
+    // rest of the region and keeps it — §7.5's own `block` example, and the
+    // half of the rule that goes red if someone "simplifies" the window into
+    // line-bounding every item.
+    let named = parse("map seed\n50\n52\n7\n", block(`map {name:word}`, ranges: lines(int)))
+    out(named.name)
+    out(named.ranges.len())
+}

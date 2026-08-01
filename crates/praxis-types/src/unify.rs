@@ -24,6 +24,22 @@ pub enum UnifyError {
     /// The occurs check failed: a variable occurs inside the very type it would be
     /// linked to (e.g. unifying `a` with `(a) -> a`). This is an infinite type.
     Occurs { var: VarId, within: Type },
+    /// Two function types that differ in how many parameters they take
+    /// (`Y024`, ADR-089).
+    ///
+    /// **A special case of `Mismatch`, raised because the general one reads as
+    /// an inference accident.** `assert(cond, "why")` came back as
+    /// *expected `(Bool) -> Unit`, found `(Bool, Text) -> ?T`* — two whole
+    /// function types to diff by eye, next to a `Y007` that names collection
+    /// arity and a `Y110` that names method arity. The arm below already
+    /// compared the lengths and discarded the fact.
+    ///
+    /// It is raised **here** rather than in `infer_call` so that every
+    /// function-to-function unification benefits, not just a direct call.
+    /// ADR-089 is the decision this serves: a name in Praxis has exactly one
+    /// signature, so a count mismatch is never a candidate for another overload
+    /// and can always be reported as the mistake it is.
+    Arity { expected: usize, found: usize },
 }
 
 impl TypeDb {
@@ -175,9 +191,10 @@ impl TypeDb {
                 },
             ) => {
                 if ps_a.len() != ps_b.len() {
-                    return Err(UnifyError::Mismatch {
-                        expected: a,
-                        found: b,
+                    // Named, not diffed: see `UnifyError::Arity` (ADR-089).
+                    return Err(UnifyError::Arity {
+                        expected: ps_a.len(),
+                        found: ps_b.len(),
                     });
                 }
                 for (p, q) in ps_a.into_iter().zip(ps_b) {

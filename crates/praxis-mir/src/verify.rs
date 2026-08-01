@@ -20,7 +20,36 @@
 //! and destination is in range; `MoveGc` is `Gc → Gc`; a GC safepoint's root
 //! set was actually annotated; a branch target exists; a `Return` yields a `Gc`
 //! local; a branch condition is a scalar; a `Bounded` arithmetic site is not a
-//! division.
+//! division; **a faulting instruction is immediately followed by a
+//! [`Inst::CheckFault`], and a `CheckFault` follows only a faulting
+//! instruction**.
+//!
+//! # The fault rule, and why it is strict in both directions (MIR-10, ADR-088)
+//!
+//! §10.4 says generated code checks `pending_fault` immediately after calls
+//! that can fault. Nothing enforced it, and both halves had rotted: the fused
+//! `collect` sink pushed into its result Vec with no check at all (REP-52),
+//! while every method call emitted one whether or not its wrapper could fault
+//! (REP-53) — including `praxis_vec_len`, which is `Effect::Allocates`. The
+//! answer to "can this fault" is [`Inst::can_fault`], which derives from the
+//! ABI manifest through the same instruction→symbol mapping the Cranelift
+//! backend uses, so the verifier and the emitted call cannot disagree.
+//!
+//! The **converse** is checked too, and that is the half that does the work.
+//! Without it the forward rule is satisfied by checking after everything, which
+//! is what lowering did: REP-53's fix would have had no invariant behind it and
+//! would have regressed to unconditional the first time a site was copied. With
+//! it, `praxis_runtime::abi::panic_fault_is_observable`'s premise — that a
+//! `Pure`/`Allocates` symbol is never followed by a `CheckFault`, so its panic
+//! path can abort rather than fault — is *enforced* rather than asserted.
+//!
+//! §10.4 also says "later optimization may combine checks when safe". That
+//! relaxes **both** directions together — a combined check observes several
+//! faulting instructions, so neither "immediately followed" nor "follows a
+//! faulting instruction" survives it — and the pass that introduces one
+//! relaxes this rule with it. Until then the one-check-per-faulting-instruction
+//! shape is what lowering emits, and a rule that admitted a shape nothing
+//! builds would not catch the site that forgot.
 //!
 //! **`MissingTerminator` is unrepresentable**, so there is no rule for it:
 //! [`Block::term`](crate::ir::Block::term) is not an `Option`, and
@@ -158,6 +187,30 @@ pub enum VerifyError {
         inst: usize,
         op: IntBinOp,
     },
+    /// An instruction that [`Inst::can_fault`] is not immediately followed by a
+    /// [`Inst::CheckFault`] in the same block (§10.4, MIR-10). The fault is
+    /// sticky, so it is not *lost* — it is observed wherever the next check
+    /// happens to be, which is a different frame, a different iteration, or
+    /// after `main` returns. `why` names the wrapper or operation that can
+    /// raise it.
+    UnobservedFault {
+        func: String,
+        block: BlockId,
+        inst: usize,
+        why: &'static str,
+    },
+    /// A [`Inst::CheckFault`] whose preceding instruction cannot fault — or
+    /// which begins a block, where there is no preceding instruction at all.
+    ///
+    /// The converse of [`VerifyError::UnobservedFault`], and the half that
+    /// keeps the forward rule from being satisfiable by checking after
+    /// everything (REP-53). It also costs: a check is a call plus a branch, and
+    /// on the fused-pipeline loop header it ran once per element.
+    RedundantFaultCheck {
+        func: String,
+        block: BlockId,
+        inst: usize,
+    },
 }
 
 /// Which slot set a [`VerifyError::RootIsNotGc`] came from.
@@ -258,6 +311,23 @@ impl std::fmt::Display for VerifyError {
                  bound rules out a zero divisor",
                 block.0
             ),
+            VerifyError::UnobservedFault {
+                func,
+                block,
+                inst,
+                why,
+            } => write!(
+                f,
+                "{func}: block {} inst {inst}: can fault ({why}) but is not \
+                 followed by a CheckFault",
+                block.0
+            ),
+            VerifyError::RedundantFaultCheck { func, block, inst } => write!(
+                f,
+                "{func}: block {} inst {inst}: CheckFault follows nothing that \
+                 can fault",
+                block.0
+            ),
         }
     }
 }
@@ -289,6 +359,7 @@ pub fn verify(f: &Function) -> Result<(), Vec<VerifyError>> {
                 }
             }
             check_slot_sets(f, bid, i, inst, &gc, n_locals, &mut errs);
+            check_fault_observed(f, bid, i, block, &mut errs);
 
             match inst {
                 Inst::MoveGc { dst, src } => {
@@ -401,6 +472,53 @@ pub fn report(errs: &[VerifyError]) -> String {
         out.push_str(&e.to_string());
     }
     out
+}
+
+/// Both directions of the fault rule, for the instruction at `block.insts[i]`
+/// (MIR-10, ADR-088; see this module's header for why it is strict).
+///
+/// The pairing is **positional and within one block**: a fault is observed by
+/// the instruction that immediately follows the one that can raise it. Looking
+/// further — "some check dominates this point" — is the weaker property the
+/// defect already satisfied: `v.sum()`'s overflow *was* eventually observed, by
+/// the next loop-header check, one iteration later and with a snapshot showing
+/// values from after the fault.
+fn check_fault_observed(
+    f: &Function,
+    bid: BlockId,
+    i: usize,
+    block: &crate::ir::Block,
+    errs: &mut Vec<VerifyError>,
+) {
+    let inst = &block.insts[i];
+    let next = block.insts.get(i + 1);
+
+    if let Some(why) = inst.fault_reason() {
+        if !matches!(next, Some(Inst::CheckFault { .. })) {
+            errs.push(VerifyError::UnobservedFault {
+                func: f.name.clone(),
+                block: bid,
+                inst: i,
+                why,
+            });
+        }
+    }
+
+    // The converse. A `CheckFault` at index 0 has no predecessor at all: the
+    // faulting instruction it would observe is in another block, and control
+    // may reach this one by an edge that never executed it.
+    if matches!(inst, Inst::CheckFault { .. })
+        && !i
+            .checked_sub(1)
+            .and_then(|p| block.insts.get(p))
+            .is_some_and(Inst::can_fault)
+    {
+        errs.push(VerifyError::RedundantFaultCheck {
+            func: f.name.clone(),
+            block: bid,
+            inst: i,
+        });
+    }
 }
 
 /// The slot sets of one instruction, checked for membership and annotation.

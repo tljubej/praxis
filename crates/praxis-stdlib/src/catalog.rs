@@ -235,6 +235,32 @@ impl MethodCatalog {
             .filter(move |e| &e.receiver == receiver && e.name == name)
     }
 
+    /// Does **any** receiver in the catalog have a method `name` taking `arity`
+    /// arguments?
+    ///
+    /// The predicate lives here rather than at the call site because its
+    /// justification is a fact about this table: the catalog is the *complete*
+    /// method universe of the language. A record carries no rows (`p.len()` on
+    /// `struct P { len: Int }` is a missing method, not a field read), an enum
+    /// carries none, and there is no user `impl` — so a name this table does not
+    /// hold at that arity can never resolve against **any** receiver, known or
+    /// not yet known.
+    ///
+    /// That is what lets inference refuse `fn f(x) { x.nope() }` before anything
+    /// says what `x` is (ADR-093). The complementary half matters just as much:
+    /// a name the table *does* hold — `sum`, at arity 0 — is left deferred even
+    /// though no receiver is known, because §5.2's `fn total(values) {
+    /// values.sum() }` must still infer. Spelling the predicate as "no row
+    /// matches this receiver" instead would reject that program.
+    ///
+    /// If this language ever grows user-defined methods, this predicate loses
+    /// its justification and ADR-093's Rule B has to go with it.
+    pub fn has_name_at_arity(&self, name: &str, arity: usize) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.name == name && e.arity() == arity)
+    }
+
     /// The number of entries.
     pub fn len(&self) -> usize {
         self.entries.len()

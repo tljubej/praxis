@@ -1,0 +1,26 @@
+// Input-parser fixture: arity 3, mixed element types, nested one level deeper
+// (ADR-092, REP-54).
+//
+// ``sections(lines(`{int},{int},{text}`))`` is `Vec[Vec[(Int, Int, Text)]]`.
+// Three things at once, deliberately: arity is not 2, the elements are not all
+// `Int`, and the tuple sits two collections deep, so a fix that answered the
+// *first child's* descriptor, or that only reached one level of nesting, is
+// red here and green in `template_multi_capture_tuple`.
+//
+// OBSERVED RED at 6e74642 (the fix removed): line 1 printed
+// `[[Unit, Unit], [Unit]]`.
+//
+// **Line 2 prints the same on both binaries and must not change.** That is the
+// fixture's own evidence for what the defect was: the value was always a real
+// tuple — `walk_template` assembled it with the right `TupleSchema` — and only
+// the *collection's element tag* lied about it. Reaching an element by
+// `.get(...)` reads the descriptor from the object's own header and prints
+// `(3, 4, beta)`; rendering the collection reads the tag and printed `Unit`.
+// If line 2 ever starts changing with line 1, the fix has moved from the tag
+// to the value and something else is wrong.
+fn main() -> Int {
+    let groups = read sections(lines(`{int},{int},{text}`));
+    out(groups);
+    out(groups.get(0).get(1));
+    groups.len()
+}

@@ -234,6 +234,7 @@ runtime_symbols! {
     BitsetRemove = "praxis_bitset_remove": (Ctx, Gc, Gc) -> GcUnit, Pure;
     BoolLoad = "praxis_bool_load": (Ctx, Gc) -> RawI64, Pure;
     CharLoad = "praxis_char_load": (Ctx, Gc) -> RawI64, Pure;
+    CharToInt = "praxis_char_to_int": (Ctx, Gc) -> Gc, Allocates;
     CheckFault = "praxis_check_fault": (Ctx) -> RawI64, Pure;
     ClosureCapture = "praxis_closure_capture": (Ctx, Gc, RawI64) -> Gc, Pure;
     ClosureFnPtr = "praxis_closure_fn_ptr": (Ctx, Gc) -> Ptr, Pure;
@@ -297,6 +298,8 @@ runtime_symbols! {
     IntAbs = "praxis_int_abs": (Ctx, Gc) -> Gc, AllocatesAndFaults;
     IntAdd = "praxis_int_add": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     IntCheckedAdd = "praxis_int_checked_add": (Ctx, Gc, Gc) -> Gc, Allocates;
+    IntCheckedMul = "praxis_int_checked_mul": (Ctx, Gc, Gc) -> Gc, Allocates;
+    IntCheckedSub = "praxis_int_checked_sub": (Ctx, Gc, Gc) -> Gc, Allocates;
     IntClamp = "praxis_int_clamp": (Ctx, Gc, Gc, Gc) -> Gc, Faults;
     IntDiv = "praxis_int_div": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     IntEq = "praxis_int_eq": (Ctx, Gc, Gc) -> Gc, Pure;
@@ -314,10 +317,15 @@ runtime_symbols! {
     IntNeg = "praxis_int_neg": (Ctx, Gc) -> Gc, AllocatesAndFaults;
     IntRem = "praxis_int_rem": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     IntSaturatingAdd = "praxis_int_saturating_add": (Ctx, Gc, Gc) -> Gc, Allocates;
+    IntSaturatingMul = "praxis_int_saturating_mul": (Ctx, Gc, Gc) -> Gc, Allocates;
+    IntSaturatingSub = "praxis_int_saturating_sub": (Ctx, Gc, Gc) -> Gc, Allocates;
     IntSign = "praxis_int_sign": (Ctx, Gc) -> Gc, Allocates;
     IntSub = "praxis_int_sub": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    IntToChar = "praxis_int_to_char": (Ctx, Gc) -> Gc, AllocatesAndFaults;
     IntToFloat = "praxis_int_to_float": (Ctx, Gc) -> Gc, Allocates;
     IntWrappingAdd = "praxis_int_wrapping_add": (Ctx, Gc, Gc) -> Gc, Allocates;
+    IntWrappingMul = "praxis_int_wrapping_mul": (Ctx, Gc, Gc) -> Gc, Allocates;
+    IntWrappingSub = "praxis_int_wrapping_sub": (Ctx, Gc, Gc) -> Gc, Allocates;
     MapContains = "praxis_map_contains": (Ctx, Gc, Gc) -> Gc, Pure;
     RangeGet = "praxis_range_get": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     RangeLen = "praxis_range_len": (Ctx, Gc) -> Gc, AllocatesAndFaults;
@@ -379,11 +387,19 @@ runtime_symbols! {
     ValueCmp = "praxis_value_cmp": (Ctx, Gc, Gc) -> RawI64, Faults;
     VarCellGet = "praxis_var_cell_get": (Ctx, Gc) -> Gc, Pure;
     VarCellSet = "praxis_var_cell_set": (Ctx, Gc, Gc) -> Gc, Pure;
+    VecFrequencies = "praxis_vec_frequencies": (Ctx, Gc) -> Gc, Allocates;
     VecGet = "praxis_vec_get": (Ctx, Gc, Gc) -> Gc, Faults;
     VecIsEmpty = "praxis_vec_is_empty": (Ctx, Gc) -> Gc, Pure;
     VecLen = "praxis_vec_len": (Ctx, Gc) -> Gc, Allocates;
     VecNew = "praxis_vec_new": (Ctx, Ptr) -> Gc, Allocates;
     VecPush = "praxis_vec_push": (Ctx, Gc, Gc) -> GcUnit, AllocatesAndFaults;
+    // `sorted` faults and `unique` does not, and the difference is derived from
+    // the wrappers rather than guessed: `praxis_vec_sorted` raises
+    // `TypeMismatch` when the element type has no `compare`, while
+    // `praxis_vec_unique` and `praxis_vec_frequencies` go through `DynamicKey`,
+    // which answers "not equal" for a type with no `equals` instead of raising.
+    VecSorted = "praxis_vec_sorted": (Ctx, Gc) -> Gc, AllocatesAndFaults;
+    VecUnique = "praxis_vec_unique": (Ctx, Gc) -> Gc, Allocates;
     WriteStdout = "praxis_write_stdout": (Ctx, Gc) -> GcUnit, Pure;
 }
 
@@ -493,6 +509,38 @@ mod tests {
         assert!(!Effect::Faults.allocates() && Effect::Faults.faults());
         assert!(Effect::Allocates.allocates() && !Effect::Allocates.faults());
         assert!(Effect::AllocatesAndFaults.allocates() && Effect::AllocatesAndFaults.faults());
+    }
+
+    /// **A standing invariant, not a gate** (REP-46): none of the nine overflow
+    /// alternatives may be declared faulting.
+    ///
+    /// It is green by construction the moment the rows exist, so it was never
+    /// red for this change and is not counted among its gates. What it catches
+    /// is a *later* edit marking one `AllocatesAndFaults` — which would make MIR
+    /// emit a `CheckFault` after a call that never faults, i.e. REP-53's failure
+    /// mode arriving from the other end, and would quietly undo the one property
+    /// that makes these methods alternatives to a faulting operator at all.
+    #[test]
+    fn no_overflow_alternative_declares_that_it_faults() {
+        use RuntimeSymbol::*;
+        for sym in [
+            IntWrappingAdd,
+            IntSaturatingAdd,
+            IntCheckedAdd,
+            IntWrappingSub,
+            IntSaturatingSub,
+            IntCheckedSub,
+            IntWrappingMul,
+            IntSaturatingMul,
+            IntCheckedMul,
+        ] {
+            assert_eq!(
+                sym.sig().effect,
+                Effect::Allocates,
+                "`{}` answers a fresh number and cannot fault (§4.12)",
+                sym.name()
+            );
+        }
     }
 
     /// Spot-check the rows the compiler is most sensitive to: the two that take

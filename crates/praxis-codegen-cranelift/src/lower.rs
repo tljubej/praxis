@@ -19,7 +19,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
 use praxis_mir::{
     AllocKind, CallTarget, CmpOp, DebugSlots, FloatBinOp, Function as MirFunction, Inst, IntBinOp,
-    LocalId, LocalKind, MirType, Overflow, RootSlots, ScalarKind, Terminator,
+    LocalId, LocalKind, MirType, Overflow, RootSlots, Terminator,
 };
 use praxis_runtime::{DebugLocalMeta, RuntimeContext, ShadowFrame, MAX_SHADOW_SLOTS};
 use praxis_stdlib::abi::{AbiKind, AbiRet, RuntimeSymbol};
@@ -482,80 +482,56 @@ fn lower_inst<M: Module>(
             // call: the wrapper may trigger a collection (§12.4), and the
             // collector walks the frame (ADR-019).
             spill.spill_safepoint(builder, roots, debug, vars);
+            // **One authority for the instruction→symbol mapping** (MIR-10).
+            // Which wrapper creates the object, and which fills one slot of a
+            // composite, is `AllocKind`'s answer — and it is the same answer
+            // `Inst::can_fault` reads to decide whether the MIR verifier
+            // requires a `CheckFault` after this instruction. Written out here
+            // as well, the two would be separate statements of one fact, and
+            // the next person to change a symbol in this match would make the
+            // verifier lie about which calls can fault.
+            let Some(ctor_sym) = alloc.constructor() else {
+                // The only allocation with no constructor is a collection
+                // whose ctor has no `praxis_*_new` wrapper — `Range` (built
+                // from its endpoints by `praxis_range_new`, an `Inst::Call`)
+                // and the compiler-internal `Seq`. Both are unreachable from
+                // source: `collection_from_name` resolves the *type*, but no
+                // construction lowering exists.
+                return Err(anyhow!(
+                    "construction of {alloc:?} not yet implemented (M8 workstream)"
+                ));
+            };
+            // The slot-filler, for the four composites the backend builds in
+            // two phases (allocate, then set each slot).
+            let filler = || {
+                alloc
+                    .filler()
+                    .expect("a composite allocation names its slot-filler")
+            };
             match alloc {
-                AllocKind::Int { value } => {
+                AllocKind::Int { value }
+                | AllocKind::Bool { value }
+                | AllocKind::Char { value }
+                | AllocKind::Float { value } => {
+                    // The four scalar boxes are one shape: pass the payload
+                    // word, take back the `GcRef`. `Float`'s scalar local
+                    // holds the f64 bit pattern as an i64 and
+                    // `praxis_alloc_float` reassembles the f64; `Char`'s is a
+                    // u32 Unicode scalar the wrapper validates.
                     let arg = builder.use_var(vars[value.0 as usize]);
-                    let result = call_symbol(
-                        builder,
-                        ctx_val,
-                        &[arg],
-                        RuntimeSymbol::AllocInt,
-                        module,
-                        imports,
-                    )?;
-                    builder.def_var(vars[dst.0 as usize], result);
-                }
-                AllocKind::Bool { value } => {
-                    let arg = builder.use_var(vars[value.0 as usize]);
-                    let result = call_symbol(
-                        builder,
-                        ctx_val,
-                        &[arg],
-                        RuntimeSymbol::AllocBool,
-                        module,
-                        imports,
-                    )?;
+                    let result = call_symbol(builder, ctx_val, &[arg], ctor_sym, module, imports)?;
                     builder.def_var(vars[dst.0 as usize], result);
                 }
                 AllocKind::Unit => {
-                    let result = call_symbol(
-                        builder,
-                        ctx_val,
-                        &[],
-                        RuntimeSymbol::AllocUnit,
-                        module,
-                        imports,
-                    )?;
+                    let result = call_symbol(builder, ctx_val, &[], ctor_sym, module, imports)?;
                     builder.def_var(vars[dst.0 as usize], result);
                 }
                 AllocKind::Text { value } => {
                     // Embed the string as a data object, then call praxis_alloc_text
                     // with (ptr, len).
                     let (ptr, len_val) = embed_text(builder, generation, value);
-                    let result = call_symbol(
-                        builder,
-                        ctx_val,
-                        &[ptr, len_val],
-                        RuntimeSymbol::AllocText,
-                        module,
-                        imports,
-                    )?;
-                    builder.def_var(vars[dst.0 as usize], result);
-                }
-                AllocKind::Char { value } => {
-                    let arg = builder.use_var(vars[value.0 as usize]);
-                    let result = call_symbol(
-                        builder,
-                        ctx_val,
-                        &[arg],
-                        RuntimeSymbol::AllocChar,
-                        module,
-                        imports,
-                    )?;
-                    builder.def_var(vars[dst.0 as usize], result);
-                }
-                AllocKind::Float { value } => {
-                    // The scalar local holds the f64 bit pattern as i64; the
-                    // runtime wrapper `praxis_alloc_float` reassembles the f64.
-                    let arg = builder.use_var(vars[value.0 as usize]);
-                    let result = call_symbol(
-                        builder,
-                        ctx_val,
-                        &[arg],
-                        RuntimeSymbol::AllocFloat,
-                        module,
-                        imports,
-                    )?;
+                    let result =
+                        call_symbol(builder, ctx_val, &[ptr, len_val], ctor_sym, module, imports)?;
                     builder.def_var(vars[dst.0 as usize], result);
                 }
                 AllocKind::Record {
@@ -569,17 +545,12 @@ fn lower_inst<M: Module>(
                     let schema_ptr = record_schema_for(db, *record_def_id, generation)?;
                     let schema_imm = builder.ins().iconst(GC, schema_ptr as i64);
                     // praxis_alloc_record(ctx, schema_ptr) -> GcRef.
-                    let record_ref = call_symbol(
-                        builder,
-                        ctx_val,
-                        &[schema_imm],
-                        RuntimeSymbol::AllocRecord,
-                        module,
-                        imports,
-                    )?;
+                    let record_ref =
+                        call_symbol(builder, ctx_val, &[schema_imm], ctor_sym, module, imports)?;
                     // Fill in each field in declaration order. The field locals
                     // are already spilled into the shadow frame by
                     // `emit_spill` above; here we pass them as call args.
+                    let set_field = filler();
                     for (idx, field_local) in fields.iter().enumerate() {
                         let field_val = builder.use_var(vars[field_local.0 as usize]);
                         let idx_val = builder.ins().iconst(GC, idx as i64);
@@ -587,7 +558,7 @@ fn lower_inst<M: Module>(
                             builder,
                             ctx_val,
                             &[record_ref, idx_val, field_val],
-                            RuntimeSymbol::RecordSetField,
+                            set_field,
                             module,
                             imports,
                         )?;
@@ -614,10 +585,11 @@ fn lower_inst<M: Module>(
                         builder,
                         ctx_val,
                         &[schema_imm, tag_val],
-                        RuntimeSymbol::AllocEnum,
+                        ctor_sym,
                         module,
                         imports,
                     )?;
+                    let set_payload = filler();
                     for (idx, arg_local) in args.iter().enumerate() {
                         let arg_val = builder.use_var(vars[arg_local.0 as usize]);
                         let idx_val = builder.ins().iconst(GC, idx as i64);
@@ -625,7 +597,7 @@ fn lower_inst<M: Module>(
                             builder,
                             ctx_val,
                             &[enum_ref, idx_val, arg_val],
-                            RuntimeSymbol::EnumSetPayload,
+                            set_payload,
                             module,
                             imports,
                         )?;
@@ -646,15 +618,10 @@ fn lower_inst<M: Module>(
                     let schema_ptr = tuple_schema_for(db, *ty, elements.len(), generation)?;
                     let schema_imm = builder.ins().iconst(GC, schema_ptr as i64);
                     // praxis_alloc_tuple(ctx, schema_ptr) -> GcRef.
-                    let tuple_ref = call_symbol(
-                        builder,
-                        ctx_val,
-                        &[schema_imm],
-                        RuntimeSymbol::AllocTuple,
-                        module,
-                        imports,
-                    )?;
+                    let tuple_ref =
+                        call_symbol(builder, ctx_val, &[schema_imm], ctor_sym, module, imports)?;
                     // Fill in each element in positional order.
+                    let set_elem = filler();
                     for (idx, el_local) in elements.iter().enumerate() {
                         let el_val = builder.use_var(vars[el_local.0 as usize]);
                         let idx_val = builder.ins().iconst(GC, idx as i64);
@@ -662,7 +629,7 @@ fn lower_inst<M: Module>(
                             builder,
                             ctx_val,
                             &[tuple_ref, idx_val, el_val],
-                            RuntimeSymbol::TupleSet,
+                            set_elem,
                             module,
                             imports,
                         )?;
@@ -683,10 +650,11 @@ fn lower_inst<M: Module>(
                         builder,
                         ctx_val,
                         &[fn_ptr_val, n_val],
-                        RuntimeSymbol::AllocClosure,
+                        ctor_sym,
                         module,
                         imports,
                     )?;
+                    let set_capture = filler();
                     for (idx, cap_local) in captures.iter().enumerate() {
                         let cap_val = builder.use_var(vars[cap_local.0 as usize]);
                         let idx_val = builder.ins().iconst(GC, idx as i64);
@@ -694,7 +662,7 @@ fn lower_inst<M: Module>(
                             builder,
                             ctx_val,
                             &[closure_ref, idx_val, cap_val],
-                            RuntimeSymbol::ClosureSetCapture,
+                            set_capture,
                             module,
                             imports,
                         )?;
@@ -702,158 +670,60 @@ fn lower_inst<M: Module>(
                     builder.def_var(vars[dst.0 as usize], closure_ref);
                 }
                 AllocKind::Collection { ctor, args } => {
-                    // M8 WS1: `Vec[T]()`, `Grid[T]()`, etc. Resolve the real
-                    // element descriptor (closing the M7 null-descriptor
-                    // carryover) and call `praxis_<kind>_new`. The element
-                    // descriptor is resolved recursively so nested collections
-                    // (e.g. `Vec[Vec[Int]]`) dispatch eq/hash correctly.
+                    // M8 WS1: `Vec[T]()`, `Grid[T]()`, etc. `ctor_sym` is the
+                    // `praxis_<kind>_new` wrapper; what differs per ctor is only
+                    // the *arguments*, and resolving the element descriptor
+                    // recursively is what makes a nested collection (e.g.
+                    // `Vec[Vec[Int]]`) dispatch eq/hash correctly.
                     use praxis_types::CollectionCtor;
-                    match ctor {
-                        CollectionCtor::Vec => {
-                            let el_desc = collection_element_descriptor_for(db, args, 0)?;
-                            let el_imm = builder.ins().iconst(GC, el_desc as i64);
-                            let vec_ref = call_symbol(
-                                builder,
-                                ctx_val,
-                                &[el_imm],
-                                RuntimeSymbol::VecNew,
-                                module,
-                                imports,
-                            )?;
-                            builder.def_var(vars[dst.0 as usize], vec_ref);
-                        }
-                        CollectionCtor::Deque => {
-                            // Deque mirrors Vec: a single element descriptor
-                            // passed to praxis_deque_new (M8-WS2, §6.1).
-                            let el_desc = collection_element_descriptor_for(db, args, 0)?;
-                            let el_imm = builder.ins().iconst(GC, el_desc as i64);
-                            let deque_ref = call_symbol(
-                                builder,
-                                ctx_val,
-                                &[el_imm],
-                                RuntimeSymbol::DequeNew,
-                                module,
-                                imports,
-                            )?;
-                            builder.def_var(vars[dst.0 as usize], deque_ref);
-                        }
-                        CollectionCtor::Map => {
-                            // Map: pass the key descriptor to praxis_map_new.
-                            // The value descriptor is adopted from the first
-                            // inserted value at runtime (§11.3).
-                            let key_desc = collection_element_descriptor_for(db, args, 0)?;
-                            let key_imm = builder.ins().iconst(GC, key_desc as i64);
-                            let map_ref = call_symbol(
-                                builder,
-                                ctx_val,
-                                &[key_imm],
-                                RuntimeSymbol::MapNew,
-                                module,
-                                imports,
-                            )?;
-                            builder.def_var(vars[dst.0 as usize], map_ref);
-                        }
-                        CollectionCtor::Set => {
-                            // Set: pass the element descriptor.
-                            let el_desc = collection_element_descriptor_for(db, args, 0)?;
-                            let el_imm = builder.ins().iconst(GC, el_desc as i64);
-                            let set_ref = call_symbol(
-                                builder,
-                                ctx_val,
-                                &[el_imm],
-                                RuntimeSymbol::SetNew,
-                                module,
-                                imports,
-                            )?;
-                            builder.def_var(vars[dst.0 as usize], set_ref);
-                        }
-                        CollectionCtor::Counter => {
-                            // Counter: pass the key descriptor.
-                            let key_desc = collection_element_descriptor_for(db, args, 0)?;
-                            let key_imm = builder.ins().iconst(GC, key_desc as i64);
-                            let counter_ref = call_symbol(
-                                builder,
-                                ctx_val,
-                                &[key_imm],
-                                RuntimeSymbol::CounterNew,
-                                module,
-                                imports,
-                            )?;
-                            builder.def_var(vars[dst.0 as usize], counter_ref);
-                        }
-                        CollectionCtor::MinHeap | CollectionCtor::MaxHeap => {
-                            // Heaps: pass the element descriptor; the runtime
-                            // selects min vs max by the construction symbol.
-                            let el_desc = collection_element_descriptor_for(db, args, 0)?;
-                            let el_imm = builder.ins().iconst(GC, el_desc as i64);
-                            let sym = if *ctor == CollectionCtor::MinHeap {
-                                RuntimeSymbol::MinHeapNew
-                            } else {
-                                RuntimeSymbol::MaxHeapNew
-                            };
-                            let heap_ref =
-                                call_symbol(builder, ctx_val, &[el_imm], sym, module, imports)?;
-                            builder.def_var(vars[dst.0 as usize], heap_ref);
-                        }
-                        CollectionCtor::BitSet => {
-                            // BitSet is nullary (no element descriptor); elements
-                            // are always Int. praxis_bitset_new takes only ctx.
-                            let bs_ref = call_symbol(
-                                builder,
-                                ctx_val,
-                                &[],
-                                RuntimeSymbol::BitsetNew,
-                                module,
-                                imports,
-                            )?;
-                            builder.def_var(vars[dst.0 as usize], bs_ref);
-                        }
+                    let call_args: Vec<Value> = match ctor {
+                        // BitSet is nullary (no element descriptor); elements
+                        // are always Int. praxis_bitset_new takes only ctx.
+                        CollectionCtor::BitSet => Vec::new(),
+                        // Grid construction from source `Grid()`: an empty
+                        // 0×0 grid. (The input parser is the usual grid
+                        // constructor; source construction is for manual
+                        // grids filled via set.) praxis_grid_new takes
+                        // (descriptor, width, height).
                         CollectionCtor::Grid => {
-                            // Grid construction from source `Grid()`: an empty
-                            // 0×0 grid. (The input parser is the usual grid
-                            // constructor; source construction is for manual
-                            // grids filled via set.) praxis_grid_new takes
-                            // (descriptor, width, height).
                             let el_desc = collection_element_descriptor_for(db, args, 0)?;
-                            let el_imm = builder.ins().iconst(GC, el_desc as i64);
-                            let w_imm = builder.ins().iconst(GC, 0);
-                            let h_imm = builder.ins().iconst(GC, 0);
-                            let grid_ref = call_symbol(
-                                builder,
-                                ctx_val,
-                                &[el_imm, w_imm, h_imm],
-                                RuntimeSymbol::GridNew,
-                                module,
-                                imports,
-                            )?;
-                            builder.def_var(vars[dst.0 as usize], grid_ref);
+                            vec![
+                                builder.ins().iconst(GC, el_desc as i64),
+                                builder.ins().iconst(GC, 0),
+                                builder.ins().iconst(GC, 0),
+                            ]
                         }
-                        // Other collection ctors (Deque/Map/Set/Counter/MinHeap/
-                        // MaxHeap/BitSet/Range/Seq) land in their own WS and add
-                        // arms here. They are unreachable from source until then
-                        // (collection_from_name resolves the *type*, but no
-                        // `praxis_<kind>_new` wrapper exists yet).
+                        // Everything else takes one descriptor: the element
+                        // type, or — for `Map` and `Counter` — the *key* type.
+                        // A Map's value descriptor is adopted from the first
+                        // inserted value at runtime (§11.3).
                         _ => {
-                            return Err(anyhow!(
-                                "construction of {ctor:?} not yet implemented (M8 workstream)"
-                            ));
+                            let desc = collection_element_descriptor_for(db, args, 0)?;
+                            vec![builder.ins().iconst(GC, desc as i64)]
                         }
-                    }
+                    };
+                    let result =
+                        call_symbol(builder, ctx_val, &call_args, ctor_sym, module, imports)?;
+                    builder.def_var(vars[dst.0 as usize], result);
                 }
             }
         }
         Inst::ExtractScalar { dst, src, scalar } => {
+            // Which wrapper reads this payload width is `ScalarKind`'s answer,
+            // stated once in `praxis_mir::ir` (MIR-10). It used to be written
+            // here and nowhere else, which meant the MIR verifier's "can this
+            // instruction fault" would have had to restate it — two statements
+            // of one fact, and the next edit to this match would have made the
+            // verifier lie.
             let src_val = builder.use_var(vars[src.0 as usize]);
-            let sym = match scalar {
-                ScalarKind::Int => RuntimeSymbol::IntLoad,
-                ScalarKind::Bool => RuntimeSymbol::BoolLoad,
-                ScalarKind::Char => RuntimeSymbol::CharLoad,
-                // Float's payload is read as its f64 bit pattern (i64 channel).
-                ScalarKind::Float => RuntimeSymbol::FloatLoad,
-                // Byte is not yet wired (reserved); read as Int defensively.
-                ScalarKind::Byte => RuntimeSymbol::IntLoad,
-            };
-            let result = call_symbol(builder, ctx_val, &[src_val], sym, module, imports)?;
+            let result = call_symbol(
+                builder,
+                ctx_val,
+                &[src_val],
+                scalar.load_symbol(),
+                module,
+                imports,
+            )?;
             builder.def_var(vars[dst.0 as usize], result);
         }
         Inst::Materialize {
@@ -865,19 +735,18 @@ fn lower_inst<M: Module>(
         } => {
             // Materialize re-boxes a scalar → it allocates → safepoint.
             spill.spill_safepoint(builder, roots, debug, vars);
-            // A scalar payload re-boxed: Int → praxis_alloc_int, Bool → alloc_bool,
-            // Char → praxis_alloc_char.
+            // A scalar payload re-boxed: Int → praxis_alloc_int, Bool →
+            // alloc_bool, Char → praxis_alloc_char. The mapping is
+            // `ScalarKind::alloc_symbol`, for `ExtractScalar`'s reason above.
             let src_val = builder.use_var(vars[src.0 as usize]);
-            let sym = match scalar {
-                ScalarKind::Int => RuntimeSymbol::AllocInt,
-                ScalarKind::Bool => RuntimeSymbol::AllocBool,
-                ScalarKind::Char => RuntimeSymbol::AllocChar,
-                // Float's bit pattern is boxed by praxis_alloc_float.
-                ScalarKind::Float => RuntimeSymbol::AllocFloat,
-                // Byte is not yet wired (reserved); box as Int defensively.
-                ScalarKind::Byte => RuntimeSymbol::AllocInt,
-            };
-            let result = call_symbol(builder, ctx_val, &[src_val], sym, module, imports)?;
+            let result = call_symbol(
+                builder,
+                ctx_val,
+                &[src_val],
+                scalar.alloc_symbol(),
+                module,
+                imports,
+            )?;
             builder.def_var(vars[dst.0 as usize], result);
         }
         Inst::StoreScalar { .. } => {
@@ -1027,15 +896,13 @@ fn lower_inst<M: Module>(
                 }
             };
             builder.def_var(vars[dst.0 as usize], result);
-            // Fault check after faultable arith.
-            let _ = call_symbol(
-                builder,
-                ctx_val,
-                &[],
-                RuntimeSymbol::CheckFault,
-                module,
-                imports,
-            )?;
+            // No fault check here. There used to be a bare
+            // `praxis_check_fault` call at this point whose result was
+            // discarded and which no branch followed — a leftover from before
+            // MIR carried `Inst::CheckFault`, costing one call per checked
+            // arithmetic op and diverting nothing. The `Inst::CheckFault` the
+            // builder emits next is what actually observes the raise, and the
+            // MIR verifier now requires it to be there (MIR-10).
         }
         Inst::IntCmp { op, dst, lhs, rhs } => {
             // Compare the scalar operands directly in Cranelift (no boxing). The

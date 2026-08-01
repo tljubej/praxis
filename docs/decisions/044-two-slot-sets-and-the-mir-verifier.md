@@ -196,8 +196,13 @@ manifest, like `MethodEntry::allocates()`.
   effect of imprecision. A future change that shrinks `DebugSlots` will fail
   `the_debug_set_still_shows_what_the_root_set_dropped`, not a CLI snapshot
   test three layers away.
-- **`v.sum()` overflow is still observed late.** The accumulator is `Checked`,
-  but no `CheckFault` follows the loop, so an overflow sets a sticky fault that
-  the host sees after `main` returns rather than unwinding at the sink. That is
-  pre-existing, out of MIR-10's scope, and the reason the verifier has no
-  "every faulting instruction is observed" rule yet.
+- ~~**`v.sum()` overflow is still observed late.**~~ **Superseded by ADR-088**,
+  which adds the rule this bullet was written to explain the absence of. The
+  bullet's conclusion was right and **its mechanism was wrong**: it said the
+  sticky fault is one "the host sees after `main` returns rather than unwinding
+  at the sink". Measured at `1bd85d8` — `v.sum()` over `[i64::MAX, 1]` followed
+  by `out(111)` faults *without printing `111`*, so it was observed inside the
+  loop by the next iteration's header check, one element late and with a
+  snapshot showing the following element's operands. Late, but not that late.
+  The accumulator carries its own `CheckFault` now, so the overflow diverts at
+  the addition.

@@ -1,0 +1,57 @@
+// REP-58 / ADR-090 (§7.7): the design document's own "repeated labeled
+// blocks" example, character for character, over the AoC-2022-day-11 sample.
+//
+// The fence below is §7.7's, copied verbatim, and until ADR-090 it did not
+// run: `  Starting items: {items:csv(int)}` ends in its capture, so the capture
+// was its template's last part, so `walk_template` handed `csv` the rest of the
+// *section* rather than the rest of the line. `csv` split on commas, read `79`
+// and `98`, and then faulted on the 115 bytes of the following five lines --
+// `at input offset 34..149: expected the rest of the field`.
+//
+// `m9_repeated_labeled_blocks.px` next door does not cover this and cannot: it
+// spells the body `items: lines(int)`, a *named* block item whose parser
+// computes its own extent, so it never asks the question this file asks. It is
+// still the gate for that half of ADR-090's rule -- a named `lines(...)` item
+// must keep the rest of its region -- which is why both files exist.
+//
+// Every line printed below fails differently if the window moves:
+//   * `items.len()` and `items.get(1)` catch a window one field too wide or too
+//     narrow, as a count *and* as an element.
+//   * `operator` and `operand` are on the line *after* the greedy one, so they
+//     go wrong if the greedy capture crossed its line even without faulting.
+//   * the totals cross all four blocks, so a window that is right for the first
+//     monkey and wrong for a later one cannot hide.
+fn main() {
+    let monkeys = read sections(
+        block(
+            `Monkey {id:int}:`,
+            `  Starting items: {items:csv(int)}`,
+            `  Operation: new = old {operator:char} {operand:word}`,
+            `  Test: divisible by {divisor:int}`,
+            `    If true: throw to monkey {if_true:int}`,
+            `    If false: throw to monkey {if_false:int}`,
+        )
+    )
+
+    let m0 = monkeys.get(0)
+    let m1 = monkeys.get(1)
+    let m2 = monkeys.get(2)
+    let m3 = monkeys.get(3)
+
+    out(monkeys.len())
+    out(m0.id)
+
+    // The greedy capture stopped at the end of its own line.
+    out(m0.items.len())
+    out(m0.items.get(1))
+    out(m1.items.len())
+    out(m3.items.len())
+    out(m0.items.len() + m1.items.len() + m2.items.len() + m3.items.len())
+
+    // ...and the five lines after it still parsed.
+    out(m2.operator)
+    out(m2.operand)
+    out(m0.divisor + m1.divisor + m2.divisor + m3.divisor)
+    out(m3.if_true)
+    out(m0.if_false)
+}

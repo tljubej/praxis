@@ -669,7 +669,7 @@ pub(crate) fn take_template<'a>(cur: &mut Scan<'a>) -> Result<&'a str, ScanError
             cur.advance_to(end);
             Ok(&cur.src()[open + 1..end - 1])
         }
-        praxis_syntax::template::TemplateEnd::Unterminated => {
+        praxis_syntax::template::TemplateEnd::Unterminated(_) => {
             Err(ScanError::MalformedCaptureBody {
                 byte_offset: open,
                 message: "unterminated nested template".to_string(),

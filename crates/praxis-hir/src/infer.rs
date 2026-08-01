@@ -32,8 +32,8 @@ use praxis_types::{
 use rowan::TextRange;
 
 use crate::diagnostics::{
-    infinite_type, not_equatable, not_hashable, not_numeric, not_orderable, type_mismatch,
-    type_mismatch_with_help,
+    arity_mismatch, infinite_type, not_equatable, not_hashable, not_numeric, not_orderable,
+    type_mismatch, type_mismatch_with_help,
 };
 use crate::name_table::NameTable;
 use crate::resolve::{NameResolution, ResolvedRef};
@@ -133,8 +133,8 @@ struct UnresolvedReport {
 }
 
 /// The report a deferred [`Capability::HasMethod`] owes if it turns out to be a
-/// subscript on a receiver that has none, or `None` for an ordinary method (whose
-/// miss lowering reports as `Y110`).
+/// subscript on a receiver that has none, or `None` for an ordinary method
+/// (whose miss is `Y110`, reported by inference at both doors — ADR-093).
 ///
 /// `args` is the requirement's argument count, which for a store is the indices
 /// *and* the value.
@@ -425,9 +425,13 @@ impl Inferer {
     /// when it was made — the receiver had no type yet — and lowering reads that
     /// map and nothing else (F15/HIR-02).
     ///
-    /// A receiver that turns out **not** to have the method is left alone here:
-    /// lowering owns `Y110`, it has the method-name span, and it will report the
-    /// same call. Reporting here as well is the same mistake twice.
+    /// A receiver that turns out **not** to have the method is reported here
+    /// (ADR-093). It used to be left to lowering, on the argument that lowering
+    /// has the method-name span — but so does this pass, `c.at` *is* the name
+    /// token's range, and lowering is the one place `praxis check` never runs.
+    /// The consequence was `fn f(x) { x.nope() }` / `out(f(3))`: `check` exit 0
+    /// and silent, `run` exit 1 with a `Y110`. Reporting here is not "the same
+    /// mistake twice" because lowering no longer reports at all.
     fn resolve_deferred_method(&mut self, c: &Constraint) {
         let Capability::HasMethod {
             name,
@@ -442,12 +446,9 @@ impl Inferer {
         let hits = crate::catalog::lookup(&self.db, self.catalog, receiver_ty, &name, params.len());
         let Some(entry) = hits.first().copied() else {
             // A **subscript** requirement that resolves to a receiver with no
-            // such row has to be reported here, because nothing downstream will:
-            // `lower_index` emits no `Y110` (inference owns `Y020`, so that
-            // `praxis check` sees it), so `fn first(m, k) { m[k] }` applied to a
-            // `Set` would otherwise be accepted and then silently dropped at
-            // lowering. A *method* requirement is still left alone: lowering
-            // reports it, and it has the name span.
+            // such row gets the subscript wording: there is no method name to
+            // report about, and `fn first(m, k) { m[k] }` applied to a `Set`
+            // should say "cannot be indexed", not "no method `[]`".
             if let Some(report) = subscript_unresolved_report(&name, params.len()) {
                 let rendered = self.db.render(receiver_ty);
                 let at = range_of(c.at);
@@ -456,7 +457,14 @@ impl Inferer {
                     &rendered,
                     report.indices,
                 ));
+                return;
             }
+            // An ordinary method gets `Y110`, from here, at `praxis check` time
+            // (ADR-093). The receiver is concrete by construction — this is the
+            // discharge path, and `take_dischargeable` only hands back a
+            // constraint whose variable has resolved — so the message can name
+            // it, which is what lowering's could never do.
+            self.report_cap_failure(&c.cap, receiver_ty, c.report_at(), c.origin_note());
             return;
         };
         // The entry's patterns, instantiated through one shared name map so a
@@ -543,15 +551,12 @@ impl Inferer {
     /// variable, and this is the only thing that ever says what it holds.
     ///
     /// A receiver that turns out to have **no such field** is reported here, and
-    /// that is a correction rather than a design choice. Leaving it to lowering is
-    /// what `HasMethod` does with `Y110`, and it only works because a `HasMethod`
-    /// call site survives into lowering with a concrete receiver to complain about.
-    /// A `HasField` one need not: the receiver may be a *parameter* that this
-    /// discharge is the first and last place to resolve — `fn dist(a) { a.x }` /
-    /// `out(dist(3))` — and lowering then sees a receiver that is still a variable
-    /// and, by REP-28's own rule, says nothing. Silence here was silence
-    /// everywhere: `praxis check` passed and `praxis run` failed, the exact
-    /// divergence REP-28 exists to close.
+    /// that is a correction rather than a design choice. Leaving it to lowering
+    /// is what `HasMethod` used to do with `Y110`, and it never really worked:
+    /// lowering runs at `run` and not at `check`, so `praxis check` passed and
+    /// `praxis run` failed — the exact divergence REP-28 exists to close, and
+    /// which ADR-093 has since closed at the method door too. Both capabilities
+    /// now report from this pass, which is the one both commands run.
     ///
     /// So the failure goes through `report_cap_failure`, exactly as
     /// [`resolve_deferred_iterable`](Self::resolve_deferred_iterable)'s does, with
@@ -659,6 +664,19 @@ impl Inferer {
                         self.diag_unify(self.file_span(at), e);
                     }
                 }
+                // Through `require_cap`, not through `capability::check`
+                // directly, and that is the whole difference between the two
+                // arms. `let v = Vec()` mints `Vec[?T]` — a *concrete* receiver
+                // with an *open* element — so `v.sorted()` resolves its row and
+                // reaches here before any `push` has said what `?T` is.
+                // `capability::check` answers **yes** to every unresolved
+                // variable by design, so deciding now would accept the program
+                // and nothing would ever ask again; the channel asks when the
+                // `push` two lines later pins it. A scalar bound *pins*; a kind
+                // bound *asks*.
+                praxis_stdlib::Bound::Kind(kind) => {
+                    self.require_cap(ty, Capability::Kind(kind), at);
+                }
             }
         }
     }
@@ -711,7 +729,7 @@ impl Inferer {
             // it holds — the catalog entry the deferred call site could not
             // select — so it is discharged by resolving it rather than by
             // checking it. See [`Inferer::resolve_deferred_method`], including
-            // why a failure is lowering's to report and not this pass's.
+            // why a failure is reported there and not left to lowering.
             if matches!(c.cap, Capability::HasMethod { .. }) {
                 self.resolve_deferred_method(&c);
                 continue;
@@ -758,15 +776,16 @@ impl Inferer {
             Capability::Kind(CapKind::HashStable) => not_hashable(at, &rendered),
             Capability::Kind(CapKind::Numeric) => not_numeric(at, &rendered),
             Capability::Iterable { .. } => crate::diagnostics::not_iterable(at, &rendered),
-            // Reached only by a `HasMethod` required against a receiver that was
-            // already concrete, which `require_method` never does — a concrete
-            // receiver is resolved at the call site. The deferred ones are
-            // discharged by [`Inferer::resolve_deferred_method`], which leaves a
-            // failure to lowering (it owns `Y110` and has the name span). The arm
-            // is the honest translation of the capability all the same, and the
-            // match is what keeps it honest if a second emitter appears.
-            Capability::HasMethod { name, .. } => {
-                crate::diagnostics::unknown_method(at, name, &rendered)
+            // Live, and from the deferred door (ADR-093). It used to be dead:
+            // `require_method` only ever defers a receiver that is a variable, so
+            // nothing failed here immediately, and
+            // [`Inferer::resolve_deferred_method`] returned silently on a miss
+            // because lowering was said to own `Y110`. Lowering runs at `run` and
+            // not at `check`, so that made every missing method a clean `praxis
+            // check` followed by a failing `praxis run` — the divergence REP-28
+            // closed at `HasField` and ADR-093 closes here.
+            Capability::HasMethod { name, params, .. } => {
+                crate::diagnostics::unknown_method(at, name, Some(&rendered), params.len())
             }
             // Live, and from both doors — unlike `HasMethod`'s arm above.
             // `infer_field_get` requires the field of *every* receiver it cannot
@@ -804,6 +823,7 @@ impl Inferer {
                 let f = self.db.render(found);
                 type_mismatch(at, &e, &f)
             }
+            UnifyError::Arity { expected, found } => arity_mismatch(at, expected, found),
             UnifyError::Occurs { .. } => infinite_type(at),
         }
     }
@@ -829,6 +849,11 @@ impl Inferer {
                     }
                     None => self.diagnostics.push(type_mismatch(at, &e, &f)),
                 }
+            }
+            UnifyError::Arity { expected, found } => {
+                // No hint: the message already names both counts, and ADR-089
+                // means there is no other signature to suggest.
+                self.diagnostics.push(arity_mismatch(at, expected, found));
             }
             UnifyError::Occurs { .. } => {
                 self.diagnostics.push(infinite_type(at));
@@ -1218,8 +1243,15 @@ impl Inferer {
         }
         // Whatever the per-function sweeps left: a requirement made at the top
         // level, and any a later declaration resolved. What is still pending
-        // after this belongs to a variable nothing pinned, which inference has
-        // already reported as itself.
+        // after this belongs to a variable nothing pinned — and that is now safe
+        // to drop, which it was not before ADR-093. A `HasMethod` requirement is
+        // only ever *made* when the catalog holds that name at that arity
+        // (`infer_catalog_call` reports the ones it does not, on the spot), so a
+        // pending one means the program never said which of those receivers it
+        // meant — §5.2's uncalled `fn total(values) { values.sum() }` — and
+        // monomorphization drops the uncalled polymorphic original rather than
+        // lowering it. Before, the pending set silently swallowed `x.nope()` and
+        // lowering met it at `run`.
         self.discharge_constraints();
         self.db.exit_level(group);
     }
@@ -2118,33 +2150,118 @@ impl Inferer {
                     self.infer_pattern(sub, elem_ty);
                 }
             }
-            // `P { x, y: p }` — a record pattern (REP-10, §4.5).
-            PatternKind::Record(rname) => self.infer_record_pattern(pat, &rname, expected),
-            PatternKind::Variant(vname) => {
-                // An enum variant pattern. The constructor is a name reference
-                // resolution already resolved; read the variant off its symbol.
-                let ctor = pat
-                    .name_token()
-                    .and_then(|t| self.refs.get(&t.text_range()).copied())
-                    .map(|r| r.symbol);
-                if let Some((enum_ty, variant_idx, payload_types)) =
-                    ctor.and_then(|symbol| self.lookup_enum_variant(symbol, &vname))
-                {
-                    if let Err(e) = self.db.unify(expected, enum_ty) {
-                        if let Some(tok) = pat.name_token() {
-                            self.diag_unify(self.file_span(tok.text_range()), e);
-                        }
-                    }
-                    // Unify sub-patterns with payload types.
-                    let sub_pats: Vec<_> = pat.sub_patterns().collect();
-                    for (i, sub) in sub_pats.iter().enumerate() {
-                        if let Some(&payload_ty) = payload_types.get(i) {
-                            self.infer_pattern(sub, payload_ty);
-                        }
-                    }
-                    let _ = variant_idx;
+            // `P { x, y: p }` or a headless `{ x, y: p }` — a record pattern
+            // (REP-10, §4.5; ADR-091).
+            PatternKind::Record(rname) => {
+                self.infer_record_pattern(pat, rname.as_deref(), expected)
+            }
+            PatternKind::Variant(vname) => self.infer_variant_pattern(pat, &vname, expected),
+        }
+    }
+
+    /// Infer a variant pattern `V(p, …)` against `expected` (M7, §4.6; REP-56).
+    ///
+    /// **A variant pattern's enum is the scrutinee's.** That is the rule lowering
+    /// has always had — `lower_pattern`'s own `Variant` arm reads the def off
+    /// `scrutinee_ty` — and it is now the rule here, which is what makes the two
+    /// halves agree instead of disagreeing about where the enum comes from.
+    ///
+    /// Inference used to reach the enum *only* through the constructor's resolved
+    /// symbol, and its comment asserted the symbol was "resolution already
+    /// resolved". That is false for every anonymous enum: a `choice(...)` type has
+    /// no declaration, so `resolve_pattern_bindings` records no ref for the
+    /// constructor, the symbol was `None`, and the whole arm was skipped. Three
+    /// things then never happened — the scrutinee was never unified, the payload
+    /// was never asked for, and the payload binding never got a type. `Mul(p) =>
+    /// p.a` left `p` an unbound var, so `infer_field_get` took its REP-28
+    /// tolerance arm, lowering answered `Unit` instead of emitting the field load
+    /// at all, and the *next* instruction aborted the runtime reading a `Unit` as
+    /// an `Int` payload. `praxis check` was clean the whole way (REP-56).
+    ///
+    /// The constructor symbol stays as the **fallback**, for the case that is
+    /// exactly the other way round: when nothing has pinned the scrutinee, the
+    /// constructor is the only thing that can pin it, which is why `fn score(m) {
+    /// match m { A(n) => n, B => 0 } }` infers at all for a *nominal* enum. An
+    /// anonymous enum has no constructor symbol to fall back to, and equally no
+    /// name to annotate the parameter with — see ADR-091's Consequences.
+    fn infer_variant_pattern(&mut self, pat: &praxis_ast::Pattern, vname: &str, expected: Type) {
+        let at = pat
+            .name_token()
+            .map(|t| t.text_range())
+            .unwrap_or_else(|| pat.syntax().text_range());
+        let resolved = self.db.follow(expected);
+        let scrutinee_enum = match self.db.data(resolved) {
+            praxis_types::TypeData::Enum { def, args } => Some((*def, args.clone())),
+            _ => None,
+        };
+        let found = match scrutinee_enum {
+            Some((def, args)) => {
+                let Some(idx) = self.db.enum_def(def).variant(vname) else {
+                    // The scrutinee is a concrete enum and it has no such
+                    // variant: the answer is known *here*, so say it here. This
+                    // used to be lowering's alone, which made a misspelled
+                    // variant REP-12's asymmetry — `praxis check` clean, `praxis
+                    // run` exiting 1 on the same file — for every enum, not only
+                    // the anonymous ones this row is about.
+                    let rendered = self.db.render(resolved);
+                    self.diagnostics
+                        .push(crate::diagnostics::unknown_enum_variant(
+                            self.file_span(at),
+                            &rendered,
+                            vname,
+                        ));
+                    // Do not fall back to the constructor symbol: a name that
+                    // happens to be *some other* enum's variant would unify the
+                    // scrutinee with that enum and bury this report under a
+                    // mismatch about a type the program never mentioned.
+                    self.infer_sub_patterns_freely(pat);
+                    return;
+                };
+                Some((resolved, self.db.variant_payload_of(def, &args, idx)))
+            }
+            // Nothing has pinned the scrutinee (or it is not an enum at all):
+            // ask the constructor, which is the only thing left that can pin it.
+            None => pat
+                .name_token()
+                .and_then(|t| self.refs.get(&t.text_range()).copied())
+                .map(|r| r.symbol)
+                .and_then(|symbol| self.lookup_enum_variant(symbol, vname))
+                .map(|(enum_ty, _idx, payload)| (enum_ty, payload)),
+        };
+        let Some((enum_ty, payload_types)) = found else {
+            // Neither end knows the enum. Lowering reports what it can see
+            // (`Y123` for a scrutinee that is not an enum at all); the
+            // sub-patterns still get types so their own bindings work.
+            self.infer_sub_patterns_freely(pat);
+            return;
+        };
+        if let Err(e) = self.db.unify(expected, enum_ty) {
+            self.diag_unify(self.file_span(at), e);
+        }
+        let sub_pats: Vec<_> = pat.sub_patterns().collect();
+        for (i, sub) in sub_pats.iter().enumerate() {
+            match payload_types.get(i) {
+                Some(&payload_ty) => self.infer_pattern(sub, payload_ty),
+                // More sub-patterns than payload slots is lowering's `Y124`
+                // (REP-05); infer the extras anyway so what is inside them is
+                // still checked.
+                None => {
+                    let fresh = self.db.fresh_var();
+                    self.infer_pattern(sub, fresh);
                 }
             }
+        }
+    }
+
+    /// The sub-patterns of a variant pattern whose enum neither the scrutinee nor
+    /// the constructor could name, inferred against fresh variables. Nothing is
+    /// known about the payload, but a binding inside it still needs a type and a
+    /// mistake inside it is still a mistake — the same tolerance
+    /// [`Self::infer_record_pattern_fields_only`] has at a record's fields.
+    fn infer_sub_patterns_freely(&mut self, pat: &praxis_ast::Pattern) {
+        for sub in pat.sub_patterns() {
+            let fresh = self.db.fresh_var();
+            self.infer_pattern(&sub, fresh);
         }
     }
 
@@ -2160,20 +2277,49 @@ impl Inferer {
         }
     }
 
-    /// Infer a record pattern `P { x, y: p }` against `expected` (REP-10, §4.5).
+    /// Infer a record pattern `P { x, y: p }` — or a headless `{ x, y: p }` —
+    /// against `expected` (REP-10, §4.5; ADR-091).
     ///
-    /// The head is a type name resolution already resolved, exactly as a record
+    /// A head is a type name resolution already resolved, exactly as a record
     /// *literal*'s is; the fields are checked against that record's declared
     /// fields, and a field the record does not have is the literal's own `Y114`.
+    ///
+    /// With **no head** the record is the scrutinee's, which is how a tuple
+    /// pattern has always worked (ADR-069 Decision 4) and the only way an
+    /// anonymous record can be matched at all: a `choice(...)` payload record has
+    /// no name a head could write.
+    ///
+    /// A headless pattern therefore needs a record it can *see*. Field names
+    /// alone cannot construct a record type — the language has no row variables,
+    /// so unlike a tuple pattern this one cannot pin an open scrutinee from its
+    /// own shape — and it is reported when the scrutinee is still open (ADR-091
+    /// Decision 2). Staying silent there, the way `infer_field_get` stays silent
+    /// about an unpinned receiver (REP-28), was measured and is *not* the same
+    /// trade: `let f = |{x, y}| x + y` passed `praxis check` and then aborted the
+    /// runtime with "int_payload wants a `Int` payload; this value is a `Unit`",
+    /// because inference had bound `x` and `y` to fresh variables while lowering
+    /// — which reads the record off the scrutinee and by then knows it — stored
+    /// the fields at `Int`. The binding's type and the body's disagreed, which is
+    /// REP-56's own failure mode reintroduced one pattern over. A field *read*
+    /// can be silent because lowering answers `Unit` too, consistently; a
+    /// *binding* cannot.
     ///
     /// Unlike a literal, a pattern need not name every field: an unnamed field is
     /// a wildcard, which is HIR-06's padding rule at the second kind of composite
     /// pattern (`Some` and `Some(_)` are one test for the same reason).
-    fn infer_record_pattern(&mut self, pat: &praxis_ast::Pattern, rname: &str, expected: Type) {
-        let head_ty = pat
-            .name_token()
-            .and_then(|tok| self.refs.get(&tok.text_range()).copied())
-            .and_then(|resolved| self.type_env.ty(resolved.symbol));
+    fn infer_record_pattern(
+        &mut self,
+        pat: &praxis_ast::Pattern,
+        rname: Option<&str>,
+        expected: Type,
+    ) {
+        let head_ty = match rname {
+            Some(_) => pat
+                .name_token()
+                .and_then(|tok| self.refs.get(&tok.text_range()).copied())
+                .and_then(|resolved| self.type_env.ty(resolved.symbol)),
+            None => Some(expected),
+        };
         let at = self.file_span(pat.syntax().text_range());
         // A head that names nothing has already been reported (`N001`), and a
         // head that names something which is not a record cannot match at all.
@@ -2183,12 +2329,27 @@ impl Inferer {
         };
         let (def_id, def_args) = match self.db.data(self.db.follow(head_ty)) {
             praxis_types::TypeData::Record { def, args } => (*def, args.clone()),
-            _ => {
-                let rendered = self.db.render(self.db.follow(head_ty));
+            // A headless pattern whose scrutinee is still open: the fields it
+            // names do not determine a record, so there is no honest type to
+            // bind them at. See this function's doc comment for what silence
+            // here cost. Name the record, or annotate the value.
+            praxis_types::TypeData::Var(_) if rname.is_none() => {
                 self.diagnostics.push(crate::diagnostics::not_a_pattern(
                     at,
-                    &format!("`{rname}` is `{rendered}`, which has no fields to match"),
+                    "`{ … }` cannot tell which record it matches here; \
+                     name the record (`P { … }`) or annotate the value",
                 ));
+                self.infer_record_pattern_fields_only(pat);
+                return;
+            }
+            _ => {
+                let rendered = self.db.render(self.db.follow(head_ty));
+                let reason = match rname {
+                    Some(n) => format!("`{n}` is `{rendered}`, which has no fields to match"),
+                    None => format!("`{{ … }}` is not a pattern for `{rendered}`"),
+                };
+                self.diagnostics
+                    .push(crate::diagnostics::not_a_pattern(at, &reason));
                 self.infer_record_pattern_fields_only(pat);
                 return;
             }
@@ -3200,10 +3361,12 @@ impl Inferer {
     /// whole `INDEX_EXPR` node, whose range always ends in `]` and so can never
     /// collide with an identifier's.
     ///
-    /// `unresolved` is the report for a **concrete** receiver with no matching
-    /// row. A method call passes `None`: lowering owns `Y110` and has the name
-    /// span. A subscript passes its own, because there is no method name to report
-    /// about and because `praxis check` never runs lowering (REP-12).
+    /// `unresolved` **overrides** the report for a concrete receiver with no
+    /// matching row. A method call passes `None` and gets `Y110`, built here
+    /// (ADR-093). A subscript passes its own, because there is no method name to
+    /// report about — `m[k]` on a `Set` is "cannot be indexed", not "no method
+    /// `[]`". Both report at `praxis check` time, which is the point: lowering
+    /// is a pass `check` never runs (REP-12).
     fn infer_catalog_call(
         &mut self,
         receiver_ty: Type,
@@ -3220,23 +3383,61 @@ impl Inferer {
             // a fresh var either way.
             let arg_types: Vec<Type> = arg_exprs.iter().map(|a| self.infer_expr(a)).collect();
             let result = self.db.fresh_var();
-            // Two different situations arrive here and only one of them is a
-            // mistake. A **concrete** receiver with no matching entry has no such
-            // method, and the HIR lowerer reports it (`Y110`; it has the
-            // method-name span). A receiver that is still a **variable** has not
-            // failed anything: nothing has said what it is yet, and
-            // `catalog::lookup` cannot answer about a type that does not exist.
-            // That one becomes a requirement on the channel, answered when the
-            // program pins the receiver — which is the whole of TY-30, and what
-            // makes §5.2's `fn total(values) { values.sum() }` infer.
+            // Three situations arrive here, and ADR-093 is the rule that sorts
+            // them: **inference reports a method call that cannot resolve —
+            // either because the receiver is known and has no such row, or
+            // because no receiver in the catalog has that name at that arity —
+            // and lowering reports nothing.**
+            //
+            // A receiver that is still a **variable** has usually not failed
+            // anything: nothing has said what it is yet, and `catalog::lookup`
+            // cannot answer about a type that does not exist. That one becomes a
+            // requirement on the channel, answered when the program pins the
+            // receiver — the whole of TY-30, and what makes §5.2's `fn
+            // total(values) { values.sum() }` infer. But if the catalog holds the
+            // name nowhere at that arity, no receiver can ever answer it, and
+            // deferring is deferring forever: `take_dischargeable` only returns
+            // constraints whose variable has resolved, so an unpinned one sits in
+            // `pending_constraints` and is never looked at again. That is how `fn
+            // f(x) { x.nope() }` used to reach lowering unreported.
+            //
+            // A **concrete** receiver with no matching entry has no such method,
+            // full stop. `unresolved` is the subscript's own wording for that —
+            // "cannot be indexed" rather than "no method `[]`"; a method call
+            // passes `None` and gets `Y110` here.
             if self.db.var_id_of(self.db.follow(receiver_ty)).is_some() {
-                self.require_method(receiver_ty, name.to_string(), arg_types, result, key);
+                // The name-universe half is for **method calls only**, which is
+                // why it asks `unresolved.is_none()`. A subscript reaches this
+                // function through the same door but has no method name to
+                // report about: REP-16 gave it "values of type `X` cannot be
+                // indexed with N index(es)" precisely so the user never reads
+                // ``no method `[]` ``, and there is no receiver type to put in
+                // that sentence here. A subscript on a receiver nothing pinned
+                // therefore defers exactly as it did before.
+                if unresolved.is_some() || self.catalog.has_name_at_arity(name, arity) {
+                    self.require_method(receiver_ty, name.to_string(), arg_types, result, key);
+                } else {
+                    self.diagnostics.push(crate::diagnostics::unknown_method(
+                        self.file_span(key),
+                        name,
+                        None,
+                        arity,
+                    ));
+                }
             } else if let Some(report) = unresolved {
                 let rendered = self.db.render(self.db.follow(receiver_ty));
                 self.diagnostics.push((report.build)(
                     self.file_span(key),
                     &rendered,
                     report.indices,
+                ));
+            } else {
+                let rendered = self.db.render(self.db.follow(receiver_ty));
+                self.diagnostics.push(crate::diagnostics::unknown_method(
+                    self.file_span(key),
+                    name,
+                    Some(&rendered),
+                    arity,
                 ));
             }
             return result;

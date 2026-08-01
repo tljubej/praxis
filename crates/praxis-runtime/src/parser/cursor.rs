@@ -411,6 +411,49 @@ pub(crate) fn split_lines(i: &Input<'_>, region: ByteRegion) -> Vec<ByteRegion> 
     out
 }
 
+/// [`split_lines`]' notion of a line, asked *forwards* from a cursor: where the
+/// line `at` sits on ends, after stepping over `extra` further line terminators.
+///
+/// A caller that already holds a cursor cannot use [`split_lines`] — it would
+/// have to split the whole region and then find its own position in the result,
+/// and the two would answer differently the moment one of them changed. So the
+/// `\r`/terminator rule lives once, in [`split_lines`]; this is the same rule
+/// read from a position rather than from a region, and it deliberately restates
+/// none of it.
+///
+/// `extra` is how many terminators the *caller* has already accounted for — a
+/// template that writes `\n` says it spans another line (§7.2), so `block`
+/// passes the count of those and gets a window that reaches exactly that far.
+/// `region.end()` is the answer whenever the region runs out first, which covers
+/// both "the last line has no terminator" and "the template claims more lines
+/// than the region holds"; the second is a mismatch, and the parts themselves
+/// report it against the bytes rather than being pre-empted here.
+pub(crate) fn line_window_end(
+    i: &Input<'_>,
+    region: ByteRegion,
+    at: Cursor,
+    extra: usize,
+) -> Cursor {
+    let bytes = region.from(at).bytes(i);
+    let mut pos = 0usize;
+    for _ in 0..extra {
+        match bytes[pos..].iter().position(|b| *b == b'\n') {
+            Some(n) => pos += n + 1,
+            None => return region.end(),
+        }
+    }
+    let mut end = match bytes[pos..].iter().position(|b| *b == b'\n') {
+        Some(n) => pos + n,
+        None => return region.end(),
+    };
+    // A `\r` in front of the `\n` is part of the terminator, not of the line —
+    // which is why a CRLF input and an LF input give the same answer.
+    if end > pos && bytes[end - 1] == b'\r' {
+        end -= 1;
+    }
+    at.advance(end)
+}
+
 /// The index at which `lines`' trailing run of blank lines begins — `lines.len()`
 /// when the last line has content.
 ///
@@ -598,6 +641,53 @@ mod tests {
             .map(|l| l.str(&i2).expect("a line is a str"))
             .collect();
         assert_eq!(lines2, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn line_window_end_is_split_lines_asked_forwards_from_a_cursor() {
+        // The two functions state one rule and this is what holds them to it.
+        // Each case is `(text, cursor, extra, window)`.
+        //
+        // **Observed red, one mutation per row.** Deleting the `\r` back-off
+        // makes the CRLF rows answer `"a\r"` — and a template's trailing
+        // literal then cannot match, so a CRLF input stops agreeing with the
+        // LF one. Deleting the `extra` loop (i.e. always one line) makes the
+        // `extra = 1` rows answer `"a"` instead of `"a\nb"`, which is the fault
+        // `at input offset 3..3: expected whitespace` end to end: the
+        // template's own `\n` part has no terminator left inside its window.
+        // Replacing the no-further-`\n` arm with `at` makes the last two rows
+        // answer `""` and every final line of a file unreadable.
+        for (text, cursor, extra, want) in [
+            // The ordinary case: the window is the line the cursor sits on.
+            ("a\nb\nc\n", 0usize, 0usize, "a"),
+            ("a\nb\nc\n", 2, 0, "b"),
+            // `\r` belongs to the terminator, not to the line.
+            ("a\r\nb\r\n", 0, 0, "a"),
+            ("a\r\nb\r\n", 3, 0, "b"),
+            // `extra` steps over exactly that many terminators, and the window
+            // ends at the end of the line it lands on.
+            ("a\nb\nc\n", 0, 1, "a\nb"),
+            ("a\r\nb\r\nc\r\n", 0, 1, "a\r\nb"),
+            ("a\nb\nc\n", 0, 2, "a\nb\nc"),
+            // No further terminator: the window is the rest of the region,
+            // which is how a last line with no newline is still readable.
+            ("a\nb", 2, 0, "b"),
+            ("abc", 0, 0, "abc"),
+            // More lines claimed than the region holds is not pre-empted here;
+            // the window is the rest and the parts report the mismatch.
+            ("a\nb\n", 0, 5, "a\nb\n"),
+        ] {
+            let (_rt, owner) = input_over(text);
+            let i = unsafe { Input::new(owner) }.expect("a Text is UTF-8");
+            let region = i.whole();
+            let at = region.start().advance(cursor);
+            let end = line_window_end(&i, region, at, extra);
+            assert_eq!(
+                region.subregion(at, end).str(&i),
+                Some(want),
+                "window of {text:?} from {cursor} over {extra} extra terminators"
+            );
+        }
     }
 
     #[test]

@@ -108,10 +108,14 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(seq_count_if_on_seq())
         .entry(seq_collect_on_vec())
         .entry(seq_collect_on_seq())
+        // The barrier combinators (§6.3). Runtime symbols rather than
+        // intrinsics, and on `Vec[T]` only — see the block comment above their
+        // definitions, including why `chunks`/`windows` are still absent.
+        .entry(seq_sorted_on_vec())
+        .entry(seq_unique_on_vec())
+        .entry(seq_frequencies_on_vec())
         // M8-WS11: the remaining non-barrier combinators. Each is an intrinsic
-        // fused by the MIR pipeline recognizer. Barriers (sorted/unique/
-        // frequencies/chunks/windows) are intentionally absent — they need new
-        // runtime helpers (separate workstream).
+        // fused by the MIR pipeline recognizer.
         .entry(seq_take_on_vec())
         .entry(seq_take_on_seq())
         .entry(seq_skip_on_vec())
@@ -166,9 +170,19 @@ pub fn builtin_catalog() -> MethodCatalog {
         // The explicit Int→Float widening method (§4.12). The first Int-receiver
         // method; establishes the pattern for scalar-receiver methods.
         .entry(int_to_float())
+        // The Char/Int conversion pair (ADR-086), written as a pair for the
+        // reason §4.12 writes Float.to_int/Int.to_float as one.
+        .entry(char_to_int())
+        .entry(int_to_char())
         .entry(int_wrapping_add())
         .entry(int_saturating_add())
         .entry(int_checked_add())
+        .entry(int_wrapping_sub())
+        .entry(int_saturating_sub())
+        .entry(int_checked_sub())
+        .entry(int_wrapping_mul())
+        .entry(int_saturating_mul())
+        .entry(int_checked_mul())
         // Subscripts (REP-16, §4.7/§6.2/§6.4). Six collections read; the three
         // that have a store at all also store. See the block comment above
         // `vec_index` for why these are catalog rows.
@@ -323,10 +337,11 @@ fn text_index() -> MethodEntry {
         receiver: text_receiver(),
         name: crate::catalog::INDEX_READ,
         params: vec![TypePattern::Scalar(ScalarType::Int)],
-        result: TypePattern::Scalar(ScalarType::Int),
+        result: TypePattern::Scalar(ScalarType::Char),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::TextGet),
-        doc: "`t[i]` — the scalar value of the char at `i`; faults if out of range.",
+        doc: "`t[i]` — the `Char` at `i`, indexing by Unicode scalar value and not \
+              by byte; faults if out of range (ADR-086).",
         stability: Stability::Stable,
     }
 }
@@ -500,10 +515,11 @@ fn text_get() -> MethodEntry {
         receiver: text_receiver(),
         name: "get",
         params: vec![TypePattern::Scalar(ScalarType::Int)],
-        result: TypePattern::Scalar(ScalarType::Int),
+        result: TypePattern::Scalar(ScalarType::Char),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::TextGet),
-        doc: "The scalar value of the char at `index`; faults if out of range.",
+        doc: "The `Char` at `index`; faults if out of range. `t[index]` is the \
+              same row and the same answer (ADR-086).",
         stability: Stability::Stable,
     }
 }
@@ -688,18 +704,91 @@ fn int_to_float() -> MethodEntry {
     }
 }
 
+// --- Char conversions (ADR-086) ----------------------------------------------
+//
+// The `Char`/`Int` pair, written as a pair for the reason §4.12 writes
+// `Float.to_int`/`Int.to_float` as one: a one-way conversion is a one-way door.
+// With `to_int` alone a program could take a `Char` apart and never build one,
+// so `Grid[Char]`, `Vec[Char]` and `Map[Char, _]` would stay write-only from the
+// language's side.
+//
+// `to_int` is required and not a nicety. Before ADR-086 a text index answered an
+// `Int`, so `t[i] - 48`, `t[i] >= 97` and a `Map[Int, _]` keyed on a character
+// were all ordinary; `capability::supports_numeric` excludes `Char` on purpose
+// ("a `Char` is a scalar value and not an arithmetic one"), so without this row
+// making the index a `Char` would be a straight regression. With it, every
+// program expressible before stays expressible by inserting `.to_int()`.
+//
+// **Deliberately absent, each for its own reason** — the same convention the
+// `_add` trio's comment below uses, so an omission is recorded where a reader
+// looks for it rather than only in a commit message:
+//
+// - **`Char.to_text()`.** §4.13 records a standing gap in the design doc's own
+//   words: `Int` has no `to_text()` either, and §8.1's interpolation is
+//   specified and unimplemented. The `to_text` family is one decision and wants
+//   taking whole. Adding it here would also give a second spelling for "is this
+//   character a `#`" (`t[i].to_text() == "#"` beside `t[i] == "#"[0]`), and two
+//   spellings for one question is what ADR-077 refused.
+// - **`is_digit`, `is_alpha`, `to_upper`, `to_lower`.** No design-doc surface
+//   asks for any of them and `to_int()` expresses every one. Four invented rows
+//   is exactly what REP-46 refused with `wrapping_sub`/`_mul`.
+// - **`Text.chars()` and `for c in text`.** `for c in text` is `Y005` because
+//   `capability::iter_item` answers `None` for a scalar. A real gap — but it
+//   reads the same before and after ADR-086, so it is neither caused nor
+//   worsened here, and inventing it here would be surface the doc does not ask
+//   for.
+
+fn char_to_int() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Char),
+        name: "to_int",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CharToInt),
+        doc: "The Unicode scalar value, as an `Int`. Never faults (ADR-086).",
+        stability: Stability::Stable,
+    }
+}
+
+fn int_to_char() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Int),
+        name: "to_char",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Char),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntToChar),
+        doc: "The `Char` with this Unicode scalar value; **faults** \
+              (`InvalidChar`) if it is negative, above `0x10FFFF`, or a \
+              surrogate. The narrowing half of the pair, as `Float.to_int` is \
+              (ADR-086).",
+        stability: Stability::Stable,
+    }
+}
+
 // §4.12's three explicit overflow alternatives (REP-46). The design document
 // writes exactly these three spellings, and until now none of them existed:
 // §4.12 said "integer arithmetic is checked by default … explicit alternatives"
 // and then named three methods a program could not call, so the section
 // described a language with no way to opt out of a fault.
 //
-// **`_sub` and `_mul` siblings are deliberately absent.** §4.12 names only the
-// `_add` trio, so adding six more rows would be inventing surface rather than
-// implementing it, and the shape of the family — three rows or nine, and
-// whether `wrapping_neg`/`abs` join it — is a language decision. It is recorded
-// as REP-46's open half rather than guessed at here, because a half-invented
-// numeric tower is harder to remove than an honest gap.
+// **The family is three modes over three operators** — `wrapping_`,
+// `saturating_`, `checked_` × `add`, `sub`, `mul`. §4.12 states that shape and
+// both of its closures (no `_div`/`_rem`, no `_neg`/`_abs`) and is the only
+// place the rule is written; `the_overflow_alternative_family_is_three_modes_over_three_operators`
+// below is what enforces it against this table.
+//
+// The `_sub`/`_mul` six were once deliberately absent, on the reading that
+// §4.12 "names only the three". That reading does not survive checking: the
+// sentence it rests on was written **by REP-46's own first half** as a note
+// deferring the question, so it cannot be the authority for the decision it was
+// written to defer. §4.12 closes a set in prose every time it means to — "The
+// stdlib Float methods **are** …", "Division by zero always faults" — and closes
+// nothing here. The measurement decided the rest: `wrapping_mul` cannot be
+// written in this language at all (every arithmetic operator faults and there
+// are no bitwise operators), so leaving it out was a hole with no reason
+// behind it.
 
 fn int_wrapping_add() -> MethodEntry {
     MethodEntry {
@@ -736,6 +825,87 @@ fn int_checked_add() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntCheckedAdd),
         doc: "Add, answering None where the checked `+` would fault (§4.12).",
+        stability: Stability::Stable,
+    }
+}
+
+fn int_wrapping_sub() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Int),
+        name: "wrapping_sub",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntWrappingSub),
+        doc: "Subtract with two's-complement wraparound instead of a fault (§4.12).",
+        stability: Stability::Stable,
+    }
+}
+
+fn int_saturating_sub() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Int),
+        name: "saturating_sub",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntSaturatingSub),
+        doc: "Subtract, clamping to Int's ends instead of faulting (§4.12).",
+        stability: Stability::Stable,
+    }
+}
+
+fn int_checked_sub() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Int),
+        name: "checked_sub",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int))),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntCheckedSub),
+        doc: "Subtract, answering None where the checked `-` would fault (§4.12).",
+        stability: Stability::Stable,
+    }
+}
+
+fn int_wrapping_mul() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Int),
+        name: "wrapping_mul",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntWrappingMul),
+        doc: "Multiply with two's-complement wraparound instead of a fault. The \
+              one row here a program could not write for itself: every arithmetic \
+              operator is checked and the language has no bitwise operators \
+              (§4.12).",
+        stability: Stability::Stable,
+    }
+}
+
+fn int_saturating_mul() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Int),
+        name: "saturating_mul",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Scalar(ScalarType::Int),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntSaturatingMul),
+        doc: "Multiply, clamping to Int's ends instead of faulting (§4.12).",
+        stability: Stability::Stable,
+    }
+}
+
+fn int_checked_mul() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Int),
+        name: "checked_mul",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int))),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntCheckedMul),
+        doc: "Multiply, answering None where the checked `*` would fault (§4.12).",
         stability: Stability::Stable,
     }
 }
@@ -1851,13 +2021,108 @@ fn seq_collect_on_seq() -> MethodEntry {
     }
 }
 
+// --- the barrier combinators (§6.3) ---------------------------------------
+//
+// A barrier needs the whole sequence before it can answer anything, so it
+// cannot be fused into the loop feeding it. That makes it the opposite kind of
+// row from everything above: a `RuntimeSymbol`, not an `Intrinsic`. That is the
+// MIR fuser's guardrail talking and not a style preference — registering
+// `sorted` as `MethodLowering::Intrinsic("seq_sorted")` with no
+// `classify_link`/`classify_sink` arm was tried, and
+// `intrinsics_are_all_recognized_so_there_is_no_second_lowering` answers:
+// "`sorted` at arity 0 lowers as an intrinsic and no runtime symbol, but the
+// pipeline recognizer declines it — it has no lowering".
+//
+// **Registered on `Vec[T]` only, not on `Seq[T]`.** A runtime wrapper needs a
+// materialized Vec, and no catalog row produces a `Seq` result today — every
+// combinator's result pattern is `vec_of_t`/`vec_of_u` — so the `*_on_seq`
+// half would be unreachable. `recognize_pipeline` already ends a fused chain at
+// an unclassified `MethodCall` and starts a fresh one from its result, which is
+// exactly what a barrier means: `pairs.map(f).sorted()` fuses the map into a
+// collect, calls the wrapper, and `sorted(…).zip(…)` starts again.
+//
+// **`chunks` and `windows` are still deferred, and here is the reason.** Both
+// answer `Vec[Vec[T]]`, so their wrapper has to label the *outer* Vec with
+// `collections::VEC` while the inner ones keep the element descriptor — a
+// second descriptor decision that no program in the design document forces.
+// Appendix D needs `sorted` and `frequencies`; `unique` is here because it is
+// the same `Vec[T] -> Vec[T]` shape with the same descriptor and therefore
+// costs nothing extra. Guessing the `Vec[Vec[T]]` labelling would.
+
+/// `sorted` — a new `Vec` in ascending order (§6.3).
+///
+/// The `Ord` bound is the row's own, and it has to be: the wrapper orders
+/// through the element descriptor's `compare` callback, and
+/// `require_collection_invariants` — which is where the language's other
+/// ordering rule lives — is applied to the receiver *type*, where it would be
+/// wrong. A `Vec` of unorderable things is a perfectly good `Vec` right up until
+/// someone sorts it.
+fn seq_sorted_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![TypePattern::of_kind("T", crate::CapKind::Ord)],
+        },
+        name: "sorted",
+        params: vec![],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecSorted),
+        doc: "A new Vec holding these elements in ascending order.",
+        stability: Stability::Stable,
+    }
+}
+
+/// `unique` — a new `Vec` with later duplicates dropped, in first-occurrence
+/// order (§6.3).
+///
+/// `HashStable` and not `Hash`: sameness is decided by the descriptor's `hash`
+/// and `equals`, so an element that can change after it has been seen would not
+/// be recognized the second time (D4, TY-32).
+fn seq_unique_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![TypePattern::of_kind("T", crate::CapKind::HashStable)],
+        },
+        name: "unique",
+        params: vec![],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecUnique),
+        doc: "A new Vec with duplicate elements removed, keeping first occurrences.",
+        stability: Stability::Stable,
+    }
+}
+
+/// `frequencies` — a `Counter[T]` of how often each element occurs (§6.3, §6.2).
+///
+/// The **first** catalog row whose result is a keyed collection, and the reason
+/// `Bound::Kind` exists. `require_collection_invariants` asks the key rule of a
+/// method's receiver only; here the receiver is an ordinary `Vec` that is
+/// allowed to hold anything, and it is the *result* that has keys. So the bound
+/// is written on the row, where `MethodCatalogBuilder::finish` will refuse it if
+/// it ever contradicts another.
+fn seq_frequencies_on_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![TypePattern::of_kind("T", crate::CapKind::HashStable)],
+        },
+        name: "frequencies",
+        params: vec![],
+        result: counter_of_t(),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecFrequencies),
+        doc: "A Counter holding how many times each element occurs.",
+        stability: Stability::Stable,
+    }
+}
+
 // --- M8-WS11: the remaining non-barrier combinators (§6.3) ----------------
 // Each is an intrinsic lowered by the MIR fuser (`recognize_pipeline` +
 // `lower_pipeline`) into a single fused loop. Defined on both `Vec[T]` and
 // `Seq[T]` so chains can start on a concrete collection and continue on Seq.
-// The 5 barriers (sorted/unique/frequencies/chunks/windows) need new runtime
-// helpers and are intentionally NOT registered here — they Y110 until that
-// separate workstream lands.
 
 /// `(T, T) -> Bool` — the shape of `min_by`/`max_by`'s comparator ("less-than").
 fn t_t_to_bool() -> TypePattern {
@@ -2834,5 +3099,138 @@ mod tests {
             TypePattern::Scalar(ScalarType::Int),
             "§6.2: a Counter's absent values read as zero, deliberately"
         );
+    }
+
+    /// **ADR-086, the catalog half.** `t[i]` and `t.get(i)` answer a `Char`.
+    ///
+    /// This is pure data, so it goes red on the catalog edit alone and stays red
+    /// whatever the runtime does — which is what makes it the *catalog's* gate.
+    /// Its runtime twin is `text_get_answers_a_char_object` in
+    /// `praxis-runtime`'s `abi.rs`, and neither can see the other's half.
+    ///
+    /// Observed red with the fix removed: with `result` back at
+    /// `Scalar(Int)` both assertions fail, naming the row.
+    #[test]
+    fn the_two_text_reads_answer_a_char() {
+        let cat = builtin_catalog();
+        let text = text_receiver();
+
+        for name in [crate::catalog::INDEX_READ, "get"] {
+            let row = cat
+                .by_receiver_and_name(&text, name)
+                .next()
+                .unwrap_or_else(|| panic!("Text.{name} exists"));
+            assert_eq!(
+                row.result,
+                TypePattern::Scalar(ScalarType::Char),
+                "ADR-086: `Text.{name}` answers a Char, not the char's scalar value"
+            );
+            // The two spellings are one answer, so they are one wrapper — unlike
+            // `Map`, whose two reads are two wrappers on purpose (§4.7).
+            assert_eq!(
+                row.lowering,
+                MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::TextGet),
+                "`Text.{name}` lowers through the one text read"
+            );
+        }
+    }
+
+    /// **ADR-086, the conversion pair.** A one-way conversion would make
+    /// `Grid[Char]`, `Vec[Char]` and `Map[Char, _]` write-only from the
+    /// language's side, so the pair is asserted as a pair — the same shape
+    /// §4.12 gives `Float.to_int`/`Int.to_float`.
+    ///
+    /// Observed red with the fix removed: neither row resolves, and both
+    /// `expect`s fire.
+    #[test]
+    fn char_and_int_convert_both_ways() {
+        let cat = builtin_catalog();
+
+        let to_int = cat
+            .by_receiver_and_name(&TypePattern::Scalar(ScalarType::Char), "to_int")
+            .next()
+            .expect("Char.to_int exists");
+        assert_eq!(to_int.result, TypePattern::Scalar(ScalarType::Int));
+        assert_eq!(to_int.purity, Purity::Pure);
+
+        let to_char = cat
+            .by_receiver_and_name(&TypePattern::Scalar(ScalarType::Int), "to_char")
+            .next()
+            .expect("Int.to_char exists");
+        assert_eq!(to_char.result, TypePattern::Scalar(ScalarType::Char));
+
+        // The narrowing direction is the one that can fail — `Int.to_char` is to
+        // `Char.to_int` what `Float.to_int` is to `Int.to_float`. The manifest is
+        // where that is enforced, so read it there rather than restating it.
+        assert!(
+            to_char.can_fault(),
+            "not every Int is a Unicode scalar value, so the narrowing faults"
+        );
+        assert!(
+            !to_int.can_fault(),
+            "every Unicode scalar value fits an Int, so the widening cannot"
+        );
+    }
+
+    /// **REP-46.** §4.12's overflow alternatives are three modes over three
+    /// operators, and the table says exactly that — no more and no fewer.
+    ///
+    /// This is the enforcement of a rule §4.12 states and nothing else should
+    /// restate. It asserts the closures as well as the members, because the
+    /// closures are the half a reader is most likely to undo by adding the
+    /// "obviously missing" `checked_div` — which would contradict §4.12's own
+    /// next sentence, "Division by zero always faults".
+    ///
+    /// **Not a gate for the six new rows** — `a_missing_row_is_a_missing_row`
+    /// would not be red for them either, since a catalog test can only assert
+    /// what is there. The gates for the behaviour are in `jit.rs`, at the
+    /// boundaries where the ordinary operator faults. This one is red on a
+    /// *later* edit that widens or narrows the family, which is the thing worth
+    /// pinning once nine rows exist and a tenth looks natural.
+    #[test]
+    fn the_overflow_alternative_family_is_three_modes_over_three_operators() {
+        let cat = builtin_catalog();
+        let int = TypePattern::Scalar(ScalarType::Int);
+
+        for mode in ["wrapping", "saturating", "checked"] {
+            for op in ["add", "sub", "mul"] {
+                let name = format!("{mode}_{op}");
+                let row = cat
+                    .by_receiver_and_name(&int, &name)
+                    .next()
+                    .unwrap_or_else(|| panic!("§4.12's family includes `Int.{name}`"));
+                assert_eq!(row.params, vec![TypePattern::Scalar(ScalarType::Int)]);
+                // None of the nine may fault: that is what an *alternative* to a
+                // faulting operator means, and ADR-088's verifier rule turns it
+                // into "no `CheckFault` follows the call".
+                assert!(!row.can_fault(), "`{name}` is an alternative to faulting");
+
+                let want = if mode == "checked" {
+                    TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int)))
+                } else {
+                    TypePattern::Scalar(ScalarType::Int)
+                };
+                assert_eq!(row.result, want, "`{name}`'s result");
+            }
+        }
+
+        // The two closures §4.12 draws, asserted as absences.
+        for absent in [
+            "wrapping_div",
+            "saturating_div",
+            "checked_div",
+            "wrapping_rem",
+            "checked_rem",
+            "wrapping_neg",
+            "checked_neg",
+            "saturating_abs",
+        ] {
+            assert!(
+                cat.by_receiver_and_name(&int, absent).next().is_none(),
+                "§4.12 closes the family before `{absent}`: division's escape \
+                 hatch is closed by \"Division by zero always faults\", and \
+                 `_neg`/`_abs` are spelled with `0.wrapping_sub(x)`"
+            );
+        }
     }
 }

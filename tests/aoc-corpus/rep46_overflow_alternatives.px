@@ -1,0 +1,51 @@
+// REP-46 (§4.12): the overflow-alternative family, all nine, through the real
+// binary.
+//
+// §4.12 offers three ways out of a checked-arithmetic fault. Only the `_add`
+// three existed; the reading that closed the set there rested on a sentence
+// REP-46's own first half had written to *defer* the question, so it could not
+// be the authority for the decision it deferred.
+//
+// The measurement decided the rest: `wrapping_mul` has no in-language spelling
+// at all. Every arithmetic operator is checked and there are no bitwise
+// operators, so modular multiplication was simply unreachable — a hole with no
+// reason behind it.
+//
+// Every line below is at a boundary where the ordinary operator faults. Two
+// small numbers would exercise the same wrappers and prove only that a name
+// resolves.
+fn main() {
+    let max = 9223372036854775807
+    // `9223372036854775808` is not an Int literal, and unary minus binds after
+    // the literal, so Int::MIN is spelled as a subtraction.
+    let min = -9223372036854775807 - 1
+    // 2^62, whose product with 4 is exactly 2^64 — i.e. 0 when it wraps.
+    let big = 4611686018427387904
+
+    out(max.wrapping_add(1) == min)
+    out(max.saturating_add(1) == max)
+    out(min.wrapping_sub(1) == max)
+    out(min.saturating_sub(1) == min)
+    out(big.wrapping_mul(4))
+    out(big.saturating_mul(4) == max)
+
+    // `checked_*` answers a real Option[Int] (§4.7, ADR-076), so the miss is
+    // matched rather than sentinelled.
+    match max.checked_add(1) {
+        Some(n) => out(n)
+        None => out(-1)
+    }
+    match min.checked_sub(1) {
+        Some(n) => out(n)
+        None => out(-2)
+    }
+    match big.checked_mul(4) {
+        Some(n) => out(n)
+        None => out(-3)
+    }
+    // …and each answers Some where the result fits.
+    match 6.checked_mul(7) {
+        Some(n) => out(n)
+        None => out(0)
+    }
+}

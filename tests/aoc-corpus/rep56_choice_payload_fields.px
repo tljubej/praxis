@@ -1,0 +1,65 @@
+// AoC corpus fixture: a choice payload record's fields are readable (REP-56,
+// REP-57; §7.5, C.9, ADR-091).
+//
+// This is C.9's puzzle carried all the way to its answer, which is the half
+// `m9_noisy_scan.px` stops short of: that fixture counts the matches, so it
+// passed while every field inside them was unreachable. The instructions here
+// are only useful if `a` and `b` come *out* of the payload.
+//
+// Two spellings of the same read, because they failed for two different
+// reasons. `Mul(p) => p.a * p.b` bound `p` at an unbound variable, so the field
+// read lowered to `Unit` and the next instruction aborted the runtime reading a
+// `Unit` as an `Int` payload — inference reached the enum only through a
+// constructor *symbol*, and an anonymous `choice(...)` enum has none (REP-56).
+// `Mul({a, b})` did not parse at all: a pattern's `{` was "expected a pattern"
+// (REP-57), and the record production had no headless form for a record that
+// has no name to write.
+//
+// Input (on stdin): C.9's corrupted memory, one line.
+// Output: the enabled products' sum, then the same sum computed by
+// destructuring, then the instruction count `m9_noisy_scan.px` already claims.
+let instructions = read scan(choice(
+    Mul: `mul({a:int},{b:int})`,
+    Do: `do()`,
+    Dont: `don't()`,
+))
+
+// `don't()` disables the multiplications that follow it and `do()` re-enables
+// them, so the answer depends on reading the payload *and* on the arms being
+// told apart: a variant pattern that silently matched everything would sum the
+// disabled products too.
+var enabled = true
+var total = 0
+for m in instructions {
+    match m {
+        Mul(p) => {
+            if enabled {
+                total = total + p.a * p.b
+            }
+        }
+        Do(_) => { enabled = true }
+        Dont(_) => { enabled = false }
+    }
+}
+out(total)
+
+// The same walk, with the payload record taken apart in the pattern. A headless
+// `{ a, b }` pins its record from the scrutinee the way a tuple pattern always
+// has, which is the only spelling available here: the payload record is
+// anonymous, so no head could name it.
+var on = true
+var sum = 0
+for m in instructions {
+    match m {
+        Mul({a, b}) => {
+            if on {
+                sum = sum + a * b
+            }
+        }
+        Do(_) => { on = true }
+        Dont(_) => { on = false }
+    }
+}
+out(sum)
+
+out(instructions.len())

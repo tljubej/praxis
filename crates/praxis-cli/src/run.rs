@@ -173,17 +173,10 @@ pub fn run(
     // (REP-51). The reader below is installed, not called; `praxis_get_input`
     // calls it the one time, from the program's first `read`.
     //
-    // **A zero-byte file is input, not the absence of input** (REP-60). The
-    // buffer used to be installed only `if !t.is_empty()`, so `--input` on an
-    // empty file left `ctx.input_source` at the immortal Unit — and `Input::new`
-    // answers `None` for a non-Text source and takes the "no detail was
-    // recorded" path, so every `read` faulted with `input parse mismatch` and
-    // no offset, no `expected` and no `actual`. Nothing about "the file is
-    // empty" was in the message. Installing a zero-length `Text` unconditionally
-    // makes `read` run against a zero-length buffer, which the constructors
-    // already have answers for: `lines(int)` over it is `[]` under
-    // `split_lines`'s own rule, and a constructor that requires content faults
-    // at offset `0..0` naming what it expected.
+    // The `Text` is installed unconditionally, a zero-byte file included: empty
+    // input is input, and the rule and its reasons are stated once, at
+    // `praxis_get_input` (REP-60, ADR-087). The CLI's own decision is only the
+    // one above — `--input` is eager, standard input is lazy.
     match input_file {
         Some(path) => match std::fs::read_to_string(path) {
             Ok(t) => {

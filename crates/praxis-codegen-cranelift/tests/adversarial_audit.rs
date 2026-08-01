@@ -1159,6 +1159,51 @@ fn an_interior_blank_line_is_a_row_and_a_trailing_one_is_nobodys() {
     assert_eq!(result.as_int(), 2, "`csv(int)` made nothing of \"  \"");
 }
 
+/// **One template, two constructs, one answer** (ADR-090).
+///
+/// `` `items: {items:csv(int)}` `` read two ints as a `lines` element and
+/// swallowed the following line as a `block` item, faulting `at input offset
+/// 13..23: expected the rest of the field`. `lines` had narrowed to a line;
+/// `block` — the only sequencing construct that computed no window — had
+/// narrowed to nothing, and the unbounded-last-part rule did the rest. That is
+/// ADR-078's own defect class: two constructs in one stage disagreeing about
+/// one byte.
+///
+/// **Asserted as a pair on purpose, against each other rather than a constant.**
+/// A gate that measured only one side is what let this survive: the `lines` half
+/// is 2 on both binaries.
+///
+/// **Observed red**: with `block_item_window` removed from `walk_block`'s two
+/// call sites, the `block` half faults `ParseFailed` at `13..23`; the `lines`
+/// half is unchanged.
+#[test]
+fn the_same_template_reads_the_same_bytes_under_lines_and_under_block() {
+    let lines = "fn main() -> Int {\n  let v = read lines(`items: {items:csv(int)}`)\n  \
+                 v.get(0).items.len()\n}\n";
+    let block = "fn main() -> Int {\n  let b = read block(`items: {items:csv(int)}`, \
+                 `op: {op:word}`)\n  b.items.len()\n}\n";
+
+    let (runtime, from_lines) =
+        run_main_with_input(lines, "items: 79, 98\nitems: 54, 65, 75, 74\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    let (runtime, from_block) = run_main_with_input(block, "items: 79, 98\nop: plus\n");
+    assert!(
+        !runtime.has_pending_fault(),
+        "the same template under `block` faulted: {:?}",
+        runtime.fault()
+    );
+    assert_eq!(
+        from_block.as_int(),
+        from_lines.as_int(),
+        "one template, two constructs, one answer"
+    );
+    assert_eq!(
+        from_lines.as_int(),
+        2,
+        "and the answer is the line's two ints"
+    );
+}
+
 /// **A whitespace-only template part is a bound too.**
 ///
 /// The capture bound first looked only for a following literal with *non-empty*
@@ -1596,13 +1641,19 @@ fn text_equality_compares_bytes_not_the_payload_discriminant() {
 /// **Rewritten**, not merely un-ignored: its input changed from `aβ\n` to
 /// `ab\n`.
 ///
-/// The non-ASCII cell is unparseable for a reason that has nothing to do with
-/// ordering — the `grid(char)` cell parser works in bytes, so `β` is an
-/// "expected char" mismatch, and `read grid(char)` is the only source of `Char`
-/// values in the language (`Text.get` returns the scalar value as an `Int`).
-/// That is an input-parser defect, S19/S20's territory alongside IPR-06's
-/// `grid(int)` granularity, and leaving it here would make an ordering test go
-/// red until a parser fix lands.
+/// The non-ASCII cell was unparseable for a reason that has nothing to do with
+/// ordering — the `grid(char)` cell parser worked in bytes, so `β` was an
+/// "expected char" mismatch — and `read grid(char)` was then the only source of
+/// `Char` values in the language. That is an input-parser defect, S19/S20's
+/// territory alongside IPR-06's `grid(int)` granularity, and leaving it here
+/// would have made an ordering test go red until a parser fix landed.
+///
+/// **Both halves of that reason have since expired.** S20 made the cell parser
+/// read Unicode scalars, so `read grid(char)` over `aβ` answers `β` today; and
+/// ADR-086 made `t[i]` answer a `Char`, so `"β"[0]` writes one. The input is
+/// left at `ab\n` regardless: what this test owns is the four-byte payload
+/// width, which `ab` reaches, and rewriting it to chase a reason that no longer
+/// applies would change what it pins.
 ///
 /// What survives is the property P0-12 owns and this input still reaches: two
 /// `Char` cells are ordered by their four-byte payloads, not by eight bytes
@@ -1860,9 +1911,11 @@ fn text_comparison_never_extracts_a_scalar_from_the_payload() {
 /// as `Int`, an eight-byte load from a smaller, differently-aligned payload.
 #[test]
 fn small_scalars_are_extracted_at_their_own_width() {
-    // `grid(char)` is the only source of `Char` values today — `Text.get`
-    // returns the scalar value as an `Int`, and the language has no char
-    // literal.
+    // `grid(char)` was the only source of `Char` values when this was written.
+    // It is not since ADR-086: `Text.get`/`t[i]` answer a `Char` too, so
+    // `"#"[0]` names one. The language still has no char literal (D19). The
+    // property under test is unaffected either way — this reads a grid because
+    // that is what it read when P0-12 was measured.
     let chars = comparison_shapes_for(
         "fn main() -> Bool {\n  let g = read grid(char)\n  g.get(0, 0) < g.get(1, 0)\n}\n",
     );

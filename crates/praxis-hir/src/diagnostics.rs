@@ -343,6 +343,25 @@ pub(crate) fn infinite_type(at: FileSpan) -> Diagnostic {
     )
 }
 
+/// `Y024` — a call whose argument count does not match the function's
+/// (D16, ADR-089).
+///
+/// The counts, not the two function types. `assert(cond, "why")` used to report
+/// *expected `(Bool) -> Unit`, found `(Bool, Text) -> ?T`* — a whole-type diff
+/// that reads like an inference accident, where the mistake is arithmetic.
+///
+/// There is no `assert`-specific wording, and no `help:` naming another
+/// signature: ADR-089 decides that a name has exactly one, so there is no other
+/// one to point at.
+pub(crate) fn arity_mismatch(at: FileSpan, expected: usize, found: usize) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::CallArityMismatch,
+        format!("this function takes {expected} argument(s), but {found} were given"),
+        at,
+    )
+}
+
 /// `Y003` — an explicit annotation conflicts with what inference derived.
 pub(crate) fn annotation_conflict(at: FileSpan, annotated: &str, derived: &str) -> Diagnostic {
     Diagnostic::new(
@@ -425,16 +444,33 @@ pub(crate) fn not_numeric(at: FileSpan, ty: &str) -> Diagnostic {
     )
 }
 
-/// `Y110` at a *use* site rather than at a method name: a generic function's
-/// body called a method on a parameter, and this call instantiated that
-/// parameter at a type with no such method (TY-30).
-pub(crate) fn unknown_method(at: FileSpan, name: &str, ty: &str) -> Diagnostic {
-    Diagnostic::new(
-        Severity::Error,
-        DiagCode::NoMethodOnType,
-        format!("no method `{name}` on type `{ty}`"),
-        at,
-    )
+/// `Y110` — **the** builder for a method call that cannot resolve (ADR-093).
+///
+/// There were two of these. Inference's said the type and not the arity;
+/// lowering's said the arity and not the type, and lowering's was the one users
+/// met — because `praxis check` never runs lowering, so every `Y110` arrived at
+/// `run` after a silent `check`. ADR-093 moved the report to inference and
+/// deleted lowering's, and this message is the union of what the two said: the
+/// type is what §5.4 asks for (concrete language, never the capability), and the
+/// arity is what distinguishes `v.get(0)` from `v.get()`.
+///
+/// `ty` is `None` for the one shape where there is no receiver type to name:
+/// nothing has pinned the receiver, and the call is refused anyway because the
+/// catalog holds that name at that arity on **no** receiver. Rendering the
+/// receiver there would print `?a` — a type variable's leaked name — into a
+/// message §5.4 requires to be concrete, and it would be the least useful half
+/// of the sentence. The name and the arity are the whole answer.
+pub(crate) fn unknown_method(
+    at: FileSpan,
+    name: &str,
+    ty: Option<&str>,
+    arity: usize,
+) -> Diagnostic {
+    let message = match ty {
+        Some(ty) => format!("no method `{name}` on type `{ty}` taking {arity} argument(s)"),
+        None => format!("no type has a method `{name}` taking {arity} argument(s)"),
+    };
+    Diagnostic::new(Severity::Error, DiagCode::NoMethodOnType, message, at)
 }
 
 /// `Y112` at a *use* site rather than at a field name — [`unknown_method`]'s
@@ -547,6 +583,23 @@ pub(crate) fn missing_record_fields(
 /// name something no value can be.
 pub(crate) fn not_a_pattern(at: FileSpan, reason: &str) -> Diagnostic {
     Diagnostic::new(Severity::Error, DiagCode::NotAPatternForType, reason, at)
+}
+
+/// `Y122` — a variant pattern naming a variant the scrutinee's enum does not
+/// have (REP-56; ADR-091 Decision 5).
+///
+/// The same code lowering reports, because it is the same mistake seen one phase
+/// earlier. It had been lowering's alone, and lowering only runs on a program
+/// analysis accepted — so `praxis check` was clean on a misspelled variant while
+/// `praxis run` exited 1 on the same file, which is REP-12's asymmetry for every
+/// enum. `praxis check` is the command that is supposed to know.
+pub(crate) fn unknown_enum_variant(at: FileSpan, type_name: &str, variant: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::UnknownEnumVariant,
+        format!("`{type_name}` has no variant `{variant}`"),
+        at,
+    )
 }
 
 /// `Y115` — a record *pattern* naming one field twice (REP-10).

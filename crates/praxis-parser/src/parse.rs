@@ -180,6 +180,10 @@ fn is_pattern_start(kind: SyntaxKind) -> bool {
             // `(a, b) => …` stopped the arm list, so the second arm and every
             // arm after it vanished from the tree.
             | SyntaxKind::L_PAREN
+            // A headless record pattern (ADR-091). Same regression as REP-10's,
+            // one brace over: without it the arm list stopped *before*
+            // `{a, b} => …` and it, with every arm after it, left the tree.
+            | SyntaxKind::L_BRACE
     )
 }
 
@@ -1238,6 +1242,7 @@ impl<'t> Parser<'t> {
             | SyntaxKind::FloatLit
             | SyntaxKind::TextLit
             | SyntaxKind::BacktickTemplate
+            | SyntaxKind::UnterminatedBacktickTemplate
             | SyntaxKind::KW_TRUE
             | SyntaxKind::KW_FALSE => {
                 self.start_node(SyntaxKind::LITERAL);
@@ -1451,18 +1456,30 @@ impl<'t> Parser<'t> {
     ///          | Ident                                 // variable bind or payload-less variant
     ///          | Ident "(" [pattern ("," pattern)*] ")" // enum variant
     ///          | Ident "{" [pattern_field ("," pattern_field)*] "}" // record (§4.5)
+    ///          | "{" pattern_field ("," pattern_field)* "}"        // headless record (ADR-091)
     ///          | "(" pattern ("," pattern)* ")"        // tuple (§4.4)
     /// pattern_field := Ident [":" pattern]
     /// ```
     ///
     /// A record pattern's `{` is unambiguous where a record *literal*'s is not
     /// (FE-06): a pattern is followed by `=>` or `in`, never by a block, so
-    /// nothing else can be waiting for that brace.
+    /// nothing else can be waiting for that brace. That is also what makes the
+    /// **head optional** (ADR-091 Decision 2): a leading `{` in pattern position
+    /// can only ever open fields, so a headless record pattern needs no new token
+    /// to tell it apart, and it pins its record from the scrutinee exactly as a
+    /// tuple pattern does. It is the form a `choice(...)` payload record wants,
+    /// because an anonymous record has no name a head could write.
     ///
     /// Parentheses in pattern position are **always** a tuple — there is no
     /// grouping form, because a pattern has no precedence to override. `(p)` is
     /// therefore a one-element tuple pattern, which `Y123` reports against every
     /// type: `TypeData::Tuple` carries two elements or more.
+    ///
+    /// A headless `{}` is rejected for `()`'s reason (ADR-091 Decision 3): it
+    /// binds nothing and tests nothing against a record it cannot even name, so
+    /// it is an irrefutable arm written by accident. The pattern that matches
+    /// anything is spelled `_`. A *headed* `P {}` is kept — it names the record
+    /// it tests for, so it is refutable, and it is `Some` beside `Some(_)`.
     fn parse_pattern(&mut self) {
         self.start_node(SyntaxKind::PATTERN);
         match self.peek() {
@@ -1485,6 +1502,19 @@ impl<'t> Parser<'t> {
                     self.parse_pattern_list(SyntaxKind::R_PAREN);
                     self.expect(SyntaxKind::R_PAREN, "`)` to close variant pattern");
                 }
+            }
+            SyntaxKind::L_BRACE => {
+                // Headless record pattern `{ a, b: p }` (ADR-091). The fields
+                // are the headed form's, unchanged — one production, so `for
+                // {x, y} in points` and `|{x, y}| x + y` arrive with it.
+                if self.nth_kind(1) == SyntaxKind::R_BRACE {
+                    // `{}` binds nothing and names no record: an arm nobody can
+                    // read as refutable. Reported where `()` is, and for the
+                    // same reason.
+                    let span = self.current_span();
+                    self.error(span, "expected a pattern");
+                }
+                self.parse_record_pattern_fields();
             }
             SyntaxKind::L_PAREN => {
                 // Tuple pattern `(a, b)` — or a grouping `(p)`, which the list
@@ -1768,7 +1798,14 @@ impl<'t> Parser<'t> {
         self.eat_trivia(); // whitespace outside backticks is insignificant (§7.1)
         let kind = self.peek();
         match kind {
-            SyntaxKind::BacktickTemplate => self.parse_parser_template(),
+            // An unterminated run is still *shaped* like a template, and the
+            // lexer has already reported it (T002, ADR-094). Taking it here
+            // rather than falling through to "expected a parser expression"
+            // is what keeps one typo to one error: the alternative is a P001
+            // and then an I000 about an interior nobody wrote.
+            SyntaxKind::BacktickTemplate | SyntaxKind::UnterminatedBacktickTemplate => {
+                self.parse_parser_template()
+            }
             SyntaxKind::Ident => {
                 // An identifier is either an atomic parser (`int`, `char`, …)
                 // or a constructor call (`lines(P)`, `sep(s, P)`). Decide by the
@@ -3452,6 +3489,93 @@ mod tests {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must report");
         }
+    }
+
+    /// **REP-57, ADR-091.** A record pattern's head is optional.
+    ///
+    /// `{ a, b }` was `P001 expected a pattern` at the `{`, and the arm list and
+    /// the enclosing function disintegrated from there — a two-line program
+    /// produced 23 diagnostics. The production is REP-10's own with the head made
+    /// optional, which is why it costs one arm and no new token.
+    ///
+    /// **Observed red with the `L_BRACE` arm removed from `parse_pattern`**:
+    /// `let a = match p { {x} => x }` reports six diagnostics — "expected a
+    /// pattern" at the `{`, then "expected `=>` in match arm, found unexpected
+    /// token", then four more as the statement list picks up the wreckage.
+    /// **Observed red with `L_BRACE` removed from `is_pattern_start` only**: the
+    /// two-arm case below reports "expected `}` to end match arms, found
+    /// unexpected token" at the `{` and cascades from there — the arm list ends
+    /// before the headless arm, so it and everything after it leave the tree.
+    /// That is REP-10's own regression, one brace over.
+    #[test]
+    fn a_record_pattern_needs_no_head() {
+        let count = |src: &str, kind: SyntaxKind| -> usize {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            construct_names(&out.tree)
+                .into_iter()
+                .filter(|k| *k == kind)
+                .count()
+        };
+
+        // The fields are the headed form's, unchanged — punned, explicit, mixed,
+        // and with REP-17's trailing comma.
+        for (src, fields) in [
+            ("let a = match p { {x} => x }", 1),
+            ("let a = match p { {x, y} => x }", 2),
+            ("let a = match p { {x: 1, y} => y }", 2),
+            ("let a = match p { {x: q, y: r} => q }", 2),
+            ("let a = match p { {x, y,} => x }", 2),
+        ] {
+            assert_eq!(count(src, SyntaxKind::PATTERN_FIELD), fields, "{src}");
+        }
+
+        // One production, so it composes in every position a pattern appears:
+        // nested in a variant's payload (the shape a `choice(...)` payload record
+        // needs), in a tuple, in a `for` header (REP-25), and as a closure
+        // parameter.
+        for src in [
+            "let a = match m { Mul({x, y}) => x, Do(_) => 0 }",
+            "let a = match t { ({x}, n) => x }",
+            "let a = match p { {at: (x, y)} => x }",
+            "for {x, y} in ps { out(x) }",
+            "let f = |{x, y}| x + y",
+        ] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+        }
+
+        // A headless pattern must be able to *start* an arm, or the arm list
+        // stops before it and it — with every arm after it — silently leaves the
+        // tree. The headless arm is written **second** on purpose: the first
+        // arm's pattern is parsed unconditionally, so only a later one exercises
+        // `is_pattern_start`.
+        assert_eq!(
+            count(
+                "let a = match p { _ => 0\n {x, y} => x }",
+                SyntaxKind::MATCH_ARM
+            ),
+            2,
+            "both arms are in the tree"
+        );
+
+        // `{}` is rejected where `()` is, and for the same reason (ADR-091
+        // Decision 3): it binds nothing and names no record, so it is an
+        // irrefutable arm written by accident. The pattern that matches
+        // everything is spelled `_`.
+        let out = parse_text("let a = match p { {} => 0 }");
+        assert!(
+            out.diagnostics
+                .iter()
+                .any(|d| d.message().contains("expected a pattern")),
+            "an empty headless record pattern must report: {:?}",
+            out.diagnostics
+        );
+
+        // …but a *headed* `P {}` is kept: it names the record it tests for, so it
+        // is refutable — `Some` beside `Some(_)`.
+        let out = parse_text("let a = match p { P {} => 0 }");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
     }
 
     /// **REP-27.** A `(` that begins a line begins something new; a `(` on the

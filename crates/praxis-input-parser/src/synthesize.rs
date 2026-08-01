@@ -155,11 +155,17 @@ fn atomic_type(kind: AtomicKind, db: &mut TypeDb) -> Type {
     }
 }
 
-/// The result type of a template (§7.3).
+/// The result type of a template (§7.3). The shapes and the reason they are
+/// what they are live on [`TemplateShape`](crate::plan::TemplateShape); this is
+/// the same classification over *AST* parts, one step before lowering, so it
+/// answers a `Type` where that one answers a runtime descriptor.
 ///
-/// - A single anonymous capture → the scalar type.
-/// - Multiple anonymous captures → a tuple.
-/// - Any named capture → an anonymous record (§5.6; formalized in M7).
+/// The two are deliberately not one generic function: threading a trait across
+/// `TemplatePart`/`TemplatePartNode` would buy nothing, since this side has
+/// always been right. It was the descriptor side that drifted (REP-54,
+/// ADR-092) — `praxis check` typed ``lines(`{int},{int}`)`` as
+/// `Vec[(Int, Int)]` throughout, while the value it produced was tagged `Unit`.
+/// If a shape is ever added, it is added in both places.
 fn template_type(parts: &[TemplatePart], db: &mut TypeDb) -> Result<Type, TypeCtorError> {
     let captures: Vec<&TemplatePart> = parts
         .iter()

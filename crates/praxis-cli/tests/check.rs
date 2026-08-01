@@ -207,3 +207,53 @@ fn an_unterminated_template_does_not_also_report_a_fabricated_interior() {
         "reported about an interior the token does not have: {stderr}"
     );
 }
+
+/// **D18 / ADR-094.** An unterminated template names its own line, and is the
+/// *only* thing reported.
+///
+/// The report used to be true and three times too wide. The token ran to EOF,
+/// so `T002`'s caret covered the rest of the file; the `}` closing the enclosing
+/// block was swallowed inside it, which produced a `P001` for the block that
+/// never closed; and a `Y001` followed that. One typo, three errors, two of them
+/// about damage the first one caused.
+///
+/// **The count is the assertion.** "It reports `T002`" was already true before
+/// the fix and is the acceptance-not-value shape — what changed is that nothing
+/// else is reported, and that the caret is one line.
+///
+/// Observed red before the rule landed: three errors, `T002` + `P001` + `Y001`.
+/// Observed red at an intermediate state where the lexer bounded the token but
+/// the parser did not accept the new token kind: three again, `T002` + `P001` +
+/// `I000`.
+#[test]
+fn an_unterminated_template_names_its_own_line_and_nothing_else() {
+    let output = Command::new(bin_path())
+        .arg("check")
+        .arg(fixture("unterminated_template.px"))
+        .output()
+        .expect("failed to run praxis");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("praxis: 1 error(s)"),
+        "one typo is one error (ADR-094): {stderr}"
+    );
+    for cascade in ["error[P001]", "error[Y001]", "error[I000]", "error[Y023]"] {
+        assert!(
+            !stderr.contains(cascade),
+            "{cascade} is damage the unterminated token used to cause: {stderr}"
+        );
+    }
+
+    // The caret spans the template, not the rest of the file: an underline that
+    // reached EOF would be far longer than the line that carries it.
+    let caret = stderr
+        .lines()
+        .find(|l| l.contains('^'))
+        .expect("the report draws a caret");
+    let width = caret.chars().filter(|c| *c == '^').count();
+    assert!(
+        (1..=40).contains(&width),
+        "the caret must cover the template, not the file: {width} carets in {caret:?}"
+    );
+}

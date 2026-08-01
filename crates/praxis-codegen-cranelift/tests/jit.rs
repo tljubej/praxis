@@ -492,7 +492,8 @@ fn adv_int_min_mod_neg_one_overflows() {
 /// "Integer arithmetic is checked by default. Overflow faults and enters the
 /// crash debugger. Explicit alternatives: `a.wrapping_add(b)`,
 /// `a.saturating_add(b)`, `a.checked_add(b) // returns Option[Int]`." All three
-/// were `Y110: no method \`wrapping_add\` on this type taking 1 argument(s)`, so
+/// were `Y110: no method \`wrapping_add\` on type \`Int\` taking 1 argument(s)`
+/// (the wording is ADR-093's), so
 /// the section described checked arithmetic with no way to opt out.
 ///
 /// Every assertion is at `i64::MAX`, where the ordinary `+` faults: a test that
@@ -526,6 +527,80 @@ fn the_overflow_alternatives_answer_where_a_checked_add_faults() {
     let src = "fn main() -> Int {\n  match 5.checked_add(7) { Some(n) => n\n None => 0 }\n}";
     let (_rt, result) = run_main(src);
     assert_eq!(result.as_int(), 12, "a sum that fits is Some(sum)");
+}
+
+/// **REP-46's second half.** The `_sub` trio, at the boundary where `-` faults.
+///
+/// Like its `_add` sibling, every assertion is at `Int::MIN`, where the ordinary
+/// operator faults — two small numbers would pass against `praxis_int_sub`
+/// itself and prove only that a name resolves. Values **and** the absence of a
+/// pending fault, because an alternative that faults is not an alternative.
+///
+/// `Int::MIN` is spelled `-9223372036854775807 - 1`: `9223372036854775808` is
+/// not an `Int` literal, and unary minus binds after the literal.
+///
+/// Observed red before the rows existed: `error[Y110]: no method `wrapping_sub`
+/// on this type taking 1 argument(s)` — a clean `praxis check` and a lowering
+/// failure. REP-33 closed that shape (ADR-093): the same program reports at
+/// `check` now, and the message names the receiver type.
+#[test]
+fn the_sub_alternatives_answer_where_a_checked_sub_faults() {
+    // MIN.wrapping_sub(1) is MAX, so subtracting MAX is 0.
+    let src = "fn main() -> Int {\n  let m = -9223372036854775807 - 1\n  \
+               m.wrapping_sub(1) - 9223372036854775807\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "wrapping_sub must not fault");
+    assert_eq!(result.as_int(), 0, "MIN.wrapping_sub(1) is MAX");
+
+    // Saturating stays at MIN, so subtracting MIN is 0.
+    let src = "fn main() -> Int {\n  let m = -9223372036854775807 - 1\n  \
+               m.saturating_sub(1) - m\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "saturating_sub must not fault");
+    assert_eq!(result.as_int(), 0, "MIN.saturating_sub(1) is MIN");
+
+    let src = "fn main() -> Int {\n  let m = -9223372036854775807 - 1\n  \
+               match m.checked_sub(1) { Some(n) => n\n None => 7 }\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "checked_sub must not fault");
+    assert_eq!(result.as_int(), 7, "MIN.checked_sub(1) is None");
+
+    let src = "fn main() -> Int {\n  match 12.checked_sub(7) { Some(n) => n\n None => 0 }\n}";
+    let (_rt, result) = run_main(src);
+    assert_eq!(result.as_int(), 5, "a difference that fits is Some(it)");
+}
+
+/// **REP-46's third half, and the row the family exists for.** `wrapping_mul`
+/// has *no in-language spelling*: every arithmetic operator is checked and there
+/// are no bitwise operators, so modular multiplication was unreachable — which
+/// is the measurement that decided REP-46 against closing the set at three.
+///
+/// `2^62 * 4` is `2^64`, i.e. exactly 0 under two's-complement wraparound. That
+/// is a better probe than a near-boundary product because the wrapped answer is
+/// a value no partial computation would land on by accident.
+#[test]
+fn the_mul_alternatives_answer_where_a_checked_mul_faults() {
+    let src = "fn main() -> Int {\n  4611686018427387904.wrapping_mul(4)\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "wrapping_mul must not fault");
+    assert_eq!(result.as_int(), 0, "2^62 * 4 wraps to exactly 0");
+
+    // Saturating clamps to MAX, so subtracting MAX is 0.
+    let src = "fn main() -> Int {\n  \
+               4611686018427387904.saturating_mul(4) - 9223372036854775807\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "saturating_mul must not fault");
+    assert_eq!(result.as_int(), 0, "2^62 * 4 saturates to MAX");
+
+    let src = "fn main() -> Int {\n  \
+               match 4611686018427387904.checked_mul(4) { Some(n) => n\n None => 7 }\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "checked_mul must not fault");
+    assert_eq!(result.as_int(), 7, "2^62 * 4 is None");
+
+    let src = "fn main() -> Int {\n  match 6.checked_mul(7) { Some(n) => n\n None => 0 }\n}";
+    let (_rt, result) = run_main(src);
+    assert_eq!(result.as_int(), 42, "a product that fits is Some(it)");
 }
 
 /// **REP-43.** `Counter.inc` is arithmetic, and §4.12's arithmetic is checked.
@@ -2435,8 +2510,13 @@ fn an_empty_source_makes_find_answer_none() {
 
 #[test]
 fn text_len_and_get_end_to_end() {
-    // Text literals allocate; .len() counts chars; .get(0) returns the scalar.
-    let src = "fn main() -> Int {\n  let s = \"hello\"\n  s.get(1)\n}\n";
+    // Text literals allocate; .len() counts chars; .get(i) answers the `Char`
+    // there. **This test pinned REP-65** (§8.2: rewritten, not deleted): it
+    // asserted `101` off `s.get(1)` directly, which was the right *value* under
+    // the wrong *type* — the row answered an `Int` because M5 reserved `Char`.
+    // The scalar value is still 101; naming it now takes the `.to_int()` that
+    // ADR-086 added for exactly this.
+    let src = "fn main() -> Int {\n  let s = \"hello\"\n  s.get(1).to_int()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
     // 'e' = 101
@@ -2460,10 +2540,61 @@ fn text_get_indexes_by_scalar_not_byte() {
     // distinguishes the two implementations and guards a regression toward
     // byte indexing — load-bearing for M6, where input parsing produces Text
     // values that get indexed into.
-    let src = "fn main() -> Int {\n  let s = \"héllo\"\n  s.get(1)\n}\n";
+    //
+    // The subject is unchanged by ADR-086 and is why this test was rewritten
+    // rather than deleted (§8.2): scalar-not-byte indexing is the property, and
+    // it is now observed through the `Char` the row answers.
+    let src = "fn main() -> Int {\n  let s = \"héllo\"\n  s.get(1).to_int()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 233);
+}
+
+/// **ADR-086 end to end.** The two halves — the catalog row's type and the
+/// runtime's descriptor — are one change, and this is the test that proves it.
+///
+/// Each case is red for its own reason, which is the point of having four:
+/// - (a) and (b) are `Y110 no method` without the conversion rows.
+/// - (b) and (c) *abort* with the runtime half reverted and the catalog half in
+///   place: a `Char`-typed comparison lowers through `praxis_char_load`, whose
+///   `read_scalar` answers `None` against the `INT` descriptor. A half-fix is
+///   loud, not silent.
+/// - (c) is `Y001 expected Char, found Int` with the catalog half reverted and
+///   the runtime half in place.
+#[test]
+fn a_char_and_its_code_point_convert_both_ways() {
+    // (a) Non-ASCII on purpose: this also re-pins scalar-not-byte indexing
+    // through the new type.
+    let (rt, result) = run_main("fn main() -> Int {\n  \"héllo\"[1].to_int()\n}\n");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 233);
+
+    // (b) The round trip. `Int.to_char()` is the half that makes `Vec[Char]`
+    // and `Map[Char, _]` writable from the language rather than read-only.
+    let src =
+        "fn main() -> Int {\n  let c = \"héllo\"[1]\n  if 233.to_char() == c { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 1);
+
+    // (c) The capability the change unlocks: `"#"[0]` is how a program names a
+    // particular character while there is no char literal (D19), so a
+    // `Grid[Char]` cell is finally comparable to one. Before ADR-086 this was
+    // `Y001`, and the corpus worked around it by comparing a cell to another
+    // cell through `find_all`.
+    let src = "fn main() -> Int {\n  let g = read grid(char)\n  if g[1, 0] == \"#\"[0] { 1 } else { 0 }\n}\n";
+    let (rt, result) = run_main_with_input(src, "a#\ncd\n");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 1);
+}
+
+/// `Int.to_char()` is the narrowing half, so it faults where its partner
+/// cannot — `Float.to_int()`'s relationship to `Int.to_float()` exactly.
+#[test]
+fn int_to_char_faults_on_a_value_that_is_not_a_scalar() {
+    let (rt, _) = run_main("fn main() -> Char {\n  55296.to_char()\n}\n");
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::InvalidChar);
 }
 
 #[test]
@@ -4675,6 +4806,27 @@ fn m9_block_two_template_fields_flatten() {
     assert_eq!(result.as_int(), 6);
 }
 
+#[test]
+fn m9_block_template_that_writes_a_newline_spans_the_lines_it_writes() {
+    // ADR-090. Both halves of the window in one number: the `\n` the first
+    // template writes buys it a second line, and the final `{w:rest}` is
+    // bounded to its own line.
+    //
+    // **Observed red two ways.** Without `block_item_window`: 11, because the
+    // unbounded `{w:rest}` takes `"abcd\n"` (5) instead of `"abcd"` (4) — a
+    // silent wrong answer, not a fault, which is why this test is worth having.
+    // With `extra` forced to 0 (a window of exactly one line, always):
+    // `at input offset 3..3: expected whitespace`, because the template's own
+    // `\n` part has no terminator left inside its window.
+    let src =
+        "fn main() -> Int {\n  let b = read block(`{x:int},{y:int}\\n{z:int}`, `{w:rest}`)\n  \
+               b.x + b.y + b.z + b.w.len()\n}\n";
+    let (rt, result) = run_main_with_input(src, "1,2\n3\nabcd\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    // 1 + 2 + 3 + len("abcd") = 10, not 11.
+    assert_eq!(result.as_int(), 10);
+}
+
 // --- M9 WS4: choice generated enums (§7.5) ----------------------------------
 
 #[test]
@@ -4690,8 +4842,9 @@ fn m9_choice_first_alternative_matches() {
 #[test]
 fn m9_choice_second_alternative_via_backtrack() {
     // choice(A: int, B: word) on "hello" — A fails (not an int), B wins via
-    // backtracking. Scalar payloads to avoid the anon-record-as-payload field
-    // access inference gap (a pre-existing limitation, not choice-specific).
+    // backtracking. Scalar payloads keep this test about *backtracking*; the
+    // record-payload field access it used to avoid is covered by
+    // `a_choice_payload_records_fields_are_readable`.
     let src = "fn main() -> Int {\n  let v = read choice(A: int, B: word)\n  match v {\n    A(n) => n\n    B(w) => 99\n  }\n}\n";
     let (rt, result) = run_main_with_input(src, "hello");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4717,12 +4870,39 @@ fn m9_choice_equality() {
     assert_eq!(result.as_int(), 1);
 }
 
-// NOTE: choice with a *record-payload* case (e.g. choice(A: `{a:int}`) then
-// `match v { A(r) => r.a }`) is a known gap: anonymous-record field access on
-// a match-bound variant payload doesn't resolve through the anon-enum payload
-// type. Scalar payloads work fully (above). This is a pre-existing inference
-// interaction surfaced by choice, tracked as an M9 follow-up; it does not block
-// the §19.9 acceptance fixtures, which use scalar-payload choices (C.9 scan).
+/// **REP-56 end to end.** A `choice(...)` payload record's fields are readable
+/// from a match-bound variant payload.
+///
+/// This replaces a NOTE that called it "a known gap … tracked as an M9
+/// follow-up". It was neither: the payload record type was already real end to
+/// end (ADR-024/ADR-025), and inference simply reached the enum through the
+/// constructor *symbol*, which an anonymous enum does not have (ADR-091
+/// Decision 1).
+///
+/// **Observed red with ADR-091 Decision 1 reverted** (`infer_variant_pattern`
+/// back to `ctor.and_then(lookup_enum_variant)`): `p` keeps an unbound variable,
+/// `p.a` lowers to `Unit` because `lower_field_get` takes REP-28's tolerance
+/// arm, and the multiply that follows aborts the test process —
+/// ``int_payload wants a `Int` payload; this value is a `Unit` (REP-56)``,
+/// rc=134. An aborting test is a failing test.
+#[test]
+fn a_choice_payload_records_fields_are_readable() {
+    // Through a binding: the payload record reaches the field read.
+    let src = "fn main() -> Int {\n  let v = read choice(A: `{a:int},{b:int}`)\n  \
+               match v {\n    A(p) => p.a * p.b\n  }\n}\n";
+    let (rt, result) = run_main_with_input(src, "6,7");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+
+    // …and through the headless record pattern (REP-57), which is the only
+    // spelling available: the payload record is anonymous, so there is no name
+    // a head could write.
+    let src = "fn main() -> Int {\n  let v = read choice(A: `{a:int},{b:int}`)\n  \
+               match v {\n    A({a, b}) => a * b\n  }\n}\n";
+    let (rt, result) = run_main_with_input(src, "6,7");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42);
+}
 
 // --- M9 WS5: optional + Option[T] integration (§7.5) -----------------------
 
@@ -4778,9 +4958,8 @@ fn m9_scan_extracts_matches_in_order() {
 
 #[test]
 fn m9_scan_extracts_payload_values() {
-    // Sum the `a` of every matched mul(a,b). Uses scalar payload via the choice
-    // case (the record-payload field-access gap is separate). Here we just count
-    // and verify the first match's existence indirectly via length.
+    // The match count, which is what this test is about. Reading the payload's
+    // own fields is `a_choice_payload_records_fields_are_readable`.
     let src = "fn main() -> Int {\n  let ms = read scan(choice(M: `mul({a:int},{b:int})`))\n  ms.len()\n}\n";
     let input = "abc()mul(1,2)xyz";
     let (rt, result) = run_main_with_input(src, input);
@@ -4830,16 +5009,42 @@ fn m9_matrix_rectangular_int() {
     assert_eq!(result.as_int(), 5);
 }
 
+/// **REP-55, end to end.** matrix requires a uniform token count, and the fault
+/// names the row that broke it.
+///
+/// This test **asserted an acceptance, not a value**: it checked only that a
+/// ragged matrix faulted, which stayed true while the fault named the whole
+/// input instead of the short row. That is the shape handover 17 warns about,
+/// so it gains the span assertion rather than a sibling.
+///
+/// It is the half `a_ragged_row_fault_names_the_row_in_grid_and_in_matrix`
+/// (praxis-runtime's `parser.rs`) cannot cover: it drives the real JIT, so it
+/// goes through `ParseDetail::consider`'s deepest-wins filter and gates that
+/// the new span actually *surfaces* rather than merely that `walk_matrix`
+/// returned it.
+///
+/// Observed red with the fix removed: the span is `(0, 9)`, the whole input.
 #[test]
 fn m9_matrix_uniformity_faults_on_ragged() {
-    // matrix requires uniform token count; ragged input → ParseFailed.
     let src = "fn main() -> Int {\n  let m = read matrix(int)\n  42\n}\n";
+    // Lines are 0..5 (`1 2 3`) and 6..9 (`4 5`). The second is the offender.
     let input = "1 2 3\n4 5";
     let (rt, _result) = run_main_with_input(src, input);
     assert!(
         rt.has_pending_fault(),
         "expected ParseFailed on ragged matrix, got: {:?}",
         rt.fault()
+    );
+    let detail = rt.parse_detail();
+    let fail = detail
+        .fail
+        .as_ref()
+        .expect("a parse failure records its detail (§7.11)");
+    assert_eq!(fail.expected, "rectangular matrix row");
+    assert_eq!(
+        fail.input_span,
+        (6, 9),
+        "the short row `4 5`, not the whole input"
     );
 }
 
@@ -6109,7 +6314,10 @@ fn a_subscript_reads_and_writes_through_the_wrapper_its_receiver_needs() {
             "let c = Counter()\n c.inc(\"a\")\n c[\"a\"] + c[\"nope\"]",
             1,
         ),
-        ("\"abc\"[1]", 98),
+        // `Text`'s read answers a `Char` (ADR-086), so naming its scalar value
+        // in an `Int`-returning `main` takes the conversion. The row under test
+        // is still the subscript; `.to_int()` is how the answer is spelled.
+        ("\"abc\"[1].to_int()", 98),
     ] {
         let (rt, result) = run_main(&format!("fn main() -> Int {{\n  {src}\n}}\n"));
         assert!(!rt.has_pending_fault(), "{src} faulted: {:?}", rt.fault());
@@ -7662,5 +7870,89 @@ fn text_concatenation_joins_two_texts() {
         result.as_int(),
         7,
         "a built Text keys the same entry a literal does"
+    );
+}
+
+/// **REP-33 half (a).** `sorted` orders through the element descriptor, and the
+/// receiver keeps its own order.
+///
+/// The `Vec[Text]` case is why this cannot be written with integers alone. A
+/// `Text` is a pointer-and-length structure, so a sort that reads the first
+/// eight payload bytes compares *addresses* (P0-12) — which passes on
+/// `Vec[Int]` and answers allocation order on `Vec[Text]`. The three texts are
+/// pushed in an order whose allocations ascend `"b"`, `"a"`, `"c"`, so a payload
+/// sort answers `"b"` here and this fails.
+///
+/// Observed red before the row existed: `error[Y110]: no method `sorted` on
+/// type `Vec[Int]` taking 0 argument(s)`, from `praxis check`.
+#[test]
+fn a_sorted_vec_is_ordered_by_the_descriptor_and_the_source_is_untouched() {
+    // Integers: the easy half, and the one a wrong implementation also passes.
+    let src = "fn main() -> Int {\n  let v = Vec[Int]()\n  v.push(5)\n  v.push(1)\n  \
+               v.push(3)\n  let s = v.sorted()\n  s.get(0) * 100 + s.get(1) * 10 + s.get(2)\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 135, "1, 3, 5 in that order");
+
+    // Text: ordered by `compare`, not by the payload's first eight bytes.
+    let src = "fn main() -> Text {\n  let v = Vec[Text]()\n  v.push(\"b\")\n  \
+               v.push(\"a\")\n  v.push(\"c\")\n  v.sorted().get(0)\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_text(),
+        "a",
+        "ordered by the descriptor's `compare`"
+    );
+
+    // An empty Vec sorts to an empty Vec rather than faulting on a `compare` it
+    // would never have called.
+    let src = "fn main() -> Int {\n  let v = Vec[Int]()\n  v.sorted().len()\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+
+    // The receiver keeps its own order: `sorted` answers a new Vec. `51` is
+    // `v.get(0)` still 5 and `s.get(0)` already 1.
+    let src = "fn main() -> Int {\n  let v = Vec[Int]()\n  v.push(5)\n  v.push(1)\n  \
+               let s = v.sorted()\n  v.get(0) * 10 + s.get(0)\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 51, "the source Vec is not mutated");
+}
+
+/// **REP-33 half (a).** `frequencies` counts every element, an absent key reads
+/// zero, and `unique` keeps first occurrences.
+///
+/// The zero-default is what proves the result is a real `Counter` and not a
+/// `Map` wearing the type (§6.2: "absent values read as zero"). `310` is three
+/// 3s, one 4, and an absent 7.
+///
+/// Observed red before the rows existed: `error[Y110]: no method `frequencies`
+/// on type `Vec[Int]` taking 0 argument(s)`.
+#[test]
+fn frequencies_counts_every_element_and_an_absent_key_reads_zero() {
+    let src = "fn main() -> Int {\n  let v = Vec[Int]()\n  v.push(3)\n  v.push(3)\n  \
+               v.push(4)\n  v.push(3)\n  v.push(9)\n  let c = v.frequencies()\n  \
+               c[3] * 100 + c[4] * 10 + c[7]\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        310,
+        "three 3s, one 4, and an absent 7 is zero"
+    );
+
+    // `unique` in first-occurrence order, not sorted: `231` is two elements,
+    // `3` first and `1` second — the order they were pushed, not `1, 3`.
+    let src = "fn main() -> Int {\n  let v = Vec[Int]()\n  v.push(3)\n  v.push(1)\n  \
+               v.push(3)\n  v.push(1)\n  let u = v.unique()\n  \
+               u.len() * 100 + u.get(0) * 10 + u.get(1)\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        231,
+        "duplicates dropped, first occurrences kept"
     );
 }

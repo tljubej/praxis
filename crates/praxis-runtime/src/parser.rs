@@ -21,7 +21,7 @@ use crate::scalars;
 use crate::text::TextPayload;
 use crate::GcRef;
 use cursor::{split_lines, split_sections, trailing_blank_run, ByteRegion, Cursor, Input, Walked};
-use praxis_input_parser::{AtomicKind, ParserPlan, PlanNode};
+use praxis_input_parser::{AtomicKind, ParserPlan, PlanNode, TemplateShape};
 
 /// Run the parser plan named by `raw_id` against `input`, returning the parsed
 /// result or `None` on failure (a value that names no plan → `None`; parse
@@ -145,9 +145,13 @@ unsafe fn set_parse_fault(ctx: *mut RuntimeContext) {
 
 /// Clear the runtime's [`ParseDetail`] slot at the start of a parse.
 ///
+/// `pub(crate)` for `praxis_run_parser`'s §6.3 descriptor guard, which returns
+/// before `run_plan` and so has to do its own clearing — otherwise it reports the
+/// *previous* parse's offset and expectation for a parse that never ran (REP-60).
+///
 /// # Safety
 /// `ctx` must be live and wired with a non-null `parse_detail`.
-unsafe fn clear_parse_detail(ctx: *mut RuntimeContext) {
+pub(crate) unsafe fn clear_parse_detail(ctx: *mut RuntimeContext) {
     if (*ctx).parse_detail.is_null() {
         return;
     }
@@ -386,7 +390,6 @@ unsafe fn walk(
         }
         PlanNode::Grid { child } => walk_grid(&rt, i, plan, *child, region),
         PlanNode::Template { parts } => walk_template(&rt, i, plan, parts, region),
-        PlanNode::Tuple { elements } => walk_tuple(&rt, i, plan, elements, region),
     }
 }
 
@@ -763,6 +766,36 @@ unsafe fn walk_grid_row(
     Ok(cells)
 }
 
+/// **The uniform-row rule (§7.5), stated where it is enforced.** Every row holds
+/// the same count as the first, and the fault names **the row that broke it** —
+/// the line's own region, never the region the constructor was handed. Returns
+/// the width to carry forward.
+///
+/// Two constructors enforce this and they used to state it twice, with two
+/// different answers: `grid` faulted at the line and `matrix` at `region`, so
+/// `matrix(int)` over `"1 2\n  \n3 4\n"` reported the whole input where
+/// `grid(digit)` over the analogous `"12\n  \n34\n"` reported the blank line
+/// itself (REP-55). What the count *counts* is the caller's — cells for `grid`,
+/// whitespace tokens for `matrix` — and so is `expected`; where the fault
+/// points is not. ADR-078 consequence 2 and §7.11 already say a fault names the
+/// position parsing broke at; this is the one constructor that missed it.
+///
+/// It answers the width rather than taking `&mut Option<usize>` so that a caller
+/// cannot check the rule and forget to record the first row's width: the check
+/// **is** how the width is obtained.
+fn uniform_row_width(
+    first: Option<usize>,
+    count: usize,
+    line: ByteRegion,
+    expected: &'static str,
+) -> Result<usize, ParseFail> {
+    match first {
+        None => Ok(count),
+        Some(w) if w != count => Err(ParseFail::at(line.start().offset(), line.len(), expected)),
+        Some(w) => Ok(w),
+    }
+}
+
 fn walk_lines(
     rt: &Rt,
     i: &Input<'_>,
@@ -913,10 +946,12 @@ fn walk_sections_named(
 /// field. The result is a flattened anonymous record assembled via
 /// [`alloc_record`].
 ///
-/// Cursor model: each item is walked against the region's tail from the current
+/// Cursor model: each item is walked against a window computed from the current
 /// cursor, and the item's returned position becomes the next cursor. Every
-/// position in play is absolute, so a chain of line-anchored templates advances
-/// line by line.
+/// position in play is absolute. Line-anchoring is two questions with two
+/// answers, and both live elsewhere: where an item *starts* is
+/// [`skip_line_boundary`]'s, and how far it may *reach* is
+/// [`block_item_window`]'s.
 fn walk_block(
     rt: &Rt,
     i: &Input<'_>,
@@ -934,16 +969,23 @@ fn walk_block(
     // flattened positional record, we expand its fields into separate entries.
     let mut captures: Vec<(Option<&'static str>, u32, GcRef)> = Vec::new();
     for (n, item) in items.iter().enumerate() {
-        // Before every item after the first, skip the line boundary: any run of
-        // horizontal whitespace plus one newline (§7.5 block items are
-        // line-anchored). The first item starts at the region head.
+        // Before every item after the first, skip the line boundary. The first
+        // item starts at the region head.
         if n > 0 {
             cursor = skip_line_boundary(i, region, cursor);
         }
         match item {
             praxis_input_parser::BlockItemNode::Positional { child } => {
                 // SAFETY: ctx is valid.
-                let walked = unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
+                let walked = unsafe {
+                    walk(
+                        rt.ctx,
+                        i,
+                        plan,
+                        *child,
+                        block_item_window(i, plan, *child, region, cursor),
+                    )?
+                };
                 scope.root(walked.value);
                 cursor = walked.next;
                 // If the positional produced a record (named-capture template),
@@ -956,8 +998,20 @@ fn walk_block(
                 // (I026); if we reach one here it contributes no field.
             }
             praxis_input_parser::BlockItemNode::Named { name, child } => {
+                // The same window as the positional arm, deliberately: the
+                // window is read off the item's plan node, so whether the item
+                // carries a name has no part in it. Giving one arm a window and
+                // not the other is the same half a rule this row was about.
                 // SAFETY: ctx is valid.
-                let walked = unsafe { walk(rt.ctx, i, plan, *child, region.from(cursor))? };
+                let walked = unsafe {
+                    walk(
+                        rt.ctx,
+                        i,
+                        plan,
+                        *child,
+                        block_item_window(i, plan, *child, region, cursor),
+                    )?
+                };
                 scope.root(walked.value);
                 cursor = walked.next;
                 captures.push((Some(name), *child, walked.value));
@@ -971,10 +1025,75 @@ fn walk_block(
     })
 }
 
+/// **The window a `block` item is offered** (ADR-090, §7.5). A *template* item
+/// gets the line it starts on, plus one more line for each `\n` the template
+/// writes; every other item gets the rest of the region.
+///
+/// This is the one statement of the rule. `block` is the only sequencing
+/// construct that computed no window for its children — `lines` narrows to a
+/// line, `sections` to a section, `csv` to a field, `ws`/`sep`/`matrix` to a
+/// token — and ADR-078's thesis is that the window is the *parent's* job. With
+/// no parent bound, a capture that is its template's last part met
+/// `walk_template`'s unbounded-last-part rule and was handed the rest of the
+/// section: §7.7's own example, whose `` `  Starting items: {items:csv(int)}` ``
+/// fed the remaining five lines of the monkey to `csv`, which faulted on them.
+/// The identical template under `lines` read two ints, because `lines` had
+/// bounded it. One template, two answers.
+///
+/// **Why the split is templates and not a list of greedy constructors.** §7.2
+/// defines a template as a description of characters *within a line*, and gives
+/// `\n` as the template's own way of saying it spans another one — so a
+/// template states its extent and this function reads it off. `lines`,
+/// `sections`, `grid` and `matrix` are defined on several lines by their §7.5
+/// entries and compute their own extent, so bounding them here would be a
+/// second, disagreeing opinion. Any other split — "is this parser greedy?" —
+/// would need a per-constructor table, which is the rule-in-N-places trap
+/// ADR-078's corollary warns against, and it is what got the exhausting variant
+/// rejected too.
+///
+/// It is a **narrowing and not a bound**: the item may stop short of the window
+/// and `block` carries its cursor to the next item, which is how two items on
+/// one line still work. Requiring exhaustion here ([`walk_exact`]) breaks
+/// ``block(`a: {a:int}`, `b: {b:int}`)`` over `"a: 1 b: 2"` and every named
+/// `lines(...)` item, which is §7.5's own `block` example.
+///
+/// The gap it leaves, named rather than papered over: a **non-template** greedy
+/// item followed by another item (``block(`h:`, a: csv(int), b: word)``) still
+/// swallows. It is a loud fault rather than a wrong answer, and closing it is
+/// the per-constructor table above.
+fn block_item_window(
+    i: &Input<'_>,
+    plan: &ParserPlan,
+    child: u32,
+    region: ByteRegion,
+    cursor: Cursor,
+) -> ByteRegion {
+    let PlanNode::Template { parts } = &plan.nodes[child as usize] else {
+        return region.from(cursor);
+    };
+    let extra = parts
+        .iter()
+        .filter(|p| {
+            matches!(
+                p,
+                praxis_input_parser::TemplatePartNode::Literal {
+                    ws: praxis_input_parser::WsPolicy::Newline,
+                    ..
+                }
+            )
+        })
+        .count();
+    region.subregion(cursor, cursor::line_window_end(i, region, cursor, extra))
+}
+
 /// Skip the line boundary between sequential `block` items (§7.5): any run of
 /// horizontal whitespace, then an optional single line ending (`\n` or `\r\n`).
 /// Returns the new cursor. If no line ending is present (e.g. the items are on
 /// one line separated by spaces), only the horizontal whitespace is consumed.
+///
+/// Where the *next* item starts, and only that. How far it may then reach is
+/// [`block_item_window`]'s, which is the other half of "block items are
+/// line-anchored" and the half that used to be missing.
 ///
 /// Byte-wise on purpose: space, tab, CR and LF are single-byte scalars and
 /// cannot occur inside a multi-byte one, so scanning bytes here can never land
@@ -1341,9 +1460,19 @@ fn walk_matrix(
     // so a scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
-    let mut rows: Vec<Vec<ByteRegion>> = Vec::new();
     let lines = split_lines(i, region);
     let blank_run = trailing_blank_run(i, &lines);
+    // **One loop, because the offending line has to still be in scope at the
+    // width check.** This was two — tokenize every line into a `Vec<Vec<_>>`,
+    // then check and walk each row — and the line's own `ByteRegion` was the
+    // first loop's variable, dropped before the second could name it. So the
+    // check had only `region`, and a ragged `matrix` reported the whole input
+    // where the identical `grid` rule reported the line (REP-55). Merging is
+    // order-preserving: the first observable failure was already the earliest
+    // row's, and `region_str` can only fail on a non-scalar-boundary region,
+    // which `split_lines` over a validated `Input` cannot produce.
+    let mut items = Vec::with_capacity(lines.len());
+    let mut width: Option<usize> = None;
     for (n, line) in lines.iter().enumerate() {
         let text = region_str(i, *line, "matrix row")?;
         let tokens = whitespace_tokens(*line, text);
@@ -1359,19 +1488,16 @@ fn walk_matrix(
         if tokens.is_empty() && n >= blank_run {
             continue;
         }
-        rows.push(tokens);
-    }
-    let width = rows.first().map(Vec::len).unwrap_or(0);
-    let mut items = Vec::with_capacity(rows.len() * width);
-    for row in &rows {
-        if row.len() != width {
-            return Err(ParseFail::at(
-                region.start().offset(),
-                region.len(),
-                "rectangular matrix row",
-            ));
-        }
-        for token in row {
+        // Uniform in **whitespace tokens**, which is matrix's own unit — grid
+        // counts cells. `uniform_row_width` owns the half that is not: which
+        // span the fault names.
+        width = Some(uniform_row_width(
+            width,
+            tokens.len(),
+            *line,
+            "rectangular matrix row",
+        )?);
+        for token in &tokens {
             // The token's own region, not its bytes copied into a fresh buffer
             // walked at offset zero (IPR-03/IPR-05), and consumed exactly.
             // SAFETY: ctx is valid.
@@ -1380,6 +1506,7 @@ fn walk_matrix(
             items.push(value);
         }
     }
+    let width = width.unwrap_or(0);
     let elem_desc = child_descriptor(plan, child);
     alloc_grid(rt, elem_desc, items, width, region.end())
 }
@@ -1647,21 +1774,17 @@ fn walk_grid(
         if cells == 0 && n >= blank_run {
             continue;
         }
-        match width {
-            None => width = Some(cells),
-            // Grid rows must be uniform (§7.5). Ragged grids are M9. Uniform in
-            // **cells**, which is the only measure that means the same thing for
-            // every cell parser: `grid(char)` counts characters and `grid(int)`
-            // counts integer tokens.
-            Some(w) if w != cells => {
-                return Err(ParseFail::at(
-                    line.start().offset(),
-                    line.len(),
-                    "a grid row of the same cell count as the first",
-                ));
-            }
-            Some(_) => {}
-        }
+        // Grid rows must be uniform (§7.5). Ragged grids are M9. Uniform in
+        // **cells**, which is the only measure that means the same thing for
+        // every cell parser: `grid(char)` counts characters and `grid(int)`
+        // counts integer tokens. That choice of unit is grid's own; where the
+        // fault points is the shared rule, and `uniform_row_width` owns it.
+        width = Some(uniform_row_width(
+            width,
+            cells,
+            *line,
+            "a grid row of the same cell count as the first",
+        )?);
     }
     let width = width.unwrap_or(0);
     let elem_desc = child_descriptor(plan, child);
@@ -1794,17 +1917,12 @@ fn capture_bound(
 ///
 /// Walks the `parts` in order: a `Literal` part matches its bytes (honoring the
 /// whitespace policy), a `Capture` part recursively walks its child parser to
-/// extract one value. The result is assembled per §7.3:
-/// - 0 captures → `Unit` (a pure literal match).
-/// - 1 anonymous capture → the scalar value directly.
-/// - any named capture → a `Record` (schema built at runtime from the capture
-///   names + the child result descriptors).
-///
-/// A multi-anon-capture template is assembled here too, by the last arm — the
-/// plan has a `Tuple` node for it and nothing ever emits one, so `walk_tuple`
-/// is unreachable from source. That gap is why `template_result_descriptor`
-/// answers `Unit` for this shape; it is registered as REP-54 and not fixed
-/// here.
+/// extract one value. Which of §7.3's four results those captures assemble into
+/// is [`TemplateShape::of`]'s answer, read from the same `parts` — this
+/// function does not classify them itself, and neither does
+/// [`template_result_descriptor`], which tags the same value inside a
+/// collection. They used to classify separately and disagreed (REP-54,
+/// ADR-092).
 fn walk_template(
     rt: &Rt,
     i: &Input<'_>,
@@ -1933,68 +2051,28 @@ fn walk_template(
 
     // Assemble the result per §7.3, returning the position where matching
     // stopped so a `block(...)` parent can advance item by item (§7.5).
-    let any_named = captures.iter().any(|(n, _, _)| n.is_some());
-    let value = if any_named {
+    let value = match (TemplateShape::of(parts), captures.as_slice()) {
         // Named captures → Record. Build the schema at runtime.
-        alloc_record(rt, &captures)
-    } else if captures.len() == 1 {
-        // Single anonymous capture → the scalar value.
-        captures.into_iter().next().unwrap().2
-    } else if captures.is_empty() {
-        // No captures → Unit.
-        alloc_unit(rt)
-    } else {
-        // Multiple anonymous captures → Tuple. Build the schema from the child
-        // result descriptors and fill the payload with the captured values.
-        let children: Vec<u32> = captures.iter().map(|(_, c, _)| *c).collect();
-        let values: Vec<GcRef> = captures.into_iter().map(|(_, _, v)| v).collect();
-        alloc_tuple(rt, &children, plan, values)
+        (TemplateShape::Record, _) => alloc_record(rt, &captures),
+        // One anonymous capture → the captured value itself.
+        (TemplateShape::Scalar { .. }, [(_, _, only)]) => *only,
+        // Two or more anonymous captures → Tuple. The schema comes from the
+        // child result descriptors, the payload from the captured values.
+        (TemplateShape::Tuple, _) => {
+            let children: Vec<u32> = captures.iter().map(|(_, c, _)| *c).collect();
+            let values: Vec<GcRef> = captures.iter().map(|(_, _, v)| *v).collect();
+            alloc_tuple(rt, &children, plan, values)
+        }
+        // No captures → Unit, and so is `Scalar` paired with anything other
+        // than exactly one captured value — a combination the classifier
+        // cannot produce, since it counts the same captures this loop pushed.
+        // Bound by slice pattern rather than bridged with `expect`: this runs
+        // beneath an `extern "C"` entry point, where a panic is undefined
+        // behaviour, and parser.rs already carries one such scar.
+        _ => alloc_unit(rt),
     };
     Ok(Walked {
         value,
-        next: cursor,
-    })
-}
-
-/// Interpret a `PlanNode::Tuple` (§7.3): each element against the region's tail
-/// from the current cursor, the cursor advancing to where that element stopped.
-///
-/// **Unreachable from source.** `lower_template` emits `PlanNode::Template` for
-/// every template shape, multi-anon included, and `walk_template` assembles the
-/// tuple itself; nothing in `praxis-input-parser` ever pushes a `Tuple` node.
-/// Kept because the plan variant is public and a hand-built plan can name it —
-/// see REP-54, which is the descriptor half of the same gap.
-///
-/// Same model as [`walk_template`] and the same fix: the predecessor returned
-/// `bytes.len() - offset`, a *length*, where its caller wanted a position.
-fn walk_tuple(
-    rt: &Rt,
-    i: &Input<'_>,
-    plan: &ParserPlan,
-    elements: &[u32],
-    region: ByteRegion,
-) -> WalkResult {
-    let mut cursor = region.start();
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
-    // SAFETY: ctx is live and outlives this scope.
-    let scope = unsafe { NativeScope::new(rt.ctx) };
-    let mut values: Vec<GcRef> = Vec::with_capacity(elements.len());
-    for &elem in elements {
-        // The element is offered the bytes at the cursor, whitespace and all —
-        // the same rule [`walk_template`]'s captures answer from. There is no
-        // literal between two elements here to be bounded by, so there is not
-        // even a bound scan to offset: the child alone decides.
-        // SAFETY: ctx is valid.
-        let walked = unsafe { walk(rt.ctx, i, plan, elem, region.from(cursor))? };
-        scope.root(walked.value);
-        cursor = walked.next;
-        values.push(walked.value);
-    }
-    let tuple_ref = alloc_tuple(rt, elements, plan, values);
-    Ok(Walked {
-        value: tuple_ref,
         next: cursor,
     })
 }
@@ -2515,6 +2593,11 @@ fn is_ws(b: u8) -> bool {
 /// implementation collapsed the whole subtree to its leaf atomic and returned
 /// that scalar, mis-tagging every intermediate Vec/Grid — a silent mis-dispatch
 /// in any nested-collection format/eq/hash.)
+///
+/// `RECORD`, `ENUM` and `TUPLE` are uniform in exactly the same way: one
+/// descriptor for every shape, with the `RecordSchema`/`EnumSchema`/
+/// `TupleSchema` in the payload. So every arm below answers a fixed descriptor
+/// or recurses; none of them ever needs to *construct* one.
 fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescriptor {
     match &plan.nodes[child as usize] {
         // Atomics produce their scalar.
@@ -2540,11 +2623,9 @@ fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescri
         PlanNode::Characters { .. } => &crate::collections::VEC,
         // matrix / ragged grid produce a Grid.
         PlanNode::Matrix { .. } | PlanNode::GridRagged { .. } => &crate::collections::GRID,
-        // A template's result is a scalar (single anon capture), a record (named
-        // captures), or Unit (no captures). A tuple's result is a tuple. These
-        // are uniform descriptors too (schema in the payload).
+        // A template's result is one of §7.3's four shapes, decided by the same
+        // classifier that assembles the value.
         PlanNode::Template { parts } => template_result_descriptor(plan, parts),
-        PlanNode::Tuple { .. } => &crate::tuples::TUPLE,
     }
 }
 
@@ -2563,38 +2644,29 @@ fn atomic_descriptor(kind: AtomicKind) -> &'static crate::TypeDescriptor {
     }
 }
 
-/// The descriptor of a template's *result*: a scalar if it has exactly one
-/// anonymous capture, a record if it has named captures, Unit if none.
+/// The descriptor of a template's *result*, which is the tag a collection built
+/// from that template carries for its elements. One arm per §7.3 shape, from
+/// the same [`TemplateShape::of`] that decides the value in [`walk_template`].
 ///
-/// **Two or more anonymous captures answer `Unit` and the value is a tuple**,
-/// which is ADR-079 Decision 5's own class of defect surviving in one shape:
-/// `read lines(`{int},{int}`)` renders `[Unit, Unit]`. The comment here used to
-/// say that shape "lowers to a `Tuple` node, handled above" — it does not;
-/// `lower_template` emits a `Template` node for every template and
-/// `walk_template` builds the tuple. Pre-existing (identical at the pre-S20
-/// base) and registered as **REP-54**: the fix wants a tuple descriptor built
-/// from the child descriptors, which is a wider change than this stage owns.
+/// **The tuple arm is a fixed descriptor, not a constructed one** — that is the
+/// whole of REP-54 (ADR-092). This function answered `&scalars::UNIT` for two
+/// or more anonymous captures, on a comment claiming that shape "lowers to a
+/// `Tuple` node, handled above": it does not, there was no "above", and the
+/// register's estimate followed the comment into predicting a tuple-descriptor
+/// constructor that this path would have to grow. There is nothing to
+/// construct. `TUPLE` is uniform like `VEC` and `RECORD`; the per-shape
+/// `TupleSchema` lives in the payload (`tuples.rs`), where `alloc_tuple`
+/// already interned it. So ``read lines(`{int},{int}`)`` held real tuples in a
+/// `Vec` tagged `Unit`, printed `[Unit, Unit]` through `unit_format`, and
+/// compared unequal to the same Vec built with `push` because `vec_equals`
+/// bails on unequal element tags before comparing an element.
 fn template_result_descriptor(
     plan: &ParserPlan,
     parts: &[praxis_input_parser::TemplatePartNode],
 ) -> &'static crate::TypeDescriptor {
-    let mut single_anonymous: Option<u32> = None;
-    let mut captures = 0usize;
-    let mut any_named = false;
-    for p in parts {
-        if let praxis_input_parser::TemplatePartNode::Capture { name, child, .. } = p {
-            captures += 1;
-            if name.is_some() {
-                any_named = true;
-            } else {
-                single_anonymous = Some(*child);
-            }
-        }
-    }
-    if any_named {
-        &crate::records::RECORD
-    } else if captures == 1 {
-        // Single anonymous capture → the child's own result descriptor.
+    match TemplateShape::of(parts) {
+        TemplateShape::Unit => &scalars::UNIT,
+        // One anonymous capture → the child's own result descriptor.
         //
         // This used to be `&scalars::INT`, defended by a comment arguing it was
         // "a sound default" because the per-value descriptor is read from the
@@ -2603,18 +2675,16 @@ fn template_result_descriptor(
         // `vec_equals` and `vec_hash` dispatch through exactly that tag. So
         // `lines(`{word}`)` produced a `Vec` of `Text` objects whose element
         // descriptor said `Int`, and rendering it read a `Text` payload through
-        // the `Int` callback (IPR-13).
+        // the `Int` callback (IPR-13, ADR-078 Decision 5 — an earlier version
+        // of this comment credited ADR-079, which is the grid-cell decision).
         //
         // Deriving it is only correct because a capture names its own parser
         // body (IP-05, S19). Before that, every capture in a template shared
         // one guessed kind, and reading the child here would have shipped a
         // green test asserting the wrong descriptor.
-        match single_anonymous {
-            Some(child) => child_descriptor(plan, child),
-            None => &scalars::UNIT,
-        }
-    } else {
-        &scalars::UNIT
+        TemplateShape::Scalar { child } => child_descriptor(plan, child),
+        TemplateShape::Record => &crate::records::RECORD,
+        TemplateShape::Tuple => &crate::tuples::TUPLE,
     }
 }
 
@@ -2988,6 +3058,73 @@ mod tests {
         );
     }
 
+    /// **REP-55.** A ragged row's fault names *the row that broke it*, in both
+    /// constructors that have the rule.
+    ///
+    /// `grid` named the offending line and `matrix` named the whole region it
+    /// was handed, because `walk_matrix` was written as two loops and the
+    /// line's own `ByteRegion` was the first loop's variable — dropped before
+    /// the check in the second could name it. One rule, two statements, two
+    /// answers.
+    ///
+    /// **Both halves are asserted in one test on purpose.** The gate is on the
+    /// *pair* stating one rule, so a future contributor cannot regress `grid`
+    /// to `matrix`'s old shape and stay green.
+    ///
+    /// Observed red with the fix removed: restoring `walk_matrix`'s
+    /// `ParseFail::at(region.start().offset(), region.len(), …)` fails the
+    /// matrix half with `left: (0, 11), right: (4, 6)` — the whole input where
+    /// the blank line was wanted.
+    #[test]
+    fn a_ragged_row_fault_names_the_row_in_grid_and_in_matrix() {
+        let mut rt = crate::Runtime::new();
+
+        // `"1 2\n  \n3 4\n"`: the interior blank line is a zero-token row, and
+        // its own bytes are 4..6.
+        let input = rt.alloc_text("1 2\n  \n3 4\n");
+        let mut ctx = rt.context();
+        ctx.input_source = input;
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Int,
+                },
+                PlanNode::Matrix { child: 0 },
+            ],
+            1,
+        );
+        let fail = unsafe { run_root(&mut ctx, &plan, input) }
+            .expect_err("a zero-token row is not two tokens wide");
+        assert_eq!(fail.expected, "rectangular matrix row");
+        assert_eq!(
+            fail.input_span,
+            (4, 6),
+            "the blank line's own bytes, not the region matrix was handed"
+        );
+
+        // The analogous grid, whose answer was already right and must stay so.
+        // `"12\n  \n34\n"`: the blank line is 3..5.
+        let input = rt.alloc_text("12\n  \n34\n");
+        let mut ctx = rt.context();
+        ctx.input_source = input;
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Digit,
+                },
+                PlanNode::Grid { child: 0 },
+            ],
+            1,
+        );
+        let fail = unsafe { run_root(&mut ctx, &plan, input) }
+            .expect_err("a zero-cell row is not two cells wide");
+        assert_eq!(
+            fail.expected,
+            "a grid row of the same cell count as the first"
+        );
+        assert_eq!(fail.input_span, (3, 5), "the blank line's own bytes");
+    }
+
     /// **The `chars` skip policies, ordered by what they skip.**
     ///
     /// `Whitespace` is spaces and tabs; `Newlines` is those **and** line
@@ -3279,6 +3416,63 @@ mod tests {
             child_descriptor(&plan, plan.root).id(),
             crate::text::TEXT.id(),
             "lines(`{{word}}`) must carry Text as its Vec element descriptor"
+        );
+    }
+
+    /// The sibling of the test above: that one gates the *one*-capture tag,
+    /// this one gates the *many*-capture tag (ADR-092, REP-54).
+    ///
+    /// `Int` and `Word`, not `Int` and `Int`, on purpose: a "fix" that reached
+    /// for the first child's descriptor — the shape the one-capture arm has —
+    /// would answer `INT` and this assertion would still be red.
+    ///
+    /// GATE, observed red: with `template_result_descriptor`'s tuple arm
+    /// reverted to `&scalars::UNIT`, this failed with `left: TypeId(0)`
+    /// (`Unit`) against `right: TypeId(16)` (`Tuple`).
+    #[test]
+    fn multi_anonymous_template_captures_are_a_tuple() {
+        let parts: &'static [praxis_input_parser::TemplatePartNode] = Box::leak(
+            vec![
+                praxis_input_parser::TemplatePartNode::Capture {
+                    child: 0,
+                    field_index: Some(0),
+                    name: None,
+                },
+                praxis_input_parser::TemplatePartNode::Literal {
+                    text: ",",
+                    ws: praxis_input_parser::WsPolicy::None,
+                },
+                praxis_input_parser::TemplatePartNode::Capture {
+                    child: 1,
+                    field_index: Some(1),
+                    name: None,
+                },
+            ]
+            .into_boxed_slice(),
+        );
+        let nodes: &'static [PlanNode] = Box::leak(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Int,
+                },
+                PlanNode::Atomic {
+                    kind: AtomicKind::Word,
+                },
+                PlanNode::Template { parts },
+            ]
+            .into_boxed_slice(),
+        );
+        let plan = ParserPlan {
+            nodes,
+            template_parts: &[],
+            literals: &[],
+            root: 2,
+        };
+
+        assert_eq!(
+            child_descriptor(&plan, plan.root).id(),
+            crate::tuples::TUPLE.id(),
+            "lines(`{{int}},{{word}}`) must carry Tuple as its Vec element descriptor"
         );
     }
 }

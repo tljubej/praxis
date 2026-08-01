@@ -462,18 +462,33 @@ impl<'a> Lexer<'a> {
     /// literals, so `` `{c:one_of("{")}` `` — which the scanner accepted —
     /// closed nowhere and swallowed the rest of the file.
     fn eat_template(&mut self, start: usize) {
-        match praxis_syntax::template::template_end(self.src, start) {
-            TemplateEnd::Closed(end) => self.pos = end,
-            TemplateEnd::Unterminated => {
-                self.pos = self.src.len();
+        // **A template ends at the line it opens on** (ADR-094), so an
+        // unterminated one names its own line instead of the rest of the file.
+        // It used to set `self.pos = self.src.len()`: the `}` closing the
+        // enclosing block ended up *inside* the token, so one typo produced
+        // `T002` spanning to EOF, then a `P001` for the block that never closed,
+        // then a `Y001`. The report was true and three times too wide.
+        //
+        // The two kinds are not cosmetic — see
+        // `SyntaxKind::UnterminatedBacktickTemplate` for why the alternative
+        // (one kind plus a "does it end in a backtick" test at each consumer)
+        // reintroduces a closed defect.
+        let kind = match praxis_syntax::template::template_end(self.src, start) {
+            TemplateEnd::Closed(end) => {
+                self.pos = end;
+                SyntaxKind::BacktickTemplate
+            }
+            TemplateEnd::Unterminated(stopped) => {
+                self.pos = stopped;
                 self.diagnostic(
                     Span::new(start as u32, self.pos as u32),
                     DiagCode::UnterminatedTemplate,
                     "unterminated backtick template",
                 );
+                SyntaxKind::UnterminatedBacktickTemplate
             }
-        }
-        self.push(SyntaxKind::BacktickTemplate, start);
+        };
+        self.push(kind, start);
     }
 
     fn diagnose_unknown(&mut self, start: usize, len: usize) {

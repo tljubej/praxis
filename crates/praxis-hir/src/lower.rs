@@ -2189,7 +2189,6 @@ impl<'a> Lowerer<'a> {
             .arg_list()
             .map(|a| self.lower_args(&a))
             .unwrap_or_default();
-        let arity = args.len();
 
         // The catalog entry and the result type are what **inference** resolved
         // at this call site (HIR-02/F15). Repeating the lookup here re-derived
@@ -2201,18 +2200,29 @@ impl<'a> Lowerer<'a> {
             .method_name()
             .and_then(|t| self.method_refs.get(&t.text_range()).copied());
         let Some(resolved) = resolved else {
-            // Inference could not resolve the method: report it (this is the
-            // one diagnostic lowering owns here, because it has the name span)
-            // and keep the receiver and arguments, which are well-formed trees
-            // in their own right — discarding them lost every closure and
-            // capture inside them.
-            if let Some(name_tok) = m.method_name() {
-                self.diag(
-                    name_tok.text_range(),
-                    DiagCode::NoMethodOnType,
-                    format!("no method `{name}` on this type taking {arity} argument(s)"),
-                );
-            }
+            // Inference could not resolve the method, and **inference reported
+            // it** — ADR-093: a method call that cannot resolve is reported
+            // there, either because the receiver is known and has no such row or
+            // because no receiver in the catalog has that name at that arity.
+            // Lowering reports nothing. It used to own this `Y110` on the
+            // argument that it has the method-name span, but so does inference,
+            // and lowering is the pass `praxis check` never runs — so every
+            // missing method was a silent `check` followed by a failing `run`.
+            // Two emitters for one code is what ADR-057 Decision 5 got wrong and
+            // REP-28 corrected at the field door; this is the same correction.
+            //
+            // Two things can still land here, and neither wants a diagnostic.
+            // A receiver **no call site pinned** — the body of an uncalled
+            // generic — reaches lowering unresolved on purpose; `monomorphize`
+            // drops uncalled polymorphic originals, so it never reaches MIR.
+            // And a chain that somehow *does* reach MIR with `lowering_symbol:
+            // None` is a compiler bug, which surfaces as the MIR builder's ICE
+            // naming the method rather than as a user-facing type error — a
+            // compiler bug should read as a compiler bug report.
+            //
+            // The receiver and arguments are kept either way: they are
+            // well-formed trees in their own right, and discarding them lost
+            // every closure and capture inside them.
             let ty = self.node_ty(m.syntax());
             return TypedExpr::MethodCall {
                 receiver: Box::new(receiver),
@@ -2410,9 +2420,10 @@ impl<'a> Lowerer<'a> {
     /// exactly. `name` carries the catalog spelling (`[]`), so a MIR dump reads as
     /// the source did.
     ///
-    /// An unresolved subscript was reported in inference (`Y020`), so there is no
-    /// report here — unlike a method call, whose `Y110` lowering owns because it has
-    /// the name span.
+    /// An unresolved subscript was reported in inference (`Y020`), so there is
+    /// no report here — and since ADR-093 that is no longer the exception it
+    /// once was: a method call's `Y110` is reported in inference too, so
+    /// lowering emits nothing for either.
     fn lower_index(&mut self, i: &praxis_ast::IndexExpr) -> TypedExpr {
         let span = self.node_span(i.syntax());
         let receiver = match i.receiver() {
@@ -2773,7 +2784,9 @@ impl<'a> Lowerer<'a> {
             }
             // `P { x, y: p }` — one sub-pattern per *declared* field, in
             // declaration order (REP-10, §4.5). A field the pattern does not
-            // name stays a wildcard.
+            // name stays a wildcard. The head is optional (ADR-091), and this
+            // arm never needed it: the record has always come from the
+            // *scrutinee* here, which is exactly what inference now does too.
             PatternKind::Record(rname) => {
                 let resolved = self.db.follow(scrutinee_ty);
                 let (record_def_id, record_args) = match self.db.data(resolved) {
@@ -2781,10 +2794,14 @@ impl<'a> Lowerer<'a> {
                     praxis_types::TypeData::Var(_) => return TypedPattern::Wildcard,
                     _ => {
                         let rendered = self.db.render(resolved);
+                        let head = match &rname {
+                            Some(n) => format!("{n} {{ … }}"),
+                            None => "{ … }".to_string(),
+                        };
                         self.diag(
                             pat.syntax().text_range(),
                             DiagCode::NotAPatternForType,
-                            format!("`{rname} {{ … }}` is not a pattern for `{rendered}`"),
+                            format!("`{head}` is not a pattern for `{rendered}`"),
                         );
                         return TypedPattern::Wildcard;
                     }

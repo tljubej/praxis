@@ -31,9 +31,10 @@ use std::cell::Cell;
 
 /// A host's process-input reader: the UTF-8 bytes of the input buffer.
 ///
-/// Called at most once, from the first `read` a program evaluates. Returning
-/// an empty slice means "no input", which leaves `input_source` at the
-/// immortal Unit — the same state a host that installs no reader leaves it in.
+/// Called at most once, from the first `read` a program evaluates. Its whole
+/// obligation is bytes — however many the host has, including none. What becomes
+/// of them, and why a zero-byte answer is still an input buffer, is stated once
+/// at [`praxis_get_input`](crate::abi::praxis_get_input) (ADR-087).
 ///
 /// A plain `fn` and not a closure: it is stored across the ABI boundary and
 /// called from generated code's stack, so it carries no captured state and no

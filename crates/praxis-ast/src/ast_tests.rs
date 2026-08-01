@@ -238,3 +238,51 @@ fn only_the_three_type_node_kinds_are_annotations() {
         "an initializer is not an annotation"
     );
 }
+
+/// A pattern is a **record** pattern because of its brace (ADR-091 Decision 3).
+///
+/// `Pattern::kind()` used to decide the record shape from the presence of a
+/// `PATTERN_FIELD` child and, before that, from a direct `Ident` token. Both
+/// tests are silently wrong at one end each, and both failures are the *same*
+/// failure: the pattern becomes something that matches everything.
+///
+/// **Observed red with the brace test removed but the grammar kept**: a headless
+/// `{a, b}` has no direct `Ident` (its names are inside `PATTERN_FIELD` nodes),
+/// so `kind()` reaches the final `PatternKind::Wildcard` fallthrough and the arm
+/// becomes an irrefutable catch-all — HIR-07's defect, shipped by a grammar-only
+/// fix. `P {}` has no `PATTERN_FIELD` at all, so it read as
+/// `PatternKind::Name("P")`, a *binding*: `match q { P {} => 1 }` where `q` is a
+/// `Q` ran the arm and returned 1 (REP-66). This test is the gate on both.
+#[test]
+fn a_patterns_brace_is_what_makes_it_a_record_pattern() {
+    use crate::{Pattern, PatternKind};
+
+    fn kind_of(arm: &str) -> PatternKind {
+        let tree = root(&format!("let r = match s {{ {arm} => 1 }}"));
+        tree.descendants()
+            .find_map(Pattern::cast)
+            .unwrap_or_else(|| panic!("`{arm}` produced no PATTERN node"))
+            .kind()
+    }
+
+    // Headless: a record pattern with no name, and emphatically not a wildcard.
+    assert_eq!(kind_of("{a, b}"), PatternKind::Record(None));
+    // A head with empty braces: still a record pattern, not a binding named `P`.
+    assert_eq!(kind_of("P {}"), PatternKind::Record(Some("P".into())));
+    // The shapes it must stay apart from — one `Ident`, three meanings.
+    assert_eq!(kind_of("P {a}"), PatternKind::Record(Some("P".into())));
+    assert_eq!(kind_of("P(a)"), PatternKind::Variant("P".into()));
+    assert_eq!(kind_of("P"), PatternKind::Name("P".into()));
+    assert_eq!(kind_of("(a, b)"), PatternKind::Tuple);
+    assert_eq!(kind_of("_"), PatternKind::Wildcard);
+
+    // A headless pattern has no head token to read, which is what the `Option`
+    // in `Record` records — resolution must not go looking for one.
+    let tree = root("let r = match s { {a, b} => 1 }");
+    let pat = tree.descendants().find_map(Pattern::cast).unwrap();
+    assert!(
+        pat.name_token().is_none(),
+        "a headless record pattern has no head token"
+    );
+    assert_eq!(pat.fields().count(), 2, "…and its fields are still its own");
+}
