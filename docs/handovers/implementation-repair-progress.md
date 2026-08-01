@@ -10,25 +10,34 @@ Update this file at the end of every stage.
 ## 1. Status
 
 **Every stage the plan schedules is closed** — S1 … S21 and S23 … S26, with S22
-struck as "no action" — and **138 of the audit's 139 findings** are addressed and
-marked so in the plan's §4. The suite is **1645 passed, 0 failed, 0 ignored**
-(measured at `6d5c9bc`): the ignored suite the audit left behind is at **zero
-for the first time**, and `just ci` is green.
+struck as "no action" — and **all 139 of the audit's findings** are addressed and
+marked so in the plan's §4. The ignored suite the audit left behind is at zero,
+and `just ci` is green. The suite's pass count is not restated here: it is a
+count, and the rule this file keeps learning is that a number stated in two
+places goes stale in one. `just ci` is the statement.
 
-The finding that is not addressed is **MIR-10**, the one §4 row reading
-`PARTIAL — part owed`: its verifier landed and the *rule* it is about — "a
-faulting instruction is followed by a `CheckFault`" — did not, and REP-52 and
-REP-53 are that rule's two ends. It is a live code gap, not bookkeeping, and an
-earlier version of this paragraph said "every one of the audit's 139 findings",
-which contradicted the §4 row and this file's own §4.
+**MIR-10 was the one §4 row reading `PARTIAL — part owed`, and it is closed**
+(ADR-088). Its verifier had landed and its *rule* had not — "a faulting
+instruction is followed by a `CheckFault`" — and REP-52 and REP-53 were that
+rule's two ends. The rule is enforced now, in both directions, and a prototype
+run of it over every tracked `.px` found **more than the two registered ends**:
+41 unchecked text-literal allocations, the fused `sum`/`product` accumulator, and
+~170 checks after instructions that cannot fault. That is the argument for the
+rule rather than the two patches, which is what handover 17 warned about.
 
-What else is left is not a stage. It is the plan's **§4.1** rows that were
-registered and deliberately not fixed — REP-33, REP-52, REP-53, REP-54, REP-55,
-REP-56, REP-57, REP-58, REP-60's stdin half and the `_sub`/`_mul` half of
-REP-46 — and **two open language decisions, D16 and D18**. Each of those rows was
-re-reproduced against `b557e0a` in the close-out pass; **REP-59 was not
-reproducible and is closed there** (it was fixed by S19's `6648a72` before the
-S20 branch that filed it ever saw that commit). §4 of this file says where to
+**The §4.1 rows are all closed.** REP-33, REP-52, REP-53, REP-54, REP-55, REP-56,
+REP-57, REP-58, REP-60's stdin half and REP-46's `_sub`/`_mul` half — each with
+an ADR where it needed a decision. **D16 and D18 are answered** (ADR-089,
+ADR-094). Every row was re-reproduced against `b557e0a` in the close-out pass;
+**REP-59 was not reproducible and is closed there** (it was fixed by S19's
+`6648a72` before the S20 branch that filed it ever saw that commit).
+
+**Four rows were registered during this round and closed with it** — REP-65 (a
+`Text` subscript answered an `Int`; ADR-086), REP-66 (`P {}` parsed as a binding
+that matched anything), and two the work exposed rather than fixed: **REP-67**
+(`praxis_alloc_text` faults where the compiler is the caller, so the verifier
+rule costs a never-taken check per text literal) and the `praxis-cli` tests'
+shared-`/tmp` fixture race, which is fixed. §4 of this file says where to
 start with them.
 
 | Stage | State | Commits |
@@ -3825,64 +3834,98 @@ with them the plan's whole schedule. What is left is the §4.1 rows nobody has
 fixed and the two open decisions — nothing here blocks anything else, so this is
 a menu and not a queue.
 
-**The open §4.1 rows, in the order they are worth taking:**
+**The §4.1 rows are closed. What each answer turned out to be — and where this
+register was wrong about it, which is the part worth reading:**
 
-- **REP-56 (P0)** — a `choice` payload record's fields cannot be read, and
-  `praxis check` says nothing. It is the highest-severity row left and the only
-  one that costs a user a working program: `scan(choice(template))` is §7.5's
-  most natural spelling and the `m9_noisy_scan` shape. On `b557e0a` it does not
-  report — it **aborts the host** (`rc=134`) on REP-37's width guard, because the
-  field read reaches lowering as a `Unit`. **Re-severitied P1 → P0 by the final
-  audit**: that measurement was a *debug* build, and in **release** the guard was
-  a `debug_assert` and therefore absent — the same program printed a different
-  pointer-shaped number on every run, `rc=0`, off an 8-byte out-of-bounds heap
-  read. A silent wrong answer from a program that passes `check` is this
-  register's definition of P0, and the read is memory-unsafe besides. **The read
-  is now bounded in every profile** (`int_payload`'s width check is an ordinary
-  branch); the row stays open because the *type* is what it is about.
-  **REP-57 (P2) is its workaround and
-  wants doing with it**: a record pattern nested inside a variant pattern has no
-  grammar, because `parse_pattern` handles `Ident {` and a bare `{` reaches its
-  `_` arm. Fixing REP-57 alone buys nothing; fixing REP-56 alone leaves the
-  spelling ADR-069 would suggest still unparseable.
-- **REP-52 (P2) and REP-53 (P3)** — both are **F17/MIR-10's** verifier rule, "a
-  faulting instruction is followed by a `CheckFault`", from its two ends: a fused
-  `collect` that pushes without a check, and a method-call path that checks
-  unconditionally and so reads neither `MethodEntry::can_fault` nor the
-  manifest's fault column. MIR-10 is the one §4 row still marked `PARTIAL — part
-  owed`, and these two are why. Take all three together or none.
-- **REP-54 (P2)** — a template with two or more anonymous captures is tagged
-  `Unit` and holds tuples: `read lines(\`{int},{int}\`)` prints `[Unit, Unit]`.
-  The answer is a tuple descriptor built from the child descriptors, and it wants
-  deciding alongside whether `PlanNode::Tuple` is emitted or deleted (nothing
-  emits it today).
-- **REP-58 (P2)** — §7.7's own "repeated labeled blocks" example does not run; a
-  nested-constructor capture inside a `block` is the template's last part, so it
-  is unbounded and swallows past its line. Pre-existing, and the answer is a
-  language decision: either a `block` item is line-anchored for its captures too,
-  or §7.7 is amended. Add a corpus fixture for §7.7 as written when it is taken.
-- **REP-55 (P3)** — `matrix`'s ragged-row fault names the whole input where
-  `grid`'s names the offending line. Diagnostic quality, not correctness.
-- **REP-33 (P2)** and **REP-46's open half (P2)** — both are *features* the
-  design doc writes and the language does not have: Appendix D's `sorted`,
-  `frequencies`, `zip`, `map`-on-a-pipeline and `sum` (a clean `praxis check`
-  then eight `Y110`s at run), and `wrapping_sub`/`saturating_mul`/`checked_mul`
-  beside the three `_add` forms §4.12 got. Neither is a repair.
-- **REP-60's open half (P2)** — empty *stdin* still faults with a diagnostic
-  carrying no offset, no `expected` and no `actual`, because `praxis_get_input`
-  installs no buffer for it. The `--input` half is fixed; this one is a runtime
-  contract with an ABI-boundary guard behind it, and taking it is the pass that
-  decides whether "no input at all" and "empty input" are one state or two.
+- **REP-56 (P0) + REP-57 + REP-66** — ADR-091. **This register's framing was
+  wrong.** It said REP-56 "needs a real payload-record type — a feature, not a
+  repair". The payload record type was already real end to end: `synthesize`
+  built a genuine anonymous `TypeData::Record`, `unify` already unified anonymous
+  records structurally, and the field indices already agreed with the runtime
+  slots by construction. What was wrong is that `infer_pattern` reached the enum
+  through the resolved constructor **symbol** while lowering reached it through
+  the **scrutinee** — and a `choice(...)` enum has no symbol, so inference
+  skipped the arm entirely and the field read lowered as `Unit`. About fifteen
+  lines. REP-57's headless record pattern (`{a, b}`) landed with it, as the
+  register required. **REP-66 was found in passing and is new**: `P {}` had no
+  `PATTERN_FIELD` child, so `Pattern::kind()` fell through to a *binding* named
+  `P` that matched anything — `match q { P {} => 1 }` with `q: Q` ran the arm and
+  returned 1. A pattern is a record pattern because of its **brace** now.
+- **MIR-10 + REP-52 + REP-53** — ADR-088, taken together as the register
+  required. See §1: the rule found more than the two registered ends.
+- **REP-54** — ADR-092. **The estimate was wrong and the ADR says so.** This row
+  and ADR-078 both predicted "a tuple descriptor built from the child
+  descriptors, which the static-descriptor path has no constructor for". There
+  was nothing to construct: `TUPLE` is a uniform descriptor like `VEC` and
+  `RECORD`, the per-shape `TupleSchema` lives in the payload, and
+  `VecPayload::element_descriptor` is a `*const TypeDescriptor` that could not
+  hold a schema in any case. `PlanNode::Tuple` was **deleted**, not emitted — not
+  because nothing emitted it, but because it could not represent a tuple: a
+  multi-capture template's separators are `Literal` parts and
+  `Tuple { elements }` has nowhere to put them, so `` `{int},{int}` `` would lose
+  its comma. The silent half of the defect was that such a `Vec` compared
+  *unequal* to an identical one built with `push`.
+- **REP-58** — ADR-090. §7.7's own example runs as written, and its fence is now
+  a gate that reads the document rather than quoting it.
+- **REP-55** — one `uniform_row_width` helper shared by `grid` and `matrix`, so
+  the rule is stated once. `matrix`'s ragged-row fault named the whole input
+  (`0..11`) where `grid`'s named the offending line; it names `4..6` now.
+- **REP-33** — ADR-093. **This row was wrong twice.** Three of the five names it
+  listed (`zip`, `map`-on-a-pipeline, `sum`) were implemented and working all
+  along — six of the eight `Y110`s were cascade off the fresh type variable
+  `sorted` handed back. And it was *two* items, of which one was a repair: `Y110`
+  moved from lowering into inference, so a method that cannot resolve is reported
+  at `check` (the class, not just Appendix D's instance), and then `sorted`,
+  `unique` and `frequencies` were registered. Appendix D runs and prints
+  `11` / `31`.
+- **REP-46's open half** — nine rows: three modes over `add`, `sub`, `mul`.
+  **The sentence that read as a closure could not be one.** §4.12's "These three
+  are the family… whether there should be is undecided (REP-46)" was written *by
+  REP-46's own first half*, as a note deferring the question, so it was not the
+  authority for the decision it deferred — and §4.12 closes a set in prose every
+  time it means to. The measurement decided the rest: `wrapping_mul` has no
+  in-language spelling at all, because every arithmetic operator is checked and
+  there are no bitwise operators.
+- **REP-60's stdin half** — ADR-087. Empty input is input; only a host that
+  installs neither a buffer nor a reader has *no* input, and that is an embedder
+  state. Taking it exposed a **third** site with the same guard, in
+  `praxis-debugger`, which had been breaking §9.7 on the `--input` half the
+  register already recorded as fixed.
 
-**The two open decisions, both belonging to closed stages:**
+**The two decisions are answered:**
 
-- **D16 (S25)** — does `assert` take a message, and does the language get
-  arity-based overloading or optional parameters? The plan's warning is the
-  load-bearing part: `assert`'s message is the cheapest possible motivating case,
-  so answering it in isolation sets the precedent by accident.
-- **D18 (S19 round 3)** — may a backtick template span a raw newline? It decides
-  what an unterminated template reports; the reasoning and the two candidate
-  rules are in this section, below.
+- **D16 (S25)** — ADR-089. The general question first, as the plan's warning
+  demanded: **a name has exactly one signature**. So `assert` keeps its one
+  argument, and the decision ships `Y024` — `unify` already compared the two
+  parameter counts and discarded the fact, so every arity mistake read as a
+  whole-function-type mismatch. The measurement that settled `assert` itself: a
+  failed assert already prints the condition's source text beside its value and
+  every local in the frame, so a hand-written message is strictly *less*
+  information than the crash report already carries.
+- **D18 (S19 round 3)** — ADR-094. A template ends at the line it opens on. Three
+  findings made it easy: it is the rule `"…"` literals already follow; a raw
+  newline never had a meaning in a template (it fell through to *literal text*,
+  matching LF and failing on CRLF where `\n` matches both); and a sweep of every
+  `.px`, every doc fence and every `.rs` found no template that spans one. The
+  report for `` read `{int` `` went from `T002`-to-EOF plus `P001` plus `Y001` to
+  one `T002` naming one line.
+
+**Two rows this round opened and did not close:**
+
+- **REP-67 (P3, new)** — `praxis_alloc_text` is declared faulting because it
+  validates UTF-8 for the raw-stdin path, but the compiler hands it bytes from a
+  Rust `String`, so ADR-088's rule now emits a never-taken check at each of 41
+  text-literal sites. A site claim was **rejected** (a rule with a hand-carved
+  hole is not a rule, and the `Overflow::Bounded` precedent does not carry — the
+  backend reads that one). The cure is to split the wrapper so its row becomes
+  `Allocates`, which is ADR-017 territory and must be reconciled with REP-45's
+  faulting-wrapper sweep.
+- **D19 (new)** — is there a character literal? ADR-086 made `"#"[0]` a spelling
+  that works, so the literal is ergonomics rather than a blocker. Worth recording
+  for whoever takes it: **everything below the parser already exists and is
+  dead** — `Lit::Char(u32)` has no constructor, and `AllocKind::Char`'s MIR
+  lowering and its Cranelift codegen are complete. It is a lexer, a parser arm
+  and `lower_lit`.
 
 **There is no ABI bump left in this round.** S19, S20 and S21 had none; H17 is
 one per stage and S18 spent the one that was available (13 → 14, with RT-13, in

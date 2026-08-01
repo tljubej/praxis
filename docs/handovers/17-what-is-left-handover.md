@@ -3,6 +3,15 @@
 **Date:** 2026-07-31
 **Tree:** `1bd85d8` (everything below was measured there) · **0 ignored tests** · `just ci` green
 
+> **Superseded by `18-every-row-closed-handover.md` (2026-08-01).** Every row in
+> both tables below is closed and both decisions are answered. **Read this for
+> how the work was scoped; read 18 for what the answers were** — including the
+> three places where a row below turned out to describe its own defect wrongly
+> (REP-56's "a feature, not a repair", REP-33's five missing names, and REP-54's
+> "a tuple descriptor from a static path with no tuple constructor"). The tables
+> are left as written: they are the record of what was believed on 2026-07-31,
+> and editing them would erase the thing 18 is about.
+
 This is the successor to `16-repair-s18-s21-and-the-second-register-handover.md`,
 which is still worth reading for *how* the four stages landed and for its five
 "worth not rediscovering" notes. **Read 16 for the history; read this for the
