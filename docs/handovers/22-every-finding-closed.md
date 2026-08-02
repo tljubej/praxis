@@ -8,6 +8,10 @@
 **Supersedes:** handover 21's §4 ordering and its §1 estimate
 **Regenerates:** `benchmarks/REPORT.md` from a real `run.py` at `sizes.json`
 sizes
+**Continues in:**
+[`23-what-is-left-after-the-performance-work.md`](./23-what-is-left-after-the-performance-work.md)
+— the two defects, the four deferrals, and the one question that decides two of
+them. Read this document for what happened; read 23 for what to do next.
 
 > Handover 21 predicted that its two prototyped changes were worth ~2.7×, and
 > that "4.6× CPython becomes roughly 1.9× and 185× Rust roughly 75×". All six
