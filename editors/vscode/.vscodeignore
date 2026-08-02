@@ -1,8 +1,14 @@
 .vscode/**
 .gitignore
-node_modules/**
+# **`node_modules/` is NOT ignored**, and that is deliberate: `vscode-languageclient`
+# is a *runtime* dependency, so a `.vsix` built without it fails to activate with
+# "Cannot find module 'vscode-languageclient/node'". `vsce` prunes
+# devDependencies on its own, so only the client and its transitive deps ship.
+# If the extension ever gains a bundler (esbuild/webpack), this line comes back
+# and `main` points at the bundle instead.
 out/**/*.map
 out/*.test.js
 src/**
 tsconfig.json
 **/*.ts
+*.vsix

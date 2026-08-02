@@ -1,5 +1,6 @@
 {
   "name": "praxis",
+  "publisher": "praxis-lang",
   "displayName": "Praxis",
   "description": "Language support for Praxis: syntax highlighting, diagnostics, hover, completion, and the local toolchain commands.",
   "version": "0.1.0",
@@ -69,7 +70,7 @@
       },
       {
         "command": "praxis.watchFile",
-        "title": "Praxis: Watch File (not implemented yet — `praxis watch` reports which milestone owns it)"
+        "title": "Praxis: Watch File (not implemented yet \u2014 `praxis watch` reports which milestone owns it)"
       },
       {
         "command": "praxis.restartServer",
