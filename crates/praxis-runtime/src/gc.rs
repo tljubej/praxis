@@ -100,6 +100,24 @@ pub struct GcHeader {
 }
 
 impl GcHeader {
+    /// Where the descriptor pointer sits, relative to the header's address.
+    ///
+    /// Generated code reads it: since ADR-102 an `Inst::ExtractScalar` proves
+    /// the object's type inline — one load from here, one compare against the
+    /// scalar descriptor's address — instead of calling `praxis_int_load` and
+    /// letting the wrapper prove it. The check is what makes the folded payload
+    /// offset below the offset the allocator actually used, and it is what keeps
+    /// REP-56 (a `praxis check`-clean program extracting an `Int` from a `Unit`)
+    /// a refusal rather than an out-of-bounds read.
+    ///
+    /// Exported from here, derived with `offset_of!`, because ADR-039 decision 1
+    /// made the fields **private** to this module: the backend cannot reach for
+    /// the offset itself, and the alternative — writing `0` in the backend —
+    /// is exactly the re-derived literal that decision exists to prevent.
+    /// [`payload_offset_for`](Self::payload_offset_for) is the same idea one
+    /// step further along.
+    pub const DESCRIPTOR_OFFSET: usize = core::mem::offset_of!(GcHeader, descriptor);
+
     /// Where the payload begins, relative to the header's address, for a
     /// payload with the given alignment.
     ///
@@ -405,6 +423,38 @@ mod tests {
         }
         assert_eq!(GcHeader::payload_offset_for(16), 32);
         assert_eq!(GcHeader::payload_offset_for(64), 64);
+    }
+
+    /// The descriptor is the first word of the header, and generated code reads
+    /// it there (ADR-102).
+    ///
+    /// Asserting the *value* as well as the round trip is deliberate: the
+    /// backend folds `DESCRIPTOR_OFFSET` into an immediate, so a field reorder
+    /// that moved the descriptor would be a silent miscompile of every scalar
+    /// extract in the language if nothing here noticed. The round trip is what
+    /// proves the constant names the field rather than merely being small.
+    #[test]
+    fn the_descriptor_is_at_the_offset_generated_code_reads() {
+        assert_eq!(GcHeader::DESCRIPTOR_OFFSET, 0);
+        let header = GcHeader::new(
+            &crate::scalars::INT,
+            8,
+            GcHeader::payload_offset_for(8) as u16,
+            HeapId::mint(),
+        );
+        let base = &header as *const GcHeader as *const u8;
+        // SAFETY: `DESCRIPTOR_OFFSET` is within the header by construction, and
+        // the field is a `Cell<*const TypeDescriptor>` — one pointer, so reading
+        // it as a `*const TypeDescriptor` is reading it at its own width.
+        let read_back = unsafe {
+            base.add(GcHeader::DESCRIPTOR_OFFSET)
+                .cast::<*const TypeDescriptor>()
+                .read()
+        };
+        assert!(
+            std::ptr::eq(read_back, &crate::scalars::INT),
+            "the word at DESCRIPTOR_OFFSET is the descriptor the header was built with"
+        );
     }
 
     /// The offset a header records must be the one `payload_offset_for`

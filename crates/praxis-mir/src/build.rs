@@ -6218,6 +6218,11 @@ mod tests {
     /// `true` against itself reads one address twice and is right for the wrong
     /// reason — so the observable answer is right on most runs and wrong on the
     /// ones where the padding happens to match. The instruction is the fact.
+    ///
+    /// Since ADR-102 the `ScalarKind` this pins also selects the width of an
+    /// **inline** load in generated code, not just which wrapper is called. The
+    /// same defect would now be an eight-byte read emitted directly into the
+    /// function body, past a descriptor check that proved `Bool`.
     #[test]
     fn a_bool_pattern_reads_its_scrutinee_at_a_bools_width() {
         let extracts = |src: &str| -> Vec<ScalarKind> {

@@ -97,6 +97,32 @@ const FALSE_REF_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, false_ref) a
 /// constant rather than a silent miscompile of every enum in the language.
 const ENUM_TAG_OFFSET: i32 = core::mem::offset_of!(praxis_runtime::enums::EnumPayload, tag) as i32;
 
+/// The byte offset of the descriptor pointer within a `GcHeader`.
+/// `Inst::ExtractScalar` loads it and compares it against the scalar
+/// descriptor's address before reading the payload inline (ADR-102).
+///
+/// Exported from `gc.rs` rather than reached for with `offset_of!` here: the
+/// header's fields are private to that module by ADR-039 decision 1, and the
+/// point of that decision is that the layout has one authority. Writing `0`
+/// here would be the re-derived literal it exists to prevent.
+const GC_DESCRIPTOR_OFFSET: i32 = praxis_runtime::GcHeader::DESCRIPTOR_OFFSET as i32;
+
+/// The byte offset of `pending_fault` within a `RuntimeContext`, and of `kind`
+/// within the `Fault` it points at. `Inst::CheckFault` is a load through each
+/// and a branch, where it used to be a call to `praxis_check_fault` (ADR-102).
+const PENDING_FAULT_OFFSET: i32 = core::mem::offset_of!(RuntimeContext, pending_fault) as i32;
+const FAULT_KIND_OFFSET: i32 = praxis_runtime::Fault::KIND_OFFSET as i32;
+
+/// The width the fault check loads at, asserted against the runtime's own
+/// answer. A `#[repr(C)]` fieldless enum is the target's C `int` on every target
+/// `Jit::check_target` accepts — but *assuming* that is how a repr change
+/// becomes a silent three-bytes-of-something-else read instead of a build
+/// failure. This is the build failure.
+const _: () = assert!(
+    praxis_runtime::Fault::KIND_SIZE == 4,
+    "the inline fault check loads `Fault.kind` as an I32"
+);
+
 /// Lower one MIR function into a Cranelift function and define it in `module`.
 pub(crate) fn lower_function<M: Module>(
     module: &mut M,
@@ -957,16 +983,23 @@ fn lower_inst<M: Module>(
             // instruction fault" would have had to restate it — two statements
             // of one fact, and the next edit to this match would have made the
             // verifier lie.
+            //
+            // Since ADR-102 that wrapper is the *cold path* rather than the
+            // whole lowering: `emit_scalar_load` proves the descriptor inline
+            // and loads the payload inline, and branches to the wrapper when
+            // the proof fails. `load_symbol()` is still the one authority for
+            // which wrapper that is, so `Inst::fault_reason` still reads the
+            // same function the backend does.
             let src_val = builder.use_var(vars[src.0 as usize]);
-            let result = call_symbol(
+            emit_scalar_load(
                 builder,
                 ctx_val,
-                &[src_val],
-                scalar.load_symbol(),
+                src_val,
+                vars[dst.0 as usize],
+                *scalar,
                 module,
                 imports,
             )?;
-            builder.def_var(vars[dst.0 as usize], result);
         }
         Inst::Materialize {
             dst,
@@ -1013,10 +1046,13 @@ fn lower_inst<M: Module>(
             // sentinel, and the `int_load` ran *before* the fault check, reading
             // eight bytes past a size-0 Unit payload.
             //
-            // Overflow is reported by calling a non-allocating raise wrapper
-            // with the predicate rather than by branching around it: arithmetic
-            // stays one basic block, and the `CheckFault` that MIR emits next
-            // is what diverts to the fault epilogue.
+            // Overflow is reported by branching to a cold block that calls a
+            // non-allocating raise wrapper — see `raise_on_cold_path`, which
+            // carries the argument for why a branch beats the unconditional
+            // call this used to emit. The site is still not a GC safepoint and
+            // still spills no roots; the `CheckFault` that MIR emits next is
+            // still what diverts to the fault epilogue, and it lowers into the
+            // block both arms of the diamond converge on.
             //
             // `Overflow::Bounded` sites — a `for` index bump, a `count`
             // accumulator — skip the test entirely: their operands are bounded
@@ -1081,11 +1117,10 @@ fn lower_inst<M: Module>(
                     let high = builder.ins().smulhi(l, r);
                     let sign = builder.ins().sshr_imm_u(product, 63);
                     let differs = builder.ins().icmp(IntCC::NotEqual, high, sign);
-                    let flag = builder.ins().uextend(GC, differs);
-                    raise_if_nonzero(
+                    raise_on_cold_path(
                         builder,
                         ctx_val,
-                        flag,
+                        differs,
                         RuntimeSymbol::RaiseIntOverflowIf,
                         module,
                         imports,
@@ -1116,20 +1151,22 @@ fn lower_inst<M: Module>(
                         builder.ins().srem(l, divisor)
                     };
 
-                    let by_zero_flag = builder.ins().uextend(GC, by_zero);
-                    raise_if_nonzero(
+                    // Two diamonds in sequence, in this order. The conditions
+                    // are mutually exclusive (`r == 0` versus `r == -1`), so
+                    // neither kind can overwrite the other — as when both
+                    // raises were straight-line calls.
+                    raise_on_cold_path(
                         builder,
                         ctx_val,
-                        by_zero_flag,
+                        by_zero,
                         RuntimeSymbol::RaiseDivByZeroIf,
                         module,
                         imports,
                     )?;
-                    let overflow_flag = builder.ins().uextend(GC, overflows);
-                    raise_if_nonzero(
+                    raise_on_cold_path(
                         builder,
                         ctx_val,
-                        overflow_flag,
+                        overflows,
                         RuntimeSymbol::RaiseIntOverflowIf,
                         module,
                         imports,
@@ -1338,11 +1375,33 @@ fn lower_inst<M: Module>(
         Inst::CheckFault { on_fault, debug } => {
             // Divert to the fault block when a fault is pending (§10.4). The
             // faultable op just before this set `pending_fault` (or a callee
-            // did); `praxis_check_fault` returns 1 iff a fault is pending. If so,
-            // branch to the function's fault block — which pops the shadow frame
-            // and returns the Unit sentinel, unwinding cleanly to the host. The
-            // rest of this MIR block's instructions lower into a fresh
-            // fall-through block, so the diversion does not strand them.
+            // did). If a fault is pending, branch to the function's fault block
+            // — which restores the shadow stack and returns the Unit sentinel,
+            // unwinding cleanly to the host. The rest of this MIR block's
+            // instructions lower into a fresh fall-through block, so the
+            // diversion does not strand them.
+            //
+            // The test is two loads and a branch (ADR-102), where it was a call
+            // to `praxis_check_fault` — a guarded call, two null tests, an
+            // `is_pending()` and a `Result` discriminant, to read one word. It
+            // runs once per faultable instruction, which after ADR-088 is once
+            // per checked arithmetic op, per user call and per faulting wrapper
+            // call, so it was among the most-executed instructions in the
+            // language.
+            //
+            // Neither load tests for null, and neither needs to. ADR-017's
+            // Consequences state the invariant: "`pending_fault` is always
+            // non-null once wired; the pending state lives in the `Fault` slot,
+            // not in pointer-nullness." `Runtime::context` is the only producer
+            // of a context generated code ever sees and wires the slot;
+            // `RuntimeContext::placeholder`, the one null-wiring constructor, is
+            // `unsafe` and test-only. `a_wired_context_has_a_fault_slot` pins
+            // it. Nor is `ctx` itself a new assumption: the prologue's recursion
+            // guard already loads through it unconditionally.
+            //
+            // The branch tests the loaded kind directly, which is
+            // `Fault::is_pending()` because `FaultKind::None` is 0 and no other
+            // kind is (`the_fault_record_is_one_kind_at_offset_zero`).
             //
             // This is load-bearing for faults that must propagate through
             // subsequent operations (notably StackOverflow: a deeply-recursive
@@ -1357,14 +1416,19 @@ fn lower_inst<M: Module>(
             // `x / 0`). The faulting op's own result is genuinely never
             // produced (the fault happens during it), so it stays `<uninit>`.
             spill.spill_debug(builder, debug, vars);
-            let pending = call_symbol(
-                builder,
-                ctx_val,
-                &[],
-                RuntimeSymbol::CheckFault,
-                module,
-                imports,
-            )?;
+            // Plain `trusted()` — `notrap + aligned`, and deliberately *not*
+            // `readonly` or `can_move`. Cranelift's alias analysis treats a call
+            // as clobbering memory, which is exactly what must stay true here:
+            // the whole point of this instruction is to observe a write a callee
+            // (or the raise wrapper on a cold path) just made. Claiming the load
+            // is readonly would let two `CheckFault`s collapse into one and a
+            // fault go unobserved — as an intermittent wrong answer, not a
+            // compile error.
+            let flags = MemFlags::trusted();
+            let slot = builder.ins().load(GC, flags, ctx_val, PENDING_FAULT_OFFSET);
+            let pending = builder
+                .ins()
+                .load(types::I32, flags, slot, FAULT_KIND_OFFSET);
             let fault_block = blocks[on_fault.0 as usize];
             let fallthrough = builder.create_block();
             builder
@@ -1707,8 +1771,191 @@ fn load_gc_const(builder: &mut FunctionBuilder, ctx: Value, konst: GcConst) -> V
     }
 }
 
+/// How a scalar payload is read once its descriptor has been proved.
+///
+/// One variant per payload *width*, not per `ScalarKind`, because that is what
+/// the load instruction depends on — and because REP-37 was exactly a `Bool`
+/// read at an `Int`'s width. The kinds that share a width still get their own
+/// row in [`inline_scalar_load_of`]; they differ in which descriptor is proved.
+enum ScalarLoad {
+    /// Eight bytes, straight into the uniform `i64` channel. `Int`'s payload,
+    /// and `Float`'s — a float rides the channel as `f64::to_bits()`, which is
+    /// what `praxis_float_load` returns, so the same load answers both.
+    Word,
+    /// Four bytes, zero-extended. `Char`'s payload is a `u32` code point and
+    /// `i64::from(code)` is what `praxis_char_load` answers.
+    HalfWord,
+    /// One byte, then `!= 0`. Not a shortcut for a one-byte load: a Rust `bool`
+    /// whose byte is neither 0 nor 1 is an *invalid value*, so `praxis_bool_load`
+    /// reads the byte and compares rather than materializing a `bool`
+    /// (`BoolPayload` is a `u8` for that reason). The inline form reproduces the
+    /// wrapper's answer, including for a byte the wrapper would not trust.
+    BoolByte,
+}
+
+/// The descriptor, payload alignment and load width for a scalar kind whose
+/// payload generated code may read inline — or `None` for one it may not.
+///
+/// A new [`praxis_mir::ScalarKind`] variant fails to compile here, which is the
+/// point: this is the second statement of a mapping whose first is
+/// `ScalarKind::load_symbol` (MIR-10), and the two must not drift. They cannot
+/// disagree about *which* type is being read, because the cold path below calls
+/// `load_symbol()` — this only adds which descriptor proves it and how wide the
+/// read is.
+fn inline_scalar_load_of(
+    scalar: praxis_mir::ScalarKind,
+) -> Option<(&'static praxis_runtime::TypeDescriptor, usize, ScalarLoad)> {
+    use praxis_mir::ScalarKind;
+    use praxis_runtime::scalars;
+    Some(match scalar {
+        ScalarKind::Int => (
+            &scalars::INT,
+            core::mem::align_of::<scalars::IntPayload>(),
+            ScalarLoad::Word,
+        ),
+        ScalarKind::Bool => (
+            &scalars::BOOL,
+            core::mem::align_of::<scalars::BoolPayload>(),
+            ScalarLoad::BoolByte,
+        ),
+        ScalarKind::Char => (
+            &scalars::CHAR,
+            core::mem::align_of::<scalars::CharPayload>(),
+            ScalarLoad::HalfWord,
+        ),
+        ScalarKind::Float => (
+            &scalars::FLOAT,
+            core::mem::align_of::<scalars::FloatPayload>(),
+            ScalarLoad::Word,
+        ),
+        // `Byte` is reserved and unwired, and its `load_symbol()` is `IntLoad`
+        // — an eight-byte read of a one-byte payload, chosen "defensively" when
+        // nothing emitted it. Giving that an inline form would be REP-37 by
+        // construction: the descriptor check would prove `INT` of a value that
+        // is not one, or prove nothing at all. Keep the call, which at least
+        // refuses inside `int_payload`'s bounded reader.
+        ScalarKind::Byte => return None,
+    })
+}
+
+/// Read a scalar payload out of `src_val` into `dst`: an inline load guarded by
+/// an inline descriptor check, with the existing wrapper as the cold path.
+///
+/// # The check is the proof, and the static type is not one
+///
+/// This does **not** trust the MIR local's type, and there is no version of this
+/// that could. `Scalar` locals are `MirType::Opaque` by construction, the `src`
+/// here is frequently a `Gc` local lowering allocated as `Opaque`, and — the
+/// part that settles it — where a type *is* known it has been wrong. REP-56 is a
+/// program that passes `praxis check` and emits `ExtractScalar { scalar: Int }`
+/// against a value whose descriptor is `Unit`, zero bytes wide; a release build
+/// answered an ASLR-varying number off an eight-byte out-of-bounds read. REP-49
+/// and REP-37 are the same defect from two other directions.
+///
+/// So the check survives inlining, and it survives it in the form
+/// `int_payload`'s doc insists on: **unconditional, in every profile**. What
+/// moves is only where the refusal lives — from a never-taken branch inside a
+/// `#[cold]` callee to a never-taken branch to a Cranelift cold block. The
+/// refusal itself is bit-for-bit what it was, because the cold block *calls the
+/// same wrapper*: `praxis_int_load` re-runs `read_scalar`, fails, panics,
+/// `abi_guard!` catches it, and — its manifest row being `Effect::Pure`, so the
+/// panic fault is not observable — it prints that message and aborts. Same
+/// message, same exit, no new wrapper, no manifest change.
+///
+/// # What else the check buys
+///
+/// The payload offset is folded from `GcHeader::payload_offset_for`, exactly as
+/// `Inst::EnumTag` folds it. That is correct *only because* the header records
+/// what the allocator computed from **that descriptor's** alignment (ADR-039
+/// decision 1) — so proving the descriptor is also what makes the constant
+/// offset the offset the allocator actually used. And ADR-039 decision 3's
+/// poisoning falls out for free: a swept header has a null descriptor, which
+/// fails the comparison and routes to the wrapper, whose `GcHeader::descriptor()`
+/// panics "descriptor read from a poisoned (swept) GcHeader" — again the same
+/// refusal as before.
+///
+/// `Inst::EnumTag` inlines a payload read with no check at all. It is a weaker
+/// precedent than it looks: what licenses it is ADR-091 (a variant pattern's
+/// enum is the scrutinee's, so the static type reaches the read), and that is
+/// the same class of argument REP-56 falsified here. Whether the tag read should
+/// acquire this check too is a real question, and not one this answers.
+#[allow(clippy::too_many_arguments)] // The lowering context, as `lower_inst` carries it.
+fn emit_scalar_load<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx_val: Value,
+    src_val: Value,
+    dst: Variable,
+    scalar: praxis_mir::ScalarKind,
+    module: &mut M,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
+) -> Result<()> {
+    let sym = scalar.load_symbol();
+    let Some((descriptor, payload_align, load)) = inline_scalar_load_of(scalar) else {
+        let result = call_symbol(builder, ctx_val, &[src_val], sym, module, imports)?;
+        builder.def_var(dst, result);
+        return Ok(());
+    };
+
+    // `MemFlags::trusted()` is `notrap + aligned`, which is what the prologue's
+    // context reads use and all this needs: the header is live and its fields
+    // are in bounds by construction. It deliberately does **not** claim
+    // `readonly`, so Cranelift's alias analysis keeps treating calls as
+    // clobbering this memory — `set_mark_color` and the sweep write headers.
+    let flags = MemFlags::trusted();
+    let have = builder.ins().load(GC, flags, src_val, GC_DESCRIPTOR_OFFSET);
+    let want = builder.ins().iconst(GC, descriptor as *const _ as i64);
+    let ok = builder.ins().icmp(IntCC::Equal, have, want);
+
+    let fast = builder.create_block();
+    let slow = builder.create_block();
+    let merge = builder.create_block();
+    builder.set_cold_block(slow);
+    builder.ins().brif(ok, fast, &[], slow, &[]);
+
+    builder.switch_to_block(fast);
+    {
+        // The one object-layout authority, folded to an immediate — not a
+        // header size this file re-derives (ADR-039 decision 1).
+        let offset = praxis_runtime::GcHeader::payload_offset_for(payload_align) as i32;
+        let value = match load {
+            ScalarLoad::Word => builder.ins().load(GC, flags, src_val, offset),
+            // `uload32` returns an I64 with the upper half zeroed, which *is*
+            // `i64::from(code)`.
+            ScalarLoad::HalfWord => builder.ins().uload32(flags, src_val, offset),
+            ScalarLoad::BoolByte => {
+                let byte = builder.ins().uload8(GC, flags, src_val, offset);
+                let set = builder.ins().icmp_imm_u(IntCC::NotEqual, byte, 0);
+                builder.ins().uextend(GC, set)
+            }
+        };
+        builder.def_var(dst, value);
+        builder.ins().jump(merge, &[]);
+    }
+
+    builder.switch_to_block(slow);
+    {
+        let result = call_symbol(builder, ctx_val, &[src_val], sym, module, imports)?;
+        // The wrapper does not return: every kind with an inline form refuses a
+        // wrong descriptor by panicking. `def_var` anyway, because Cranelift
+        // needs the variable defined on every path into `merge` — proving the
+        // path is dead is the optimizer's business, not the lowering's.
+        builder.def_var(dst, result);
+        builder.ins().jump(merge, &[]);
+    }
+
+    // `def_var` in both arms rather than a block parameter: `FunctionBuilder`'s
+    // SSA construction inserts the join itself, which is the idiom every other
+    // arm of `lower_inst` already uses.
+    builder.switch_to_block(merge);
+    Ok(())
+}
+
 /// Report a fault when `predicate` is negative — the sign-bit form the
 /// add/sub overflow tests produce.
+///
+/// The sign test is the branch's own condition, not a value: this used to
+/// `ushr_imm_u(predicate, 63)` to shape an `i64` argument for the call, and
+/// with the call gone there is nothing to shape it for.
 fn raise_if_negative<M: Module>(
     builder: &mut FunctionBuilder,
     ctx: Value,
@@ -1717,24 +1964,77 @@ fn raise_if_negative<M: Module>(
     module: &mut M,
     imports: &mut HashMap<RuntimeSymbol, FuncRef>,
 ) -> Result<()> {
-    let flag = builder.ins().ushr_imm_u(predicate, 63);
-    raise_if_nonzero(builder, ctx, flag, sym, module, imports)
+    let cond = builder
+        .ins()
+        .icmp_imm_s(IntCC::SignedLessThan, predicate, 0);
+    raise_on_cold_path(builder, ctx, cond, sym, module, imports)
 }
 
-/// Report a fault when `flag` is non-zero.
+/// Report a fault when `cond` is non-zero, by branching to a cold block that
+/// calls `sym` — not by calling `sym` unconditionally and letting it decide.
 ///
-/// The call is unconditional and the wrapper decides: an arithmetic site stays
-/// one basic block, and the wrapper allocates nothing, so the site is not a GC
-/// safepoint and needs no root spill.
-fn raise_if_nonzero<M: Module>(
+/// # Why this is a branch now, and what the old comment had right
+///
+/// It read: *"The call is unconditional and the wrapper decides: an arithmetic
+/// site stays one basic block, and the wrapper allocates nothing, so the site is
+/// not a GC safepoint and needs no root spill."* Both clauses are true and the
+/// second survives untouched — the cold block calls the same `Effect::Faults`
+/// wrapper, which still allocates nothing, so this is still not a safepoint and
+/// still spills no roots.
+///
+/// The first clause is the one that was mispriced. What a single basic block
+/// buys is not having to keep values live across a CFG edge — but **a branch
+/// does not clobber registers and a call does**. Cranelift must treat every
+/// caller-saved register as dead across `bl praxis_raise_int_overflow_if`, so at
+/// `opt_level=none` a loop doing one checked add per iteration spilled and
+/// reloaded its counter, its accumulator and `ctx` around a call that a
+/// non-faulting program never needs. A not-taken `cbz` is one instruction and
+/// essentially always predicted; the hot path also gets *shorter*, because the
+/// `ushr_imm_u` and the `uextend`s that existed only to shape an `i64` argument
+/// are gone with the argument.
+///
+/// # Why the wrapper still takes a condition
+///
+/// The cold block passes a constant `1`, which is honest — it is reached only
+/// when the predicate held — and keeps `praxis_raise_int_overflow_if`'s
+/// `if condition != 0` a true statement rather than dead code. Adding an
+/// unconditional `praxis_raise_int_overflow` to mirror
+/// `praxis_raise_stack_overflow` would be tidier and costs two manifest rows,
+/// two address-table arms and a doc rewrite; it is not worth that here.
+///
+/// # ADR-088 is untouched
+///
+/// The rule that a faulting instruction is observed by the next one is a
+/// property of *MIR* (`verify::check_fault_observed`), and this emits no MIR.
+/// Both arms of the diamond converge at `cont` before the `Inst::CheckFault`
+/// that MIR requires next lowers, so the check runs on the raising path and the
+/// non-raising path alike — as it did when the raise was straight-line.
+fn raise_on_cold_path<M: Module>(
     builder: &mut FunctionBuilder,
     ctx: Value,
-    flag: Value,
+    cond: Value,
     sym: RuntimeSymbol,
     module: &mut M,
     imports: &mut HashMap<RuntimeSymbol, FuncRef>,
 ) -> Result<()> {
-    call_symbol(builder, ctx, &[flag], sym, module, imports)?;
+    let cold = builder.create_block();
+    let cont = builder.create_block();
+    // Cold-block placement runs in the machine-independent lowering
+    // (`BlockLoweringOrder` reads `Layout::is_cold`), not in the mid-end, so it
+    // applies at `opt_level=none` too — which is the level this change was
+    // measured at.
+    builder.set_cold_block(cold);
+    builder.ins().brif(cond, cold, &[], cont, &[]);
+
+    builder.switch_to_block(cold);
+    let one = builder.ins().iconst(GC, 1);
+    call_symbol(builder, ctx, &[one], sym, module, imports)?;
+    builder.ins().jump(cont, &[]);
+
+    // No block parameters: the raise wrapper returns `Void`, so no value crosses
+    // the join. Everything the caller computed before the branch was defined in
+    // a block that dominates `cont`, so it is readable there without one.
+    builder.switch_to_block(cont);
     Ok(())
 }
 
@@ -2434,6 +2734,374 @@ mod tests {
         assert!(
             schema.descriptors.iter().all(|d| d.is_null()),
             "and every slot says it has no static type"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-102: the shapes the inlined sites emit.
+    //
+    // These read the emitted Cranelift IR, and they have to. "The instruction
+    // is the fact": a behavioural test cannot tell an inline load from a call
+    // to a wrapper that does the same load, so nothing that runs a program can
+    // see the difference this change makes — or see it being undone. The one
+    // that matters most is the descriptor check: it is the thing a later "the
+    // type is known, drop the check" edit would remove, and REP-56 is what
+    // that costs.
+    // -----------------------------------------------------------------------
+
+    /// A scratch function with one `i64` parameter (standing in for `ctx`) and
+    /// one `Variable`, plus a `JITModule` to import wrappers into.
+    ///
+    /// Returns the emitted IR as text, and the entry block's own text — the
+    /// split matters because "the entry block contains no `call`" is a
+    /// different claim from "the function contains no `call`", and the second
+    /// would be false by design: the cold blocks call.
+    fn emitted_ir(
+        build: impl FnOnce(&mut FunctionBuilder, Value, Variable, &mut JITModule) -> Result<()>,
+    ) -> (String, String) {
+        let mut module = test_module();
+        let mut ctx = module.make_context();
+        let mut sig = Signature::new(module.isa().default_call_conv());
+        sig.params.push(AbiParam::new(GC));
+        sig.returns.push(AbiParam::new(GC));
+        ctx.func.signature = sig;
+
+        let mut fn_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fn_ctx);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let ctx_val = builder.block_params(entry)[0];
+        let dst = builder.declare_var(GC);
+
+        build(&mut builder, ctx_val, dst, &mut module).expect("emission");
+
+        // Terminate whatever block we ended up in, then seal and read back.
+        let out = builder.use_var(dst);
+        builder.ins().return_(&[out]);
+        builder.seal_all_blocks();
+        builder.finalize(module.isa().frontend_config());
+
+        let all = ctx.func.display().to_string();
+        let entry_text = block_text(&all, entry);
+        (all, entry_text)
+    }
+
+    /// The lines of `ir` belonging to `block`, from its label up to the next
+    /// block label.
+    ///
+    /// A header is one of `blockN:`, `blockN(v0: i64):` or `blockN cold:`, so
+    /// the name is the leading run of non-`(`, non-space, non-`:` characters —
+    /// matching the whole line would silently miss the cold ones, which are
+    /// exactly the blocks two of these tests are about.
+    fn block_text(ir: &str, block: Block) -> String {
+        let label = format!("{block}");
+        let mut out = String::new();
+        let mut inside = false;
+        for line in ir.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("block") && trimmed.ends_with(':') {
+                let name: &str = trimmed.split(['(', ' ', ':']).next().unwrap_or("");
+                inside = name == label;
+                continue;
+            }
+            if inside {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// The one instruction in `ir` that reads at the payload displacement.
+    ///
+    /// The *width* of this line is the whole of REP-37, and it has to be picked
+    /// out by displacement rather than by opcode: the descriptor check reads a
+    /// pointer, so "the IR contains a `load.i64`" is true of every kind and
+    /// says nothing. The payload sits at `payload_offset_for(align)`, which is
+    /// 24 for all four scalars — the same number `Inst::EnumTag` folds — and
+    /// Cranelift prints the displacement as `+24`.
+    fn payload_load(ir: &str, align: usize) -> String {
+        let displacement = format!("+{}", praxis_runtime::GcHeader::payload_offset_for(align));
+        let mut hits = ir
+            .lines()
+            .filter(|l| l.contains(&displacement) && !l.trim_start().starts_with(';'));
+        let line = hits
+            .next()
+            .unwrap_or_else(|| panic!("no instruction reads at {displacement}:\n{ir}"))
+            .trim()
+            .to_string();
+        assert!(
+            hits.next().is_none(),
+            "more than one instruction reads at {displacement}:\n{ir}"
+        );
+        line
+    }
+
+    /// An `Int` extract loads the payload inline — and proves the descriptor
+    /// first, in the same block, before the load can happen.
+    ///
+    /// The `icmp` is the assertion that matters. Dropping it would leave a
+    /// green suite and a faster benchmark and REP-56 back: a `praxis check`-
+    /// clean program extracting an `Int` from a zero-byte `Unit` payload, which
+    /// in a release build read eight bytes past the object and answered a
+    /// different number every run.
+    #[test]
+    fn an_int_extract_loads_the_payload_and_proves_its_descriptor() {
+        let (all, entry) = emitted_ir(|b, ctx, dst, m| {
+            let src = b.ins().iconst(GC, 0x1000);
+            emit_scalar_load(
+                b,
+                ctx,
+                src,
+                dst,
+                praxis_mir::ScalarKind::Int,
+                m,
+                &mut HashMap::new(),
+            )
+        });
+
+        assert!(
+            entry.contains("icmp eq"),
+            "the descriptor check must be an ordinary compare in the hot block, \
+             not something a profile can compile out (REP-56):\n{all}"
+        );
+        assert!(
+            entry.contains("brif"),
+            "and it must branch on the result:\n{all}"
+        );
+        assert!(
+            !entry.contains("call "),
+            "the fast path calls nothing; the wrapper is the cold block:\n{all}"
+        );
+        let payload = payload_load(
+            &all,
+            core::mem::align_of::<praxis_runtime::scalars::IntPayload>(),
+        );
+        assert!(
+            payload.contains("load.i64"),
+            "an Int payload is one eight-byte load, at the offset \
+             `payload_offset_for` computes: {payload}\n{all}"
+        );
+        assert!(
+            all.contains("call "),
+            "and the cold path still calls the wrapper, which is what keeps the \
+             refusal byte-for-byte what it was:\n{all}"
+        );
+    }
+
+    /// REP-49 and REP-37, moved to the inline path: a `Bool` payload is one
+    /// byte and a `Char`'s is four, and neither is read as eight.
+    ///
+    /// The `Bool` shape is three instructions rather than one on purpose — the
+    /// byte is compared against zero rather than materialized as a Rust `bool`,
+    /// reproducing `praxis_bool_load` rather than shortcutting it.
+    #[test]
+    fn a_bool_extract_reads_one_byte_and_a_char_four() {
+        let shape = |scalar| {
+            emitted_ir(move |b, ctx, dst, m| {
+                let src = b.ins().iconst(GC, 0x1000);
+                emit_scalar_load(b, ctx, src, dst, scalar, m, &mut HashMap::new())
+            })
+            .0
+        };
+
+        use praxis_runtime::scalars;
+
+        let bools = shape(praxis_mir::ScalarKind::Bool);
+        let read = payload_load(&bools, core::mem::align_of::<scalars::BoolPayload>());
+        assert!(
+            read.contains("uload8"),
+            "a Bool payload is one byte, never an Int's eight: {read}\n{bools}"
+        );
+        assert!(
+            bools.contains("icmp ne"),
+            "and it is compared against zero, not materialized as a `bool`:\n{bools}"
+        );
+
+        let chars = shape(praxis_mir::ScalarKind::Char);
+        let read = payload_load(&chars, core::mem::align_of::<scalars::CharPayload>());
+        assert!(
+            read.contains("uload32"),
+            "a Char payload is four bytes, zero-extended: {read}\n{chars}"
+        );
+
+        // Float rides the uniform i64 channel as its bit pattern, which is
+        // exactly what `praxis_float_load` returns.
+        let floats = shape(praxis_mir::ScalarKind::Float);
+        let read = payload_load(&floats, core::mem::align_of::<scalars::FloatPayload>());
+        assert!(
+            read.contains("load.i64"),
+            "a Float payload is its eight-byte bit pattern: {read}\n{floats}"
+        );
+    }
+
+    /// `ScalarKind::Byte` has no inline form, and that is not an oversight.
+    #[test]
+    fn a_reserved_byte_scalar_keeps_its_call() {
+        assert!(
+            inline_scalar_load_of(praxis_mir::ScalarKind::Byte).is_none(),
+            "`Byte`'s load_symbol() is `IntLoad` — an eight-byte read of a \
+             one-byte payload, chosen defensively while nothing emitted it. \
+             Inlining that would be REP-37 by construction."
+        );
+        for wired in [
+            praxis_mir::ScalarKind::Int,
+            praxis_mir::ScalarKind::Bool,
+            praxis_mir::ScalarKind::Char,
+            praxis_mir::ScalarKind::Float,
+        ] {
+            assert!(
+                inline_scalar_load_of(wired).is_some(),
+                "{wired:?} is wired and must have an inline form"
+            );
+        }
+    }
+
+    /// The inline check proves **exactly** what the wrapper would prove.
+    ///
+    /// This is the seam the whole change rests on. The fast path reads the
+    /// payload because a comparison said the descriptor is `D`; the cold path
+    /// calls a wrapper that reads it because `read_scalar` said the descriptor
+    /// is the one behind `scalars::…_PAYLOAD`. If those two descriptors were
+    /// ever different, the site would have two contradictory notions of what
+    /// this value is: the fast path could accept a value the wrapper refuses
+    /// (an out-of-bounds read at the wrong width, REP-37) or refuse one it
+    /// accepts (an abort on a correct program). Asserting the identity is what
+    /// makes "the refusal is byte-for-byte what it was" a checked claim rather
+    /// than a comment.
+    #[test]
+    fn the_inline_check_proves_exactly_what_the_wrapper_would() {
+        use praxis_mir::ScalarKind;
+        use praxis_runtime::scalars;
+        for (kind, handle_descriptor) in [
+            (ScalarKind::Int, scalars::INT_PAYLOAD.descriptor()),
+            (ScalarKind::Bool, scalars::BOOL_PAYLOAD.descriptor()),
+            (ScalarKind::Char, scalars::CHAR_PAYLOAD.descriptor()),
+            (ScalarKind::Float, scalars::FLOAT_PAYLOAD.descriptor()),
+        ] {
+            let (inline_descriptor, align, _) =
+                inline_scalar_load_of(kind).expect("a wired scalar has an inline form");
+            assert!(
+                core::ptr::eq(inline_descriptor, handle_descriptor),
+                "{kind:?}: the inline check proves `{}` but the wrapper it falls \
+                 back to proves `{}`",
+                inline_descriptor.name,
+                handle_descriptor.name
+            );
+            // And the width the fast path reads at is the descriptor's own, not
+            // one this file picked: `payload_offset_for` places the payload from
+            // the alignment, and the descriptor records the size.
+            assert_eq!(
+                align,
+                inline_descriptor.align(),
+                "{kind:?}: the payload offset is folded from an alignment that \
+                 is not the descriptor's"
+            );
+        }
+    }
+
+    /// The overflow report is a branch to a cold block, not a call per op.
+    #[test]
+    fn an_overflow_report_is_a_branch_to_a_cold_block() {
+        let mut module = test_module();
+        let mut ctx = module.make_context();
+        let mut sig = Signature::new(module.isa().default_call_conv());
+        sig.params.push(AbiParam::new(GC));
+        ctx.func.signature = sig;
+
+        let mut fn_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fn_ctx);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let ctx_val = builder.block_params(entry)[0];
+        let cond = builder.ins().iconst(types::I8, 0);
+        raise_on_cold_path(
+            &mut builder,
+            ctx_val,
+            cond,
+            RuntimeSymbol::RaiseIntOverflowIf,
+            &mut module,
+            &mut HashMap::new(),
+        )
+        .expect("emission");
+        builder.ins().return_(&[]);
+        builder.seal_all_blocks();
+        builder.finalize(module.isa().frontend_config());
+
+        let all = ctx.func.display().to_string();
+        let entry_text = block_text(&all, entry);
+        assert!(entry_text.contains("brif"), "{all}");
+        assert!(
+            !entry_text.contains("call "),
+            "the arithmetic site branches; it does not call on the hot path:\n{all}"
+        );
+
+        let cold: Vec<_> = ctx
+            .func
+            .layout
+            .blocks()
+            .filter(|&b| ctx.func.layout.is_cold(b))
+            .collect();
+        assert_eq!(cold.len(), 1, "exactly the raise block is cold:\n{all}");
+        assert!(
+            block_text(&all, cold[0]).contains("call "),
+            "and the cold block is the one that calls the wrapper:\n{all}"
+        );
+    }
+
+    /// A fault check is two loads and a branch: through `ctx.pending_fault`,
+    /// then the kind, then `brif`. No call, and no null test on either — see
+    /// the `Inst::CheckFault` arm for why neither is needed.
+    #[test]
+    fn a_fault_check_is_two_loads_and_a_branch() {
+        let module = test_module();
+        let mut ctx = module.make_context();
+        let mut sig = Signature::new(module.isa().default_call_conv());
+        sig.params.push(AbiParam::new(GC));
+        ctx.func.signature = sig;
+
+        let mut fn_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fn_ctx);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let ctx_val = builder.block_params(entry)[0];
+
+        let flags = MemFlags::trusted();
+        let slot = builder.ins().load(GC, flags, ctx_val, PENDING_FAULT_OFFSET);
+        let pending = builder
+            .ins()
+            .load(types::I32, flags, slot, FAULT_KIND_OFFSET);
+        let on_fault = builder.create_block();
+        let fallthrough = builder.create_block();
+        builder.ins().brif(pending, on_fault, &[], fallthrough, &[]);
+        builder.switch_to_block(on_fault);
+        builder.ins().return_(&[]);
+        builder.switch_to_block(fallthrough);
+        builder.ins().return_(&[]);
+        builder.seal_all_blocks();
+        builder.finalize(module.isa().frontend_config());
+
+        let all = ctx.func.display().to_string();
+        assert!(all.contains("load.i64"), "the slot pointer:\n{all}");
+        assert!(
+            all.contains("load.i32"),
+            "the kind, at the width the runtime says it is:\n{all}"
+        );
+        assert!(all.contains("brif"), "{all}");
+        assert!(
+            !all.contains("call "),
+            "reading one word must not cost a guarded call:\n{all}"
+        );
+        // The load flags must stay `notrap+aligned` and nothing more. `readonly`
+        // would let Cranelift's alias analysis hoist the kind read across the
+        // call that wrote it, collapsing two checks into one and losing a fault
+        // — as an intermittent wrong answer, not a compile error.
+        assert!(
+            !all.contains("readonly") && !all.contains("can_move"),
+            "the pending-fault load must not claim the memory is stable:\n{all}"
         );
     }
 }

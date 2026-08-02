@@ -68,11 +68,14 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// the automatic collector's root set is now the whole `RuntimeRoots`, which is
 /// a behavioural contract generated code depends on.
 /// v11 (repair S7): `Fault` lost its `pending: bool`, so the struct behind
-/// `RuntimeContext.pending_fault` is one `FaultKind` wide. Generated code never
-/// read the field — it calls `praxis_check_fault` — but the type is `#[repr(C)]`
-/// and reachable from the context, so the shape change is declared rather than
-/// assumed. `FaultKind` also gained `InvalidChar` and `InvalidText`, the two
-/// kinds that previously had to be raised as `None` (RT-17).
+/// `RuntimeContext.pending_fault` is one `FaultKind` wide. Generated code did
+/// not read the field at the time — it called `praxis_check_fault` — but the
+/// type is `#[repr(C)]` and reachable from the context, so the shape change was
+/// declared rather than assumed. That caution paid: as of v17 generated code
+/// *does* read it, so this entry is exactly the layout a v17-compiled program
+/// would misread if run against a v10 runtime. `FaultKind` also gained
+/// `InvalidChar` and `InvalidText`, the two kinds that previously had to be
+/// raised as `None` (RT-17).
 /// v12 (repair S9): `DebugLocal.value` is an `Option<GcRef>`, and generated
 /// code's meaning for the word changed with it. The struct's *layout* is
 /// unchanged — the `NonNull` niche keeps it one machine word — but "no value
@@ -117,7 +120,23 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// bump and a restore, with the recursion-depth guard ahead of them — so
 /// `praxis_push_shadow_frame` and `praxis_pop_shadow_frame` no longer exist,
 /// in the manifest or in the runtime.
-pub const RUNTIME_ABI_VERSION: u32 = 16;
+///
+/// v17 (finding §3.4, ADR-102): generated code reads two `#[repr(C)]` fields
+/// it never read before. `Inst::CheckFault` loads `RuntimeContext.pending_fault`
+/// and then the `FaultKind` at `Fault::KIND_OFFSET`, instead of calling
+/// `praxis_check_fault`; `Inst::ExtractScalar` loads a `GcHeader`'s descriptor
+/// at `GcHeader::DESCRIPTOR_OFFSET` and compares it against a scalar
+/// descriptor's address before reading the payload inline, instead of calling
+/// `praxis_int_load` and friends. **No layout, calling convention or wrapper
+/// signature changed** — every wrapper still exists, still has its manifest row
+/// and its address arm, and is still what the inline path's cold block calls.
+/// What changed is the *set of things generated code depends on*, which is the
+/// same reason v12 was bumped for a meaning change with no layout change: a
+/// program compiled against v17 run against a runtime whose `Fault` still
+/// carried v10's `pending: bool` would read that bool as the kind, and one
+/// whose `GcHeader` put something else first would compare the wrong word.
+/// Repacking `Fault`, `FaultKind` or `GcHeader`'s leading field now owes a bump.
+pub const RUNTIME_ABI_VERSION: u32 = 17;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -139,7 +158,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 16;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 17;
 
 // ---------------------------------------------------------------------------
 // The runtime symbol table (F4).
@@ -1017,9 +1036,23 @@ pub unsafe extern "C" fn praxis_alloc_float(ctx: *mut RuntimeContext, value: i64
 #[no_mangle]
 pub unsafe extern "C" fn praxis_float_load(_ctx: *mut RuntimeContext, r: GcRef) -> i64 {
     abi_guard!("praxis_float_load", _ctx, {
-        // SAFETY: caller guarantees `r` is a Float; payload is an f64.
-        let p: *mut f64 = r.payload::<f64>();
-        unsafe { (*p).to_bits() as i64 }
+        // Through `float_payload`, which goes through `read_scalar` — this was
+        // the last scalar reader in the file that dereferenced the payload on
+        // the caller's word alone. It slipped past
+        // `every_scalar_payload_read_goes_through_the_bounded_reader` on a
+        // spelling: that gate forbids the literal `*r.payload::<f64>()`, and
+        // this bound the pointer to a `let` first. REP-56's lesson is the read
+        // must prove its own width, not that one phrasing of it must.
+        //
+        // It matters more since ADR-102: generated code now reads a `Float`
+        // payload inline behind a descriptor check, and this wrapper is the
+        // cold path that check branches to. If it read unchecked, the two
+        // would disagree about what a wrong descriptor means — the inline
+        // path would refuse and the fallback would read anyway.
+        //
+        // SAFETY: caller guarantees `r` is a valid `GcRef`; `float_payload`
+        // proves it is a `Float` before reading.
+        unsafe { float_payload(r) }.to_bits() as i64
     })
 }
 
@@ -1875,8 +1908,20 @@ int_cmp!(praxis_int_ge, >=);
 // Fault check.
 // ---------------------------------------------------------------------------
 
-/// Return 1 if a fault is pending on `ctx`, else 0 (§10.4). Generated code
-/// emits this after any faultable operation.
+/// Return 1 if a fault is pending on `ctx`, else 0 (§10.4).
+///
+/// **Generated code no longer calls this.** Since ADR-102 an `Inst::CheckFault`
+/// is a load of `ctx.pending_fault`, a load of the kind at
+/// [`Fault::KIND_OFFSET`](crate::Fault::KIND_OFFSET) and a `brif` — the same
+/// question, without the call, the `catch_unwind` region and the `Result`
+/// discriminant, on a path that used to run once per faultable instruction.
+///
+/// The wrapper stays: it is the named ABI entry point for a host asking the
+/// question from Rust (the JIT test harness does), it keeps its manifest row and
+/// its address-table arm so `RuntimeSymbol` stays a bijection onto real
+/// addresses, and deleting it would churn ADR-080's source-reading test for no
+/// gain. Its two null tests are the difference between it and the inline form,
+/// and they are why *this* is what a host with a possibly-unwired context calls.
 ///
 /// # Safety
 /// `ctx` must point at a live `RuntimeContext` (a null/unwired context reports
@@ -1941,10 +1986,21 @@ pub unsafe extern "C" fn praxis_raise_empty_collection(ctx: *mut RuntimeContext)
 ///
 /// Generated code lowers `Int` arithmetic natively — `iadd`/`isub`/`imul` on
 /// the raw scalar channel — and computes the overflow predicate inline. This is
-/// how it reports one: the caller passes the predicate, and the wrapper decides
-/// nothing else. It allocates nothing, so an arithmetic site is not a
-/// safepoint, and taking the condition rather than branching around the call
-/// keeps arithmetic to a single basic block.
+/// how it reports one. It allocates nothing, so an arithmetic site is not a GC
+/// safepoint and spills no roots.
+///
+/// **The call site branches; this is the cold path.** It used to be called
+/// unconditionally, and this doc used to say that "taking the condition rather
+/// than branching around the call keeps arithmetic to a single basic block".
+/// That was true and it was the wrong trade: a branch does not clobber
+/// registers and a call does, so the unconditional call forced a spill and
+/// reload of every live value around an arithmetic op that never faults.
+/// ADR-102 made it a `brif` to a cold block; `raise_on_cold_path` in the
+/// backend carries the full argument.
+///
+/// The signature is unchanged, and the cold block passes a constant `1` — which
+/// is honest, since it is reached only when the predicate held, and keeps the
+/// test below a true statement rather than dead code.
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`.
@@ -5799,8 +5855,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_sixteen_after_the_contiguous_shadow_stack() {
-        assert_eq!(RUNTIME_ABI_VERSION, 16);
+    fn version_is_seventeen_after_the_inlined_fault_and_scalar_reads() {
+        assert_eq!(RUNTIME_ABI_VERSION, 17);
     }
 
     #[test]
@@ -5880,10 +5936,21 @@ mod tests {
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
+        //
+        //    The patterns are the *bare* calls, not the dereferenced ones, and
+        //    that is the second thing this gate has now been widened for.
+        //    `praxis_float_load` read `let p: *mut f64 = r.payload::<f64>();`
+        //    and dereferenced `p` on the next line — unchecked, and green here,
+        //    because the list named `*r.payload::<f64>()` and a `let` breaks the
+        //    spelling without breaking the defect. Forbidding the call means no
+        //    phrasing of it passes. `payload::<u8>()` stays legal: it is how
+        //    `read_scalar` itself reaches the bytes, and how every *compound*
+        //    payload (record, tuple, closure) is reached — those are cast to a
+        //    struct the descriptor already vouched for, not read at a width.
         for forbidden in [
-            "*r.payload::<i64>()",
-            "*r.payload::<f64>()",
-            "*r.payload::<u32>()",
+            "r.payload::<i64>()",
+            "r.payload::<f64>()",
+            "r.payload::<u32>()",
             "r.payload::<bool>()",
         ] {
             assert!(

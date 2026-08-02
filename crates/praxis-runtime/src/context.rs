@@ -281,6 +281,30 @@ pub struct Fault {
 }
 
 impl Fault {
+    /// Where the kind sits within the record, and how wide it is.
+    ///
+    /// **Generated code reads the kind directly as of ADR-102.** An
+    /// `Inst::CheckFault` used to be a call to `praxis_check_fault`; it is now a
+    /// load of `ctx.pending_fault`, a load of the kind at this offset, and a
+    /// `brif` — which works only because [`FaultKind::None`] is 0 and every
+    /// raisable kind is not, so the loaded word *is* [`Fault::is_pending`].
+    ///
+    /// So a repr change to `Fault` or to [`FaultKind`] is now a generated-code
+    /// change and owes a
+    /// [`RUNTIME_ABI_VERSION`](crate::abi::RUNTIME_ABI_VERSION) bump. The
+    /// backend asserts `KIND_SIZE` at compile time against the width it loads,
+    /// so a `#[repr(u8)]` or a `#[repr(C)]` that grows the enum fails the build
+    /// rather than reading three bytes of something else.
+    ///
+    /// Both are minted here rather than reached for with `offset_of!` from the
+    /// backend because `kind` is private — the field is private so that
+    /// [`Fault::set`] is the only way to raise, which is what makes
+    /// "raise no fault" unspellable (RT-17).
+    pub const KIND_OFFSET: usize = core::mem::offset_of!(Fault, kind);
+
+    /// The width of the kind, in bytes. See [`Fault::KIND_OFFSET`].
+    pub const KIND_SIZE: usize = core::mem::size_of::<FaultKind>();
+
     /// A fresh, clear fault record (no fault pending).
     pub fn clear() -> Self {
         Fault {
@@ -416,6 +440,18 @@ pub struct DebugFrame {
 #[repr(C)]
 pub struct RuntimeContext {
     pub heap: *mut Heap,
+    /// The runtime's one fault slot. **Non-null in every context generated code
+    /// is ever handed** — [`Runtime::context`] is its only producer and wires
+    /// it to the runtime's own `Fault`; the sole null-wiring constructor,
+    /// [`RuntimeContext::placeholder`], is `unsafe` and test-only.
+    ///
+    /// That invariant is load-bearing as of ADR-102: an `Inst::CheckFault` is
+    /// now a load of this pointer and a load of the [`Fault::KIND_OFFSET`] word
+    /// behind it, with no null test, where it used to be a call to
+    /// `praxis_check_fault` (which does test, and answers "no fault"). A host
+    /// that hand-built a context with a null here and called generated code
+    /// would now fault the process rather than silently never observing a
+    /// Praxis fault. `a_wired_context_has_a_fault_slot` is the gate.
     pub pending_fault: *mut Fault,
     pub debug_top: *mut DebugFrame,
     /// The header of the runtime's one compiler-managed shadow stack (§12.3,
@@ -1144,6 +1180,70 @@ mod tests {
     use crate::gc::GcHeader;
     use crate::roots::RootScope;
     use std::ptr::NonNull;
+
+    /// ADR-102: generated code loads the fault kind rather than calling
+    /// `praxis_check_fault`, so three things `is_pending()` used to encapsulate
+    /// are now baked into emitted instructions and must be pinned here.
+    ///
+    /// The `brif` the backend emits treats the loaded word as the predicate, so
+    /// "a fault is pending" and "the word is non-zero" have to be the same
+    /// statement. That holds because `None` is 0 and no other kind is — and the
+    /// second half needs no loop here: [`FaultKind`] gives every variant an
+    /// explicit discriminant, and Rust rejects an enum that assigns one twice.
+    /// So pinning `None == 0` is the whole of what is left to check.
+    #[test]
+    fn the_fault_record_is_one_kind_at_offset_zero() {
+        assert_eq!(Fault::KIND_OFFSET, 0);
+        assert_eq!(
+            Fault::KIND_SIZE,
+            4,
+            "a `#[repr(C)]` fieldless enum is a C `int`, and the backend loads \
+             this width"
+        );
+        assert_eq!(
+            std::mem::size_of::<Fault>(),
+            Fault::KIND_SIZE,
+            "the kind is the whole record; a second field would make the \
+             inline load read half of it"
+        );
+        assert_eq!(FaultKind::None as u32, 0, "the zero word means no fault");
+
+        // And the load really is the predicate: raise, then read the record's
+        // first four bytes the way generated code does.
+        let mut fault = Fault::clear();
+        let word = |f: &Fault| {
+            let base = f as *const Fault as *const u8;
+            // SAFETY: `KIND_OFFSET`/`KIND_SIZE` bound a `FaultKind` inside a
+            // live `Fault`, and `u32` is that width with no alignment demand
+            // the record does not already meet.
+            unsafe { base.add(Fault::KIND_OFFSET).cast::<u32>().read() }
+        };
+        assert_eq!(word(&fault), 0, "a clear record loads as zero");
+        fault.set(RaisedFault::INT_OVERFLOW);
+        assert_ne!(word(&fault), 0, "a raised record loads as non-zero");
+        assert!(fault.is_pending());
+    }
+
+    /// The invariant the inline fault check depends on, stated as a test rather
+    /// than as prose in ADR-017's Consequences: a context generated code can be
+    /// handed has a fault slot to read.
+    ///
+    /// The old call did test for null and answered "no fault"; the two loads
+    /// that replaced it do not, so a null here is now a segfault instead of a
+    /// program that never observes a fault.
+    #[test]
+    fn a_wired_context_has_a_fault_slot() {
+        let mut rt = Runtime::new();
+        let ctx = rt.context();
+        assert!(
+            !ctx.pending_fault.is_null(),
+            "`Runtime::context` is the only producer of a context generated code \
+             sees, and generated code dereferences this without testing it"
+        );
+        // SAFETY: non-null as just asserted, and it points at `rt`'s own slot,
+        // which outlives this borrow.
+        assert!(!unsafe { (*ctx.pending_fault).is_pending() });
+    }
 
     #[test]
     fn placeholder_reports_no_fault() {
