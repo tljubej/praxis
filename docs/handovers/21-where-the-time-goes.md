@@ -1,5 +1,12 @@
 # Where the time actually goes — 2.5× before any unboxing
 
+> **All six findings are now implemented.** See
+> [`22-every-finding-closed.md`](./22-every-finding-closed.md) for what landed,
+> the regenerated suite (4.6× CPython → 1.0×, 185× Rust → 39×), and the three
+> claims below that did not survive being acted on: §3.2's premise about the
+> shadow frame is false, §3.2's percentage is two costs on two program shapes,
+> and §3.6's profile was stale before it was written.
+
 **Date:** 2026-08-02
 **Status:** investigation only; no code changed on `main` by this document
 **Scope:** the code the JIT generates and the runtime it calls, on the

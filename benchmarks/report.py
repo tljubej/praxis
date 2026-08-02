@@ -100,38 +100,54 @@ def main() -> None:
     w(
         f"Across the {len(names)} benchmarks Praxis is **{geo(px_rs):.0f}× slower than Rust** "
         f"and **{geo(px_py):.1f}× slower than CPython 3.14** (geometric means of the "
-        f"per-benchmark ratios). {verdict}. The hoped-for landing zone was between Rust and "
-        "Python, closer to Rust; the measured position is on the far side of Python."
-    )
-    w("")
-    w("There are two separate findings, and it matters that they are separate.")
-    w("")
-    w(
-        "**The speed is the boxing.** It is not the JIT — the JIT is fine, and the "
-        "floor measurements below establish that to two decimal places. §4.3 makes "
-        "every language value a `GcRef` and says so normatively: *no language-visible "
-        "storage location contains an unboxed scalar.* So `acc + i` is an add plus an "
-        "allocation plus a header write, where Rust emits one instruction and CPython "
-        "hits a small-int cache. Every ratio in the table below is a restatement of "
-        "that one sentence — the benchmarks whose inner loop is arithmetic are the "
-        "furthest from Rust, and the one whose inner loop is a hash probe is the "
-        "closest."
+        f"per-benchmark ratios). {verdict}."
     )
     w("")
     w(
-        "**The scale is the collector's pacer, and that is a different problem with a "
-        "different fix.** `collect_threshold` doubles after every paced collection and "
-        "nothing bounds it, so peak resident set is a function of how long a program "
-        "has run rather than of how much it is holding: these benchmarks retain "
-        "**200–500 MiB per second of runtime** on workloads whose live data is a "
-        "couple of dozen megabytes. That, not time, is what caps this suite — at "
-        f"roughly 30 seconds of Praxis runtime a benchmark exhausts this "
-        f"{meta.get('memory_gib', 16)} GiB machine. The sizes below are chosen to peak "
-        "near 6 GiB, which is why Rust lands in the tens of milliseconds rather than "
-        "the few seconds that would be conventional; sizing for a one-second Rust run "
-        "would need Praxis to allocate several hundred gigabytes. The appendix "
-        "measures what fixing the pacer costs, and the answer is not what it looks "
-        "like."
+        "**This report was regenerated after the six findings in "
+        "[`docs/handovers/21-where-the-time-goes.md`](../docs/handovers/21-where-the-time-goes.md) "
+        "were fixed.** The previous run of this suite measured 4.6× CPython and 185× "
+        "Rust, and attributed the gap to boxing. That attribution did not survive a "
+        "profile: only 19% of `collatz` was inside JIT-generated code, and most of the "
+        "rest was runtime bookkeeping a uniform boxed representation does not require "
+        "— a SipHash-keyed free list probed twice per object, a 1552-byte frame "
+        "malloc\'d and memset per call, a crash-debugger view maintained continuously "
+        "ahead of a fault that almost never comes, a literal re-boxed on every "
+        "evaluation, and a side registry pushed per allocation and walked in full per "
+        "sweep. Fixing those, without changing one language semantic or touching §4.3, "
+        "is what moved the numbers below."
+    )
+    w("")
+    w("Two things are worth reading the tables for.")
+    w("")
+    w(
+        "**The boxing is still there, and it is now most of what is left.** §4.3 "
+        "remains normative — *no language-visible storage location contains an "
+        "unboxed scalar* — so `acc + i` is still an add plus an allocation plus a "
+        "header write where Rust emits one instruction. What changed is that this is "
+        "now the *dominant* cost rather than a fifth of it. §4.3 anticipates the way "
+        "out — *later optimizations [may] intern small integers, use tagged pointers, "
+        "or eliminate allocations through escape analysis* — and the first of those "
+        "now exists ([ADR-100](../docs/decisions/100-a-small-int-is-one-object-and-a-literal-is-a-load.md): "
+        "an `Int` in [-256, 1024] is one immortal object per value, and a literal is "
+        "a load). Tagged pointers and escape analysis do not."
+    )
+    w("")
+    w(
+        "**The pacer is unchanged, and the memory ceiling moved anyway.** "
+        "`collect_threshold` still doubles after every paced collection and nothing "
+        "bounds it, so peak resident set is still a function of how long a program has "
+        "run rather than of how much it is holding. But storage is now "
+        "size-class-segregated pages with mark bitmaps "
+        "([ADR-103](../docs/decisions/103-a-page-owns-the-storage-and-the-liveness.md)) "
+        "rather than a bump arena plus an 8-byte-per-object side registry, and an "
+        "emptied page is re-classed rather than being dead capital for its old layout "
+        "— so the same workloads now peak between 0.5 and 3.2 GiB where they used to "
+        "peak near 6. The sizes in `sizes.json` were chosen for the old ceiling and "
+        "have not been re-tuned; they could now be raised substantially. What fixing "
+        "the pacer *itself* would cost was measured once, against the pre-fix build, "
+        "and the answer was not what it looks like — see `benchmarks/README.md` for "
+        "why that measurement is no longer rendered here."
     )
     w("")
 
@@ -234,17 +250,29 @@ def main() -> None:
         "So `acc = acc + i` is an add, an allocation, a header write and a root "
         "update, where Rust emits one instruction. §4.3 also anticipates the way out "
         "— *later optimizations [may] intern small integers, use tagged pointers, or "
-        "eliminate allocations through escape analysis* — and none of it is "
-        "implemented yet."
+        "eliminate allocations through escape analysis*. The first of the three now "
+        "exists: an `Int` in [-256, 1024] is one immortal object per value and an "
+        "in-range literal is a load rather than a call and an allocation "
+        "([ADR-100](../docs/decisions/100-a-small-int-is-one-object-and-a-literal-is-a-load.md)). "
+        "Tagged pointers and escape analysis do not, and every allocation outside "
+        "that range is still a real one."
     )
     w("")
+    closest = min(px_rs, key=px_rs.get)
+    furthest = max(px_rs, key=px_rs.get)
     w(
-        f"The spread across the suite follows directly. `hashwork` is the closest "
-        f"to Rust ({px_rs['hashwork']:.0f}×) because its inner loop is a SipHash of a "
+        f"The spread across the suite still follows the amount of boxing per unit of "
+        f"work, but the ordering is no longer the one the pre-fix report described. "
+        f"`{closest}` is now the closest to Rust ({px_rs[closest]:.0f}×) and "
+        f"`{furthest}` the furthest ({px_rs[furthest]:.0f}×). `hashwork` "
+        f"({px_rs['hashwork']:.0f}×) is close because its inner loop is a SipHash of a "
         f"key and a probe of a `HashMap` — work both languages pay identically, since "
-        f"the Praxis runtime *is* `std::collections::HashMap`. `collatz` is the "
-        f"furthest ({px_rs['collatz']:.0f}×) because its inner loop is nothing but "
-        "arithmetic, so it is nothing but boxing."
+        f"the Praxis runtime *is* `std::collections::HashMap`. `collatz` "
+        f"({px_rs['collatz']:.0f}×) used to be the furthest, because its inner loop is "
+        f"nothing but arithmetic and therefore nothing but boxing; small-`Int` "
+        f"interning reaches exactly that shape, and it moved the most. What is "
+        f"furthest now is the collection-heavy end of the suite, where the boxed "
+        f"values are the elements themselves and interning cannot help."
     )
     w("")
     w("### The collector's pacer never comes back down")
@@ -281,8 +309,10 @@ def main() -> None:
         f"floor), rather than from the previous threshold. {measured} What is wrong "
         "with the rule is not its rate but that nothing bounds it — a program's "
         "resident set is a function of how long it has run rather than of how much it "
-        "is holding, which is what makes ~30 seconds the longest Praxis run this "
-        "machine can complete."
+        "is holding. What moved since the pre-fix report is the constant, not the "
+        "shape: an object costs less and an emptied page is re-classed rather than "
+        "held for its old layout, so the same workloads peak between 0.5 and 3.2 GiB "
+        "where they used to peak near 6 — but the curve is still unbounded in time."
     )
     w("")
     w("### What the sequence pipelines are worth")
@@ -333,8 +363,8 @@ def main() -> None:
         else "pacing off the live set bounds peak memory to a multiple of live data"
     )
     w(
-        f"2. **Bound the collector's threshold.** Measured below, and it is a "
-        f"*scalability* fix rather than a speed one: {cost}. "
+        f"2. **Bound the collector's threshold.** A *scalability* fix rather than a "
+        f"speed one: {cost}. "
         "That trade is worth taking anyway, because today the thing that decides how "
         "large a Praxis program can be is how much RAM it has, not how long you are "
         "willing to wait — and a puzzle input that runs for a minute is not an exotic "
@@ -404,6 +434,18 @@ def main() -> None:
             "It is the boxing, and only item 1 above reaches it."
         )
         w("")
+        w(
+            "**That last sentence was wrong, and this report is the correction.** "
+            "It was written from a pacer experiment, not from a profile. A profile of "
+            "`collatz` — the row it names — put only 19% of runtime inside "
+            "JIT-generated code; the rest was runtime bookkeeping that a uniform boxed "
+            "representation does not require. Six such items were found and fixed "
+            "(see [`docs/handovers/21-where-the-time-goes.md`](../docs/handovers/21-where-the-time-goes.md)), "
+            "and between them they moved the suite from 4.6× CPython to parity without "
+            "touching §4.3 or any language semantic. Boxing is what is left, which is "
+            "what the pre-fix report claimed it already was."
+        )
+        w("")
 
     # --- caveats ------------------------------------------------------------
     w("## Caveats")
@@ -425,10 +467,10 @@ def main() -> None:
         "frequency locking."
     )
     w(
-        "- **The sizes are memory-bound, not time-bound.** The appendix's patched "
-        "build runs the same workloads in tens to hundreds of megabytes; the shipping "
-        "one cannot "
-        "be sized past this without exhausting the machine."
+        "- **The sizes are memory-bound, not time-bound**, and less so than they "
+        "were. They were chosen when these workloads peaked near 6 GiB; they now peak "
+        "between 0.5 and 3.2 GiB and have not been re-tuned, so every Rust column here "
+        "is smaller than it needs to be."
     )
     w(
         "- **`vm` and `bfs` give Python its two idiom advantages.** A Python `list` of "

@@ -35,6 +35,16 @@ time, is what bounds how large these can be.
 against a build whose collector paces off the live set. It is produced by hand,
 not by `run.py`, and `report.py` renders the appendix only if the file exists.
 
+The file currently in the directory is `gcfix-pre-perf-fixes.json`, deliberately
+named so `report.py` does *not* find it. It was measured against the build at
+`fd70374`, before the six findings in
+[`../docs/handovers/21-where-the-time-goes.md`](../docs/handovers/21-where-the-time-goes.md)
+were fixed, and `report.py` renders the appendix by comparing it row-for-row
+against whatever is in `results.json` — so leaving it named `gcfix.json` would
+have the report silently attribute this suite's changes to a pacer experiment
+that never ran against this build. Rename it back only alongside a fresh run of
+the experiment.
+
 Neither `.build/` nor `results.json` is part of `just ci`: this directory is
 outside the cargo workspace and nothing in it is compiled by `cargo build
 --workspace`. That is deliberate — the Rust benchmarks are single files built
