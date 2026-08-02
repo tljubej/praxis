@@ -35,7 +35,8 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 ///
 /// v2 (M5): `RuntimeContext` gained the `roots: *mut ShadowFrame` field for the
 /// compiler-managed shadow-stack spill (ADR-019), and the `praxis_push_shadow_frame`
-/// / `praxis_pop_shadow_frame` extern helpers were added.
+/// / `praxis_pop_shadow_frame` extern helpers were added. (Both are retired in
+/// v15 below; the field is now `shadow`.)
 /// v3 (M7 Part 1): record/enum object model — `praxis_alloc_record`,
 /// `praxis_record_set_field`, `praxis_record_field`, `praxis_alloc_enum`,
 /// `praxis_enum_set_payload`, `praxis_enum_tag`, `praxis_enum_payload`.
@@ -104,7 +105,19 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// offset, replacing a call to `praxis_alloc_int` and the shadow-frame spill
 /// that call's safepoint required. A runtime of the previous version has no such
 /// field, so code compiled against v15 would read whatever follows the struct.
-pub const RUNTIME_ABI_VERSION: u32 = 15;
+///
+/// v16 (finding §3.3, ADR-101): the shadow stack is one contiguous region owned
+/// by the `Runtime` instead of a chain of per-call `Box<ShadowFrame>`s. v2's
+/// `RuntimeContext.roots: *mut ShadowFrame` became `shadow: *mut
+/// ShadowStackHeader` — the same position and the same width, so every other
+/// generated-code-read offset is unchanged, but pointing at a `{ top, base,
+/// limit }` header rather than at the top frame of a chain. A runtime of the
+/// previous version would read a stack header as a frame, taking `top` for a
+/// `parent` pointer. The prologue and epilogue are now inline Cranelift — a
+/// bump and a restore, with the recursion-depth guard ahead of them — so
+/// `praxis_push_shadow_frame` and `praxis_pop_shadow_frame` no longer exist,
+/// in the manifest or in the runtime.
+pub const RUNTIME_ABI_VERSION: u32 = 16;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -126,7 +139,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 15;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 16;
 
 // ---------------------------------------------------------------------------
 // The runtime symbol table (F4).
@@ -291,11 +304,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::MinHeapPush => praxis_min_heap_push as *const (),
         RuntimeSymbol::Panic => praxis_panic as *const (),
         RuntimeSymbol::PopDebugFrame => crate::debug::praxis_pop_debug_frame as *const (),
-        RuntimeSymbol::PopShadowFrame => crate::shadow_frame::praxis_pop_shadow_frame as *const (),
         RuntimeSymbol::PushDebugFrame => crate::debug::praxis_push_debug_frame as *const (),
-        RuntimeSymbol::PushShadowFrame => {
-            crate::shadow_frame::praxis_push_shadow_frame as *const ()
-        }
         RuntimeSymbol::RaiseDivByZeroIf => praxis_raise_div_by_zero_if as *const (),
         RuntimeSymbol::RaiseEmptyCollection => praxis_raise_empty_collection as *const (),
         RuntimeSymbol::RaiseIntOverflowIf => praxis_raise_int_overflow_if as *const (),
@@ -521,13 +530,13 @@ unsafe fn heap<'a>(ctx: *mut RuntimeContext) -> &'a Heap {
 }
 
 /// Trigger a collection on allocation pressure, rooting from the context's
-/// shadow-stack frame chain (§12.4, ADR-019). Called by every allocating
+/// shadow stack (§12.4, ADR-019, ADR-101). Called by every allocating
 /// `praxis_*` wrapper. Safe to call with a null/unwired context (no-op).
 ///
 /// The roots are every arm of [`RuntimeRoots`](crate::roots::RuntimeRoots) —
-/// the shadow-stack chain, the ambient input buffer, a parse failure's partial
-/// value, a runtime-owned crash snapshot, and the native root frames. This used
-/// to read `ctx.roots` alone **and return early when it was null**, which meant
+/// the shadow stack, the ambient input buffer, a parse failure's partial value,
+/// a runtime-owned crash snapshot, and the native root frames. This used to
+/// read `ctx.roots` alone **and return early when it was null**, which meant
 /// nothing was collected at all during host-driven allocation or anywhere in
 /// the parser interpreter, and that the other four owners were invisible to
 /// automatic GC even when a frame was pushed (P0-06).
@@ -5749,6 +5758,7 @@ mod tests {
     use super::*;
     use crate::context::{Fault, FaultKind, Runtime};
     use crate::parse_detail::ParseFail;
+    use crate::shadow_stack::{push_frame, SlotCount};
 
     /// A wired context backed by a real runtime.
     fn wired_ctx(rt: &mut Runtime) -> *mut RuntimeContext {
@@ -5789,8 +5799,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_fifteen_after_the_interned_int_table() {
-        assert_eq!(RUNTIME_ABI_VERSION, 15);
+    fn version_is_sixteen_after_the_contiguous_shadow_stack() {
+        assert_eq!(RUNTIME_ABI_VERSION, 16);
     }
 
     #[test]
@@ -6259,8 +6269,8 @@ mod tests {
                     "praxis_grid_width" => praxis_grid_new(ctx, &scalars::INT, big as i64, 1),
                     _ => praxis_grid_new(ctx, &scalars::INT, 1, big as i64),
                 };
-                let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 1);
-                (*frame).slots[0] = receiver.as_ptr();
+                let mut frame = push_frame(ctx, SlotCount::new(1).unwrap());
+                frame.set(0, receiver);
 
                 let mut before = rt.heap().stats().live_count;
                 let mut paced = false;
@@ -6273,7 +6283,7 @@ mod tests {
                     }
                     before = after;
                 }
-                crate::shadow_frame::praxis_pop_shadow_frame(ctx, frame);
+                drop(frame);
                 assert!(paced, "{name} never gave the collector a turn");
             }
             unsafe { drop_ctx(ctx) };
@@ -6834,8 +6844,8 @@ mod tests {
         // SAFETY: ctx wired; push mutates in place so `v` stays valid throughout.
         unsafe {
             let v = praxis_vec_new(ctx, &crate::scalars::INT as *const _);
-            let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 2);
-            (*frame).slots[0] = v.as_ptr();
+            let mut frame = push_frame(ctx, SlotCount::new(2).unwrap());
+            frame.set(0, v);
             let mut observed_reclamation = false;
             for i in 0..5000_i64 {
                 let before_alloc = rt.heap().stats().live_count;
@@ -6843,13 +6853,13 @@ mod tests {
                 if rt.heap().stats().live_count < before_alloc.saturating_add(1) {
                     observed_reclamation = true;
                 }
-                (*frame).slots[1] = elem.as_ptr();
+                frame.set(1, elem);
                 let before_push = rt.heap().stats().live_count;
                 let _ = praxis_vec_push(ctx, v, elem);
                 if rt.heap().stats().live_count < before_push {
                     observed_reclamation = true;
                 }
-                (*frame).slots[1] = std::ptr::null_mut();
+                frame.clear(1);
                 let _ = rt.alloc_int(-UNINTERNED - i - 1);
             }
             assert!(
@@ -6875,7 +6885,7 @@ mod tests {
                 praxis_int_load(ctx, praxis_vec_get(ctx, v, last)),
                 UNINTERNED + 4999
             );
-            crate::shadow_frame::praxis_pop_shadow_frame(ctx, frame);
+            drop(frame);
         }
         unsafe { drop_ctx(ctx) };
     }
@@ -7691,8 +7701,8 @@ mod tests {
     fn maybe_collect_runs_under_pressure() {
         // Allocating past the 64 KiB threshold collects. This used to allocate
         // 3000 Ints and *then* call `maybe_collect` by hand, because the
-        // automatic path returned early whenever `ctx.roots` was null — which
-        // is exactly the case here, with no generated frame on the stack. With
+        // automatic path returned early whenever the shadow arm was null —
+        // exactly the case here, with no generated frame on the stack. With
         // that early return gone (P0-06) the allocation loop collects on its
         // own, and the helper asserts it happens within 10,000 allocations.
         let mut rt = Runtime::new();
@@ -7722,9 +7732,9 @@ mod tests {
             // registry, and an interned sum never does (see `UNINTERNED`).
             let lhs = praxis_alloc_int(ctx, UNINTERNED);
             let rhs = praxis_alloc_int(ctx, 22);
-            let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 2);
-            (*frame).slots[0] = lhs.as_ptr();
-            (*frame).slots[1] = rhs.as_ptr();
+            let mut frame = push_frame(ctx, SlotCount::new(2).unwrap());
+            frame.set(0, lhs);
+            frame.set(1, rhs);
 
             let mut before = rt.heap().stats().live_count;
             let mut observed = false;
@@ -7738,7 +7748,7 @@ mod tests {
                 before = after;
             }
             collected = observed;
-            crate::shadow_frame::praxis_pop_shadow_frame(ctx, frame);
+            drop(frame);
         }
         unsafe { drop_ctx(ctx) };
 
@@ -7755,9 +7765,9 @@ mod tests {
         let live_after_collection;
         unsafe {
             (*ctx).input_source = rt.alloc_text("input that main has not read yet");
-            let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 0);
+            let frame = push_frame(ctx, SlotCount::new(0).unwrap());
             live_after_collection = allocate_until_automatic_collection(&rt, ctx);
-            crate::shadow_frame::praxis_pop_shadow_frame(ctx, frame);
+            drop(frame);
         }
         unsafe { drop_ctx(ctx) };
 
@@ -7780,9 +7790,9 @@ mod tests {
             .consider(ParseFail::here(0, "test").with_partial(Some(partial)), b"");
         let live_after_collection;
         unsafe {
-            let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 0);
+            let frame = push_frame(ctx, SlotCount::new(0).unwrap());
             live_after_collection = allocate_until_automatic_collection(&rt, ctx);
-            crate::shadow_frame::praxis_pop_shadow_frame(ctx, frame);
+            drop(frame);
         }
         unsafe { drop_ctx(ctx) };
 
@@ -7820,9 +7830,9 @@ mod tests {
             crate::debug::praxis_pop_debug_frame(ctx, debug_frame);
             assert!(rt.crash_snapshot().is_some());
 
-            let shadow_frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 0);
+            let shadow_frame = push_frame(ctx, SlotCount::new(0).unwrap());
             live_after_collection = allocate_until_automatic_collection(&rt, ctx);
-            crate::shadow_frame::praxis_pop_shadow_frame(ctx, shadow_frame);
+            drop(shadow_frame);
         }
         unsafe { drop_ctx(ctx) };
 
@@ -7856,8 +7866,8 @@ mod tests {
         unsafe {
             let cells: Vec<GcRef> = (0..(W * W) as i64).map(|i| rt.alloc_int(i)).collect();
             let grid = rt.alloc_grid(&scalars::INT, cells, W);
-            let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 1);
-            (*frame).slots[0] = grid.as_ptr();
+            let mut frame = push_frame(ctx, SlotCount::new(1).unwrap());
+            frame.set(0, grid);
 
             let before = rt.heap().stats().live_count;
             let positions = praxis_grid_positions(ctx, grid);
@@ -7872,7 +7882,7 @@ mod tests {
                 coords.push((int_payload(tuple.items[0]), int_payload(tuple.items[1])));
             }
 
-            crate::shadow_frame::praxis_pop_shadow_frame(ctx, frame);
+            drop(frame);
         }
         unsafe { drop_ctx(ctx) };
 
@@ -7897,15 +7907,12 @@ mod tests {
         assert_eq!(unsafe { praxis_check_fault(std::ptr::null_mut()) }, 0);
     }
 
-    #[test]
-    fn push_shadow_frame_on_null_context_returns_null() {
-        // A null context must return a null frame rather than dereferencing it
-        // (the guard at `praxis_push_shadow_frame`).
-        // SAFETY: passing a null context is the exact case the guard handles.
-        let frame =
-            unsafe { crate::shadow_frame::praxis_push_shadow_frame(std::ptr::null_mut(), 0) };
-        assert!(frame.is_null());
-    }
+    // There is no `push_shadow_frame_on_null_context_returns_null` any more:
+    // the wrapper it guarded is gone, and the inline prologue that replaced it
+    // deliberately does not null-check the context (ADR-101 — the check cost
+    // every call in the language, and `Runtime::context` is the only producer
+    // of a context generated code is handed). `RuntimeContext::placeholder`
+    // carries the obligation in its doc instead.
 
     // --- REP-41: a null element type stays unknown -------------------------
 
@@ -8579,13 +8586,12 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
              ({pure} non-faulting, {faulting} faulting)"
         );
 
-        // A wrapper the manifest does not name — the shadow-frame and debug
-        // entry points — is in the same position as a non-faulting one: there
-        // is nothing that could have emitted a check after it.
-        assert!(
-            !panic_fault_is_observable("praxis_push_shadow_frame"),
-            "an unmanifested entry point has no fault check either"
-        );
+        // `praxis_push_shadow_frame` used to stand here: an entry point the
+        // manifest deliberately did not name, in the same position as a
+        // non-faulting wrapper because nothing could have emitted a check after
+        // it. ADR-101 inlined it and its pop, and with them gone every
+        // `#[no_mangle]` wrapper in this crate is manifested — so the only
+        // remaining unobservable case is a name that is not a wrapper at all.
         assert!(
             !panic_fault_is_observable("praxis_not_a_wrapper_at_all"),
             "an unknown name is never treated as observable"

@@ -1,4 +1,12 @@
-fn main() {
-    var b = "sddzdd"
-    out(b[3])
+fn kurac(a) {
+    a
 }
+
+
+var b = "sddzdd"
+var z = [1,2, 3]
+z = z.map(|x| {x*2})
+for c in b {
+    out(c)
+}
+out(b[3])

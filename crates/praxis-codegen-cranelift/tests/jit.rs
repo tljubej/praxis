@@ -430,11 +430,12 @@ fn adv_deep_recursion_over_limit_faults_cleanly() {
     // PROBE (§6.2): recursion beyond MAX_RECURSION_DEPTH used to overflow the
     // native stack and abort the host with SIGABRT ("fatal runtime error: stack
     // overflow, aborting") rather than faulting gracefully — §9.2/§17.4 require
-    // the host to survive. Fixed: every generated function's prologue now bumps
-    // `ctx.recursion_depth` (in praxis_push_shadow_frame) and branches to a
-    // stack-overflow fault epilogue when it exceeds MAX_RECURSION_DEPTH (8000),
-    // raising FaultKind::StackOverflow and unwinding to the host. count(100000)
-    // pre-fix killed the process; now it faults cleanly and the host stays alive.
+    // the host to survive. Fixed: every generated function's prologue reads
+    // `ctx.recursion_depth` inline and branches to a stack-overflow fault
+    // epilogue when it has reached MAX_RECURSION_DEPTH (8000), raising
+    // FaultKind::StackOverflow and unwinding to the host; only if it passes does
+    // it bump the counter and push. count(100000) pre-fix killed the process;
+    // now it faults cleanly and the host stays alive.
     let src = "\
 fn count(n: Int) -> Int { if n == 0 { 0 } else { 1 + count(n - 1) } }
 fn main() -> Int { count(100000) }
@@ -8263,5 +8264,148 @@ fn a_crash_snapshot_still_shows_an_interned_literal_bound_to_a_local() {
         value.as_int(),
         7,
         "and it must be the value the source wrote"
+    );
+}
+
+// ADR-101 — the shadow stack is one contiguous region.
+//
+// A frame is a run of slots claimed by bumping a pointer, not an allocation, so
+// the property that used to be "every push has a matching free" is now "every
+// epilogue restores the `top` its prologue saved". That one is observable: the
+// stack is empty again when a run ends. These tests assert it on the three ways
+// a run can end — a normal return, a fault, and the recursion-depth guard —
+// because an unbalanced prologue would otherwise be a slow leak that surfaces
+// only as a wrong root set thousands of calls later.
+// ===========================================================================
+
+#[test]
+fn adr100_a_clean_run_leaves_the_shadow_stack_empty() {
+    // Recursion, allocation and collection, then a balanced unwind: 200 nested
+    // frames each holding a live `Vec` across the recursive call.
+    let src = "fn build(n: Int) -> Vec[Int] {\n  \
+               if n == 0 { Vec() } else { let v = build(n - 1)\n v.push(n)\n v }\n}\n\
+               fn main() -> Int { build(200).len() }\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 200);
+    assert!(
+        rt.shadow_stack().is_empty(),
+        "{} slots are still claimed after a clean run",
+        rt.shadow_stack().len()
+    );
+}
+
+#[test]
+fn adr100_a_fault_epilogue_restores_the_shadow_stack() {
+    // The fault path is the one that would leak frames if its epilogue were
+    // wrong, because it unwinds through every caller at once. An
+    // IndexOutOfBounds three calls deep must leave the stack exactly as it was
+    // before `main` was entered.
+    let src = "fn inner(v: Vec[Int]) -> Int { v[5] }\n\
+               fn middle(v: Vec[Int]) -> Int { inner(v) }\n\
+               fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  middle(v)\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
+    assert!(
+        rt.shadow_stack().is_empty(),
+        "{} slots are still claimed after a fault unwind",
+        rt.shadow_stack().len()
+    );
+}
+
+#[test]
+fn adr100_a_stack_overflow_restores_the_shadow_stack() {
+    // 8000 frames, each holding a live `Vec`, unwound by the depth guard. The
+    // over-limit path is the one block in a generated function whose `return_`
+    // is not preceded by an epilogue — because the guard runs before the push,
+    // so that path claimed nothing. Wrong in either direction and the stack
+    // ends non-empty (nothing popped) or below its base (popped twice), the
+    // second of which trips `SlotStackHeader::live_slots`' debug assertion.
+    let src = "fn count(n: Int) -> Int {\n  let v = Vec()\n  v.push(n)\n  \
+               count(n + 1) + v.len()\n}\n\
+               fn main() -> Int { count(0) }\n";
+    let (rt, _result) = run_main(src);
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::StackOverflow);
+    assert!(
+        rt.shadow_stack().is_empty(),
+        "{} slots are still claimed after a stack-overflow unwind",
+        rt.shadow_stack().len()
+    );
+}
+
+#[test]
+fn adr100_a_wide_frame_recursing_deep_claims_and_gives_back_every_slot() {
+    // The empirical half of the capacity argument, as far as it can be taken.
+    // `SHADOW_STACK_SLOTS` is sized from MAX_RECURSION_DEPTH × MAX_SHADOW_SLOTS
+    // on the strength of two premises — every prologue guards before it pushes,
+    // and every frame is a `SlotCount` — and nothing checks the limit at run
+    // time because of it. The failure mode that argument rules out is therefore
+    // silent: a frame wide enough and a recursion deep enough to walk `top` past
+    // the end of the reservation.
+    //
+    // No test can reach that corner, and the reason is worth writing down: a
+    // function wide enough to fill the reservation has a *native* frame to
+    // match, and 8000 of those exhaust the thread's stack long before the
+    // shadow stack's 12.29 MiB. MAX_RECURSION_DEPTH is a call count, not a byte
+    // budget. So the corner is closed by the arithmetic in `SHADOW_STACK_SLOTS`
+    // and by the `const` block beside it, and what this test can show is the
+    // mechanism working at a width and depth an actual program could reach.
+    //
+    // This frame is also wide enough to take the prologue's zeroing off the
+    // unrolled path and onto the `memset` one (well past SLOT_ZERO_UNROLL_MAX
+    // once temporaries are counted), which nothing else in the suite reaches.
+    let mut body = String::from("fn wide(n: Int) -> Int {\n  if n == 0 { return 0 }\n");
+    for i in 0..20 {
+        body.push_str(&format!("  let v{i} = Vec()\n  v{i}.push(n)\n"));
+    }
+    body.push_str("  var s = wide(n - 1)\n");
+    for i in 0..20 {
+        body.push_str(&format!("  s = s + v{i}.len()\n"));
+    }
+    body.push_str("  s\n}\n");
+
+    // Every frame's twenty collections are live across the recursive call, so
+    // the answer counts them all: a slot zeroed but not spilled, or a frame
+    // whose base overlapped its callee's, loses one.
+    let (rt, result) = run_main(&format!("{body}fn main() -> Int {{ wide(600) }}"));
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        600 * 20,
+        "each frame's twenty Vecs survive"
+    );
+    assert!(
+        rt.shadow_stack().is_empty(),
+        "{} slots are still claimed",
+        rt.shadow_stack().len()
+    );
+}
+
+#[test]
+fn adr100_a_praxis_closure_called_from_a_graph_helper_balances_the_shadow_stack() {
+    // Re-entrancy. `praxis_bfs` calls a Praxis closure from inside an
+    // `abi_guard!` and inside a `NativeScope`, so generated prologues run
+    // underneath native runtime code that is itself holding roots. The
+    // discipline is still strictly LIFO — the closure's own epilogue restores
+    // both `top` and `recursion_depth` — and the native chain and the shadow
+    // stack stay independent arms of `RuntimeRoots`.
+    //
+    // The closure recurses and allocates, so it pushes frames of its own and
+    // forces collections while the helper's own intermediates are half-built.
+    let src = "fn chain(n: Int, k: Int) -> Vec[Int] {\n  \
+               let v = Vec()\n  \
+               if k == 0 {\n    if n < 60 { v.push(n + 1) }\n    return v\n  }\n  \
+               let inner = chain(n, k - 1)\n  \
+               for x in inner { v.push(x) }\n  \
+               v\n}\n\
+               fn main() -> Int { bfs(0, |n| chain(n, 8)).len() }\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 61, "0..=60 reached, each once");
+    assert!(
+        rt.shadow_stack().is_empty(),
+        "{} slots are still claimed after a re-entrant walk",
+        rt.shadow_stack().len()
     );
 }

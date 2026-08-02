@@ -13,7 +13,7 @@ use anyhow::{anyhow, Context, Result};
 use cranelift::codegen::ir::condcodes::IntCC;
 use cranelift::codegen::ir::FuncRef;
 use cranelift::codegen::ir::MemFlagsData as MemFlags;
-use cranelift::codegen::isa::CallConv;
+use cranelift::codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift::prelude::*;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
@@ -21,7 +21,9 @@ use praxis_mir::{
     AllocKind, CallTarget, CmpOp, DebugSlots, FloatBinOp, Function as MirFunction, GcConst, Inst,
     IntBinOp, LocalId, LocalKind, MirType, Overflow, RootSlots, Terminator,
 };
-use praxis_runtime::{DebugLocalMeta, RuntimeContext, ShadowFrame, MAX_SHADOW_SLOTS};
+use praxis_runtime::{
+    DebugLocalMeta, RuntimeContext, ShadowStackHeader, SlotCount, MAX_SHADOW_SLOTS,
+};
 use praxis_stdlib::abi::{AbiKind, AbiRet, RuntimeSymbol};
 
 use crate::generation::Generation;
@@ -31,16 +33,41 @@ use crate::generation::Generation;
 /// `i64`/`bool`. `i64` carries both faithfully on a 64-bit host.
 const GC: types::Type = types::I64;
 
-/// The byte offset of the `slots` array within a `ShadowFrame`. Generated code
-/// writes root `GcRef`s into `frame_ptr + SLOTS_OFFSET + index*8` at safepoints.
-/// Computed from the `#[repr(C)]` layout so it stays correct if the struct
-/// evolves (and the ABI version check catches a drift that matters).
-const SLOTS_OFFSET: i64 = core::mem::offset_of!(ShadowFrame, slots) as i64;
+/// The byte offset of the shadow-stack header pointer within a
+/// `RuntimeContext`. The prologue loads the header from here to bump-allocate
+/// this frame's slots (ADR-101). Computed from the `#[repr(C)]` layout so it
+/// stays correct if the struct evolves (and the ABI version check catches a
+/// drift that matters).
+const SHADOW_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, shadow) as i64;
+
+/// The byte offset of `top` within a slot-stack header. The whole prologue and
+/// epilogue are a load and two stores against this displacement.
+///
+/// Read off the shadow instantiation, but it is the same for every one: a
+/// `SlotStackHeader<T>` is three pointers with `top` first, whatever `T` is.
+const SLOT_STACK_TOP_OFFSET: i32 = ShadowStackHeader::TOP_OFFSET;
+
+/// The width of one shadow slot. Derived rather than written as `8` because it
+/// is the stride the spill indexes by and the multiplier the prologue's bump
+/// uses, and those two disagreeing would be a silent miscompile of every rooted
+/// local in the language.
+const SHADOW_SLOT_BYTES: i64 = core::mem::size_of::<*mut praxis_runtime::GcHeader>() as i64;
+
+/// Zero more than this many slots with a `memset` rather than a run of stores.
+/// Below it the call and its argument setup cost more than the stores; above
+/// it — a function with dozens of live `Gc` locals — the stores are both slower
+/// and a kilobyte of prologue.
+///
+/// Deliberately not `FunctionBuilder::emit_small_memset`, whose threshold is 4:
+/// that would put a libc call in the prologue of any function with five `Gc`
+/// locals, which is most of them, and the point of ADR-101 is that the common
+/// prologue makes no calls at all.
+const SLOT_ZERO_UNROLL_MAX: u32 = 32;
 
 /// The byte offset of `recursion_depth` within a `RuntimeContext`. The prologue
-/// guard reads it (after the shadow-frame push bumps it) to decide whether to
-/// branch to the stack-overflow fault epilogue (§9.2, §17.4). Computed from the
-/// `#[repr(C)]` layout, like `SLOTS_OFFSET`.
+/// guard reads it — *before* it pushes anything — to decide whether to branch to
+/// the stack-overflow fault epilogue (§9.2, §17.4). Computed from the
+/// `#[repr(C)]` layout, like `SHADOW_OFFSET`.
 const RECURSION_DEPTH_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, recursion_depth) as i64;
 
 /// The byte offset of `unit_ref` within a `RuntimeContext`. A fault epilogue
@@ -66,7 +93,7 @@ const FALSE_REF_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, false_ref) a
 /// rather than through a wrapper call, so it is baked into emitted code — and
 /// it was baked in as a literal `0` until the payload gained a leading schema
 /// pointer (RT-13) and moved the tag to offset 8. Computed from the `#[repr(C)]`
-/// layout, like `SLOTS_OFFSET`, so the next reorder is a compile-time-derived
+/// layout, like `SHADOW_OFFSET`, so the next reorder is a compile-time-derived
 /// constant rather than a silent miscompile of every enum in the language.
 const ENUM_TAG_OFFSET: i32 = core::mem::offset_of!(praxis_runtime::enums::EnumPayload, tag) as i32;
 
@@ -79,6 +106,10 @@ pub(crate) fn lower_function<M: Module>(
     db: &mut praxis_types::TypeDb,
     generation: &Generation,
 ) -> Result<()> {
+    // The ISA's pointer width and default call convention. Needed by the
+    // prologue's slot-zeroing memset and by `finalize` at the end, and taken
+    // here because both points hold a borrow that excludes `module`.
+    let frontend_config = module.isa().frontend_config();
     // Use the module's own Context (the 0.134 idiom): build into `ctx.func`,
     // then `define_function(id, &mut ctx)`.
     let mut ctx = module.make_context();
@@ -114,11 +145,17 @@ pub(crate) fn lower_function<M: Module>(
             .collect()
     };
     let gc_count = gc_slot.len() as u32;
-    anyhow::ensure!(
-        gc_count as usize <= MAX_SHADOW_SLOTS,
-        "function `{}` has {gc_count} Gc locals, exceeding MAX_SHADOW_SLOTS ({MAX_SHADOW_SLOTS})",
-        mir.name
-    );
+    // A frame wider than the shadow stack can hold is rejected here, and this
+    // is the only place it can be: `SlotCount` is unconstructible above the cap,
+    // and every consumer downstream — including the reservation-sizing argument
+    // in `SHADOW_STACK_SLOTS` — assumes the bound rather than re-checking it.
+    let slot_count = SlotCount::new(gc_count).ok_or_else(|| {
+        anyhow!(
+            "function `{}` has {gc_count} Gc locals, exceeding MAX_SHADOW_SLOTS \
+             ({MAX_SHADOW_SLOTS})",
+            mir.name
+        )
+    })?;
 
     // Entry block: receive context + params, map params to their Variables.
     let entry = blocks[0];
@@ -132,22 +169,125 @@ pub(crate) fn lower_function<M: Module>(
         builder.def_var(vars[param_local.0 as usize], arg);
     }
 
-    // Prologue: push a shadow frame and keep its pointer in a Variable. This
-    // frame is the root set the collector walks during the automatic GC that
-    // `praxis_alloc_*` wrappers trigger (§12.4, ADR-019).
-    let frame_var = builder.declare_var(GC);
-    let frame_ptr = {
-        let count_val = builder.ins().iconst(GC, gc_count as i64);
+    let mut import_cache: HashMap<RuntimeSymbol, FuncRef> = HashMap::new();
+    let mut user_func_cache: HashMap<String, FuncRef> = HashMap::new();
+
+    // Recursion-depth guard (§9.2, §17.4), and it comes *first*.
+    //
+    // It used to sit after the shadow-frame push, because the push helper was
+    // what bumped `ctx.recursion_depth` and the guard read the result back.
+    // With the bump inline there is no reason to push before deciding, and two
+    // reasons not to: the over-limit path then pushes nothing, so it pops
+    // nothing (the third `emit_pop_shadow_frame` call site is gone rather than
+    // rewritten), and "every prologue guards before it pushes" is the premise
+    // that lets `SHADOW_STACK_SLOTS` be sized so shadow-stack exhaustion is
+    // unrepresentable. Observable behaviour is unchanged — bodies still run at
+    // nesting levels 1..MAX_RECURSION_DEPTH and the call past it still faults
+    // `StackOverflow` — with one fewer frame ever pushed.
+    //
+    // Without the guard, deep recursion (e.g. `count(100000)`) overflows the
+    // native stack and the host aborts (SIGABRT); with it, the call faults
+    // cleanly and unwinds to the host like any other fault.
+    //
+    // Block 0's actual instructions run in `body_entry` (a fresh block), so the
+    // `entry` block ends with this conditional branch.
+    let body_entry = builder.create_block();
+    let over_limit = builder.create_block();
+    // The depth this call found, saved so the epilogue can restore it rather
+    // than decrement. `entry` dominates every block, so this is defined
+    // everywhere the epilogues can run.
+    let saved_depth_var = builder.declare_var(types::I32);
+    {
+        // Load `(*ctx).recursion_depth` (u32) at its fixed `#[repr(C)]` offset.
+        // `MemFlags::trusted()` is aligned + notrap: the context is live for the
+        // whole call and the offset is in-bounds by construction.
+        let depth = builder.ins().load(
+            types::I32,
+            MemFlags::trusted(),
+            ctx_val,
+            RECURSION_DEPTH_OFFSET as i32,
+        );
+        builder.def_var(saved_depth_var, depth);
+        // Unsigned, and `>=` rather than `>`: the saturating add that used to
+        // keep the counter non-negative lives in a helper that no longer
+        // exists, and guarding before the bump means this frame is the
+        // (depth+1)-th, so `depth == MAX` is already one too many.
+        let over = builder.ins().icmp_imm_u(
+            IntCC::UnsignedGreaterThanOrEqual,
+            depth,
+            i64::from(praxis_runtime::MAX_RECURSION_DEPTH),
+        );
+        builder.ins().brif(over, over_limit, &[], body_entry, &[]);
+    }
+
+    // The stack-overflow fault epilogue: raise the fault, snapshot, and return
+    // the Unit sentinel. Mirrors `Terminator::Fault` below, minus the pops —
+    // guard-first means this path pushed neither the shadow frame nor the debug
+    // frame, so this is the one `return_` in the function that is not preceded
+    // by an epilogue, and it is exactly the one path that skipped the prologue.
+    //
+    // The snapshot taken here now reflects the caller's chain (at depth
+    // MAX_RECURSION_DEPTH) rather than the overflowing frame's — one frame
+    // shallower than before, same fault, same kind.
+    {
+        builder.switch_to_block(over_limit);
         call_symbol(
             &mut builder,
             ctx_val,
-            &[count_val],
-            RuntimeSymbol::PushShadowFrame,
+            &[],
+            RuntimeSymbol::RaiseStackOverflow,
             module,
-            &mut HashMap::new(),
-        )?
-    };
-    builder.def_var(frame_var, frame_ptr);
+            &mut import_cache,
+        )?;
+        // Snapshot the (deep) debug-frame chain before unwinding (M10-WS3).
+        emit_snapshot_debug_chain(&mut builder, ctx_val, module, &mut import_cache)?;
+        let unit = load_unit_sentinel(&mut builder, ctx_val);
+        builder.ins().return_(&[unit]);
+    }
+
+    // Everything below is the prologue proper, and it runs only on the path the
+    // guard let through. Block 0's body follows it in the same block.
+    builder.switch_to_block(body_entry);
+
+    // Prologue: claim this call's depth. Storing `depth + 1` rather than
+    // incrementing in place is the same load the guard already did, reused.
+    {
+        let depth = builder.use_var(saved_depth_var);
+        #[allow(deprecated)] // iadd_imm_s vs iadd_imm: the immediate is 1.
+        let deeper = builder.ins().iadd_imm_s(depth, 1);
+        builder.ins().store(
+            MemFlags::trusted(),
+            deeper,
+            ctx_val,
+            RECURSION_DEPTH_OFFSET as i32,
+        );
+    }
+
+    // Prologue (cont.): claim this frame's run of shadow slots (ADR-101). The
+    // run is the root set the collector scans during the automatic GC that
+    // `praxis_alloc_*` wrappers trigger (§12.4, ADR-019). `frame_var` holds its
+    // base, which is both what the spill indexes and what the epilogue stores
+    // back as the stack's `top`.
+    //
+    // Emitted unconditionally, including when this function has no `Gc` locals.
+    // `spill_roots` calls `use_var(frame_var)` whenever the root set is
+    // non-empty, and a root set can be non-empty while `slot_of` yields nothing
+    // (a `Scalar` local in the set — see the `continue` there), so a
+    // `gc_count == 0` special case would leave `frame_var` undefined on a path
+    // that reads it and panic Cranelift. One code path is worth two wasted
+    // instructions in a case that essentially does not occur.
+    let frame_var = builder.declare_var(GC);
+    {
+        let base = emit_slot_stack_push(
+            &mut builder,
+            ctx_val,
+            SHADOW_OFFSET,
+            slot_count,
+            SHADOW_SLOT_BYTES,
+            frontend_config,
+        );
+        builder.def_var(frame_var, base);
+    }
 
     // Prologue (cont.): push a debug frame and keep its pointer in a Variable
     // (§9.3, ADR-021, M10-WS2). This frame is what the crash debugger reads for
@@ -175,7 +315,7 @@ pub(crate) fn lower_function<M: Module>(
             &[name_ptr_val, name_len_val, count_val, meta_ptr_val],
             RuntimeSymbol::PushDebugFrame,
             module,
-            &mut HashMap::new(),
+            &mut import_cache,
         )?
     };
     builder.def_var(debug_frame_var, debug_frame_ptr);
@@ -195,71 +335,21 @@ pub(crate) fn lower_function<M: Module>(
             &[start, end],
             RuntimeSymbol::SetFrameSourceSpan,
             module,
-            &mut HashMap::new(),
+            &mut import_cache,
         )?;
     }
 
-    let mut import_cache: HashMap<RuntimeSymbol, FuncRef> = HashMap::new();
-    let mut user_func_cache: HashMap<String, FuncRef> = HashMap::new();
     let spill = SpillCtx {
         frame_var,
+        saved_depth_var,
         debug_frame_var,
         slot_of: &gc_slot,
     };
 
-    // Recursion-depth guard (§9.2, §17.4). The shadow-frame push above bumped
-    // `ctx.recursion_depth`; read it back and, if it exceeds MAX_RECURSION_DEPTH,
-    // branch to a stack-overflow fault epilogue instead of executing the body.
-    // Without this, deep recursion (e.g. `count(100000)`) overflows the native
-    // stack and the host aborts (SIGABRT); with it, the call faults cleanly as
-    // `FaultKind::StackOverflow` and unwinds to the host like any other fault.
-    //
-    // Block 0's actual instructions run in `body_entry` (a fresh block), so the
-    // `entry` block ends with this conditional branch.
-    let body_entry = builder.create_block();
-    let over_limit = builder.create_block();
-    {
-        // Load `(*ctx).recursion_depth` (u32) at its fixed `#[repr(C)]` offset.
-        #[allow(deprecated)] // iadd_imm_s vs iadd_imm: offset is a small positive imm.
-        let depth_addr = builder.ins().iadd_imm_s(ctx_val, RECURSION_DEPTH_OFFSET);
-        let mut depth_flags = MemFlags::trusted();
-        depth_flags.set_notrap();
-        let depth = builder.ins().load(types::I32, depth_flags, depth_addr, 0);
-        // Compare against the limit; branch if depth > MAX (signed is fine — the
-        // saturating add in the push helper keeps depth non-negative and bounded).
-        let limit = builder
-            .ins()
-            .iconst(types::I32, praxis_runtime::MAX_RECURSION_DEPTH as i64);
-        let over = builder.ins().icmp(IntCC::SignedGreaterThan, depth, limit);
-        builder.ins().brif(over, over_limit, &[], body_entry, &[]);
-    }
-
-    // The stack-overflow fault epilogue: raise the fault, pop the shadow frame
-    // (which also decrements recursion_depth, balancing the prologue bump), and
-    // return the Unit sentinel. Mirrors `Terminator::Fault` below.
-    {
-        builder.switch_to_block(over_limit);
-        call_symbol(
-            &mut builder,
-            ctx_val,
-            &[],
-            RuntimeSymbol::RaiseStackOverflow,
-            module,
-            &mut import_cache,
-        )?;
-        // Snapshot the (deep) debug-frame chain before unwinding (M10-WS3).
-        emit_snapshot_debug_chain(&mut builder, ctx_val, module, &mut import_cache)?;
-        emit_pop_shadow_frame(&mut builder, ctx_val, &spill, module, &mut import_cache)?;
-        emit_pop_debug_frame(&mut builder, ctx_val, &spill, module, &mut import_cache)?;
-        let unit = load_unit_sentinel(&mut builder, ctx_val);
-        builder.ins().return_(&[unit]);
-    }
-
     // Lower each block. Blocks are sealed together after the whole CFG is built
-    // so loop backedges resolve correctly. Block 0's body runs in `body_entry`
-    // (the recursion guard's fall-through target), not the param-receiving
-    // `entry` block.
-    builder.switch_to_block(body_entry);
+    // so loop backedges resolve correctly. Block 0's body continues in
+    // `body_entry` (the recursion guard's fall-through target, which the
+    // prologue above is already filling), not the param-receiving `entry` block.
     for (blk_idx, mir_block) in mir.blocks.iter().enumerate() {
         let block = blocks[blk_idx];
         if blk_idx != 0 {
@@ -298,7 +388,6 @@ pub(crate) fn lower_function<M: Module>(
     // All blocks are built (including loop backedges); seal them together so
     // Cranelift resolves the SSA joins, then finalize.
     builder.seal_all_blocks();
-    let frontend_config = module.isa().frontend_config();
     builder.finalize(frontend_config);
 
     // Resolve our FuncId (declared in the first pass) and define the function.
@@ -308,9 +397,133 @@ pub(crate) fn lower_function<M: Module>(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Slot stacks (ADR-101).
+//
+// A slot stack is a contiguous, fixed-capacity region the runtime owns, with a
+// `{ top, base, limit }` header reachable from the `RuntimeContext`. A frame is
+// a run of slots inside it, claimed by bumping `top` and released by restoring
+// the base the claim started from. The three functions below are the whole of
+// the mechanism in generated code, and they are parameterised by the context
+// field so a second stack — the crash debugger's per-frame locals — is one more
+// field and the same two calls, not a second implementation.
+// ---------------------------------------------------------------------------
+
+/// The store/load displacement of slot `index` from a frame's base.
+///
+/// `MAX_SHADOW_SLOTS` slots of `SHADOW_SLOT_BYTES` is far inside `i32`, which
+/// is what a Cranelift memory displacement is.
+fn slot_displacement(index: u32) -> i32 {
+    (i64::from(index) * SHADOW_SLOT_BYTES) as i32
+}
+
+/// Claim `count` zeroed slots from the slot stack whose header pointer lives at
+/// `ctx + ctx_field_offset`, and answer this frame's base.
+///
+/// Four instructions and no call: load the header, load `top`, zero the claimed
+/// run, store the bumped `top`. There is no bounds check because there is
+/// nothing to check — see `SHADOW_STACK_SLOTS`, which is sized from the
+/// recursion limit the prologue has already enforced by the time this runs.
+///
+/// The returned base is the caller's to keep for the whole call: it is both the
+/// address the spill indexes and the value [`emit_slot_stack_pop`] stores back.
+/// Hold it in a `Variable` — it cannot be recovered by re-reading `top`, since
+/// every callee's own push and pop will have moved `top` and put it back.
+fn emit_slot_stack_push(
+    builder: &mut FunctionBuilder,
+    ctx_val: Value,
+    ctx_field_offset: i64,
+    count: SlotCount,
+    slot_bytes: i64,
+    cfg: TargetFrontendConfig,
+) -> Value {
+    // Aligned + non-trapping: the header and the reservation are owned by the
+    // runtime and live for as long as the context is.
+    let flags = MemFlags::trusted();
+    let header = builder
+        .ins()
+        .load(GC, flags, ctx_val, ctx_field_offset as i32);
+    let base = builder.ins().load(GC, flags, header, SLOT_STACK_TOP_OFFSET);
+    emit_zero_slots(builder, base, count, slot_bytes, cfg);
+    #[allow(deprecated)] // iadd_imm_s vs iadd_imm: a small positive immediate.
+    let new_top = builder
+        .ins()
+        .iadd_imm_s(base, i64::from(count.get()) * slot_bytes);
+    builder
+        .ins()
+        .store(flags, new_top, header, SLOT_STACK_TOP_OFFSET);
+    base
+}
+
+/// Release the frame [`emit_slot_stack_push`] claimed, by restoring the `top`
+/// it started from.
+///
+/// Restoring the saved absolute rather than subtracting the frame's width is
+/// deliberate: it cannot underflow (the extern pop this replaced needed a
+/// `saturating_sub` for exactly that reason) and it is self-healing — an
+/// imbalance introduced by anything that ran inside this frame is corrected
+/// here rather than propagated to the caller.
+///
+/// The header is re-read from the context rather than carried from the push.
+/// Carrying it would keep a second value live across the whole body, and at
+/// `opt_level = "none"` a value live across a call is a native stack slot in
+/// every frame — which is the budget deep recursion actually runs out of. The
+/// reload is an L1 hit off a pointer that is live regardless.
+fn emit_slot_stack_pop(
+    builder: &mut FunctionBuilder,
+    ctx_val: Value,
+    ctx_field_offset: i64,
+    base: Value,
+) {
+    let flags = MemFlags::trusted();
+    let header = builder
+        .ins()
+        .load(GC, flags, ctx_val, ctx_field_offset as i32);
+    builder
+        .ins()
+        .store(flags, base, header, SLOT_STACK_TOP_OFFSET);
+}
+
+/// Write `count` zero slots starting at `base`.
+///
+/// The zeroing is what makes a claimed slot mean "not yet written": the
+/// collector scans every slot below `top`, and a slot the function has not
+/// spilled into yet would otherwise hold whatever a previous, deeper call left
+/// there — a pointer to an object that may since have been swept and its
+/// storage reused (RT-01). Only the claimed run is zeroed, which is the whole
+/// of finding §3.3: ADR-019 zeroed all `MAX_SHADOW_SLOTS` on every call.
+fn emit_zero_slots(
+    builder: &mut FunctionBuilder,
+    base: Value,
+    count: SlotCount,
+    slot_bytes: i64,
+    cfg: TargetFrontendConfig,
+) {
+    let n = count.get();
+    if n == 0 {
+        return;
+    }
+    if n <= SLOT_ZERO_UNROLL_MAX {
+        let zero = builder.ins().iconst(GC, 0);
+        for i in 0..n {
+            builder.ins().store(
+                MemFlags::trusted(),
+                zero,
+                base,
+                (i64::from(i) * slot_bytes) as i32,
+            );
+        }
+        return;
+    }
+    let ch = builder.ins().iconst(types::I8, 0);
+    let size = builder
+        .ins()
+        .iconst(cfg.pointer_type(), i64::from(n) * slot_bytes);
+    builder.call_memset(cfg, base, ch, size);
+}
+
 /// The spill context handed to every instruction/terminator lowering: the
-/// Variables holding the current shadow-frame and debug-frame pointers, and the
-/// Gc-local → slot-index map.
+/// Variables the prologue defined, and the Gc-local → slot-index map.
 ///
 /// **Two spills, not one** (MIR-16). There used to be a single `emit_spill`
 /// writing one root list into both frames, which is why the two frames could
@@ -319,7 +532,13 @@ pub(crate) fn lower_function<M: Module>(
 /// and takes the exact [`RootSlots`]; [`SpillCtx::spill_debug`] serves the
 /// crash debugger and takes the over-approximate [`DebugSlots`].
 struct SpillCtx<'a> {
+    /// The base of this frame's run of slots inside the one contiguous shadow
+    /// stack (ADR-101) — not a frame object. The spill indexes it directly, and
+    /// the epilogue stores it back as the stack's `top`.
     frame_var: Variable,
+    /// `ctx.recursion_depth` as this call found it. The epilogue stores it back
+    /// rather than decrementing.
+    saved_depth_var: Variable,
     /// The debug frame pointer Variable (M10-WS2). Written only by
     /// [`SpillCtx::spill_debug`].
     debug_frame_var: Variable,
@@ -336,9 +555,16 @@ const DEBUG_LOCAL_SIZE: i64 = core::mem::size_of::<praxis_runtime::DebugLocal>()
 
 impl SpillCtx<'_> {
     /// The GC spill, emitted just before a safepoint (§12.3, ADR-019): write
-    /// each live root's current value into `frame_ptr + SLOTS_OFFSET +
-    /// slot_index*8`, and write **null** into every slot the liveness pass
-    /// marked dead.
+    /// each live root's current value into `frame_base + slot_index*8`, and
+    /// write **null** into every slot the liveness pass marked dead.
+    ///
+    /// One store per slot, with the index as the store's own displacement.
+    /// Under ADR-019's frame objects this was an `iadd_imm_s` plus a store,
+    /// because the slot array sat at a fixed offset *inside* the frame and the
+    /// two displacements had to be summed at runtime — and at `opt_level =
+    /// "none"` Cranelift does not fold that add into the store, so every
+    /// spilled root cost an extra address computation. A frame's base is now the
+    /// address of slot 0, so there is nothing to add.
     ///
     /// The null stores are MIR-01. A slot written at one safepoint and not live
     /// at the next used to keep its old value forever: the collector reads the
@@ -349,24 +575,18 @@ impl SpillCtx<'_> {
         if roots.live().is_empty() && roots.dead().is_empty() {
             return;
         }
-        let frame_ptr = builder.use_var(self.frame_var);
-        let mut flags = MemFlags::trusted();
-        flags.set_notrap();
+        let frame_base = builder.use_var(self.frame_var);
+        // Aligned + non-trapping: the frame's slots are live for the whole call
+        // and in-bounds by construction.
+        let flags = MemFlags::trusted();
         for &local in roots.live() {
             let Some(&slot) = self.slot_of.get(&local) else {
                 continue; // a Scalar local in the root set; it has no slot.
             };
             let val = builder.use_var(vars[local.0 as usize]);
-            // `iadd_imm` is deprecated in Cranelift 0.134 in favor of the
-            // sign/zero-extended variants; the slot offset is always a small
-            // positive immediate so the distinction is immaterial.
-            #[allow(deprecated)]
-            let slot_addr = builder
+            builder
                 .ins()
-                .iadd_imm_s(frame_ptr, SLOTS_OFFSET + (slot as i64) * 8);
-            // Store into the frame slot; these accesses never trap (the frame is
-            // always live and the offset is in-bounds by construction).
-            builder.ins().store(flags, val, slot_addr, 0);
+                .store(flags, val, frame_base, slot_displacement(slot));
         }
         if roots.dead().is_empty() {
             return;
@@ -376,11 +596,9 @@ impl SpillCtx<'_> {
             let Some(&slot) = self.slot_of.get(&local) else {
                 continue;
             };
-            #[allow(deprecated)]
-            let slot_addr = builder
+            builder
                 .ins()
-                .iadd_imm_s(frame_ptr, SLOTS_OFFSET + (slot as i64) * 8);
-            builder.ins().store(flags, null, slot_addr, 0);
+                .store(flags, null, frame_base, slot_displacement(slot));
         }
     }
 
@@ -1288,7 +1506,7 @@ fn lower_terminator<M: Module>(
         Terminator::Return { value } => {
             // Epilogue: pop the shadow frame and debug frame before returning
             // (ADR-019, §9.3/M10-WS2).
-            emit_pop_shadow_frame(builder, ctx_val, spill, module, imports)?;
+            emit_pop_shadow_frame(builder, ctx_val, spill);
             emit_pop_debug_frame(builder, ctx_val, spill, module, imports)?;
             let v = builder.use_var(vars[value.0 as usize]);
             builder.ins().return_(&[v]);
@@ -1300,7 +1518,7 @@ fn lower_terminator<M: Module>(
             // (which runs first) captures; outer frames unwinding later skip.
             emit_snapshot_debug_chain(builder, ctx_val, module, imports)?;
             // Then pop the shadow frame and debug frame before unwinding.
-            emit_pop_shadow_frame(builder, ctx_val, spill, module, imports)?;
+            emit_pop_shadow_frame(builder, ctx_val, spill);
             emit_pop_debug_frame(builder, ctx_val, spill, module, imports)?;
             // Unwind to the host: return the Unit sentinel (the caller checks
             // pending_fault). The fault block has no value of its own — but it
@@ -1315,24 +1533,25 @@ fn lower_terminator<M: Module>(
     Ok(())
 }
 
-/// Emit the `praxis_pop_shadow_frame(ctx, frame)` epilogue call (ADR-019).
-fn emit_pop_shadow_frame<M: Module>(
-    builder: &mut FunctionBuilder,
-    ctx_val: Value,
-    spill: &SpillCtx<'_>,
-    module: &mut M,
-    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
-) -> Result<()> {
-    let frame_ptr = builder.use_var(spill.frame_var);
-    call_symbol(
-        builder,
+/// Emit the shadow-stack epilogue (ADR-019, ADR-101): give this frame's slots
+/// back and restore the call depth. Two stores, no call.
+///
+/// Both restore an absolute the prologue saved rather than undoing an
+/// increment. The extern helper this replaced decremented `recursion_depth`
+/// with a `saturating_sub` precisely because a fault path could otherwise
+/// underflow it; there is nothing to saturate when the value being written is
+/// the one this call found on entry, and an imbalance introduced below this
+/// frame cannot leak upward past it.
+fn emit_pop_shadow_frame(builder: &mut FunctionBuilder, ctx_val: Value, spill: &SpillCtx<'_>) {
+    let saved_depth = builder.use_var(spill.saved_depth_var);
+    builder.ins().store(
+        MemFlags::trusted(),
+        saved_depth,
         ctx_val,
-        &[frame_ptr],
-        RuntimeSymbol::PopShadowFrame,
-        module,
-        imports,
-    )?;
-    Ok(())
+        RECURSION_DEPTH_OFFSET as i32,
+    );
+    let base = builder.use_var(spill.frame_var);
+    emit_slot_stack_pop(builder, ctx_val, SHADOW_OFFSET, base);
 }
 
 /// Emit the `praxis_pop_debug_frame(ctx, frame)` epilogue call (§9.3, M10-WS2).
@@ -2023,11 +2242,11 @@ mod tests {
 
     /// A wrapper that returns nothing must declare no results. The arity-only
     /// synthesis gave every symbol an `i64` return, so a call to
-    /// `praxis_pop_shadow_frame` read a result register the callee never wrote.
+    /// `praxis_pop_debug_frame` read a result register the callee never wrote.
     #[test]
     fn void_wrappers_declare_no_result() {
         let module = test_module();
-        assert!(signature_for(RuntimeSymbol::PopShadowFrame, &module)
+        assert!(signature_for(RuntimeSymbol::PopDebugFrame, &module)
             .returns
             .is_empty());
         assert!(signature_for(RuntimeSymbol::SetFrameSourceSpan, &module)
