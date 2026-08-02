@@ -358,9 +358,7 @@ runtime_symbols! {
     MinHeapPush = "praxis_min_heap_push": (Ctx, Gc, Gc) -> GcUnit, Allocates;
     Panic = "praxis_panic": (Ctx, Gc) -> GcUnit, Faults;
     PopDebugFrame = "praxis_pop_debug_frame": (Ctx, Ptr) -> Void, Pure;
-    PopShadowFrame = "praxis_pop_shadow_frame": (Ctx, Ptr) -> Void, Pure;
     PushDebugFrame = "praxis_push_debug_frame": (Ctx, Ptr, RawU32, RawU32, Ptr) -> Ptr, Pure;
-    PushShadowFrame = "praxis_push_shadow_frame": (Ctx, RawU32) -> Ptr, Pure;
     RaiseDivByZeroIf = "praxis_raise_div_by_zero_if": (Ctx, RawI64) -> Void, Faults;
     RaiseEmptyCollection = "praxis_raise_empty_collection": (Ctx) -> GcUnit, Faults;
     RaiseIntOverflowIf = "praxis_raise_int_overflow_if": (Ctx, RawI64) -> Void, Faults;
@@ -557,12 +555,6 @@ mod tests {
             RuntimeSymbol::RecordSetField.sig().params,
             &[AbiKind::Ctx, AbiKind::Gc, AbiKind::RawU32, AbiKind::Gc]
         );
-        assert_eq!(
-            RuntimeSymbol::PushShadowFrame.sig().params,
-            &[AbiKind::Ctx, AbiKind::RawU32]
-        );
-        assert_eq!(RuntimeSymbol::PushShadowFrame.sig().ret, AbiRet::Ptr);
-        assert_eq!(RuntimeSymbol::PopShadowFrame.sig().ret, AbiRet::Void);
 
         for sym in [
             RuntimeSymbol::IntAdd,
