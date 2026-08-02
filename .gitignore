@@ -10,3 +10,9 @@
 
 # Agent worktrees (git worktree checkouts live here; never part of a commit)
 .claude/worktrees/
+
+# The VS Code extension's own build output (editors/vscode). Not part of a
+# commit: `just ci` does not build it, and M14 packages it from source.
+editors/vscode/node_modules/
+editors/vscode/out/
+editors/vscode/*.vsix

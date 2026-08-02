@@ -1,0 +1,243 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Praxis",
+  "scopeName": "source.praxis",
+  "fileTypes": ["px"],
+  "comment": "Fallback highlighting for .px files: it works before the language server attaches, while it is restarting, and in any non-LSP renderer. It emits the SAME TextMate scopes the server's semantic tokens are mapped onto in package.json's semanticTokenScopes, so a file does not change colour when the server connects. Four Rust tests in crates/praxis-cli/tests/grammar.rs read this file and check its keyword, atomic and constructor patterns against the compiler's own closed tables — a grammar's word lists are copies that no compiler checks, and the failure (a word quietly stops being coloured) is one nobody files.",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#read-region" },
+    { "include": "#keywords" },
+    { "include": "#update-operator" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#declarations" },
+    { "include": "#types" },
+    { "include": "#calls" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "include": "#block-comment" },
+        {
+          "name": "comment.line.double-slash.praxis",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "block-comment": {
+      "comment": "Nestable: /* /* */ */ is ONE comment (SyntaxKind::BlockComment). A flat rule closes at the first */ and paints the rest of the file as code.",
+      "name": "comment.block.praxis",
+      "begin": "/\\*",
+      "end": "\\*/",
+      "patterns": [{ "include": "#block-comment" }]
+    },
+
+    "keywords": {
+      "comment": "Every keyword in SyntaxKind's table. Checked against SyntaxKind::all_keyword_texts() by a Rust test, because this list is a copy the compiler does not see.",
+      "name": "keyword.control.praxis",
+      "match": "\\b(let|var|fn|if|else|while|for|in|loop|match|return|break|continue|read|struct|enum|true|false)\\b"
+    },
+
+    "update-operator": {
+      "comment": "`min=` / `max=` are contextual operators built from an identifier plus `=` (UPDATE_OP), not keywords — the lexer cannot claim `min` without taking it from every program that names the prelude helper. The lookahead is what keeps a plain `min(a, b)` an ordinary call.",
+      "match": "\\b(min|max)(?=\\s*=[^=])",
+      "captures": {
+        "1": { "name": "keyword.operator.update.praxis" }
+      }
+    },
+
+    "strings": {
+      "comment": "A text literal may not span a line (the lexer refuses one, T004), so the rule ends at the line even when the quote is unclosed.",
+      "name": "string.quoted.double.praxis",
+      "begin": "\"",
+      "end": "\"|(?=\\n)",
+      "patterns": [
+        {
+          "name": "constant.character.escape.praxis",
+          "match": "\\\\(x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f]+\\}|[nrt0\\\\\"'`])"
+        },
+        { "name": "invalid.illegal.escape.praxis", "match": "\\\\." }
+      ]
+    },
+
+    "numbers": {
+      "comment": "§4.12 allows `.5` and `2.`, and `..`/`..=` is a range and never part of a float. The negative lookahead after a trailing dot, and the negative lookbehind before a leading one, are what keep `1..2` from painting as two floats.",
+      "patterns": [
+        {
+          "name": "constant.numeric.float.praxis",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.float.praxis",
+          "match": "\\b[0-9][0-9_]*[eE][+-]?[0-9]+\\b"
+        },
+        {
+          "name": "constant.numeric.float.praxis",
+          "match": "\\b[0-9][0-9_]*\\.(?!\\.)"
+        },
+        {
+          "name": "constant.numeric.float.praxis",
+          "match": "(?<![\\w.])\\.[0-9][0-9_]*\\b"
+        },
+        {
+          "name": "constant.numeric.integer.praxis",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+([\\p{L}_][\\p{L}\\p{N}_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.praxis" },
+            "2": { "name": "entity.name.function.praxis" }
+          }
+        },
+        {
+          "match": "\\b(struct|enum)\\s+([\\p{L}_][\\p{L}\\p{N}_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.praxis" },
+            "2": { "name": "entity.name.type.praxis" }
+          }
+        }
+      ]
+    },
+
+    "types": {
+      "comment": "A capitalized identifier is a type name: §4.1's convention, and the only thing a regex can tell. The semantic layer knows the difference between `Grid[T]` and a local called `Grid`; this is the approximation it refines.",
+      "name": "entity.name.type.praxis",
+      "match": "\\b[\\p{Lu}][\\p{L}\\p{N}_]*\\b"
+    },
+
+    "calls": {
+      "match": "([\\p{L}_][\\p{L}\\p{N}_]*)\\s*(?=\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.praxis" }
+      }
+    },
+
+    "operators": {
+      "name": "keyword.operator.praxis",
+      "match": "\\.\\.=|\\.\\.|->|=>|==|!=|<=|>=|&&|\\|\\||[+\\-*/%<>=!&|^]"
+    },
+
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.separator.praxis", "match": "[,;:]" },
+        { "name": "punctuation.accessor.praxis", "match": "\\." }
+      ]
+    },
+
+    "read-region": {
+      "comment": "§7.1 enters the parser-expression sublanguage at `read` (and at `parse`'s second argument, which a regex grammar cannot find without counting commas — inside a `parse` call the semantic layer supplies the parser classes on its own). The region ends at the end of the line or at a delimiter it did not open; a constructor's own parenthesis opens a sub-rule, so a parser expression broken across lines stays inside it. Constructors are contextual (`lines` is an ordinary identifier outside a parser expression) and this is the approximation §6.3 allows: the semantic layer corrects it, and the disagreement resolves toward the compiler.",
+      "begin": "\\b(read)\\b",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.praxis" }
+      },
+      "end": "(?=[\\n;,)\\]}])",
+      "patterns": [{ "include": "#parser-expression" }]
+    },
+
+    "parser-expression": {
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#parser-template" },
+        { "include": "#parser-call" },
+        { "include": "#parser-named-argument" },
+        { "include": "#parser-flags" },
+        { "include": "#capture-type" },
+        { "include": "#strings" },
+        { "include": "#numbers" }
+      ]
+    },
+
+    "parser-call": {
+      "comment": "Every §7.5 constructor. Checked against Constructor::ALL by a Rust test.",
+      "begin": "\\b(lines|sections|csv|ws|sep|grid|matrix|chars|one_of|block|choice|optional|scan|repeated)\\s*(\\()",
+      "beginCaptures": {
+        "1": { "name": "entity.name.function.parser.praxis" },
+        "2": { "name": "punctuation.section.arguments.begin.praxis" }
+      },
+      "end": "\\)",
+      "endCaptures": {
+        "0": { "name": "punctuation.section.arguments.end.praxis" }
+      },
+      "patterns": [{ "include": "#parser-expression" }]
+    },
+
+    "parser-named-argument": {
+      "comment": "`rules: lines(int)`, `skip: whitespace`, `fill: 0` — §7.5's named arguments. Which names are *keyword* arguments is the constructor's question and not a regex's; both get the same scope, and the semantic layer distinguishes them.",
+      "match": "\\b([\\p{L}_][\\p{L}\\p{N}_]*)\\s*(:)",
+      "captures": {
+        "1": { "name": "variable.parameter.parser.praxis" },
+        "2": { "name": "punctuation.separator.praxis" }
+      }
+    },
+
+    "parser-flags": {
+      "comment": "`ragged` is §7.5's one bare-keyword argument; the other three are `skip:`'s policy values (SkipPolicy::ALL).",
+      "name": "variable.parameter.parser.praxis",
+      "match": "\\b(ragged|none|whitespace|newlines)\\b"
+    },
+
+    "capture-type": {
+      "comment": "Every §7.4 atomic. Checked against AtomicKind::ALL by a Rust test.",
+      "name": "support.type.capture.praxis",
+      "match": "\\b(int|uint|float|byte|char|digit|word|identifier|text|rest)\\b"
+    },
+
+    "parser-template": {
+      "comment": "ADR-094: a template ends at the line it opens on. The `(?=\\n)` alternative is what keeps an unterminated backtick from painting the rest of the file as a string — the lexer draws the same bound, with two distinct token kinds so the state is unrepresentable rather than re-derived.",
+      "name": "string.quoted.other.template.praxis",
+      "begin": "`",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.template.begin.praxis" }
+      },
+      "end": "`|(?=\\n)",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.template.end.praxis" }
+      },
+      "patterns": [
+        { "include": "#template-capture" },
+        { "include": "#template-escape" }
+      ]
+    },
+
+    "template-escape": {
+      "comment": "§7.2's whitespace policies and the two character escapes.",
+      "name": "constant.character.escape.praxis",
+      "match": "\\\\(s[*+]|x[0-9A-Fa-f]{2}|[nt`\\\\])"
+    },
+
+    "template-capture": {
+      "comment": "`{name:type}`, `{type}` and `{name:constructor(...)}` scope their parts separately — which is what makes §19.11 criterion 4 visible before the server attaches.",
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.capture.begin.praxis" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.capture.end.praxis" }
+      },
+      "patterns": [
+        {
+          "comment": "The capture NAME, anchored at the capture's start so only a leading `ident :` is one. `{int}` has no name and falls through to the capture-type rule; `{c:one_of(\":\")}`'s inner colon is inside a nested rule and never reaches here.",
+          "match": "\\G\\s*([\\p{L}_][\\p{L}\\p{N}_]*)\\s*(:)",
+          "captures": {
+            "1": { "name": "variable.other.capture.praxis" },
+            "2": { "name": "punctuation.separator.capture.praxis" }
+          }
+        },
+        { "include": "#parser-call" },
+        { "include": "#parser-template" },
+        { "include": "#capture-type" },
+        { "include": "#strings" }
+      ]
+    }
+  }
+}

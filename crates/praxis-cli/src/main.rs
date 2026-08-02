@@ -64,7 +64,8 @@ enum Command {
     },
     /// Start an ordinary interactive REPL session. (Later milestone)
     Repl,
-    /// Start the language server over stdio. (Milestone 11)
+    /// Start the language server over stdio (§15, M11). Speaks JSON-RPC LSP on
+    /// stdin/stdout; not meant to be run by hand.
     Lsp,
 }
 
@@ -79,7 +80,7 @@ fn main() -> Result<()> {
         Command::Run { file, input, debug } => run::run(&file, input.as_deref(), debug, cli.color),
         Command::Watch { file } => not_implemented("watch", Some(&file), 0),
         Command::Repl => not_implemented("repl", None, 0),
-        Command::Lsp => not_implemented("lsp", None, 11),
+        Command::Lsp => praxis_lsp::run(),
     }?;
 
     std::process::exit(exit);

@@ -12,8 +12,10 @@ use praxis_input_parser::ast::{
 };
 use praxis_input_parser::{
     build_call, build_repeated_tail, lower_to_plan, register_plan, scan_template, synthesize,
-    validate, CallArg, PlanId, ValidationError,
+    synthesize_indexed, validate, CallArg, PlanId, ValidationError,
 };
+
+use crate::parser_index::ParserIndex;
 use praxis_source::{DiagCode, Diagnostic, FileId, FileSpan, Severity, Span};
 use praxis_types::{Type, TypeDb};
 
@@ -76,11 +78,19 @@ pub fn analyze_parser_expr(
 
 /// Synthesize only the result type of a parser expression (no plan
 /// registration). Used during inference; lowering later does the full analysis.
+///
+/// **`index` is where the tree survives** (ADR-098). The converted AST and the
+/// type of every node in it are appended here rather than dropped on the way out
+/// — hover on an inner constructor, capture-type completion and the four parser
+/// semantic-token classes all read this and nothing else. Nothing is appended
+/// when conversion, validation or synthesis fails: an index entry for a tree the
+/// compiler rejected would answer questions about a program that does not exist.
 pub fn synthesize_parser_type(
     parser_expr: &ParserExpr,
     file: FileId,
     db: &mut TypeDb,
     diagnostics: &mut Vec<Diagnostic>,
+    index: &mut Vec<ParserIndex>,
 ) -> Option<Type> {
     let ast = convert_parser_expr(parser_expr, file, diagnostics)?;
     let errs = validate(&ast);
@@ -90,8 +100,15 @@ pub fn synthesize_parser_type(
         }
         return None;
     }
-    match synthesize(&ast, db) {
-        Ok(ty) => Some(ty),
+    match synthesize_indexed(&ast, db) {
+        Ok((ty, node_types)) => {
+            index.push(ParserIndex {
+                expr_range: parser_expr.syntax().text_range(),
+                ast,
+                node_types,
+            });
+            Some(ty)
+        }
         Err(e) => {
             diagnostics.push(err_diag(
                 file,

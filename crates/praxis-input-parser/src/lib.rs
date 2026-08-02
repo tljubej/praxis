@@ -30,7 +30,7 @@ pub use plan::{
     MAX_PLANS,
 };
 pub use scan::{scan_template, ScanError, MAX_NESTING};
-pub use synthesize::synthesize;
+pub use synthesize::{synthesize, synthesize_indexed};
 pub use validate::{check_call, validate, ArgKind, ValidationError};
 
 /// Marker documenting that this crate is filled at Milestone 6.

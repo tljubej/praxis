@@ -26,6 +26,7 @@ pub mod infer;
 pub mod lower;
 pub mod mono;
 pub mod name_table;
+pub mod parser_index;
 pub mod parser_lower;
 pub mod resolve;
 pub mod scope;
@@ -37,6 +38,7 @@ pub use lower::{
     TypedPattern, TypedStmt, UnaryOp, ENTRY_NAME,
 };
 pub use name_table::NameTable;
+pub use parser_index::{CaptureAt, ParserIndex, ParserMode};
 /// The identity of a compiled parser plan, re-exported so MIR can name the
 /// field on `TypedExpr::Read`/`Parse` without depending on the input-parser
 /// crate directly.
@@ -129,6 +131,13 @@ pub struct Analysis {
     pub expr_types: std::collections::HashMap<NodeKey, Type>,
     /// Each method call, keyed by the method-name token's range.
     pub method_refs: std::collections::HashMap<rowan::TextRange, MethodRef>,
+    /// Each `read`/`parse` body's retained parser AST and per-node types
+    /// (ADR-098), in the order inference reached them. **The only data source**
+    /// for hover on an inner constructor, capture-type completion, the four
+    /// parser semantic-token classes, and §15.3's cursor-mode question — the
+    /// alternative being a second scanner over template interiors living in the
+    /// language server.
+    pub parser_exprs: Vec<ParserIndex>,
     /// All `N0xx` (name) and `Y0xx` (type) diagnostics, in source order.
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -177,6 +186,7 @@ pub fn analyze(file: FileId, root: &SourceFile) -> Analysis {
         call_sites: inference.call_sites,
         expr_types: inference.expr_types,
         method_refs: inference.method_refs,
+        parser_exprs: inference.parser_exprs,
         diagnostics: inference.diagnostics,
     }
 }
@@ -197,6 +207,7 @@ pub fn analyze_root(file: FileId, root: &praxis_syntax::SyntaxNode) -> Analysis 
             call_sites: std::collections::HashMap::new(),
             expr_types: std::collections::HashMap::new(),
             method_refs: std::collections::HashMap::new(),
+            parser_exprs: Vec::new(),
             // The parser should always produce a SOURCE_FILE root; if not, this
             // is an internal error, surfaced as a single diagnostic.
             diagnostics: vec![praxis_source::Diagnostic::new(
@@ -220,3 +231,7 @@ mod hover_tests;
 #[cfg(test)]
 #[path = "infer_tests.rs"]
 mod infer_tests;
+
+#[cfg(test)]
+#[path = "parser_index_tests.rs"]
+mod parser_index_tests;

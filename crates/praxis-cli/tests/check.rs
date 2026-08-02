@@ -142,10 +142,20 @@ fn missing_file_exits_two() {
     );
 }
 
+/// The stubbed commands must not pretend to succeed.
+///
+/// **`lsp` left this list at M11.** It was `["repl", "lsp"]` and asserting
+/// `main.rs:82`'s `not_implemented("lsp", None, 11)`; the server is real now and
+/// `crates/praxis-cli/tests/lsp.rs` drives a scripted JSON-RPC session against
+/// the same binary instead. `watch` is not here because it takes a file
+/// argument and is covered where the run tests live.
 #[test]
 fn unimplemented_commands_exit_two() {
-    // The stubbed commands must not pretend to succeed.
-    for cmd in ["repl", "lsp"] {
+    // One entry today. Kept as a list because `watch` joins it the moment it
+    // takes an argument-free form, and because the shape says "these commands",
+    // not "this command".
+    #[allow(clippy::single_element_loop)]
+    for cmd in ["repl"] {
         let output = Command::new(bin_path())
             .arg(cmd)
             .output()

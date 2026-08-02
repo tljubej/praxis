@@ -95,4 +95,49 @@ impl Analysis {
     pub fn scheme_of(&self, id: SymbolId) -> Option<&Scheme> {
         self.names.get(id).and_then(|s| s.scheme.as_ref())
     }
+
+    /// Hover over a **parser expression** (§15.3, §19.11 criterion 3).
+    ///
+    /// Answers the synthesized type of the *innermost* parser node containing
+    /// `offset` — so hovering `lines(…)` inside `sections(lines(…))` reports
+    /// `Vec[{ … }]` and not the root's `Vec[Vec[{ … }]]`. That distinction is
+    /// the whole of ADR-098: before the index existed, the only type in reach
+    /// was the root's, and an implementation that answered it everywhere passed
+    /// "hover over a parser expression shows a type".
+    ///
+    /// Returns `None` outside every `read`/`parse` body, and for a body the
+    /// compiler rejected — there is no synthesized type for a tree that did not
+    /// convert, and inventing one would report about a program that does not
+    /// exist.
+    #[must_use]
+    pub fn hover_parser(&self, offset: u32) -> Option<ParserHoverInfo> {
+        let index = self
+            .parser_exprs
+            .iter()
+            .filter(|idx| idx.contains(offset))
+            .min_by_key(|idx| u32::from(idx.expr_range.len()))?;
+        let ty = index.type_at(offset)?;
+        Some(ParserHoverInfo {
+            rendered: self.db.render(self.db.follow(ty)),
+            mode: index.mode_at(offset),
+            is_root: index
+                .type_at(offset)
+                .zip(index.type_at(u32::from(index.expr_range.start())))
+                .is_some_and(|(a, b)| a == b),
+        })
+    }
+}
+
+/// What hover over a parser expression reveals.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParserHoverInfo {
+    /// The synthesized result type, rendered by the same `db.render` the CLI
+    /// prints — so the editor and `praxis check` name a type the same way.
+    pub rendered: String,
+    /// Where in the sublanguage the cursor is (§15.3's five-way question).
+    pub mode: crate::ParserMode,
+    /// Whether this is the whole `read`/`parse` body's type rather than an
+    /// inner node's. Lets the presentation say "read result" for the root and
+    /// name the node otherwise.
+    pub is_root: bool,
 }

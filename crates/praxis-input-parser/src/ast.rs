@@ -179,20 +179,55 @@ impl std::fmt::Display for CaptureName {
 }
 
 /// One part of a backtick template (§7.9 `TemplatePart`).
+///
+/// **Every part carries its own source span**, for the same reason every
+/// [`ParserAst`] node does (§7.10, ADR-078): the editor has to colour the
+/// capture *name* differently from the capture *type* (§19.11 criterion 4), and
+/// the only alternative to recording the extent where the scanner already knows
+/// it is a second scanner in the language server re-deriving it — the failure
+/// ADR-098 exists to prevent. Spans are interior-relative until
+/// [`shift_part_spans`] rebases them onto the file, exactly like the spans on
+/// the parser nodes underneath.
 #[derive(Clone, Debug)]
 pub enum TemplatePart {
     /// A literal run: the raw matched bytes plus the whitespace policy.
-    Literal { text: String, ws: WsPolicy },
+    ///
+    /// `span` covers the **source** the run was decoded from, which is not the
+    /// same length as `text`: `` \` `` is two source bytes and one character,
+    /// and a policy part decoded from `\s+` has an empty `text` and a two-byte
+    /// span.
+    Literal {
+        text: String,
+        ws: WsPolicy,
+        span: Span,
+    },
     /// A capture `{name? : parser}`. `name` is `None` for anonymous captures.
     ///
     /// `parser` is the capture's **own** parser expression, parsed from its own
     /// body (IP-05, D10). It used to be a placeholder `Atomic { Int }` that the
     /// HIR overwrote by rescanning the whole template and taking the first
     /// recognizable name — so every capture in a template shared one kind.
+    ///
+    /// `span` covers the whole capture including both braces; `name_span`
+    /// covers the name **as trimmed** (`{ n :int}` names `n`, not `" n "`), and
+    /// is `None` exactly when `name` is. The capture's *type* needs no span
+    /// here: it is `parser.span()`.
     Capture {
         name: Option<CaptureName>,
         parser: Box<ParserAst>,
+        span: Span,
+        name_span: Option<Span>,
     },
+}
+
+impl TemplatePart {
+    /// The part's source span.
+    #[must_use]
+    pub fn span(&self) -> Span {
+        match self {
+            TemplatePart::Literal { span, .. } | TemplatePart::Capture { span, .. } => *span,
+        }
+    }
 }
 
 /// A parser expression (§7.9 `ParserExpr`). The M6 subset of the full node list.
@@ -524,8 +559,20 @@ impl ParserAst {
 /// came to be missed in the first place.
 pub fn shift_part_spans(parts: &mut [TemplatePart], delta: u32) {
     for part in parts {
-        if let TemplatePart::Capture { parser, .. } = part {
-            parser.shift_spans(delta);
+        match part {
+            TemplatePart::Literal { span, .. } => *span = span.shifted(delta),
+            TemplatePart::Capture {
+                parser,
+                span,
+                name_span,
+                ..
+            } => {
+                *span = span.shifted(delta);
+                if let Some(n) = name_span {
+                    *n = n.shifted(delta);
+                }
+                parser.shift_spans(delta);
+            }
         }
     }
 }

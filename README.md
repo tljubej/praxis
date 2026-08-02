@@ -5,35 +5,41 @@ Advent of Code-style puzzle solving. It favors rapid iteration, concise data
 manipulation, practical parsing, and strong diagnostics over systems-programming
 concerns.
 
-> **Status:** Milestone 10 complete, **and the implementation repair with it.**
-> The adversarial audit of 2026-07-28 raised 139 findings and shipped 149
-> `#[ignore]`d regressions as its acceptance gate. Every stage of
-> [`docs/handovers/implementation-repair-plan-2026-07-28.md`](./docs/handovers/implementation-repair-plan-2026-07-28.md)
-> is closed and **`cargo test --workspace` reports zero ignored tests**, against
-> a baseline of 149.
+> **Status:** Milestone 11 complete — the **language server MVP**, the VS Code
+> extension, and its syntax highlighting.
 >
-> **138 of the 139 findings are addressed.** The one that is not is `MIR-10`,
-> which the register carries as `PARTIAL — part owed`: its verifier landed and
-> the *rule* the finding is about — "a faulting instruction is followed by a
-> `CheckFault`" — did not. Three things are open: **MIR-10's owed rule**, the
-> **ten open rows in that plan's §4.1** — two of them, `REP-52` and `REP-53`, are
-> that rule's two ends, and §4.1's list is the claim while this count is only a
-> convenience — and **two open language decisions**. See
-> [`docs/handovers/17-what-is-left-handover.md`](./docs/handovers/17-what-is-left-handover.md).
-> (The suite's pass count lives in `implementation-repair-progress.md` §1 and
-> nowhere else, so it can only be stale in one place — which is why it is not
-> repeated here.)
+> `praxis lsp` is a real JSON-RPC process over stdio (ADR-095: one synchronous
+> loop, no async runtime). It serves document synchronization with incremental
+> revisions, diagnostics, hover, completion including receiver methods,
+> signature help, go-to-definition, document symbols, and semantic tokens.
+> All five §19.11 acceptance criteria pass, each gated on the assertion that
+> would fail a plausible-but-wrong implementation rather than on "something was
+> returned" — the inner constructor's own type, a `Map` method's absence from
+> `grid.`, the active parameter after a comma, the second of two shadowed
+> declarations, four distinct parser token ranges.
 >
-> Milestone 10 is the crash debugger (§9). A fault renders
-> a numbered backtrace + locals and (when attached to a terminal, or with
-> `--debug=always`) drops into an interactive crash REPL with all fifteen §9.4
-> commands: `bt`/`frame`/`up`/`down`/`locals` for navigation, `p EXPR`/`type
-> EXPR`/`heap EXPR` for read-only evaluation through the JIT, `source`/`input`/
-> `parser` for context, and `restart`/`reload` to rerun. The §9.6 noninteractive
-> fallback covers piped/non-TTY runs. All five §19.10 acceptance criteria pass.
+> Two things are worth knowing about the shape of it. **`praxis check` now
+> routes through the language server's query layer** (ADR-097), so a divergence
+> between what the CLI prints and what the editor underlines is unrepresentable
+> rather than merely unlikely. And **inference retains the parser AST**
+> (ADR-098): hover on an inner constructor, capture-type completion and the four
+> parser token classes read spans the compiler computed, rather than a second
+> scanner in the editor that could disagree with it.
+>
+> `editors/vscode/` is the thin extension: a launcher, four commands, and a
+> TextMate grammar that highlights a `.px` file before the server attaches and
+> while it is down. Both layers emit the **same** TextMate scopes, and four Rust
+> tests read the grammar at test time to keep its word lists from drifting from
+> the lexer's — with no Node toolchain in `just ci` (ADR-002).
+>
+> Milestone 10, the crash debugger (§9), and the implementation repair before it
+> both remain closed; see
+> [`docs/handovers/18-every-row-closed-handover.md`](./docs/handovers/18-every-row-closed-handover.md).
 > See [`praxis_technical_design.md`](./praxis_technical_design.md) for the full
-> language and the milestone roadmap (§19); the next milestone (M11) is the
-> LSP / IDE integration.
+> language and the milestone roadmap (§19); the next milestone (M12) is LSP
+> completeness — find references, rename, workspace symbols, inlay hints, the
+> formatter, and code actions — and `praxis watch` / `praxis repl` remain
+> unimplemented.
 
 ## Command surface
 
@@ -41,11 +47,15 @@ concerns.
 praxis run day05.px < input.txt      # JIT-compile and run, reading stdin
 praxis run day05.px --input in.txt   # same, but read input from a file
 praxis check day05.px                # front-end only (lex + parse + type-check)
+praxis lsp                           # the language server, JSON-RPC over stdio
 ```
 
 `run` works end-to-end: lex → parse → infer → lower → MIR → Cranelift JIT →
-execute, then print the result. `watch`, `repl`, and `lsp` are wired but
-implemented in later milestones.
+execute, then print the result. `check` runs the front end and routes through
+the same query layer the language server uses (ADR-097). `lsp` speaks the
+Language Server Protocol on stdin/stdout and is not meant to be run by hand —
+the VS Code extension in `editors/vscode/` launches it. `watch` and `repl` are
+wired but implemented in later milestones.
 
 ## Development
 
@@ -99,4 +109,9 @@ short version:
 - `crates/praxis-runtime` — GC heap, type descriptors, ABI wrappers, input parser.
 - `crates/praxis-input-parser` — the input-parser DSL (ParserAst, plans, synthesis).
 - `crates/praxis-stdlib` — method catalog schema and the prelude.
-- `crates/praxis-cli` — the `praxis` command (`run`, `check`).
+- `crates/praxis-cli` — the `praxis` command (`run`, `check`, `lsp`).
+- `crates/praxis-lsp` — the shared front-end query layer (§14.2) **and** the LSP
+  transport. `praxis check` calls the first half; the server is the second.
+- `editors/vscode` — the thin VS Code extension and the TextMate grammar. Its
+  drift gates are Rust tests in `crates/praxis-cli/tests/grammar.rs`, so `just
+  ci` stays the whole gate and CI needs no Node toolchain.

@@ -406,6 +406,25 @@ impl SyntaxKind {
         self.keyword_text().is_some()
     }
 
+    /// Every keyword's source spelling, in discriminant order.
+    ///
+    /// **Swept, not listed.** The whole kind space is walked and filtered by
+    /// [`is_keyword`](Self::is_keyword), so a keyword added to
+    /// [`keyword_text`](Self::keyword_text) joins this by construction. A second
+    /// hand-written list is exactly what omitted `KW_IN` from the round-trip
+    /// test's copy of it.
+    ///
+    /// M11's TextMate grammar is tested against this: the editor's keyword
+    /// pattern is a copy of the lexer's table that no compiler checks, and the
+    /// failure — a word quietly stopping being coloured — is one nobody files.
+    #[must_use]
+    pub fn all_keyword_texts() -> Vec<&'static str> {
+        (0..=Self::LAST)
+            .map(Self::from_raw_u16)
+            .filter_map(Self::keyword_text)
+            .collect()
+    }
+
     /// Whether this kind is one of the three shapes a written type annotation
     /// can take: a name (with or without bracketed arguments), a tuple, or a
     /// function type.

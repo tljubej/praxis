@@ -9,6 +9,7 @@
 //! displays (acceptance criterion 4).
 
 use crate::ast::{AtomicKind, ParserAst, TemplatePart};
+use praxis_source::Span;
 use praxis_types::{
     CollectionCtor, EnumVariantDef, FieldSet, TupleElems, Type, TypeCtorError, TypeDb, VariantSet,
 };
@@ -23,22 +24,73 @@ use praxis_types::{
 /// an internal inconsistency. `validate` catches those cases today; threading
 /// the `Result` is what keeps the two from drifting apart silently.
 pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Result<Type, TypeCtorError> {
+    let mut discard = Vec::new();
+    synth(ast, db, &mut discard)
+}
+
+/// [`synthesize`], keeping the type it derived for **every** node on the way
+/// (ADR-098), not only the root's.
+///
+/// §15.3 asks for the synthesized type of *a* parser expression, and an inner
+/// constructor is one. The recursion already computes every inner type and used
+/// to drop each on the way back up, so hover on `lines(…)` inside
+/// `sections(lines(…))` had nothing to read.
+///
+/// The entries come out in **post-order** — a node is recorded after the
+/// children it was derived from — so where two nodes share a span the earlier
+/// entry is the deeper one. That is the tie-break the cursor lookup uses; it is
+/// not cosmetic, because `` `{int}` `` gives a single-capture template and its
+/// capture's parser genuinely equal extents.
+///
+/// # Errors
+/// The same [`TypeCtorError`]s [`synthesize`] answers.
+pub fn synthesize_indexed(
+    ast: &ParserAst,
+    db: &mut TypeDb,
+) -> Result<(Type, Vec<(Span, Type)>), TypeCtorError> {
+    let mut out = Vec::new();
+    let ty = synth(ast, db, &mut out)?;
+    Ok((ty, out))
+}
+
+/// The §7.8 derivation table — **one implementation**, walked once, recording as
+/// it goes. `synthesize` and `synthesize_indexed` differ only in whether they
+/// keep the recording.
+fn synth(
+    ast: &ParserAst,
+    db: &mut TypeDb,
+    out: &mut Vec<(Span, Type)>,
+) -> Result<Type, TypeCtorError> {
+    let ty = synth_inner(ast, db, out)?;
+    // Recorded **after** the recursion, so children precede their parent. A
+    // `Type` has no forgeable value to reserve a slot with (it is a sealed arena
+    // index, F5), which is the other reason this is post-order and not a
+    // patched-in placeholder.
+    out.push((ast.span(), ty));
+    Ok(ty)
+}
+
+fn synth_inner(
+    ast: &ParserAst,
+    db: &mut TypeDb,
+    out: &mut Vec<(Span, Type)>,
+) -> Result<Type, TypeCtorError> {
     Ok(match ast {
         ParserAst::Atomic { kind, .. } => atomic_type(*kind, db),
-        ParserAst::Template { parts, .. } => template_type(parts, db)?,
+        ParserAst::Template { parts, .. } => template_type(parts, db, out)?,
         ParserAst::Lines { child, .. }
         | ParserAst::Sections { child, .. }
         | ParserAst::Csv { child, .. }
         | ParserAst::Ws { child, .. } => {
-            let elem = synthesize(child, db)?;
+            let elem = synth(child, db, out)?;
             db.vec(elem)
         }
         ParserAst::Sep { child, .. } => {
-            let elem = synthesize(child, db)?;
+            let elem = synth(child, db, out)?;
             db.vec(elem)
         }
         ParserAst::Grid { child, .. } => {
-            let elem = synthesize(child, db)?;
+            let elem = synth(child, db, out)?;
             db.unary_collection(CollectionCtor::Grid, elem)
         }
         ParserAst::SectionsNamed {
@@ -50,10 +102,10 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Result<Type, TypeCtorErro
             // `Vec[result(P)]` field for the `repeated` tail (if any).
             let mut rec_fields: Vec<(String, Type)> = Vec::with_capacity(fields.len());
             for (name, p) in fields {
-                rec_fields.push((name.clone(), synthesize(p, db)?));
+                rec_fields.push((name.clone(), synth(p, db, out)?));
             }
             if let Some((name, tail)) = repeated_tail {
-                let elem = synthesize(tail, db)?;
+                let elem = synth(tail, db, out)?;
                 rec_fields.push((name.clone(), db.vec(elem)));
             }
             db.record(None, FieldSet::from_pairs(rec_fields)?)
@@ -71,16 +123,17 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Result<Type, TypeCtorErro
                                 if let TemplatePart::Capture {
                                     name: Some(n),
                                     parser,
+                                    ..
                                 } = part
                                 {
                                     rec_fields
-                                        .push((n.as_str().to_string(), synthesize(parser, db)?));
+                                        .push((n.as_str().to_string(), synth(parser, db, out)?));
                                 }
                             }
                         }
                     }
                     crate::ast::BlockItem::Named { name, parser } => {
-                        rec_fields.push((name.clone(), synthesize(parser, db)?));
+                        rec_fields.push((name.clone(), synth(parser, db, out)?));
                     }
                 }
             }
@@ -93,7 +146,7 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Result<Type, TypeCtorErro
             // via the M9 unify arm and the absent name.
             let mut variants: Vec<EnumVariantDef> = Vec::with_capacity(cases.len());
             for (name, p) in cases {
-                let payload_ty = synthesize(p, db)?;
+                let payload_ty = synth(p, db, out)?;
                 variants.push(EnumVariantDef::new(name.clone(), vec![payload_ty]));
             }
             db.enum_(None, VariantSet::new(variants)?)
@@ -103,12 +156,12 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Result<Type, TypeCtorErro
             // (F12), applied to the child's result type. This used to spell the
             // variant list out and register a *fresh nominal def* per site,
             // which is one of TY-06's three copies of `Option`.
-            let elem = synthesize(child, db)?;
+            let elem = synth(child, db, out)?;
             db.option_of(elem)
         }
         ParserAst::Scan { child, .. } => {
             // `scan(P)` → `Vec[result(P)]` (§7.5): matches in source order.
-            let elem = synthesize(child, db)?;
+            let elem = synth(child, db, out)?;
             db.vec(elem)
         }
         ParserAst::OneOf { .. } => {
@@ -126,12 +179,12 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Result<Type, TypeCtorErro
             // the class of defect P0-11 closed for collections generally.
             // `chars(one_of("LR"))` is still `Vec[Char]`, because `one_of`
             // synthesizes `Char`; it is derived now rather than assumed.
-            let elem = synthesize(child, db)?;
+            let elem = synth(child, db, out)?;
             db.vec(elem)
         }
         ParserAst::Matrix { child, .. } | ParserAst::GridRagged { child, .. } => {
             // `matrix(P)` / ragged `grid(P)` → Grid[result(P)] (§7.5, ADR-030).
-            let elem = synthesize(child, db)?;
+            let elem = synth(child, db, out)?;
             db.unary_collection(CollectionCtor::Grid, elem)
         }
     })
@@ -166,7 +219,11 @@ fn atomic_type(kind: AtomicKind, db: &mut TypeDb) -> Type {
 /// ADR-092) — `praxis check` typed ``lines(`{int},{int}`)`` as
 /// `Vec[(Int, Int)]` throughout, while the value it produced was tagged `Unit`.
 /// If a shape is ever added, it is added in both places.
-fn template_type(parts: &[TemplatePart], db: &mut TypeDb) -> Result<Type, TypeCtorError> {
+fn template_type(
+    parts: &[TemplatePart],
+    db: &mut TypeDb,
+    out: &mut Vec<(Span, Type)>,
+) -> Result<Type, TypeCtorError> {
     let captures: Vec<&TemplatePart> = parts
         .iter()
         .filter(|p| matches!(p, TemplatePart::Capture { .. }))
@@ -183,7 +240,7 @@ fn template_type(parts: &[TemplatePart], db: &mut TypeDb) -> Result<Type, TypeCt
 
     if any_named {
         // Named captures → anonymous structural record (§5.6, M7 ADR-025).
-        return record_type(&captures, db);
+        return record_type(&captures, db, out);
     }
 
     // All anonymous: scalar if one, tuple if many (§7.3).
@@ -192,7 +249,7 @@ fn template_type(parts: &[TemplatePart], db: &mut TypeDb) -> Result<Type, TypeCt
         let TemplatePart::Capture { parser, .. } = p else {
             unreachable!("filtered to captures")
         };
-        elem_types.push(synthesize(parser, db)?);
+        elem_types.push(synth(parser, db, out)?);
     }
     if elem_types.len() == 1 {
         Ok(elem_types[0])
@@ -207,18 +264,22 @@ fn template_type(parts: &[TemplatePart], db: &mut TypeDb) -> Result<Type, TypeCt
 /// record type is a proper `TypeData::Record` variant (M7, ADR-025), with fields
 /// keyed by name. Two records with the same field names (in any order) and
 /// structurally-equal types share one type.
-fn record_type(captures: &[&TemplatePart], db: &mut TypeDb) -> Result<Type, TypeCtorError> {
+fn record_type(
+    captures: &[&TemplatePart],
+    db: &mut TypeDb,
+    out: &mut Vec<(Span, Type)>,
+) -> Result<Type, TypeCtorError> {
     // Collect (name, type) pairs in source order. Display preserves this order;
     // identity is name-set-based (§5.6), established through unification.
     let mut fields = Vec::with_capacity(captures.len());
     for part in captures {
         match part {
-            TemplatePart::Capture { name, parser } => {
+            TemplatePart::Capture { name, parser, .. } => {
                 let name_str = name
                     .as_ref()
                     .map(|n| n.as_str().to_string())
                     .unwrap_or_default();
-                fields.push((name_str, synthesize(parser, db)?));
+                fields.push((name_str, synth(parser, db, out)?));
             }
             _ => unreachable!("filtered to captures"),
         }
@@ -378,6 +439,8 @@ mod tests {
             parts: vec![TemplatePart::Capture {
                 name: None,
                 parser: Box::new(atom(AtomicKind::Int)),
+                span: Span::at(0),
+                name_span: None,
             }],
             span: Span::at(0),
         };
@@ -397,10 +460,14 @@ mod tests {
                 TemplatePart::Capture {
                     name: None,
                     parser: Box::new(atom(AtomicKind::Int)),
+                    span: Span::at(0),
+                    name_span: None,
                 },
                 TemplatePart::Capture {
                     name: None,
                     parser: Box::new(atom(AtomicKind::Int)),
+                    span: Span::at(0),
+                    name_span: None,
                 },
             ],
             span: Span::at(0),
@@ -418,10 +485,14 @@ mod tests {
                 TemplatePart::Capture {
                     name: Some(CaptureName::parse("x").expect("an identifier")),
                     parser: Box::new(atom(AtomicKind::Int)),
+                    span: Span::at(0),
+                    name_span: None,
                 },
                 TemplatePart::Capture {
                     name: Some(CaptureName::parse("y").expect("an identifier")),
                     parser: Box::new(atom(AtomicKind::Int)),
+                    span: Span::at(0),
+                    name_span: None,
                 },
             ],
             span: Span::at(0),
@@ -449,10 +520,14 @@ mod tests {
                     TemplatePart::Capture {
                         name: Some(CaptureName::parse("x").expect("an identifier")),
                         parser: Box::new(atom(AtomicKind::Int)),
+                        span: Span::at(0),
+                        name_span: None,
                     },
                     TemplatePart::Capture {
                         name: Some(CaptureName::parse("y").expect("an identifier")),
                         parser: Box::new(atom(AtomicKind::Int)),
+                        span: Span::at(0),
+                        name_span: None,
                     },
                 ],
                 span: Span::at(0),

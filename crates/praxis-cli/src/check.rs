@@ -1,5 +1,5 @@
-//! The `praxis check` command: load a `.px` file, run the front end (lex +
-//! parse as of Milestone 1), render any diagnostics, and return the exit code.
+//! The `praxis check` command: load a `.px` file, run the front end, render any
+//! diagnostics, and return the exit code.
 //!
 //! Exit codes:
 //! - `0` — no errors.
@@ -9,8 +9,20 @@
 //! `check::run` prints its own diagnostics and never returns `Err` for a
 //! user-facing problem (a missing file is reported here, not via `anyhow`),
 //! so the exit code it returns is the final one.
+//!
+//! # The front end is not here (ADR-097)
+//!
+//! This file used to hold its own parse → analyze → concatenate → sort-by-span
+//! sequence. §14.2 requires the CLI and the LSP to share one front-end query
+//! API, and M11 built it: `praxis_lsp::query::Snapshot`. The sequence lives
+//! there now, stated once, so a divergence between what `praxis check` prints
+//! and what the editor underlines is unrepresentable rather than merely
+//! unlikely.
 
 use std::path::Path;
+
+use praxis_lsp::query::Snapshot;
+use praxis_lsp::Revision;
 
 use crate::color_mode::ColorMode;
 use crate::diagnostic_render;
@@ -26,27 +38,13 @@ pub fn run(file: &str, color: ColorMode) -> anyhow::Result<i32> {
         }
     };
 
-    // Intern the file into the source map so diagnostics can reference it.
-    let source = praxis_source::SourceMap::new();
-    let id = source.intern(path, text.clone());
+    // One snapshot, one revision: a process that exits has no revisions to
+    // invalidate. The queries it answers are the ones the language server asks.
+    let snapshot = Snapshot::new(file, text, Revision(0));
+    let diagnostics = snapshot.diagnostics();
 
-    // Front end: lex + parse, producing a lossless tree and any `T0xx` (lex) /
-    // `P0xx` (parse) diagnostics. Then name resolution + type inference (M2)
-    // add `N0xx` (name) / `Y0xx` (type) diagnostics on top.
-    let parsed = praxis_parser::parse(id, &text);
-    let mut diagnostics = parsed.diagnostics;
-
-    // Skip semantic analysis if parsing already failed badly enough that the
-    // tree would mislead resolution. We still run analysis when there are parse
-    // errors (recovery keeps the tree usable), but only if the root is intact.
-    let analysis = praxis_hir::analyze_root(id, &parsed.tree);
-    diagnostics.extend(analysis.diagnostics);
-    diagnostics.sort_by_key(|d| {
-        let s = d.primary().span;
-        (s.start(), s.end())
-    });
-
-    let rendered = diagnostic_render::render_all(&source, &diagnostics, color.palette());
+    let rendered =
+        diagnostic_render::render_all(snapshot.source_map(), &diagnostics, color.palette());
     diagnostic_render::write_to(&mut std::io::stderr(), &rendered)?;
 
     Ok(if rendered.has_errors() { 1 } else { 0 })

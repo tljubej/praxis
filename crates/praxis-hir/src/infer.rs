@@ -61,6 +61,9 @@ pub struct Inference {
     pub expr_types: HashMap<crate::NodeKey, Type>,
     /// Each method call, keyed by the method-name token's range (F15/HIR-02).
     pub method_refs: HashMap<TextRange, crate::MethodRef>,
+    /// The retained parser AST and per-node types of each `read`/`parse` body
+    /// (ADR-098), in the order inference reached them.
+    pub parser_exprs: Vec<crate::ParserIndex>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -92,6 +95,7 @@ pub(crate) fn infer_with_tree(
         call_sites: HashMap::new(),
         expr_types: HashMap::new(),
         method_refs: HashMap::new(),
+        parser_exprs: Vec::new(),
         diagnostics: Vec::new(),
         catalog: builtin_catalog(),
         decl_site: Level::OUTERMOST,
@@ -116,6 +120,7 @@ pub(crate) fn infer_with_tree(
         call_sites: inferer.call_sites,
         expr_types: inferer.expr_types,
         method_refs: inferer.method_refs,
+        parser_exprs: inferer.parser_exprs,
         diagnostics,
     }
 }
@@ -206,6 +211,8 @@ struct Inferer {
     /// `ref_types` — everything that walks references had to know to skip it,
     /// and hover, which asks `refs` first, never saw it at all.
     method_refs: HashMap<TextRange, crate::MethodRef>,
+    /// ADR-098's spanned parser index, appended to by `synthesize_parser_type`.
+    parser_exprs: Vec<crate::ParserIndex>,
     diagnostics: Vec<Diagnostic>,
     /// The built-in method catalog (§16.2), for resolving `receiver.method()`.
     /// Immutable; shared via a process-wide `OnceLock`.
@@ -2417,6 +2424,7 @@ impl Inferer {
                 self.file,
                 &mut self.db,
                 &mut self.diagnostics,
+                &mut self.parser_exprs,
             )
             .unwrap_or_else(|| self.db.fresh_var()),
             None => self.db.fresh_var(),
@@ -2446,6 +2454,7 @@ impl Inferer {
                 self.file,
                 &mut self.db,
                 &mut self.diagnostics,
+                &mut self.parser_exprs,
             )
             .unwrap_or_else(|| self.db.fresh_var()),
             None => self.db.fresh_var(),

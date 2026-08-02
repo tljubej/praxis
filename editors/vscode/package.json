@@ -1,0 +1,113 @@
+{
+  "name": "praxis",
+  "displayName": "Praxis",
+  "description": "Language support for Praxis: syntax highlighting, diagnostics, hover, completion, and the local toolchain commands.",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tljubej/praxis"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:praxis"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "praxis",
+        "aliases": [
+          "Praxis",
+          "praxis"
+        ],
+        "extensions": [
+          ".px"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "praxis",
+        "scopeName": "source.praxis",
+        "path": "./syntaxes/praxis.tmLanguage.json"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "praxis",
+        "scopes": {
+          "parserConstructor": [
+            "entity.name.function.parser.praxis"
+          ],
+          "parserTemplateText": [
+            "string.quoted.other.template.praxis"
+          ],
+          "parserCaptureName": [
+            "variable.other.capture.praxis"
+          ],
+          "parserCaptureType": [
+            "support.type.capture.praxis"
+          ]
+        }
+      }
+    ],
+    "commands": [
+      {
+        "command": "praxis.runFile",
+        "title": "Praxis: Run File"
+      },
+      {
+        "command": "praxis.checkFile",
+        "title": "Praxis: Check File"
+      },
+      {
+        "command": "praxis.watchFile",
+        "title": "Praxis: Watch File (not implemented yet — `praxis watch` reports which milestone owns it)"
+      },
+      {
+        "command": "praxis.restartServer",
+        "title": "Praxis: Restart Language Server"
+      }
+    ],
+    "configuration": {
+      "title": "Praxis",
+      "properties": {
+        "praxis.binaryPath": {
+          "type": "string",
+          "default": "praxis",
+          "description": "Path to the `praxis` binary. The language server is `praxis lsp`; the run/check/watch commands invoke the same binary. A bare name is resolved on PATH."
+        },
+        "praxis.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace the JSON-RPC traffic between VS Code and `praxis lsp`."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "node --test out/argv.test.js"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.4.0"
+  }
+}

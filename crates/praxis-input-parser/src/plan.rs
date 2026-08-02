@@ -675,14 +675,14 @@ fn lower_template_parts(
     let mut nodes = Vec::new();
     for part in parts {
         match part {
-            TemplatePart::Literal { text, ws } => {
+            TemplatePart::Literal { text, ws, .. } => {
                 let text_static = b.alloc_str(text);
                 nodes.push(TemplatePartNode::Literal {
                     text: text_static,
                     ws: *ws,
                 });
             }
-            TemplatePart::Capture { name, parser } => {
+            TemplatePart::Capture { name, parser, .. } => {
                 let child = lower_node(b, parser);
                 let field_index = captures
                     .iter()
@@ -871,10 +871,13 @@ mod tests {
                         kind: AtomicKind::Int,
                         span: Span::at(0),
                     }),
+                    span: Span::at(0),
+                    name_span: None,
                 },
                 TemplatePart::Literal {
                     text: ",".to_string(),
                     ws: WsPolicy::SpaceRun,
+                    span: Span::at(0),
                 },
                 TemplatePart::Capture {
                     name: None,
@@ -882,6 +885,8 @@ mod tests {
                         kind: AtomicKind::Int,
                         span: Span::at(0),
                     }),
+                    span: Span::at(0),
+                    name_span: None,
                 },
             ],
             span: Span::at(0),

@@ -22,9 +22,14 @@ praxis-runtime.workspace = true
 praxis-debugger.workspace = true
 praxis-stdlib.workspace = true
 praxis-codegen-cranelift.workspace = true
+# The shared front-end query layer (§14.2, ADR-097). `praxis check` calls it, so
+# the CLI and the editor cannot disagree about what a file says.
+praxis-lsp.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+praxis-input-parser.workspace = true
 praxis-test-support.workspace = true
+serde_json.workspace = true

@@ -751,6 +751,10 @@ pub fn lower(
         call_sites,
         expr_types,
         method_refs,
+        // ADR-098's index is the language server's, not lowering's: lowering
+        // runs `analyze_parser_expr`, which builds and registers a plan from the
+        // rowan tree, and never reads a retained AST.
+        parser_exprs: _,
         diagnostics: _,
     } = analysis;
     // Cache the scalar/unit handles once (these methods need &mut db).

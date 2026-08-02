@@ -23,7 +23,7 @@
 use std::iter::Peekable;
 use std::str::CharIndices;
 
-use praxis_source::DiagCode;
+use praxis_source::{DiagCode, Span};
 
 use crate::ast::{TemplatePart, WsPolicy};
 use crate::validate::ValidationError;
@@ -333,16 +333,25 @@ pub(crate) fn scan_template_at(
         });
     }
     let mut parts = Vec::new();
+    // The accumulating literal run, and the **source** extent it was decoded
+    // from. The two lengths differ whenever an escape contributes a character
+    // (`` \` `` is two bytes and one char), which is why the run carries its own
+    // start/end rather than being reconstructed from `lit.len()`.
     let mut lit = String::new();
+    let mut lit_run: Option<(usize, usize)> = None;
     let mut cur = Scan::new(interior);
 
     while let Some((at, c)) = cur.peek() {
         match c {
             '{' => {
-                flush(&mut lit, &mut parts);
+                flush(&mut lit, &mut lit_run, &mut parts);
                 let (name, body_text, body_at) = capture_extent(&mut cur, at)?;
+                // The capture's extent is what the cursor just crossed: the `{`
+                // it started on through the `}` it stopped after.
+                let span = Span::new(at as u32, cur.pos() as u32);
+                let name_span = name.map(|(raw, raw_at)| trimmed_span(raw, raw_at));
                 let name = match name {
-                    Some(raw) => Some(capture_name(raw, at)?),
+                    Some((raw, _)) => Some(capture_name(raw, at)?),
                     None => None,
                 };
                 // **Not `depth + 1`.** A capture body is inside *this*
@@ -353,6 +362,8 @@ pub(crate) fn scan_template_at(
                 parts.push(TemplatePart::Capture {
                     name,
                     parser: Box::new(parser),
+                    span,
+                    name_span,
                 });
             }
             '\\' => {
@@ -365,23 +376,47 @@ pub(crate) fn scan_template_at(
                 cur.bump();
                 match escape(&mut cur, at)? {
                     Escape::Policy(ws) => {
-                        flush(&mut lit, &mut parts);
+                        flush(&mut lit, &mut lit_run, &mut parts);
                         parts.push(TemplatePart::Literal {
                             text: String::new(),
                             ws,
+                            span: Span::new(at as u32, cur.pos() as u32),
                         });
                     }
-                    Escape::Char(ch) => lit.push(ch),
+                    Escape::Char(ch) => {
+                        lit.push(ch);
+                        extend_run(&mut lit_run, at, cur.pos());
+                    }
                 }
             }
             _ => {
                 cur.bump();
                 lit.push(c);
+                extend_run(&mut lit_run, at, cur.pos());
             }
         }
     }
-    flush(&mut lit, &mut parts);
+    flush(&mut lit, &mut lit_run, &mut parts);
     Ok(parts)
+}
+
+/// Grow the literal run's source extent to cover `[at, end)`.
+fn extend_run(run: &mut Option<(usize, usize)>, at: usize, end: usize) {
+    match run {
+        Some((_, e)) => *e = end,
+        None => *run = Some((at, end)),
+    }
+}
+
+/// The span of `raw` **after trimming**, given that `raw` starts at `base`.
+///
+/// `capture_name` parses the trimmed text, so `{ n :int}` names `n`; the span
+/// has to name the same three-byte-shorter thing, or hover and semantic tokens
+/// would paint the surrounding spaces as part of the name.
+fn trimmed_span(raw: &str, base: usize) -> Span {
+    let lead = raw.len() - raw.trim_start().len();
+    let start = base + lead;
+    Span::new(start as u32, (start + raw.trim().len()) as u32)
 }
 
 /// Flush the accumulated literal run, turning a space/tab run at **either** end
@@ -439,18 +474,35 @@ pub(crate) fn scan_template_at(
 /// its **front** carries `SpaceRun`; one that did not carries
 /// [`WsPolicy::None`], and then `SpaceRun` can require the one-or-more its own
 /// definition promises — at both ends.
-fn flush(lit: &mut String, parts: &mut Vec<TemplatePart>) {
+fn flush(lit: &mut String, run: &mut Option<(usize, usize)>, parts: &mut Vec<TemplatePart>) {
     if lit.is_empty() {
+        *run = None;
         return;
     }
     let text = std::mem::take(lit);
-    let had_leading_run = text.starts_with([' ', '\t']);
-    let stripped = text.trim_matches([' ', '\t']);
+    // The run's source extent. A non-empty `lit` always has one — every push
+    // site calls `extend_run` — so the fallback is unreachable and empty rather
+    // than a guess.
+    let (run_start, run_end) = run.take().unwrap_or((0, 0));
+    let after_lead = text.trim_start_matches([' ', '\t']);
+    let lead = text.len() - after_lead.len();
+    let stripped = after_lead.trim_end_matches([' ', '\t']);
+    let trail = after_lead.len() - stripped.len();
+    let had_leading_run = lead > 0;
     // A literal whose runs strip it to nothing is pure whitespace: one run, one
     // part, and the policy *is* the part. `had_leading_run` is true here by
     // construction (a non-empty all-whitespace text starts with whitespace), so
     // the single part carries the policy.
-    let had_trailing_run = !stripped.is_empty() && text.ends_with([' ', '\t']);
+    let had_trailing_run = !stripped.is_empty() && trail > 0;
+    // The stripped runs are spaces and tabs, and a space or a tab only ever
+    // reaches `lit` as **one source byte** — `\t` and `\x20` are policy parts,
+    // and the two escapes that do produce a character produce `` ` `` or `\`.
+    // So the byte counts on either end are the source byte counts too.
+    let (text_start, text_end) = if stripped.is_empty() {
+        (run_start, run_end)
+    } else {
+        (run_start + lead, run_end - trail)
+    };
     parts.push(TemplatePart::Literal {
         text: stripped.to_string(),
         ws: if had_leading_run {
@@ -458,6 +510,7 @@ fn flush(lit: &mut String, parts: &mut Vec<TemplatePart>) {
         } else {
             WsPolicy::None
         },
+        span: Span::new(text_start as u32, text_end as u32),
     });
     if had_trailing_run {
         // The trailing run has no slot on the literal it followed — the slot is
@@ -465,6 +518,7 @@ fn flush(lit: &mut String, parts: &mut Vec<TemplatePart>) {
         parts.push(TemplatePart::Literal {
             text: String::new(),
             ws: WsPolicy::SpaceRun,
+            span: Span::new(text_end as u32, run_end as u32),
         });
     }
 }
@@ -530,17 +584,22 @@ fn escape(cur: &mut Scan<'_>, at: usize) -> Result<Escape, ScanError> {
 }
 
 /// Consume a capture starting at the `{` the cursor is sitting on, returning
-/// `(optional name text, body text, body's byte offset)`.
+/// `(optional name text **and where it starts**, body text, body's byte
+/// offset)`.
+///
+/// The name's own offset is returned rather than derived, because the two
+/// offsets are not the same: the body begins after the `:`, and computing the
+/// name's span from the body's base put the capture-*name* token on top of the
+/// capture *type* — `{name:word}` reported its name as `word`.
 ///
 /// **The `}`-scan is depth-aware** (D10). A capture body may hold `}` inside a
 /// string (`{c:one_of("}")}`), `)` and `,` inside a call (`{xs:sep(",", int)}`),
 /// and a template of its own. The predecessor scanned to the *first* `}`, which
 /// is why the grammar had to be "atomics only" — and §7.7's own monkey example
 /// writes `{items:csv(int)}`.
-fn capture_extent<'a>(
-    cur: &mut Scan<'a>,
-    open: usize,
-) -> Result<(Option<&'a str>, &'a str, usize), ScanError> {
+type CaptureExtent<'a> = (Option<(&'a str, usize)>, &'a str, usize);
+
+fn capture_extent<'a>(cur: &mut Scan<'a>, open: usize) -> Result<CaptureExtent<'a>, ScanError> {
     cur.bump(); // the `{`
     let body_at = cur.pos();
     let mut braces = 1usize;
@@ -626,7 +685,7 @@ fn capture_extent<'a>(
     }
     match name_colon {
         Some(colon) => Ok((
-            Some(&src[body_at..colon]),
+            Some((&src[body_at..colon], body_at)),
             &src[colon + 1..close],
             colon + 1,
         )),
@@ -803,7 +862,7 @@ mod tests {
         // consumes it, and `\\x20` is the escape for a space that must match.
         let parts = scan_template("{a:int} a b {b:int}").unwrap();
         match &parts[1] {
-            TemplatePart::Literal { text, ws } => {
+            TemplatePart::Literal { text, ws, .. } => {
                 assert_eq!(text, "a b");
                 assert_eq!(*ws, WsPolicy::SpaceRun);
             }
@@ -811,7 +870,7 @@ mod tests {
         }
         // The trailing run of that same literal, as its own part.
         match &parts[2] {
-            TemplatePart::Literal { text, ws } => {
+            TemplatePart::Literal { text, ws, .. } => {
                 assert!(text.is_empty());
                 assert_eq!(*ws, WsPolicy::SpaceRun);
             }
@@ -835,7 +894,7 @@ mod tests {
         let parts = scan_template("{a:int} {b:int}").unwrap();
         assert_eq!(parts.len(), 3);
         match &parts[1] {
-            TemplatePart::Literal { text, ws } => {
+            TemplatePart::Literal { text, ws, .. } => {
                 assert!(text.is_empty());
                 assert_eq!(*ws, WsPolicy::SpaceRun);
             }
@@ -845,7 +904,7 @@ mod tests {
         // An escaped policy is untouched: it carries no text to strip.
         let parts = scan_template(r"{a:int}\s+{b:int}").unwrap();
         match &parts[1] {
-            TemplatePart::Literal { text, ws } => {
+            TemplatePart::Literal { text, ws, .. } => {
                 assert!(text.is_empty());
                 assert_eq!(*ws, WsPolicy::OneOrMore);
             }
@@ -1040,7 +1099,7 @@ mod tests {
         // scan must not end the capture, and the name split must not fire.
         let parts = scan_template(r#"{s:sep("-", int)}"#).unwrap();
         match &parts[0] {
-            TemplatePart::Capture { name, parser } => {
+            TemplatePart::Capture { name, parser, .. } => {
                 assert_eq!(name.as_ref().map(|n| n.as_str()), Some("s"));
                 match parser.as_ref() {
                     ParserAst::Sep { separator, .. } => assert_eq!(separator.as_str(), "-"),
@@ -1073,7 +1132,7 @@ mod tests {
         // A colon inside a nested call is not the name separator.
         let parts = scan_template("{g:choice(A: word, B: int)}").unwrap();
         match &parts[0] {
-            TemplatePart::Capture { name, parser } => {
+            TemplatePart::Capture { name, parser, .. } => {
                 assert_eq!(name.as_ref().map(|n| n.as_str()), Some("g"));
                 match parser.as_ref() {
                     ParserAst::Choice { cases, .. } => assert_eq!(cases.len(), 2),

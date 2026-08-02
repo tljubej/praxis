@@ -99,3 +99,7 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-092: A template's shape is read from its parts, in one place, and there is no tuple node](./092-a-templates-shape-is-read-from-its-parts.md)
 - [ADR-093: A method that cannot resolve is reported at `check` — one emitter for `Y110`, and it is inference's](./093-a-method-that-cannot-resolve-is-reported-at-check.md)
 - [ADR-094: A backtick template ends at the line it opens on](./094-a-template-ends-at-the-line-it-opens-on.md)
+- [ADR-095: The language server is a synchronous, single-threaded stdio loop](./095-the-language-server-is-a-synchronous-stdio-loop.md)
+- [ADR-096: Positions convert at the protocol boundary; `LineMap` stays byte-based](./096-positions-convert-at-the-protocol-boundary.md)
+- [ADR-097: The shared query layer lives in `praxis-lsp`, and `praxis check` routes through it](./097-the-shared-query-layer-lives-in-praxis-lsp.md)
+- [ADR-098: The parser AST is retained by inference, and per-node types with it](./098-the-parser-ast-is-retained-by-inference.md)

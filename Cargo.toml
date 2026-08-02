@@ -36,10 +36,19 @@ cranelift-frontend = "0.134"
 cranelift-jit = "0.134"
 cranelift-module = "0.134"
 cranelift-native = "0.134"
+crossbeam-channel = "0.5"
 insta = "1"
 proptest = "1"
 rowan = "0.16"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 unicode-ident = "1"
+
+# The rust-analyzer transport crates (ADR-095): a synchronous, crossbeam-channel
+# message loop and the protocol's types. No async runtime is pulled in by
+# either, which is half the reason they were chosen.
+lsp-server = "0.10"
+lsp-types = "0.97"
 
 # Internal crates — paths so every consumer resolves to the workspace copy.
 praxis-ast = { path = "crates/praxis-ast" }

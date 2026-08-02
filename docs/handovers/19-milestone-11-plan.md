@@ -2,7 +2,10 @@
 
 **Date:** 2026-08-01
 **Tree:** `bcc5319` (every claim below about existing code was read there)
-**Status:** plan, nothing implemented
+**Status:** **superseded** by `20-milestone-11-handover.md` — M11 is complete.
+This document is kept as the record of what was planned and measured *before*
+the code; the handover says what shipped, where the plan was right (§8's
+completion measurement), and the three things it did not foresee.
 **Predecessor:** `18-every-row-closed-handover.md` — the repair is closed, the
 register is empty, so M11 starts from a green gate and not from a debt list.
 

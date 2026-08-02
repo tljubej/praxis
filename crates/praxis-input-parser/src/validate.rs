@@ -198,7 +198,7 @@ fn validate_template(parts: &[TemplatePart], span: Span, errs: &mut Vec<Validati
     let mut has_named = false;
     let mut has_anonymous = false;
     for part in parts {
-        if let TemplatePart::Capture { name, parser } = part {
+        if let TemplatePart::Capture { name, parser, .. } = part {
             if name.is_some() {
                 has_named = true;
             } else {
@@ -502,10 +502,14 @@ mod tests {
                 TemplatePart::Capture {
                     name: Some(CaptureName::parse("x").expect("an identifier")),
                     parser: Box::new(atom()),
+                    span: Span::at(0),
+                    name_span: None,
                 },
                 TemplatePart::Capture {
                     name: None,
                     parser: Box::new(atom()),
+                    span: Span::at(0),
+                    name_span: None,
                 },
             ],
             span: Span::at(0),
@@ -522,10 +526,14 @@ mod tests {
                 TemplatePart::Capture {
                     name: Some(CaptureName::parse("x").expect("an identifier")),
                     parser: Box::new(atom()),
+                    span: Span::at(0),
+                    name_span: None,
                 },
                 TemplatePart::Capture {
                     name: Some(CaptureName::parse("x").expect("an identifier")),
                     parser: Box::new(atom()),
+                    span: Span::at(0),
+                    name_span: None,
                 },
             ],
             span: Span::at(0),

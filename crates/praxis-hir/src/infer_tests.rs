@@ -3328,7 +3328,7 @@ fn a_capture_body_is_a_full_parser_expression() {
         assert!(!has_input_error(src), "a nested template is a parser body");
         match parser_ast_of(src) {
             ParserAst::Template { parts, .. } => match &parts[0] {
-                TemplatePart::Capture { name, parser } => {
+                TemplatePart::Capture { name, parser, .. } => {
                     assert_eq!(name.as_ref().map(|n| n.as_str()), Some("g"));
                     match parser.as_ref() {
                         ParserAst::Choice { cases, .. } => {
