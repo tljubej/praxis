@@ -78,10 +78,32 @@ npm test
 `just ci`, for the reason above; the drift it would catch that matters — a
 subcommand the CLI no longer has — is caught by the Rust gate instead.
 
+## Sideloading it
+
+`F5` runs the extension from *source*, which is not the same thing a user
+installs — and the difference has already hidden one bug (see the `.vscodeignore`
+comment). So the packaged form is worth checking too:
+
+```bash
+npm install && npm run compile && npx @vscode/vsce package
+```
+
+That writes `praxis-0.1.0.vsix`. Install it from the Extensions view's `…` menu
+→ **Install from VSIX…**, or with the CLI:
+
+```bash
+code --install-extension editors/vscode/praxis-0.1.0.vsix
+```
+
+Then set `praxis.binaryPath` to an absolute path to the built binary, or put
+`praxis` on `PATH` with `cargo install --path crates/praxis-cli`. The `.vsix` is
+gitignored; reinstalling the same version replaces the previous one.
+
 ## The manual check
 
 The last mile genuinely needs a host, so it is written down rather than
-automated:
+automated. Steps 1–7 run from source (`F5`); **step 8 is the packaged form**,
+because the two differ:
 
 1. `cargo build --release` (or `cargo build`), and set `praxis.binaryPath` to
    `target/debug/praxis` in the extension development host's settings.
@@ -96,3 +118,6 @@ automated:
 6. Run `Praxis: Run File` — the same terminal runs the program, with
    `--input input.txt` appended when that file sits beside the source.
 7. Run `Praxis: Restart Language Server` and confirm diagnostics come back.
+8. Package and install per "Sideloading it" above, reload, and confirm the
+   extension **activates** — a missing runtime dependency shows up only here,
+   as "Cannot find module" in the Extension Host log, and never under `F5`.

@@ -111,6 +111,39 @@ all be dropped together.
 The same loop also refuses requests that arrive after `shutdown`, which is the
 protocol's own rule and one line in the same place.
 
+### 2.7 The two bugs `F5` cannot find, and the two gates that now do
+
+Both were found by *installing* the extension rather than by running it from
+source, and neither was reachable from `just ci` as M11 first shipped it.
+
+**The `.vsix` did not ship its language client.** `.vscodeignore` excluded
+`node_modules/**` — right for a bundled extension, wrong for this one, because
+`vscode-languageclient` is a *runtime* dependency. `F5` cannot see it: the
+Extension Development Host runs from the source tree where `node_modules` is
+right there. Only a package finds it, and the symptom is an extension that
+installs cleanly and then fails to activate.
+
+**The client appended a flag the CLI did not have.** `TransportKind.stdio` makes
+`vscode-languageclient` add `--stdio` to the server's argv. `praxis lsp` is a
+clap subcommand and rejected it, exiting 2 before a byte of protocol — which the
+client reports as *"the server crashed 5 times in the last 3 minutes"*, naming
+neither the flag nor the exit code.
+
+`the_extensions_argv_names_only_subcommands_the_cli_has` could not catch the
+second one: it reads `argv.ts`, and the flag was never in `argv.ts` to be read —
+the client library injected it. **A gate that reads what we wrote cannot see
+what a dependency adds.** So the fix is on both sides and the gate is on the
+side that does not depend on us being right:
+
+- the extension sets no `transport`, so what it runs is exactly `serverArgv()`;
+- `praxis lsp` accepts `--stdio` as a documented no-op, because the next client
+  to pass it will not be ours, and
+  `the_server_accepts_the_stdio_flag_clients_append` drives the real binary with
+  it.
+
+Packaging is now a step in the extension README's manual check for the same
+reason: the last mile has two miles in it, and `F5` is only the first.
+
 ## 3. What §15.5's targets measured
 
 Engineering targets, not language semantics, so they are **measured and

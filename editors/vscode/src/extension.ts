@@ -16,7 +16,6 @@ import {
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
-  TransportKind,
 } from "vscode-languageclient/node";
 
 import type { PraxisSubcommand } from "./argv";
@@ -64,9 +63,14 @@ function binaryPath(): string {
 
 async function startServer(context: vscode.ExtensionContext): Promise<void> {
   const command = binaryPath();
+  // **No `transport` field**, deliberately. Setting `TransportKind.stdio`
+  // makes the client append `--stdio` to the server's argv, and the server's
+  // argv is `argv.ts`'s to decide — that is the whole reason the argv lives in
+  // one tested function. Omitting `transport` uses stdio pipes and passes
+  // nothing, so what the client runs is exactly `serverArgv()`.
   const serverOptions: ServerOptions = {
-    run: { command, args: serverArgv(), transport: TransportKind.stdio },
-    debug: { command, args: serverArgv(), transport: TransportKind.stdio },
+    run: { command, args: serverArgv() },
+    debug: { command, args: serverArgv() },
   };
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: LANGUAGE_ID }],

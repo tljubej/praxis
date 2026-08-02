@@ -66,7 +66,20 @@ enum Command {
     Repl,
     /// Start the language server over stdio (§15, M11). Speaks JSON-RPC LSP on
     /// stdin/stdout; not meant to be run by hand.
-    Lsp,
+    Lsp {
+        /// Accepted and ignored. Several LSP clients append `--stdio` to the
+        /// server's argv to select a transport — `vscode-languageclient` does
+        /// it whenever `TransportKind.stdio` is set, and a number of Neovim and
+        /// Helix configurations pass it by hand. stdio is the **only** transport
+        /// this server has, so the flag names what is already true.
+        ///
+        /// It is here because the alternative is exiting 2 on an argument the
+        /// convention says is harmless, before a byte of protocol is spoken —
+        /// which is what happened, and which every client reports as
+        /// "the server crashed" rather than as a bad flag.
+        #[arg(long)]
+        stdio: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -80,7 +93,8 @@ fn main() -> Result<()> {
         Command::Run { file, input, debug } => run::run(&file, input.as_deref(), debug, cli.color),
         Command::Watch { file } => not_implemented("watch", Some(&file), 0),
         Command::Repl => not_implemented("repl", None, 0),
-        Command::Lsp => praxis_lsp::run(),
+        // `stdio` is the only transport, so the flag selects nothing.
+        Command::Lsp { stdio: _ } => praxis_lsp::run(),
     }?;
 
     std::process::exit(exit);

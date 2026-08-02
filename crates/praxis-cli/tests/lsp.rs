@@ -27,8 +27,14 @@ struct Session {
 
 impl Session {
     fn start() -> Session {
+        Session::start_with(&[])
+    }
+
+    /// A session with extra arguments after `lsp`.
+    fn start_with(extra: &[&str]) -> Session {
         let mut child = Command::new(bin_path())
             .arg("lsp")
+            .args(extra)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -266,6 +272,28 @@ fn diagnostics_are_published_with_a_code_and_a_span() {
     assert_eq!(diags[0]["range"]["start"]["character"], 13);
     assert_eq!(diags[0]["range"]["end"]["character"], 16);
 
+    shutdown(&mut session);
+    assert_eq!(session.finish(), 0);
+}
+
+/// **`praxis lsp --stdio` completes the handshake.**
+///
+/// Several clients append `--stdio` to the server's argv to name a transport —
+/// `vscode-languageclient` does it whenever `TransportKind.stdio` is set, which
+/// is how the extension shipped and how it failed: clap rejected the flag and
+/// exited 2 before a byte of protocol, and the client reported it as "the server
+/// crashed 5 times".
+///
+/// The extension no longer sets `transport`, so it no longer passes the flag.
+/// This test is the *other* half — the one that does not depend on the
+/// extension being right, because the next client to pass it will not be ours.
+/// `the_extensions_argv_names_only_subcommands_the_cli_has` could not catch it:
+/// the flag was never in `argv.ts` to be read.
+#[test]
+fn the_server_accepts_the_stdio_flag_clients_append() {
+    let mut session = Session::start_with(&["--stdio"]);
+    let response = initialize(&mut session);
+    assert_eq!(response["result"]["serverInfo"]["name"], "praxis-lsp");
     shutdown(&mut session);
     assert_eq!(session.finish(), 0);
 }
