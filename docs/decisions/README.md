@@ -104,3 +104,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-097: The shared query layer lives in `praxis-lsp`, and `praxis check` routes through it](./097-the-shared-query-layer-lives-in-praxis-lsp.md)
 - [ADR-098: The parser AST is retained by inference, and per-node types with it](./098-the-parser-ast-is-retained-by-inference.md)
 - [ADR-099: A `[a, b]` is a `Vec` literal, and a `Text` is the eleventh iterable](./099-a-list-literal-is-a-vec-and-a-text-is-iterable.md)
+- [ADR-100: The shadow stack is one contiguous region, and the recursion limit is what keeps it in bounds](./100-the-shadow-stack-is-contiguous.md)

@@ -39,7 +39,7 @@ pub mod records;
 pub mod repr;
 pub mod roots;
 pub mod scalars;
-pub mod shadow_frame;
+pub mod shadow_stack;
 pub mod teardown;
 pub mod text;
 pub mod tuples;
@@ -66,7 +66,10 @@ pub use parse_detail::{ParseDetail, ParseFail};
 pub use records::{RecordField, RecordPayload, RecordSchema, SchemaIdentity};
 pub use repr::{instance_repr, InstanceArg, InstanceRepr};
 pub use roots::{NativeRootFrame, NativeScope, RootScope, RootSet, Rooted, RuntimeRoots};
-pub use shadow_frame::{ShadowFrame, MAX_SHADOW_SLOTS};
+pub use shadow_stack::{
+    push_frame, ShadowFrameGuard, ShadowStack, ShadowStackHeader, SlotCount, SlotStack,
+    SlotStackHeader, MAX_SHADOW_SLOTS, SHADOW_STACK_SLOTS,
+};
 pub use teardown::{retire_parser_plans, HeapDrained};
 pub use text::TextPayload;
 pub use tuples::{TuplePayload, TupleSchema};

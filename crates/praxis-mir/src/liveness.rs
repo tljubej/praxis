@@ -159,9 +159,9 @@ fn block_roots(
 }
 
 /// Forward *may* dataflow to a fixpoint: which shadow slots might hold a value
-/// at the top of each block. The entry block starts empty — the frame that
-/// `praxis_push_shadow_frame` hands back is all-null — and only a GC safepoint
-/// writes the frame, so the set changes only there.
+/// at the top of each block. The entry block starts empty — the prologue zeroes
+/// every slot it claims (ADR-100) — and only a GC safepoint writes the frame,
+/// so the set changes only there.
 fn dirty_in_fixpoint(
     func: &Function,
     gc_locals: &BTreeSet<LocalId>,

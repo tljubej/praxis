@@ -6,7 +6,7 @@
 //! [`RootScope`] holds a `Vec<GcRef>` and chains to an optional parent.
 //!
 //! That left the collector's root set open: whoever called `Heap::collect`
-//! chose what to root, and the automatic path chose only `ctx.roots` — so
+//! chose what to root, and the automatic path chose only `ctx.shadow` — so
 //! `input_source`, a parse failure's partial value, a runtime-owned crash
 //! snapshot and everything native code held in a Rust local were invisible to
 //! automatic GC (P0-06). [`RuntimeRoots`] closes that: it is the only thing
@@ -248,7 +248,7 @@ impl Drop for NativeScope<'_> {
 ///
 /// | arm | owner |
 /// |---|---|
-/// | `shadow` | `ctx.roots` — the generated shadow-stack chain (ADR-019) |
+/// | `shadow` | `ctx.shadow` — the generated shadow stack, scanned `[base, top)` (ADR-019, ADR-100) |
 /// | `input` | `ctx.input_source` — the read-in buffer |
 /// | `parse_partial` | `ParseDetail.fail.partial` — the best partial parse |
 /// | `snapshot` | the runtime-owned `CrashSnapshot`'s copied locals |
@@ -259,7 +259,7 @@ impl Drop for NativeScope<'_> {
 /// parser interpreter, nothing was collected at all. Deleting that early return
 /// is what makes the other four arms load-bearing rather than decorative.
 pub struct RuntimeRoots<'a> {
-    shadow: Option<&'a crate::ShadowFrame>,
+    shadow: Option<&'a crate::ShadowStackHeader>,
     input: Option<GcRef>,
     parse_partial: Option<GcRef>,
     snapshot: Option<&'a crate::CrashSnapshot>,
@@ -271,7 +271,7 @@ impl<'a> RuntimeRoots<'a> {
     ///
     /// # Safety
     /// `ctx` must be null, or point at a live `RuntimeContext` whose non-null
-    /// `roots` / `parse_detail` / `crash_snapshot` / `native_roots` pointers
+    /// `shadow` / `parse_detail` / `crash_snapshot` / `native_roots` pointers
     /// reference live values for `'a`. A non-null context's `input_source` must
     /// be a valid `GcRef` (`RuntimeContext::placeholder` documents the same
     /// requirement).
@@ -289,9 +289,9 @@ impl<'a> RuntimeRoots<'a> {
         // SAFETY: caller guarantees `ctx` is live for `'a`.
         let c = unsafe { &*ctx };
         RuntimeRoots {
-            // SAFETY: a non-null `roots` is a shadow frame pushed by a prologue
-            // that has not yet returned.
-            shadow: unsafe { c.roots.as_ref() },
+            // SAFETY: a non-null `shadow` is the header of the runtime-owned
+            // shadow stack, which is live for as long as the context is.
+            shadow: unsafe { c.shadow.as_ref() },
             input: Some(c.input_source),
             // SAFETY: a non-null `parse_detail` points at the runtime's slot.
             parse_partial: unsafe { c.parse_detail.as_ref() }

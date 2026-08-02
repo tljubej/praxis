@@ -17,7 +17,7 @@ use crate::immortal::{read_bool, Immortals};
 use crate::parse_detail::ParseDetail;
 #[cfg(test)]
 use crate::roots::RootSet;
-use crate::shadow_frame::ShadowFrame;
+use crate::shadow_stack::{ShadowStack, ShadowStackHeader, SHADOW_STACK_SLOTS};
 use crate::{collections::VecPayload, descriptor::TypeDescriptor};
 
 /// The maximum Praxis call depth before the prologue guard raises
@@ -26,6 +26,16 @@ use crate::{collections::VecPayload, descriptor::TypeDescriptor};
 /// that runaway recursion faults cleanly instead of killing the host with
 /// SIGABRT. The guard is emitted in every generated function's prologue (§9.2,
 /// §17.4).
+///
+/// Since ADR-100 the guard is inline Cranelift — a load, a compare and a
+/// branch, with no call — and it runs *before* the shadow-stack push rather
+/// than after it. That ordering is what makes this constant the bound on the
+/// shadow stack as well as on the native one: at most `MAX_RECURSION_DEPTH`
+/// frames are ever live at once, so
+/// [`SHADOW_STACK_SLOTS`](crate::SHADOW_STACK_SLOTS) can be sized to make
+/// shadow-stack exhaustion unrepresentable. It does not work the other way
+/// round: a function with no `Gc` locals claims no slots, so a full shadow
+/// stack is not an encoding of deep recursion.
 pub const MAX_RECURSION_DEPTH: u32 = 8000;
 
 /// What kind of runtime fault occurred (§9.2, §10.4). Set by the runtime
@@ -408,11 +418,16 @@ pub struct RuntimeContext {
     pub heap: *mut Heap,
     pub pending_fault: *mut Fault,
     pub debug_top: *mut DebugFrame,
-    /// The current top of the compiler-managed shadow-stack root chain (§12.3,
-    /// ADR-019). Generated code pushes a frame in the prologue, spills live
-    /// `GcRef`s into it at safepoints, and pops it in the epilogue. The
-    /// collector walks this chain via [`RootSet`].
-    pub roots: *mut ShadowFrame,
+    /// The header of the runtime's one compiler-managed shadow stack (§12.3,
+    /// ADR-019, ADR-100). Generated code claims a run of slots in the prologue
+    /// by bumping the header's `top`, spills live `GcRef`s into that run at
+    /// safepoints, and restores `top` in the epilogue. The collector scans
+    /// `[base, top)` via [`RootSet`].
+    ///
+    /// This field was `roots: *mut ShadowFrame` — the top of a chain of
+    /// per-call heap frames — through ABI v14. Same position, same width, a
+    /// different thing entirely pointed at, which is why v15 exists.
+    pub shadow: *mut ShadowStackHeader,
     pub input_source: GcRef,
     /// The cached immortal `Unit` — the "defined dummy" returned on fault paths
     /// (§10.4). M6 split this from `input_source` (which now holds the read-in
@@ -472,6 +487,13 @@ impl RuntimeContext {
     /// the canonical placeholder. Real runtime setup (rooting the heap,
     /// installing a fault sink) is done via [`Runtime::context`] in M3+.
     ///
+    /// **Generated code must never be run against a placeholder.** Since
+    /// ADR-100 the prologue is inline: it dereferences `shadow` unconditionally
+    /// and without a null check, because the check cost every call in the
+    /// language and `Runtime::context` is the only producer of a context
+    /// generated code is ever handed. The extern push/pop helpers this replaced
+    /// returned null / returned early for a null context; nothing does now.
+    ///
     /// # Safety
     /// `input_source` must be a valid `GcRef` (or the caller must ensure no
     /// generated code dereferences it before the runtime is fully initialized).
@@ -480,7 +502,7 @@ impl RuntimeContext {
             heap: std::ptr::null_mut(),
             pending_fault: std::ptr::null_mut(),
             debug_top: std::ptr::null_mut(),
-            roots: std::ptr::null_mut(),
+            shadow: std::ptr::null_mut(),
             input_source,
             // Placeholder: reuse the input_source ref as the Unit sentinel too,
             // since this constructor is only for not-yet-wired test scaffolding.
@@ -554,6 +576,11 @@ pub struct Runtime {
     /// The message slot a `panic`/`assert` fault carries (§9.1). Owned here so
     /// its address is stable; `Runtime::context` installs it on every context.
     fault_message: FaultMessage,
+    /// The one shadow stack every generated frame bump-allocates from
+    /// (ADR-100). Owned here, sized once, never resized: generated code holds
+    /// the header's address for the whole program and a frame's base pointer
+    /// for the duration of a call, so a reallocation would be a use-after-free.
+    shadow_stack: ShadowStack,
 }
 
 impl Runtime {
@@ -569,6 +596,11 @@ impl Runtime {
             parse_detail: ParseDetail::new(),
             crash_snapshot: SnapshotSlot::new(),
             fault_message: FaultMessage::new(),
+            // 12.29 MiB of address space, allocated zeroed — one `mmap` of
+            // untouched pages, faulted in only as deep as the program actually
+            // recurses. See `SHADOW_STACK_SLOTS` for why it can be sized once
+            // and never checked.
+            shadow_stack: ShadowStack::new(SHADOW_STACK_SLOTS, std::ptr::null_mut()),
         }
     }
 
@@ -614,16 +646,23 @@ impl Runtime {
 
     /// A `RuntimeContext` view of this runtime, suitable for generated code.
     /// `pending_fault` points at this runtime's fault slot; `debug_top` stays
-    /// null until the debugger lands (M10); `roots` starts null — the first
-    /// generated function's prologue pushes the initial shadow frame.
-    /// `parse_detail` points at this runtime's [`ParseDetail`] slot so the
-    /// parser interpreter can record the richest `ParseFailed` detail.
+    /// null until the debugger lands (M10); `shadow` points at this runtime's
+    /// shadow-stack header, which every generated prologue bump-allocates from
+    /// and which the collector scans. `parse_detail` points at this runtime's
+    /// [`ParseDetail`] slot so the parser interpreter can record the richest
+    /// `ParseFailed` detail.
+    ///
+    /// Every context this mints shares the one stack, so a context taken while
+    /// generated code is running (as [`Runtime::collect_now`] does) sees the
+    /// frames already on it. The `roots` field this replaced started null and
+    /// was filled by the first prologue, so a freshly minted context could not
+    /// see the shadow chain at all.
     pub fn context(&mut self) -> RuntimeContext {
         RuntimeContext {
             heap: &mut self.heap as *mut Heap,
             pending_fault: &mut self.fault as *mut Fault,
             debug_top: std::ptr::null_mut(),
-            roots: std::ptr::null_mut(),
+            shadow: self.shadow_stack.header_ptr(),
             input_source: self.immortals.unit(),
             unit_ref: self.immortals.unit(),
             current_generation: 0,
@@ -707,6 +746,28 @@ impl Runtime {
         self.crash_snapshot.clear();
         self.parse_detail.clear();
         self.fault_message.clear();
+        // Every epilogue — including every fault epilogue — restores the `top`
+        // its prologue saved, so a completed run leaves the stack exactly as it
+        // found it. A non-empty stack here is an unbalanced prologue, which is
+        // a codegen bug and not something a rerun should paper over silently.
+        debug_assert!(
+            self.shadow_stack.is_empty(),
+            "the shadow stack is {} slots deep between runs; some prologue was \
+             not balanced by an epilogue",
+            self.shadow_stack.len()
+        );
+        self.shadow_stack.reset();
+    }
+
+    /// The shadow stack every generated frame bump-allocates from (ADR-100).
+    ///
+    /// Read-only, and the reason it is exposed at all is that "the stack is
+    /// empty again" is the observable form of "every prologue was balanced by
+    /// an epilogue" — an unbalanced prologue must be a test failure, not a slow
+    /// leak that only shows up as a wrong root set thousands of calls later.
+    #[must_use]
+    pub fn shadow_stack(&self) -> &ShadowStack {
+        &self.shadow_stack
     }
 
     /// Consume the runtime, drop the heap, and return the proof that no live
@@ -1178,5 +1239,28 @@ mod tests {
         let rt = Runtime::new();
         let b = rt.alloc_bool(false);
         let _ = b.as_int();
+    }
+
+    #[test]
+    fn a_rerun_starts_from_an_empty_shadow_stack() {
+        // The `restart`/`reload` path (§9.7): the debugger reruns `main` against
+        // the same `Runtime`. A run that faulted still restored every frame on
+        // the way out — the fault epilogue is an epilogue — so the stack is
+        // already empty, and `clear_for_rerun` says so with a `debug_assert`
+        // before resetting it. That reset is the backstop, not the mechanism.
+        let mut rt = Runtime::new();
+        let mut ctx = rt.context();
+        // SAFETY: `ctx` is wired to `rt`, which outlives the guard.
+        let guard = unsafe {
+            crate::shadow_stack::push_frame(
+                &mut ctx as *mut RuntimeContext,
+                crate::shadow_stack::SlotCount::new(5).unwrap(),
+            )
+        };
+        assert_eq!(rt.shadow_stack().len(), 5);
+        drop(guard);
+        assert!(rt.shadow_stack().is_empty());
+        rt.clear_for_rerun();
+        assert!(rt.shadow_stack().is_empty());
     }
 }

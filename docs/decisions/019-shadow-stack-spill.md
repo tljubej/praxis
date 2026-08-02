@@ -2,6 +2,21 @@
 
 **Date:** 2026-07-23 · **Status:** accepted
 
+> **Amended by ADR-100 (2026-08-02): the frame is no longer an allocation, and
+> the chain is no longer a chain.** Decision 1's per-frame `Box` and `parent`
+> pointer, and decision 3's two extern helpers, are retired for one contiguous
+> runtime-owned region that generated code bump-allocates inline. What survives
+> is everything else: `#[repr(C)]` with a compile-time-derived offset the
+> backend emits directly, raw nullable slots rather than `GcRef`, a `RootSet`
+> impl as the collector's only door, and the obligation that every function
+> claims exactly one frame and every return path gives it back. Decisions 2, 4
+> and 5 are unchanged in substance — `RuntimeContext`'s field keeps its position
+> and width (it is now `shadow`), the spill still writes `LocalId → slot_index`
+> before the safepoint, and pacing is untouched. The body below is kept as
+> written, because the reasoning for a per-frame allocation is what a future
+> reader will be tempted by, and the Consequences bullet on prologue overhead is
+> the sentence ADR-100 exists to answer.
+
 ## Context
 
 §12.3 requires compiler-managed root tracking so the non-moving mark-and-sweep
