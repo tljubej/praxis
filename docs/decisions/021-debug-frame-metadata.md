@@ -1,6 +1,22 @@
 # ADR-021: Debug frame metadata and shadowed-symbol registration
 
-**Date:** 2026-07-23 · **Status:** accepted
+**Date:** 2026-07-23 · **Status:** accepted · **Amended by:** ADR-104
+
+> **ADR-104 supersedes decisions 2 and 3 and the second Consequences bullet.** A
+> frame is no longer a `Box` chained through `ctx.debug_top`: it is one
+> `DebugFrameEntry` on a contiguous stack, pairing a static, arena-interned
+> `FunctionDebugMeta` (the name, the source span, and the `DebugLocalMeta`
+> array — everything that does not vary per call) with the base of that call's
+> run of value slots on a second contiguous stack. `praxis_push_debug_frame`,
+> `praxis_pop_debug_frame` and `praxis_set_frame_source_span` no longer exist;
+> the prologue and epilogue are inline bumps. The `value` fields are written
+> once per definition rather than by the safepoint spill.
+>
+> **Decision 1 and the §4.2 guarantee are unchanged.** `DebugLocal` keeps its
+> layout and its `(source_name, symbol_id)` pair, and this ADR's Reason — that
+> the shadowing guarantee is testable by constructing a frame directly, with no
+> REPL — is why its unit test was rebuilt on the new API rather than deleted:
+> see `a_functions_metadata_distinguishes_shadowed_bindings`.
 
 ## Context
 

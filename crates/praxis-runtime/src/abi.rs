@@ -136,7 +136,24 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// carried v10's `pending: bool` would read that bool as the kind, and one
 /// whose `GcHeader` put something else first would compare the wrong word.
 /// Repacking `Fault`, `FaultKind` or `GcHeader`'s leading field now owes a bump.
-pub const RUNTIME_ABI_VERSION: u32 = 17;
+///
+/// v18 (finding §3.2, ADR-104): the crash debugger's per-call frame stops being
+/// a heap allocation. `RuntimeContext.debug_top: *mut DebugFrame` — the top of a
+/// chain of `Box`ed frames — becomes `debug_frames: *mut DebugFrameStackHeader`,
+/// the same position and the same width (ADR-101 did exactly this to `roots`),
+/// pointing at a `{ top, base, limit }` header whose slots are
+/// `{ meta, values }` pairs; and `debug_values: *mut DebugValueStackHeader` is
+/// appended after `small_ints`, so every offset above is unchanged. A runtime of
+/// the previous version would read a stack header as a frame, taking `top` for a
+/// `parent` pointer. Everything a frame carried that does not vary per call —
+/// the function name, the source span, the `DebugLocalMeta` array — is now a
+/// static `FunctionDebugMeta` the prologue names with one immediate, so
+/// `praxis_push_debug_frame`, `praxis_pop_debug_frame` and
+/// `praxis_set_frame_source_span` no longer exist, in the manifest or in the
+/// runtime, and `DebugFrame` is gone with them. `DebugLocal`, `SnapshotFrame`
+/// and `CrashSnapshot` are unchanged: the snapshot walker rejoins the static and
+/// per-call halves, which is what keeps `praxis-debugger` untouched.
+pub const RUNTIME_ABI_VERSION: u32 = 18;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -158,7 +175,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 17;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 18;
 
 // ---------------------------------------------------------------------------
 // The runtime symbol table (F4).
@@ -322,8 +339,6 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::MinHeapPop => praxis_min_heap_pop as *const (),
         RuntimeSymbol::MinHeapPush => praxis_min_heap_push as *const (),
         RuntimeSymbol::Panic => praxis_panic as *const (),
-        RuntimeSymbol::PopDebugFrame => crate::debug::praxis_pop_debug_frame as *const (),
-        RuntimeSymbol::PushDebugFrame => crate::debug::praxis_push_debug_frame as *const (),
         RuntimeSymbol::RaiseDivByZeroIf => praxis_raise_div_by_zero_if as *const (),
         RuntimeSymbol::RaiseEmptyCollection => praxis_raise_empty_collection as *const (),
         RuntimeSymbol::RaiseIntOverflowIf => praxis_raise_int_overflow_if as *const (),
@@ -332,9 +347,6 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::RecordSetField => praxis_record_set_field as *const (),
         RuntimeSymbol::RunParser => praxis_run_parser as *const (),
         RuntimeSymbol::SetContains => praxis_set_contains as *const (),
-        RuntimeSymbol::SetFrameSourceSpan => {
-            crate::debug::praxis_set_frame_source_span as *const ()
-        }
         RuntimeSymbol::SetInsert => praxis_set_insert as *const (),
         RuntimeSymbol::SetIsEmpty => praxis_set_is_empty as *const (),
         RuntimeSymbol::SetItems => praxis_set_items as *const (),
@@ -5855,8 +5867,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_seventeen_after_the_inlined_fault_and_scalar_reads() {
-        assert_eq!(RUNTIME_ABI_VERSION, 17);
+    fn version_is_eighteen_after_the_debug_frame_became_two_stacks() {
+        assert_eq!(RUNTIME_ABI_VERSION, 18);
     }
 
     #[test]
@@ -7538,14 +7550,17 @@ mod tests {
     /// `GcHeader::payload_offset_for(1)` — but in memory *this module* owns,
     /// and with the seven bytes after the one-byte payload set to `0xFF`.
     ///
-    /// The arena cannot be asked for this shape. A `Bool`'s block is
-    /// `payload_offset + 1` bytes, bumpalo rounds the next block's base down to
-    /// eight, and the seven bytes in between are slack that nothing ever
-    /// writes — fresh arena pages read back as zero, so the eight-byte read
-    /// REP-37 removed answered *correctly* in every measurement of the real
-    /// allocator. Owning the storage turns the padding from an accident into a
-    /// fixture, which is the only way the read can be measured rather than
-    /// sampled.
+    /// The heap cannot be asked for this shape. Under the page allocator
+    /// (ADR-103) a `Bool` lands on the ladder's bottom rung, so its block is
+    /// rounded up to an 8-byte boundary and the seven bytes after the one-byte
+    /// payload are slack no object ever writes — a fresh page is `mmap`ped
+    /// zero, so the eight-byte read REP-37 removed answered *correctly* in
+    /// every measurement of the real allocator. (The `bumpalo` arena this
+    /// replaced had the same property for a different reason: it rounded the
+    /// next block's base up to eight and never wrote the gap. The fixture is
+    /// unaffected by the swap because it depends on neither.) Owning the storage
+    /// turns the padding from an accident into a fixture, which is the only way
+    /// the read can be measured rather than sampled.
     ///
     /// The header carries a **freshly minted** `HeapId`, so the collector's
     /// provenance check (`Heap::mark`) skips this object instead of colouring
@@ -7613,8 +7628,8 @@ mod tests {
     /// therefore `Some(0)`; a read at *any* offset past byte zero answers
     /// `0xFF`, likewise `Some(0)`. Only one byte at offset zero answers `None`,
     /// so the test fails if either the width or the offset is wrong. Asking the
-    /// allocator for this shape does not work — see [`DirtyPaddedBool`] — which
-    /// is why the walk that stood here before passed with the fix removed.
+    /// heap for this shape does not work — see [`DirtyPaddedBool`] — which is
+    /// why the walk that stood here before passed with the fix removed.
     ///
     /// [`read_scalar`] is what makes both mistakes unspellable at the call
     /// site, and `int_payload`'s width check is what stops the next
@@ -7888,13 +7903,25 @@ mod tests {
             span_start: 0,
             span_end: 0,
         };
+        let metas = [meta];
+        let func_name = b"main";
+        let func_meta = crate::debug::FunctionDebugMeta {
+            func_name: func_name.as_ptr(),
+            func_name_len: func_name.len() as u32,
+            local_count: 1,
+            locals: metas.as_ptr(),
+            span_start: 0,
+            span_end: 0,
+        };
         let live_after_collection;
+        // SAFETY: `ctx` is wired to `rt`; `func_meta`/`metas` outlive the guard,
+        // and the snapshot is taken while the frame is still claimed — the
+        // ordering a generated fault epilogue has (ADR-033 decision 1).
         unsafe {
-            let debug_frame =
-                crate::debug::praxis_push_debug_frame(ctx, b"main".as_ptr(), 4, 1, &meta);
-            (*(*debug_frame).locals).value = Some(captured);
+            let mut debug_frame = crate::debug::push_frame(ctx, &func_meta);
+            debug_frame.set(0, captured);
             crate::crash_snapshot::praxis_snapshot_debug_chain(ctx);
-            crate::debug::praxis_pop_debug_frame(ctx, debug_frame);
+            drop(debug_frame);
             assert!(rt.crash_snapshot().is_some());
 
             let shadow_frame = push_frame(ctx, SlotCount::new(0).unwrap());

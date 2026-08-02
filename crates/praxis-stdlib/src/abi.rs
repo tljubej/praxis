@@ -357,8 +357,6 @@ runtime_symbols! {
     MinHeapPop = "praxis_min_heap_pop": (Ctx, Gc) -> Gc, Faults;
     MinHeapPush = "praxis_min_heap_push": (Ctx, Gc, Gc) -> GcUnit, Allocates;
     Panic = "praxis_panic": (Ctx, Gc) -> GcUnit, Faults;
-    PopDebugFrame = "praxis_pop_debug_frame": (Ctx, Ptr) -> Void, Pure;
-    PushDebugFrame = "praxis_push_debug_frame": (Ctx, Ptr, RawU32, RawU32, Ptr) -> Ptr, Pure;
     RaiseDivByZeroIf = "praxis_raise_div_by_zero_if": (Ctx, RawI64) -> Void, Faults;
     RaiseEmptyCollection = "praxis_raise_empty_collection": (Ctx) -> GcUnit, Faults;
     RaiseIntOverflowIf = "praxis_raise_int_overflow_if": (Ctx, RawI64) -> Void, Faults;
@@ -367,7 +365,6 @@ runtime_symbols! {
     RecordSetField = "praxis_record_set_field": (Ctx, Gc, RawU32, Gc) -> Gc, Pure;
     RunParser = "praxis_run_parser": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     SetContains = "praxis_set_contains": (Ctx, Gc, Gc) -> Gc, Pure;
-    SetFrameSourceSpan = "praxis_set_frame_source_span": (Ctx, RawU32, RawU32) -> Void, Pure;
     SetInsert = "praxis_set_insert": (Ctx, Gc, Gc) -> GcUnit, Allocates;
     SetIsEmpty = "praxis_set_is_empty": (Ctx, Gc) -> Gc, Pure;
     SetItems = "praxis_set_items": (Ctx, Gc) -> Gc, Allocates;

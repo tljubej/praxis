@@ -94,6 +94,14 @@ impl RootSlots {
 /// It is also what [`crate::ir::Inst::CheckFault`] carries, which is not a GC
 /// safepoint at all: `CheckFault` allocates nothing, so it roots nothing, but
 /// it is where a fault diverts and therefore where a snapshot is taken.
+///
+/// **It is a contract, not a store list** (ADR-104). The backend used to emit
+/// one store per member of [`DebugSlots::visible`] at every annotated point;
+/// it now emits one store per `Gc` *definition*, which realizes the same
+/// contents at every point a snapshot can be taken and rather fewer stores. The
+/// set stays exactly as defined here — narrowing it to a per-point delta would
+/// be the shrink `the_debug_set_still_shows_what_the_root_set_dropped` exists
+/// to refuse.
 #[derive(Debug, Default)]
 pub struct DebugSlots {
     visible: Vec<LocalId>,

@@ -5,6 +5,7 @@
 **Milestone:** M10-WS3 (Crash snapshot + GC rooting, §9.3 / §19.10)
 **Builds on:** ADR-011 (non-moving collector), ADR-019 (shadow-stack spill),
 ADR-021 (debug-frame metadata)
+**Amended by:** ADR-104 (decision 4 only)
 
 ## Context
 
@@ -44,6 +45,16 @@ snapshot must be captured **while the chain is intact**, and the captured
    spill mirrors each live-root write into both the shadow-stack slot *and* the
    matching `DebugLocal.value`, so the snapshot reflects the live state at the
    safepoint before the fault, not a stale prologue-time value.
+
+   > **Amended by ADR-104.** The *def-store* keeps them fresh, at the same or
+   > earlier program points: the backend writes each `Gc` local's debug slot at
+   > the instruction that defines it, and emits nothing at safepoints. Decisions
+   > 1–3 are untouched, and decision 1 in particular is: the innermost fault
+   > epilogue still captures, still before any pop, still guarded by
+   > `SnapshotSlot::is_set()`. A slot stack does not destroy the words a pop
+   > releases, so capturing lazily at the host became *possible* under ADR-104
+   > and is rejected — values above `top` are in no arm of `RuntimeRoots`, which
+   > is decision 2's rooting story.
 
 ## Alternatives considered
 

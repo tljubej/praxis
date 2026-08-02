@@ -18,11 +18,12 @@ use cranelift::prelude::*;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
 use praxis_mir::{
-    AllocKind, CallTarget, CmpOp, DebugSlots, FloatBinOp, Function as MirFunction, GcConst, Inst,
-    IntBinOp, LocalId, LocalKind, MirType, Overflow, RootSlots, Terminator,
+    AllocKind, CallTarget, CmpOp, FloatBinOp, Function as MirFunction, GcConst, Inst, IntBinOp,
+    LocalId, LocalKind, MirType, Overflow, RootSlots, Terminator,
 };
 use praxis_runtime::{
-    DebugLocalMeta, RuntimeContext, ShadowStackHeader, SlotCount, MAX_SHADOW_SLOTS,
+    DebugFrameEntry, DebugLocalMeta, FunctionDebugMeta, RuntimeContext, ShadowStackHeader,
+    SlotCount, MAX_SHADOW_SLOTS,
 };
 use praxis_stdlib::abi::{AbiKind, AbiRet, RuntimeSymbol};
 
@@ -39,6 +40,24 @@ const GC: types::Type = types::I64;
 /// stays correct if the struct evolves (and the ABI version check catches a
 /// drift that matters).
 const SHADOW_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, shadow) as i64;
+
+/// The byte offsets of the crash debugger's two slot-stack headers within a
+/// `RuntimeContext` (ADR-104). The prologue claims from both and the epilogue
+/// restores both, with the same three helpers the shadow stack uses — which is
+/// the whole reason ADR-101 parameterised them by the context field.
+const DEBUG_VALUES_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, debug_values) as i64;
+const DEBUG_FRAMES_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, debug_frames) as i64;
+
+/// The width of one debug value slot: an `Option<GcRef>`, one machine word by
+/// the `NonNull` niche (F18). Derived rather than written as `8` for the reason
+/// `SHADOW_SLOT_BYTES` is, and asserted equal to it because a local's shadow
+/// slot index *is* its debug slot index — two strides that disagreed would put
+/// a local's value in another local's display.
+const DEBUG_VALUE_SLOT_BYTES: i64 = core::mem::size_of::<Option<praxis_runtime::GcRef>>() as i64;
+const _: () = assert!(
+    DEBUG_VALUE_SLOT_BYTES == SHADOW_SLOT_BYTES,
+    "the shadow and debug stacks are indexed by the same slot number"
+);
 
 /// The byte offset of `top` within a slot-stack header. The whole prologue and
 /// epilogue are a load and two stores against this displacement.
@@ -315,62 +334,71 @@ pub(crate) fn lower_function<M: Module>(
         builder.def_var(frame_var, base);
     }
 
-    // Prologue (cont.): push a debug frame and keep its pointer in a Variable
-    // (§9.3, ADR-021, M10-WS2). This frame is what the crash debugger reads for
-    // `bt`/`locals`; the spill below keeps each `DebugLocal.value` fresh across
-    // safepoints, parallel to the shadow-frame slots. The frame carries one
-    // `DebugLocalMeta` per Gc local — in the same order as `gc_slot`, so a
-    // local's shadow slot index doubles as its debug-local index.
+    // Prologue (cont.): claim this call's debug frame (§9.3, ADR-021, ADR-104).
+    // This is what the crash debugger reads for `bt`/`locals`, and it is now two
+    // more claims on two more slot stacks rather than two extern calls and two
+    // to three mallocs:
+    //
+    //  - `debug_values_var` holds the base of this call's run of one
+    //    `Option<GcRef>` per `Gc` local, in the same order as `gc_slot` — so a
+    //    local's shadow slot index doubles as its debug-local index and the two
+    //    stacks are index-parallel for free. Zeroed on claim, which is what
+    //    makes an unwritten slot render as `<uninit>` (F18).
+    //  - `debug_frame_var` holds this call's one `DebugFrameEntry`, which pairs
+    //    the function's *static* `FunctionDebugMeta` with that base. Claimed
+    //    without zeroing: both words are written immediately below, in
+    //    straight-line code with nothing between, so the only reader — a fault
+    //    epilogue's `praxis_snapshot_debug_chain`, far downstream — can never
+    //    observe the gap.
+    //
+    // The whole of what used to be `praxis_push_debug_frame`'s four arguments
+    // and `praxis_set_frame_source_span`'s two is the one immediate below.
+    let debug_values_var = builder.declare_var(GC);
     let debug_frame_var = builder.declare_var(GC);
-    let debug_frame_ptr = {
-        // Build the `[DebugLocalMeta]` for this function's Gc locals in the
-        // generation arena. Each entry carries the source name (interned in the
-        // same arena), a per-local symbol id placeholder, and the static type
-        // descriptor resolved from the MIR local's Type.
-        let (metas_ptr, _metas_len) = build_debug_local_metas(mir, db, generation);
-        let meta_ptr_val = builder.ins().iconst(GC, metas_ptr as i64);
-        // Embed the function name (ptr + len) for the frame, interned so the
-        // same function lowered twice into one generation costs one copy.
-        let name_static = generation.alloc_str(&mir.name);
-        let name_ptr_val = builder.ins().iconst(GC, name_static.as_ptr() as i64);
-        let name_len_val = builder.ins().iconst(GC, name_static.len() as i64);
-        let count_val = builder.ins().iconst(GC, gc_count as i64);
-        call_symbol(
-            &mut builder,
-            ctx_val,
-            &[name_ptr_val, name_len_val, count_val, meta_ptr_val],
-            RuntimeSymbol::PushDebugFrame,
-            module,
-            &mut import_cache,
-        )?
-    };
-    builder.def_var(debug_frame_var, debug_frame_ptr);
-
-    // Prologue (cont.): record this function's source span on the just-pushed
-    // debug frame (§9.3 "current source span", M10-WS1). Threaded AST → HIR
-    // `TypedFn` → MIR `Function.span` → here. The crash debugger's `source`
-    // command renders the faulting function's extent from this. A `(0, 0)`
-    // span (synthetic/closure functions) is a no-op: the setter still writes
-    // it, and the debugger treats `(0, 0)` as "no span recorded".
     {
-        let start = builder.ins().iconst(GC, mir.span.0 as i64);
-        let end = builder.ins().iconst(GC, mir.span.1 as i64);
-        call_symbol(
+        let values_base = emit_slot_stack_push(
             &mut builder,
             ctx_val,
-            &[start, end],
-            RuntimeSymbol::SetFrameSourceSpan,
-            module,
-            &mut import_cache,
-        )?;
+            DEBUG_VALUES_OFFSET,
+            slot_count,
+            DEBUG_VALUE_SLOT_BYTES,
+            frontend_config,
+        );
+        builder.def_var(debug_values_var, values_base);
+
+        let meta_ptr = build_function_debug_meta(mir, db, generation);
+        let entry = emit_slot_stack_claim(
+            &mut builder,
+            ctx_val,
+            DEBUG_FRAMES_OFFSET,
+            DebugFrameEntry::SIZE,
+        );
+        builder.def_var(debug_frame_var, entry);
+        let meta_val = builder.ins().iconst(GC, meta_ptr as i64);
+        let flags = MemFlags::trusted();
+        builder
+            .ins()
+            .store(flags, meta_val, entry, DebugFrameEntry::META_OFFSET);
+        builder
+            .ins()
+            .store(flags, values_base, entry, DebugFrameEntry::VALUES_OFFSET);
     }
 
     let spill = SpillCtx {
         frame_var,
         saved_depth_var,
+        debug_values_var,
         debug_frame_var,
         slot_of: &gc_slot,
     };
+
+    // Prologue (cont.): the parameters are the one set of `Gc` locals no
+    // instruction defines, so nothing in the block loop below would store them.
+    // They are defined by `def_var` in the entry block above, which dominates
+    // everything, so the store belongs here — after the frame exists.
+    for &param_local in &mir.params {
+        spill.store_debug_local(&mut builder, param_local, &vars);
+    }
 
     // Lower each block. Blocks are sealed together after the whole CFG is built
     // so loop backedges resolve correctly. Block 0's body continues in
@@ -396,6 +424,11 @@ pub(crate) fn lower_function<M: Module>(
                 db,
                 generation,
             )?;
+            // The debugger's view is written *here*, once per definition, not
+            // at every safepoint over the whole visible set (ADR-104). See
+            // `SpillCtx::store_debug_defs` for why the two produce the same
+            // slot contents at every point a snapshot can be taken.
+            spill.store_debug_defs(&mut builder, inst, &vars);
         }
         lower_terminator(
             &mut builder,
@@ -463,6 +496,31 @@ fn emit_slot_stack_push(
     slot_bytes: i64,
     cfg: TargetFrontendConfig,
 ) -> Value {
+    let base = emit_slot_stack_claim(
+        builder,
+        ctx_val,
+        ctx_field_offset,
+        i64::from(count.get()) * slot_bytes,
+    );
+    emit_zero_slots(builder, base, count, slot_bytes, cfg);
+    base
+}
+
+/// Claim `bytes` from the slot stack at `ctx + ctx_field_offset` **without
+/// zeroing them**, and answer the base of the claimed run.
+///
+/// The half of [`emit_slot_stack_push`] that moves the cursor. Separated because
+/// a caller that writes every byte it claims, in straight-line code, before
+/// anything can read them does not need the zeroing and should not pay for it —
+/// the debug frame entry (ADR-104) is the one such caller. Zeroing exists so
+/// that a slot the function has *not* written yet reads as "nothing here"; a
+/// run with no such slot has nothing to say.
+fn emit_slot_stack_claim(
+    builder: &mut FunctionBuilder,
+    ctx_val: Value,
+    ctx_field_offset: i64,
+    bytes: i64,
+) -> Value {
     // Aligned + non-trapping: the header and the reservation are owned by the
     // runtime and live for as long as the context is.
     let flags = MemFlags::trusted();
@@ -470,11 +528,8 @@ fn emit_slot_stack_push(
         .ins()
         .load(GC, flags, ctx_val, ctx_field_offset as i32);
     let base = builder.ins().load(GC, flags, header, SLOT_STACK_TOP_OFFSET);
-    emit_zero_slots(builder, base, count, slot_bytes, cfg);
     #[allow(deprecated)] // iadd_imm_s vs iadd_imm: a small positive immediate.
-    let new_top = builder
-        .ins()
-        .iadd_imm_s(base, i64::from(count.get()) * slot_bytes);
+    let new_top = builder.ins().iadd_imm_s(base, bytes);
     builder
         .ins()
         .store(flags, new_top, header, SLOT_STACK_TOP_OFFSET);
@@ -517,7 +572,17 @@ fn emit_slot_stack_pop(
 /// spilled into yet would otherwise hold whatever a previous, deeper call left
 /// there — a pointer to an object that may since have been swept and its
 /// storage reused (RT-01). Only the claimed run is zeroed, which is the whole
-/// of finding §3.3: ADR-019 zeroed all `MAX_SHADOW_SLOTS` on every call.
+/// of finding §3.3: ADR-019 zeroed all `MAX_SHADOW_SLOTS` on every call. The
+/// crash debugger's value slots (ADR-104) are zeroed for the neighbouring
+/// reason: an unwritten slot must read `None` so `locals` renders `<uninit>`
+/// rather than a value from a deeper call that has since returned.
+///
+/// # Panics
+/// If a slot is not one machine word wide. The unrolled path below writes one
+/// `GC`-typed zero per slot, so a wider slot would leave its tail untouched —
+/// silently, and only for the slots a function never writes. Both instantiations
+/// are pointer-width today; a third that is not must extend this rather than
+/// discover it in a profile.
 fn emit_zero_slots(
     builder: &mut FunctionBuilder,
     base: Value,
@@ -525,6 +590,11 @@ fn emit_zero_slots(
     slot_bytes: i64,
     cfg: TargetFrontendConfig,
 ) {
+    assert_eq!(
+        slot_bytes,
+        i64::from(GC.bytes()),
+        "emit_zero_slots writes one word per slot"
+    );
     let n = count.get();
     if n == 0 {
         return;
@@ -551,12 +621,14 @@ fn emit_zero_slots(
 /// The spill context handed to every instruction/terminator lowering: the
 /// Variables the prologue defined, and the Gc-local → slot-index map.
 ///
-/// **Two spills, not one** (MIR-16). There used to be a single `emit_spill`
+/// **Two writers, not one** (MIR-16). There used to be a single `emit_spill`
 /// writing one root list into both frames, which is why the two frames could
 /// not disagree — and why making the GC root set exact would have silently
 /// emptied the debugger's view. [`SpillCtx::spill_roots`] serves the collector
-/// and takes the exact [`RootSlots`]; [`SpillCtx::spill_debug`] serves the
-/// crash debugger and takes the over-approximate [`DebugSlots`].
+/// and takes the exact [`RootSlots`] at each safepoint;
+/// [`SpillCtx::store_debug_defs`] serves the crash debugger and runs at every
+/// *definition*, which is where the over-approximate [`DebugSlots`] contract is
+/// actually realized (ADR-104).
 struct SpillCtx<'a> {
     /// The base of this frame's run of slots inside the one contiguous shadow
     /// stack (ADR-101) — not a frame object. The spill indexes it directly, and
@@ -565,19 +637,16 @@ struct SpillCtx<'a> {
     /// `ctx.recursion_depth` as this call found it. The epilogue stores it back
     /// rather than decrementing.
     saved_depth_var: Variable,
-    /// The debug frame pointer Variable (M10-WS2). Written only by
-    /// [`SpillCtx::spill_debug`].
+    /// The base of this call's run of slots inside the contiguous debug value
+    /// stack (ADR-104). Written only by [`SpillCtx::store_debug_local`], and
+    /// stored back as that stack's `top` by the epilogue.
+    debug_values_var: Variable,
+    /// This call's one `DebugFrameEntry` inside the contiguous debug frame
+    /// stack, written in the prologue and stored back as that stack's `top` by
+    /// the epilogue.
     debug_frame_var: Variable,
     slot_of: &'a HashMap<LocalId, u32>,
 }
-
-/// The byte offset of `locals` within a `DebugFrame`, and of `value` within a
-/// `DebugLocal`. The spill writes a live root into debug frame slot `i` at
-/// `frame.locals[i].value`. Computed from the `#[repr(C)]` layouts so they stay
-/// correct if the structs evolve.
-const DEBUG_LOCALS_OFFSET: i64 = core::mem::offset_of!(praxis_runtime::DebugFrame, locals) as i64;
-const DEBUG_VALUE_OFFSET: i64 = core::mem::offset_of!(praxis_runtime::DebugLocal, value) as i64;
-const DEBUG_LOCAL_SIZE: i64 = core::mem::size_of::<praxis_runtime::DebugLocal>() as i64;
 
 impl SpillCtx<'_> {
     /// The GC spill, emitted just before a safepoint (§12.3, ADR-019): write
@@ -628,55 +697,72 @@ impl SpillCtx<'_> {
         }
     }
 
-    /// The debugger spill (§9.3, M10-WS2): write each visible local's current
-    /// value into `debug_frame.locals[slot_index].value`.
+    /// The debugger's write (§9.3, M10-WS2, ADR-104): store every `Gc` local
+    /// `inst` defines into `debug_frame.locals[slot].value`, at the definition.
     ///
-    /// Separate from [`SpillCtx::spill_roots`] and driven by a separate,
-    /// deliberately over-approximate set. Nothing here is cleared: the slot's
-    /// `Option<GcRef>` starts `None` and a value that has been produced stays
-    /// renderable, which is what `locals` in the crash REPL is for.
-    fn spill_debug(&self, builder: &mut FunctionBuilder, debug: &DebugSlots, vars: &[Variable]) {
-        if debug.visible().is_empty() {
-            return;
-        }
-        let debug_frame_ptr = builder.use_var(self.debug_frame_var);
-        // debug_frame.locals is a *mut DebugLocal; slot i's DebugLocal is at
-        // *(debug_frame.locals) + i*size, and `value` is at +DEBUG_VALUE_OFFSET
-        // within it. Load the locals base pointer once, then index it.
-        let locals_base = builder.ins().load(
-            GC,
-            MemFlags::trusted(),
-            debug_frame_ptr,
-            DEBUG_LOCALS_OFFSET as i32,
-        );
-        let mut flags = MemFlags::trusted();
-        flags.set_notrap();
-        for &local in debug.visible() {
-            let Some(&slot) = self.slot_of.get(&local) else {
-                continue;
-            };
-            let val = builder.use_var(vars[local.0 as usize]);
-            let local_off = (slot as i64) * DEBUG_LOCAL_SIZE + DEBUG_VALUE_OFFSET;
-            #[allow(deprecated)]
-            let value_addr = builder.ins().iadd_imm_s(locals_base, local_off);
-            // A non-null `GcRef` written into an `Option<GcRef>` slot *is*
-            // `Some(v)`: the niche makes the two the same word (F18). The
-            // all-zero word the frame starts with is `None`.
-            builder.ins().store(flags, val, value_addr, 0);
+    /// # Why one store per definition is the same view as a store per safepoint
+    ///
+    /// This replaces a `spill_debug` that ran at every GC safepoint *and* at
+    /// every `Inst::CheckFault`, writing the whole `DebugSlots::visible()` set
+    /// each time — `Σ_points |visible|` stores, against `Σ 1 per definition`
+    /// here. The two produce identical slot contents everywhere a snapshot can
+    /// be taken, and the argument is short:
+    ///
+    /// A debug slot is never cleared, so its content is *the value the most
+    /// recently executed store to it wrote*. The old spill wrote
+    /// `builder.use_var(vars[L])`, which is by definition the value of the most
+    /// recently executed `def_var` of `L` — or Cranelift's zero for a path
+    /// where none executed (`cranelift-frontend`'s SSA builder zero-initializes
+    /// a variable that is undefined along an incoming edge). Writing at every
+    /// `def_var` therefore leaves exactly that same value in the slot, and a
+    /// frame's slots start `None`, which is the same zero. Loop back-edges and
+    /// redefinitions are covered by the same sentence: "most recently executed"
+    /// is a property of the run, not of the CFG.
+    ///
+    /// So the change cannot lose a value. It *gains* a few: a local defined at
+    /// the end of a block and dead at the top of the next was in no debug
+    /// point's `visible()` and so was never written at all, and now shows the
+    /// value it was given. That is MIR-16's contract — "a value that has been
+    /// produced stays renderable" — being met more completely, not less.
+    ///
+    /// `DebugSlots` is unchanged and stays exactly what ADR-044 defines. It
+    /// stops being the *emission driver* and remains the *contract*: whatever a
+    /// point's `visible()` names, this has already stored.
+    fn store_debug_defs(&self, builder: &mut FunctionBuilder, inst: &Inst, vars: &[Variable]) {
+        // `praxis_mir::defs` rather than a match here. ADR-044's Consequences
+        // fix the count of exhaustive matches over `Inst` at five, and the
+        // liveness pass's own answer to "what does this define" is one of them;
+        // a sixth copy could drift, and the drift would present as a local the
+        // debugger silently stops showing.
+        for local in praxis_mir::defs(inst) {
+            self.store_debug_local(builder, local, vars);
         }
     }
 
-    /// The pair emitted at a GC safepoint: the collector's exact root set and
-    /// the debugger's over-approximate view of the same point.
-    fn spill_safepoint(
-        &self,
-        builder: &mut FunctionBuilder,
-        roots: &RootSlots,
-        debug: &DebugSlots,
-        vars: &[Variable],
-    ) {
-        self.spill_roots(builder, roots, vars);
-        self.spill_debug(builder, debug, vars);
+    /// Store `local`'s current value into its debug slot, if it has one.
+    ///
+    /// Non-`Gc` locals (a scalar payload) have no slot and are skipped — the
+    /// same `slot_of` filter [`SpillCtx::spill_roots`] applies.
+    ///
+    /// One store, with the slot index as the store's own displacement, exactly
+    /// like [`SpillCtx::spill_roots`]. Under ADR-021's heap frame this was a
+    /// load of `frame.locals`, an `iadd_imm_s` over a 48-byte `DebugLocal`
+    /// stride, and a store at zero.
+    fn store_debug_local(&self, builder: &mut FunctionBuilder, local: LocalId, vars: &[Variable]) {
+        let Some(&slot) = self.slot_of.get(&local) else {
+            return;
+        };
+        let values_base = builder.use_var(self.debug_values_var);
+        let val = builder.use_var(vars[local.0 as usize]);
+        // A non-null `GcRef` written into an `Option<GcRef>` slot *is* `Some(v)`:
+        // the niche makes the two the same word (F18). The all-zero word the
+        // claim starts with is `None`.
+        builder.ins().store(
+            MemFlags::trusted(),
+            val,
+            values_base,
+            slot_displacement(slot),
+        );
     }
 }
 
@@ -731,7 +817,7 @@ fn lower_inst<M: Module>(
             builder.def_var(vars[dst.0 as usize], v);
         }
         Inst::ConstGc { dst, konst } => {
-            // **No `spill.spill_safepoint` here, and that is the point.** This
+            // **No `spill.spill_roots` here, and that is the point.** This
             // instruction reads a reference the runtime minted before `main`
             // ran; nothing it emits can collect, so there is no frame for the
             // collector to see and no fault for the debugger to divert on
@@ -744,12 +830,15 @@ fn lower_inst<M: Module>(
             dst,
             alloc,
             roots,
-            debug,
+            // The debugger's view is written at definitions now, not here
+            // (ADR-104). The field stays in the pattern so the set this arm
+            // carries is still visible at the point that used to consume it.
+            debug: _,
         } => {
             // Spill live Gc roots into the shadow frame *before* the allocating
             // call: the wrapper may trigger a collection (§12.4), and the
             // collector walks the frame (ADR-019).
-            spill.spill_safepoint(builder, roots, debug, vars);
+            spill.spill_roots(builder, roots, vars);
             // **One authority for the instruction→symbol mapping** (MIR-10).
             // Which wrapper creates the object, and which fills one slot of a
             // composite, is `AllocKind`'s answer — and it is the same answer
@@ -1006,10 +1095,13 @@ fn lower_inst<M: Module>(
             src,
             scalar,
             roots,
-            debug,
+            // The debugger's view is written at definitions now, not here
+            // (ADR-104). The field stays in the pattern so the set this arm
+            // carries is still visible at the point that used to consume it.
+            debug: _,
         } => {
             // Materialize re-boxes a scalar → it allocates → safepoint.
-            spill.spill_safepoint(builder, roots, debug, vars);
+            spill.spill_roots(builder, roots, vars);
             // A scalar payload re-boxed: Int → praxis_alloc_int, Bool →
             // alloc_bool, Char → praxis_alloc_char. The mapping is
             // `ScalarKind::alloc_symbol`, for `ExtractScalar`'s reason above.
@@ -1260,11 +1352,14 @@ fn lower_inst<M: Module>(
             callee,
             args,
             roots,
-            debug,
+            // The debugger's view is written at definitions now, not here
+            // (ADR-104). The field stays in the pattern so the set this arm
+            // carries is still visible at the point that used to consume it.
+            debug: _,
         } => {
             // A call may allocate (and M4 user functions allocate freely) →
             // safepoint. Spill the live Gc roots before the call.
-            spill.spill_safepoint(builder, roots, debug, vars);
+            spill.spill_roots(builder, roots, vars);
             let arg_vals: Vec<Value> = args
                 .iter()
                 .map(|a| builder.use_var(vars[a.0 as usize]))
@@ -1292,7 +1387,10 @@ fn lower_inst<M: Module>(
             callee,
             args,
             roots,
-            debug,
+            // The debugger's view is written at definitions now, not here
+            // (ADR-104). The field stays in the pattern so the set this arm
+            // carries is still visible at the point that used to consume it.
+            debug: _,
         } => {
             // M7, §4.10 (Approach B). An indirect call through a closure value.
             // Spill live Gc roots (safepoint — the call may allocate/GC), read
@@ -1301,7 +1399,7 @@ fn lower_inst<M: Module>(
             // `fn(ctx, closure, args...) -> i64`. The closure is passed as the
             // hidden first explicit arg; the synthetic function loads its
             // captures at entry.
-            spill.spill_safepoint(builder, roots, debug, vars);
+            spill.spill_roots(builder, roots, vars);
             let callee_val = builder.use_var(vars[callee.0 as usize]);
             let arg_vals: Vec<Value> = args
                 .iter()
@@ -1337,11 +1435,14 @@ fn lower_inst<M: Module>(
             lhs,
             rhs,
             roots,
-            debug,
+            // The debugger's view is written at definitions now, not here
+            // (ADR-104). The field stays in the pattern so the set this arm
+            // carries is still visible at the point that used to consume it.
+            debug: _,
         } => {
             // Structural equality via praxis_struct_eq(ctx, a, b) -> i64 (0/1).
             // The call may trigger GC → spill live Gc roots first (safepoint).
-            spill.spill_safepoint(builder, roots, debug, vars);
+            spill.spill_roots(builder, roots, vars);
             let l = builder.use_var(vars[lhs.0 as usize]);
             let r = builder.use_var(vars[rhs.0 as usize]);
             let result = call_symbol(
@@ -1372,7 +1473,14 @@ fn lower_inst<M: Module>(
             )?;
             builder.def_var(vars[dst.0 as usize], result);
         }
-        Inst::CheckFault { on_fault, debug } => {
+        Inst::CheckFault {
+            on_fault,
+            // The debug set stays on the instruction — it is the contract for
+            // what a snapshot taken on this fault path must be able to render
+            // (MIR-16), and the verifier still checks it is annotated. It is no
+            // longer an emission driver: see below.
+            debug: _,
+        } => {
             // Divert to the fault block when a fault is pending (§10.4). The
             // faultable op just before this set `pending_fault` (or a callee
             // did). If a fault is pending, branch to the function's fault block
@@ -1409,13 +1517,20 @@ fn lower_inst<M: Module>(
             // feed it to an arithmetic wrapper before the host can observe the
             // fault). Branching here keeps every operand on the fault path valid.
             //
-            // Spill live roots into the debug frame *before* the fault test:
-            // CheckFault is a debugger (not GC) safepoint. Without this, a
-            // snapshot taken on the fault path sees `<uninit>` for operands
-            // computed since the last GC safepoint (e.g. the `0` divisor in
-            // `x / 0`). The faulting op's own result is genuinely never
-            // produced (the fault happens during it), so it stays `<uninit>`.
-            spill.spill_debug(builder, debug, vars);
+            // **Nothing is spilled here any more** (ADR-104). This used to
+            // write the whole `DebugSlots::visible()` set before the fault
+            // test, because a snapshot taken on the fault path would otherwise
+            // show `<uninit>` for operands computed since the last GC safepoint
+            // — the `0` divisor in `x / 0` being the case that motivated it.
+            // Those operands are `Gc` locals produced by an `Alloc`, a
+            // `Materialize` or a `ConstGc` *earlier in this block*, and
+            // `SpillCtx::store_debug_defs` has already written each of them at
+            // its own definition, so the fault path sees them without a spill
+            // here. The faulting op's own result is still genuinely never
+            // produced — the fault happened during it — so it still reads
+            // `<uninit>` for the arithmetic case, and still reads the wrapper's
+            // fault-path return for a call, exactly as before.
+            //
             // Plain `trusted()` — `notrap + aligned`, and deliberately *not*
             // `readonly` or `can_move`. Cranelift's alias analysis treats a call
             // as clobbering memory, which is exactly what must stay true here:
@@ -1568,22 +1683,22 @@ fn lower_terminator<M: Module>(
             builder.ins().jump(blocks[target.0 as usize], &[]);
         }
         Terminator::Return { value } => {
-            // Epilogue: pop the shadow frame and debug frame before returning
-            // (ADR-019, §9.3/M10-WS2).
+            // Epilogue: give this call's shadow and debug frames back before
+            // returning (ADR-019, ADR-101, ADR-104).
             emit_pop_shadow_frame(builder, ctx_val, spill);
-            emit_pop_debug_frame(builder, ctx_val, spill, module, imports)?;
+            emit_pop_debug_frame(builder, ctx_val, spill);
             let v = builder.use_var(vars[value.0 as usize]);
             builder.ins().return_(&[v]);
         }
         Terminator::Fault => {
-            // Epilogue (fault path): snapshot the debug-frame chain BEFORE
-            // popping, so the host can inspect the intact chain after unwind
-            // (§9.3, M10-WS3). Idempotent: only the innermost frame's epilogue
-            // (which runs first) captures; outer frames unwinding later skip.
+            // Epilogue (fault path): snapshot the debug frames BEFORE popping,
+            // so the host can inspect them after the unwind (§9.3, M10-WS3).
+            // Idempotent: only the innermost frame's epilogue (which runs first)
+            // captures; outer frames unwinding later skip.
             emit_snapshot_debug_chain(builder, ctx_val, module, imports)?;
-            // Then pop the shadow frame and debug frame before unwinding.
+            // Then give both back before unwinding.
             emit_pop_shadow_frame(builder, ctx_val, spill);
-            emit_pop_debug_frame(builder, ctx_val, spill, module, imports)?;
+            emit_pop_debug_frame(builder, ctx_val, spill);
             // Unwind to the host: return the Unit sentinel (the caller checks
             // pending_fault). The fault block has no value of its own — but it
             // still returns a `GcRef`, so it must return a *valid* one. It used
@@ -1618,25 +1733,18 @@ fn emit_pop_shadow_frame(builder: &mut FunctionBuilder, ctx_val: Value, spill: &
     emit_slot_stack_pop(builder, ctx_val, SHADOW_OFFSET, base);
 }
 
-/// Emit the `praxis_pop_debug_frame(ctx, frame)` epilogue call (§9.3, M10-WS2).
-/// Mirrors [`emit_pop_shadow_frame`] for the debug-frame chain.
-fn emit_pop_debug_frame<M: Module>(
-    builder: &mut FunctionBuilder,
-    ctx_val: Value,
-    spill: &SpillCtx<'_>,
-    module: &mut M,
-    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
-) -> Result<()> {
-    let frame_ptr = builder.use_var(spill.debug_frame_var);
-    call_symbol(
-        builder,
-        ctx_val,
-        &[frame_ptr],
-        RuntimeSymbol::PopDebugFrame,
-        module,
-        imports,
-    )?;
-    Ok(())
+/// Emit the crash debugger's epilogue (§9.3, ADR-104): give this call's frame
+/// entry and value slots back. Two stores, no call — where
+/// `praxis_pop_debug_frame` was a guarded extern call that freed two boxes.
+///
+/// Mirrors [`emit_pop_shadow_frame`], and restores saved absolutes for the same
+/// reasons: no subtraction to underflow, and an imbalance introduced below this
+/// frame is corrected here rather than propagated to the caller.
+fn emit_pop_debug_frame(builder: &mut FunctionBuilder, ctx_val: Value, spill: &SpillCtx<'_>) {
+    let values_base = builder.use_var(spill.debug_values_var);
+    emit_slot_stack_pop(builder, ctx_val, DEBUG_VALUES_OFFSET, values_base);
+    let entry = builder.use_var(spill.debug_frame_var);
+    emit_slot_stack_pop(builder, ctx_val, DEBUG_FRAMES_OFFSET, entry);
 }
 
 /// Emit the `praxis_snapshot_debug_chain(ctx)` fault-epilogue call (§9.3,
@@ -2305,15 +2413,26 @@ fn tuple_schema_for(
     Ok(generation.tuple_schema(&descriptors))
 }
 
-/// Build the `[DebugLocalMeta]` array for a function's `Gc` locals, in the
-/// same order as the `gc_slot` map iterates them (so a local's shadow-slot
-/// index doubles as its debug-local index), and store it in the generation
-/// arena. Each entry carries the source name (interned in the same arena, empty
-/// for temps), a per-local symbol-id placeholder, the static type descriptor
-/// resolved from the MIR local's `Type` (§9.3, M10-WS2), the user-vs-temp
-/// classification, and the source span.
+/// Build this function's whole static debug metadata — its name, its source
+/// span, and the `[DebugLocalMeta]` array for its `Gc` locals — in the
+/// generation arena, and answer the address the prologue writes into its
+/// `DebugFrameEntry` (§9.3, ADR-104).
 ///
-/// The array is deduplicated by content: a function lowered twice into one
+/// The locals are in the same order as the `gc_slot` map iterates them, so a
+/// local's shadow-slot index doubles as its debug-local index. Each entry
+/// carries the source name (interned in the same arena, empty for temps), a
+/// per-local symbol-id placeholder, the static type descriptor resolved from the
+/// MIR local's `Type` (§9.3, M10-WS2), the user-vs-temp classification, and the
+/// source span.
+///
+/// The span is `mir.span`, threaded AST → HIR `TypedFn` → MIR `Function.span`
+/// → here (ADR-035 decision 3). Its last hop used to be
+/// `praxis_set_frame_source_span(ctx, start, end)` — a runtime call, in every
+/// prologue, to record a compile-time constant. Only where it is written
+/// changed; the crash debugger's `source` command reads the same two numbers out
+/// of the same `SnapshotFrame` field.
+///
+/// Everything is deduplicated by content: a function lowered twice into one
 /// generation — which is what a debugger session does on every `p EXPR` —
 /// yields the same metadata and pays for it once (DBG-05, MIR-13).
 ///
@@ -2325,11 +2444,11 @@ fn tuple_schema_for(
 /// Temps no longer get the old `"<tmp>"` name placeholder: the debugger now
 /// classifies them structurally via `kind` and renders them as
 /// `<tmp#N: Type> @ "expr"` using the symbol id and span threaded here.
-fn build_debug_local_metas(
+fn build_function_debug_meta(
     mir: &MirFunction,
     db: &mut praxis_types::TypeDb,
     generation: &Generation,
-) -> (*const DebugLocalMeta, usize) {
+) -> *const FunctionDebugMeta {
     use praxis_mir::ir::LocalDebugKind;
     let mut metas: Vec<DebugLocalMeta> = Vec::new();
     let mut symbol_id = 0u32;
@@ -2377,7 +2496,9 @@ fn build_debug_local_metas(
         });
         symbol_id += 1;
     }
-    generation.debug_local_metas(metas)
+    // Interned so the same function lowered twice into one generation costs one
+    // copy of the name as well as one copy of the metadata.
+    generation.function_debug_meta(generation.alloc_str(&mir.name), mir.span, metas)
 }
 
 /// The runtime descriptor for values of type `ty`, or a compile error.
@@ -2541,18 +2662,19 @@ mod tests {
     }
 
     /// A wrapper that returns nothing must declare no results. The arity-only
-    /// synthesis gave every symbol an `i64` return, so a call to
-    /// `praxis_pop_debug_frame` read a result register the callee never wrote.
+    /// synthesis gave every symbol an `i64` return, so a call to a `Void`
+    /// wrapper read a result register the callee never wrote. (The two debug
+    /// wrappers this used to name — `praxis_pop_debug_frame` and
+    /// `praxis_set_frame_source_span` — are gone with ADR-104; the property is
+    /// not about them, and `every_symbol_has_a_derivable_signature` checks it
+    /// over the whole manifest.)
     #[test]
     fn void_wrappers_declare_no_result() {
         let module = test_module();
-        assert!(signature_for(RuntimeSymbol::PopDebugFrame, &module)
-            .returns
-            .is_empty());
-        assert!(signature_for(RuntimeSymbol::SetFrameSourceSpan, &module)
-            .returns
-            .is_empty());
         assert!(signature_for(RuntimeSymbol::SnapshotDebugChain, &module)
+            .returns
+            .is_empty());
+        assert!(signature_for(RuntimeSymbol::RaiseStackOverflow, &module)
             .returns
             .is_empty());
     }
@@ -2621,11 +2743,13 @@ mod tests {
         );
 
         let generation = Generation::new();
-        let (ptr, len) = build_debug_local_metas(&f, &mut db, &generation);
-        assert_eq!(len, 2);
-        // SAFETY: `build_debug_local_metas` returns `len` initialized entries
-        // owned by `generation`, which outlives this borrow.
-        let metas = unsafe { std::slice::from_raw_parts(ptr, len) };
+        let meta = build_function_debug_meta(&f, &mut db, &generation);
+        // SAFETY: `build_function_debug_meta` returns a record owned by
+        // `generation`, which outlives this borrow, with `local_count`
+        // initialized `locals` entries behind it.
+        let meta = unsafe { &*meta };
+        assert_eq!(meta.local_count, 2);
+        let metas = unsafe { std::slice::from_raw_parts(meta.locals, 2) };
         assert!(
             !metas[0].descriptor.is_null(),
             "a Known local keeps its descriptor"

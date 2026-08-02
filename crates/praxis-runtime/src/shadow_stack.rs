@@ -157,6 +157,51 @@ impl<T: Copy> SlotStackHeader<T> {
     /// stays correct if the struct evolves.
     pub const TOP_OFFSET: i32 = core::mem::offset_of!(Self, top) as i32;
 
+    /// Claim `n` slots, all set to `zero`, and answer the base of the run: the
+    /// Rust-side form of the bump a generated prologue emits inline.
+    ///
+    /// Crate-private, and deliberately so — the public doors are
+    /// [`push_frame`] and [`crate::debug::push_frame`], which hand back a guard
+    /// that restores `top` on drop. A caller holding a bare base could forget.
+    ///
+    /// # Safety
+    /// The [`SlotStack`] this header belongs to must be live.
+    ///
+    /// # Panics
+    /// If the run does not fit. This is the one place the reservation's limit is
+    /// checked at runtime: Rust callers do not pass the prologue's depth guard,
+    /// so the argument in [`SHADOW_STACK_SLOTS`] does not cover them.
+    pub(crate) unsafe fn claim(&mut self, n: usize, zero: T) -> *mut T {
+        let base = self.top;
+        // SAFETY: `top` is inside the reservation and `n` slots past it is at
+        // worst one-past-the-end once the assertion below passes.
+        let new_top = unsafe { base.add(n) };
+        assert!(
+            new_top <= self.limit,
+            "slot stack exhausted: {n} more slots do not fit"
+        );
+        // SAFETY: `[base, new_top)` is inside the live reservation.
+        unsafe { std::slice::from_raw_parts_mut(base, n) }.fill(zero);
+        self.top = new_top;
+        base
+    }
+
+    /// Restore `top` to `base`, releasing everything claimed since.
+    ///
+    /// An absolute, not a subtraction: it cannot underflow, and an imbalance
+    /// introduced below this frame is corrected here rather than propagated.
+    pub(crate) fn restore(&mut self, base: *mut T) {
+        self.top = base;
+    }
+
+    /// Every frame currently on the stack, concatenated — the collector's door
+    /// for the shadow instantiation, and the crash snapshot's for the debug
+    /// ones.
+    #[must_use]
+    pub fn claimed(&self) -> &[T] {
+        self.live_slots()
+    }
+
     /// The slots between `base` and `top`: every frame currently on the stack,
     /// concatenated.
     fn live_slots(&self) -> &[T] {
@@ -380,7 +425,7 @@ impl Drop for ShadowFrameGuard {
         // no subtraction to underflow.
         // SAFETY: `header` was non-null when the guard was made, and belongs to
         // a runtime the caller guaranteed outlives it.
-        unsafe { (*self.header).top = self.base };
+        unsafe { (*self.header).restore(self.base) };
     }
 }
 
@@ -408,23 +453,13 @@ pub unsafe fn push_frame(ctx: *mut crate::RuntimeContext, count: SlotCount) -> S
         "push_frame needs a context from `Runtime::context`, not a placeholder"
     );
     let n = count.get() as usize;
-    // SAFETY: `header` is non-null and owned by a live `SlotStack`, so `top`
-    // and `limit` are addresses in one reservation and the claimed run is
-    // inside it once the assertion below passes.
-    unsafe {
-        let base = (*header).top;
-        let new_top = base.add(n);
-        assert!(
-            new_top <= (*header).limit,
-            "shadow stack exhausted: {n} more slots do not fit"
-        );
-        std::ptr::write_bytes(base, 0, n);
-        (*header).top = new_top;
-        ShadowFrameGuard {
-            header,
-            base,
-            count: count.get(),
-        }
+    // SAFETY: `header` is non-null and owned by a live `SlotStack`, so `claim`
+    // may bump it; it checks the reservation's limit itself.
+    let base = unsafe { (*header).claim(n, std::ptr::null_mut()) };
+    ShadowFrameGuard {
+        header,
+        base,
+        count: count.get(),
     }
 }
 

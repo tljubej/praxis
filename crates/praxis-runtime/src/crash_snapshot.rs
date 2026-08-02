@@ -1,15 +1,22 @@
-//! Crash snapshots: a stable, deep-copied view of the debug-frame chain taken
-//! at the moment a fault begins to unwind (§9.3, M10-WS3).
+//! Crash snapshots: a stable, deep-copied view of the debug frames taken at the
+//! moment a fault begins to unwind (§9.3, M10-WS3).
 //!
-//! When a fault fires, each generated function's fault epilogue pops its shadow
-//! and debug frames as it returns to its caller. By the time control reaches the
-//! host, **every** language frame has unwound and `ctx.debug_top` is null again.
-//! To give the host (the noninteractive fallback, the crash REPL) something to
-//! inspect, the **first** fault epilogue — the innermost frame's, which runs
-//! while the full chain is still intact — deep-copies the chain into a
-//! [`CrashSnapshot`] owned by the [`Runtime`]. The copy is stable because the
-//! collector is precise and non-moving (ADR-011): a `GcRef` copied into a
-//! snapshot keeps pointing at the same object.
+//! When a fault fires, each generated function's fault epilogue restores the
+//! shadow and debug stack tops it saved as it returns to its caller. By the time
+//! control reaches the host, **every** language frame has unwound and both debug
+//! stacks are empty again. To give the host (the noninteractive fallback, the
+//! crash REPL) something to inspect, the **first** fault epilogue — the
+//! innermost frame's, which runs while the whole stack is still claimed —
+//! deep-copies it into a [`CrashSnapshot`] owned by the [`Runtime`]. The copy is
+//! stable because the collector is precise and non-moving (ADR-011): a `GcRef`
+//! copied into a snapshot keeps pointing at the same object.
+//!
+//! Copying eagerly at the first fault epilogue is ADR-033 decision 1, and it
+//! survives ADR-104 unchanged even though a stack — unlike the `Box`ed chain it
+//! replaced — does not *destroy* the words a pop releases. Reading them lazily
+//! from the host would be possible and is rejected: values above `top` are in no
+//! arm of [`crate::roots::RuntimeRoots`], so a collection between the unwind and
+//! the read could free what they name.
 //!
 //! GC rooting (the §19.10 acceptance criterion "GC retains all objects
 //! reachable from snapshots"): [`CrashSnapshot`] implements [`RootSet`],
@@ -23,7 +30,8 @@
 //! The slot is cleared at the start of each program run.
 
 use crate::abi::abi_guard;
-use crate::context::{DebugFrame, DebugLocal};
+use crate::context::DebugLocal;
+use crate::debug::DebugFrameEntry;
 use crate::gc::GcRef;
 use crate::roots::RootSet;
 
@@ -151,19 +159,18 @@ impl SnapshotSlot {
     }
 }
 
-/// Deep-copy the live debug-frame chain at `ctx.debug_top` into a fresh
-/// [`CrashSnapshot`], recording `fault_kind`, and store it in the runtime's
-/// [`SnapshotSlot`] — **but only if no snapshot has been taken yet this run**
-/// (idempotency: the innermost fault epilogue runs first, while the chain is
-/// intact; outer frames unwinding later are no-ops).
+/// Deep-copy the claimed debug frames into a fresh [`CrashSnapshot`], recording
+/// the pending fault kind, and store it in the runtime's [`SnapshotSlot`] —
+/// **but only if no snapshot has been taken yet this run** (idempotency: the
+/// innermost fault epilogue runs first, while every frame is still claimed;
+/// outer frames unwinding later are no-ops).
 ///
 /// Called from generated fault epilogues (and the stack-overflow epilogue)
-/// *before* the debug-frame pop. If `ctx.debug_top` is null (no debug frames
-/// were pushed, e.g. a host-side fault path), this is a no-op.
+/// *before* the debug-stack pops. If the stack is empty (no debug frames were
+/// pushed, e.g. a host-side fault path), this is a no-op.
 ///
 /// # Safety
-/// `ctx` must be live and wired; `debug_top`, if non-null, must point at a
-/// valid `DebugFrame` whose parent chain is intact.
+/// `ctx` must be live and wired.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_snapshot_debug_chain(ctx: *mut crate::RuntimeContext) {
     abi_guard!("praxis_snapshot_debug_chain", ctx, {
@@ -175,17 +182,25 @@ pub unsafe extern "C" fn praxis_snapshot_debug_chain(ctx: *mut crate::RuntimeCon
             return;
         }
         // Idempotency: if a snapshot already exists this run, do nothing. The first
-        // (innermost) fault epilogue captures the intact chain; later frames skip.
+        // (innermost) fault epilogue captures the whole stack; later frames skip.
         // SAFETY: slot_ptr points at a live SnapshotSlot owned by the Runtime.
         if unsafe { (*slot_ptr).is_set() } {
             return;
         }
-        let top = unsafe { (*ctx).debug_top };
-        if top.is_null() {
+        let frames = unsafe { (*ctx).debug_frames };
+        if frames.is_null() {
             return;
         }
-        // SAFETY: debug_top is null or a valid DebugFrame with an intact parent chain.
-        let snapshot = unsafe { copy_chain(top) };
+        // SAFETY: a non-null `debug_frames` is the header of a live
+        // `DebugFrameStack` owned by the runtime that wired this context.
+        let entries = unsafe { (*frames).claimed() };
+        if entries.is_empty() {
+            return;
+        }
+        // SAFETY: every claimed entry was written by a prologue with a
+        // `'static` meta and the base of its own run of value slots, and no
+        // epilogue has run yet (this is called before the pops).
+        let snapshot = unsafe { copy_stack(entries) };
         let kind = unsafe { crate::context::current_fault_kind(ctx) };
         let mut s = CrashSnapshot::new();
         s.fault_kind = kind;
@@ -194,40 +209,64 @@ pub unsafe extern "C" fn praxis_snapshot_debug_chain(ctx: *mut crate::RuntimeCon
     })
 }
 
-/// Deep-copy the frame chain starting at `top` into a `Vec<SnapshotFrame>`,
+/// Deep-copy the claimed frame entries into a `Vec<SnapshotFrame>`,
 /// innermost-first. The `parent` index of each frame points at the next entry
 /// in the vec (so frame 0's parent is frame 1, etc.); the outermost frame's
 /// parent is `usize::MAX` (sentinel for "no parent").
 ///
+/// `entries` is in push order — outermost first — so this walks it in reverse.
+/// That reversal is what ADR-021's `parent` pointer used to buy, and the stack's
+/// order is a stronger statement of the same thing: the frames *are* the run, so
+/// a chain cannot be truncated or looped by a bad pointer.
+///
+/// Reassembling a [`DebugLocal`] here is what keeps `SnapshotFrame`,
+/// `CrashSnapshot` and every consumer in `praxis-debugger` unchanged across
+/// ADR-104: the static half of each local comes from the function's
+/// [`crate::debug::FunctionDebugMeta`] and the value from the call's own slot,
+/// where they used to be pre-joined in a heap frame the prologue built.
+///
 /// # Safety
-/// `top` must be a valid `DebugFrame`; its parent chain must be intact until
-/// the outermost (null-parent) frame.
-unsafe fn copy_chain(top: *mut DebugFrame) -> Vec<SnapshotFrame> {
-    let mut out = Vec::new();
-    let mut cur = top;
-    while !cur.is_null() {
-        // SAFETY: cur is null or a valid DebugFrame in the live chain.
-        let frame = unsafe { &*cur };
-        // Copy the locals slice. The DebugLocal fields are plain data except
-        // `value` (a GcRef) and `descriptor`/`source_name` (raw pointers to
-        // 'static data); a shallow Vec copy is correct and keeps the GcRefs live.
-        let locals: Vec<DebugLocal> = if frame.locals.is_null() || frame.local_count == 0 {
+/// Every entry's `meta` must point at a live `FunctionDebugMeta` whose `locals`
+/// array has `local_count` entries, and its `values` at that many value slots.
+unsafe fn copy_stack(entries: &[DebugFrameEntry]) -> Vec<SnapshotFrame> {
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries.iter().rev() {
+        // SAFETY: the caller guarantees `meta` is live; a prologue writes it
+        // before anything that could fault, so null is unreachable here.
+        let Some(meta) = (unsafe { entry.meta.as_ref() }) else {
+            continue;
+        };
+        let count = meta.local_count as usize;
+        let locals: Vec<DebugLocal> = if count == 0 {
             Vec::new()
         } else {
-            // SAFETY: locals was allocated with local_count entries.
-            let slice =
-                unsafe { std::slice::from_raw_parts(frame.locals, frame.local_count as usize) };
-            slice.to_vec()
+            // SAFETY: the caller guarantees both arrays hold `count` entries.
+            let metas = unsafe { std::slice::from_raw_parts(meta.locals, count) };
+            let values = unsafe { std::slice::from_raw_parts(entry.values, count) };
+            metas
+                .iter()
+                .zip(values)
+                .map(|(m, &value)| DebugLocal {
+                    source_name: m.source_name,
+                    name_len: m.name_len,
+                    symbol_id: m.symbol_id,
+                    descriptor: m.descriptor,
+                    value,
+                    type_id: m.type_id,
+                    kind: m.kind,
+                    span_start: m.span_start,
+                    span_end: m.span_end,
+                })
+                .collect()
         };
         out.push(SnapshotFrame {
             // parent index is filled in the second pass below.
             parent: usize::MAX,
-            func_name: frame.func_name,
-            func_name_len: frame.func_name_len,
-            source_span: frame.source_span,
+            func_name: meta.func_name,
+            func_name_len: meta.func_name_len,
+            source_span: (meta.span_start, meta.span_end),
             locals,
         });
-        cur = frame.parent;
     }
     // Fill in parent indices: frame i's parent is i+1 (the caller), except the
     // outermost frame whose parent stays usize::MAX.

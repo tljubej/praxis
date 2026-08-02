@@ -29,6 +29,13 @@
 //!    forward walk: `live_in(block) ∪ {defs seen so far}`. The debugger must
 //!    show `a` after `let a = 10` whether or not anything reads it again, so
 //!    this set is what making the *root* set exact must not shrink (H3).
+//!
+//! The fourth is a **contract, not an emission plan** (ADR-104). The backend no
+//! longer writes `DebugSlots::visible()` at each annotated point; it writes each
+//! `Gc` local once, at its definition, which leaves the same value in the same
+//! slot at every point a snapshot can be taken and costs `Σ 1 per def` stores
+//! instead of `Σ_points |visible|`. [`defs`] is public for exactly that, so the
+//! two are driven by one answer to "what does this instruction define".
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -230,7 +237,16 @@ fn transfer_term(live: &mut BTreeSet<LocalId>, term: &Terminator) {
 }
 
 /// Locals defined by an instruction.
-fn defs(inst: &Inst) -> Vec<LocalId> {
+///
+/// **Public because the backend writes the debugger's view at definitions.**
+/// Since ADR-104 the Cranelift lowering emits one debug store per `Gc`
+/// definition instead of re-writing the whole [`DebugSlots`] set at every
+/// safepoint, and it drives those stores from *this* function rather than from
+/// a sixth exhaustive match over [`Inst`]. ADR-044's Consequences fix the count
+/// at five (`ir.rs`, this `defs`, `uses`, `verify.rs`'s `operands`, and
+/// `lower_inst`); a private copy in the backend would have made it six, and the
+/// two would have to agree for the debugger to show what MIR-16 promises.
+pub fn defs(inst: &Inst) -> Vec<LocalId> {
     match inst {
         Inst::Alloc { dst, .. } => vec![*dst],
         Inst::ExtractScalar { dst, .. } => vec![*dst],

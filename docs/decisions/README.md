@@ -108,3 +108,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-101: The shadow stack is one contiguous region, and the recursion limit is what keeps it in bounds](./101-the-shadow-stack-is-contiguous.md)
 - [ADR-102: A check is a branch, not a call — and the check itself stays](./102-a-check-is-a-branch-not-a-call.md)
 - [ADR-103: A page owns the storage and the liveness, and the registry is gone](./103-a-page-owns-the-storage-and-the-liveness.md)
+- [ADR-104: The debugger's view is written once per value, and a frame is two slot-stack claims](./104-the-debugger-view-is-written-once-per-value.md)

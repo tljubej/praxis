@@ -11,6 +11,10 @@
 //! debug-frame pointers remain null (M4/M10).
 
 use crate::crash_snapshot::{CrashSnapshot, SnapshotSlot};
+use crate::debug::{
+    DebugFrameEntry, DebugFrameStack, DebugFrameStackHeader, DebugValueStack,
+    DebugValueStackHeader, DEBUG_FRAME_STACK_SLOTS, DEBUG_VALUE_STACK_SLOTS,
+};
 use crate::gc::GcRef;
 use crate::heap::Heap;
 use crate::immortal::{read_bool, Immortals};
@@ -394,44 +398,6 @@ pub struct DebugLocal {
     pub span_end: u32,
 }
 
-/// One frame in the crash-debugger's snapshot chain (§9.3, M5/M10).
-///
-/// M5 gave `DebugFrame` a real layout (parent, func name, locals). M10-WS2
-/// completes the §9.3 field set: per-local type descriptors (on
-/// [`DebugLocal`]), the function's source span, and the active input-parser
-/// path. The prologue helper ([`crate::debug::praxis_push_debug_frame`])
-/// allocates and links a frame; the epilogue pops it. The shadow-stack spill
-/// (ADR-019) keeps the `value` fields fresh across GC safepoints so a crash
-/// snapshot reflects live state.
-///
-/// `source_span` and `parser_path` are **reserved** in M10a: the backend
-/// zeroes them at push time (the MIR does not yet carry per-function spans or
-/// the active-parser path). M10b fills them so the `source`/`input`/`parser`
-/// REPL commands can render them.
-#[repr(C)]
-pub struct DebugFrame {
-    /// The caller's frame, or null for the outermost (`main`) frame.
-    pub parent: *mut DebugFrame,
-    /// The function's source name (a `'static` embedded string).
-    pub func_name: *const u8,
-    /// The function name's byte length.
-    pub func_name_len: u32,
-    /// The local-variable entries, as a pointer + count (FFI-safe slice).
-    pub locals: *mut DebugLocal,
-    /// How many locals are in the `locals` array.
-    pub local_count: u32,
-    /// The function's source span `[start, end)` as byte offsets into the
-    /// program source (§9.3 "current source span"). `(0, 0)` until M10b threads
-    /// the span from the AST through HIR/MIR into the backend.
-    pub source_span: (u32, u32),
-    /// The active input-parser path at the fault (§9.3), as a `'static`
-    /// embedded string. Null/zero-length until M10b populates it from the
-    /// parser plan; the `parser` REPL command renders it.
-    pub parser_path: *const u8,
-    /// The byte length of `parser_path`.
-    pub parser_path_len: u32,
-}
-
 /// The hidden first argument to every generated function.
 ///
 /// Matches the sketch in Appendix B. Fields are raw pointers because generated
@@ -453,7 +419,19 @@ pub struct RuntimeContext {
     /// would now fault the process rather than silently never observing a
     /// Praxis fault. `a_wired_context_has_a_fault_slot` is the gate.
     pub pending_fault: *mut Fault,
-    pub debug_top: *mut DebugFrame,
+    /// The header of the runtime's one crash-debugger frame stack (§9.3,
+    /// ADR-021, ADR-104). Generated code claims one [`DebugFrameEntry`] in the
+    /// prologue and restores the `top` in the epilogue;
+    /// [`crate::crash_snapshot::praxis_snapshot_debug_chain`] reads `[base, top)`
+    /// innermost-first to build the frames the crash REPL renders.
+    ///
+    /// This field was `debug_top: *mut DebugFrame` — the top of a chain of
+    /// per-call heap frames — through ABI v17. Same position, same width, a
+    /// different thing entirely pointed at, which is why v18 exists. (The
+    /// alternative, deleting it and appending a replacement, would have shifted
+    /// every field below it; §11.6's discipline in this struct is *append at the
+    /// end, never reorder*, and ADR-101 did the same to `roots`.)
+    pub debug_frames: *mut DebugFrameStackHeader,
     /// The header of the runtime's one compiler-managed shadow stack (§12.3,
     /// ADR-019, ADR-101). Generated code claims a run of slots in the prologue
     /// by bumping the header's `top`, spills live `GcRef`s into that run at
@@ -533,6 +511,21 @@ pub struct RuntimeContext {
     /// neighbours, so every offset above is unchanged and only code compiled
     /// against v15 emits the load at all.
     pub small_ints: *const GcRef,
+    /// The header of the runtime's one crash-debugger value stack (§9.3,
+    /// ADR-104). Generated code claims one slot per `Gc` local in the prologue,
+    /// stores each local's value there at the instruction that defines it, and
+    /// restores the `top` in the epilogue. Each [`DebugFrameEntry`] in
+    /// `debug_frames` names the base of its own call's run.
+    ///
+    /// **The collector never reads this.** It is not an arm of
+    /// [`crate::roots::RuntimeRoots`], and the slot type is `Option<GcRef>`
+    /// rather than the shadow stack's `*mut GcHeader` precisely so that
+    /// `impl RootSet for SlotStackHeader<*mut GcHeader>` cannot reach it: the
+    /// debug set is over-approximate and never cleared (MIR-16), and rooting it
+    /// would undo MIR-01's clears.
+    ///
+    /// Appended after `small_ints`, so every offset above is unchanged.
+    pub debug_values: *mut DebugValueStackHeader,
 }
 
 impl RuntimeContext {
@@ -554,7 +547,7 @@ impl RuntimeContext {
         RuntimeContext {
             heap: std::ptr::null_mut(),
             pending_fault: std::ptr::null_mut(),
-            debug_top: std::ptr::null_mut(),
+            debug_frames: std::ptr::null_mut(),
             shadow: std::ptr::null_mut(),
             input_source,
             // Placeholder: reuse the input_source ref as the Unit sentinel too,
@@ -574,6 +567,7 @@ impl RuntimeContext {
             // the first `Inst::ConstGc` rather than reading whatever the
             // `input_source` trick would have aliased.
             small_ints: std::ptr::null(),
+            debug_values: std::ptr::null_mut(),
         }
     }
 
@@ -639,6 +633,14 @@ pub struct Runtime {
     /// the header's address for the whole program and a frame's base pointer
     /// for the duration of a call, so a reallocation would be a use-after-free.
     shadow_stack: ShadowStack,
+    /// The crash debugger's two stacks (§9.3, ADR-104), owned and sized here
+    /// for the same reason and under the same never-resize rule as
+    /// `shadow_stack`. `debug_frames` holds one entry per live call — which
+    /// function, and where its values are — and `debug_values` one slot per `Gc`
+    /// local per live call. They replace the per-call `Box<DebugFrame>` and its
+    /// separately boxed locals array that ADR-021's prologue allocated.
+    debug_frames: DebugFrameStack,
+    debug_values: DebugValueStack,
 }
 
 impl Runtime {
@@ -659,6 +661,8 @@ impl Runtime {
             // recurses. See `SHADOW_STACK_SLOTS` for why it can be sized once
             // and never checked.
             shadow_stack: ShadowStack::new(SHADOW_STACK_SLOTS, std::ptr::null_mut()),
+            debug_frames: DebugFrameStack::new(DEBUG_FRAME_STACK_SLOTS, DebugFrameEntry::empty()),
+            debug_values: DebugValueStack::new(DEBUG_VALUE_STACK_SLOTS, None),
         }
     }
 
@@ -703,23 +707,31 @@ impl Runtime {
     }
 
     /// A `RuntimeContext` view of this runtime, suitable for generated code.
-    /// `pending_fault` points at this runtime's fault slot; `debug_top` stays
-    /// null until the debugger lands (M10); `shadow` points at this runtime's
-    /// shadow-stack header, which every generated prologue bump-allocates from
-    /// and which the collector scans. `parse_detail` points at this runtime's
-    /// [`ParseDetail`] slot so the parser interpreter can record the richest
-    /// `ParseFailed` detail.
+    /// `pending_fault` points at this runtime's fault slot; `shadow` points at
+    /// this runtime's shadow-stack header, which every generated prologue
+    /// bump-allocates from and which the collector scans; `debug_frames` and
+    /// `debug_values` point at the crash debugger's two stacks, which the
+    /// prologue claims from and which `praxis_snapshot_debug_chain` reads.
+    /// `parse_detail` points at this runtime's [`ParseDetail`] slot so the
+    /// parser interpreter can record the richest `ParseFailed` detail.
     ///
-    /// Every context this mints shares the one stack, so a context taken while
-    /// generated code is running (as [`Runtime::collect_now`] does) sees the
-    /// frames already on it. The `roots` field this replaced started null and
-    /// was filled by the first prologue, so a freshly minted context could not
-    /// see the shadow chain at all.
+    /// Every context this mints shares the three stacks, so a context taken
+    /// while generated code is running (as [`Runtime::collect_now`] does) sees
+    /// the frames already on them. The `roots` field `shadow` replaced started
+    /// null and was filled by the first prologue, so a freshly minted context
+    /// could not see the shadow chain at all; `debug_top` had the same defect.
+    ///
+    /// **Two contexts must never execute over these stacks concurrently.** That
+    /// is not a new property — `shadow` and `recursion_depth` have always had it
+    /// — and it holds because a Praxis program is single-threaded and every host
+    /// that mints a second context ([`crate::Runtime::collect_now`], the
+    /// debugger's `p EXPR` and `restart`) does so only when the previous run has
+    /// fully unwound.
     pub fn context(&mut self) -> RuntimeContext {
         RuntimeContext {
             heap: &mut self.heap as *mut Heap,
             pending_fault: &mut self.fault as *mut Fault,
-            debug_top: std::ptr::null_mut(),
+            debug_frames: self.debug_frames.header_ptr(),
             shadow: self.shadow_stack.header_ptr(),
             input_source: self.immortals.unit(),
             unit_ref: self.immortals.unit(),
@@ -733,6 +745,7 @@ impl Runtime {
             false_ref: self.immortals.false_(),
             fault_message: &mut self.fault_message as *mut FaultMessage,
             small_ints: self.immortals.small_ints_ptr(),
+            debug_values: self.debug_values.header_ptr(),
         }
     }
 
@@ -806,8 +819,8 @@ impl Runtime {
         self.parse_detail.clear();
         self.fault_message.clear();
         // Every epilogue — including every fault epilogue — restores the `top`
-        // its prologue saved, so a completed run leaves the stack exactly as it
-        // found it. A non-empty stack here is an unbalanced prologue, which is
+        // its prologue saved, so a completed run leaves the stacks exactly as it
+        // found them. A non-empty stack here is an unbalanced prologue, which is
         // a codegen bug and not something a rerun should paper over silently.
         debug_assert!(
             self.shadow_stack.is_empty(),
@@ -815,7 +828,16 @@ impl Runtime {
              not balanced by an epilogue",
             self.shadow_stack.len()
         );
+        debug_assert!(
+            self.debug_frames.is_empty() && self.debug_values.is_empty(),
+            "the debug stacks are {} frames / {} values deep between runs; some \
+             prologue was not balanced by an epilogue",
+            self.debug_frames.len(),
+            self.debug_values.len()
+        );
         self.shadow_stack.reset();
+        self.debug_frames.reset();
+        self.debug_values.reset();
     }
 
     /// The shadow stack every generated frame bump-allocates from (ADR-101).
@@ -827,6 +849,21 @@ impl Runtime {
     #[must_use]
     pub fn shadow_stack(&self) -> &ShadowStack {
         &self.shadow_stack
+    }
+
+    /// The crash debugger's frame stack (§9.3, ADR-104). Read-only, and exposed
+    /// for the same reason as [`Runtime::shadow_stack`]: "the stack is empty
+    /// again" is the observable form of "every prologue was balanced".
+    #[must_use]
+    pub fn debug_frame_stack(&self) -> &DebugFrameStack {
+        &self.debug_frames
+    }
+
+    /// The crash debugger's value stack (§9.3, ADR-104). See
+    /// [`Runtime::debug_frame_stack`].
+    #[must_use]
+    pub fn debug_value_stack(&self) -> &DebugValueStack {
+        &self.debug_values
     }
 
     /// Consume the runtime, drop the heap, and return the proof that no live

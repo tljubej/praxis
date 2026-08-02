@@ -25,7 +25,7 @@ pub use ir::{
     AllocKind, Block, BlockId, CallTarget, CmpOp, FloatBinOp, Function, GcConst, Inst, IntBinOp,
     Local, LocalId, LocalKind, MirType, Overflow, ScalarKind, Terminator,
 };
-pub use liveness::annotate;
+pub use liveness::{annotate, defs};
 pub use verify::{verify, VerifyError};
 
 /// Marker documenting the milestone that filled this crate.

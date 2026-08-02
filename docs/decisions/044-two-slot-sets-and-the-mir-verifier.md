@@ -7,6 +7,7 @@
 type); ADR-019 (a safepoint also *clears*); ADR-021 and ADR-035 (the debug
 frame is driven by its own set); ADR-033 (`DebugLocal.value` is an
 `Option<GcRef>`)
+**Amended by:** ADR-104 (decision 1's *emission*, not its contract)
 
 ## Context
 
@@ -72,6 +73,28 @@ It would be easy to read "exact" as better here too. It is not. `locals` after
 asking what the program's state *is*, not what the optimizer still needs. The
 two sets answer different questions, and the only reason they were ever one set
 is that nobody had asked the second question separately.
+
+### `DebugSlots` is a contract, not a store list (ADR-104)
+
+The backend used to *emit* from this set: one store per member of
+`DebugSlots::visible()` at every safepoint and every `CheckFault`,
+`Σ_points |visible|` stores. It now emits one store per `Gc` **definition** and
+nothing at safepoints, which leaves the same value in the same slot at every
+point a snapshot can be taken — a debug slot is never cleared, so its content is
+whatever the most recently *executed* store to it wrote, and that is exactly what
+`use_var` answered.
+
+`DebugSlots` keeps its definition, its `unannotated()`-only construction seal,
+its `liveness::annotate`-only filler and its verifier check, and it is still what
+`Inst::CheckFault` carries even though the backend spills nothing there — it is
+the statement of what a snapshot at that point must be able to render, and the
+verifier still requires it to be annotated. Narrowing it to a per-point delta
+would fail `the_debug_set_still_shows_what_the_root_set_dropped`, which is what
+that test is for.
+
+ADR-104 also records why the new emission needed no new verifier rule: the
+divergence a reaching-definitions rule would have ruled out cannot occur, because
+stores are dynamic and reaching definitions are static.
 
 ## Decision 2: a safepoint clears as well as spills
 
@@ -186,9 +209,13 @@ manifest, like `MethodEntry::allocates()`.
 
 - **Adding an instruction now touches five exhaustive matches**, not four:
   `ir.rs`, `liveness.rs` defs and uses, `verify.rs`'s `operands`, and
-  `lower_inst`.
+  `lower_inst`. ADR-104 kept it at five deliberately: the backend's def-driven
+  debug stores are driven by `liveness::defs`, made `pub` for the purpose,
+  rather than by a sixth copy that could drift.
 - **A safepoint emits stores for dead slots.** Code size grows slightly at
-  safepoints that follow a value's death; nothing else changes.
+  safepoints that follow a value's death; nothing else changes. (The *debug*
+  half of a safepoint's stores is gone entirely as of ADR-104; this bullet is
+  about `RootSlots::dead`, which is unchanged.)
 - **A stale `GcRef` in a shadow slot is now a compiler bug rather than a
   latent leak**, because the slot is cleared and the verifier checks the
   set it was cleared from.

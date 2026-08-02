@@ -5148,55 +5148,70 @@ fn m10ws1_parse_failed_preview_is_single_line() {
 }
 
 // ===========================================================================
-// M10 WS2 — debug-frame codegen wiring (§9.3, ADR-021).
+// M10 WS2 — debug-frame codegen wiring (§9.3, ADR-021, ADR-104).
 //
-// Every generated function now pushes/pops a debug frame in lockstep with its
-// shadow frame, and the spill mirrors each live-root write into the
-// corresponding `DebugLocal.value`. These tests confirm the wiring is balanced
-// and non-corrupting: GC rooting stays sound (the run-pass suite guards this)
-// and the deepest push/pop chain — the stack-overflow fault path — unwinds
-// cleanly back to the host. The chain's *content* (locals at fault time) is
-// made observable by WS3's crash snapshot.
+// Every generated function claims a debug frame in lockstep with its shadow
+// frame — one `DebugFrameEntry` and one value slot per `Gc` local, both
+// bump-claimed inline — and writes each local's value into its slot at the
+// instruction that defines it. These tests confirm the wiring is balanced and
+// non-corrupting: GC rooting stays sound (the run-pass suite guards this), the
+// stacks come back empty, and the deepest claim/release sequence — the
+// stack-overflow fault path — unwinds cleanly back to the host. The frames'
+// *content* (locals at fault time) is made observable by WS3's crash snapshot.
 // ===========================================================================
 
 #[test]
 fn m10ws2_debug_frame_pushpop_balanced_across_recursion() {
-    // Deep recursion pushes/pops many debug frames. If the push/pop were
-    // unbalanced or the spill corrupted the frame, this would either leak
-    // (eventual OOM) or fault spuriously. A clean result confirms the wiring.
+    // Deep recursion claims and releases many debug frames. If the two were
+    // unbalanced the stacks would drift upward until the reservation ran out;
+    // if a def-store wrote outside its own run it would corrupt a caller's
+    // frame. A clean result plus two empty stacks confirms the wiring.
     let src = "fn sum(n: Int) -> Int {\n  if n <= 0 { 0 } else { n + sum(n - 1) }\n}\n
                fn main() -> Int { sum(500) }\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // sum(500) = 500*501/2 = 125250.
     assert_eq!(result.as_int(), 125250);
+    assert!(
+        rt.debug_frame_stack().is_empty(),
+        "every claim was released"
+    );
+    assert!(rt.debug_value_stack().is_empty());
+    assert!(rt.shadow_stack().is_empty());
 }
 
 #[test]
 fn m10ws2_debug_frame_unwinds_cleanly_on_stack_overflow() {
-    // The stack-overflow fault path is the deepest push/pop chain: every
-    // recursed frame has pushed a shadow + debug frame. The fault epilogue
-    // must pop *both* for every frame as it unwinds to the host, leaving
-    // debug_top null and no leak/corruption. A clean StackOverflow fault
-    // confirms the debug-frame epilogue ordering is correct.
+    // The stack-overflow fault path is the deepest claim/release sequence:
+    // every recursed frame has claimed shadow slots, debug value slots and a
+    // frame entry. Each fault epilogue must give all three back as it unwinds
+    // to the host. `MAX_RECURSION_DEPTH` frames deep is also where an
+    // *unbalanced* epilogue would be loudest, since the reservations are sized
+    // for exactly that depth (ADR-101, ADR-104).
     let src = "fn count(n: Int) -> Int { count(n + 1) }\n
                fn main() -> Int { count(0) }\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::StackOverflow);
-    // After unwind, debug_top must be null: every frame's epilogue popped.
-    // (We cannot read ctx here — it was dropped — but a clean fault return
-    // without abort/SIGSEGV is itself the proof the epilogue chain is sound;
-    // the chain's persistence is asserted via the snapshot in WS3.)
+    // Every frame's fault epilogue restored the tops its prologue saved. This
+    // used to be unassertable — `debug_top` lived on a context the harness had
+    // already dropped — and is now a property of the runtime, which outlives
+    // the run.
+    assert!(
+        rt.debug_frame_stack().is_empty(),
+        "every claim was released"
+    );
+    assert!(rt.debug_value_stack().is_empty());
+    assert!(rt.shadow_stack().is_empty());
 }
 
 #[test]
 fn m10ws2_debug_frame_locals_survive_gc_during_recursion() {
     // A recursive function that allocates on every call forces GC at safepoints
-    // while the debug-frame chain is deep. If the spill into DebugLocal.value
-    // corrupted any slot, the GC (which walks the parallel shadow frame) or the
-    // returned value would be wrong. The correct sum confirms both frames stay
-    // consistent across collections.
+    // while the debug stacks are deep. If a def-store wrote outside its own run
+    // the GC (which walks the parallel shadow stack) or the returned value
+    // would be wrong. The correct sum confirms the two stay consistent across
+    // collections.
     let src = "fn build(n: Int) -> Vec[Int] {\n  if n == 0 { Vec() } else { let v = build(n - 1); v.push(n); v }\n}\n
                fn main() -> Int {\n  let v = build(100);\n  var s = 0;\n  var i = 0;\n  while i < v.len() { s = s + v.get(i); i = i + 1 }\n  s\n}\n";
     let (rt, result) = run_main(src);
@@ -5359,6 +5374,169 @@ fn m10b_ws1_snapshot_locals_carry_distinct_type_ids() {
         n.type_id, xs.type_id,
         "Int and Vec locals must have distinct type ids"
     );
+}
+
+// ===========================================================================
+// ADR-104 — the debugger's view is written once per value.
+//
+// The backend stores a `Gc` local into its debug slot at the instruction that
+// *defines* it, instead of re-writing the whole over-approximate
+// `DebugSlots::visible()` set at every GC safepoint and every `CheckFault`.
+// The three tests below pin the properties that makes load-bearing, and they
+// assert on the `CrashSnapshot` rather than through the REPL so the contract
+// holds one layer below `m11_locals_split_users_and_temps_with_types` and
+// friends.
+//
+// Together they are also the case against reconstructing the debugger's view
+// from the shadow stack: the first shows a value the exact GC root set has
+// deliberately dropped, and the third shows one that was never in a shadow slot
+// at any point in the program's execution.
+// ===========================================================================
+
+/// The `Vec` a local names in `l`, or `None` if that local has no value.
+fn snapshot_local_vec(snap: &praxis_runtime::CrashSnapshot, name: &str) -> Option<Vec<i64>> {
+    snap.frames
+        .iter()
+        .flat_map(|f| &f.locals)
+        .find(|l| l.name() == name)
+        .and_then(|l| l.value)
+        .map(|r| r.as_vec().iter().map(|e| e.as_int()).collect())
+}
+
+#[test]
+fn a_local_the_root_set_dropped_is_still_renderable() {
+    // MIR-16 / ADR-044 decision 1, stated at the snapshot level. `xs` is dead
+    // for the collector from its last `push` onward, so `RootSlots::dead` nulls
+    // its shadow slot at the very next safepoint — the `Vec()` that makes `ys`
+    // — and `a_dead_local_stops_being_reachable_from_its_frame` is the test
+    // that insists it does. The debugger must show it anyway: the user is
+    // asking what the program's state *is*, not what the collector still needs.
+    //
+    // This is the property store-at-def could plausibly have broken, because
+    // `xs`'s definition is now the only point that writes its debug slot. It
+    // does not break it, because the debug slot is never cleared.
+    let src = "fn main() -> Int {\n  let xs = Vec()\n  xs.push(11)\n  let ys = Vec()\n  \
+               ys.push(22)\n  ys.get(99)\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
+    let snap = rt.crash_snapshot().expect("snapshot captured");
+    assert_eq!(
+        snapshot_local_vec(snap, "xs"),
+        Some(vec![11]),
+        "`xs` is dead for GC at the fault and must still be renderable"
+    );
+    assert_eq!(
+        snapshot_local_vec(snap, "ys"),
+        Some(vec![22]),
+        "`ys` is live at the fault"
+    );
+}
+
+#[test]
+fn a_fault_between_a_definition_and_the_next_safepoint_shows_the_value() {
+    // The case the deleted `CheckFault` spill existed for. `d` is boxed by an
+    // `Inst::ConstGc`/`Inst::Alloc`, then read back as a scalar and divided
+    // into — and the division faults before any GC safepoint runs. Nothing
+    // between `d`'s definition and the fault would have written its debug slot
+    // under the old scheme except the spill at the `CheckFault` itself; under
+    // store-at-def the value arrived at the definition.
+    //
+    // The comment the spill carried named this exact program: "a snapshot taken
+    // on the fault path sees `<uninit>` for the `0` divisor in `x / 0`".
+    let src = "fn main() -> Int {\n  let n = 10\n  let d = 0\n  n / d\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::DivByZero);
+    let snap = rt.crash_snapshot().expect("snapshot captured");
+    let locals = &snap.frames[0].locals;
+    let value_of = |name: &str| {
+        locals
+            .iter()
+            .find(|l| l.name() == name)
+            .and_then(|l| l.value)
+            .map(|r| r.as_int())
+    };
+    assert_eq!(value_of("d"), Some(0), "the divisor must be renderable");
+    assert_eq!(value_of("n"), Some(10), "so must the dividend");
+}
+
+#[test]
+fn a_temp_that_never_reached_a_shadow_slot_is_still_renderable() {
+    // The loss class a reconstruction-from-the-shadow-stack design cannot
+    // recover, and the reason ADR-104 rejects one outright.
+    //
+    // `a + b` is materialized into a temp, and that temp is consumed by the
+    // overflowing addition before the next GC safepoint. `liveness::block_roots`
+    // computes the root set as live-*before* the instruction, so a
+    // `Materialize`'s destination is by construction excluded from its own
+    // safepoint's root set — "the destination is written after the collection so
+    // it is not rooted". The temp is therefore in *no* shadow slot at any point
+    // in this program, yet `locals` must show it: `m11_locals_split_users_and_
+    // temps_with_types` asserts on its `@ "a + b"` provenance line.
+    let src = "fn main() -> Int {\n  let a = 10\n  let b = 20\n  \
+               a + b + 9223372036854775807\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
+    let snap = rt.crash_snapshot().expect("snapshot captured");
+    let sum = snap.frames[0]
+        .locals
+        .iter()
+        .filter(|l| !l.is_user())
+        .filter_map(|l| l.value)
+        .map(|r| r.as_int())
+        .find(|&v| v == 30);
+    assert_eq!(
+        sum,
+        Some(30),
+        "the `a + b` temp lives only in a register and the debug frame, and \
+         must be renderable from the latter"
+    );
+}
+
+#[test]
+fn a_snapshot_orders_its_frames_innermost_first_with_each_functions_own_locals() {
+    // The debug frames are a *stack* now, not a `parent`-linked chain, so the
+    // innermost-first order the host renders (`#0` is the faulting function)
+    // comes from walking `[base, top)` backwards rather than from following
+    // pointers. This is the test for that reversal, and for the rejoin: each
+    // frame's locals come from *its* function's static metadata zipped with
+    // *its own* run of value slots, so two frames must not show each other's.
+    let src = "fn inner(a: Int) -> Int {\n  let deep = a + 1\n  deep / 0\n}\n\
+               fn main() -> Int {\n  let outer = 7\n  inner(outer)\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::DivByZero);
+    let snap = rt.crash_snapshot().expect("snapshot captured");
+    assert_eq!(snap.len(), 2, "the fault is two frames deep");
+    // SAFETY: function names are compiler-embedded 'static UTF-8.
+    assert_eq!(unsafe { snap.frame_name(0) }, "inner");
+    // SAFETY: as above.
+    assert_eq!(unsafe { snap.frame_name(1) }, "main");
+    assert_eq!(snap.frames[0].parent, 1, "frame 0's caller is frame 1");
+    assert_eq!(snap.frames[1].parent, usize::MAX, "`main` has no caller");
+
+    let named = |i: usize, name: &str| {
+        snap.frames[i]
+            .locals
+            .iter()
+            .find(|l| l.name() == name)
+            .and_then(|l| l.value)
+            .map(|r| r.as_int())
+    };
+    assert_eq!(named(0, "a"), Some(7), "the callee's parameter");
+    assert_eq!(named(0, "deep"), Some(8), "the callee's own local");
+    assert_eq!(named(1, "outer"), Some(7), "the caller's local");
+    assert_eq!(named(1, "deep"), None, "`deep` belongs to `inner` alone");
+    assert_eq!(named(0, "outer"), None, "`outer` belongs to `main` alone");
+
+    // Each frame's span is its own function's, which is the field
+    // `praxis_set_frame_source_span` used to write at runtime.
+    let (s0, e0) = snap.frames[0].source_span;
+    let (s1, e1) = snap.frames[1].source_span;
+    assert!(src[s0 as usize..e0 as usize].starts_with("fn inner"));
+    assert!(src[s1 as usize..e1 as usize].starts_with("fn main"));
 }
 
 /// TY-33's first unit end to end. `panic` typechecked before this stage and

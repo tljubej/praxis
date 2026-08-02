@@ -54,7 +54,7 @@ use praxis_runtime::descriptor::TypeDescriptor;
 use praxis_runtime::enums::{EnumSchema, EnumVariantShape};
 use praxis_runtime::records::{RecordField, RecordSchema, SchemaIdentity};
 use praxis_runtime::tuples::TupleSchema;
-use praxis_runtime::{DebugLocalMeta, HeapDrained};
+use praxis_runtime::{DebugLocalMeta, FunctionDebugMeta, HeapDrained};
 
 /// A process-unique identity for one JIT generation.
 ///
@@ -117,6 +117,8 @@ pub struct GenerationStats {
     pub enum_schemas: usize,
     /// Distinct debug-local-metadata arrays built.
     pub debug_meta_arrays: usize,
+    /// Distinct per-function debug metadata records built.
+    pub function_debug_metas: usize,
 }
 
 /// One JIT generation's arena and metadata caches.
@@ -135,6 +137,7 @@ pub struct Generation {
     tuple_schemas: RefCell<TupleSchemaCache>,
     enum_schemas: RefCell<HashMap<EnumKey, *const EnumSchema>>,
     debug_metas: RefCell<DebugMetaCache>,
+    function_metas: RefCell<HashMap<FunctionMetaKey, *const FunctionDebugMeta>>,
 }
 
 /// Tuple schemas, keyed by their element-descriptor sequence (structural shape).
@@ -156,6 +159,23 @@ struct DebugMetaKey {
     descriptor: usize,
     type_id: u32,
     kind: u8,
+    span_start: u32,
+    span_end: u32,
+}
+
+/// The comparable projection of a [`FunctionDebugMeta`], for interning.
+///
+/// Same reasoning as [`DebugMetaKey`], one level up: spelled out rather than
+/// hashed as bytes, and the two pointers compare as addresses because both are
+/// already interned in this arena — the name by [`Generation::alloc_str`], the
+/// locals array by [`Generation::debug_local_metas`]. So equal content really
+/// is one address, and this cache is the last hop rather than a re-comparison.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct FunctionMetaKey {
+    func_name: usize,
+    func_name_len: u32,
+    local_count: u32,
+    locals: usize,
     span_start: u32,
     span_end: u32,
 }
@@ -186,6 +206,7 @@ impl Generation {
             tuple_schemas: RefCell::new(HashMap::new()),
             enum_schemas: RefCell::new(HashMap::new()),
             debug_metas: RefCell::new(HashMap::new()),
+            function_metas: RefCell::new(HashMap::new()),
         }
     }
 
@@ -203,6 +224,7 @@ impl Generation {
             tuple_schemas: self.tuple_schemas.borrow().len(),
             enum_schemas: self.enum_schemas.borrow().len(),
             debug_meta_arrays: self.debug_metas.borrow().len(),
+            function_debug_metas: self.function_metas.borrow().len(),
         }
     }
 
@@ -358,8 +380,7 @@ impl Generation {
     }
 
     /// Store one function's debug-local metadata array, deduplicated by
-    /// content, and return `(ptr, len)` for the prologue's
-    /// `praxis_push_debug_frame` call.
+    /// content, and return `(ptr, len)`.
     ///
     /// Deduplication is what makes repeated compilation of the same source into
     /// one generation cost nothing (DBG-05): the same function lowered twice
@@ -374,6 +395,49 @@ impl Generation {
         let entry = (stored.as_ptr(), len);
         self.debug_metas.borrow_mut().insert(key, entry);
         entry
+    }
+
+    /// Store one function's whole debug metadata record — name, source span and
+    /// locals — deduplicated by content, and return the address the prologue
+    /// writes into its [`DebugFrameEntry`](praxis_runtime::DebugFrameEntry).
+    ///
+    /// This is where ADR-104's static half lands. Everything here was previously
+    /// passed as *arguments*: four to `praxis_push_debug_frame` and two more to
+    /// `praxis_set_frame_source_span`, on every call, to describe something that
+    /// is the same for every call of the function. Interning it means the
+    /// prologue names it with one immediate, and a debugger session that
+    /// recompiles the same function on every `p EXPR` still allocates nothing
+    /// new — the property `repeated_identical_metadata_stops_growing_the_arena`
+    /// pins.
+    pub fn function_debug_meta(
+        &self,
+        func_name: &'static str,
+        span: (u32, u32),
+        metas: Vec<DebugLocalMeta>,
+    ) -> *const FunctionDebugMeta {
+        let (locals, local_count) = self.debug_local_metas(metas);
+        let key = FunctionMetaKey {
+            func_name: func_name.as_ptr() as usize,
+            func_name_len: func_name.len() as u32,
+            local_count: local_count as u32,
+            locals: locals as usize,
+            span_start: span.0,
+            span_end: span.1,
+        };
+        if let Some(&hit) = self.function_metas.borrow().get(&key) {
+            return hit;
+        }
+        let stored: &FunctionDebugMeta = self.arena.alloc(FunctionDebugMeta {
+            func_name: func_name.as_ptr(),
+            func_name_len: key.func_name_len,
+            local_count: key.local_count,
+            locals,
+            span_start: span.0,
+            span_end: span.1,
+        });
+        let raw: *const FunctionDebugMeta = stored;
+        self.function_metas.borrow_mut().insert(key, raw);
+        raw
     }
 }
 
@@ -514,7 +578,7 @@ mod tests {
         // Two rounds to prime every cache, then measure across a hundred more.
         for _ in 0..2 {
             let name = gen.alloc_str("main");
-            gen.debug_local_metas(vec![meta(name)]);
+            gen.function_debug_meta(name, (0, 40), vec![meta(name)]);
             gen.tuple_schema(&[&praxis_runtime::scalars::INT]);
             gen.record_schema(0, SchemaIdentity::Anonymous, || {
                 Ok::<_, ()>(vec![RecordField {
@@ -527,7 +591,7 @@ mod tests {
         let primed = gen.stats();
         for _ in 0..100 {
             let name = gen.alloc_str("main");
-            gen.debug_local_metas(vec![meta(name)]);
+            gen.function_debug_meta(name, (0, 40), vec![meta(name)]);
             gen.tuple_schema(&[&praxis_runtime::scalars::INT]);
             gen.record_schema(0, SchemaIdentity::Anonymous, || {
                 Ok::<_, ()>(vec![RecordField {

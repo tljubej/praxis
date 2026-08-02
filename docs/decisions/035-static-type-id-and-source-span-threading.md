@@ -5,6 +5,7 @@
 **Milestone:** M10b-WS1 (Thread spans + type ids, §9.3)
 **Builds on:** ADR-021 (debug-frame metadata), ADR-025 (TypeData def-id
 indirection)
+**Amended by:** ADR-104 (decision 3's last hop; decision 1's ABI note)
 
 ## Context
 
@@ -28,6 +29,13 @@ render.
    at `DEBUG_VALUE_OFFSET` — stays unchanged (§11.6 ABI stability). The codegen
    emits `local.ty.0` at push time.
 
+   > **ADR-104 removes the constraint this care was taken for.** The debug
+   > values are a separate 8-byte-stride array now, so `DebugLocal`'s layout no
+   > longer constrains generated code at all — nothing emits an offset into it.
+   > It is still the crash snapshot's element type and still `#[repr(C)]`, and
+   > the field order is left as it is; there is simply nothing left to break by
+   > reordering it.
+
 2. **Deep-resolve the local's type before capturing its id.** `TypeDb::follow`
    resolves only the top-level representative; a `Collection`'s element/param
    vars are left untouched, so a `Vec[Linked→Int]` rendered as `Vec[?T]`. The
@@ -44,6 +52,14 @@ render.
    end)` in the prologue after the debug-frame push. Closures and synthetic
    functions (`__p_expr`) are span-less (`(0, 0)`); the `source` command
    degrades gracefully.
+
+   > **Amended by ADR-104: only the last hop moves.** The AST → HIR `TypedFn` →
+   > MIR `Function.span` threading is unchanged, and so is what the `source`
+   > command reads. What is gone is `praxis_set_frame_source_span` — a runtime
+   > call, in every prologue, to record a compile-time constant. The span is now
+   > a field of the function's static `FunctionDebugMeta`, and the crash
+   > snapshot reads it there when it builds the `SnapshotFrame`.
+   > `m10b_ws1_snapshot_frame_carries_source_span` is the gate, unchanged.
 
 4. **Type recovery from the runtime descriptor** (`descriptor_to_type`) is the
    evaluator's primary source for a local's type, with the static `type_id` as
