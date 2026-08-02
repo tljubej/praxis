@@ -106,3 +106,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-099: A `[a, b]` is a `Vec` literal, and a `Text` is the eleventh iterable](./099-a-list-literal-is-a-vec-and-a-text-is-iterable.md)
 - [ADR-100: A small `Int` is one object per value, and a literal is a load](./100-a-small-int-is-one-object-and-a-literal-is-a-load.md)
 - [ADR-101: The shadow stack is one contiguous region, and the recursion limit is what keeps it in bounds](./101-the-shadow-stack-is-contiguous.md)
+- [ADR-103: A page owns the storage and the liveness, and the registry is gone](./103-a-page-owns-the-storage-and-the-liveness.md)

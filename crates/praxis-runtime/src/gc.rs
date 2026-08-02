@@ -9,9 +9,12 @@
 //! in §10.3.
 //!
 //! See §12.2 for the conceptual header layout. The concrete fields here are the
-//! M3 realization (ADR-011): a typed descriptor pointer, a tri-color mark byte
-//! (interior-mutable so the collector can color through a shared reference),
-//! and the payload size in bytes for precise sweep and debugging.
+//! M3 realization (ADR-011) as amended by ADR-039 and ADR-103: a typed
+//! descriptor pointer, the payload size in bytes for debugging, the offset the
+//! allocator laid the payload at, and the owning heap's identity. The mark
+//! colour is **not** here — it is a bit in the object's page ([`crate::page`]),
+//! because a per-object colour byte cost a random-access store per surviving
+//! object per collection.
 
 use std::cell::Cell;
 use std::num::NonZeroU32;
@@ -19,12 +22,6 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::descriptor::TypeDescriptor;
-
-/// Tri-color mark values used by the collector (ADR-011). Stored in the
-/// header's `mark` byte.
-pub(crate) const WHITE: u8 = 0;
-pub(crate) const GREY: u8 = 1;
-pub(crate) const BLACK: u8 = 2;
 
 /// The identity of the heap that owns an allocation.
 ///
@@ -79,23 +76,25 @@ pub struct GcHeader {
     ///
     /// Null means **poisoned**: the storage has been swept and its payload
     /// finalized. `Cell` so `poison` can run through a shared reference during
-    /// the sweep, which walks the live registry by shared borrow.
+    /// the sweep, which reaches every block through a `&PageHeader`.
     descriptor: Cell<*const TypeDescriptor>,
     /// Size of the payload in bytes (excludes the header). Used for stats and
-    /// debugging; precise sweep uses the live-set registry, not this field.
+    /// debugging; precise sweep uses the page's `allocated` bitmap and the
+    /// page's stride, not this field.
     size: u32,
     /// Distance in bytes from this header's address to its payload's. **The
     /// single layout authority** — written by the allocator from the same
     /// calculation that produced the address it initialized, and read by
     /// [`GcHeader::payload`], by the collector, and by generated code.
     payload_offset: u16,
-    /// Tri-color mark byte for the collector (ADR-011). `Cell` so the mark phase
-    /// can recolor a header reached through a shared `&GcHeader`.
-    mark: Cell<u8>,
-    /// Explicit padding, so the `#[repr(C)]` layout has no implicit holes.
-    _pad: u8,
     /// Which heap owns this allocation ([`HeapId`]). 0 means poisoned/unowned.
     /// `Cell` for the same reason as `descriptor`.
+    ///
+    /// The page carries the same id, and could answer for it — but this copy is
+    /// what the mark phase reads *first*, and reading it first is what makes
+    /// masking the address to find the page sound at all (ADR-103): only a
+    /// header this heap allocated carries this heap's id, and every header this
+    /// heap allocated is inside one of its pages.
     heap_id: Cell<u32>,
 }
 
@@ -131,8 +130,6 @@ impl GcHeader {
             descriptor: Cell::new(descriptor as *const TypeDescriptor),
             size,
             payload_offset,
-            mark: Cell::new(WHITE),
-            _pad: 0,
             heap_id: Cell::new(heap_id.get()),
         }
     }
@@ -198,8 +195,8 @@ impl GcHeader {
 
     /// Mark this header's storage as reclaimed: no descriptor, no owning heap.
     ///
-    /// Called by the sweep *after* finalizing the payload and before the header
-    /// leaves the live registry, so a stale `GcRef` that reaches it afterwards
+    /// Called by the sweep *after* finalizing the payload and before the block's
+    /// `allocated` bit is cleared, so a stale `GcRef` that reaches it afterwards
     /// is rejected by [`GcHeader::heap_id`] instead of being traced through
     /// freed storage.
     #[inline]
@@ -208,28 +205,19 @@ impl GcHeader {
         self.heap_id.set(0);
     }
 
-    /// Current mark color (ADR-011).
-    #[inline]
-    pub(crate) fn mark_color(&self) -> u8 {
-        self.mark.get()
-    }
-
-    /// Recolor this header.
-    #[inline]
-    pub(crate) fn set_mark_color(&self, color: u8) {
-        self.mark.set(color);
-    }
-
     /// A header owned by no heap, for tests that need a non-null `GcRef`
     /// address and never dereference the object behind it.
+    ///
+    /// The zero `heap_id` is what keeps this safe now that `Heap::mark` masks an
+    /// accepted address to find its page: no heap's id is zero, so a detached
+    /// header is rejected by the provenance check *before* anything derives a
+    /// page from its address.
     #[cfg(test)]
     pub(crate) fn detached() -> GcHeader {
         GcHeader {
             descriptor: Cell::new(std::ptr::null()),
             size: 0,
             payload_offset: std::mem::size_of::<GcHeader>() as u16,
-            mark: Cell::new(WHITE),
-            _pad: 0,
             heap_id: Cell::new(0),
         }
     }
@@ -393,6 +381,31 @@ mod tests {
     fn header_layout_is_fixed() {
         assert_eq!(std::mem::size_of::<GcHeader>(), 24);
         assert_eq!(std::mem::align_of::<GcHeader>(), 8);
+    }
+
+    /// **Moving the mark colour into the page must not move the immediate
+    /// generated code bakes in.** `Inst::EnumTag` reaches an enum's tag by
+    /// calling `payload_offset_for` at compile time and folding the answer into
+    /// an `iadd_imm`, so a header that quietly changed size would make the
+    /// runtime and the JIT disagree about where every payload starts — silently,
+    /// because compiler and runtime are the same binary and `assert_abi_version`
+    /// would be trivially satisfied. ADR-039's Context is explicit that this is
+    /// why a header repack is one commit; this test is why removing the mark
+    /// byte is *not* a repack. Deleting `mark: Cell<u8>` and its `_pad` left the
+    /// struct 20 bytes of fields in 24 bytes of `#[repr(C)]` padding, so nothing
+    /// moved and no ABI bump is owed.
+    #[test]
+    fn removing_the_mark_byte_did_not_move_the_payload_offset() {
+        assert_eq!(std::mem::size_of::<GcHeader>(), 24);
+        assert_eq!(
+            GcHeader::payload_offset_for(std::mem::align_of::<GcHeader>()),
+            24
+        );
+        assert_eq!(
+            GcHeader::payload_offset_for(std::mem::align_of::<crate::enums::EnumPayload>()),
+            24,
+            "the offset lower.rs:Inst::EnumTag folds into an immediate"
+        );
     }
 
     /// `payload_offset_for` is the single layout authority. For any alignment

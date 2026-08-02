@@ -1,26 +1,28 @@
-//! The GC heap and the precise non-moving mark-and-sweep collector (§12, ADR-011).
+//! The GC heap and the precise non-moving mark-and-sweep collector (§12,
+//! ADR-011, ADR-103).
 //!
-//! Every allocation is `[GcHeader | payload]` laid out contiguously in a
-//! [`bumpalo::Bump`] arena. A side `live` registry (`Vec<NonNull<GcHeader>>`)
-//! tracks every outstanding allocation so sweep is precise: there is no need to
-//! recover object boundaries by scanning. Objects never move (§12.1), so `GcRef`
-//! addresses are stable for the object's lifetime.
+//! Every allocation is `[GcHeader | payload]` laid out contiguously in a **block**
+//! on a size-class **page** ([`crate::page`]). The page's `allocated` bitmap is
+//! the record of every outstanding allocation, so sweep is precise: object
+//! boundaries are recovered from the page's stride rather than scanned for, and
+//! there is no side registry to push to or walk. Objects never move (§12.1), so
+//! `GcRef` addresses are stable for the object's lifetime.
 //!
-//! Collection is tri-color mark-and-sweep with no write barrier (§12.1):
-//!   1. **Mark** — start from the root set; for each reachable object, run its
-//!      descriptor `trace` callback to enqueue child references.
-//!   2. **Sweep** — any allocation still white after marking gets its descriptor
-//!      `drop_value` called (§12.5) and is dropped from the registry.
+//! Collection is mark-and-sweep with no write barrier (§12.1):
+//!   1. **Mark** — start from the root set; for each reachable object, set its
+//!      block's bit in its page's `mark` bitmap and run its descriptor `trace`
+//!      callback to enqueue child references.
+//!   2. **Sweep** — walk every page a word at a time; each block in `allocated &
+//!      !mark` gets its descriptor `drop_value` called (§12.5), is poisoned, and
+//!      has its `allocated` bit cleared so the block can be reissued (RT-01).
 
-use std::alloc::Layout;
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-use bumpalo::Bump;
-
 use crate::descriptor::{Payload, TypeDescriptor};
-use crate::gc::{GcHeader, GcRef, HeapId, BLACK, GREY, WHITE};
+use crate::gc::{GcHeader, GcRef, HeapId};
+use crate::page::{self, PageHeader, SizeClass, NUM_CLASSES};
 use crate::roots::{RootSet, RuntimeRoots};
 use crate::Tracer;
 
@@ -43,21 +45,25 @@ pub struct Safepoint<'a>(PhantomData<&'a Heap>);
 /// A precise, non-moving GC heap (§12.1, ADR-011).
 ///
 /// `#[repr(C)]` so the `RuntimeContext.heap` pointer offset is stable
-/// (Appendix B). The interior `RefCell` lets the mark phase enqueue child
-/// references through a `&Heap` (the collector borrows the heap immutably while
-/// the worklist, owned by the mark, grows).
+/// (Appendix B). Every mutable field is a [`Cell`]: the collector runs through a
+/// `&Heap` that the descriptor `trace` callbacks reborrow, so a `RefCell` would
+/// only buy a double-borrow panic that a scalar and a raw pointer cannot need —
+/// and it charged a borrow-flag round trip on the hottest path in the runtime.
 #[repr(C)]
 pub struct Heap {
-    arena: Bump,
     /// This heap's identity, stamped into every header it allocates. The mark
     /// phase compares it against a root's `heap_id` before touching anything
     /// the header points at, so a root from another heap — or one whose storage
     /// this heap has already swept — is rejected rather than traced.
     id: HeapId,
-    /// Every live allocation's header pointer. Precise sweep iterates this.
-    /// Wrapped in a `RefCell` because `collect` mutates it while a `&Heap` is
-    /// reborrowed by the tracer callbacks.
-    live: RefCell<Vec<NonNull<GcHeader>>>,
+    /// How many collectable objects this heap holds — what [`HeapStats`]
+    /// reports.
+    ///
+    /// A running counter rather than a registry's length. It counts exactly what
+    /// the registry used to: immortals are not in it, because
+    /// [`Heap::alloc_immortal`] does not bump it, and sweep decrements it by the
+    /// blocks it actually reclaimed.
+    live_count: Cell<usize>,
     /// Bytes allocated since the last collection. Used by [`Heap::maybe_collect`]
     /// to trigger automatic collection on allocation pressure (§12.4, M5). This
     /// is the mechanism that makes "survives collection" observable from JIT'd
@@ -73,23 +79,37 @@ pub struct Heap {
     ///
     /// A `Cell` for [`Heap::bytes_since_collect`]'s reason.
     collect_threshold: Cell<usize>,
-    /// Swept blocks, keyed by the exact `[header|payload]` layout they were laid
-    /// out with, ready to be handed back out (RT-01).
+    /// Every page this heap owns, newest first, linked by `PageHeader::next`.
+    /// The only list that is exhaustive: sweep, `reset` and `Drop` all walk it,
+    /// and a page is on it from the moment it is created until the heap dies.
+    pages: Cell<*mut PageHeader>,
+    /// Per size class, the head of the list of pages that may still have a free
+    /// block, linked by `PageHeader::next_of_class`.
     ///
-    /// A `bumpalo::Bump` can only reclaim *everything* — it has no route to
-    /// return one block — so sweep finalized and unregistered a dead object but
-    /// its bytes stayed spent. A program that allocated and collected a bounded
-    /// working set in a loop grew the arena forever while `live_count` returned
-    /// to zero each cycle.
+    /// Allocation takes the head, and drops it off this list the moment it
+    /// reports itself full. Sweep rebuilds all three availability lists from the
+    /// pages' own `live_count`s, which is what keeps a page from ever being on
+    /// two of them at once.
+    partial: [Cell<*mut PageHeader>; NUM_CLASSES],
+    /// Small pages holding nothing, awaiting a class.
     ///
-    /// Keying on the whole layout rather than on a descriptor is what makes
-    /// handing a block back sound: an exact `(size, align)` match means the
-    /// reused storage is large enough and correctly aligned for whatever the
-    /// next allocation puts there, whoever allocated it first.
+    /// **This is where the free list went.** A per-layout free list left an
+    /// emptied bucket as dead capital for every other layout — a program that
+    /// filled a heap with `Int`s and then with `Text`s paid for both. A page
+    /// that empties is re-classed on demand, so storage is reusable across
+    /// layouts (RT-01, strengthened).
+    empty: Cell<*mut PageHeader>,
+    /// Large pages holding nothing. Keyed on the whole layout rather than a
+    /// class, because that is exactly what the ladder rejected them for; the
+    /// list is empty in every real program, which is why a linear scan is the
+    /// right shape for it.
+    empty_large: Cell<*mut PageHeader>,
+    /// Pages flagged immortal, linked by `PageHeader::next_of_class`.
     ///
-    /// *How* the bucket is found is [`FreeList`]'s business and is orthogonal to
-    /// that argument — see its doc comment for why it stopped being a hash map.
-    free: RefCell<FreeList>,
+    /// A separate list rather than a single page because the immortals are not
+    /// one size class: `Unit` is a bare header and the interned small-`Int`
+    /// table ([`crate::small_int`]) is a thousand blocks of the next rung up.
+    immortal_pages: Cell<*mut PageHeader>,
 }
 
 /// What ran a collection. Only allocation pressure grows the pacing threshold:
@@ -103,10 +123,10 @@ enum Trigger {
     Explicit,
 }
 
-/// The size and alignment of one whole `[header|payload]` allocation — the
-/// free-list key. Not the payload's own layout: the payload's offset within the
-/// block is recomputed and re-recorded on every reuse, so two descriptors that
-/// split the same total differently still share a block.
+/// The size and alignment of one whole `[header|payload]` allocation — what a
+/// page must be able to hold. Not the payload's own layout: the payload's offset
+/// within the block is recomputed on every reuse, so two descriptors that split
+/// the same total differently still share a block.
 ///
 /// Deliberately not `Hash`. The free list used to be a `HashMap` keyed on this,
 /// and hashing a 16-byte key twice per object — once to find a bucket in
@@ -114,22 +134,24 @@ enum Trigger {
 /// of runtime on `collatz` and 33% on `primes`, ahead of the generated code
 /// (docs/handovers/21-where-the-time-goes.md §3.1). Withholding the derive makes
 /// re-introducing a hash lookup a compile error rather than a silent regression.
+/// There is no hash left to re-introduce — a block's page is a mask and its
+/// class is a subtraction — and the derive stays withheld so it stays that way.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct BlockLayout {
-    size: usize,
-    align: usize,
+pub(crate) struct BlockLayout {
+    pub(crate) size: usize,
+    pub(crate) align: usize,
 }
 
 impl BlockLayout {
     /// The block `descriptor`'s objects occupy, and where their payload starts
     /// within it. The single calculation both [`Heap::alloc_raw`] and
-    /// [`Heap::sweep`] read, so a block can only be filed under the layout it
-    /// actually has.
+    /// [`SizeClass::of`] read, so a block can only be placed on a page that
+    /// holds the layout it actually has.
     ///
     /// # Panics
     /// Panics if the payload alignment exceeds what a `GcHeader` can record, or
     /// if the total size overflows.
-    fn of(descriptor: &TypeDescriptor) -> (usize, BlockLayout) {
+    pub(crate) fn of(descriptor: &TypeDescriptor) -> (usize, BlockLayout) {
         let payload_align = descriptor.align();
         let payload_offset = GcHeader::payload_offset_for(payload_align);
         let size = payload_offset
@@ -137,148 +159,6 @@ impl BlockLayout {
             .expect("allocation size overflow");
         let align = std::mem::align_of::<GcHeader>().max(payload_align);
         (payload_offset, BlockLayout { size, align })
-    }
-
-    /// This block as a [`Layout`], for the arena.
-    fn layout(self) -> Layout {
-        Layout::from_size_align(self.size, self.align).expect("invalid layout")
-    }
-}
-
-/// The alignment every block has, because every block starts with a
-/// [`GcHeader`]. [`BlockLayout::of`] takes the max of this and the payload's own
-/// alignment, and no built-in payload is over-aligned — so in a real program
-/// this is not a lower bound, it is the answer.
-const MIN_BLOCK_ALIGN: usize = std::mem::align_of::<GcHeader>();
-
-/// One past the largest block size [`SizeClass`] indexes directly.
-///
-/// The set of block layouts a Praxis program can produce is *closed*:
-/// [`TypeDescriptor::builtin`] is the only non-test constructor and
-/// [`crate::descriptor::BUILTINS`] is the whole list of descriptors that call
-/// it. A record, enum, tuple or closure does not widen it either — each boxes
-/// its schema behind a pointer and its fields behind a `Vec<GcRef>`, so its
-/// payload is one fixed struct whatever its arity. The largest block the
-/// language can ask for today is well under this bound, and
-/// `every_builtin_block_has_a_size_class` is what keeps that honest: a
-/// twenty-third built-in with a bigger payload fails that test rather than
-/// silently degrading to the linear scan.
-const SIZE_CLASSES: usize = 128;
-
-/// The bucket index for a block whose alignment is exactly [`MIN_BLOCK_ALIGN`]
-/// and whose size fits [`SIZE_CLASSES`] — which is every block a real program
-/// allocates.
-///
-/// **This newtype is how indexing by size alone stays exact.** RT-01's soundness
-/// rests on handing a swept block only to a request of the same `(size, align)`,
-/// and a bare `size` index would break that for two layouts that share a size
-/// but not an alignment: file a `{48, 8}` block, hand it to a `{48, 16}`
-/// request, and the payload lands at `base + 32` where `base` is only 8-aligned.
-/// [`SizeClass::of`] is the only constructor and it rejects exactly that case,
-/// so "the index is the size" and "the bucket holds one layout" cannot come
-/// apart. Everything it rejects is keyed on the whole [`BlockLayout`] instead.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct SizeClass(usize);
-
-impl SizeClass {
-    /// `block`'s class, or `None` if it is over-aligned or too large — in which
-    /// case it belongs in [`FreeList::oversize`], not in the array.
-    #[inline]
-    fn of(block: BlockLayout) -> Option<SizeClass> {
-        if block.align == MIN_BLOCK_ALIGN && block.size < SIZE_CLASSES {
-            Some(SizeClass(block.size))
-        } else {
-            None
-        }
-    }
-
-    /// The one layout this class holds. The inverse of [`SizeClass::of`], and it
-    /// exists so the round trip is testable rather than merely asserted — hence
-    /// test-only: nothing on the allocation path needs to go this way.
-    #[cfg(test)]
-    #[inline]
-    fn layout(self) -> BlockLayout {
-        BlockLayout {
-            size: self.0,
-            align: MIN_BLOCK_ALIGN,
-        }
-    }
-}
-
-/// Swept blocks awaiting reuse, bucketed by layout.
-///
-/// This was a `HashMap<BlockLayout, Vec<NonNull<u8>>>` with the default
-/// `RandomState`, probed once per allocation and once per swept block. A program
-/// uses single digits of distinct block layouts, and SipHash over a 16-byte key
-/// — twice per object — was 34% of `collatz`'s runtime, ahead of everything else
-/// including the generated code (docs/handovers/21-where-the-time-goes.md §3.1).
-/// The hash bought nothing: the key set is closed and small enough to address
-/// directly.
-struct FreeList {
-    /// `classed[c.0]` holds blocks — and only blocks — whose layout is
-    /// `SizeClass(c.0).layout()`. [`SizeClass::of`] is the only way in, so the
-    /// index *is* the size and the alignment is [`MIN_BLOCK_ALIGN`] by
-    /// construction.
-    classed: [Vec<NonNull<u8>>; SIZE_CLASSES],
-    /// Everything [`SizeClass::of`] rejects: an over-aligned payload, or one
-    /// larger than the class array. No built-in descriptor produces either, so
-    /// this list is empty in every real program — which is why a linear scan is
-    /// the right shape for it. It is still keyed on the whole [`BlockLayout`]
-    /// and compared with `==`, so it is exact for the array's reason.
-    oversize: Vec<(BlockLayout, Vec<NonNull<u8>>)>,
-}
-
-impl FreeList {
-    fn new() -> FreeList {
-        FreeList {
-            classed: std::array::from_fn(|_| Vec::new()),
-            oversize: Vec::new(),
-        }
-    }
-
-    /// A filed block of exactly `block`'s layout, if one is available.
-    #[inline]
-    fn take(&mut self, block: BlockLayout) -> Option<NonNull<u8>> {
-        match SizeClass::of(block) {
-            Some(class) => self.classed[class.0].pop(),
-            None => self
-                .oversize
-                .iter_mut()
-                .find(|(filed, _)| *filed == block)
-                .and_then(|(_, blocks)| blocks.pop()),
-        }
-    }
-
-    /// File `base`, a swept block of exactly `block`'s layout, for reuse.
-    #[inline]
-    fn put(&mut self, block: BlockLayout, base: NonNull<u8>) {
-        match SizeClass::of(block) {
-            Some(class) => self.classed[class.0].push(base),
-            None => match self.oversize.iter_mut().find(|(filed, _)| *filed == block) {
-                Some((_, blocks)) => blocks.push(base),
-                None => self.oversize.push((block, vec![base])),
-            },
-        }
-    }
-
-    /// Forget every filed block. Both halves, always: a block left in `oversize`
-    /// after [`Heap::reset`] points into arena storage that no longer exists.
-    fn clear(&mut self) {
-        for bucket in &mut self.classed {
-            bucket.clear();
-        }
-        self.oversize.clear();
-    }
-
-    /// How many blocks are filed, across both halves.
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.classed.iter().map(Vec::len).sum::<usize>()
-            + self
-                .oversize
-                .iter()
-                .map(|(_, blocks)| blocks.len())
-                .sum::<usize>()
     }
 }
 
@@ -303,14 +183,233 @@ pub struct HeapStats {
 
 impl Heap {
     /// A fresh, empty heap.
+    ///
+    /// No page is created here: the first allocation of a class creates that
+    /// class's first page. A heap that never allocates costs nothing, which
+    /// matters because the debugger mints a second one (ADR-032).
     pub fn new() -> Self {
         Heap {
-            arena: Bump::new(),
             id: HeapId::mint(),
-            live: RefCell::new(Vec::new()),
+            live_count: Cell::new(0),
             bytes_since_collect: Cell::new(0),
             collect_threshold: Cell::new(INITIAL_COLLECT_THRESHOLD),
-            free: RefCell::new(FreeList::new()),
+            pages: Cell::new(std::ptr::null_mut()),
+            partial: std::array::from_fn(|_| Cell::new(std::ptr::null_mut())),
+            empty: Cell::new(std::ptr::null_mut()),
+            empty_large: Cell::new(std::ptr::null_mut()),
+            immortal_pages: Cell::new(std::ptr::null_mut()),
+        }
+    }
+
+    /// Bytes of address space this heap's pages occupy.
+    ///
+    /// The page allocator's answer to what `bumpalo::Bump::allocated_bytes`
+    /// used to report, and the number RT-01 is about: a program that allocates
+    /// and collects a bounded working set in a loop must not grow it.
+    pub fn committed_bytes(&self) -> usize {
+        self.walk_pages().map(|page| page.page_bytes()).sum()
+    }
+
+    /// How many pages this heap holds, live or pooled.
+    pub fn page_count(&self) -> usize {
+        self.walk_pages().count()
+    }
+
+    /// Every page this heap owns, in no particular order.
+    ///
+    /// A borrowing iterator rather than a raw loop at each call site: the pages
+    /// outlive any one borrow, so handing out `&PageHeader` bound to `&self` is
+    /// exactly the lifetime the callers want, and it keeps the `unsafe` in one
+    /// place.
+    fn walk_pages(&self) -> impl Iterator<Item = &PageHeader> {
+        let mut next = self.pages.get();
+        std::iter::from_fn(move || {
+            if next.is_null() {
+                return None;
+            }
+            // SAFETY: every page on this list was created by this heap and is
+            // released only by `Heap::drop`, which runs after every borrow of
+            // `self` has ended.
+            let page = unsafe { &*next };
+            next = page.next();
+            Some(page)
+        })
+    }
+
+    /// Thread a freshly created page onto the heap's page list.
+    fn adopt(&self, page: *mut PageHeader) {
+        // SAFETY: `page` was just created and nothing else names it.
+        unsafe { (*page).set_next(self.pages.get()) };
+        self.pages.set(page);
+    }
+
+    /// Take a block of `block`'s layout, and report the stride it was taken at
+    /// — which is what the pacing counter is charged, because it is what the
+    /// heap actually spent.
+    #[inline]
+    fn claim_block(
+        &self,
+        descriptor: &'static TypeDescriptor,
+        payload_offset: usize,
+        block: BlockLayout,
+    ) -> (*mut u8, usize) {
+        let Some(class) = SizeClass::of(block) else {
+            return (
+                self.claim_large_block(descriptor, payload_offset, block),
+                block.size,
+            );
+        };
+        // Resolve the class's list head **once**. `class.index()` is below
+        // `NUM_CLASSES` by construction but the optimizer cannot see that, so
+        // indexing inside the loop would put a bounds check and its panic path
+        // on the hottest instruction sequence in the runtime, twice per turn.
+        let head_cell = self
+            .partial
+            .get(class.index())
+            .expect("SizeClass::of yields an index below NUM_CLASSES");
+        loop {
+            let head = head_cell.get();
+            if head.is_null() {
+                self.grow_class(class);
+                continue;
+            }
+            // SAFETY: a page on an availability list is one of this heap's own,
+            // live until `Heap::drop`.
+            let page = unsafe { &*head };
+            match page.claim_free_block() {
+                Some(base) => return (base, class.block_size()),
+                // Full. Drop it off the availability list — sweep relinks it if
+                // it ever frees anything, and until then re-scanning its bitmap
+                // on every allocation would be the cost this design removes.
+                None => head_cell.set(page.next_of_class()),
+            }
+        }
+    }
+
+    /// Put a page of `class` at the head of its availability list: a pooled
+    /// empty one if there is one, a fresh one otherwise.
+    #[cold]
+    #[inline(never)]
+    fn grow_class(&self, class: SizeClass) {
+        let page = match self.pop_empty() {
+            Some(page) => {
+                // SAFETY: a pooled page is live and holds nothing.
+                unsafe { (*page).reclass(class) };
+                page
+            }
+            None => {
+                let page = PageHeader::new_small(class, self.id.get());
+                self.adopt(page);
+                page
+            }
+        };
+        // SAFETY: `page` is live and on no availability list.
+        unsafe { (*page).set_next_of_class(self.partial[class.index()].get()) };
+        self.partial[class.index()].set(page);
+    }
+
+    /// Pop a pooled empty page, if any.
+    fn pop_empty(&self) -> Option<*mut PageHeader> {
+        let page = self.empty.get();
+        if page.is_null() {
+            return None;
+        }
+        // SAFETY: a pooled page is one of this heap's own.
+        self.empty.set(unsafe { (*page).next_of_class() });
+        Some(page)
+    }
+
+    /// The one block of a page laid out for exactly this layout — pooled if one
+    /// is available, fresh otherwise.
+    ///
+    /// No production descriptor comes here; see [`PageHeader::new_large`].
+    #[cold]
+    #[inline(never)]
+    fn claim_large_block(
+        &self,
+        descriptor: &'static TypeDescriptor,
+        payload_offset: usize,
+        block: BlockLayout,
+    ) -> *mut u8 {
+        let mut previous: *mut PageHeader = std::ptr::null_mut();
+        let mut current = self.empty_large.get();
+        while !current.is_null() {
+            // SAFETY: a pooled page is one of this heap's own.
+            let page = unsafe { &*current };
+            if page.fits_large(payload_offset, block) {
+                if previous.is_null() {
+                    self.empty_large.set(page.next_of_class());
+                } else {
+                    // SAFETY: `previous` is the page we visited last.
+                    unsafe { (*previous).set_next_of_class(page.next_of_class()) };
+                }
+                page.set_next_of_class(std::ptr::null_mut());
+                page.rewind_cursor();
+                return page
+                    .claim_free_block()
+                    .expect("an empty large page has its block");
+            }
+            previous = current;
+            current = page.next_of_class();
+        }
+        let page = PageHeader::new_large(descriptor, payload_offset, block, self.id.get());
+        self.adopt(page);
+        // SAFETY: `page` was just created with one free block.
+        unsafe { (*page).claim_free_block() }.expect("a fresh large page has its block")
+    }
+
+    /// Rebuild the three availability lists from the pages' own liveness, and
+    /// rewind every page's allocation cursor.
+    ///
+    /// Rebuilding rather than unlinking is what makes "a page is on at most one
+    /// availability list" structural instead of a discipline four call sites
+    /// have to keep. Membership is a function of `live_count`, and after a sweep
+    /// every `live_count` is final.
+    ///
+    /// Rewinding the cursor is not cosmetic: it is what makes the next
+    /// allocation of a class take the *lowest* free block, so the address a
+    /// collection just reclaimed is the address the next object of that layout
+    /// gets. `a_reclaimed_block_is_reused_for_the_next_object_of_its_layout`
+    /// pins it, and a "resume where we left off" cursor would silently break it.
+    fn relink_pages(&self) {
+        for head in &self.partial {
+            head.set(std::ptr::null_mut());
+        }
+        self.empty.set(std::ptr::null_mut());
+        self.empty_large.set(std::ptr::null_mut());
+        let mut current = self.pages.get();
+        while !current.is_null() {
+            // SAFETY: every page on this list is this heap's own.
+            let page = unsafe { &*current };
+            let next = page.next();
+            if !page.is_immortal() {
+                page.rewind_cursor();
+                // An empty page joins the pool its geometry can be reused from;
+                // a small page with room goes back to its class; a full page —
+                // and a large page holding its one object — joins nothing, and
+                // waits for a later sweep to free something.
+                let list = if page.live_count() == 0 {
+                    match page.class() {
+                        Some(_) => Some(&self.empty),
+                        None => Some(&self.empty_large),
+                    }
+                } else {
+                    match page.class() {
+                        Some(class) if (page.live_count() as usize) < page.block_count() => {
+                            Some(&self.partial[class.index()])
+                        }
+                        _ => None,
+                    }
+                };
+                match list {
+                    Some(head) => {
+                        page.set_next_of_class(head.get());
+                        head.set(current);
+                    }
+                    None => page.set_next_of_class(std::ptr::null_mut()),
+                }
+            }
+            current = next;
         }
     }
 
@@ -321,8 +420,9 @@ impl Heap {
 
     /// Whether `value` was allocated by this heap and has not been swept.
     ///
-    /// O(1): it reads the owning id out of the header rather than searching the
-    /// live registry. This is the guard the collector applies to every root.
+    /// O(1): it reads the owning id out of the header, which is the same test
+    /// the collector applies to every root, and the same one that licenses
+    /// masking an address to find its page.
     #[inline]
     pub fn owns(&self, value: GcRef) -> bool {
         value.header().heap_id() == Some(self.id)
@@ -331,7 +431,7 @@ impl Heap {
     /// Current allocation count.
     pub fn stats(&self) -> HeapStats {
         HeapStats {
-            live_count: self.live.borrow().len(),
+            live_count: self.live_count.get(),
         }
     }
 
@@ -347,9 +447,17 @@ impl Heap {
         self.bytes_since_collect.get()
     }
 
-    /// Allocate an immortal object: same layout as [`Heap::alloc`], but **not**
-    /// registered in the live set, so the collector never reclaims it (§4.3,
-    /// M3 deliverable). Used for the `Unit`/`Bool` singletons.
+    /// Allocate an immortal object: same layout as [`Heap::alloc`], but on a
+    /// page the collector never walks, so it is never reclaimed (§4.3, M3
+    /// deliverable). Used for the `Unit`/`Bool` singletons and the interned
+    /// small-`Int` table.
+    ///
+    /// The exemption used to be an omission — `alloc_raw` registered the object
+    /// and this function linear-scanned the registry to un-register it. It is
+    /// now a page flag, which is a stronger statement of the same thing: sweep
+    /// and `finalize_all` do not read an immortal page's `allocated` bitmap at
+    /// all, so there is no window in which an immortal is momentarily
+    /// collectable and no scan whose cost grows with the heap.
     ///
     /// Restricted to [`Immortals::new`](crate::immortal::Immortals::new) by the
     /// [`ImmortalWitness`](crate::immortal::ImmortalWitness) it takes, which
@@ -357,8 +465,7 @@ impl Heap {
     /// over: an immortal is invisible to sweep *and* to [`Heap`]'s `Drop`, so
     /// every immortal payload must be `Copy` (nothing to finalize) and must be
     /// minted exactly once at startup. Minting one per call — which the `Bool`
-    /// wrappers used to do — is unregistered arena storage nothing ever
-    /// reclaims (RT-03).
+    /// wrappers used to do — is storage nothing ever reclaims (RT-03).
     ///
     /// **This allocation is pacing-neutral, and that is not an optimization.**
     /// [`Heap::alloc_raw`] charges every block against `bytes_since_collect`
@@ -372,8 +479,8 @@ impl Heap {
     /// spent, and widening the interned range would have moved the first
     /// collection of every program in the language. So the counter is
     /// snapshotted and restored around the call rather than the charge being
-    /// skipped inside `alloc_raw`, which would need a flag on the one path
-    /// every real allocation takes.
+    /// skipped inside `occupy`, which would need a flag on the one path every
+    /// real allocation takes.
     pub(crate) fn alloc_immortal<T: Copy>(
         &self,
         payload: Payload<T>,
@@ -381,25 +488,65 @@ impl Heap {
         _witness: crate::immortal::ImmortalWitness,
     ) -> GcRef {
         let descriptor = payload.descriptor();
+        let (payload_offset, block) = BlockLayout::of(descriptor);
+        let class = SizeClass::of(block).expect(
+            "an immortal payload is a scalar, and the size-class ladder holds every scalar",
+        );
         let charged_before = self.bytes_since_collect.get();
-        // SAFETY: `T: Copy`, bytes are fully initialized.
-        let r = unsafe { self.alloc_raw(descriptor, |payload| (payload as *mut T).write(value)) };
-        // Remove the registration `alloc_raw` just performed, so sweep skips it.
-        let mut live = self.live.borrow_mut();
-        if let Some(idx) = live
-            .iter()
-            .position(|p| p.as_ptr() == r.as_non_null().as_ptr())
-        {
-            live.swap_remove(idx);
-        }
-        drop(live);
+        let base = self.claim_immortal_block(class);
+        // SAFETY: `base` is a fresh block of `class`, whose stride is at least
+        // `block.size`; `T: Copy`, so writing the bytes fully initializes the
+        // payload.
+        let r = unsafe {
+            self.occupy(
+                base,
+                class.block_size(),
+                descriptor,
+                payload_offset,
+                |payload| (payload as *mut T).write(value),
+            )
+        };
         // Un-charge the block: see this function's doc. Restoring the snapshot
         // rather than subtracting the block size keeps this correct whatever
-        // `alloc_raw` decides an object costs (it also charges the descriptor's
+        // `occupy` decides an object costs (it also charges the descriptor's
         // owned bytes, which for a `Copy` immortal is zero today and need not
         // stay so).
         self.bytes_since_collect.set(charged_before);
         r
+    }
+
+    /// A block on an immortal page of `class`, creating one if none has room.
+    ///
+    /// Linear over the immortal pages, which is right: there are three of them
+    /// after `Immortals::new` and none is ever added afterwards, because
+    /// [`ImmortalWitness`](crate::immortal::ImmortalWitness) confines minting to
+    /// startup. They are not one class — `Unit` is a bare header and the
+    /// interned `Int` table is a thousand blocks of the next rung up — which is
+    /// why this is a list rather than the single page it would otherwise be.
+    #[cold]
+    #[inline(never)]
+    fn claim_immortal_block(&self, class: SizeClass) -> *mut u8 {
+        let mut current = self.immortal_pages.get();
+        while !current.is_null() {
+            // SAFETY: an immortal page is one of this heap's own.
+            let page = unsafe { &*current };
+            if page.class() == Some(class) {
+                if let Some(base) = page.claim_free_block() {
+                    return base;
+                }
+            }
+            current = page.next_of_class();
+        }
+        let page = PageHeader::new_small(class, self.id.get());
+        // SAFETY: `page` was just created and nothing else names it.
+        unsafe {
+            (*page).set_immortal();
+            (*page).set_next_of_class(self.immortal_pages.get());
+        }
+        self.adopt(page);
+        self.immortal_pages.set(page);
+        // SAFETY: a fresh page has room.
+        unsafe { (*page).claim_free_block() }.expect("a fresh page has room")
     }
 
     /// Give the collector a chance to run, and hand back the [`Safepoint`] that
@@ -467,7 +614,7 @@ impl Heap {
     /// [`Heap::alloc`] **without** pacing the collector.
     ///
     /// The heap grows by this allocation and nothing here gives the collector a
-    /// chance to reclaim; something else must pace, or the arena grows until it
+    /// chance to reclaim; something else must pace, or the heap grows until it
     /// does. **One** caller legitimately cannot pace, and it is the only one:
     /// the host's own `Runtime::alloc_*` helpers, which hold their results in
     /// Rust locals that no root set can see, so a collection *here* would
@@ -520,11 +667,15 @@ impl Heap {
         unsafe { self.alloc_raw(descriptor, init) }
     }
 
-    /// The shared low-level allocator: lay out `[GcHeader | payload]`, run `init`
-    /// on the payload, register the header in `live`.
+    /// The shared low-level allocator: take a block from a page, lay out
+    /// `[GcHeader | payload]` in it, and run `init` on the payload. Claiming the
+    /// block *is* the registration — the page's `allocated` bit is what sweep
+    /// enumerates.
     ///
-    /// Storage comes from the free list of swept blocks when one of the exact
-    /// layout is available, and from the arena otherwise (RT-01).
+    /// The whole fast path is a load of the class's partial-page pointer, one
+    /// bitmap word, an `andnot`, a `trailing_zeros`, a bitmap store, the header
+    /// store, the payload `init` and two counter bumps. No hash, no registry
+    /// push, no reallocation, no `RefCell` borrow.
     ///
     /// # Safety
     /// `init` must fully initialize `descriptor.size` bytes of the payload and
@@ -537,8 +688,41 @@ impl Heap {
         // Where the payload starts is `GcHeader::payload_offset_for`'s decision
         // and nobody else's — the same call the header records and `payload()`
         // reads back — and the block that holds it is `BlockLayout::of`'s, the
-        // same call `sweep` files a reclaimed block under.
+        // same call `SizeClass::of` chooses a page from.
         let (payload_offset, block) = BlockLayout::of(descriptor);
+        let (base, stride) = self.claim_block(descriptor, payload_offset, block);
+        self.live_count.set(self.live_count.get() + 1);
+        // SAFETY: `base` is a fresh block of at least `block.size` bytes,
+        // aligned for a `GcHeader` and for this descriptor's payload; `init`'s
+        // contract is forwarded from this function's.
+        unsafe { self.occupy(base, stride, descriptor, payload_offset, init) }
+    }
+
+    /// Head a claimed block with `descriptor`, initialize its payload, and
+    /// charge the allocation against the pacing counter.
+    ///
+    /// Shared by [`Heap::alloc_raw`] and [`Heap::alloc_immortal`], which differ
+    /// only in which page the block came from and in whether the collector will
+    /// ever look at it again. Keeping one body is what stops the immortal path
+    /// from drifting away from the layout every other object has — the whole
+    /// point of an immortal is that its accessors work on it unchanged.
+    ///
+    /// # Safety
+    /// `base` must be an unclaimed block of at least `payload_offset +
+    /// descriptor.size()` bytes, aligned for a `GcHeader` and for the payload;
+    /// `init` must fully initialize the payload as `descriptor`'s type.
+    unsafe fn occupy(
+        &self,
+        base: *mut u8,
+        stride: usize,
+        descriptor: &'static TypeDescriptor,
+        payload_offset: usize,
+        init: impl FnOnce(*mut u8),
+    ) -> GcRef {
+        // Unreachable in practice — a payload aligned past a page's reach is
+        // rejected by `PageHeader::new_large` before it gets here — but it is
+        // the header field's own bound, and ADR-039's Consequences say the
+        // allocator panics naming the descriptor rather than truncating.
         let recorded_offset = u16::try_from(payload_offset).unwrap_or_else(|_| {
             panic!(
                 "payload alignment {} of descriptor {} exceeds the \
@@ -547,41 +731,35 @@ impl Heap {
                 descriptor.name
             )
         });
-
-        // Reuse a swept block of this exact layout, or take fresh arena bytes.
-        // The block was poisoned and its payload finalized before it was filed,
-        // so nothing outstanding claims it is still a typed object.
-        let reused = self.free.borrow_mut().take(block);
-        let base = match reused {
-            Some(base) => base,
-            None => self.arena.alloc_layout(block.layout()),
-        };
-        let base_ptr = base.as_ptr();
-        let header_ptr = base_ptr as *mut GcHeader;
-        let payload_ptr = base_ptr.add(payload_offset);
+        let header_ptr = base as *mut GcHeader;
+        // SAFETY: the block is at least `payload_offset + size` bytes.
+        let payload_ptr = unsafe { base.add(payload_offset) };
 
         // Write the header. Mark starts white (unscanned).
-        std::ptr::write(
-            header_ptr,
-            GcHeader::new(
-                descriptor,
-                descriptor.size() as u32,
-                recorded_offset,
-                self.id,
-            ),
-        );
+        // SAFETY: `base` is an unclaimed, header-aligned block.
+        unsafe {
+            std::ptr::write(
+                header_ptr,
+                GcHeader::new(
+                    descriptor,
+                    descriptor.size() as u32,
+                    recorded_offset,
+                    self.id,
+                ),
+            );
+        }
         // Initialize the payload.
         init(payload_ptr);
 
-        let nn = NonNull::new(header_ptr).expect("bumpalo never returns null");
-        self.live.borrow_mut().push(nn);
         // Account for the allocation against the collection pacing counter.
         // Reused storage counts too: pacing measures the pressure a program is
-        // putting on the collector, not the arena's high-water mark.
+        // putting on the collector, not the heap's high-water mark. The stride
+        // is what a block costs — a class rounds up to it, and that rounding is
+        // real memory the program spent.
         //
-        // The block is only part of what the object costs. A `Text` is 40 bytes
+        // The block is only part of what the object costs. A `Text` is 56 bytes
         // of block and a `Box<str>` of whatever length the program read; a
-        // freshly built `Vec` is 40 bytes and a buffer of `capacity` refs. The
+        // freshly built `Vec` is 56 bytes and a buffer of `capacity` refs. The
         // descriptor measures the rest, so a text-heavy program no longer
         // under-reports its pressure by essentially its whole footprint
         // (RT-04). Growth *after* this point — a `push` that reallocates — is
@@ -590,9 +768,10 @@ impl Heap {
         // SAFETY: `init` has run, so the payload is a valid value of `descriptor`.
         let owned = unsafe { descriptor.owned_bytes_of(payload_ptr) };
         self.bytes_since_collect
-            .set(self.bytes_since_collect.get() + block.size.saturating_add(owned));
-        // SAFETY: `nn` points at the just-allocated, initialized header.
-        unsafe { GcRef::from_non_null(nn) }
+            .set(self.bytes_since_collect.get() + stride.saturating_add(owned));
+        // SAFETY: `header_ptr` is inside a live page, so it is non-null, and it
+        // has just been initialized.
+        unsafe { GcRef::from_non_null(NonNull::new_unchecked(header_ptr)) }
     }
 
     /// Run a mark-and-sweep collection (§12.1, ADR-011).
@@ -666,14 +845,16 @@ impl Heap {
         should
     }
 
-    /// Mark phase: color every reachable object black.
+    /// Mark phase: set the page bit of every reachable object.
     fn mark(&self, roots: &dyn RootSet) {
         let mut worklist: Vec<GcRef> = Vec::new();
         roots.push_roots(&mut worklist);
 
-        // The tracer enqueues child references onto the worklist. It borrows the
-        // worklist (and indirectly `&self` through descriptor callbacks), so it
-        // is dropped before we touch `self.live` again.
+        // The tracer enqueues child references onto the worklist. The grey set
+        // *is* this worklist — a transient grey colour would say nothing extra
+        // in a single-threaded collector with no concurrency, which is why the
+        // header never had a use for a third colour and no longer has a byte
+        // for one.
         struct Enqueuer<'a>(&'a mut Vec<GcRef>);
         impl Tracer for Enqueuer<'_> {
             fn trace(&mut self, reference: GcRef) {
@@ -683,94 +864,163 @@ impl Heap {
 
         while let Some(r) = worklist.pop() {
             let header = r.header();
-            // Provenance check, before anything the header points at is read.
-            // A reference this heap did not allocate is not this heap's to
-            // color: marking a foreign object black delays *its* heap's
-            // reclamation of it, and a swept object's descriptor is a null
-            // pointer into finalized storage. Both are rejected here.
+            // (a) Provenance check, before anything the header points at is
+            // read, and before the address is masked. A reference this heap did
+            // not allocate is not this heap's to colour: marking a foreign
+            // object delays *its* heap's reclamation of it, and a swept
+            // object's descriptor is a null pointer into finalized storage.
+            // Both are rejected here (ADR-039 Decision 2).
+            //
+            // **This check is also what makes the mask below sound.** Only this
+            // heap's allocator writes this heap's id into a header, and it only
+            // ever writes one into a block on one of this heap's pages — so a
+            // header that passes here is inside a page, and `page_of` is
+            // arithmetic on an address whose provenance is already established.
+            // A `GcHeader` that lives anywhere else (a test fixture, another
+            // heap's object) carries an id this test rejects.
             if header.heap_id() != Some(self.id) {
                 continue;
             }
-            if header.mark_color() == BLACK {
-                continue;
-            }
-            // Color black first, *then* trace, so the descriptor's `trace`
+            // (b) The mark bit lives in the page, not in the header: sweep's
+            // per-survivor "reset to white" store — a random-access write per
+            // live object per collection — becomes one store per 64 blocks.
+            let address = r.as_ptr() as *const u8;
+            // SAFETY: (a) established that this heap allocated this block, so
+            // masking its address yields one of this heap's own live pages.
+            let page = unsafe { &*page::page_of(address) };
+            debug_assert_eq!(page.heap_id(), self.id.get());
+            let index = page.block_index(address);
+            debug_assert!(page.is_allocated(index), "a live header on a free block");
+            // Set the bit first, *then* trace, so the descriptor's `trace`
             // callback may enqueue children that point back to this object
             // without re-tracing it infinitely.
-            header.set_mark_color(BLACK);
+            if page.test_and_set_mark(index) {
+                continue;
+            }
             let desc = header.descriptor();
             let payload = r.payload::<u8>();
+            let mut enq = Enqueuer(&mut worklist);
             // SAFETY: `r` is a live, reachable object whose payload matches its
             // descriptor.
-            let mut enq = Enqueuer(&mut worklist);
-            // Mark grey transiently to denote "in progress" is unnecessary; we
-            // color black immediately (single-threaded, no concurrency).
-            let _ = GREY; // GREY kept for future concurrent-collection use.
             unsafe { (desc.trace)(payload, &mut enq) };
         }
     }
 
-    /// Sweep phase: finalize every still-white allocation, unregister it, and
-    /// file its storage for reuse.
+    /// Sweep phase: finalize every allocated-but-unmarked block, release it for
+    /// reuse, and clear the mark bitmap for the next cycle.
+    ///
+    /// A page in which nothing died costs one `alive & !marked == 0` test and at
+    /// most two stores per 64 blocks. That — not the allocation path — is where
+    /// most of this finding's win is: the registry walk touched every live
+    /// object on every collection, twice over, once to test its colour and once
+    /// to reset it.
     fn sweep(&self) {
-        let mut live = self.live.borrow_mut();
-        let mut free = self.free.borrow_mut();
-        let mut i = 0;
-        while i < live.len() {
-            // SAFETY: every entry in `live` was pushed by `alloc_raw` and points
-            // at an initialized header + payload.
-            let header = unsafe { live[i].as_ref() };
-            if header.mark_color() == WHITE {
-                // Finalize: run the descriptor's drop_value on the payload.
-                let desc = header.descriptor();
-                let payload = header.payload::<u8>();
-                // Read the block's layout while the descriptor is still there —
-                // `poison` takes it away.
-                let (_, block) = BlockLayout::of(desc);
-                // SAFETY: payload matches `desc` and is about to become invalid.
-                unsafe { (desc.drop_value)(payload) };
-                // Poison before unregistering, so a stale `GcRef` that still
-                // names this storage is rejected by the mark phase's provenance
-                // check instead of being traced through a finalized payload.
-                // This is also RT-01's precondition: between filing the block
-                // and handing it out again, it must not claim to be a typed
-                // object, or a stale reference would be traced through whatever
-                // the allocator put there next (hazard H7).
-                header.poison();
-                free.put(block, live[i].cast::<u8>());
-                live.swap_remove(i);
-            } else {
-                // Reset to white for the next collection and keep it.
-                header.set_mark_color(WHITE);
-                i += 1;
+        let mut reclaimed = 0usize;
+        for page in self.walk_pages() {
+            let words = page.words();
+            if page.is_immortal() {
+                // Nothing on an immortal page is ever finalized and no
+                // `allocated` bit of it is ever cleared — that is what the flag
+                // means. Its *mark* bits are cleared, though: a root may alias
+                // an immortal, and a mark bit left set would make the next
+                // cycle stop at it instead of tracing through it. Every
+                // immortal payload is a scalar with no children today, so that
+                // would be harmless — but "harmless because of what the payload
+                // happens to be" is not an invariant, and one store per 64
+                // blocks on three pages is not a cost worth taking the risk for.
+                for word in 0..words {
+                    if page.mark_word(word) != 0 {
+                        page.clear_mark_word(word);
+                    }
+                }
+                continue;
+            }
+            let mut freed = 0u32;
+            for word in 0..words {
+                let alive = page.allocated_word(word);
+                let marked = page.mark_word(word);
+                let mut dead = alive & !marked;
+                if dead != 0 {
+                    while dead != 0 {
+                        let index = word * 64 + dead.trailing_zeros() as usize;
+                        dead &= dead - 1;
+                        // SAFETY: the block's `allocated` bit is set, so
+                        // `alloc_raw` initialized a header and a payload of its
+                        // descriptor there and nothing has finalized it since.
+                        let header = unsafe { &*(page.block_ptr(index) as *const GcHeader) };
+                        let desc = header.descriptor();
+                        // SAFETY: payload matches `desc` and is about to become
+                        // invalid.
+                        unsafe { (desc.drop_value)(header.payload::<u8>()) };
+                        // Poison before the bit is cleared, so a stale `GcRef`
+                        // that still names this storage is rejected by the mark
+                        // phase's provenance check instead of being traced
+                        // through a finalized payload. This is also RT-01's
+                        // precondition: between releasing the block and handing
+                        // it out again, it must not claim to be a typed object,
+                        // or a stale reference would be traced through whatever
+                        // the allocator put there next (hazard H7).
+                        header.poison();
+                        freed += 1;
+                    }
+                    page.set_allocated_word(word, alive & marked);
+                }
+                if marked != 0 {
+                    page.clear_mark_word(word);
+                }
+            }
+            if freed != 0 {
+                page.release_blocks(freed);
+                reclaimed += freed as usize;
             }
         }
+        self.live_count.set(self.live_count.get() - reclaimed);
+        self.relink_pages();
     }
 
-    /// Finalize and unregister **every** still-live allocation, reachable or
-    /// not, and discard the free list.
+    /// Finalize **every** still-live allocation, reachable or not, and empty
+    /// every page.
     ///
     /// Sweep only finalizes what it proved unreachable, so this is the other
     /// half: at teardown, whatever a program left live still owns the
     /// `Box<str>` / `Vec` / `HashMap` backing allocations its payload points
-    /// at, and those are not in the arena — dropping the `Bump` reclaims the
+    /// at, and those are not in a page — releasing the pages reclaims the
     /// `[header|payload]` blocks and leaks everything they own (RT-02).
     ///
-    /// After this the heap holds nothing, so [`Heap::reset`] and `Drop` can
-    /// both use it and neither can double-finalize.
+    /// This is the answer to "without a live registry, how do you enumerate
+    /// every live object": the `allocated` bitmaps already know, exactly.
+    ///
+    /// Immortal pages are left alone, exactly as the unregistered immortals
+    /// were: an immortal payload is `Copy` by
+    /// [`ImmortalWitness`](crate::immortal::ImmortalWitness)'s argument, so
+    /// there is nothing to finalize.
+    ///
+    /// After this the heap holds nothing collectable, so [`Heap::reset`] and
+    /// `Drop` can both use it and neither can double-finalize — the bitmap it
+    /// cleared is the same one that told it what to finalize.
     fn finalize_all(&self) {
-        let live = std::mem::take(&mut *self.live.borrow_mut());
-        for nn in live {
-            // SAFETY: each `nn` is a live, initialized allocation.
-            let header = unsafe { nn.as_ref() };
-            let desc = header.descriptor();
-            let payload = header.payload::<u8>();
-            // SAFETY: payload matches `desc`, becomes invalid after this.
-            unsafe { (desc.drop_value)(payload) };
-            header.poison();
+        for page in self.walk_pages() {
+            if page.is_immortal() {
+                continue;
+            }
+            for word in 0..page.words() {
+                let mut alive = page.allocated_word(word);
+                while alive != 0 {
+                    let index = word * 64 + alive.trailing_zeros() as usize;
+                    alive &= alive - 1;
+                    // SAFETY: as in `sweep` — an allocated bit means an
+                    // initialized header and payload.
+                    let header = unsafe { &*(page.block_ptr(index) as *const GcHeader) };
+                    let desc = header.descriptor();
+                    // SAFETY: payload matches `desc`, becomes invalid after this.
+                    unsafe { (desc.drop_value)(header.payload::<u8>()) };
+                    header.poison();
+                }
+            }
+            page.clear_bitmaps();
         }
-        // Every filed block points into storage that is about to go away.
-        self.free.borrow_mut().clear();
+        self.live_count.set(0);
+        self.relink_pages();
     }
 
     /// Reset the heap to empty, dropping everything. Used by tests and, later,
@@ -778,34 +1028,71 @@ impl Heap {
     /// which since the small-`Int` table ([`crate::small_int`]) means the whole
     /// `Immortals` value, not just the three singletons: a `RuntimeContext`
     /// minted before the reset holds `unit_ref`, `true_ref`, `false_ref` **and**
-    /// a `small_ints` pointer, and every one of them names storage the arena is
+    /// a `small_ints` pointer, and every one of them names storage the heap is
     /// now free to hand out again.
     pub fn reset(&mut self) {
-        // Finalize every live allocation before tearing down the arena.
+        // Finalize every live allocation before repudiating the pages.
         self.finalize_all();
-        self.arena.reset();
+        // A reset heap is a different heap: the immortals it handed out are
+        // gone, and every `GcRef` minted before this point names storage the
+        // heap is free to hand out again. A fresh identity makes those refs fail
+        // the mark phase's provenance check rather than be traced.
+        let id = HeapId::mint();
+        // The pages are **kept**, and that is deliberate: a stale `GcRef` must
+        // mask to storage that is still mapped, or the rejection above becomes a
+        // use-after-free. What is repudiated is everything recorded on them —
+        // every allocated bit (including the immortal pages', which is what
+        // makes the immortal singletons genuinely gone) and the owning identity.
+        for page in self.walk_pages() {
+            page.clear_bitmaps();
+            page.clear_immortal();
+            page.set_heap_id(id.get());
+        }
+        self.immortal_pages.set(std::ptr::null_mut());
+        self.relink_pages();
         // Pacing is part of the heap's state, so a reset heap paces like a fresh
         // one. Leaving the counter and the geometrically-grown threshold in
         // place meant a reset heap could run for megabytes before its first
         // collection, or collect on its very first allocation (RT-04).
         self.bytes_since_collect.set(0);
         self.collect_threshold.set(INITIAL_COLLECT_THRESHOLD);
-        // A reset heap is a different heap: the immortals it handed out are
-        // gone, and every `GcRef` minted before this point names storage the
-        // arena is free to hand out again. A fresh identity makes those refs
-        // fail the mark phase's provenance check rather than be traced.
-        self.id = HeapId::mint();
+        self.id = id;
+    }
+
+    /// Return every page to the global allocator.
+    ///
+    /// The only place a page is ever unmapped, and it runs after
+    /// [`Heap::finalize_all`]. Everything else keeps pages mapped forever,
+    /// because "a stale `GcRef` masks to a page that is still there" is what
+    /// makes the rejection in `Heap::mark` a rejection rather than a wild read.
+    fn release_pages(&mut self) {
+        let mut current = self.pages.get();
+        while !current.is_null() {
+            // SAFETY: every page on this list came from `PageHeader::new_*` and
+            // is released exactly once, here.
+            let next = unsafe { (*current).next() };
+            // SAFETY: as above; `&mut self` means nothing else can name a block.
+            unsafe { PageHeader::release(current) };
+            current = next;
+        }
+        self.pages.set(std::ptr::null_mut());
+        for head in &self.partial {
+            head.set(std::ptr::null_mut());
+        }
+        self.empty.set(std::ptr::null_mut());
+        self.empty_large.set(std::ptr::null_mut());
+        self.immortal_pages.set(std::ptr::null_mut());
     }
 }
 
 impl Drop for Heap {
-    /// Finalize whatever the program left live (RT-02).
+    /// Finalize whatever the program left live (RT-02), then release the pages.
     ///
-    /// `Bump::drop` reclaims the `[header|payload]` blocks, and nothing else:
-    /// the `Box<str>` behind a `Text`, the `Vec<GcRef>` behind a `Vec[T]`, the
-    /// `HashMap` behind a `Map[K,V]` are ordinary Rust allocations the arena
-    /// never owned. Without this, every object still reachable at teardown
-    /// leaked its backing store.
+    /// Releasing the pages reclaims the `[header|payload]` blocks, and nothing
+    /// else: the `Box<str>` behind a `Text`, the `Vec<GcRef>` behind a `Vec[T]`,
+    /// the `HashMap` behind a `Map[K,V]` are ordinary Rust allocations no page
+    /// ever owned. Without the finalize, every object still reachable at
+    /// teardown leaked its backing store.
     ///
     /// **A `GcRef` does not outlive the heap.** Finalizing here makes that a
     /// visible use-after-free for a host that reads one afterwards, where it
@@ -827,6 +1114,7 @@ impl Drop for Heap {
     /// order among live objects does not matter.
     fn drop(&mut self) {
         self.finalize_all();
+        self.release_pages();
     }
 }
 
@@ -1313,9 +1601,12 @@ mod tests {
         }
 
         let (_, block) = BlockLayout::of(&TEXT);
+        let stride = SizeClass::of(block)
+            .expect("a Text is on the ladder")
+            .block_size();
         assert_eq!(
             heap.bytes_since_collect.get() - after_owner,
-            block.size,
+            stride,
             "a slice owns no bytes of its own"
         );
     }
@@ -1329,7 +1620,7 @@ mod tests {
             let _ = heap.alloc_unpaced(INT_PAYLOAD, i as i64);
         }
         heap.collect_with(&RootScope::new());
-        let first_cycle_bytes = heap.arena.allocated_bytes();
+        let first_cycle_bytes = heap.committed_bytes();
 
         for cycle in 1..=8 {
             for i in 0..OBJECTS_PER_CYCLE {
@@ -1337,13 +1628,117 @@ mod tests {
             }
             heap.collect_with(&RootScope::new());
         }
-        let final_bytes = heap.arena.allocated_bytes();
+        let final_bytes = heap.committed_bytes();
 
         assert!(
             final_bytes <= first_cycle_bytes.saturating_mul(2),
-            "reclaiming the same bounded working set repeatedly grew the arena \
+            "reclaiming the same bounded working set repeatedly grew the heap \
              from {first_cycle_bytes} to {final_bytes} bytes"
         );
+    }
+
+    /// The reason the free list became a pool of pages rather than a pool of
+    /// blocks: a bucket keyed by layout is dead capital for every other layout,
+    /// so a program that fills a heap with one shape and then another paid for
+    /// both. An emptied page is re-classed, so it does not.
+    #[test]
+    fn an_emptied_page_is_reused_for_another_size_class() {
+        use crate::text::{TextPayload, TEXT};
+        let heap = Heap::new();
+        // Enough `Text`s to need many pages of their own class.
+        for _ in 0..8_000 {
+            // SAFETY: TextPayload matches TEXT's size/align and is initialized.
+            unsafe {
+                heap.alloc_with_unpaced(
+                    &TEXT,
+                    std::mem::size_of::<TextPayload>(),
+                    std::mem::align_of::<TextPayload>(),
+                    |p| (p as *mut TextPayload).write(TextPayload::Owned("x".into())),
+                );
+            }
+        }
+        heap.collect_with(&RootScope::new());
+        let after_texts = heap.page_count();
+        assert!(after_texts > 1, "the fixture must span several pages");
+
+        // The same count of `Int`s, which are a different class entirely and
+        // pack more densely — so every page they need can come from the pool.
+        for i in 0..8_000_i64 {
+            let _ = heap.alloc_unpaced(INT_PAYLOAD, i);
+        }
+
+        assert_eq!(
+            heap.page_count(),
+            after_texts,
+            "the pages the `Text`s emptied must have been re-classed for the `Int`s, \
+             not left as dead capital beside fresh ones"
+        );
+    }
+
+    /// An immortal is on a page sweep does not walk, so it is never finalized,
+    /// never counted, and never handed back out — the three things the old
+    /// "allocate then un-register" trick bought, now bought by a flag.
+    #[test]
+    fn an_immortal_is_invisible_to_sweep_and_to_finalize_all() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        {
+            let heap = Heap::new();
+            // Through `Immortals::new`, which is the only route there is — the
+            // `ImmortalWitness` seal is RT-03 and this test does not get to
+            // widen it.
+            let immortals = crate::immortal::Immortals::new(&heap);
+            let immortal = immortals.small_int(7).expect("7 is interned");
+            let address = immortal.as_ptr();
+            // A collectable object of the same class, to prove sweep is running
+            // and that the immortal's page is not simply unreachable.
+            unsafe {
+                heap.alloc_with_unpaced(
+                    &DROP_PROBE,
+                    std::mem::size_of::<DropProbe>(),
+                    std::mem::align_of::<DropProbe>(),
+                    |payload| (payload as *mut DropProbe).write(DropProbe(Arc::clone(&drops))),
+                );
+            }
+
+            heap.collect_with(&RootScope::new());
+            assert_eq!(drops.load(Ordering::SeqCst), 1, "the probe was reclaimed");
+            assert_eq!(heap.stats().live_count, 0, "an immortal is not counted");
+            assert!(!immortal.header().is_poisoned(), "an immortal is not swept");
+            assert_eq!(immortal.header().heap_id(), Some(heap.id()));
+            // SAFETY: the immortal is still a live `Int`.
+            assert_eq!(unsafe { *immortal.payload::<i64>() }, 7);
+
+            // Nothing else may be given the immortal's block.
+            for i in 0..4_000_i64 {
+                assert_ne!(heap.alloc_unpaced(INT_PAYLOAD, i).as_ptr(), address);
+            }
+        }
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "teardown must not finalize anything twice"
+        );
+    }
+
+    /// Two heaps' pages are disjoint allocations, so one heap's mark bits can
+    /// never be the other's. The mask is what makes this worth stating: it is
+    /// arithmetic, and arithmetic does not check which heap it belongs to.
+    #[test]
+    fn two_heaps_pages_do_not_alias() {
+        let first = Heap::new();
+        let second = Heap::new();
+        for i in 0..2_000_i64 {
+            let _ = first.alloc_unpaced(INT_PAYLOAD, i);
+            let _ = second.alloc_unpaced(INT_PAYLOAD, i);
+        }
+        let mine: Vec<usize> = first
+            .walk_pages()
+            .map(|page| page.base() as usize)
+            .collect();
+        for page in second.walk_pages() {
+            assert!(!mine.contains(&(page.base() as usize)));
+        }
+        assert!(mine.len() > 1);
     }
 
     /// The allocator must record the offset it actually used, for every
@@ -1387,10 +1782,11 @@ mod tests {
         assert!(!second.owns(mine));
     }
 
-    /// Sweep poisons before it unregisters, so the storage stops claiming to be
-    /// a typed object the moment it stops being one. This is the precondition
-    /// for reusing swept arena storage (RT-01): without it, a stale `GcRef`
-    /// would be traced into whatever the allocator put there next.
+    /// Sweep poisons before it clears the block's `allocated` bit, so the
+    /// storage stops claiming to be a typed object the moment it stops being
+    /// one. This is the precondition for reusing swept storage (RT-01): without
+    /// it, a stale `GcRef` would be traced into whatever the allocator put there
+    /// next.
     #[test]
     fn sweeping_poisons_the_reclaimed_header() {
         let heap = Heap::new();
@@ -1425,10 +1821,13 @@ mod tests {
         );
     }
 
-    /// The free list is keyed by the whole block, not by the type that happened
-    /// to occupy it first, so a reclaimed `Int` block houses the next `Float`.
-    /// The reused object must be indistinguishable from a fresh one: re-headed
-    /// with this heap's id, unpoisoned, and reading back as its new type.
+    /// A page is not keyed by the type that happened to occupy it first, so a
+    /// reclaimed `Int` block houses the next `Float`. The reused object must be
+    /// indistinguishable from a fresh one: re-headed with this heap's id,
+    /// unpoisoned, and reading back as its new type.
+    ///
+    /// The exact-address assertion is what pins `relink_pages`'s cursor rewind:
+    /// the next allocation of a class must take the *lowest* free block.
     #[test]
     fn a_reclaimed_block_is_reused_for_the_next_object_of_its_layout() {
         use crate::scalars::FLOAT_PAYLOAD;
@@ -1439,8 +1838,8 @@ mod tests {
         heap.collect_with(&RootScope::new());
         assert!(doomed.header().is_poisoned());
 
-        // `Float`'s payload has `Int`'s size and alignment, so it files under
-        // the same `BlockLayout`.
+        // `Float`'s payload has `Int`'s size and alignment, so it lands on the
+        // same rung of the ladder.
         let reused = heap.alloc_unpaced(FLOAT_PAYLOAD, 2.5_f64);
 
         assert_eq!(
@@ -1456,88 +1855,48 @@ mod tests {
         assert_eq!(heap.stats().live_count, 1);
     }
 
-    /// Blocks that are still filed when the arena is torn down must not be
-    /// handed out afterwards — they point into storage `Bump::reset` reclaimed.
+    /// A reset heap keeps its storage — a stale `GcRef` must mask to a page
+    /// that is still mapped, or the rejection below would be a use-after-free —
+    /// and repudiates everything recorded on it.
     #[test]
-    fn reset_discards_the_free_list() {
+    fn reset_repudiates_every_page_and_keeps_the_storage() {
         let mut heap = Heap::new();
         let doomed = heap.alloc_unpaced(INT_PAYLOAD, 1_i64);
-        let stale = doomed.as_ptr();
         heap.collect_with(&RootScope::new());
-        assert_eq!(heap.free.borrow().len(), 1);
+        let live_ref = heap.alloc_unpaced(INT_PAYLOAD, 3_i64);
+        let committed = heap.committed_bytes();
+        assert!(committed > 0);
 
         heap.reset();
 
-        assert_eq!(heap.free.borrow().len(), 0);
+        assert_eq!(
+            heap.committed_bytes(),
+            committed,
+            "reset keeps every page, so a stale reference still masks to mapped storage"
+        );
+        for page in heap.walk_pages() {
+            assert_eq!(page.live_count(), 0, "no page may still claim a live block");
+            assert!(
+                !page.is_immortal(),
+                "reset repudiates the immortal pages too"
+            );
+            assert_eq!(page.heap_id(), heap.id().get());
+        }
+        // Both the swept reference and the one that was still live before the
+        // reset now belong to nobody this heap recognizes.
+        assert!(!heap.owns(doomed));
+        assert!(!heap.owns(live_ref));
+
         let fresh = heap.alloc_unpaced(INT_PAYLOAD, 2_i64);
         assert_eq!(fresh.header().heap_id(), Some(heap.id()));
-        // The address may legitimately be reused by the fresh arena; what must
-        // not happen is the *stale block* being handed out with the old layout
-        // bookkeeping still attached. The fresh heap identity is the check.
-        let _ = stale;
     }
 
-    /// The class array must cover the whole language, not just the scalars the
-    /// benchmark happened to allocate. `BUILTINS` is the closed set of
-    /// descriptors a program can allocate through, so this makes "the fast path
-    /// covers everything" a checked invariant: a twenty-third built-in with a
-    /// payload past the bound fails here instead of silently degrading to the
-    /// linear scan.
-    #[test]
-    fn every_builtin_block_has_a_size_class() {
-        for descriptor in crate::descriptor::BUILTINS {
-            let (_, block) = BlockLayout::of(descriptor);
-            let class = SizeClass::of(block).unwrap_or_else(|| {
-                panic!(
-                    "descriptor {} has block {{size: {}, align: {}}}, which no \
-                     SizeClass indexes (SIZE_CLASSES = {SIZE_CLASSES}, \
-                     MIN_BLOCK_ALIGN = {MIN_BLOCK_ALIGN})",
-                    descriptor.name, block.size, block.align
-                )
-            });
-            assert_eq!(
-                class.layout(),
-                block,
-                "SizeClass::of and SizeClass::layout must be inverses for {}",
-                descriptor.name
-            );
-        }
-    }
-
-    /// RT-01's exactness, as an executable proposition. Indexing by size alone
-    /// would hand a `{48, 8}` block to a `{48, 16}` request, putting a 16-aligned
-    /// payload at `base + 32` where `base` is only 8-aligned. `SizeClass::of` is
-    /// the single point where that could go wrong, so it is tested directly.
-    #[test]
-    fn a_size_class_never_conflates_two_alignments() {
-        assert_eq!(
-            SizeClass::of(BlockLayout { size: 48, align: 8 }),
-            Some(SizeClass(48))
-        );
-        assert_eq!(
-            SizeClass::of(BlockLayout {
-                size: 48,
-                align: 16
-            }),
-            None,
-            "same size, different alignment: not the same class"
-        );
-        assert_eq!(
-            SizeClass::of(BlockLayout {
-                size: SIZE_CLASSES,
-                align: MIN_BLOCK_ALIGN
-            }),
-            None,
-            "one past the array is out of range, not index 0"
-        );
-    }
-
-    /// The `oversize` fallback is not decoration: an over-aligned block must be
+    /// The large path is not decoration: an over-aligned block must be
     /// reclaimed and reissued like any other, and must still land at its
-    /// alignment. Nothing tested that before — the free list only ever saw
+    /// alignment. Nothing tested that before §3.1 — the free list only ever saw
     /// 8-aligned blocks in the suite.
     #[test]
-    fn an_overaligned_block_round_trips_through_the_free_list() {
+    fn an_overaligned_block_round_trips_through_its_own_page() {
         let heap = Heap::new();
         let doomed = unsafe {
             heap.alloc_with_unpaced(
@@ -1550,7 +1909,7 @@ mod tests {
         let address = doomed.as_ptr();
 
         heap.collect_with(&RootScope::new());
-        assert_eq!(heap.free.borrow().len(), 1, "the block must be filed");
+        let pages = heap.page_count();
 
         let reused = unsafe {
             heap.alloc_with_unpaced(
@@ -1566,6 +1925,11 @@ mod tests {
             "an over-aligned block must be handed back out, not left spent"
         );
         assert_eq!(reused.payload::<Overaligned>() as usize % 64, 0);
+        assert_eq!(
+            heap.page_count(),
+            pages,
+            "the emptied large page must be reused, not left beside a fresh one"
+        );
     }
 
     #[repr(C)]
@@ -1638,8 +2002,8 @@ mod tests {
     }
 
     /// A reset heap is a different heap, so the refs it minted before the reset
-    /// no longer pass the provenance check even though the arena may hand their
-    /// addresses out again.
+    /// no longer pass the provenance check even though the retained pages may
+    /// hand their addresses out again.
     #[test]
     fn reset_mints_a_new_heap_identity() {
         let mut heap = Heap::new();

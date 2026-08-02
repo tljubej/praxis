@@ -32,6 +32,10 @@ pub mod heaps;
 pub mod immortal;
 pub mod input;
 pub mod maps;
+/// Size-class pages: the storage and the liveness bitmaps behind [`Heap`]
+/// (ADR-103). Crate-private — a page is the collector's business and nothing
+/// outside it has a reason to name one.
+pub(crate) mod page;
 pub mod parse_detail;
 pub mod parser;
 pub mod range;
