@@ -13,7 +13,7 @@
 //!      `drop_value` called (§12.5) and is dropped from the registry.
 
 use std::alloc::Layout;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
@@ -62,11 +62,17 @@ pub struct Heap {
     /// to trigger automatic collection on allocation pressure (§12.4, M5). This
     /// is the mechanism that makes "survives collection" observable from JIT'd
     /// code: the alloc wrappers call `maybe_collect` with the current roots.
-    bytes_since_collect: RefCell<usize>,
+    ///
+    /// A `Cell`, not a `RefCell`: a `usize` is `Copy`, so there is nothing to
+    /// borrow, and paying a borrow-flag round trip for it on the hottest path in
+    /// the runtime buys only a double-borrow panic that a scalar cannot need.
+    bytes_since_collect: Cell<usize>,
     /// The threshold at/above which [`Heap::maybe_collect`] runs a collection.
     /// Doubled after each collection so the heap grows geometrically (amortized
     /// O(1) allocations per collection), a standard GC pacing heuristic.
-    collect_threshold: RefCell<usize>,
+    ///
+    /// A `Cell` for [`Heap::bytes_since_collect`]'s reason.
+    collect_threshold: Cell<usize>,
     /// Swept blocks, keyed by the exact `[header|payload]` layout they were laid
     /// out with, ready to be handed back out (RT-01).
     ///
@@ -80,7 +86,10 @@ pub struct Heap {
     /// handing a block back sound: an exact `(size, align)` match means the
     /// reused storage is large enough and correctly aligned for whatever the
     /// next allocation puts there, whoever allocated it first.
-    free: RefCell<std::collections::HashMap<BlockLayout, Vec<NonNull<u8>>>>,
+    ///
+    /// *How* the bucket is found is [`FreeList`]'s business and is orthogonal to
+    /// that argument — see its doc comment for why it stopped being a hash map.
+    free: RefCell<FreeList>,
 }
 
 /// What ran a collection. Only allocation pressure grows the pacing threshold:
@@ -98,7 +107,14 @@ enum Trigger {
 /// free-list key. Not the payload's own layout: the payload's offset within the
 /// block is recomputed and re-recorded on every reuse, so two descriptors that
 /// split the same total differently still share a block.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+///
+/// Deliberately not `Hash`. The free list used to be a `HashMap` keyed on this,
+/// and hashing a 16-byte key twice per object — once to find a bucket in
+/// [`Heap::alloc_raw`], once to file a swept block in [`Heap::sweep`] — was 34%
+/// of runtime on `collatz` and 33% on `primes`, ahead of the generated code
+/// (docs/handovers/21-where-the-time-goes.md §3.1). Withholding the derive makes
+/// re-introducing a hash lookup a compile error rather than a silent regression.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct BlockLayout {
     size: usize,
     align: usize,
@@ -129,6 +145,143 @@ impl BlockLayout {
     }
 }
 
+/// The alignment every block has, because every block starts with a
+/// [`GcHeader`]. [`BlockLayout::of`] takes the max of this and the payload's own
+/// alignment, and no built-in payload is over-aligned — so in a real program
+/// this is not a lower bound, it is the answer.
+const MIN_BLOCK_ALIGN: usize = std::mem::align_of::<GcHeader>();
+
+/// One past the largest block size [`SizeClass`] indexes directly.
+///
+/// The set of block layouts a Praxis program can produce is *closed*:
+/// [`TypeDescriptor::builtin`] is the only non-test constructor and
+/// [`crate::descriptor::BUILTINS`] is the whole list of descriptors that call
+/// it. A record, enum, tuple or closure does not widen it either — each boxes
+/// its schema behind a pointer and its fields behind a `Vec<GcRef>`, so its
+/// payload is one fixed struct whatever its arity. The largest block the
+/// language can ask for today is well under this bound, and
+/// `every_builtin_block_has_a_size_class` is what keeps that honest: a
+/// twenty-third built-in with a bigger payload fails that test rather than
+/// silently degrading to the linear scan.
+const SIZE_CLASSES: usize = 128;
+
+/// The bucket index for a block whose alignment is exactly [`MIN_BLOCK_ALIGN`]
+/// and whose size fits [`SIZE_CLASSES`] — which is every block a real program
+/// allocates.
+///
+/// **This newtype is how indexing by size alone stays exact.** RT-01's soundness
+/// rests on handing a swept block only to a request of the same `(size, align)`,
+/// and a bare `size` index would break that for two layouts that share a size
+/// but not an alignment: file a `{48, 8}` block, hand it to a `{48, 16}`
+/// request, and the payload lands at `base + 32` where `base` is only 8-aligned.
+/// [`SizeClass::of`] is the only constructor and it rejects exactly that case,
+/// so "the index is the size" and "the bucket holds one layout" cannot come
+/// apart. Everything it rejects is keyed on the whole [`BlockLayout`] instead.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct SizeClass(usize);
+
+impl SizeClass {
+    /// `block`'s class, or `None` if it is over-aligned or too large — in which
+    /// case it belongs in [`FreeList::oversize`], not in the array.
+    #[inline]
+    fn of(block: BlockLayout) -> Option<SizeClass> {
+        if block.align == MIN_BLOCK_ALIGN && block.size < SIZE_CLASSES {
+            Some(SizeClass(block.size))
+        } else {
+            None
+        }
+    }
+
+    /// The one layout this class holds. The inverse of [`SizeClass::of`], and it
+    /// exists so the round trip is testable rather than merely asserted — hence
+    /// test-only: nothing on the allocation path needs to go this way.
+    #[cfg(test)]
+    #[inline]
+    fn layout(self) -> BlockLayout {
+        BlockLayout {
+            size: self.0,
+            align: MIN_BLOCK_ALIGN,
+        }
+    }
+}
+
+/// Swept blocks awaiting reuse, bucketed by layout.
+///
+/// This was a `HashMap<BlockLayout, Vec<NonNull<u8>>>` with the default
+/// `RandomState`, probed once per allocation and once per swept block. A program
+/// uses single digits of distinct block layouts, and SipHash over a 16-byte key
+/// — twice per object — was 34% of `collatz`'s runtime, ahead of everything else
+/// including the generated code (docs/handovers/21-where-the-time-goes.md §3.1).
+/// The hash bought nothing: the key set is closed and small enough to address
+/// directly.
+struct FreeList {
+    /// `classed[c.0]` holds blocks — and only blocks — whose layout is
+    /// `SizeClass(c.0).layout()`. [`SizeClass::of`] is the only way in, so the
+    /// index *is* the size and the alignment is [`MIN_BLOCK_ALIGN`] by
+    /// construction.
+    classed: [Vec<NonNull<u8>>; SIZE_CLASSES],
+    /// Everything [`SizeClass::of`] rejects: an over-aligned payload, or one
+    /// larger than the class array. No built-in descriptor produces either, so
+    /// this list is empty in every real program — which is why a linear scan is
+    /// the right shape for it. It is still keyed on the whole [`BlockLayout`]
+    /// and compared with `==`, so it is exact for the array's reason.
+    oversize: Vec<(BlockLayout, Vec<NonNull<u8>>)>,
+}
+
+impl FreeList {
+    fn new() -> FreeList {
+        FreeList {
+            classed: std::array::from_fn(|_| Vec::new()),
+            oversize: Vec::new(),
+        }
+    }
+
+    /// A filed block of exactly `block`'s layout, if one is available.
+    #[inline]
+    fn take(&mut self, block: BlockLayout) -> Option<NonNull<u8>> {
+        match SizeClass::of(block) {
+            Some(class) => self.classed[class.0].pop(),
+            None => self
+                .oversize
+                .iter_mut()
+                .find(|(filed, _)| *filed == block)
+                .and_then(|(_, blocks)| blocks.pop()),
+        }
+    }
+
+    /// File `base`, a swept block of exactly `block`'s layout, for reuse.
+    #[inline]
+    fn put(&mut self, block: BlockLayout, base: NonNull<u8>) {
+        match SizeClass::of(block) {
+            Some(class) => self.classed[class.0].push(base),
+            None => match self.oversize.iter_mut().find(|(filed, _)| *filed == block) {
+                Some((_, blocks)) => blocks.push(base),
+                None => self.oversize.push((block, vec![base])),
+            },
+        }
+    }
+
+    /// Forget every filed block. Both halves, always: a block left in `oversize`
+    /// after [`Heap::reset`] points into arena storage that no longer exists.
+    fn clear(&mut self) {
+        for bucket in &mut self.classed {
+            bucket.clear();
+        }
+        self.oversize.clear();
+    }
+
+    /// How many blocks are filed, across both halves.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.classed.iter().map(Vec::len).sum::<usize>()
+            + self
+                .oversize
+                .iter()
+                .map(|(_, blocks)| blocks.len())
+                .sum::<usize>()
+    }
+}
+
 /// The initial collection threshold (bytes). Small enough that the first
 /// collection runs early in a program's life (catching rooting bugs fast in
 /// tests), then grows via the doubling rule.
@@ -155,9 +308,9 @@ impl Heap {
             arena: Bump::new(),
             id: HeapId::mint(),
             live: RefCell::new(Vec::new()),
-            bytes_since_collect: RefCell::new(0),
-            collect_threshold: RefCell::new(INITIAL_COLLECT_THRESHOLD),
-            free: RefCell::new(std::collections::HashMap::new()),
+            bytes_since_collect: Cell::new(0),
+            collect_threshold: Cell::new(INITIAL_COLLECT_THRESHOLD),
+            free: RefCell::new(FreeList::new()),
         }
     }
 
@@ -364,11 +517,7 @@ impl Heap {
         // Reuse a swept block of this exact layout, or take fresh arena bytes.
         // The block was poisoned and its payload finalized before it was filed,
         // so nothing outstanding claims it is still a typed object.
-        let reused = self
-            .free
-            .borrow_mut()
-            .get_mut(&block)
-            .and_then(|blocks| blocks.pop());
+        let reused = self.free.borrow_mut().take(block);
         let base = match reused {
             Some(base) => base,
             None => self.arena.alloc_layout(block.layout()),
@@ -406,7 +555,8 @@ impl Heap {
         // the residual under-count is the spine, not the contents.
         // SAFETY: `init` has run, so the payload is a valid value of `descriptor`.
         let owned = unsafe { descriptor.owned_bytes_of(payload_ptr) };
-        *self.bytes_since_collect.borrow_mut() += block.size.saturating_add(owned);
+        self.bytes_since_collect
+            .set(self.bytes_since_collect.get() + block.size.saturating_add(owned));
         // SAFETY: `nn` points at the just-allocated, initialized header.
         unsafe { GcRef::from_non_null(nn) }
     }
@@ -438,7 +588,7 @@ impl Heap {
     /// the threshold.
     #[cfg(test)]
     pub fn maybe_collect_with(&self, roots: &dyn RootSet) -> bool {
-        let should = *self.bytes_since_collect.borrow() >= *self.collect_threshold.borrow();
+        let should = self.bytes_since_collect.get() >= self.collect_threshold.get();
         if should {
             self.collect_inner(roots, Trigger::Paced);
         }
@@ -448,7 +598,7 @@ impl Heap {
     fn collect_inner(&self, roots: &dyn RootSet, trigger: Trigger) {
         self.mark(roots);
         self.sweep();
-        *self.bytes_since_collect.borrow_mut() = 0;
+        self.bytes_since_collect.set(0);
         // Grow the threshold geometrically, so allocations per collection are
         // amortized O(1) — but only when *pacing* was what ran this collection.
         //
@@ -458,10 +608,12 @@ impl Heap {
         // pressure having caused it, and after a few such calls the program was
         // effectively running without a collector (RT-04).
         if trigger == Trigger::Paced {
-            let mut threshold = self.collect_threshold.borrow_mut();
-            *threshold = (*threshold)
-                .saturating_mul(2)
-                .max(INITIAL_COLLECT_THRESHOLD);
+            self.collect_threshold.set(
+                self.collect_threshold
+                    .get()
+                    .saturating_mul(2)
+                    .max(INITIAL_COLLECT_THRESHOLD),
+            );
         }
     }
 
@@ -473,7 +625,7 @@ impl Heap {
     ///
     /// Returns `true` if a collection ran.
     pub fn maybe_collect(&self, roots: &RuntimeRoots<'_>) -> bool {
-        let should = *self.bytes_since_collect.borrow() >= *self.collect_threshold.borrow();
+        let should = self.bytes_since_collect.get() >= self.collect_threshold.get();
         if should {
             self.collect_inner(roots, Trigger::Paced);
         }
@@ -551,7 +703,7 @@ impl Heap {
                 // object, or a stale reference would be traced through whatever
                 // the allocator put there next (hazard H7).
                 header.poison();
-                free.entry(block).or_default().push(live[i].cast::<u8>());
+                free.put(block, live[i].cast::<u8>());
                 live.swap_remove(i);
             } else {
                 // Reset to white for the next collection and keep it.
@@ -597,8 +749,8 @@ impl Heap {
         // one. Leaving the counter and the geometrically-grown threshold in
         // place meant a reset heap could run for megabytes before its first
         // collection, or collect on its very first allocation (RT-04).
-        *self.bytes_since_collect.borrow_mut() = 0;
-        *self.collect_threshold.borrow_mut() = INITIAL_COLLECT_THRESHOLD;
+        self.bytes_since_collect.set(0);
+        self.collect_threshold.set(INITIAL_COLLECT_THRESHOLD);
         // A reset heap is a different heap: the immortals it handed out are
         // gone, and every `GcRef` minted before this point names storage the
         // arena is free to hand out again. A fresh identity makes those refs
@@ -1009,13 +1161,13 @@ mod tests {
         // Only a *paced* collection grows the threshold, so drive one.
         assert!(allocate_until_paced(&heap, 100_000));
         let _ = heap.alloc_unpaced(INT_PAYLOAD, 1_i64);
-        assert_ne!(*heap.bytes_since_collect.borrow(), 0);
-        assert_ne!(*heap.collect_threshold.borrow(), INITIAL_COLLECT_THRESHOLD);
+        assert_ne!(heap.bytes_since_collect.get(), 0);
+        assert_ne!(heap.collect_threshold.get(), INITIAL_COLLECT_THRESHOLD);
 
         heap.reset();
 
-        assert_eq!(*heap.bytes_since_collect.borrow(), 0);
-        assert_eq!(*heap.collect_threshold.borrow(), INITIAL_COLLECT_THRESHOLD);
+        assert_eq!(heap.bytes_since_collect.get(), 0);
+        assert_eq!(heap.collect_threshold.get(), INITIAL_COLLECT_THRESHOLD);
     }
 
     /// A host that collects on a schedule — the debugger between REPL commands,
@@ -1030,14 +1182,14 @@ mod tests {
             heap.collect_with(&RootScope::new());
         }
         assert_eq!(
-            *heap.collect_threshold.borrow(),
+            heap.collect_threshold.get(),
             INITIAL_COLLECT_THRESHOLD,
             "an explicit collection must leave the automatic threshold alone"
         );
 
         assert!(allocate_until_paced(&heap, 100_000));
         assert_eq!(
-            *heap.collect_threshold.borrow(),
+            heap.collect_threshold.get(),
             INITIAL_COLLECT_THRESHOLD * 2,
             "a paced collection is what grows it"
         );
@@ -1070,8 +1222,8 @@ mod tests {
         let big = Heap::new();
         alloc_text(&big, 64 * 1024);
 
-        let charged_small = *small.bytes_since_collect.borrow();
-        let charged_big = *big.bytes_since_collect.borrow();
+        let charged_small = small.bytes_since_collect.get();
+        let charged_big = big.bytes_since_collect.get();
         assert_eq!(
             charged_big - charged_small,
             64 * 1024 - 8,
@@ -1104,7 +1256,7 @@ mod tests {
                 |p| (p as *mut TextPayload).write(TextPayload::Owned(owner)),
             )
         };
-        let after_owner = *heap.bytes_since_collect.borrow();
+        let after_owner = heap.bytes_since_collect.get();
 
         // SAFETY: as above; the range lands inside the owner.
         unsafe {
@@ -1123,7 +1275,7 @@ mod tests {
 
         let (_, block) = BlockLayout::of(&TEXT);
         assert_eq!(
-            *heap.bytes_since_collect.borrow() - after_owner,
+            heap.bytes_since_collect.get() - after_owner,
             block.size,
             "a slice owns no bytes of its own"
         );
@@ -1273,17 +1425,177 @@ mod tests {
         let doomed = heap.alloc_unpaced(INT_PAYLOAD, 1_i64);
         let stale = doomed.as_ptr();
         heap.collect_with(&RootScope::new());
-        assert_eq!(heap.free.borrow().values().map(Vec::len).sum::<usize>(), 1);
+        assert_eq!(heap.free.borrow().len(), 1);
 
         heap.reset();
 
-        assert_eq!(heap.free.borrow().values().map(Vec::len).sum::<usize>(), 0);
+        assert_eq!(heap.free.borrow().len(), 0);
         let fresh = heap.alloc_unpaced(INT_PAYLOAD, 2_i64);
         assert_eq!(fresh.header().heap_id(), Some(heap.id()));
         // The address may legitimately be reused by the fresh arena; what must
         // not happen is the *stale block* being handed out with the old layout
         // bookkeeping still attached. The fresh heap identity is the check.
         let _ = stale;
+    }
+
+    /// The class array must cover the whole language, not just the scalars the
+    /// benchmark happened to allocate. `BUILTINS` is the closed set of
+    /// descriptors a program can allocate through, so this makes "the fast path
+    /// covers everything" a checked invariant: a twenty-third built-in with a
+    /// payload past the bound fails here instead of silently degrading to the
+    /// linear scan.
+    #[test]
+    fn every_builtin_block_has_a_size_class() {
+        for descriptor in crate::descriptor::BUILTINS {
+            let (_, block) = BlockLayout::of(descriptor);
+            let class = SizeClass::of(block).unwrap_or_else(|| {
+                panic!(
+                    "descriptor {} has block {{size: {}, align: {}}}, which no \
+                     SizeClass indexes (SIZE_CLASSES = {SIZE_CLASSES}, \
+                     MIN_BLOCK_ALIGN = {MIN_BLOCK_ALIGN})",
+                    descriptor.name, block.size, block.align
+                )
+            });
+            assert_eq!(
+                class.layout(),
+                block,
+                "SizeClass::of and SizeClass::layout must be inverses for {}",
+                descriptor.name
+            );
+        }
+    }
+
+    /// RT-01's exactness, as an executable proposition. Indexing by size alone
+    /// would hand a `{48, 8}` block to a `{48, 16}` request, putting a 16-aligned
+    /// payload at `base + 32` where `base` is only 8-aligned. `SizeClass::of` is
+    /// the single point where that could go wrong, so it is tested directly.
+    #[test]
+    fn a_size_class_never_conflates_two_alignments() {
+        assert_eq!(
+            SizeClass::of(BlockLayout { size: 48, align: 8 }),
+            Some(SizeClass(48))
+        );
+        assert_eq!(
+            SizeClass::of(BlockLayout {
+                size: 48,
+                align: 16
+            }),
+            None,
+            "same size, different alignment: not the same class"
+        );
+        assert_eq!(
+            SizeClass::of(BlockLayout {
+                size: SIZE_CLASSES,
+                align: MIN_BLOCK_ALIGN
+            }),
+            None,
+            "one past the array is out of range, not index 0"
+        );
+    }
+
+    /// The `oversize` fallback is not decoration: an over-aligned block must be
+    /// reclaimed and reissued like any other, and must still land at its
+    /// alignment. Nothing tested that before — the free list only ever saw
+    /// 8-aligned blocks in the suite.
+    #[test]
+    fn an_overaligned_block_round_trips_through_the_free_list() {
+        let heap = Heap::new();
+        let doomed = unsafe {
+            heap.alloc_with_unpaced(
+                &OVERALIGNED,
+                std::mem::size_of::<Overaligned>(),
+                std::mem::align_of::<Overaligned>(),
+                |payload| (payload as *mut Overaligned).write(Overaligned(1)),
+            )
+        };
+        let address = doomed.as_ptr();
+
+        heap.collect_with(&RootScope::new());
+        assert_eq!(heap.free.borrow().len(), 1, "the block must be filed");
+
+        let reused = unsafe {
+            heap.alloc_with_unpaced(
+                &OVERALIGNED,
+                std::mem::size_of::<Overaligned>(),
+                std::mem::align_of::<Overaligned>(),
+                |payload| (payload as *mut Overaligned).write(Overaligned(2)),
+            )
+        };
+        assert_eq!(
+            reused.as_ptr(),
+            address,
+            "an over-aligned block must be handed back out, not left spent"
+        );
+        assert_eq!(reused.payload::<Overaligned>() as usize % 64, 0);
+    }
+
+    #[repr(C)]
+    struct Aligned8([u64; 3]);
+
+    #[repr(C, align(16))]
+    struct Aligned16([u64; 2]);
+
+    static ALIGNED_8: TypeDescriptor = TypeDescriptor::for_test::<Aligned8>(
+        2,
+        "Aligned8",
+        probe_trace,
+        overaligned_drop,
+        probe_format,
+        None,
+        None,
+        None,
+    );
+
+    static ALIGNED_16: TypeDescriptor = TypeDescriptor::for_test::<Aligned16>(
+        3,
+        "Aligned16",
+        probe_trace,
+        overaligned_drop,
+        probe_format,
+        None,
+        None,
+        None,
+    );
+
+    /// The adversarial test for the one way size-class indexing can go wrong.
+    /// Both blocks are 48 bytes; only the alignment separates them, and a swept
+    /// 8-aligned block must never satisfy a 16-aligned request.
+    #[test]
+    fn a_swept_block_is_never_handed_to_a_request_of_another_alignment() {
+        let (_, eight) = BlockLayout::of(&ALIGNED_8);
+        let (_, sixteen) = BlockLayout::of(&ALIGNED_16);
+        assert_eq!(
+            eight.size, sixteen.size,
+            "the fixtures must share a size or this test proves nothing"
+        );
+        assert_ne!(eight.align, sixteen.align);
+
+        let heap = Heap::new();
+        let doomed = unsafe {
+            heap.alloc_with_unpaced(
+                &ALIGNED_8,
+                std::mem::size_of::<Aligned8>(),
+                std::mem::align_of::<Aligned8>(),
+                |payload| (payload as *mut Aligned8).write(Aligned8([1, 2, 3])),
+            )
+        };
+        let address = doomed.as_ptr();
+        heap.collect_with(&RootScope::new());
+
+        let other = unsafe {
+            heap.alloc_with_unpaced(
+                &ALIGNED_16,
+                std::mem::size_of::<Aligned16>(),
+                std::mem::align_of::<Aligned16>(),
+                |payload| (payload as *mut Aligned16).write(Aligned16([4, 5])),
+            )
+        };
+        assert_ne!(
+            other.as_ptr(),
+            address,
+            "a block filed under {{48, 8}} must not satisfy a {{48, 16}} request"
+        );
+        assert_eq!(other.payload::<Aligned16>() as usize % 16, 0);
     }
 
     /// A reset heap is a different heap, so the refs it minted before the reset
