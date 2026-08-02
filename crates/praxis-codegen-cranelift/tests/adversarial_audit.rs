@@ -448,10 +448,13 @@ fn a_mutable_collection_key_is_refused_before_it_can_be_mutated() {
 #[test]
 fn heavy_jit_loop_proves_that_automatic_collection_actually_ran() {
     // Result-only stress tests can pass without ever crossing the collection
-    // threshold. This loop creates at least ten registered Int allocations per
-    // iteration (~100k total). With no sweep, live_count remains >=100k; after
-    // automatic GC it is well below that even though the arithmetic result is
-    // unchanged.
+    // threshold. This loop allocates several registered `Int`s per iteration —
+    // `sum` runs to ~50M and `i` past 1024, both well outside the interned
+    // small-`Int` range (`praxis_runtime::small_int`), so the counter's first
+    // thousand iterations answer from the immortal table but everything after
+    // that, and every partial sum, is a real allocation. With no sweep,
+    // live_count stays far above the bound below; after automatic GC it is well
+    // under it even though the arithmetic result is unchanged.
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  var sum = 0\n  var i = 0\n  while i < 10000 {\n    sum = sum + i\n    i = i + 1\n  }\n  sum\n}\n",
     );
@@ -1947,6 +1950,13 @@ fn small_scalars_are_extracted_at_their_own_width() {
 /// them, and the heaps come out the same size. Comparing the two rather than
 /// asserting an absolute count keeps the test honest about collection timing:
 /// whatever residue the arithmetic loop leaves, both programs leave the same.
+///
+/// **The elements are offset past the interned small-`Int` range on purpose**
+/// (`praxis_runtime::small_int`). An interned `Int` is an immortal that no
+/// collection reclaims, so a `Vec` of `0..3000` holds only ~2000 reclaimable
+/// objects and the margin below stops being a margin. The offset keeps all
+/// three thousand elements real allocations, which is what makes "freed almost
+/// nothing" a statement about the shadow slot rather than about interning.
 #[test]
 fn a_dead_local_stops_being_reachable_from_its_frame() {
     const FILL_AND_LOOP: &str = "\
@@ -1954,7 +1964,7 @@ fn main() -> Int {
   let xs = Vec()
   var i = 0
   while i < 3000 {
-    xs.push(i)
+    xs.push(i + 2000)
     i = i + 1
   }
   var sum = 0

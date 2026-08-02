@@ -25,8 +25,8 @@ use praxis_types::{Type, TypeDb};
 
 use crate::annot::{DebugSlots, RootSlots};
 use crate::ir::{
-    AllocKind, BlockId, CallTarget, CmpOp, FloatBinOp, Function, Inst, IntBinOp, LocalDebugKind,
-    LocalId, LocalKind, MirType, Overflow, ScalarKind, Terminator,
+    AllocKind, BlockId, CallTarget, CmpOp, FloatBinOp, Function, GcConst, Inst, IntBinOp,
+    LocalDebugKind, LocalId, LocalKind, MirType, Overflow, ScalarKind, Terminator,
 };
 
 /// Lower a typed module to MIR: one [`Function`] per source `fn` item, plus one
@@ -1481,23 +1481,49 @@ fn run_parser_plan(
 fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> LocalId {
     match value {
         Lit::Int(n) => {
-            let scalar = b.alloc_scalar(ScalarKind::Int);
-            b.push(Inst::ConstInt {
-                dst: scalar,
-                value: *n,
-            });
             let dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, span);
-            b.alloc(dst, AllocKind::Int { value: scalar });
+            // **The one question asked here is the runtime's own.**
+            // `small_int::index_of` is what `praxis_alloc_int` consults, so an
+            // answer of `Some` is a guarantee that `ctx.small_ints` holds this
+            // value — the compiler cannot emit a table read for a slot the
+            // table does not have.
+            if praxis_runtime::small_int::index_of(*n).is_some() {
+                // Not a safepoint, and `b.push` rather than `b.emit` says so:
+                // `Builder::emit` exists to decide whether a fault check
+                // follows, and this instruction calls no wrapper, allocates
+                // nothing and cannot fault. `verify` rejects a `CheckFault`
+                // after it in so many words (ADR-088, both directions).
+                b.push(Inst::ConstGc {
+                    dst,
+                    konst: GcConst::SmallInt(*n),
+                });
+            } else {
+                // Out of range, so this is a real allocation and must stay a
+                // safepoint: the wrapper can collect, and the collector must see
+                // this frame (ADR-040). The `Gc` local, its type, its
+                // `LocalDebugKind::Temp` and its span are the same either way,
+                // so the debugger renders the literal identically whichever
+                // branch produced it.
+                let scalar = b.alloc_scalar(ScalarKind::Int);
+                b.push(Inst::ConstInt {
+                    dst: scalar,
+                    value: *n,
+                });
+                b.alloc(dst, AllocKind::Int { value: scalar });
+            }
             dst
         }
         Lit::Bool(v) => {
-            let scalar = b.alloc_scalar(ScalarKind::Bool);
-            b.push(Inst::ConstInt {
-                dst: scalar,
-                value: if *v { 1 } else { 0 },
-            });
+            // There are two `Bool` values and the runtime minted both at
+            // startup, so a literal is a load and has been all along — what it
+            // used to cost was the extern call and the shadow-frame spill that
+            // `Inst::Alloc`'s unconditional safepoint status put in front of it,
+            // at a point the manifest itself calls `Effect::Pure`.
             let dst = b.alloc_gc(MirType::Known(b.bool_ty), None, LocalDebugKind::Temp, span);
-            b.alloc(dst, AllocKind::Bool { value: scalar });
+            b.push(Inst::ConstGc {
+                dst,
+                konst: GcConst::Bool(*v),
+            });
             dst
         }
         Lit::Text(s) => {
@@ -1545,9 +1571,14 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
             dst
         }
         Lit::Unit => {
-            // The Unit value (§4.3): allocate the immortal Unit singleton.
+            // The Unit value (§4.3): the immortal singleton, read out of the
+            // context. As for `Lit::Bool` — this never allocated; it only paid
+            // for looking like it did.
             let dst = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, span);
-            b.alloc(dst, AllocKind::Unit);
+            b.push(Inst::ConstGc {
+                dst,
+                konst: GcConst::Unit,
+            });
             dst
         }
     }
@@ -3436,7 +3467,10 @@ fn sink_alloc(
 /// a first element" into an answer.
 fn seeded_gc_accumulator(b: &mut Builder<'_>) -> LocalId {
     let acc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
-    b.alloc(acc, AllocKind::Unit);
+    b.push(Inst::ConstGc {
+        dst: acc,
+        konst: GcConst::Unit,
+    });
     acc
 }
 
@@ -5042,28 +5076,165 @@ mod tests {
         assert!(has_call, "should emit a Call instruction");
     }
 
+    /// An `Int` literal the runtime interns lowers to [`Inst::ConstGc`], and
+    /// that instruction is **not** a GC safepoint.
+    ///
+    /// This is §3.5's whole fix at the MIR level: `1` in a loop body used to be
+    /// `ConstInt` + `Alloc { Int }`, and the `Alloc` made the site a safepoint —
+    /// a call to `praxis_alloc_int` with every live root spilled into the shadow
+    /// frame before it, on every iteration.
     #[test]
-    fn lowers_unit_literal_to_alloc_unit() {
+    fn a_small_int_literal_is_a_const_gc_and_not_a_safepoint() {
+        let (funcs, _analysis) = lower_src_to_mir("fn main() -> Int { 1 }");
+        let f = &funcs[0];
+
+        let konst = f.blocks.iter().find_map(|b| {
+            b.insts.iter().find_map(|i| match i {
+                Inst::ConstGc { dst, konst } => Some((*dst, *konst)),
+                _ => None,
+            })
+        });
+        let (dst, konst) = konst.expect("an in-range Int literal lowers to ConstGc");
+        assert_eq!(konst, GcConst::SmallInt(1));
+        // The value still lands in a `Gc` slot: `ConstGc` is a `Gc`-destination
+        // constant, not the `ConstInt`-into-a-rootable-slot shape P0-03 was.
+        assert_eq!(f.locals[dst.0 as usize].kind, LocalKind::Gc);
+
+        // Nothing allocates an Int here any more...
+        assert!(
+            !f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(
+                i,
+                Inst::Alloc {
+                    alloc: AllocKind::Int { .. },
+                    ..
+                }
+            ))),
+            "the literal must not also allocate"
+        );
+        // ...and the annotated function has no safepoint at all in its body, so
+        // there is nothing for the backend to spill.
+        let mut annotated = lower_src_to_mir("fn main() -> Int { 1 }").0;
+        crate::annotate(&mut annotated[0]);
+        crate::verify(&annotated[0]).expect("an interned literal verifies");
+        assert!(
+            !annotated[0].blocks.iter().any(|b| b.insts.iter().any(|i| {
+                matches!(
+                    i,
+                    Inst::Alloc { .. } | Inst::Materialize { .. } | Inst::Call { .. }
+                )
+            })),
+            "a body that is one interned literal has no safepoint left"
+        );
+    }
+
+    /// The other half of the branch, and the one a regression would silently
+    /// delete: a literal outside the interned range still allocates, still
+    /// carries a `ConstInt` feeding it, and is still an annotated safepoint.
+    #[test]
+    fn a_large_int_literal_still_allocates_and_is_still_a_safepoint() {
+        let src = format!(
+            "fn main() -> Int {{ {} }}",
+            praxis_runtime::SMALL_INT_MAX + 1
+        );
+        let (mut funcs, _analysis) = lower_src_to_mir(&src);
+        crate::annotate(&mut funcs[0]);
+        crate::verify(&funcs[0]).expect("an allocated literal verifies");
+        let f = &funcs[0];
+
+        assert!(
+            !f.blocks
+                .iter()
+                .any(|b| b.insts.iter().any(|i| matches!(i, Inst::ConstGc { .. }))),
+            "an out-of-range literal must not read the interned table"
+        );
+        let allocs = f
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .find_map(|i| match i {
+                Inst::Alloc {
+                    alloc: AllocKind::Int { value },
+                    roots,
+                    ..
+                } => Some((*value, roots)),
+                _ => None,
+            });
+        let (value, roots) = allocs.expect("an out-of-range literal still allocates");
+        // The scalar feeding it is a real `ConstInt` in a `Scalar(Int)` slot.
+        assert_eq!(
+            f.locals[value.0 as usize].kind,
+            LocalKind::Scalar(ScalarKind::Int)
+        );
+        // And the safepoint is annotated — `verify` rejects an unannotated one,
+        // but assert it directly so the reason is visible here.
+        assert!(
+            roots.is_annotated(),
+            "an allocating literal is a GC safepoint"
+        );
+    }
+
+    /// The interned range's boundary, at the lowering that reads it: the exact
+    /// endpoints take the `ConstGc` branch and one step outside either takes the
+    /// allocating one. `build` and the runtime must agree about where the table
+    /// ends, or generated code reads past it.
+    #[test]
+    fn the_lowering_branch_falls_exactly_on_the_interned_range() {
+        for (value, interned) in [
+            (praxis_runtime::SMALL_INT_MIN - 1, false),
+            (praxis_runtime::SMALL_INT_MIN, true),
+            (praxis_runtime::SMALL_INT_MAX, true),
+            (praxis_runtime::SMALL_INT_MAX + 1, false),
+        ] {
+            // A negative literal is unary negation of a positive one, which is
+            // not a `Lit::Int` — so the negative cases go through a `let` whose
+            // initializer is the positive magnitude and are checked for the
+            // *positive* value's treatment. Only the two positive rows below
+            // exercise the ceiling; the floor is covered by `small_int`'s own
+            // boundary test plus the runtime's.
+            if value < 0 {
+                continue;
+            }
+            let (funcs, _analysis) = lower_src_to_mir(&format!("fn main() -> Int {{ {value} }}"));
+            let has_const_gc = funcs[0]
+                .blocks
+                .iter()
+                .any(|b| b.insts.iter().any(|i| matches!(i, Inst::ConstGc { .. })));
+            assert_eq!(
+                has_const_gc,
+                interned,
+                "{value} should {} be interned",
+                if interned { "" } else { "not" }
+            );
+        }
+    }
+
+    #[test]
+    fn lowers_unit_literal_to_the_unit_singleton() {
         // A `Unit`-returning `main` with an empty body synthesizes a `Lit::Unit`
-        // tail. That tail must lower to an `Alloc { AllocKind::Unit }` whose
-        // destination slot carries the Unit type — not an `Int(0)` masquerading
-        // as Unit. This is the MIR-side guard for the type-lie fix: a
-        // `Unit`-typed expression holds a genuine Unit value.
+        // tail. That tail must produce the immortal `Unit` into a slot that
+        // carries the Unit type — not an `Int(0)` masquerading as Unit. This is
+        // the MIR-side guard for the type-lie fix: a `Unit`-typed expression
+        // holds a genuine Unit value.
+        //
+        // It used to be an `Alloc { AllocKind::Unit }`, which never allocated
+        // (`praxis_alloc_unit` answers `ctx.unit_ref` and its manifest row is
+        // `Effect::Pure`) but was still a call and still spilled the shadow
+        // frame, because `is_gc_safepoint` matches `Inst::Alloc` unconditionally.
+        // It is an `Inst::ConstGc` now. What this test is about — the *type* of
+        // the slot — is unchanged.
         let (funcs, analysis) = lower_src_to_mir("fn main() -> Unit { let x = 1 }");
         let f = &funcs[0];
 
-        // Find an Alloc-Unit instruction and inspect its destination slot.
-        let alloc_unit = f.blocks.iter().find_map(|b| {
+        let const_unit = f.blocks.iter().find_map(|b| {
             b.insts.iter().find_map(|i| match i {
-                Inst::Alloc {
+                Inst::ConstGc {
                     dst,
-                    alloc: AllocKind::Unit,
-                    ..
+                    konst: GcConst::Unit,
                 } => Some(*dst),
                 _ => None,
             })
         });
-        let dst = alloc_unit.expect("a Unit-returning body should emit an AllocKind::Unit");
+        let dst = const_unit.expect("a Unit-returning body should produce the Unit singleton");
 
         // The destination slot must be a Gc local typed Unit (not Int(0):Unit).
         // `TypeData` isn't `PartialEq`, so compare via `matches!` on the
@@ -5164,6 +5335,27 @@ mod tests {
         );
     }
 
+    /// Whether `inst` produces the `Unit` singleton, in **either** of the two
+    /// forms lowering can take.
+    ///
+    /// `Lit::Unit` used to be an `Alloc { AllocKind::Unit }` and is an
+    /// `Inst::ConstGc { GcConst::Unit }` now. The two tests below are looking
+    /// for a Unit that should not be there at all, so a predicate that knew only
+    /// the old form would pass vacuously and stop guarding anything — which is
+    /// exactly the failure mode a "no X appears" assertion has.
+    fn produces_unit(inst: &Inst) -> bool {
+        matches!(
+            inst,
+            Inst::Alloc {
+                alloc: AllocKind::Unit,
+                ..
+            } | Inst::ConstGc {
+                konst: GcConst::Unit,
+                ..
+            }
+        )
+    }
+
     #[test]
     fn dynamic_take_argument_does_not_silently_lower_to_unit() {
         // `take` is typed to accept any Int expression, not literals only. The
@@ -5177,15 +5369,7 @@ mod tests {
             .blocks
             .iter()
             .flat_map(|block| &block.insts)
-            .filter(|inst| {
-                matches!(
-                    inst,
-                    Inst::Alloc {
-                        alloc: AllocKind::Unit,
-                        ..
-                    }
-                )
-            })
+            .filter(|inst| produces_unit(inst))
             .collect();
 
         assert!(
@@ -5204,20 +5388,31 @@ mod tests {
             .blocks
             .iter()
             .flat_map(|block| &block.insts)
-            .filter(|inst| {
-                matches!(
-                    inst,
-                    Inst::Alloc {
-                        alloc: AllocKind::Unit,
-                        ..
-                    }
-                )
-            })
+            .filter(|inst| produces_unit(inst))
             .collect();
 
         assert!(
             unit_fallbacks.is_empty(),
             "a well-typed `skip(n)` pipeline must not lower through a Unit fallback"
+        );
+    }
+
+    /// The predicate the two tests above rely on really does recognize both
+    /// forms — including the one lowering emits today.
+    ///
+    /// Without this, `produces_unit` could quietly stop matching what `build`
+    /// produces and both tests would keep passing on an empty list. Lowering a
+    /// program that *does* contain a `Lit::Unit` is what pins it.
+    #[test]
+    fn the_unit_predicate_recognizes_what_lowering_emits() {
+        let (funcs, _analysis) = lower_src_to_mir("fn main() -> Unit { let x = 1 }");
+        assert!(
+            funcs[0]
+                .blocks
+                .iter()
+                .flat_map(|b| &b.insts)
+                .any(produces_unit),
+            "a Unit-returning body emits a Unit the predicate must see"
         );
     }
 

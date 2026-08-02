@@ -94,7 +94,17 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// two kinds three S17 ADRs recorded as owed (ADR-058, ADR-059, ADR-060), and
 /// four raises that had been borrowing `InvalidSize` moved onto them. A runtime
 /// of the previous version would read an enum's schema pointer as its tag.
-pub const RUNTIME_ABI_VERSION: u32 = 14;
+/// v15 (§3.5): `RuntimeContext` gained `small_ints`, the base of the interned
+/// small-`Int` table (`crates/praxis-runtime/src/small_int.rs`), so an `Int` in
+/// that range is one immortal object per value rather than a fresh box per
+/// evaluation. Appended after `fault_message`, so every generated-code-read
+/// offset is unchanged — but unlike `parse_detail`, `crash_snapshot` and
+/// `fault_message`, generated code *does* read this one: `Inst::ConstGc` lowers
+/// an in-range `Int` literal to a load of this base plus a compile-time element
+/// offset, replacing a call to `praxis_alloc_int` and the shadow-frame spill
+/// that call's safepoint required. A runtime of the previous version has no such
+/// field, so code compiled against v15 would read whatever follows the struct.
+pub const RUNTIME_ABI_VERSION: u32 = 15;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -116,7 +126,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 14;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 15;
 
 // ---------------------------------------------------------------------------
 // The runtime symbol table (F4).
@@ -619,6 +629,51 @@ unsafe fn bool_ref(ctx: *mut RuntimeContext, value: bool) -> GcRef {
     }
 }
 
+/// The `Int` for `value`: the interned immortal when it is small
+/// ([`crate::small_int`]), a fresh allocation otherwise.
+///
+/// [`bool_ref`]'s shape, one step less absolute: `Bool` has two values so it is
+/// always the singleton, while `Int` has a *range* that is interned and an
+/// unbounded remainder that is not. Every wrapper that answers an `Int` reaches
+/// the heap through here, so the interning covers not just literals but
+/// `Vec.len()`, a `Counter` bump, an enum tag, a comparison's index and the
+/// result of arithmetic — which is where most of a real program's small `Int`s
+/// come from.
+///
+/// # It paces even when it does not allocate, and that is deliberate
+///
+/// The manifest declares `VecLen`, `MapLen`, `EnumTag`, `TextLen`, `CounterGet`
+/// and two dozen more `Effect::Allocates`, which is generated code's contract
+/// that the call site is a GC safepoint. If this returned before [`safepoint`],
+/// a loop whose only allocations were small `Int`s would never offer the
+/// collector a turn — the collector's *only* trigger is the pacing counter, and
+/// nothing else in such a loop touches it. So the token is minted and then
+/// dropped: [`Safepoint`] is `#[must_use]`, so `drop(sp)` is the honest spelling
+/// of "the collector got its turn and we allocated nothing", and it is a
+/// compile error to forget which of the two happened.
+///
+/// The interned path therefore costs a threshold compare and a range test rather
+/// than an allocation. `Inst::ConstGc` is what removes even that, but only for a
+/// *literal*, where the compiler knows the value and no manifest row applies.
+///
+/// # Safety
+/// `ctx` must point at a live, wired `RuntimeContext`.
+#[inline]
+unsafe fn int_ref(ctx: *mut RuntimeContext, value: i64) -> GcRef {
+    // SAFETY: caller upholds ctx validity.
+    let (h, sp) = unsafe { safepoint(ctx) };
+    match crate::small_int::index_of(value) {
+        Some(i) => {
+            drop(sp);
+            // SAFETY: `index_of` bounds `i` by `SMALL_INT_COUNT`, and
+            // `Runtime::context` points `small_ints` at a table of exactly that
+            // length whose slot `i` holds `SMALL_INT_MIN + i`.
+            unsafe { *(*ctx).small_ints.add(i) }
+        }
+        None => h.alloc(sp, scalars::INT_PAYLOAD, value),
+    }
+}
+
 /// Read `r`'s payload through a [`Payload`] handle, first checking that `r`
 /// really is that handle's type.
 ///
@@ -730,19 +785,25 @@ unsafe fn unit_sentinel(ctx: *mut RuntimeContext) -> GcRef {
 // Allocation wrappers.
 // ---------------------------------------------------------------------------
 
-/// Allocate a boxed `Int` initialized to `value` (§4.3, §11.1).
+/// The `Int` for `value` (§4.3, §11.1) — the interned immortal when it is small
+/// ([`crate::small_int`]), a fresh box otherwise.
+///
+/// The row stays `Effect::Allocates`, not `Pure` as `AllocBool`'s is: this
+/// wrapper still allocates for an out-of-range value, so the call site is still
+/// a GC safepoint and generated code must still spill its roots across it. The
+/// interning is invisible to the caller by design.
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext` whose `heap` is valid.
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_int(ctx: *mut RuntimeContext, value: i64) -> GcRef {
     abi_guard!("praxis_alloc_int", ctx, {
-        // `gc_alloc` paces first, rooted at the whole `RuntimeRoots`. The new object
+        // `int_ref` paces first, rooted at the whole `RuntimeRoots`. The new object
         // is not yet a root, but it is returned by value to the caller, which spills
         // it — so it is safe across this collection (the *previous* allocation's
         // result was already spilled by the backend before this wrapper was called).
         // SAFETY: caller upholds the ctx/heap validity.
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, value) }
+        unsafe { int_ref(ctx, value) }
     })
 }
 
@@ -1002,7 +1063,7 @@ pub unsafe extern "C" fn praxis_char_to_int(ctx: *mut RuntimeContext, r: GcRef) 
             scalar_type_mismatch("praxis_char_to_int", "Char", r.descriptor().name)
         });
         // SAFETY: ctx/heap valid; every scalar value is a valid Int payload.
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, i64::from(code)) }
+        unsafe { int_ref(ctx, i64::from(code)) }
     })
 }
 
@@ -1048,7 +1109,7 @@ pub unsafe extern "C" fn praxis_float_to_int(ctx: *mut RuntimeContext, r: GcRef)
         // then exact for every representable integer and inexact-but-safe for the
         // fractional part (which is discarded).
         // SAFETY: ctx/heap valid; the value is in i64 range.
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, f as i64) }
+        unsafe { int_ref(ctx, f as i64) }
     })
 }
 
@@ -1285,7 +1346,7 @@ macro_rules! checked_int_binop {
                 let a = unsafe { int_payload(lhs) };
                 let b = unsafe { int_payload(rhs) };
                 match a.$op(b) {
-                    Some(result) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, result) },
+                    Some(result) => unsafe { int_ref(ctx, result) },
                     None => {
                         unsafe { set_fault(ctx, $fault) };
                         unsafe { unit_sentinel(ctx) }
@@ -1324,7 +1385,7 @@ pub unsafe extern "C" fn praxis_int_div(ctx: *mut RuntimeContext, lhs: GcRef, rh
         }
         // Division truncates toward zero (Rust's `i64::div_euclid` rounds differently;
         // Praxis follows C/Rust integer division semantics toward zero).
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, a / b) }
+        unsafe { int_ref(ctx, a / b) }
     })
 }
 
@@ -1349,7 +1410,7 @@ pub unsafe extern "C" fn praxis_int_rem(ctx: *mut RuntimeContext, lhs: GcRef, rh
             unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
             return unsafe { unit_sentinel(ctx) };
         }
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, a % b) }
+        unsafe { int_ref(ctx, a % b) }
     })
 }
 
@@ -1362,7 +1423,7 @@ pub unsafe extern "C" fn praxis_int_neg(ctx: *mut RuntimeContext, r: GcRef) -> G
     abi_guard!("praxis_int_neg", ctx, {
         let a = unsafe { int_payload(r) };
         match a.checked_neg() {
-            Some(result) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, result) },
+            Some(result) => unsafe { int_ref(ctx, result) },
             None => {
                 unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
                 unsafe { unit_sentinel(ctx) }
@@ -1398,7 +1459,7 @@ pub unsafe extern "C" fn praxis_int_wrapping_add(
 ) -> GcRef {
     abi_guard!("praxis_int_wrapping_add", ctx, {
         let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x.wrapping_add(y)) }
+        unsafe { int_ref(ctx, x.wrapping_add(y)) }
     })
 }
 
@@ -1414,7 +1475,7 @@ pub unsafe extern "C" fn praxis_int_saturating_add(
 ) -> GcRef {
     abi_guard!("praxis_int_saturating_add", ctx, {
         let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x.saturating_add(y)) }
+        unsafe { int_ref(ctx, x.saturating_add(y)) }
     })
 }
 
@@ -1439,7 +1500,7 @@ pub unsafe extern "C" fn praxis_int_checked_add(
         match x.checked_add(y) {
             Some(sum) => unsafe {
                 let scope = NativeScope::new(ctx);
-                let boxed = gc_alloc(ctx, scalars::INT_PAYLOAD, sum);
+                let boxed = int_ref(ctx, sum);
                 let rooted = scope.root(boxed);
                 option_some(ctx, rooted.get())
             },
@@ -1460,7 +1521,7 @@ pub unsafe extern "C" fn praxis_int_wrapping_sub(
 ) -> GcRef {
     abi_guard!("praxis_int_wrapping_sub", ctx, {
         let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x.wrapping_sub(y)) }
+        unsafe { int_ref(ctx, x.wrapping_sub(y)) }
     })
 }
 
@@ -1476,7 +1537,7 @@ pub unsafe extern "C" fn praxis_int_saturating_sub(
 ) -> GcRef {
     abi_guard!("praxis_int_saturating_sub", ctx, {
         let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x.saturating_sub(y)) }
+        unsafe { int_ref(ctx, x.saturating_sub(y)) }
     })
 }
 
@@ -1496,7 +1557,7 @@ pub unsafe extern "C" fn praxis_int_checked_sub(
         match x.checked_sub(y) {
             Some(difference) => unsafe {
                 let scope = NativeScope::new(ctx);
-                let boxed = gc_alloc(ctx, scalars::INT_PAYLOAD, difference);
+                let boxed = int_ref(ctx, difference);
                 let rooted = scope.root(boxed);
                 option_some(ctx, rooted.get())
             },
@@ -1522,7 +1583,7 @@ pub unsafe extern "C" fn praxis_int_wrapping_mul(
 ) -> GcRef {
     abi_guard!("praxis_int_wrapping_mul", ctx, {
         let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x.wrapping_mul(y)) }
+        unsafe { int_ref(ctx, x.wrapping_mul(y)) }
     })
 }
 
@@ -1538,7 +1599,7 @@ pub unsafe extern "C" fn praxis_int_saturating_mul(
 ) -> GcRef {
     abi_guard!("praxis_int_saturating_mul", ctx, {
         let (x, y) = unsafe { (int_payload(a), int_payload(b)) };
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x.saturating_mul(y)) }
+        unsafe { int_ref(ctx, x.saturating_mul(y)) }
     })
 }
 
@@ -1558,7 +1619,7 @@ pub unsafe extern "C" fn praxis_int_checked_mul(
         match x.checked_mul(y) {
             Some(product) => unsafe {
                 let scope = NativeScope::new(ctx);
-                let boxed = gc_alloc(ctx, scalars::INT_PAYLOAD, product);
+                let boxed = int_ref(ctx, product);
                 let rooted = scope.root(boxed);
                 option_some(ctx, rooted.get())
             },
@@ -1590,7 +1651,7 @@ pub unsafe extern "C" fn praxis_int_abs(ctx: *mut RuntimeContext, r: GcRef) -> G
     abi_guard!("praxis_int_abs", ctx, {
         let a = unsafe { int_payload(r) };
         match a.checked_abs() {
-            Some(result) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, result) },
+            Some(result) => unsafe { int_ref(ctx, result) },
             None => {
                 unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
                 unsafe { unit_sentinel(ctx) }
@@ -1608,7 +1669,7 @@ pub unsafe extern "C" fn praxis_int_abs(ctx: *mut RuntimeContext, r: GcRef) -> G
 pub unsafe extern "C" fn praxis_int_sign(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_int_sign", ctx, {
         let a = unsafe { int_payload(r) };
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, a.signum()) }
+        unsafe { int_ref(ctx, a.signum()) }
     })
 }
 
@@ -1725,7 +1786,7 @@ pub unsafe extern "C" fn praxis_int_gcd(ctx: *mut RuntimeContext, lhs: GcRef, rh
         let a = unsafe { int_payload(lhs) };
         let b = unsafe { int_payload(rhs) };
         match checked_gcd(a, b) {
-            Some(result) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, result) },
+            Some(result) => unsafe { int_ref(ctx, result) },
             None => {
                 unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
                 unsafe { unit_sentinel(ctx) }
@@ -1749,7 +1810,7 @@ pub unsafe extern "C" fn praxis_int_lcm(ctx: *mut RuntimeContext, lhs: GcRef, rh
         // `lcm(n, 0)` is 0 for every n: 0 is a multiple of everything, and dividing
         // by the gcd below would divide by zero when both are 0.
         if a == 0 || b == 0 {
-            return unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, 0i64) };
+            return unsafe { int_ref(ctx, 0i64) };
         }
         // |a / gcd * b| in i128, which cannot overflow: both operands fit i64, so
         // the product fits i128 with room to spare. The range check is the only
@@ -1758,7 +1819,7 @@ pub unsafe extern "C" fn praxis_int_lcm(ctx: *mut RuntimeContext, lhs: GcRef, rh
             .map(|g| ((a as i128) / (g as i128) * (b as i128)).abs())
             .and_then(|m| i64::try_from(m).ok());
         match result {
-            Some(result) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, result) },
+            Some(result) => unsafe { int_ref(ctx, result) },
             None => {
                 unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
                 unsafe { unit_sentinel(ctx) }
@@ -2230,7 +2291,7 @@ pub unsafe extern "C" fn praxis_enum_tag(ctx: *mut RuntimeContext, enum_value: G
         let tag = unsafe { (*payload).tag as i64 };
         // SAFETY: alloc boxes the i64 into a fresh Int object. The tag value is
         // already in a register, so GC collecting enum_value here is safe.
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, tag) }
+        unsafe { int_ref(ctx, tag) }
     })
 }
 
@@ -2678,7 +2739,7 @@ pub unsafe extern "C" fn praxis_vec_len(ctx: *mut RuntimeContext, vec: GcRef) ->
         let p = unsafe { vec_payload(vec) };
         let len = p.items.len() as i64;
         // len allocates the returned Int, but the input vec is still live via `vec`.
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, len) }
+        unsafe { int_ref(ctx, len) }
     })
 }
 
@@ -2882,7 +2943,7 @@ pub unsafe extern "C" fn praxis_vec_frequencies(ctx: *mut RuntimeContext, vec: G
             // allocation can collect, and the counter has to be reachable
             // through the native root frame rather than through a `&mut` this
             // frame is holding across it.
-            let boxed = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, count) };
+            let boxed = unsafe { int_ref(ctx, count) };
             unsafe { counter_payload_mut(rooted) }
                 .entries
                 .insert(key, boxed);
@@ -3042,7 +3103,7 @@ pub unsafe extern "C" fn praxis_deque_len(ctx: *mut RuntimeContext, deque: GcRef
     abi_guard!("praxis_deque_len", ctx, {
         let p = unsafe { deque_payload(deque) };
         let len = p.items.len() as i64;
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, len) }
+        unsafe { int_ref(ctx, len) }
     })
 }
 
@@ -3303,7 +3364,7 @@ pub unsafe extern "C" fn praxis_map_remove(
 pub unsafe extern "C" fn praxis_map_len(ctx: *mut RuntimeContext, map: GcRef) -> GcRef {
     abi_guard!("praxis_map_len", ctx, {
         let p = unsafe { map_payload(map) };
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.entries.len() as i64) }
+        unsafe { int_ref(ctx, p.entries.len() as i64) }
     })
 }
 
@@ -3508,7 +3569,7 @@ pub unsafe extern "C" fn praxis_set_contains(
 pub unsafe extern "C" fn praxis_set_len(ctx: *mut RuntimeContext, set: GcRef) -> GcRef {
     abi_guard!("praxis_set_len", ctx, {
         let p = unsafe { set_payload(set) };
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.entries.len() as i64) }
+        unsafe { int_ref(ctx, p.entries.len() as i64) }
     })
 }
 
@@ -3592,7 +3653,7 @@ pub unsafe extern "C" fn praxis_counter_get(
             Some(v) => unsafe { int_payload(*v) },
             None => 0, // §6.2: absent reads as zero.
         };
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, count) }
+        unsafe { int_ref(ctx, count) }
     })
 }
 
@@ -3624,10 +3685,10 @@ pub unsafe extern "C" fn praxis_counter_inc(
                     return unsafe { unit_sentinel(ctx) };
                 };
                 // SAFETY: ctx is wired; alloc a fresh Int for the incremented value.
-                *v = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, next) };
+                *v = unsafe { int_ref(ctx, next) };
             }
             None => {
-                let one = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, 1_i64) };
+                let one = unsafe { int_ref(ctx, 1_i64) };
                 p.entries.insert(dk, one);
             }
         }
@@ -3704,7 +3765,7 @@ pub unsafe extern "C" fn praxis_counter_values(ctx: *mut RuntimeContext, counter
 pub unsafe extern "C" fn praxis_counter_len(ctx: *mut RuntimeContext, counter: GcRef) -> GcRef {
     abi_guard!("praxis_counter_len", ctx, {
         let p = unsafe { counter_payload(counter) };
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.entries.len() as i64) }
+        unsafe { int_ref(ctx, p.entries.len() as i64) }
     })
 }
 
@@ -3846,7 +3907,7 @@ pub unsafe extern "C" fn praxis_max_heap_peek(ctx: *mut RuntimeContext, heap_ref
 pub unsafe extern "C" fn praxis_max_heap_len(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     abi_guard!("praxis_max_heap_len", ctx, {
         let p = unsafe { max_heap_payload(heap_ref) };
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.items.len() as i64) }
+        unsafe { int_ref(ctx, p.items.len() as i64) }
     })
 }
 
@@ -3982,7 +4043,7 @@ pub unsafe extern "C" fn praxis_min_heap_peek(ctx: *mut RuntimeContext, heap_ref
 pub unsafe extern "C" fn praxis_min_heap_len(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     abi_guard!("praxis_min_heap_len", ctx, {
         let p = unsafe { min_heap_payload(heap_ref) };
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.items.len() as i64) }
+        unsafe { int_ref(ctx, p.items.len() as i64) }
     })
 }
 
@@ -4128,7 +4189,7 @@ pub unsafe extern "C" fn praxis_bitset_contains(
 pub unsafe extern "C" fn praxis_bitset_len(ctx: *mut RuntimeContext, bs: GcRef) -> GcRef {
     abi_guard!("praxis_bitset_len", ctx, {
         let p = unsafe { bitset_payload(bs) };
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.count() as i64) }
+        unsafe { int_ref(ctx, p.count() as i64) }
     })
 }
 
@@ -4152,7 +4213,7 @@ pub unsafe extern "C" fn praxis_bitset_items(ctx: *mut RuntimeContext, bs: GcRef
         let scope = unsafe { NativeScope::new(ctx) };
         let rooted = scope.root(result);
         for value in members {
-            let boxed = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, value) };
+            let boxed = unsafe { int_ref(ctx, value) };
             unsafe { vec_payload_mut(rooted) }.items.push(boxed);
         }
         result
@@ -4201,9 +4262,9 @@ unsafe fn alloc_point(ctx: *mut RuntimeContext, x: i64, y: i64) -> GcRef {
     let schema = crate::tuples::point_schema();
     let schema_ptr = schema as *const crate::tuples::TupleSchema;
     let tup = scope.root(unsafe { praxis_alloc_tuple(ctx, schema_ptr) });
-    let x_ref = scope.root(unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, x) });
+    let x_ref = scope.root(unsafe { int_ref(ctx, x) });
     unsafe { praxis_tuple_set(ctx, tup.get(), 0, x_ref.get()) };
-    let y_ref = unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, y) };
+    let y_ref = unsafe { int_ref(ctx, y) };
     unsafe { praxis_tuple_set(ctx, tup.get(), 1, y_ref) };
     tup.get()
 }
@@ -4263,7 +4324,7 @@ unsafe fn default_cell(
         match builtin {
             B::Unit => Some(unit_sentinel(ctx)),
             B::Bool => Some(bool_ref(ctx, false)),
-            B::Int => Some(gc_alloc(ctx, scalars::INT_PAYLOAD, 0_i64)),
+            B::Int => Some(int_ref(ctx, 0_i64)),
             B::Byte => Some(gc_alloc(ctx, scalars::BYTE_PAYLOAD, 0_u8)),
             // `0_u32`, not `'\0'`: a `Char`'s payload is the scalar *value*, and
             // a Rust `char` only happened to fit because it shares `u32`'s
@@ -4358,7 +4419,7 @@ pub unsafe extern "C" fn praxis_grid_new(
 pub unsafe extern "C" fn praxis_grid_width(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
     abi_guard!("praxis_grid_width", ctx, {
         let p = unsafe { grid_payload(grid) };
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, p.width as i64) }
+        unsafe { int_ref(ctx, p.width as i64) }
     })
 }
 
@@ -4372,7 +4433,7 @@ pub unsafe extern "C" fn praxis_grid_height(ctx: *mut RuntimeContext, grid: GcRe
         let p = unsafe { grid_payload(grid) };
         // height = items.len() / width.
         let height = grid_height(p.items.len(), p.width);
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, height as i64) }
+        unsafe { int_ref(ctx, height as i64) }
     })
 }
 
@@ -4831,7 +4892,7 @@ pub unsafe extern "C" fn praxis_text_len(ctx: *mut RuntimeContext, text: GcRef) 
         // SAFETY: caller guarantees `text` is Text.
         let s = unsafe { text_str(text) };
         let len = s.chars().count() as i64;
-        unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, len) }
+        unsafe { int_ref(ctx, len) }
     })
 }
 
@@ -5101,7 +5162,7 @@ pub unsafe extern "C" fn praxis_range_len(ctx: *mut RuntimeContext, r: GcRef) ->
         // SAFETY: the compiler only emits this with a Range-typed operand.
         let range = unsafe { &*r.payload::<crate::range::RangeVal>() };
         match i64::try_from(range.len()) {
-            Ok(len) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, len) },
+            Ok(len) => unsafe { int_ref(ctx, len) },
             Err(_) => {
                 unsafe { set_fault(ctx, RaisedFault::INT_OVERFLOW) };
                 unsafe { unit_sentinel(ctx) }
@@ -5127,7 +5188,7 @@ pub unsafe extern "C" fn praxis_range_get(
         let range = unsafe { &*r.payload::<crate::range::RangeVal>() };
         let i = unsafe { int_payload(index) };
         match range.get(i) {
-            Some(value) => unsafe { gc_alloc(ctx, scalars::INT_PAYLOAD, value) },
+            Some(value) => unsafe { int_ref(ctx, value) },
             None => {
                 unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
                 unsafe { unit_sentinel(ctx) }
@@ -5615,7 +5676,7 @@ pub unsafe extern "C" fn praxis_dijkstra(
                 // allocation while a `&mut MapPayload` is live is what `Rooted`
                 // exists to make impossible, and taking the borrow per entry is
                 // what keeps that true.
-                let boxed = scope.root(gc_alloc(ctx, scalars::INT_PAYLOAD, cost));
+                let boxed = scope.root(int_ref(ctx, cost));
                 map_payload_mut(result)
                     .entries
                     .insert(DynamicKey::new(state), boxed.get());
@@ -5675,7 +5736,7 @@ unsafe fn alloc_optional_int(ctx: *mut RuntimeContext, value: Option<i64>) -> Gc
     unsafe {
         match value {
             Some(n) => {
-                let boxed = gc_alloc(ctx, scalars::INT_PAYLOAD, n);
+                let boxed = int_ref(ctx, n);
                 option_some(ctx, boxed)
             }
             None => option_none(ctx),
@@ -5700,13 +5761,24 @@ mod tests {
         let _ = unsafe { Box::from_raw(ctx) };
     }
 
+    /// The first `Int` value the runtime does **not** intern.
+    ///
+    /// Every test below that detects a collection by watching the live registry
+    /// *shrink* must allocate above this. An interned `Int` never enters the
+    /// registry, so `praxis_alloc_int(ctx, 5)` in such a loop makes
+    /// `after < before + 1` true on the first iteration and the test reports
+    /// success without a collection ever having run — a false pass, which is
+    /// strictly worse than the failure it replaces.
+    const UNINTERNED: i64 = crate::small_int::SMALL_INT_MAX + 1;
+
     /// Allocate through a safepointed ABI wrapper until its pre-allocation
     /// collection causes the live registry to shrink. Returns the live count
     /// immediately after that wrapper allocates its result.
     unsafe fn allocate_until_automatic_collection(rt: &Runtime, ctx: *mut RuntimeContext) -> usize {
         let mut before = rt.heap().stats().live_count;
         for i in 0..10_000_i64 {
-            let _ = unsafe { praxis_alloc_int(ctx, i) };
+            // Above the interned range: see `UNINTERNED`.
+            let _ = unsafe { praxis_alloc_int(ctx, UNINTERNED + i) };
             let after = rt.heap().stats().live_count;
             if after < before.saturating_add(1) {
                 return after;
@@ -5717,8 +5789,8 @@ mod tests {
     }
 
     #[test]
-    fn version_is_fourteen_after_the_enum_schema_pointer() {
-        assert_eq!(RUNTIME_ABI_VERSION, 14);
+    fn version_is_fifteen_after_the_interned_int_table() {
+        assert_eq!(RUNTIME_ABI_VERSION, 15);
     }
 
     #[test]
@@ -5876,6 +5948,174 @@ mod tests {
         unsafe { drop_ctx(ctx) };
     }
 
+    /// The `Int` counterpart of
+    /// [`bool_and_unit_abi_allocations_reuse_runtime_singletons`]: a small `Int`
+    /// is one object per value, and an out-of-range one is still a fresh box.
+    ///
+    /// Both halves matter. The first is the optimization; the second is the
+    /// branch a regression would silently delete, leaving every large `Int` in
+    /// the language reading slot `value - SMALL_INT_MIN` of a table that ends
+    /// long before it.
+    #[test]
+    fn small_ints_are_one_object_per_value_and_large_ones_are_not() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx is wired to rt throughout.
+        unsafe {
+            // In range: two calls, one object — and it is the runtime's own
+            // table entry, not some other cache.
+            let a = praxis_alloc_int(ctx, 7);
+            let b = praxis_alloc_int(ctx, 7);
+            assert_eq!(a.as_ptr(), b.as_ptr());
+            assert_eq!(a.as_ptr(), rt.immortals().small_int(7).unwrap().as_ptr());
+            assert_eq!(praxis_int_load(ctx, a), 7);
+
+            // The four boundary cases, through the ABI: the exact endpoints are
+            // interned and one step outside either is not.
+            for v in [
+                crate::small_int::SMALL_INT_MIN,
+                crate::small_int::SMALL_INT_MAX,
+            ] {
+                assert_eq!(
+                    praxis_alloc_int(ctx, v).as_ptr(),
+                    praxis_alloc_int(ctx, v).as_ptr(),
+                    "{v} is the edge of the range and must be interned"
+                );
+            }
+            for v in [
+                crate::small_int::SMALL_INT_MIN - 1,
+                crate::small_int::SMALL_INT_MAX + 1,
+            ] {
+                let x = praxis_alloc_int(ctx, v);
+                let y = praxis_alloc_int(ctx, v);
+                assert_ne!(
+                    x.as_ptr(),
+                    y.as_ptr(),
+                    "{v} is outside the range and must still allocate"
+                );
+                assert_eq!(praxis_int_load(ctx, x), v, "and still hold its value");
+                assert_eq!(praxis_int_load(ctx, y), v);
+            }
+
+            // Distinct in-range values are distinct objects: interning shares
+            // an object across *calls*, never across values.
+            assert_ne!(
+                praxis_alloc_int(ctx, 7).as_ptr(),
+                praxis_alloc_int(ctx, 8).as_ptr()
+            );
+
+            // The host helper and the ABI wrapper answer the same object, as
+            // `Runtime::alloc_bool` and `praxis_alloc_bool` already do.
+            assert_eq!(rt.alloc_int(7).as_ptr(), a.as_ptr());
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// An interned `Int` is never registered, so a collection cannot reclaim it
+    /// however unrooted it is. The `Int` analogue of
+    /// `runtime_collect_keeps_immortals_alive_unrooted`.
+    #[test]
+    fn an_interned_int_survives_collection_unrooted() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx is wired to rt throughout.
+        unsafe {
+            let _ = praxis_alloc_int(ctx, 5);
+        }
+        assert_eq!(
+            rt.heap().stats().live_count,
+            0,
+            "an interned Int must not enter the live registry"
+        );
+        // Nothing roots `5`: no shadow frame, no native scope, no Rust local the
+        // collector can see. A registered object here would be swept.
+        rt.collect_now();
+        // SAFETY: ctx is still wired; the reference must still be readable.
+        unsafe {
+            let five = praxis_alloc_int(ctx, 5);
+            assert!(!five.header().is_poisoned(), "an immortal is never swept");
+            assert_eq!(praxis_int_load(ctx, five), 5);
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// The executable form of "nothing in the language can observe `Int`
+    /// identity": the three keyed collections must behave identically whether
+    /// their keys are shared objects or distinct ones.
+    ///
+    /// [`crate::dynamic_key::DynamicKey`]'s `eq` opens with a pointer
+    /// comparison, and that is the line interning could in principle have moved
+    /// — but it is a fast path *for* structural equality and `int_equals` is
+    /// reflexive, so sharing can only make it fire more often. This asserts the
+    /// consequence rather than the argument: every operation below is run twice
+    /// at the same shape, once with interned keys and once with uninterned ones,
+    /// and the two must agree.
+    #[test]
+    fn interning_does_not_change_keyed_collection_behaviour() {
+        // (key_a, key_b) pairs: two distinct keys, once inside the interned
+        // range and once outside it.
+        for (a_val, b_val, label) in [
+            (5_i64, 6_i64, "interned"),
+            (UNINTERNED, UNINTERNED + 1, "allocated"),
+        ] {
+            let mut rt = Runtime::new();
+            let ctx = wired_ctx(&mut rt);
+            // SAFETY: ctx wired; every ref below comes from the ABI.
+            unsafe {
+                let a = praxis_alloc_int(ctx, a_val);
+                // A *second* reference to the same value, allocated separately.
+                // Interned it is `a`; uninterned it is a different object with
+                // the same payload. Both must key the same slot.
+                let a_again = praxis_alloc_int(ctx, a_val);
+                let b = praxis_alloc_int(ctx, b_val);
+
+                let map = praxis_map_new(ctx, &scalars::INT);
+                let one = praxis_alloc_int(ctx, 1);
+                let _ = praxis_map_insert(ctx, map, a, one);
+                // `map_index` rather than `map_get`: the subscript answers the
+                // value where `.get` answers an `Option` (ADR-076), and the
+                // value is what has to match.
+                assert_eq!(
+                    praxis_int_load(ctx, praxis_map_index(ctx, map, a_again)),
+                    1,
+                    "{label}: an equal key must find the entry"
+                );
+                assert_eq!(
+                    rt.fault(),
+                    FaultKind::None,
+                    "{label}: an equal key is a present key"
+                );
+                assert_eq!(
+                    praxis_bool_load(ctx, praxis_map_contains(ctx, map, b)),
+                    0,
+                    "{label}: a different key must not"
+                );
+                assert_eq!(praxis_int_load(ctx, praxis_map_len(ctx, map)), 1);
+
+                let set = praxis_set_new(ctx, &scalars::INT);
+                let _ = praxis_set_insert(ctx, set, a);
+                let _ = praxis_set_insert(ctx, set, a_again);
+                assert_eq!(
+                    praxis_int_load(ctx, praxis_set_len(ctx, set)),
+                    1,
+                    "{label}: re-inserting an equal value must not grow the set"
+                );
+                assert_eq!(praxis_bool_load(ctx, praxis_set_contains(ctx, set, b)), 0);
+
+                let counter = praxis_counter_new(ctx, &scalars::INT);
+                let _ = praxis_counter_inc(ctx, counter, a);
+                let _ = praxis_counter_inc(ctx, counter, a_again);
+                assert_eq!(
+                    praxis_int_load(ctx, praxis_counter_get(ctx, counter, a)),
+                    2,
+                    "{label}: two bumps of an equal key are two bumps of one key"
+                );
+                assert_eq!(praxis_int_load(ctx, praxis_counter_len(ctx, counter)), 1);
+            }
+            unsafe { drop_ctx(ctx) };
+        }
+    }
+
     #[test]
     fn bool_and_unit_abi_allocations_reuse_runtime_singletons() {
         let mut rt = Runtime::new();
@@ -5976,6 +6216,15 @@ mod tests {
     /// whose pressure came from those (a text-processing loop, say) could run
     /// arbitrarily long with the collector never offered a turn. Each is driven
     /// here until its own pacing collects.
+    ///
+    /// **Every receiver is sized past the interned range on purpose.** The first
+    /// four wrappers answer a *length*, and a length inside
+    /// [`crate::small_int`]'s range is an immortal that never enters the live
+    /// registry — so with a five-byte `Text` or a 2×2 `Grid` the shrink test
+    /// below is true on the first iteration and the test passes without a
+    /// collection ever running (see `UNINTERNED`). Interning removes the
+    /// allocation, not the pacing, and it is the pacing this test is about; the
+    /// oversized receivers are what keep the observable in place.
     #[test]
     fn every_scalar_boxing_wrapper_paces_the_collector() {
         // (name, a closure that performs one allocating call)
@@ -5987,16 +6236,28 @@ mod tests {
             ("praxis_grid_height", praxis_grid_height),
             ("praxis_float_to_text", praxis_float_to_text),
         ];
+        // One past the interned range, in whatever unit the receiver measures.
+        let big = UNINTERNED as usize;
         for (name, call) in cases {
             let mut rt = Runtime::new();
             let ctx = wired_ctx(&mut rt);
             // SAFETY: ctx wired; each receiver matches its wrapper.
             unsafe {
+                let text = "x".repeat(big);
                 let receiver = match name {
-                    "praxis_text_len" => praxis_alloc_text(ctx, "hello".as_ptr(), 5),
-                    "praxis_vec_len" => praxis_vec_new(ctx, &scalars::INT),
+                    "praxis_text_len" => praxis_alloc_text(ctx, text.as_ptr(), big),
+                    "praxis_vec_len" => {
+                        // The elements are all the same interned `0`, so the Vec
+                        // costs one allocation regardless of its length — only
+                        // its `len()` matters here.
+                        rt.alloc_vec(&scalars::INT, vec![rt.alloc_int(0); big])
+                    }
                     "praxis_float_to_text" => praxis_alloc_float(ctx, 1.5_f64.to_bits() as i64),
-                    _ => praxis_grid_new(ctx, &scalars::INT, 2, 2),
+                    // `width` reads the first dimension and `height` the second,
+                    // so each case makes *its own* answer uninterned and leaves
+                    // the other dimension at one cell.
+                    "praxis_grid_width" => praxis_grid_new(ctx, &scalars::INT, big as i64, 1),
+                    _ => praxis_grid_new(ctx, &scalars::INT, 1, big as i64),
                 };
                 let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 1);
                 (*frame).slots[0] = receiver.as_ptr();
@@ -6561,6 +6822,13 @@ mod tests {
         // does, push enough elements to force multiple automatic collections,
         // and leave one unrooted allocation per iteration so collection is
         // observable as a live-registry shrink.
+        //
+        // Both the pushed element and the deliberately-unrooted allocation are
+        // offset past the interned range: an interned `Int` is never registered,
+        // so an in-range element would trip the shrink test on iteration zero
+        // and neither the collection nor the rooting would be exercised (see
+        // `UNINTERNED`). The offset is carried through the spot checks below so
+        // the values read back are still the values pushed.
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx wired; push mutates in place so `v` stays valid throughout.
@@ -6571,7 +6839,7 @@ mod tests {
             let mut observed_reclamation = false;
             for i in 0..5000_i64 {
                 let before_alloc = rt.heap().stats().live_count;
-                let elem = praxis_alloc_int(ctx, i);
+                let elem = praxis_alloc_int(ctx, UNINTERNED + i);
                 if rt.heap().stats().live_count < before_alloc.saturating_add(1) {
                     observed_reclamation = true;
                 }
@@ -6582,20 +6850,31 @@ mod tests {
                     observed_reclamation = true;
                 }
                 (*frame).slots[1] = std::ptr::null_mut();
-                let _ = rt.alloc_int(-i - 1);
+                let _ = rt.alloc_int(-UNINTERNED - i - 1);
             }
             assert!(
                 observed_reclamation,
                 "the test must observe an automatic collection, not merely allocation pressure"
             );
             assert_eq!(praxis_int_load(ctx, praxis_vec_len(ctx, v)), 5000);
-            // Spot-check first/middle/last.
+            // Spot-check first/middle/last. The *indices* stay small (they are
+            // interned, which is fine — nothing here watches them); the values
+            // carry the offset the elements were pushed with.
             let zero = praxis_alloc_int(ctx, 0);
-            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, zero)), 0);
+            assert_eq!(
+                praxis_int_load(ctx, praxis_vec_get(ctx, v, zero)),
+                UNINTERNED
+            );
             let middle = praxis_alloc_int(ctx, 2500);
-            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, middle)), 2500);
+            assert_eq!(
+                praxis_int_load(ctx, praxis_vec_get(ctx, v, middle)),
+                UNINTERNED + 2500
+            );
             let last = praxis_alloc_int(ctx, 4999);
-            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, last)), 4999);
+            assert_eq!(
+                praxis_int_load(ctx, praxis_vec_get(ctx, v, last)),
+                UNINTERNED + 4999
+            );
             crate::shadow_frame::praxis_pop_shadow_frame(ctx, frame);
         }
         unsafe { drop_ctx(ctx) };
@@ -7438,7 +7717,10 @@ mod tests {
         let ctx = wired_ctx(&mut rt);
         let collected;
         unsafe {
-            let lhs = praxis_alloc_int(ctx, 20);
+            // The *sum* has to be uninterned, not just the operands: what is
+            // watched below is whether `praxis_int_add`'s result enters the live
+            // registry, and an interned sum never does (see `UNINTERNED`).
+            let lhs = praxis_alloc_int(ctx, UNINTERNED);
             let rhs = praxis_alloc_int(ctx, 22);
             let frame = crate::shadow_frame::praxis_push_shadow_frame(ctx, 2);
             (*frame).slots[0] = lhs.as_ptr();
@@ -7489,7 +7771,11 @@ mod tests {
     fn automatic_gc_roots_parse_failure_partial_values() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
-        let partial = rt.alloc_int(99);
+        // Uninterned: what this test watches is a *registered* object surviving
+        // a collection that roots only through `ParseDetail.partial`, and an
+        // interned `Int` is never registered, so it would survive whether the
+        // root set included the slot or not (see `UNINTERNED`).
+        let partial = rt.alloc_int(UNINTERNED);
         rt.parse_detail_mut()
             .consider(ParseFail::here(0, "test").with_partial(Some(partial)), b"");
         let live_after_collection;
@@ -7510,7 +7796,10 @@ mod tests {
     fn automatic_gc_roots_runtime_owned_crash_snapshots() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
-        let captured = rt.alloc_int(7);
+        // Uninterned, for `automatic_gc_roots_parse_failure_partial_values`'s
+        // reason: the observable is a registered object surviving because the
+        // snapshot rooted it.
+        let captured = rt.alloc_int(UNINTERNED);
         let local_name = b"value";
         let meta = crate::debug::DebugLocalMeta {
             source_name: local_name.as_ptr(),

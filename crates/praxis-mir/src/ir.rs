@@ -216,6 +216,31 @@ pub enum Inst {
     /// as its IEEE-754 bit pattern (`f64::to_bits()` as `i64`) so it rides the
     /// uniform scalar channel. The backend bit-casts back to `f64` on use (§4.12).
     ConstFloat { dst: LocalId, bits: i64 },
+    /// Put a `GcRef` the runtime has **already minted** into a `Gc` local
+    /// ([`GcConst`]).
+    ///
+    /// The `Gc` counterpart of [`ConstInt`](Self::ConstInt), and it carries no
+    /// [`RootSlots`] or [`DebugSlots`] for a reason worth stating: it is not a
+    /// GC safepoint. It calls no wrapper, allocates nothing, and cannot fault,
+    /// so there is nothing here that could trigger a collection and therefore
+    /// nothing the collector must be shown. The backend lowers it to two loads
+    /// out of the [`RuntimeContext`](praxis_runtime::RuntimeContext) — no call,
+    /// no `catch_unwind`, no pacing check, no shadow-frame spill.
+    ///
+    /// That is the whole of the win. An `Int` literal in a loop body used to be
+    /// `ConstInt` + `Alloc { Int }`, and the `Alloc` was a safepoint: a call to
+    /// `praxis_alloc_int` *and* a store of every live root into the shadow frame
+    /// before it, on every iteration
+    /// (docs/handovers/21-where-the-time-goes.md §3.5). Interning the value in
+    /// the runtime (`praxis_runtime::small_int`) removed the allocation; this
+    /// removes everything that surrounded it.
+    ///
+    /// **This is not the shape a fresh allocation may take.** A value the
+    /// runtime has not already minted still needs [`Alloc`](Self::Alloc): the
+    /// allocation can collect, and a collection that cannot see the frame is
+    /// ADR-040's whole subject. [`crate::build`] chooses between the two forms
+    /// by asking `small_int::index_of`, the same function the runtime asks.
+    ConstGc { dst: LocalId, konst: GcConst },
     /// Allocate a fresh `GcRef` and store it in `dst`. This is a GC safepoint
     /// (allocation may trigger collection). `kind` selects the runtime wrapper.
     Alloc {
@@ -499,6 +524,11 @@ impl Inst {
                 ..
             } => Some("a called function's body may raise any fault"),
             Inst::CallIndirect { .. } => Some("a called closure's body may raise any fault"),
+            // The backend loads the reference out of the context — no call, so
+            // no manifest row applies and nothing can fault. Same standing as
+            // `EnumTag` above, and the exhaustive match is what forces the
+            // decision to be made here rather than assumed at the emit site.
+            Inst::ConstGc { .. } => None,
             Inst::ConstInt { .. }
             | Inst::ConstFloat { .. }
             | Inst::StoreScalar { .. }
@@ -510,6 +540,51 @@ impl Inst {
             | Inst::CheckFault { .. } => None,
         }
     }
+}
+
+/// A `GcRef` the runtime minted before the program started, for
+/// [`Inst::ConstGc`].
+///
+/// Every variant names an object that already exists in
+/// [`Immortals`](praxis_runtime::Immortals) and is reachable from the
+/// `RuntimeContext`, so lowering one is a *load*, never a construction. That is
+/// the membership rule: a value belongs here only if the runtime can name it
+/// without allocating, for the whole life of the run, on the context the code is
+/// executed against.
+///
+/// The rule rules out the obvious extension. A constant cannot be a compile-time
+/// *address*, because there is no heap at compile time (the CLI builds the `Jit`
+/// before the `Runtime`) and because a `praxis_debugger` session replaces its
+/// `Jit` while keeping its `Runtime` — an address baked into code would belong to
+/// whichever runtime happened to mint it, and nothing types that relationship.
+/// Reading it out of the live context at run time costs one extra load and is
+/// correct by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcConst {
+    /// An `Int` inside `praxis_runtime::small_int`'s interned range. The backend
+    /// reads `ctx.small_ints` and indexes it by
+    /// `small_int::index_of(value)` — an offset it computes at compile time,
+    /// from the same function the runtime uses, so the compiler's notion of
+    /// "in range" cannot drift from the table's actual bounds.
+    SmallInt(i64),
+    /// The `Unit` singleton (`ctx.unit_ref`).
+    ///
+    /// `Unit` has been an immortal since M3, so `AllocKind::Unit` never
+    /// allocated anything — `praxis_alloc_unit` returns the cached reference and
+    /// the manifest declares it `Effect::Pure`. What it *did* cost was an extern
+    /// call and, because `liveness::is_gc_safepoint` matches `Inst::Alloc`
+    /// unconditionally, a full shadow-frame spill at a point where no collection
+    /// can happen. Both are gone here: the two answers to "is this a safepoint"
+    /// — the manifest's and the instruction shape's — become one.
+    Unit,
+    /// One of the two `Bool` singletons (`ctx.true_ref` / `ctx.false_ref`), for
+    /// [`Unit`](Self::Unit)'s reason: `praxis_alloc_bool` has answered from the
+    /// context since ABI v10 and its row is `Effect::Pure`.
+    ///
+    /// Only a *literal* takes this form. A computed `Bool` — a comparison's
+    /// result, `contains`, `is_empty` — is a `Scalar(Bool)` the backend
+    /// re-boxes through [`Inst::Materialize`], which does not know the value.
+    Bool(bool),
 }
 
 /// What to allocate, for [`Inst::Alloc`].

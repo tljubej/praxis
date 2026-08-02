@@ -335,6 +335,18 @@ impl Heap {
         }
     }
 
+    /// Bytes charged against the pacing counter since the last collection.
+    ///
+    /// Test-only, and deliberately not part of [`HeapStats`]: pacing is the
+    /// collector's own schedule and nothing outside this crate has any business
+    /// reading it, let alone deciding from it. It is here so a sibling module's
+    /// test can assert the RT-04 property that a *non*-collectable allocation
+    /// leaves the schedule alone (see [`Heap::alloc_immortal`]).
+    #[cfg(test)]
+    pub(crate) fn bytes_since_collect(&self) -> usize {
+        self.bytes_since_collect.get()
+    }
+
     /// Allocate an immortal object: same layout as [`Heap::alloc`], but **not**
     /// registered in the live set, so the collector never reclaims it (§4.3,
     /// M3 deliverable). Used for the `Unit`/`Bool` singletons.
@@ -347,6 +359,21 @@ impl Heap {
     /// minted exactly once at startup. Minting one per call — which the `Bool`
     /// wrappers used to do — is unregistered arena storage nothing ever
     /// reclaims (RT-03).
+    ///
+    /// **This allocation is pacing-neutral, and that is not an optimization.**
+    /// [`Heap::alloc_raw`] charges every block against `bytes_since_collect`
+    /// because pacing measures the pressure a program is putting on the
+    /// collector (RT-04) — and an object no collection can ever reclaim exerts
+    /// none: collecting harder does not give one byte of it back. Charging it
+    /// anyway made the immortal table a hidden GC-schedule change, because the
+    /// interned small-`Int` table ([`crate::small_int`]) is ~40 KiB against a
+    /// 64 KiB [`INITIAL_COLLECT_THRESHOLD`]: every program's *first* real
+    /// allocation would have arrived with two thirds of its budget already
+    /// spent, and widening the interned range would have moved the first
+    /// collection of every program in the language. So the counter is
+    /// snapshotted and restored around the call rather than the charge being
+    /// skipped inside `alloc_raw`, which would need a flag on the one path
+    /// every real allocation takes.
     pub(crate) fn alloc_immortal<T: Copy>(
         &self,
         payload: Payload<T>,
@@ -354,6 +381,7 @@ impl Heap {
         _witness: crate::immortal::ImmortalWitness,
     ) -> GcRef {
         let descriptor = payload.descriptor();
+        let charged_before = self.bytes_since_collect.get();
         // SAFETY: `T: Copy`, bytes are fully initialized.
         let r = unsafe { self.alloc_raw(descriptor, |payload| (payload as *mut T).write(value)) };
         // Remove the registration `alloc_raw` just performed, so sweep skips it.
@@ -365,6 +393,12 @@ impl Heap {
             live.swap_remove(idx);
         }
         drop(live);
+        // Un-charge the block: see this function's doc. Restoring the snapshot
+        // rather than subtracting the block size keeps this correct whatever
+        // `alloc_raw` decides an object costs (it also charges the descriptor's
+        // owned bytes, which for a `Copy` immortal is zero today and need not
+        // stay so).
+        self.bytes_since_collect.set(charged_before);
         r
     }
 
@@ -740,7 +774,12 @@ impl Heap {
     }
 
     /// Reset the heap to empty, dropping everything. Used by tests and, later,
-    /// runtime teardown. Immortal singletons must be re-allocated afterwards.
+    /// runtime teardown. Immortal singletons must be re-allocated afterwards —
+    /// which since the small-`Int` table ([`crate::small_int`]) means the whole
+    /// `Immortals` value, not just the three singletons: a `RuntimeContext`
+    /// minted before the reset holds `unit_ref`, `true_ref`, `false_ref` **and**
+    /// a `small_ints` pointer, and every one of them names storage the arena is
+    /// now free to hand out again.
     pub fn reset(&mut self) {
         // Finalize every live allocation before tearing down the arena.
         self.finalize_all();

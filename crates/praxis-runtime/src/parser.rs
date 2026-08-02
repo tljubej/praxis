@@ -212,10 +212,25 @@ impl Rt {
         (heap, safepoint)
     }
 
-    /// Allocate a boxed `Int`.
+    /// The boxed `Int` for `value` — the interned immortal when it is small
+    /// ([`crate::small_int`]), a fresh allocation otherwise.
+    ///
+    /// The safepoint is taken either way, for [`Interp::safepoint`]'s reason and
+    /// not out of symmetry: a `number` atomic repeated over a large input is one
+    /// of the few things in a parse that allocates on every step, so it is
+    /// exactly where the collector must keep being offered a turn even once most
+    /// of the digits it parses answer from the table.
     fn alloc_int(&self, value: i64) -> GcRef {
         let (heap, safepoint) = self.safepoint();
-        heap.alloc(safepoint, scalars::INT_PAYLOAD, value)
+        match crate::small_int::index_of(value) {
+            // SAFETY: `ctx` is valid (the `Interp`'s invariant) and `index_of`
+            // bounds `i` by the table's length.
+            Some(i) => {
+                drop(safepoint);
+                unsafe { *(*self.ctx).small_ints.add(i) }
+            }
+            None => heap.alloc(safepoint, scalars::INT_PAYLOAD, value),
+        }
     }
 
     /// Allocate a boxed `Char` from a Unicode scalar.

@@ -241,18 +241,47 @@ mod tests {
         ctx as *mut RuntimeContext
     }
 
+    /// A value the runtime does not intern, so two allocations of it really are
+    /// two objects. The tests below that say "structurally equal" mean equal
+    /// *without* being the same object; an interned `Int` would make them true
+    /// by the pointer fast path at the top of [`DynamicKey::eq`] and stop
+    /// exercising `int_equals` at all.
+    const UNINTERNED: i64 = crate::small_int::SMALL_INT_MAX + 1;
+
     #[test]
     fn dynamic_key_equal_for_identical_scalar_values() {
-        // Two Int(5) values are structurally equal keys.
+        // Two equal Ints from two allocations are structurally equal keys.
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx is wired; praxis_alloc_int produces a valid Int.
+        let a = unsafe { praxis_alloc_int(ctx, UNINTERNED) };
+        let b = unsafe { praxis_alloc_int(ctx, UNINTERNED) };
+        assert_ne!(a, b, "distinct allocations");
+        let ka = DynamicKey::new(a);
+        let kb = DynamicKey::new(b);
+        assert_eq!(ka, kb, "equal Ints are equal keys structurally");
+    }
+
+    #[test]
+    fn dynamic_key_equal_for_the_same_interned_scalar() {
+        // The other half: a small `Int` *is* one object per value, and the
+        // pointer fast path must agree with `int_equals` rather than shortcut
+        // past it to a different answer. This is the executable form of "sharing
+        // an `Int` is unobservable" — a shared key behaves exactly like a
+        // distinct one (crate::small_int).
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx is wired; praxis_alloc_int produces a valid Int.
         let a = unsafe { praxis_alloc_int(ctx, 5) };
         let b = unsafe { praxis_alloc_int(ctx, 5) };
-        assert_ne!(a, b, "distinct allocations");
-        let ka = DynamicKey::new(a);
-        let kb = DynamicKey::new(b);
-        assert_eq!(ka, kb, "Int(5) == Int(5) structurally");
+        assert_eq!(a.as_ptr(), b.as_ptr(), "a small Int is interned");
+        assert_eq!(DynamicKey::new(a), DynamicKey::new(b));
+        // And an interned key is still unequal to a different value, interned
+        // or not — sharing must not collapse two values into one slot.
+        let c = unsafe { praxis_alloc_int(ctx, 6) };
+        let d = unsafe { praxis_alloc_int(ctx, UNINTERNED) };
+        assert_ne!(DynamicKey::new(a), DynamicKey::new(c));
+        assert_ne!(DynamicKey::new(a), DynamicKey::new(d));
     }
 
     #[test]
@@ -269,8 +298,10 @@ mod tests {
         // Equal keys must hash equal (the HashMap invariant).
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
-        let a = unsafe { praxis_alloc_int(ctx, 42) };
-        let b = unsafe { praxis_alloc_int(ctx, 42) };
+        // Uninterned, so this really is "two objects hash the same" rather than
+        // "one object hashes the same as itself".
+        let a = unsafe { praxis_alloc_int(ctx, UNINTERNED) };
+        let b = unsafe { praxis_alloc_int(ctx, UNINTERNED) };
         let ha = {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             DynamicKey::new(a).hash(&mut h);

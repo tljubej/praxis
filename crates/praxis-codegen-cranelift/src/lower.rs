@@ -18,8 +18,8 @@ use cranelift::prelude::*;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
 use praxis_mir::{
-    AllocKind, CallTarget, CmpOp, DebugSlots, FloatBinOp, Function as MirFunction, Inst, IntBinOp,
-    LocalId, LocalKind, MirType, Overflow, RootSlots, Terminator,
+    AllocKind, CallTarget, CmpOp, DebugSlots, FloatBinOp, Function as MirFunction, GcConst, Inst,
+    IntBinOp, LocalId, LocalKind, MirType, Overflow, RootSlots, Terminator,
 };
 use praxis_runtime::{DebugLocalMeta, RuntimeContext, ShadowFrame, MAX_SHADOW_SLOTS};
 use praxis_stdlib::abi::{AbiKind, AbiRet, RuntimeSymbol};
@@ -47,6 +47,20 @@ const RECURSION_DEPTH_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, recurs
 /// loads the immortal Unit from here and returns it, because the ABI says a
 /// Praxis function returns a valid `GcRef` — including when it unwinds.
 const UNIT_REF_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, unit_ref) as i64;
+
+/// The byte offset of `small_ints` within a `RuntimeContext`: the base of the
+/// interned small-`Int` table (`praxis_runtime::small_int`). `Inst::ConstGc`
+/// loads it and then loads the element at a compile-time offset — two loads,
+/// where an in-range `Int` literal used to be a call to `praxis_alloc_int`
+/// preceded by a shadow-frame spill (docs/handovers/21-where-the-time-goes.md
+/// §3.5). Computed from the `#[repr(C)]` layout, like `SLOTS_OFFSET`.
+const SMALL_INTS_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, small_ints) as i64;
+
+/// The byte offsets of the two cached `Bool` immortals within a
+/// `RuntimeContext`. A `Bool` literal is one load of one of these — the same
+/// object `praxis_alloc_bool` would have answered, without the call.
+const TRUE_REF_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, true_ref) as i64;
+const FALSE_REF_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, false_ref) as i64;
 
 /// The byte offset of `tag` within an `EnumPayload`. `match` reads it directly
 /// rather than through a wrapper call, so it is baked into emitted code — and
@@ -470,6 +484,16 @@ fn lower_inst<M: Module>(
             // them directly with `iconst` — no f64 materialization needed here.
             // (The bit-cast to/from f64 happens at arithmetic/comparison points.)
             let v = builder.ins().iconst(GC, *bits);
+            builder.def_var(vars[dst.0 as usize], v);
+        }
+        Inst::ConstGc { dst, konst } => {
+            // **No `spill.spill_safepoint` here, and that is the point.** This
+            // instruction reads a reference the runtime minted before `main`
+            // ran; nothing it emits can collect, so there is no frame for the
+            // collector to see and no fault for the debugger to divert on
+            // (`Inst::fault_reason` answers `None`, and `liveness` gives it no
+            // slot sets to spill).
+            let v = load_gc_const(builder, ctx_val, *konst);
             builder.def_var(vars[dst.0 as usize], v);
         }
         Inst::Alloc {
@@ -1422,6 +1446,46 @@ fn load_unit_sentinel(builder: &mut FunctionBuilder, ctx: Value) -> Value {
     builder
         .ins()
         .load(GC, MemFlags::trusted(), ctx, UNIT_REF_OFFSET as i32)
+}
+
+/// Load a [`GcConst`] — a reference the runtime minted at startup — out of the
+/// live context. [`load_unit_sentinel`]'s shape, one indirection deeper.
+///
+/// The address is read from `ctx` at run time rather than baked in as an
+/// `iconst`, which is what makes it correct for whichever `Runtime` the code is
+/// executed against: there is no heap at compile time, and a debugger session
+/// replaces its `Jit` while keeping its `Runtime`. See [`GcConst`].
+fn load_gc_const(builder: &mut FunctionBuilder, ctx: Value, konst: GcConst) -> Value {
+    match konst {
+        GcConst::SmallInt(n) => {
+            // `praxis-mir` only emits this for a value `small_int::index_of`
+            // accepted, so the index exists — the `expect` documents that the
+            // two agree rather than guarding against them disagreeing, and it
+            // would fire at compile time, not in a running program.
+            let index = praxis_runtime::small_int::index_of(n)
+                .expect("MIR emits ConstGc::SmallInt only for an interned value");
+            let elem_offset = (index * praxis_runtime::SMALL_INT_STRIDE) as i32;
+            // Two loads and no adds: the table base is at a fixed offset in the
+            // context and the element offset is a constant well inside `i32`
+            // (the whole table is `SMALL_INT_COUNT` × 8 bytes).
+            let base = builder
+                .ins()
+                .load(GC, MemFlags::trusted(), ctx, SMALL_INTS_OFFSET as i32);
+            builder
+                .ins()
+                .load(GC, MemFlags::trusted(), base, elem_offset)
+        }
+        // One load: `Unit` and the two `Bool`s are cached in the context
+        // directly, not behind a table, because there is a fixed, tiny number of
+        // them.
+        GcConst::Unit => load_unit_sentinel(builder, ctx),
+        GcConst::Bool(b) => {
+            let offset = if b { TRUE_REF_OFFSET } else { FALSE_REF_OFFSET };
+            builder
+                .ins()
+                .load(GC, MemFlags::trusted(), ctx, offset as i32)
+        }
+    }
 }
 
 /// Report a fault when `predicate` is negative — the sign-bit form the

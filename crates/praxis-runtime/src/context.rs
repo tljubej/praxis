@@ -465,6 +465,23 @@ pub struct RuntimeContext {
     /// the end of the struct so every generated-code-read offset above is
     /// unchanged (§11.6 ABI stability).
     pub fault_message: *mut FaultMessage,
+    /// The base of the interned small-`Int` table (`Immortals::small_ints`),
+    /// alongside [`Self::true_ref`] and [`Self::unit_ref`] (§4.3,
+    /// [`crate::small_int`]).
+    ///
+    /// Unlike those, this is a *pointer to* the objects rather than one of
+    /// them: there are [`crate::SMALL_INT_COUNT`] of them, so generated code
+    /// takes two loads — the base from here, then the element at a byte offset
+    /// it computed at compile time from the literal's value. That is what
+    /// `Inst::ConstGc` emits, and it is why an in-range `Int` literal in a loop
+    /// body is no longer a call, an allocation and a shadow-frame spill per
+    /// iteration (docs/handovers/21-where-the-time-goes.md §3.5).
+    ///
+    /// Generated code *does* read this one, so it would be a compatibility
+    /// break if it moved — but it is appended like `fault_message` and its
+    /// neighbours, so every offset above is unchanged and only code compiled
+    /// against v15 emits the load at all.
+    pub small_ints: *const GcRef,
 }
 
 impl RuntimeContext {
@@ -494,6 +511,11 @@ impl RuntimeContext {
             true_ref: input_source,
             false_ref: input_source,
             fault_message: std::ptr::null_mut(),
+            // Null, not a dangling table: a placeholder context is scaffolding
+            // no generated code runs against, and a null here faults loudly at
+            // the first `Inst::ConstGc` rather than reading whatever the
+            // `input_source` trick would have aliased.
+            small_ints: std::ptr::null(),
         }
     }
 
@@ -635,6 +657,7 @@ impl Runtime {
             true_ref: self.immortals.true_(),
             false_ref: self.immortals.false_(),
             fault_message: &mut self.fault_message as *mut FaultMessage,
+            small_ints: self.immortals.small_ints_ptr(),
         }
     }
 
@@ -737,9 +760,20 @@ impl Default for Runtime {
 // access helpers") -----------------------------------------------
 
 impl Runtime {
-    /// Allocate an `Int` (§4.3).
+    /// Allocate an `Int` (§4.3), or answer the interned immortal when `value` is
+    /// small ([`crate::small_int`]).
+    ///
+    /// The interning is here and not only in `praxis_alloc_int` so that the host
+    /// helper and the ABI wrapper answer the *same object* for the same small
+    /// value, exactly as [`Runtime::alloc_bool`] already does. Two allocators
+    /// disagreeing about whether `5` is shared would be a wart with no upside:
+    /// nothing can observe the sharing (that is `small_int`'s argument), so the
+    /// only thing a split would buy is two behaviours to remember.
     pub fn alloc_int(&self, value: i64) -> GcRef {
-        self.heap.alloc_unpaced(crate::scalars::INT_PAYLOAD, value)
+        match self.immortals.small_int(value) {
+            Some(interned) => interned,
+            None => self.heap.alloc_unpaced(crate::scalars::INT_PAYLOAD, value),
+        }
     }
 
     /// Allocate a `Bool` as the corresponding immortal singleton (§4.3). Booleans

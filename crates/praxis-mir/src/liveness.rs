@@ -247,6 +247,7 @@ fn defs(inst: &Inst) -> Vec<LocalId> {
         Inst::MoveGc { dst, .. } => vec![*dst],
         Inst::ConstInt { dst, .. } => vec![*dst],
         Inst::ConstFloat { dst, .. } => vec![*dst],
+        Inst::ConstGc { dst, .. } => vec![*dst],
         Inst::LoadField { dst, .. } | Inst::LoadTupleElem { dst, .. } => vec![*dst],
         Inst::LoadCapture { dst, .. } => vec![*dst],
         Inst::EnumTag { dst, .. } => vec![*dst],
@@ -314,6 +315,9 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
         Inst::ValueCmp { lhs, rhs, .. } => vec![*lhs, *rhs],
         Inst::ConstInt { .. } => vec![],
         Inst::ConstFloat { .. } => vec![],
+        // The value is an immediate; the table it indexes is reached through
+        // `ctx`, which is not a MIR local.
+        Inst::ConstGc { .. } => vec![],
         Inst::CheckFault { .. } => vec![],
     }
 }
@@ -332,6 +336,16 @@ fn term_uses(term: &Terminator) -> Vec<LocalId> {
 ///
 /// [`Inst::CheckFault`] is deliberately absent: it allocates nothing, roots
 /// nothing, and carries only a [`DebugSlots`]. See [`debug_only_slots`].
+///
+/// [`Inst::ConstGc`] is absent for a stronger reason: it has no slot sets to
+/// annotate at all. It reads a reference the runtime minted at startup out of
+/// the context, so no collection can happen at it — and unlike `CheckFault` it
+/// is not a place control can divert either, so the debugger needs nothing
+/// spilled here. A temp holding an interned literal is still spilled at the next
+/// `CheckFault`, whose `DebugSlots` is over-approximate on purpose and includes
+/// every `Gc` local defined so far in the block (MIR-16, [`crate::annot`]) — and
+/// the verifier guarantees a `CheckFault` immediately precedes every fault
+/// diversion, so no crash snapshot loses the value.
 fn gc_safepoint_slots(inst: &mut Inst) -> Option<(&mut RootSlots, &mut DebugSlots)> {
     match inst {
         Inst::Alloc { roots, debug, .. }

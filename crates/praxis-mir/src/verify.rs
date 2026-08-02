@@ -616,7 +616,9 @@ fn check_is_gc(
 fn operands(inst: &Inst) -> Vec<LocalId> {
     let mut v = Vec::new();
     match inst {
-        Inst::ConstInt { dst, .. } | Inst::ConstFloat { dst, .. } => v.push(*dst),
+        Inst::ConstInt { dst, .. } | Inst::ConstFloat { dst, .. } | Inst::ConstGc { dst, .. } => {
+            v.push(*dst)
+        }
         Inst::Alloc { dst, alloc, .. } => {
             v.push(*dst);
             match alloc {
@@ -726,6 +728,83 @@ mod tests {
     #[test]
     fn an_annotated_function_verifies() {
         let (mut f, _, _) = alloc_and_return();
+        crate::annotate(&mut f);
+        assert_eq!(verify(&f), Ok(()));
+    }
+
+    /// A one-block function whose whole body is an [`Inst::ConstGc`] returned.
+    fn const_gc_and_return() -> (Function, LocalId) {
+        let mut f = empty_fn("f");
+        let dst = gc_local(&mut f);
+        f.return_local = dst;
+        let blk = f.new_block();
+        f.blocks[blk.0 as usize].insts.push(Inst::ConstGc {
+            dst,
+            konst: crate::ir::GcConst::SmallInt(1),
+        });
+        f.blocks[blk.0 as usize].term = Terminator::Return { value: dst };
+        (f, dst)
+    }
+
+    /// `Inst::ConstGc` verifies with no slot sets, and a `CheckFault` after it
+    /// is rejected — both directions of ADR-088 over the new instruction.
+    ///
+    /// The first half is what makes it cheap: no `RootSlots`, so nothing is
+    /// spilled, and `check_slot_sets` must not demand an annotation it has no
+    /// field for. The second is what keeps the rule without a carve-out: the
+    /// instruction calls no wrapper, so nothing can fault, so observing it is a
+    /// redundant check rather than a harmless one.
+    #[test]
+    fn a_const_gc_verifies_and_may_not_be_fault_checked() {
+        let (mut f, _) = const_gc_and_return();
+        crate::annotate(&mut f);
+        assert_eq!(verify(&f), Ok(()));
+
+        let (mut f, _) = const_gc_and_return();
+        f.blocks[0].insts.push(Inst::CheckFault {
+            on_fault: BlockId(0),
+            debug: DebugSlots::unannotated(),
+        });
+        crate::annotate(&mut f);
+        let errs = verify(&f).expect_err("a check after a non-faulting instruction is redundant");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, VerifyError::RedundantFaultCheck { .. })),
+            "{errs:?}"
+        );
+    }
+
+    /// **MIR has no def-dominates-use rule, and that is deliberate** (ADR-015:
+    /// MIR is slot-based, not SSA). An `Alloc` in one block whose result is read
+    /// in another verifies — which is exactly what every `let` already produces,
+    /// and what a future loop-invariant hoisting pass would need.
+    ///
+    /// Written down as a test rather than left as an absence, because "the
+    /// verifier is silent about X" is only load-bearing while someone can see
+    /// that it is true.
+    #[test]
+    fn an_alloc_hoisted_out_of_its_using_block_still_verifies() {
+        let mut f = empty_fn("f");
+        let scalar = int_local(&mut f);
+        let dst = gc_local(&mut f);
+        f.return_local = dst;
+        let b0 = f.new_block();
+        let b1 = f.new_block();
+        // Block 0 defines the value...
+        f.blocks[b0.0 as usize].insts.push(Inst::ConstInt {
+            dst: scalar,
+            value: 1,
+        });
+        f.blocks[b0.0 as usize].insts.push(Inst::Alloc {
+            dst,
+            alloc: AllocKind::Int { value: scalar },
+            roots: RootSlots::unannotated(),
+            debug: DebugSlots::unannotated(),
+        });
+        f.blocks[b0.0 as usize].term = Terminator::Jump { target: b1 };
+        // ...and block 1 is the only place it is read.
+        f.blocks[b1.0 as usize].term = Terminator::Return { value: dst };
+
         crate::annotate(&mut f);
         assert_eq!(verify(&f), Ok(()));
     }

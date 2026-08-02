@@ -22,8 +22,8 @@ pub mod verify;
 pub use annot::{DebugSlots, RootSlots};
 pub use build::lower_module;
 pub use ir::{
-    AllocKind, Block, BlockId, CallTarget, CmpOp, FloatBinOp, Function, Inst, IntBinOp, Local,
-    LocalId, LocalKind, MirType, Overflow, ScalarKind, Terminator,
+    AllocKind, Block, BlockId, CallTarget, CmpOp, FloatBinOp, Function, GcConst, Inst, IntBinOp,
+    Local, LocalId, LocalKind, MirType, Overflow, ScalarKind, Terminator,
 };
 pub use liveness::annotate;
 pub use verify::{verify, VerifyError};

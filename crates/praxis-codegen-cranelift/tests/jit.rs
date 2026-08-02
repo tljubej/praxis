@@ -8138,3 +8138,130 @@ fn a_for_over_a_text_yields_its_characters() {
         "one body, a Text clone and a Vec clone"
     );
 }
+
+// ===========================================================================
+// §3.5 — an interned `Int` literal is two loads, not a call and an allocation
+// (docs/handovers/21-where-the-time-goes.md; `praxis_runtime::small_int`).
+// ===========================================================================
+
+/// An in-range literal evaluated a hundred times allocates nothing, and an
+/// out-of-range one still allocates every time.
+///
+/// The pair is the point. Counting live objects after the loop is the only
+/// end-to-end way to see that `Inst::ConstGc` reached the backend: the answer
+/// (`100`) is identical either way, and a timing difference alone could not
+/// distinguish "the literal stopped allocating" from "the pacer got luckier".
+#[test]
+fn an_interned_literal_costs_no_allocation_and_a_large_one_still_does() {
+    // The harness installs an input `Text` before every run, so "allocated
+    // nothing" is measured against a program that runs no loop at all rather
+    // than against zero.
+    let (control, _) = run_main("fn main() -> Int {\n  0\n}\n");
+    let floor = control.heap().stats().live_count;
+
+    // `i = i + 1`: the literal `1` is interned, `i` runs only to 100 so every
+    // value it takes is interned too, and the loop allocates nothing at all.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  var i = 0\n  while i < 100 { i = i + 1 }\n  i\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 100);
+    assert_eq!(
+        rt.heap().stats().live_count,
+        floor,
+        "a loop over interned values must not allocate"
+    );
+
+    // The same loop shape with an accumulator that leaves the range: the
+    // literals are still free, but every partial sum is a real object. This is
+    // the half a regression that deleted the out-of-range branch would break.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var i = 0\n  var s = 0\n  \
+         while i < 100 { s = s + 1000\n i = i + 1 }\n  s\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 100_000);
+    assert!(
+        rt.heap().stats().live_count > floor,
+        "an out-of-range value is still a real allocation"
+    );
+}
+
+/// A `Bool` or `Unit` literal answers the runtime's own singleton, and does so
+/// without a call or an allocation.
+///
+/// Both have been immortals since M3 — `praxis_alloc_bool` and
+/// `praxis_alloc_unit` return the cached references and their manifest rows say
+/// `Effect::Pure` — but lowering still went through `Inst::Alloc`, which
+/// `liveness::is_gc_safepoint` treats as a safepoint whatever the manifest says,
+/// so every literal `true` in a loop paid an extern call *and* a full
+/// shadow-frame spill at a point no collection can happen. This pins the object
+/// identity that makes folding them into `Inst::ConstGc` a no-op semantically.
+#[test]
+fn a_bool_or_unit_literal_is_the_runtime_singleton_and_allocates_nothing() {
+    let (control, _) = run_main("fn main() -> Int {\n  0\n}\n");
+    let floor = control.heap().stats().live_count;
+
+    // A hundred `true`s and a hundred `false`s: one object each, no allocation.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var i = 0\n  var n = 0\n  \
+         while i < 100 { let t = true\n let f = false\n \
+         if t { n = n + 1 } else { n = n }\n \
+         if f { n = n } else { n = n + 1 }\n i = i + 1 }\n  n\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 200);
+    assert_eq!(
+        rt.heap().stats().live_count,
+        floor,
+        "Bool literals must not allocate"
+    );
+
+    // And the value a `Bool` literal produces is the runtime's own singleton,
+    // not some other object that happens to read as `true`.
+    let (rt, result) = run_main("fn main() -> Bool {\n  true\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(
+        result.as_ptr(),
+        rt.immortals().true_().as_ptr(),
+        "a `true` literal is the immortal `true`"
+    );
+
+    let (rt, result) = run_main("fn main() -> Unit {\n  let x = 1\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(
+        result.as_ptr(),
+        rt.immortals().unit().as_ptr(),
+        "a Unit tail is the immortal `Unit`"
+    );
+}
+
+/// **The MIR-16 discharge, as a test rather than an argument.**
+///
+/// `Inst::ConstGc` is not a debug point, so the temp holding an interned literal
+/// is *not* spilled into the debug frame at the instruction that defines it. It
+/// is spilled at the next `CheckFault`, whose `DebugSlots` is over-approximate
+/// on purpose and includes every `Gc` local defined so far in the block — and
+/// the verifier guarantees a `CheckFault` immediately precedes every fault
+/// diversion. So a crash snapshot must still render the value, not `<uninit>`.
+#[test]
+fn a_crash_snapshot_still_shows_an_interned_literal_bound_to_a_local() {
+    // `n` is 7 — interned, so its lowering is a `ConstGc` and nothing spills it
+    // at that point. The division then faults, and the snapshot must show `n`.
+    let src = "fn main() -> Int {\n  let n = 7\n  let z = 0\n  n / z\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault(), "the division must fault");
+    let snap = rt.crash_snapshot().expect("snapshot captured");
+    let n = snap.frames[0]
+        .locals
+        .iter()
+        .find(|l| l.name() == "n")
+        .expect("`n` is a named local of the faulting frame");
+    let value = n
+        .value
+        .expect("an interned literal must not read back as <uninit>");
+    assert_eq!(
+        value.as_int(),
+        7,
+        "and it must be the value the source wrote"
+    );
+}
