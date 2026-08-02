@@ -179,6 +179,37 @@ Worth writing down so it is not tried twice: the mid-end has nothing to work
 with when a loop body is a chain of opaque calls into Rust. This becomes worth
 revisiting only *after* §3.4.
 
+**Re-tested after §3.4 landed (ADR-102), and the result is unchanged.** The
+premise above was the explanation, so removing the opaque calls should have
+changed the answer. It did not. With `ExtractScalar`, the overflow report and
+`CheckFault` all inlined, `opt_level = "speed"` against the same tree, all eight
+benchmarks plus the two microbenchmarks, interleaved, min of three:
+
+| | none | speed |
+|---|---:|---:|
+| `collatz` @ 60,000 | 0.227 s | 0.230 s |
+| `primes` @ 300,000 | 0.191 s | 0.192 s |
+| 10M × `i = i + 1` | 0.300 s | 0.305 s |
+| 5M × no-op call | 0.342 s | 0.332 s |
+| `tree` @ 60 | 1.398 s | 1.387 s |
+| `hashwork` @ 800,000 | 0.727 s | 0.716 s |
+| `vm` @ 400,000 | 1.211 s | 1.214 s |
+| `mandelbrot` @ 200 | 0.901 s | 0.905 s |
+| `pipeline` @ 200,000 | 1.381 s | 1.407 s |
+| `bfs` @ 80 | 5.551 s | 5.527 s |
+
+Every row is within ±3%, in both directions, which is this laptop's noise.
+Meanwhile the floor pass (size 0 — compile, start, fixed setup) grows on every
+benchmark: `bfs` +4.7 ms, `vm` +4.4 ms, `tree` +3.5 ms, the rest under 1 ms. So
+`speed` is a small, strictly one-directional cost. **Reverted; the flag is not
+set and `module.rs` now says why.**
+
+What is left of the original explanation is that the *remaining* calls still act
+as memory clobbers — every allocation is still `praxis_alloc_*`, and `collatz`'s
+loop still allocates — so the mid-end still cannot move much across a loop body.
+That predicts this stays negative until §3.6 changes what allocation costs, and
+it should not be tried again before then.
+
 ## 4. What to do first
 
 1. **§3.1** — a few lines, ~2.5× on allocation-heavy code, no design question.

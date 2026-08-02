@@ -1732,6 +1732,58 @@ fn native_arithmetic_faults_match_the_runtime_wrappers() {
     }
 }
 
+/// ADR-102: the diamond does not move the point at which a fault is observed.
+///
+/// The overflow report is a `brif` to a cold block now, not an unconditional
+/// call, and the `Inst::CheckFault` that MIR requires next lowers into the block
+/// both arms converge on. If it did not — if the diversion landed anywhere but
+/// immediately after the raise — the *second* statement here would run and
+/// `set_fault` would overwrite `IntOverflow` with `DivByZero`, because raising
+/// is a store and nothing about it is conditional on the slot being clear.
+///
+/// So the fault kind is the assertion, and it is a sharper one than "it
+/// faulted": it says which operation was the last one to run.
+#[test]
+fn an_overflow_diverts_before_the_next_statement_runs() {
+    let (runtime, _) = run_main(
+        "fn main() -> Int {\n  \
+           let x = 9223372036854775807 + 1\n  \
+           let y = 1 / 0\n  \
+           x + y\n\
+         }\n",
+    );
+    assert_eq!(
+        runtime.fault(),
+        praxis_runtime::FaultKind::IntOverflow,
+        "the overflow must divert before the division runs; DivByZero here \
+         means the check observed the raise too late"
+    );
+}
+
+/// The same property for a fault raised inside a *wrapper* rather than by
+/// inline arithmetic — the non-arithmetic path through the inline check.
+///
+/// `praxis_vec_get` is `Effect::Faults`: it stores `IndexOutOfBounds` and hands
+/// back the Unit sentinel. The inline `CheckFault` that follows is the only
+/// thing that stops the sentinel reaching the division below, and stops the
+/// division overwriting the kind.
+#[test]
+fn a_fault_in_a_wrapper_is_observed_by_the_inline_check() {
+    let (runtime, _) = run_main(
+        "fn main() -> Int {\n  \
+           let v = Vec()\n  \
+           let x = v.get(0)\n  \
+           let y = 1 / 0\n  \
+           x + y\n\
+         }\n",
+    );
+    assert_eq!(
+        runtime.fault(),
+        praxis_runtime::FaultKind::IndexOutOfBounds,
+        "the wrapper's fault must divert at the check that follows it"
+    );
+}
+
 /// `i64::MIN / -1` and `i64::MIN % -1` are the one overflowing signed division.
 /// Cranelift's `sdiv`/`srem` *trap* on them — a process abort, not a Praxis
 /// fault — so the lowering must keep those operands away from the instruction
@@ -1912,6 +1964,14 @@ fn text_comparison_never_extracts_a_scalar_from_the_payload() {
 
 /// P0-12. A `Char` payload is four bytes and a `Bool` one; both were extracted
 /// as `Int`, an eight-byte load from a smaller, differently-aligned payload.
+///
+/// The `ScalarKind` this pins carries more weight since ADR-102: it no longer
+/// only selects which wrapper is called, it selects the **inline** load's
+/// descriptor and width. A defect of this class would now be an out-of-bounds
+/// read in generated code rather than one inside a callee.
+/// `a_bool_extract_reads_one_byte_and_a_char_four` (praxis-codegen-cranelift's
+/// `lower.rs`) is the other half — this pins the kind, that pins the
+/// instruction the kind selects.
 #[test]
 fn small_scalars_are_extracted_at_their_own_width() {
     // `grid(char)` was the only source of `Char` values when this was written.

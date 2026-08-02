@@ -81,6 +81,14 @@ impl Jit {
     /// # Errors
     /// As [`Jit::new`].
     pub fn in_generation(generation: Rc<Generation>) -> Result<Self, JitError> {
+        // `JITBuilder::new` is `with_flags(&[], …)`, so Cranelift runs at its
+        // default `opt_level = "none"`. That is deliberate, and it has now been
+        // measured twice — see `docs/handovers/21-where-the-time-goes.md` §3.7,
+        // which records both the original negative result and the re-test after
+        // finding §3.4 removed the chain of opaque calls the mid-end was
+        // supposed to have been blocked by. `"speed"` moved no benchmark by more
+        // than noise and added up to 4.7 ms of compile time per program. Do not
+        // try it a third time without a new reason.
         let mut builder = JITBuilder::new(cranelift_module::default_libcall_names())
             .map_err(|e| JitError::UnsupportedTarget(format!("{e:?}")))?;
         // Resolve `praxis_*` imports through `symbols::resolve` — the one
