@@ -343,6 +343,32 @@ mod tests {
         assert_eq!(once, twice);
     }
 
+    /// A list literal's brackets are tight, which is what `needs_space` already
+    /// says about `[` and `]` — this is the gate that keeps it saying so now
+    /// that a `[` can open an expression.
+    ///
+    /// The comma is tight too, and that is the formatter's own standing rule
+    /// rather than anything about lists: `f(1,2)` and `(1,2)` come out the same
+    /// way. A list literal inherits it rather than getting a second answer.
+    #[test]
+    fn format_is_idempotent_on_a_list_literal() {
+        let src = "let v=[1,2 , 3]";
+        assert_clean(src);
+        let once = format(src);
+        insta::assert_snapshot!(once, @"let v = [1,2,3]\n");
+        assert_eq!(format(&once), once, "not idempotent:\n{once}");
+        // The same shape a call and a tuple get, which is the point.
+        assert_eq!(format("let v = f(1, 2)").trim_end(), "let v = f(1,2)");
+
+        // The empty one, and a nested one, keep their shape too.
+        for src in ["let v = []", "let v = [[1],[2,3]]"] {
+            assert_clean(src);
+            let once = format(src);
+            assert_eq!(once.trim_end(), src, "{src}");
+            assert_eq!(format(&once), once, "not idempotent:\n{once}");
+        }
+    }
+
     #[test]
     fn format_preserves_text_literal_verbatim() {
         let src = r#"out("hello world")"#;

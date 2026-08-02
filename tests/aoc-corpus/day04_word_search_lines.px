@@ -1,0 +1,31 @@
+// AoC corpus fixture: list literals and `Text` iteration together (ADR-099).
+//
+// The word-search shape: read the grid as lines of text, walk each line's
+// *characters* with a `for`, and count the ones in a set of targets written as
+// a literal. Both features are the natural spelling of their half — `for c in
+// line` instead of an index loop over `line[i]`, and `["X"[0], "M"[0]]` instead
+// of two pushes into a `Vec()`.
+//
+// Input (on stdin): lines of letters.
+// Output: (characters that are `X` or `M`) * 10 + (lines starting with `M`).
+fn main() -> Int {
+    let lines = read lines(word)
+    // A list literal of the characters we are looking for. `"X"[0]` is how a
+    // program names a character (§4.13); there is no character literal.
+    let targets = ["X"[0], "M"[0]]
+    var hits = 0
+    for line in lines {
+        for c in line {
+            for t in targets {
+                if c == t { hits = hits + 1 }
+            }
+        }
+    }
+    var starts = 0
+    for line in lines {
+        if line.len() > 0 {
+            if line[0] == "M"[0] { starts = starts + 1 }
+        }
+    }
+    hits * 10 + starts
+}

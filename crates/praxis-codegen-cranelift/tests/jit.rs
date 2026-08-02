@@ -82,6 +82,12 @@ fn every_runtime_symbol_mir_emits_is_registered() {
         "  for kv in c { acc = acc + kv.1 }\n",
         "  let txt = \"hi\"\n",
         "  out(txt.len())\n",
+        // A `Text` is the eleventh iterable, and the only one that is not a
+        // collection: its plan names `praxis_text_len`/`praxis_text_get`.
+        "  for ch in txt { acc = acc + ch.to_int() }\n",
+        // A list literal, which emits a `Vec` allocation plus one
+        // `praxis_vec_push` per element.
+        "  for x in [1, 2] { acc = acc + x }\n",
         "  let fl = 1.5\n  out(fl.sqrt())\n",
         "  acc + p.x + m.len() + s.len() + d.len() + c.len()\n",
         "}\n"
@@ -7954,5 +7960,181 @@ fn frequencies_counts_every_element_and_an_absent_key_reads_zero() {
         result.as_int(),
         231,
         "duplicates dropped, first occurrences kept"
+    );
+}
+
+// ===========================================================================
+// List literals and `Text` iteration
+// ===========================================================================
+
+/// A list literal **is** a `Vec`: allocated and pushed into, so everything a
+/// `Vec` can do it can do.
+///
+/// Each case answers something a wrong lowering could not produce. The order
+/// assertions are the load-bearing ones: a literal that allocated before
+/// evaluating any element, or that pushed in reverse, still passes a `len()`
+/// check and fails these.
+#[test]
+fn a_list_literal_builds_a_vec_of_its_elements_in_order() {
+    for (src, want, what) in [
+        (
+            "fn main() -> Int {\n  let v = [1, 2, 3]\n  v.len()\n}\n",
+            3,
+            "three elements",
+        ),
+        // Positional: `123` and not `321`, so a reversed push order fails.
+        (
+            "fn main() -> Int {\n  let v = [1, 2, 3]\n  v.get(0) * 100 + v.get(1) * 10 + v.get(2)\n}\n",
+            123,
+            "elements in source order",
+        ),
+        (
+            "fn main() -> Int {\n  let v = []\n  v.len()\n}\n",
+            0,
+            "the empty list",
+        ),
+        (
+            "fn main() -> Int {\n  let v = [7]\n  v[0]\n}\n",
+            7,
+            "one element, read by subscript",
+        ),
+        // An element is an arbitrary expression, evaluated where it is written.
+        (
+            "fn main() -> Int {\n  let n = 4\n  let v = [n + 1, n * 2]\n  v.get(0) * 10 + v.get(1)\n}\n",
+            58,
+            "computed elements",
+        ),
+        // Nested: the inner literals are elements of the outer one.
+        (
+            "fn main() -> Int {\n  let v = [[1, 2], [3]]\n  v.len() * 100 + v.get(0).len() * 10 + v.get(1).len()\n}\n",
+            221,
+            "a list of lists",
+        ),
+        // The `Vec` a literal builds takes every `Vec` method, including the
+        // ones that read the element descriptor.
+        (
+            "fn main() -> Int {\n  let v = [3, 1, 2]\n  let s = v.sorted()\n  \
+             s.get(0) * 100 + s.get(1) * 10 + s.get(2)\n}\n",
+            123,
+            "sorted, which dispatches on the element descriptor",
+        ),
+        (
+            "fn main() -> Int {\n  [1, 2, 3].sum()\n}\n",
+            6,
+            "a pipeline sink straight off the literal",
+        ),
+        // …and it is a real, mutable `Vec`: pushing into one works.
+        (
+            "fn main() -> Int {\n  let v = [1]\n  v.push(2)\n  v.len() * 10 + v.get(1)\n}\n",
+            22,
+            "a literal is mutable afterwards",
+        ),
+    ] {
+        let (rt, result) = run_main(src);
+        assert!(!rt.has_pending_fault(), "{what} faulted: {:?}", rt.fault());
+        assert_eq!(result.as_int(), want, "{what}");
+    }
+}
+
+/// A `for` over a list literal reaches every element, in order.
+///
+/// The literal is not bound to a name here, which is the shape worth its own
+/// case: the `Vec` the loop walks is a temporary, and it has to stay rooted
+/// across a body that allocates.
+#[test]
+fn a_for_over_a_list_literal_reaches_every_element() {
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var t = 0\n  for x in [1, 2, 3] { t = t * 10 + x }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 123, "every element, in order");
+
+    // An empty literal iterates zero times rather than once or forever.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  var n = 0\n  for x in [] { n = n + 1 }\n  n\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0, "an empty list iterates zero times");
+
+    // The temporary must survive an allocating body across a collection: 300
+    // pushes into a `Vec` the loop does not hold is well past the initial 64 KiB
+    // threshold, so an unrooted iteration source would be reclaimed under it.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var t = 0\n  var i = 0\n  \
+         while i < 300 { for x in [1, 2, 3] { let junk = Vec()\n junk.push(x)\n t = t + x }\n i = i + 1 }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        300 * 6,
+        "the walked temporary stays rooted"
+    );
+
+    // A literal of a *heap* type: each element allocates, and the `Vec` being
+    // built has to be rooted across those allocations.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let v = [\"aa\", \"b\", \"ccc\"]\n  var t = 0\n  \
+         for s in v { t = t * 10 + s.len() }\n  t\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 213, "allocating elements, in order");
+}
+
+/// **A `for` over a `Text` yields its characters** (§4.13, ADR-086).
+///
+/// `for c in t` was `Y005`, recorded in `praxis-stdlib`'s own comment as a
+/// standing gap. The loop indexes the `Text` in place through the
+/// `praxis_text_len`/`praxis_text_get` pair that `t.len()` and `t[i]` already
+/// call, so the two spellings cannot disagree — which is what the second case
+/// asserts by comparing the loop's answer to the subscript's.
+#[test]
+fn a_for_over_a_text_yields_its_characters() {
+    // `w`=119, `x`=120, `y`=121, `z`=122 — the sum is what a loop that skipped
+    // or repeated a character gets wrong.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var n = 0\n  for c in \"wxyz\" { n = n + c.to_int() }\n  n\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 119 + 120 + 121 + 122);
+
+    // The loop and the subscript are one answer: walking `t` and indexing it
+    // must produce the same characters in the same order.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let t = \"abc\"\n  var i = 0\n  var same = 1\n  \
+         for c in t { if c == t[i] { same = same } else { same = 0 }\n i = i + 1 }\n  \
+         same * 10 + i\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 13, "three steps, each matching `t[i]`");
+
+    // By Unicode scalar and not by byte, which is the property `text_get`'s own
+    // tests pin for the subscript: "héllo" is five characters, and é is 233.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var n = 0\n  var first = 0\n  \
+         for c in \"héllo\" { n = n + 1\n if n == 2 { first = c.to_int() } else { first = first } }\n  \
+         n * 1000 + first\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 5233, "five scalars, and the second is é");
+
+    // An empty `Text` iterates zero times — the shape a length read off the
+    // wrong payload gets wrong first.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  var n = 0\n  for c in \"\" { n = n + 1 }\n  n\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0, "an empty Text iterates zero times");
+
+    // A `Text` reached through a parameter is one more iterable the single
+    // quantified body serves (ADR-062): `each` is cloned per iterable kind, and
+    // this clone's symbols are `praxis_text_*`.
+    let (rt, result) = run_main(
+        "fn count(r) { var n = 0\n for x in r { n = n + 1 }\n n }\n\
+         fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  \
+         count(\"abc\") * 10 + count(v)\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        31,
+        "one body, a Text clone and a Vec clone"
     );
 }

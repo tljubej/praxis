@@ -1565,6 +1565,7 @@ impl Inferer {
                 let els: Vec<Type> = t.elements().map(|e| self.infer_expr(&e)).collect();
                 crate::decl::tuple_or_degenerate(&mut self.db, els)
             }
+            Expr::List(l) => self.infer_list(l),
             Expr::Block(b) => self.infer_block(b),
             Expr::If(i) => self.infer_if(i),
             Expr::While(w) => self.infer_while(w),
@@ -2572,6 +2573,36 @@ impl Inferer {
         self.db
             .collection(CollectionCtor::Range, CollectionArgs::Nullary)
             .expect("Range is nullary")
+    }
+
+    /// `[ e1, e2, … ]` — a `Vec` literal (§6.1). Every element has the same
+    /// type, and the literal's type is `Vec` of it.
+    ///
+    /// The element type is a **fresh variable unified with each element in turn**
+    /// rather than "the first element's type, unified with the rest". The two
+    /// agree on what they accept and disagree on what they report: with the first
+    /// element as the expectation, `[x, 1]` for an unannotated `x` pins `x` to
+    /// whatever `x` already was and blames `1`, and `[]` has no first element to
+    /// take a type from at all. A fresh variable makes the empty list the same
+    /// rule as the others — `[]` is `Vec[?T]`, and the use decides `?T`, exactly
+    /// as `Vec()` does.
+    ///
+    /// The *order* of the unification is what makes the message read correctly:
+    /// `unify(element, el)` puts the type established so far in `expected`, so a
+    /// `[1, "a"]` says "expected `Int`, found `Text`" at the `"a"` and not the
+    /// reverse (REP-61).
+    fn infer_list(&mut self, l: &praxis_ast::ListExpr) -> Type {
+        let element = self.db.fresh_var();
+        for el in l.elements() {
+            let at = el.syntax().text_range();
+            let el_ty = self.infer_expr(&el);
+            if let Err(e) = self.db.unify(element, el_ty) {
+                self.diag_unify(self.file_span(at), e);
+            }
+        }
+        self.db
+            .collection(CollectionCtor::Vec, CollectionArgs::Unary(element))
+            .expect("Vec is unary")
     }
 
     fn infer_bin(&mut self, b: &BinExpr) -> Type {

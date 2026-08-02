@@ -608,6 +608,11 @@ impl Resolver {
                     self.resolve_expr(scope, &el);
                 }
             }
+            Expr::List(l) => {
+                for el in l.elements() {
+                    self.resolve_expr(scope, &el);
+                }
+            }
             Expr::Block(b) => self.resolve_block(scope, b),
             Expr::If(i) => self.resolve_if(scope, i),
             Expr::While(w) => self.resolve_while(scope, w),

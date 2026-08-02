@@ -502,6 +502,8 @@ pub enum Expr {
     Call(CallExpr),
     MethodCall(MethodCallExpr),
     Tuple(TupleExpr),
+    /// `[ e1, e2, … ]` — a `Vec` literal (§6.1).
+    List(ListExpr),
     /// `read parser_expression` (§7.1, M6).
     Read(ReadExpr),
     /// `parse(text, parser_expression)` (§7.1, M6).
@@ -545,6 +547,7 @@ impl Expr {
             Expr::Call(e) => e.syntax(),
             Expr::MethodCall(e) => e.syntax(),
             Expr::Tuple(e) => e.syntax(),
+            Expr::List(e) => e.syntax(),
             Expr::Read(e) => e.syntax(),
             Expr::Parse(e) => e.syntax(),
             Expr::RecordLit(e) => e.syntax(),
@@ -584,6 +587,7 @@ impl Expr {
             K::CALL_EXPR => Expr::Call(CallExpr::from_syntax(n)),
             K::METHOD_CALL_EXPR => Expr::MethodCall(MethodCallExpr::from_syntax(n)),
             K::TUPLE_EXPR => Expr::Tuple(TupleExpr::from_syntax(n)),
+            K::LIST_EXPR => Expr::List(ListExpr::from_syntax(n)),
             K::READ_EXPR => Expr::Read(ReadExpr::from_syntax(n)),
             K::PARSE_EXPR => Expr::Parse(ParseExpr::from_syntax(n)),
             K::RECORD_LIT_EXPR => Expr::RecordLit(RecordLitExpr::from_syntax(n)),
@@ -1340,6 +1344,33 @@ impl TupleExpr {
     /// The tuple elements, in order.
     pub fn elements(&self) -> impl Iterator<Item = Expr> + '_ {
         self.syntax.children().filter_map(Expr::cast_from_child)
+    }
+}
+
+/// A list expression `[ e1, e2, … ]` — a `Vec` literal (§6.1).
+#[derive(Clone, Debug)]
+pub struct ListExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for ListExpr {
+    const KIND: K = K::LIST_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+impl ListExpr {
+    /// The `[element, …]` list. `None` only for a malformed node.
+    pub fn element_list(&self) -> Option<ArgList> {
+        child(&self.syntax)
+    }
+    /// The element expressions, in source order. Empty for `[]`.
+    pub fn elements(&self) -> Vec<Expr> {
+        self.element_list()
+            .map(|l| l.args().collect())
+            .unwrap_or_default()
     }
 }
 

@@ -400,7 +400,8 @@ Supported constructs:
 
 - `if` and `else` expressions.
 - `match` expressions.
-- `for` loops over built-in iterable shapes.
+- `for` loops over built-in iterable shapes — the ten collections of §6.1 and
+  `Text`, which yields the `Char`s §4.13's subscript answers (ADR-099).
 - `while` loops.
 - `loop` for explicit infinite loops.
 - `break`, optionally with a value in expression loops.
@@ -539,6 +540,21 @@ how a program names a particular character**. That spelling is what makes a
 `Grid[Char]` cell comparable to a character a program chose, rather than only to
 another cell.
 
+**A `Text` is iterable and yields those same `Char`s** (§4.11, ADR-099):
+
+```praxis
+var digits = 0
+for c in line {
+    if c >= "0"[0] && c <= "9"[0] { digits += 1 }
+}
+```
+
+The loop indexes the `Text` in place through the same length and subscript the
+two spellings above call, so `for c in t` and `t[i]` cannot disagree — including
+about indexing by Unicode scalar rather than by byte. There is deliberately no
+`Text.chars()`: the `for` is the spelling, and two spellings for one question is
+what ADR-077 refused.
+
 Two related gaps are open rather than answered: `Int` has no `to_text()` (only
 `Float` does, §4.12), and §8.1's interpolation is specified and unimplemented.
 Building a `Text` out of a number is not yet possible in any spelling. `Char`
@@ -675,6 +691,28 @@ The language server uses the same table for completion and signature help.
 - `BitSet`
 - `Grid[T]`
 - `Range`
+
+**`Vec[T]` has a literal** (ADR-099). `[a, b, c]` is `Vec[T]`, and `[]` is a
+`Vec` whose element type its use decides — exactly what `Vec()` is, because the
+literal *is* an allocation followed by one `push` per element:
+
+```praxis
+let v = [1, 2, 3]        // Vec[Int]
+let empty: Vec[Text] = []
+v.push(4)                // a literal is a Vec, so it is mutable afterwards
+for x in [1, 2, 3] { out(x) }
+```
+
+No other collection has a literal, and there is no immutable array distinct from
+`Vec`: a second sequence type would need its own descriptor, its own catalog
+rows and its own answer to what `[1] + [2]` means, and `Vec` already has all
+three.
+
+A `[` that **begins** an expression opens a literal; a `[` that continues one is
+a subscript (`m[k]`, `grid[x, y]`). The tie is broken by position, the same way
+a type constructor's brackets are told from a subscript's (ADR-065) and a
+line-leading `(` from an argument list's (ADR-049). So a subscript is written on
+one line with its receiver.
 
 ### 6.2 Collection semantics
 

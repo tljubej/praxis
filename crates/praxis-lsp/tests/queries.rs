@@ -586,3 +586,65 @@ fn the_encoded_tokens_are_relative_to_their_predecessor() {
         .expect("a token on the next line");
     assert_eq!(second_line.delta_start, 0, "and at its start");
 }
+
+/// The two new iteration surfaces answer in the editor the same way they do at
+/// `praxis check` — which they do by construction (ADR-097), so what this pins
+/// is that each has a *type recorded on its own node*.
+///
+/// The list literal's is the one an implementation gets plausibly wrong: a
+/// `LIST_EXPR` holds its elements inside an `ARG_LIST`, so a hover that walked
+/// to the nearest typed ancestor would answer `Int` on the whole literal — the
+/// element's type, at the literal's offset.
+#[test]
+fn a_list_literal_and_a_texts_loop_variable_hover_as_themselves() {
+    let src = "fn main() -> Unit {\n  let xs = [1, 2, 3]\n  for c in \"ab\" { out(c) }\n}\n";
+    let s = snap(src);
+    assert!(
+        s.diagnostics().is_empty(),
+        "{:?}",
+        s.diagnostics()
+            .iter()
+            .map(|d| d.message().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // The binding takes the literal's type.
+    let h = praxis_lsp::hover::hover(&s, at(src, "xs"), Encoding::Utf16).expect("answers");
+    let text = hover_text(&h);
+    assert!(text.contains("Vec[Int]"), "the literal's type, got {text}");
+
+    // …and the literal itself answers `Vec[Int]`, not its element's `Int`.
+    let h = praxis_lsp::hover::hover(&s, at(src, "[1, 2, 3]"), Encoding::Utf16).expect("answers");
+    let text = hover_text(&h);
+    assert!(
+        text.contains("Vec[Int]"),
+        "the literal's own type, got {text}"
+    );
+
+    // A `Text`'s loop variable is a `Char`, which is what makes `c.to_int()`
+    // complete rather than `c.len()`.
+    let h = praxis_lsp::hover::hover(&s, at(src, "c in"), Encoding::Utf16).expect("answers");
+    let text = hover_text(&h);
+    assert!(text.contains("Char"), "the item type, got {text}");
+    assert!(!text.contains("Text"), "and not the receiver's, got {text}");
+}
+
+/// A list literal is a `Vec`, so `[1, 2, 3].` offers the `Vec` methods — the
+/// completion half of "a literal is a spelling, not a shape".
+#[test]
+fn a_list_literal_offers_vec_methods() {
+    let src = "fn main() -> Unit {\n  [1, 2, 3].\n}\n";
+    let s = snap(src);
+    let cursor = at(src, "[1, 2, 3].") + 10;
+    let ctx = s.completion_context(cursor);
+    let items = praxis_lsp::completion::items(&s, &ctx);
+    let names: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(names.contains(&"push"), "a Vec method, got {names:?}");
+    assert!(names.contains(&"len"), "a Vec method, got {names:?}");
+    // …and not another collection's, which is what "offer every catalog entry"
+    // looks like.
+    assert!(
+        !names.contains(&"insert"),
+        "a Set/Map method, got {names:?}"
+    );
+}

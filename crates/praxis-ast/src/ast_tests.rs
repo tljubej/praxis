@@ -286,3 +286,46 @@ fn a_patterns_brace_is_what_makes_it_a_record_pattern() {
     );
     assert_eq!(pat.fields().count(), 2, "…and its fields are still its own");
 }
+
+/// A list literal's elements come out of its `ARG_LIST`, in source order, at
+/// every arity the grammar admits — including none.
+///
+/// The wrapper reaches *through* the `ARG_LIST` the way `IndexExpr::indices`
+/// does, and that is why it is worth a test: `syntax.children()` on a
+/// `LIST_EXPR` finds the arg list and no expressions at all, so a wrapper
+/// written like `TupleExpr`'s — whose elements are direct children — would
+/// answer "empty" for every list ever written.
+#[test]
+fn a_list_literals_elements_are_its_arg_lists() {
+    fn elements(src: &str) -> Vec<String> {
+        let tree = root(src);
+        let list = tree
+            .descendants()
+            .find_map(crate::ListExpr::cast)
+            .expect("a LIST_EXPR");
+        list.elements()
+            .iter()
+            .map(|e| e.syntax().text().to_string())
+            .collect()
+    }
+
+    assert_eq!(elements("let v = [1, 2, 3]"), ["1", "2", "3"]);
+    assert_eq!(elements("let v = [1]"), ["1"]);
+    assert!(elements("let v = []").is_empty());
+    // A trailing comma adds no element (REP-17).
+    assert_eq!(elements("let v = [1, 2,]"), ["1", "2"]);
+    // Order is source order, and an element is a whole expression.
+    assert_eq!(elements("let v = [a + 1, f(2)]"), ["a + 1", "f(2)"]);
+
+    // The outer list of a nested one holds the inner lists, not their elements.
+    assert_eq!(elements("let v = [[1, 2], [3]]"), ["[1, 2]", "[3]"]);
+
+    // And the enum casts to the right variant, which is what every walk
+    // dispatches on.
+    let tree = root("let v = [1]");
+    let list = tree.descendants().find_map(crate::ListExpr::cast).unwrap();
+    assert!(matches!(
+        Expr::cast(list.syntax().clone()),
+        Some(Expr::List(_))
+    ));
+}

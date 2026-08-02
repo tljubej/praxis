@@ -732,11 +732,11 @@ fn int_to_float() -> MethodEntry {
 // - **`is_digit`, `is_alpha`, `to_upper`, `to_lower`.** No design-doc surface
 //   asks for any of them and `to_int()` expresses every one. Four invented rows
 //   is exactly what REP-46 refused with `wrapping_sub`/`_mul`.
-// - **`Text.chars()` and `for c in text`.** `for c in text` is `Y005` because
-//   `capability::iter_item` answers `None` for a scalar. A real gap — but it
-//   reads the same before and after ADR-086, so it is neither caused nor
-//   worsened here, and inventing it here would be surface the doc does not ask
-//   for.
+// - **`Text.chars()`.** `for c in text` **is** the spelling (ADR-099): a `Text`
+//   is iterable and yields the same `Char` `t[i]` answers, through the same
+//   `praxis_text_len`/`praxis_text_get` pair. A `chars()` row would be a second
+//   spelling for one question, which is what ADR-077 refused. This note used to
+//   record the `for` as a gap alongside it; that half is closed.
 
 fn char_to_int() -> MethodEntry {
     MethodEntry {

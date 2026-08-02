@@ -1348,6 +1348,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             );
             dst
         }
+        TypedExpr::ListLit { elements, ty, .. } => lower_list_lit(b, elements, *ty, e),
         // M6: `read`/`parse` lower to a runtime call against the parser plan.
         TypedExpr::Read { plan, ty, .. } => lower_read(b, *plan, *ty),
         TypedExpr::Parse { text, plan, ty, .. } => lower_parse(b, text, *plan, *ty),
@@ -2073,8 +2074,9 @@ fn lower_for(
     // `len = iter.len()`.
     let len_sym = plan.len_symbol();
     let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
-    // Only `praxis_range_len` faults among the three the plan can name; a
-    // `Vec`/`Deque`/snapshot length does not, and this ran once per iteration.
+    // Only `praxis_range_len` faults among the lengths the plan can name; a
+    // `Vec`/`Deque`/`Text`/snapshot length does not, and this ran once per
+    // iteration.
     b.call_runtime(len_dst, len_sym, vec![iter_local]);
     let len_scalar = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ExtractScalar {
@@ -2115,8 +2117,8 @@ fn lower_for(
     // typed tree carries on the `For` node (`item_ty`). Both slots used to be
     // `Opaque`, so the debugger showed a `for` binding with no type at all.
     let item_gc = b.alloc_gc(MirType::Known(item_ty), None, LocalDebugKind::Temp, None);
-    // All three accessors an `IterPlan` can name fault on an out-of-range
-    // index, so this check stays — but it is the row that says so, not the site.
+    // Every accessor an `IterPlan` can name faults on an out-of-range index, so
+    // this check stays — but it is the row that says so, not the site.
     b.call_runtime(item_gc, get_sym, vec![iter_local, idx_gc]);
     // A keyed collection's member is the `(K, V)` pair `item_ty` names, and the
     // two halves arrive from two index-aligned snapshots. The pair is built
@@ -4029,11 +4031,12 @@ fn alloc_empty_vec(b: &mut Builder<'_>, result_ty: MirType) -> LocalId {
 
 /// How a `for` reaches the members of the thing it iterates (REP-15, ADR-066).
 ///
-/// Only three of the ten iterables answer "the member at `i`" in constant time.
-/// The rest have no nth member to ask for at all: a `HashSet` would need a
-/// linear scan per step, a heap's backing array is heap-ordered only at its root,
-/// and `MapGet`/`CounterGet` take a *key*. So the loop takes a **snapshot** —
-/// one runtime call before the header, answering a `Vec` — and indexes that.
+/// Only four of the eleven iterables answer "the member at `i`" in constant
+/// time (`Vec`, `Deque`, `Range`, and `Text`). The rest have no nth member to
+/// ask for at all: a `HashSet` would need a linear scan per step, a heap's
+/// backing array is heap-ordered only at its root, and `MapGet`/`CounterGet`
+/// take a *key*. So the loop takes a **snapshot** — one runtime call before the
+/// header, answering a `Vec` — and indexes that.
 ///
 /// The distinction this enum makes is the one the defect was made of: reading a
 /// `Set`'s payload through `praxis_vec_get` was a wrong-type read that hung or
@@ -4078,20 +4081,35 @@ impl IterPlan {
     }
 }
 
-/// The [`IterPlan`] for an iterable expression, by its static collection ctor.
+/// The [`IterPlan`] for an iterable expression, by its static collection ctor —
+/// or, for the one iterable scalar, by its scalar type.
 ///
-/// A non-collection static type cannot reach here from a well-typed program —
+/// Any other static type cannot reach here from a well-typed program —
 /// `capability::iter_item` answers `None` for one and the `for` is a `Y005` — so
 /// the fallback is the shape MIR has always assumed rather than a panic.
 fn iter_plan(db: &TypeDb, iter: &TypedExpr) -> IterPlan {
     use praxis_types::data::TypeData;
     use praxis_types::CollectionCtor as C;
+    use praxis_types::ScalarType;
     let ty = expr_static_type(iter);
-    let TypeData::Collection { ctor, .. } = db.data(db.follow(ty)) else {
-        return IterPlan::InPlace {
-            len: RuntimeSymbol::VecLen,
-            get: RuntimeSymbol::VecGet,
-        };
+    let ctor = match db.data(db.follow(ty)) {
+        TypeData::Collection { ctor, .. } => ctor,
+        // A `Text` indexes itself, so it needs no snapshot: `praxis_text_len`
+        // counts Unicode scalars and `praxis_text_get` answers the `Char` at one
+        // (§4.13, ADR-086). They are the pair `t.len()` and `t[i]` already call,
+        // which is what makes the loop and the subscript one answer.
+        TypeData::Scalar(ScalarType::Text) => {
+            return IterPlan::InPlace {
+                len: RuntimeSymbol::TextLen,
+                get: RuntimeSymbol::TextGet,
+            }
+        }
+        _ => {
+            return IterPlan::InPlace {
+                len: RuntimeSymbol::VecLen,
+                get: RuntimeSymbol::VecGet,
+            }
+        }
     };
     match ctor {
         C::Vec | C::Seq => IterPlan::InPlace {
@@ -4221,6 +4239,7 @@ fn expr_static_type(e: &TypedExpr) -> Type {
         | TypedExpr::Call { ty, .. }
         | TypedExpr::MethodCall { ty, .. }
         | TypedExpr::Tuple { ty, .. }
+        | TypedExpr::ListLit { ty, .. }
         | TypedExpr::Read { ty, .. }
         | TypedExpr::Parse { ty, .. }
         | TypedExpr::RecordLit { ty, .. }
@@ -4247,6 +4266,56 @@ fn control_builtin_symbol(callee_name: &str) -> Option<RuntimeSymbol> {
         "assert" => Some(RuntimeSymbol::Assert),
         _ => None,
     }
+}
+
+/// `[ a, b, … ]` — a `Vec` literal (§6.1). Allocates the `Vec`, then pushes each
+/// element into it, left to right.
+///
+/// The allocation comes **first**, so the `Vec` is live across every element
+/// expression and the loop's own liveness roots it — which it must be, since an
+/// element may allocate (`[Point { x: 1 }, f()]`). Evaluation still runs left to
+/// right, because each element is lowered immediately before its own push rather
+/// than all of them up front.
+///
+/// This is `Vec[T]()` followed by `v.push(…)`, emitted directly: the same
+/// `AllocKind::Collection` a constructor call builds and the same
+/// `praxis_vec_push` a method call resolves to. A literal is a *spelling* for
+/// those two operations, so it lowers to them rather than to anything new — no
+/// runtime wrapper, no ABI change, and a `Vec` built either way is one kind of
+/// object.
+fn lower_list_lit(b: &mut Builder<'_>, elements: &[TypedExpr], ty: Type, e: &TypedExpr) -> LocalId {
+    use praxis_types::data::TypeData;
+    use praxis_types::CollectionCtor;
+    // The element type, from the literal's own `Vec[T]`. An element type that is
+    // still an inference variable — `let v = []`, whose use decides it — reaches
+    // the backend as a null descriptor, which is what `praxis_vec_new`'s
+    // "unknown element" contract already means (H10).
+    let args: Vec<MirType> = match b.db.data(b.db.follow(ty)) {
+        TypeData::Collection {
+            ctor: CollectionCtor::Vec,
+            args: a,
+        } => a.iter().copied().map(MirType::Known).collect(),
+        _ => Vec::new(),
+    };
+    let dst = b.alloc_gc(
+        MirType::Known(ty),
+        None,
+        LocalDebugKind::Temp,
+        Some(praxis_hir::expr_span(e)),
+    );
+    b.alloc(
+        dst,
+        AllocKind::Collection {
+            ctor: CollectionCtor::Vec,
+            args,
+        },
+    );
+    for el in elements {
+        let item = lower_expr_gc(b, el);
+        let unit = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
+        b.call_runtime(unit, RuntimeSymbol::VecPush, vec![dst, item]);
+    }
+    dst
 }
 
 /// Build an [`AllocKind::Collection`] for a `Name[T]()` construction call, if
@@ -5292,6 +5361,149 @@ mod tests {
         }
         assert!(saw_vec, "the pipeline allocates its result Vec");
         assert!(saw_push, "the pipeline pushes into its result Vec");
+    }
+
+    /// **ADR-099 decision 1.** A list literal lowers to the allocation a `Vec()`
+    /// emits plus one `praxis_vec_push` per element — no new instruction, no new
+    /// wrapper — and the `Vec` is allocated **before** any element is evaluated.
+    ///
+    /// The ordering is the half a run test cannot see on its own: a lowering
+    /// that evaluated every element first and then allocated would produce the
+    /// same answers and leave the elements unrooted across each other's
+    /// allocations. Here it is the `Vec` that is live across them, which is what
+    /// makes the loop's own liveness root it.
+    #[test]
+    fn a_list_literal_allocates_a_vec_then_pushes_each_element() {
+        let (funcs, analysis) = lower_src_to_mir("fn main() {\n  let v = [1, 2, 3]\n}\n");
+        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+
+        // The instruction sequence, in order: the allocation first, then one
+        // push per element and no more.
+        let mut alloc_at = None;
+        let mut pushes = Vec::new();
+        for (i, inst) in main
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .enumerate()
+        {
+            match inst {
+                Inst::Alloc {
+                    dst,
+                    alloc:
+                        AllocKind::Collection {
+                            ctor: praxis_types::CollectionCtor::Vec,
+                            ..
+                        },
+                    ..
+                } => {
+                    assert!(alloc_at.is_none(), "one Vec allocation, not two");
+                    alloc_at = Some((i, *dst));
+                }
+                Inst::Call {
+                    dst,
+                    callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
+                    args,
+                    ..
+                } => pushes.push((i, *dst, args.clone())),
+                _ => {}
+            }
+        }
+        let (alloc_i, vec_local) = alloc_at.expect("a list literal allocates a Vec");
+        assert_eq!(pushes.len(), 3, "one push per element");
+
+        for (push_i, unit_dst, args) in &pushes {
+            assert!(
+                *push_i > alloc_i,
+                "the Vec is allocated before anything is pushed into it"
+            );
+            // Every push targets *that* Vec, so a literal cannot build one
+            // object and answer another.
+            assert_eq!(args[0], vec_local, "each push targets the allocated Vec");
+            // …and each slot says what it holds, which is what feeds the debug
+            // metadata and the schema construction.
+            let unit_ty = main.locals[unit_dst.0 as usize].ty.known();
+            assert!(
+                matches!(
+                    unit_ty.map(|t| analysis.db.data(analysis.db.follow(t))),
+                    Some(praxis_types::TypeData::Unit)
+                ),
+                "praxis_vec_push defines a Unit-typed local, got {unit_ty:?}"
+            );
+        }
+        let vec_ty = main.locals[vec_local.0 as usize]
+            .ty
+            .known()
+            .expect("the literal's slot is typed");
+        assert!(
+            matches!(
+                analysis.db.data(analysis.db.follow(vec_ty)),
+                praxis_types::TypeData::Collection {
+                    ctor: praxis_types::CollectionCtor::Vec,
+                    ..
+                }
+            ),
+            "a list literal defines a Vec-typed local, got {}",
+            analysis.db.render(vec_ty)
+        );
+
+        // The empty literal is the allocation and nothing else.
+        let (funcs, _) = lower_src_to_mir("fn main() {\n  let v: Vec[Int] = []\n}\n");
+        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        assert_eq!(
+            main.blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|inst| matches!(
+                    inst,
+                    Inst::Call {
+                        callee: CallTarget::Runtime(RuntimeSymbol::VecPush),
+                        ..
+                    }
+                ))
+                .count(),
+            0,
+            "`[]` pushes nothing"
+        );
+    }
+
+    /// **ADR-099 decision 5.** A `for` over a `Text` walks it **in place**,
+    /// through the same accessors `t.len()` and `t[i]` call.
+    ///
+    /// The plan is the assertion: a `Text` that fell through to `iter_plan`'s
+    /// non-collection fallback would read a `Text`'s payload through
+    /// `praxis_vec_get` — the wrong-type read ADR-066 exists because of, and one
+    /// that no type error would report. A snapshot would be wrong differently:
+    /// correct answers, and a `Vec` materialized per loop that nothing needs.
+    #[test]
+    fn a_for_over_a_text_names_the_text_accessors_and_takes_no_snapshot() {
+        let (funcs, _analysis) =
+            lower_src_to_mir("fn main() {\n  let t = \"ab\"\n  for c in t { out(c) }\n}\n");
+        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let called: Vec<RuntimeSymbol> = main
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .filter_map(|inst| match inst {
+                Inst::Call {
+                    callee: CallTarget::Runtime(name),
+                    ..
+                } => Some(*name),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            called.contains(&RuntimeSymbol::TextLen),
+            "the header reads the Text's own length, got {called:?}"
+        );
+        assert!(
+            called.contains(&RuntimeSymbol::TextGet),
+            "the body reads the Text's own character, got {called:?}"
+        );
+        assert!(
+            !called.contains(&RuntimeSymbol::VecLen) && !called.contains(&RuntimeSymbol::VecGet),
+            "a Text is not read through a Vec's accessors, got {called:?}"
+        );
     }
 
     #[test]

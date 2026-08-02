@@ -345,13 +345,10 @@ impl<'t> Parser<'t> {
     /// True iff the `(` here opens an **argument list** for the expression that
     /// precedes it, rather than beginning something new (REP-27).
     ///
-    /// A `(` and a `[` are not the same door, and this is the difference. Nothing
-    /// in the grammar begins with `[` — there is no list literal — so a `[` after a
-    /// line break can only continue the expression before it, which is what REP-16
-    /// relies on and what the postfix loop's `L_BRACK` arm says. A `(` begins three
-    /// things: a parenthesized expression, a tuple, and — since REP-10 and REP-25 —
-    /// a **tuple pattern**, in a match arm and in a `for` binding. So a line-leading
-    /// `(` is ambiguous in exactly the way ADR-049's rule is written to settle:
+    /// A `(` begins three things: a parenthesized expression, a tuple, and — since
+    /// REP-10 and REP-25 — a **tuple pattern**, in a match arm and in a `for`
+    /// binding. So a line-leading `(` is ambiguous in exactly the way ADR-049's
+    /// rule is written to settle:
     ///
     /// ```text
     /// match p {
@@ -378,6 +375,31 @@ impl<'t> Parser<'t> {
     /// the fix is to move the `(` up.
     fn at_argument_list(&mut self) -> bool {
         self.at(SyntaxKind::L_PAREN) && !self.newline_before()
+    }
+
+    /// True iff the `[` here opens a **subscript** on the expression that
+    /// precedes it, rather than beginning a list literal.
+    ///
+    /// [`at_argument_list`](Self::at_argument_list)'s rule at the second bracket,
+    /// and it used to be unnecessary for a reason that a list literal removes:
+    /// nothing in the grammar began with `[`, so a `[` could only ever *continue*
+    /// the expression before it. Now it begins one, and the two spellings are the
+    /// same two characters:
+    ///
+    /// ```text
+    /// let n = total
+    /// [1, 2, 3]           // ← would be read as `total[1, 2, 3]`
+    /// ```
+    ///
+    /// So the tie is broken by position, exactly as it is for `(`: a `[` on the
+    /// same line as what precedes it subscripts that expression, and a
+    /// line-leading `[` starts a new one. `m[k]`, `grid[x, y]` and `m[k][j]` are
+    /// unaffected — every one of them is written on one line — and the stated
+    /// cost is the mirror of REP-27's: a subscript whose receiver ends a line and
+    /// whose bracket begins the next is two expressions, and the fix is to move
+    /// the `[` up.
+    fn at_subscript(&mut self) -> bool {
+        self.at(SyntaxKind::L_BRACK) && !self.newline_before()
     }
 
     /// True iff a value follows `break`/`return` on the same line.
@@ -1036,10 +1058,10 @@ impl<'t> Parser<'t> {
                 // like the other two, so `grid[x, y].len()` and `m[k][j]` chain
                 // without a second loop.
                 //
-                // No statement, and no pattern, can begin with `[`, so a `[` at
-                // the start of a line always continues the expression before it.
-                // A `(` cannot say that, which is REP-27.
-                SyntaxKind::L_BRACK => {
+                // And **only on the same line**, for the reason the `(` above is:
+                // a `[` also begins a list literal now. See
+                // [`Parser::at_subscript`].
+                SyntaxKind::L_BRACK if self.at_subscript() => {
                     self.start_node_at(cp, SyntaxKind::INDEX_EXPR);
                     self.bump(); // `[`
                                  // A subscript selects *something*, so unlike a call's
@@ -1250,6 +1272,7 @@ impl<'t> Parser<'t> {
                 self.finish_node();
             }
             SyntaxKind::L_PAREN => self.parse_paren(),
+            SyntaxKind::L_BRACK => self.parse_list(),
             SyntaxKind::L_BRACE => self.parse_block(),
             SyntaxKind::KW_IF => self.parse_if(),
             SyntaxKind::KW_WHILE => self.parse_while(),
@@ -1321,6 +1344,23 @@ impl<'t> Parser<'t> {
         }
         self.expect(SyntaxKind::R_PAREN, "`)`");
         self.finish_node();
+    }
+
+    /// `[ e1, e2, … ]` — a `Vec` literal (§6.1). The opening `[` is current.
+    ///
+    /// One node kind for every arity, including the empty `[]`: a list is a
+    /// collection built from its elements, so nothing about it changes at two
+    /// the way a paren becomes a tuple at two. The element list is an `ARG_LIST`
+    /// for the reason a subscript's is — the comma rules, the trailing comma and
+    /// the recovery are one loop (REP-17), and a second copy is a second place
+    /// for a rule to be missing.
+    fn parse_list(&mut self) {
+        self.start_node(SyntaxKind::LIST_EXPR);
+        self.bump(); // `[`
+                     // Unlike a subscript, an empty one is legal: `[]` is the empty
+                     // `Vec`, whose element type inference takes from its use.
+        self.parse_arg_list_until(SyntaxKind::R_BRACK, "`]` to close list literal");
+        self.finish_node(); // LIST_EXPR
     }
 
     fn parse_if(&mut self) {
@@ -3115,9 +3155,11 @@ mod tests {
             );
         }
 
-        // No statement can begin with `[`, so a `[` after a line break continues
-        // the expression before it — the property `(` already relies on, and the
-        // reason the postfix arm needs no newline guard.
+        // A `[` after a line break no longer continues the expression before
+        // it: a list literal begins with one, so the tie is broken by position
+        // the way REP-27 broke `(`'s. This asserted the opposite until the
+        // literal existed, and the comment it carried gave the reason — "no
+        // statement can begin with `[`" — that stopped being true.
         let out = parse_text(
             "let n = m
 [key]",
@@ -3125,9 +3167,14 @@ mod tests {
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert_eq!(
             out.tree.children().count(),
-            1,
-            "the subscript stays part of the binding"
+            2,
+            "a line-leading `[` starts a list rather than subscripting"
         );
+        // …and a `[` on the same line still subscripts, which is every subscript
+        // any program writes.
+        let out = parse_text("let n = m[key]");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert_eq!(out.tree.children().count(), 1);
 
         // An unclosed subscript is reported rather than swallowing the rest.
         for bad in ["let v = m[key", "let v = m[]", "m[key] ="] {
@@ -3190,6 +3237,74 @@ mod tests {
             "let c = Counter[Int",
             "let c = Vec[Int] + 1",
         ] {
+            let out = parse_text(bad);
+            assert!(!out.diagnostics.is_empty(), "{bad} must report");
+        }
+    }
+
+    /// A `[` that **begins** an expression opens a list literal; a `[` that
+    /// continues one is still a subscript.
+    ///
+    /// The two spellings are the same two characters, and — like REP-09's type
+    /// arguments and REP-27's `(` — their contents cannot break the tie: `[k]` is
+    /// a legal list and a legal subscript. Position is the whole rule, and this
+    /// is where it is pinned.
+    #[test]
+    fn a_bracket_that_begins_an_expression_is_a_list_and_one_that_continues_it_is_a_subscript() {
+        let count = |src: &str, kind: SyntaxKind| -> usize {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            construct_names(&out.tree)
+                .into_iter()
+                .filter(|k| *k == kind)
+                .count()
+        };
+
+        // Every position an expression can begin in: a binding, an argument, a
+        // `for` iterable, a return value, an element of another list.
+        for src in [
+            "let v = [1, 2, 3]",
+            "let v = []",
+            "let v = [1]",
+            // A trailing comma closes this list too (REP-17).
+            "let v = [1, 2,]",
+            "out([1, 2])",
+            "for x in [1, 2] { out(x) }",
+            "fn f() { return [1] }",
+        ] {
+            assert!(count(src, SyntaxKind::LIST_EXPR) >= 1, "{src}");
+            assert_eq!(count(src, SyntaxKind::INDEX_EXPR), 0, "{src}");
+        }
+
+        // One node kind at every arity, including zero: nothing about a list
+        // changes at two the way a paren becomes a tuple there.
+        for (src, want) in [
+            ("let v = []", 1),
+            ("let v = [1]", 1),
+            ("let v = [1, 2]", 1),
+            ("let v = [[1], [2, 3]]", 3),
+        ] {
+            assert_eq!(count(src, SyntaxKind::LIST_EXPR), want, "{src}");
+        }
+
+        // …and a `[` that continues an expression is the subscript it has always
+        // been, including one that a list literal *indexes*.
+        for (src, want) in [
+            ("let v = m[key]", 1),
+            ("let v = grid[x, y]", 1),
+            // Chained: each link continues the whole expression before it.
+            ("let v = m[k][j]", 2),
+            // A list literal is itself something a subscript can continue.
+            ("let v = [1, 2][0]", 1),
+            ("let v = f()[0]", 1),
+        ] {
+            assert_eq!(count(src, SyntaxKind::INDEX_EXPR), want, "{src}");
+        }
+        assert_eq!(count("let v = [1, 2][0]", SyntaxKind::LIST_EXPR), 1);
+
+        // The empty subscript is still the error it was: a subscript selects
+        // *something*, where a list may hold nothing.
+        for bad in ["let v = m[]", "let v = [1, 2", "let v = [1 2]"] {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must report");
         }
@@ -3624,12 +3739,15 @@ mod tests {
             assert!(count(src, SyntaxKind::CALL_EXPR) >= 1, "{src}");
         }
 
-        // A `[` is deliberately *not* subject to the rule (REP-16): no statement
-        // and no pattern begins with `[`, so a line-leading one can only continue
-        // the expression before it. That asymmetry is the decision.
+        // A `[` is subject to the same rule, and it was not until a list literal
+        // began with one. `m\n[k]` is a binding and a list now, not a subscript.
         let sub = "let a = m\n[k]";
-        assert_eq!(count(sub, SyntaxKind::INDEX_EXPR), 1);
+        assert_eq!(count(sub, SyntaxKind::INDEX_EXPR), 0);
+        assert_eq!(count(sub, SyntaxKind::LIST_EXPR), 1);
         assert_eq!(count(sub, SyntaxKind::LET_STMT), 1);
+        // On one line it is the subscript it has always been.
+        assert_eq!(count("let a = m[k]", SyntaxKind::INDEX_EXPR), 1);
+        assert_eq!(count("let a = m[k]", SyntaxKind::LIST_EXPR), 0);
 
         // Nor is the Pratt loop (ADR-049 D8): an operator that ends a line still
         // continues across it, and so does a `.method()` chain.

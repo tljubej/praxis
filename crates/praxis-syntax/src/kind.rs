@@ -333,6 +333,15 @@ pub enum SyntaxKind {
     /// A tuple expression `( e1, e2, … )` with two or more elements. A
     /// single parenthesized value is [`PAREN_EXPR`](Self::PAREN_EXPR), not this.
     TUPLE_EXPR,
+    /// A list expression `[ e1, e2, … ]` — a `Vec` literal (§6.1).
+    ///
+    /// Its own kind rather than an [`INDEX_EXPR`](Self::INDEX_EXPR) with no
+    /// receiver: the brackets in `[1, 2]` and in `m[k]` are the same two
+    /// characters and two different operations, and what tells them apart is
+    /// **position** — a subscript continues an expression, a list begins one.
+    /// That is the rule [`TYPE_ARG_LIST`](Self::TYPE_ARG_LIST) is decided by and
+    /// the rule REP-27 settled the `(` with.
+    LIST_EXPR,
     /// A type written in source. M2 covers scalar names (`Int`, `Text`, …),
     /// tuple types, and function types; richer type syntax lands with the
     /// constructs that need it.

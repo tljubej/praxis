@@ -395,6 +395,7 @@ fn resolve_expr(db: &mut TypeDb, binders: &[VarId], args: &[Type], e: &mut Typed
         | TypedExpr::Return { ty, .. }
         | TypedExpr::MethodCall { ty, .. }
         | TypedExpr::Tuple { ty, .. }
+        | TypedExpr::ListLit { ty, .. }
         | TypedExpr::Read { ty, .. }
         | TypedExpr::Parse { ty, .. }
         | TypedExpr::RecordLit { ty, .. }

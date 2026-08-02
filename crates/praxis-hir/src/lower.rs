@@ -334,6 +334,22 @@ pub enum TypedExpr {
         ty: Type,
         span: (u32, u32),
     },
+    /// `[ a, b, … ]` — a `Vec` literal (§6.1). `ty` is the `Vec[T]` it builds;
+    /// `elements` are the lowered element expressions in source order, possibly
+    /// none (`[]`).
+    ///
+    /// Its own variant rather than a desugaring to `Vec()` + `push` calls in
+    /// HIR: a `Call` needs a `SymbolId` for its callee and a `MethodCall` needs a
+    /// catalog row instantiated at the element type, so the desugaring would have
+    /// to synthesize name-resolution results that no name in the program produced
+    /// — and every one of them would then be a thing the crash debugger, the
+    /// purity gate and the escape walk see and have to explain. MIR builds the
+    /// same two instructions from this variant without any of that.
+    ListLit {
+        elements: Vec<TypedExpr>,
+        ty: Type,
+        span: (u32, u32),
+    },
     /// `read parser_expression` (§7.1, M6). `plan` identifies the compiled
     /// [`ParserPlan`] in the process-wide arena; the runtime interpreter looks
     /// it up.
@@ -606,6 +622,7 @@ typed_expr_children! {
     Call { args: each, callee_expr: opt },
     MethodCall { receiver, args: each },
     Tuple { elements: each },
+    ListLit { elements: each },
     Parse { text },
     RecordLit { fields: field_each },
     FieldGet { receiver },
@@ -1382,6 +1399,7 @@ impl<'a> Lowerer<'a> {
             Expr::Call(c) => self.lower_call(c),
             Expr::MethodCall(m) => self.lower_method_call(m),
             Expr::Tuple(t) => self.lower_tuple(t),
+            Expr::List(l) => self.lower_list(l),
             Expr::Read(r) => self.lower_read(r),
             Expr::Parse(p) => self.lower_parse(p),
             Expr::RecordLit(r) => self.lower_record_lit(r),
@@ -2263,6 +2281,16 @@ impl<'a> Lowerer<'a> {
         TypedExpr::Tuple { elements, ty, span }
     }
 
+    /// `[ a, b, … ]` — a `Vec` literal (§6.1). The same shape as a tuple's
+    /// lowering, at a different node kind: the elements are lowered in source
+    /// order and the type is the one inference recorded (ADR-054).
+    fn lower_list(&mut self, l: &praxis_ast::ListExpr) -> TypedExpr {
+        let span = self.node_span(l.syntax());
+        let elements: Vec<TypedExpr> = l.elements().iter().map(|e| self.lower_expr(e)).collect();
+        let ty = self.node_ty(l.syntax());
+        TypedExpr::ListLit { elements, ty, span }
+    }
+
     /// Lower a `read parser_expression` (§7.1, M6). Analyzes the parser expr
     /// (validate + synthesize type + lower to plan), then produces a `TypedExpr`
     /// carrying the plan index and synthesized result type.
@@ -2906,6 +2934,7 @@ pub fn expr_span(e: &TypedExpr) -> (u32, u32) {
         | TypedExpr::Call { span, .. }
         | TypedExpr::MethodCall { span, .. }
         | TypedExpr::Tuple { span, .. }
+        | TypedExpr::ListLit { span, .. }
         | TypedExpr::Read { span, .. }
         | TypedExpr::Parse { span, .. }
         | TypedExpr::RecordLit { span, .. }
@@ -2980,6 +3009,7 @@ pub fn expr_ty(e: &TypedExpr) -> Type {
         TypedExpr::Call { ty, .. } => *ty,
         TypedExpr::MethodCall { ty, .. } => *ty,
         TypedExpr::Tuple { ty, .. } => *ty,
+        TypedExpr::ListLit { ty, .. } => *ty,
         TypedExpr::Read { ty, .. } => *ty,
         TypedExpr::Parse { ty, .. } => *ty,
         TypedExpr::RecordLit { ty, .. } => *ty,

@@ -405,8 +405,10 @@ pub fn supports_ord(db: &TypeDb, t: Type) -> bool {
 /// Recursive over the type's structure. A `Vec[T]`/`Deque[T]`/`Set[T]`/
 /// `MinHeap[T]`/`MaxHeap[T]` yields `T`; a `BitSet` yields `Int`; a `Grid[T]`
 /// yields its cell type `T`; a `Range` yields `Int`. A `Map[K, V]` yields the
-/// `(K, V)` tuple (so a pipeline over a map threads key/value pairs). Functions,
-/// scalars, records, enums, and tuples are not iterable.
+/// `(K, V)` tuple (so a pipeline over a map threads key/value pairs). A `Text`
+/// yields `Char` — the one scalar that is iterable, because it is the one with
+/// members (§4.13). Functions, the other scalars, records, enums, and tuples are
+/// not iterable.
 ///
 /// # An unresolved receiver yields a *fresh* variable (REP-03)
 ///
@@ -439,6 +441,12 @@ pub fn iter_item(db: &mut TypeDb, t: Type) -> Option<Type> {
     // `db.scalar` calls below.
     let shape = match db.data(db.follow(t)) {
         TypeData::Collection { ctor, args } => Some((*ctor, args.clone())),
+        // A `Text` yields its characters, and the `Char` it yields is the one
+        // `t[i]` already answers (§4.13, ADR-086). One accessor answers both, so
+        // `for c in t` and `t[i]` cannot disagree about what a character is —
+        // which is the same "iteration order is the accessors' order" rule
+        // ADR-066 applied to the ten collections.
+        TypeData::Scalar(ScalarType::Text) => return Some(db.scalar(ScalarType::Char)),
         TypeData::Var(_) => return Some(db.fresh_var()),
         _ => None,
     }?;
@@ -547,12 +555,38 @@ mod tests {
         assert!(is_int(&db, item));
     }
 
+    /// **`Text` is the one iterable scalar**, and the `Char` it yields is the
+    /// one `t[i]` answers (§4.13, ADR-086).
+    ///
+    /// The item type is the whole assertion: a `Text` that yielded `Text` would
+    /// typecheck every loop body a `Char` does not, and the `for` would then
+    /// lower `praxis_text_get`'s `Char` into a slot typed `Text` — the shape
+    /// REP-03's silent half was made of.
     #[test]
-    fn scalars_and_functions_are_not_iterable() {
+    fn text_yields_char() {
+        let mut db = TypeDb::new();
+        let text = db.text();
+        let item = iter_item(&mut db, text).expect("Text is iterable");
+        assert!(
+            matches!(db.data(db.follow(item)), TypeData::Scalar(ScalarType::Char)),
+            "a Text yields Char, got {}",
+            db.render(item)
+        );
+        // …and it is not itself, which is what would make `for c in t` accept a
+        // body that treats `c` as a `Text`.
+        assert!(!is_text(&db, item));
+    }
+
+    #[test]
+    fn the_other_scalars_and_functions_are_not_iterable() {
         let mut db = TypeDb::new();
         let (int, unit) = (db.int(), db.unit());
         assert!(iter_item(&mut db, int).is_none());
         assert!(iter_item(&mut db, unit).is_none());
+        // A `Char` is not iterable: it is what iterating a `Text` *produces*, so
+        // making it iterable in turn would have no bottom.
+        let ch = db.scalar(ScalarType::Char);
+        assert!(iter_item(&mut db, ch).is_none());
         let (param, result) = (db.int(), db.int());
         let func = db.func(vec![param], result);
         assert!(iter_item(&mut db, func).is_none());

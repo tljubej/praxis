@@ -84,6 +84,18 @@ fn walk_expr(e: &TypedExpr) -> Result<(), String> {
             }
             Ok(())
         }
+        // A list literal allocates a `Vec` and pushes into it, and both halves
+        // are the expression's own: the only object either touches is the one
+        // this node just made. That is the same read-only-ness `Range` has —
+        // allocating is not mutating in the sense §9.5 means — and it is why the
+        // `push`es here are not the `Impure` method-call rejection below. A
+        // literal whose *elements* mutate is still rejected, by the recursion.
+        TypedExpr::ListLit { elements, .. } => {
+            for el in elements {
+                walk_expr(el)?;
+            }
+            Ok(())
+        }
         TypedExpr::RecordLit { fields, .. } => {
             for (_, init) in fields {
                 walk_expr(init)?;
@@ -295,6 +307,56 @@ mod tests {
             span: (0, 0),
         };
         assert!(assert_read_only(&call).is_ok());
+    }
+
+    /// `p [1, 2]` is read-only: the `Vec` it builds and the pushes that fill it
+    /// are both the expression's own, so nothing the program computed changes.
+    ///
+    /// The pushes are the reason this needs saying — `push` is the catalog's
+    /// canonical `Impure` row, and the rejection above is what a literal *looks*
+    /// like from the runtime's side.
+    #[test]
+    fn accepts_a_list_literal_and_still_rejects_an_impure_element() {
+        let mut db = mk_db();
+        let int = db.int();
+        let vec_int = db.vec(int);
+        let elements = vec![lit_int(&mut db), lit_int(&mut db)];
+        let list = TypedExpr::ListLit {
+            elements,
+            ty: vec_int,
+            span: (0, 0),
+        };
+        assert!(assert_read_only(&list).is_ok());
+        // The empty one too.
+        assert!(assert_read_only(&TypedExpr::ListLit {
+            elements: vec![],
+            ty: vec_int,
+            span: (0, 0),
+        })
+        .is_ok());
+
+        // …and an element that mutates is still rejected, by the recursion.
+        let receiver = TypedExpr::Path {
+            symbol: praxis_hir::SymbolId(0),
+            ty: db.int(),
+            span: (0, 0),
+        };
+        let impure = TypedExpr::MethodCall {
+            receiver: Box::new(receiver),
+            name: "push".to_string(),
+            lowering_symbol: Some(praxis_stdlib::abi::RuntimeSymbol::VecPush),
+            args: vec![lit_int(&mut db)],
+            purity: Purity::Impure,
+            ty: db.unit(),
+            span: (0, 0),
+        };
+        let err = assert_read_only(&TypedExpr::ListLit {
+            elements: vec![impure],
+            ty: vec_int,
+            span: (0, 0),
+        })
+        .unwrap_err();
+        assert!(err.contains("impure"), "{err}");
     }
 
     #[test]

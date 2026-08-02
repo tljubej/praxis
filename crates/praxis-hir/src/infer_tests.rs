@@ -6953,3 +6953,118 @@ fn an_unknown_variant_is_reported_at_check() {
     .expect("score has a scheme");
     assert_eq!(scheme, "(Move) -> Int");
 }
+
+/// A list literal is a `Vec` of its elements' one type, and its elements are
+/// checked against **each other** rather than against nothing.
+///
+/// The empty `[]` is the case worth pinning: it has no element to take a type
+/// from, so it is `Vec[?T]` and the *use* decides `?T` — the same answer `Vec()`
+/// gives. A rule written as "the first element's type" has no answer here at
+/// all, which is why the element type is a fresh variable unified with each
+/// element in turn.
+#[test]
+fn a_list_literal_is_a_vec_of_one_element_type() {
+    // The type, at each element type and each arity.
+    assert_eq!(expr_type("[1, 2, 3]"), "Vec[Int]");
+    assert_eq!(expr_type("[1]"), "Vec[Int]");
+    assert_eq!(expr_type("[\"a\", \"b\"]"), "Vec[Text]");
+    assert_eq!(expr_type("[[1], [2]]"), "Vec[Vec[Int]]");
+    assert_eq!(expr_type("[(1, \"a\")]"), "Vec[(Int, Text)]");
+    // An element is an arbitrary expression, so its type is inferred and not
+    // read off a literal.
+    assert_eq!(expr_type("[1 + 1, 2 * 3]"), "Vec[Int]");
+
+    // An empty list is generic in its element, and the use pins it. `[]` is not
+    // generalized — a `Vec` is mutable, so the value restriction applies to it
+    // exactly as it does to `Vec()`.
+    assert!(!has_type_error(
+        "fn main() -> Int { let v: Vec[Int] = []\n v.len() }"
+    ));
+    assert!(!has_type_error(
+        "fn main() -> Int { var v = []\n v.push(1)\n v.len() }"
+    ));
+
+    // Elements that disagree are reported. The message names the type
+    // established so far as `expected`, so the *offending* element is `found`.
+    assert!(has_type_error("let v = [1, \"a\"]"));
+    assert!(has_type_error("let v = [\"a\", 1]"));
+    assert!(has_type_error("let v = [[1], [\"a\"]]"));
+    let diags = analyze("let v = [1, \"a\"]").diagnostics;
+    let y001 = diags
+        .iter()
+        .find(|d| d.code().to_string() == "Y001")
+        .unwrap_or_else(|| panic!("expected Y001, got {diags:?}"));
+    assert!(
+        y001.message().contains("expected Int, found Text"),
+        "the element written second is what is wrong: {}",
+        y001.message()
+    );
+
+    // …and the literal's own type is checked against its context like any other
+    // expression.
+    assert!(has_type_error(
+        "fn main() -> Int { let v: Vec[Text] = [1, 2]\n v.len() }"
+    ));
+}
+
+/// A list literal is iterable, subscriptable and a method receiver — it is a
+/// `Vec`, not a shape that only `for` understands.
+#[test]
+fn a_list_literal_is_a_vec_everywhere_a_vec_goes() {
+    for src in [
+        "fn main() -> Unit { for x in [1, 2, 3] { out(x) } }",
+        "fn main() -> Int { [1, 2, 3].len() }",
+        "fn main() -> Int { [1, 2, 3][0] }",
+        "fn main() -> Int { let v: Vec[Int] = [1]\n v.len() }",
+        // Passed to a function that iterates an unannotated parameter (REP-03):
+        // a list literal is one of the iterables that instantiates it.
+        "fn total(r) { var t = 0\n for i in r { t = t + i }\n t }\n\
+         fn main() -> Int { total([1, 2, 3]) }",
+    ] {
+        assert!(!has_type_error(src), "must be accepted: {src}");
+    }
+
+    // The element type reaches the loop variable, so a body that uses it at the
+    // wrong type is reported.
+    assert!(has_type_error(
+        "fn main() -> Unit { for x in [1, 2] { let t: Text = x\n out(t) } }"
+    ));
+}
+
+/// **A `Text` is iterable and yields `Char`** (§4.13, ADR-086).
+///
+/// `for c in text` was `Y005` — `capability::iter_item` answered `None` for
+/// every scalar — and `crates/praxis-stdlib/src/builtins.rs` recorded it as a
+/// standing gap next to `Char.to_text()`. The item type is the assertion, not
+/// merely that the loop is accepted: a `Text` that yielded `Text` would accept
+/// every body a `Char` does not.
+#[test]
+fn a_text_is_iterable_and_yields_char() {
+    assert!(!has_type_error(
+        "fn main() -> Unit { for c in \"abc\" { out(c) } }"
+    ));
+    // The loop variable is a `Char`, so `Char`'s own method resolves on it…
+    assert!(!has_type_error(
+        "fn main() -> Int { var n = 0\n for c in \"abc\" { n = n + c.to_int() }\n n }"
+    ));
+    // …and it is not a `Text`.
+    assert!(has_type_error(
+        "fn main() -> Unit { for c in \"abc\" { let t: Text = c\n out(t) } }"
+    ));
+    // The same answer through a binding and through a parameter, so it is the
+    // type that is iterable and not the literal.
+    assert!(!has_type_error(
+        "fn main() -> Unit { let s = \"abc\"\n for c in s { out(c) } }"
+    ));
+    assert!(!has_type_error(
+        "fn each(t: Text) -> Unit { for c in t { out(c) } }\nfn main() -> Unit { each(\"ab\") }"
+    ));
+    // A `Char` is what iterating a `Text` produces, and is not itself iterable.
+    assert!(has_type_error(
+        "fn main() -> Unit { for c in \"ab\"[0] { out(c) } }"
+    ));
+    // The other scalars are unchanged: `Y005` where they are written.
+    assert!(has_type_error(
+        "fn main() -> Unit { for i in 3 { out(i) } }"
+    ));
+}
