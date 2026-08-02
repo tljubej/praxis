@@ -1,0 +1,87 @@
+// bfs — breadth-first search over an explicit adjacency structure.
+//
+// The traversal benchmark, and the one closest to what this language is for. A
+// 320x320 grid with about one cell in eleven blocked is turned into a
+// `Vec[Vec[Int]]` adjacency list once, and then walked level-synchronously
+// from a different start cell per rep: two `Deque`s swapped at each level, a
+// `BitSet` of visited ids, and an inner `for` over a subscripted inner vector.
+//
+// The visited marks use each language's idiomatic dense-id structure — Praxis
+// `BitSet`, Rust `Vec<bool>`, Python `bytearray` — rather than forcing one
+// language's choice on the other two. Everything else is the same algorithm on
+// the same graph, and the reachable-cell count and distance sum pin that down.
+//
+// Input: the number of searches, as one integer on stdin.
+// Output: the open-cell count, then the summed (reached, distance-sum) pair
+// over every search.
+
+let runs = read int
+let w = 320
+let h = 320
+
+fn open_cell(x: Int, y: Int) -> Bool {
+    (x * 31 + y * 17 + 5) % 11 != 0
+}
+
+let adj = Vec()
+var y = 0
+while y < h {
+    var x = 0
+    while x < w {
+        let nb = Vec()
+        if open_cell(x, y) {
+            if x > 0 && open_cell(x - 1, y) { nb.push(y * w + x - 1) }
+            if x + 1 < w && open_cell(x + 1, y) { nb.push(y * w + x + 1) }
+            if y > 0 && open_cell(x, y - 1) { nb.push((y - 1) * w + x) }
+            if y + 1 < h && open_cell(x, y + 1) { nb.push((y + 1) * w + x) }
+        }
+        adj.push(nb)
+        x = x + 1
+    }
+    y = y + 1
+}
+
+var open_count = 0
+var c = 0
+while c < w * h {
+    if adj[c].len() > 0 { open_count = open_count + 1 }
+    c = c + 1
+}
+
+var reached_total = 0
+var dist_total = 0
+var run = 0
+while run < runs {
+    var start = (run * 7919) % (w * h)
+    while adj[start].len() == 0 {
+        start = (start + 1) % (w * h)
+    }
+
+    var visited = BitSet()
+    visited.insert(start)
+    var current = Deque()
+    current.push_back(start)
+    var dist = 0
+
+    while current.len() > 0 {
+        let next = Deque()
+        while current.len() > 0 {
+            let node = current.pop_front()
+            reached_total = reached_total + 1
+            dist_total = (dist_total + dist) % 1000003
+            for nb in adj[node] {
+                if !visited.contains(nb) {
+                    visited.insert(nb)
+                    next.push_back(nb)
+                }
+            }
+        }
+        current = next
+        dist = dist + 1
+    }
+    run = run + 1
+}
+
+out(open_count)
+out(reached_total)
+out(dist_total)

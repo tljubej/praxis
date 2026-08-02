@@ -1,0 +1,58 @@
+// tree — recursive traversal of a record tree held in an arena.
+//
+// Praxis has no self-referring types (`enum Expr { Add(Expr, Expr) }` is
+// rejected by name resolution), so the idiomatic shape for a tree is an arena:
+// a `Vec` of records whose child links are indices into that same vector, with
+// -1 for a leaf. That is what this builds, bottom-up, so the append-only `Vec`
+// is enough.
+//
+// The measured phase is the traversal, not the build: a recursive walk over
+// every one of the 2^17-1 nodes, repeated once per requested rep with a
+// different salt so no implementation can hoist the walk out of the loop. Each
+// visit is a record field read, a comparison, two recursive calls and a
+// remainder — pointer-chasing through memory the prefetcher cannot help with.
+//
+// Input: the number of traversals, as one integer on stdin.
+// Output: the node count, then the accumulated traversal checksum.
+
+struct Node {
+    l: Int
+    r: Int
+    v: Int
+}
+
+fn build(ns: Vec[Node], depth: Int, v: Int) -> Int {
+    if depth == 0 {
+        ns.push(Node { l: -1, r: -1, v: v })
+        return ns.len() - 1
+    }
+    let li = build(ns, depth - 1, (v * 2 + 1) % 1000003)
+    let ri = build(ns, depth - 1, (v * 2 + 2) % 1000003)
+    ns.push(Node { l: li, r: ri, v: v })
+    ns.len() - 1
+}
+
+fn walk(ns: Vec[Node], i: Int, salt: Int) -> Int {
+    let node = ns[i]
+    if node.l < 0 {
+        (node.v + salt) % 1000003
+    } else {
+        (node.v + walk(ns, node.l, salt) + walk(ns, node.r, salt) * 3) % 1000003
+    }
+}
+
+let reps = read int
+let depth = 16
+
+let nodes = Vec()
+let root = build(nodes, depth, 1)
+
+var acc = 0
+var r = 0
+while r < reps {
+    acc = (acc + walk(nodes, root, r)) % 1000003
+    r = r + 1
+}
+
+out(nodes.len())
+out(acc)

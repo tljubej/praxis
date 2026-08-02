@@ -1,0 +1,42 @@
+{
+  "primes": {
+    "min": 15.734507749999466,
+    "peak_rss": 23232512,
+    "checksum_ok": true
+  },
+  "mandelbrot": {
+    "min": 14.589883208998799,
+    "peak_rss": 25657344,
+    "checksum_ok": true
+  },
+  "collatz": {
+    "min": 18.077656375000515,
+    "peak_rss": 23134208,
+    "checksum_ok": true
+  },
+  "vm": {
+    "min": 20.90930749999825,
+    "peak_rss": 26427392,
+    "checksum_ok": true
+  },
+  "hashwork": {
+    "min": 17.188719333000336,
+    "peak_rss": 46120960,
+    "checksum_ok": true
+  },
+  "tree": {
+    "min": 20.39589837499807,
+    "peak_rss": 128565248,
+    "checksum_ok": true
+  },
+  "pipeline": {
+    "min": 21.035199250000005,
+    "peak_rss": 257720320,
+    "checksum_ok": true
+  },
+  "bfs": {
+    "min": 28.58631320799759,
+    "peak_rss": 128204800,
+    "checksum_ok": true
+  }
+}

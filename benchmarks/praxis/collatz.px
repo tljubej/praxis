@@ -1,0 +1,37 @@
+// collatz — the longest hailstone sequence below a limit.
+//
+// The conditional benchmark. Every step of the inner loop takes a branch whose
+// direction the CPU cannot predict — the parity of a number that was just
+// derived from an unpredictable one — and the loop's trip count varies by two
+// orders of magnitude between neighbouring starting values. Integer division
+// and remainder are on the hot path; nothing is allocated and nothing is
+// indexed.
+//
+// Input: the inclusive upper limit, as one integer on stdin.
+// Output: the starting value with the longest chain, then that chain's length.
+
+let limit = read int
+
+var best_n = 0
+var best_len = 0
+var n = 1
+while n <= limit {
+    var c = n
+    var steps = 0
+    while c != 1 {
+        if c % 2 == 0 {
+            c = c / 2
+        } else {
+            c = 3 * c + 1
+        }
+        steps = steps + 1
+    }
+    if steps > best_len {
+        best_len = steps
+        best_n = n
+    }
+    n = n + 1
+}
+
+out(best_n)
+out(best_len)

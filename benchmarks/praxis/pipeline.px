@@ -1,0 +1,46 @@
+// pipeline — the §6.3 sequence combinators.
+//
+// §6.3 says a chain of non-barrier combinators fuses into one loop over the
+// source with no intermediate `Vec`s (ADR-029). This is the benchmark that
+// asks what that is worth: the same `map` -> `filter` -> `sum` chain over the
+// same million-element vector, expressed as each language's own idiom — a
+// Praxis pipeline, a Rust iterator chain, and a Python generator expression.
+//
+// A second chain adds `enumerate` and `fold` so the measurement is not one
+// combinator triple. The rep counter is copied into a `let` before the closure
+// captures it: capturing the `var` itself would put the loop counter in a
+// GC-managed cell (§4.10) and measure that instead.
+//
+// Input: the source vector's length, as one integer on stdin.
+// Output: the source length, the fused chain's checksum, then the folded one's.
+
+let n = read int
+
+let v = Vec()
+var i = 0
+while i < n {
+    v.push((i * 7919 + 13) % 1000003)
+    i = i + 1
+}
+
+var acc = 0
+var r = 0
+while r < 12 {
+    let salt = r
+    acc = (acc + v.map(|x| (x * 3 + salt) % 1000003).filter(|x| x % 5 != 0).sum()) % 1000003
+    r = r + 1
+}
+
+var folded = 0
+var s = 0
+while s < 12 {
+    let salt = s
+    folded = (folded
+        + v.enumerate().map(|p| match p { (idx, x) => (x + idx * salt) % 1000003 })
+            .fold(0, |a, x| (a * 2 + x) % 1000003)) % 1000003
+    s = s + 1
+}
+
+out(v.len())
+out(acc)
+out(folded)

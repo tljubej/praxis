@@ -1,0 +1,10 @@
+{
+  "primes": 1600000,
+  "mandelbrot": 430,
+  "collatz": 340000,
+  "vm": 2800000,
+  "hashwork": 9400000,
+  "tree": 330,
+  "pipeline": 1000000,
+  "bfs": 200
+}
