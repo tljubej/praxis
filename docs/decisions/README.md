@@ -107,3 +107,4 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-100: A small `Int` is one object per value, and a literal is a load](./100-a-small-int-is-one-object-and-a-literal-is-a-load.md)
 - [ADR-101: The shadow stack is one contiguous region, and the recursion limit is what keeps it in bounds](./101-the-shadow-stack-is-contiguous.md)
 - [ADR-102: A check is a branch, not a call — and the check itself stays](./102-a-check-is-a-branch-not-a-call.md)
+- [ADR-103: A page owns the storage and the liveness, and the registry is gone](./103-a-page-owns-the-storage-and-the-liveness.md)

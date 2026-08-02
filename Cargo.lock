@@ -789,7 +789,6 @@ dependencies = [
 name = "praxis-runtime"
 version = "0.1.0"
 dependencies = [
- "bumpalo",
  "praxis-input-parser",
  "praxis-source",
  "praxis-stdlib",

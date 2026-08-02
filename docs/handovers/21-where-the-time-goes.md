@@ -169,6 +169,29 @@ That halves peak RSS as a side effect, which is the *other* half of the
 report's problem — and unlike the pacer experiment in the report's appendix, it
 does not trade time for it.
 
+**Implemented (ADR-102), and the prediction was half right.** Size-class pages
+with allocated/mark bitmaps landed; `bumpalo`, the `live` registry and the mark
+byte are gone. The header shrink was deliberately *not* done — it costs an ABI
+bump and moves an immediate generated code bakes in, and descriptor-segregated
+pages would make it wasted work.
+
+The memory half came in as predicted, without the header shrink: peak RSS falls
+**1.3× to 1.8×** across the suite (`mandelbrot` 1032 → 573 MiB, `vm` 253 → 138,
+`tree` 787 → 518, `bfs` 764 → 577, `collatz` 111 → 72).
+
+The time half did not, because **this section's profile had already expired when
+3.1, 3.3 and 3.5 landed.** Re-profiled on the tree this change went onto,
+`collatz` reads `Heap::alloc_raw` **6.1%** and `Heap::collect_inner` **6.6%** —
+not 36% and 24%. Against that baseline the rewrite takes `collect_inner` to
+**1.1%** (six times cheaper: a word of `allocated & !mark` per 64 blocks instead
+of a walk over every live object, twice) and puts allocation up to **7.7%** (a
+bitmap claim is a little dearer than popping a `Vec`). Net collector time on
+`collatz` falls 31%, and wall clock moves 0–16%: `bfs` 1.16×, `hashwork` 1.10×,
+`mandelbrot` 1.10×, `10M i = i + 1` 1.11×, `primes` 1.04×, `collatz`/`tree`/
+`pipeline`/`call` unchanged. The lesson for whoever reads this next: **re-take
+the profile before believing a percentage from an earlier section of the same
+document.**
+
 ### 3.7 Negative result: `opt_level` is `none`, and raising it does nothing
 
 `JITBuilder::new` is used with no flags set anywhere in the workspace, so

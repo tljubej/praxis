@@ -2,8 +2,9 @@
 //!
 //! §4.3 notes that `Unit` and `Bool` "may be immortal singleton objects." M3
 //! materializes this: [`Immortals`] pre-allocates `Unit`, `true`, and `false`
-//! once at runtime startup. They are kept out of the sweepable `live` set, so
-//! the collector never reclaims them — they live for the entire run.
+//! once at runtime startup. They are allocated on pages the sweep does not walk
+//! (ADR-103), so the collector never reclaims them — they live for the entire
+//! run.
 //!
 //! Immortals are the natural return value for runtime wrappers that must return
 //! *a* `GcRef` after a fault (Appendix B: "return a valid sentinel object such
@@ -29,7 +30,7 @@ use crate::GcRef;
 /// immortal can be minted. Restricting it here is what keeps two properties
 /// true: an immortal is never swept and never dropped, so its payload must be
 /// `Copy` and it must be allocated exactly once — a wrapper that minted one per
-/// call consumed unregistered arena storage permanently (RT-03).
+/// call consumed storage no collection could ever reclaim (RT-03).
 pub(crate) struct ImmortalWitness(());
 
 /// The immortal singletons, pre-allocated at runtime start (§4.3).
@@ -50,20 +51,23 @@ pub struct Immortals {
 }
 
 impl Immortals {
-    /// Allocate the immortal singletons on `heap`. They are intentionally *not*
-    /// registered in the heap's live set; the collector never reclaims them.
+    /// Allocate the immortal singletons on `heap`. They land on pages flagged
+    /// immortal, which the sweep does not walk; the collector never reclaims
+    /// them.
+    ///
+    /// There is no pre-colouring here any more. The three singletons used to be
+    /// painted black at birth so a mark phase that happened to visit them —
+    /// through a root that aliases one — did not transiently un-protect them by
+    /// resetting their colour at the next sweep. The page flag says the same
+    /// thing permanently instead of transiently: sweep never clears an immortal
+    /// page's `allocated` bit, whatever its mark bit says.
     pub fn new(heap: &Heap) -> Self {
-        // Bypass `Heap::alloc`'s live-set registration: immortals are managed
-        // out-of-band. We use the same low-level layout so the descriptors and
-        // accessors still work on them.
+        // `alloc_immortal` uses the same low-level layout as every other
+        // allocation, so the descriptors and accessors work on immortals
+        // unchanged; only the page they come from differs.
         let unit = heap.alloc_immortal(UNIT_PAYLOAD, (), ImmortalWitness(()));
         let true_ = heap.alloc_immortal(BOOL_PAYLOAD, 1_u8, ImmortalWitness(()));
         let false_ = heap.alloc_immortal(BOOL_PAYLOAD, 0_u8, ImmortalWitness(()));
-        // Immortals start black so a mark phase that happens to visit them (e.g.
-        // via a root that aliases them) does not transiently un-protect them.
-        unit.header().set_mark_color(crate::gc::BLACK);
-        true_.header().set_mark_color(crate::gc::BLACK);
-        false_.header().set_mark_color(crate::gc::BLACK);
         // The interned `Int`s, in index order, so slot `i` holds
         // `SMALL_INT_MIN + i` and `small_int::index_of` is the only arithmetic
         // anyone does over this table. Minting them here — rather than lazily on
@@ -72,11 +76,7 @@ impl Immortals {
         // RT-03, and it would also make `ctx.small_ints` hold a null the backend
         // would have to test.
         let small_ints: Box<[GcRef]> = (SMALL_INT_MIN..=SMALL_INT_MAX)
-            .map(|v| {
-                let r = heap.alloc_immortal(INT_PAYLOAD, v, ImmortalWitness(()));
-                r.header().set_mark_color(crate::gc::BLACK);
-                r
-            })
+            .map(|v| heap.alloc_immortal(INT_PAYLOAD, v, ImmortalWitness(())))
             .collect();
         debug_assert_eq!(small_ints.len(), SMALL_INT_COUNT);
         Immortals {
@@ -177,10 +177,11 @@ mod tests {
         assert_eq!(im.bool_(true).as_ptr(), true_);
         assert_eq!(im.bool_(false).as_ptr(), false_);
 
-        // Nothing is in the live set — immortals are out-of-band. The interned
-        // `Int` table is a thousand more of them and must not change this: a
-        // table object in the sweepable set would be finalized and its storage
-        // handed back out from under every reference generated code holds.
+        // Nothing is counted — immortals live on pages the sweep does not walk.
+        // The interned `Int` table is a thousand more of them and must not
+        // change this: a table object on a sweepable page would be finalized and
+        // its storage handed back out from under every reference generated code
+        // holds.
         assert_eq!(heap.stats().live_count, 0);
     }
 
