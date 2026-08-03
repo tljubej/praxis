@@ -127,6 +127,45 @@ outside the cargo workspace and nothing in it is compiled by `cargo build
 with `rustc` directly, so they cannot drift into the workspace's lint and
 formatting gates.
 
+### The per-iteration instruction count
+
+`periter.py` turns a `praxis-dump` into a per-iteration instruction count, by the
+rule in `praxis-codegen-cranelift`'s `dump.rs` module doc. It is beside `ab.py`
+rather than inside it because it answers the other kind of question: a change
+that removes three instructions from a loop body is deterministic and the clock
+on this laptop cannot resolve it (handover 26 §6), so several packages state
+their headline as a count rather than a ratio.
+
+```bash
+PRAXIS_DUMP_CLIF='<entry>' PRAXIS_DUMP_VCODE='<entry>' \
+    ./target/release/praxis run loop.px 2>dump.txt
+python3 benchmarks/periter.py dump.txt
+python3 benchmarks/periter.py --self-test
+```
+
+**It is in the tree because two separately hand-written walkers of the same rule
+were wrong**, and each clause of it is one of their mistakes:
+
+* **Each IR is walked over its own graph.** A helper the round shared read the
+  vcode's per-block counts through the *CLIF* graph; a CLIF block and a vcode
+  block that share a number are unrelated. On handover 25 §3's loop that is worth
+  15 machine instructions per iteration, in the same direction for both arms of
+  an A/B, so it survives subtraction and only shows up in a headline. ADR-118
+  part 2 caught it.
+* **Cold vcode blocks are excluded, and the vcode listing does not mark them** —
+  coldness survives into it only as emission order. A later walker had the graphs
+  right and no cold set, so wherever Cranelift emits the out-of-line wrapper call
+  before the inline arm it walked *through* the wrapper. That is the one whose
+  numbers reached a record; ADR-117 and ADR-120 carry the corrections.
+* **The `prologue` row is not a block**, and **a branch may have two hot in-loop
+  successors** — `bs.contains(x)`'s `absent` arm is a correct answer, not a
+  bail-out — in which case there is no single per-iteration number and the tool
+  prints every hot cycle rather than picking one.
+
+`--self-test` checks each clause against a fixture small enough to verify by
+hand, and the tool reproduces Wave 0's recorded baseline (311 CLIF in 55 blocks
+and 171 over 35; 458 vcode and 215 over 38) to the instruction.
+
 ## What each one measures
 
 | Benchmark | What it stresses |

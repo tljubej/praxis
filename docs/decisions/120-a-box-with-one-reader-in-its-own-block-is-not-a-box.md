@@ -1033,3 +1033,73 @@ loop", and it is why this amendment is measured rather than reasoned.
   to a composite would be widening it to something whose value is *in* the heap,
   and its debug slot would have to stay a reference — which
   `DebugSlotKind::Reference` already spells.
+
+---
+
+## Amendment, 2026-08-04 — two cells of part 2's table, and its amendment to ADR-117, are corrected
+
+Part 2's per-iteration table walked each IR over its own control-flow graph,
+which was already more than the round's shared helper did — but for the **vcode**
+it carried **no set of cold blocks**, and took at each branch the first
+in-component successor the listing named. The vcode listing does not write
+`cold` anywhere; coldness survives into it only as emission order, which
+`dump.rs`'s module doc says and `benchmarks/periter.py` now reads and asserts.
+Where the out-of-line wrapper call is emitted before the inline arm, that walk
+steps *into* the wrapper and counts its block as part of the iteration.
+
+It is right whenever no branch on the path names a cold block first, which is
+three of the five rows. It is wrong on two, and both were re-derived at
+`2491140` by rebuilding each arm:
+
+| toggle reverted | vcode/iter as published | vcode/iter | |
+|---|---:|---:|---|
+| `praxis-mir/adr120-arm-a` (part 1: no forwarding) | 178 over 32 | **179** over 32 | corrected |
+| `praxis-codegen-cranelift/unfolded-check-fault` (W7) | 144 over 27 | **132** over 27 | corrected |
+| `praxis-codegen-cranelift/adr116-arm-a` (W6) | 125 over 21 | 125 over 21 | stands |
+| `praxis-mir/adr120b-arm-a` — arm A | 107 over 21 | 107 over 21 | stands |
+| this branch — arm B | 115 over 21 | 115 over 21 | stands |
+
+Every CLIF cell in that table stands, and so does every whole-function and byte
+figure. The walker reproduces Wave 0's recorded baseline exactly — 311 CLIF in
+55 blocks and 171 over 35, 458 vcode in 67 blocks + prologue, 1960 bytes and 215
+over 38 — which is the check that settles it, because that pair predates every
+walker in this round and its two denominators differ.
+
+**This package's own headline is unaffected: +4 CLIF and +8 machine instructions
+per iteration**, from 102/107 to 106/115, both of which are rows that stand.
+What moves with the part-1 cell is the sentence beside it: the pair is **−64**
+machine instructions per iteration, not −63 — 179 with forwarding off, 107 with
+it on and this package off, 115 with both — of which part 2 gives back 8.
+
+**Part 1's own measurements were right when they were written.** Its tree
+(`f380589`) was rebuilt, both arms, and every figure reproduces to the
+instruction: 311 in 55 blocks and 171 over 35 → **240 in 39 and 111 over 24**
+CLIF; 458 in 67 blocks and 215 over 38 → **344 in 49 and 133 over 27** vcode;
+1960 bytes → 1472.
+
+### The amendment to ADR-116 stands
+
+**125 → 115 machine instructions per iteration, −10**, five sites × two. Both
+arms rebuilt; the figure reproduces. ADR-116's original **−18** was also right on
+the tree it was taken on (`fa15c59` rebuilt: 215 → 197 over 38 blocks), so that
+amendment is a record of a number that *moved*, which is what it says it is.
+
+### The amendment to ADR-117 is corrected
+
+It reported **111 → 102 CLIF (−9) and 135 → 107 vcode (−28)**. The CLIF pair is
+right. The vcode arm-A cell is the same defect as the table's W7 row, one
+pairing over: with part 2's toggle reverted in both arms it is **123 → 107,
+−16**, and with `unfolded-check-fault` as the only toggle reverted — the arms
+W7 ships — it is **132 → 115, −17**.
+
+So **"W7 is worth more after part 1, not less" is wrong as stated**: in absolute
+instructions the fold is worth −18 on W7's own tree and −17 here, unchanged
+within one instruction, for the same reason its CLIF delta is unchanged. It is
+right as a fraction — 18 of 215 is 8.4% and 17 of 132 is 12.9% — because part 1
+shrank the loop around it. The arithmetic about the per-fold figure going "from
+6 to ~9.3" was arithmetic on the −28 and goes with it. ADR-117 carries the same
+correction in its own voice.
+
+Nothing here touches part 1's transform, part 2's slot discrimination, the
+census, the corpus figures or any decision in this record. What was wrong was a
+walk, in one column, at branches where Cranelift emits the cold arm first.

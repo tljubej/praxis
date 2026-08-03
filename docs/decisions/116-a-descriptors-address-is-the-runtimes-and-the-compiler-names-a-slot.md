@@ -510,3 +510,42 @@ and `the_sample_loop_proves_a_scalars_descriptor_nine_times_per_iteration`
 This is the double count handover 21 §3.6 recorded and handover 26 §7 trap 7
 warned about. It arrived as a failing test at the wave merge rather than as a
 wrong number in a report, which is what the wave structure is for.
+
+---
+
+## Amendment, 2026-08-04 — both figures were re-derived from rebuilt trees, and both stand
+
+Two different per-iteration walkers were in use this round and both were wrong:
+the shared helper ADR-118 part 2 caught, which read the vcode's per-block counts
+through the *CLIF* control-flow graph, and a later one that built each graph
+correctly but had no set of cold vcode blocks. So this record's two figures — the
+original **−18** and the amendment above's **−10** — were re-derived rather than
+assumed.
+
+The walk is now `benchmarks/periter.py`, which walks each IR over its own graph
+and self-tests; `dump.rs`'s module doc says where the rule needed the
+qualification. It reproduces Wave 0's recorded baseline exactly — 311 CLIF in 55
+blocks and 171 over 35, 458 vcode in 67 blocks + prologue and 215 over 38 — which
+is the strongest available check, because that pair was recorded before any of
+these walkers existed and its two denominators differ.
+
+**The original −18: right when written.** This record's own tree (`fa15c59`) was
+rebuilt, both arms:
+
+| | arm A | arm B | delta |
+|---|---:|---:|---:|
+| CLIF, per iteration | 171 over 35 blocks | 171 over 35 blocks | — |
+| vcode, whole function | 458 in 67 blocks, 1960 bytes | 439 in 67, 1884 bytes | −19 |
+| vcode, per iteration | 215 over 38 blocks | **197** over 38 blocks | **−18** |
+
+Every figure in "Measurements" above reproduces to the instruction. Nine sites ×
+two is eighteen, and it was eighteen.
+
+**The amendment's −10: right too.** At `2491140`, `adr116-arm-a` the only toggle
+reverted: **125 → 115** machine instructions per iteration, 21 blocks either
+way, and 106 → 106 CLIF. Five sites × two.
+
+So nothing in this record is corrected, and the reason for saying so at length is
+that a reader of this round now has to tell a figure that was checked from one
+that was not. ADR-117's amendment and two cells of ADR-120's part-2 table did
+not survive the same check; this record's did.

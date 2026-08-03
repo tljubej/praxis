@@ -405,3 +405,62 @@ on the merged tree, not nine**, and the test named there is renamed accordingly.
 Nine was right about what `build.rs` emits; five is right about what reaches the
 backend. ADR-116's amendment restates its own headline against the same
 denominator.
+
+---
+
+## Amendment, 2026-08-04 — the −28 above is not reproducible; the machine delta is −17, and it did not grow
+
+**The amendment immediately above is withdrawn as to its number.** Its **−28**
+was wrong when it was written, not stale: it came out of a walk that built the
+vcode control-flow graph correctly and then had **no set of cold blocks for it
+at all**, so at every branch it took the first in-component successor the
+listing named. Where the out-of-line wrapper call is emitted before the inline
+arm — which is most of the fallible operations in this loop — that walk goes
+*into* the wrapper and back, and counts a cold block as part of the iteration.
+`dump.rs`'s rule says "the successor that is inside the component **and is not
+cold**", and the vcode listing does not write `cold` anywhere; coldness survives
+into it only as emission order.
+
+The walk is now `benchmarks/periter.py`, which reads the boundary off that
+order and asserts it, and which reproduces Wave 0's recorded baseline exactly —
+311 CLIF in 55 blocks and 171 over 35, 458 vcode and 215 over 38 — a pair whose
+two denominators differ and which predates every walker in this round.
+
+**This record's own figures were right when they were written.** Its tree
+(`b70cba7`) was rebuilt, both arms, and every number in "What it is worth"
+reproduces to the instruction:
+
+| | arm A | arm B | delta |
+|---|---:|---:|---:|
+| CLIF, whole function | 311 in 55 blocks | 302 in 52 | −9 |
+| CLIF, per iteration | 171 over 35 blocks | **162** over 32 | **−9** |
+| vcode, whole function | 458 in 67 blocks, 1960 bytes | 431 in 58, 1876 bytes | −27, −84 bytes |
+| vcode, per iteration | 215 over 38 blocks | **197** over 32 | **−18** |
+
+**On the merged tree at `2491140`, with `unfolded-check-fault` the only toggle
+reverted** — the arms as this package ships them:
+
+| | arm A | arm B | delta |
+|---|---:|---:|---:|
+| CLIF, per iteration | 115 over 24 blocks | **106** over 21 | **−9** |
+| vcode, per iteration | 132 over 27 blocks | **115** over 21 | **−17** |
+
+And on the pairing the withdrawn amendment used, with ADR-120 part 2's toggle
+reverted in *both* arms so that only this package differs: **111 → 102 CLIF
+(−9) and 123 → 107 vcode (−16)**, against the 111 → 102 and 135 → 107 it
+reported. The CLIF column was right on both pairings; only the vcode arm-A cell
+was wrong, and it was wrong by the wrapper blocks the walk stepped through.
+
+**So the sentence "the fold is worth *more* after ADR-120, not less" is wrong as
+stated, and right as a fraction.** In absolute instructions the machine delta is
+−18 on this record's tree and −17 on the merged one: unchanged, within one
+instruction, for the same reason the CLIF delta is unchanged — three
+instructions per folded check and three foldable checks, whichever tree it is
+measured on. What did grow is the *share*: 18 of 215 is 8.4%, and 17 of 132 is
+**12.9%**, because ADR-120 shrank the loop around it. The prose about the
+per-fold figure going "from 6 to ~9.3" was arithmetic on the −28 and goes with
+it.
+
+The rest of the withdrawn amendment stands: **runtime type proofs are five per
+iteration on the merged tree, not nine**, the CLIF delta does not move, and the
+renamed test asserts five.

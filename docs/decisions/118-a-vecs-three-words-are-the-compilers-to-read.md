@@ -976,3 +976,46 @@ it.
   round has an answer. A `debug_assertions`-gated bounds check emitted *into*
   generated code would be one shape of answer, and it would need a decision about
   what a violated check does at a point with no fault protocol.
+
+---
+
+## Amendment, 2026-08-04 — the follow-up part 2 registered is discharged
+
+Part 2 found the shared per-iteration helper's defect and deliberately did not
+fix it, "because the helper lives outside the repository, and correcting it would
+silently restate numbers other records own". Both halves are now done, and this
+note is here because this is the record that raised it.
+
+**The defect is confirmed, independently.** At `2491140`, on handover 25 §3's
+loop, the helper answers **130** machine instructions per iteration and a walk
+over the vcode's own graph answers **115** — the same two numbers part 2 reports.
+The walk is now `benchmarks/periter.py`, beside `ab.py`; it walks each IR over
+its own control-flow graph, keeps the `prologue` row out of the block set, reads
+vcode coldness off emission order and asserts the boundary, enumerates every hot
+cycle instead of taking a successor, and self-tests. It reproduces Wave 0's
+recorded baseline exactly — 311 CLIF in 55 blocks and 171 over 35, 458 vcode and
+215 over 38 — which is the check that settles it: that pair predates every walker
+in this round and its two denominators differ.
+
+**Part 2's own figures reproduce to the instruction**, which is what a separately
+built walker was for. On this tree, arm B: the `contains` loop's four hot cycles
+are **86, 90, 124 and 128** machine instructions and **80, 89, 119 and 128** CLIF,
+against the 128 / 90 vcode and 128 / 89 CLIF this record names for the
+member-present and member-absent paths; whole function 369 in 48 blocks and 1592
+bytes. Nothing in the table above is corrected.
+
+**The exception this record found is now in `dump.rs`'s module doc**, where the
+rule it qualifies lives, rather than only here.
+
+**And there was a second walker with a second defect, which is the one that
+actually reached a record.** No published figure in this round reproduces as
+having come from the shared helper: on the trees ADR-116, ADR-117 and ADR-120
+part 1 were measured on, it would have said 191, 181 and 137 where those records
+say 197, 197 and 133, and each of those three reproduces exactly under the
+correct walk. What did reach a record is a later walker that built each IR's
+graph correctly — so it was not this one — and then had no set of cold vcode
+blocks, and therefore walked *through* an out-of-line wrapper call wherever
+Cranelift emits the cold arm first. That is what produced ADR-117's amended −28
+and two cells of ADR-120 part 2's table, and both are corrected in their own
+records. Registering the defect was right; the lesson is that the register
+should have been "put the walk in the tree", which is what it now is.

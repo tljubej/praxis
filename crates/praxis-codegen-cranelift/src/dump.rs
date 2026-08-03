@@ -62,6 +62,32 @@
 //! the vcode. Handover 25's own figures for the same shape were 156 CLIF and
 //! **216** aarch64 — the second is one instruction from what this reproduces,
 //! which is as much agreement as two hand-written copies of a loop can give.
+//!
+//! **The walk is `benchmarks/periter.py`, and it is in the tree because two
+//! separate hand-written walkers of this rule were wrong.** The first read the
+//! vcode's per-block counts through the *CLIF* graph — "the CFG" above means
+//! that IR's own, and a CLIF block and a vcode block that share a number are
+//! unrelated, which `vcode_block_counts` below says in the other direction ("the
+//! two dumps are comparable in total, not row by row"). On the loop above at
+//! `2491140` that answers **130** where the walk over the vcode's own graph
+//! answers **115**; ADR-118 part 2 caught it. The second built each graph
+//! correctly and had no set of *cold* vcode blocks, so at a branch where the
+//! out-of-line wrapper call is emitted before the inline arm it walked through
+//! the wrapper; that is the one whose numbers reached a record, and ADR-117 and
+//! ADR-120 carry the corrections. The tool sits beside `ab.py` for the reason
+//! this hook is in the tree at all: so the next package quoting a count does not
+//! write its own.
+//!
+//! **The rule has an exception, and it is not a defect in the rule.** "Take the
+//! successor that is inside the component and is not cold" assumes there is one
+//! such successor. `bs.contains(x)`'s `absent` arm is a *correct answer* rather
+//! than a bail-out, so it is hot and inside the loop beside the `read` arm
+//! (ADR-118 decision 7), and a loop with one `contains` and one `if` on its
+//! result therefore has **four** hot cycles rather than one — 86, 90, 124 and
+//! 128 machine instructions on this tree. Where that happens there is no single
+//! per-iteration count, and a record must say which path its number is;
+//! `periter.py` enumerates the cycles rather than taking the first successor and
+//! calling it the iteration.
 
 use std::sync::OnceLock;
 
