@@ -152,7 +152,7 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-117: *owed* — W7, folding `CheckFault` into the inline raise](./117-slug.md)
 - [ADR-118: A `Vec[T]`'s three words are the compiler's to read, and a `VecDeque`'s are not (part 1 of 2 — W4a; W4b appends)](./118-a-vecs-three-words-are-the-compilers-to-read.md)
 - [ADR-119: *owed* — W10, the inline scalar claim](./119-slug.md)
-- [ADR-120: *owed* — W8-S0/S0b, block-local box/unbox forwarding](./120-slug.md)
+- [ADR-120: A box with one reader in its own block is not a box, and deleting it costs the debugger a value (part 1 of 2 — W8-S0; W8-S0b appends)](./120-a-box-with-one-reader-in-its-own-block-is-not-a-box.md)
 - [ADR-121: *reserved* — W8-S1, `Gc`→`Scalar` demotion for loop-carried locals; behind the wave-5 gate](./121-slug.md)
 - [ADR-122: *owed* — W11-safety, a provable-descriptor analysis and the verifier rule it licenses](./122-slug.md)
 - [ADR-123: *reserved* — W12, two code variants selected by `--debug never`; handover 26 defers it](./123-slug.md)

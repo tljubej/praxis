@@ -805,6 +805,41 @@ fn m11_locals_split_users_and_temps_with_types() {
     );
 }
 
+/// **RED ON PURPOSE, and the reason it is here at all.**
+///
+/// Handover 26 said four times that W8-S0 lands
+/// `m11_locals_split_users_and_temps_with_types` red and called that its
+/// measurement signal. It does not: every assertion in that test is a
+/// *provenance string*, never a value. Handover 27 §1 read the chain — the
+/// fixture makes `a + b` an interior node whose producer ADR-120 deletes; the
+/// debug store is driven by `praxis_mir::defs`, so the slot is never written;
+/// `render.rs` keeps an uninit temp that has a span; and the span survives
+/// because `build_function_debug_meta` emits a `DebugLocalMeta` for every `Gc`
+/// local, defined or not. So the temp silently degrades from `= 30` to
+/// `= <uninit>` and nothing goes red.
+///
+/// This is the assertion that goes red, and it was added by ADR-120 part 1
+/// *before* the pass landed so that part 2 (W8-S0b, the scalar debug slot) has
+/// something to turn green **unedited**. Do not relax it, do not delete it, and
+/// do not "fix" it by editing what it expects: the whole of its value is that a
+/// §9 debugger guarantee cannot be narrowed without a test saying so.
+///
+/// `crates/praxis-codegen-cranelift/tests/jit.rs`'s
+/// `a_temp_that_never_reached_a_shadow_slot_is_still_renderable` is the same
+/// regression one layer down, at the crash-snapshot API rather than the
+/// rendered text, and it is red for the same reason. Handover 27 §9 asked
+/// whether such a test existed outside `run.rs`; it does, and finding it was
+/// worth more than the guess.
+#[test]
+fn a_forwarded_binop_temp_still_renders_the_value_it_materialized() {
+    let (code, out) = run_repl_with_cmds("debug_temps.px", "locals\nquit\n");
+    assert_eq!(code, 1, "overflow faults and exits 1 after REPL quits");
+    assert!(
+        out.contains("@ \"a + b\" = 30"),
+        "the `a + b` temp renders its value, not `<uninit>`: {out}"
+    );
+}
+
 #[test]
 fn m11_temp_provenance_shows_materializing_expression() {
     // The faulting method-call temp must show the expression it materialized
