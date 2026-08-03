@@ -149,7 +149,7 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-114: The native roots are one store, and it grows because only their depth is bounded](./114-the-native-roots-are-one-store-and-only-their-depth-is-bounded.md)
 - [ADR-115: A `Text` counts itself once, and the count is the licence to index its bytes](./115-a-text-counts-itself-once-and-the-count-is-the-licence.md)
 - [ADR-116: A descriptor's address is the runtime's, and the compiler names a slot](./116-a-descriptors-address-is-the-runtimes-and-the-compiler-names-a-slot.md)
-- [ADR-117: *owed* — W7, folding `CheckFault` into the inline raise](./117-slug.md)
+- [ADR-117: A raise that branches is its own observation, and only checked `Int` arithmetic can be one](./117-a-raise-that-branches-is-its-own-observation.md)
 - [ADR-118: A `Vec[T]`'s three words are the compiler's to read, and a `VecDeque`'s are not (part 1 of 2 — W4a; W4b appends)](./118-a-vecs-three-words-are-the-compilers-to-read.md)
 - [ADR-119: *owed* — W10, the inline scalar claim](./119-slug.md)
 - [ADR-120: *owed* — W8-S0/S0b, block-local box/unbox forwarding](./120-slug.md)

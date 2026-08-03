@@ -307,6 +307,18 @@ the calls are gone rather than merely cheaper.
   by a sharper route than "it faulted": the statement after the overflow is a
   division by zero, and `set_fault` overwrites unconditionally, so the observed
   kind names the last operation that ran.
+
+  > **The convergence half is amended by
+  > [ADR-117](./117-a-raise-that-branches-is-its-own-observation.md)
+  > (2026-08-03), and the conclusion held.** A diamond whose `Inst::CheckFault`
+  > has been folded into it does *not* converge — its cold block jumps straight
+  > to the fault epilogue and the check emits nothing. What survives is the
+  > weaker sentence ADR-117 states in its place: *on the raising path, control
+  > reaches the fault epilogue before any instruction after the raise executes.*
+  > The sentence above is that rule seen in the one case where the raise is
+  > observed by a later read rather than by its own branch. ADR-088 is still
+  > untouched, still for the reason given here, and
+  > `an_overflow_diverts_before_the_next_statement_runs` still passes unedited.
 - **ADR-080 loses nothing.** No guard is removed and no entry point is added or
   deleted, so `every_no_mangle_wrapper_is_behind_the_panic_guard` and
   `every_manifest_symbol_resolves_to_a_distinct_address` are untouched. This
