@@ -2268,12 +2268,19 @@ impl<'a> Lowerer<'a> {
         let lowering_symbol = match &resolved.entry.lowering {
             // A `ScalarPrimitive` row carries the same symbol and reaches MIR
             // the same way. What differs is what MIR *builds* from it — a
-            // dedicated instruction rather than an `Inst::Call` — and that is
-            // the MIR builder's question, asked in one place
-            // (`build::scalar_primitive_of`) and cross-checked against this
-            // arm by `every_scalar_primitive_row_has_a_mir_instruction`. The
-            // typed tree carries the symbol, not the instruction, because
-            // nothing between here and MIR has an opinion about the difference.
+            // dedicated instruction rather than an `Inst::Call` — and MIR does
+            // not ask this variant at all: `lower_method_call` asks the
+            // *manifest* whether the row answers `AbiRet::RawI64`, so there is
+            // no symbol list on that side to keep in step with this one
+            // (ADR-118 decision 6). The typed tree therefore carries the
+            // symbol and not the instruction, because nothing between here and
+            // MIR has an opinion about the difference.
+            //
+            // What keeps the two in step is a pair of refusals rather than a
+            // cross-check: `a_scalar_primitive_row_answers_the_scalar_channel_and_a_scalar_type`
+            // refuses a `ScalarPrimitive` row whose wrapper still answers a
+            // `GcRef`, and `build::lower_scalar_primitive`'s fallthrough is an
+            // ICE for a `RawI64` wrapper no `Inst` produces.
             praxis_stdlib::MethodLowering::RuntimeSymbol(sym)
             | praxis_stdlib::MethodLowering::ScalarPrimitive(sym) => Some(*sym),
             // An intrinsic has no runtime symbol: the MIR builder lowers it

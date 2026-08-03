@@ -482,16 +482,26 @@ every `RuntimeSymbol` row and requires a value result to be `AbiRet::Gc`. That
 sweep is **right** about wrappers that answer a `GcRef` — the alternative is a
 row that returns the unit sentinel through the value channel, which is the class
 of confusion it was written for — and **wrong** about one that answers the
-scalar channel on purpose. Loosening it would have cost the check on the
-nineteen rows it is right about, so `ScalarPrimitive` is the distinction made
-representable, and it owes the sweep a companion, which it has.
+scalar channel on purpose. Loosening it would have cost the check on the forty-
+odd rows it *is* right about — the sweep asserts its own reach, precisely so
+that skipping rows cannot silently empty it — so `ScalarPrimitive` is the
+distinction made representable, and it owes the sweep a companion, which it has.
 
 Two facts follow from the variant that `RuntimeSymbol` cannot express, and they
 are written on the variant rather than in this record: the answer is not a
 `GcRef`, and the call site's safepoint status is the instruction's rather than
-`Inst::Call`'s. `every_scalar_primitive_row_has_a_mir_instruction` is the
-cross-check that the catalog and the MIR builder agree about which rows those
-are.
+`Inst::Call`'s.
+
+**The variant is not what MIR dispatches on**, and that is deliberate.
+`build::lower_method_call` asks the *manifest* whether the row answers
+`AbiRet::RawI64`, so there is no second symbol list to keep in step with the
+catalog's. Two refusals close the gap from both ends:
+`a_scalar_primitive_row_answers_the_scalar_channel_and_a_scalar_type` refuses a
+`ScalarPrimitive` row whose wrapper still answers a `GcRef` — the state that
+would put a raw `0`/`1` into a rootable slot, which is P0-03 — and
+`lower_scalar_primitive`'s fallthrough is an ICE naming any `RawI64` wrapper
+reachable from a method call that no `Inst` produces. Neither is a test that
+compares two lists, because there is only one list.
 
 ### Measured on the shape alone, this commit was five CLIF instructions *worse*
 
@@ -855,9 +865,10 @@ triple with a `#[repr(transparent)]` newtype over `std::Vec`. **It no longer
 builds against the backend, on purpose.** With loads emitted at those
 displacements, that arm is not a slower build of the same program — it is a
 miscompile, reading a capacity where a length is wanted. So
-`REPR_C_VEC_ELEMENTS_OFFSET`, `INLINE_VEC_SITE` and `INLINE_BITSET_SITE` do not
-exist under the feature, and `praxis-codegen-cranelift` names them
-unconditionally, which turns the combination into a link-time refusal:
+`REPR_C_VEC_ELEMENTS_OFFSET` and the two `InlineSliceSite`s built on it —
+`INLINE_VEC_SITE`, `INLINE_BITSET_SITE` — do not exist under the feature, and
+`praxis-codegen-cranelift` names the two sites unconditionally, which turns the
+combination into a compile-time refusal:
 
 ```
 $ cargo check -p praxis-cli --features praxis-runtime/std-vec-payload
