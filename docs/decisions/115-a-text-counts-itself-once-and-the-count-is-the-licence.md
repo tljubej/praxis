@@ -260,11 +260,251 @@ If it is ever revived, the honest form is not a cursor on this payload but a
 different `Text` representation for multi-byte text — which is a §4.3 question,
 not a caching one.
 
+## Measurement
+
+Apple M2 Pro, 16 GiB, macOS 26.6, release builds, `/tmp/praxis-arms/W2-a` and
+`/tmp/praxis-arms/W2-b` exactly as the build phase staged them and neither
+rebuilt. **The headline is not a speedup, it is the shape of a curve**, because
+that is the claim this package makes and it is the one claim a noisy machine
+cannot spoil: a ratio at one size is a speedup, a ratio that doubles when the
+input doubles is a complexity fix.
+
+### What was run, and how
+
+`benchmarks/ab.py` **cannot measure this and was not made to.** Its `--only`
+argument is validated against `run.BENCHMARKS` and `die`s on any other name, and
+its runner feeds `f"{size}\n"` on stdin — one integer, never a file. Both are
+correct for the eight-benchmark suite and both make it structurally unable to
+run a program that reads text. So its *discipline* was borrowed rather than its
+code: the same exclusive `/tmp/praxis-measure.lock`; an untimed warm-up run per
+(binary, program, input) before the clock starts, for the XProtect exec scan the
+load gate cannot see; **A,B,B,A per rep with the leading arm alternating, five
+reps** — twenty timed runs per cell, ten paired A/B adjacencies; **every run's
+stdout compared byte-for-byte against the other arm's**, with a hard exit on the
+first difference; median per arm, and the median of the paired ratios as the
+headline. No run in any table below differed by a byte between the arms.
+
+**The load gate was recorded rather than enforced**; see the caveat at the end
+of this section for why, and for what it can and cannot have done to these
+numbers. The four programs are:
+
+```praxis
+// walk — `for c in t` over a Text read from stdin; the shape `test.px` uses.
+let t = read rest
+var total = 0
+for c in t { total = (total + c.to_int()) % 1000003 }
+out(total)
+
+// index — n random subscripts into an n-scalar Text, the length hoisted by hand
+// so the loop header's re-read is not what is being timed.
+let t = read rest
+let n = t.len()
+var total = 0
+var i = 0
+var k = 0
+while k < n {
+    i = (i * 7919 + 13) % n
+    total = (total + t[i].to_int()) % 1000003
+    k = k + 1
+}
+
+// puzzle — parse into captures, then walk each capture. Eight long lines, so
+// the per-capture cost grows with the input rather than the capture count.
+let ws = read lines(word)
+for w in ws { for c in w { total = (total + c.to_int()) % 1000003 } }
+
+// parse — many captures, none of them indexed: quadratic #3 alone.
+let rows = read lines(`{a:word} {b:word}`)
+out(rows.len())
+```
+
+### The asymptotics
+
+Median seconds per arm; `A×` and `B×` are each arm's growth over the previous
+row, and `A/B` is the median of that cell's ten paired ratios.
+
+**`for c in t`, a slice of the input buffer, ASCII** — Decision 3's row three:
+
+| n (bytes) | arm A | arm B | A× | A/B |
+|---:|---:|---:|---:|---:|
+| 16,384 | 0.0292 | 0.0051 | — | **5.5×** |
+| 32,768 | 0.0982 | 0.0064 | 3.37 | **15.0×** |
+| 65,536 | 0.3721 | 0.0083 | 3.79 | **44.5×** |
+| 131,072 | 1.4663 | 0.0117 | 3.94 | **125.4×** |
+| 262,144 | 5.8378 | 0.0189 | 3.98 | **309.1×** |
+
+**`t[i]`, n subscripts into an n-scalar slice, ASCII** — row three again, with
+the loop header taken out of it:
+
+| n | arm A | arm B | A× | A/B |
+|---:|---:|---:|---:|---:|
+| 16,384 | 0.0193 | 0.0055 | — | **3.5×** |
+| 32,768 | 0.0612 | 0.0068 | 3.17 | **8.9×** |
+| 65,536 | 0.2214 | 0.0098 | 3.62 | **22.5×** |
+| 131,072 | 0.8514 | 0.0155 | 3.85 | **55.2×** |
+| 262,144 | 3.3365 | 0.0264 | 3.92 | **126.3×** |
+
+**`for c in w` over the parser's captures** — the shape a puzzle program has,
+and the one Decision 2 exists for. Eight lines, each n/8 bytes:
+
+| n | arm A | arm B | A× | A/B |
+|---:|---:|---:|---:|---:|
+| 65,536 | 0.0564 | 0.0077 | — | **7.3×** |
+| 131,072 | 0.1929 | 0.0113 | 3.42 | **17.2×** |
+| 262,144 | 0.7356 | 0.0193 | 3.81 | **38.2×** |
+| 524,288 | 2.8586 | 0.0339 | 3.89 | **84.2×** |
+
+Arm A quadruples per doubling on all three. Least-squares slope in log-log, on
+each arm's time net of a same-size control program (`let t = read rest;
+out(t.len())`, which is process start plus the read plus one scan and costs 3.1
+to 5.5 ms across these sizes):
+
+| | arm A exponent | arm B exponent |
+|---|---:|---:|
+| `for c in t` | **1.955** | 0.98 |
+| `t[i]` | **1.924** | 0.98 |
+| `for c in w` | **1.919** | ~0.97 |
+
+**Arm B's exponent is quoted from a larger sweep, and the reason is stated
+rather than hidden.** At the sizes above, arm B's whole runtime is 5 to 34 ms
+against a 3 to 5 ms floor, so subtracting the control removes most of what is
+left and the fitted slope reads 0.69 to 0.90 — a floor artifact, not a
+sub-linear algorithm. Run alone at sizes where the floor is noise, arm B is flat
+linear:
+
+| n | `for c in t` net | ×prev | `t[i]` net | ×prev |
+|---:|---:|---:|---:|---:|
+| 1,048,576 | 0.0529 | — | 0.0824 | — |
+| 2,097,152 | 0.1064 | 2.01 | 0.1580 | 1.92 |
+| 4,194,304 | 0.2055 | 1.93 | 0.3153 | 2.00 |
+| 8,388,608 | 0.4065 | 1.98 | 0.6358 | 2.02 |
+
+— slopes **0.977** and **0.984**; the capture program over the same range is
+1.99 and 1.91 per doubling. Arm B walks 8.4 MB of text in 0.41 s where arm A
+needed 5.8 s for 262 kB.
+
+**The owned row, measured separately and under a weaker protocol.** `test.px`'s
+own shape is a literal, which is an `Owned` payload rather than a slice, so it
+is Decision 3's row one. Programs with an n-byte literal in the source and no
+stdin, median of seven, arms run back to back rather than palindromically —
+enough to show the curve, not enough to quote a ratio to three figures:
+
+| n | arm A | arm B | A× | A/B |
+|---:|---:|---:|---:|---:|
+| 16,384 | 0.0278 | 0.0044 | — | 6.3× |
+| 32,768 | 0.0960 | 0.0053 | 3.46 | 18.2× |
+| 65,536 | 0.3680 | 0.0070 | 3.83 | 52.7× |
+| 131,072 | 1.4359 | 0.0102 | 3.90 | 140.8× |
+
+### Row four is not fixed, and it measures exactly as unfixed as claimed
+
+Decision 2 prices a residual out loud, and it is worth as much as the wins above
+that it was measured rather than asserted. The same `for c in t` program, same
+sizes, over an input that is ASCII except for **one two-byte scalar at the very
+end**:
+
+| n | arm A | arm B | A× | B× | A/B |
+|---:|---:|---:|---:|---:|---:|
+| 16,384 | 0.0657 | 0.0658 | — | — | 1.00 |
+| 32,768 | 0.2520 | 0.2510 | 3.83 | 3.96 | 1.00 |
+| 65,536 | 0.9788 | 0.9807 | 3.88 | 3.94 | 1.00 |
+| 131,072 | 3.9110 | 3.9240 | 4.00 | 4.01 | 0.99 |
+
+Exponent **1.986** in arm A and **1.988** in arm B. One `é` in a 128 kB input
+costs 3.9 s where the same program over the same bytes without it costs 12 ms —
+a factor of **330** paid for a single scalar, because the licence lives on the
+owner and one multi-byte scalar anywhere revokes it for every view. That is
+Decision 2's trade, and the number it costs when it loses is now on the record
+next to the number it wins.
+
+### Quadratic #3 is in **both** arms, so it has no A/B number and gets a curve instead
+
+Decision 4 is deliberately in the baseline (see the first consequence below), so
+the parse-only program is arm-invariant by construction and measures so:
+
+| lines | captures | bytes | arm A | arm B | A× | A/B |
+|---:|---:|---:|---:|---:|---:|---:|
+| 50,000 | 100,000 | 700 kB | 0.0218 | 0.0220 | — | 0.99 |
+| 100,000 | 200,000 | 1.4 MB | 0.0413 | 0.0416 | 1.89 | 0.99 |
+| 200,000 | 400,000 | 2.8 MB | 0.0826 | 0.0829 | 2.00 | 1.00 |
+| 400,000 | 800,000 | 5.6 MB | 0.1648 | 0.1667 | 2.00 | 0.99 |
+
+**The curve is the evidence, and it does not need an arm.** Both n and k double
+per row, so the old `SourceSlice::new` predicts a slope of 2 and a 4× step; the
+measured slope is **1.035** and the step is 2.00. 800,000 `word` captures out of
+5.6 MB in 165 ms is 206 ns per capture; under O(n·k) that row alone is 4.5×10¹²
+byte validations. The unit test `taking_a_view_does_not_walk_the_owner` is the
+other half of the same statement from the opposite side — it is written at sizes
+the old constructor cannot finish.
+
+### Does every program that reads input get faster? For the suite: no, and not by a little
+
+**No, and the reason is sharper than "a negligible fraction".** Quadratic #3
+charged one whole-owner validation *per allocated source slice*, and in
+`parser.rs` only `word`, `identifier` and `text`/`rest` allocate one — `int`,
+`uint`, `float`, `byte`, `digit` and `char` build their scalar from the bytes and
+allocate no `Text` at all. **All eight benchmarks are `let n = read int`**, over
+a stdin of at most eight bytes (`hashwork`'s `9400000\n`; `bfs`'s is `200\n`).
+So `k = 0`: the suite made *zero* calls into the constructor Decision 4 fixed,
+and the win there is not small, it is absent. `bfs` and `vm` "read structured
+input" only in the sense that they *build* it — the grid and the bytecode are
+constructed in the program from one integer, not parsed.
+
+The measurable floor agrees: `let n = read int; out(n)` on that stdin is 2.98 ms
+in both arms, and that is process start and code generation, not parsing.
+
+### The suite, and why 0.994× is the right answer
+
+`ab-W2.json`, all eight benchmarks, five reps, both arms:
+
+| | speedup | resolution bar | resolved? |
+|---|---:|---:|---|
+| `primes` @ 1,600,000 | 1.000 | 2.0% | no |
+| `mandelbrot` @ 430 | 1.006 | 2.0% | no |
+| `collatz` @ 340,000 | 1.003 | 2.0% | no |
+| `vm` @ 2,800,000 | 0.996 | 2.0% | no |
+| `hashwork` @ 9,400,000 | 1.001 | 2.0% | no |
+| `tree` @ 330 | 0.998 | 2.0% | no |
+| `pipeline` @ 1,000,000 | 1.005 | 2.0% | no |
+| `bfs` @ 200 | 0.947 | 9.4% | no |
+
+Geometric mean **0.994×**, **8 of 8 unresolvable**. This is the predicted result
+and it is not a disappointing one: it is the suite reporting, correctly, that it
+does not contain the shape. No `.px` in `benchmarks/` iterates a `Text`, seven of
+the eight contain no double quote at all, and every one of them reads a single
+integer. A suite number that had moved would have needed explaining, because
+there is no mechanism by which this package could have moved it — and `bfs`'s
+0.947 is the one cell whose own paired dispersion (9.4%) is larger than its
+delta, which is what a wide bar is for.
+
+The consequence for how this repo measures is the general one: **a suite that
+does not contain a shape cannot price a change to it**, and running the suite
+anyway was still worth doing, as the check that nothing regressed.
+
+### The load caveat
+
+The 1-minute load average was **2.44 at the start of the A/B sweep and 2.47 at
+the end** (2.21 → 2.27 for the `ab-W2.json` suite run, taken with `ab.py
+--max-load 6`). §6's quiescence definition asks for under 0.5 and this machine
+cannot reach it: the editor's own UI holds it at 2–3 indefinitely with nothing
+building, which is the case `ab.py`'s `--max-load` waiver was added for. No
+`cargo build`, `cargo test` or `just ci` ran during any measurement above.
+
+**For these numbers it matters less than it would anywhere else in this
+directory, and that is a statement about the claim rather than about the
+machine.** The per-cell paired dispersion ran 0.3% to 8.4%; the effects are 5×
+to 309× and the growth ratios are 3.4 to 4.0 against a null of 2.0. A stationary
+background load is charged to both arms by the palindrome, and it would have to
+be wrong by two orders of magnitude, in one arm only, and increasingly so with
+input size, to manufacture the curve. It could not have manufactured row four's
+1.00 either.
+
 ## Consequences
 
-- **This ADR claims no measured speedup, because the round is in its build phase
-  and handover 26 §6 discards numbers produced there.** What it produces instead
-  is the pair of binaries the measurement phase compares: `/tmp/praxis-arms/W2-b`
+- **This ADR was written in the build phase, when it could claim no measured
+  speedup, because handover 26 §6 discards numbers produced there. It carries
+  one now** — the Measurement section above, taken in the measurement phase
+  against the pair of binaries the build phase staged: `/tmp/praxis-arms/W2-b`
   is this branch, `/tmp/praxis-arms/W2-a` is this branch with the toggle
   reverted. The toggle is one constant, `text::COUNT_IS_CACHED`, driven by the
   `adr115-arm-a` feature on `praxis-runtime`; with it set, the count is never
@@ -272,12 +512,13 @@ not a caching one.
   complexity with the representation otherwise identical. Arm A is **not**
   `main`: Decision 4 is in both arms, because it is a separate finding and
   leaving it out of the baseline would attribute its win here.
-- **The measurement this package deserves is not a benchmark-suite number.** No
-  `.px` file in `benchmarks/` iterates a `Text`; seven of the eight contain no
-  double quote at all. The suite geometric mean cannot move and the ADR does not
-  predict that it will. The claim is a complexity claim, and the evidence for it
-  is `taking_a_view_does_not_walk_the_owner` — a test that the old code cannot
-  finish — plus the table in Decision 3.
+- **The measurement this package deserves is not a benchmark-suite number, and
+  the suite confirmed it by not moving.** No `.px` file in `benchmarks/` iterates
+  a `Text`; seven of the eight contain no double quote at all; all eight read one
+  integer. The suite came out at 0.994× with 8 of 8 deltas unresolvable, which is
+  the prediction, not a disappointment. The claim is a complexity claim and it is
+  now measured as one: arm A's exponent is 1.92–1.96 where arm B's is 0.98, on
+  three separate text shapes.
 - **`size_of::<TextPayload>() == 32` is now a build failure to break**, along
   with `OwnedText == 24` and `SourceSlice == 24`. Handover 26 §9 flagged the 32
   as never measured on this tree; it is measured, it is right, and the next

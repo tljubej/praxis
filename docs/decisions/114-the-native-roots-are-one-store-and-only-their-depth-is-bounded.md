@@ -266,11 +266,59 @@ in. This is one more paragraph in it, and the paragraph exists so that the
 
 ## Measurements
 
-**This record was produced in a build phase and deliberately contains no
-timing.** Handover 26 §6 is explicit that a number produced while two other
-agents are compiling measures their build, and that such numbers are discarded.
-What is here instead is the deterministic evidence, which does not drift, plus
-the two staged binaries the measurement phase compares.
+The deterministic evidence came first and is below; the timings were taken in a
+separate measurement phase, after the wave merged, and are here because they
+arrived rather than because the record needed them.
+
+### The clock, taken after the merge
+
+Two independent passes of `benchmarks/ab.py` over the frozen `sizes.json`, five
+A,B,B,A reps each with the leading arm alternating, every run's stdout compared
+byte-for-byte between the arms. The statistic is the median of the per-pair
+ratios and the bar is the scaled MAD of the same ratios; `collatz` and `primes`
+were declared controls.
+
+| | pass 1 | pass 2 |
+|---|---:|---:|
+| `vm` | 3.380× ± 2.8% | **3.428× ± 1.6%** |
+| `bfs` | 1.433× ± 4.4% | **1.535× ± 7.2%** |
+| `hashwork` | 1.416× ± 6.0% | **1.357× ± 1.3%** |
+| `mandelbrot` | 1.000× | 1.002× — unresolved |
+| `tree` | 1.016× | 0.996× — unresolved |
+| `pipeline` | 1.021× | 0.994× — unresolved |
+| *control* `collatz` | 0.996× | 1.003× — did not move |
+| *control* `primes` | 0.997× | 0.997× — did not move |
+| **geometric mean** | | **1.386×** |
+
+The three that matter reproduce across two independent passes, which is the
+standard ADR-113 set for a timing on this machine. Neither control moved: both
+stayed under the 2% floor and inside their own paired spread, so the win is not
+something that moved the whole machine.
+
+**Three of six are honestly unresolvable and are reported as such.** `pipeline`
+is the useful one to look at: it read +2.1% and *resolved* in pass 1, then −0.6%
+and *unresolved* in pass 2. A delta that changes sign between passes is noise,
+and the second pass's wider bar caught it rather than letting a small win
+through. Nothing here should be quoted for `mandelbrot`, `tree` or `pipeline`.
+
+**The load caveat, which travels with these numbers.** They were taken with the
+1-minute load at 2.2–3.2 and *no competing build* — the editor's own UI holds
+this machine there indefinitely, so §6's 0.5 ceiling was unreachable and was
+explicitly waived (`ab.py --max-load`). The competing-build half of the gate was
+not waived and cannot be. Steady load is stationary and the palindrome charges it
+to both arms; the MAD bar widens with whatever it cannot absorb, which is why the
+unresolved rows are unresolved. **These are not comparable to a number taken at
+0.5**, and handover 25's are.
+
+### What the prototype predicted, and what actually happened
+
+Handover 25 §4 predicted `vm` 2.70×, `bfs` 1.50×, `hashwork` 1.24×, geometric
+mean 1.22×, and said in the same breath that the prototype *understates* the fix
+because 20% of its remaining runtime was the thread-local pool it used to dodge
+the box. **That prediction was right and the margin is large**: `vm` came in at
+3.43× against 2.70×, and the geometric mean at 1.386× against 1.22×. `REPORT.md`
+lists `vm` as the benchmark furthest from Rust; this is the largest single
+movement the round has produced.
 
 ### The allocator traffic, which is the claim
 

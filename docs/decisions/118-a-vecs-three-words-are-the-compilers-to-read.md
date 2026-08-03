@@ -292,8 +292,40 @@ nothing is allowed to assume, and the test reads a pointer where it expects a
 length. A toggle whose test suite is indifferent to it is not a toggle.
 
 All seven benchmarks produce byte-identical stdout under both arms (checked
-untimed; this is a correctness check, not a measurement — no timing was taken in
-the build phase, per handover 26 §6).
+untimed in the build phase; that is a correctness check, not a measurement).
+
+### What the clock said, after the wave merged
+
+Five A,B,B,A reps with the leading arm alternating, the median of the per-pair
+ratios against a bar of the scaled MAD of the same ratios:
+
+| | paired | |
+|---|---:|---|
+| `mandelbrot` | 1.018× | unresolved |
+| `tree` | 1.005× | unresolved |
+| `primes` | 0.998× | unresolved |
+| `vm` | 0.996× | unresolved |
+| `collatz` | 0.995× | unresolved |
+| `bfs` | 0.990× | unresolved |
+| *control* `hashwork` | 1.020× | unresolved |
+| *control* `pipeline` | 1.012× | unresolved |
+| **geometric mean** | **1.000×** | |
+
+**Six of six non-control deltas the clock could not resolve, and the geometric
+mean is 1.000×.** That is the result this record predicted and it is the right
+one: the prediction above was that a measurable speedup would be evidence of a
+mistake, and there is not one. Note in particular that `vm` and `bfs` — the two
+benchmarks that reach a `Vec` hardest, and the two this section nominated as
+having something to say — are at 0.996× and 0.990×, both inside their own spread.
+Both controls also stayed inside theirs.
+
+Taken with the 1-minute load at 2.2–3.1 and no competing build; §6's 0.5 ceiling
+is unreachable on this machine and was explicitly waived. For a null result that
+is a weaker caveat than it would be for a win — a wider bar makes "no difference"
+easier to report, so the honest statement is that this measurement **can rule out
+a regression larger than roughly 2%, and cannot rule out a smaller one.** Nothing
+in the design suggests one: the container holds the same three words the `Vec`
+held, in an order the compiler no longer has to guess.
 
 ## What the sanitizer says
 

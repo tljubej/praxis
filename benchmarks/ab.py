@@ -134,6 +134,30 @@ LOCK_PATH = Path("/tmp/praxis-measure.lock")
 SIZES_SHA256 = "194ad251f4c2387ffc36a7586572fbea2c81a06bdc592d03939fa5fe87f6927a"
 
 # §6's quiescence definition, verbatim: no competing build, 1-minute load < 0.5.
+#
+# The two halves are not the same claim and only one of them is waivable.
+#
+# **A competing build is always fatal.** `cargo`/`rustc`/`praxis` saturating the
+# cores is the failure §6 opens by naming, and no flag turns it into a warning.
+#
+# **The load ceiling is a proxy**, and its job is to catch what the process match
+# cannot see — chiefly XProtect's `syspolicyd` exec-scan of a freshly linked
+# binary, which is ~30 s per binary and matches none of those names. 0.5 assumes
+# a machine with nothing on it. That assumption fails on a laptop whose owner is
+# *watching the measurement happen*: the editor and its renderer alone hold this
+# one at ~3, indefinitely, with not one build process alive. Waiting for 0.5 then
+# waits forever, and the honest options are to raise the ceiling or to not
+# measure at all.
+#
+# So `--max-load` raises it, and the waiver is recorded in the JSON, printed at
+# the top of the run and repeated in the verdict — because the number's caveat
+# has to travel with the number. This is sound in a way that skipping the process
+# check would not be: a steady UI load is *stationary*, and the palindrome puts
+# the two arms seconds apart specifically so that whatever is stationary is
+# charged to both. It is also self-limiting — pair-to-pair noise widens the MAD
+# bar, so a contaminated sweep reports "cannot resolve" rather than a wrong
+# number. What it cannot absorb is a *step change* mid-sweep, which is what the
+# between-benchmarks re-check is for and which stays armed at the raised ceiling.
 MAX_LOAD_1MIN = 0.5
 QUIET_PATTERN = "cargo|rustc|praxis"
 
@@ -246,11 +270,15 @@ def competing_processes() -> list[str]:
     return out
 
 
-def check_quiescent() -> tuple[bool, float, list[str]]:
-    """(is the machine quiet, 1-minute load, the processes that say it is not)."""
+def check_quiescent(max_load: float = MAX_LOAD_1MIN) -> tuple[bool, float, list[str]]:
+    """(is the machine quiet, 1-minute load, the processes that say it is not).
+
+    `max_load` is the ceiling in force; a competing process is fatal at any
+    ceiling. See `MAX_LOAD_1MIN` for why only one of the two is waivable.
+    """
     busy = competing_processes()
     load = load_average_1min()
-    return (not busy and load < MAX_LOAD_1MIN, load, busy)
+    return (not busy and load < max_load, load, busy)
 
 
 def stage(binary: Path, into: Path, arm: str) -> Path:
@@ -337,6 +365,15 @@ def main() -> None:
         help="benchmarks this package must NOT move; one moving voids the sweep",
     )
     ap.add_argument("--reps", type=int, default=MIN_REPS, help=f"A,B,B,A reps (min {MIN_REPS})")
+    ap.add_argument(
+        "--max-load",
+        type=float,
+        default=MAX_LOAD_1MIN,
+        help=f"1-minute load ceiling (default {MAX_LOAD_1MIN}). Raising it WAIVES "
+        "the load half of the quiescence gate and stamps every result with the "
+        "waiver; a competing cargo/rustc/praxis process stays fatal regardless. "
+        "Raise it only for a load you have identified and know to be steady",
+    )
     ap.add_argument("--out", default=None, help="default ab-<label>.json")
     # Mutually exclusive rather than checked: `--check-only` reports whether the
     # machine passes the gates, and `--smoke` waives one of them, so a run that
@@ -376,17 +413,31 @@ def main() -> None:
             "the whole suite and update SIZES_SHA256 in the same commit."
         )
 
-    quiet, load, busy = check_quiescent()
+    if args.max_load < MAX_LOAD_1MIN:
+        die(f"--max-load {args.max_load} is below the protocol's {MAX_LOAD_1MIN}")
+    load_gate_waived = args.max_load > MAX_LOAD_1MIN
+
+    quiet, load, busy = check_quiescent(args.max_load)
     if not quiet and not args.smoke:
         detail = "\n".join(f"    {p}" for p in busy) or "    (none)"
         die(
             "the machine is not quiescent — refusing to measure.\n"
-            f"  1-minute load {load:.2f} (must be < {MAX_LOAD_1MIN})\n"
+            f"  1-minute load {load:.2f} (must be < {args.max_load})\n"
             f"  competing processes matching /{QUIET_PATTERN}/:\n{detail}\n"
             "  Note this gate is blind to XProtect: a freshly linked binary is "
             "exec-scanned by `syspolicyd`, which matches none of those names, so "
             "a `just ci` that has just finished linking is still costing you "
-            "cores for ~30 s per binary. The load average is what sees that."
+            "cores for ~30 s per binary. The load average is what sees that.\n"
+            "  If the load is steady background you have identified and no build "
+            "is running, `--max-load` raises the ceiling and stamps the result."
+        )
+    if load_gate_waived and busy:
+        # Belt and braces: `check_quiescent` already refuses, but this is the one
+        # combination someone reaching for `--max-load` is most likely to want to
+        # force, so it gets its own sentence rather than a generic refusal.
+        die(
+            "--max-load waives the load ceiling, not the competing-build check. "
+            f"{len(busy)} process(es) matching /{QUIET_PATTERN}/ are running."
         )
     # Every *environment* gate is asked before `--check-only` may answer, because
     # what it answers is "is this machine ready to measure?" and these are part
@@ -487,6 +538,15 @@ def main() -> None:
                 "  harness, not measuring anything. Do not quote a number from this run.\n",
                 file=sys.stderr,
             )
+        if load_gate_waived:
+            print(
+                f"\n  LOAD GATE WAIVED — ceiling raised {MAX_LOAD_1MIN} → "
+                f"{args.max_load}, observed {load:.2f}, no competing build.\n"
+                "  Steady load is charged to both arms by the palindrome and\n"
+                "  widens the MAD bar; a resolved delta is real, an unresolved\n"
+                "  one may be this machine. Not comparable to a 0.5 number.\n",
+                file=sys.stderr,
+            )
         print(
             f"{args.reps} reps of A,B,B,A, leading arm alternating; "
             f"controls: {', '.join(controls) or 'none'}\n",
@@ -499,6 +559,9 @@ def main() -> None:
 
         out_benchmarks: dict[str, dict] = {}
         void_reasons: list[str] = []
+        # A caveat is not a void reason. Void means "these numbers must not be
+        # quoted"; a caveat means "quote them with this attached".
+        caveats: list[str] = []
 
         for name in names:
             size = PILOT_SIZES[name] if args.smoke else all_sizes[name]
@@ -649,7 +712,7 @@ def main() -> None:
             # the quiescence gate is re-asked between benchmarks rather than only
             # at the top — otherwise a build that began at benchmark three is
             # charged to benchmarks three through eight and nothing says so.
-            still_quiet, now_load, now_busy = check_quiescent()
+            still_quiet, now_load, now_busy = check_quiescent(args.max_load)
             if not still_quiet and not args.smoke:
                 who = f"; first competitor: {now_busy[0]}" if now_busy else ""
                 void_reasons.append(
@@ -677,10 +740,24 @@ def main() -> None:
         )
         if args.smoke:
             void_reasons.append("--smoke: pilot sizes, quiescence gate skipped")
-
         # Both ends recorded, so a reader can see whether the machine was as
-        # quiet at the end as it was asked to be at the start.
-        _, end_load, _ = check_quiescent()
+        # quiet at the end as it was asked to be at the start. Read before the
+        # caveat is composed, because the caveat quotes it.
+        _, end_load, _ = check_quiescent(args.max_load)
+        if load_gate_waived:
+            # NOT a void reason. A void sweep is one whose numbers must not be
+            # quoted; this one's may be, with the caveat attached — which is why
+            # the caveat is a first-class field and is printed twice rather than
+            # left in the JSON for a reader who may never open it.
+            caveats.append(
+                f"the load ceiling was raised from {MAX_LOAD_1MIN} to "
+                f"{args.max_load} (--max-load); observed {load:.2f} at the start "
+                f"and {end_load:.2f} at the end, with no competing build at "
+                "either point. The palindrome charges steady load to both arms "
+                "equally and the MAD bar widens with what it cannot absorb, so a "
+                "resolved delta here is real and an unresolved one may only be "
+                "this machine. Do not compare against a number taken at 0.5."
+            )
         out = {
             "meta": {
                 "label": args.label,
@@ -704,6 +781,8 @@ def main() -> None:
                 "load_1min_at_start": load,
                 "load_1min_at_end": end_load,
                 "quiescent": quiet,
+                "load_ceiling": args.max_load,
+                "load_gate_waived": load_gate_waived,
                 "benchmarks_completed": len(out_benchmarks),
                 "noise_floor": NOISE_FLOOR,
                 "smoke": args.smoke,
@@ -714,8 +793,9 @@ def main() -> None:
             # The verdict is a field rather than something the reader infers,
             # because a void sweep whose per-benchmark numbers look fine is
             # exactly the artefact §6 exists to stop being quoted.
-            "verdict": "void" if void_reasons else "ok",
+            "verdict": "void" if void_reasons else ("ok, with caveats" if caveats else "ok"),
             "void_reasons": void_reasons,
+            "caveats": caveats,
         }
         out_path = Path(args.out or HERE / f"ab-{args.label}.json")
         out_path.write_text(json.dumps(out, indent=2) + "\n")
@@ -745,6 +825,10 @@ def main() -> None:
                 "pass the way ADR-113's +1.4%/+2.0% costs were.",
                 file=sys.stderr,
             )
+        if caveats:
+            # Last thing on the terminal, after the numbers, because that is
+            # where it will actually be read.
+            print("\nCAVEATS:\n  " + "\n  ".join(caveats), file=sys.stderr)
         if void_reasons:
             die("VOID measurement:\n  " + "\n  ".join(void_reasons))
     finally:
