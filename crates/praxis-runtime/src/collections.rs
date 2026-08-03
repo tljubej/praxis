@@ -59,8 +59,8 @@ pub struct VecPayload {
     pub items: ReprCVec<GcRef>,
 }
 
-// The offsets W4b will bake into generated code, pinned here rather than
-// asserted in prose (ADR-118). `element_descriptor` stays at 0 — it is what
+// The offsets W4b bakes into generated code, pinned here rather than asserted
+// in prose (ADR-118). `element_descriptor` stays at 0 — it is what
 // `same_element` and every `element()` call reads, and moving it would be an
 // unrelated churn — so `items` starts at 8, its element pointer is at 8 and its
 // length at 16.
@@ -68,6 +68,26 @@ const _: () = assert!(std::mem::offset_of!(VecPayload, element_descriptor) == 0)
 const _: () = assert!(std::mem::offset_of!(VecPayload, items) == 8);
 // The block size class does not move: 8 + 24 is the 32 it always was (ADR-109).
 const _: () = assert!(std::mem::size_of::<VecPayload>() == 32);
+
+/// The one site generated code may read a `Vec[T]`'s three words through
+/// (ADR-118 part 2). `v.len()` reads the length; `v[i]` reads the length for the
+/// bounds test and then the element.
+///
+/// Minted here, beside the payload whose alignment and field offset it names,
+/// for `INLINE_INTERN_SITE`'s reason: [`InlineSliceSite::new`] is `pub(crate)`,
+/// so the set of payloads generated code may walk is a list this crate wrote.
+/// **`GridPayload` is the reason that matters** — it is also a leading word
+/// followed by a growable vector, at a different offset and behind a different
+/// descriptor, and a `Grid` walked as a `Vec` would read its width as an
+/// element pointer.
+#[cfg(not(feature = "std-vec-payload"))]
+pub const INLINE_VEC_SITE: crate::repr_c_vec::InlineSliceSite =
+    crate::repr_c_vec::InlineSliceSite::new(
+        BuiltinTypeId::Vec,
+        std::mem::align_of::<VecPayload>(),
+        std::mem::offset_of!(VecPayload, items),
+        std::mem::size_of::<GcRef>(),
+    );
 
 impl VecPayload {
     /// The element descriptor, or `None` if this vector was never told its
@@ -626,6 +646,52 @@ mod tests {
             let element = unsafe { *items_ptr.add(i) };
             assert!(std::ptr::eq(element.descriptor(), &crate::scalars::INT));
             // SAFETY: the descriptor check above proves the payload is an `Int`.
+            assert_eq!(unsafe { *element.payload::<i64>() }, i as i64);
+        }
+    }
+
+    /// The same three words, reached the way generated code reaches them:
+    /// through [`INLINE_VEC_SITE`], from the **object** base, with the header
+    /// size folded in by the site rather than added at the emit site.
+    ///
+    /// The test above is the payload-relative rehearsal W4a owed and W4b's
+    /// loads have to agree with; this is the agreement, and the reason it is a
+    /// second test rather than an edit of the first is that the two pin
+    /// different things — that one pins `VecPayload`'s field order, this one
+    /// pins the arithmetic the site performs on top of it.
+    #[cfg(not(feature = "std-vec-payload"))]
+    #[test]
+    fn the_inline_vec_site_addresses_a_live_vec_from_its_object_base() {
+        let rt = crate::Runtime::new();
+        let elements: Vec<GcRef> = (0..5_i64).map(|v| rt.alloc_int(v)).collect();
+        let vec_ref = rt.alloc_vec(&crate::scalars::INT, elements);
+
+        assert!(
+            std::ptr::eq(INLINE_VEC_SITE.type_id().descriptor(), vec_ref.descriptor()),
+            "the site names the descriptor the proof compares against, and it \
+             must be the one a live `Vec` carries"
+        );
+
+        let base = vec_ref.as_ptr().cast::<u8>().cast_const();
+        // SAFETY: `vec_ref` is a live `Vec` whose descriptor was just checked
+        // against the site's, so the site's two displacements address the
+        // element pointer and the length of an initialized `ReprCVec`.
+        let (items, len) = unsafe {
+            (
+                base.add(INLINE_VEC_SITE.elements_offset())
+                    .cast::<*const GcRef>()
+                    .read(),
+                base.add(INLINE_VEC_SITE.len_offset())
+                    .cast::<usize>()
+                    .read(),
+            )
+        };
+        assert_eq!(len, 5);
+        assert_eq!(INLINE_VEC_SITE.element_shift(), 3, "a GcRef is eight bytes");
+        for i in 0..len {
+            // SAFETY: `i < len` and `items` is the live element buffer.
+            let element = unsafe { *items.add(i) };
+            // SAFETY: every element was allocated as an `Int` above.
             assert_eq!(unsafe { *element.payload::<i64>() }, i as i64);
         }
     }

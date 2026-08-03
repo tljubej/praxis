@@ -281,7 +281,26 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// as a truth value. Both are immediate, and neither is subtle enough to
 /// survive a test — which is the only comfortable thing about it.
 ///
-/// The numeral is not touched here: ADR-116 owns v20's digit for the round.
+/// v20 (ADR-118, W4b, part 2): generated code now reads **two collection
+/// payloads' field layouts**, which it never did before. `VecPayload`'s element
+/// pointer and length (`payload+8` and `payload+16`, through
+/// [`ReprCVec`](crate::ReprCVec)) and `BitSetPayload`'s words pointer and word
+/// count (`payload+0` and `payload+8`, likewise) are baked into the loads
+/// `praxis_vec_get`, `praxis_vec_len` and `praxis_bitset_contains`'s inline arms
+/// emit. W4a pinned the first pair with `const _` assertions and deliberately
+/// did **not** bump for it, because nothing in generated code read them yet;
+/// that sentence is now false, which is the v12/v17 class of bump exactly.
+/// Repacking either payload, or reordering `ReprCVec`'s three words, is a
+/// generated-code change from here.
+///
+/// `BitSetPayload.words` also changes type — `Vec<u64>` to `ReprCVec<u64>` —
+/// which is the same three words in a pinned order at the same size, so no
+/// descriptor, size class or `owned_bytes` charge moves. That is a `praxis-runtime`
+/// internal and would owe nothing on its own; it is here because the
+/// displacements above are read off it.
+///
+/// The numeral is not touched by either line: ADR-116 owns v20's digit for the
+/// round.
 ///
 /// v20 (ADR-119, W10): *owed* — the inline bitmap claim, if it clears its
 /// wave-3 gate. Same reason as the line above.
@@ -4430,7 +4449,9 @@ pub unsafe extern "C" fn praxis_bitset_new(ctx: *mut RuntimeContext) -> GcRef {
                 std::mem::size_of::<BitSetPayload>(),
                 std::mem::align_of::<BitSetPayload>(),
                 |payload| {
-                    (payload as *mut BitSetPayload).write(BitSetPayload { words: Vec::new() });
+                    (payload as *mut BitSetPayload).write(BitSetPayload {
+                        words: ReprCVec::new(),
+                    });
                 },
             )
         }
@@ -8238,6 +8259,65 @@ mod tests {
             );
             assert_eq!(words, 0, "BitSet.insert({member}) must allocate no words");
         }
+    }
+
+    /// The words of a **live, heap-allocated** `BitSet`, reached the way
+    /// generated code reaches them: through
+    /// [`INLINE_BITSET_SITE`](crate::bitset::INLINE_BITSET_SITE), from the
+    /// object base, with no knowledge of the payload beyond what the site
+    /// carries (ADR-118 part 2).
+    ///
+    /// `a_backend_can_read_the_length_and_the_elements_out_of_a_live_payload`
+    /// in `collections.rs` is this test for `Vec`, and part 1 of the record
+    /// calls it the thing W4b's first emitted load has to agree with. This is
+    /// the second payload's copy of that agreement.
+    ///
+    /// Arm-B only: under `std-vec-payload` there is no site to name, which is
+    /// how that arm now fails the *build* rather than miscompiling a load.
+    #[cfg(not(feature = "std-vec-payload"))]
+    #[test]
+    fn the_inline_bitset_site_addresses_a_live_bitsets_words() {
+        use crate::bitset::INLINE_BITSET_SITE;
+
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let (words, len) = unsafe {
+            let bs = praxis_bitset_new(ctx);
+            assert!(
+                std::ptr::eq(INLINE_BITSET_SITE.type_id().descriptor(), bs.descriptor()),
+                "the site names the descriptor the inline proof compares against"
+            );
+            for member in [0_i64, 63, 64, 200] {
+                let value = praxis_alloc_int(ctx, member);
+                let _ = praxis_bitset_insert(ctx, bs, value);
+            }
+            let base = bs.as_ptr().cast::<u8>().cast_const();
+            (
+                base.add(INLINE_BITSET_SITE.elements_offset())
+                    .cast::<*const u64>()
+                    .read(),
+                base.add(INLINE_BITSET_SITE.len_offset())
+                    .cast::<usize>()
+                    .read(),
+            )
+        };
+
+        assert_eq!(len, 4, "bit 200 lives in the fourth word");
+        assert_eq!(
+            INLINE_BITSET_SITE.element_shift(),
+            3,
+            "a word is eight bytes"
+        );
+        for member in [0_u64, 63, 64, 200] {
+            // SAFETY: `member >> 6 < len`, and `words` is the live buffer the
+            // site's displacement just answered.
+            let w = unsafe { *words.add((member >> 6) as usize) };
+            assert!(
+                (w >> (member & 63)) & 1 == 1,
+                "bit {member} read back through the site's displacements"
+            );
+        }
+        unsafe { drop_ctx(ctx) };
     }
 
     /// Queries stay total: a value the set cannot hold is a value it does not

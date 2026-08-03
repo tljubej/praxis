@@ -1623,6 +1623,23 @@ fn lower_inst<M: Module>(
                 // each argument to the width the row declares. `args` already
                 // includes the receiver as its first element.
                 CallTarget::Runtime(sym) => {
+                    // Two of the collection reads have an inline form that
+                    // proves the receiver's descriptor and then reads the
+                    // payload directly (ADR-118 part 2). The emitter defines
+                    // `dst` on every path and leaves the builder at its merge
+                    // block, exactly as `emit_scalar_load` does, so there is
+                    // nothing left for this arm to do.
+                    if emit_inline_collection_read(
+                        builder,
+                        ctx_val,
+                        &arg_vals,
+                        *sym,
+                        vars[dst.0 as usize],
+                        module,
+                        imports,
+                    )? {
+                        return Ok(());
+                    }
                     call_symbol(builder, ctx_val, &arg_vals, *sym, module, imports)?
                 }
             };
@@ -1725,20 +1742,17 @@ fn lower_inst<M: Module>(
             // not a safepoint, there is nothing to spill, and no `CheckFault`
             // follows. The narrowing is MIR's (`liveness::is_gc_safepoint` does
             // not match this variant); this arm only emits what MIR decided.
-            //
-            // The wrapper answers `RawI64`, so the value it hands back is the
-            // `Bool` scalar itself and there is no box to unwrap.
             let s = builder.use_var(vars[set.0 as usize]);
             let m = builder.use_var(vars[member.0 as usize]);
-            let result = call_symbol(
+            emit_bitset_contains(
                 builder,
                 ctx_val,
-                &[s, m],
-                RuntimeSymbol::BitsetContains,
+                s,
+                m,
+                vars[dst.0 as usize],
                 module,
                 imports,
             )?;
-            builder.def_var(vars[dst.0 as usize], result);
         }
         Inst::CheckFault {
             on_fault,
@@ -2148,6 +2162,369 @@ fn emit_inline_bool(builder: &mut FunctionBuilder, ctx: Value, value: Value) -> 
     builder.ins().select(is_true, t, f)
 }
 
+/// The address of `id`'s descriptor, as ADR-116 says to obtain it: one load
+/// from `RuntimeContext.descriptors` at a folded displacement.
+///
+/// **One function rather than the two lines it used to be inside
+/// `emit_scalar_load`**, because ADR-118 part 2 added three more proof sites
+/// and a second spelling of "where a descriptor address comes from" is exactly
+/// what ADR-116 removed. The `adr116-arm-a` toggle is still those two lines and
+/// still reverts every proof site in the tree, which is what its `Cargo.toml`
+/// comment claims.
+///
+/// The `iconst` arm is what this replaced: on aarch64 a `static` in this binary
+/// lives above 2³², so its address is `movz`+`movk`+`movk` — three instructions
+/// per proof site, re-materialized rather than kept live because that is what
+/// the register allocator does with constants (handover 25 §3's `opt_level`
+/// measurement).
+fn descriptor_address(builder: &mut FunctionBuilder, ctx_val: Value, id: BuiltinTypeId) -> Value {
+    #[cfg(not(feature = "adr116-arm-a"))]
+    {
+        builder
+            .ins()
+            .load(GC, MemFlags::trusted(), ctx_val, descriptor_slot_offset(id))
+    }
+    #[cfg(feature = "adr116-arm-a")]
+    {
+        builder.ins().iconst(GC, id.descriptor() as *const _ as i64)
+    }
+}
+
+/// Prove that `obj` carries `id`'s descriptor: ADR-102's inline type check, as
+/// a condition value the caller branches on.
+///
+/// `MemFlags::trusted()` is `notrap + aligned` and deliberately **not**
+/// `readonly`, for [`emit_scalar_load`]'s reason: `set_mark_color` and the
+/// sweep write headers, so Cranelift's alias analysis must go on treating a
+/// call as clobbering this word.
+fn prove_descriptor(
+    builder: &mut FunctionBuilder,
+    ctx_val: Value,
+    obj: Value,
+    id: BuiltinTypeId,
+) -> Value {
+    let have = builder
+        .ins()
+        .load(GC, MemFlags::trusted(), obj, GC_DESCRIPTOR_OFFSET);
+    let want = descriptor_address(builder, ctx_val, id);
+    builder.ins().icmp(IntCC::Equal, have, want)
+}
+
+/// Whether the collection primitives get their inline form.
+///
+/// **This pair of lines is ADR-118 part 2's whole toggle**; see the
+/// `adr118-arm-a` feature's comment in this crate's `Cargo.toml`. With the
+/// feature on, `emit_bitset_contains` and `emit_inline_collection_read` fall
+/// straight through to the wrapper call and every other line in the tree is
+/// byte-for-byte identical — including the MIR shape change, which is not part
+/// of this toggle and is measured by instruction census instead.
+#[cfg(not(feature = "adr118-arm-a"))]
+const INLINE_COLLECTION_PRIMITIVES: bool = true;
+#[cfg(feature = "adr118-arm-a")]
+const INLINE_COLLECTION_PRIMITIVES: bool = false;
+
+/// `bs.contains(x)` — the `0`/`1` [`Inst::BitsetContains`] answers, inline.
+///
+/// ```text
+/// prove:  brif  descriptor(bs) == BITSET, prove_int, slow
+/// prove_int:
+///         brif  descriptor(x) == INT,     probe,     slow
+/// probe:  i     = load.i64 [x  + int_payload_offset]
+///         word  = ushr_imm i, 6
+///         len   = load.i64 [bs + site.len_offset()]
+///         brif  icmp ult word, len,       read,      absent
+/// read:   base  = load.i64 [bs + site.elements_offset()]
+///         w     = load.i64 [base + (word << 3)]
+///         r     = band_imm (ushr w, (i & 63)), 1
+/// absent: r     = 0
+/// slow:   (cold) r = call praxis_bitset_contains(ctx, bs, x)
+/// ```
+///
+/// # There is no range test, and that is a decision rather than an omission
+///
+/// The wrapper is `BitIndex::new(i).is_some_and(|b| p.contains(b))` — a
+/// membership test against `0..=BitIndex::MAX` and then a word probe. The
+/// inline form emits only the word probe, because the probe **subsumes** the
+/// range test: `BitIndex::MAX_WORDS` is `2^26`, a word count can never reach
+/// it, and every `i64` outside the range shifts down to at least `2^26` under
+/// the *unsigned* shift — negatives to `2^57` and up. That is the argument;
+/// `the_word_probe_generated_code_emits_answers_contains`, in the module that
+/// owns the range, is the check, over both extremes of the type and a dense
+/// sweep. It is `small_int`'s
+/// `the_unsigned_range_test_generated_code_emits_answers_index_of` in a second
+/// place, and the reason to write it is the same: an exact identity is the kind
+/// of thing that gets believed until a range constant changes.
+///
+/// # `absent` is inline and not a bail
+///
+/// A word past the end is a *correct answer*, not a refusal: an empty or short
+/// `BitSet` answers `false`, and in `bfs` the set is short for the whole first
+/// level of every search. Routing it to the cold block would make the common
+/// early state pay a call.
+///
+/// # What the cold block is for
+///
+/// A receiver whose descriptor is not `BitSet`, or a member that is not an
+/// `Int`. Both are compiler bugs by the time they reach here (§4.3's uniform
+/// model plus inference), and the cold arm calls the same wrapper, which reads
+/// the payload through the same `read_scalar` refusal it always did — so the
+/// diagnosis of a compiler bug is bit-for-bit what it was (ADR-102).
+#[allow(clippy::too_many_arguments)] // The lowering context, as `lower_inst` carries it.
+fn emit_bitset_contains<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx_val: Value,
+    set: Value,
+    member: Value,
+    dst: Variable,
+    module: &mut M,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
+) -> Result<()> {
+    if !INLINE_COLLECTION_PRIMITIVES {
+        let result = call_symbol(
+            builder,
+            ctx_val,
+            &[set, member],
+            RuntimeSymbol::BitsetContains,
+            module,
+            imports,
+        )?;
+        builder.def_var(dst, result);
+        return Ok(());
+    }
+
+    let site = praxis_runtime::bitset::INLINE_BITSET_SITE;
+    let (int_id, int_align, _) = inline_scalar_load_of(praxis_mir::ScalarKind::Int)
+        .expect("`Int` has an inline payload form; `emit_scalar_load` reads the same row");
+    let flags = MemFlags::trusted();
+
+    let prove_int = builder.create_block();
+    let probe = builder.create_block();
+    let read = builder.create_block();
+    let absent = builder.create_block();
+    let slow = builder.create_block();
+    let merge = builder.create_block();
+    builder.set_cold_block(slow);
+
+    let is_bitset = prove_descriptor(builder, ctx_val, set, site.type_id());
+    builder.ins().brif(is_bitset, prove_int, &[], slow, &[]);
+
+    // The member's payload is read **after** its descriptor is proved and never
+    // before: an eight-byte load off an object that is not an `Int` is REP-56
+    // exactly — a zero-width `Unit` read as a word.
+    builder.switch_to_block(prove_int);
+    let is_int = prove_descriptor(builder, ctx_val, member, int_id);
+    builder.ins().brif(is_int, probe, &[], slow, &[]);
+
+    builder.switch_to_block(probe);
+    let i = builder.ins().load(
+        GC,
+        flags,
+        member,
+        praxis_runtime::GcHeader::payload_offset_for(int_align) as i32,
+    );
+    let word = builder.ins().ushr_imm_u(i, 6);
+    let len = builder.ins().load(GC, flags, set, site.len_offset() as i32);
+    let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, word, len);
+    builder.ins().brif(in_bounds, read, &[], absent, &[]);
+
+    builder.switch_to_block(read);
+    {
+        let base = builder
+            .ins()
+            .load(GC, flags, set, site.elements_offset() as i32);
+        let offset = builder
+            .ins()
+            .ishl_imm_u(word, i64::from(site.element_shift()));
+        let slot = builder.ins().iadd(base, offset);
+        let w = builder.ins().load(GC, flags, slot, 0);
+        let shift = builder.ins().band_imm_u(i, 63);
+        let bit = builder.ins().ushr(w, shift);
+        let present = builder.ins().band_imm_u(bit, 1);
+        builder.def_var(dst, present);
+        builder.ins().jump(merge, &[]);
+    }
+
+    builder.switch_to_block(absent);
+    {
+        let no = builder.ins().iconst(GC, 0);
+        builder.def_var(dst, no);
+        builder.ins().jump(merge, &[]);
+    }
+
+    builder.switch_to_block(slow);
+    {
+        let result = call_symbol(
+            builder,
+            ctx_val,
+            &[set, member],
+            RuntimeSymbol::BitsetContains,
+            module,
+            imports,
+        )?;
+        builder.def_var(dst, result);
+        builder.ins().jump(merge, &[]);
+    }
+
+    // `def_var` in every arm rather than a block parameter, as `emit_scalar_load`
+    // and `emit_inline_intern` do — `FunctionBuilder`'s SSA construction inserts
+    // the join itself — and the builder is left switched to `merge`, which
+    // `lower_inst`'s caller relies on: `spill.store_debug_defs` runs immediately
+    // afterwards and must land where every arm is visible.
+    builder.switch_to_block(merge);
+    Ok(())
+}
+
+/// The inline form of a collection *read* whose MIR is still an `Inst::Call`:
+/// `praxis_vec_len` and `praxis_vec_get` (ADR-118 part 2).
+///
+/// Answers whether it emitted anything. When it did, `dst` is defined on every
+/// path and the builder is left at the merge block — [`emit_scalar_load`]'s
+/// contract, which `lower_inst`'s caller relies on because
+/// `spill.store_debug_defs` runs immediately afterwards and must land where all
+/// the arms are visible.
+///
+/// **Both keep their root spill and their safepoint**, and that is not an
+/// oversight: MIR still calls them `Inst::Call`, `liveness::is_gc_safepoint`
+/// matches every `Call`, and ADR-113 settled that narrowing a spill from what a
+/// backend arm happens to emit is the wrong place to make the decision.
+/// `praxis_bitset_contains` got out of that by acquiring its own instruction
+/// (decision 6); `vec_get` and `vec_len` are registered as wanting the same
+/// treatment and it is a separate change.
+///
+/// `praxis_deque_len` and `praxis_deque_get` have no arm here and cannot: a
+/// `VecDeque` is a ring buffer with a head index, so element *i* is at
+/// `(head + i) % cap` and the storage wraps (decision 5).
+#[allow(clippy::too_many_arguments)] // The lowering context, as `lower_inst` carries it.
+fn emit_inline_collection_read<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx_val: Value,
+    args: &[Value],
+    sym: RuntimeSymbol,
+    dst: Variable,
+    module: &mut M,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
+) -> Result<bool> {
+    if !INLINE_COLLECTION_PRIMITIVES {
+        return Ok(false);
+    }
+    let site = praxis_runtime::collections::INLINE_VEC_SITE;
+    let flags = MemFlags::trusted();
+
+    match (sym, args) {
+        // `v.len()` — the length word, then ADR-113's intern probe to box it.
+        //
+        // The row is `Effect::Allocates`, and the fast path discharges that
+        // obligation by **delegating** rather than by reading a `usize` and
+        // pretending: `emit_inline_intern` tests `Heap::collection_is_due`
+        // first and hands the wrapper the value when it holds, exactly as
+        // `int_ref` inside `praxis_vec_len` would have. So the collection
+        // schedule is unchanged, which is the only thing ADR-113's decision 1
+        // asks of a second caller.
+        (RuntimeSymbol::VecLen, &[vec]) => {
+            let fast = builder.create_block();
+            let slow = builder.create_block();
+            let merge = builder.create_block();
+            builder.set_cold_block(slow);
+
+            let is_vec = prove_descriptor(builder, ctx_val, vec, site.type_id());
+            builder.ins().brif(is_vec, fast, &[], slow, &[]);
+
+            builder.switch_to_block(fast);
+            {
+                let len = builder.ins().load(GC, flags, vec, site.len_offset() as i32);
+                emit_inline_intern(
+                    builder,
+                    ctx_val,
+                    len,
+                    dst,
+                    praxis_runtime::small_int::INLINE_INTERN_SITE,
+                    RuntimeSymbol::AllocInt,
+                    module,
+                    imports,
+                )?;
+                // `emit_inline_intern` leaves the builder at its own merge.
+                builder.ins().jump(merge, &[]);
+            }
+
+            builder.switch_to_block(slow);
+            {
+                let result = call_symbol(builder, ctx_val, &[vec], sym, module, imports)?;
+                builder.def_var(dst, result);
+                builder.ins().jump(merge, &[]);
+            }
+
+            builder.switch_to_block(merge);
+            Ok(true)
+        }
+        // `v[i]` / `v.get(i)` — one unsigned compare and one load.
+        //
+        // The row is `Effect::Faults` (`IndexOutOfBounds`) and **the fast arm
+        // cannot fault**: an index the bounds test rejects goes to the wrapper,
+        // which raises exactly as it always did. The `Inst::CheckFault` MIR
+        // emits after the call is unchanged and reads a flag the fast arm never
+        // writes.
+        //
+        // `idx < 0 || idx as usize >= len` is one *unsigned* compare, for
+        // `emit_inline_intern`'s reason: a negative index reinterpreted as a
+        // `u64` is above every length, so the sign test is the same branch.
+        (RuntimeSymbol::VecGet, &[vec, index]) => {
+            let (int_id, int_align, _) = inline_scalar_load_of(praxis_mir::ScalarKind::Int)
+                .expect("`Int` has an inline payload form");
+
+            let prove_int = builder.create_block();
+            let probe = builder.create_block();
+            let fast = builder.create_block();
+            let slow = builder.create_block();
+            let merge = builder.create_block();
+            builder.set_cold_block(slow);
+
+            let is_vec = prove_descriptor(builder, ctx_val, vec, site.type_id());
+            builder.ins().brif(is_vec, prove_int, &[], slow, &[]);
+
+            // The index's payload is read **after** its descriptor is proved
+            // and never before: an eight-byte load off an object that is not an
+            // `Int` is REP-56 exactly — a zero-width `Unit` read as a word.
+            builder.switch_to_block(prove_int);
+            let is_int = prove_descriptor(builder, ctx_val, index, int_id);
+            builder.ins().brif(is_int, probe, &[], slow, &[]);
+
+            builder.switch_to_block(probe);
+            let i = builder.ins().load(
+                GC,
+                flags,
+                index,
+                praxis_runtime::GcHeader::payload_offset_for(int_align) as i32,
+            );
+            let len = builder.ins().load(GC, flags, vec, site.len_offset() as i32);
+            let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, i, len);
+            builder.ins().brif(in_bounds, fast, &[], slow, &[]);
+
+            builder.switch_to_block(fast);
+            {
+                let base = builder
+                    .ins()
+                    .load(GC, flags, vec, site.elements_offset() as i32);
+                let offset = builder.ins().ishl_imm_u(i, i64::from(site.element_shift()));
+                let slot = builder.ins().iadd(base, offset);
+                let element = builder.ins().load(GC, flags, slot, 0);
+                builder.def_var(dst, element);
+                builder.ins().jump(merge, &[]);
+            }
+
+            builder.switch_to_block(slow);
+            {
+                let result = call_symbol(builder, ctx_val, &[vec, index], sym, module, imports)?;
+                builder.def_var(dst, result);
+                builder.ins().jump(merge, &[]);
+            }
+
+            builder.switch_to_block(merge);
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 /// Box a scalar by probing the runtime's intern table inline, with the
 /// allocating wrapper on a cold path (ADR-113).
 ///
@@ -2498,24 +2875,7 @@ fn emit_scalar_load<M: Module>(
     // clobbering this memory — `set_mark_color` and the sweep write headers.
     let flags = MemFlags::trusted();
     let have = builder.ins().load(GC, flags, src_val, GC_DESCRIPTOR_OFFSET);
-    // ADR-116: the descriptor's address is the *runtime's*, read out of the
-    // context at a folded displacement. It used to be an `iconst` of
-    // `&scalars::INT`, which on aarch64 is `movz`+`movk`+`movk` because a
-    // `static` in this binary lives above 2³² — three instructions per proof
-    // site, nine sites per iteration of handover 25 §3's loop, re-materialized
-    // rather than kept live because that is what the register allocator does
-    // with constants (handover 25 §3's `opt_level` measurement).
-    //
-    // These two lines are the package's whole toggle point; see the
-    // `adr116-arm-a` feature's comment in this crate's `Cargo.toml`.
-    #[cfg(not(feature = "adr116-arm-a"))]
-    let want = builder
-        .ins()
-        .load(GC, flags, ctx_val, descriptor_slot_offset(builtin));
-    #[cfg(feature = "adr116-arm-a")]
-    let want = builder
-        .ins()
-        .iconst(GC, builtin.descriptor() as *const _ as i64);
+    let want = descriptor_address(builder, ctx_val, builtin);
     let ok = builder.ins().icmp(IntCC::Equal, have, want);
 
     let fast = builder.create_block();
@@ -3649,6 +4009,22 @@ mod tests {
     fn emitted_ir(
         build: impl FnOnce(&mut FunctionBuilder, Value, Variable, &mut JITModule) -> Result<()>,
     ) -> (String, String) {
+        let (func, entry) = emitted_function(build);
+        let all = func.display().to_string();
+        let entry_text = block_text(&all, entry);
+        (all, entry_text)
+    }
+
+    /// [`emitted_ir`]'s scaffolding, answering the finished
+    /// `codegen::ir::Function` and its entry block instead of text.
+    ///
+    /// Text is enough for "which block calls" and not for "which block
+    /// dominates which", which is what ADR-118 part 2's proof-before-load claim
+    /// actually says — so the two share one builder rather than growing a
+    /// second copy that could drift in signature or sealing.
+    fn emitted_function(
+        build: impl FnOnce(&mut FunctionBuilder, Value, Variable, &mut JITModule) -> Result<()>,
+    ) -> (codegen::ir::Function, Block) {
         let mut module = test_module();
         let mut ctx = module.make_context();
         let mut sig = Signature::new(module.isa().default_call_conv());
@@ -3672,9 +4048,7 @@ mod tests {
         builder.seal_all_blocks();
         builder.finalize(module.isa().frontend_config());
 
-        let all = ctx.func.display().to_string();
-        let entry_text = block_text(&all, entry);
-        (all, entry_text)
+        (ctx.func, entry)
     }
 
     /// The lines of `ir` belonging to `block`, from its label up to the next
@@ -4320,6 +4694,325 @@ mod tests {
             !entry_text.contains("call "),
             "and still calls nothing:\n{all}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-118 part 2: the shapes the three inlined collection reads emit.
+    //
+    // Arm-B only. Under `adr118-arm-a` every one of these emits the call it
+    // asserts is absent, which is the toggle working rather than the toggle
+    // broken — `a_scalar_proof_loads_its_descriptor_from_the_context` carries
+    // the same note for ADR-116.
+    // -----------------------------------------------------------------------
+
+    /// Every block that is not cold, as text, so "the hot path calls nothing"
+    /// can be asserted once rather than per block.
+    #[cfg(not(feature = "adr118-arm-a"))]
+    fn hot_blocks(func: &codegen::ir::Function) -> Vec<(Block, String)> {
+        let all = func.display().to_string();
+        func.layout
+            .blocks()
+            .filter(|&b| !func.layout.is_cold(b))
+            .map(|b| (b, block_text(&all, b)))
+            .collect()
+    }
+
+    /// `bs.contains(x)` reaches the wrapper from exactly one block, and that
+    /// block is cold.
+    ///
+    /// This is the package's headline stated as a shape: what the inlining
+    /// removes is a `call` from the path a loop takes, and no instruction count
+    /// can say that on its own — an inline sequence is *bigger* than the `bl`
+    /// it replaces, because the wrapper's body was never in the count.
+    #[cfg(not(feature = "adr118-arm-a"))]
+    #[test]
+    fn a_membership_test_calls_the_wrapper_only_from_its_cold_block() {
+        let (func, _entry) = emitted_function(|builder, ctx_val, dst, module| {
+            emit_bitset_contains(
+                builder,
+                ctx_val,
+                ctx_val,
+                ctx_val,
+                dst,
+                module,
+                &mut HashMap::new(),
+            )
+        });
+        let all = func.display().to_string();
+        let cold: Vec<_> = func
+            .layout
+            .blocks()
+            .filter(|&b| func.layout.is_cold(b))
+            .collect();
+        assert_eq!(cold.len(), 1, "exactly the wrapper block is cold:\n{all}");
+        assert!(
+            block_text(&all, cold[0]).contains("call "),
+            "and it is the one that calls `praxis_bitset_contains`:\n{all}"
+        );
+        for (block, text) in hot_blocks(&func) {
+            assert!(
+                !text.contains("call "),
+                "no hot block may call: {block} does:\n{all}"
+            );
+        }
+        // Three edges reach the cold block — the two descriptor proofs — plus
+        // its own label. A shape with one proof, or with a third bail-out,
+        // reads differently here.
+        assert!(
+            all.matches(&format!("{}", cold[0])).count() >= 3,
+            "both proofs share one cold block:\n{all}"
+        );
+    }
+
+    /// The member's payload is read **only** where its descriptor has been
+    /// proved, and the words are read only where the receiver's has.
+    ///
+    /// Stated as dominance over the emitted CFG rather than as "the load is in
+    /// a later block", because the second is a claim about block numbering and
+    /// the first is the claim REP-56 is about: an eight-byte read off an object
+    /// that is not an `Int` is an out-of-bounds read of a zero-width `Unit`.
+    #[cfg(not(feature = "adr118-arm-a"))]
+    #[test]
+    fn a_membership_test_proves_a_descriptor_before_every_payload_read() {
+        let (func, entry) = emitted_function(|builder, ctx_val, dst, module| {
+            emit_bitset_contains(
+                builder,
+                ctx_val,
+                ctx_val,
+                ctx_val,
+                dst,
+                module,
+                &mut HashMap::new(),
+            )
+        });
+        let all = func.display().to_string();
+        let site = praxis_runtime::bitset::INLINE_BITSET_SITE;
+
+        // The block that reads the `Int` payload, found by its displacement as
+        // a whole address token (handover 26 §7 trap 3: `"+168"` contains
+        // `"+16"`).
+        let int_align = inline_scalar_load_of(praxis_mir::ScalarKind::Int)
+            .expect("`Int` has an inline payload form")
+            .1;
+        let payload_disp = format!(
+            "+{}",
+            praxis_runtime::GcHeader::payload_offset_for(int_align)
+        );
+        let words_disp = format!("+{}", site.elements_offset());
+        let len_disp = format!("+{}", site.len_offset());
+
+        let blocks_reading = |disp: &str| {
+            hot_blocks(&func)
+                .into_iter()
+                .filter(|(_, text)| {
+                    text.lines().any(|l| {
+                        l.split_whitespace()
+                            .any(|t| t.trim_end_matches(',').ends_with(disp))
+                    })
+                })
+                .map(|(b, _)| b)
+                .collect::<Vec<_>>()
+        };
+
+        // The member's proof is the block the entry branches to; the entry
+        // itself holds the receiver's. Every payload read must come after both,
+        // and "after" is dominance over the emitted CFG rather than block
+        // numbering — the second is a claim about the builder, the first is the
+        // claim REP-56 is about.
+        let member_proof = func
+            .layout
+            .blocks()
+            .nth(1)
+            .expect("the member's proof is the second block emitted");
+
+        // `+16` is *both* the `Int` payload and the words pointer, because
+        // `payload_offset_for(8)` is 16 and `BitSetPayload.words` is at the
+        // payload's start. That collision is why this sweeps every block that
+        // reads at a displacement rather than asserting there is one.
+        for disp in [&payload_disp, &words_disp, &len_disp] {
+            let reads = blocks_reading(disp);
+            assert!(!reads.is_empty(), "something reads at {disp}:\n{all}");
+            for block in reads {
+                assert_ne!(
+                    block, entry,
+                    "a read at {disp} in the entry block would be unproved:\n{all}"
+                );
+                assert_dominates(&func, member_proof, block);
+            }
+        }
+    }
+
+    /// `v.len()` discharges its `Effect::Allocates` obligation by **delegating**
+    /// to ADR-113's intern probe, not by reading a `usize` and pretending.
+    ///
+    /// The evidence is the pacing predicate: both `Heap` words are loaded and
+    /// compared on the path that answers inline, so a collection that was due
+    /// still reaches `praxis_alloc_int`, which paces exactly as the `int_ref`
+    /// inside `praxis_vec_len` would have. Without that, every `v.len()` in a
+    /// loop would defer the collector indefinitely — ADR-113 decision 1's
+    /// rejected alternative, arrived at from a different direction.
+    #[cfg(not(feature = "adr118-arm-a"))]
+    #[test]
+    fn an_inline_vec_length_paces_before_it_answers_from_the_intern_table() {
+        let (func, _entry) = emitted_function(|builder, ctx_val, dst, module| {
+            let emitted = emit_inline_collection_read(
+                builder,
+                ctx_val,
+                &[ctx_val],
+                RuntimeSymbol::VecLen,
+                dst,
+                module,
+                &mut HashMap::new(),
+            )?;
+            assert!(emitted, "`praxis_vec_len` has an inline form");
+            Ok(())
+        });
+        let all = func.display().to_string();
+        let site = praxis_runtime::small_int::INLINE_INTERN_SITE;
+
+        for (what, disp) in [
+            ("bytes_since_collect", site.bytes_since_collect_offset()),
+            ("collect_threshold", site.collect_threshold_offset()),
+            ("the intern table's base", site.table_offset()),
+        ] {
+            // Cranelift prints a zero displacement as nothing at all, so a
+            // field at offset 0 is unassertable this way. None of these three
+            // is at 0 today; the assertion says so rather than passing vacuously
+            // if one moves there.
+            assert_ne!(disp, 0, "{what} is not at offset zero");
+            let token = format!("+{disp}");
+            assert!(
+                all.lines().any(|l| l
+                    .split_whitespace()
+                    .any(|t| t.trim_end_matches(',').ends_with(&token))),
+                "the fast path loads {what} at {token}:\n{all}"
+            );
+        }
+        assert!(
+            all.contains("icmp uge"),
+            "…and compares them, which is `Heap::collection_is_due` inline:\n{all}"
+        );
+        for (block, text) in hot_blocks(&func) {
+            assert!(
+                !text.contains("call "),
+                "no hot block may call: {block} does:\n{all}"
+            );
+        }
+        // Two cold blocks, and the pair is the point: one is the wrapper for a
+        // receiver that is not a `Vec`, the other is `praxis_alloc_int` for a
+        // length outside the intern table. Folding them into one would mean
+        // calling `praxis_vec_len` for an out-of-range length, which is a
+        // second read of a payload this path already has in a register.
+        let cold: Vec<_> = func
+            .layout
+            .blocks()
+            .filter(|&b| func.layout.is_cold(b))
+            .collect();
+        assert_eq!(cold.len(), 2, "the two bail-outs are separate:\n{all}");
+        for block in cold {
+            assert!(
+                block_text(&all, block).contains("call "),
+                "{block} is cold because it calls:\n{all}"
+            );
+        }
+    }
+
+    /// `v[i]` is one unsigned compare and one load, and the fault path is the
+    /// wrapper's — so the `Inst::CheckFault` MIR emits after it reads a flag
+    /// the fast arm never writes.
+    ///
+    /// The single unsigned compare is `praxis_vec_get`'s `idx < 0 || idx as
+    /// usize >= len` exactly: a negative index reinterpreted as a `u64` is
+    /// above every length, so the sign test *is* the bounds test. ADR-113's
+    /// `the_unsigned_range_test_generated_code_emits_answers_index_of` is the
+    /// same identity in the same shape.
+    #[cfg(not(feature = "adr118-arm-a"))]
+    #[test]
+    fn an_inline_vec_index_bounds_checks_with_one_unsigned_compare() {
+        let (func, _entry) = emitted_function(|builder, ctx_val, dst, module| {
+            let emitted = emit_inline_collection_read(
+                builder,
+                ctx_val,
+                &[ctx_val, ctx_val],
+                RuntimeSymbol::VecGet,
+                dst,
+                module,
+                &mut HashMap::new(),
+            )?;
+            assert!(emitted, "`praxis_vec_get` has an inline form");
+            Ok(())
+        });
+        let all = func.display().to_string();
+        assert_eq!(
+            all.matches("icmp ult").count(),
+            1,
+            "one unsigned compare covers both the sign and the bound:\n{all}"
+        );
+        assert!(
+            !all.contains("icmp slt") && !all.contains("icmp sgt"),
+            "…and no signed compare is emitted beside it:\n{all}"
+        );
+        for (block, text) in hot_blocks(&func) {
+            assert!(
+                !text.contains("call "),
+                "no hot block may call: {block} does:\n{all}"
+            );
+        }
+        let cold: Vec<_> = func
+            .layout
+            .blocks()
+            .filter(|&b| func.layout.is_cold(b))
+            .collect();
+        assert_eq!(
+            cold.len(),
+            1,
+            "the two proofs and the bounds test share one bail-out:\n{all}"
+        );
+        assert!(
+            block_text(&all, cold[0]).contains("call "),
+            "and it calls `praxis_vec_get`, which is what raises:\n{all}"
+        );
+    }
+
+    /// `praxis_deque_len` has no inline form, and that is decision 5 rather
+    /// than an omission: a `VecDeque` is a ring buffer with a head index, so
+    /// element *i* is at `(head + i) % cap` and the storage wraps.
+    ///
+    /// The refusal is worth a test because the failure it prevents is silent:
+    /// an arm added by copying the `VecLen` one would read a `std::VecDeque`'s
+    /// second word as a length.
+    #[test]
+    fn a_deque_read_has_no_inline_form_and_falls_through_to_the_wrapper() {
+        let mut module = test_module();
+        let mut ctx = module.make_context();
+        let mut sig = Signature::new(module.isa().default_call_conv());
+        sig.params.push(AbiParam::new(GC));
+        ctx.func.signature = sig;
+        let mut fn_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fn_ctx);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let ctx_val = builder.block_params(entry)[0];
+        let dst = builder.declare_var(GC);
+
+        for sym in [
+            RuntimeSymbol::DequeLen,
+            RuntimeSymbol::DequeGet,
+            RuntimeSymbol::GridGet,
+        ] {
+            let emitted = emit_inline_collection_read(
+                &mut builder,
+                ctx_val,
+                &[ctx_val, ctx_val],
+                sym,
+                dst,
+                &mut module,
+                &mut HashMap::new(),
+            )
+            .expect("emission");
+            assert!(!emitted, "`{sym}` must keep its call");
+        }
     }
 
     // -----------------------------------------------------------------------

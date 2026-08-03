@@ -1,16 +1,21 @@
 //! `BitSet` (M8-WS5, §6.1).
 //!
-//! A compact set of non-negative integers, backed by a `Vec<u64>` of words.
-//! Occupancy is bit `i` of word `i / 64`. Nullary in user syntax (`BitSet`, no
-//! type arg); elements are always `Int`. Iterable (yields `Int`).
+//! A compact set of non-negative integers, backed by a [`ReprCVec<u64>`] of
+//! words. Occupancy is bit `i` of word `i / 64`. Nullary in user syntax
+//! (`BitSet`, no type arg); elements are always `Int`. Iterable (yields `Int`).
 //!
-//! `BitSet` is its own GC payload: the words are a `Drop` `Vec`, so the
+//! `BitSet` is its own GC payload: the words are a `Drop` vector, so the
 //! descriptor's `drop_value` releases them on sweep. Equality/hash are
 //! structural (two bitsets are equal iff they hold the same bits).
+//!
+//! The container is a [`ReprCVec`] and not a `std::Vec` because generated code
+//! reads its two leading words inline for `bs.contains(x)` (ADR-118 part 2);
+//! [`INLINE_BITSET_SITE`] is the one value that says where they are.
 
 use std::fmt;
 
 use crate::descriptor::{BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
+use crate::repr_c_vec::ReprCVec;
 
 /// A value a `BitSet` can actually hold: non-negative, and small enough that
 /// the word vector backing it stays a real allocation.
@@ -31,6 +36,29 @@ impl BitIndex {
     /// process survives.
     pub const MAX: i64 = u32::MAX as i64;
 
+    /// The most words a `BitSet` can ever hold, which is
+    /// [`MAX`](Self::MAX)`/64 + 1`.
+    ///
+    /// **This bound is what lets generated code omit the range test**
+    /// (ADR-118 part 2). `bs.contains(x)` inline is `word = (x as u64) >> 6;
+    /// if word >= words.len() { false } else { … }`, with no separate check
+    /// that `x` is a member `BitIndex::new` would accept — because for every
+    /// `i64` outside `0..=MAX` the *unsigned* shift already lands at or above
+    /// this number, and the word count never reaches it:
+    ///
+    /// * `x < 0` → `x as u64 >= 2^63` → `word >= 2^57`;
+    /// * `x > MAX` → `x as u64 >= 2^32` → `word >= 2^26 == MAX_WORDS`;
+    /// * and [`BitSetPayload::insert`] resizes to `word + 1` for a `BitIndex`,
+    ///   so `words.len() <= MAX_WORDS` always.
+    ///
+    /// So `word >= words.len()` subsumes the range test, exactly, for every
+    /// value of the type. `the_word_probe_generated_code_emits_answers_contains`
+    /// is that claim checked against `contains` rather than argued, in the
+    /// module that owns the range — `small_int`'s
+    /// `the_unsigned_range_test_generated_code_emits_answers_index_of` in its
+    /// second place.
+    pub const MAX_WORDS: usize = (Self::MAX as usize) / 64 + 1;
+
     /// The bit `value` names, or `None` if it is negative or above
     /// [`MAX`](Self::MAX).
     #[must_use]
@@ -49,12 +77,47 @@ impl BitIndex {
 }
 
 /// The `BitSet` payload: a growable vector of 64-bit words. Bit `i` is in word
-/// `i / 64` at position `i % 64`. Both fields are `Drop`.
+/// `i / 64` at position `i % 64`. The field is `Drop`.
 #[repr(C)]
 pub struct BitSetPayload {
     /// The words. Trailing zero words may be present; equality/hash trim them.
-    pub words: Vec<u64>,
+    ///
+    /// A [`ReprCVec`](crate::ReprCVec) rather than a `std::Vec` for ADR-118's
+    /// reason, now applied to the second payload: generated code reads the
+    /// words pointer and the word count inline for `bs.contains(x)`, and
+    /// `std::Vec` is `#[repr(Rust)]` — its three words live inside a private
+    /// `RawVec` in no guaranteed order. The container holds the same three
+    /// words the `Vec` held and `Vec` still does every allocation.
+    ///
+    /// **W4a migrated `VecPayload` and not this one**, on the reading that
+    /// `praxis_bitset_contains` was "the cleanest" of W4b's three primitives
+    /// (handover 26 §4). It is the cleanest in every other respect — `Pure`, no
+    /// allocation, no fault, no pacing obligation — and it was the one with no
+    /// legal number to read.
+    pub words: ReprCVec<u64>,
 }
+
+// The offsets generated code bakes for `bs.contains(x)` (ADR-118 part 2), in
+// the tree rather than in a sentence. `words` is the only field, so its
+// element pointer is at payload+0 and its length at payload+8.
+const _: () = assert!(std::mem::offset_of!(BitSetPayload, words) == 0);
+// The payload is one container and nothing else, so the block's size class and
+// the pacer's page density are exactly what they were before the migration.
+const _: () = assert!(std::mem::size_of::<BitSetPayload>() == 24);
+const _: () = assert!(std::mem::align_of::<BitSetPayload>() == 8);
+
+/// The one site generated code may read a `BitSet`'s words through (ADR-118
+/// part 2), minted beside the payload for [`INLINE_VEC_SITE`]'s reason.
+///
+/// [`INLINE_VEC_SITE`]: crate::collections::INLINE_VEC_SITE
+#[cfg(not(feature = "std-vec-payload"))]
+pub const INLINE_BITSET_SITE: crate::repr_c_vec::InlineSliceSite =
+    crate::repr_c_vec::InlineSliceSite::new(
+        BuiltinTypeId::BitSet,
+        std::mem::align_of::<BitSetPayload>(),
+        std::mem::offset_of!(BitSetPayload, words),
+        std::mem::size_of::<u64>(),
+    );
 
 impl BitSetPayload {
     /// True iff bit `i` is set.
@@ -68,11 +131,21 @@ impl BitSetPayload {
 
     /// Set bit `i`, growing the words vector as needed. The growth is bounded
     /// by [`BitIndex::MAX`], which is what makes this a real allocation.
+    ///
+    /// **The only thing in the tree that grows `words`**, which is what makes
+    /// [`BitIndex::MAX_WORDS`] a bound rather than a hope — and generated code
+    /// leans on that bound to skip a range test. The assertion says so at the
+    /// one site that could falsify it.
     pub(crate) fn insert(&mut self, i: BitIndex) {
         let (word, bit) = i.word_and_bit();
         if self.words.len() <= word {
             self.words.resize(word + 1, 0);
         }
+        debug_assert!(
+            self.words.len() <= BitIndex::MAX_WORDS,
+            "a BitSet's word count is bounded by BitIndex::MAX, and generated \
+             code reads that bound as licence to skip the range test"
+        );
         self.words[word] |= 1u64 << bit;
     }
 
@@ -215,7 +288,9 @@ mod tests {
     /// boundaries — the order `for i in b` walks and the order it prints.
     #[test]
     fn a_bitsets_members_come_out_ascending() {
-        let mut b = BitSetPayload { words: Vec::new() };
+        let mut b = BitSetPayload {
+            words: ReprCVec::new(),
+        };
         // Deliberately inserted out of order and spanning three words, so a
         // per-word or per-insertion order is a different sequence.
         for i in [130, 5, 64, 0, 63] {
@@ -228,17 +303,23 @@ mod tests {
         unsafe { bitset_format((&b as *const BitSetPayload).cast::<u8>(), &mut rendered) };
         assert_eq!(rendered, "{0, 5, 63, 64, 130}");
         // An empty one yields nothing rather than one member or forever.
-        let empty = BitSetPayload { words: Vec::new() };
+        let empty = BitSetPayload {
+            words: ReprCVec::new(),
+        };
         assert_eq!(empty.members().count(), 0);
         // …and so does one whose words are present but all zero, which is the
         // shape `remove` leaves behind.
-        let cleared = BitSetPayload { words: vec![0, 0] };
+        let cleared = BitSetPayload {
+            words: ReprCVec::from_vec(vec![0, 0]),
+        };
         assert_eq!(cleared.members().count(), 0);
     }
 
     #[test]
     fn bitset_insert_contains_count() {
-        let mut b = BitSetPayload { words: Vec::new() };
+        let mut b = BitSetPayload {
+            words: ReprCVec::new(),
+        };
         b.insert(bit(0));
         b.insert(bit(63));
         b.insert(bit(64));
@@ -254,13 +335,89 @@ mod tests {
 
     #[test]
     fn bitset_remove_clears_bit() {
-        let mut b = BitSetPayload { words: Vec::new() };
+        let mut b = BitSetPayload {
+            words: ReprCVec::new(),
+        };
         b.insert(bit(5));
         assert!(b.contains(bit(5)));
         b.remove(bit(5));
         assert!(!b.contains(bit(5)));
         // Removing an unset bit is a no-op.
         b.remove(bit(999));
+    }
+
+    /// **ADR-118 part 2's load-bearing arithmetic**, checked against
+    /// [`BitSetPayload::contains`] rather than argued.
+    ///
+    /// This is the sequence the backend emits, transcribed: an unsigned shift,
+    /// a compare against the word count, a shift and a mask — and **no range
+    /// test**, because [`BitIndex::MAX_WORDS`] makes the compare subsume it.
+    /// The claim is exact for every `i64`, which is precisely why it is the
+    /// kind of thing that gets believed rather than checked: the interesting
+    /// values are the ones no program produces on purpose.
+    ///
+    /// `small_int`'s `the_unsigned_range_test_generated_code_emits_answers_index_of`
+    /// is the same test for ADR-113's range identity, and this is written to
+    /// its shape: both extremes of the type, every boundary, and a dense sweep.
+    #[test]
+    fn the_word_probe_generated_code_emits_answers_contains() {
+        /// Exactly what the emitted fast path computes, in the same order.
+        fn probe(words: &[u64], member: i64) -> bool {
+            let word = (member as u64) >> 6;
+            if word >= words.len() as u64 {
+                return false;
+            }
+            let w = words[word as usize];
+            (w >> ((member as u64) & 63)) & 1 == 1
+        }
+
+        let mut b = BitSetPayload {
+            words: ReprCVec::new(),
+        };
+        for i in [0, 1, 63, 64, 65, 127, 128, 1000, 4095, 4096] {
+            b.insert(bit(i));
+        }
+
+        // The extremes and the boundaries, where the two forms could disagree
+        // and where no program would look.
+        let corners = [
+            i64::MIN,
+            i64::MIN + 1,
+            -4096,
+            -65,
+            -64,
+            -1,
+            0,
+            1,
+            63,
+            64,
+            BitIndex::MAX - 1,
+            BitIndex::MAX,
+            BitIndex::MAX + 1,
+            i64::MAX - 1,
+            i64::MAX,
+        ];
+        for member in corners {
+            let expected = BitIndex::new(member).is_some_and(|i| b.contains(i));
+            assert_eq!(
+                probe(&b.words, member),
+                expected,
+                "the word probe and `contains` disagree at {member}"
+            );
+        }
+        // …and densely across the populated range plus a margin on both sides.
+        for member in -64_i64..4200 {
+            let expected = BitIndex::new(member).is_some_and(|i| b.contains(i));
+            assert_eq!(probe(&b.words, member), expected, "at {member}");
+        }
+
+        // The bound the omitted range test rests on, stated as a number: a
+        // word count can never reach the index a non-member shifts down to.
+        assert_eq!(BitIndex::MAX_WORDS, 1 << 26);
+        assert!((BitIndex::MAX as u64) >> 6 < BitIndex::MAX_WORDS as u64);
+        assert!(((BitIndex::MAX + 1) as u64) >> 6 >= BitIndex::MAX_WORDS as u64);
+        assert!((-1_i64 as u64) >> 6 >= BitIndex::MAX_WORDS as u64);
+        assert!((i64::MIN as u64) >> 6 >= BitIndex::MAX_WORDS as u64);
     }
 
     /// RT-07. A member the set cannot hold has no `BitIndex`, so there is no

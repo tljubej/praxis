@@ -105,13 +105,125 @@ mod layout {
     use crate::GcRef;
     use std::mem::offset_of;
 
-    // The field order W4b will bake into generated code. Changing any of these
-    // three numbers is an ABI change even though no ABI constant names them
-    // yet, because the moment the backend emits a load at a displacement, the
-    // displacement is the contract.
+    // The field order W4b bakes into generated code. Changing any of these
+    // three numbers is an ABI change even though no ABI constant names them,
+    // because the moment the backend emits a load at a displacement, the
+    // displacement is the contract (ABI v20, ADR-118 part 2).
     const _: () = assert!(offset_of!(ReprCVec<GcRef>, ptr) == 0);
     const _: () = assert!(offset_of!(ReprCVec<GcRef>, len) == 8);
     const _: () = assert!(offset_of!(ReprCVec<GcRef>, cap) == 16);
+
+    // …and the same three for `u64`, which is `BitSetPayload.words`. The two
+    // instantiations are asserted separately rather than argued to be equal:
+    // the fields are all pointer-width whatever `T` is, so the equality is
+    // obvious and therefore exactly the kind of thing that goes unchecked until
+    // a `PhantomData` moves. These two are the only instantiations generated
+    // code reads, and a third one wants its own pair of lines here.
+    const _: () = assert!(offset_of!(ReprCVec<u64>, ptr) == 0);
+    const _: () = assert!(offset_of!(ReprCVec<u64>, len) == 8);
+    const _: () = assert!(offset_of!(ReprCVec<u64>, cap) == 16);
+}
+
+/// The displacement of the element pointer within a [`ReprCVec`], for the two
+/// payloads generated code reads (`VecPayload.items`, `BitSetPayload.words`).
+///
+/// **This constant does not exist under `std-vec-payload`, and that is the
+/// point.** ADR-118 part 1's measurement arm replaces the pinned triple with a
+/// `std::Vec`, whose word order is precisely what nothing may assume — so a
+/// backend that emitted a load at this displacement against that arm would read
+/// a capacity where it wanted a length. Naming these two constants
+/// unconditionally in `praxis-codegen-cranelift` makes the combination a
+/// **build failure** rather than a miscompile, which retires part 1's toggle
+/// now that its measurement has been taken and recorded.
+#[cfg(not(feature = "std-vec-payload"))]
+pub const REPR_C_VEC_ELEMENTS_OFFSET: usize = std::mem::offset_of!(ReprCVec<crate::GcRef>, ptr);
+
+/// The displacement of the length word within a [`ReprCVec`]. See
+/// [`REPR_C_VEC_ELEMENTS_OFFSET`].
+#[cfg(not(feature = "std-vec-payload"))]
+pub const REPR_C_VEC_LEN_OFFSET: usize = std::mem::offset_of!(ReprCVec<crate::GcRef>, len);
+
+/// Everything generated code needs to walk one collection payload's pinned
+/// [`ReprCVec`] inline, as **one value with private fields** (ADR-118 part 2).
+///
+/// This is [`InlineInternSite`](crate::InlineInternSite)'s shape and it is here
+/// for the same reason. The sequence needs a descriptor to prove and three
+/// displacements, and handed over as loose constants they are four independent
+/// chances to pair one payload's offsets with another's descriptor — which is
+/// not a hypothetical: `VecPayload` and `GridPayload` are both a `Vec<GcRef>`
+/// behind a leading word, at *different* displacements, and a `Grid` proved as
+/// a `Vec` would read its width as an element pointer. So they are one value,
+/// its fields are private, its constructor is `pub(crate)`, and each instance is
+/// minted in the module that owns the payload whose layout it describes.
+///
+/// The backend cannot assemble one; it can only name one this crate wrote.
+///
+/// **The displacements are from the object's base**, not from its payload:
+/// generated code holds a `GcRef` and the header size is `GcHeader`'s business
+/// (ADR-039 decision 1), so the addition happens once, here, rather than at
+/// three emit sites.
+#[cfg(not(feature = "std-vec-payload"))]
+#[derive(Clone, Copy, Debug)]
+pub struct InlineSliceSite {
+    type_id: crate::descriptor::BuiltinTypeId,
+    elements_offset: usize,
+    len_offset: usize,
+    element_shift: u8,
+}
+
+#[cfg(not(feature = "std-vec-payload"))]
+impl InlineSliceSite {
+    /// The site for a payload of alignment `payload_align` whose `ReprCVec`
+    /// field begins at `field_offset` within it and holds elements of
+    /// `element_size` bytes, in objects whose descriptor is `type_id`'s.
+    ///
+    /// # Panics
+    /// At compile time (every call is a `const` initializer) if `element_size`
+    /// is not a power of two — the emitted index arithmetic is a shift.
+    pub(crate) const fn new(
+        type_id: crate::descriptor::BuiltinTypeId,
+        payload_align: usize,
+        field_offset: usize,
+        element_size: usize,
+    ) -> InlineSliceSite {
+        assert!(
+            element_size.is_power_of_two(),
+            "the element scale must be a shift"
+        );
+        let base = crate::GcHeader::payload_offset_for(payload_align) + field_offset;
+        InlineSliceSite {
+            type_id,
+            elements_offset: base + REPR_C_VEC_ELEMENTS_OFFSET,
+            len_offset: base + REPR_C_VEC_LEN_OFFSET,
+            element_shift: element_size.trailing_zeros() as u8,
+        }
+    }
+
+    /// The built-in whose descriptor an object must carry before any of the
+    /// displacements below may be read. The proof is ADR-102's, and it is what
+    /// makes the folded offsets the offsets the allocator actually used.
+    #[must_use]
+    pub const fn type_id(self) -> crate::descriptor::BuiltinTypeId {
+        self.type_id
+    }
+
+    /// Object base → the element buffer pointer.
+    #[must_use]
+    pub const fn elements_offset(self) -> usize {
+        self.elements_offset
+    }
+
+    /// Object base → the element count.
+    #[must_use]
+    pub const fn len_offset(self) -> usize {
+        self.len_offset
+    }
+
+    /// `log2(element_size)`: the shift that turns an index into a byte offset.
+    #[must_use]
+    pub const fn element_shift(self) -> u8 {
+        self.element_shift
+    }
 }
 
 // ===========================================================================
@@ -419,6 +531,12 @@ impl<T: Clone> ReprCVec<T> {
     #[inline]
     pub fn extend_from_slice(&mut self, other: &[T]) {
         self.vec_mut().extend_from_slice(other);
+    }
+
+    /// Grow or shrink to `len` elements, filling new slots with `value`.
+    #[inline]
+    pub fn resize(&mut self, len: usize, value: T) {
+        self.vec_mut().resize(len, value);
     }
 }
 

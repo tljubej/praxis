@@ -15,13 +15,24 @@ description = "GC ABI types, type descriptors, and runtime context for Praxis"
 #
 # Nothing in the workspace enables either, and `just ci` builds neither.
 [features]
-# ADR-118 arm A. Off (the default) `ReprCVec` is the pinned `#[repr(C)]` triple
-# W4b will read from generated code; on, it is a `#[repr(transparent)]` newtype
-# over `std::Vec` with every caller byte-for-byte identical.
+# ADR-118 part 1 arm A. Off (the default) `ReprCVec` is the pinned `#[repr(C)]`
+# triple generated code reads; on, it is a `#[repr(transparent)]` newtype over
+# `std::Vec` with every caller byte-for-byte identical.
 #
-#     cargo build --release -p praxis-cli                                # arm B
-#     cargo build --release -p praxis-cli \
-#         --features praxis-runtime/std-vec-payload                      # arm A
+# **Retired by ADR-118 part 2, and deliberately in the loud direction.** Part 2
+# emits loads at those displacements, so this arm is no longer a slower build of
+# the same program — it is a miscompile, reading a `std::Vec`'s capacity where
+# the length is wanted. `INLINE_VEC_SITE` and `INLINE_BITSET_SITE` therefore do
+# not exist under the feature, and naming them unconditionally in
+# `praxis-codegen-cranelift` turns the combination into a build failure:
+#
+#     cargo check -p praxis-cli --features praxis-runtime/std-vec-payload
+#     error[E0425]: cannot find value `INLINE_BITSET_SITE` …
+#
+# `cargo test -p praxis-runtime --features std-vec-payload` still passes: the
+# crate on its own is unaffected, and part 1's measurement (a null result, in
+# its own record) was taken before part 2 landed. What is gone is the *whole
+# workspace* built that way.
 std-vec-payload = []
 # ADR-115 arm A. **It makes the runtime slower on purpose**: the `Text` scalar
 # count is never remembered and `t[i]` never indexes bytes, which is the
