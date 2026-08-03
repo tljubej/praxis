@@ -1150,7 +1150,7 @@ pub unsafe extern "C" fn praxis_alloc_text(
                 std::mem::align_of::<crate::text::TextPayload>(),
                 |payload| {
                     (payload as *mut crate::text::TextPayload)
-                        .write(crate::text::TextPayload::Owned(owned));
+                        .write(crate::text::TextPayload::owned(owned));
                 },
             )
         }
@@ -1533,7 +1533,7 @@ pub unsafe extern "C" fn praxis_float_to_text(ctx: *mut RuntimeContext, r: GcRef
                 |payload| {
                     let owned: Box<str> = s.clone().into_boxed_str();
                     (payload as *mut crate::text::TextPayload)
-                        .write(crate::text::TextPayload::Owned(owned));
+                        .write(crate::text::TextPayload::owned(owned));
                 },
             )
         }
@@ -5150,7 +5150,24 @@ unsafe fn text_str(r: GcRef) -> &'static str {
     unsafe { crate::text::text_str(payload) }
 }
 
+/// The `Text` payload behind a `GcRef`.
+///
+/// # Safety
+/// `r` must be a valid `Text` `GcRef`. Non-moving GC keeps it stable.
+#[inline]
+unsafe fn text_payload(r: GcRef) -> *const crate::text::TextPayload {
+    r.payload::<crate::text::TextPayload>() as *const crate::text::TextPayload
+}
+
 /// The number of Unicode scalar values (chars) in `text`, as a boxed `Int`.
+///
+/// **O(1) after the text or its owner has been counted once** (ADR-115). This
+/// used to be `text_str(text).chars().count()`, which was two passes over every
+/// byte — `text_str` re-validates the UTF-8 the payload is already known to
+/// hold, and `chars().count()` then decodes it — and it is called *once per
+/// iteration* of `for c in t`, because `lower_for` puts the plan's `len` call in
+/// the loop **header** (`praxis-mir/src/build.rs`, `lower_for`). That is the
+/// half of handover 25's F-8 that F-8 did not name.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `text` must be a valid `Text` `GcRef`.
@@ -5158,13 +5175,16 @@ unsafe fn text_str(r: GcRef) -> &'static str {
 pub unsafe extern "C" fn praxis_text_len(ctx: *mut RuntimeContext, text: GcRef) -> GcRef {
     abi_guard!("praxis_text_len", ctx, {
         // SAFETY: caller guarantees `text` is Text.
-        let s = unsafe { text_str(text) };
-        let len = s.chars().count() as i64;
+        let len = unsafe { crate::text::text_char_count(text_payload(text)) } as i64;
         unsafe { int_ref(ctx, len) }
     })
 }
 
 /// True iff `text` has no chars, as a boxed `Bool`.
+///
+/// Asks the bytes rather than a `&str`: `text_str` validates the whole payload
+/// to hand back a `&str`, which made an O(1) question O(n) (ADR-115). A text is
+/// empty iff it has no bytes — no scalar encodes to zero of them.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `text` must be a valid `Text` `GcRef`.
@@ -5172,9 +5192,9 @@ pub unsafe extern "C" fn praxis_text_len(ctx: *mut RuntimeContext, text: GcRef) 
 pub unsafe extern "C" fn praxis_text_is_empty(ctx: *mut RuntimeContext, text: GcRef) -> GcRef {
     abi_guard!("praxis_text_is_empty", ctx, {
         // SAFETY: caller guarantees `text` is Text.
-        let s = unsafe { text_str(text) };
+        let empty = unsafe { crate::text::text_bytes(text_payload(text)) }.is_empty();
         // SAFETY: ctx/heap valid; Bool immortal path.
-        unsafe { bool_ref(ctx, s.is_empty()) }
+        unsafe { bool_ref(ctx, empty) }
     })
 }
 
@@ -5213,7 +5233,7 @@ pub unsafe extern "C" fn praxis_text_concat(ctx: *mut RuntimeContext, a: GcRef, 
                 |payload| {
                     let owned: Box<str> = joined.clone().into_boxed_str();
                     (payload as *mut crate::text::TextPayload)
-                        .write(crate::text::TextPayload::Owned(owned));
+                        .write(crate::text::TextPayload::owned(owned));
                 },
             )
         }
@@ -5234,13 +5254,34 @@ pub unsafe extern "C" fn praxis_text_get(
 ) -> GcRef {
     abi_guard!("praxis_text_get", ctx, {
         // SAFETY: caller guarantees `text` is Text.
-        let s = unsafe { text_str(text) };
+        let payload = unsafe { text_payload(text) };
         // SAFETY: caller guarantees `index` is a valid Int.
         let idx = unsafe { int_payload(index) };
         if idx < 0 {
             unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
             return unsafe { unit_sentinel(ctx) };
         }
+        // **The byte index is the character index exactly when every scalar is
+        // one byte, and `text_ascii_bytes` answers that in O(1)** (ADR-115).
+        // The fallback is the old `chars().nth(i)` and it is still O(i), which
+        // is the honest position: a multi-byte text has no random access
+        // without either a wider representation or a cursor, and ADR-115
+        // declines the cursor with its arithmetic. `idx` is non-negative above,
+        // so the `as usize` cannot wrap.
+        // SAFETY: caller guarantees `text` is Text.
+        if let Some(bytes) = unsafe { crate::text::text_ascii_bytes(payload) } {
+            return match bytes.get(idx as usize) {
+                // One-byte scalars are exactly the ASCII range, so the byte
+                // *is* the code point (§4.3, ADR-086).
+                Some(&b) => unsafe { char_ref(ctx, u32::from(b)) },
+                None => {
+                    unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
+                    unsafe { unit_sentinel(ctx) }
+                }
+            };
+        }
+        // SAFETY: caller guarantees `text` is Text.
+        let s = unsafe { text_str(text) };
         match s.chars().nth(idx as usize) {
             Some(ch) => {
                 // No validity check, and none belongs here: `ch` is a Rust `char`,
@@ -7690,6 +7731,84 @@ mod tests {
             let got = praxis_text_get(ctx, utext, one);
             assert!(!rt.has_pending_fault());
             assert_eq!(got.as_char(), 'é');
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-115 at the ABI, on the shape that decides it.** `t.len()` and
+    /// `t[i]` are defined on scalars (§4.3, ADR-086); indexing bytes is an
+    /// optimization licensed by the count, and the licence must be refused on
+    /// every text where it would be wrong.
+    ///
+    /// The cases are chosen to break a byte-indexing implementation that only
+    /// looked at the text's own leading byte or only at its first scalar: a
+    /// multi-byte scalar at the start, in the middle, at the end, a four-byte
+    /// one, and a slice whose own bytes are all one-byte but whose owner's are
+    /// not.
+    #[test]
+    fn a_text_reads_by_scalar_wherever_the_multi_byte_scalar_sits() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired for every call in this block.
+        unsafe {
+            for src in [
+                "",
+                "abc",
+                "\u{0}\u{7f}",
+                "éabc",
+                "abéc",
+                "abcé",
+                "a\u{1F600}b",
+                "\u{20AC}\u{20AC}",
+                "héllo wörld",
+            ] {
+                let text = praxis_alloc_text(ctx, src.as_ptr(), src.len());
+                let expected: Vec<char> = src.chars().collect();
+
+                let len = praxis_text_len(ctx, text);
+                assert!(!rt.has_pending_fault(), "{src:?}");
+                assert_eq!(len.as_int(), expected.len() as i64, "{src:?}");
+
+                let empty = praxis_text_is_empty(ctx, text);
+                assert_eq!(empty.as_bool(), expected.is_empty(), "{src:?}");
+
+                for (i, want) in expected.iter().enumerate() {
+                    let idx = praxis_alloc_int(ctx, i as i64);
+                    let got = praxis_text_get(ctx, text, idx);
+                    assert!(!rt.has_pending_fault(), "{src:?}[{i}]");
+                    assert!(
+                        std::ptr::eq(got.descriptor(), &crate::scalars::CHAR),
+                        "{src:?}[{i}] answers a Char (ADR-086)"
+                    );
+                    assert_eq!(got.as_char(), *want, "{src:?}[{i}]");
+                }
+
+                // One past the end faults, whichever path answered above.
+                let past = praxis_alloc_int(ctx, expected.len() as i64);
+                let _ = praxis_text_get(ctx, text, past);
+                assert!(rt.has_pending_fault(), "{src:?}[{}]", expected.len());
+                assert_eq!(rt.fault(), FaultKind::IndexOutOfBounds);
+                let _ = rt.take_fault();
+            }
+
+            // A view whose own bytes are all one-byte, inside an owner whose
+            // are not. The answers are the same as the owner's corresponding
+            // scalars; the byte-index path is refused because the licence is
+            // the owner's to give.
+            let owner_src = "héllo wörld";
+            let owner = praxis_alloc_text(ctx, owner_src.as_ptr(), owner_src.len());
+            // "llo " — bytes [3, 7) of the owner, all below 0x80.
+            let view = rt
+                .alloc_text_slice(owner, 3, 4)
+                .expect("[3, 7) is on scalar boundaries");
+            let len = praxis_text_len(ctx, view);
+            assert_eq!(len.as_int(), 4);
+            for (i, want) in "llo ".chars().enumerate() {
+                let idx = praxis_alloc_int(ctx, i as i64);
+                let got = praxis_text_get(ctx, view, idx);
+                assert!(!rt.has_pending_fault());
+                assert_eq!(got.as_char(), want);
+            }
         }
         unsafe { drop_ctx(ctx) };
     }

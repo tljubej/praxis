@@ -305,7 +305,7 @@ impl Rt {
     /// while allocating slices against the *input*, so a `Text` fill cell named
     /// input bytes chosen by the fill's length (IPR-03).
     fn alloc_text_owned(&self, s: &str) -> GcRef {
-        let payload = TextPayload::Owned(s.into());
+        let payload = TextPayload::owned(s);
         // SAFETY: ctx is valid; payload matches TEXT's layout.
         let (heap, safepoint) = self.safepoint();
         // SAFETY: payload matches TEXT's layout.

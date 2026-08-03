@@ -23,7 +23,7 @@
 //! **Why not `Float` or `Text`.** `Float` fails the reflexivity argument that
 //! carries `DynamicKey`'s fast path — `float_equals` is IEEE, so NaN ≠ NaN — and
 //! interning it would make two separately-written NaN literals compare equal as
-//! map keys. `Text` fails a different test: `TextPayload::Owned(Box<str>)` is
+//! map keys. `Text` fails a different test: `TextPayload::Owned(OwnedText)` is
 //! not `Copy`, and [`Heap::alloc_immortal`](crate::Heap) requires `Copy`
 //! *because* an immortal is invisible to `Heap`'s `Drop` — an immortal `Text`
 //! would leak its `Box<str>` at teardown (RT-02).

@@ -6,6 +6,16 @@ license.workspace = true
 repository.workspace = true
 description = "GC ABI types, type descriptors, and runtime context for Praxis"
 
+[features]
+# **Measurement only, and it makes the runtime slower on purpose.** ADR-115's
+# A/B arm A: the `Text` scalar count is never remembered and `t[i]` never
+# indexes bytes, which is the complexity the tree had before ADR-115 with the
+# representation otherwise identical. Handover 26 §6 requires the baseline arm
+# to be this branch with the package's single toggle reverted rather than an
+# earlier commit; this is that toggle, and it lives here so both arms are
+# buildable from the committed tree. Nothing in the workspace enables it.
+adr115-arm-a = []
+
 [dependencies]
 praxis-source.workspace = true
 praxis-input-parser.workspace = true

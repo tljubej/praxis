@@ -8484,6 +8484,58 @@ fn a_for_over_a_text_yields_its_characters() {
     );
 }
 
+/// **ADR-115 end to end, on the `Text` shape the decision exists for.**
+///
+/// The texts a program indexes are mostly not literals — they are the input
+/// parser's captures, which are `SourceSlice` views of the stdin buffer. The
+/// scalar count lives on the owned payload, so a view answers `len()` and `[i]`
+/// through its owner, and this is the test that the two representations give
+/// one answer. Nothing here can distinguish O(1) from O(n) by timing; what it
+/// pins is that the fast path is taken where it is right and refused where it
+/// is not.
+#[test]
+fn a_parsed_text_reads_the_same_as_the_literal_it_came_from() {
+    // ASCII input: every capture is a view of a one-byte-per-scalar owner, so
+    // every `len()` and `[i]` takes the byte-index path.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let ws = read lines(word)\n  var n = 0\n  \
+         var i = 0\n  while i < ws.len() {\n    let w = ws[i]\n    \
+         for c in w { n = n + c.to_int() }\n    n = n + w.len()\n    i = i + 1\n  }\n  n\n}\n",
+        "ab\ncde\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    let expect: i64 = "abcde".chars().map(|c| c as i64).sum::<i64>() + 2 + 3;
+    assert_eq!(result.as_int(), expect, "five characters and two lengths");
+
+    // The same program over input with a multi-byte scalar in it. The captures
+    // "wörld" and "abc" are views of an owner that is *not* one byte per
+    // scalar — including "abc", whose own bytes are — so both must fall back to
+    // decoding and both must still answer in scalars. A view that inherited the
+    // byte-index path from its own bytes would answer 6 for "wörld".
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let ws = read lines(word)\n  var n = 0\n  \
+         var i = 0\n  while i < ws.len() {\n    n = n * 10 + ws[i].len()\n    i = i + 1\n  }\n  n\n}\n",
+        "wörld\nabc\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        53,
+        "five scalars then three, not six then three"
+    );
+
+    // And the characters themselves, walked out of a view whose owner has a
+    // multi-byte scalar *before* the view starts — the case where a byte index
+    // is not merely wide but misaligned.
+    let (rt, result) = run_main_with_input(
+        "fn main() -> Int {\n  let ws = read lines(word)\n  var n = 0\n  \
+         for c in ws[1] { n = n + c.to_int() }\n  n\n}\n",
+        "ö\nxyz\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 120 + 121 + 122, "x, y, z");
+}
+
 // ===========================================================================
 // §3.5 — an interned `Int` literal is two loads, not a call and an allocation
 // (docs/handovers/21-where-the-time-goes.md; `praxis_runtime::small_int`).
