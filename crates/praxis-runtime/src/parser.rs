@@ -839,9 +839,9 @@ fn walk_lines(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
+    // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
+    // scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
@@ -888,9 +888,9 @@ fn walk_sections(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
+    // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
+    // scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
@@ -937,9 +937,9 @@ fn walk_sections_named(
     }
     // Each section is a narrowing of the input, so the child's offsets are the
     // input's own offsets and a source-slice `Text` is right by construction.
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
+    // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
+    // scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut captures: Vec<(Option<&'static str>, u32, GcRef)> = Vec::new();
@@ -995,9 +995,9 @@ fn walk_block(
     items: &'static [praxis_input_parser::BlockItemNode],
     region: ByteRegion,
 ) -> WalkResult {
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
+    // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
+    // scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut cursor = region.start();
@@ -1197,9 +1197,9 @@ fn walk_choice(
     cases: &'static [(&'static str, u32)],
     region: ByteRegion,
 ) -> WalkResult {
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
+    // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
+    // scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut deepest: Option<ParseFail> = None;
@@ -1252,9 +1252,9 @@ fn walk_optional(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
+    // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
+    // scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     // SAFETY: ctx is valid.
@@ -1292,9 +1292,9 @@ fn walk_scan(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
+    // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
+    // scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
@@ -1375,9 +1375,9 @@ fn walk_characters(
     skip: praxis_input_parser::SkipPolicy,
     region: ByteRegion,
 ) -> WalkResult {
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
+    // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
+    // scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
@@ -1491,9 +1491,9 @@ fn walk_matrix(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
+    // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
+    // scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let lines = split_lines(i, region);
@@ -1557,9 +1557,9 @@ fn walk_grid_ragged(
     fill: &str,
     region: ByteRegion,
 ) -> WalkResult {
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
+    // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
+    // scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let lines = split_lines(i, region);
@@ -1660,9 +1660,9 @@ fn walk_csv(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
+    // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
+    // scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let text = region_str(i, region, "csv")?;
@@ -1702,9 +1702,9 @@ fn walk_ws(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
+    // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
+    // scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let text = region_str(i, region, "whitespace-separated tokens")?;
@@ -1745,9 +1745,9 @@ fn walk_sep(
     if sep_bytes.is_empty() {
         return Err(ParseFail::at(base.offset(), 0, "a non-empty separator"));
     }
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
+    // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
+    // scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
@@ -1788,9 +1788,9 @@ fn walk_grid(
     child: u32,
     region: ByteRegion,
 ) -> WalkResult {
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
+    // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
+    // scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let lines = split_lines(i, region);
@@ -1966,9 +1966,9 @@ fn walk_template(
     parts: &[praxis_input_parser::TemplatePartNode],
     region: ByteRegion,
 ) -> WalkResult {
-    // Every `GcRef` this helper holds is rooted here. A `NativeScope` links
-    // itself into `ctx.native_roots`, and `RuntimeRoots` walks the whole chain,
-    // so a scope opened deeper covers everything its callers hold too (IPR-14).
+    // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
+    // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
+    // scope opened deeper covers everything its callers hold too (IPR-14).
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let base = region.start();

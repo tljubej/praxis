@@ -78,7 +78,9 @@ pub use input::{clear_input_reader, install_input_reader, InputReader};
 pub use parse_detail::{ParseDetail, ParseFail};
 pub use records::{RecordField, RecordPayload, RecordSchema, SchemaIdentity};
 pub use repr::{instance_repr, InstanceArg, InstanceRepr};
-pub use roots::{NativeRootFrame, NativeScope, RootScope, RootSet, Rooted, RuntimeRoots};
+pub use roots::{
+    NativeRootStore, NativeScope, RootScope, RootSet, Rooted, RuntimeRoots, NATIVE_ROOT_RESERVATION,
+};
 pub use shadow_stack::{
     push_frame, ShadowFrameGuard, ShadowStack, ShadowStackHeader, SlotCount, SlotStack,
     SlotStackHeader, MAX_SHADOW_SLOTS, SHADOW_STACK_SLOTS,

@@ -224,6 +224,23 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// program compiled against this version run against a runtime whose `Heap` put
 /// `pages` or `live_count` at those displacements would compare two pointers and
 /// decide from them whether the collector had been offered a turn.
+///
+/// v19 (ADR-114): `RuntimeContext.native_roots` stops being the head of a chain
+/// of per-scope `Box<NativeRootFrame>`s and becomes a pointer to the runtime's
+/// one [`NativeRootStore`](crate::roots::NativeRootStore) — same position, same
+/// width, a different thing entirely pointed at. **That is the shape v15
+/// (`roots` → `shadow`) and v18 (`debug_top` → `debug_frames`) each bumped for,
+/// and this one deliberately does not**, because those two fields are read and
+/// bump-allocated by every generated prologue and this one has no reader outside
+/// `praxis-runtime` at all: its writers are `Runtime::context` and
+/// `NativeScope`, its only reader is `RuntimeRoots::from_context`, and none of
+/// the `offset_of!`s in `crates/praxis-codegen-cranelift/src/lower.rs` names it.
+/// The struct's size and every generated-code-read displacement are unchanged,
+/// so the v9 struct-size rule that put `native_roots` in this list in the first
+/// place does not fire either. What a host that hand-built a v18 context and
+/// handed it to this runtime would suffer is exactly what it suffered before —
+/// [`RuntimeContext::placeholder`](crate::RuntimeContext::placeholder) is the
+/// only public constructor, and it writes a null here.
 pub const RUNTIME_ABI_VERSION: u32 = 19;
 
 /// Assert that the compiler's expected ABI version matches this build's.
@@ -637,7 +654,7 @@ unsafe fn heap<'a>(ctx: *mut RuntimeContext) -> &'a Heap {
 ///
 /// The roots are every arm of [`RuntimeRoots`](crate::roots::RuntimeRoots) —
 /// the shadow stack, the ambient input buffer, a parse failure's partial value,
-/// a runtime-owned crash snapshot, and the native root frames. This used to
+/// a runtime-owned crash snapshot, and the native root store. This used to
 /// read `ctx.roots` alone **and return early when it was null**, which meant
 /// nothing was collected at all during host-driven allocation or anywhere in
 /// the parser interpreter, and that the other four owners were invisible to
@@ -3202,7 +3219,7 @@ pub unsafe extern "C" fn praxis_vec_frequencies(ctx: *mut RuntimeContext, vec: G
         for (key, count) in counts {
             // Allocate first, then take the payload borrow — the boxed `Int`
             // allocation can collect, and the counter has to be reachable
-            // through the native root frame rather than through a `&mut` this
+            // through the native root store rather than through a `&mut` this
             // frame is holding across it.
             let boxed = unsafe { int_ref(ctx, count) };
             unsafe { counter_payload_mut(rooted) }

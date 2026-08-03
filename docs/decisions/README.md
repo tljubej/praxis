@@ -146,7 +146,7 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-111: A `Text` literal's bytes are the compiler's promise, and the input's are the host's](./111-a-text-literals-bytes-are-the-compilers-promise.md)
 - [ADR-112: The pacer has a ceiling, and only the live set may exceed it](./112-the-pacer-has-a-ceiling-and-the-live-set-may-exceed-it.md)
 - [ADR-113: An `Int` box is a table read behind a pacing branch, and the token is permission to collect](./113-an-int-box-is-a-table-read-behind-a-pacing-branch.md)
-- [ADR-114: *owed* — W1, the native root stack](./114-slug.md)
+- [ADR-114: The native roots are one store, and it grows because only their depth is bounded](./114-the-native-roots-are-one-store-and-only-their-depth-is-bounded.md)
 - [ADR-115: *owed* — W2, `Text` length and indexing in O(1)](./115-slug.md)
 - [ADR-116: *owed* — W6, built-in descriptor addresses in `RuntimeContext`](./116-slug.md)
 - [ADR-117: *owed* — W7, folding `CheckFault` into the inline raise](./117-slug.md)

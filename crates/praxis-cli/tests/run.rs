@@ -249,6 +249,28 @@ fn a_second_read_sees_the_same_buffer() {
     assert_passes_with_stdin("reads_lines_of_int.px", "1\n2\n3\n", "3\n3");
 }
 
+/// **ADR-114.** A parse whose input forces the native root store past its
+/// reservation still answers, end to end.
+///
+/// `parser::walk_lines` opens **one** `NativeScope` for the whole `lines(…)`
+/// walk and roots one reference per input line, so the store's high-water mark
+/// is the input's line count — 200,001 for a 200,000-line file, measured. That
+/// is what makes the store a growable one rather than a second ADR-101, and the
+/// growth is where a pointer-shaped watermark would have died: the array moves,
+/// and every scope that saved its position before the move publishes a stale
+/// address on the way out.
+///
+/// The unit tests in `praxis-runtime::roots` pin the mechanism at every corner.
+/// This one exists because they force the growth *synthetically*, and this is
+/// the shape a real program reaches it through: 4096 lines is four doublings
+/// past `NATIVE_ROOT_RESERVATION`, through the interpreter, with the collector
+/// pacing underneath.
+#[test]
+fn a_parse_that_outgrows_the_native_root_reservation_still_answers() {
+    let lines: String = (0..4096).map(|n| format!("{n}\n")).collect();
+    assert_passes_with_stdin("reads_lines_of_int.px", &lines, "4096\n4096");
+}
+
 /// **REP-60.** A zero-byte `--input` file is *empty input*, not the absence of
 /// input.
 ///

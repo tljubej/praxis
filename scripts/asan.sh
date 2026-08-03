@@ -123,7 +123,14 @@ UNINSTRUMENTED=""
 while IFS= read -r exe; do
     [ -n "$exe" ] || continue
     COUNT=$((COUNT + 1))
-    if ! nm "$exe" 2>/dev/null | grep -q '__asan_'; then
+    # `grep -c`, not `grep -q`, and the reason is `set -o pipefail` above.
+    # `grep -q` exits at the *first* match, which SIGPIPEs `nm` mid-output; the
+    # pipeline then reports 141 and `!` turns that into "not instrumented". So
+    # this check failed on every binary, always — including on a build carrying
+    # 25,435 `__asan_*` symbols — and `just asan` could not pass. The 1911/0
+    # baseline in the header was carried from handover 25 §1, not produced by
+    # this script. `grep -c` reads its input to the end, so nothing is signalled.
+    if [ "$(nm "$exe" 2>/dev/null | grep -c '__asan_' || true)" -eq 0 ]; then
         UNINSTRUMENTED="$UNINSTRUMENTED  $exe"$'\n'
     fi
 done <<EOF

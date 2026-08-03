@@ -634,14 +634,22 @@ pub struct RuntimeContext {
     /// `praxis_snapshot_debug_chain` — it is appended at the end of
     /// `RuntimeContext` for ABI stability.
     pub crash_snapshot: *mut crate::SnapshotSlot,
-    /// The head of the native root-frame chain (P0-07): what the runtime's own
-    /// Rust code holds live across an allocation.
+    /// The runtime's one native root store (P0-07, ADR-114): what the runtime's
+    /// own Rust code holds live across an allocation, in one contiguous array.
     ///
-    /// Pushed and popped by [`crate::roots::NativeScope`], never by generated
+    /// Claimed and released by [`crate::roots::NativeScope`], never by generated
     /// code — which is why it, like `parse_detail` and `crash_snapshot`, is
     /// appended at the end of the struct. It is the fifth arm of
-    /// [`crate::roots::RuntimeRoots`].
-    pub native_roots: *mut crate::roots::NativeRootFrame,
+    /// [`crate::roots::RuntimeRoots`], which scans `[0, len)`.
+    ///
+    /// Through ABI v19 this was the head of a chain of per-scope
+    /// `Box<NativeRootFrame>`s, each with its own `Vec` — same position, same
+    /// width, a different thing entirely pointed at. It does **not** bump the
+    /// version the way `roots` → `shadow` (v15) and `debug_top` →
+    /// `debug_frames` (v18) did, and the difference is which side reads it:
+    /// those two are bump-allocated by every generated prologue, and this one
+    /// has no reader outside `praxis-runtime` at all. See ADR-114.
+    pub native_roots: *mut crate::roots::NativeRootStore,
     /// The cached immortal `true`, alongside [`Self::unit_ref`] (§4.3).
     ///
     /// `praxis_alloc_bool` used to mint a *fresh* immortal on every call, so a
@@ -829,6 +837,17 @@ pub struct Runtime {
     /// the header's address for the whole program and a frame's base pointer
     /// for the duration of a call, so a reallocation would be a use-after-free.
     shadow_stack: ShadowStack,
+    /// The one native root store every [`crate::roots::NativeScope`] claims from
+    /// (ADR-114). Owned here so its address is stable, like `fault` and
+    /// `parse_detail`, and for the same reason: `Runtime::context` hands out a
+    /// raw pointer to it.
+    ///
+    /// Unlike `shadow_stack` this one **grows**, and it can, because the only
+    /// address anything holds is the store's own — never the array's. A scope
+    /// saves a `usize` watermark; the collector re-reads the slice at every
+    /// collection. ADR-114 prices the asymmetry: how deep the scopes nest is
+    /// bounded, how many roots one of them holds is the program's input.
+    native_roots: crate::roots::NativeRootStore,
     /// The crash debugger's two stacks (§9.3, ADR-104), owned and sized here
     /// for the same reason and under the same never-resize rule as
     /// `shadow_stack`. `debug_frames` holds one entry per live call — which
@@ -867,6 +886,10 @@ impl Runtime {
             // exact where it used to be the product of two worst cases that
             // cannot occur together.
             shadow_stack: ShadowStack::new(SHADOW_STACK_SLOTS, std::ptr::null_mut()),
+            // 8 KiB of reservation, one `malloc`, and a growable one — the
+            // asymmetry ADR-114 records: how deep the native scopes nest is
+            // bounded, how many roots one of them holds is not.
+            native_roots: crate::roots::NativeRootStore::new(),
             debug_frames: DebugFrameStack::new(DEBUG_FRAME_STACK_SLOTS, DebugFrameEntry::empty()),
             debug_values: DebugValueStack::new(DEBUG_VALUE_STACK_SLOTS, None),
             stack_budget: StackBudget::DEFAULT,
@@ -904,8 +927,8 @@ impl Runtime {
     }
 
     /// Force a mark-and-sweep collection (§12.1) rooted from everything this
-    /// runtime owns — the shadow chain, the ambient input buffer, a parse
-    /// failure's partial value, the crash snapshot, and any native root frame.
+    /// runtime owns — the shadow stack, the ambient input buffer, a parse
+    /// failure's partial value, the crash snapshot, and the native root store.
     ///
     /// This is the host's collection entry point. It takes no root set: a host
     /// that could name its own would be choosing which of the runtime's owners
@@ -940,11 +963,13 @@ impl Runtime {
     /// `parse_detail` points at this runtime's [`ParseDetail`] slot so the
     /// parser interpreter can record the richest `ParseFailed` detail.
     ///
-    /// Every context this mints shares the three stacks, so a context taken
-    /// while generated code is running (as [`Runtime::collect_now`] does) sees
-    /// the frames already on them. The `roots` field `shadow` replaced started
-    /// null and was filled by the first prologue, so a freshly minted context
-    /// could not see the shadow chain at all; `debug_top` had the same defect.
+    /// Every context this mints shares the three stacks **and the native root
+    /// store**, so a context taken while generated code or a runtime wrapper is
+    /// running (as [`Runtime::collect_now`] does) sees the frames and scopes
+    /// already on them. The `roots` field `shadow` replaced started null and was
+    /// filled by the first prologue, so a freshly minted context could not see
+    /// the shadow chain at all; `debug_top` had the same defect, and so did
+    /// `native_roots` until ADR-114 moved the store here.
     ///
     /// **Two contexts must never execute over these stacks concurrently.** That
     /// is not a new property — `shadow` and `stack_left` have always had it
@@ -970,8 +995,13 @@ impl Runtime {
             stack_left: self.stack_budget.get(),
             parse_detail: &mut self.parse_detail as *mut ParseDetail,
             crash_snapshot: &mut self.crash_snapshot as *mut SnapshotSlot,
-            // No native frame is on the Rust stack when the context is minted.
-            native_roots: std::ptr::null_mut(),
+            // The one store, shared by every context this runtime mints — so a
+            // context taken while native code is running (as `collect_now` does)
+            // sees the scopes already open on it. The `native_roots` this
+            // replaced started null on every fresh context, so it could not:
+            // that is the same defect ADR-101 fixed for `shadow`, arriving one
+            // arm later.
+            native_roots: &mut self.native_roots as *mut crate::roots::NativeRootStore,
             true_ref: self.immortals.true_(),
             false_ref: self.immortals.false_(),
             fault_message: &mut self.fault_message as *mut FaultMessage,
@@ -1067,7 +1097,23 @@ impl Runtime {
             self.debug_frames.len(),
             self.debug_values.len()
         );
+        // The same statement for the fourth region, and a sharper one: a
+        // `NativeScope` is RAII on the *Rust* stack, so between runs there is no
+        // frame that could still be holding a claim. A non-empty store is a
+        // scope that was leaked or `mem::forget`ten, and every root in it is one
+        // the next run's collections would keep alive forever.
+        debug_assert!(
+            self.native_roots.is_empty(),
+            "the native root store holds {} roots between runs; some \
+             `NativeScope` was not dropped",
+            self.native_roots.len()
+        );
         self.shadow_stack.reset();
+        // Length only. The capacity is deliberately kept: a `restart` re-parses
+        // the same input, so a store that grew to hold one root per line wants
+        // to be exactly that big again, and shrinking here would put the whole
+        // doubling schedule back on the next run's parse.
+        self.native_roots.reset();
         self.debug_frames.reset();
         self.debug_values.reset();
     }
@@ -1081,6 +1127,18 @@ impl Runtime {
     #[must_use]
     pub fn shadow_stack(&self) -> &ShadowStack {
         &self.shadow_stack
+    }
+
+    /// The native root store every [`crate::roots::NativeScope`] claims from
+    /// (ADR-114). Read-only, and exposed for [`Runtime::shadow_stack`]'s reason
+    /// — "the store is empty again" is the observable form of "every scope was
+    /// dropped" — plus one this region has and the others do not: its
+    /// [`capacity`](crate::roots::NativeRootStore::capacity) is the observable
+    /// form of "this program made the store grow", which is the state a
+    /// pointer-shaped watermark would not have survived.
+    #[must_use]
+    pub fn native_root_store(&self) -> &crate::roots::NativeRootStore {
+        &self.native_roots
     }
 
     /// The crash debugger's frame stack (§9.3, ADR-104). Read-only, and exposed
