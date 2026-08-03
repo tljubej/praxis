@@ -18,8 +18,8 @@ use cranelift::prelude::*;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
 use praxis_mir::{
-    AllocKind, CallTarget, CmpOp, FloatBinOp, Function as MirFunction, GcConst, Inst, IntBinOp,
-    LocalId, LocalKind, MirType, Overflow, RootSlots, ScalarKind, Terminator,
+    AllocKind, BlockId, CallTarget, CmpOp, FloatBinOp, Function as MirFunction, GcConst, Inst,
+    IntBinOp, LocalId, LocalKind, MirType, Overflow, RootSlots, ScalarKind, Terminator,
 };
 use praxis_runtime::{
     DebugFrameEntry, DebugLocalMeta, FunctionDebugMeta, RuntimeContext, ShadowStackHeader,
@@ -466,26 +466,63 @@ fn lower_function_capturing<M: Module>(
         if blk_idx != 0 {
             builder.switch_to_block(block);
         }
-        for inst in &mir_block.insts {
-            lower_inst(
-                &mut builder,
-                inst,
-                ctx_val,
-                &vars,
-                &spill,
-                &blocks,
-                module,
-                &mut import_cache,
-                user_funcs,
-                &mut user_func_cache,
-                db,
-                generation,
-            )?;
+        for step in steps(&mir_block.insts) {
+            match step.kind {
+                StepKind::Lone => lower_inst(
+                    &mut builder,
+                    &step.insts[0],
+                    ctx_val,
+                    &vars,
+                    &spill,
+                    &blocks,
+                    module,
+                    &mut import_cache,
+                    user_funcs,
+                    &mut user_func_cache,
+                    db,
+                    generation,
+                )?,
+                // The fused pair (ADR-117): the raise's cold blocks jump to the
+                // fault epilogue and the `Inst::CheckFault` at `step.insts[1]`
+                // is never handed to `lower_inst`, so it emits nothing. It is
+                // still covered by the step, which is what keeps the debugger's
+                // store below a walk over every instruction of the block.
+                StepKind::RaiseIntoFault {
+                    op,
+                    dst,
+                    lhs,
+                    rhs,
+                    on_fault,
+                } => lower_int_binop(
+                    &mut builder,
+                    op,
+                    dst,
+                    lhs,
+                    rhs,
+                    OverflowReport::Checked(RaiseExit::Folded(blocks[on_fault.0 as usize])),
+                    ctx_val,
+                    &vars,
+                    module,
+                    &mut import_cache,
+                )?,
+            }
             // The debugger's view is written *here*, once per definition, not
             // at every safepoint over the whole visible set (ADR-104). See
             // `SpillCtx::store_debug_defs` for why the two produce the same
             // slot contents at every point a snapshot can be taken.
-            spill.store_debug_defs(&mut builder, inst, &vars);
+            //
+            // Over the step's instructions rather than one, so a fused pair is
+            // not a pair of instructions one of which nobody asked about. It
+            // emits nothing either way today: a `CheckFault` defines no local,
+            // and an `IntBinOp`'s `dst` is a `Scalar` local, which has no debug
+            // slot. If it ever did, folding would move that store off the
+            // raising path — which is the direction ADR-104 already argues for:
+            // the faulting operation's result was never produced, so `<uninit>`
+            // is the honest rendering and the converging shape stored the
+            // wrapped value instead.
+            for inst in step.insts {
+                spill.store_debug_defs(&mut builder, inst, &vars);
+            }
         }
         lower_terminator(
             &mut builder,
@@ -912,6 +949,114 @@ fn func_id_for<M: Module>(module: &M, name: &str) -> Result<FuncId> {
     }
 }
 
+/// One lowering step of a MIR block: a run of its instructions that emit code
+/// together.
+///
+/// There is exactly one run longer than a single instruction, and it is
+/// ADR-117's: a checked `IntBinOp` and the `Inst::CheckFault` that ADR-088 puts
+/// after it. The raise's cold block branches straight to the fault epilogue and
+/// the check emits nothing.
+///
+/// **Why the pair is a step rather than a look-ahead inside [`lower_inst`].**
+/// The fold has two halves that have to agree — the raise diverts, *and* the
+/// check is silent — and as two independent match arms consulting the same
+/// neighbourhood they can disagree in two ways: a check skipped after a raise
+/// that still converged (a fault that is never observed, i.e. a program that
+/// keeps running past an overflow) and a raise that diverts under a check that
+/// also fires (harmless, but dead code nobody would find). Grouping leaves
+/// neither spellable. The check is a member of the pair and of no other step,
+/// so it cannot be lowered twice or forgotten separately; and
+/// [`StepKind::RaiseIntoFault`] carries the *operation*, not an `&Inst`, so the
+/// diverting form cannot be handed an instruction that does not emit its own
+/// fault path.
+struct Step<'a> {
+    /// Every MIR instruction this step covers, in block order.
+    ///
+    /// The debugger's per-definition store (ADR-104) runs over all of them, so
+    /// grouping two instructions cannot change what a snapshot renders — which
+    /// is what makes this field the group's definition rather than a
+    /// convenience.
+    insts: &'a [Inst],
+    /// What the step emits.
+    kind: StepKind,
+}
+
+/// What a [`Step`] emits.
+enum StepKind {
+    /// The step's one instruction, lowered as itself by [`lower_inst`].
+    Lone,
+    /// Checked `Int` arithmetic whose overflow — and, for `Div`/`Rem`, whose
+    /// zero divisor — branches straight to `on_fault` (ADR-117).
+    ///
+    /// The second instruction of the step is the `Inst::CheckFault` this
+    /// replaces. It is covered by the step and emits nothing.
+    RaiseIntoFault {
+        op: IntBinOp,
+        dst: LocalId,
+        lhs: LocalId,
+        rhs: LocalId,
+        on_fault: BlockId,
+    },
+}
+
+/// Group a MIR block's instructions into [`Step`]s.
+///
+/// **The whole of ADR-117's applicability test is the match below**, and it is
+/// a match on two *adjacent* instructions because that is precisely what
+/// ADR-088 decision 1 makes locally decidable: the check is in the same block
+/// and at the next index, or `verify::check_fault_observed` rejects the
+/// function. Nothing here depends on the verifier having run, though — an
+/// unfused checked `IntBinOp` lowers to the converging diamond it always did,
+/// so a hypothetical caller that skipped `verify` gets slower code and not
+/// wrong code.
+///
+/// Checked `Int` arithmetic is the only candidate there can be. It is the one
+/// instruction in the language whose fault path the *lowering* emits (a cold
+/// block calling `praxis_raise_*_if`); every other faulting instruction is a
+/// call into a wrapper that sets `pending_fault` and returns, and the only way
+/// to learn that from generated code is to read the slot — which is what
+/// `Inst::CheckFault` is.
+fn steps(insts: &[Inst]) -> Vec<Step<'_>> {
+    let mut out = Vec::with_capacity(insts.len());
+    let mut i = 0;
+    while i < insts.len() {
+        // ADR-117's single toggle, and the only reader of the feature. Off, the
+        // pair below is one step; on, every instruction is its own and the
+        // backend emits exactly what it emitted before ADR-117 — which is what
+        // makes the A/B two builds of one branch rather than two branches.
+        let fused = if cfg!(feature = "unfolded-check-fault") {
+            None
+        } else {
+            match (&insts[i], insts.get(i + 1)) {
+                (
+                    Inst::IntBinOp {
+                        op,
+                        dst,
+                        lhs,
+                        rhs,
+                        overflow: Overflow::Checked,
+                    },
+                    Some(Inst::CheckFault { on_fault, .. }),
+                ) => Some(StepKind::RaiseIntoFault {
+                    op: *op,
+                    dst: *dst,
+                    lhs: *lhs,
+                    rhs: *rhs,
+                    on_fault: *on_fault,
+                }),
+                _ => None,
+            }
+        };
+        let width = if fused.is_some() { 2 } else { 1 };
+        out.push(Step {
+            insts: &insts[i..i + width],
+            kind: fused.unwrap_or(StepKind::Lone),
+        });
+        i += width;
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_inst<M: Module>(
     builder: &mut FunctionBuilder,
@@ -1329,153 +1474,18 @@ fn lower_inst<M: Module>(
             rhs,
             overflow,
         } => {
-            // Native scalar arithmetic (§4.12). The operands are already raw
-            // i64s in the scalar channel, so the operation is one Cranelift
-            // instruction plus an inline overflow predicate.
-            //
-            // This replaces boxing both operands with `praxis_alloc_int`,
-            // calling the wrapper, and `praxis_int_load`ing the result: two
-            // allocations and three calls per arithmetic op. That shape also
-            // carried a live memory bug — on fault the wrapper returns the Unit
-            // sentinel, and the `int_load` ran *before* the fault check, reading
-            // eight bytes past a size-0 Unit payload.
-            //
-            // Overflow is reported by branching to a cold block that calls a
-            // non-allocating raise wrapper — see `raise_on_cold_path`, which
-            // carries the argument for why a branch beats the unconditional
-            // call this used to emit. The site is still not a GC safepoint and
-            // still spills no roots; the `CheckFault` that MIR emits next is
-            // still what diverts to the fault epilogue, and it lowers into the
-            // block both arms of the diamond converge on.
-            //
-            // `Overflow::Bounded` sites — a `for` index bump, a `count`
-            // accumulator — skip the test entirely: their operands are bounded
-            // by a collection's length, so the predicate is provably false and
-            // computing it cost two instructions and a call per iteration.
-            let l = builder.use_var(vars[lhs.0 as usize]);
-            let r = builder.use_var(vars[rhs.0 as usize]);
-            if matches!(overflow, Overflow::Bounded) {
-                let bare = match op {
-                    IntBinOp::Add => builder.ins().iadd(l, r),
-                    IntBinOp::Sub => builder.ins().isub(l, r),
-                    IntBinOp::Mul => builder.ins().imul(l, r),
-                    // Unreachable: `verify` rejects a bounded division, because
-                    // no bound on the operands rules out a zero divisor, and
-                    // `sdiv`/`srem` *trap* on one.
-                    IntBinOp::Div | IntBinOp::Rem => {
-                        anyhow::bail!("`{op:?}` cannot be lowered as a bounded operation")
-                    }
-                };
-                builder.def_var(vars[dst.0 as usize], bare);
-                return Ok(());
-            }
-            let result = match op {
-                IntBinOp::Add => {
-                    let sum = builder.ins().iadd(l, r);
-                    // Signed overflow iff the operands agree in sign and the
-                    // result disagrees with them: ((l ^ sum) & (r ^ sum)) < 0.
-                    let a = builder.ins().bxor(l, sum);
-                    let b = builder.ins().bxor(r, sum);
-                    let both = builder.ins().band(a, b);
-                    raise_if_negative(
-                        builder,
-                        ctx_val,
-                        both,
-                        RuntimeSymbol::RaiseIntOverflowIf,
-                        module,
-                        imports,
-                    )?;
-                    sum
-                }
-                IntBinOp::Sub => {
-                    let diff = builder.ins().isub(l, r);
-                    // Signed overflow iff the operands differ in sign and the
-                    // result differs from the left: ((l ^ r) & (l ^ diff)) < 0.
-                    let a = builder.ins().bxor(l, r);
-                    let b = builder.ins().bxor(l, diff);
-                    let both = builder.ins().band(a, b);
-                    raise_if_negative(
-                        builder,
-                        ctx_val,
-                        both,
-                        RuntimeSymbol::RaiseIntOverflowIf,
-                        module,
-                        imports,
-                    )?;
-                    diff
-                }
-                IntBinOp::Mul => {
-                    let product = builder.ins().imul(l, r);
-                    // The full 128-bit product fits in 64 bits iff its high half
-                    // is the sign extension of the low half.
-                    let high = builder.ins().smulhi(l, r);
-                    let sign = builder.ins().sshr_imm_u(product, 63);
-                    let differs = builder.ins().icmp(IntCC::NotEqual, high, sign);
-                    raise_on_cold_path(
-                        builder,
-                        ctx_val,
-                        differs,
-                        RuntimeSymbol::RaiseIntOverflowIf,
-                        module,
-                        imports,
-                    )?;
-                    product
-                }
-                IntBinOp::Div | IntBinOp::Rem => {
-                    // `sdiv`/`srem` trap on a zero divisor and on the one
-                    // overflowing signed division, `i64::MIN / -1`. Neither may
-                    // reach the instruction: a trap is a process abort, not a
-                    // Praxis fault. Substituting a divisor of 1 in those cases
-                    // keeps the instruction total; the value it produces is
-                    // dead, because the `CheckFault` after this diverts.
-                    let zero = builder.ins().iconst(GC, 0);
-                    let by_zero = builder.ins().icmp(IntCC::Equal, r, zero);
-                    let min = builder.ins().iconst(GC, i64::MIN);
-                    let neg_one = builder.ins().iconst(GC, -1);
-                    let l_is_min = builder.ins().icmp(IntCC::Equal, l, min);
-                    let r_is_neg_one = builder.ins().icmp(IntCC::Equal, r, neg_one);
-                    let overflows = builder.ins().band(l_is_min, r_is_neg_one);
-
-                    let one = builder.ins().iconst(GC, 1);
-                    let unsafe_divisor = builder.ins().bor(by_zero, overflows);
-                    let divisor = builder.ins().select(unsafe_divisor, one, r);
-                    let value = if matches!(op, IntBinOp::Div) {
-                        builder.ins().sdiv(l, divisor)
-                    } else {
-                        builder.ins().srem(l, divisor)
-                    };
-
-                    // Two diamonds in sequence, in this order. The conditions
-                    // are mutually exclusive (`r == 0` versus `r == -1`), so
-                    // neither kind can overwrite the other — as when both
-                    // raises were straight-line calls.
-                    raise_on_cold_path(
-                        builder,
-                        ctx_val,
-                        by_zero,
-                        RuntimeSymbol::RaiseDivByZeroIf,
-                        module,
-                        imports,
-                    )?;
-                    raise_on_cold_path(
-                        builder,
-                        ctx_val,
-                        overflows,
-                        RuntimeSymbol::RaiseIntOverflowIf,
-                        module,
-                        imports,
-                    )?;
-                    value
-                }
+            // Unfused, which is what a *lone* `IntBinOp` means: this site's
+            // raise converges on the join, and the `Inst::CheckFault` the
+            // builder emits next observes it — ADR-102's shape. The fused form
+            // is `StepKind::RaiseIntoFault`, which the block loop lowers
+            // through the same function with `RaiseExit::Folded` (ADR-117).
+            let report = match overflow {
+                Overflow::Bounded => OverflowReport::Bare,
+                Overflow::Checked => OverflowReport::Checked(RaiseExit::Observed),
             };
-            builder.def_var(vars[dst.0 as usize], result);
-            // No fault check here. There used to be a bare
-            // `praxis_check_fault` call at this point whose result was
-            // discarded and which no branch followed — a leftover from before
-            // MIR carried `Inst::CheckFault`, costing one call per checked
-            // arithmetic op and diverting nothing. The `Inst::CheckFault` the
-            // builder emits next is what actually observes the raise, and the
-            // MIR verifier now requires it to be there (MIR-10).
+            lower_int_binop(
+                builder, *op, *dst, *lhs, *rhs, report, ctx_val, vars, module, imports,
+            )?;
         }
         Inst::IntCmp { op, dst, lhs, rhs } => {
             // Compare the scalar operands directly in Cranelift (no boxing). The
@@ -1690,6 +1700,16 @@ fn lower_inst<M: Module>(
             // unwinding cleanly to the host. The rest of this MIR block's
             // instructions lower into a fresh fall-through block, so the
             // diversion does not strand them.
+            //
+            // **This arm is not reached for every `Inst::CheckFault`.** One
+            // whose predecessor is checked `Int` arithmetic is fused into it by
+            // `steps` and emits nothing: that instruction's own raise already
+            // branched, on the same predicate, to the same fault block, so the
+            // load-load-branch below would be re-deciding what the branch above
+            // it decided (ADR-117). Every other faulting instruction is a call
+            // into a wrapper that returns normally after setting the slot, and
+            // reading the slot is the only way generated code can learn it — so
+            // for those this arm is still the whole mechanism.
             //
             // The test is two loads and a branch (ADR-102), where it was a call
             // to `praxis_check_fault` — a guarded call, two null tests, an
@@ -2461,6 +2481,231 @@ fn emit_scalar_load<M: Module>(
     Ok(())
 }
 
+/// Lower `Inst::IntBinOp` (§4.12), reporting overflow the way `report` says.
+///
+/// A function rather than the body of [`lower_inst`]'s arm because it has two
+/// callers: that arm, and the block loop's fused [`Step`], which reaches it
+/// with `RaiseExit::Folded` (ADR-117). The alternative — a parameter on
+/// `lower_inst` — would be a fault target that twenty-odd other arms ignore,
+/// and the one arm that reads it would be the only thing saying which of them
+/// it meant.
+#[allow(clippy::too_many_arguments)]
+fn lower_int_binop<M: Module>(
+    builder: &mut FunctionBuilder,
+    op: IntBinOp,
+    dst: LocalId,
+    lhs: LocalId,
+    rhs: LocalId,
+    report: OverflowReport,
+    ctx_val: Value,
+    vars: &[Variable],
+    module: &mut M,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
+) -> Result<()> {
+    // Native scalar arithmetic (§4.12). The operands are already raw i64s in the
+    // scalar channel, so the operation is one Cranelift instruction plus an
+    // inline overflow predicate.
+    //
+    // This replaces boxing both operands with `praxis_alloc_int`, calling the
+    // wrapper, and `praxis_int_load`ing the result: two allocations and three
+    // calls per arithmetic op. That shape also carried a live memory bug — on
+    // fault the wrapper returns the Unit sentinel, and the `int_load` ran
+    // *before* the fault check, reading eight bytes past a size-0 Unit payload.
+    //
+    // Overflow is reported by branching to a cold block that calls a
+    // non-allocating raise wrapper — see `raise_on_cold_path`, which carries the
+    // argument for why a branch beats the unconditional call this used to emit.
+    // The site is still not a GC safepoint and still spills no roots. What
+    // *diverts* to the fault epilogue is `report`'s business: at
+    // `RaiseExit::Observed` it is the `Inst::CheckFault` MIR emits next, reached
+    // through the block both arms of the diamond converge on; at
+    // `RaiseExit::Folded` it is the cold block itself, and that check emits
+    // nothing (ADR-117).
+    let l = builder.use_var(vars[lhs.0 as usize]);
+    let r = builder.use_var(vars[rhs.0 as usize]);
+    let exit = match report {
+        // `Overflow::Bounded` sites — a `for` index bump, a `count` accumulator
+        // — skip the test entirely: their operands are bounded by a collection's
+        // length, so the predicate is provably false and computing it cost two
+        // instructions and a call per iteration.
+        OverflowReport::Bare => {
+            let bare = match op {
+                IntBinOp::Add => builder.ins().iadd(l, r),
+                IntBinOp::Sub => builder.ins().isub(l, r),
+                IntBinOp::Mul => builder.ins().imul(l, r),
+                // Unreachable: `verify` rejects a bounded division, because
+                // no bound on the operands rules out a zero divisor, and
+                // `sdiv`/`srem` *trap* on one.
+                IntBinOp::Div | IntBinOp::Rem => {
+                    anyhow::bail!("`{op:?}` cannot be lowered as a bounded operation")
+                }
+            };
+            builder.def_var(vars[dst.0 as usize], bare);
+            return Ok(());
+        }
+        OverflowReport::Checked(exit) => exit,
+    };
+    let result = match op {
+        IntBinOp::Add => {
+            let sum = builder.ins().iadd(l, r);
+            // Signed overflow iff the operands agree in sign and the
+            // result disagrees with them: ((l ^ sum) & (r ^ sum)) < 0.
+            let a = builder.ins().bxor(l, sum);
+            let b = builder.ins().bxor(r, sum);
+            let both = builder.ins().band(a, b);
+            raise_if_negative(
+                builder,
+                ctx_val,
+                both,
+                RuntimeSymbol::RaiseIntOverflowIf,
+                exit,
+                module,
+                imports,
+            )?;
+            sum
+        }
+        IntBinOp::Sub => {
+            let diff = builder.ins().isub(l, r);
+            // Signed overflow iff the operands differ in sign and the
+            // result differs from the left: ((l ^ r) & (l ^ diff)) < 0.
+            let a = builder.ins().bxor(l, r);
+            let b = builder.ins().bxor(l, diff);
+            let both = builder.ins().band(a, b);
+            raise_if_negative(
+                builder,
+                ctx_val,
+                both,
+                RuntimeSymbol::RaiseIntOverflowIf,
+                exit,
+                module,
+                imports,
+            )?;
+            diff
+        }
+        IntBinOp::Mul => {
+            let product = builder.ins().imul(l, r);
+            // The full 128-bit product fits in 64 bits iff its high half
+            // is the sign extension of the low half.
+            let high = builder.ins().smulhi(l, r);
+            let sign = builder.ins().sshr_imm_u(product, 63);
+            let differs = builder.ins().icmp(IntCC::NotEqual, high, sign);
+            raise_on_cold_path(
+                builder,
+                ctx_val,
+                differs,
+                RuntimeSymbol::RaiseIntOverflowIf,
+                exit,
+                module,
+                imports,
+            )?;
+            product
+        }
+        IntBinOp::Div | IntBinOp::Rem => {
+            // `sdiv`/`srem` trap on a zero divisor and on the one
+            // overflowing signed division, `i64::MIN / -1`. Neither may
+            // reach the instruction: a trap is a process abort, not a
+            // Praxis fault. Substituting a divisor of 1 in those cases
+            // keeps the instruction total; the value it produces is
+            // dead, because the `CheckFault` after this diverts.
+            let zero = builder.ins().iconst(GC, 0);
+            let by_zero = builder.ins().icmp(IntCC::Equal, r, zero);
+            let min = builder.ins().iconst(GC, i64::MIN);
+            let neg_one = builder.ins().iconst(GC, -1);
+            let l_is_min = builder.ins().icmp(IntCC::Equal, l, min);
+            let r_is_neg_one = builder.ins().icmp(IntCC::Equal, r, neg_one);
+            let overflows = builder.ins().band(l_is_min, r_is_neg_one);
+
+            let one = builder.ins().iconst(GC, 1);
+            let unsafe_divisor = builder.ins().bor(by_zero, overflows);
+            let divisor = builder.ins().select(unsafe_divisor, one, r);
+            let value = if matches!(op, IntBinOp::Div) {
+                builder.ins().sdiv(l, divisor)
+            } else {
+                builder.ins().srem(l, divisor)
+            };
+
+            // Two diamonds in sequence, in this order. The conditions
+            // are mutually exclusive (`r == 0` versus `r == -1`), so
+            // neither kind can overwrite the other — as when both
+            // raises were straight-line calls. Mutual exclusion is also
+            // why `RaiseExit::Folded` may be given to *both*: at most
+            // one cold block runs, so the fault epilogue is entered with
+            // the kind the raise that ran set, exactly as the single
+            // `CheckFault` downstream would have seen it.
+            raise_on_cold_path(
+                builder,
+                ctx_val,
+                by_zero,
+                RuntimeSymbol::RaiseDivByZeroIf,
+                exit,
+                module,
+                imports,
+            )?;
+            raise_on_cold_path(
+                builder,
+                ctx_val,
+                overflows,
+                RuntimeSymbol::RaiseIntOverflowIf,
+                exit,
+                module,
+                imports,
+            )?;
+            value
+        }
+    };
+    // Reached only when no raise fired, at either exit: at `Folded` the raising
+    // path left for the epilogue and never comes back, and at `Observed` the
+    // `Inst::CheckFault` below diverts before anything reads `dst`. So the value
+    // stored here is a value the program is entitled to, and on the fault path
+    // `dst` is simply never defined — which is what the debugger renders as
+    // `<uninit>` for the operation that faulted, as it did before ADR-117.
+    builder.def_var(vars[dst.0 as usize], result);
+    // No fault check here. There used to be a bare `praxis_check_fault` call at
+    // this point whose result was discarded and which no branch followed — a
+    // leftover from before MIR carried `Inst::CheckFault`, costing one call per
+    // checked arithmetic op and diverting nothing. What observes the raise is
+    // the `Inst::CheckFault` the builder emits next, which the MIR verifier
+    // requires to be there (MIR-10) — either as emitted code, or, at
+    // `RaiseExit::Folded`, as the branch this function already made (ADR-117).
+    Ok(())
+}
+
+/// What an `Inst::IntBinOp` site does about overflow.
+///
+/// Two facts about one site, and pairing them in one value is what keeps the
+/// third combination — a bounded site handed a fault target — from existing:
+/// bounded arithmetic emits no raise at all, so a fault target given to one
+/// would be silently dropped, and the `Inst::CheckFault` it was folded out of
+/// would be gone with it. That combination is a program that runs past an
+/// overflow, and this enum is why it cannot be written.
+#[derive(Clone, Copy)]
+enum OverflowReport {
+    /// `Overflow::Bounded` (ADR-044 decision 6): the bare instruction and no
+    /// test, because the site's operands are bounded by a collection's length.
+    /// There is no fault to route, which is why this variant carries none.
+    Bare,
+    /// `Overflow::Checked` (§4.12): a predicate and a cold-block raise, leaving
+    /// by the given exit.
+    Checked(RaiseExit),
+}
+
+/// Where the cold block that reports a fault goes when the raise wrapper
+/// returns.
+#[derive(Clone, Copy)]
+enum RaiseExit {
+    /// Back to the join, which is where the `Inst::CheckFault` that ADR-088 puts
+    /// after this instruction lowers. Both arms of the diamond converge before
+    /// it, so the check runs on the raising path and the non-raising path alike.
+    /// ADR-102's shape, and still the one a checked site takes when its check
+    /// was not fused into a [`Step`].
+    Observed,
+    /// Straight to the function's fault epilogue, because the `Inst::CheckFault`
+    /// was folded into this branch and emits nothing (ADR-117). Reachable only
+    /// through [`StepKind::RaiseIntoFault`], whose construction is the proof
+    /// that the check exists and observes this instruction and nothing else.
+    Folded(Block),
+}
+
 /// Report a fault when `predicate` is negative — the sign-bit form the
 /// add/sub overflow tests produce.
 ///
@@ -2472,13 +2717,14 @@ fn raise_if_negative<M: Module>(
     ctx: Value,
     predicate: Value,
     sym: RuntimeSymbol,
+    exit: RaiseExit,
     module: &mut M,
     imports: &mut HashMap<RuntimeSymbol, FuncRef>,
 ) -> Result<()> {
     let cond = builder
         .ins()
         .icmp_imm_s(IntCC::SignedLessThan, predicate, 0);
-    raise_on_cold_path(builder, ctx, cond, sym, module, imports)
+    raise_on_cold_path(builder, ctx, cond, sym, exit, module, imports)
 }
 
 /// Report a fault when `cond` is non-zero, by branching to a cold block that
@@ -2513,18 +2759,35 @@ fn raise_if_negative<M: Module>(
 /// `praxis_raise_stack_overflow` would be tidier and costs two manifest rows,
 /// two address-table arms and a doc rewrite; it is not worth that here.
 ///
-/// # ADR-088 is untouched
+/// # ADR-088 is untouched, and `exit` is where its rule is now discharged
 ///
 /// The rule that a faulting instruction is observed by the next one is a
 /// property of *MIR* (`verify::check_fault_observed`), and this emits no MIR.
-/// Both arms of the diamond converge at `cont` before the `Inst::CheckFault`
-/// that MIR requires next lowers, so the check runs on the raising path and the
-/// non-raising path alike — as it did when the raise was straight-line.
+/// What changed under ADR-117 is *which emitted branch* discharges it.
+///
+/// At [`RaiseExit::Observed`] both arms of the diamond converge at `cont` before
+/// the `Inst::CheckFault` that MIR requires next lowers, so the check runs on
+/// the raising path and the non-raising path alike — as it did when the raise
+/// was straight-line. **That sentence is ADR-102's Consequences, and it is no
+/// longer the whole of it.** At [`RaiseExit::Folded`] the arms do not converge:
+/// the cold block jumps to the function's fault epilogue and the `CheckFault`
+/// emits nothing at all. The invariant that survives both is the weaker and true
+/// one — *on the raising path, control reaches the fault epilogue before any
+/// instruction after the raise runs* — and at `Folded` it holds because this is
+/// the only branch on the way there, where at `Observed` it holds because the
+/// check re-reads what this cold block wrote.
+///
+/// The fold is sound because a `CheckFault` immediately after checked `Int`
+/// arithmetic can observe *nothing else*: every earlier faulting instruction in
+/// the block has its own check by ADR-088's converse
+/// (`VerifyError::RedundantFaultCheck`), so a fault raised earlier has already
+/// diverted and `pending_fault` is clear when this block runs. See ADR-117.
 fn raise_on_cold_path<M: Module>(
     builder: &mut FunctionBuilder,
     ctx: Value,
     cond: Value,
     sym: RuntimeSymbol,
+    exit: RaiseExit,
     module: &mut M,
     imports: &mut HashMap<RuntimeSymbol, FuncRef>,
 ) -> Result<()> {
@@ -2540,11 +2803,20 @@ fn raise_on_cold_path<M: Module>(
     builder.switch_to_block(cold);
     let one = builder.ins().iconst(GC, 1);
     call_symbol(builder, ctx, &[one], sym, module, imports)?;
-    builder.ins().jump(cont, &[]);
+    // No block parameters at either target. The raise wrapper returns `Void`, so
+    // no value crosses the join; and the fault epilogue takes none either — it
+    // reads only the prologue's frame bases and `ctx`, all defined in the entry
+    // block, which dominates this one. That is what makes `Folded` a jump rather
+    // than an edge that has to carry the arithmetic's `dst`, and it is checked
+    // by `a_folded_raise_jumps_to_the_fault_epilogue_with_no_arguments`.
+    let target = match exit {
+        RaiseExit::Observed => cont,
+        RaiseExit::Folded(fault) => fault,
+    };
+    builder.ins().jump(target, &[]);
 
-    // No block parameters: the raise wrapper returns `Void`, so no value crosses
-    // the join. Everything the caller computed before the branch was defined in
-    // a block that dominates `cont`, so it is readable there without one.
+    // Everything the caller computed before the branch was defined in a block
+    // that dominates `cont`, so it is readable there without a block parameter.
     builder.switch_to_block(cont);
     Ok(())
 }
@@ -3747,9 +4019,13 @@ mod tests {
         );
     }
 
-    /// The overflow report is a branch to a cold block, not a call per op.
-    #[test]
-    fn an_overflow_report_is_a_branch_to_a_cold_block() {
+    /// One `raise_on_cold_path` at the given exit, as IR text, plus the entry
+    /// block's own text and the one cold block's label.
+    ///
+    /// A closure over the exit rather than two copies: the two arms differ in
+    /// exactly one instruction — the cold block's `jump` — and a second copy of
+    /// the scaffolding would let the shared claims drift apart.
+    fn raise_ir(exit: impl FnOnce(Block) -> RaiseExit) -> (String, String, Block) {
         let mut module = test_module();
         let mut ctx = module.make_context();
         let mut sig = Signature::new(module.isa().default_call_conv());
@@ -3762,28 +4038,27 @@ mod tests {
         builder.append_block_params_for_function_params(entry);
         builder.switch_to_block(entry);
         let ctx_val = builder.block_params(entry)[0];
+        // Stands in for the function's `Terminator::Fault` block: reachable,
+        // takes no parameters, returns. Both facts are what the fold needs.
+        let fault = builder.create_block();
         let cond = builder.ins().iconst(types::I8, 0);
         raise_on_cold_path(
             &mut builder,
             ctx_val,
             cond,
             RuntimeSymbol::RaiseIntOverflowIf,
+            exit(fault),
             &mut module,
             &mut HashMap::new(),
         )
         .expect("emission");
         builder.ins().return_(&[]);
+        builder.switch_to_block(fault);
+        builder.ins().return_(&[]);
         builder.seal_all_blocks();
         builder.finalize(module.isa().frontend_config());
 
         let all = ctx.func.display().to_string();
-        let entry_text = block_text(&all, entry);
-        assert!(entry_text.contains("brif"), "{all}");
-        assert!(
-            !entry_text.contains("call "),
-            "the arithmetic site branches; it does not call on the hot path:\n{all}"
-        );
-
         let cold: Vec<_> = ctx
             .func
             .layout
@@ -3791,10 +4066,202 @@ mod tests {
             .filter(|&b| ctx.func.layout.is_cold(b))
             .collect();
         assert_eq!(cold.len(), 1, "exactly the raise block is cold:\n{all}");
+        let entry_text = block_text(&all, entry);
+        (all, entry_text, cold[0])
+    }
+
+    /// The overflow report is a branch to a cold block, not a call per op.
+    #[test]
+    fn an_overflow_report_is_a_branch_to_a_cold_block() {
+        let (all, entry_text, cold) = raise_ir(|_| RaiseExit::Observed);
+        assert!(entry_text.contains("brif"), "{all}");
         assert!(
-            block_text(&all, cold[0]).contains("call "),
+            !entry_text.contains("call "),
+            "the arithmetic site branches; it does not call on the hot path:\n{all}"
+        );
+        assert!(
+            block_text(&all, cold).contains("call "),
             "and the cold block is the one that calls the wrapper:\n{all}"
         );
+    }
+
+    /// At `RaiseExit::Observed` the cold block rejoins the hot path, where the
+    /// `Inst::CheckFault` that MIR emits next reads the slot the wrapper wrote.
+    /// This is ADR-102's shape and it is still what an unfused site gets.
+    #[test]
+    fn an_observed_raise_rejoins_the_hot_path() {
+        let (all, entry_text, cold) = raise_ir(|_| RaiseExit::Observed);
+        // The join is the `brif`'s second target, which is also where the cold
+        // block goes: three mentions of one label, exactly as ADR-102 left it.
+        let join = entry_text
+            .split_once("brif")
+            .and_then(|(_, rest)| rest.rsplit_once(", "))
+            .map(|(_, tail)| tail.trim().trim_end_matches(&['(', ')'][..]).to_string())
+            .expect("the entry block branches");
+        let join = join.split_whitespace().next().unwrap().to_string();
+        assert!(
+            block_text(&all, cold).contains(&format!("jump {join}")),
+            "the cold block rejoins the not-taken arm at {join}:\n{all}"
+        );
+    }
+
+    /// At `RaiseExit::Folded` the cold block goes straight to the fault
+    /// epilogue, with no arguments, and never rejoins the hot path (ADR-117).
+    ///
+    /// The "no arguments" half is the structural precondition the fold rests
+    /// on: `Terminator::Fault`'s epilogue reads only the prologue's frame bases
+    /// and `ctx`, all defined in the entry block, so nothing has to be carried
+    /// across this edge — and in particular not the arithmetic's `dst`, which
+    /// on this path was never computed.
+    #[test]
+    fn a_folded_raise_jumps_to_the_fault_epilogue_with_no_arguments() {
+        let mut fault_label = None;
+        let (all, entry_text, cold) = raise_ir(|fault| {
+            fault_label = Some(format!("{fault}"));
+            RaiseExit::Folded(fault)
+        });
+        let fault = fault_label.expect("the closure ran");
+        let cold_text = block_text(&all, cold);
+        assert!(
+            cold_text.contains(&format!("jump {fault}\n"))
+                || cold_text.contains(&format!("jump {fault} ")),
+            "the cold block leaves for the epilogue with no block arguments:\n{all}"
+        );
+        assert!(
+            cold_text.contains("call "),
+            "and it still calls the raise wrapper on the way:\n{all}"
+        );
+        assert!(
+            entry_text.contains("brif"),
+            "the hot path is still one branch:\n{all}"
+        );
+        assert!(
+            !entry_text.contains("call "),
+            "and still calls nothing:\n{all}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Which instructions `steps` pairs, which is the whole of ADR-117's
+    // applicability test. These need no builder: the answer is a function of
+    // two adjacent `Inst`s and nothing else.
+    // -----------------------------------------------------------------------
+
+    /// An `Inst::CheckFault` diverting to block 1, the fault block every
+    /// `Builder` mints second (`praxis_mir::build`).
+    fn check() -> Inst {
+        Inst::CheckFault {
+            on_fault: BlockId(1),
+            debug: praxis_mir::DebugSlots::unannotated(),
+        }
+    }
+
+    /// An `Inst::IntBinOp` over locals 0..2 at the given overflow discipline.
+    fn add(overflow: Overflow) -> Inst {
+        Inst::IntBinOp {
+            op: IntBinOp::Add,
+            dst: LocalId(0),
+            lhs: LocalId(1),
+            rhs: LocalId(2),
+            overflow,
+        }
+    }
+
+    /// A call to a wrapper that faults — the shape of every *other* observed
+    /// fault in the language, and the one that keeps its check.
+    fn call() -> Inst {
+        Inst::Call {
+            dst: LocalId(0),
+            callee: CallTarget::Runtime(RuntimeSymbol::ValueCmp),
+            args: vec![LocalId(1), LocalId(2)],
+            roots: RootSlots::unannotated(),
+            debug: praxis_mir::DebugSlots::unannotated(),
+        }
+    }
+
+    fn fused(insts: &[Inst]) -> Vec<bool> {
+        steps(insts)
+            .iter()
+            .map(|s| matches!(s.kind, StepKind::RaiseIntoFault { .. }))
+            .collect()
+    }
+
+    /// The pair ADR-117 folds: checked arithmetic and the check ADR-088
+    /// requires after it, as one step covering both instructions.
+    #[test]
+    fn a_checked_int_binop_and_the_check_after_it_are_one_step() {
+        let insts = vec![add(Overflow::Checked), check()];
+        let steps = steps(&insts);
+        assert_eq!(steps.len(), 1, "one step, not two");
+        assert_eq!(steps[0].insts.len(), 2, "and it covers both instructions");
+        let StepKind::RaiseIntoFault { on_fault, dst, .. } = steps[0].kind else {
+            panic!("the pair is fused");
+        };
+        assert_eq!(on_fault, BlockId(1), "and it carries the check's target");
+        assert_eq!(dst, LocalId(0), "and the arithmetic's own destination");
+    }
+
+    /// A check after anything else keeps its own step, and so emits the load,
+    /// load and branch. That is the *majority* of the corpus — a wrapper that
+    /// faults returns normally, and reading the slot is the only way generated
+    /// code can learn it happened.
+    #[test]
+    fn a_check_after_a_faulting_call_is_its_own_step() {
+        assert_eq!(fused(&[call(), check()]), vec![false, false]);
+    }
+
+    /// `Overflow::Bounded` emits no raise at all, so there is no branch for a
+    /// check to fold into — and the verifier rejects a check after one anyway
+    /// (`VerifyError::RedundantFaultCheck`). Both readings agree here, and this
+    /// pins that they do: a fused bounded site would be a fault target the
+    /// lowering silently drops.
+    #[test]
+    fn a_bounded_int_binop_is_never_fused() {
+        assert_eq!(
+            fused(&[add(Overflow::Bounded), check()]),
+            vec![false, false]
+        );
+    }
+
+    /// A checked site with no check after it lowers to ADR-102's converging
+    /// diamond. The verifier makes this unreachable, and the point is that the
+    /// backend does not *depend* on that: an unverified function gets slower
+    /// code, not code that runs past an overflow.
+    #[test]
+    fn a_checked_int_binop_with_no_check_after_it_is_its_own_step() {
+        assert_eq!(fused(&[add(Overflow::Checked)]), vec![false]);
+        assert_eq!(
+            fused(&[add(Overflow::Checked), call()]),
+            vec![false, false],
+            "and the instruction after it is untouched"
+        );
+    }
+
+    /// Every instruction of a block belongs to exactly one step, in order.
+    /// A grouping that dropped one would delete emitted code silently, and a
+    /// grouping that repeated one would emit it twice.
+    #[test]
+    fn every_instruction_of_a_block_belongs_to_exactly_one_step_in_order() {
+        let insts = vec![
+            add(Overflow::Bounded),
+            add(Overflow::Checked),
+            check(),
+            call(),
+            check(),
+            add(Overflow::Checked),
+            check(),
+        ];
+        // By address, not by value: `Inst` has no `PartialEq`, and identity is
+        // the stronger claim anyway — these are the block's own instructions
+        // regrouped, not copies that happen to match.
+        let covered: Vec<*const Inst> = steps(&insts)
+            .iter()
+            .flat_map(|s| s.insts.iter())
+            .map(std::ptr::from_ref)
+            .collect();
+        let expected: Vec<*const Inst> = insts.iter().map(std::ptr::from_ref).collect();
+        assert_eq!(covered, expected, "the steps concatenate back to the block");
+        assert_eq!(fused(&insts), vec![false, true, false, false, true]);
     }
 
     /// A fault check is two loads and a branch: through `ctx.pending_fault`,
@@ -4057,6 +4524,153 @@ mod tests {
             triple,
             lowered_function_ir(src),
             "which is not the entry point's"
+        );
+    }
+
+    /// How many `Inst::CheckFault`s `func` still emits.
+    ///
+    /// One load of `ctx.pending_fault` each, and nothing else in the lowering
+    /// reads that field — `PENDING_FAULT_OFFSET` has exactly one non-test user,
+    /// the `Inst::CheckFault` arm. The context value is read out of the entry
+    /// block's parameters rather than spelled `v0`, so the count survives a
+    /// prologue that grows a value in front of it.
+    ///
+    /// **The operand is matched as a whole token.** `"v0+8".contains("v0+8")`
+    /// is also true of `v0+80` — the shadow-stack header's fifth slot — and a
+    /// substring match here would report the frame's stores as fault checks.
+    /// This is the trap handover 26 §7 records W6 walking into from the other
+    /// direction, in the same file.
+    fn emitted_fault_checks(func: &codegen::ir::Function) -> usize {
+        let entry = func
+            .layout
+            .entry_block()
+            .expect("a lowered function has one");
+        let ctx = func.dfg.block_params(entry)[0];
+        let operand = format!("{ctx}+{PENDING_FAULT_OFFSET}");
+        func.display()
+            .to_string()
+            .lines()
+            .filter(|l| {
+                l.contains("load.i64")
+                    && l.split_whitespace()
+                        .any(|t| t.trim_end_matches(',') == operand)
+            })
+            .count()
+    }
+
+    /// Every fault check in handover 25 §3's loop is folded into the raise that
+    /// is the only thing that could have set the flag (ADR-117).
+    ///
+    /// **This is the package's headline as a test.** MIR emits three
+    /// `Inst::CheckFault`s per iteration — the census below is the count, not an
+    /// estimate — and the lowered function reads `ctx.pending_fault` zero times.
+    #[test]
+    fn every_fault_check_in_the_sample_loop_is_folded_into_its_raise() {
+        use praxis_mir::test_support::{lower_src_to_mir, Census, InstKind};
+
+        let lowered = lower_src_to_mir(SAMPLE_LOOP);
+        let entry = lowered.entry();
+        let loop_body = lowered.innermost_loop_over(entry, "acc + i * 3");
+        let per_iteration = Census::of_blocks(entry, loop_body.blocks.iter().copied());
+        assert_eq!(
+            per_iteration.count(InstKind::CheckFault),
+            3,
+            "handover 25 §3 counts three fallible operations per iteration, and \
+             the census agrees: {per_iteration:?}"
+        );
+        assert_eq!(
+            emitted_fault_checks(&lowered_function(SAMPLE_LOOP)),
+            0,
+            "and the backend emits none of them"
+        );
+    }
+
+    /// Handover 25 §3 counts **seven** runtime type proofs per iteration of that
+    /// loop. There are nine, and this is the count that says so — every
+    /// `Inst::ExtractScalar` is one `emit_scalar_load`, which is one descriptor
+    /// proof (ADR-102).
+    ///
+    /// Recorded here rather than in a handover because it is the denominator
+    /// W6's acceptance criterion is stated against (handover 27 §9), and a
+    /// number two documents disagree about should be settled by the compiler.
+    #[test]
+    fn the_sample_loop_proves_nine_descriptors_per_iteration_not_seven() {
+        use praxis_mir::test_support::{lower_src_to_mir, Census, InstKind};
+
+        let lowered = lower_src_to_mir(SAMPLE_LOOP);
+        let entry = lowered.entry();
+        let loop_body = lowered.innermost_loop_over(entry, "acc + i * 3");
+        let per_iteration = Census::of_blocks(entry, loop_body.blocks.iter().copied());
+        let proofs = per_iteration.count(InstKind::ExtractScalar(praxis_mir::ScalarKind::Int))
+            + per_iteration.count(InstKind::ExtractScalar(praxis_mir::ScalarKind::Bool));
+        assert_eq!(
+            proofs, 9,
+            "eight `Int` reads and the loop condition's `Bool`"
+        );
+    }
+
+    /// A check that follows a *call* is not foldable and is still emitted: the
+    /// wrapper sets `pending_fault` and returns, so reading the slot is the only
+    /// way generated code learns it happened.
+    ///
+    /// The control for the test above. Without it, "zero fault checks" would
+    /// also pass if the lowering had stopped emitting them altogether.
+    #[test]
+    fn a_check_after_a_faulting_wrapper_is_still_a_load_and_a_branch() {
+        let src = "let v = [3, 1, 2]\nout(v[0] < v[1])\n";
+        assert!(
+            emitted_fault_checks(&lowered_function(src)) > 0,
+            "`praxis_value_cmp` faults, and nothing but the slot says so"
+        );
+    }
+
+    /// The three raise cold blocks of the sample loop all leave for one block,
+    /// and that block returns rather than rejoining the hot path (ADR-117).
+    ///
+    /// **The raise blocks are the argument-free ones**, and that is a fact
+    /// about them rather than a trick: `praxis_raise_*_if` returns `Void`, so
+    /// nothing crosses the edge. The other cold blocks in this function —
+    /// ADR-102's descriptor bail-out and ADR-113's out-of-range box — hand a
+    /// `GcRef` back to their join and are printed `jump blockN(vM)`.
+    ///
+    /// Asserting "they agree, and it returns" rather than naming the epilogue
+    /// is what makes this survive the epilogue growing or shrinking. It is also
+    /// what discriminates the two exits: at `RaiseExit::Observed` these blocks
+    /// jump argument-free too — to a join that carries on with the loop.
+    #[test]
+    fn the_sample_loops_three_raises_leave_for_one_returning_block() {
+        let func = lowered_function(SAMPLE_LOOP);
+        let ir = func.display().to_string();
+        let targets: Vec<String> = func
+            .layout
+            .blocks()
+            .filter(|&b| func.layout.is_cold(b))
+            .filter_map(|b| {
+                let text = block_text(&ir, b);
+                let last = text.trim_end().lines().last().unwrap_or("").trim();
+                last.strip_prefix("jump block")
+                    .filter(|rest| rest.chars().all(|c| c.is_ascii_digit()))
+                    .map(|rest| format!("block{rest}"))
+            })
+            .collect();
+        assert_eq!(
+            targets.len(),
+            3,
+            "one raise per checked operation in the loop; found {targets:?}:\n{ir}"
+        );
+        let first = &targets[0];
+        assert!(
+            targets.iter().all(|t| t == first),
+            "every raise leaves for the same block; found {targets:?}:\n{ir}"
+        );
+        let epilogue = func
+            .layout
+            .blocks()
+            .find(|b| format!("{b}") == *first)
+            .unwrap_or_else(|| panic!("`{first}` is a block of this function:\n{ir}"));
+        assert!(
+            block_text(&ir, epilogue).contains("return"),
+            "and it is an epilogue: it returns rather than rejoining:\n{ir}"
         );
     }
 
