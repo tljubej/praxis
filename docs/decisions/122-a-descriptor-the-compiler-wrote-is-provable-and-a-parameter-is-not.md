@@ -266,6 +266,43 @@ worth pinning rather than paraphrasing.
 > less than half as many proofs left to elide, and the ones that remain are the
 > ones this analysis is weakest at.
 
+> **Amended again when W4b merged, and the size of the move is the finding.**
+> The suite goes **219 → 218 sites, 30 literal (13.7% → 13.8%), 140 chased
+> (63.9% → 64.2%)**, and the three inner loops do not move at all: 29 sites, 2
+> literal, 27 chased, the same four numbers. One site, in `bfs`, whose own row
+> goes 63 → 62 with both columns unchanged at 4 and 49.
+>
+> **One site is not what W4b was expected to be worth here, and the reason is
+> worth having in writing**, because the expectation was reasonable. W4b was
+> filed as the counterweight to W8-S0 — a package that moves descriptors *out*
+> of `Inst::Call`, where this analysis is blind, and into MIR's own emissions,
+> where it is not. That is true of exactly **one** of W4b's three
+> primitives. `bs.contains(x)` becomes `Inst::BitsetContains` with a
+> `Scalar(Bool)` dst, so its `ExtractScalar` goes away with the box W8-S0
+> forwards; that is the one site. `praxis_vec_get` and `praxis_vec_len` inline
+> **in the backend** and keep their `Inst::Call` in MIR — the wrapper is the cold
+> arm, not the only arm — so this census cannot see them at all, and the
+> descriptor of the `GcRef` they answer is exactly as unprovable as it was.
+>
+> The general statement is the useful one: **inlining a call in the backend buys
+> this analysis nothing.** What buys it something is giving the primitive its own
+> `Inst`, which is a MIR change and costs a variant, a verifier arm, a liveness
+> arm and a backend arm apiece (ADR-118 decisions 6 and 10). Anyone hoping to
+> raise the chased column by inlining more wrappers should price that, not the
+> inlining.
+>
+> A note on provenance, since this record is quoted from: **the open question
+> that names W4b is not in this document, and never was.** W4b's brief attributes
+> to "ADR-122's own open questions" the claim that W4b's inline collection
+> primitives beat an interprocedural analysis at making sites provable. The word
+> `W4b` does not appear in this file, and the third open question — *"Is the
+> parameter case recoverable interprocedurally?"* — names neither W4b nor
+> `Inst::Call`; it prices a summary-based analysis against W11's backend half and
+> stops. The gloss was a reasonable reading of the two together and the
+> measurement above answers it either way. The attribution is what needed fixing,
+> and it is recorded because the next reader will otherwise come looking for a
+> sentence that is not here.
+
 **The one word to correct is handover 27's own.** It glosses 29/56 = 52% as *"a
 fail on the 'fewer than half' gate"*. 29 of 56 is not fewer than half — it is a
 bare **pass**, by one site. What fails handover 26's gate is the post-W8-S0

@@ -884,16 +884,31 @@ mod census {
     /// chased (81.1%), with `vm` the floor at 54.3% and `collatz` the ceiling at
     /// 95.8%.
     ///
-    /// Measured **on this tree**, with W8-S0 and W8-S0b in it: **219 sites, 30
-    /// literal (13.7%), 140 chased (63.9%)**. The denominator nearly halved and
-    /// the literal column collapsed by 41 points, and both are one fact: W8-S0's
-    /// producer set is `Materialize`/`Alloc`/`ConstGc`, which is *exactly* what
-    /// the literal column counts, so the two anti-correlate rather than merely
-    /// differ. Every site the literal column could prove is a site W8-S0 would
-    /// rather delete.
+    /// Measured with W8-S0 and W8-S0b in the tree and W4b not yet: 219 sites,
+    /// 30 literal (13.7%), 140 chased (63.9%). The denominator nearly halved
+    /// and the literal column collapsed by 41 points, and both are one fact:
+    /// W8-S0's producer set is `Materialize`/`Alloc`/`ConstGc`, which is
+    /// *exactly* what the literal column counts, so the two anti-correlate
+    /// rather than merely differ. Every site the literal column could prove is
+    /// a site W8-S0 would rather delete.
     ///
     /// That is the strongest argument in the round against W11's backend half,
     /// and it arrived by measurement rather than by judgement.
+    ///
+    /// Measured **on this tree**, with W4b in it too: **218 sites, 30 literal
+    /// (13.8%), 140 chased (64.2%)**. The whole of the move is **one site, in
+    /// `bfs`** — 63 → 62, with `literal` and `chased` both unchanged at 4 and
+    /// 49 — and the size of it is the finding. ADR-122's open questions
+    /// nominate W4b as the way to make *more* sites provable, on the grounds
+    /// that it "moves descriptors out of `Inst::Call` and into MIR's own
+    /// emissions". That is true of exactly one of its three arms:
+    /// `Inst::BitsetContains` is a MIR instruction and its `ExtractScalar`
+    /// disappears with the box W8-S0 forwards away, which is the one site.
+    /// `praxis_vec_get` and `praxis_vec_len` inline **in the backend** and
+    /// keep their `Inst::Call` in MIR, so this census — which reads MIR —
+    /// cannot see them, and the descriptor of a value the wrapper minted is no
+    /// more provable than it was. Making it so is an `Inst` per primitive, not
+    /// a backend arm (ADR-118 decision 10).
     #[test]
     fn the_census_over_the_whole_suite_is_a_different_answer_in_each_column() {
         let mut suite = Sites::default();
@@ -935,6 +950,12 @@ mod census {
     /// as "a fail on the 'fewer than half' gate". 29 of 56 is not fewer than
     /// half; it is a bare *pass*, by one site. What genuinely fails handover
     /// 26's gate is this tree's 6.9%.
+    ///
+    /// **W4b moves none of these four numbers**, and that is not a null result
+    /// worth shrugging at: `collatz`, `primes` and `mandelbrot` are arithmetic
+    /// loops that touch no `BitSet` and no `Vec`, so the one site W4b removes
+    /// suite-wide lands in `bfs` and nowhere near here. The three inner loops
+    /// stay at 29/2/27 exactly.
     ///
     /// These digits move with every lowering change. Re-measure, do not re-type:
     /// run with `--nocapture` and the table prints itself.
