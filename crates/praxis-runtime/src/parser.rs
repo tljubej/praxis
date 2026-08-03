@@ -328,7 +328,7 @@ impl Rt {
     ) -> GcRef {
         let payload = crate::collections::VecPayload {
             element_descriptor,
-            items,
+            items: items.into(),
         };
         // SAFETY: ctx is valid.
         let (heap, safepoint) = self.safepoint();

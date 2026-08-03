@@ -1793,7 +1793,7 @@ mod tests {
                 |payload| {
                     let vp = VecPayload {
                         element_descriptor: &INT,
-                        items: elems.clone(),
+                        items: elems.clone().into(),
                     };
                     (payload as *mut VecPayload).write(vp);
                 },
@@ -1841,7 +1841,7 @@ mod tests {
                     |payload| {
                         (payload as *mut VecPayload).write(VecPayload {
                             element_descriptor: &INT,
-                            items: elems,
+                            items: elems.into(),
                         });
                     },
                 )
@@ -1859,7 +1859,7 @@ mod tests {
                     (payload as *mut VecPayload).write(VecPayload {
                         // The element descriptor of a Vec-of-X is VEC itself.
                         element_descriptor: &VEC,
-                        items: vec![inner0, inner1],
+                        items: vec![inner0, inner1].into(),
                     });
                 },
             )

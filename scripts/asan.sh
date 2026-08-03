@@ -123,7 +123,14 @@ UNINSTRUMENTED=""
 while IFS= read -r exe; do
     [ -n "$exe" ] || continue
     COUNT=$((COUNT + 1))
-    if ! nm "$exe" 2>/dev/null | grep -q '__asan_'; then
+    # `grep`, not `grep -q`. `-q` exits at the first match, `nm` then dies of
+    # SIGPIPE with 141, and `set -o pipefail` two dozen lines up turns that into
+    # the pipeline's status — so the check reports "not instrumented" for
+    # precisely the binaries big enough for `nm` to still be writing, which is
+    # all the interesting ones. It is a race, so it passed at `e4f42e6` and
+    # fails on a tree whose `praxis` has 25k `__asan_*` symbols. Found by W4a
+    # (ADR-118), whose sanitizer run is not optional.
+    if ! nm "$exe" 2>/dev/null | grep '__asan_' >/dev/null; then
         UNINSTRUMENTED="$UNINSTRUMENTED  $exe"$'\n'
     fi
 done <<EOF
