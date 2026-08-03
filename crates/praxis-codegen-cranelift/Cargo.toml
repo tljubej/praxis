@@ -23,6 +23,7 @@ anyhow.workspace = true
 [dev-dependencies]
 praxis-ast.workspace = true
 praxis-hir.workspace = true
+praxis-mir = { workspace = true, features = ["test-support"] }
 praxis-parser.workspace = true
 praxis-source.workspace = true
 praxis-test-support.workspace = true

@@ -206,7 +206,11 @@ fn dirty_in_fixpoint(
 }
 
 /// Successor blocks of a terminator.
-fn successors(term: &Terminator) -> Vec<BlockId> {
+///
+/// `pub(crate)` for the `test_support` module's CFG walk: one statement of
+/// "what edges leave a block" is what keeps a second walker from disagreeing
+/// with the liveness fixpoint about whether a fault edge is an edge.
+pub(crate) fn successors(term: &Terminator) -> Vec<BlockId> {
     match term {
         Terminator::Branch {
             then_block,

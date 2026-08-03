@@ -13,10 +13,27 @@ praxis-runtime.workspace = true
 praxis-hir.workspace = true
 praxis-stdlib.workspace = true
 
+# The front end, for `test_support::lower_src_to_mir` only. Optional so that a
+# plain `cargo build` of the compiler compiles nothing extra: `praxis-mir`'s
+# production job starts at typed HIR and it must not acquire a parser.
+praxis-ast = { workspace = true, optional = true }
+praxis-parser = { workspace = true, optional = true }
+
+# `praxis-ast` and `praxis-parser` appear here as well as above, and both entries
+# are load-bearing. The optional ones serve `--features test-support` for *other*
+# crates' tests; these serve this crate's own `#[cfg(test)]` code, which
+# `test_support` is also gated on, so `cargo test -p praxis-mir` needs no feature
+# flag and nobody has to remember one.
 [dev-dependencies]
 praxis-ast.workspace = true
 praxis-parser.workspace = true
 praxis-test-support.workspace = true
+
+[features]
+# Makes `praxis_mir::test_support` reachable from another crate's tests. Off by
+# default and never enabled by a `[dependencies]` entry — a consumer asks for it
+# in `[dev-dependencies]`, which `cargo build` does not resolve.
+test-support = ["dep:praxis-ast", "dep:praxis-parser"]
 
 # Doctests are not run (see the justfile and README): rustdoc has to analyze the
 # whole crate before it can find out there are none, and the result is never

@@ -6,6 +6,34 @@ implementing them. Each entry is short: context, decision, and the reason.
 
 Entries are numbered and dated. Add new decisions at the bottom.
 
+**A number can be reserved before its decision is written.** Ten packages in the
+[handover-26](../handovers/26-ten-packages-six-waves-and-the-five-things-25-got-wrong.md)
+round independently named their ADR `114-*.md`, and in ten separate worktrees
+that is a *silent overwrite* rather than a merge conflict — two unrelated
+documents at one path, and the merge keeps whichever it saw last. So `114..123`
+below are assigned in advance, one per package, and nobody picks their own
+(§2, §7 trap 1).
+
+A reserved entry is a placeholder: it carries a **status word** where its title
+belongs and points at `NNN-slug.md`, which is not a file. Writing the decision is
+then a **one-line edit** — real title, real filename, status word gone — rather
+than an append that two branches would both perform at the same offset. A line
+that still has a status word was never written, and that is how to tell six
+months from now.
+
+There are two status words and the difference is the point: ***owed*** means the
+package is planned this round and is expected to write the decision, while
+***reserved*** means handover 26 defers or declines the package, so the number
+may stay unwritten forever. A reserved number is still spent — handover 26's
+prose already refers to these numbers by name, so recycling one would make an
+existing document wrong.
+
+A status word can move, and one already has:
+[handover 27](../handovers/27-the-five-gates-and-what-26-got-wrong.md) §5 splits
+W11 into a safety half worth building now and a backend half with no honest slot
+before the round's last gate, so **122 became *owed*** — for the analysis and the
+verifier rule only. Its decision must not claim the elision.
+
 - [ADR-001: Snapshot testing library is `insta`](./001-snapshot-testing-insta.md)
 - [ADR-002: CI runs `just ci`, with a minimal GitHub Actions wrapper](./002-ci-via-just.md)
 - [ADR-003: Lossless syntax tree uses the `rowan` crate](./003-lossless-tree-uses-rowan.md)
@@ -118,3 +146,13 @@ Entries are numbered and dated. Add new decisions at the bottom.
 - [ADR-111: A `Text` literal's bytes are the compiler's promise, and the input's are the host's](./111-a-text-literals-bytes-are-the-compilers-promise.md)
 - [ADR-112: The pacer has a ceiling, and only the live set may exceed it](./112-the-pacer-has-a-ceiling-and-the-live-set-may-exceed-it.md)
 - [ADR-113: An `Int` box is a table read behind a pacing branch, and the token is permission to collect](./113-an-int-box-is-a-table-read-behind-a-pacing-branch.md)
+- [ADR-114: *owed* — W1, the native root stack](./114-slug.md)
+- [ADR-115: *owed* — W2, `Text` length and indexing in O(1)](./115-slug.md)
+- [ADR-116: *owed* — W6, built-in descriptor addresses in `RuntimeContext`](./116-slug.md)
+- [ADR-117: *owed* — W7, folding `CheckFault` into the inline raise](./117-slug.md)
+- [ADR-118: *owed* — W4, inlining the collection primitives](./118-slug.md)
+- [ADR-119: *owed* — W10, the inline scalar claim](./119-slug.md)
+- [ADR-120: *owed* — W8-S0/S0b, block-local box/unbox forwarding](./120-slug.md)
+- [ADR-121: *reserved* — W8-S1, `Gc`→`Scalar` demotion for loop-carried locals; behind the wave-5 gate](./121-slug.md)
+- [ADR-122: *owed* — W11-safety, a provable-descriptor analysis and the verifier rule it licenses](./122-slug.md)
+- [ADR-123: *reserved* — W12, two code variants selected by `--debug never`; handover 26 defers it](./123-slug.md)

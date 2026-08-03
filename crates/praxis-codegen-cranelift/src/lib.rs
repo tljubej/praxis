@@ -12,7 +12,25 @@
 //! Milestone 4 fills this crate. GC root tracking via a generated shadow-stack
 //! frame (§12.3) is implemented; the per-safepoint root set comes from MIR
 //! liveness (`live_roots`).
+//!
+//! # Reading the emitted code
+//!
+//! Two environment variables dump what the backend emitted, on **stderr**, from
+//! the real compile path — `PRAXIS_DUMP_CLIF` for the Cranelift IR as
+//! `define_function` leaves it and `PRAXIS_DUMP_VCODE` for the machine-level
+//! listing. Each takes `1`/`all` or a
+//! comma-separated list of function names (`<entry>`, `main`, a user `fn`), and
+//! each dump is headed by its instruction count per block:
+//!
+//! ```text
+//! PRAXIS_DUMP_CLIF='<entry>' praxis run loop.px
+//! ```
+//!
+//! They are permanent because an instruction count is the deterministic result
+//! for a change that removes a few instructions from a loop, and the clock is
+//! not (handover 26 §6). The module doc of `dump.rs` has the rest of the why.
 
+mod dump;
 pub mod generation;
 mod lower;
 mod module;

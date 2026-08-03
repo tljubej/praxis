@@ -39,3 +39,26 @@ build:
 # The full quality gate — exactly what hosted CI runs. Run this before pushing.
 ci: fmt-check clippy test
     @echo "all Praxis checks passed"
+
+# AddressSanitizer over the whole suite. This is deliberately NOT a dependency
+# of `ci`.
+#
+# The instrumented build is a *second full compile* of the workspace, and `ci` is
+# already ~17 minutes on the development laptop — of which ~14 is macOS XProtect
+# exec-scanning freshly linked binaries. Doubling that makes the pre-push gate
+# one people stop running, which costs more than the sanitizer catches. So it
+# runs nightly instead: `.github/workflows/asan.yml`, on a schedule, calling this
+# same recipe. ADR-002's rule that hosted CI runs what developers run is intact —
+# what is new is a second *job*, not a second command.
+#
+# Needs a nightly toolchain (`rustup toolchain install nightly`);
+# `rust-toolchain.toml` pins stable and the script overrides it with `+nightly`.
+# Why the flags are what they are is in the script, at length.
+#
+# It does not cover JIT-generated code: Cranelift emits that raw and no `-Z` flag
+# reaches it. A green run is necessary and not sufficient for any change that
+# puts new unsafe behaviour in generated code.
+#
+# Run the whole suite under AddressSanitizer (nightly toolchain; not in `ci`).
+asan:
+    ./scripts/asan.sh

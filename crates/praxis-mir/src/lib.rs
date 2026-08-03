@@ -19,6 +19,18 @@ pub mod ir;
 pub mod liveness;
 pub mod verify;
 
+/// Shape assertions over lowered MIR, for the packages whose gate is a count of
+/// emitted instructions (handover 26 §2).
+///
+/// `cfg(test)` **and** the feature, because there are two consumers and they
+/// need different doors: this crate's own tests get it with no flag to
+/// remember, and another crate's tests get it by asking for
+/// `features = ["test-support"]` in their `[dev-dependencies]`. Neither door is
+/// open to `cargo build`, which is the point — the front end this module needs
+/// is not a dependency of the compiler's MIR crate.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 pub use annot::{DebugSlots, RootSlots};
 pub use build::lower_module;
 pub use ir::{

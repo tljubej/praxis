@@ -5014,35 +5014,14 @@ fn emit_subpattern_tests(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use praxis_ast::AstNode;
-    use praxis_hir::{analyze_root, lower};
-    use praxis_parser::parse;
-    use praxis_source::SourceMap;
 
+    /// The pair shape these tests destructure, over the crate's one front-end
+    /// driver ([`crate::test_support::lower_src_to_mir`]). It used to be a
+    /// second copy of that driver, which is how it came to be the only one of
+    /// the three that skipped monomorphization.
     fn lower_src_to_mir(src: &str) -> (Vec<Function>, praxis_hir::Analysis) {
-        let map = SourceMap::new();
-        let file = map.intern("build_test.px", src);
-        let parsed = parse(file, src);
-        assert!(
-            parsed.diagnostics.is_empty(),
-            "parse diagnostics: {:?}",
-            parsed.diagnostics
-        );
-        let mut analysis = analyze_root(file, &parsed.tree);
-        assert!(
-            analysis.diagnostics.is_empty(),
-            "analysis diagnostics: {:?}",
-            analysis.diagnostics
-        );
-        let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-        let module = lower(file, &root, &mut analysis);
-        assert!(
-            module.diagnostics.is_empty(),
-            "lowering diagnostics: {:?}",
-            module.diagnostics
-        );
-        let funcs = lower_module(&module, &mut analysis.db);
-        (funcs, analysis)
+        let lowered = crate::test_support::lower_src_to_mir(src);
+        (lowered.funcs, lowered.analysis)
     }
 
     /// **P0-02, the half F15 unblocked.** A `for` binding's slot and the item

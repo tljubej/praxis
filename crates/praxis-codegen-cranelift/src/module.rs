@@ -59,6 +59,40 @@ pub struct Jit {
     generation: Rc<Generation>,
 }
 
+/// The Cranelift settings every Praxis JIT is built with, written out rather
+/// than left to `JITBuilder::new`'s empty list, so the decision is visible at
+/// the point it takes effect.
+///
+/// **`opt_level` is `"none"`, and the question is closed.** It was measured four
+/// times. Handover 21 §3.7 and 22 §4 were both negative and explained it with
+/// "the mid-end has nothing to work with when the loop body is a chain of opaque
+/// calls"; ADR-113 removed exactly that, and the third measurement was the first
+/// non-null one — `collatz` −6.3%, `primes` −1.6%, the other five inside ±0.5% —
+/// which is why the note that stood here ended "try it again after P-1b".
+///
+/// Handover 25 §3 settled it without waiting, by comparing the *code* instead of
+/// the clock. Same program, same binary, the flag toggled:
+///
+/// | | hot loop | whole function |
+/// |---|---:|---:|
+/// | `"none"` | 216 instrs | 473 |
+/// | `"speed"` | 216 instrs | 471 |
+///
+/// **Zero difference in the loop** — not "within noise", the same instructions.
+/// That retires the explanation carried since 21 and replaces it with a sharper
+/// one: what the lowering emits is not redundant *to Cranelift*. The register
+/// allocator rematerializes descriptor addresses on purpose rather than keeping
+/// them live, the loads are through memory it cannot prove non-aliasing, and the
+/// type proofs compare against addresses it cannot fold. Redundancy in the loop
+/// is the **lowering's** to remove, and every item in handover 26's plan removes
+/// it there. This is the last measurement the flag gets.
+///
+/// Cranelift's settings builder is stringly typed, so a name or a value it does
+/// not know is an error from `JITBuilder::with_flags` at run time and not a build
+/// failure. `the_opt_level_flag_is_accepted_and_takes_effect` is the build
+/// failure.
+pub(crate) const CRANELIFT_FLAGS: &[(&str, &str)] = &[("opt_level", "none")];
+
 impl Jit {
     /// Create a fresh JIT with the `praxis_*` symbols registered, in its own
     /// new generation.
@@ -81,30 +115,9 @@ impl Jit {
     /// # Errors
     /// As [`Jit::new`].
     pub fn in_generation(generation: Rc<Generation>) -> Result<Self, JitError> {
-        // `JITBuilder::new` is `with_flags(&[], …)`, so Cranelift runs at its
-        // default `opt_level = "none"`.
-        //
-        // **This has now been measured three times, and the third one is not
-        // null.** See `docs/handovers/21-where-the-time-goes.md` §3.7. The first
-        // two were negative and the standing explanation was that allocation is
-        // an opaque call and a memory clobber, so the mid-end cannot move
-        // anything across a loop body; the comment here used to say not to try
-        // again without a new reason. ADR-113 is that reason — it turns the
-        // commonest allocation in the language into a load behind a branch — and
-        // on the tree it landed on, `"speed"` takes 6.3% off `collatz`
-        // (reproduced twice), 1.6% off `primes`, and leaves the other five
-        // inside ±0.5%. Compile time costs 0.2–0.9 ms per program, against the
-        // 4.7 ms handover 21 measured.
-        //
-        // The default stays `"none"` anyway, and the reason is that one
-        // benchmark is not a result: `collatz` is the most allocation-dense
-        // program in the suite and therefore the one ADR-113 changed most, so
-        // its number is the best case rather than the average. Flipping this
-        // wants the *next* allocation change — P-1b, the inline bitmap claim —
-        // and a fourth measurement across a suite where more than one row moves.
-        // What is no longer true is that trying it is a waste of time.
-        let mut builder = JITBuilder::new(cranelift_module::default_libcall_names())
-            .map_err(|e| JitError::UnsupportedTarget(format!("{e:?}")))?;
+        let mut builder =
+            JITBuilder::with_flags(CRANELIFT_FLAGS, cranelift_module::default_libcall_names())
+                .map_err(|e| JitError::UnsupportedTarget(format!("{e:?}")))?;
         // Resolve `praxis_*` imports through `symbols::resolve` — the one
         // table. The previous code kept a second, hand-maintained list of 57
         // names here; it had already drifted from the ~130 the resolver knows,
@@ -289,5 +302,43 @@ mod tests {
     fn an_unknown_runtime_symbol_is_not_resolvable() {
         assert!(symbols::resolve("praxis_alloc_int").is_some());
         assert!(symbols::resolve("praxis_not_a_real_runtime_symbol").is_none());
+    }
+
+    /// The optimization level is set explicitly, and it reached the ISA.
+    ///
+    /// Both halves are the test. A settings name or value Cranelift does not
+    /// know is an `Err` from `with_flags` — see the test below — so "it
+    /// compiles" says nothing about whether [`CRANELIFT_FLAGS`] is spelled
+    /// right, and `Jit::new()` succeeding is what says the pair was accepted.
+    /// Reading the level back off the ISA is what says it governs the
+    /// compilations this `Jit` performs, rather than having been accepted and
+    /// dropped.
+    #[test]
+    fn the_opt_level_flag_is_accepted_and_takes_effect() {
+        let jit = Jit::new().expect("the explicit flags must be accepted");
+        assert_eq!(
+            jit.module.isa().flags().opt_level(),
+            cranelift::codegen::settings::OptLevel::None,
+            "handover 25 §3 closed this: `\"speed\"` emitted the same 216 \
+             instructions in the hot loop and 2 fewer in the whole function"
+        );
+    }
+
+    /// A settings pair Cranelift does not know is a run-time error, which is
+    /// the reason the test above has to read the level back rather than trust
+    /// the constant.
+    #[test]
+    fn a_flag_value_cranelift_does_not_know_is_rejected_at_run_time() {
+        let err = JITBuilder::with_flags(
+            &[("opt_level", "fastest")],
+            cranelift_module::default_libcall_names(),
+        )
+        .err()
+        .expect("`fastest` is not one of Cranelift's three optimization levels");
+        assert!(
+            format!("{err}").contains("none, speed, speed_and_size"),
+            "and the three legal values are the ones `CRANELIFT_FLAGS` must be \
+             spelled from: {err}"
+        );
     }
 }

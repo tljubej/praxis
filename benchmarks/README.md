@@ -60,6 +60,62 @@ were fixed. It is kept because it is the measurement ADR-112 overturns, and it
 should not be renamed: there is nothing left in the tree it could be a control
 for.
 
+### The per-package A/B
+
+`ab.py` is the harness for measuring one change against one baseline, and it
+implements
+[handover 26](../docs/handovers/26-ten-packages-six-waves-and-the-five-things-25-got-wrong.md)
+§6 clause by clause. It takes **two binary paths and builds neither**:
+
+```bash
+python3 benchmarks/ab.py --label W6 \
+    --arm-a /tmp/praxis-baseline --arm-b /tmp/praxis-w6 \
+    --controls collatz,primes
+```
+
+**Arm A is not the previous commit.** It is *this* tree with the package's single
+toggle point reverted. ADR-113 measured itself both ways and the two answers were
+−14.4% and −0.8%; the 13.6 points in between were four unrelated changes that had
+landed since. Everything else the tool enforces — the exclusive lock at
+`/tmp/praxis-measure.lock`, the quiescence gate, staging both binaries out of
+`target/`, the palindromic A,B,B,A order, the frozen `sizes.json` hash, the
+byte-for-byte stdout diff, the control benchmarks — is in its module docstring
+with the reason each clause exists. `--help` prints all of it.
+
+**The statistic is paired.** A rep is four runs, `A,B,B,A` or `B,A,A,B`, and it
+contains exactly two A/B adjacencies — runs 1-2 and runs 3-4. Each is one ratio
+formed from two runs *seconds* apart, so `2 × reps` ratios per benchmark, ten at
+the protocol minimum of five reps. The headline `speedup` is the **median** of
+those ratios and the resolution bar is their **scaled median absolute
+deviation**: a robust centre with a robust scale, computed on the same sample.
+`min(A)/min(B)` is still reported as `speedup_min`, because that is the number
+handover 25 and ADR-113 quote and the two must be comparable.
+
+That pairing is what the palindromic order is *for*. Collapsing each arm to one
+number over the whole sweep and only then comparing throws it away, and what the
+resulting error bar then measures is the sweep's drift — which the palindrome
+had already cancelled. Each arm's full `max − min` range is still reported, as
+`sweep_drift`, but only as a diagnostic about the machine: over one self-test of
+all eight benchmarks with the same binary in both arms it ran 5-23%, where the
+paired dispersion of those very same runs was 0.7-4.0%.
+
+Two flags worth knowing. `--check-only` runs every gate and times nothing, which
+answers "is this machine ready to measure?" without starting a sweep — the lock,
+the frozen `sizes.json` hash, quiescence, `PRAXIS_GC_PACER`, `PRAXIS_DUMP_*`, and
+that `results.json` has a checksum for every benchmark. It exits nonzero if any
+of them would have stopped the sweep it is green-lighting. `--smoke` exercises
+the harness at pilot sizes with the quiescence gate and the `results.json`
+checksum comparison waived — a pilot size computes a different, equally correct
+answer, so there is nothing to compare against; the byte-for-byte diff *between
+the arms* still applies. It stamps everything it produces `VOID` and exits
+nonzero, because a run that skipped a gate is not a measurement.
+
+It writes `ab-<label>.json`, which carries both arms, both binaries' sha256s, the
+paired ratios in execution order, the load average at the start, and a `verdict`
+field that is `"void"` whenever a checksum differed or a control moved. That
+field is there so a sweep whose per-benchmark numbers look fine cannot be quoted
+without the reason it was thrown out.
+
 `run.py` **refuses to run** with `PRAXIS_GC_PACER` set. The variable changes the
 collector's schedule and nothing else, so a stale export would move every Praxis
 number in `results.json` without moving one character of its output — and

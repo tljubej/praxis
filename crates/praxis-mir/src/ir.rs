@@ -141,7 +141,13 @@ pub enum LocalKind {
 }
 
 /// The representation of a transient scalar payload.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// `Ord` and `Hash` are the same courtesy [`RuntimeSymbol`] extends, and mean
+/// the same thing: this is a tag, so it can key a map. The order is declaration
+/// order and says nothing about the payloads — a `Float` is not "greater than"
+/// an `Int`, and how the language orders *values* is ADR-045's `compare`
+/// callback, not this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScalarKind {
     /// `i64` — the payload of an `Int` object.
     Int,

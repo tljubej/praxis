@@ -1,0 +1,46 @@
+# AddressSanitizer, nightly and scheduled — deliberately NOT part of `just ci`.
+#
+# ADR-002 says hosted CI runs exactly what a developer runs and the workflow does
+# no logic of its own. That still holds here: this job runs `just asan`, one
+# recipe, and every flag it needs lives in `scripts/asan.sh`. What is the
+# exception is that it is a *second job on a schedule* rather than another line
+# in the `ci` aggregate — because the instrumented build is a second full compile
+# of the workspace, `just ci` already takes ~17 minutes at the keyboard
+# (docs/handovers/25-two-mallocs-per-runtime-call.md §1), and a gate developers
+# stop running before pushing costs more than this catches.
+#
+# The triple here is not the laptop's. `scripts/asan.sh` derives it from the
+# nightly toolchain, so this file names no target.
+
+name: asan
+
+on:
+  schedule:
+    # 03:00 UTC daily. Nothing depends on the hour; it is off-peak for the
+    # hosted runners and far from any push.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  asan:
+    runs-on: ubuntu-latest
+    # An instrumented build plus 1911 tests is long but not unbounded. Failing at
+    # 90 minutes says "something hung" rather than burning the default six hours.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - name: Install nightly
+        # rust-toolchain.toml pins stable, and `-Zsanitizer=address` is a nightly
+        # flag, so the toolchain `scripts/asan.sh` invokes as `+nightly` has to be
+        # installed explicitly. `--profile minimal` is enough: the sanitizer
+        # runtime ships inside `rust-std` for the host target.
+        run: rustup toolchain install nightly --profile minimal
+      - name: Install just
+        run: cargo install just
+      - name: Sanitizer suite
+        run: just asan

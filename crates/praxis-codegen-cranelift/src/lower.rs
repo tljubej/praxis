@@ -27,6 +27,7 @@ use praxis_runtime::{
 };
 use praxis_stdlib::abi::{AbiKind, AbiRet, RuntimeSymbol};
 
+use crate::dump;
 use crate::generation::Generation;
 
 /// The uniform Cranelift type for a `GcRef` and every scalar payload: `i64`.
@@ -166,6 +167,29 @@ pub(crate) fn lower_function<M: Module>(
     user_funcs: &HashMap<String, FuncId>,
     db: &mut praxis_types::TypeDb,
     generation: &Generation,
+) -> Result<()> {
+    lower_function_capturing(module, fn_ctx, mir, user_funcs, db, generation, None)
+}
+
+/// [`lower_function`], with the defined function's Cranelift IR cloned into
+/// `captured` when one is supplied — the post-`define_function` text, which at
+/// `opt_level = "none"` is the builder's own output tidied and not optimized
+/// output (`dump::emit` has the list of what "tidied" covers).
+///
+/// The compile path supplies none. This exists because `define_function` is the
+/// last point at which the lowered function exists at all — `clear_context`
+/// wipes `ctx.func` on the next line — so a test that wants to assert something
+/// about a *whole* lowered function, rather than about one hand-driven emit
+/// closure, has nothing to read afterwards. `dump::emit` answers the same
+/// question for a human on stderr; this is the answer a test can hold.
+fn lower_function_capturing<M: Module>(
+    module: &mut M,
+    fn_ctx: &mut FunctionBuilderContext,
+    mir: &MirFunction,
+    user_funcs: &HashMap<String, FuncId>,
+    db: &mut praxis_types::TypeDb,
+    generation: &Generation,
+    captured: Option<&mut codegen::ir::Function>,
 ) -> Result<()> {
     // The ISA's pointer width and default call convention. Needed by the
     // prologue's slot-zeroing memset and by `finalize` at the end, and taken
@@ -484,8 +508,23 @@ pub(crate) fn lower_function<M: Module>(
 
     // Resolve our FuncId (declared in the first pass) and define the function.
     let id = func_id_for(module, &mir.name)?;
+    // The disassembly has to be *asked for* before compilation: `define_function`
+    // hands `want_disasm` straight to the ISA and there is no way to request it
+    // afterwards. `dump::wants_vcode` and `dump::emit` read the same field, so
+    // they cannot disagree about whether it was asked for.
+    ctx.set_disasm(dump::wants_vcode(&mir.name));
     module.define_function(id, &mut ctx)?;
     audit_frame_cost(&ctx, &mir.name, this_frame_cost);
+    // Between here and `clear_context` is the only window in which the lowered
+    // function exists, and the next line drops it. What `define_function` did to
+    // `ctx.func` on the way through is *not* optimization: at `opt_level =
+    // "none"` (module::CRANELIFT_FLAGS) `Context::optimize` is unreachable-block
+    // elimination, constant-block-parameter removal and alias resolution, and the
+    // egraph mid-end is gated off. See `dump::emit` for the whole of it.
+    dump::emit(&mir.name, &ctx);
+    if let Some(out) = captured {
+        *out = ctx.func.clone();
+    }
     module.clear_context(&mut ctx);
     Ok(())
 }
@@ -3002,9 +3041,19 @@ mod tests {
     use super::*;
     use cranelift_jit::{JITBuilder, JITModule};
 
+    /// A `JITModule` configured exactly as `Jit::in_generation` configures its
+    /// own — `crate::module::CRANELIFT_FLAGS`, not Cranelift's defaults.
+    ///
+    /// The two agree today (the default `opt_level` is also `"none"`), and that
+    /// is the reason to share the constant rather than to leave it: a test that
+    /// asserts on the emitted shape, and a `PRAXIS_DUMP_CLIF` run of the same
+    /// program, must be looking at the same code.
     fn test_module() -> JITModule {
-        let builder = JITBuilder::new(cranelift_module::default_libcall_names())
-            .expect("host target is supported");
+        let builder = JITBuilder::with_flags(
+            crate::module::CRANELIFT_FLAGS,
+            cranelift_module::default_libcall_names(),
+        )
+        .expect("host target is supported");
         JITModule::new(builder)
     }
 
@@ -3800,5 +3849,375 @@ mod tests {
             !all.contains("readonly") && !all.contains("can_move"),
             "the pending-fault load must not claim the memory is stable:\n{all}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // From Praxis source to a whole lowered function.
+    //
+    // `emitted_ir` above wraps one emit closure, which is the right shape for
+    // "what does `emit_scalar_load` emit" and the wrong one for "does this
+    // loop's hot path contain a call" — that is a claim about a whole
+    // `lower_function`, and the only way to make it today was to hand-build
+    // MIR. These run the real pipeline instead: parse → HIR → MIR →
+    // `lower_function`, the same passes `praxis run` runs.
+    //
+    // What comes back is the `Function` and not its text, because the text is
+    // the weaker of the two: `assert_dominates` needs the CFG, and
+    // `lowered_function_ir` is one `display()` away.
+    // -----------------------------------------------------------------------
+
+    /// The MIR of `src`, annotated and verified.
+    fn mir_for(src: &str) -> (Vec<MirFunction>, praxis_types::TypeDb) {
+        use praxis_ast::AstNode;
+
+        let map = praxis_source::SourceMap::new();
+        let file = map.intern("lower_test.px", src);
+        let parsed = praxis_parser::parse(file, src);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "parse diagnostics: {:?}",
+            parsed.diagnostics
+        );
+        let mut analysis = praxis_hir::analyze_root(file, &parsed.tree);
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "analysis diagnostics: {:?}",
+            analysis.diagnostics
+        );
+        let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).expect("a source file root");
+        let module = praxis_hir::lower(file, &root, &mut analysis);
+        assert!(
+            module.diagnostics.is_empty(),
+            "HIR lowering diagnostics: {:?}",
+            module.diagnostics
+        );
+        let module = praxis_hir::mono::monomorphize(module, &analysis.names, &mut analysis.db);
+        let mut funcs = praxis_mir::lower_module(&module, &mut analysis.db);
+        for f in &mut funcs {
+            praxis_mir::annotate(f);
+            if let Err(errs) = praxis_mir::verify(f) {
+                panic!("{}", praxis_mir::verify::report(&errs));
+            }
+        }
+        (funcs, analysis.db)
+    }
+
+    /// Every function of `src`, lowered by the real backend, by MIR name.
+    fn lowered_functions(src: &str) -> HashMap<String, codegen::ir::Function> {
+        let (funcs, mut db) = mir_for(src);
+        let mut module = test_module();
+        // Two passes, exactly as `Jit::compile` does it: everything is declared
+        // before anything is defined, so a call to a sibling — or to itself —
+        // resolves.
+        let mut ids = HashMap::new();
+        for f in &funcs {
+            let id = module
+                .declare_function(&f.name, Linkage::Export, &abi_signature(f))
+                .unwrap_or_else(|e| panic!("declaring `{}`: {e}", f.name));
+            ids.insert(f.name.clone(), id);
+        }
+        let generation = Generation::new();
+        let mut fn_ctx = FunctionBuilderContext::new();
+        let mut out = HashMap::new();
+        for f in &funcs {
+            let mut captured = codegen::ir::Function::new();
+            lower_function_capturing(
+                &mut module,
+                &mut fn_ctx,
+                f,
+                &ids,
+                &mut db,
+                &generation,
+                Some(&mut captured),
+            )
+            .unwrap_or_else(|e| panic!("lowering `{}`: {e}", f.name));
+            out.insert(f.name.clone(), captured);
+        }
+        out
+    }
+
+    /// One named function of `src`, lowered. Every function in the program is
+    /// still lowered — a caller asking about one of them is not a reason to
+    /// compile a different program from the one `praxis run` would.
+    fn lowered_function_named(src: &str, name: &str) -> codegen::ir::Function {
+        let mut all = lowered_functions(src);
+        let mut names: Vec<String> = all.keys().cloned().collect();
+        names.sort();
+        all.remove(name)
+            .unwrap_or_else(|| panic!("no function named `{name}`; this program has {names:?}"))
+    }
+
+    /// The program's entry point, lowered: `<entry>` when the file has
+    /// top-level statements and `main` otherwise, which is the rule both hosts
+    /// that execute a module ask (`praxis_hir::entry_point`).
+    fn lowered_function(src: &str) -> codegen::ir::Function {
+        let mut all = lowered_functions(src);
+        let name = praxis_hir::entry_point(|n| all.contains_key(n))
+            .expect("the program has neither top-level statements nor a `main`");
+        all.remove(name).expect("`entry_point` just found it")
+    }
+
+    /// The post-`define_function` Cranelift IR of `src`'s entry point, as text
+    /// — the same text `PRAXIS_DUMP_CLIF` writes, without the count headers.
+    /// Not "optimized": at `opt_level = "none"` the egraph mid-end never runs.
+    fn lowered_function_ir(src: &str) -> String {
+        lowered_function(src).display().to_string()
+    }
+
+    /// Assert that every path from `func`'s entry block to `dominated` passes
+    /// through `dominator`.
+    ///
+    /// This is what a claim like "no store into a claimed block is reachable
+    /// unless the pacing branch was taken" actually says, and it is strictly
+    /// stronger than ADR-113's "the branch is the entry block's terminator" —
+    /// which is a statement about one shape and stops being a proof the moment
+    /// there are two guarded sites.
+    fn assert_dominates(func: &codegen::ir::Function, dominator: Block, dominated: Block) {
+        use cranelift::codegen::dominator_tree::DominatorTree;
+        use cranelift::codegen::flowgraph::ControlFlowGraph;
+
+        let cfg = ControlFlowGraph::with_function(func);
+        let domtree = DominatorTree::with_function(func, &cfg);
+        // Dominance is ill-defined for an unreachable block, and
+        // `DominatorTree::dominates` answers `false` there — which would read
+        // as "the guard is missing" when it means "the block is dead".
+        assert!(
+            domtree.is_reachable(dominated),
+            "{dominated} is unreachable from the entry block, so no block \
+             dominates it and the question is not the one you meant to \
+             ask:\n{}",
+            func.display()
+        );
+        assert!(
+            domtree.dominates(dominator, dominated, &func.layout),
+            "{dominator} does not dominate {dominated}: some path from the \
+             entry block reaches {dominated} without passing through \
+             {dominator}:\n{}",
+            func.display()
+        );
+    }
+
+    /// Handover 25 §3's loop, which is the program every instruction count in
+    /// the plan is quoted against.
+    const SAMPLE_LOOP: &str = concat!(
+        "var i = 0\n",
+        "var acc = 0\n",
+        "let limit = 1000\n",
+        "while i < limit {\n",
+        "  acc = acc + i * 3\n",
+        "  i = i + 1\n",
+        "}\n",
+        "out(acc)\n",
+    );
+
+    /// The helper answers a whole function, and it is the entry point's.
+    #[test]
+    fn a_lowered_loop_is_a_whole_function_with_branches_and_calls() {
+        let ir = lowered_function_ir(SAMPLE_LOOP);
+        assert!(
+            ir.starts_with("function "),
+            "this is a function, not one emit site's block:\n{ir}"
+        );
+        assert!(ir.contains("icmp"), "`i < limit` is a compare:\n{ir}");
+        assert!(ir.contains("brif"), "and the loop branches on it:\n{ir}");
+        assert!(
+            ir.contains("call "),
+            "and boxing the results is still an out-of-line call — which is \
+             the whole of what handover 26's plan is about:\n{ir}"
+        );
+        assert!(
+            ir.lines()
+                .filter(|l| l.trim_start().starts_with("block"))
+                .count()
+                > 3,
+            "a loop is a header, a body and a join at least:\n{ir}"
+        );
+    }
+
+    /// A caller can name a function other than the entry point, and gets that
+    /// one — a program with two functions lowers both.
+    #[test]
+    fn a_named_function_is_lowered_beside_the_entry_point() {
+        let src = concat!(
+            "fn triple(n: Int) -> Int {\n  n * 3\n}\n",
+            "out(triple(7))\n",
+        );
+        let all = lowered_functions(src);
+        assert!(
+            all.contains_key("triple") && all.contains_key("<entry>"),
+            "both functions are lowered: {:?}",
+            all.keys().collect::<Vec<_>>()
+        );
+        let triple = lowered_function_named(src, "triple").display().to_string();
+        assert!(
+            triple.contains("i64") && triple.contains("return"),
+            "and `triple` is a function of its own:\n{triple}"
+        );
+        assert_ne!(
+            triple,
+            lowered_function_ir(src),
+            "which is not the entry point's"
+        );
+    }
+
+    /// The entry block dominates every block of a real lowered function, which
+    /// is the trivially true case the helper must not report as a failure.
+    #[test]
+    fn the_entry_block_dominates_every_block_of_a_lowered_loop() {
+        let func = lowered_function(SAMPLE_LOOP);
+        let entry = func
+            .layout
+            .entry_block()
+            .expect("a lowered function has one");
+        for block in func.layout.blocks() {
+            assert_dominates(&func, entry, block);
+        }
+    }
+
+    /// A diamond: `entry` dominates the join, and neither arm does.
+    fn diamond() -> (codegen::ir::Function, Block, Block, Block) {
+        let module = test_module();
+        let mut sig = Signature::new(module.isa().default_call_conv());
+        sig.params.push(AbiParam::new(GC));
+        let mut func = codegen::ir::Function::with_name_signature(Default::default(), sig);
+        let mut fn_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut func, &mut fn_ctx);
+
+        let entry = builder.create_block();
+        let taken = builder.create_block();
+        let skipped = builder.create_block();
+        let join = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let cond = builder.block_params(entry)[0];
+        builder.ins().brif(cond, taken, &[], skipped, &[]);
+        builder.switch_to_block(taken);
+        builder.ins().jump(join, &[]);
+        builder.switch_to_block(skipped);
+        builder.ins().jump(join, &[]);
+        builder.switch_to_block(join);
+        builder.ins().return_(&[]);
+        builder.seal_all_blocks();
+        builder.finalize(module.isa().frontend_config());
+        (func, entry, taken, join)
+    }
+
+    /// The branch dominates the join it created.
+    #[test]
+    fn a_block_every_path_goes_through_dominates_the_join() {
+        let (func, entry, _taken, join) = diamond();
+        assert_dominates(&func, entry, join);
+    }
+
+    /// One arm of a diamond does not, and the message names both blocks — the
+    /// failure this exists to catch is a store the guard was supposed to cover
+    /// and does not, so "which two blocks" is the whole of the report.
+    #[test]
+    #[should_panic(expected = "does not dominate")]
+    fn one_arm_of_a_diamond_does_not_dominate_the_join() {
+        let (func, _entry, taken, join) = diamond();
+        assert_dominates(&func, taken, join);
+    }
+
+    // -----------------------------------------------------------------------
+    // The dump hook, end to end.
+    //
+    // It cannot be checked in-process: `dump::hooks` reads the environment once
+    // per process on purpose, and a test binary runs its tests as threads of
+    // one process, so a `set_var` here would race every other test's first
+    // compilation. So the parent re-executes the test binary with the variables
+    // set and reads the child's streams — which is also the only way to check
+    // the half that matters most, that the dump is on **stderr**. The A/B
+    // protocol voids a measurement whose stdout differs between arms (handover
+    // 26 §6), so a dump on stdout would invalidate exactly the runs it exists
+    // to explain.
+    // -----------------------------------------------------------------------
+
+    /// The one function the dump child asks for by name.
+    const DUMP_CHILD_FN: &str = "dumped_by_the_child";
+
+    /// A two-function program, so "by name" has something to exclude.
+    const DUMP_CHILD_SRC: &str = concat!(
+        "fn dumped_by_the_child(n: Int) -> Int {\n  n + 1\n}\n",
+        "out(dumped_by_the_child(1))\n",
+    );
+
+    /// The child half of the two tests below: lower a program, print nothing of
+    /// its own. Run ordinarily — with neither variable set — it is the arm that
+    /// says an unset hook writes nothing at all.
+    #[test]
+    fn dump_hook_child_lowers_two_functions() {
+        lowered_function_named(DUMP_CHILD_SRC, DUMP_CHILD_FN);
+    }
+
+    /// Run the child with `env` applied, and answer its (stdout, stderr).
+    fn run_dump_child(env: &[(&str, Option<&str>)]) -> (String, String) {
+        let exe = std::env::current_exe().expect("this test binary's own path");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args([
+            "lower::tests::dump_hook_child_lowers_two_functions",
+            "--exact",
+            "--nocapture",
+        ]);
+        for (name, value) in env {
+            match value {
+                Some(v) => cmd.env(name, v),
+                // Removed rather than skipped: the child inherits this
+                // process's environment, and a developer who exported the
+                // variable in their shell would otherwise flip the answer.
+                None => cmd.env_remove(name),
+            };
+        }
+        let out = cmd.output().expect("re-running this test binary");
+        assert!(
+            out.status.success(),
+            "the child failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    /// Both hooks fire through the real compile path, on stderr, for the named
+    /// function and no other.
+    #[test]
+    fn the_dump_hooks_write_the_named_functions_ir_to_stderr() {
+        let (stdout, stderr) = run_dump_child(&[
+            ("PRAXIS_DUMP_CLIF", Some(DUMP_CHILD_FN)),
+            ("PRAXIS_DUMP_VCODE", Some(DUMP_CHILD_FN)),
+        ]);
+        assert!(
+            stderr.contains(&format!(";; praxis-dump clif `{DUMP_CHILD_FN}`:")),
+            "the CLIF dump is on stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(&format!(";; praxis-dump vcode `{DUMP_CHILD_FN}`:")),
+            "and so is the machine-level one:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("no disassembly was requested"),
+            "which means `set_disasm` was called before `define_function` and \
+             not after it:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("praxis-dump clif `<entry>`"),
+            "and naming one function dumps one function:\n{stderr}"
+        );
+        assert!(
+            !stdout.contains("praxis-dump"),
+            "nothing reaches stdout, or every A/B run with the hook on is \
+             void:\n{stdout}"
+        );
+    }
+
+    /// And with the variables unset, nothing is written at all.
+    #[test]
+    fn an_unset_dump_hook_writes_nothing() {
+        let (stdout, stderr) =
+            run_dump_child(&[("PRAXIS_DUMP_CLIF", None), ("PRAXIS_DUMP_VCODE", None)]);
+        assert!(!stderr.contains("praxis-dump"), "{stderr}");
+        assert!(!stdout.contains("praxis-dump"), "{stdout}");
     }
 }
