@@ -243,8 +243,28 @@ chased over the `collatz`/`primes`/`mandelbrot` inner loops. Mechanically:
 | **three inner loops** | **56** | **29 (51.8%)** | **54 (96.4%)** |
 
 Four numbers, four agreements, hand count against mechanical census. That is
-worth pinning rather than paraphrasing, and
-`the_inner_loop_census_reproduces_handover_27s_hand_count_exactly` pins it.
+worth pinning rather than paraphrasing.
+
+> **Amended when W8-S0 and W8-S0b merged.** Both tables above were measured on a
+> tree without W8-S0, and the merge moved them — legitimately, and by more than
+> anyone estimated. On the merged tree the suite is **219 sites, 30 literal
+> (13.7%), 140 chased (63.9%)**, and the three inner loops are **29 sites, 2
+> literal (6.9%), 27 chased (93.1%)**. The census tests carry the new digits and
+> print the tables under `--nocapture`; the pre-merge numbers are kept here
+> because the *comparison* is the finding.
+>
+> **The denominator nearly halved and the literal column collapsed by 41 points,
+> and those are one fact rather than two.** W8-S0's producer set is
+> `Materialize`/`Alloc`/`ConstGc` — which is *exactly* what the literal column
+> counts. Every site the literal column could prove is a site W8-S0 would rather
+> delete, so the two anti-correlate. The chased column, which resolves `MoveGc`
+> transitively, barely moves in the inner loops (96.4% → 93.1%) because it was
+> never counting the sites W8-S0 takes.
+>
+> This is the strongest argument the round produced against W11's backend half,
+> and it arrived by measurement rather than by judgement: after W8-S0 there are
+> less than half as many proofs left to elide, and the ones that remain are the
+> ones this analysis is weakest at.
 
 **The one word to correct is handover 27's own.** It glosses 29/56 = 52% as *"a
 fail on the 'fewer than half' gate"*. 29 of 56 is not fewer than half — it is a

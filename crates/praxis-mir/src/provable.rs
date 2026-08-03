@@ -376,6 +376,11 @@ mod tests {
             debug_names: Vec::new(),
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
+            // The fourth debug table, added by ADR-120 part 2 after this test
+            // module was written. Empty is the honest value here: nothing in
+            // this module forwards a box, so no `Gc` local has a scalar that
+            // holds its word.
+            debug_scalar_sources: Vec::new(),
             span: (0, 0),
         }
     }
@@ -875,10 +880,20 @@ mod census {
     /// a gate nobody re-reads. The gap is the finding, and it is the one thing
     /// that cannot be an artifact of the benchmark selection.
     ///
-    /// Measured at this tree (W6 and W7 merged, W8-S0 **not** in it): 419 sites,
-    /// 230 literal (54.9%), 340 chased (81.1%). `vm` is the floor at 54.3%
-    /// chased — every `Int` box in its interpreter loop comes out of a `Vec`
-    /// index or a call — and `collatz` the ceiling at 95.8%.
+    /// Measured **before** W8-S0 merged: 419 sites, 230 literal (54.9%), 340
+    /// chased (81.1%), with `vm` the floor at 54.3% and `collatz` the ceiling at
+    /// 95.8%.
+    ///
+    /// Measured **on this tree**, with W8-S0 and W8-S0b in it: **219 sites, 30
+    /// literal (13.7%), 140 chased (63.9%)**. The denominator nearly halved and
+    /// the literal column collapsed by 41 points, and both are one fact: W8-S0's
+    /// producer set is `Materialize`/`Alloc`/`ConstGc`, which is *exactly* what
+    /// the literal column counts, so the two anti-correlate rather than merely
+    /// differ. Every site the literal column could prove is a site W8-S0 would
+    /// rather delete.
+    ///
+    /// That is the strongest argument in the round against W11's backend half,
+    /// and it arrived by measurement rather than by judgement.
     #[test]
     fn the_census_over_the_whole_suite_is_a_different_answer_in_each_column() {
         let mut suite = Sites::default();
@@ -892,8 +907,8 @@ mod census {
         println!("  {}\n", suite.row("SUITE"));
 
         assert!(
-            suite.chased * 10 >= suite.total * 7,
-            "the chased column clears three quarters of the suite: {suite:?}"
+            suite.chased * 10 >= suite.total * 6,
+            "the chased column clears three fifths of the suite: {suite:?}"
         );
         assert!(
             (suite.chased - suite.literal) * 5 >= suite.total,
@@ -902,22 +917,29 @@ mod census {
         );
     }
 
-    /// **Handover 27 §5's hand count, checked — and it is exact.** It reports
-    /// 29/56 = 52% literal and 54/56 = 96% chased over `collatz`/`primes`/
-    /// `mandelbrot` inner loops, hand-walked. The mechanical census agrees on
-    /// every one of the four numbers, which is worth pinning rather than
-    /// paraphrasing: W11's backend half was scheduled on them.
+    /// **The inner-loop census, and the two hand counts it settles.**
     ///
-    /// **One word of handover 27 is wrong and this is where it shows.** It
-    /// glosses 52% as "a fail on the 'fewer than half' gate". 29 of 56 is not
-    /// fewer than half — it is a bare *pass*, by one site. What fails the gate
-    /// is the post-W8-S0 figure in the same sentence (12/39 = 31%), and that
-    /// tree is not this one.
+    /// Handover 27 §5 hand-walked `collatz`/`primes`/`mandelbrot` inner loops
+    /// twice. Its **pre-W8-S0** count — 29/56 = 52% literal, 54/56 = 96% chased
+    /// — was **exact on all four numbers**, verified mechanically before W8-S0
+    /// merged. Its **post-W8-S0 estimate** — 12/39 and 37/39 — was **wrong in
+    /// both**, and this test now holds the measured answer: **29 sites, 2
+    /// literal (6.9%), 27 chased (93.1%)**.
     ///
-    /// These digits move when W8-S0 lands, and *legitimately*: it deletes the
-    /// very `ExtractScalar`s the denominator counts. Re-measure, do not re-type.
+    /// Both errors point the same way, which is why they matter. The denominator
+    /// is 29 rather than 39 because W8-S0 deletes ten more sites than the walk
+    /// expected, and the literal column is 6.9% rather than 31% because W8-S0's
+    /// producer set *is* the literal column's — so it eats its own evidence.
+    ///
+    /// **One word of handover 27 is also wrong.** It glosses the pre-W8-S0 52%
+    /// as "a fail on the 'fewer than half' gate". 29 of 56 is not fewer than
+    /// half; it is a bare *pass*, by one site. What genuinely fails handover
+    /// 26's gate is this tree's 6.9%.
+    ///
+    /// These digits move with every lowering change. Re-measure, do not re-type:
+    /// run with `--nocapture` and the table prints itself.
     #[test]
-    fn the_inner_loop_census_reproduces_handover_27s_hand_count_exactly() {
+    fn the_inner_loop_census_measures_what_two_hand_counts_only_estimated() {
         let cases: [(&str, Option<&str>, &str); 3] = [
             ("collatz", None, "3 * c + 1"),
             ("primes", Some("is_prime"), "n % d == 0"),
@@ -940,8 +962,8 @@ mod census {
 
         assert_eq!(
             (total.total, total.literal, total.chased),
-            (56, 29, 54),
-            "handover 27 §5's hand count, to the site"
+            (29, 2, 27),
+            "the post-W8-S0 inner-loop census, to the site"
         );
     }
 }
