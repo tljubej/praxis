@@ -147,7 +147,7 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-112: The pacer has a ceiling, and only the live set may exceed it](./112-the-pacer-has-a-ceiling-and-the-live-set-may-exceed-it.md)
 - [ADR-113: An `Int` box is a table read behind a pacing branch, and the token is permission to collect](./113-an-int-box-is-a-table-read-behind-a-pacing-branch.md)
 - [ADR-114: The native roots are one store, and it grows because only their depth is bounded](./114-the-native-roots-are-one-store-and-only-their-depth-is-bounded.md)
-- [ADR-115: *owed* — W2, `Text` length and indexing in O(1)](./115-slug.md)
+- [ADR-115: A `Text` counts itself once, and the count is the licence to index its bytes](./115-a-text-counts-itself-once-and-the-count-is-the-licence.md)
 - [ADR-116: *owed* — W6, built-in descriptor addresses in `RuntimeContext`](./116-slug.md)
 - [ADR-117: *owed* — W7, folding `CheckFault` into the inline raise](./117-slug.md)
 - [ADR-118: A `Vec[T]`'s three words are the compiler's to read, and a `VecDeque`'s are not (part 1 of 2 — W4a; W4b appends)](./118-a-vecs-three-words-are-the-compilers-to-read.md)

@@ -10,13 +10,24 @@
 //! Both are produced in M6: the input parser allocates source slices pointing
 //! into the immutable stdin buffer, and string literals remain owned. The
 //! descriptor callbacks handle both variants through [`text_bytes`], which
-//! recurses through slice owners — sound because the collector is non-moving
-//! (ADR-011) and owners are kept alive by GC reachability.
+//! follows slice owners — sound because the collector is non-moving (ADR-011)
+//! and owners are kept alive by GC reachability. Every walk of an owner chain
+//! in this module is iterative, because nothing bounds its depth
+//! (`reading_a_deep_slice_chain_does_not_recurse`).
 //!
 //! Owned payloads own a Rust allocation (`Box<str>`), so [`TEXT`]'s `drop_value`
 //! releases it on sweep (§12.5). Slice payloads carry only a `GcRef` (traced, not
 //! owned) plus offsets — no Rust resources to drop.
+//!
+//! An owned payload additionally carries a **lazily computed scalar count**
+//! (ADR-115), which is what makes `t.len()` and `t[i]` O(1) on the texts a
+//! program actually indexes. The count is the whole mechanism: `count ==
+//! bytes.len()` is exactly "every scalar in this text is one byte", so it is
+//! both the length answer and the byte-indexing licence, and a slice inherits
+//! the licence from its owner because a view of one-byte scalars is one-byte
+//! scalars. See [`text_char_count`] and [`text_ascii_bytes`].
 
+use std::cell::Cell;
 use std::fmt;
 
 #[cfg(test)]
@@ -24,15 +35,160 @@ use crate::descriptor::hash_value;
 use crate::descriptor::{BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
 use crate::GcRef;
 
+/// **The ADR-115 measurement toggle** (handover 26 §6), and the only difference
+/// between the A/B arms this package was measured with.
+///
+/// `false` — enabled by the `adr115-arm-a` feature — keeps the representation
+/// byte-for-byte identical and makes the cache never answer: every count is
+/// recomputed from the bytes and [`text_ascii_bytes`] refuses, so `t.len()`
+/// walks the text and `t[i]` decodes to the index, which is the complexity the
+/// tree had before this decision. It exists so arm A differs from arm B in this
+/// mechanism and in nothing else; measuring against `main` would also be
+/// measuring [`SourceSlice::new`]'s dropped whole-owner revalidation, which is
+/// a separate finding and is in both arms.
+const COUNT_IS_CACHED: bool = !cfg!(feature = "adr115-arm-a");
+
+/// The value [`OwnedText::char_count`] holds until someone asks.
+///
+/// A real count can never collide with it: a text with `u64::MAX` scalars would
+/// need `u64::MAX` bytes, and the `Box<str>` holding them cannot be allocated
+/// on a 64-bit host. So this is a sentinel in the strong sense — the state
+/// "counted, and the count happens to be `NOT_COUNTED`" is unreachable rather
+/// than merely unlikely.
+const NOT_COUNTED: u64 = u64::MAX;
+
 /// The `Text` payload: either an owned UTF-8 string or a zero-copy slice into
 /// another `Text` (the input buffer) (§4.3, §7.10, ADR-013).
 #[repr(C)]
 pub enum TextPayload {
-    /// An owned, heap-allocated UTF-8 string (string literals, runtime-built text).
-    Owned(Box<str>),
+    /// An owned, heap-allocated UTF-8 string (string literals, runtime-built
+    /// text) together with its lazily computed scalar count (ADR-115).
+    Owned(OwnedText),
     /// A zero-copy view into another `Text`'s bytes (§7.10). `owner` is traced
     /// by the descriptor so the slice keeps its backing alive.
     Slice(SourceSlice),
+}
+
+/// An owned UTF-8 payload and the number of Unicode scalars in it, computed on
+/// first demand (ADR-115).
+///
+/// The fields are private and [`OwnedText::new`] is the only constructor,
+/// because a count that does not describe these bytes is not a slow `Text`, it
+/// is a wrong one: `t.len()` would answer someone else's length and `t[i]`
+/// would index bytes in a text that has multi-byte scalars. The only writer is
+/// [`OwnedText::char_count`], which writes what it just counted from
+/// `self.bytes`, and `Text` is immutable (ADR-085 allocates a fresh payload for
+/// `+`), so there is no path that could invalidate one.
+///
+/// **This costs zero bytes.** `Box<str>` is 16 and [`SourceSlice`] is 24, so
+/// the `#[repr(C)]` enum's union already reserved 8 bytes the owned variant
+/// never used. The `const _` below is what holds that claim true.
+#[repr(C)]
+pub struct OwnedText {
+    bytes: Box<str>,
+    /// [`NOT_COUNTED`] until the first [`char_count`](Self::char_count).
+    ///
+    /// `Cell` because counting happens behind the `&TextPayload` every
+    /// descriptor callback and every accessor already has — the runtime is
+    /// single-threaded (`RuntimeContext` is not `Sync`) and this is the same
+    /// interior mutability `GcHeader` uses for its own sweep-time writes.
+    char_count: Cell<u64>,
+}
+
+/// `size_of::<TextPayload>()` is **32**, so a `Text` block is 48 and its size
+/// class does not move (ADR-109's ladder is 16, 24, 32, …, 128 with a 16-byte
+/// header). This is the claim ADR-115 rests on, and handover 26 §9 recorded it
+/// as measured on a standalone copy of these declarations rather than on this
+/// tree. It is measured here now, where a future field cannot silently move a
+/// `Text` to the 56-byte class and charge the pacer 16.7% more per text object.
+const _: () = {
+    assert!(std::mem::size_of::<TextPayload>() == 32);
+    assert!(std::mem::size_of::<OwnedText>() == 24);
+    assert!(std::mem::size_of::<SourceSlice>() == 24);
+    assert!(std::mem::align_of::<TextPayload>() == 8);
+};
+
+impl OwnedText {
+    /// An owned payload over `bytes`, not yet counted.
+    #[must_use]
+    pub fn new(bytes: Box<str>) -> OwnedText {
+        OwnedText {
+            bytes,
+            char_count: Cell::new(NOT_COUNTED),
+        }
+    }
+
+    /// The payload's bytes as a `&str`. Owned text is a `Box<str>`, so this
+    /// needs no validation and no decoding.
+    #[inline]
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.bytes
+    }
+
+    /// The number of Unicode scalars in these bytes, counting them the first
+    /// time and remembering the answer.
+    ///
+    /// **Lazy, not computed at construction**, and deliberately against
+    /// handover 25 §5 F-8's phrasing: `praxis_get_input`'s buffer is one owned
+    /// `Text` that can be tens of megabytes, and a program that reads its input
+    /// and never indexes any text would pay a full scan of it for nothing.
+    /// Every caller of this is already asking a question whose honest answer is
+    /// a scan.
+    #[inline]
+    fn char_count(&self) -> u64 {
+        let cached = self.char_count.get();
+        if COUNT_IS_CACHED && cached != NOT_COUNTED {
+            return cached;
+        }
+        let counted = count_scalars(self.bytes.as_bytes());
+        if COUNT_IS_CACHED {
+            self.char_count.set(counted);
+        }
+        counted
+    }
+
+    /// True iff every scalar in these bytes is one byte wide — that is, iff a
+    /// byte index into them is a character index.
+    ///
+    /// **This is the count, not a second field.** A UTF-8 text has one byte per
+    /// scalar exactly when its scalar count equals its byte length, so the
+    /// cached count already answers it. A separate `is_ascii` flag would be a
+    /// second thing to keep true about the same bytes, and the pair
+    /// `(count, flag)` has states — a text that claims 3 scalars in 5 bytes and
+    /// claims to be ASCII — that this cannot express.
+    ///
+    /// The equivalence needs the bytes to be **valid** UTF-8, and that is the
+    /// payload's invariant (`text_str`, ADR-111): a leading byte at or above
+    /// `0x80` is followed by at least one continuation byte, so "no
+    /// continuation bytes" and "every byte below `0x80`" are the same statement
+    /// about a valid encoding and different statements about arbitrary bytes.
+    #[inline]
+    fn is_one_byte_per_scalar(&self) -> bool {
+        self.char_count() == self.bytes.len() as u64
+    }
+}
+
+/// The number of Unicode scalars in `bytes`, which must be valid UTF-8.
+///
+/// Counting the bytes that are *not* continuation bytes is the same answer as
+/// `str::chars().count()` and needs neither a `&str` nor a decode: in UTF-8
+/// every scalar contributes exactly one leading byte. The `is_ascii` short
+/// circuit is not an optimization of the answer but of the loop — it is the
+/// case that holds for essentially all puzzle input, and the standard library's
+/// `is_ascii` is word-at-a-time where a filtered count is byte-at-a-time.
+#[inline]
+fn count_scalars(bytes: &[u8]) -> u64 {
+    if bytes.is_ascii() {
+        return bytes.len() as u64;
+    }
+    bytes.iter().filter(|&&b| !is_continuation(b)).count() as u64
+}
+
+/// True iff `b` is a UTF-8 continuation byte — `0b10xx_xxxx`.
+#[inline]
+const fn is_continuation(b: u8) -> bool {
+    (b as i8) < -0x40
 }
 
 /// A validated zero-copy view of `owner`'s bytes over `[start, start + len)`.
@@ -73,8 +229,19 @@ impl SourceSlice {
         }
         // Both ends must begin a scalar. A view that splits one is not UTF-8,
         // and reading it as a `&str` would fail.
-        let whole = std::str::from_utf8(bytes).ok()?;
-        if !whole.is_char_boundary(start) || !whole.is_char_boundary(end) {
+        //
+        // **Two byte tests, not a validation of the whole owner** (ADR-115).
+        // This used to be `std::str::from_utf8(bytes)` followed by two
+        // `str::is_char_boundary` calls, which re-validated every byte of the
+        // owner on every slice allocation — so parsing an n-byte input into k
+        // captures was O(n·k), a third quadratic nobody had named. The
+        // revalidation answered a question that was already settled: since
+        // ADR-111 the one door raw host bytes enter through
+        // (`praxis_get_input`) validates them, `praxis_alloc_text`'s callers
+        // owe UTF-8 as a precondition, and `text_str` states the invariant by
+        // `expect`ing it. `is_scalar_boundary` is `str::is_char_boundary`'s
+        // test spelled on bytes, and it is the whole of what the two calls did.
+        if !is_scalar_boundary(bytes, start) || !is_scalar_boundary(bytes, end) {
             return None;
         }
         Some(SourceSlice { owner, start, len })
@@ -88,7 +255,29 @@ impl SourceSlice {
     }
 }
 
+/// True iff `at` begins a UTF-8 scalar in `bytes`, or is the end of them.
+///
+/// `str::is_char_boundary` without the `&str`: a byte begins a scalar iff it is
+/// not a continuation byte, and the end position always does.
+#[inline]
+fn is_scalar_boundary(bytes: &[u8], at: usize) -> bool {
+    match bytes.get(at) {
+        None => at == bytes.len(),
+        Some(&b) => !is_continuation(b),
+    }
+}
+
 impl TextPayload {
+    /// An owned payload over `bytes`, not yet counted.
+    ///
+    /// The variant's field is an [`OwnedText`] whose own field is private, so
+    /// this is the only way to build one and there is no way to build one whose
+    /// count does not describe its bytes.
+    #[must_use]
+    pub fn owned(bytes: impl Into<Box<str>>) -> TextPayload {
+        TextPayload::Owned(OwnedText::new(bytes.into()))
+    }
+
     /// True iff this is the [`Owned`](Self::Owned) variant.
     pub fn is_owned(&self) -> bool {
         matches!(self, Self::Owned(_))
@@ -121,8 +310,8 @@ pub unsafe fn text_bytes(payload: *const TextPayload) -> &'static [u8] {
         // SAFETY: caller guarantees `payload` points at a valid TextPayload and
         // that every `owner` along the chain is a live Text.
         match unsafe { &*payload } {
-            TextPayload::Owned(boxed) => {
-                let bytes = boxed.as_bytes();
+            TextPayload::Owned(owned) => {
+                let bytes = owned.as_str().as_bytes();
                 // In range by construction: `SourceSlice::new` is the only
                 // constructor and it rejects anything else. There used to be a
                 // clamp here — `&owner_bytes[start..]` when the end ran past —
@@ -173,6 +362,94 @@ pub unsafe fn text_root(text: GcRef) -> (GcRef, usize) {
                 root = slice.owner;
             }
         }
+    }
+}
+
+/// The root **owned** payload behind `payload`, following slice owners.
+///
+/// This is [`text_root`] over a raw payload pointer rather than a `GcRef`, and
+/// it exists for the same reason [`text_bytes`] is iterative: the depth of an
+/// owner chain is not bounded by anything (`reading_a_deep_slice_chain_does_not_recurse`),
+/// so a read must not recurse through it. The parser separately refuses to
+/// build chains at all — `Input::new` collapses to the root owner — so in
+/// practice this is one step.
+///
+/// # Safety
+/// See [`text_bytes`]: every `owner` along the chain must point at a live
+/// `Text`.
+unsafe fn text_owner(payload: *const TextPayload) -> &'static OwnedText {
+    let mut payload = payload;
+    loop {
+        // SAFETY: caller guarantees `payload` points at a valid TextPayload and
+        // that every `owner` along the chain is a live Text.
+        match unsafe { &*payload } {
+            TextPayload::Owned(owned) => return owned,
+            TextPayload::Slice(slice) => {
+                payload = slice.owner.payload::<TextPayload>() as *const TextPayload;
+            }
+        }
+    }
+}
+
+/// The number of Unicode scalars in `payload` — `t.len()`'s answer (§4.3,
+/// ADR-086) — in O(1) once the text or its owner has been counted once.
+///
+/// **Where the count lives is the decision** (ADR-115). An owned text caches
+/// its own; a slice has no room for one, and takes the answer from its owner
+/// instead: a view of a text whose scalars are all one byte has one scalar per
+/// byte, so its length *is* its byte length. When the owner has a multi-byte
+/// scalar anywhere the slice has to count its own bytes, which is O(its own
+/// length) — the same cost `t[i]` pays on that text either way, so no loop that
+/// was quadratic becomes linear by caching it and no loop that is linear
+/// becomes quadratic by not.
+///
+/// # Safety
+/// See [`text_bytes`].
+#[must_use]
+pub unsafe fn text_char_count(payload: *const TextPayload) -> usize {
+    // SAFETY: caller guarantees the chain is live.
+    match unsafe { &*payload } {
+        TextPayload::Owned(owned) => owned.char_count() as usize,
+        TextPayload::Slice(_) => {
+            // SAFETY: same guarantee.
+            let bytes = unsafe { text_bytes(payload) };
+            // SAFETY: same guarantee.
+            if COUNT_IS_CACHED && unsafe { text_owner(payload) }.is_one_byte_per_scalar() {
+                bytes.len()
+            } else {
+                count_scalars(bytes) as usize
+            }
+        }
+    }
+}
+
+/// The bytes of `payload` when a byte index into them is a character index —
+/// that is, when every scalar in the text is one byte wide — and `None`
+/// otherwise.
+///
+/// `t[i]` is defined on characters (§4.3, ADR-086); indexing bytes is an
+/// optimization that is only valid here. The property is decided by the **root
+/// owner's** count rather than by this text's own bytes, and that is what makes
+/// it O(1) for a slice: scanning a slice to find out whether it is ASCII costs
+/// exactly what decoding it to the index costs, so it would buy nothing,
+/// whereas the owner's count is computed once and answers for every view of it
+/// forever. `SourceSlice::new` refuses ends that split a scalar, so a slice of
+/// a one-byte-per-scalar owner is itself one-byte-per-scalar with no further
+/// check.
+///
+/// # Safety
+/// See [`text_bytes`].
+#[must_use]
+pub unsafe fn text_ascii_bytes(payload: *const TextPayload) -> Option<&'static [u8]> {
+    if !COUNT_IS_CACHED {
+        return None;
+    }
+    // SAFETY: caller guarantees the chain is live.
+    if unsafe { text_owner(payload) }.is_one_byte_per_scalar() {
+        // SAFETY: same guarantee.
+        Some(unsafe { text_bytes(payload) })
+    } else {
+        None
     }
 }
 
@@ -273,7 +550,7 @@ pub static TEXT: TypeDescriptor = TypeDescriptor::builtin::<TextPayload>(
 unsafe fn text_owned_bytes(payload: *const u8) -> usize {
     // SAFETY: caller guarantees `payload` points at an initialized TextPayload.
     match unsafe { &*(payload as *const TextPayload) } {
-        TextPayload::Owned(s) => s.len(),
+        TextPayload::Owned(owned) => owned.as_str().len(),
         TextPayload::Slice(_) => 0,
     }
 }
@@ -285,9 +562,9 @@ mod tests {
 
     #[test]
     fn owned_text_descriptor_formats_and_compares() {
-        let a = TextPayload::Owned("hello".into());
-        let b = TextPayload::Owned("hello".into());
-        let c = TextPayload::Owned("world".into());
+        let a = TextPayload::owned("hello");
+        let b = TextPayload::owned("hello");
+        let c = TextPayload::owned("world");
 
         let mut buf = String::new();
         unsafe { (TEXT.format)(ptr::addr_of!(a) as *const u8, &mut buf) };
@@ -308,9 +585,9 @@ mod tests {
     #[test]
     fn text_compares_lexicographically_whatever_its_representation() {
         let cmp = TEXT.compare.expect("Text is orderable");
-        let apple = TextPayload::Owned("apple".into());
-        let banana = TextPayload::Owned("banana".into());
-        let apple_again = TextPayload::Owned("apple".into());
+        let apple = TextPayload::owned("apple");
+        let banana = TextPayload::owned("banana");
+        let apple_again = TextPayload::owned("apple");
         let at = |p: &TextPayload| ptr::addr_of!(*p) as *const u8;
 
         assert_eq!(
@@ -328,15 +605,15 @@ mod tests {
         );
 
         // A prefix precedes what extends it.
-        let app = TextPayload::Owned("app".into());
+        let app = TextPayload::owned("app");
         assert_eq!(
             unsafe { cmp(at(&app), at(&apple)) },
             std::cmp::Ordering::Less
         );
 
         // UTF-8 byte order is code-point order: "é" (U+00E9) follows "z".
-        let z = TextPayload::Owned("z".into());
-        let e_acute = TextPayload::Owned("é".into());
+        let z = TextPayload::owned("z");
+        let e_acute = TextPayload::owned("é");
         assert_eq!(
             unsafe { cmp(at(&z), at(&e_acute)) },
             std::cmp::Ordering::Less
@@ -345,8 +622,8 @@ mod tests {
 
     #[test]
     fn owned_text_hash_is_stable() {
-        let a = TextPayload::Owned("hello".into());
-        let b = TextPayload::Owned("hello".into());
+        let a = TextPayload::owned("hello");
+        let b = TextPayload::owned("hello");
         let mut ha = crate::descriptor::StructHasher::new();
         let mut hb = crate::descriptor::StructHasher::new();
         unsafe {
@@ -358,7 +635,7 @@ mod tests {
 
     #[test]
     fn owned_text_bytes_can_be_borrowed_as_a_manual_subslice() {
-        let owner = TextPayload::Owned("hello, world".into());
+        let owner = TextPayload::owned("hello, world");
         let owner_ptr = ptr::addr_of!(owner);
         let bytes = unsafe { text_bytes(owner_ptr) };
         assert_eq!(&bytes[7..12], b"world");
@@ -480,6 +757,269 @@ mod tests {
                 .alloc_text_slice(owner, 1, 2)
                 .expect("[1, 3) is a scalar");
             assert_eq!(e.as_text(), "é");
+        }
+    }
+
+    // ---- ADR-115: the scalar count ---------------------------------------
+
+    /// The payload of a live `Text`, for the count tests below.
+    ///
+    /// # Safety
+    /// `r` must be a live `Text`.
+    unsafe fn payload_of(r: GcRef) -> *const TextPayload {
+        r.payload::<TextPayload>() as *const TextPayload
+    }
+
+    /// **The count is lazy, and that is the decision** (ADR-115). An owned
+    /// `Text` is allocated uncounted; `praxis_get_input`'s buffer is one such
+    /// payload and can be tens of megabytes, so counting at construction would
+    /// charge a full scan to every program that reads its input and never
+    /// indexes a text.
+    ///
+    /// This and the three tests below observe the cache itself, so they are the
+    /// tests that describe arm B rather than the language. Under the
+    /// `adr115-arm-a` measurement feature there is no cache to observe by
+    /// construction; the tests that state what a `Text` *answers* are not
+    /// gated, and they are the ones that must hold in both arms.
+    #[cfg(not(feature = "adr115-arm-a"))]
+    #[test]
+    fn a_text_is_allocated_uncounted_and_counts_itself_once_when_asked() {
+        let rt = crate::Runtime::new();
+        let text = rt.alloc_text("hello");
+        // SAFETY: `text` is the live Text allocated above.
+        let payload = unsafe { payload_of(text) };
+        // SAFETY: same.
+        let TextPayload::Owned(owned) = (unsafe { &*payload }) else {
+            panic!("a literal is owned")
+        };
+        assert_eq!(
+            owned.char_count.get(),
+            NOT_COUNTED,
+            "nothing has asked for the length yet"
+        );
+
+        // SAFETY: same.
+        assert_eq!(unsafe { text_char_count(payload) }, 5);
+        assert_eq!(
+            owned.char_count.get(),
+            5,
+            "the first ask is what pays for the scan"
+        );
+
+        // And the second ask reads the cell rather than the bytes. Poisoning
+        // the cell is how the read is observed: a recount would answer 5.
+        owned.char_count.set(99);
+        // SAFETY: same.
+        assert_eq!(unsafe { text_char_count(payload) }, 99);
+    }
+
+    /// The count is the whole ASCII test. `char_count == bytes.len()` iff every
+    /// scalar is one byte, so there is no second flag to keep true — and the
+    /// byte-indexing licence follows from the length answer rather than sitting
+    /// beside it.
+    #[cfg(not(feature = "adr115-arm-a"))]
+    #[test]
+    fn the_count_equals_the_byte_length_exactly_when_every_scalar_is_one_byte() {
+        let rt = crate::Runtime::new();
+        for (src, chars, one_byte) in [
+            ("", 0usize, true),
+            ("hello", 5, true),
+            ("héllo", 5, false),
+            ("é", 1, false),
+            ("aéb", 3, false),
+            // A four-byte scalar, and a three-byte one.
+            ("a\u{1F600}b", 3, false),
+            ("\u{20AC}", 1, false),
+            // Every ASCII byte, including the ones a naive `is_ascii` on
+            // `char` boundaries would still accept.
+            ("\u{0}\u{7f}", 2, true),
+        ] {
+            let text = rt.alloc_text(src);
+            // SAFETY: `text` is live.
+            let payload = unsafe { payload_of(text) };
+            // SAFETY: same.
+            assert_eq!(unsafe { text_char_count(payload) }, chars, "{src:?}");
+            assert_eq!(chars == src.len(), one_byte, "{src:?}");
+            // SAFETY: same.
+            assert_eq!(
+                unsafe { text_ascii_bytes(payload) }.is_some(),
+                one_byte,
+                "{src:?} must {} take the byte-index path",
+                if one_byte { "" } else { "not" }
+            );
+            assert_eq!(chars, src.chars().count(), "{src:?}");
+        }
+    }
+
+    /// **A slice takes the licence from its owner, and that is why the package
+    /// works at all** (ADR-115). The `Text`s a program indexes are mostly the
+    /// parser's captures, which are `Slice`s of the input buffer — putting the
+    /// count only where the `Owned` variant's spare bytes are would have given
+    /// the case the decision exists for nothing.
+    #[cfg(not(feature = "adr115-arm-a"))]
+    #[test]
+    fn a_slice_of_a_one_byte_owner_answers_its_length_from_its_byte_length() {
+        let rt = crate::Runtime::new();
+        let owner = rt.alloc_text("abcdefghij");
+        // SAFETY: `owner` is live.
+        let slice = unsafe { rt.alloc_text_slice(owner, 3, 4) }.expect("[3, 7) is in range");
+        // SAFETY: both are live.
+        let (op, sp) = unsafe { (payload_of(owner), payload_of(slice)) };
+
+        // SAFETY: live.
+        assert_eq!(unsafe { text_char_count(sp) }, 4);
+        // SAFETY: live.
+        assert_eq!(unsafe { text_ascii_bytes(sp) }, Some(&b"defg"[..]));
+
+        // The scan that answered it landed on the **owner**, so every other
+        // view of the same buffer is now free.
+        // SAFETY: live.
+        let TextPayload::Owned(owned) = (unsafe { &*op }) else {
+            panic!("the owner is owned")
+        };
+        assert_eq!(owned.char_count.get(), 10);
+    }
+
+    /// A slice of a multi-byte owner has no cached count of its own — there are
+    /// no bytes left in the payload to put one in — so it counts its own bytes.
+    /// The answer must still be scalars, and the byte-index path must stay
+    /// shut even when the slice's *own* bytes happen to be one-byte, because
+    /// deciding that per slice costs exactly what decoding it costs.
+    #[test]
+    fn a_slice_of_a_multi_byte_owner_still_answers_in_scalars() {
+        let rt = crate::Runtime::new();
+        // "héllo wörld" — 'é' at bytes 1..3 and 'ö' at bytes 8..10.
+        let owner = rt.alloc_text("héllo wörld");
+        assert_eq!(owner.as_text().len(), 13);
+
+        // A view that contains the multi-byte scalar.
+        // SAFETY: `owner` is live.
+        let with = unsafe { rt.alloc_text_slice(owner, 0, 3) }.expect("[0, 3) is 'hé'");
+        assert_eq!(with.as_text(), "hé");
+        // SAFETY: live.
+        assert_eq!(unsafe { text_char_count(payload_of(with)) }, 2);
+        // SAFETY: live.
+        assert!(unsafe { text_ascii_bytes(payload_of(with)) }.is_none());
+
+        // A view that does not — the answer is the same either way, and the
+        // fast path is still refused because the owner is what carries the
+        // licence.
+        // SAFETY: live.
+        let without = unsafe { rt.alloc_text_slice(owner, 3, 4) }.expect("[3, 7) is 'llo '");
+        assert_eq!(without.as_text(), "llo ");
+        // SAFETY: live.
+        assert_eq!(unsafe { text_char_count(payload_of(without)) }, 4);
+        // SAFETY: live.
+        assert!(unsafe { text_ascii_bytes(payload_of(without)) }.is_none());
+
+        // An empty view at a scalar boundary.
+        // SAFETY: live.
+        let empty = unsafe { rt.alloc_text_slice(owner, 3, 0) }.expect("an empty view");
+        // SAFETY: live.
+        assert_eq!(unsafe { text_char_count(payload_of(empty)) }, 0);
+    }
+
+    /// `Text + Text` allocates a fresh owned payload (ADR-085), so the
+    /// concatenation is uncounted and counts *its own* bytes. A count inherited
+    /// from either operand would be a wrong program rather than a slow one.
+    #[test]
+    fn a_concatenation_counts_its_own_bytes_and_not_an_operands() {
+        let rt = crate::Runtime::new();
+        let left = rt.alloc_text("ab");
+        let right = rt.alloc_text("é");
+        // SAFETY: both live.
+        unsafe {
+            assert_eq!(text_char_count(payload_of(left)), 2);
+            assert_eq!(text_char_count(payload_of(right)), 1);
+        }
+
+        let joined = rt.alloc_text(&format!("{}{}", left.as_text(), right.as_text()));
+        // SAFETY: live.
+        assert_eq!(unsafe { text_char_count(payload_of(joined)) }, 3);
+        // SAFETY: live.
+        assert!(
+            unsafe { text_ascii_bytes(payload_of(joined)) }.is_none(),
+            "an ASCII text joined to a multi-byte one is not byte-indexable"
+        );
+    }
+
+    /// A slice taken from an owner that has **already** been counted reads the
+    /// same answer as one taken before. There is nothing to invalidate — `Text`
+    /// is immutable and a view cannot change what it views — but the pair is
+    /// what makes that a tested property rather than an argued one.
+    #[test]
+    fn a_slice_reads_the_same_whether_its_owner_was_counted_before_or_after() {
+        let rt = crate::Runtime::new();
+        let owner = rt.alloc_text("wxyz");
+        // SAFETY: live.
+        let early = unsafe { rt.alloc_text_slice(owner, 1, 2) }.expect("[1, 3)");
+        // SAFETY: live.
+        assert_eq!(unsafe { text_char_count(payload_of(early)) }, 2);
+        // SAFETY: live.
+        let late = unsafe { rt.alloc_text_slice(owner, 1, 2) }.expect("[1, 3)");
+        // SAFETY: live.
+        assert_eq!(unsafe { text_char_count(payload_of(late)) }, 2);
+        assert_eq!(early.as_text(), late.as_text());
+    }
+
+    /// The count and the byte view follow an owner chain **iteratively**, for
+    /// the reason `reading_a_deep_slice_chain_does_not_recurse` gives: the
+    /// depth is not bounded by anything, and this thread's stack is small
+    /// enough that a recursive walk would overflow it. The test passing is the
+    /// assertion.
+    #[cfg(not(feature = "adr115-arm-a"))]
+    #[test]
+    fn counting_a_deep_slice_chain_does_not_recurse() {
+        const DEPTH: usize = 4_000;
+        std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(|| {
+                let rt = crate::Runtime::new();
+                let mut text = rt.alloc_text("hello world");
+                let mut roots = crate::RootScope::new();
+                for _ in 0..DEPTH {
+                    // SAFETY: `text` is the live Text from the previous step.
+                    text = unsafe { rt.alloc_text_slice(text, 0, 11) }.expect("the whole owner");
+                    roots.root(text);
+                }
+                // SAFETY: `text` and its whole chain are live and rooted.
+                unsafe {
+                    assert_eq!(text_char_count(payload_of(text)), 11);
+                    assert_eq!(
+                        text_ascii_bytes(payload_of(text)),
+                        Some(&b"hello world"[..])
+                    );
+                }
+            })
+            .expect("spawn")
+            .join()
+            .expect("a deep chain must be countable without recursing");
+    }
+
+    /// **Allocating a view is O(1), not O(the owner).** `SourceSlice::new` used
+    /// to call `std::str::from_utf8` on the owner's whole byte range so it could
+    /// ask `str::is_char_boundary` twice, which made parsing an n-byte input
+    /// into k captures O(n·k) — a third quadratic, and the one handover 25's
+    /// F-8 did not name. Since ADR-111 the owner's bytes are UTF-8 by a
+    /// precondition checked at the one door raw bytes enter, so the boundary
+    /// test is two byte comparisons.
+    ///
+    /// The sizes are chosen so the old code cannot finish this test: 8000 views
+    /// of a 256 KiB owner is two billion byte validations. There is no
+    /// assertion to make about that beyond the test returning.
+    #[test]
+    fn taking_a_view_does_not_walk_the_owner() {
+        const OWNER_BYTES: usize = 256 * 1024;
+        const VIEWS: usize = 8_000;
+        let rt = crate::Runtime::new();
+        let owner = rt.alloc_text(&"x".repeat(OWNER_BYTES));
+        let mut roots = crate::RootScope::new();
+        roots.root(owner);
+        for i in 0..VIEWS {
+            // SAFETY: `owner` is live and rooted for the whole loop.
+            let view = unsafe { rt.alloc_text_slice(owner, i, 4) }.expect("in range");
+            roots.root(view);
+            assert_eq!(view.as_text(), "xxxx");
         }
     }
 

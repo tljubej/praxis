@@ -2505,7 +2505,7 @@ mod tests {
                     &TEXT,
                     std::mem::size_of::<TextPayload>(),
                     std::mem::align_of::<TextPayload>(),
-                    |p| (p as *mut TextPayload).write(TextPayload::Owned(owned)),
+                    |p| (p as *mut TextPayload).write(TextPayload::owned(owned)),
                 )
             }
         };
@@ -2586,7 +2586,7 @@ mod tests {
                 &TEXT,
                 std::mem::size_of::<TextPayload>(),
                 std::mem::align_of::<TextPayload>(),
-                |p| (p as *mut TextPayload).write(TextPayload::Owned(owner)),
+                |p| (p as *mut TextPayload).write(TextPayload::owned(owner)),
             )
         };
         let after_owner = heap.bytes_since_collect.get();
@@ -2659,7 +2659,7 @@ mod tests {
                     &TEXT,
                     std::mem::size_of::<TextPayload>(),
                     std::mem::align_of::<TextPayload>(),
-                    |p| (p as *mut TextPayload).write(TextPayload::Owned("x".into())),
+                    |p| (p as *mut TextPayload).write(TextPayload::owned("x")),
                 );
             }
         }

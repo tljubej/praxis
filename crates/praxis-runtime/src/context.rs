@@ -1259,7 +1259,7 @@ impl Runtime {
                 std::mem::align_of::<crate::text::TextPayload>(),
                 |payload| {
                     (payload as *mut crate::text::TextPayload)
-                        .write(crate::text::TextPayload::Owned(owned));
+                        .write(crate::text::TextPayload::owned(owned));
                 },
             )
         }

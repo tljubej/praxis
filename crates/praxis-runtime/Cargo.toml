@@ -6,20 +6,28 @@ license.workspace = true
 repository.workspace = true
 description = "GC ABI types, type descriptors, and runtime context for Praxis"
 
-# The ADR-118 measurement toggle, and the only cargo feature this crate has.
+# The measurement toggles. Both exist for the same reason and neither is a
+# feature in the ordinary sense: handover 26 §6 requires an A/B's baseline arm to
+# be *this tree with the package's single toggle reverted*, never an earlier
+# commit — ADR-113 records measuring against the wrong baseline giving 14.4%
+# where the right one gave 0.8%. So each toggle lives here, and both arms are
+# buildable from the committed tree.
 #
-# Default (feature off) is arm B: `ReprCVec` is the pinned `#[repr(C)]` triple
-# W4b will read from generated code. With the feature on it is a
-# `#[repr(transparent)]` newtype over `std::Vec`, and *nothing else in the tree
-# differs* — which is what makes the A/B a measurement of the representation
-# and not of anything else (handover 26 §6: the baseline is this tree with this
-# package's single toggle point reverted, never the previous commit).
+# Nothing in the workspace enables either, and `just ci` builds neither.
+[features]
+# ADR-118 arm A. Off (the default) `ReprCVec` is the pinned `#[repr(C)]` triple
+# W4b will read from generated code; on, it is a `#[repr(transparent)]` newtype
+# over `std::Vec` with every caller byte-for-byte identical.
 #
 #     cargo build --release -p praxis-cli                                # arm B
 #     cargo build --release -p praxis-cli \
 #         --features praxis-runtime/std-vec-payload                      # arm A
-[features]
 std-vec-payload = []
+# ADR-115 arm A. **It makes the runtime slower on purpose**: the `Text` scalar
+# count is never remembered and `t[i]` never indexes bytes, which is the
+# complexity the tree had before ADR-115 with the representation otherwise
+# identical. Do not enable it anywhere except when staging that arm.
+adr115-arm-a = []
 
 [dependencies]
 praxis-source.workspace = true
