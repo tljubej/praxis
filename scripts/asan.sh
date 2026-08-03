@@ -125,11 +125,21 @@ while IFS= read -r exe; do
     COUNT=$((COUNT + 1))
     # `grep -c`, not `grep -q`, and the reason is `set -o pipefail` above.
     # `grep -q` exits at the *first* match, which SIGPIPEs `nm` mid-output; the
-    # pipeline then reports 141 and `!` turns that into "not instrumented". So
-    # this check failed on every binary, always — including on a build carrying
-    # 25,435 `__asan_*` symbols — and `just asan` could not pass. The 1911/0
-    # baseline in the header was carried from handover 25 §1, not produced by
-    # this script. `grep -c` reads its input to the end, so nothing is signalled.
+    # pipeline then reports 141 and `!` turns that into "not instrumented".
+    #
+    # Whether `nm` is still writing when `grep` leaves depends on how much it
+    # had left to write, so this is a race conditioned on binary size — it
+    # reports "uninstrumented" for precisely the binaries big enough to matter.
+    # On this tree it failed 23 of 30, including a `praxis` carrying ~25,400
+    # `__asan_*` symbols, and `just asan` could not pass at all. W1 and W4a both
+    # walked into it independently and it is the reason neither could run the
+    # gate their packages need. Note also that the 1911/0 baseline in the header
+    # above was carried from handover 25 §1's hand-run command, not produced by
+    # this script — so nothing had ever exercised this line.
+    #
+    # `grep -c` reads its input to the end, so nothing is signalled. Had the
+    # comparison been written the other way round, the bug would have blessed an
+    # uninstrumented build instead of refusing an instrumented one.
     if [ "$(nm "$exe" 2>/dev/null | grep -c '__asan_' || true)" -eq 0 ]; then
         UNINSTRUMENTED="$UNINSTRUMENTED  $exe"$'\n'
     fi

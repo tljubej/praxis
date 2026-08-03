@@ -26,6 +26,7 @@ use crate::scalars;
 use crate::{
     collections::VecPayload,
     descriptor::{Payload, TypeDescriptor},
+    repr_c_vec::ReprCVec,
 };
 pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 
@@ -2338,7 +2339,7 @@ pub unsafe extern "C" fn praxis_vec_new(
                 |payload| {
                     (payload as *mut VecPayload).write(VecPayload {
                         element_descriptor,
-                        items: Vec::new(),
+                        items: ReprCVec::new(),
                     });
                 },
             )
@@ -3102,7 +3103,7 @@ pub unsafe extern "C" fn praxis_vec_sorted(ctx: *mut RuntimeContext, vec: GcRef)
     abi_guard!("praxis_vec_sorted", ctx, {
         // SAFETY: caller guarantees `vec` is a valid Vec.
         let p = unsafe { vec_payload(vec) };
-        let mut items: Vec<GcRef> = p.items.clone();
+        let mut items: Vec<GcRef> = p.items.to_vec();
         // Nothing to order, and nothing to check: a zero- or one-element Vec has
         // no pair to compare, so an empty `Vec[fn(Int) -> Int]` sorts rather than
         // faulting on a `compare` it would never have called.
@@ -5750,7 +5751,7 @@ impl crate::graph::GraphOracle for ClosureOracle<'_, '_> {
         // SAFETY: the descriptor check proves the payload is a `VecPayload`, and
         // the result is rooted by `call`, so reading its items cannot race a
         // collection — nothing allocates between here and the copy.
-        let items = unsafe { (*result.payload::<VecPayload>()).items.clone() };
+        let items = unsafe { (*result.payload::<VecPayload>()).items.to_vec() };
         for item in &items {
             self.scope.root(*item);
         }

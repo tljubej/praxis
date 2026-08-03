@@ -6,6 +6,21 @@ license.workspace = true
 repository.workspace = true
 description = "GC ABI types, type descriptors, and runtime context for Praxis"
 
+# The ADR-118 measurement toggle, and the only cargo feature this crate has.
+#
+# Default (feature off) is arm B: `ReprCVec` is the pinned `#[repr(C)]` triple
+# W4b will read from generated code. With the feature on it is a
+# `#[repr(transparent)]` newtype over `std::Vec`, and *nothing else in the tree
+# differs* — which is what makes the A/B a measurement of the representation
+# and not of anything else (handover 26 §6: the baseline is this tree with this
+# package's single toggle point reverted, never the previous commit).
+#
+#     cargo build --release -p praxis-cli                                # arm B
+#     cargo build --release -p praxis-cli \
+#         --features praxis-runtime/std-vec-payload                      # arm A
+[features]
+std-vec-payload = []
+
 [dependencies]
 praxis-source.workspace = true
 praxis-input-parser.workspace = true

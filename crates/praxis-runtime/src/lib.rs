@@ -41,6 +41,7 @@ pub mod parser;
 pub mod range;
 pub mod records;
 pub mod repr;
+pub mod repr_c_vec;
 pub mod roots;
 pub mod scalars;
 pub mod shadow_stack;
@@ -78,6 +79,7 @@ pub use input::{clear_input_reader, install_input_reader, InputReader};
 pub use parse_detail::{ParseDetail, ParseFail};
 pub use records::{RecordField, RecordPayload, RecordSchema, SchemaIdentity};
 pub use repr::{instance_repr, InstanceArg, InstanceRepr};
+pub use repr_c_vec::{ReprCVec, VecMut};
 pub use roots::{
     NativeRootStore, NativeScope, RootScope, RootSet, Rooted, RuntimeRoots, NATIVE_ROOT_RESERVATION,
 };

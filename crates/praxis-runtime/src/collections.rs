@@ -9,26 +9,35 @@
 //! This is the composite type that proves nested `GcRef` tracing (ADR-013):
 //! `trace` forwards every element to the tracer.
 //!
-//! **M5 change:** `items` is now a `Vec<GcRef>` (was `Box<[GcRef]>` in M3) so
+//! **M5 change:** `items` became growable (it was `Box<[GcRef]>` in M3) so
 //! `push` mutates the vector *in place* — matching §4.2's "a `let` binding may
 //! still point to a mutable object" and §11.1's `push -> Unit` (the receiver is
-//! mutated, no new reference returned). The `Vec`'s backing storage may
-//! reallocate internally, but the `VecPayload` object itself stays at the same
-//! GC address (non-moving collector, ADR-011), so existing `GcRef`s remain
-//! valid. Per §11.5, runtime wrappers never expose an interior pointer to the
-//! `Vec`'s backing buffer across a capacity-mutating op; they reload from the
-//! payload each call.
+//! mutated, no new reference returned). The backing storage may reallocate
+//! internally, but the `VecPayload` object itself stays at the same GC address
+//! (non-moving collector, ADR-011), so existing `GcRef`s remain valid. Per
+//! §11.5, runtime wrappers never expose an interior pointer to the vector's
+//! backing buffer across a capacity-mutating op; they reload from the payload
+//! each call.
+//!
+//! **ADR-118 change:** `VecPayload.items` is a
+//! [`ReprCVec<GcRef>`](crate::repr_c_vec::ReprCVec) rather than a
+//! `std::Vec<GcRef>`. Same three words, same size, same growth machinery — but
+//! `#[repr(C)]`, so the length and the element pointer are at offsets a backend
+//! is allowed to bake in. `DequePayload` and `GridPayload` are deliberately not
+//! migrated; see the ADR.
 
 use std::fmt;
 
 use crate::descriptor::{BuiltinTypeId, Tracer, TypeDescriptor};
+use crate::repr_c_vec::ReprCVec;
 use crate::DynamicHasher;
 use crate::GcRef;
 
 /// The `Vec[T]` payload: the element descriptor plus the growable items.
 ///
-/// `items` is a `Vec<GcRef>` so `push` can grow it in place (§11.1). Both fields
-/// are `Drop`, so [`VEC`]`'s `drop_value` releases them on sweep (§12.5).
+/// `items` grows in place (§11.1) and is `Drop`, so [`VEC`]'s `drop_value`
+/// releases its buffer on sweep (§12.5). The element descriptor is a `'static`
+/// borrow and owns nothing.
 #[repr(C)]
 pub struct VecPayload {
     /// The descriptor for every element in `items`, or **null** when this
@@ -42,10 +51,23 @@ pub struct VecPayload {
     /// to hold `Int`s and why `push` had licence to *retag* a vector that had
     /// been told its type (P0-11).
     pub element_descriptor: *const TypeDescriptor,
-    /// The elements, in order. A `Vec` (not `Box<[T]>`) so `push` mutates in
-    /// place.
-    pub items: Vec<GcRef>,
+    /// The elements, in order. Growable (not `Box<[T]>`) so `push` mutates in
+    /// place, and a [`ReprCVec`] rather than a `std::Vec` so the length and the
+    /// element pointer are at offsets generated code is allowed to know
+    /// (ADR-118). `std::Vec` is `#[repr(Rust)]` and hides both inside a private
+    /// `RawVec`; nothing else about the field changed, including its size.
+    pub items: ReprCVec<GcRef>,
 }
+
+// The offsets W4b will bake into generated code, pinned here rather than
+// asserted in prose (ADR-118). `element_descriptor` stays at 0 — it is what
+// `same_element` and every `element()` call reads, and moving it would be an
+// unrelated churn — so `items` starts at 8, its element pointer is at 8 and its
+// length at 16.
+const _: () = assert!(std::mem::offset_of!(VecPayload, element_descriptor) == 0);
+const _: () = assert!(std::mem::offset_of!(VecPayload, items) == 8);
+// The block size class does not move: 8 + 24 is the 32 it always was (ADR-109).
+const _: () = assert!(std::mem::size_of::<VecPayload>() == 32);
 
 impl VecPayload {
     /// The element descriptor, or `None` if this vector was never told its
@@ -101,8 +123,10 @@ unsafe fn vec_trace(payload: *mut u8, tracer: &mut dyn Tracer) {
 
 unsafe fn vec_drop(payload: *mut u8) {
     // SAFETY: caller guarantees `payload` points at an initialized `VecPayload`.
-    // `drop_in_place` frees the boxed slice; the element descriptor is a static
-    // reference and is not owned.
+    // `drop_in_place` runs `ReprCVec`'s `Drop`, which hands the three words back
+    // to a `Vec` and lets it free the buffer — the same single free the
+    // `std::Vec` field performed before ADR-118, reached the same way. The
+    // element descriptor is a static reference and is not owned.
     unsafe { std::ptr::drop_in_place(payload as *mut VecPayload) };
 }
 
@@ -557,5 +581,111 @@ mod tests {
             !ints.equals(&floats),
             "a collection's element descriptor is part of its runtime type identity"
         );
+    }
+
+    // ADR-118. The three properties W4b will rest on, asserted against a real
+    // heap-allocated payload rather than against a standalone `ReprCVec`.
+
+    #[test]
+    fn a_vec_payload_is_thirty_two_bytes_with_the_items_at_offset_eight() {
+        // Also a `const _` above; repeated as a test because the number is what
+        // decides the block's size class (ADR-109) and a silent change to it
+        // would move every `Vec` to a different page pool.
+        assert_eq!(std::mem::size_of::<VecPayload>(), 32);
+        assert_eq!(std::mem::offset_of!(VecPayload, element_descriptor), 0);
+        assert_eq!(std::mem::offset_of!(VecPayload, items), 8);
+    }
+
+    // Arm-B only. Under `std-vec-payload` the payload holds a `std::Vec`, whose
+    // field order is exactly the thing nothing is allowed to assume — so this
+    // test failing there is the toggle working, not the toggle broken.
+    #[cfg(not(feature = "std-vec-payload"))]
+    #[test]
+    fn a_backend_can_read_the_length_and_the_elements_out_of_a_live_payload() {
+        // The rehearsal for W4b: everything below is a load at a constant
+        // displacement from the payload pointer generated code already holds.
+        // `praxis_vec_len` is the word at 16; `praxis_vec_get` is a bounds
+        // compare against it and a load through the word at 8.
+        let rt = crate::Runtime::new();
+        let elements: Vec<GcRef> = (0..7_i64).map(|v| rt.alloc_int(v)).collect();
+        let vec_ref = rt.alloc_vec(&crate::scalars::INT, elements);
+
+        let base = vec_ref.payload::<u8>().cast_const();
+        // SAFETY: `vec_ref` is a live `Vec`, so `base` addresses an initialized
+        // `VecPayload` whose layout the `const _` assertions above pin: the
+        // element pointer at 8 and the length at 16.
+        let (items_ptr, len) = unsafe {
+            (
+                base.add(8).cast::<*const GcRef>().read(),
+                base.add(16).cast::<usize>().read(),
+            )
+        };
+        assert_eq!(len, 7);
+        for i in 0..len {
+            // SAFETY: `i < len`, and `items_ptr` is the live element buffer.
+            let element = unsafe { *items_ptr.add(i) };
+            assert!(std::ptr::eq(element.descriptor(), &crate::scalars::INT));
+            // SAFETY: the descriptor check above proves the payload is an `Int`.
+            assert_eq!(unsafe { *element.payload::<i64>() }, i as i64);
+        }
+    }
+
+    #[test]
+    fn a_vec_that_reallocates_across_a_collection_keeps_every_element() {
+        // The failure this is aimed at: a payload left holding the address of a
+        // buffer `RawVec` has already grown away from. `vec_trace` walks
+        // `items` on every mark, so a stale pointer here is a wild read inside
+        // the collector rather than a wrong answer.
+        let rt = crate::Runtime::new();
+        let mut scope = crate::roots::RootScope::new();
+        let vec_ref = rt.alloc_vec(&crate::scalars::INT, Vec::new());
+        scope.root(vec_ref);
+
+        // Outside the intern range (ADR-100), so every element is a real block
+        // the sweep can reclaim rather than an immortal it cannot.
+        const BASE: i64 = 1_000_000;
+        for i in 0..512_i64 {
+            let element = rt.alloc_int(BASE + i);
+            // Growing the buffer is a Rust `malloc`, not a GC allocation, so
+            // nothing collects between the `alloc_int` and the `push` and the
+            // element needs no root of its own.
+            //
+            // SAFETY: `vec_ref` is rooted in `scope` and the collector does not
+            // move objects (ADR-011), so the payload address is stable and the
+            // only live reference to it is this one.
+            unsafe { &mut *vec_ref.payload::<VecPayload>() }
+                .items
+                .push(element);
+        }
+
+        // Garbage the sweep must take, so the collection is a real one.
+        for i in 0..64_i64 {
+            let _ = rt.alloc_int(BASE + 100_000 + i);
+        }
+        rt.collect_with(&scope);
+
+        // SAFETY: `vec_ref` was rooted across the collection.
+        let p = unsafe { &*vec_ref.payload::<VecPayload>() };
+        assert_eq!(p.items.len(), 512);
+        assert!(p.items.capacity() >= 512);
+        for (i, item) in p.items.iter().enumerate() {
+            // SAFETY: every element was traced through `items` and survived.
+            assert_eq!(unsafe { *item.payload::<i64>() }, BASE + i as i64);
+        }
+    }
+
+    #[test]
+    fn the_owned_bytes_callback_charges_the_pacer_for_the_whole_buffer() {
+        let rt = crate::Runtime::new();
+        let elements: Vec<GcRef> = (0..10_i64).map(|v| rt.alloc_int(v)).collect();
+        let vec_ref = rt.alloc_vec(&crate::scalars::INT, elements);
+
+        // SAFETY: `vec_ref` is a live `Vec`.
+        let p = unsafe { &*vec_ref.payload::<VecPayload>() };
+        let expected = p.items.capacity() * std::mem::size_of::<GcRef>();
+        // SAFETY: same payload, and `vec_owned_bytes` is `VEC`'s own callback.
+        let reported = unsafe { vec_owned_bytes(vec_ref.payload::<u8>() as *const u8) };
+        assert_eq!(reported, expected);
+        assert!(reported >= 10 * std::mem::size_of::<GcRef>());
     }
 }

@@ -1308,7 +1308,7 @@ impl Runtime {
                 |payload| {
                     (payload as *mut VecPayload).write(VecPayload {
                         element_descriptor,
-                        items,
+                        items: items.into(),
                     });
                 },
             )
