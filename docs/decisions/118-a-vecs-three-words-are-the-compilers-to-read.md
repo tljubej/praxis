@@ -855,8 +855,27 @@ profile bucket is not a speedup, the eight benchmarks are not one benchmark, and
 `bfs` is the only one of the eight where `bs.contains` is hot. The number is the
 measurement phase's to supply and this record does not anticipate it.
 
-All eight benchmarks produce byte-identical stdout against `main`'s binary,
-checked untimed. That is a correctness gate, not a measurement.
+The staged arms, and the check that the toggle bites:
+
+```
+/tmp/praxis-arms/W4b-a  a75e8d3ba10f074b9ec01fa6cd3401229f0d90745aa640987e7595012bc41be6
+/tmp/praxis-arms/W4b-b  3ad32cd6e2b04bfc43f46aba87cabf80f1014bad9115566a0dc394f5725026f0
+```
+
+Equal hashes would mean the feature compiled to the same program and the
+measurement was of nothing. They are not equal. The unit tests that pin the
+inline shapes are `#[cfg(not(feature = "adr118-arm-a"))]` for the same reason
+ADR-116's are — under the feature the emitted code contains the call they assert
+is absent — so the arms differ in what the suite *checks* as well as in what it
+emits.
+
+All eight benchmarks produce byte-identical stdout under **all three** of
+`main`'s binary, arm A and arm B, at the frozen sizes, checked untimed:
+`bfs`, `collatz`, `hashwork`, `mandelbrot`, `pipeline`, `primes`, `tree`, `vm`.
+That is a correctness gate, not a measurement — and it is the gate that matters
+most here, because the three inline arms reimplement three wrappers' semantics
+in a second place, and `vm` and `bfs` between them drive `v[i]`, `v.len()` and
+`bs.contains(x)` millions of times per run.
 
 ### Part 1's arm is retired, and in the loud direction
 
