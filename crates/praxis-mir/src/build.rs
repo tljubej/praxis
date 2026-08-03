@@ -288,6 +288,7 @@ fn lower_fn(
         debug_names: Vec::new(),
         debug_kinds: Vec::new(),
         debug_spans: Vec::new(),
+        debug_scalar_sources: Vec::new(),
         span: f.span,
     };
     let entry = func.new_block();
@@ -376,6 +377,7 @@ fn lower_closure_fn(
         debug_names: Vec::new(),
         debug_kinds: Vec::new(),
         debug_spans: Vec::new(),
+        debug_scalar_sources: Vec::new(),
         // Closures are lifted to synthetic functions; the `__p_expr` debugger
         // function is also span-less. The `source` command degrades to "no
         // span recorded" for these, which is acceptable (the faulting frame is
@@ -511,6 +513,7 @@ fn lower_fn_value_adapter(adapter: &FnValueAdapter, db: &mut TypeDb) -> Function
         debug_names: Vec::new(),
         debug_kinds: Vec::new(),
         debug_spans: Vec::new(),
+        debug_scalar_sources: Vec::new(),
         // Synthetic, like a lifted closure: no source span of its own.
         span: (0, 0),
     };

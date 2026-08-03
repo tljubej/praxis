@@ -50,6 +50,26 @@ test-support = ["dep:praxis-ast", "dep:praxis-parser"]
 # shape assertions, which is the toggle working; do not enable it anywhere else.
 adr120-arm-a = []
 
+# ADR-120 **part 2** arm A. `forward::carry_debug_slot` records nothing, so an
+# elided box's `Gc` local never learns which `Scalar` local holds its word — and
+# the backend, whose only input for this is `Function::debug_scalar_source`,
+# emits no debug store for it and marks every slot `DebugSlotKind::Reference`.
+# The forwarding itself is untouched: arm A runs exactly the code arm B runs and
+# computes exactly what arm B computes, and the two differ in the debugger's
+# view and in the stores that produce it.
+#
+#     cargo build --release -p praxis-cli                          # arm B
+#     cargo build --release -p praxis-cli \
+#         --features praxis-mir/adr120b-arm-a                      # arm A
+#
+# Arm A is the tree with the part-1 regression left in place, so `cargo test`
+# with it on fails the two debugger-fidelity tests part 2 exists to turn green
+# — `run.rs`'s `a_forwarded_binop_temp_still_renders_the_value_it_materialized`
+# and `jit.rs`'s `a_temp_that_never_reached_a_shadow_slot_is_still_renderable`.
+# That is the toggle working, and it is also the sharpest available statement of
+# what this package is: those two tests *are* the difference between the arms.
+adr120b-arm-a = []
+
 # Doctests are not run (see the justfile and README): rustdoc has to analyze the
 # whole crate before it can find out there are none, and the result is never
 # cached, so `cargo test` paid ~6s per crate for it on every run.

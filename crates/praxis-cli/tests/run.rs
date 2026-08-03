@@ -840,6 +840,48 @@ fn a_forwarded_binop_temp_still_renders_the_value_it_materialized() {
     );
 }
 
+/// **All three of them**, and the third is the one nobody predicted.
+///
+/// ADR-120 decision 6 measured the part-1 regression as three temps of the
+/// fixture's seven going `<uninit>`, not the one handover 27 §1 traced:
+/// `@ "a + b"` 30, `@ "a + b + c"` 60, and `@ "9223372036854775807"` — an
+/// out-of-range `Int` literal whose `Alloc{Int}` producer is in the forwarded
+/// set. `@ "10"`, `@ "20"` and `@ "30"` never degraded, because a small-int
+/// box is also `MoveGc`'d into the binding it initializes and that second
+/// reader declines the forward.
+///
+/// The test above asserts the first. This asserts all three, so a part-2
+/// implementation that repaired the `Materialize` case and missed the `Alloc`
+/// one would be a failure rather than a partial success — and so the survivors
+/// are pinned too: they are the control that says the fixture still contains
+/// temps this transform does not touch.
+#[test]
+fn every_temp_the_forwarding_elided_renders_its_value_again() {
+    let (code, out) = run_repl_with_cmds("debug_temps.px", "locals\nquit\n");
+    assert_eq!(code, 1, "overflow faults and exits 1 after REPL quits");
+    for expected in [
+        "@ \"a + b\" = 30",
+        "@ \"a + b + c\" = 60",
+        "@ \"9223372036854775807\" = 9223372036854775807",
+        // The three that never degraded, asserted so a change that "fixed" the
+        // three above by writing every slot from somewhere else is still a
+        // failure if it disturbed these.
+        "@ \"10\" = 10",
+        "@ \"20\" = 20",
+        "@ \"30\" = 30",
+    ] {
+        assert!(out.contains(expected), "missing `{expected}`: {out}");
+    }
+    // And the faulting expression's own temp stays `<uninit>`: `render.rs`
+    // keeps an uninit temp that has a span precisely so the user can see which
+    // expression did not finish, and ADR-120 part 2 must not fill it in with
+    // the wrapped sum the overflow produced on the way to the raise.
+    assert!(
+        out.contains("@ \"a + b + c + 9223372036854775807\" = <uninit>"),
+        "the expression that faulted produced no value: {out}"
+    );
+}
+
 #[test]
 fn m11_temp_provenance_shows_materializing_expression() {
     // The faulting method-call temp must show the expression it materialized

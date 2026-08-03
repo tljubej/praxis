@@ -54,7 +54,7 @@ use praxis_runtime::descriptor::TypeDescriptor;
 use praxis_runtime::enums::{EnumSchema, EnumVariantShape};
 use praxis_runtime::records::{RecordField, RecordSchema, SchemaIdentity};
 use praxis_runtime::tuples::TupleSchema;
-use praxis_runtime::{DebugLocalMeta, FunctionDebugMeta, HeapDrained};
+use praxis_runtime::{DebugLocalMeta, DebugSlotKind, FunctionDebugMeta, HeapDrained};
 
 /// A process-unique identity for one JIT generation.
 ///
@@ -161,6 +161,12 @@ struct DebugMetaKey {
     kind: u8,
     span_start: u32,
     span_end: u32,
+    /// ADR-120 part 2. Load-bearing for *correctness*, not just for cache hit
+    /// rate: two locals identical in every other field but disagreeing about
+    /// whether their slot holds a reference are not one local, and interning
+    /// them together would hand one function's frame the other's answer to the
+    /// question the collector's post-sweep scan asks.
+    slot_kind: DebugSlotKind,
 }
 
 /// The comparable projection of a [`FunctionDebugMeta`], for interning.
@@ -191,6 +197,7 @@ impl DebugMetaKey {
             kind: m.kind,
             span_start: m.span_start,
             span_end: m.span_end,
+            slot_kind: m.slot_kind,
         }
     }
 }
@@ -574,6 +581,7 @@ mod tests {
             kind: praxis_runtime::LOCAL_KIND_USER,
             span_start: 0,
             span_end: 4,
+            slot_kind: DebugSlotKind::Reference,
         };
         // Two rounds to prime every cache, then measure across a hundred more.
         for _ in 0..2 {

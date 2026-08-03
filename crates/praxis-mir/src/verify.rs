@@ -680,6 +680,7 @@ mod tests {
             debug_names: Vec::new(),
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
             span: (0, 0),
         }
     }

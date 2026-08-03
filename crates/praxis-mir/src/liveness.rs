@@ -459,6 +459,7 @@ mod tests {
             debug_names: Vec::new(),
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
             span: (0, 0),
         };
         let ret = gc_local(&mut f, "ret");
@@ -527,6 +528,7 @@ mod tests {
             debug_names: Vec::new(),
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
             span: (0, 0),
         };
         let _blk: Block = Block {
@@ -560,6 +562,7 @@ mod tests {
             debug_names: Vec::new(),
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
             span: (0, 0),
         };
         let ret = gc_local(&mut f, "ret");
@@ -629,6 +632,7 @@ mod tests {
             debug_names: Vec::new(),
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
             span: (0, 0),
         };
         let ret = gc_local(&mut f, "ret");
@@ -731,6 +735,7 @@ mod tests {
             debug_names: Vec::new(),
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
             span: (0, 0),
         };
         let ret = gc_local(&mut f, "ret");

@@ -62,8 +62,9 @@ pub use context::{
 };
 pub use crash_snapshot::{CrashSnapshot, SnapshotFrame, SnapshotSlot};
 pub use debug::{
-    DebugFrameEntry, DebugFrameStack, DebugFrameStackHeader, DebugLocalMeta, DebugValueStack,
-    DebugValueStackHeader, FunctionDebugMeta, LOCAL_KIND_TEMP, LOCAL_KIND_USER,
+    DebugFrameEntry, DebugFrameStack, DebugFrameStackHeader, DebugLocalMeta, DebugSlotKind,
+    DebugValue, DebugValueStack, DebugValueStackHeader, FunctionDebugMeta, ScalarValue,
+    LOCAL_KIND_TEMP, LOCAL_KIND_USER,
 };
 pub use descriptor::{
     BuiltinTypeId, CompareFn, DropFn, DynamicHasher, EqualsFn, FormatFn, HashFn, StructHasher,

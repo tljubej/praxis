@@ -476,3 +476,37 @@ an allocation fast path and it forges no token, because it never asks for one.
   function with more live values spills it, each proof becomes two loads and
   this package's win goes to zero there. Nothing in the tree measures that today;
   the sample loop is the only program whose emitted code anyone has counted.
+
+---
+
+## Amendment, 2026-08-03 — the denominator was nine and is five
+
+**Amended by [ADR-120 part 2](./120-a-box-with-one-reader-in-its-own-block-is-not-a-box.md),
+which carries the measurement.** ADR-120's block-local box/unbox forwarding
+landed in the same wave as this package and deletes four of the nine proof sites
+in handover 25 §3's loop — three interior nodes of the expression trees, and the
+`while` condition's whole `Materialize{Bool}` → `ExtractScalar{Bool}` round
+trip. This record's headline arithmetic, "**nine sites × two instructions =
+eighteen fewer per iteration, exactly**", was exact when it was written and is
+stated against a tree that no longer exists.
+
+Re-measured on the merged tree with `adr116-arm-a` as the only toggle reverted,
+by the same `PRAXIS_DUMP_VCODE` rule: **125 → 115 machine instructions per
+iteration, −10.** Five sites × two, exactly, again.
+
+The mechanism, the `RUNTIME_ABI_VERSION` bump, the decisions and the
+whole-program figures below are unchanged and unaffected; what moved is the
+count of sites the loop contains, and therefore the number a later package
+re-pricing the descriptor table must net against. The per-program table in
+"Measurement" was taken before the forwarding landed and should be read the same
+way. Both tests this record points at as pins are renamed and now assert five,
+each carrying the table of all three answers and why they differ:
+`the_sample_loop_proves_nine_descriptors_per_iteration_not_seven` (`lower.rs`)
+is `the_sample_loop_proves_five_descriptors_per_iteration_where_nine_were_written`,
+and `the_sample_loop_proves_a_scalars_descriptor_nine_times_per_iteration`
+(`mir_shape.rs`) is
+`the_sample_loop_proves_a_scalars_descriptor_five_times_per_iteration`.
+
+This is the double count handover 21 §3.6 recorded and handover 26 §7 trap 7
+warned about. It arrived as a failing test at the wave merge rather than as a
+wrong number in a report, which is what the wave structure is for.

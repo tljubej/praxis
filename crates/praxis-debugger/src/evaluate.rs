@@ -167,7 +167,15 @@ fn collect_bindings(frame: &SnapshotFrame, db: &mut TypeDb) -> Vec<LocalBinding>
         .iter()
         .filter(|l| l.is_user() && is_bindable_name(&l.name()))
         .filter_map(|l| {
+            // `reference()` rather than the value: a local whose box ADR-120
+            // elided holds a raw payload, and `p EXPR` binds *objects* — it
+            // roots them (`scope.root` below), recovers their type through
+            // their descriptor, and hands them to compiled code as `GcRef`
+            // arguments. None of that is available for a word. In practice no
+            // such local is ever a candidate anyway: the filter above keeps
+            // user bindings, and the forwarding only elides compiler temps.
             l.value
+                .and_then(praxis_runtime::DebugValue::reference)
                 .map(|value| (l.type_id, l.name().to_string(), value))
         })
         .collect();
@@ -667,7 +675,7 @@ mod tests {
             name_len: name.len() as u32,
             symbol_id: 0,
             descriptor: &praxis_runtime::collections::VEC as *const _,
-            value: Some(value),
+            value: Some(praxis_runtime::DebugValue::Reference(value)),
             type_id: ty.to_u32(),
             kind,
             span_start: 0,

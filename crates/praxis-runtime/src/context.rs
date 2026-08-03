@@ -522,17 +522,26 @@ pub struct DebugLocal {
     /// frames constructed before M10-WS2 (the M5 unit tests).
     pub descriptor: *const crate::TypeDescriptor,
     /// The current value of the local, or `None` for a slot no value has been
-    /// written into yet (updated by the debug spill at safepoints).
+    /// written into yet.
     ///
-    /// `GcRef` is `#[repr(transparent)]` over a `NonNull`, so `None` is the
-    /// all-zero niche and this field is still one machine word: generated code
-    /// writes a raw pointer and gets `Some`, and the zeroed slot a fresh frame
-    /// starts with *is* `None`. The predecessor was a `GcRef` holding
-    /// `NonNull::dangling()`, compared by pointer identity to decide whether a
-    /// slot held anything — which is to say, an invalid `GcRef` constructed in
-    /// Rust (UB) and a sentinel a real allocation could in principle collide
-    /// with (F18).
-    pub value: Option<GcRef>,
+    /// Decoded from the slot's one machine word by
+    /// [`DebugLocalMeta::read`](crate::debug::DebugLocalMeta::read), under the
+    /// [`DebugSlotKind`](crate::debug::DebugSlotKind) the compiler recorded for
+    /// this local — so a temp whose box ADR-120 elided is a
+    /// [`DebugValue::Scalar`](crate::debug::DebugValue::Scalar) carrying its
+    /// payload and *no* reference, and everything else is a
+    /// [`DebugValue::Reference`](crate::debug::DebugValue::Reference). A
+    /// consumer that means to follow the value into the heap says so with
+    /// [`DebugValue::reference`](crate::debug::DebugValue::reference), which is
+    /// the one door a scalar cannot pass.
+    ///
+    /// The word itself is still `Option<GcRef>`-shaped in the slot, and the
+    /// zeroed slot a fresh frame starts with is still the `None` niche (F18).
+    /// The predecessor of *that* was a `GcRef` holding `NonNull::dangling()`,
+    /// compared by pointer identity to decide whether a slot held anything —
+    /// an invalid `GcRef` constructed in Rust (UB) and a sentinel a real
+    /// allocation could in principle collide with.
+    pub value: Option<crate::debug::DebugValue>,
     /// The full static `Type` id (`praxis_types::Type(u32)` handle, M10-WS1b),
     /// so the crash debugger can reconstruct the local's *exact* type —
     /// including collection element types (`Vec[Int]`, `Map[Text, Int]`) and

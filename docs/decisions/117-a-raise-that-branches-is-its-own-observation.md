@@ -367,3 +367,41 @@ rendering where the converging shape stored the wrapped value.
   question this package does not turn on — the fold is free at every site,
   executed or not. It would, however, be the right denominator if anyone ever
   proposes the reverse trade.
+
+---
+
+## Amendment, 2026-08-03 — the fold is worth *more* after ADR-120, not less
+
+**Amended by [ADR-120 part 2](./120-a-box-with-one-reader-in-its-own-block-is-not-a-box.md),
+which carries the measurement.** ADR-120's block-local box/unbox forwarding
+landed in the same wave as this package, and the natural expectation — another
+package removing instructions from the same loop shrinks this one's share — is
+wrong in both directions at once.
+
+Re-measured on the merged tree with `unfolded-check-fault` as the only toggle
+reverted:
+
+| | this record | merged tree |
+|---|---:|---:|
+| CLIF, per iteration | −9 | **−9** |
+| vcode, per iteration | −18 | **−28** |
+
+**The CLIF delta does not move, and this record already says why it could not:**
+three instructions per folded check, and the census still counts three foldable
+checks per iteration. That is not luck — ADR-120 forwards no producer that
+`can_fault`, so it cannot delete a `CheckFault` or the raise that precedes one.
+
+**The machine delta grew**, and the explanation is also already here: "Removing
+the check removes a *block boundary* as well as two loads and a branch… Per
+iteration of the sample loop the figure is 6 rather than 9, because three of the
+nine sit in edge blocks the hot path does not walk." The forwarding shortened
+that hot walk from 32 blocks to 21, so the three folds are now all on it and the
+per-fold figure on the walked path went from 6 to ~9.3 — which is the
+whole-program 8–9 this record measured over the corpus.
+
+The one thing this changes downstream is the sentence in "The counts handover 25
+and handover 27 disagreed about": **runtime type proofs are five per iteration
+on the merged tree, not nine**, and the test named there is renamed accordingly.
+Nine was right about what `build.rs` emits; five is right about what reaches the
+backend. ADR-116's amendment restates its own headline against the same
+denominator.

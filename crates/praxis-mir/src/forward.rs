@@ -67,18 +67,24 @@
 //! and one debug slot zeroed in the prologue per elided temp — a per-call cost
 //! against a per-iteration win.
 //!
-//! It also costs the debugger a value, and that is a known, measured regression
-//! rather than a surprise: a temp whose producer is gone renders
+//! It also cost the debugger a value, and that was a known, measured regression
+//! rather than a surprise: a temp whose producer is gone rendered
 //! `<tmp#N: Int> @ "a + b" = <uninit>` where it used to render `= 30`. Two
-//! tests say so and both are **red on this branch on purpose**:
+//! tests said so and both were red on the part-1 branch on purpose:
 //! `crates/praxis-cli/tests/run.rs`'s
 //! `a_forwarded_binop_temp_still_renders_the_value_it_materialized`, added by
 //! this package because handover 26 believed an existing test covered it and
 //! handover 27 §1 proved none did, and
 //! `crates/praxis-codegen-cranelift/tests/jit.rs`'s
 //! `a_temp_that_never_reached_a_shadow_slot_is_still_renderable`, which was
-//! already there. ADR-120 part 2 (W8-S0b, a scalar debug slot) is what turns
-//! both green **unedited**. The hand-off is [`carry_debug_metadata`].
+//! already there.
+//!
+//! **ADR-120 part 2 (W8-S0b) turned both green, unedited**, by giving the
+//! elided box's debug slot the *scalar* the box would have held. This pass
+//! hands it the two things it needs, and both are here because this is the last
+//! point in the compiler that knows the box and the scalar are one value:
+//! [`carry_debug_metadata`] moves the box's provenance onto the scalar, and
+//! [`carry_debug_slot`] tells the box which scalar feeds its slot.
 
 use std::collections::BTreeSet;
 
@@ -344,9 +350,20 @@ fn drop_producer_if_dead(func: &mut Function, site: &Site) {
     if census.use_count(site.boxed) != 0 || census.def_count(site.boxed) != 1 {
         return;
     }
-    if let How::Operand { scalar } = site.how {
-        carry_debug_metadata(func, site.boxed, scalar);
-    }
+    // The word the box would have held is now some `Scalar` local's, and which
+    // one depends on the transform: the producer's operand where there was one,
+    // and the `ConstInt` that replaced the reload where the producer was a
+    // `ConstGc` carrying an immediate. Both are the same statement to the
+    // debugger — *this box's value is that scalar's* — so both are recorded the
+    // same way.
+    let replacement = match site.how {
+        How::Operand { scalar } => {
+            carry_debug_metadata(func, site.boxed, scalar);
+            scalar
+        }
+        How::Immediate { .. } => site.extracted,
+    };
+    carry_debug_slot(func, &census, site.boxed, replacement);
     func.blocks[site.block.0 as usize]
         .insts
         .remove(site.producer);
@@ -375,6 +392,44 @@ fn carry_debug_metadata(func: &mut Function, boxed: LocalId, scalar: LocalId) {
     func.debug_spans[s] = span;
     func.debug_names[s] = name;
     func.debug_kinds[s] = kind;
+}
+
+/// Point the elided box's *debug slot* at the scalar that now holds its word
+/// (ADR-120 part 2, and the whole of what part 2 needs from this pass).
+///
+/// [`carry_debug_metadata`] above moves the box's provenance onto the scalar;
+/// this moves the value channel the other way, and the two are separate because
+/// they answer different questions. The provenance says what the scalar *is*.
+/// This says which slot a definition of the scalar must write — and it is
+/// recorded against the **box**, so `build_function_debug_meta` keeps emitting
+/// one `DebugLocalMeta` per `Gc` local, in position order, with the box's own
+/// name, span and `type_id`. Nothing is renumbered and no second line appears
+/// for one temp: the slot that was there gains a value instead of the debugger
+/// gaining a local. ADR-120 decision 7 kept the box in `Function::locals` for
+/// the numbering; this is what that decision was worth.
+///
+/// **The gate is that the scalar is defined exactly once in the function.** A
+/// debug slot is never cleared, so it renders whatever the most recently
+/// executed store wrote (ADR-104); a scalar with two definitions could
+/// therefore leave the second expression's value under the first expression's
+/// `@ "…"` provenance, which is a *wrong* rendering rather than a missing one.
+/// One definition makes that unrepresentable. It costs nothing today —
+/// `build.rs` allocates a fresh `Scalar` local per expression node, so every
+/// site this pass forwards passes the gate — and it is what keeps the property
+/// true if a later builder stops doing that.
+fn carry_debug_slot(func: &mut Function, census: &Census, boxed: LocalId, scalar: LocalId) {
+    // ADR-120 part 2's measurement arm A, and the whole of the toggle: with the
+    // feature on, no box is ever linked to a scalar, so the backend has nothing
+    // to store and nothing to mark. The transform above is unaffected — both
+    // arms compute the same thing — and what differs is the debugger's view and
+    // the stores that produce it, which is exactly the package.
+    if cfg!(feature = "adr120b-arm-a") {
+        return;
+    }
+    if census.def_count(scalar) != 1 {
+        return;
+    }
+    func.debug_scalar_sources[boxed.0 as usize] = Some(scalar);
 }
 
 /// Rewrite every `Scalar` operand field of `inst` that names `from` to name
@@ -505,6 +560,7 @@ mod tests {
     use praxis_stdlib::abi::RuntimeSymbol;
 
     use super::*;
+    use crate::ir::LocalKind;
     use crate::test_support::{lower_src_to_mir, Census, InstKind, Lowered};
     use crate::verify::verify;
 
@@ -683,6 +739,7 @@ mod tests {
             debug_names: Vec::new(),
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
             span: (0, 0),
         };
         let scalar = |f: &mut Function| {
@@ -950,5 +1007,114 @@ mod tests {
             "exactly one scalar carries `a + b`'s span: {:?}",
             func.debug_spans
         );
+    }
+
+    /// The other half of the hand-off, and the one part 2 actually reads: the
+    /// **box** learns which scalar now holds its word, so the backend can point
+    /// its debug slot at that scalar's definition.
+    ///
+    /// Recorded against the box rather than the scalar because the box is the
+    /// local that owns the debug slot and the `symbol_id`. That is what keeps
+    /// `<tmp#7>` `<tmp#7>` — one metadata entry per `Gc` local, in position
+    /// order, exactly as ADR-120 decision 7 left it.
+    #[test]
+    fn an_elided_box_learns_which_scalar_holds_the_word_it_would_have_boxed() {
+        let src = "fn f(a: Int, b: Int) -> Int { a + b + 1 }";
+        let lowered = lower_src_to_mir(src);
+        let func = lowered.function("f");
+        let start = u32::try_from(src.find("a + b").expect("in the source")).unwrap();
+        let span = Some((start, start + 5));
+        let boxed = func
+            .locals
+            .iter()
+            .find(|l| l.kind == LocalKind::Gc && func.debug_spans[l.id.0 as usize] == span)
+            .expect("`a + b`'s box is still in the table, undefined");
+        let (scalar, kind) = func
+            .debug_scalar_source(boxed.id)
+            .expect("and it names the scalar that replaced it");
+        assert_eq!(kind, ScalarKind::Int, "an `Int` expression's payload");
+        assert_eq!(
+            func.locals[scalar.0 as usize].kind,
+            LocalKind::Scalar(ScalarKind::Int),
+            "and the accessor's kind is the local table's, not a second copy"
+        );
+    }
+
+    /// A box the pass did **not** elide keeps its own definition, so it must
+    /// *not* be given a scalar source — its slot is written by the producer
+    /// that is still there, and marking it scalar would make the collector's
+    /// post-sweep scan skip a live reference.
+    ///
+    /// The control for the test above, and the one that matters for soundness
+    /// rather than for fidelity.
+    #[test]
+    fn a_box_the_pass_kept_is_never_given_a_scalar_source() {
+        let src = "fn f(a: Int, b: Int) -> Int { a + b + 1 }";
+        let lowered = lower_src_to_mir(src);
+        let func = lowered.function("f");
+        let defined: BTreeSet<LocalId> = func
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .flat_map(defs)
+            .collect();
+        for local in &func.locals {
+            if local.kind == LocalKind::Gc && defined.contains(&local.id) {
+                assert_eq!(
+                    func.debug_scalar_source(local.id),
+                    None,
+                    "{local:?} still has a producer writing its slot"
+                );
+            }
+        }
+    }
+
+    /// The `ConstGc` case (decision 4) hands part 2 the `Inst::ConstInt` that
+    /// replaced the reload, which is a `Scalar` local like any other. Without
+    /// this the immediate-forwarded literals would be the one shape that stayed
+    /// `<uninit>` for no reason a reader could state.
+    #[test]
+    fn an_elided_small_int_literal_is_fed_by_the_const_int_that_replaced_it() {
+        // `a + 7`: the `7` is in ADR-100's intern range, so its box is a
+        // `ConstGc` and the reload becomes an immediate rather than a forward.
+        let src = "fn f(a: Int) -> Int { a + 7 }";
+        let lowered = lower_src_to_mir(src);
+        let func = lowered.function("f");
+        let start = u32::try_from(src.rfind('7').expect("in the source")).unwrap();
+        let boxed = func
+            .locals
+            .iter()
+            .find(|l| {
+                l.kind == LocalKind::Gc
+                    && func.debug_spans[l.id.0 as usize] == Some((start, start + 1))
+            })
+            .expect("the literal's box");
+        assert!(
+            func.debug_scalar_source(boxed.id).is_some(),
+            "the `7` temp is renderable again: {:?}",
+            func.debug_scalar_sources
+        );
+    }
+
+    /// Arm A of ADR-120 part 2, asserted in a test rather than left to two
+    /// binaries that might turn out to be identical.
+    ///
+    /// The forwarding still happens in both arms — this toggle changes what the
+    /// *debugger* is told, not what the program computes — so the check is that
+    /// the same function that has a scalar source in arm B has none in arm A.
+    #[test]
+    fn the_part_two_toggle_decides_whether_a_box_learns_its_scalar() {
+        let lowered = lower_src_to_mir("fn f(a: Int, b: Int) -> Int { a + b + 1 }");
+        let func = lowered.function("f");
+        let linked = func
+            .locals
+            .iter()
+            .filter(|l| func.debug_scalar_source(l.id).is_some())
+            .count();
+        if cfg!(feature = "adr120b-arm-a") {
+            assert_eq!(linked, 0, "arm A links nothing");
+        } else {
+            assert!(linked > 0, "arm B links the elided box: {linked}");
+        }
     }
 }
