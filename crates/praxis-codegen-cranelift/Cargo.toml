@@ -29,6 +29,22 @@ description = "Cranelift JIT module and ABI lowering for Praxis."
 # absent.
 [features]
 adr116-arm-a = []
+# ADR-117 arm A, and the whole of that toggle: `lower::steps` never fuses, so a
+# checked `IntBinOp` and the `Inst::CheckFault` that observes it lower as two
+# steps and the backend emits ADR-102's converging diamond followed by the
+# load-load-branch. That is byte-for-byte the code this tree emitted before
+# ADR-117; nothing else in the crate reads the flag.
+#
+#     cargo build --release -p praxis-cli \
+#         --features praxis-codegen-cranelift/unfolded-check-fault       # arm A
+#
+# **It makes the compiler emit worse code on purpose**, and the tests that pin
+# ADR-117 assert the folded shape, so `cargo test --features
+# unfolded-check-fault` fails by design. Enable it only when staging that arm.
+#
+# The two toggles are independent and neither is on by default, so `just ci`
+# builds the crate exactly once, with both arms' code paths compiled out.
+unfolded-check-fault = []
 
 [dependencies]
 praxis-mir.workspace = true
@@ -43,22 +59,6 @@ cranelift-jit.workspace = true
 cranelift-module.workspace = true
 thiserror = "2.0.19"
 anyhow.workspace = true
-
-[features]
-# ADR-117 arm A, and the whole of the toggle: `lower::steps` never fuses, so a
-# checked `IntBinOp` and the `Inst::CheckFault` that observes it lower as two
-# steps and the backend emits ADR-102's converging diamond followed by the
-# load-load-branch. That is byte-for-byte the code this tree emitted before
-# ADR-117; nothing else in the crate reads the flag.
-#
-#     cargo build --release -p praxis-cli                                # arm B
-#     cargo build --release -p praxis-cli \
-#         --features praxis-codegen-cranelift/unfolded-check-fault       # arm A
-#
-# **It makes the compiler emit worse code on purpose**, and the tests that pin
-# ADR-117 assert the folded shape, so `cargo test --features
-# unfolded-check-fault` fails by design. Enable it only when staging that arm.
-unfolded-check-fault = []
 
 [dev-dependencies]
 praxis-ast.workspace = true
