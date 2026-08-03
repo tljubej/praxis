@@ -560,6 +560,28 @@ pub static BUILTINS: [&TypeDescriptor; BuiltinTypeId::COUNT] = [
     &crate::range::RANGE,
 ];
 
+/// [`BUILTINS`] as raw addresses, for
+/// [`RuntimeContext::descriptors`](crate::RuntimeContext::descriptors) to hold
+/// by value (ADR-116).
+///
+/// **Derived rather than written out, which is the point.** Generated code
+/// proves a value's type by loading slot `id` of that array and comparing it
+/// against the header's descriptor word (ADR-102), so a slot holding a
+/// neighbour's descriptor would be a proof of the wrong type — REP-37 with the
+/// table as its source. Mapping `BUILTINS` here leaves the registry as the one
+/// place the index-to-descriptor correspondence is stated, and
+/// `builtins_are_indexed_by_their_id` as the one gate on it.
+///
+/// A `fn` and not a `const fn`: const evaluation may not read a `static`, and
+/// `BUILTINS` is one deliberately — the addresses *are* the identities
+/// (`builtin_descriptors_have_a_stable_address`). It is called once per
+/// [`Runtime::context`](crate::Runtime::context), which is once per program
+/// run, not per call into generated code.
+#[must_use]
+pub fn builtin_descriptor_addresses() -> [*const TypeDescriptor; BuiltinTypeId::COUNT] {
+    BUILTINS.map(|d| d as *const TypeDescriptor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -22,8 +22,8 @@ use praxis_mir::{
     LocalId, LocalKind, MirType, Overflow, RootSlots, ScalarKind, Terminator,
 };
 use praxis_runtime::{
-    DebugFrameEntry, DebugLocalMeta, FunctionDebugMeta, RuntimeContext, ShadowStackHeader,
-    SlotCount, MAX_SHADOW_SLOTS,
+    descriptor::BuiltinTypeId, DebugFrameEntry, DebugLocalMeta, FunctionDebugMeta, RuntimeContext,
+    ShadowStackHeader, SlotCount, MAX_SHADOW_SLOTS,
 };
 use praxis_stdlib::abi::{AbiKind, AbiRet, RuntimeSymbol};
 
@@ -142,6 +142,40 @@ const ENUM_TAG_OFFSET: i32 = core::mem::offset_of!(praxis_runtime::enums::EnumPa
 /// point of that decision is that the layout has one authority. Writing `0`
 /// here would be the re-derived literal it exists to prevent.
 const GC_DESCRIPTOR_OFFSET: i32 = praxis_runtime::GcHeader::DESCRIPTOR_OFFSET as i32;
+
+/// The displacement of `id`'s slot in `RuntimeContext.descriptors`, as a
+/// Cranelift memory offset (ADR-116).
+///
+/// **This is the whole of what the backend knows about a descriptor now.** It
+/// names a [`BuiltinTypeId`] — an enum discriminant, the same one
+/// `BUILTINS[i]`'s registry is indexed by — and the address it proves against
+/// is whatever the runtime wrote into that slot. Where the compiler used to
+/// carry `&scalars::INT` across the ABI as an immediate, there is no descriptor
+/// address in emitted code at all, so a compiler and a runtime cannot disagree
+/// about one.
+///
+/// `RuntimeContext::descriptor_offset` is the authority for the arithmetic,
+/// including the stride: computing `offset_of!(…, descriptors) + i * 8` here
+/// would be a second statement of a layout that has an owner (ADR-039
+/// decision 1's discipline, applied to the context).
+// Arm A of ADR-116's measurement toggle emits the immediate instead, so it has
+// no caller. Kept compiled rather than `#[cfg]`ed out so the toggle stays the
+// two lines in `emit_scalar_load` that it claims to be.
+#[cfg_attr(feature = "adr116-arm-a", allow(dead_code))]
+fn descriptor_slot_offset(id: BuiltinTypeId) -> i32 {
+    RuntimeContext::descriptor_offset(id) as i32
+}
+
+/// Every slot is within a Cranelift memory offset's reach, so the cast above is
+/// total. The table's last slot bounds all 22 — `descriptor_offset` is affine
+/// in the discriminant — and the context is a few hundred bytes, so this asserts
+/// a property that is nowhere near its limit rather than one that might drift
+/// into it. It exists because the alternative to a `const` assert is an
+/// `expect` in the lowering for a state that cannot arise.
+const _: () = assert!(
+    RuntimeContext::descriptor_offset(BuiltinTypeId::Range) <= i32::MAX as usize,
+    "a descriptor slot's displacement must fit a Cranelift memory offset"
+);
 
 /// The byte offset of `pending_fault` within a `RuntimeContext`, and of `kind`
 /// within the `Fault` it points at. `Inst::CheckFault` is a load through each
@@ -2301,7 +2335,7 @@ enum ScalarLoad {
     BoolByte,
 }
 
-/// The descriptor, payload alignment and load width for a scalar kind whose
+/// The built-in id, payload alignment and load width for a scalar kind whose
 /// payload generated code may read inline — or `None` for one it may not.
 ///
 /// A new [`praxis_mir::ScalarKind`] variant fails to compile here, which is the
@@ -2310,29 +2344,38 @@ enum ScalarLoad {
 /// disagree about *which* type is being read, because the cold path below calls
 /// `load_symbol()` — this only adds which descriptor proves it and how wide the
 /// read is.
+///
+/// **The first column is an id and not an address, as of ADR-116**, and that is
+/// the change: the proof compares against
+/// `[ctx + RuntimeContext::descriptor_offset(id)]`, so the slot the load names
+/// and the descriptor it proves are one value and cannot be given separately.
+/// Before, this answered `&scalars::INT` and the backend baked the address in
+/// as an `iconst` — three `movz`/`movk` on aarch64, where the load is one
+/// instruction from a line the prologue has already touched.
 fn inline_scalar_load_of(
     scalar: praxis_mir::ScalarKind,
-) -> Option<(&'static praxis_runtime::TypeDescriptor, usize, ScalarLoad)> {
+) -> Option<(praxis_runtime::descriptor::BuiltinTypeId, usize, ScalarLoad)> {
     use praxis_mir::ScalarKind;
+    use praxis_runtime::descriptor::BuiltinTypeId;
     use praxis_runtime::scalars;
     Some(match scalar {
         ScalarKind::Int => (
-            &scalars::INT,
+            BuiltinTypeId::Int,
             core::mem::align_of::<scalars::IntPayload>(),
             ScalarLoad::Word,
         ),
         ScalarKind::Bool => (
-            &scalars::BOOL,
+            BuiltinTypeId::Bool,
             core::mem::align_of::<scalars::BoolPayload>(),
             ScalarLoad::BoolByte,
         ),
         ScalarKind::Char => (
-            &scalars::CHAR,
+            BuiltinTypeId::Char,
             core::mem::align_of::<scalars::CharPayload>(),
             ScalarLoad::HalfWord,
         ),
         ScalarKind::Float => (
-            &scalars::FLOAT,
+            BuiltinTypeId::Float,
             core::mem::align_of::<scalars::FloatPayload>(),
             ScalarLoad::Word,
         ),
@@ -2401,7 +2444,7 @@ fn emit_scalar_load<M: Module>(
     imports: &mut HashMap<RuntimeSymbol, FuncRef>,
 ) -> Result<()> {
     let sym = scalar.load_symbol();
-    let Some((descriptor, payload_align, load)) = inline_scalar_load_of(scalar) else {
+    let Some((builtin, payload_align, load)) = inline_scalar_load_of(scalar) else {
         let result = call_symbol(builder, ctx_val, &[src_val], sym, module, imports)?;
         builder.def_var(dst, result);
         return Ok(());
@@ -2414,7 +2457,24 @@ fn emit_scalar_load<M: Module>(
     // clobbering this memory — `set_mark_color` and the sweep write headers.
     let flags = MemFlags::trusted();
     let have = builder.ins().load(GC, flags, src_val, GC_DESCRIPTOR_OFFSET);
-    let want = builder.ins().iconst(GC, descriptor as *const _ as i64);
+    // ADR-116: the descriptor's address is the *runtime's*, read out of the
+    // context at a folded displacement. It used to be an `iconst` of
+    // `&scalars::INT`, which on aarch64 is `movz`+`movk`+`movk` because a
+    // `static` in this binary lives above 2³² — three instructions per proof
+    // site, nine sites per iteration of handover 25 §3's loop, re-materialized
+    // rather than kept live because that is what the register allocator does
+    // with constants (handover 25 §3's `opt_level` measurement).
+    //
+    // These two lines are the package's whole toggle point; see the
+    // `adr116-arm-a` feature's comment in this crate's `Cargo.toml`.
+    #[cfg(not(feature = "adr116-arm-a"))]
+    let want = builder
+        .ins()
+        .load(GC, flags, ctx_val, descriptor_slot_offset(builtin));
+    #[cfg(feature = "adr116-arm-a")]
+    let want = builder
+        .ins()
+        .iconst(GC, builtin.descriptor() as *const _ as i64);
     let ok = builder.ins().icmp(IntCC::Equal, have, want);
 
     let fast = builder.create_block();
@@ -3361,11 +3421,27 @@ mod tests {
     /// deleted `GcHeader::size`; this helper derives the number from
     /// `payload_offset_for` rather than spelling it, so only this sentence
     /// needed the edit, which is ADR-039 Decision 1 doing its job.)
+    ///
+    /// **The displacement is matched as a whole address token, not as a
+    /// substring, and that is not fastidiousness.** Cranelift prints an address
+    /// as `vN+DISP`, and `"v0+168".contains("+16")` is true. ADR-116 put the
+    /// built-in descriptor table in the `RuntimeContext` at an offset that puts
+    /// `Char`'s slot at exactly +168, so a substring match found the *context*
+    /// load as well as the payload load and this helper's own
+    /// "more than one instruction reads at +16" assertion fired — in a test
+    /// about payload widths, for one of three scalars, with `Int` (+152) and
+    /// `Float` (+176) passing beside it. Splitting on whitespace and asking
+    /// which token *ends* with `+16` is exact: the `+` is the token's only one,
+    /// so nothing longer can end with it.
     fn payload_load(ir: &str, align: usize) -> String {
         let displacement = format!("+{}", praxis_runtime::GcHeader::payload_offset_for(align));
+        let reads_there = |l: &str| {
+            l.split_whitespace()
+                .any(|token| token.trim_end_matches(',').ends_with(&displacement))
+        };
         let mut hits = ir
             .lines()
-            .filter(|l| l.contains(&displacement) && !l.trim_start().starts_with(';'));
+            .filter(|l| reads_there(l) && !l.trim_start().starts_with(';'));
         let line = hits
             .next()
             .unwrap_or_else(|| panic!("no instruction reads at {displacement}:\n{ir}"))
@@ -3476,6 +3552,83 @@ mod tests {
         );
     }
 
+    /// **ADR-116, as an assertion about the instruction stream.** The proof's
+    /// second operand is a load from the context, and no descriptor address
+    /// appears in the emitted code at all.
+    ///
+    /// Nothing that runs a program can see this. An `iconst` of `&scalars::INT`
+    /// and a load of the slot holding `&scalars::INT` compare the same word and
+    /// admit the same values; what separates them is three `movz`/`movk` per
+    /// site on aarch64 versus one `ldr`, which is a property of the emitted code
+    /// and of nothing else. So this is the gate, in the shape ADR-102's own
+    /// tests take for the same reason.
+    ///
+    /// The negative half is the one that survives a rewrite: an edit that
+    /// re-introduced the immediate "just for `Int`" would still load the slot
+    /// for the other three and still pass a test that only looked for the load.
+    ///
+    /// Arm-B-only, and that is how the measurement toggle is shown to bite:
+    /// under `adr116-arm-a` the emitted code holds exactly the address this
+    /// asserts is absent, so a feature that did nothing would leave this test
+    /// green in both arms and the A/B would be comparing a binary with itself.
+    #[cfg(not(feature = "adr116-arm-a"))]
+    #[test]
+    fn a_scalar_proof_loads_its_descriptor_from_the_context() {
+        use praxis_mir::ScalarKind;
+        use praxis_runtime::descriptor::BuiltinTypeId;
+
+        for kind in [
+            ScalarKind::Int,
+            ScalarKind::Bool,
+            ScalarKind::Char,
+            ScalarKind::Float,
+        ] {
+            let (all, entry) = emitted_ir(move |b, ctx, dst, m| {
+                let src = b.ins().iconst(GC, 0x1000);
+                emit_scalar_load(b, ctx, src, dst, kind, m, &mut HashMap::new())
+            });
+            let (builtin, _, _) = inline_scalar_load_of(kind).expect("a wired scalar");
+            let slot = format!("v0+{}", RuntimeContext::descriptor_offset(builtin));
+            assert!(
+                entry.split_whitespace().any(|t| t == slot),
+                "{kind:?}: the descriptor must come from `{slot}`, the context \
+                 slot its `BuiltinTypeId` indexes:\n{all}"
+            );
+
+            // And no built-in's address is materialized anywhere in the
+            // function — not the one being proved and not a neighbour's. This
+            // is the half that catches a partial revert, and it is checked
+            // against the addresses *this process* has, so it says nothing
+            // about where ASLR put them.
+            for descriptor in praxis_runtime::descriptor::BUILTINS {
+                let immediate = format!("iconst.i64 {}", descriptor as *const _ as i64);
+                assert!(
+                    !all.contains(&immediate),
+                    "{kind:?}: `{}`'s address is materialized as `{immediate}`; \
+                     since ADR-116 the backend holds no descriptor address:\n{all}",
+                    descriptor.name
+                );
+            }
+        }
+
+        // And the four slots are four different slots, so no two kinds can be
+        // proved by the same load. `Bool`, `Int`, `Char`, `Float` are ids 1, 2,
+        // 4 and 5 (`Byte` sits between and has no inline form), which is the
+        // registry's order and not a list this file keeps.
+        let mut offsets: Vec<usize> = [
+            BuiltinTypeId::Int,
+            BuiltinTypeId::Bool,
+            BuiltinTypeId::Char,
+            BuiltinTypeId::Float,
+        ]
+        .into_iter()
+        .map(RuntimeContext::descriptor_offset)
+        .collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        assert_eq!(offsets.len(), 4, "each wired scalar has its own slot");
+    }
+
     /// `ScalarKind::Byte` has no inline form, and that is not an oversight.
     #[test]
     fn a_reserved_byte_scalar_keeps_its_call() {
@@ -3512,6 +3665,12 @@ mod tests {
     /// accepts (an abort on a correct program). Asserting the identity is what
     /// makes "the refusal is byte-for-byte what it was" a checked claim rather
     /// than a comment.
+    ///
+    /// Since ADR-116 the inline side names a [`BuiltinTypeId`] rather than an
+    /// address, so this reads the descriptor back out of the registry that id
+    /// indexes — which is the same registry `Runtime::context` fills the
+    /// context's table from, so proving the identity here proves it of the
+    /// address generated code will load.
     #[test]
     fn the_inline_check_proves_exactly_what_the_wrapper_would() {
         use praxis_mir::ScalarKind;
@@ -3522,8 +3681,9 @@ mod tests {
             (ScalarKind::Char, scalars::CHAR_PAYLOAD.descriptor()),
             (ScalarKind::Float, scalars::FLOAT_PAYLOAD.descriptor()),
         ] {
-            let (inline_descriptor, align, _) =
+            let (builtin, align, _) =
                 inline_scalar_load_of(kind).expect("a wired scalar has an inline form");
+            let inline_descriptor = builtin.descriptor();
             assert!(
                 core::ptr::eq(inline_descriptor, handle_descriptor),
                 "{kind:?}: the inline check proves `{}` but the wrapper it falls \

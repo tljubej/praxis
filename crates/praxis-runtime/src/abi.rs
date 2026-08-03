@@ -242,7 +242,41 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// handed it to this runtime would suffer is exactly what it suffered before —
 /// [`RuntimeContext::placeholder`](crate::RuntimeContext::placeholder) is the
 /// only public constructor, and it writes a null here.
-pub const RUNTIME_ABI_VERSION: u32 = 19;
+///
+/// v20 gathers the round's backend changes for v19's reason: they ship in one
+/// build, and a version is a statement about a build. **The numeral is bumped
+/// once, by ADR-116** — the round had four packages with a claim on it, and
+/// four independent bumps in four worktrees is one merge that silently keeps
+/// the last. Every other package appends prose under its own line below and
+/// touches no digit. A line that still carries a status word was never written.
+///
+/// v20 (ADR-116): `RuntimeContext` gains `descriptors`, every built-in
+/// descriptor's address indexed by
+/// [`BuiltinTypeId`](crate::descriptor::BuiltinTypeId), and ADR-102's inline
+/// type proof loads its slot from there instead of comparing against an
+/// `iconst` of the descriptor's address. Appended after `small_chars`, so every
+/// offset above is unchanged — but the struct grows by
+/// `22 × size_of::<*const TypeDescriptor>()`, which is the v9/v13 struct-size
+/// rule, and generated code reads it, which is v15's rule. Both fire. A program
+/// compiled against v20 and run against a v19 runtime would read 176 bytes past
+/// the end of a context nobody sized for a table and compare the header's
+/// descriptor against whatever was there; the proof would fail, take the cold
+/// arm, and `praxis_int_load` would abort on a value of the right type. The
+/// direction that matters more is that **the compiler no longer carries a
+/// descriptor address at all** — it names a slot index — so what a mismatched
+/// pair can now disagree about is which slot `Int` is in, and that is an enum
+/// discriminant `builtins_are_indexed_by_their_id` pins.
+///
+/// v20 (ADR-118, W4b): *owed* — the backend half of the collection-primitive
+/// inlining. Its line is here so that appending it is a one-line edit rather
+/// than two branches writing adjacent paragraphs at the same offset.
+///
+/// v20 (ADR-119, W10): *owed* — the inline bitmap claim, if it clears its
+/// wave-3 gate. Same reason as the line above.
+///
+/// v20 (ADR-120, W8-S0b): *owed* — the scalar debug slot, which adds a field to
+/// the `#[repr(C)]` `DebugLocalMeta` generated code writes. Same reason again.
+pub const RUNTIME_ABI_VERSION: u32 = 20;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -264,7 +298,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 19;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 20;
 
 // ---------------------------------------------------------------------------
 // The runtime symbol table (F4).
@@ -6160,20 +6194,20 @@ mod tests {
 
     /// The version number this build declares.
     ///
-    /// Named for the version rather than for a change, because v19 gathers
-    /// several of them — ADR-105's `stack_left`, ADR-107's interned-`Char`
-    /// table, ADR-109's 16-byte `GcHeader`, ADR-111's `praxis_alloc_text`
-    /// contract — and naming one would make the other three look like they
-    /// arrived unversioned. The changelog on [`RUNTIME_ABI_VERSION`] is where
-    /// the list lives; this only asserts that the constant and the changelog
-    /// were updated together.
+    /// Named for the version rather than for a change, because a version gathers
+    /// several of them — v19 held ADR-105's `stack_left`, ADR-107's
+    /// interned-`Char` table, ADR-109's 16-byte `GcHeader` and ADR-111's
+    /// `praxis_alloc_text` contract — and naming one would make the others look
+    /// like they arrived unversioned. The changelog on [`RUNTIME_ABI_VERSION`]
+    /// is where the list lives; this only asserts that the constant and the
+    /// changelog were updated together.
     ///
-    /// `gc::tests::the_header_shrink_moved_the_folded_payload_offset_at_abi_v19`
+    /// `gc::tests::the_folded_payload_offset_moved_at_v19_and_is_pinned_here`
     /// asserts the other direction, pinning the payload offset *to* this number,
-    /// so the layout change and the version that declares it cannot drift apart.
+    /// so a layout change and the version that declares it cannot drift apart.
     #[test]
-    fn version_is_nineteen_for_the_batch_this_build_ships() {
-        assert_eq!(RUNTIME_ABI_VERSION, 19);
+    fn version_is_twenty_for_the_batch_this_build_ships() {
+        assert_eq!(RUNTIME_ABI_VERSION, 20);
     }
 
     #[test]

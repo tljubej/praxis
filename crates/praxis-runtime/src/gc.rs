@@ -456,8 +456,16 @@ mod tests {
     /// cannot catch it because they are one binary. So the guard is this: the
     /// immediate is pinned here, and it is pinned beside the version number that
     /// declares the disagreement, so the two can only be updated together.
+    ///
+    /// **The pin rides the current version, not v19**, and ADR-116's bump to
+    /// v20 is what forced the distinction. The offset moved *at* v19 and has not
+    /// moved since; what this asserts is that whoever bumps the version comes
+    /// through here and re-confirms the immediate, which is the tripwire the
+    /// paragraph above asks for. Pinning it to 19 forever would have made the
+    /// next bump a mechanical edit of a failing number, which is the same thing
+    /// as deleting the test.
     #[test]
-    fn the_header_shrink_moved_the_folded_payload_offset_at_abi_v19() {
+    fn the_folded_payload_offset_moved_at_v19_and_is_pinned_here() {
         assert_eq!(std::mem::size_of::<GcHeader>(), 16);
         assert_eq!(
             GcHeader::payload_offset_for(std::mem::align_of::<GcHeader>()),
@@ -470,8 +478,9 @@ mod tests {
         );
         assert_eq!(
             crate::abi::RUNTIME_ABI_VERSION,
-            19,
-            "the offset above moved at v19; a later bump must not orphan this test"
+            20,
+            "the offset above last moved at v19 and is 16 at this version; a \
+             bump must re-confirm it here rather than orphan this test"
         );
     }
 

@@ -6,6 +6,30 @@ license.workspace = true
 repository.workspace = true
 description = "Cranelift JIT module and ABI lowering for Praxis."
 
+# The ADR-116 measurement toggle, and the only cargo feature this crate has.
+#
+# Default (feature off) is arm B: ADR-102's inline type proof loads the
+# descriptor it compares against out of `RuntimeContext.descriptors`. With the
+# feature on, that one `let want = …` in `emit_scalar_load` goes back to an
+# `iconst` of the descriptor's address — `movz`+`movk`+`movk` on aarch64 — and
+# *nothing else in the tree differs*: the context still carries the table, the
+# ABI version is still 20, and every other file is byte-for-byte identical.
+# That is what makes the A/B a measurement of the proof's shape and of nothing
+# else (handover 26 §6: the baseline arm is this tree with this package's single
+# toggle point reverted, never the previous commit — ADR-113 records that
+# mistake reporting 14.4% where the truth was 0.8%).
+#
+#     cargo build --release -p praxis-cli                                # arm B
+#     cargo build --release -p praxis-cli \
+#         --features praxis-codegen-cranelift/adr116-arm-a               # arm A
+#
+# The toggle is verified to bite by
+# `a_scalar_proof_loads_its_descriptor_from_the_context`, which is arm-B-only
+# because under the feature the emitted code holds the address it asserts is
+# absent.
+[features]
+adr116-arm-a = []
+
 [dependencies]
 praxis-mir.workspace = true
 praxis-repr.workspace = true

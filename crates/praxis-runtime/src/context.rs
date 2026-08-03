@@ -22,7 +22,10 @@ use crate::parse_detail::ParseDetail;
 #[cfg(test)]
 use crate::roots::RootSet;
 use crate::shadow_stack::{ShadowStack, ShadowStackHeader, SHADOW_STACK_SLOTS};
-use crate::{collections::VecPayload, descriptor::TypeDescriptor};
+use crate::{
+    collections::VecPayload,
+    descriptor::{builtin_descriptor_addresses, BuiltinTypeId, TypeDescriptor},
+};
 
 /// What *any* call spends, however narrow: the floor of [`frame_cost`], in
 /// bytes (ADR-105).
@@ -719,9 +722,72 @@ pub struct RuntimeContext {
     /// reason: every generated-code-read offset above stays where it was
     /// (§11.6 ABI stability).
     pub small_chars: *const GcRef,
+    /// Every built-in descriptor's address, indexed by [`BuiltinTypeId`]
+    /// (ADR-116). ADR-102's inline type proof loads one slot of this and
+    /// compares the object header's descriptor word against it.
+    ///
+    /// **By value, and that is the decision.** A pointer to
+    /// [`crate::descriptor::BUILTINS`] would make the proof two *dependent*
+    /// loads; the array makes it one load at a displacement the backend folds
+    /// from [`RuntimeContext::descriptor_offset`]. What it replaces was no load
+    /// at all — the backend baked `&scalars::INT` in as an `iconst`, which on
+    /// aarch64 is `movz`+`movk`+`movk` because a `static` in this binary lives
+    /// above 2³² — so a proof is two machine instructions shorter and the
+    /// compiler no longer names a descriptor *address* anywhere
+    /// (docs/handovers/25-two-mallocs-per-runtime-call.md §3 F-4).
+    ///
+    /// Filled by [`crate::descriptor::builtin_descriptor_addresses`], which
+    /// derives it from `BUILTINS` — so "slot `i` holds the descriptor whose id
+    /// is `i`" has no second place it could be written wrong, and
+    /// `builtins_are_indexed_by_their_id` stays the one gate on it.
+    ///
+    /// Appended after `small_chars`, so every offset above is unchanged
+    /// (§11.6 ABI stability). Generated code *does* read this one.
+    pub descriptors: [*const TypeDescriptor; BuiltinTypeId::COUNT],
 }
 
+/// The table is appended, so every field generated code read before it is
+/// where it was. Pinned rather than described: `small_chars` is the last field
+/// of ABI v19, and the proof site's displacement is only a compile-time
+/// immediate because the array starts where v19's struct ended.
+const _: () = assert!(
+    RuntimeContext::descriptor_offset(BuiltinTypeId::Unit)
+        == core::mem::offset_of!(RuntimeContext, small_chars)
+            + core::mem::size_of::<*const GcRef>(),
+    "the descriptor table is appended after `small_chars`, not spliced in"
+);
+
+/// A slot is one pointer wide and the table is exactly the built-ins, so the
+/// last slot is in bounds and there is no room for a twenty-third.
+const _: () = assert!(
+    RuntimeContext::descriptor_offset(BuiltinTypeId::Range)
+        + core::mem::size_of::<*const TypeDescriptor>()
+        == core::mem::size_of::<RuntimeContext>(),
+    "`Range` is the last built-in and its slot is the last word of the context"
+);
+
 impl RuntimeContext {
+    /// The byte displacement of `id`'s slot in [`Self::descriptors`], from the
+    /// base of a `RuntimeContext`.
+    ///
+    /// **The one authority for the address ADR-102's proof compares against**,
+    /// and the reason the backend no longer holds a descriptor address at all:
+    /// it folds this displacement, loads whatever the runtime put there, and
+    /// compares. *Which* descriptor that is is the runtime's answer rather than
+    /// a pointer the compiler carried across the ABI — so the two cannot
+    /// disagree about the address `Int`'s descriptor has, only about which slot
+    /// it is in, and that is the enum discriminant.
+    ///
+    /// Minted here rather than reached for with `offset_of!` from the backend
+    /// for [`Fault::KIND_OFFSET`]'s reason one step further on: the element
+    /// stride is part of the answer, and a backend that multiplied by its own
+    /// `size_of::<*const _>()` would be a second statement of this layout.
+    #[must_use]
+    pub const fn descriptor_offset(id: BuiltinTypeId) -> usize {
+        core::mem::offset_of!(RuntimeContext, descriptors)
+            + (id as usize) * core::mem::size_of::<*const TypeDescriptor>()
+    }
+
     /// Construct a context with all pointers null and the input source set to
     /// the canonical placeholder. Real runtime setup (rooting the heap,
     /// installing a fault sink) is done via [`Runtime::context`] in M3+.
@@ -772,6 +838,14 @@ impl RuntimeContext {
             // `Rt::alloc_char`, which is the standing one `Rt::alloc_int`
             // already has — a parse is never run against a placeholder.
             small_chars: std::ptr::null(),
+            // Real addresses, where every neighbour above is null — and the
+            // difference is that there is nothing here for a runtime to wire.
+            // These are `static`s of this binary; they are valid before `main`
+            // and depend on no `Runtime`. A null table would be a trap for a
+            // state that cannot exist, and it would make the *only* difference
+            // between a placeholder and a wired context at ADR-102's proof site
+            // a null dereference rather than an honest comparison (ADR-116).
+            descriptors: builtin_descriptor_addresses(),
         }
     }
 
@@ -1008,6 +1082,11 @@ impl Runtime {
             small_ints: self.immortals.small_ints_ptr(),
             debug_values: self.debug_values.header_ptr(),
             small_chars: self.immortals.small_chars_ptr(),
+            // Not `self`'s: the built-in descriptors are `static`s shared by
+            // every runtime in the process, so this is the same table in every
+            // context and copying it costs one 176-byte block move per program
+            // run (ADR-116).
+            descriptors: builtin_descriptor_addresses(),
         }
     }
 
@@ -1586,6 +1665,78 @@ mod tests {
         // SAFETY: non-null as just asserted, and it points at `rt`'s own slot,
         // which outlives this borrow.
         assert!(!unsafe { (*ctx.pending_fault).is_pending() });
+    }
+
+    /// **ADR-116's whole correctness argument, as one assertion.** Generated
+    /// code proves a value's type by loading
+    /// `[ctx + RuntimeContext::descriptor_offset(id)]` and comparing it against
+    /// the header's descriptor word (ADR-102). If a slot held a neighbour's
+    /// descriptor, that proof would accept an object of the wrong type and the
+    /// payload read behind it would be REP-37 at whatever width the backend
+    /// folded — so the correspondence between the slot index and the descriptor
+    /// is the one thing this table has to get right.
+    ///
+    /// It is checked here at the offset generated code reads, in bytes, rather
+    /// than by indexing the Rust array: indexing would re-derive the stride
+    /// from `size_of` and prove that `descriptor_offset` and the compiler agree
+    /// only if they were both wrong in the same way.
+    #[test]
+    fn every_descriptor_slot_holds_the_builtin_whose_id_indexes_it() {
+        let mut rt = Runtime::new();
+        let ctx = rt.context();
+        let base = &ctx as *const RuntimeContext as *const u8;
+        for index in 0..BuiltinTypeId::COUNT {
+            let id = BuiltinTypeId::from_u32(index as u32).expect("index is in range");
+            // SAFETY: the two `const _` blocks beside the field bound the table
+            // inside the context, and `ctx` is live for this borrow.
+            let read = unsafe {
+                base.add(RuntimeContext::descriptor_offset(id))
+                    .cast::<*const TypeDescriptor>()
+                    .read()
+            };
+            assert!(
+                std::ptr::eq(read, id.descriptor()),
+                "the slot generated code reads for {id:?} holds `{}`",
+                // SAFETY: every slot holds a `&'static TypeDescriptor`'s address.
+                unsafe { (*read).name }
+            );
+        }
+    }
+
+    /// The table is the same in every context a process mints, which is what
+    /// lets the backend fold a displacement and nothing else.
+    ///
+    /// Two runtimes are two heaps, two fault slots and two shadow stacks; they
+    /// are not two sets of built-in descriptors, because those are `static`s of
+    /// this binary. A future runtime that minted per-`Runtime` descriptors
+    /// would make code compiled for one unusable against another, and this is
+    /// where that would be noticed.
+    #[test]
+    fn two_runtimes_agree_on_every_descriptor_address() {
+        let mut first = Runtime::new();
+        let mut second = Runtime::new();
+        assert_eq!(first.context().descriptors, second.context().descriptors);
+    }
+
+    /// A placeholder carries the real table, alone among its fields.
+    ///
+    /// Every pointer `placeholder` nulls is one a `Runtime` has to wire. These
+    /// are not: they are addresses of `static`s, valid before `main`. Nulling
+    /// them would be a trap for a state that cannot arise, and it would make a
+    /// placeholder fail ADR-102's proof by segfaulting on the load rather than
+    /// by comparing unequal.
+    #[test]
+    fn a_placeholder_context_still_knows_every_builtin_descriptor() {
+        let mut header = GcHeader::detached();
+        let nn = NonNull::from(&mut header);
+        // SAFETY: local live header for the duration of this test.
+        let gcref = unsafe { GcRef::from_non_null(nn) };
+        let ctx = unsafe { RuntimeContext::placeholder(gcref) };
+        assert!(std::ptr::eq(
+            ctx.descriptors[BuiltinTypeId::Int as usize],
+            &crate::scalars::INT
+        ));
+        assert!(ctx.descriptors.iter().all(|d| !d.is_null()));
     }
 
     #[test]
