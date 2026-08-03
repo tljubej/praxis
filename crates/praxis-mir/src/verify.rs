@@ -22,7 +22,23 @@
 //! local; a branch condition is a scalar; a `Bounded` arithmetic site is not a
 //! division; **a faulting instruction is immediately followed by a
 //! [`Inst::CheckFault`], and a `CheckFault` follows only a faulting
-//! instruction**.
+//! instruction**; and **an [`Inst::ExtractScalar`] does not name a payload width
+//! that contradicts the descriptor MIR itself wrote at every definition of its
+//! source** ([`check_proved_descriptor`], ADR-122).
+//!
+//! # The descriptor rule refuses a proof, not a doubt (ADR-122)
+//!
+//! [`crate::provable`] answers, for each `Gc` local, which descriptor class
+//! *every* definition of that slot produces — and `None` where there is no such
+//! class, which includes every value the runtime minted and every local with no
+//! defining instruction at all. Parameters are the second kind: "every
+//! definition produces `Int`" is vacuously true over an empty set, so a rule
+//! built on the universal quantifier would bless `primes`' `is_prime(n)` and a
+//! rule built on the existential would refuse it. Neither is what this checks.
+//! It fires only where MIR wrote one descriptor down and then read a different
+//! one out — REP-56's `ConstGc { Unit }` read as an `Int`, REP-49's
+//! `ConstGc { Bool }` read as an `Int` — which is why it needed no lowering
+//! change to deploy and has never fired on a correct program.
 //!
 //! # The fault rule, and why it is strict in both directions (MIR-10, ADR-088)
 //!
@@ -99,8 +115,10 @@
 use std::collections::BTreeSet;
 
 use crate::ir::{
-    AllocKind, BlockId, Function, Inst, IntBinOp, LocalId, LocalKind, Overflow, Terminator,
+    AllocKind, BlockId, Function, Inst, IntBinOp, LocalId, LocalKind, Overflow, ScalarKind,
+    Terminator,
 };
+use crate::provable::{DescriptorClass, ProvableDescriptors};
 
 /// One way a [`Function`] can be malformed.
 ///
@@ -210,6 +228,33 @@ pub enum VerifyError {
         func: String,
         block: BlockId,
         inst: usize,
+    },
+    /// An [`Inst::ExtractScalar`] reading a payload width out of an object MIR
+    /// itself proves is something else (ADR-122).
+    ///
+    /// This is REP-56's shape stated as a rule. An unresolvable field get
+    /// lowered to `error_expr()` → `Lit::Unit` → `Inst::ConstGc { Unit }`, and
+    /// an `ExtractScalar { scalar: Int }` was emitted against it — an
+    /// eight-byte `praxis_int_load` off a descriptor **zero** bytes wide, from a
+    /// program `praxis check` accepted. REP-49 is the same shape at a different
+    /// site: `Lit::Bool` shared `Lit::Int`'s arm in `emit_pattern_test`, so
+    /// `match b { true => … }` read eight bytes of a one-byte `BoolPayload` and
+    /// told the two immortals apart by their alignment padding.
+    ///
+    /// **The rule refuses a proved contradiction, never an absence of proof.**
+    /// [`crate::provable`] answers `None` for every local whose descriptor came
+    /// out of the runtime and for every local with no defining instruction at
+    /// all — parameters included — and `None` is not an error here. That
+    /// asymmetry is what makes the rule deployable with no false positives and
+    /// no lowering change: a "proof required" version would refuse `primes`,
+    /// whose `is_prime(n)` extracts twice from a parameter.
+    ProvedDescriptorMismatch {
+        func: String,
+        block: BlockId,
+        inst: usize,
+        src: LocalId,
+        proved: DescriptorClass,
+        scalar: ScalarKind,
     },
 }
 
@@ -328,6 +373,20 @@ impl std::fmt::Display for VerifyError {
                  can fault",
                 block.0
             ),
+            VerifyError::ProvedDescriptorMismatch {
+                func,
+                block,
+                inst,
+                src,
+                proved,
+                scalar,
+            } => write!(
+                f,
+                "{func}: block {} inst {inst}: ExtractScalar reads a {scalar:?} \
+                 payload out of {src:?}, which every definition proves is a \
+                 {proved}",
+                block.0
+            ),
         }
     }
 }
@@ -344,6 +403,9 @@ pub fn verify(f: &Function) -> Result<(), Vec<VerifyError>> {
         .filter(|l| l.kind == LocalKind::Gc)
         .map(|l| l.id)
         .collect();
+    // One linear pass plus a short fixpoint, computed once for the function
+    // rather than per `ExtractScalar` (ADR-122).
+    let provable = ProvableDescriptors::of(f);
 
     for (blk_idx, block) in f.blocks.iter().enumerate() {
         let bid = BlockId(blk_idx as u32);
@@ -360,6 +422,7 @@ pub fn verify(f: &Function) -> Result<(), Vec<VerifyError>> {
             }
             check_slot_sets(f, bid, i, inst, &gc, n_locals, &mut errs);
             check_fault_observed(f, bid, i, block, &mut errs);
+            check_proved_descriptor(f, bid, i, inst, &provable, &mut errs);
 
             match inst {
                 Inst::MoveGc { dst, src } => {
@@ -521,6 +584,66 @@ fn check_fault_observed(
     }
 }
 
+/// ADR-122's rule: an [`Inst::ExtractScalar`] may not name a payload width that
+/// contradicts what [`crate::provable`] proves about the object it reads.
+///
+/// The width this instruction names *is* a claim about the object's descriptor —
+/// `praxis_int_load` reads eight bytes — and here MIR has already made a
+/// contradictory one at every definition of the slot. The two historical
+/// instances are REP-56 (`ConstGc { Unit }` read as an `Int`, an out-of-bounds
+/// heap read from a `praxis check`-clean program) and REP-49 (`ConstGc { Bool }`
+/// read as an `Int`, two immortals told apart by their alignment padding).
+///
+/// **`None` is not an error, in either position.** An absence of proof about the
+/// source is the honest answer for a parameter, a capture, and every value the
+/// runtime minted; a "proof required" rule would refuse `primes`, whose
+/// `is_prime(n)` extracts twice from a parameter. And
+/// [`DescriptorClass::of_scalar`] is `None` only for [`ScalarKind::Byte`], which
+/// has no descriptor at all ([`ScalarKind::BYTE_HAS_NO_WRAPPER`]) and therefore
+/// contradicts nothing.
+#[cfg(not(feature = "unproved-extract-scalar"))]
+fn check_proved_descriptor(
+    f: &Function,
+    bid: BlockId,
+    i: usize,
+    inst: &Inst,
+    provable: &ProvableDescriptors,
+    errs: &mut Vec<VerifyError>,
+) {
+    let Inst::ExtractScalar { src, scalar, .. } = inst else {
+        return;
+    };
+    let (Some(proved), Some(wanted)) = (provable.class(*src), DescriptorClass::of_scalar(*scalar))
+    else {
+        return;
+    };
+    if proved != wanted {
+        errs.push(VerifyError::ProvedDescriptorMismatch {
+            func: f.name.clone(),
+            block: bid,
+            inst: i,
+            src: *src,
+            proved,
+            scalar: *scalar,
+        });
+    }
+}
+
+/// **ADR-122 arm A**: the rule is not compiled in, so MIR that reads an `Int`
+/// payload out of a proved `Unit` verifies — which is what this tree did before
+/// ADR-122. The analysis still runs; only the rule that reads it is absent, so
+/// the two arms differ in exactly the deliverable and in nothing else.
+#[cfg(feature = "unproved-extract-scalar")]
+fn check_proved_descriptor(
+    _f: &Function,
+    _bid: BlockId,
+    _i: usize,
+    _inst: &Inst,
+    _provable: &ProvableDescriptors,
+    _errs: &mut Vec<VerifyError>,
+) {
+}
+
 /// The slot sets of one instruction, checked for membership and annotation.
 fn check_slot_sets(
     f: &Function,
@@ -608,6 +731,52 @@ fn check_is_gc(
             local,
             set,
         });
+    }
+}
+
+/// The local an instruction **writes**, or `None` for the two that write none.
+///
+/// [`operands`] returns the destination and the sources in one undifferentiated
+/// `Vec`, which is the right shape for a range check and the wrong one for any
+/// question about definitions — and [`crate::provable`] asks exactly that
+/// question. The `Option` is the statement that **an instruction defines at most
+/// one local**: `Inst::Alloc { alloc: AllocKind::Record { fields, .. } }` names
+/// six locals and defines one, so a `Vec` return leaves every caller re-deriving
+/// which of the six it meant.
+///
+/// **This is not a sixth exhaustive match over [`Inst`]** — ADR-044's
+/// Consequences fix that count at five, and
+/// [`liveness::defs`](crate::liveness::defs) is now this function with its
+/// answer wrapped, rather than a second list. The two cannot drift because
+/// there is only one.
+#[must_use]
+pub fn defines(inst: &Inst) -> Option<LocalId> {
+    match inst {
+        Inst::ConstInt { dst, .. }
+        | Inst::ConstFloat { dst, .. }
+        | Inst::ConstGc { dst, .. }
+        | Inst::Alloc { dst, .. }
+        | Inst::ExtractScalar { dst, .. }
+        | Inst::Materialize { dst, .. }
+        | Inst::IntBinOp { dst, .. }
+        | Inst::IntCmp { dst, .. }
+        | Inst::FloatBinOp { dst, .. }
+        | Inst::FloatNeg { dst, .. }
+        | Inst::FloatCmp { dst, .. }
+        | Inst::StructEq { dst, .. }
+        | Inst::ValueCmp { dst, .. }
+        | Inst::Call { dst, .. }
+        | Inst::CallIndirect { dst, .. }
+        | Inst::MoveGc { dst, .. }
+        | Inst::LoadCapture { dst, .. }
+        | Inst::LoadField { dst, .. }
+        | Inst::LoadTupleElem { dst, .. }
+        | Inst::EnumTag { dst, .. }
+        | Inst::EnumPayloadGet { dst, .. } => Some(*dst),
+        // `StoreScalar` writes *into* an existing object through `dst_gc`; the
+        // local itself is unchanged, which is why it is a use and not a def.
+        // `CheckFault` writes nothing at all.
+        Inst::StoreScalar { .. } | Inst::CheckFault { .. } => None,
     }
 }
 
@@ -922,6 +1091,205 @@ mod tests {
         assert!(
             errs.iter()
                 .any(|e| matches!(e, VerifyError::BoundedDivision { .. })),
+            "{errs:?}"
+        );
+    }
+
+    /// A one-block function that reads a `scalar`-wide payload out of a local
+    /// holding `konst`, and returns the constant. The two historical defects
+    /// below are this shape with different arguments.
+    fn extract_from_const_gc(konst: crate::ir::GcConst, scalar: ScalarKind) -> Function {
+        let mut f = empty_fn("f");
+        let boxed = gc_local(&mut f);
+        let payload = f.new_local(
+            LocalKind::Scalar(scalar),
+            MirType::Opaque,
+            None,
+            LocalDebugKind::Temp,
+            None,
+        );
+        f.return_local = boxed;
+        let blk = f.new_block();
+        f.blocks[blk.0 as usize]
+            .insts
+            .push(Inst::ConstGc { dst: boxed, konst });
+        f.blocks[blk.0 as usize].insts.push(Inst::ExtractScalar {
+            dst: payload,
+            src: boxed,
+            scalar,
+        });
+        f.blocks[blk.0 as usize].term = Terminator::Return { value: boxed };
+        crate::annotate(&mut f);
+        f
+    }
+
+    /// **REP-56, as a refusal** (ADR-122). An unresolvable field get lowers to
+    /// `error_expr()` → `Lit::Unit` → `Inst::ConstGc { Unit }`, and the
+    /// arithmetic around it then emits `ExtractScalar { Int }` against it. That
+    /// is an eight-byte `praxis_int_load` off a descriptor **zero** bytes wide,
+    /// from a program `praxis check` exits 0 on — measured in release as three
+    /// different pointer-shaped numbers on three consecutive runs.
+    ///
+    /// The runtime's own bound (`read_scalar`) turned that into a defined abort;
+    /// this turns it into a refusal at the compiler, which is where a compiler
+    /// bug belongs.
+    #[test]
+    fn extracting_an_int_from_a_proved_unit_is_rejected() {
+        let f = extract_from_const_gc(crate::ir::GcConst::Unit, ScalarKind::Int);
+        let errs = verify(&f).expect_err("Unit is not Int");
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                VerifyError::ProvedDescriptorMismatch {
+                    proved: DescriptorClass::Unit,
+                    scalar: ScalarKind::Int,
+                    ..
+                }
+            )),
+            "{errs:?}"
+        );
+    }
+
+    /// **REP-49, as a refusal** (ADR-122). `emit_pattern_test` put `Lit::Bool`
+    /// in `Lit::Int`'s arm, so `match b { true => …, false => … }` extracted an
+    /// `Int` payload from *both* operands — and the literal operand is a
+    /// `ConstGc { Bool }`, so the contradiction is proved rather than merely
+    /// suspected. Eight bytes read off a one-byte `BoolPayload`; the seven above
+    /// it are the block's alignment padding, which the bump allocator never
+    /// writes, so `true` and `false` were told apart by uninitialized memory.
+    ///
+    /// REP-37's width assertion caught this one twenty minutes after it landed.
+    /// The point of the rule is that the *next* one does not need a runtime
+    /// guard to be caught.
+    #[test]
+    fn extracting_an_int_from_a_proved_bool_is_rejected() {
+        let f = extract_from_const_gc(crate::ir::GcConst::Bool(true), ScalarKind::Int);
+        let errs = verify(&f).expect_err("Bool is not Int");
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                VerifyError::ProvedDescriptorMismatch {
+                    proved: DescriptorClass::Bool,
+                    scalar: ScalarKind::Int,
+                    ..
+                }
+            )),
+            "{errs:?}"
+        );
+    }
+
+    /// The same shape with the width the lowering actually emits today. A rule
+    /// that rejected this would reject `match b { true => … }`, which is the
+    /// difference between a verifier and an outage.
+    #[test]
+    fn extracting_a_bool_from_a_proved_bool_verifies() {
+        let f = extract_from_const_gc(crate::ir::GcConst::Bool(true), ScalarKind::Bool);
+        assert_eq!(verify(&f), Ok(()));
+    }
+
+    /// **The false positive the rule must not have**, and the reason it refuses
+    /// a proved contradiction rather than requiring a proof.
+    ///
+    /// `primes`' `is_prime(n)` extracts an `Int` payload out of its parameter
+    /// twice per call. A parameter is a `Gc` local with **no defining
+    /// instruction**, so "every definition produces `Int`" is vacuously true and
+    /// "some definition produces `Int`" is vacuously false — a rule built on
+    /// either quantifier gets this program wrong, in opposite directions. The
+    /// analysis answers `None`, and `None` is not an error.
+    #[test]
+    fn extracting_a_payload_from_a_parameter_is_not_an_error_because_nothing_is_proved() {
+        let mut f = empty_fn("is_prime");
+        let param = gc_local(&mut f);
+        let payload = int_local(&mut f);
+        f.params = vec![param];
+        f.return_local = param;
+        let blk = f.new_block();
+        f.blocks[blk.0 as usize].insts.push(Inst::ExtractScalar {
+            dst: payload,
+            src: param,
+            scalar: ScalarKind::Int,
+        });
+        f.blocks[blk.0 as usize].term = Terminator::Return { value: param };
+        crate::annotate(&mut f);
+
+        assert_eq!(verify(&f), Ok(()));
+        assert_eq!(
+            crate::provable::ProvableDescriptors::of(&f).class(param),
+            None,
+            "a parameter has no definition, so it proves nothing"
+        );
+    }
+
+    /// A value the runtime chose the descriptor for proves nothing either, so
+    /// the rule is silent over it — which is why it catches REP-56 and REP-49
+    /// and **not** REP-54 or TY-31's catalog bound, whose bad descriptors are
+    /// built inside a wrapper.
+    #[test]
+    fn extracting_a_payload_from_a_call_result_is_not_an_error() {
+        let mut f = empty_fn("f");
+        let boxed = gc_local(&mut f);
+        let payload = int_local(&mut f);
+        f.return_local = boxed;
+        let blk = f.new_block();
+        f.blocks[blk.0 as usize].insts.push(Inst::Call {
+            dst: boxed,
+            callee: crate::ir::CallTarget::User("g".into()),
+            args: Vec::new(),
+            roots: RootSlots::unannotated(),
+            debug: DebugSlots::unannotated(),
+        });
+        f.blocks[blk.0 as usize].insts.push(Inst::CheckFault {
+            on_fault: blk,
+            debug: DebugSlots::unannotated(),
+        });
+        f.blocks[blk.0 as usize].insts.push(Inst::ExtractScalar {
+            dst: payload,
+            src: boxed,
+            scalar: ScalarKind::Int,
+        });
+        f.blocks[blk.0 as usize].term = Terminator::Return { value: boxed };
+        crate::annotate(&mut f);
+
+        assert_eq!(verify(&f), Ok(()));
+    }
+
+    /// The proof survives the copy a `let` or an `Assign` lowers to, which is
+    /// what makes the rule reach a *user variable* at all: `TypedExpr::Path`
+    /// hands back the binding's slot, so every read of one is an
+    /// `ExtractScalar` whose `src` is `MoveGc`-defined (handover 27 §5).
+    #[test]
+    fn the_proof_reaches_a_user_variable_through_the_move_gc_a_let_lowers_to() {
+        let mut f = empty_fn("f");
+        let literal = gc_local(&mut f);
+        let binding = gc_local(&mut f);
+        let payload = int_local(&mut f);
+        f.return_local = binding;
+        let blk = f.new_block();
+        f.blocks[blk.0 as usize].insts.push(Inst::ConstGc {
+            dst: literal,
+            konst: crate::ir::GcConst::Unit,
+        });
+        f.blocks[blk.0 as usize].insts.push(Inst::MoveGc {
+            dst: binding,
+            src: literal,
+        });
+        f.blocks[blk.0 as usize].insts.push(Inst::ExtractScalar {
+            dst: payload,
+            src: binding,
+            scalar: ScalarKind::Int,
+        });
+        f.blocks[blk.0 as usize].term = Terminator::Return { value: binding };
+        crate::annotate(&mut f);
+
+        let errs = verify(&f).expect_err("the copy carries the Unit descriptor with it");
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                VerifyError::ProvedDescriptorMismatch {
+                    proved: DescriptorClass::Unit,
+                    ..
+                }
+            )),
             "{errs:?}"
         );
     }

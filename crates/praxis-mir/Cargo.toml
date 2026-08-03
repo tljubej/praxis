@@ -35,6 +35,23 @@ praxis-test-support.workspace = true
 # in `[dev-dependencies]`, which `cargo build` does not resolve.
 test-support = ["dep:praxis-ast", "dep:praxis-parser"]
 
+# ADR-122 arm A, and the whole of that toggle: `verify::check_proved_descriptor`
+# compiles to an empty body, so an `Inst::ExtractScalar` that names a payload
+# width contradicting what `provable` proves about its source is accepted. That
+# is byte-for-byte what this tree did before ADR-122 — REP-56's out-of-bounds
+# read compiles again — and nothing else in the crate reads the flag. The
+# analysis itself runs in both arms; only the rule differs.
+#
+#     cargo build --release -p praxis-cli                                # arm B
+#     cargo build --release -p praxis-cli \
+#         --features praxis-mir/unproved-extract-scalar                  # arm A
+#
+# **It makes the compiler accept MIR it should refuse**, and the tests that pin
+# ADR-122 assert the refusal, so `cargo test --features
+# praxis-mir/unproved-extract-scalar` is expected red. Do not enable it anywhere
+# except when staging that arm.
+unproved-extract-scalar = []
+
 # Doctests are not run (see the justfile and README): rustdoc has to analyze the
 # whole crate before it can find out there are none, and the result is never
 # cached, so `cargo test` paid ~6s per crate for it on every run.
