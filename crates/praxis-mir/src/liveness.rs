@@ -250,30 +250,15 @@ fn transfer_term(live: &mut BTreeSet<LocalId>, term: &Terminator) {
 /// at five (`ir.rs`, this `defs`, `uses`, `verify.rs`'s `operands`, and
 /// `lower_inst`); a private copy in the backend would have made it six, and the
 /// two would have to agree for the debugger to show what MIR-16 promises.
+///
+/// **The match itself now lives in [`crate::verify::defines`]** (ADR-122),
+/// which answers the sharper question — *the* local, not a list — because the
+/// provable-descriptor analysis needs a definition site and a `Vec` of one
+/// element is not one. This wraps it rather than restating it, so the count
+/// stays at five: the backend's iteration order over a definition set is
+/// unchanged, because there was never more than one member.
 pub fn defs(inst: &Inst) -> Vec<LocalId> {
-    match inst {
-        Inst::Alloc { dst, .. } => vec![*dst],
-        Inst::ExtractScalar { dst, .. } => vec![*dst],
-        Inst::Materialize { dst, .. } => vec![*dst],
-        Inst::IntBinOp { dst, .. } => vec![*dst],
-        Inst::FloatBinOp { dst, .. } => vec![*dst],
-        Inst::FloatNeg { dst, .. } => vec![*dst],
-        Inst::IntCmp { dst, .. } => vec![*dst],
-        Inst::FloatCmp { dst, .. } => vec![*dst],
-        Inst::StructEq { dst, .. } => vec![*dst],
-        Inst::ValueCmp { dst, .. } => vec![*dst],
-        Inst::Call { dst, .. } => vec![*dst],
-        Inst::CallIndirect { dst, .. } => vec![*dst],
-        Inst::MoveGc { dst, .. } => vec![*dst],
-        Inst::ConstInt { dst, .. } => vec![*dst],
-        Inst::ConstFloat { dst, .. } => vec![*dst],
-        Inst::ConstGc { dst, .. } => vec![*dst],
-        Inst::LoadField { dst, .. } | Inst::LoadTupleElem { dst, .. } => vec![*dst],
-        Inst::LoadCapture { dst, .. } => vec![*dst],
-        Inst::EnumTag { dst, .. } => vec![*dst],
-        Inst::EnumPayloadGet { dst, .. } => vec![*dst],
-        Inst::StoreScalar { .. } | Inst::CheckFault { .. } => vec![],
-    }
+    crate::verify::defines(inst).into_iter().collect()
 }
 
 /// Locals used by an instruction (excluding `live_roots`, which is derived, not

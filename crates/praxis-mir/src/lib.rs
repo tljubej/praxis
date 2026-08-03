@@ -22,6 +22,7 @@ pub mod build;
 pub mod forward;
 pub mod ir;
 pub mod liveness;
+pub mod provable;
 pub mod verify;
 
 /// Shape assertions over lowered MIR, for the packages whose gate is a count of
@@ -44,7 +45,8 @@ pub use ir::{
     Local, LocalId, LocalKind, MirType, Overflow, ScalarKind, Terminator,
 };
 pub use liveness::{annotate, defs};
-pub use verify::{verify, VerifyError};
+pub use provable::{DescriptorClass, ProvableDescriptors};
+pub use verify::{defines, verify, VerifyError};
 
 /// Marker documenting the milestone that filled this crate.
 pub const FILLED_AT_MILESTONE: u32 = 4;

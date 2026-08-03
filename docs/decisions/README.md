@@ -154,5 +154,5 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-119: *owed* — W10, the inline scalar claim](./119-slug.md)
 - [ADR-120: A box with one reader in its own block is not a box, and the value it cost the debugger is given back by a slot that knows it is not a reference (complete — part 1 W8-S0, part 2 W8-S0b)](./120-a-box-with-one-reader-in-its-own-block-is-not-a-box.md)
 - [ADR-121: *reserved* — W8-S1, `Gc`→`Scalar` demotion for loop-carried locals; behind the wave-5 gate](./121-slug.md)
-- [ADR-122: *owed* — W11-safety, a provable-descriptor analysis and the verifier rule it licenses](./122-slug.md)
+- [ADR-122: A descriptor the compiler wrote is provable, and a parameter is not](./122-a-descriptor-the-compiler-wrote-is-provable-and-a-parameter-is-not.md)
 - [ADR-123: *reserved* — W12, two code variants selected by `--debug never`; handover 26 defers it](./123-slug.md)
