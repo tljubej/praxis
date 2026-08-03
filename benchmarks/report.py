@@ -101,12 +101,19 @@ def main() -> None:
     # --- headline -----------------------------------------------------------
     w("## The short version")
     w("")
-    verdict = (
-        f"It is slower than Python on all {len(names)} of them"
-        if not faster
-        else f"It is slower than Python on {len(slower)} of the {len(names)} and faster on "
-        + ", ".join(f"`{n}`" for n in faster)
-    )
+    # Three cases, not two. The `not slower` arm is here because the suite
+    # reached it: the old code rendered a clean sweep as "slower than Python on
+    # 0 of the 8 and faster on" all eight names, which is a sentence that makes
+    # a reader check the table to find out what it is claiming.
+    if not faster:
+        verdict = f"It is slower than Python on all {len(names)} of them"
+    elif not slower:
+        verdict = f"It is faster than Python on all {len(names)} of them"
+    else:
+        verdict = (
+            f"It is slower than Python on {len(slower)} of the {len(names)} and faster on "
+            + ", ".join(f"`{n}`" for n in faster)
+        )
     w(
         f"Across the {len(names)} benchmarks Praxis is **{geo(px_rs):.0f}× slower than Rust** "
         f"and **{geo(px_py):.1f}× slower than CPython 3.14** (geometric means of the "
@@ -114,8 +121,9 @@ def main() -> None:
     )
     w("")
     w(
-        "**Two rounds of work stand behind these numbers, and neither changed one "
-        "language semantic or touched §4.3.** The first is the six findings in "
+        "**Three rounds of work stand behind these numbers, and none of them "
+        "changed one language semantic or touched §4.3.** The first is the six "
+        "findings in "
         "[`docs/handovers/21-where-the-time-goes.md`](../docs/handovers/21-where-the-time-goes.md). "
         "Before it this suite measured 4.6× CPython and 185× Rust and attributed the "
         "gap to boxing — an attribution that did not survive a profile: only 19% of "
@@ -143,6 +151,32 @@ def main() -> None:
         "and every heap block lost eight bytes "
         "([ADR-109](../docs/decisions/109-pages-stay-segregated-by-size-class.md)). "
         "The memory column is a separate story and it is the pacer\'s; see below."
+    )
+    w("")
+    w(
+        "The third is the nine packages of "
+        "[`docs/handovers/26-ten-packages-six-waves-and-the-five-things-25-got-wrong.md`](../docs/handovers/26-ten-packages-six-waves-and-the-five-things-25-got-wrong.md) "
+        "and [`27`](../docs/handovers/27-the-five-gates-and-what-26-got-wrong.md), "
+        "and it is the largest of the three: this suite was **32× Rust and 0.8× "
+        "CPython** when the round opened and the Praxis column is **2.32× faster** "
+        "across the eight, with `vm` alone 3.76× and `primes` 3.51×. **Two of the "
+        "nine are nearly all of it**, and each was measured against this tree with "
+        "its own toggle reverted rather than against a previous commit: a box "
+        "whose only reader is in its own block is not written at all "
+        "([ADR-120](../docs/decisions/120-a-box-with-one-reader-in-its-own-block-is-not-a-box.md)), "
+        "worth **1.85×** on the geometric mean of the eight and 3.29× on "
+        "`mandelbrot`; and a rooting runtime call no longer `malloc`s twice "
+        "([ADR-114](../docs/decisions/114-the-native-roots-are-one-store-and-only-their-depth-is-bounded.md)), "
+        "worth **1.39×** and 3.43× on `vm`. Three collection primitives inlined "
+        "([ADR-118](../docs/decisions/118-a-vecs-three-words-are-the-compilers-to-read.md)) "
+        "add 1.04×, concentrated on `bfs` (1.12×) and `tree` (1.07×); the scalar "
+        "debug slot that keeps the debugger honest gives 2.4% back, which is the "
+        "price of §9 and is recorded rather than netted away. **That 2.32× is two "
+        "`run.py` sweeps compared across a round, "
+        "not a paired A/B**, and the Rust and Python columns of the same two sweeps "
+        "drifted up to 6% and 15% against each other — which is why the per-package "
+        "credit is assigned by `ab.py` in the ADRs and not by subtracting this "
+        "table from the last one."
     )
     w("")
     w("Two things are worth reading the tables for.")

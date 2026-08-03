@@ -1,0 +1,207 @@
+{
+  "meta": {
+    "what": "leaf-first /usr/bin/sample profile at 1 ms, three runs pooled per benchmark, and handover 27 \u00a74's W10 entry gate computed off it. Self samples are a node's count minus its children's; every self sample inside claim_block/alloc_raw/praxis_alloc_int/praxis_alloc_float is charged to the nearest named runtime entry point above it, which is what nets composite allocations out of the scalar figure.",
+    "tool": "/usr/bin/sample <pid> 60 1",
+    "runs_pooled_per_benchmark": 3,
+    "praxis_bin_sha256": "34d4b1967d316d15cdaf6491a1b2b7a9726c4d48e9e6f8ff8ab6f81a7c2b60e5",
+    "commit": "8f368f154f79f7a148bfbf567c605ba00e74a58f",
+    "sizes": {
+      "primes": 1600000,
+      "mandelbrot": 430,
+      "collatz": 340000,
+      "vm": 2800000,
+      "hashwork": 9400000,
+      "tree": 330,
+      "pipeline": 1000000,
+      "bfs": 200
+    },
+    "sizes_sha256": "194ad251f4c2387ffc36a7586572fbea2c81a06bdc592d03939fa5fe87f6927a",
+    "gate": "handover 27 \u00a74: under 10% on every benchmark and W10 is not built this round"
+  },
+  "benchmarks": {
+    "primes": {
+      "samples": 729,
+      "self_percent": {
+        "JIT-generated code": 84.64,
+        "Heap::claim_block": 5.08,
+        "Heap::alloc_raw": 3.16,
+        "praxis_alloc_int": 2.19,
+        "libsystem (other)": 1.92,
+        "Heap::collect_inner": 0.96,
+        "I7MQgnUhkh_14praxis_runtime4pageNtB4_10PageHeader10alloc_page": 0.82,
+        "<deduplicated_symbol>": 0.69,
+        "_NtCs3I7MQgnUhkh_14praxis_runtime4heapNtB5_4Heap12finalize_all": 0.55
+      },
+      "w10_gate": {
+        "gross_percent": 10.43,
+        "scalar_netted_percent": 10.01,
+        "composite_percent": 0.0,
+        "char_percent": 0.0,
+        "unattributed_percent": 0.41,
+        "by_entry_percent": {
+          "praxis_alloc_int": 10.01,
+          "(no named entry)": 0.41
+        }
+      }
+    },
+    "mandelbrot": {
+      "samples": 1938,
+      "self_percent": {
+        "JIT-generated code": 55.78,
+        "Heap::claim_block": 14.6,
+        "Heap::alloc_raw": 10.73,
+        "praxis_alloc_float": 9.91,
+        "Heap::collect_inner": 6.09,
+        "<deduplicated_symbol>": 2.32
+      },
+      "w10_gate": {
+        "gross_percent": 35.24,
+        "scalar_netted_percent": 32.46,
+        "composite_percent": 0.36,
+        "char_percent": 0.0,
+        "unattributed_percent": 2.43,
+        "by_entry_percent": {
+          "praxis_alloc_float": 32.46,
+          "(no named entry)": 2.43,
+          "praxis_int_to_float": 0.36
+        }
+      }
+    },
+    "collatz": {
+      "samples": 1402,
+      "self_percent": {
+        "JIT-generated code": 67.05,
+        "Heap::claim_block": 12.2,
+        "Heap::alloc_raw": 8.77,
+        "praxis_alloc_int": 5.49,
+        "Heap::collect_inner": 4.14,
+        "<deduplicated_symbol>": 1.64,
+        "_NtCs3I7MQgnUhkh_14praxis_runtime4heapNtB5_4Heap12finalize_all": 0.43
+      },
+      "w10_gate": {
+        "gross_percent": 26.46,
+        "scalar_netted_percent": 24.54,
+        "composite_percent": 0.0,
+        "char_percent": 0.0,
+        "unattributed_percent": 1.93,
+        "by_entry_percent": {
+          "praxis_alloc_int": 24.54,
+          "(no named entry)": 1.93
+        }
+      }
+    },
+    "vm": {
+      "samples": 4889,
+      "self_percent": {
+        "JIT-generated code": 42.14,
+        "Heap::claim_block": 13.17,
+        "praxis_deque_push_back": 11.43,
+        "praxis_alloc_int": 9.39,
+        "Heap::alloc_raw": 8.61,
+        "praxis_deque_pop_back": 7.08,
+        "Heap::collect_inner": 5.15,
+        "<deduplicated_symbol>": 1.92,
+        "praxis_enum_payload": 0.94
+      },
+      "w10_gate": {
+        "gross_percent": 31.17,
+        "scalar_netted_percent": 28.76,
+        "composite_percent": 0.0,
+        "char_percent": 0.0,
+        "unattributed_percent": 2.41,
+        "by_entry_percent": {
+          "praxis_alloc_int": 28.76,
+          "(no named entry)": 2.41
+        }
+      }
+    },
+    "tree": {
+      "samples": 3447,
+      "self_percent": {
+        "JIT-generated code": 65.71,
+        "Heap::claim_block": 9.37,
+        "Heap::alloc_raw": 6.73,
+        "Heap::collect_inner": 6.12,
+        "praxis_alloc_int": 4.47,
+        "praxis_record_field": 4.26,
+        "<deduplicated_symbol>": 1.19,
+        "Heap::mark": 0.99,
+        "Heap::trace": 0.52
+      },
+      "w10_gate": {
+        "gross_percent": 20.57,
+        "scalar_netted_percent": 18.68,
+        "composite_percent": 0.0,
+        "char_percent": 0.0,
+        "unattributed_percent": 1.89,
+        "by_entry_percent": {
+          "praxis_alloc_int": 18.68,
+          "(no named entry)": 1.89
+        }
+      }
+    },
+    "pipeline": {
+      "samples": 6085,
+      "self_percent": {
+        "JIT-generated code": 29.12,
+        "Heap::claim_block": 16.04,
+        "Heap::collect_inner": 13.26,
+        "Heap::alloc_raw": 9.81,
+        "system malloc/free": 9.43,
+        "praxis_alloc_int": 7.02,
+        "<deduplicated_symbol>": 4.68,
+        "Heap::mark": 4.37,
+        "libsystem (other)": 1.17,
+        "praxis_alloc_tuple": 1.05,
+        "praxis_closure_capture": 0.9,
+        "Heap::trace": 0.66,
+        "praxis_closure_set_capture": 0.64,
+        "praxis_closure_fn_ptr": 0.56,
+        "DYLD-STUB$$free": 0.41,
+        "wFQrvczXsK_7___rustc11___rdl_alloc": 0.33
+      },
+      "w10_gate": {
+        "gross_percent": 32.87,
+        "scalar_netted_percent": 27.17,
+        "composite_percent": 2.86,
+        "char_percent": 0.0,
+        "unattributed_percent": 2.84,
+        "by_entry_percent": {
+          "praxis_alloc_int": 27.17,
+          "praxis_alloc_tuple": 2.86,
+          "(no named entry)": 2.84
+        }
+      }
+    },
+    "bfs": {
+      "samples": 7593,
+      "self_percent": {
+        "JIT-generated code": 75.5,
+        "Heap::claim_block": 3.71,
+        "praxis_deque_push_back": 3.24,
+        "Heap::alloc_raw": 3.17,
+        "praxis_bitset_insert": 2.61,
+        "Heap::collect_inner": 2.13,
+        "praxis_alloc_int": 1.96,
+        "praxis_deque_pop_front": 1.91,
+        "praxis_deque_len": 1.29,
+        "system malloc/free": 1.21,
+        "I7MQgnUhkh_14praxis_runtime6bitsetNtB4_13BitSetPayload6insert": 1.21,
+        "libsystem (other)": 0.63,
+        "<deduplicated_symbol>": 0.54,
+        "Heap::mark": 0.42
+      },
+      "w10_gate": {
+        "gross_percent": 8.85,
+        "scalar_netted_percent": 8.05,
+        "composite_percent": 0.05,
+        "char_percent": 0.0,
+        "unattributed_percent": 0.75,
+        "by_entry_percent": {
+          "praxis_alloc_int": 8.05,
+          "(no named entry)": 0.75
+        }
+      }
+    }
+  }
+}
