@@ -65,6 +65,17 @@ pub fn lower_module(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
     for adapter in &adapted {
         funcs.push(lower_fn_value_adapter(adapter, db));
     }
+    // Block-local box/unbox forwarding (ADR-120), and it is *here* rather than
+    // beside `lower_module` at each of the five hosts. It deletes safepoints, so
+    // it has to run before `crate::annotate` computes a slot set per safepoint;
+    // every host does `lower_module → annotate → verify` in that order, so the
+    // last line of this function is the one place that ordering holds with no
+    // host edited — which is ADR-108 §1's stated reason for refusing a
+    // standalone pass. Every closure and adapter above is covered because they
+    // are in `funcs` by now.
+    for func in &mut funcs {
+        crate::forward::forward_boxes(func);
+    }
     funcs
 }
 

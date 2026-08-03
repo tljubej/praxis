@@ -12,9 +12,14 @@
 //! and [`verify`] is what keeps the rooting invariant fixed once a stage has
 //! fixed it — every host runs it after `annotate` and refuses to compile MIR
 //! that fails.
+//!
+//! [`forward`] is the crate's one *optimization*, and it runs inside
+//! `lower_module` rather than beside it, because it deletes safepoints and so
+//! must precede [`annotate`] (ADR-120, ADR-108 §1).
 
 pub mod annot;
 pub mod build;
+pub mod forward;
 pub mod ir;
 pub mod liveness;
 pub mod verify;
@@ -33,6 +38,7 @@ pub mod test_support;
 
 pub use annot::{DebugSlots, RootSlots};
 pub use build::lower_module;
+pub use forward::forward_boxes;
 pub use ir::{
     AllocKind, Block, BlockId, CallTarget, CmpOp, FloatBinOp, Function, GcConst, Inst, IntBinOp,
     Local, LocalId, LocalKind, MirType, Overflow, ScalarKind, Terminator,

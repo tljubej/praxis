@@ -278,7 +278,15 @@ pub fn defs(inst: &Inst) -> Vec<LocalId> {
 
 /// Locals used by an instruction (excluding `live_roots`, which is derived, not
 /// an operand).
-fn uses(inst: &Inst) -> Vec<LocalId> {
+///
+/// `pub(crate)` for [`crate::forward`], whose census is built from this and
+/// [`defs`] rather than from a sixth match over [`Inst`] (ADR-044's
+/// Consequences fix the count at five). It is also the *read-only* half of that
+/// pass's licence to delete: after rewriting an operand field, `forward` asks
+/// this again and deletes the definition only when no use survives, so a field
+/// its own non-exhaustive rewriter missed costs an optimization rather than
+/// correctness (ADR-120).
+pub(crate) fn uses(inst: &Inst) -> Vec<LocalId> {
     match inst {
         Inst::Alloc {
             alloc:
@@ -343,7 +351,12 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
 }
 
 /// Locals used by a terminator.
-fn term_uses(term: &Terminator) -> Vec<LocalId> {
+///
+/// `pub(crate)` for [`uses`]'s reason, and for one of its own:
+/// [`crate::forward`]'s single most valuable rewrite is `Terminator::Branch`'s
+/// condition, because `lower_while` emits a `Materialize{Bool}` whose only
+/// consumer is the terminator (ADR-120).
+pub(crate) fn term_uses(term: &Terminator) -> Vec<LocalId> {
     match term {
         Terminator::Branch { cond, .. } => vec![*cond],
         Terminator::Return { value } => vec![*value],

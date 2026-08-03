@@ -35,6 +35,21 @@ praxis-test-support.workspace = true
 # in `[dev-dependencies]`, which `cargo build` does not resolve.
 test-support = ["dep:praxis-ast", "dep:praxis-parser"]
 
+# ADR-120 arm A. `forward::forward_boxes` returns 0 without looking at the
+# function, so the emitted MIR is what the builder wrote and every box/unbox
+# pair survives to the backend. **It makes the compiler emit slower code on
+# purpose**; it exists so the A/B baseline is this branch with this package's
+# one toggle reverted rather than an older commit (handover 26 §6, and ADR-113
+# for what the wrong baseline cost).
+#
+#     cargo build --release -p praxis-cli                          # arm B
+#     cargo build --release -p praxis-cli \
+#         --features praxis-mir/adr120-arm-a                       # arm A
+#
+# `cargo test` with it on fails this crate's forwarding tests and the backend's
+# shape assertions, which is the toggle working; do not enable it anywhere else.
+adr120-arm-a = []
+
 # Doctests are not run (see the justfile and README): rustdoc has to analyze the
 # whole crate before it can find out there are none, and the result is never
 # cached, so `cargo test` paid ~6s per crate for it on every run.
