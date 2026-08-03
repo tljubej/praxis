@@ -1719,6 +1719,27 @@ fn lower_inst<M: Module>(
             )?;
             builder.def_var(vars[dst.0 as usize], result);
         }
+        Inst::BitsetContains { dst, set, member } => {
+            // ADR-118 decision 6. `praxis_bitset_contains` is `Effect::Pure` —
+            // it allocates nothing and a `BitSet` query is total — so this is
+            // not a safepoint, there is nothing to spill, and no `CheckFault`
+            // follows. The narrowing is MIR's (`liveness::is_gc_safepoint` does
+            // not match this variant); this arm only emits what MIR decided.
+            //
+            // The wrapper answers `RawI64`, so the value it hands back is the
+            // `Bool` scalar itself and there is no box to unwrap.
+            let s = builder.use_var(vars[set.0 as usize]);
+            let m = builder.use_var(vars[member.0 as usize]);
+            let result = call_symbol(
+                builder,
+                ctx_val,
+                &[s, m],
+                RuntimeSymbol::BitsetContains,
+                module,
+                imports,
+            )?;
+            builder.def_var(vars[dst.0 as usize], result);
+        }
         Inst::CheckFault {
             on_fault,
             // The debug set stays on the instruction — it is the contract for

@@ -262,6 +262,7 @@ pub fn defs(inst: &Inst) -> Vec<LocalId> {
         Inst::FloatCmp { dst, .. } => vec![*dst],
         Inst::StructEq { dst, .. } => vec![*dst],
         Inst::ValueCmp { dst, .. } => vec![*dst],
+        Inst::BitsetContains { dst, .. } => vec![*dst],
         Inst::Call { dst, .. } => vec![*dst],
         Inst::CallIndirect { dst, .. } => vec![*dst],
         Inst::MoveGc { dst, .. } => vec![*dst],
@@ -333,6 +334,7 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
         Inst::EnumPayloadGet { src, .. } => vec![*src],
         Inst::StructEq { lhs, rhs, .. } => vec![*lhs, *rhs],
         Inst::ValueCmp { lhs, rhs, .. } => vec![*lhs, *rhs],
+        Inst::BitsetContains { set, member, .. } => vec![*set, *member],
         Inst::ConstInt { .. } => vec![],
         Inst::ConstFloat { .. } => vec![],
         // The value is an immediate; the table it indexes is reached through
@@ -356,6 +358,17 @@ fn term_uses(term: &Terminator) -> Vec<LocalId> {
 ///
 /// [`Inst::CheckFault`] is deliberately absent: it allocates nothing, roots
 /// nothing, and carries only a [`DebugSlots`]. See [`debug_only_slots`].
+///
+/// [`Inst::ValueCmp`] and [`Inst::BitsetContains`] are deliberately absent for
+/// the reason that matters most: **their wrappers do not allocate**, so no
+/// collection can begin inside them and there is no frame for the collector to
+/// see. `Inst::Call` is matched unconditionally because a call's callee is not
+/// knowable here — a `CallTarget::User` body allocates freely — and that
+/// conservatism is right for `Call` and wrong for a `Pure` primitive the
+/// builder named directly. ADR-118 decision 6 is where a row earns its way out
+/// of `Call` and therefore out of this list; the price of being here is
+/// [`spill_roots`](crate::annot) at every site, which handover 25 §3 measures
+/// at ~17 instructions.
 ///
 /// [`Inst::ConstGc`] is absent for a stronger reason: it has no slot sets to
 /// annotate at all. It reads a reference the runtime minted at startup out of

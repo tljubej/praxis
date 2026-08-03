@@ -61,6 +61,33 @@ pub enum MethodLowering {
     /// sequence pipeline and a handful of primitives that the compiler folds
     /// directly.
     Intrinsic(&'static str),
+    /// Lowers to a **dedicated MIR instruction whose result is a scalar**, with
+    /// this symbol as the out-of-line form the backend's cold arm calls
+    /// (ADR-118 decision 6).
+    ///
+    /// The distinction from [`RuntimeSymbol`](Self::RuntimeSymbol) is not
+    /// cosmetic and it is not "this one is inlined". Two facts follow from it
+    /// that the plain arm cannot express:
+    ///
+    /// * **The answer is not a `GcRef`.** The row's manifest return is
+    ///   `AbiRet::RawI64`, so the wrapper hands back the scalar channel and the
+    ///   builder decides whether the value is ever boxed at all. Every value
+    ///   answer in the plain arm is an `AbiRet::Gc`, which is what
+    ///   `a_non_faulting_row_with_a_value_result_cannot_answer_the_unit_sentinel`
+    ///   checks — and the check is *right* about that arm, which is why this one
+    ///   is a separate variant rather than a loosening of it.
+    /// * **The call site's safepoint status is the instruction's, not
+    ///   `Inst::Call`'s.** `liveness::is_gc_safepoint` matches every
+    ///   `Inst::Call` regardless of the symbol's [`Effect`](crate::abi::Effect),
+    ///   so a `Pure` primitive lowered as a call spills the whole root set at a
+    ///   point no collection can happen. A row lowered this way gets an
+    ///   instruction MIR can classify honestly.
+    ///
+    /// `BitSet.contains` is the only row here today. `Vec.get`/`Vec[]` want the
+    /// same treatment and cannot have it yet: their answer is a `GcRef` element,
+    /// so they need a `Gc`-dst instruction rather than a scalar one. See
+    /// ADR-118's open questions.
+    ScalarPrimitive(crate::abi::RuntimeSymbol),
 }
 
 /// Stability marker for an entry. Most built-ins are `Stable`; experimental
@@ -107,7 +134,9 @@ impl MethodEntry {
     /// carries its own per-instruction effects.
     pub fn allocates(&self) -> bool {
         match self.lowering {
-            MethodLowering::RuntimeSymbol(sym) => sym.allocates(),
+            MethodLowering::RuntimeSymbol(sym) | MethodLowering::ScalarPrimitive(sym) => {
+                sym.allocates()
+            }
             MethodLowering::Intrinsic(_) => false,
         }
     }
@@ -123,7 +152,9 @@ impl MethodEntry {
     /// `BitIndex`'s range. Nobody noticed, because nobody asked.
     pub fn can_fault(&self) -> bool {
         match self.lowering {
-            MethodLowering::RuntimeSymbol(sym) => sym.faults(),
+            MethodLowering::RuntimeSymbol(sym) | MethodLowering::ScalarPrimitive(sym) => {
+                sym.faults()
+            }
             MethodLowering::Intrinsic(_) => false,
         }
     }

@@ -405,6 +405,43 @@ pub enum Inst {
         lhs: LocalId,
         rhs: LocalId,
     },
+    /// `bs.contains(x)` — membership in a `BitSet`, yielding a `Bool` scalar
+    /// (`0`/`1`) in `dst` (ADR-118 decision 6). `set` and `member` are `Gc`
+    /// locals; the out-of-line form is `praxis_bitset_contains`, whose manifest
+    /// row answers `RawI64` for exactly this reason.
+    ///
+    /// **Its own instruction rather than an [`Inst::Call`], on
+    /// [`StructEq`](Self::StructEq)'s and [`ValueCmp`](Self::ValueCmp)'s
+    /// precedent, and it buys two separate things.**
+    ///
+    /// The first is the box. `praxis_bitset_contains` used to answer a boxed
+    /// `Bool`, and every use in the language immediately unboxed it: `if
+    /// bs.contains(x)` is a [`ExtractScalar`](Self::ExtractScalar) of the
+    /// call's result feeding the block's terminator. A `Scalar(Bool)` dst puts
+    /// the value where the consumer wanted it; the builder re-boxes through
+    /// [`Materialize`](Self::Materialize) only where a `Gc` is genuinely
+    /// wanted, which is what leaves `lower_expr_gc`'s contract unchanged.
+    ///
+    /// The second is the safepoint, and it is the larger one. **Not a GC
+    /// safepoint**: `praxis_bitset_contains` is `Effect::Pure` — it allocates
+    /// nothing, faults for nothing, and a `BitSet` query is total — so
+    /// [`crate::liveness::is_gc_safepoint`] does not match this variant, and
+    /// the shadow-frame spill in front of it is gone. That spill existed only
+    /// because `is_gc_safepoint` matches *every* `Inst::Call` regardless of the
+    /// symbol's effect, which is a property of the instruction shape and not of
+    /// the wrapper. Stating the narrowing here rather than in a backend arm is
+    /// what makes it ADR-113's rule satisfied rather than bent: the decision
+    /// about which instructions the collector may run at is MIR's, and this is
+    /// MIR making it.
+    ///
+    /// No [`CheckFault`](Self::CheckFault) follows, for the same `Effect::Pure`
+    /// reason, and [`Inst::fault_reason`] answers that from the manifest rather
+    /// than from this doc.
+    BitsetContains {
+        dst: LocalId,
+        set: LocalId,
+        member: LocalId,
+    },
     /// Call a function. Arguments and result are `Gc` locals. A safepoint +
     /// fault check follow (calls may allocate and may fault).
     Call {
@@ -550,6 +587,11 @@ impl Inst {
             // `praxis_struct_eq` dispatches to the descriptor's `equals`
             // callback, which answers a `bool` for every pair: `Effect::Pure`.
             Inst::StructEq { .. } => faulting(RuntimeSymbol::StructEq),
+            // `praxis_bitset_contains` is `Effect::Pure`: a `BitSet` query is
+            // total, so a member the set cannot hold is absent rather than a
+            // fault (RT-07). The arm goes through `faulting` anyway, so a row
+            // that ever grows a fault is observed without editing this.
+            Inst::BitsetContains { .. } => faulting(RuntimeSymbol::BitsetContains),
             Inst::LoadCapture { .. } => faulting(RuntimeSymbol::ClosureCapture),
             Inst::LoadField { .. } => faulting(RuntimeSymbol::RecordField),
             Inst::LoadTupleElem { .. } => faulting(RuntimeSymbol::TupleGet),

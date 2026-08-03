@@ -267,9 +267,21 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// pair can now disagree about is which slot `Int` is in, and that is an enum
 /// discriminant `builtins_are_indexed_by_their_id` pins.
 ///
-/// v20 (ADR-118, W4b): *owed* — the backend half of the collection-primitive
-/// inlining. Its line is here so that appending it is a one-line edit rather
-/// than two branches writing adjacent paragraphs at the same offset.
+/// v20 (ADR-118, W4b): `praxis_bitset_contains` **changes its return type**,
+/// from `GcRef` to `i64`. Its manifest row moves from `-> Gc` to `-> RawI64`
+/// and MIR carries it as `Inst::BitsetContains` — a `Scalar(Bool)` result and,
+/// because the row is `Effect::Pure`, not a GC safepoint — rather than as an
+/// `Inst::Call` whose answer has to be unboxed again on the next instruction.
+///
+/// This is a **signature** change, which is the strongest form of break in this
+/// list. It is not the v12/v17 "meaning changed, layout did not" class and it
+/// is not v15's "generated code reads a new field": a v19 caller linked against
+/// a v20 runtime takes the `0`/`1` this now answers and dereferences it as a
+/// `GcRef`, and a v20 caller against a v19 runtime takes a pointer and reads it
+/// as a truth value. Both are immediate, and neither is subtle enough to
+/// survive a test — which is the only comfortable thing about it.
+///
+/// The numeral is not touched here: ADR-116 owns v20's digit for the round.
 ///
 /// v20 (ADR-119, W10): *owed* — the inline bitmap claim, if it clears its
 /// wave-3 gate. Same reason as the line above.
@@ -4475,8 +4487,20 @@ pub unsafe extern "C" fn praxis_bitset_remove(
     })
 }
 
-/// True iff bit `value` is set, as a boxed Bool. A value the set cannot hold is
-/// simply absent — the query is total.
+/// True iff bit `value` is set, as a raw `0`/`1` in the scalar channel. A value
+/// the set cannot hold is simply absent — the query is total.
+///
+/// **It answers an `i64` and not a boxed `Bool` (ADR-118 decision 6.)** Every
+/// caller unboxed it again on the next instruction: `if bs.contains(x)` is a
+/// `Materialize{Bool}` followed by an `ExtractScalar{Bool}` followed by the
+/// branch that wanted the predicate. `praxis_struct_eq` and `praxis_value_cmp`
+/// already answer the scalar channel for the same reason, and MIR now carries
+/// this one as [`Inst::BitsetContains`](praxis_mir::Inst::BitsetContains) — a
+/// `Scalar(Bool)` result, and, because it neither allocates nor faults, not a
+/// GC safepoint.
+///
+/// `0` and `1` and nothing else, which is what the `Bool` payload byte holds
+/// and what `emit_inline_bool` re-boxes with a `!= 0` test.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `bs` and `value` must be valid `GcRef`s.
@@ -4485,12 +4509,12 @@ pub unsafe extern "C" fn praxis_bitset_contains(
     ctx: *mut RuntimeContext,
     bs: GcRef,
     value: GcRef,
-) -> GcRef {
+) -> i64 {
     abi_guard!("praxis_bitset_contains", ctx, {
         let p = unsafe { bitset_payload(bs) };
         let i = unsafe { int_payload(value) };
         let present = BitIndex::new(i).is_some_and(|index| p.contains(index));
-        unsafe { bool_ref(ctx, present) }
+        i64::from(present)
     })
 }
 
@@ -8227,11 +8251,10 @@ mod tests {
             let bs = praxis_bitset_new(ctx);
             let huge = praxis_alloc_int(ctx, i64::MAX);
             let _ = praxis_bitset_remove(ctx, bs, huge);
+            // The answer is the scalar channel's `0`/`1` since ADR-118
+            // decision 6, so there is no box to load it back out of.
             let answer = praxis_bitset_contains(ctx, bs, huge);
-            (
-                praxis_bool_load(ctx, answer) != 0,
-                bitset_payload(bs).words.len(),
-            )
+            (answer != 0, bitset_payload(bs).words.len())
         };
         unsafe { drop_ctx(ctx) };
 

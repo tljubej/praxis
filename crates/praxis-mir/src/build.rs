@@ -1350,6 +1350,17 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             for a in args {
                 arg_locals.push(lower_expr_gc(b, a));
             }
+            // A wrapper whose manifest row answers the **scalar channel** is not
+            // a call this arm can emit: `Inst::Call`'s `dst` is a `Gc` local,
+            // and putting a raw `0`/`1` in one would hand the collector an
+            // integer to dereference (P0-03). The manifest is the authority for
+            // which wrappers those are — `AbiRet::RawI64` — so the question is
+            // asked of it rather than of a symbol list this file would have to
+            // keep in step with `MethodLowering::ScalarPrimitive` (ADR-118
+            // decision 6).
+            if symbol.sig().ret == praxis_stdlib::abi::AbiRet::RawI64 {
+                return lower_scalar_primitive(b, symbol, &arg_locals, praxis_hir::expr_span(e));
+            }
             // The call's result temp materializes `e` (the whole method-call
             // expression) — thread its span so the debugger can show
             // `@ "xs.get(99)"`.
@@ -1972,6 +1983,60 @@ fn lower_materialize_bool(
         debug: DebugSlots::unannotated(),
     });
     dst
+}
+
+/// Lower a method call whose wrapper answers the **scalar channel** into the
+/// dedicated MIR instruction that produces it, then box the result so
+/// [`lower_expr_gc`]'s contract is unchanged (ADR-118 decision 6).
+///
+/// **This match is the one statement of "which symbol is which instruction"**
+/// on this side; `Inst::fault_reason`'s arm is the other direction of the same
+/// pairing, exactly as `Inst::StructEq`/`RuntimeSymbol::StructEq` already are.
+/// A `-> RawI64` wrapper that reaches a method-call site with no arm here is a
+/// **compiler bug**, not a program's, so it panics naming what to add: the
+/// alternative is emitting `Inst::Call` with a `Gc` `dst` and putting a raw
+/// integer in a rootable slot, which is a wrong answer the tests would find
+/// only by chance.
+///
+/// The box is deliberate and it is not a defeat. `Materialize{Bool}` has not
+/// allocated since ADR-040 decision 4 — it is `emit_inline_bool`'s two loads
+/// and a `select` — and a consumer that wanted the predicate rather than the
+/// object (`if`, `while`, `!`) unboxes it in the same block, which is the pair
+/// W8-S0's block-local forwarding deletes outright. What this function removes
+/// unconditionally, today, is the `Inst::Call`: with it, the safepoint and the
+/// ~17-instruction shadow-frame spill in front of it.
+fn lower_scalar_primitive(
+    b: &mut Builder<'_>,
+    sym: RuntimeSymbol,
+    args: &[LocalId],
+    span: (u32, u32),
+) -> LocalId {
+    match sym {
+        RuntimeSymbol::BitsetContains => {
+            let [set, member] = args else {
+                panic!(
+                    "internal compiler error: `{sym}` takes a receiver and one \
+                     argument, {} locals were lowered for it",
+                    args.len()
+                );
+            };
+            let dst = b.alloc_scalar(ScalarKind::Bool);
+            // No `check_fault` and no `emit`: the row is `Effect::Pure`, and
+            // `Inst::can_fault` is what the verifier checks that against.
+            b.push(Inst::BitsetContains {
+                dst,
+                set: *set,
+                member: *member,
+            });
+            lower_materialize_bool(b, dst, Some(span))
+        }
+        other => panic!(
+            "internal compiler error: `{other}` answers the scalar channel \
+             (`AbiRet::RawI64`) and is reachable from a method call, but no \
+             `Inst` produces it. Add an arm to `lower_scalar_primitive` and to \
+             `Inst::fault_reason`, or give the wrapper an `AbiRet::Gc` row."
+        ),
+    }
 }
 
 /// Lower an unchecked Float binary op on two `GcRef` operands, returning the
@@ -6999,6 +7064,65 @@ fn f(n: Int, x0: Float) -> Float {
                 .count()
         };
         assert_eq!(int_allocs_in(ph), 1, "the out-of-range literal is hoisted");
+    }
+
+    /// ADR-118 decision 6. `bs.contains(x)` is [`Inst::BitsetContains`] and no
+    /// `Inst::Call` at all — which is the whole of what removes the safepoint,
+    /// because `liveness::is_gc_safepoint` matches every `Call` regardless of
+    /// its symbol's effect.
+    ///
+    /// Written as a census rather than as "the first instruction is …" so it
+    /// survives the builder shuffling instructions around it, and phrased over
+    /// the *loop body* because that is where the cost was.
+    #[test]
+    fn a_bitset_membership_test_is_its_own_instruction_and_never_a_call() {
+        use crate::test_support::{lower_src_to_mir, InstKind};
+
+        let lowered = lower_src_to_mir(
+            "var b = BitSet()\n\
+             b.insert(3)\n\
+             var acc = 0\n\
+             var k = 0\n\
+             while k < 8 {\n\
+             \x20   if b.contains(k) { acc = acc + 1 }\n\
+             \x20   k = k + 1\n\
+             }\n",
+        );
+        let entry = lowered.entry();
+        let loop_region = lowered.innermost_loop_over(entry, "b.contains(k)");
+        let census = loop_region.census(entry);
+
+        assert_eq!(
+            census.count(InstKind::BitsetContains),
+            1,
+            "one membership test per iteration: {census:?}"
+        );
+        // `b.insert(3)` is outside the loop, so the only wrapper call the body
+        // could hold is the one this decision removes.
+        assert_eq!(
+            census.count(InstKind::Call),
+            0,
+            "the loop body calls no wrapper at all: {census:?}"
+        );
+        // The result is re-boxed for `lower_expr_gc`'s contract and unboxed
+        // again by `lower_if`, **in the same block** — which is exactly the
+        // shape W8-S0's block-local forwarding deletes. Asserted per block
+        // rather than over the loop, because the loop header holds a second
+        // `Materialize{Bool}`/`ExtractScalar{Bool}` pair of its own (`k < 8`),
+        // and a whole-loop count would not say which pair is which.
+        let block = lowered.block_over(entry, "b.contains(k)");
+        let here = crate::test_support::Census::of_blocks(entry, [block]);
+        assert_eq!(here.count(InstKind::BitsetContains), 1);
+        assert_eq!(
+            here.count(InstKind::Materialize(ScalarKind::Bool)),
+            1,
+            "the boxed `Bool` W8-S0 will forward away: {here:?}"
+        );
+        assert_eq!(
+            here.count(InstKind::ExtractScalar(ScalarKind::Bool)),
+            1,
+            "…and the unbox that consumes it, in the same block: {here:?}"
+        );
     }
 
     /// NaN is the one `Float` an allocation may not be shared for.

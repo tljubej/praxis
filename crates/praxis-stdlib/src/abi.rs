@@ -225,7 +225,12 @@ runtime_symbols! {
     AStar = "praxis_a_star": (Ctx, Gc, Gc, Gc, Gc, Gc) -> Gc, AllocatesAndFaults;
     Bfs = "praxis_bfs": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     BfsDistance = "praxis_bfs_distance": (Ctx, Gc, Gc, Gc) -> Gc, AllocatesAndFaults;
-    BitsetContains = "praxis_bitset_contains": (Ctx, Gc, Gc) -> Gc, Pure;
+    // `-> RawI64` and not `-> Gc`, which is what makes `bs.contains(x)` a
+    // scalar-producing MIR instruction rather than a call whose answer has to
+    // be unboxed again (ADR-118 decision 6). `StructEq` and `ValueCmp` are the
+    // two rows this copies, and the shape is the same on all three: a boxed
+    // `Bool` the caller immediately unboxes is a box nobody looks at.
+    BitsetContains = "praxis_bitset_contains": (Ctx, Gc, Gc) -> RawI64, Pure;
     BitsetInsert = "praxis_bitset_insert": (Ctx, Gc, Gc) -> GcUnit, AllocatesAndFaults;
     BitsetIsEmpty = "praxis_bitset_is_empty": (Ctx, Gc) -> Gc, Pure;
     BitsetItems = "praxis_bitset_items": (Ctx, Gc) -> Gc, Allocates;

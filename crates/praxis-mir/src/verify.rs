@@ -648,6 +648,7 @@ fn operands(inst: &Inst) -> Vec<LocalId> {
         | Inst::FloatCmp { dst, lhs, rhs, .. }
         | Inst::StructEq { dst, lhs, rhs, .. }
         | Inst::ValueCmp { dst, lhs, rhs } => v.extend([*dst, *lhs, *rhs]),
+        Inst::BitsetContains { dst, set, member } => v.extend([*dst, *set, *member]),
         Inst::Call { dst, args, .. } => {
             v.push(*dst);
             v.extend(args.iter().copied());

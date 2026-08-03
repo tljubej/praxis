@@ -1478,7 +1478,10 @@ fn bitset_contains() -> MethodEntry {
         params: vec![TypePattern::Scalar(ScalarType::Int)],
         result: TypePattern::Scalar(ScalarType::Bool),
         purity: Purity::Pure,
-        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::BitsetContains),
+        // The one `ScalarPrimitive` row in the catalog (ADR-118 decision 6):
+        // `bs.contains(x)` lowers to `Inst::BitsetContains`, whose result is a
+        // `Scalar(Bool)` and whose out-of-line form is this wrapper.
+        lowering: MethodLowering::ScalarPrimitive(abi::RuntimeSymbol::BitsetContains),
         doc: "True iff the bit for the integer is set.",
         stability: Stability::Stable,
     }
@@ -3055,6 +3058,63 @@ mod tests {
         assert!(
             checked >= 40,
             "expected the sweep to reach most of the catalog, it reached {checked} rows"
+        );
+    }
+
+    /// The sweep above skips [`MethodLowering::ScalarPrimitive`] rows, because
+    /// its biconditional is about wrappers that answer a `GcRef` and those
+    /// answer the scalar channel. This is their half of it (ADR-118 decision 6).
+    ///
+    /// **Skipping a row is how a sweep quietly stops covering anything**, so
+    /// the arm that made them skippable owes this test the day it is added.
+    /// What it rules out is the state that would matter: a row marked
+    /// `ScalarPrimitive` while its wrapper still returns a `GcRef`, which MIR
+    /// would take at its word and put a raw integer into a rootable slot
+    /// (P0-03). The complementary refusal is in `praxis-mir`'s
+    /// `lower_scalar_primitive`, whose fallthrough is an ICE naming the symbol:
+    /// a `-> RawI64` wrapper reachable from a method call with no instruction
+    /// to produce it is a compiler bug, not a program's.
+    #[test]
+    fn a_scalar_primitive_row_answers_the_scalar_channel_and_a_scalar_type() {
+        let cat = builtin_catalog();
+        let mut rows = 0;
+        for entry in cat.entries() {
+            let MethodLowering::ScalarPrimitive(sym) = entry.lowering else {
+                continue;
+            };
+            rows += 1;
+            assert_eq!(
+                sym.sig().ret,
+                abi::AbiRet::RawI64,
+                "{}.{} lowers as a scalar primitive, so `{}` must answer the \
+                 scalar channel; a `-> Gc` row here is a box the caller would \
+                 have to unwrap again, which is the whole thing this arm exists \
+                 to remove",
+                entry.receiver,
+                entry.name,
+                sym.name(),
+            );
+            assert!(
+                matches!(entry.result, TypePattern::Scalar(_)),
+                "{}.{} answers `{}`, which the scalar channel cannot carry",
+                entry.receiver,
+                entry.name,
+                entry.result,
+            );
+            // A scalar primitive is not a safepoint in MIR, so a row that
+            // allocates would be one the collector is never shown a frame at.
+            assert!(
+                !entry.allocates(),
+                "{}.{} allocates, so it cannot be a non-safepoint instruction",
+                entry.receiver,
+                entry.name,
+            );
+        }
+        assert_eq!(
+            rows, 1,
+            "`BitSet.contains` is the only scalar-primitive row today; a second \
+             one wants an arm in `praxis-mir`'s `lower_scalar_primitive` before \
+             this number moves"
         );
     }
 

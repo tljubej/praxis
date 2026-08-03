@@ -1328,7 +1328,15 @@ impl<'a> Lowerer<'a> {
             // No subscript row is an intrinsic, and one would have no call for
             // MIR to emit here. Dropping the statement is the same answer an
             // unresolved store gets.
-            praxis_stdlib::MethodLowering::Intrinsic(_) => return None,
+            //
+            // No subscript row is a `ScalarPrimitive` either, and that one is
+            // structural rather than incidental: a store answers `Unit`, and
+            // `ScalarPrimitive` exists precisely for rows whose answer is a
+            // scalar the caller wants unboxed (ADR-118 decision 6). A `[]=` row
+            // written that way would be asking MIR for the scalar result of a
+            // statement.
+            praxis_stdlib::MethodLowering::Intrinsic(_)
+            | praxis_stdlib::MethodLowering::ScalarPrimitive(_) => return None,
         };
         let receiver = idx.receiver().map(|r| self.lower_expr(&r))?;
         let indices: Vec<TypedExpr> = idx.indices().iter().map(|e| self.lower_expr(e)).collect();
@@ -2258,7 +2266,16 @@ impl<'a> Lowerer<'a> {
         };
         let ty = self.deep(resolved.result);
         let lowering_symbol = match &resolved.entry.lowering {
-            praxis_stdlib::MethodLowering::RuntimeSymbol(sym) => Some(*sym),
+            // A `ScalarPrimitive` row carries the same symbol and reaches MIR
+            // the same way. What differs is what MIR *builds* from it — a
+            // dedicated instruction rather than an `Inst::Call` — and that is
+            // the MIR builder's question, asked in one place
+            // (`build::scalar_primitive_of`) and cross-checked against this
+            // arm by `every_scalar_primitive_row_has_a_mir_instruction`. The
+            // typed tree carries the symbol, not the instruction, because
+            // nothing between here and MIR has an opinion about the difference.
+            praxis_stdlib::MethodLowering::RuntimeSymbol(sym)
+            | praxis_stdlib::MethodLowering::ScalarPrimitive(sym) => Some(*sym),
             // An intrinsic has no runtime symbol: the MIR builder lowers it
             // (the M8 pipeline combinators) rather than emitting a call.
             praxis_stdlib::MethodLowering::Intrinsic(_) => None,
@@ -2476,7 +2493,13 @@ impl<'a> Lowerer<'a> {
             };
         };
         let lowering_symbol = match &resolved.entry.lowering {
-            praxis_stdlib::MethodLowering::RuntimeSymbol(sym) => Some(*sym),
+            // As `lower_method_call`: a subscript read carries its symbol and
+            // MIR decides the instruction. No subscript row is a
+            // `ScalarPrimitive` today — every one of them answers a `GcRef`
+            // element — but the arm is written rather than declined, because
+            // `v[i]` is the row ADR-118's open questions nominate next.
+            praxis_stdlib::MethodLowering::RuntimeSymbol(sym)
+            | praxis_stdlib::MethodLowering::ScalarPrimitive(sym) => Some(*sym),
             praxis_stdlib::MethodLowering::Intrinsic(_) => None,
         };
         TypedExpr::MethodCall {
