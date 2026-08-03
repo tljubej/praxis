@@ -1037,6 +1037,7 @@ mod tests {
             kind: crate::LOCAL_KIND_USER,
             span_start: 0,
             span_end: 0,
+            slot_kind: crate::debug::DebugSlotKind::Reference,
         }];
         let meta = crate::FunctionDebugMeta {
             func_name: b"f".as_ptr(),

@@ -47,6 +47,23 @@ pub struct Function {
     /// locals carry their binding's span; temps carry the lowered expression's
     /// span. `None` for span-less locals (the return slot, scalar scratch).
     pub debug_spans: Vec<Option<(u32, u32)>>,
+    /// Per-`Gc`-local: the `Scalar` local whose word now stands in for the box
+    /// [`crate::forward`] deleted (ADR-120 part 2).
+    ///
+    /// The fourth of the parallel debug tables, and the only one written after
+    /// lowering rather than during it. A box the forwarding elides defines
+    /// nothing, so the backend's store-at-definition (ADR-104) never writes its
+    /// debug slot and the temp renders `<uninit>` where it rendered `= 30`.
+    /// This is the link that repairs it: the entry says *this `Gc` local's
+    /// debug slot is fed by that `Scalar` local's definition*, and it is
+    /// written at the only point in the compiler that still knows the two are
+    /// one value.
+    ///
+    /// Read through [`Function::debug_scalar_source`], never directly, because
+    /// the accessor is what makes the pairing's invariant observable: it
+    /// answers `None` unless the recorded source really is a `Scalar` local,
+    /// so a backend handed one of these cannot be handed a reference kind.
+    pub debug_scalar_sources: Vec<Option<LocalId>>,
     /// The function's source span `[start, end)` as byte offsets into the
     /// program source (§9.3, M10-WS1). Threaded AST → HIR → MIR → backend so
     /// the crash debugger's `source` command can render the faulting function.
@@ -990,6 +1007,7 @@ impl Function {
         self.debug_names.push(debug_name);
         self.debug_kinds.push(debug_kind);
         self.debug_spans.push(debug_span);
+        self.debug_scalar_sources.push(None);
         id
     }
 
@@ -1025,6 +1043,27 @@ impl Function {
     pub fn debug_span(&self, local: LocalId) -> Option<(u32, u32)> {
         self.debug_spans.get(local.0 as usize).copied().flatten()
     }
+
+    /// The `Scalar` local feeding `local`'s debug slot, and what kind of
+    /// payload it holds — `None` unless [`crate::forward`] elided `local`'s box
+    /// (ADR-120 part 2).
+    ///
+    /// The [`ScalarKind`] is read out of [`Function::locals`] rather than
+    /// stored beside the id, so the answer cannot disagree with the local it
+    /// names. That is also what makes the pair *unrepresentable* where it would
+    /// be unsound: the backend turns this kind into the runtime's
+    /// `DebugSlotKind`, and there is no way to reach that conversion holding a
+    /// source that is not a scalar. A recorded id that somehow named a `Gc`
+    /// local reads back as "no scalar source", which is the pre-ADR-120
+    /// behaviour — a `<uninit>` temp, not a payload the collector walks.
+    #[must_use]
+    pub fn debug_scalar_source(&self, local: LocalId) -> Option<(LocalId, ScalarKind)> {
+        let src = (*self.debug_scalar_sources.get(local.0 as usize)?)?;
+        match self.locals.get(src.0 as usize)?.kind {
+            LocalKind::Scalar(kind) => Some((src, kind)),
+            LocalKind::Gc => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1042,6 +1081,7 @@ mod tests {
             debug_names: Vec::new(),
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
             span: (0, 0),
         };
         let a = f.new_local(

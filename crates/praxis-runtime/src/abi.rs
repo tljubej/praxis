@@ -305,8 +305,21 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// v20 (ADR-119, W10): *owed* — the inline bitmap claim, if it clears its
 /// wave-3 gate. Same reason as the line above.
 ///
-/// v20 (ADR-120, W8-S0b): *owed* — the scalar debug slot, which adds a field to
-/// the `#[repr(C)]` `DebugLocalMeta` generated code writes. Same reason again.
+/// v20 (ADR-120 part 2, W8-S0b): the scalar debug slot. `DebugLocalMeta` gains
+/// `slot_kind: DebugSlotKind`, and with it **a debug value slot's word stops
+/// always being an `Option<GcRef>`**: a temp whose box ADR-120's forwarding
+/// elided has its payload stored raw, and the metadata beside the slot is the
+/// only thing that says so.
+///
+/// This is v12's entry again, one turn further. The struct's *size and offsets*
+/// are irrelevant to generated code — `DebugLocalMeta` is built in Rust,
+/// interned in the JIT generation arena, and `lower.rs` emits no `offset_of`
+/// against it; what a prologue stores is the address of the enclosing
+/// `FunctionDebugMeta`. What is versioned is the **meaning of the word**, as it
+/// was at v12: a v20-compiled program stores an `f64` bit pattern into a slot
+/// that a v19 runtime's `clear_reclaimed` would dereference as a `GcHeader`
+/// after every sweep (ADR-106's weak arm). That mismatch is silent and it is a
+/// wild read, which is exactly the class this changelog exists to make loud.
 pub const RUNTIME_ABI_VERSION: u32 = 20;
 
 /// Assert that the compiler's expected ABI version matches this build's.
@@ -8867,6 +8880,7 @@ mod tests {
             kind: crate::debug::LOCAL_KIND_USER,
             span_start: 0,
             span_end: 0,
+            slot_kind: crate::debug::DebugSlotKind::Reference,
         };
         let metas = [meta];
         let func_name = b"main";

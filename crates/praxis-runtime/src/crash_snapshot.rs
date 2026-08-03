@@ -29,7 +29,11 @@
 //!
 //! GC rooting (the §19.10 acceptance criterion "GC retains all objects
 //! reachable from snapshots"): [`CrashSnapshot`] implements [`RootSet`],
-//! yielding every copied `DebugLocal.value`. Transitive reachability is the
+//! yielding every copied `DebugLocal.value` that is a
+//! [`DebugValue::Reference`](crate::debug::DebugValue) — a slot holding an
+//! elided box's scalar payload (ADR-120 part 2) names no object and roots
+//! nothing, and `DebugValue::reference` is where it drops out. Transitive
+//! reachability is the
 //! collector's job; the snapshot just pins the entry points. The host registers
 //! the snapshot as a root when collecting during the REPL/noninteractive render.
 //!
@@ -123,9 +127,18 @@ impl RootSet for CrashSnapshot {
     fn push_roots(&self, out: &mut Vec<GcRef>) {
         // Walk every copied local's value. A slot no value was ever spilled
         // into is `None` and roots nothing — an absence the type carries, not a
-        // sentinel pointer to be compared against (F18).
+        // sentinel pointer to be compared against (F18). A slot holding an
+        // elided box's scalar payload (ADR-120 part 2) roots nothing either,
+        // and `reference()` is where it drops out: a snapshot *is* a strong
+        // root set, so a scalar reaching this line would be a payload traced as
+        // an object.
         for frame in &self.frames {
-            out.extend(frame.locals.iter().filter_map(|l| l.value));
+            out.extend(
+                frame
+                    .locals
+                    .iter()
+                    .filter_map(|l| l.value.and_then(crate::debug::DebugValue::reference)),
+            );
         }
     }
 }
@@ -255,12 +268,18 @@ unsafe fn copy_stack(entries: &[DebugFrameEntry]) -> Vec<SnapshotFrame> {
             metas
                 .iter()
                 .zip(values)
-                .map(|(m, &value)| DebugLocal {
+                .map(|(m, &word)| DebugLocal {
                     source_name: m.source_name,
                     name_len: m.name_len,
                     symbol_id: m.symbol_id,
                     descriptor: m.descriptor,
-                    value,
+                    // The zip *is* `read`'s precondition: slot `i` is decoded
+                    // under local `i`'s own `slot_kind` and no other's. A temp
+                    // whose box ADR-120 elided becomes a `DebugValue::Scalar`
+                    // here and is therefore not in `push_roots`' root set below
+                    // — correctly, since there is nothing to keep alive.
+                    // SAFETY: as above; the two arrays are index-parallel.
+                    value: unsafe { m.read(word) },
                     type_id: m.type_id,
                     kind: m.kind,
                     span_start: m.span_start,
@@ -324,7 +343,7 @@ mod tests {
                     name_len: 0,
                     symbol_id: 0,
                     descriptor: &INT as *const _,
-                    value: Some(value),
+                    value: Some(crate::debug::DebugValue::Reference(value)),
                     type_id: 0,
                     kind: LOCAL_KIND_USER,
                     span_start: 0,
@@ -363,7 +382,7 @@ mod tests {
                         name_len: 0,
                         symbol_id: 0,
                         descriptor: &INT as *const _,
-                        value: Some(value),
+                        value: Some(crate::debug::DebugValue::Reference(value)),
                         type_id: 0,
                         kind: LOCAL_KIND_USER,
                         span_start: 0,
@@ -420,6 +439,7 @@ mod tests {
             kind: LOCAL_KIND_USER,
             span_start: 0,
             span_end: 0,
+            slot_kind: crate::debug::DebugSlotKind::Reference,
         }];
         let meta = crate::FunctionDebugMeta {
             func_name: b"main".as_ptr(),

@@ -11,10 +11,13 @@
 //!   generation arena at compile time, shared by every call and every recursion
 //!   level. This is what made `praxis_set_frame_source_span` a *runtime* call to
 //!   record a *compile-time* constant, which is why that wrapper is gone.
-//! - **Per call:** one `Option<GcRef>` per `Gc` local, claimed from a contiguous
+//! - **Per call:** one machine word per `Gc` local, claimed from a contiguous
 //!   [`DebugValueStack`] the runtime owns, and one [`DebugFrameEntry`] pairing
 //!   the meta with the base of that run, claimed from a contiguous
-//!   [`DebugFrameStack`].
+//!   [`DebugFrameStack`]. The word is an `Option<GcRef>` for every local whose
+//!   box survives compilation and a raw scalar payload for one whose box
+//!   ADR-120's forwarding elided; which it is, is [`DebugSlotKind`]'s to say
+//!   and nothing else's.
 //!
 //! Both stacks are [`SlotStack`]s — the mechanism ADR-101 built for the shadow
 //! stack and made generic for exactly this. A prologue claims its slots by
@@ -59,6 +62,24 @@
 //! schedule — and what the debugger renders for it changes from freed memory to
 //! `<uninit>`, which is the honest answer and the one the `None` niche already
 //! spells.
+//!
+//! ## …and one slot in three now holds no reference at all (ADR-120 part 2)
+//!
+//! ADR-120's block-local forwarding deletes the box a value is put into so the
+//! next instruction can take it straight back out — and with the box goes the
+//! definition that wrote the debugger's slot, so `<tmp#7: Int> @ "a + b"`
+//! rendered `= 30` before the pass and `= <uninit>` after it. Part 2 gives that
+//! slot the *scalar* the box would have held, which means a value slot's word
+//! is no longer always an `Option<GcRef>`.
+//!
+//! That is a memory-safety statement, not a display one, because of the
+//! paragraph above: this stack is scanned after every sweep and the scan
+//! dereferences what it finds. **The discrimination is
+//! [`DebugLocalMeta::slot_kind`], a type, and [`DebugLocalMeta::read`] is the
+//! only way to turn a word into a value.** A scalar slot decodes to a
+//! [`DebugValue::Scalar`], which contains no `GcRef`, so no consumer — the
+//! scan, the crash snapshot's root set, or the debugger's `p EXPR` bindings —
+//! can reach a header through one. See [`DebugSlotKind`].
 
 use crate::context::{DebugLocal, RuntimeContext};
 use crate::gc::GcRef;
@@ -85,9 +106,161 @@ pub const LOCAL_KIND_TEMP: u8 = 1;
 /// descriptor says the same thing in the other field.
 pub const NO_STATIC_TYPE: u32 = u32::MAX;
 
+/// What a debug value slot's word **is** — and the only thing in the process
+/// that can say so (ADR-120 part 2).
+///
+/// The word alone cannot. A slot holding the `Int` payload `4` and a slot
+/// holding a `GcRef` to address `4` are the same sixty-four bits, and there is
+/// no bit left over to tag them apart: [`DebugValueStack`] is one machine word
+/// per local by ADR-104's construction and the shadow stack's, which is what
+/// makes a definition's debug store a single `str`.
+///
+/// So the discrimination lives in the *static* metadata beside the slot, where
+/// it costs nothing per call and cannot be corrupted by a program: this field
+/// is written once per function by `build_function_debug_meta` at compile time,
+/// interned in the JIT generation arena, and never written again.
+///
+/// **This is the type that makes ADR-120 part 2 sound**, and it is a type
+/// rather than a `bool` for a reason. The failure mode the scalar slot creates
+/// is *the collector dereferencing an `f64` bit pattern as a [`GcHeader`]*
+/// (`crate::GcHeader`), and ADR-106 makes the debug frames the collector's one
+/// weak arm — every claimed slot is scanned after every sweep. A `bool` field
+/// would be a condition each scan has to remember to test. An enum whose
+/// non-[`Reference`](DebugSlotKind::Reference) variants are the input to
+/// [`DebugLocalMeta::read`], which answers a
+/// [`DebugValue::Scalar`] that *contains no reference*, is a condition no scan
+/// can fail to test: there is no path from a scalar slot to a `GcRef`.
+///
+/// Every [`praxis_mir::ir::ScalarKind`](../../praxis_mir/ir/enum.ScalarKind.html)
+/// has a variant here, including the two ADR-120's forwarding cannot reach
+/// today (`Char`, whose producer faults, and `Byte`, which is unwired). The map
+/// is total on purpose: a partial map would have to answer *something* for a
+/// kind it did not cover, and the only available answer is `Reference` — which
+/// is precisely the unsound one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum DebugSlotKind {
+    /// The slot holds an `Option<GcRef>`: a reference into the heap, or the
+    /// all-zero `None`. Every local had this before ADR-120 part 2, and every
+    /// local whose box survives still does.
+    Reference,
+    /// `i64` — an `Int` payload whose box ADR-120's forwarding deleted.
+    Int,
+    /// `u8` widened — a `Bool` payload.
+    Bool,
+    /// `f64::to_bits()` — a `Float` payload. The bit pattern the scalar channel
+    /// carries (`ScalarKind::Float`'s doc), not an `f64` register value.
+    Float,
+    /// `u32` widened — a `Char` payload.
+    Char,
+    /// `u8` widened — a `Byte` payload.
+    Byte,
+}
+
+/// One scalar payload read out of a debug slot, decoded under the slot's
+/// [`DebugSlotKind`].
+///
+/// The point of the type is what it does **not** have: no pointer, no `GcRef`,
+/// no descriptor. A consumer holding one of these cannot reach the heap through
+/// it, which is why [`DebugValue`] is safe to hand to the crash-snapshot
+/// walker, the renderer and the collector's post-sweep scan alike.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ScalarValue {
+    Int(i64),
+    Bool(bool),
+    Float(f64),
+    Char(char),
+    Byte(u8),
+}
+
+/// Render a payload the way the object it came out of would have rendered.
+///
+/// **The text must match**, and that is the requirement rather than a nicety:
+/// ADR-120 part 2 exists so a user cannot tell which temps the optimizer kept a
+/// box for, and a `Float` that printed `3` here and `3.0` through
+/// `crate::scalars::FLOAT`'s `format` would give the answer away. So this lives
+/// beside those callbacks — `write_float` is literally the one `FLOAT.format`
+/// calls (ADR-083's `.0` rule) — rather than in the debugger's renderer, which
+/// is the crate that would have had to guess.
+impl std::fmt::Display for ScalarValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            ScalarValue::Int(v) => write!(f, "{v}"),
+            ScalarValue::Bool(v) => f.write_str(if v { "true" } else { "false" }),
+            ScalarValue::Float(v) => {
+                crate::scalars::write_float(f, v);
+                Ok(())
+            }
+            ScalarValue::Char(c) => write!(f, "{c}"),
+            ScalarValue::Byte(b) => write!(f, "{b}"),
+        }
+    }
+}
+
+/// What a debug slot holds: a reference the collector and the debugger may
+/// follow, or a raw scalar neither may.
+///
+/// [`DebugLocalMeta::read`] is the only constructor, and it is the only place
+/// in the runtime where a slot word becomes something typed.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum DebugValue {
+    /// A live reference into the heap.
+    Reference(GcRef),
+    /// A payload whose box the compiler elided (ADR-120).
+    Scalar(ScalarValue),
+}
+
+impl DebugValue {
+    /// The reference this value names, or `None` if it is a scalar.
+    ///
+    /// The **one** door from a debug value back to the heap, so every consumer
+    /// that roots, traces, poisons-checks or type-recovers a debug value goes
+    /// through a single line that a scalar cannot pass. `crash_snapshot`'s
+    /// `push_roots`, the collector's post-sweep scan and the debugger's
+    /// `p EXPR` bindings are its three callers.
+    #[must_use]
+    pub fn reference(self) -> Option<GcRef> {
+        match self {
+            DebugValue::Reference(r) => Some(r),
+            DebugValue::Scalar(_) => None,
+        }
+    }
+
+    /// Read this value as an `Int`, whether it is still boxed or was elided
+    /// into a scalar slot.
+    ///
+    /// # Panics
+    /// If it is neither — the same contract, and the same assertion, as
+    /// [`GcRef::as_int`](crate::GcRef::as_int), which this delegates to for a
+    /// reference. A caller asking a `Vec` for its integer has a bug either way,
+    /// and ADR-120 part 2 does not make that bug quieter.
+    #[must_use]
+    pub fn as_int(&self) -> i64 {
+        match self {
+            DebugValue::Reference(r) => r.as_int(),
+            DebugValue::Scalar(ScalarValue::Int(v)) => *v,
+            DebugValue::Scalar(other) => panic!("not an Int: {other:?}"),
+        }
+    }
+
+    /// Read this value as a `Vec`'s elements.
+    ///
+    /// # Panics
+    /// If it is a scalar. A `Vec` is never a scalar payload, so this arm is a
+    /// caller bug and not a slot the compiler could have produced: ADR-120
+    /// forwards `Int`, `Bool` and `Float` boxes only.
+    #[must_use]
+    pub fn as_vec(&self) -> &[GcRef] {
+        match self {
+            DebugValue::Reference(r) => r.as_vec(),
+            DebugValue::Scalar(other) => panic!("a scalar is not a Vec: {other:?}"),
+        }
+    }
+}
+
 /// One local's metadata at frame construction: the source name (ptr + len),
 /// the compiler-assigned symbol id, the local's static type descriptor, the
-/// full static `Type` id, the user-vs-temp classification, and the source span.
+/// full static `Type` id, the user-vs-temp classification, the source span, and
+/// what its value slot's word means.
 /// Flattened for FFI.
 #[repr(C)]
 pub struct DebugLocalMeta {
@@ -111,6 +284,81 @@ pub struct DebugLocalMeta {
     /// `(0, 0)` means "no span" (the return slot, span-less captures).
     pub span_start: u32,
     pub span_end: u32,
+    /// What this local's value slot holds (ADR-120 part 2). [`DebugSlotKind::Reference`]
+    /// for every local whose box the compiler kept, which is every local there
+    /// was before ADR-120; a scalar kind for a temp whose box the block-local
+    /// forwarding deleted and whose payload the definition now stores raw.
+    ///
+    /// A real `enum`, not the `u8` its neighbours `kind` and `type_id` are,
+    /// because nothing outside Rust ever writes this struct: `#[repr(C)]` is
+    /// here so `crate::crash_snapshot` reads a stable layout, and generated code
+    /// only ever stores the address of the enclosing [`FunctionDebugMeta`]. So
+    /// there is no bit pattern to validate and no "unknown tag" case to decide
+    /// what to do with — which is one fewer place the answer could be
+    /// `Reference` by accident.
+    pub slot_kind: DebugSlotKind,
+}
+
+impl DebugLocalMeta {
+    /// Decode one value slot's word under this local's [`slot_kind`](Self::slot_kind).
+    ///
+    /// **The only place a slot word becomes something typed**, and therefore the
+    /// only place the reference/scalar question is asked. `None` is "nothing has
+    /// been written here yet".
+    ///
+    /// ### The zero word, and the one thing a scalar slot cannot say
+    ///
+    /// A claim zeroes its run, so an all-zero word is "no value yet" — which for
+    /// a [`DebugSlotKind::Reference`] slot is *exact*, because a `GcRef` is
+    /// `NonNull` and can never be zero (F18, the niche this module's header
+    /// describes).
+    ///
+    /// For a scalar slot it is **not** exact: the payloads `0`, `false` and
+    /// `0.0` are all the zero word, so a temp that genuinely computed zero
+    /// reads back as `<uninit>`. That is the price of keeping one machine word
+    /// per slot, and it is paid in the safe direction — the slot under-reports a
+    /// value it holds and never reports a value it does not. ADR-120 part 2
+    /// records why the alternatives (a second word per slot, or a prologue store
+    /// per scalar slot to write a sentinel) are per-*call* costs against a
+    /// per-*call* debugger gain, and `a_scalar_slot_holding_zero_reads_as_uninit`
+    /// pins the behaviour so a later package changes it deliberately.
+    ///
+    /// # Safety
+    /// `word` must be the current content of a live value slot belonging to a
+    /// frame whose metadata is this one — that is, `values[i]` paired with
+    /// `locals[i]` of the same [`FunctionDebugMeta`]. Pairing a word with
+    /// another local's metadata is exactly the mistake this function exists to
+    /// make impossible to write by hand, and the two callers
+    /// ([`DebugFrameStackHeader::clear_reclaimed`] and
+    /// `crash_snapshot::copy_stack`) both zip the two arrays.
+    #[must_use]
+    pub unsafe fn read(&self, word: Option<GcRef>) -> Option<DebugValue> {
+        let word = word?;
+        if self.slot_kind == DebugSlotKind::Reference {
+            return Some(DebugValue::Reference(word));
+        }
+        // Not a reference: recover the raw bits without ever forming something
+        // dereferenceable from them. `GcRef` is `#[repr(transparent)]` over a
+        // `NonNull`, so this is the address-as-integer read `strict_provenance`
+        // sanctions and not a load through the pointer.
+        let bits = word.as_ptr() as usize as u64;
+        let scalar = match self.slot_kind {
+            // Unreachable: the branch above returned. Spelled out rather than
+            // `unreachable!()` so this match stays total over the enum and a
+            // new variant is a compile error here.
+            DebugSlotKind::Reference => return Some(DebugValue::Reference(word)),
+            DebugSlotKind::Int => ScalarValue::Int(bits as i64),
+            DebugSlotKind::Bool => ScalarValue::Bool(bits & 1 != 0),
+            DebugSlotKind::Float => ScalarValue::Float(f64::from_bits(bits)),
+            // A `Char` payload is a validated Unicode scalar everywhere the
+            // language can produce one, so `None` here is a compiler bug rather
+            // than a program one — and rendering the slot as `<uninit>` is how
+            // it stays a missing value instead of becoming a wrong character.
+            DebugSlotKind::Char => ScalarValue::Char(char::from_u32(bits as u32)?),
+            DebugSlotKind::Byte => ScalarValue::Byte(bits as u8),
+        };
+        Some(DebugValue::Scalar(scalar))
+    }
 }
 
 /// Everything the crash debugger needs about a function that does **not** vary
@@ -281,6 +529,12 @@ impl DebugFrameStackHeader {
     /// every prologue establishes. `values` must be live for the duration of the
     /// call: the collector writes through it.
     ///
+    /// A slot whose [`DebugLocalMeta::slot_kind`] is not
+    /// [`DebugSlotKind::Reference`] is not a reference and is not scanned. The
+    /// exclusion is structural rather than a test this loop performs — see the
+    /// comment at the `continue` — and it is what keeps ADR-120 part 2's scalar
+    /// slots out of the collector's one weak arm entirely.
+    ///
     /// Reading `r.header()` for a reference into a *reclaimed* block is a read of
     /// mapped memory, not a use-after-free: a page is unmapped only at teardown,
     /// after `finalize_all` (`Heap::release_pages`), which is the same premise
@@ -306,13 +560,29 @@ impl DebugFrameStackHeader {
                 // reservation's own provenance — not a pointer re-derived from
                 // a shared slice.
                 let slot = unsafe { entry.values.add(i) };
-                // SAFETY: as above; the slot holds an initialized
-                // `Option<GcRef>` (a claim zeroes its run, and zero is `None`).
-                let Some(r) = (unsafe { *slot }) else {
+                // SAFETY: the caller guarantees `locals` names `local_count`
+                // entries, and slot `i` is local `i`'s — the two arrays are
+                // index-parallel by ADR-104's construction.
+                let local = unsafe { &*meta.locals.add(i) };
+                // SAFETY: `local` is slot `i`'s own metadata, which is `read`'s
+                // whole precondition; the slot holds an initialized word (a
+                // claim zeroes its run).
+                let value = unsafe { local.read(*slot) };
+                // **A scalar slot never reaches `header()`**, and it is the type
+                // that says so rather than a test above this line: `read`
+                // answers `DebugValue::Scalar`, which holds no `GcRef`, so
+                // `reference()` is `None` and the poison check is not merely
+                // skipped — it is unreachable. That is the whole of ADR-120
+                // part 2's soundness argument against the failure mode it
+                // creates, which is this scan dereferencing an `f64` bit
+                // pattern as a `GcHeader`.
+                let Some(r) = value.and_then(DebugValue::reference) else {
                     continue;
                 };
                 if r.header().is_poisoned() {
-                    // SAFETY: as above.
+                    // SAFETY: as above. Nulling is correct for a reference slot
+                    // and would be a *lie* in a scalar one — zero is a payload
+                    // there — which is the second reason the arms are separate.
                     unsafe { *slot = None };
                     cleared += 1;
                 }
@@ -362,13 +632,17 @@ impl DebugLocal {
     }
 }
 
-/// `DebugLocal.value` and a debug value slot must stay one machine word:
-/// generated code stores a raw `GcRef` into each at a fixed offset, and reads
-/// the zeroed slot a fresh claim starts with as "no value yet". `Option<GcRef>`
-/// is niche-optimized to exactly that (F18); this is the compile-time proof.
+/// A debug value slot must stay one machine word: generated code stores into
+/// it at a fixed offset with a single `str` — a `GcRef` for a reference slot,
+/// a raw payload for a scalar one (ADR-120 part 2) — and reads the zeroed slot
+/// a fresh claim starts with as "no value yet". `Option<GcRef>` is
+/// niche-optimized to exactly that (F18); this is the compile-time proof, and
+/// the second assertion is also what makes `DebugFrameGuard::set_scalar`'s
+/// `*mut u64` write in-bounds and correctly aligned.
 const _: () = {
     assert!(std::mem::size_of::<Option<GcRef>>() == std::mem::size_of::<GcRef>());
-    assert!(std::mem::size_of::<Option<GcRef>>() == std::mem::size_of::<usize>());
+    assert!(std::mem::size_of::<Option<GcRef>>() == std::mem::size_of::<u64>());
+    assert!(std::mem::align_of::<Option<GcRef>>() == std::mem::align_of::<u64>());
 };
 
 // ---------------------------------------------------------------------------
@@ -411,6 +685,39 @@ impl DebugFrameGuard {
         // SAFETY: `index` is inside the run claimed by `push_frame`, which is
         // live until this guard drops.
         unsafe { *self.value_base.add(index) = Some(r) };
+    }
+
+    /// Record the raw word `bits` as the current value of local `index` — the
+    /// Rust-side equivalent of the store a definition of an elided box's scalar
+    /// emits (ADR-120 part 2).
+    ///
+    /// Deliberately *not* typed as a [`ScalarValue`]: generated code writes one
+    /// machine word and knows nothing about what it means, and a test that
+    /// could only write a well-formed payload could not reproduce the state the
+    /// collector has to survive — a slot whose word is an `f64` bit pattern
+    /// that happens to be a plausible heap address.
+    ///
+    /// # Panics
+    /// If `index` is outside the frame, for [`DebugFrameGuard::set`]'s reason.
+    pub fn set_scalar(&mut self, index: usize, bits: u64) {
+        assert!(
+            index < self.count as usize,
+            "debug slot {index} is outside a {}-local frame",
+            self.count
+        );
+        // SAFETY: `index` is inside the run claimed by `push_frame`, which is
+        // live until this guard drops. Written as a machine word through a
+        // `*mut u64` rather than as an `Option<GcRef>`, because that is what a
+        // generated `str` does and because no `GcRef` should exist here even
+        // momentarily: a slot word is dereferenceable only after
+        // `DebugLocalMeta::read` says its `slot_kind` is `Reference`. The two
+        // types have the same size and alignment (the `const _` below), and
+        // every bit pattern is a valid `Option<GcRef>` — `NonNull`'s only
+        // validity invariant is non-nullness — so the write is in-bounds and
+        // leaves the slot initialized either way.
+        unsafe {
+            *self.value_base.add(index).cast::<u64>() = bits;
+        }
     }
 
     /// This frame's value slots, as the crash snapshot reads them.
@@ -518,6 +825,7 @@ mod tests {
                 kind: LOCAL_KIND_USER,
                 span_start: 5,
                 span_end: 6,
+                slot_kind: crate::debug::DebugSlotKind::Reference,
             },
             DebugLocalMeta {
                 source_name: name_a.as_ptr(),
@@ -528,6 +836,7 @@ mod tests {
                 kind: LOCAL_KIND_USER,
                 span_start: 20,
                 span_end: 21,
+                slot_kind: crate::debug::DebugSlotKind::Reference,
             },
         ]
     }
@@ -717,6 +1026,170 @@ mod tests {
         );
         drop(guard);
         drop(shadow);
+    }
+
+    /// A pair of metadata whose **second** slot is a scalar (ADR-120 part 2),
+    /// so a test can put one of each side by side in one frame and check that
+    /// the collector treats them differently.
+    fn one_reference_and_one_scalar(kind: DebugSlotKind) -> [DebugLocalMeta; 2] {
+        let mut metas = shadowed_a_metas();
+        metas[1].slot_kind = kind;
+        metas
+    }
+
+    /// **The whole of ADR-120 part 2's soundness argument, as a test.** A scalar
+    /// slot must not enter the collector's post-sweep scan.
+    ///
+    /// The word written is the *address of an object this collection reclaims*,
+    /// which is the adversarial case rather than a plausible one: had the slot
+    /// been marked `Reference` the scan would have found its header poisoned
+    /// and nulled it, so "the word is unchanged" is a deterministic statement
+    /// about the discrimination working and not about a bit pattern happening
+    /// not to look like a pointer. A payload that *is* a heap address is
+    /// exactly what an `f64` or a large `Int` can be.
+    ///
+    /// `a_weak_slot_whose_object_died_becomes_an_absence` is the same program
+    /// with the same word in a `Reference` slot, and it asserts the opposite —
+    /// so the two together say the `slot_kind` is what decides, and nothing
+    /// else is.
+    #[test]
+    fn a_scalar_slot_is_not_scanned_even_when_its_word_names_reclaimed_storage() {
+        let metas = one_reference_and_one_scalar(DebugSlotKind::Int);
+        let meta = meta_for(b"f", &metas, (0, 0));
+        let mut f = Fixture::new();
+        // Past ADR-100's intern range, so the sweep really does reclaim it.
+        let doomed =
+            f.rt.heap()
+                .alloc_unpaced(crate::scalars::INT_PAYLOAD, 9_999_i64);
+        let bits = doomed.as_ptr() as usize as u64;
+        let ctx = f.ctx_ptr();
+        // SAFETY: `ctx` is wired to `f.rt`, and `meta`/`metas` outlive the guard.
+        let mut guard = unsafe { push_frame(ctx, &meta) };
+        guard.set_scalar(1, bits);
+
+        f.rt.collect_now();
+
+        // SAFETY: slot 1 is local 1's, which is the pairing `read` requires.
+        let seen = unsafe { metas[1].read(guard.values()[1]) };
+        assert_eq!(
+            seen,
+            Some(DebugValue::Scalar(ScalarValue::Int(bits as i64))),
+            "the scan nulled a scalar slot, which means it read the word as a \
+             reference and dereferenced its header"
+        );
+        assert_eq!(
+            seen.and_then(DebugValue::reference),
+            None,
+            "and a scalar can never be handed back as something to follow"
+        );
+        drop(guard);
+    }
+
+    /// The control: the *same* word in a `Reference` slot is nulled. Without
+    /// it, a scan that had quietly stopped clearing anything at all would pass
+    /// the test above.
+    #[test]
+    fn the_same_word_in_a_reference_slot_is_still_cleared_by_the_scan() {
+        let metas = shadowed_a_metas();
+        let meta = meta_for(b"f", &metas, (0, 0));
+        let mut f = Fixture::new();
+        let doomed =
+            f.rt.heap()
+                .alloc_unpaced(crate::scalars::INT_PAYLOAD, 9_999_i64);
+        let bits = doomed.as_ptr() as usize as u64;
+        let ctx = f.ctx_ptr();
+        // SAFETY: as above.
+        let mut guard = unsafe { push_frame(ctx, &meta) };
+        guard.set_scalar(1, bits);
+
+        f.rt.collect_now();
+
+        assert_eq!(guard.values()[1], None, "a reference slot is scanned");
+        drop(guard);
+    }
+
+    /// Every scalar kind round-trips through the slot's one machine word, and
+    /// `Float` is the one that matters: the scalar channel carries
+    /// `f64::to_bits()` (`ScalarKind::Float`'s own doc), so a decode that
+    /// forgot `from_bits` would render `4614256656552045848` for `3.14`.
+    #[test]
+    fn each_scalar_kind_decodes_the_word_its_channel_carries() {
+        let cases: [(DebugSlotKind, u64, ScalarValue); 5] = [
+            (DebugSlotKind::Int, -7_i64 as u64, ScalarValue::Int(-7)),
+            (DebugSlotKind::Bool, 1, ScalarValue::Bool(true)),
+            (
+                DebugSlotKind::Float,
+                std::f64::consts::PI.to_bits(),
+                ScalarValue::Float(std::f64::consts::PI),
+            ),
+            (
+                DebugSlotKind::Char,
+                u32::from('q') as u64,
+                ScalarValue::Char('q'),
+            ),
+            (DebugSlotKind::Byte, 200, ScalarValue::Byte(200)),
+        ];
+        for (kind, bits, expected) in cases {
+            let metas = one_reference_and_one_scalar(kind);
+            let meta = meta_for(b"f", &metas, (0, 0));
+            let mut f = Fixture::new();
+            let ctx = f.ctx_ptr();
+            // SAFETY: `ctx` is wired to `f.rt`, and `meta`/`metas` outlive the guard.
+            let mut guard = unsafe { push_frame(ctx, &meta) };
+            guard.set_scalar(1, bits);
+            // SAFETY: slot 1 is local 1's.
+            let seen = unsafe { metas[1].read(guard.values()[1]) };
+            assert_eq!(seen, Some(DebugValue::Scalar(expected)), "{kind:?}");
+            drop(guard);
+        }
+    }
+
+    /// **The one thing a scalar slot cannot say**, pinned so a later package
+    /// changes it deliberately rather than discovers it.
+    ///
+    /// A claim zeroes its run and zero means "nothing written here yet", which
+    /// is exact for a `Reference` slot — a `GcRef` is `NonNull` — and is not
+    /// exact for a scalar one, because `0`, `false` and `0.0` are all the zero
+    /// word. The slot therefore under-reports a value it holds; it never
+    /// reports a value it does not, which is the direction to be wrong in.
+    #[test]
+    fn a_scalar_slot_holding_zero_reads_as_uninit() {
+        let metas = one_reference_and_one_scalar(DebugSlotKind::Int);
+        let meta = meta_for(b"f", &metas, (0, 0));
+        let mut f = Fixture::new();
+        let ctx = f.ctx_ptr();
+        // SAFETY: `ctx` is wired to `f.rt`, and `meta`/`metas` outlive the guard.
+        let mut guard = unsafe { push_frame(ctx, &meta) };
+        guard.set_scalar(1, 0);
+        // SAFETY: slot 1 is local 1's.
+        assert_eq!(
+            unsafe { metas[1].read(guard.values()[1]) },
+            None,
+            "a written zero and an unwritten slot are the same word, and the \
+             honest answer for the pair is the absence"
+        );
+        drop(guard);
+    }
+
+    /// A scalar renders as the *object would have*, which is the requirement
+    /// that keeps ADR-120's elision invisible: a user must not be able to tell
+    /// which temps kept a box by looking at the value column.
+    #[test]
+    fn a_scalar_renders_the_text_its_descriptor_would_have_written() {
+        let mut out = String::new();
+        // SAFETY: the payload is a real `FloatPayload` on this stack frame.
+        let f = 3.0_f64;
+        unsafe {
+            (crate::scalars::FLOAT.format)(std::ptr::addr_of!(f) as *const u8, &mut out);
+        }
+        assert_eq!(out, ScalarValue::Float(3.0).to_string(), "ADR-083's `.0`");
+        let mut out = String::new();
+        let b: crate::scalars::BoolPayload = 1;
+        // SAFETY: as above, for a `BoolPayload`.
+        unsafe {
+            (crate::scalars::BOOL.format)(std::ptr::addr_of!(b).cast::<u8>(), &mut out);
+        }
+        assert_eq!(out, ScalarValue::Bool(true).to_string());
     }
 
     /// The scan is driven from the frame entries, so a frame that claims no

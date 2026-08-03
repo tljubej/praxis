@@ -250,36 +250,28 @@ fn transfer_term(live: &mut BTreeSet<LocalId>, term: &Terminator) {
 /// at five (`ir.rs`, this `defs`, `uses`, `verify.rs`'s `operands`, and
 /// `lower_inst`); a private copy in the backend would have made it six, and the
 /// two would have to agree for the debugger to show what MIR-16 promises.
+///
+/// **The match itself now lives in [`crate::verify::defines`]** (ADR-122),
+/// which answers the sharper question — *the* local, not a list — because the
+/// provable-descriptor analysis needs a definition site and a `Vec` of one
+/// element is not one. This wraps it rather than restating it, so the count
+/// stays at five: the backend's iteration order over a definition set is
+/// unchanged, because there was never more than one member.
 pub fn defs(inst: &Inst) -> Vec<LocalId> {
-    match inst {
-        Inst::Alloc { dst, .. } => vec![*dst],
-        Inst::ExtractScalar { dst, .. } => vec![*dst],
-        Inst::Materialize { dst, .. } => vec![*dst],
-        Inst::IntBinOp { dst, .. } => vec![*dst],
-        Inst::FloatBinOp { dst, .. } => vec![*dst],
-        Inst::FloatNeg { dst, .. } => vec![*dst],
-        Inst::IntCmp { dst, .. } => vec![*dst],
-        Inst::FloatCmp { dst, .. } => vec![*dst],
-        Inst::StructEq { dst, .. } => vec![*dst],
-        Inst::ValueCmp { dst, .. } => vec![*dst],
-        Inst::BitsetContains { dst, .. } => vec![*dst],
-        Inst::Call { dst, .. } => vec![*dst],
-        Inst::CallIndirect { dst, .. } => vec![*dst],
-        Inst::MoveGc { dst, .. } => vec![*dst],
-        Inst::ConstInt { dst, .. } => vec![*dst],
-        Inst::ConstFloat { dst, .. } => vec![*dst],
-        Inst::ConstGc { dst, .. } => vec![*dst],
-        Inst::LoadField { dst, .. } | Inst::LoadTupleElem { dst, .. } => vec![*dst],
-        Inst::LoadCapture { dst, .. } => vec![*dst],
-        Inst::EnumTag { dst, .. } => vec![*dst],
-        Inst::EnumPayloadGet { dst, .. } => vec![*dst],
-        Inst::StoreScalar { .. } | Inst::CheckFault { .. } => vec![],
-    }
+    crate::verify::defines(inst).into_iter().collect()
 }
 
 /// Locals used by an instruction (excluding `live_roots`, which is derived, not
 /// an operand).
-fn uses(inst: &Inst) -> Vec<LocalId> {
+///
+/// `pub(crate)` for [`crate::forward`], whose census is built from this and
+/// [`defs`] rather than from a sixth match over [`Inst`] (ADR-044's
+/// Consequences fix the count at five). It is also the *read-only* half of that
+/// pass's licence to delete: after rewriting an operand field, `forward` asks
+/// this again and deletes the definition only when no use survives, so a field
+/// its own non-exhaustive rewriter missed costs an optimization rather than
+/// correctness (ADR-120).
+pub(crate) fn uses(inst: &Inst) -> Vec<LocalId> {
     match inst {
         Inst::Alloc {
             alloc:
@@ -345,7 +337,12 @@ fn uses(inst: &Inst) -> Vec<LocalId> {
 }
 
 /// Locals used by a terminator.
-fn term_uses(term: &Terminator) -> Vec<LocalId> {
+///
+/// `pub(crate)` for [`uses`]'s reason, and for one of its own:
+/// [`crate::forward`]'s single most valuable rewrite is `Terminator::Branch`'s
+/// condition, because `lower_while` emits a `Materialize{Bool}` whose only
+/// consumer is the terminator (ADR-120).
+pub(crate) fn term_uses(term: &Terminator) -> Vec<LocalId> {
     match term {
         Terminator::Branch { cond, .. } => vec![*cond],
         Terminator::Return { value } => vec![*value],
@@ -459,6 +456,7 @@ mod tests {
             debug_names: Vec::new(),
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
             span: (0, 0),
         };
         let ret = gc_local(&mut f, "ret");
@@ -527,6 +525,7 @@ mod tests {
             debug_names: Vec::new(),
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
             span: (0, 0),
         };
         let _blk: Block = Block {
@@ -560,6 +559,7 @@ mod tests {
             debug_names: Vec::new(),
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
             span: (0, 0),
         };
         let ret = gc_local(&mut f, "ret");
@@ -629,6 +629,7 @@ mod tests {
             debug_names: Vec::new(),
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
             span: (0, 0),
         };
         let ret = gc_local(&mut f, "ret");
@@ -731,6 +732,7 @@ mod tests {
             debug_names: Vec::new(),
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
             span: (0, 0),
         };
         let ret = gc_local(&mut f, "ret");

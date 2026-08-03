@@ -65,6 +65,17 @@ pub fn lower_module(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
     for adapter in &adapted {
         funcs.push(lower_fn_value_adapter(adapter, db));
     }
+    // Block-local box/unbox forwarding (ADR-120), and it is *here* rather than
+    // beside `lower_module` at each of the five hosts. It deletes safepoints, so
+    // it has to run before `crate::annotate` computes a slot set per safepoint;
+    // every host does `lower_module → annotate → verify` in that order, so the
+    // last line of this function is the one place that ordering holds with no
+    // host edited — which is ADR-108 §1's stated reason for refusing a
+    // standalone pass. Every closure and adapter above is covered because they
+    // are in `funcs` by now.
+    for func in &mut funcs {
+        crate::forward::forward_boxes(func);
+    }
     funcs
 }
 
@@ -277,6 +288,7 @@ fn lower_fn(
         debug_names: Vec::new(),
         debug_kinds: Vec::new(),
         debug_spans: Vec::new(),
+        debug_scalar_sources: Vec::new(),
         span: f.span,
     };
     let entry = func.new_block();
@@ -365,6 +377,7 @@ fn lower_closure_fn(
         debug_names: Vec::new(),
         debug_kinds: Vec::new(),
         debug_spans: Vec::new(),
+        debug_scalar_sources: Vec::new(),
         // Closures are lifted to synthetic functions; the `__p_expr` debugger
         // function is also span-less. The `source` command degrades to "no
         // span recorded" for these, which is acceptable (the faulting frame is
@@ -500,6 +513,7 @@ fn lower_fn_value_adapter(adapter: &FnValueAdapter, db: &mut TypeDb) -> Function
         debug_names: Vec::new(),
         debug_kinds: Vec::new(),
         debug_spans: Vec::new(),
+        debug_scalar_sources: Vec::new(),
         // Synthetic, like a lifted closure: no source span of its own.
         span: (0, 0),
     };
@@ -7106,22 +7120,28 @@ fn f(n: Int, x0: Float) -> Float {
         );
         // The result is re-boxed for `lower_expr_gc`'s contract and unboxed
         // again by `lower_if`, **in the same block** — which is exactly the
-        // shape W8-S0's block-local forwarding deletes. Asserted per block
-        // rather than over the loop, because the loop header holds a second
-        // `Materialize{Bool}`/`ExtractScalar{Bool}` pair of its own (`k < 8`),
-        // and a whole-loop count would not say which pair is which.
+        // shape W8-S0's block-local forwarding deletes, and it deletes it:
+        // this block's whole census is `{BitsetContains: 1}` (ADR-118
+        // decision 9). Asserted per block rather than over the loop, because
+        // the loop header holds a second `Materialize{Bool}`/`ExtractScalar
+        // {Bool}` pair of its own (`k < 8`), and a whole-loop count would not
+        // say which pair is which.
+        //
+        // Written as `== 0` rather than deleted, because the zero is the
+        // claim: the round trip is not merely cheap here, it is absent, and a
+        // change that reintroduces it must fail rather than pass quietly.
         let block = lowered.block_over(entry, "b.contains(k)");
         let here = crate::test_support::Census::of_blocks(entry, [block]);
         assert_eq!(here.count(InstKind::BitsetContains), 1);
         assert_eq!(
             here.count(InstKind::Materialize(ScalarKind::Bool)),
-            1,
-            "the boxed `Bool` W8-S0 will forward away: {here:?}"
+            0,
+            "W8-S0 forwarded the boxed `Bool` away: {here:?}"
         );
         assert_eq!(
             here.count(InstKind::ExtractScalar(ScalarKind::Bool)),
-            1,
-            "…and the unbox that consumes it, in the same block: {here:?}"
+            0,
+            "…and with it the unbox that consumed it: {here:?}"
         );
     }
 

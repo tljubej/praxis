@@ -805,6 +805,83 @@ fn m11_locals_split_users_and_temps_with_types() {
     );
 }
 
+/// **RED ON PURPOSE, and the reason it is here at all.**
+///
+/// Handover 26 said four times that W8-S0 lands
+/// `m11_locals_split_users_and_temps_with_types` red and called that its
+/// measurement signal. It does not: every assertion in that test is a
+/// *provenance string*, never a value. Handover 27 §1 read the chain — the
+/// fixture makes `a + b` an interior node whose producer ADR-120 deletes; the
+/// debug store is driven by `praxis_mir::defs`, so the slot is never written;
+/// `render.rs` keeps an uninit temp that has a span; and the span survives
+/// because `build_function_debug_meta` emits a `DebugLocalMeta` for every `Gc`
+/// local, defined or not. So the temp silently degrades from `= 30` to
+/// `= <uninit>` and nothing goes red.
+///
+/// This is the assertion that goes red, and it was added by ADR-120 part 1
+/// *before* the pass landed so that part 2 (W8-S0b, the scalar debug slot) has
+/// something to turn green **unedited**. Do not relax it, do not delete it, and
+/// do not "fix" it by editing what it expects: the whole of its value is that a
+/// §9 debugger guarantee cannot be narrowed without a test saying so.
+///
+/// `crates/praxis-codegen-cranelift/tests/jit.rs`'s
+/// `a_temp_that_never_reached_a_shadow_slot_is_still_renderable` is the same
+/// regression one layer down, at the crash-snapshot API rather than the
+/// rendered text, and it is red for the same reason. Handover 27 §9 asked
+/// whether such a test existed outside `run.rs`; it does, and finding it was
+/// worth more than the guess.
+#[test]
+fn a_forwarded_binop_temp_still_renders_the_value_it_materialized() {
+    let (code, out) = run_repl_with_cmds("debug_temps.px", "locals\nquit\n");
+    assert_eq!(code, 1, "overflow faults and exits 1 after REPL quits");
+    assert!(
+        out.contains("@ \"a + b\" = 30"),
+        "the `a + b` temp renders its value, not `<uninit>`: {out}"
+    );
+}
+
+/// **All three of them**, and the third is the one nobody predicted.
+///
+/// ADR-120 decision 6 measured the part-1 regression as three temps of the
+/// fixture's seven going `<uninit>`, not the one handover 27 §1 traced:
+/// `@ "a + b"` 30, `@ "a + b + c"` 60, and `@ "9223372036854775807"` — an
+/// out-of-range `Int` literal whose `Alloc{Int}` producer is in the forwarded
+/// set. `@ "10"`, `@ "20"` and `@ "30"` never degraded, because a small-int
+/// box is also `MoveGc`'d into the binding it initializes and that second
+/// reader declines the forward.
+///
+/// The test above asserts the first. This asserts all three, so a part-2
+/// implementation that repaired the `Materialize` case and missed the `Alloc`
+/// one would be a failure rather than a partial success — and so the survivors
+/// are pinned too: they are the control that says the fixture still contains
+/// temps this transform does not touch.
+#[test]
+fn every_temp_the_forwarding_elided_renders_its_value_again() {
+    let (code, out) = run_repl_with_cmds("debug_temps.px", "locals\nquit\n");
+    assert_eq!(code, 1, "overflow faults and exits 1 after REPL quits");
+    for expected in [
+        "@ \"a + b\" = 30",
+        "@ \"a + b + c\" = 60",
+        "@ \"9223372036854775807\" = 9223372036854775807",
+        // The three that never degraded, asserted so a change that "fixed" the
+        // three above by writing every slot from somewhere else is still a
+        // failure if it disturbed these.
+        "@ \"10\" = 10",
+        "@ \"20\" = 20",
+        "@ \"30\" = 30",
+    ] {
+        assert!(out.contains(expected), "missing `{expected}`: {out}");
+    }
+    // And the faulting expression's own temp stays `<uninit>`: `render.rs`
+    // keeps an uninit temp that has a span precisely so the user can see which
+    // expression did not finish, and ADR-120 part 2 must not fill it in with
+    // the wrapped sum the overflow produced on the way to the raise.
+    assert!(
+        out.contains("@ \"a + b + c + 9223372036854775807\" = <uninit>"),
+        "the expression that faulted produced no value: {out}"
+    );
+}
+
 #[test]
 fn m11_temp_provenance_shows_materializing_expression() {
     // The faulting method-call temp must show the expression it materialized

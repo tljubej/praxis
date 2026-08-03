@@ -5500,6 +5500,115 @@ fn a_temp_that_never_reached_a_shadow_slot_is_still_renderable() {
     );
 }
 
+/// ADR-120 part 2, end to end and in the kind the failure mode names: a
+/// `Float` temp whose box the forwarding elided renders its value, and the
+/// value is the `f64` and not its bit pattern.
+///
+/// **`Float` is the one to test rather than `Int`**, because the scalar channel
+/// carries `f64::to_bits()` and the slot carries what the channel carries. An
+/// `Int` slot round-trips even if every decode were the identity; this one does
+/// not. It is also the shape handover 26 §4 names as the risk — "the collector
+/// dereferences an f64 bit pattern as a `GcHeader`" — so it is the shape whose
+/// slot the collector must be shown not to follow.
+#[test]
+fn an_elided_float_box_renders_its_value_and_not_its_bit_pattern() {
+    let src = "fn main() -> Int {\n  let a = 2.5\n  let b = 4.0\n  \
+               let c = a * b + b\n  1 / 0\n}\n";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault());
+    let snap = rt.crash_snapshot().expect("snapshot captured");
+    let found = snap.frames[0]
+        .locals
+        .iter()
+        .filter_map(|l| l.value)
+        .any(|v| v == praxis_runtime::DebugValue::Scalar(praxis_runtime::ScalarValue::Float(10.0)));
+    assert!(
+        found,
+        "`a * b`'s box was forwarded away and its slot must hold 10.0: {:?}",
+        snap.frames[0]
+            .locals
+            .iter()
+            .map(|l| l.value)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The other half of the same program, and the one that is about memory safety
+/// rather than fidelity: a snapshot **is** a strong root set (ADR-033), so a
+/// scalar slot must not appear in it.
+///
+/// A `Float` payload is an arbitrary 64-bit word; tracing one would hand the
+/// collector a `GcHeader` address it invented. `DebugValue::reference` is where
+/// it drops out, and this is the test that says the drop happens.
+#[test]
+fn an_elided_boxs_scalar_is_not_a_root_of_the_snapshot() {
+    use praxis_runtime::RootSet;
+    let src = "fn main() -> Int {\n  let a = 2.5\n  let b = 4.0\n  \
+               let c = a * b + b\n  1 / 0\n}\n";
+    let (rt, _result) = run_main(src);
+    let snap = rt.crash_snapshot().expect("snapshot captured");
+    let scalars = snap.frames[0]
+        .locals
+        .iter()
+        .filter(|l| matches!(l.value, Some(praxis_runtime::DebugValue::Scalar(_))))
+        .count();
+    assert!(
+        scalars > 0,
+        "the program has forwarded boxes to speak about"
+    );
+    let mut roots = Vec::new();
+    snap.push_roots(&mut roots);
+    assert_eq!(
+        roots.len(),
+        snap.frames
+            .iter()
+            .flat_map(|f| &f.locals)
+            .filter(|l| matches!(l.value, Some(praxis_runtime::DebugValue::Reference(_))))
+            .count(),
+        "every root is a reference and every reference is a root"
+    );
+}
+
+/// The store lands **after** the fault check, so a temp whose expression
+/// overflowed still renders `<uninit>` — the honest answer for a value that was
+/// never produced.
+///
+/// This is ADR-117's fold doing work it was not built for. `store_debug_defs`
+/// runs once per lowering *step*, and a checked `IntBinOp` and its
+/// `Inst::CheckFault` are one step whose raise block leaves for the fault
+/// epilogue; so the overflowing path diverts before the store, exactly as it
+/// diverted before the box. At `RaiseExit::Observed`, where the raise
+/// converges, this would render the wrapped value instead — which is why the
+/// assertion is here and not in a comment.
+#[test]
+fn an_overflowing_temp_is_not_given_the_wrapped_value_it_never_produced() {
+    let src = "fn main() -> Int {\n  let a = 10\n  let b = 20\n  \
+               a + b + 9223372036854775807\n}\n";
+    let (rt, _result) = run_main(src);
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
+    let snap = rt.crash_snapshot().expect("snapshot captured");
+    let wrapped = 30_i64.wrapping_add(i64::MAX);
+    let lied = snap.frames[0]
+        .locals
+        .iter()
+        .filter_map(|l| l.value)
+        .any(|v| {
+            v == praxis_runtime::DebugValue::Scalar(praxis_runtime::ScalarValue::Int(wrapped))
+        });
+    assert!(
+        !lied,
+        "the overflowing sum was never produced; no slot may claim it did"
+    );
+    // And the control, so this does not pass by the program having no slots:
+    // `a + b` did compute, and its slot says so.
+    let sum = snap.frames[0]
+        .locals
+        .iter()
+        .filter_map(|l| l.value)
+        .any(|v| v == praxis_runtime::DebugValue::Scalar(praxis_runtime::ScalarValue::Int(30)));
+    assert!(sum, "`a + b` is 30 and it did produce");
+}
+
 #[test]
 fn a_snapshot_orders_its_frames_innermost_first_with_each_functions_own_locals() {
     // The debug frames are a *stack* now, not a `parent`-linked chain, so the

@@ -626,15 +626,30 @@ mod tests {
     /// `praxis_alloc_float` call and a `Bool` box is a load, so a census
     /// reporting "`Materialize`: 2" would be reporting two different costs as
     /// one.
+    ///
+    /// The program moved when ADR-120 landed and the sentence did not. It used
+    /// to be `a + b < b`, whose `a + b` box is an interior node the forwarding
+    /// deletes and whose `Bool` box is a terminator operand it also deletes —
+    /// leaving nothing for a census to tell apart. `f(a + b)` boxes the sum
+    /// because a call argument is a `Gc` operand, and `let c = a < b` boxes the
+    /// comparison because its consumer is a binding rather than a branch. Both
+    /// are shapes the language really emits.
     #[test]
     fn a_census_tells_a_float_materialize_from_a_bool_one() {
-        let lowered = lower_src_to_mir("fn f(a: Float, b: Float) -> Bool { a + b < b }");
+        let lowered = lower_src_to_mir(
+            "fn g(x: Float) -> Float { x }\n\
+             fn f(a: Float, b: Float) -> Bool {\n  let c = a < b\n  g(a + b)\n  c\n}",
+        );
         let census = Census::of_function(lowered.function("f"));
-        assert_eq!(census.count(FLOAT_BOX), 1, "the `a + b` temp: {census:?}");
+        assert_eq!(
+            census.count(FLOAT_BOX),
+            1,
+            "the `a + b` argument: {census:?}"
+        );
         assert_eq!(
             census.count(InstKind::Materialize(ScalarKind::Bool)),
             1,
-            "the comparison's result: {census:?}"
+            "the comparison bound to `c`: {census:?}"
         );
     }
 
@@ -762,22 +777,30 @@ mod tests {
     }
 
     /// **The worked example, and the number handover 26 §1 asserted without
-    /// measuring** (§9: "counted by hand-walking one inner loop"). It is right:
-    /// `mandelbrot`'s innermost loop materializes **ten** `Float` boxes, so
-    /// W8-S0's gate — 10 to 2 — is priced against a real count.
+    /// measuring** (§9: "counted by hand-walking one inner loop"). It was
+    /// right: the builder emits **ten** `Float` boxes in `mandelbrot`'s
+    /// innermost loop, and W8-S0's gate — 10 to 2 — was priced against a real
+    /// count.
     ///
-    /// Ten is the per-iteration figure as well as the static one. The region's
+    /// **The ten are now two**, because ADR-120's forwarding runs inside
+    /// `lower_module` and this helper lowers through it. The number below moved
+    /// with the pass and the loop did not: `forward::tests::mandelbrots_inner_
+    /// loop_boxes_two_floats_where_it_boxed_ten` is where the delta is stated,
+    /// and the per-block split preserved here is what it is a delta *of* —
+    /// three of the ten were in the escape test and seven in the body, and the
+    /// two survivors are the loop-carried `x` and `y`, one in each.
+    ///
+    /// Two is the per-iteration figure as well as the static one. The region's
     /// five blocks are the header `i < max_iter`, the `&&`'s second conjunct,
     /// the short-circuit arm, the join, and the body; a full iteration runs all
-    /// of them but the short-circuit arm, which materializes nothing. That the
-    /// two named blocks below account for all ten is what pins it.
+    /// of them but the short-circuit arm, which materializes nothing.
     #[test]
-    fn mandelbrots_inner_loop_materializes_ten_floats_per_iteration() {
+    fn mandelbrots_inner_loop_materializes_two_floats_where_the_builder_wrote_ten() {
         let lowered = lower_src_to_mir(mandelbrot_src().as_str());
         let func = lowered.entry();
         let inner = lowered.innermost_loop_over(func, "x * x - y * y + x0");
         let census = inner.census(func);
-        assert_eq!(census.count(FLOAT_BOX), 10, "{census:?}");
+        assert_eq!(census.count(FLOAT_BOX), 2, "was 10: {census:?}");
 
         let by_block = census_by_block(func);
         let float_boxes_in =
@@ -787,16 +810,19 @@ mod tests {
                 float_boxes_in("x * x + y * y <= 4.0"),
                 float_boxes_in("x * x - y * y + x0")
             ),
-            (3, 7),
-            "the escape test and the body are the whole of the ten"
+            (0, 2),
+            "was (3, 7); the escape test's three were all interior nodes and \
+             the body keeps only `x` and `y`, which are assignments"
         );
     }
 
     /// The other half of the same measurement, and the reason `mandelbrot` is
-    /// 63% allocator: every one of those boxes is read straight back out.
-    /// Recorded so that W8-S0's "before" is a number rather than a memory.
+    /// the suite's most allocation-bound benchmark: every box was read straight
+    /// back out. The builder writes 22 `Float` reloads into that loop; ADR-120
+    /// leaves 14, and the eight it removes are the eight boxes it removed
+    /// paired one for one.
     #[test]
-    fn mandelbrots_inner_loop_extracts_twenty_two_float_payloads_per_iteration() {
+    fn mandelbrots_inner_loop_extracts_fourteen_float_payloads_where_the_builder_wrote_22() {
         let lowered = lower_src_to_mir(mandelbrot_src().as_str());
         let func = lowered.entry();
         let census = lowered
@@ -804,9 +830,13 @@ mod tests {
             .census(func);
         assert_eq!(
             census.count(InstKind::ExtractScalar(ScalarKind::Float)),
-            22,
-            "{census:?}"
+            14,
+            "was 22: {census:?}"
         );
-        assert_eq!(census.count(InstKind::FloatBinOp), 10, "{census:?}");
+        assert_eq!(
+            census.count(InstKind::FloatBinOp),
+            10,
+            "the arithmetic is untouched: {census:?}"
+        );
     }
 }

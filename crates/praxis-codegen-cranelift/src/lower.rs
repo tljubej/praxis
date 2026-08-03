@@ -22,8 +22,8 @@ use praxis_mir::{
     IntBinOp, LocalId, LocalKind, MirType, Overflow, RootSlots, ScalarKind, Terminator,
 };
 use praxis_runtime::{
-    descriptor::BuiltinTypeId, DebugFrameEntry, DebugLocalMeta, FunctionDebugMeta, RuntimeContext,
-    ShadowStackHeader, SlotCount, MAX_SHADOW_SLOTS,
+    descriptor::BuiltinTypeId, DebugFrameEntry, DebugLocalMeta, DebugSlotKind, FunctionDebugMeta,
+    RuntimeContext, ShadowStackHeader, SlotCount, MAX_SHADOW_SLOTS,
 };
 use praxis_stdlib::abi::{AbiKind, AbiRet, RuntimeSymbol};
 
@@ -49,11 +49,14 @@ const SHADOW_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, shadow) as i64;
 const DEBUG_VALUES_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, debug_values) as i64;
 const DEBUG_FRAMES_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, debug_frames) as i64;
 
-/// The width of one debug value slot: an `Option<GcRef>`, one machine word by
-/// the `NonNull` niche (F18). Derived rather than written as `8` for the reason
-/// `SHADOW_SLOT_BYTES` is, and asserted equal to it because a local's shadow
-/// slot index *is* its debug slot index — two strides that disagreed would put
-/// a local's value in another local's display.
+/// The width of one debug value slot: one machine word, sized as an
+/// `Option<GcRef>` because that is what the slot holds for every local whose
+/// box survives compilation — the `NonNull` niche (F18) — and because a local
+/// whose box ADR-120's forwarding elided stores its raw scalar payload into the
+/// *same* slot at the same stride. Derived rather than written as `8` for the
+/// reason `SHADOW_SLOT_BYTES` is, and asserted equal to it because a local's
+/// shadow slot index *is* its debug slot index — two strides that disagreed
+/// would put a local's value in another local's display.
 const DEBUG_VALUE_SLOT_BYTES: i64 = core::mem::size_of::<Option<praxis_runtime::GcRef>>() as i64;
 const _: () = assert!(
     DEBUG_VALUE_SLOT_BYTES == SHADOW_SLOT_BYTES,
@@ -264,6 +267,27 @@ fn lower_function_capturing<M: Module>(
             .collect()
     };
     let gc_count = gc_slot.len() as u32;
+
+    // The inverse of `Function::debug_scalar_source` (ADR-120 part 2): for each
+    // `Scalar` local that stands in for a box the forwarding elided, the debug
+    // slots its definition must write.
+    //
+    // Inverted here because `store_debug_defs` is driven by "what does this
+    // instruction define", and what it defines is the *scalar*; the MIR records
+    // the link against the *box*, because that is the local that owns the slot
+    // and the `symbol_id`. A `Vec` per scalar rather than one slot, because two
+    // boxes of one scalar are representable (`Materialize` twice) and both slots
+    // are then the same value — a fact worth writing down rather than an
+    // `unwrap` waiting to be wrong.
+    let elided_box_slots: HashMap<LocalId, Vec<u32>> = {
+        let mut map: HashMap<LocalId, Vec<u32>> = HashMap::new();
+        for (&boxed, &slot) in &gc_slot {
+            if let Some((scalar, _)) = mir.debug_scalar_source(boxed) {
+                map.entry(scalar).or_default().push(slot);
+            }
+        }
+        map
+    };
     // A frame wider than the shadow stack can hold is rejected here, and this
     // is the only place it can be: `SlotCount` is unconstructible above the cap,
     // and every consumer downstream — including the reservation-sizing argument
@@ -430,11 +454,14 @@ fn lower_function_capturing<M: Module>(
     // more claims on two more slot stacks rather than two extern calls and two
     // to three mallocs:
     //
-    //  - `debug_values_var` holds the base of this call's run of one
-    //    `Option<GcRef>` per `Gc` local, in the same order as `gc_slot` — so a
-    //    local's shadow slot index doubles as its debug-local index and the two
-    //    stacks are index-parallel for free. Zeroed on claim, which is what
-    //    makes an unwritten slot render as `<uninit>` (F18).
+    //  - `debug_values_var` holds the base of this call's run of one word per
+    //    `Gc` local, in the same order as `gc_slot` — so a local's shadow slot
+    //    index doubles as its debug-local index and the two stacks are
+    //    index-parallel for free. Zeroed on claim, which is what makes an
+    //    unwritten slot render as `<uninit>` (F18). The word is a `GcRef` for
+    //    every local whose box survives and a raw scalar payload for one whose
+    //    box ADR-120's forwarding elided; the `DebugLocalMeta` beside the slot
+    //    is what says which, so nothing here has to know.
     //  - `debug_frame_var` holds this call's one `DebugFrameEntry`, which pairs
     //    the function's *static* `FunctionDebugMeta` with that base. Claimed
     //    without zeroing: both words are written immediately below, in
@@ -481,6 +508,7 @@ fn lower_function_capturing<M: Module>(
         debug_values_var,
         debug_frame_var,
         slot_of: &gc_slot,
+        elided_box_slots: &elided_box_slots,
     };
 
     // Prologue (cont.): the parameters are the one set of `Gc` locals no
@@ -841,6 +869,11 @@ struct SpillCtx<'a> {
     /// the epilogue.
     debug_frame_var: Variable,
     slot_of: &'a HashMap<LocalId, u32>,
+    /// The debug slots each `Scalar` local must write because the box that
+    /// used to write them is gone (ADR-120 part 2). Empty for every function
+    /// the forwarding pass did not touch, which is what makes this cost nothing
+    /// where it buys nothing.
+    elided_box_slots: &'a HashMap<LocalId, Vec<u32>>,
 }
 
 impl SpillCtx<'_> {
@@ -931,6 +964,62 @@ impl SpillCtx<'_> {
         // debugger silently stops showing.
         for local in praxis_mir::defs(inst) {
             self.store_debug_local(builder, local, vars);
+            self.store_elided_boxes_of(builder, local, vars);
+        }
+    }
+
+    /// Store `local`'s raw scalar word into the debug slot of every box the
+    /// forwarding pass elided in its favour (ADR-120 part 2).
+    ///
+    /// The same one store [`SpillCtx::store_debug_local`] emits, at the same
+    /// kind of point, into the same run of slots — the difference is entirely in
+    /// what the word *means*, and that is recorded once per function in the
+    /// slot's [`DebugLocalMeta::slot_kind`] rather than per store. Generated
+    /// code emits no tag and no branch: a scalar slot costs exactly what a
+    /// reference slot costs.
+    ///
+    /// No conversion is needed for any kind. Every MIR local is one Cranelift
+    /// `Variable` of type `GC` (`I64`), so a `Scalar(Float)` local already holds
+    /// `f64::to_bits()` — which is what `ScalarKind::Float`'s own doc says the
+    /// scalar channel carries — and a `Scalar(Bool)` holds the zero-extended
+    /// byte. `DebugSlotKind` decodes each on the way out.
+    ///
+    /// ### Why this is not on the raising path, which is ADR-117's doing
+    ///
+    /// A definition of `s` in `s = a + b` can *fault*, and the box this store
+    /// stands in for was the instruction after the `Inst::CheckFault`: a program
+    /// that overflowed never reached it, so the temp rendered `<uninit>` and
+    /// that is the honest answer for a value that was never produced. The store
+    /// below keeps that answer, because the caller emits it after the whole
+    /// **step** rather than after the instruction, and ADR-117 folds a checked
+    /// `IntBinOp` and its check into one step whose raise block leaves for the
+    /// fault epilogue. So the overflowing path diverts before reaching this
+    /// store, exactly as it diverted before reaching the box.
+    ///
+    /// The call-site comment in `lower_fn`'s block loop predicted this — "if it
+    /// ever did, folding would move that store off the raising path" — one wave
+    /// before there was a store to move. At `RaiseExit::Observed`, where the
+    /// raise converges instead, this would store the wrapped value;
+    /// `an_overflowing_temp_is_not_given_the_wrapped_value_it_never_produced`
+    /// is the test that says which of the two shapes is in the tree.
+    fn store_elided_boxes_of(
+        &self,
+        builder: &mut FunctionBuilder,
+        local: LocalId,
+        vars: &[Variable],
+    ) {
+        let Some(slots) = self.elided_box_slots.get(&local) else {
+            return;
+        };
+        let values_base = builder.use_var(self.debug_values_var);
+        let val = builder.use_var(vars[local.0 as usize]);
+        for &slot in slots {
+            builder.ins().store(
+                MemFlags::trusted(),
+                val,
+                values_base,
+                slot_displacement(slot),
+            );
         }
     }
 
@@ -3595,6 +3684,26 @@ fn build_function_debug_meta(
             LocalDebugKind::Temp => praxis_runtime::LOCAL_KIND_TEMP,
         };
         let (span_start, span_end) = mir.debug_span(local.id).unwrap_or((0, 0));
+        // What this local's value slot holds (ADR-120 part 2). `Reference`
+        // unless the forwarding pass elided this box, in which case the slot is
+        // fed by a `Scalar` local's definition and holds that payload's raw
+        // word. The map is total over `ScalarKind`, so a scalar source can never
+        // come out as `Reference` — which is the one answer that would put a
+        // payload into the collector's post-sweep scan.
+        //
+        // Note what this does *not* change: `type_id` and `descriptor` are
+        // still the box's own, so `render_local_line`'s type column still says
+        // `Int`. `ir.rs`'s doctrine that a `Scalar` local is always
+        // `MirType::Opaque` is untouched, because the local that owns this
+        // metadata is the `Gc` one — the scalar never enters this loop.
+        let slot_kind = match mir.debug_scalar_source(local.id) {
+            None => DebugSlotKind::Reference,
+            Some((_, ScalarKind::Int)) => DebugSlotKind::Int,
+            Some((_, ScalarKind::Bool)) => DebugSlotKind::Bool,
+            Some((_, ScalarKind::Float)) => DebugSlotKind::Float,
+            Some((_, ScalarKind::Char)) => DebugSlotKind::Char,
+            Some((_, ScalarKind::Byte)) => DebugSlotKind::Byte,
+        };
         metas.push(DebugLocalMeta {
             source_name: name.as_ptr(),
             name_len: name.len() as u32,
@@ -3609,6 +3718,7 @@ fn build_function_debug_meta(
             kind,
             span_start,
             span_end,
+            slot_kind,
         });
         symbol_id += 1;
     }
@@ -3851,6 +3961,7 @@ mod tests {
             debug_names: Vec::new(),
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
             span: (0, 0),
         };
         f.new_local(
@@ -5459,16 +5570,28 @@ mod tests {
         );
     }
 
-    /// Handover 25 §3 counts **seven** runtime type proofs per iteration of that
-    /// loop. There are nine, and this is the count that says so — every
-    /// `Inst::ExtractScalar` is one `emit_scalar_load`, which is one descriptor
-    /// proof (ADR-102).
+    /// **Five runtime type proofs per iteration of that loop — W6's
+    /// denominator, and it has moved twice.** Every `Inst::ExtractScalar` is one
+    /// `emit_scalar_load`, which is one descriptor proof (ADR-102), so this
+    /// census is the site count.
     ///
-    /// Recorded here rather than in a handover because it is the denominator
-    /// W6's acceptance criterion is stated against (handover 27 §9), and a
-    /// number two documents disagree about should be settled by the compiler.
+    /// Handover 25 §3 said seven, by hand. This test said **nine** when W6
+    /// wrote it, and nine was right: eight `Int` reloads and the condition's
+    /// `Bool` are what `build.rs` emits. Then ADR-120's block-local forwarding
+    /// landed in the same wave and deleted four of the nine — three interior
+    /// nodes of the two expression trees, and the whole
+    /// `Materialize{Bool}`/`ExtractScalar{Bool}` round trip of the `while`
+    /// condition.
+    ///
+    /// **W6 is worth ten machine instructions per iteration here, not
+    /// eighteen**, and the amendment at the end of ADR-116 is where that is
+    /// restated with both arms re-measured on this tree. Neither number was
+    /// wrong when it was written; they are two trees. `mir_shape.rs`'s
+    /// `the_sample_loop_proves_a_scalars_descriptor_five_times_per_iteration`
+    /// carries the same count from outside this crate, with the table of all
+    /// three answers.
     #[test]
-    fn the_sample_loop_proves_nine_descriptors_per_iteration_not_seven() {
+    fn the_sample_loop_proves_five_descriptors_per_iteration_where_nine_were_written() {
         use praxis_mir::test_support::{lower_src_to_mir, Census, InstKind};
 
         let lowered = lower_src_to_mir(SAMPLE_LOOP);
@@ -5478,8 +5601,9 @@ mod tests {
         let proofs = per_iteration.count(InstKind::ExtractScalar(praxis_mir::ScalarKind::Int))
             + per_iteration.count(InstKind::ExtractScalar(praxis_mir::ScalarKind::Bool));
         assert_eq!(
-            proofs, 9,
-            "eight `Int` reads and the loop condition's `Bool`"
+            proofs, 5,
+            "five `Int` reads survive the forwarding and the `Bool` does not: \
+             {per_iteration:?}"
         );
     }
 
