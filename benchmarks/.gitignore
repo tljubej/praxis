@@ -1,0 +1,3 @@
+# `pacer_ab.py` imports `run.py` rather than copying its `peak_rss_bytes`, so
+# running it byte-compiles this directory.
+__pycache__/

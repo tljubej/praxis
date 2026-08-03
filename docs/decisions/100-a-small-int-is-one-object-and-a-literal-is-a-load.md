@@ -78,6 +78,12 @@ someone could change; the win is nil either way. `Text` fails a different test:
 `Copy` *because* an immortal is invisible to `Heap`'s `Drop` — an immortal `Text`
 leaks its `Box<str>` at teardown, which is RT-02 exactly.
 
+**Amended by ADR-107: `Char` too.** It passes every leg of the argument above —
+`char_equals` is a reflexive `u32 ==`, a `CharPayload` is `Copy`, and ASCII is a
+bounded set — and the reasons `Float` and `Text` are out are unchanged. The
+`Char` half is runtime-only: there is no character literal, so it has no
+`Inst::ConstGc` analogue.
+
 ### 2. Minting an immortal is pacing-neutral (RT-04)
 
 `Heap::alloc_immortal` snapshots `bytes_since_collect` and restores it. Pacing
@@ -201,6 +207,14 @@ and leaves one answer.
   records the one fact such a pass would need from the verifier: an `Alloc`
   hoisted out of the block that uses its result verifies, because MIR is
   deliberately non-SSA and has no def-dominates-use rule.
+
+  **Superseded by ADR-108, in both halves.** The residual list above is
+  incomplete — it omits `Lit::Float`, whose `AllocFloat` row is plain
+  `Effect::Allocates` and which `mandelbrot`'s innermost loop allocates twice
+  per iteration — and the deferral is now a decline: the general pass is not
+  worth building, because the builder *creates* each loop and already holds its
+  preheader, which is the only one of the four missing pieces a literal hoist
+  actually needs.
 
 - **ABI v14 → v15.** `RuntimeContext` gained `small_ints`, appended after
   `fault_message` so every generated-code-read offset above is unchanged. Unlike

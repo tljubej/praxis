@@ -427,15 +427,20 @@ fn main() -> Int { count(4000) }
 
 #[test]
 fn adv_deep_recursion_over_limit_faults_cleanly() {
-    // PROBE (§6.2): recursion beyond MAX_RECURSION_DEPTH used to overflow the
-    // native stack and abort the host with SIGABRT ("fatal runtime error: stack
-    // overflow, aborting") rather than faulting gracefully — §9.2/§17.4 require
-    // the host to survive. Fixed: every generated function's prologue reads
-    // `ctx.recursion_depth` inline and branches to a stack-overflow fault
-    // epilogue when it has reached MAX_RECURSION_DEPTH (8000), raising
-    // FaultKind::StackOverflow and unwinding to the host; only if it passes does
-    // it bump the counter and push. count(100000) pre-fix killed the process;
-    // now it faults cleanly and the host stays alive.
+    // PROBE (§6.2): unbounded recursion used to overflow the native stack and
+    // abort the host with SIGABRT ("fatal runtime error: stack overflow,
+    // aborting") rather than faulting gracefully — §9.2/§17.4 require the host
+    // to survive. Fixed: every generated function's prologue reads
+    // `ctx.stack_left` inline and branches to a stack-overflow fault epilogue
+    // when what is left of the native-stack budget will not cover this frame,
+    // raising FaultKind::StackOverflow and unwinding to the host; only if it
+    // passes does it spend the budget and push. count(100000) pre-fix killed the
+    // process; now it faults cleanly and the host stays alive.
+    //
+    // `count` is a minimum-width frame, so ADR-105's byte budget lets it recurse
+    // exactly MAX_RECURSION_DEPTH deep — the same 8000 the call count allowed.
+    // What ADR-105 changed is the *wide* frame; see
+    // `adr105_a_wide_frame_faults_before_it_exhausts_the_native_stack`.
     let src = "\
 fn count(n: Int) -> Int { if n == 0 { 0 } else { 1 + count(n - 1) } }
 fn main() -> Int { count(100000) }
@@ -5539,6 +5544,121 @@ fn a_snapshot_orders_its_frames_innermost_first_with_each_functions_own_locals()
     assert!(src[s1 as usize..e1 as usize].starts_with("fn main"));
 }
 
+// ===========================================================================
+// ADR-106 — the debug values are the collector's one weak arm.
+//
+// The three tests above say a value the root set dropped stays renderable, and
+// they are true because nothing ever clears a debug slot. This one says what
+// happens when the collector actually *runs* in that window: the value the
+// debugger names has become garbage, and its storage is reusable.
+//
+// Both tests below and the three above must pass together. That pairing is the
+// whole content of the decision — the arm keeps the slots valid without keeping
+// them alive — and `a_dead_local_stops_being_reachable_from_its_frame` in
+// `adversarial_audit.rs` is the third leg, saying the arm stayed weak.
+// ===========================================================================
+
+/// The defect ADR-106 closes, in a real compiled program.
+///
+/// `xs` is dead for the collector from its last read onward, so `RootSlots::dead`
+/// nulls its shadow slot (MIR-01) while its debug slot keeps naming the `Vec`
+/// (MIR-16). The loop after it allocates well past `INITIAL_COLLECT_THRESHOLD`,
+/// so a paced collection runs *inside that window* and reclaims `xs` — and then
+/// keeps allocating, so the block comes back as something else.
+///
+/// Before the weak arm, the snapshot copied that reference and the debugger read
+/// a reissued block through `xs`'s static `Vec` descriptor. After it, `xs` is an
+/// absence: `snapshot_local_vec` finds the local and finds no value, which is
+/// the `<uninit>` decision 4 chose.
+///
+/// The `+ 2000` offsets every element past the interned small-`Int` range, for
+/// the reason `a_dead_local_stops_being_reachable_from_its_frame` gives: an
+/// interned `Int` is an immortal no sweep touches, and this test needs real
+/// allocations to die.
+#[test]
+fn a_local_the_collector_reclaimed_renders_as_an_absence_not_as_a_dangling_ref() {
+    let src = "\
+fn main() -> Int {
+  let xs = Vec()
+  var i = 0
+  while i < 200 {
+    xs.push(i + 2000)
+    i = i + 1
+  }
+  var sum = xs.len()
+  var j = 0
+  while j < 40000 {
+    let junk = Vec()
+    junk.push(j + 2000)
+    sum = sum + junk.len()
+    j = j + 1
+  }
+  let ys = Vec()
+  ys.push(sum)
+  ys.get(99)
+}
+";
+    let (rt, _result) = run_main(src);
+    assert!(rt.has_pending_fault());
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
+    let snap = rt.crash_snapshot().expect("snapshot captured");
+    assert_eq!(
+        snapshot_local_vec(snap, "ys"),
+        Some(vec![40_200]),
+        "`ys` is live at the fault and must be renderable — if this is None the \
+         weak scan is nulling live values and the predicate is wrong"
+    );
+    assert_eq!(
+        snapshot_local_vec(snap, "xs"),
+        None,
+        "`xs` was reclaimed by a collection inside the window between its last \
+         use and the fault; the snapshot must copy an absence rather than a \
+         reference into storage the allocator has since handed back out"
+    );
+}
+
+/// The counterexample that keeps the test above honest: the *same* program with
+/// `xs` read after the allocating loop keeps it renderable with its real
+/// contents.
+///
+/// Without this, nulling every debug slot at every collection would pass the
+/// test above and destroy the debugger, and
+/// `a_local_the_root_set_dropped_is_still_renderable` would not catch it —
+/// that program never collects at all.
+#[test]
+fn a_local_that_survives_the_collection_is_renderable_with_its_real_contents() {
+    let src = "\
+fn main() -> Int {
+  let xs = Vec()
+  var i = 0
+  while i < 3 {
+    xs.push(i + 2000)
+    i = i + 1
+  }
+  var sum = 0
+  var j = 0
+  while j < 40000 {
+    let junk = Vec()
+    junk.push(j + 2000)
+    sum = sum + junk.len()
+    j = j + 1
+  }
+  let ys = Vec()
+  ys.push(sum + xs.len())
+  ys.get(99)
+}
+";
+    let (rt, _result) = run_main(src);
+    assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
+    let snap = rt.crash_snapshot().expect("snapshot captured");
+    assert_eq!(
+        snapshot_local_vec(snap, "xs"),
+        Some(vec![2000, 2001, 2002]),
+        "`xs` is live across every collection in this program — the weak scan \
+         must leave it alone, elements and all"
+    );
+}
+
 /// TY-33's first unit end to end. `panic` typechecked before this stage and
 /// then failed the *compile* — "unresolved user function `panic`" — so the one
 /// thing that could not be observed about it was what it does. It raises its
@@ -8022,8 +8142,10 @@ fn text_concatenation_joins_two_texts() {
     assert_eq!(result.as_int(), 1, "the empty Text is the identity");
 
     // Multi-byte characters: `len()` counts chars (§4.3), and joining two valid
-    // UTF-8 payloads cannot split one — which is why the wrapper does not need
-    // the `InvalidText` fault `praxis_alloc_text` carries.
+    // UTF-8 payloads cannot split one — which is why this wrapper needs no
+    // `InvalidText` fault. Since ADR-111 `praxis_alloc_text` needs none either,
+    // for the neighbouring reason: its bytes are the caller's promise, and the
+    // literals below are where that promise is kept.
     let (rt, result) = run_main(
         "fn main() -> Int {\n  let c = \"héllo\" + \" wörld\"\n  \
          if c == \"héllo wörld\" { c.len() } else { 0 - 1 }\n}\n",
@@ -8056,6 +8178,50 @@ fn text_concatenation_joins_two_texts() {
         7,
         "a built Text keys the same entry a literal does"
     );
+}
+
+/// **ADR-111's behavioural backstop.** A multi-byte `Text` literal, in a loop,
+/// still round-trips through the JIT.
+///
+/// Two things this catches that no MIR-shape test can. First, the cold refusal:
+/// `praxis_alloc_text` now *aborts* on bytes that are not UTF-8, so a botched
+/// edit to its `from_utf8` — one that read the wrong length, say, or measured
+/// chars where it wanted bytes — turns every literal in every program into a
+/// process abort rather than a wrong answer. Multi-byte literals are where that
+/// distinction lives; an ASCII-only test cannot tell a byte length from a char
+/// count. Second, the ADR-108 hoist now applies to `Text`, so the literals below
+/// are allocated **once, in the preheader**, and the loop compares the same
+/// object on every iteration. That sharing is sound because a `Text` payload is
+/// immutable and `text_equals` is a structural byte comparison — this is the
+/// test that says so end to end, where `a_text_literal_in_a_loop_is_hoisted_now_that_its_alloc_cannot_fault`
+/// only says the instruction moved.
+///
+/// The assertion is on the *count* rather than on a `Bool`: a hoist that shared
+/// the wrong object, or a comparison that answered identity, would still make
+/// one iteration's answer look right.
+#[test]
+fn a_multibyte_text_literal_still_round_trips_through_the_jit() {
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var hits = 0\n  var i = 0\n  while i < 5 {\n    \
+         let s = \"héllo wörld\"\n    if s == \"héllo wörld\" && s.len() == 11 { hits = hits + 1 }\n    \
+         i = i + 1\n  }\n  hits\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        5,
+        "a hoisted multi-byte literal is the same eleven characters on every iteration"
+    );
+
+    // And a `Map` keyed by one still finds the entry: hashing is structural, so
+    // one shared object and five separate ones key the same slot.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let m = Map()\n  m.insert(\"ключ\", 9)\n  \
+         var total = 0\n  var i = 0\n  while i < 3 {\n    total = total + m[\"ключ\"]\n    \
+         i = i + 1\n  }\n  total\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 27, "a shared Text key hashes structurally");
 }
 
 /// **REP-33 half (a).** `sorted` orders through the element descriptor, and the
@@ -8365,6 +8531,124 @@ fn an_interned_literal_costs_no_allocation_and_a_large_one_still_does() {
     );
 }
 
+// ===========================================================================
+// ADR-113 — a *runtime* `Int` in range is the same table read, inline.
+//
+// `Inst::ConstGc` above covers the literal. These cover `Inst::Materialize`,
+// which is the hot allocating instruction: a loop counter, an accumulator, a
+// fused-pipeline sink. The IR-shape tests in `lower.rs` say the sequence is
+// emitted; these say it computes the right thing, which is the half an
+// off-by-one in the index arithmetic breaks — silently, as a wrong number.
+// ===========================================================================
+
+/// A value *computed* into the interned range is the runtime's own object, at
+/// every boundary of the table.
+///
+/// The values are reached through a loop so no folding can turn them back into
+/// literals: what is under test is the inline probe's arithmetic — the subtract
+/// by `SMALL_INT_MIN`, the unsigned span compare and the scaled load — not
+/// `Inst::ConstGc`, which is already covered above and takes a different path
+/// entirely (a compile-time index, no pacing test, no branch).
+///
+/// The boundaries are the whole point. An index computed as `v - MIN + 1` reads
+/// the neighbouring slot and answers a number one too large for every value in
+/// the language; an inclusive/exclusive slip at the top reads one past the end
+/// of the table. Both are wrong *answers* rather than crashes, which is the only
+/// place in ADR-113 that failure mode appears at all.
+#[test]
+fn an_inline_interned_box_is_the_object_the_wrapper_would_have_answered() {
+    use praxis_runtime::{SMALL_INT_MAX, SMALL_INT_MIN};
+
+    for v in [
+        SMALL_INT_MIN,
+        SMALL_INT_MIN + 1,
+        -1,
+        0,
+        1,
+        SMALL_INT_MAX - 1,
+        SMALL_INT_MAX,
+    ] {
+        let src = format!(
+            "fn main() -> Int {{\n  var x = 0\n  var i = 0\n  \
+             while i < 1 {{ x = x + ({v})\n i = i + 1 }}\n  x\n}}\n"
+        );
+        let (rt, result) = run_main(&src);
+        assert!(!rt.has_pending_fault(), "faulted at {v}: {:?}", rt.fault());
+        assert_eq!(
+            result.as_int(),
+            v,
+            "the inline probe answered the wrong value"
+        );
+        let interned = rt
+            .immortals()
+            .small_int(v)
+            .expect("the boundary values are in the table by construction");
+        assert_eq!(
+            result.as_ptr(),
+            interned.as_ptr(),
+            "a computed {v} must be the *same object* `praxis_alloc_int` would \
+             have answered — the inline path indexes the table generated code \
+             was handed, and an off-by-one here is a wrong number rather than a \
+             crash"
+        );
+    }
+
+    // And one step outside the range on each side is a fresh object, which is
+    // what says the span compare is a bound rather than decoration.
+    for v in [SMALL_INT_MIN - 1, SMALL_INT_MAX + 1] {
+        let src = format!(
+            "fn main() -> Int {{\n  var x = 0\n  var i = 0\n  \
+             while i < 1 {{ x = x + ({v})\n i = i + 1 }}\n  x\n}}\n"
+        );
+        let (rt, result) = run_main(&src);
+        assert!(!rt.has_pending_fault(), "faulted at {v}: {:?}", rt.fault());
+        assert_eq!(result.as_int(), v);
+        assert!(
+            rt.immortals().small_int(v).is_none(),
+            "{v} is outside the table, so the wrapper allocated it"
+        );
+    }
+}
+
+/// **The collector still runs when the inline path is the only allocator.**
+///
+/// This is ADR-113's obligation observed from the outside. The inline sequence
+/// hands off to `praxis_alloc_int` on two branches — the value is out of range,
+/// or `Heap::collection_is_due` — and the wrapper paces through `Heap::pace`
+/// exactly as it always did. A version that dropped the pacing test would still
+/// pass every other test in this file: the answers are identical, and the
+/// collector's absence shows up only as a heap that keeps growing.
+///
+/// Deliberately **not** the `after < before + 1` shape handover 22 §6 found four
+/// tests using wrongly. The loop allocates something like 40,000 objects that
+/// nothing retains; asserting the live count ends up below the *iteration* count
+/// cannot be satisfied without a collection having run, whatever the pacer's
+/// ladder happens to be on this machine.
+#[test]
+fn a_loop_that_boxes_only_large_ints_still_collects() {
+    const ITERATIONS: i64 = 20_000;
+
+    // Both `s` and `i` leave `small_int`'s range almost immediately, so every
+    // iteration is two real allocations on the cold path.
+    let src = format!(
+        "fn main() -> Int {{\n  var i = 0\n  var s = 0\n  \
+         while i < {ITERATIONS} {{ s = s + 100000\n i = i + 1 }}\n  i\n}}\n"
+    );
+    let (rt, result) = run_main(&src);
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), ITERATIONS);
+
+    let live = rt.heap().stats().live_count;
+    assert!(
+        (live as i64) < ITERATIONS,
+        "the loop allocated about {} objects and retains none of them, so a \
+         heap holding {live} of them means no collection ran — the inline \
+         `Materialize` path skipped the pacing test, or its cold path stopped \
+         reaching `Heap::pace` (ADR-113, ADR-040)",
+        2 * ITERATIONS
+    );
+}
+
 /// A `Bool` or `Unit` literal answers the runtime's own singleton, and does so
 /// without a call or an allocation.
 ///
@@ -8522,13 +8806,21 @@ fn adr100_a_wide_frame_recursing_deep_claims_and_gives_back_every_slot() {
     // silent: a frame wide enough and a recursion deep enough to walk `top` past
     // the end of the reservation.
     //
-    // No test can reach that corner, and the reason is worth writing down: a
-    // function wide enough to fill the reservation has a *native* frame to
-    // match, and 8000 of those exhaust the thread's stack long before the
-    // shadow stack's 12.29 MiB. MAX_RECURSION_DEPTH is a call count, not a byte
-    // budget. So the corner is closed by the arithmetic in `SHADOW_STACK_SLOTS`
-    // and by the `const` block beside it, and what this test can show is the
-    // mechanism working at a width and depth an actual program could reach.
+    // No test can reach that corner, and since ADR-105 the reason is that the
+    // corner does not exist rather than that it is unreachable. A frame spends
+    // `FRAME_BYTES_PER_SLOT` of the budget on every slot it claims, so the
+    // claimed slots of all live frames sum to at most
+    // `STACK_BUDGET_BYTES / FRAME_BYTES_PER_SLOT`, which is what the reservation
+    // is. The old argument multiplied the deepest recursion by the widest frame
+    // as if a program could have both at once — it cannot, and the guard is now
+    // what says so. This comment used to read "MAX_RECURSION_DEPTH is a call
+    // count, not a byte budget", which was an accurate statement of defect D-1
+    // sitting in the test suite; it is a byte budget now.
+    //
+    // What this test shows is the mechanism working at a width and depth an
+    // actual program could reach. 600 frames of twenty collections is well
+    // inside the budget (which covers roughly 1990 of them), so ADR-105 does not
+    // move it.
     //
     // This frame is also wide enough to take the prologue's zeroing off the
     // unrolled path and onto the `memset` one (well past SLOT_ZERO_UNROLL_MAX
@@ -8560,13 +8852,112 @@ fn adr100_a_wide_frame_recursing_deep_claims_and_gives_back_every_slot() {
     );
 }
 
+/// ADR-105 / defect D-1: the guard charges bytes, so a wide frame runs out of
+/// budget at a depth a reference frame sails past.
+///
+/// This is the defect stated as a differential, which is the only way to state
+/// it without asserting a number about the host's stack. Both halves recurse to
+/// the *same* depth. They differ only in how wide their frames are, and that is
+/// exactly the difference a call count could not see: before ADR-105 the
+/// prologue stopped both at 8000 calls, a figure calibrated for the narrow one.
+///
+/// What the wide half did instead of faulting is recorded rather than asserted,
+/// because asserting it means deliberately overflowing this process: a
+/// twenty-two-collection frame measures 294 bytes, so the 8000 calls the old
+/// guard allowed want 2.35 MiB. `praxis run` gets an 8 MiB main thread and
+/// survived. `cargo test` does not — libtest passes no `stack_size`, so every
+/// test here runs on std's 2 MiB default. Reproduced directly on the release
+/// binaries either side of this change, under `ulimit -s 2048`: `54d2d9a` exits
+/// 134 with "thread 'main' has overflowed its stack"; the same program on the
+/// same stack now exits 1 with a clean `StackOverflow`.
+#[test]
+fn adr105_a_wide_frame_faults_where_a_reference_frame_does_not() {
+    const DEPTH: u32 = 5000;
+
+    // Twenty-two collections, all live across the recursive call so none can be
+    // sunk. Its `frame_cost` is several times the reference frame's, so the one
+    // budget buys it far fewer frames.
+    let mut body = String::from("fn wide(n: Int) -> Int {\n  if n == 0 { return 0 }\n");
+    for i in 0..22 {
+        body.push_str(&format!("  let v{i} = Vec()\n  v{i}.push(n)\n"));
+    }
+    body.push_str("  var s = wide(n - 1)\n");
+    for i in 0..22 {
+        body.push_str(&format!("  s = s + v{i}.len()\n"));
+    }
+    body.push_str("  s\n}\n");
+
+    let (wide, _) = run_main(&format!("{body}fn main() -> Int {{ wide({DEPTH}) }}"));
+    assert_eq!(
+        wide.fault(),
+        praxis_runtime::FaultKind::StackOverflow,
+        "{DEPTH} frames of twenty-two collections must fault, not abort the host"
+    );
+    // Guard-first means the frame that was refused pushed nothing, and every
+    // frame below it unwound through its own epilogue.
+    assert!(
+        wide.shadow_stack().is_empty(),
+        "{} slots are still claimed after the budget ran out",
+        wide.shadow_stack().len()
+    );
+
+    // The control: the same depth, a reference-width frame, no fault. Under a
+    // call count these two are indistinguishable.
+    let (narrow, result) = run_main(&format!(
+        "fn count(n: Int) -> Int {{ if n == 0 {{ 0 }} else {{ 1 + count(n - 1) }} }}\n\
+         fn main() -> Int {{ count({DEPTH}) }}\n"
+    ));
+    assert!(
+        !narrow.has_pending_fault(),
+        "the same depth in a narrow frame must still pass: {:?}",
+        narrow.fault()
+    );
+    assert_eq!(result.as_int(), i64::from(DEPTH));
+}
+
+/// ADR-105: the budget is spent by width, so the depth a program reaches is a
+/// function of its frames — and an ordinary one is unaffected by this change.
+///
+/// The pair is the point. Both programs recurse deep; they differ only in how
+/// wide their frames are. Before ADR-105 both succeeded (and the wide one was
+/// one `ulimit` away from SIGABRT); after it, this one still succeeds and the
+/// wide one faults. A call count cannot tell them apart, which is precisely why
+/// it was the wrong quantity.
+///
+/// **This is also the gate on `REFERENCE_FRAME_SLOTS`.** `count` is the exact
+/// program `MAX_RECURSION_DEPTH` was chosen for, and the budget is derived so
+/// that it reaches that depth and no less. If a codegen change makes `count`
+/// wider than eleven `Gc` locals, this test fails — and the fix is to re-measure
+/// that constant, not to lower the depth asserted here.
+#[test]
+fn adr105_a_reference_frame_still_recurses_as_deep_as_the_call_count_allowed() {
+    // `count(d)` makes `d + 1` frames of its own, under `main`'s. Two off the
+    // constant is the arithmetic of the call chain, not slack in the budget:
+    // the pre-ADR-105 binary faults at exactly the same depth for exactly the
+    // same reason, which is what "unchanged" means here.
+    let deep = praxis_runtime::MAX_RECURSION_DEPTH - 2;
+    let src = format!(
+        "\
+fn count(n: Int) -> Int {{ if n == 0 {{ 0 }} else {{ 1 + count(n - 1) }} }}
+fn main() -> Int {{ count({deep}) }}
+"
+    );
+    let (rt, result) = run_main(&src);
+    assert!(
+        !rt.has_pending_fault(),
+        "the reference frame lost depth to ADR-105's byte budget: {:?}",
+        rt.fault()
+    );
+    assert_eq!(result.as_int(), i64::from(deep));
+}
+
 #[test]
 fn adr100_a_praxis_closure_called_from_a_graph_helper_balances_the_shadow_stack() {
     // Re-entrancy. `praxis_bfs` calls a Praxis closure from inside an
     // `abi_guard!` and inside a `NativeScope`, so generated prologues run
     // underneath native runtime code that is itself holding roots. The
     // discipline is still strictly LIFO — the closure's own epilogue restores
-    // both `top` and `recursion_depth` — and the native chain and the shadow
+    // both `top` and `stack_left` — and the native chain and the shadow
     // stack stay independent arms of `RuntimeRoots`.
     //
     // The closure recurses and allocates, so it pushes frames of its own and

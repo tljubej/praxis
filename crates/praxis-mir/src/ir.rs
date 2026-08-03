@@ -168,6 +168,10 @@ impl ScalarKind {
     /// verifier's answer and the call the backend emits would then be two
     /// statements of one fact, drifting the first time someone changed a symbol
     /// in `lower_inst`. The backend reads this function now.
+    ///
+    /// # Panics
+    /// On [`ScalarKind::Byte`], which has no boxing wrapper. See
+    /// [`ScalarKind::BYTE_HAS_NO_WRAPPER`] for why refusing is the answer.
     #[inline]
     #[must_use]
     pub const fn alloc_symbol(self) -> RuntimeSymbol {
@@ -177,13 +181,15 @@ impl ScalarKind {
             ScalarKind::Char => RuntimeSymbol::AllocChar,
             // Float's bit pattern is boxed by `praxis_alloc_float`.
             ScalarKind::Float => RuntimeSymbol::AllocFloat,
-            // Byte is reserved and not yet wired; box as Int defensively.
-            ScalarKind::Byte => RuntimeSymbol::AllocInt,
+            ScalarKind::Byte => panic!("{}", ScalarKind::BYTE_HAS_NO_WRAPPER),
         }
     }
 
     /// The wrapper an [`Inst::ExtractScalar`] of this payload calls to read it.
     /// The sibling of [`ScalarKind::alloc_symbol`], and here for its reason.
+    ///
+    /// # Panics
+    /// On [`ScalarKind::Byte`], for [`ScalarKind::alloc_symbol`]'s reason.
     #[inline]
     #[must_use]
     pub const fn load_symbol(self) -> RuntimeSymbol {
@@ -193,10 +199,42 @@ impl ScalarKind {
             ScalarKind::Char => RuntimeSymbol::CharLoad,
             // Float's payload is read as its f64 bit pattern (i64 channel).
             ScalarKind::Float => RuntimeSymbol::FloatLoad,
-            // Byte is reserved and not yet wired; read as Int defensively.
-            ScalarKind::Byte => RuntimeSymbol::IntLoad,
+            ScalarKind::Byte => panic!("{}", ScalarKind::BYTE_HAS_NO_WRAPPER),
         }
     }
+
+    /// Why [`alloc_symbol`](ScalarKind::alloc_symbol) and
+    /// [`load_symbol`](ScalarKind::load_symbol) refuse [`ScalarKind::Byte`]
+    /// instead of answering for it.
+    ///
+    /// Both arms used to name `Int`'s wrapper "defensively", and neither
+    /// defended anything. `load_symbol`'s `IntLoad` is an eight-byte read of a
+    /// one-byte `BytePayload`, so it returns the byte plus seven bytes of
+    /// whatever the allocator put next to it; `alloc_symbol`'s `AllocInt` mints
+    /// an object carrying the `INT` descriptor over a byte's worth of value, so
+    /// every later `descriptor()` check — the inline scalar-load guard, `==`,
+    /// `Map` keying, `out` — reads it as an `Int`. Neither is a memory-safety
+    /// bug today, because nothing constructs a `ScalarKind::Byte`: `build` maps
+    /// `ScalarType::Byte` to the descriptor channel in `compare_kind` and never
+    /// mentions `ScalarKind::Byte` at all. That is precisely the problem — the
+    /// wrong answer is invisible until the day somebody wires `Byte`, and on
+    /// that day it is a silently wrong program rather than a failed build.
+    ///
+    /// A refusal is the smallest thing that cannot go quiet. There is no
+    /// correct symbol to point at: the ABI manifest
+    /// (`crates/praxis-stdlib/src/abi.rs`) has no `praxis_alloc_byte` and no
+    /// `praxis_byte_load` row, and inventing one is a runtime + ABI-version
+    /// change, not a MIR one. So the mapping says what is true — a `Byte` has no
+    /// wrapper — and the compiler stops at the site rather than emitting a call
+    /// that reads the wrong width. Wiring `Byte` means adding those two rows
+    /// (`AllocByte` must be `AllocatesAndFaults`: it has to reject a value
+    /// outside `0..=255`, exactly as `praxis_alloc_char` rejects a non-scalar
+    /// code point) and then replacing these two arms with them.
+    pub const BYTE_HAS_NO_WRAPPER: &'static str =
+        "ScalarKind::Byte has no boxing wrapper: the ABI manifest has no \
+         `praxis_alloc_byte`/`praxis_byte_load` row, and `Int`'s wrappers are \
+         the wrong width and the wrong descriptor. Wire the two rows before \
+         emitting a `Byte` scalar.";
 }
 
 /// A basic block: a straight-line list of instructions and one terminator.
@@ -479,9 +517,12 @@ impl Inst {
         let faulting = |sym: RuntimeSymbol| sym.faults().then(|| sym.name());
         match self {
             // An allocation is one constructor call plus, for a composite, one
-            // filler call per slot. `praxis_alloc_text` and `praxis_alloc_char`
-            // validate their payload (`INVALID_TEXT`/`INVALID_CHAR`) and
-            // `praxis_grid_new` its dimensions; the rest only allocate.
+            // filler call per slot. `praxis_alloc_char` validates its payload
+            // (`INVALID_CHAR`) and `praxis_grid_new` its dimensions; the rest
+            // only allocate. `praxis_alloc_text` was in the first group until
+            // ADR-111 made UTF-8 its caller's precondition, and the code here
+            // did not change when it left — the answer comes from the manifest,
+            // which is ADR-088 §2's entire point.
             Inst::Alloc { alloc, .. } => alloc.symbols().find_map(faulting),
             // Re-boxing a payload: `Char`'s wrapper validates the Unicode
             // scalar, the others do not.
@@ -585,6 +626,38 @@ pub enum GcConst {
     /// result, `contains`, `is_empty` — is a `Scalar(Bool)` the backend
     /// re-boxes through [`Inst::Materialize`], which does not know the value.
     Bool(bool),
+}
+
+impl GcConst {
+    /// [`GcConst::SmallInt`] for a value the runtime's table actually holds,
+    /// and `None` for one it does not.
+    ///
+    /// **This is the only way to obtain a `SmallInt` that is worth writing**,
+    /// and it exists because the alternative failure is invisible until it is
+    /// catastrophic. The backend's `load_gc_const` computes the element offset
+    /// with `small_int::index_of(n).expect(..)`; nothing in [`crate::verify`]
+    /// checks the range, so a lowering site that decides for itself that its
+    /// value "is obviously small" produces MIR that verifies, passes every test
+    /// that runs early in a fresh process, and panics the JIT later.
+    ///
+    /// The concrete case that motivated this is `run_parser_plan`: plan ids come
+    /// from a process-wide arena bounded by `MAX_PLANS = 1 << 20`, not by
+    /// `SMALL_INT_MAX = 1024`, so an unconditional `SmallInt(plan_id)` would
+    /// have failed on the 1025th plan a long-lived process registered — the LSP
+    /// or a big test binary, sporadically, never on `praxis run`. Asking
+    /// `index_of` here means the question and the answer are one step: a caller
+    /// holding a `GcConst::SmallInt` is holding proof the slot exists.
+    #[inline]
+    #[must_use]
+    pub const fn small_int(value: i64) -> Option<GcConst> {
+        // `is_some()` rather than `map`: `Option::map` is not a `const fn`, and
+        // this stays `const` so the range question can be asked at compile time.
+        if praxis_runtime::small_int::index_of(value).is_some() {
+            Some(GcConst::SmallInt(value))
+        } else {
+            None
+        }
+    }
 }
 
 /// What to allocate, for [`Inst::Alloc`].
@@ -947,5 +1020,77 @@ mod tests {
         assert_eq!(f.debug_kind(b), LocalDebugKind::Temp);
         assert_eq!(f.debug_span(a), Some((1, 5)));
         assert_eq!(f.debug_span(b), None);
+    }
+
+    /// A [`GcConst::SmallInt`] cannot be built for a value the interned table
+    /// does not hold, at either end of the range.
+    ///
+    /// This is what turns the backend's `small_int::index_of(n).expect(..)` in
+    /// `load_gc_const` into a documented fact rather than a hope. Nothing in
+    /// [`crate::verify`] checks the range, so before the constructor existed the
+    /// only thing standing between a lowering site's private opinion about what
+    /// counts as "small" and a JIT panic was that no site had one — and
+    /// `run_parser_plan`, whose ids come from an arena bounded by `1 << 20`, was
+    /// exactly the site about to form one.
+    #[test]
+    fn a_gc_const_small_int_cannot_name_a_slot_the_table_does_not_have() {
+        use praxis_runtime::small_int::{SMALL_INT_MAX, SMALL_INT_MIN};
+
+        assert_eq!(
+            GcConst::small_int(SMALL_INT_MIN),
+            Some(GcConst::SmallInt(SMALL_INT_MIN)),
+            "the floor is in the table"
+        );
+        assert_eq!(
+            GcConst::small_int(SMALL_INT_MAX),
+            Some(GcConst::SmallInt(SMALL_INT_MAX)),
+            "the ceiling is in the table"
+        );
+        assert_eq!(GcConst::small_int(SMALL_INT_MIN - 1), None);
+        assert_eq!(GcConst::small_int(SMALL_INT_MAX + 1), None);
+        // The case the constructor exists for: a plan id past the table's end.
+        // `MAX_PLANS` is `1 << 20`, so this is reachable in a long-lived process
+        // rather than hypothetical.
+        assert_eq!(GcConst::small_int(1 << 20), None);
+    }
+
+    /// A `Byte` payload has no boxing wrapper, and asking for one is refused
+    /// rather than answered with `Int`'s.
+    ///
+    /// The arm used to answer `RuntimeSymbol::AllocInt`, which mints an object
+    /// carrying the `INT` descriptor over a byte's worth of value. Nothing
+    /// constructs a [`ScalarKind::Byte`] today, so the wrong answer was
+    /// invisible — which is the whole reason it had to stop being an answer.
+    #[test]
+    #[should_panic(expected = "ScalarKind::Byte has no boxing wrapper")]
+    fn boxing_a_byte_payload_is_refused_because_there_is_no_byte_wrapper() {
+        let _ = ScalarKind::Byte.alloc_symbol();
+    }
+
+    /// The mirror of
+    /// [`boxing_a_byte_payload_is_refused_because_there_is_no_byte_wrapper`],
+    /// and the arm handover 23 §4 named: `IntLoad` is an eight-byte read of a
+    /// one-byte `BytePayload`, so it answers the byte plus seven bytes of
+    /// whatever the allocator happened to put beside it.
+    #[test]
+    #[should_panic(expected = "ScalarKind::Byte has no boxing wrapper")]
+    fn reading_a_byte_payload_is_refused_because_there_is_no_byte_wrapper() {
+        let _ = ScalarKind::Byte.load_symbol();
+    }
+
+    /// Every *other* `ScalarKind` answers both questions, so the refusal above
+    /// is a statement about `Byte` and not a hole in the mapping.
+    #[test]
+    fn every_wired_scalar_kind_names_both_of_its_wrappers() {
+        for sk in [
+            ScalarKind::Int,
+            ScalarKind::Bool,
+            ScalarKind::Char,
+            ScalarKind::Float,
+        ] {
+            // Both are total for these four; the assertion is that neither
+            // panics and that they do not collapse onto one symbol.
+            assert_ne!(sk.alloc_symbol(), sk.load_symbol());
+        }
     }
 }

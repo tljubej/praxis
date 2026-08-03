@@ -44,6 +44,7 @@ pub mod repr;
 pub mod roots;
 pub mod scalars;
 pub mod shadow_stack;
+pub mod small_char;
 pub mod small_int;
 pub mod teardown;
 pub mod text;
@@ -54,8 +55,9 @@ pub use abi::{assert_abi_version, RUNTIME_ABI_VERSION};
 pub use closures::ClosurePayload;
 pub use collections::{DequePayload, GridPayload, VecPayload};
 pub use context::{
-    current_fault_kind, DebugLocal, Fault, FaultKind, FaultMessage, Runtime, RuntimeContext,
-    MAX_RECURSION_DEPTH,
+    current_fault_kind, frame_cost, DebugLocal, Fault, FaultKind, FaultMessage, Runtime,
+    RuntimeContext, StackBudget, FRAME_BYTES_BASE, FRAME_BYTES_PER_SLOT, MAX_RECURSION_DEPTH,
+    REFERENCE_FRAME_SLOTS, STACK_BUDGET_BYTES,
 };
 pub use crash_snapshot::{CrashSnapshot, SnapshotFrame, SnapshotSlot};
 pub use debug::{
@@ -67,7 +69,10 @@ pub use descriptor::{
     TraceFn, Tracer, TypeDescriptor, TypeId, BUILTINS,
 };
 pub use gc::{GcHeader, GcRef, HeapId};
-pub use heap::{Heap, HeapStats};
+pub use heap::{
+    Heap, HeapStats, InlineInternSite, Pacer, INITIAL_COLLECT_THRESHOLD, LIVE_HEADROOM,
+    MAX_COLLECT_THRESHOLD,
+};
 pub use immortal::Immortals;
 pub use input::{clear_input_reader, install_input_reader, InputReader};
 pub use parse_detail::{ParseDetail, ParseFail};

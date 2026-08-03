@@ -8,6 +8,8 @@ ADR-035 decision 3's last hop; ADR-044's emission story (its two-set *contract*
 is untouched); ADR-033 decision 4. ADR-101's `SlotStack` is used as delivered.
 MIR-16, MIR-01, MIR-02 and ADR-033 decisions 1–3 are preserved and the places
 this change touches their edges are recorded below.
+**Amended by:** ADR-106 (the value slots become the collector's one weak arm —
+the last Consequences bullet below is the defect it closes)
 
 ## Context
 
@@ -317,18 +319,20 @@ debug build never exercises — passes with all three implementations agreeing.
   stacks.** The balance property — every prologue matched by an epilogue — is now
   checked for all three, so an unbalanced debug epilogue is a `debug_assert`
   between runs rather than a snapshot that walks into a popped frame.
-- **A latent soundness question is unchanged and is *not* this change's to fix.**
-  `RuntimeRoots` has five arms and the debug values are not one of them, so a
-  value that `RootSlots::dead` nulled but that a debug slot still names is
-  unreachable for GC; a collection between the null and the fault frees it, and
-  the snapshot then copies a dangling `GcRef` into a root set. This is true on
-  `main` today, for exactly the same values, and this change alters neither the
-  values nor their lifetimes. The contiguous stack does make the fix a two-line
-  change — a sixth arm walking `[base, top)` — but that arm is the merge in
-  disguise unless the values are rooted *weakly*, so it needs its own decision
-  and its own measurement against
-  `a_dead_local_stops_being_reachable_from_its_frame`. Recorded here so the next
-  reader does not have to re-derive it.
+- ~~**A latent soundness question is unchanged and is *not* this change's to
+  fix.**~~ **Closed by ADR-106**, and the derivation was right. `RuntimeRoots`
+  had five arms and the debug values were not one of them, so a value that
+  `RootSlots::dead` nulled but that a debug slot still named was unreachable for
+  GC; a collection between the null and the fault freed it, and the snapshot
+  then copied a dangling `GcRef` into a root set. This was true on `main` before
+  this change, for exactly the same values, and this change altered neither the
+  values nor their lifetimes. The contiguous stack did make the fix small — a
+  sixth arm over the claimed slots — and this bullet's condition on it was the
+  operative one: that arm is the merge in disguise unless the values are rooted
+  **weakly**. ADR-106 is that decision. The arm is never traced, it is cleared
+  once per collection immediately after the sweep, and
+  `a_dead_local_stops_being_reachable_from_its_frame` passes unchanged, which is
+  the measurement this bullet asked for.
 - **`praxis_snapshot_debug_chain` is now the only `praxis_*` symbol the debug
   machinery has**, and it is called once per fault. The four the prologue and
   epilogue called are gone.

@@ -5,6 +5,9 @@
 **Milestone:** Repair (foundation F6, stage S4)
 **Amends:** ADR-011's header description (`GcHeader` is 24 bytes, not 16);
 ADR-012's root-set contract (a root from another heap is now ignored, not traced)
+**Amended by:** ADR-103 (decision 3's mechanism, and the `mark` byte leaves the
+field list); ADR-109 (the `size` field leaves it too, and the header is 16 bytes
+at ABI v19 — see the Consequences below). All three Decisions here survive both.
 
 ## Context
 
@@ -80,6 +83,16 @@ free-list work inherits the guarantee rather than having to add it.
 - `GcHeader` is 24 bytes (8 descriptor + 4 size + 2 payload_offset + 1 mark +
   1 pad + 4 heap_id), align 8. `RUNTIME_ABI_VERSION` and
   `COMPILER_EXPECTED_ABI_VERSION` go to **8**, once, for this change.
+
+  > **Amended twice, and the field list is now half of what it says.** ADR-103
+  > took the `mark` byte and its pad into the page's bitmap; ADR-109 took `size`,
+  > which had no readers anywhere in the workspace. `GcHeader` is **16 bytes**
+  > (8 descriptor + 2 payload_offset + 2 pad + 4 heap_id), align 8, at
+  > `RUNTIME_ABI_VERSION` **19**. What survives is the part this ADR was about:
+  > `payload_offset` is still the single recorded layout authority, and the field
+  > that pays for Decision 2 — `heap_id` — is the one field neither amendment
+  > was willing to spend. `gc::tests::the_header_is_descriptor_offset_and_heap_id_and_nothing_else`
+  > pins every number in this bullet.
 - `heap::tests::overaligned_payload_accessor_matches_initialized_address` and
   `heap::tests::foreign_heap_root_cannot_delay_reclamation` are un-ignored and
   passing.
@@ -89,3 +102,10 @@ free-list work inherits the guarantee rather than having to add it.
   naming the descriptor rather than truncating. No descriptor comes close.
 - All 122 `payload::<T>()` call sites are unchanged — they route through
   `GcHeader::payload`, which is why the offset could move at all.
+
+  > **This is the bullet that paid for itself.** There are 187 of them now, and
+  > the offset *did* move — 24 to 16, ADR-109 — with none of them edited, for
+  > exactly the reason stated here. It is also why ADR-109 stopped at 16 rather
+  > than the 8 handover 23 asked for: reaching 8 means deriving the offset from
+  > `descriptor().align()` instead of reading the recorded `u16`, which would put
+  > a dependent load on every one of those 187 sites.

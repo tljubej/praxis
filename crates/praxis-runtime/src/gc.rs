@@ -9,12 +9,16 @@
 //! in §10.3.
 //!
 //! See §12.2 for the conceptual header layout. The concrete fields here are the
-//! M3 realization (ADR-011) as amended by ADR-039 and ADR-103: a typed
-//! descriptor pointer, the payload size in bytes for debugging, the offset the
-//! allocator laid the payload at, and the owning heap's identity. The mark
-//! colour is **not** here — it is a bit in the object's page ([`crate::page`]),
-//! because a per-object colour byte cost a random-access store per surviving
-//! object per collection.
+//! M3 realization (ADR-011) as amended by ADR-039, ADR-103 and ADR-109: a typed
+//! descriptor pointer, the offset the allocator laid the payload at, and the
+//! owning heap's identity. Two things that used to be here are not, and both
+//! left for the same reason — a field every object pays for must be a field
+//! something reads. The mark colour is a bit in the object's page
+//! ([`crate::page`]), because a per-object colour byte cost a random-access
+//! store per surviving object per collection. The payload size is nowhere: it
+//! was recorded "for debugging" and had no readers at all, and deleting it took
+//! the header from 24 bytes to 16 and every block in the heap down by eight
+//! (ADR-109). The descriptor answers the size question for anyone who asks it.
 
 use std::cell::Cell;
 use std::num::NonZeroU32;
@@ -68,6 +72,15 @@ impl HeapId {
 /// the only constructor, so an initialized header is the only kind that exists,
 /// and `payload_offset` cannot disagree with the address the allocator handed
 /// to the payload initializer.
+///
+/// **Sixteen bytes, and every field in them has a reader on a hot path**
+/// (ADR-109). This prefixes every allocation in the language, so a field here is
+/// a tax on every object a program makes: the `size: u32` that used to sit
+/// between `descriptor` and `payload_offset` was written by the allocator and
+/// read by nothing, and it cost eight bytes per object once `#[repr(C)]`
+/// padding is counted. Adding a field here is not a local decision — it moves
+/// `page::MIN_BLOCK`, the whole size-class ladder, and the immediate generated
+/// code folds to reach a payload, so it owes an ABI bump and an ADR.
 #[repr(C)]
 pub struct GcHeader {
     /// The descriptor that centralizes every payload-aware operation (§11.4).
@@ -78,10 +91,6 @@ pub struct GcHeader {
     /// finalized. `Cell` so `poison` can run through a shared reference during
     /// the sweep, which reaches every block through a `&PageHeader`.
     descriptor: Cell<*const TypeDescriptor>,
-    /// Size of the payload in bytes (excludes the header). Used for stats and
-    /// debugging; precise sweep uses the page's `allocated` bitmap and the
-    /// page's stride, not this field.
-    size: u32,
     /// Distance in bytes from this header's address to its payload's. **The
     /// single layout authority** — written by the allocator from the same
     /// calculation that produced the address it initialized, and read by
@@ -140,13 +149,11 @@ impl GcHeader {
     #[inline]
     pub(crate) fn new(
         descriptor: &'static TypeDescriptor,
-        size: u32,
         payload_offset: u16,
         heap_id: HeapId,
     ) -> GcHeader {
         GcHeader {
             descriptor: Cell::new(descriptor as *const TypeDescriptor),
-            size,
             payload_offset,
             heap_id: Cell::new(heap_id.get()),
         }
@@ -175,12 +182,6 @@ impl GcHeader {
         unsafe { &*ptr }
     }
 
-    /// The payload size in bytes recorded at allocation.
-    #[inline]
-    pub fn size(&self) -> u32 {
-        self.size
-    }
-
     /// Pointer to this header's payload bytes.
     ///
     /// The caller is responsible for knowing the payload type (via the
@@ -206,6 +207,14 @@ impl GcHeader {
     /// A poisoned header is not an object: its payload has been finalized and
     /// its bytes may be reused. Reading anything but this predicate off it is a
     /// bug.
+    ///
+    /// **"May be reused" is why this predicate has a shelf life.** It answers
+    /// "has this block been reclaimed" only until the allocator reissues the
+    /// block and writes a fresh header over the poison. The collector's weak
+    /// arm ([`crate::debug::DebugFrameStackHeader::clear_reclaimed`], ADR-106)
+    /// is the one caller that depends on that, and it runs inside the
+    /// collection — after the sweep and before any allocation — for exactly
+    /// this reason.
     #[inline]
     pub fn is_poisoned(&self) -> bool {
         self.descriptor.get().is_null()
@@ -234,7 +243,6 @@ impl GcHeader {
     pub(crate) fn detached() -> GcHeader {
         GcHeader {
             descriptor: Cell::new(std::ptr::null()),
-            size: 0,
             payload_offset: std::mem::size_of::<GcHeader>() as u16,
             heap_id: Cell::new(0),
         }
@@ -397,44 +405,108 @@ mod tests {
     /// a payload address (see `payload_offset_for`).
     #[test]
     fn header_layout_is_fixed() {
-        assert_eq!(std::mem::size_of::<GcHeader>(), 24);
+        assert_eq!(std::mem::size_of::<GcHeader>(), 16);
         assert_eq!(std::mem::align_of::<GcHeader>(), 8);
     }
 
-    /// **Moving the mark colour into the page must not move the immediate
-    /// generated code bakes in.** `Inst::EnumTag` reaches an enum's tag by
-    /// calling `payload_offset_for` at compile time and folding the answer into
-    /// an `iadd_imm`, so a header that quietly changed size would make the
-    /// runtime and the JIT disagree about where every payload starts — silently,
-    /// because compiler and runtime are the same binary and `assert_abi_version`
-    /// would be trivially satisfied. ADR-039's Context is explicit that this is
-    /// why a header repack is one commit; this test is why removing the mark
-    /// byte is *not* a repack. Deleting `mark: Cell<u8>` and its `_pad` left the
-    /// struct 20 bytes of fields in 24 bytes of `#[repr(C)]` padding, so nothing
-    /// moved and no ABI bump is owed.
+    /// **One test for every number generated code depends on.**
+    ///
+    /// Three separate facts have to hold together for a Praxis binary to read
+    /// its own objects, and they are asserted in one place so that the next
+    /// person who repacks the header trips exactly one assertion and is sent to
+    /// exactly one decision record:
+    ///
+    /// * the header is 16 bytes and 8-aligned, so `page::MIN_BLOCK` and
+    ///   `page::BLOCK_GRANULE` — which derive from those two numbers — put the
+    ///   ladder's floor where ADR-109 says it is;
+    /// * `DESCRIPTOR_OFFSET` is 0, which is ADR-102's inline type proof: the
+    ///   backend folds it into the load that precedes every inlined scalar read;
+    /// * `payload_offset_for(8)` is 16, which is the immediate `Inst::EnumTag`
+    ///   and `emit_scalar_load` fold into an `iadd_imm`.
+    ///
+    /// The failure this guards is silent. Compiler and runtime are the same
+    /// binary, so `assert_abi_version` is trivially satisfied and would not
+    /// notice a header that changed width; the protection is that
+    /// `payload_offset_for` is the single `const` authority (ADR-039 Decision 1)
+    /// and that this test pins what it folds to. Nobody may hand-write 16.
     #[test]
-    fn removing_the_mark_byte_did_not_move_the_payload_offset() {
-        assert_eq!(std::mem::size_of::<GcHeader>(), 24);
+    fn the_header_is_descriptor_offset_and_heap_id_and_nothing_else() {
+        assert_eq!(std::mem::size_of::<GcHeader>(), 16);
+        assert_eq!(std::mem::align_of::<GcHeader>(), 8);
+        assert_eq!(GcHeader::DESCRIPTOR_OFFSET, 0);
+        assert_eq!(GcHeader::payload_offset_for(8), 16);
+    }
+
+    /// **The header shrank, so the folded immediate moved, and ABI v19 is what
+    /// that bump is called.**
+    ///
+    /// This test replaces `removing_the_mark_byte_did_not_move_the_payload_offset`,
+    /// whose premise was the opposite one: moving the mark colour into the page
+    /// left the struct 20 bytes of fields in 24 bytes of `#[repr(C)]` padding,
+    /// so nothing moved and no bump was owed. Deleting `size: u32` (ADR-109)
+    /// *did* move it — 24 to 16 — because the field's four bytes plus the four
+    /// bytes of padding they attracted were a whole eight.
+    ///
+    /// `Inst::EnumTag` reaches an enum's tag by calling `payload_offset_for` at
+    /// compile time and folding the answer into an `iadd_imm`, and
+    /// `emit_scalar_load` does the same for an inlined scalar read. Neither has
+    /// a literal to update — that is ADR-039 Decision 1 working — but a runtime
+    /// and a compiler from either side of this change disagree about where every
+    /// payload in the language begins, and the compiler-runtime version check
+    /// cannot catch it because they are one binary. So the guard is this: the
+    /// immediate is pinned here, and it is pinned beside the version number that
+    /// declares the disagreement, so the two can only be updated together.
+    #[test]
+    fn the_header_shrink_moved_the_folded_payload_offset_at_abi_v19() {
+        assert_eq!(std::mem::size_of::<GcHeader>(), 16);
         assert_eq!(
             GcHeader::payload_offset_for(std::mem::align_of::<GcHeader>()),
-            24
+            16
         );
         assert_eq!(
             GcHeader::payload_offset_for(std::mem::align_of::<crate::enums::EnumPayload>()),
-            24,
+            16,
             "the offset lower.rs:Inst::EnumTag folds into an immediate"
         );
+        assert_eq!(
+            crate::abi::RUNTIME_ABI_VERSION,
+            19,
+            "the offset above moved at v19; a later bump must not orphan this test"
+        );
+    }
+
+    /// The ladder's floor is the header, and the granule is the header's
+    /// alignment — **and that derivation is why ADR-109 was a one-field
+    /// deletion.**
+    ///
+    /// `page::MIN_BLOCK` and `page::BLOCK_GRANULE` are written as
+    /// `size_of::<GcHeader>()` and `align_of::<GcHeader>()`, so shrinking the
+    /// header re-derived `NUM_CLASSES`, `MAX_BLOCKS`, `BITMAP_WORDS` and the
+    /// whole size-class ladder without a single edit to `page.rs`. Nothing
+    /// checked that derivation before — it was true by inspection of two `const`
+    /// lines — and this codebase pins derivations, because the alternative is
+    /// that someone "simplifies" `MIN_BLOCK` to a literal 16 and the next header
+    /// change silently strands the ladder one rung above the smallest block.
+    #[test]
+    fn the_ladder_floor_follows_the_header() {
+        assert_eq!(crate::page::MIN_BLOCK, std::mem::size_of::<GcHeader>());
+        assert_eq!(crate::page::BLOCK_GRANULE, std::mem::align_of::<GcHeader>());
     }
 
     /// `payload_offset_for` is the single layout authority. For any alignment
     /// up to the header's own it is the header size; beyond that it pads.
+    ///
+    /// The 16 case is the one that moved with ADR-109 and is worth stating: a
+    /// 16-aligned payload used to be padded forward past a 24-byte header, and
+    /// now the header is itself 16-aligned-friendly, so nothing is padded. The
+    /// 64 case is unchanged, which is what keeps `heap::tests::OVERALIGNED` and
+    /// the large-page path testing the same thing they always did.
     #[test]
     fn payload_offset_pads_only_for_overaligned_payloads() {
         let header = std::mem::size_of::<GcHeader>();
-        for align in [1_usize, 2, 4, 8] {
+        for align in [1_usize, 2, 4, 8, 16] {
             assert_eq!(GcHeader::payload_offset_for(align), header);
         }
-        assert_eq!(GcHeader::payload_offset_for(16), 32);
         assert_eq!(GcHeader::payload_offset_for(64), 64);
     }
 
@@ -451,7 +523,6 @@ mod tests {
         assert_eq!(GcHeader::DESCRIPTOR_OFFSET, 0);
         let header = GcHeader::new(
             &crate::scalars::INT,
-            8,
             GcHeader::payload_offset_for(8) as u16,
             HeapId::mint(),
         );
@@ -476,7 +547,6 @@ mod tests {
     fn payload_offset_is_recorded_in_the_header() {
         let header = GcHeader::new(
             &crate::scalars::INT,
-            8,
             GcHeader::payload_offset_for(8) as u16,
             HeapId::mint(),
         );
@@ -489,7 +559,11 @@ mod tests {
 
     #[test]
     fn a_poisoned_header_has_no_heap_and_reports_itself() {
-        let header = GcHeader::new(&crate::scalars::INT, 8, 24, HeapId::mint());
+        let header = GcHeader::new(
+            &crate::scalars::INT,
+            GcHeader::payload_offset_for(8) as u16,
+            HeapId::mint(),
+        );
         assert!(!header.is_poisoned());
         assert!(header.heap_id().is_some());
 

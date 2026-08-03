@@ -7,6 +7,9 @@
 `live` registry are both replaced); ADR-039's Decision 3 (poisoning now precedes
 clearing a bitmap bit rather than dropping a registry entry — the guarantee is
 unchanged, the mechanism is not)
+**Amended by:** ADR-109 (the final Consequence's "natural end state" is
+**rejected**, not deferred; the header shrinks to 16 bytes instead, which
+re-derives every number this ADR quotes for the ladder and the page header)
 
 ## Context
 
@@ -173,6 +176,17 @@ padding either way.
   recorded in the header by the one function that computes it, `heap_id` is still
   per-allocation provenance the mark phase enforces before any dereference, and
   sweep still poisons before the storage becomes reclaimable.
+
+  > **Amended by [ADR-109](./109-pages-stay-segregated-by-size-class.md) (the
+  > next day).** Both halves of the first sentence are now false and the last
+  > sentence is still true, which is the distinction worth keeping. Deleting
+  > `GcHeader.size` took the header to 16 bytes and `payload_offset_for(8)` to
+  > 16, so the folded immediate moved and `RUNTIME_ABI_VERSION` went to **19**.
+  > The test named here has been renamed to
+  > `gc::tests::the_header_shrink_moved_the_folded_payload_offset_at_abi_v19` —
+  > its premise was "nothing moved, so nothing is owed", and it now pins the
+  > moved immediate against the version that declares it. ADR-039's three
+  > Decisions survive ADR-109 as well, unchanged and for the same reasons.
 - **`praxis-runtime` no longer depends on `bumpalo`.** The workspace still does
   (`praxis-codegen-cranelift`, `praxis-input-parser`).
 - **Peak RSS falls by 1.3× to 1.8×** across the suite: `vm` 253 → 138 MiB,
@@ -205,3 +219,18 @@ padding either way.
   `GcRef` points at and touches all 122 `payload::<T>()` sites. Anyone who shrinks
   the header to 8 bytes first should know that work is wasted if that end state
   is ever taken.
+
+  > **Superseded by [ADR-109](./109-pages-stay-segregated-by-size-class.md):
+  > descriptor segregation is rejected, not deferred, and shrinking the header
+  > was not wasted work.** This bullet blocked two items for a day — handover 23
+  > filed both P-3 and P-1 as "do not start before answering this" — so the
+  > correction is worth stating plainly. Deleting the header leaves no
+  > per-object word the mark phase can read *before* it masks an address to a
+  > page, which forfeits exactly the ordering Decision 5 above spends a whole
+  > section establishing; the memory it would buy is 448 KiB against a suite
+  > peaking between 507 MiB and 3.19 GiB. And the warning in the last sentence
+  > did not apply: ADR-109 shrank the header to **16** bytes, not 8, by deleting
+  > `size` — the one field of the three named here that was never read by
+  > anything — and every other consequence in this ADR followed from the two
+  > `const`s that derive `MIN_BLOCK` and `BLOCK_GRANULE` from the header, with
+  > no edit to `page.rs` at all.

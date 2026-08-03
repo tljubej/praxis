@@ -27,19 +27,38 @@
 //! never cleared: a value that has been produced stays renderable, which is
 //! MIR-16's contract and what `locals` in the crash REPL is for.
 //!
-//! ## The value slots are not a root set, and cannot become one by accident
+//! ## The value slots are not a *strong* root set, and cannot become one by accident
 //!
 //! [`DebugValueStack`] is `SlotStack<Option<GcRef>>` while the shadow stack is
 //! `SlotStack<*mut GcHeader>`. The two are deliberately *different types*: the
 //! `RootSet` impl lives on `SlotStackHeader<*mut GcHeader>`, so the debug value
-//! stack does not have one and cannot be handed to the collector. That is
-//! ADR-044's split made structural — the debug set is over-approximate and never
-//! cleared, and rooting it would re-couple the two sets and undo MIR-01.
+//! stack does not have one and cannot be handed to the collector as something
+//! to trace. That is ADR-044's split made structural — the debug set is
+//! over-approximate and never cleared, and tracing it would re-couple the two
+//! sets and undo MIR-01.
 //!
 //! It also reads better: a debug slot holds a value or nothing, which
 //! `Option<GcRef>` says exactly (its `None` is the all-zero niche, F18, so a
 //! zeroed claim *is* a run of "nothing yet"). A shadow slot is a raw pointer
 //! only because the collector dereferences it and `GcRef` is `NonNull`.
+//!
+//! ## …but the collector does *write* them (ADR-106)
+//!
+//! Not tracing them left a hole, and ADR-104's Consequences registered it: a
+//! value whose shadow slot `RootSlots::dead` nulled, but whose debug slot still
+//! names it, is unreachable. A collection in that window frees it, `poison()`
+//! nulls its descriptor, and the block is then handed back out — after which the
+//! debug slot names a live object of an entirely different type, and
+//! `praxis_snapshot_debug_chain` copies that into a `CrashSnapshot`, which *is*
+//! a strong root set.
+//!
+//! So the debug frames are [`RuntimeRoots`](crate::RuntimeRoots)' one **weak**
+//! arm. [`DebugFrameStackHeader::clear_reclaimed`] runs once per collection,
+//! immediately after the sweep, and turns every slot naming reclaimed storage
+//! into `None`. The slots retain nothing — a dead local's object still dies on
+//! schedule — and what the debugger renders for it changes from freed memory to
+//! `<uninit>`, which is the honest answer and the one the `None` niche already
+//! spells.
 
 use crate::context::{DebugLocal, RuntimeContext};
 use crate::gc::GcRef;
@@ -178,8 +197,13 @@ impl DebugFrameEntry {
 /// reasons stated in this module's header: the `None` niche means a zeroed claim
 /// *is* a run of "no value yet" (F18), and the distinct type is what keeps
 /// `impl RootSet for SlotStackHeader<*mut GcHeader>` from applying here. The
-/// collector must not see these slots; ADR-044 decision 2 nulls a shadow slot
-/// the moment its local dies, and this stack deliberately does not.
+/// collector must not **trace** these slots; ADR-044 decision 2 nulls a shadow
+/// slot the moment its local dies, and this stack deliberately does not.
+///
+/// It does scan them, after every sweep, and null the ones whose object that
+/// sweep reclaimed — see [`DebugFrameStackHeader::clear_reclaimed`] and
+/// ADR-106. That is the difference between keeping a value *alive* and keeping
+/// a slot *valid*, and only the second is this stack's business.
 pub type DebugValueStack = SlotStack<Option<GcRef>>;
 /// The header generated code bump-allocates value slots against.
 pub type DebugValueStackHeader = SlotStackHeader<Option<GcRef>>;
@@ -197,12 +221,114 @@ pub type DebugFrameStackHeader = SlotStackHeader<DebugFrameEntry>;
 /// code emits no bounds check. Written as the shadow constant rather than
 /// re-derived, because the two must move together: they are indexed by the same
 /// slot number for the same local.
+///
+/// This is a *reservation*, and the weak scan (ADR-106) does not walk it. Its
+/// cost is bounded by `top - base` — the slots live calls have actually claimed
+/// — so raising this number costs address space and not collection time.
 pub const DEBUG_VALUE_STACK_SLOTS: usize = SHADOW_STACK_SLOTS;
 
 /// The size of the debug frame-entry reservation, in slots — one per live call,
 /// bounded by the same depth guard, plus the headroom `SHADOW_STACK_SLOTS`
 /// keeps for Rust-side pushes.
 pub const DEBUG_FRAME_STACK_SLOTS: usize = MAX_RECURSION_DEPTH as usize + 1;
+
+// ---------------------------------------------------------------------------
+// The weak arm (ADR-106)
+// ---------------------------------------------------------------------------
+
+impl DebugFrameStackHeader {
+    /// Null every claimed debug value slot whose object the sweep that just
+    /// finished reclaimed, and answer how many were nulled.
+    ///
+    /// This is the entire content of [`RuntimeRoots`](crate::RuntimeRoots)' one
+    /// weak arm. It retains nothing: it runs *after* the mark and the sweep have
+    /// already decided what dies, and its only effect is to replace a reference
+    /// to storage that no longer holds an object with the absence
+    /// `Option<GcRef>` already spells.
+    ///
+    /// ### Why `is_poisoned`, and why here
+    ///
+    /// Sweep calls `GcHeader::poison` on each reclaimed block *before* it clears
+    /// that block's `allocated` bit (ADR-039 decision 3), and nothing else in the
+    /// runtime ever nulls a descriptor. So at this instant "poisoned" is exactly
+    /// "reclaimed by this collection or an earlier one", and it is a one-word
+    /// load and a compare against zero.
+    ///
+    /// It is only exactly that *at this instant*. `claim_free_block` hands a
+    /// reclaimed block back to the next allocation, which writes a fresh header
+    /// over the poison — so a slot naming that block stops being distinguishable
+    /// from a slot naming a live object, and the two have different types. That
+    /// is why this cannot be deferred to `praxis_snapshot_debug_chain` or to the
+    /// debugger's render: the window between the sweep and the next allocation is
+    /// the only place the question has an answer. `Heap::collect_inner` calls this
+    /// inside that window.
+    ///
+    /// ### Why the frame entries rather than the value stack's `[base, top)`
+    ///
+    /// A frame entry is what pairs a run of value slots with the `local_count`
+    /// that bounds it, and `crash_snapshot::copy_stack` walks exactly these pairs
+    /// to build a snapshot. Driving the clear from the same walk makes "every
+    /// value a snapshot could copy has been checked" true by construction rather
+    /// than by an argument about the runs partitioning the reservation. The
+    /// `debug_assert` below is that argument, kept as a check: if a prologue ever
+    /// claims value slots without a frame entry to name them, this fires in every
+    /// debug build instead of silently skipping the slots it cannot see.
+    ///
+    /// # Safety
+    /// Every claimed entry's `meta` must point at a live [`FunctionDebugMeta`]
+    /// whose `locals` array has `local_count` entries, and its `values` at that
+    /// many value slots — the same contract `copy_stack` runs under, and the one
+    /// every prologue establishes. `values` must be live for the duration of the
+    /// call: the collector writes through it.
+    ///
+    /// Reading `r.header()` for a reference into a *reclaimed* block is a read of
+    /// mapped memory, not a use-after-free: a page is unmapped only at teardown,
+    /// after `finalize_all` (`Heap::release_pages`), which is the same premise
+    /// that makes the provenance check in `Heap::mark` a rejection rather than a
+    /// wild read (ADR-103 decision 3).
+    pub(crate) unsafe fn clear_reclaimed(&self, values: &DebugValueStackHeader) -> usize {
+        let mut cleared = 0usize;
+        let mut scanned = 0usize;
+        for entry in self.claimed() {
+            // SAFETY: the caller guarantees a live `meta` on every claimed
+            // entry. `copy_stack` treats null the same way and for the same
+            // reason: a prologue writes both words in straight-line code, so
+            // this is unreachable rather than handled.
+            let Some(meta) = (unsafe { entry.meta.as_ref() }) else {
+                continue;
+            };
+            let count = meta.local_count as usize;
+            scanned += count;
+            for i in 0..count {
+                // SAFETY: the caller guarantees `values` names `local_count`
+                // live slots. This is the same pointer a generated debug store
+                // and `DebugFrameGuard::set` write through, carrying the
+                // reservation's own provenance — not a pointer re-derived from
+                // a shared slice.
+                let slot = unsafe { entry.values.add(i) };
+                // SAFETY: as above; the slot holds an initialized
+                // `Option<GcRef>` (a claim zeroes its run, and zero is `None`).
+                let Some(r) = (unsafe { *slot }) else {
+                    continue;
+                };
+                if r.header().is_poisoned() {
+                    // SAFETY: as above.
+                    unsafe { *slot = None };
+                    cleared += 1;
+                }
+            }
+        }
+        debug_assert_eq!(
+            scanned,
+            values.len(),
+            "the frame entries' value runs must partition the value stack's \
+             [base, top) — a run of slots no frame entry names is a run this \
+             scan cannot reach, and a stale reference in it would survive the \
+             collection that freed what it points at"
+        );
+        cleared
+    }
+}
 
 impl DebugLocal {
     /// The source name as a `String`. Allocates; for testing/debugger only.
@@ -509,6 +635,115 @@ mod tests {
         }
         assert!(f.rt.debug_frame_stack().is_empty());
         assert!(f.rt.debug_value_stack().is_empty());
+    }
+
+    /// ADR-106, the defect it closes. A value the shadow stack has stopped
+    /// naming — which is every `Gc` local after its last use, by ADR-044
+    /// decision 2 — is unreachable while the debugger still names it. The
+    /// collection that reclaims it must leave the debug slot as an absence, not
+    /// as a reference into storage the allocator is now free to hand out.
+    ///
+    /// The `9_999` is past the interned small-`Int` range on purpose: an
+    /// interned `Int` is an immortal that no sweep touches, so a value inside
+    /// that range would pass this test by never dying.
+    #[test]
+    fn a_weak_slot_whose_object_died_becomes_an_absence() {
+        let metas = shadowed_a_metas();
+        let meta = meta_for(b"f", &metas, (0, 0));
+        let mut f = Fixture::new();
+        let value =
+            f.rt.heap()
+                .alloc_unpaced(crate::scalars::INT_PAYLOAD, 9_999_i64);
+        let before = f.rt.heap().stats().live_count;
+        let ctx = f.ctx_ptr();
+        // SAFETY: `ctx` is wired to `f.rt`, and `meta`/`metas` outlive the guard.
+        let mut guard = unsafe { push_frame(ctx, &meta) };
+        // Slot 1 names the value; nothing roots it. This is the state
+        // `RootSlots::dead` produces at a local's last use.
+        guard.set(1, value);
+        assert_eq!(guard.values()[1].map(|r| r.as_int()), Some(9_999));
+
+        f.rt.collect_now();
+
+        assert_eq!(
+            f.rt.heap().stats().live_count,
+            before - 1,
+            "the weak arm must not have retained it — that is the merge ADR-044 \
+             refuses, and it would make this test pass for the wrong reason"
+        );
+        assert_eq!(
+            guard.values()[1],
+            None,
+            "the debug slot still names swept storage; the next allocation \
+             reissues that block and the slot then names an object of another \
+             type"
+        );
+        assert_eq!(guard.values()[0], None, "slot 0 was never written");
+        drop(guard);
+    }
+
+    /// The other half: the scan is a clear, not a sweep of its own. A value some
+    /// *strong* arm still roots survives the collection, so its debug slot is
+    /// untouched and reads back.
+    ///
+    /// Without this, nulling every claimed slot unconditionally would pass the
+    /// test above and destroy the debugger.
+    #[test]
+    fn a_weak_slot_whose_object_is_still_rooted_is_untouched() {
+        let metas = shadowed_a_metas();
+        let meta = meta_for(b"f", &metas, (0, 0));
+        let mut f = Fixture::new();
+        let value =
+            f.rt.heap()
+                .alloc_unpaced(crate::scalars::INT_PAYLOAD, 9_999_i64);
+        let ctx = f.ctx_ptr();
+        // SAFETY: `ctx` is wired to `f.rt`; the shadow frame and the debug frame
+        // are both released before the runtime drops.
+        let (mut shadow, mut guard) = unsafe {
+            (
+                crate::shadow_stack::push_frame(ctx, crate::SlotCount::new(1).unwrap()),
+                push_frame(ctx, &meta),
+            )
+        };
+        shadow.set(0, value);
+        guard.set(1, value);
+
+        f.rt.collect_now();
+
+        assert_eq!(
+            guard.values()[1].map(|r| r.as_int()),
+            Some(9_999),
+            "the weak scan nulled a slot whose object the shadow stack roots"
+        );
+        drop(guard);
+        drop(shadow);
+    }
+
+    /// The scan is driven from the frame entries, so a frame that claims no
+    /// value slots must contribute nothing to it — and, more to the point, must
+    /// not make the partition check in `clear_reclaimed` disagree with the value
+    /// stack's own extent.
+    #[test]
+    fn a_zero_local_frame_neither_holds_nor_clears_anything() {
+        let metas = shadowed_a_metas();
+        let outer = meta_for(b"outer", &metas, (0, 0));
+        let empty = meta_for(b"nothing", &[], (0, 0));
+        let mut f = Fixture::new();
+        let value =
+            f.rt.heap()
+                .alloc_unpaced(crate::scalars::INT_PAYLOAD, 9_999_i64);
+        let ctx = f.ctx_ptr();
+        // SAFETY: `ctx` is wired to `f.rt`, and both metas outlive both guards.
+        let (mut outer_guard, inner_guard) =
+            unsafe { (push_frame(ctx, &outer), push_frame(ctx, &empty)) };
+        outer_guard.set(0, value);
+
+        f.rt.collect_now();
+
+        assert!(inner_guard.values().is_empty());
+        assert_eq!(outer_guard.values()[0], None);
+        drop(inner_guard);
+        drop(outer_guard);
     }
 
     #[test]

@@ -17,9 +17,19 @@
 //! **The reader is infallible by construction**, and deliberately so: what an
 //! unreadable stdin *means* is the host's question, not the runtime's. The CLI
 //! reports its own I/O failure the way it reports every other one. The runtime
-//! is left with bytes, and the only judgement it makes about them is the one
-//! §4.3 already assigns to `praxis_alloc_text`: text that is not UTF-8 is a
-//! fault.
+//! is left with bytes, and the only judgement it makes about them is §4.3's:
+//! text that is not UTF-8 is a fault. Since ADR-111 that judgement is made by
+//! [`praxis_get_input`](crate::abi::praxis_get_input) itself rather than by
+//! `praxis_alloc_text` — this is the one path in the runtime carrying bytes the
+//! compiler did not produce, so it is the one place the check belongs, and
+//! keeping it here is what leaves a `Text` *literal*'s allocation genuinely
+//! non-faulting. The reader's contract is unchanged: bytes, infallibly.
+//!
+//! `praxis run` never reaches that fault, and it is worth knowing which caller
+//! can. `lazy_stdin::read` (`praxis-cli/src/run.rs`) goes through
+//! `std::io::read_to_string`, which refuses non-UTF-8 stdin and exits 2 before
+//! the runtime sees a byte. `InvalidText` is therefore reachable only from an
+//! embedder that installs an [`InputReader`] answering bytes of its own.
 //!
 //! The slot is thread-local because the runtime is single-threaded (§12.1) and
 //! because a `static mut` would be worse; there is one program per process, so

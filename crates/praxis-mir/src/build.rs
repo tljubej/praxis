@@ -225,6 +225,19 @@ struct Builder<'a> {
     /// `break_target`; `continue` jumps to the `continue_target` (the header for
     /// `while`/`for`, the body top for `loop`). Empty at the function's top level.
     loop_stack: Vec<LoopCtx>,
+    /// The stack of enclosing loops' **preheaders** — the block that jumps into
+    /// each loop's header, which is the loop's only entry from outside and so
+    /// dominates every block the loop contains (ADR-108).
+    ///
+    /// Deliberately *not* a field on [`LoopCtx`], which is what it looks like it
+    /// should be. `LoopCtx` is pushed after a `while`'s condition is lowered,
+    /// because a `break` inside a condition belongs to the *enclosing* loop and
+    /// pushing earlier would rebind it. But the condition is exactly where
+    /// `mandelbrot`'s `4.0` lives, and it is a block of the loop like any other.
+    /// Two stacks with two lifetimes is the honest shape: this one opens at the
+    /// preheader's jump and closes at the loop's exit, `loop_stack`'s opens and
+    /// closes around the body.
+    loop_preheaders: Vec<BlockId>,
 }
 
 /// One frame of the loop-context stack (M8-WS6). Pushed on entry to a
@@ -284,6 +297,7 @@ fn lower_fn(
         unit_ty,
         escaping_vars,
         loop_stack: Vec::new(),
+        loop_preheaders: Vec::new(),
     };
 
     // Parameters: one `Gc` slot each. User locals: classified + span-less (a
@@ -375,6 +389,7 @@ fn lower_closure_fn(
         unit_ty,
         escaping_vars,
         loop_stack: Vec::new(),
+        loop_preheaders: Vec::new(),
     };
 
     // Param 0 (MIR): the closure value itself (`closure_self`). It is the hidden
@@ -507,6 +522,7 @@ fn lower_fn_value_adapter(adapter: &FnValueAdapter, db: &mut TypeDb) -> Function
         unit_ty,
         escaping_vars: &escaping,
         loop_stack: Vec::new(),
+        loop_preheaders: Vec::new(),
     };
 
     // Param 0: the closure value. Unused — the environment is empty — but it is
@@ -588,6 +604,35 @@ impl<'a> Builder<'a> {
         self.func.blocks[self.cur.0 as usize].insts.push(inst);
     }
 
+    /// Append `inst` to a block that is no longer [`Builder::cur`].
+    ///
+    /// A [`Block`](crate::ir::Block) keeps its `insts` and its `term` in
+    /// separate fields, so "the block is closed" means its terminator is
+    /// written, not that its instruction list is sealed. Appending here lands
+    /// the instruction *before* that jump however long ago it was written, which
+    /// is what makes a preheader reachable after the fact (ADR-108).
+    fn push_into(&mut self, block: BlockId, inst: Inst) {
+        self.func.blocks[block.0 as usize].insts.push(inst);
+    }
+
+    /// The block a loop-invariant, non-faulting allocation belongs in: the
+    /// innermost enclosing loop's preheader, or `None` outside every loop.
+    ///
+    /// **Innermost and not outermost** (ADR-108). Either dominates the site, so
+    /// either is correct; the difference is what it costs. Hoisting to the
+    /// outermost preheader allocates once per *function call* rather than once
+    /// per entry to the innermost loop, but the value is then live across every
+    /// enclosing loop as well — and the backend's `spill_roots` writes every
+    /// live root at every safepoint with no delta tracking, so a root that
+    /// crosses a hot inner loop it is not used in costs one store per safepoint
+    /// per iteration to save an allocation that happens once per outer step.
+    /// The innermost preheader takes the allocation off the per-iteration path,
+    /// which is the whole win, and extends the live range by exactly the loop
+    /// the value is used in.
+    fn preheader(&self) -> Option<BlockId> {
+        self.loop_preheaders.last().copied()
+    }
+
     /// Push an instruction and, iff it can fault, the check that observes it.
     ///
     /// **The one place lowering decides whether a fault check is emitted**
@@ -648,7 +693,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Emit an allocation (and its fault check, if any wrapper it reaches can
-    /// fault — `praxis_alloc_text`, `praxis_alloc_char`, `praxis_grid_new`).
+    /// fault — `praxis_alloc_char`, `praxis_grid_new`).
     fn alloc(&mut self, dst: LocalId, alloc: AllocKind) {
         self.emit(Inst::Alloc {
             dst,
@@ -1430,9 +1475,12 @@ fn lower_read(b: &mut Builder<'_>, plan: praxis_hir::PlanId, result_ty: Type) ->
     // 1. Get the input buffer from the runtime context. This is where §7.10's
     //    "the first `read` lazily reads standard input once" happens (REP-51):
     //    the call reads the host's input if nothing has yet, so it allocates
-    //    and — through `praxis_alloc_text`, on input that is not UTF-8 (§4.3) —
-    //    it can fault. Its manifest row says both, and the check below is what
-    //    makes the fault land here rather than at the next unrelated one.
+    //    and — on input that is not UTF-8 (§4.3) — it can fault. `praxis_get_input`
+    //    holds the host's raw bytes and validates them *itself* (ADR-111); it
+    //    used to inherit the fault from `praxis_alloc_text`, which meant every
+    //    text *literal* carried a check for it too. Its manifest row says both
+    //    effects, and the check below is what makes the fault land here rather
+    //    than at the next unrelated one.
     let input = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.call_runtime(input, RuntimeSymbol::GetInput, vec![]);
     // 2. Run the parser plan against it.
@@ -1451,23 +1499,27 @@ fn lower_parse(
 }
 
 /// Emit the call to `praxis_run_parser(ctx, plan_id, input) -> GcRef`, then
-/// check for a parse fault. The id is boxed as an Int GcRef to match the
-/// uniform ABI; the runtime wrapper reads its payload and validates it back
-/// into a `PlanId` (a value that names no plan becomes a parse fault).
+/// check for a parse fault. The id rides the uniform ABI as an `Int`; the
+/// runtime wrapper reads its payload and validates it back into a `PlanId` (a
+/// value that names no plan becomes a parse fault).
+///
+/// *Which* form that `Int` takes — a read of the interned table or a real
+/// allocation — is not decided here. [`lower_lit_gc`] asks
+/// `small_int::index_of`, and this site asks it through that one authority
+/// (ADR-100). The temptation is to write `GcConst::SmallInt(plan.get())`
+/// unconditionally, on the reasoning that a plan id is small; it is not.
+/// `PlanId`s are handed out by a process-wide, monotonically growing arena
+/// bounded by `praxis_input_parser::plan::MAX_PLANS` (1 << 20), while the
+/// interned table stops at `SMALL_INT_MAX` (1024) — so the 1025th plan a
+/// process registers would emit a `ConstGc` naming a slot the table does not
+/// have. [`GcConst::small_int`] is what makes that unwritable.
 fn run_parser_plan(
     b: &mut Builder<'_>,
     plan: praxis_hir::PlanId,
     input: LocalId,
     result_ty: Type,
 ) -> LocalId {
-    // Box the plan id as an Int GcRef.
-    let idx_scalar = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ConstInt {
-        dst: idx_scalar,
-        value: i64::from(plan.get()),
-    });
-    let idx_gc = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
-    b.alloc(idx_gc, AllocKind::Int { value: idx_scalar });
+    let idx_gc = lower_lit_gc(b, &Lit::Int(i64::from(plan.get())), None);
     // Call praxis_run_parser(ctx, idx, input) -> result. The result's type is
     // the one the parser plan synthesizes, which the typed tree carries.
     let dst = b.alloc_gc(MirType::Known(result_ty), None, LocalDebugKind::Temp, None);
@@ -1483,20 +1535,20 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
         Lit::Int(n) => {
             let dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, span);
             // **The one question asked here is the runtime's own.**
-            // `small_int::index_of` is what `praxis_alloc_int` consults, so an
-            // answer of `Some` is a guarantee that `ctx.small_ints` holds this
-            // value — the compiler cannot emit a table read for a slot the
-            // table does not have.
-            if praxis_runtime::small_int::index_of(*n).is_some() {
+            // `GcConst::small_int` asks `small_int::index_of`, which is what
+            // `praxis_alloc_int` consults, so an answer of `Some` is a
+            // guarantee that `ctx.small_ints` holds this value — the compiler
+            // cannot emit a table read for a slot the table does not have. The
+            // range test and the constant are one step deliberately: asking
+            // and then constructing separately is what let `run_parser_plan`
+            // be a plausible place to construct without asking.
+            if let Some(konst) = GcConst::small_int(*n) {
                 // Not a safepoint, and `b.push` rather than `b.emit` says so:
                 // `Builder::emit` exists to decide whether a fault check
                 // follows, and this instruction calls no wrapper, allocates
                 // nothing and cannot fault. `verify` rejects a `CheckFault`
                 // after it in so many words (ADR-088, both directions).
-                b.push(Inst::ConstGc {
-                    dst,
-                    konst: GcConst::SmallInt(*n),
-                });
+                b.push(Inst::ConstGc { dst, konst });
             } else {
                 // Out of range, so this is a real allocation and must stay a
                 // safepoint: the wrapper can collect, and the collector must see
@@ -1505,11 +1557,15 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
                 // so the debugger renders the literal identically whichever
                 // branch produced it.
                 let scalar = b.alloc_scalar(ScalarKind::Int);
-                b.push(Inst::ConstInt {
-                    dst: scalar,
-                    value: *n,
-                });
-                b.alloc(dst, AllocKind::Int { value: scalar });
+                box_invariant_literal(
+                    b,
+                    Some(Inst::ConstInt {
+                        dst: scalar,
+                        value: *n,
+                    }),
+                    dst,
+                    AllocKind::Int { value: scalar },
+                );
             }
             dst
         }
@@ -1528,19 +1584,36 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
         }
         Lit::Text(s) => {
             let dst = b.alloc_gc(MirType::Known(b.text_ty), None, LocalDebugKind::Temp, span);
-            // **The rule has no carve-out here, on purpose (ADR-088, D-A).**
-            // `praxis_alloc_text` is `AllocatesAndFaults`: it validates its
-            // bytes and sets `INVALID_TEXT`. The bytes a *literal* hands it came
-            // from a Rust `String`, so the fault cannot fire at this call site —
-            // but claiming that in the verifier would put the exception in the
-            // very first arm of a rule whose whole content is that it has none,
-            // and nothing but the verifier would read the claim. The cost is one
-            // check per text-literal evaluation. Moving the validation out of
-            // the wrapper (so its row becomes `Allocates` and the instruction
-            // genuinely cannot fault) is the right long-term answer and is
-            // registered as its own row — it changes what a violated compiler
-            // precondition *does*, which is ADR-017 territory.
-            b.alloc(dst, AllocKind::Text { value: s.clone() });
+            // **This arm used to carry ADR-088's cost and now carries none of
+            // it (ADR-111, REP-67).** `praxis_alloc_text` was
+            // `AllocatesAndFaults` because it validated the bytes it was handed
+            // and set `INVALID_TEXT`; the bytes a *literal* hands it are a Rust
+            // `&str` unbroken from `Lit::Text(String)` here to
+            // `Generation::alloc_str` in the backend, so the fault could not
+            // fire at this call site and 41 corpus sites emitted a check that
+            // could never be taken. ADR-088 §3 refused to carve an exception
+            // into the verifier for it — a rule with a hole in its very first
+            // arm is not a rule — and registered the real cure instead, which is
+            // to move the judgement to the one caller that holds bytes the
+            // compiler did not write. That is `praxis_get_input`, and it is
+            // done: the row is `Allocates` and the `Alloc` below is genuinely
+            // non-faulting.
+            //
+            // Nothing here says so. `b.emit` reads the manifest and stops
+            // pushing the check on its own; `verify::check_fault_observed`'s
+            // converse arm now *rejects* one. And the hoist below is admitted by
+            // the same fact — see `box_invariant_literal`'s first precondition,
+            // which asks `Inst::can_fault` rather than carrying a list of kinds
+            // exactly so that flipping a manifest row is the whole change.
+            //
+            // The shareability half (ADR-108 §3) holds for `Text` the way it
+            // holds for a non-NaN `Float`, and more simply: a `Text` payload is
+            // immutable — `+` allocates a fresh `Owned` (ADR-085) and no
+            // instruction writes one after allocation — `==` is `text_equals`,
+            // a structural byte comparison, and `DynamicKey`'s pointer fast path
+            // is a fast path *for* that comparison, which is reflexive. There is
+            // no `Text` analogue of NaN.
+            box_invariant_literal(b, None, dst, AllocKind::Text { value: s.clone() });
             dst
         }
         Lit::Char(c) => {
@@ -1551,10 +1624,16 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
                 value: *c as i64,
             });
             let dst = b.alloc_gc(MirType::Known(b.char_ty), None, LocalDebugKind::Temp, span);
-            // `praxis_alloc_char` validates the Unicode scalar
-            // (`INVALID_CHAR`), so this checks for `AllocKind::Text`'s reason.
-            // There is no char-literal syntax today, so this arm is reached
-            // only from a synthesized `Lit::Char`.
+            // `praxis_alloc_char` validates the Unicode scalar and raises
+            // `INVALID_CHAR`, so its row is `AllocatesAndFaults` and `b.alloc`
+            // pushes the check — and for the same reason the allocation is not
+            // hoisted out of a loop (`box_invariant_literal`'s first
+            // precondition). Unlike `AllocKind::Text`, whose validation ADR-111
+            // moved to its one untrusted caller, this one has nowhere to go: an
+            // `i64` that is not a Unicode scalar arrives from `Int.to_char()`
+            // at run time (ADR-086), not from a literal. There is no
+            // char-literal syntax today (ADR-107), so this arm is reached only
+            // from a synthesized `Lit::Char`.
             b.alloc(dst, AllocKind::Char { value: scalar });
             dst
         }
@@ -1562,12 +1641,17 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
             // Float's payload is an f64; ConstFloat carries it as f64::to_bits()
             // (an i64) so it rides the uniform scalar channel (§4.12).
             let scalar = b.alloc_scalar(ScalarKind::Float);
-            b.push(Inst::ConstFloat {
+            let konst = Inst::ConstFloat {
                 dst: scalar,
                 bits: f.to_bits() as i64,
-            });
+            };
             let dst = b.alloc_gc(MirType::Known(b.float_ty), None, LocalDebugKind::Temp, span);
-            b.alloc(dst, AllocKind::Float { value: scalar });
+            if float_literal_may_be_shared(*f) {
+                box_invariant_literal(b, Some(konst), dst, AllocKind::Float { value: scalar });
+            } else {
+                b.push(konst);
+                b.alloc(dst, AllocKind::Float { value: scalar });
+            }
             dst
         }
         Lit::Unit => {
@@ -1580,6 +1664,105 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
                 konst: GcConst::Unit,
             });
             dst
+        }
+    }
+}
+
+/// Whether one allocation of this `Float` literal may stand for every
+/// evaluation of it — the shareability half of [`box_invariant_literal`]'s
+/// precondition, and the reason ADR-100 interned `Int` and not `Float`.
+///
+/// Everything except NaN may. A `Float` box's payload is never written after
+/// allocation, `==` on `Float` lowers to `Inst::FloatCmp` over extracted
+/// payloads, and the language has no identity operator — so two objects holding
+/// `4.0` and one object holding `4.0` are indistinguishable, exactly as ADR-100
+/// §Context argues for `Int`.
+///
+/// NaN is the exception, and it is a real one rather than a cautious one.
+/// `DynamicKey::eq` — what `Map`, `Set` and `Counter` key on — opens with a
+/// pointer comparison, which is a fast path *for* structural equality and is
+/// sound only while the structural answer is reflexive. `float_equals` is IEEE,
+/// so `NaN != NaN`, and a shared NaN would compare equal to itself as a key
+/// where two separate allocations do not. NaN has no literal spelling today, so
+/// nothing reaches the refusal from source; that is a rule in the lexer, which
+/// is a different file, and this is the file whose correctness depends on it.
+fn float_literal_may_be_shared(f: f64) -> bool {
+    !f.is_nan()
+}
+
+/// Emit a literal's `Const*` + `Alloc` pair, **into the innermost enclosing
+/// loop's preheader** when there is one and the allocation cannot fault
+/// (ADR-108). Otherwise emit it here, exactly as [`Builder::alloc`] would.
+///
+/// `konst` is `None` for a literal whose payload rides inside the [`AllocKind`]
+/// rather than through a scalar local — which today is `AllocKind::Text`, whose
+/// `String` the backend embeds with `Generation::alloc_str`. The two are one
+/// function because there is exactly one decision here (which block do these
+/// instructions go in) and it must be made once: a separate text-only helper
+/// would be a second copy of the `can_fault` gate, and a gate stated twice is
+/// the drift MIR-10 exists to prevent.
+///
+/// This is the whole of the loop-invariant-code-motion this compiler has, and
+/// its scope is what makes it need none of the machinery a general pass would:
+/// no predecessor map, no dominator tree, no back-edge detection. The builder
+/// *creates* the loop, so it holds the preheader — the block that jumps into the
+/// header, which is the loop's only entry from outside and therefore dominates
+/// every block in it. And the value is a compile-time constant, so
+/// loop-invariance is not an analysis result, it is the literal's definition.
+///
+/// **Both preconditions are load-bearing and both are checked, not assumed:**
+///
+/// 1. *Non-faulting.* [`Inst::can_fault`] derives the answer from the ABI
+///    manifest through the same mapping the backend uses, so this asks the one
+///    authority rather than carrying a list. It has to be exact in both
+///    directions. A faulting `Alloc` is paired with its `CheckFault`
+///    **positionally, within one block** (`verify::check_fault_observed`), so
+///    moving one without the other fails the verifier — and moving both would
+///    raise, on entry to a zero-trip loop, a fault the program does not have.
+///    The same argument covers the short-circuit case, which is not a loop at
+///    all: `while i < n && x <= 4.0` evaluates its right operand in a block the
+///    header branches to, and hoisting out of that block runs the allocation on
+///    iterations where the source would not have. A non-faulting allocation
+///    makes both unobservable — it can trigger a collection and nothing else,
+///    and when a collection happens is not language-visible. `AllocKind::Char`
+///    is what this excludes today: `praxis_alloc_char` validates the Unicode
+///    scalar, so its row is `AllocatesAndFaults`. `AllocKind::Text` *was* in
+///    that group and no longer is — ADR-111 moved its validation to
+///    `praxis_get_input`, its row became `Effect::Allocates`, and the rule below
+///    admitted it with no edit to this function. That is the point of asking the
+///    manifest instead of carrying a list of kinds.
+/// 2. *Shareable.* One allocation now stands for every evaluation, so the
+///    object is shared across iterations. ADR-100 §Context is the argument that
+///    this is unobservable for a scalar box — no identity operator, `==`
+///    compares payloads, `DynamicKey`'s pointer fast path is a fast path *for*
+///    a reflexive structural equality, and a payload is never written after
+///    allocation. It is the *caller's* obligation, because the one exception is
+///    the caller's to see: a NaN `Float` breaks the reflexivity the fast path
+///    rests on, so `lower_lit_gc` filters it out before calling here. A `Text`
+///    is unconditionally shareable — its payload is immutable and `text_equals`
+///    is a reflexive byte comparison — so its arm passes nothing to filter.
+fn box_invariant_literal(b: &mut Builder<'_>, konst: Option<Inst>, dst: LocalId, alloc: AllocKind) {
+    let alloc = Inst::Alloc {
+        dst,
+        alloc,
+        roots: RootSlots::unannotated(),
+        debug: DebugSlots::unannotated(),
+    };
+    match b.preheader() {
+        Some(preheader) if !alloc.can_fault() => {
+            if let Some(konst) = konst {
+                b.push_into(preheader, konst);
+            }
+            b.push_into(preheader, alloc);
+        }
+        // Outside every loop, or faulting: emit in place. `b.emit` and not
+        // `b.push`, so the one place that decides whether a fault check follows
+        // still decides it.
+        _ => {
+            if let Some(konst) = konst {
+                b.push(konst);
+            }
+            b.emit(alloc);
         }
     }
 }
@@ -2017,6 +2200,11 @@ fn lower_while(b: &mut Builder<'_>, cond: &TypedExpr, body: &praxis_hir::TypedBl
     let exit = b.func.new_block();
 
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    // The preheader opens *before* the condition, unlike `LoopCtx` below: the
+    // condition's blocks belong to the loop and re-run per iteration, so a
+    // literal in one is worth hoisting (ADR-108). `mandelbrot`'s `4.0` is in a
+    // condition and nowhere else.
+    b.loop_preheaders.push(b.cur);
     b.cur = header;
 
     let cond_gc = lower_expr_gc(b, cond);
@@ -2043,6 +2231,7 @@ fn lower_while(b: &mut Builder<'_>, cond: &TypedExpr, body: &praxis_hir::TypedBl
     b.loop_stack.pop();
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
 
+    b.loop_preheaders.pop();
     b.cur = exit;
 }
 
@@ -2100,6 +2289,10 @@ fn lower_for(
     let exit = b.func.new_block();
 
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    // The preheader, for the hoist (ADR-108). It already holds the iterator
+    // snapshot and the index materialization for the same reason a hoisted
+    // literal joins them: one call per loop, not one per step.
+    b.loop_preheaders.push(b.cur);
     b.cur = header;
 
     // `len = iter.len()`.
@@ -2231,6 +2424,7 @@ fn lower_for(
     });
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
 
+    b.loop_preheaders.pop();
     b.cur = exit;
 }
 
@@ -2258,6 +2452,7 @@ fn lower_loop(
         _ => Some(b.alloc_gc(MirType::Known(ty), None, LocalDebugKind::Temp, None)),
     };
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.loop_preheaders.push(b.cur);
     b.cur = header;
     b.loop_stack.push(LoopCtx {
         continue_target: header,
@@ -2268,6 +2463,7 @@ fn lower_loop(
     b.loop_stack.pop();
     // Fall through the body → jump back to the header (infinite loop).
     b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.loop_preheaders.pop();
     b.cur = exit;
     result.unwrap_or_else(|| lower_lit_gc(b, &Lit::Unit, espan))
 }
@@ -6373,5 +6569,474 @@ mod tests {
             checked >= 40,
             "expected the pipeline combinators to be intrinsic rows; saw {checked}"
         );
+    }
+
+    // ---- The plan id, and the one authority for the interned range ---------
+
+    /// A parser plan's id rides the uniform ABI as an `Int` — and it takes the
+    /// interned form through [`lower_lit_gc`], not through a second opinion.
+    ///
+    /// `run_parser_plan` hand-wrote `ConstInt` + `Alloc { Int }`, so every
+    /// `read`/`parse` allocated a box for a number the compiler knew. The
+    /// tempting patch — `GcConst::SmallInt(plan.get())` — is the one that must
+    /// not be written: plan ids come from a process-wide arena bounded by
+    /// `MAX_PLANS = 1 << 20`, so the 1025th plan a process registers would name
+    /// a slot the table does not have and panic `load_gc_const`.
+    ///
+    /// The id is read *off* the instruction rather than hard-coded, because
+    /// `PLAN_ARENA` is a monotonic process-wide static and cargo runs the tests
+    /// in this binary in parallel: the id is whatever this test's registration
+    /// happened to get.
+    #[test]
+    fn a_parse_plan_id_rides_the_interned_table_when_the_table_holds_it() {
+        let (mut funcs, _analysis) = lower_src_to_mir("fn main() -> Int { read int }");
+        crate::annotate(&mut funcs[0]);
+        crate::verify(&funcs[0]).expect("the parser call verifies");
+        let f = &funcs[0];
+
+        let plan_arg = f
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .find_map(|i| match i {
+                Inst::Call {
+                    callee: CallTarget::Runtime(RuntimeSymbol::RunParser),
+                    args,
+                    ..
+                } => Some(args[0]),
+                _ => None,
+            })
+            .expect("`read int` emits a RunParser call");
+
+        let konst = f
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .find_map(|i| match i {
+                Inst::ConstGc { dst, konst } if *dst == plan_arg => Some(*konst),
+                _ => None,
+            })
+            .expect("the plan id is a ConstGc");
+        let GcConst::SmallInt(id) = konst else {
+            panic!("the plan id is an Int constant, not {konst:?}");
+        };
+        assert!(
+            praxis_runtime::small_int::index_of(id).is_some(),
+            "a ConstGc::SmallInt must name a slot the table has; {id} does not"
+        );
+
+        // And the boxing it replaced is gone: nothing in this function
+        // allocates an `Int` any more.
+        assert!(
+            !f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(
+                i,
+                Inst::Alloc {
+                    alloc: AllocKind::Int { .. },
+                    ..
+                }
+            ))),
+            "the plan id must not also allocate"
+        );
+    }
+
+    /// The anti-drift test: `run_parser_plan` makes no decision of its own about
+    /// what the interned range is.
+    ///
+    /// Two programs, one plain `Int` literal and one plan id, must take the same
+    /// branch of the same function. If someone re-implements the boxing at the
+    /// parser site, this is what notices — the failure mode it guards against is
+    /// a second, wrong copy of the range test, which no end-to-end test can see
+    /// until a process has registered more than a thousand plans.
+    #[test]
+    fn the_plan_id_and_an_int_literal_take_the_same_branch() {
+        let const_gcs = |src: &str| -> Vec<GcConst> {
+            lower_src_to_mir(src).0[0]
+                .blocks
+                .iter()
+                .flat_map(|b| b.insts.iter())
+                .filter_map(|i| match i {
+                    Inst::ConstGc { konst, .. } => Some(*konst),
+                    _ => None,
+                })
+                .collect()
+        };
+        let literal = const_gcs("fn main() -> Int { 1 }");
+        let plan_id = const_gcs("fn main() -> Int { read int }");
+        assert!(
+            literal.iter().any(|k| matches!(k, GcConst::SmallInt(_))),
+            "an in-range Int literal is a ConstGc"
+        );
+        assert!(
+            plan_id.iter().any(|k| matches!(k, GcConst::SmallInt(_))),
+            "and so is a plan id the table holds — the same branch, one function"
+        );
+    }
+
+    // ---- The build-time preheader hoist (ADR-108) --------------------------
+
+    /// Find the block every loop is entered through: the one whose `Jump`
+    /// targets a block with a lower id than its own successor edge back into it.
+    /// Simpler and sufficient here — a preheader is the block that jumps to a
+    /// header some *later* block also jumps back to.
+    fn preheaders(f: &Function) -> Vec<BlockId> {
+        let mut backedge_targets: Vec<BlockId> = Vec::new();
+        for b in &f.blocks {
+            if let Terminator::Jump { target } = b.term {
+                if target <= b.id {
+                    backedge_targets.push(target);
+                }
+            }
+        }
+        f.blocks
+            .iter()
+            .filter(|b| match b.term {
+                Terminator::Jump { target } => backedge_targets.contains(&target) && target > b.id,
+                _ => false,
+            })
+            .map(|b| b.id)
+            .collect()
+    }
+
+    /// One `while` whose body allocates a `Float` literal, shared by the two
+    /// tests that need the same shape for different reasons.
+    const LOOP_WITH_A_FLOAT_LITERAL: &str = "\
+fn f(n: Int, x0: Float) -> Float {
+  var x = x0
+  var i = 0
+  while i < n {
+    x = x + 2.0
+    i = i + 1
+  }
+  x
+}";
+
+    fn float_allocs_in(f: &Function, block: BlockId) -> usize {
+        f.blocks[block.0 as usize]
+            .insts
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i,
+                    Inst::Alloc {
+                        alloc: AllocKind::Float { .. },
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    /// A `Float` literal in a loop body is allocated **once, in the preheader**,
+    /// not once per iteration.
+    ///
+    /// This is ADR-108's payload. `AllocFloat`'s manifest row is plain
+    /// `Effect::Allocates`, so the allocation has no paired `CheckFault` to drag
+    /// with it and no fault it could raise early on a zero-trip loop — which is
+    /// what makes a literal the one thing a builder-level hoist can move without
+    /// a dominator tree or a fault-pairing analysis.
+    #[test]
+    fn a_float_literal_in_a_loop_body_is_allocated_once_in_the_preheader() {
+        let (mut funcs, _analysis) = lower_src_to_mir(LOOP_WITH_A_FLOAT_LITERAL);
+        crate::annotate(&mut funcs[0]);
+        crate::verify(&funcs[0]).expect("a hoisted literal verifies");
+        let f = &funcs[0];
+
+        let ph = preheaders(f);
+        assert_eq!(ph.len(), 1, "one `while` has one preheader");
+        assert_eq!(
+            float_allocs_in(f, ph[0]),
+            1,
+            "the `2.0` is allocated in the preheader"
+        );
+        // And nowhere else: the body's copy moved, it was not duplicated.
+        let total: usize = f.blocks.iter().map(|b| float_allocs_in(f, b.id)).sum();
+        assert_eq!(total, 1, "moved, not copied");
+    }
+
+    /// The literal in a `while` **condition** is hoisted too.
+    ///
+    /// It is the case the obvious design misses: a `LoopCtx` field would be
+    /// pushed after the condition is lowered, because a `break` inside a
+    /// condition binds to the enclosing loop. `mandelbrot`'s innermost loop is
+    /// `while i < max_iter && x * x + y * y <= 4.0`, so its `4.0` — one of the
+    /// two allocations per innermost iteration this change exists to remove —
+    /// lives exactly there.
+    #[test]
+    fn a_float_literal_in_a_while_condition_is_hoisted_like_one_in_the_body() {
+        let (mut funcs, _analysis) = lower_src_to_mir(
+            "fn f(n: Float) -> Int {\n  var i = 0\n  while n <= 4.0 {\n    i = i + 1\n  }\n  i\n}",
+        );
+        crate::annotate(&mut funcs[0]);
+        crate::verify(&funcs[0]).expect("a hoisted condition literal verifies");
+        let f = &funcs[0];
+
+        let ph = preheaders(f);
+        assert_eq!(ph.len(), 1);
+        assert_eq!(
+            float_allocs_in(f, ph[0]),
+            1,
+            "the condition's `4.0` belongs in the preheader too"
+        );
+    }
+
+    /// A literal in a nested loop lands in the **innermost** enclosing
+    /// preheader, not the outermost.
+    ///
+    /// Either dominates the use, so either is correct; this pins the trade-off
+    /// ADR-108 chose. The outermost preheader would allocate once per call
+    /// instead of once per entry to the inner loop, but the value would then be
+    /// a live root at every safepoint of every enclosing loop — and
+    /// `spill_roots` writes every live root at every safepoint with no delta
+    /// tracking, so that is a store per safepoint per iteration bought with an
+    /// allocation saved per outer step.
+    #[test]
+    fn a_literal_in_a_nested_loop_is_hoisted_to_the_innermost_preheader() {
+        let (mut funcs, _analysis) = lower_src_to_mir(
+            "fn f(n: Int, x0: Float) -> Float {\n  var x = x0\n  var i = 0\n  while i < n {\n    var j = 0\n    while j < n {\n      x = x + 2.0\n      j = j + 1\n    }\n    i = i + 1\n  }\n  x\n}",
+        );
+        crate::annotate(&mut funcs[0]);
+        crate::verify(&funcs[0]).expect("a nested hoist verifies");
+        let f = &funcs[0];
+
+        let ph = preheaders(f);
+        assert_eq!(ph.len(), 2, "two nested `while`s have two preheaders");
+        // The inner loop is lowered second, so its preheader has the higher id.
+        let inner = *ph.iter().max().expect("two preheaders");
+        let outer = *ph.iter().min().expect("two preheaders");
+        assert_eq!(
+            float_allocs_in(f, inner),
+            1,
+            "hoisted to the inner preheader"
+        );
+        assert_eq!(float_allocs_in(f, outer), 0, "and no further out than that");
+    }
+
+    /// **ADR-111.** A `Text` literal in a loop **is** hoisted, and the reason is
+    /// read off the ABI manifest rather than written down here.
+    ///
+    /// This test is the inverse of the one it replaces, and the inversion is the
+    /// whole point. `a_text_literal_in_a_loop_is_not_hoisted_because_its_alloc_can_fault`
+    /// asserted the exclusion and named its cause: `praxis_alloc_text` validated
+    /// its bytes, so its row was `AllocatesAndFaults`, so
+    /// `box_invariant_literal`'s `Inst::can_fault` gate refused it — and it said
+    /// that when P-4b moved the validation out of the wrapper, this test is the
+    /// one that would say so. It does. **No line of `box_invariant_literal`
+    /// changed**; a manifest row did, and the hoist followed.
+    ///
+    /// What this buys is bigger than the check it also removes. A hoisted `Text`
+    /// literal costs one `Box<str>` allocation, one memcpy, one GC block and one
+    /// sweep-time drop *per loop entry* instead of per iteration.
+    #[test]
+    fn a_text_literal_in_a_loop_is_hoisted_now_that_its_alloc_cannot_fault() {
+        let (mut funcs, _analysis) = lower_src_to_mir(
+            "fn f(n: Int, s0: Text) -> Text {\n  var s = s0\n  var i = 0\n  while i < n {\n    s = \"x\"\n    i = i + 1\n  }\n  s\n}",
+        );
+        crate::annotate(&mut funcs[0]);
+        crate::verify(&funcs[0]).expect("a hoisted Text literal verifies");
+        let f = &funcs[0];
+
+        let ph = preheaders(f);
+        assert_eq!(ph.len(), 1);
+        let text_allocs_in = |block: BlockId| {
+            f.blocks[block.0 as usize]
+                .insts
+                .iter()
+                .filter(|i| {
+                    matches!(
+                        i,
+                        Inst::Alloc {
+                            alloc: AllocKind::Text { .. },
+                            ..
+                        }
+                    )
+                })
+                .count()
+        };
+        assert_eq!(
+            text_allocs_in(ph[0]),
+            1,
+            "the `\"x\"` is allocated once, in the preheader"
+        );
+        // Moved, not copied — and nothing anywhere still checks for a fault it
+        // cannot raise.
+        let total: usize = f.blocks.iter().map(|b| text_allocs_in(b.id)).sum();
+        assert_eq!(total, 1, "moved, not copied");
+        for b in &f.blocks {
+            for (i, inst) in b.insts.iter().enumerate() {
+                if matches!(
+                    inst,
+                    Inst::Alloc {
+                        alloc: AllocKind::Text { .. },
+                        ..
+                    }
+                ) {
+                    assert!(
+                        !matches!(b.insts.get(i + 1), Some(Inst::CheckFault { .. })),
+                        "a Text alloc cannot fault, so a check after it is \
+                         `VerifyError::RedundantFaultCheck`"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **ADR-111, the property the hoist above is a consequence of.** A `Text`
+    /// literal's allocation is not a fault-check site at all — in a loop or out
+    /// of one.
+    ///
+    /// ADR-102's "the instruction is the fact" rule applies with full force
+    /// here: no test that *runs* a program can see this change. The wrapper
+    /// answers the same `Text` either way, and the check it removes was one that
+    /// could never be taken — 41 of them across the tracked corpus. The MIR is
+    /// the only place the difference exists, so the MIR is where it is asserted.
+    ///
+    /// `verify` is run because it is the other half: with the row `Allocates`,
+    /// `check_fault_observed`'s converse arm *rejects* a `CheckFault` after this
+    /// `Alloc`, so a later edit restoring the check fails the build rather than
+    /// quietly costing three instructions and a block split per literal.
+    #[test]
+    fn a_text_literal_allocation_is_not_a_fault_check_site() {
+        let (mut funcs, _analysis) =
+            lower_src_to_mir("fn f() -> Text {\n  let s = \"hello\"\n  s\n}");
+        crate::annotate(&mut funcs[0]);
+        crate::verify(&funcs[0]).expect("a non-faulting Text alloc verifies");
+        let f = &funcs[0];
+
+        let mut seen = 0usize;
+        for b in &f.blocks {
+            for (i, inst) in b.insts.iter().enumerate() {
+                let Inst::Alloc {
+                    alloc: AllocKind::Text { .. },
+                    ..
+                } = inst
+                else {
+                    continue;
+                };
+                seen += 1;
+                assert!(
+                    !inst.can_fault(),
+                    "`praxis_alloc_text`'s row is `Effect::Allocates` (ADR-111), so \
+                     `Inst::fault_reason` must answer `None` for a Text allocation"
+                );
+                assert!(
+                    !matches!(b.insts.get(i + 1), Some(Inst::CheckFault { .. })),
+                    "no check follows a text literal any more (ADR-088's rule, \
+                     unchanged, applied to a changed manifest row)"
+                );
+            }
+        }
+        assert_eq!(seen, 1, "one literal, one allocation");
+    }
+
+    /// Hoisting puts the instructions *before* the preheader's jump, which is
+    /// what makes the block still a block.
+    ///
+    /// A `Block` keeps `insts` and `term` in separate fields, so appending to a
+    /// closed block cannot land after its terminator — but that is a property of
+    /// the data structure that a future `Vec<Inst>`-with-terminator-inside
+    /// refactor would silently break, and the verifier has no rule for it.
+    #[test]
+    fn a_hoisted_literal_lands_before_the_preheaders_jump() {
+        let (mut funcs, _analysis) = lower_src_to_mir(LOOP_WITH_A_FLOAT_LITERAL);
+        crate::annotate(&mut funcs[0]);
+        crate::verify(&funcs[0]).expect("verifies");
+        let f = &funcs[0];
+        let ph = preheaders(f)[0];
+        assert!(
+            matches!(f.blocks[ph.0 as usize].term, Terminator::Jump { .. }),
+            "the preheader still ends in the jump that made it one"
+        );
+        // The last instruction of the preheader is the hoisted allocation, and
+        // the `ConstFloat` feeding it is immediately before.
+        let insts = &f.blocks[ph.0 as usize].insts;
+        let alloc_at = insts
+            .iter()
+            .position(|i| {
+                matches!(
+                    i,
+                    Inst::Alloc {
+                        alloc: AllocKind::Float { .. },
+                        ..
+                    }
+                )
+            })
+            .expect("the hoisted allocation is here");
+        assert!(
+            matches!(insts[alloc_at - 1], Inst::ConstFloat { .. }),
+            "the scalar it boxes is materialized immediately before it, so no \
+             safepoint separates the two"
+        );
+    }
+
+    /// A `Float` literal outside every loop is emitted where it is written.
+    ///
+    /// The hoist is a loop optimization and nothing else: with no enclosing loop
+    /// there is no preheader, and the emission must be byte-for-byte what it was
+    /// before ADR-108.
+    #[test]
+    fn a_float_literal_outside_a_loop_is_not_moved() {
+        let (mut funcs, _analysis) = lower_src_to_mir("fn f() -> Float { 2.0 }");
+        crate::annotate(&mut funcs[0]);
+        crate::verify(&funcs[0]).expect("verifies");
+        let f = &funcs[0];
+        assert!(preheaders(f).is_empty(), "no loop, no preheader");
+        assert_eq!(
+            f.blocks
+                .iter()
+                .map(|b| float_allocs_in(f, b.id))
+                .sum::<usize>(),
+            1,
+            "still exactly one allocation, still in the entry block"
+        );
+    }
+
+    /// An out-of-range `Int` literal — the case ADR-100 left allocating — is
+    /// hoisted by the same rule, for the same reason: `praxis_alloc_int`'s row
+    /// is `Effect::Allocates`.
+    #[test]
+    fn an_out_of_range_int_literal_in_a_loop_is_hoisted_too() {
+        let src = format!(
+            "fn f(n: Int) -> Int {{\n  var x = 0\n  var i = 0\n  while i < n {{\n    x = x + {}\n    i = i + 1\n  }}\n  x\n}}",
+            praxis_runtime::SMALL_INT_MAX + 1
+        );
+        let (mut funcs, _analysis) = lower_src_to_mir(&src);
+        crate::annotate(&mut funcs[0]);
+        crate::verify(&funcs[0]).expect("verifies");
+        let f = &funcs[0];
+        let ph = preheaders(f)[0];
+        let int_allocs_in = |block: BlockId| {
+            f.blocks[block.0 as usize]
+                .insts
+                .iter()
+                .filter(|i| {
+                    matches!(
+                        i,
+                        Inst::Alloc {
+                            alloc: AllocKind::Int { .. },
+                            ..
+                        }
+                    )
+                })
+                .count()
+        };
+        assert_eq!(int_allocs_in(ph), 1, "the out-of-range literal is hoisted");
+    }
+
+    /// NaN is the one `Float` an allocation may not be shared for.
+    ///
+    /// `DynamicKey::eq`'s pointer fast path is sound only while the structural
+    /// answer is reflexive, and `float_equals` is IEEE. Nothing in the language
+    /// spells a NaN literal today, so this asserts the rule directly rather than
+    /// through a program — the rule has to outlive the lexer's silence.
+    #[test]
+    fn a_nan_float_literal_may_not_be_shared_between_evaluations() {
+        assert!(!float_literal_may_be_shared(f64::NAN));
+        assert!(!float_literal_may_be_shared(-f64::NAN));
+        for ordinary in [0.0, -0.0, 4.0, -1.5, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                float_literal_may_be_shared(ordinary),
+                "{ordinary} is reflexive under `float_equals` and may be shared"
+            );
+        }
     }
 }

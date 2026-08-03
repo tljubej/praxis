@@ -18,6 +18,15 @@
 //! arm of [`crate::roots::RuntimeRoots`], so a collection between the unwind and
 //! the read could free what they name.
 //!
+//! ADR-106 sharpens that into the reason the eager copy is *sound* rather than
+//! merely conventional. Values **below** `top` are the weak arm: every
+//! collection clears the debug slots whose objects it reclaimed, so at the
+//! moment [`copy_stack`] reads a slot, that slot holds a live object or `None`.
+//! Values **above** `top` are still in no arm at all — nothing scans them,
+//! nothing clears them, and a popped frame's words are exactly as stale as they
+//! always were. The eager copy is what keeps the snapshot on the first side of
+//! that line, and the weak arm is what makes the first side mean something.
+//!
 //! GC rooting (the §19.10 acceptance criterion "GC retains all objects
 //! reachable from snapshots"): [`CrashSnapshot`] implements [`RootSet`],
 //! yielding every copied `DebugLocal.value`. Transitive reachability is the
@@ -371,5 +380,90 @@ mod tests {
         // use-after-free the audit warns about, and is deliberately not done.
         assert_eq!(snapshot.len(), 1);
         drop(snapshot);
+    }
+
+    /// The defect ADR-106 closes, end to end at the level the snapshot is taken.
+    ///
+    /// The setup is what every Praxis function produces at a local's last use:
+    /// `RootSlots::dead` nulls the shadow slot (MIR-01) and the debug slot keeps
+    /// the value (MIR-16), so between the two the debugger names an object no
+    /// arm of the root set reaches. A collection in that window reclaims it and
+    /// the *next* allocation of the same layout takes the block back — here as a
+    /// `Float`, since `Float`'s payload has `Int`'s size and alignment, so it
+    /// lands on the same rung of the ladder.
+    ///
+    /// **The reissue is the whole point.** Without the weak arm the snapshot
+    /// copies a `GcRef` that is now a live `Float` under a local whose static
+    /// descriptor says `Int`, and `impl RootSet for CrashSnapshot` then roots
+    /// it — a strong root, of the wrong type, into a `CrashSnapshot`. And no
+    /// filter applied *here* could have caught it: at this point the block is a
+    /// perfectly ordinary live object, indistinguishable from one the local
+    /// legitimately named. That is why the clear happens inside the collection.
+    #[test]
+    fn a_reissued_block_is_not_rendered_under_the_dead_locals_name() {
+        use crate::scalars::FLOAT_PAYLOAD;
+
+        let mut rt = Runtime::new();
+        // Past the interned small-`Int` range: an interned `Int` is an immortal
+        // no sweep touches, and this test needs a real allocation to die.
+        let dead = rt.heap().alloc_unpaced(INT_PAYLOAD, 9_999_i64);
+        let address = dead.as_ptr();
+        let mut ctx = Box::new(rt.context());
+
+        let name = b"xs";
+        let locals = [crate::DebugLocalMeta {
+            source_name: name.as_ptr(),
+            name_len: 2,
+            symbol_id: 1,
+            descriptor: &INT,
+            type_id: 1,
+            kind: LOCAL_KIND_USER,
+            span_start: 0,
+            span_end: 0,
+        }];
+        let meta = crate::FunctionDebugMeta {
+            func_name: b"main".as_ptr(),
+            func_name_len: 4,
+            local_count: 1,
+            locals: locals.as_ptr(),
+            span_start: 0,
+            span_end: 0,
+        };
+        // SAFETY: `ctx` is wired to `rt`, and `meta`/`locals` outlive the guard.
+        let mut guard = unsafe { crate::debug::push_frame(&mut *ctx, &meta) };
+        guard.set(0, dead);
+
+        rt.collect_now();
+
+        let reissued = rt.heap().alloc_unpaced(FLOAT_PAYLOAD, 2.5_f64);
+        assert_eq!(
+            reissued.as_ptr(),
+            address,
+            "this test only says anything if the dead local's block came back"
+        );
+
+        // SAFETY: `ctx` is live and wired; the frame is still claimed, which is
+        // the state a fault epilogue snapshots in.
+        unsafe { praxis_snapshot_debug_chain(&mut *ctx) };
+        drop(guard);
+
+        let snapshot = rt.take_crash_snapshot().expect("a frame was claimed");
+        assert_eq!(snapshot.len(), 1);
+        let local = &snapshot.frames[0].locals[0];
+        assert_eq!(
+            local.value, None,
+            "the snapshot copied the reissued block under `xs`, whose static \
+             descriptor is Int — a `Float` rendered as an `Int`, and a strong \
+             root to it out of `CrashSnapshot::push_roots`"
+        );
+
+        let mut out = Vec::new();
+        snapshot.push_roots(&mut out);
+        assert!(
+            out.is_empty(),
+            "an absence must root nothing; a dangling entry would have made \
+             the snapshot a strong root set for storage it does not own"
+        );
+        assert_eq!(reissued.descriptor().name, "Float");
     }
 }

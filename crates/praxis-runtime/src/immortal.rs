@@ -10,16 +10,18 @@
 //! *a* `GcRef` after a fault (Appendix B: "return a valid sentinel object such
 //! as `Unit`").
 //!
-//! **`Int` joined them.** The same §4.3 paragraph reserves the right to "intern
-//! small integers", and a small `Int` satisfies exactly the two conditions the
-//! `ImmortalWitness` below exists to enforce — its payload is `Copy`, and there
-//! is a bounded set of them so each can be minted once at startup. The range and
-//! the argument that sharing an `Int` is unobservable are [`crate::small_int`]'s;
-//! this module's job is only that the table is minted here, once, like every
-//! other immortal.
+//! **`Int` joined them, and then `Char`.** The same §4.3 paragraph reserves the
+//! right to "intern small integers", and a small `Int` satisfies exactly the two
+//! conditions the `ImmortalWitness` below exists to enforce — its payload is
+//! `Copy`, and there is a bounded set of them so each can be minted once at
+//! startup. An ASCII `Char` satisfies both identically (ADR-107). The ranges and
+//! the argument that sharing such an object is unobservable are
+//! [`crate::small_int`]'s and [`crate::small_char`]'s; this module's job is only
+//! that the tables are minted here, once, like every other immortal.
 
 use crate::heap::Heap;
-use crate::scalars::{BoolPayload, BOOL_PAYLOAD, INT_PAYLOAD, UNIT_PAYLOAD};
+use crate::scalars::{BoolPayload, BOOL_PAYLOAD, CHAR_PAYLOAD, INT_PAYLOAD, UNIT_PAYLOAD};
+use crate::small_char::{self, SMALL_CHAR_COUNT, SMALL_CHAR_MAX};
 use crate::small_int::{self, SMALL_INT_COUNT, SMALL_INT_MAX, SMALL_INT_MIN};
 use crate::GcRef;
 
@@ -48,6 +50,16 @@ pub struct Immortals {
     /// `Runtime` that owns the `Immortals`. An inline array would move with it;
     /// a boxed slice's elements do not.
     small_ints: Box<[GcRef]>,
+    /// One `Char` per code point in [`crate::small_char`]'s range, indexed by
+    /// [`small_char::index_of`].
+    ///
+    /// A `Box<[GcRef]>` for `small_ints`' reason, reaching a different consumer:
+    /// the parser interpreter reads this table through a raw pointer parked in
+    /// `RuntimeContext.small_chars` (`parser.rs`'s `Rt` holds nothing but a
+    /// `*mut RuntimeContext`), and that pointer must survive a move of the
+    /// `Runtime` that owns the `Immortals`. An inline array would move with it;
+    /// a boxed slice's elements do not.
+    small_chars: Box<[GcRef]>,
 }
 
 impl Immortals {
@@ -79,11 +91,22 @@ impl Immortals {
             .map(|v| heap.alloc_immortal(INT_PAYLOAD, v, ImmortalWitness(())))
             .collect();
         debug_assert_eq!(small_ints.len(), SMALL_INT_COUNT);
+        // The interned ASCII `Char`s, on the same terms and appended after the
+        // `Int`s rather than interleaved with them: a `Char` block rounds to the
+        // same 32-byte rung, so these 128 land on the class-1 immortal pages the
+        // `Int` table already opened, and `small_ints_ptr`'s density argument is
+        // untouched by construction. Slot `i` holds code point `i` — the map is
+        // the identity, which `small_char::index_of` is the single statement of.
+        let small_chars: Box<[GcRef]> = (0..=SMALL_CHAR_MAX)
+            .map(|code| heap.alloc_immortal(CHAR_PAYLOAD, code, ImmortalWitness(())))
+            .collect();
+        debug_assert_eq!(small_chars.len(), SMALL_CHAR_COUNT);
         Immortals {
             unit,
             true_,
             false_,
             small_ints,
+            small_chars,
         }
     }
 
@@ -142,6 +165,36 @@ impl Immortals {
     pub fn small_ints_ptr(&self) -> *const GcRef {
         self.small_ints.as_ptr()
     }
+
+    /// The interned `Char` for `code`, or `None` when `code` is outside
+    /// [`crate::small_char`]'s range and the caller must allocate.
+    ///
+    /// [`Immortals::small_int`]'s shape and its `Option` for the same reason:
+    /// "this code point is not interned" is an ordinary answer, not a failure,
+    /// and every caller has a perfectly good allocating path to fall back to.
+    #[inline]
+    #[must_use]
+    pub fn small_char(&self, code: u32) -> Option<GcRef> {
+        // `index_of` proved the bound; the table was built over the same range.
+        small_char::index_of(code).map(|i| self.small_chars[i])
+    }
+
+    /// The base address of the interned-`Char` table, for
+    /// `RuntimeContext.small_chars`.
+    ///
+    /// The reader is `parser.rs`'s `Rt::alloc_char`, not generated code: there
+    /// is no character literal in the language, so nothing lowers to a load of
+    /// this base (ADR-107 Decision 2). It is still a raw pointer for the same
+    /// reason `small_ints_ptr` is — the parser interpreter reaches the runtime
+    /// only through a `*mut RuntimeContext` — and it is still sound only because
+    /// the table is dense, in index order, and never reallocated after
+    /// [`Immortals::new`], which is not checkable from the reader and so is
+    /// stated here where the table is built.
+    #[inline]
+    #[must_use]
+    pub fn small_chars_ptr(&self) -> *const GcRef {
+        self.small_chars.as_ptr()
+    }
 }
 
 /// Read a `Bool` payload, recognizing the immortal singletons.
@@ -178,10 +231,10 @@ mod tests {
         assert_eq!(im.bool_(false).as_ptr(), false_);
 
         // Nothing is counted — immortals live on pages the sweep does not walk.
-        // The interned `Int` table is a thousand more of them and must not
-        // change this: a table object on a sweepable page would be finalized and
-        // its storage handed back out from under every reference generated code
-        // holds.
+        // The interned `Int` table is a thousand more of them, and the `Char`
+        // table a hundred and twenty-eight more again; neither may change this.
+        // A table object on a sweepable page would be finalized and its storage
+        // handed back out from under every reference generated code holds.
         assert_eq!(heap.stats().live_count, 0);
     }
 
@@ -231,13 +284,89 @@ mod tests {
     }
 
     #[test]
+    fn the_small_char_table_is_one_object_per_code_point_and_stable() {
+        let heap = Heap::new();
+        let im = Immortals::new(&heap);
+
+        // Every code point in range answers *the same* object on every call —
+        // the whole point of the table, and what makes `t[i]` in a loop cost no
+        // allocation at all.
+        for code in [0_u32, 'a' as u32, '#' as u32, '9' as u32, SMALL_CHAR_MAX] {
+            let first = im.small_char(code).expect("in range");
+            assert_eq!(im.small_char(code).unwrap().as_ptr(), first.as_ptr());
+            // SAFETY: the table holds `Char`s, minted with `CHAR_PAYLOAD`.
+            assert_eq!(
+                unsafe { *first.payload::<u32>() },
+                code,
+                "slot holds its own code point"
+            );
+        }
+
+        // The boundary cases at the table rather than at `index_of`: the exact
+        // ceiling is interned and one above it is not. There is no floor case —
+        // the payload is unsigned and 0 is interned.
+        assert!(im.small_char(SMALL_CHAR_MAX).is_some());
+        assert!(im.small_char(SMALL_CHAR_MAX + 1).is_none());
+        // `é`, the code point every `Char` test in this crate uses for "outside
+        // the range", and the surrogate floor, which no widening may ever reach.
+        assert!(im.small_char('é' as u32).is_none());
+        assert!(im.small_char(0xD800).is_none());
+
+        // Distinct code points are distinct objects. Sharing an object across
+        // two *values* would make `'a' == 'b'`, which is the one way interning
+        // could change an answer.
+        let a = im.small_char('a' as u32).unwrap();
+        let b = im.small_char('b' as u32).unwrap();
+        assert_ne!(a.as_ptr(), b.as_ptr());
+
+        // Every slot is its own object: 128 distinct addresses, not 128 handles
+        // onto one. A `map` that reused a buffer would pass every check above.
+        let mut seen: Vec<*const u8> = (0..=SMALL_CHAR_MAX)
+            .map(|c| im.small_char(c).unwrap().as_ptr() as *const u8)
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), SMALL_CHAR_COUNT);
+
+        // The raw pointer the context hands the parser addresses the same
+        // objects `small_char` answers, in index order — the invariant
+        // `Rt::alloc_char`'s `add(i)` rests on.
+        let base = im.small_chars_ptr();
+        for code in 0..=SMALL_CHAR_MAX {
+            // SAFETY: `code` is below `SMALL_CHAR_COUNT`, the table's length.
+            let through_ptr = unsafe { *base.add(code as usize) };
+            assert_eq!(
+                through_ptr.as_ptr(),
+                im.small_char(code).unwrap().as_ptr(),
+                "slot {code} through the raw pointer must be slot {code}"
+            );
+        }
+
+        // And the two tables are disjoint: an interned `Char` is never an
+        // interned `Int` with the same numeric value. They share a size class,
+        // so a table built over the wrong descriptor would be the same shape and
+        // the same width — and `praxis_char_load` would then read an `Int`.
+        for code in 0..=SMALL_CHAR_MAX {
+            let ch = im.small_char(code).unwrap();
+            assert!(
+                std::ptr::eq(ch.descriptor(), &crate::scalars::CHAR),
+                "slot {code} must be a Char"
+            );
+            let int = im.small_int(i64::from(code)).unwrap();
+            assert_ne!(ch.as_ptr(), int.as_ptr());
+        }
+    }
+
+    #[test]
     fn minting_the_immortals_costs_the_collector_nothing() {
         // RT-04: pacing measures the pressure a program puts on the collector,
-        // and an object no collection can reclaim exerts none. The table is
-        // ~40 KiB against a 64 KiB initial threshold, so charging it would put
-        // every program two thirds of the way to its first collection before
+        // and an object no collection can reclaim exerts none. The `Int` table
+        // is ~40 KiB against a 64 KiB initial threshold, so charging it would
+        // put every program two thirds of the way to its first collection before
         // `main` ran — and would silently move that point again the next time
-        // anyone tuned the interned range.
+        // anyone tuned an interned range. The `Char` table is 4 KiB more of
+        // exactly the same argument (ADR-107), and it must not charge either:
+        // together they would be three quarters of the budget.
         let heap = Heap::new();
         let _im = Immortals::new(&heap);
         assert_eq!(

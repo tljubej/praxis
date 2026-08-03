@@ -34,7 +34,10 @@
 
 use crate::gc::{GcHeader, GcRef};
 use crate::roots::RootSet;
-use crate::MAX_RECURSION_DEPTH;
+use crate::{
+    FRAME_BYTES_BASE, FRAME_BYTES_PER_SLOT, MAX_RECURSION_DEPTH, REFERENCE_FRAME_SLOTS,
+    STACK_BUDGET_BYTES,
+};
 
 /// The maximum `Gc` roots a single JIT'd function may spill. The backend
 /// rejects (at compile time) any function exceeding this, through
@@ -90,39 +93,68 @@ impl SlotCount {
 
 /// The size of the one shadow-stack reservation, in slots.
 ///
-/// **Exhaustion is unrepresentable, not handled.** Two facts bound the stack:
+/// **Exhaustion is unrepresentable, not handled.** One fact bounds the stack,
+/// and since ADR-105 it bounds it *exactly* rather than through a product of two
+/// independent worst cases:
 ///
-/// 1. every generated prologue rejects `recursion_depth >= MAX_RECURSION_DEPTH`
-///    *before* it pushes anything, so at most [`MAX_RECURSION_DEPTH`] frames
-///    are live at once; and
-/// 2. every frame is at most [`MAX_SHADOW_SLOTS`] wide, by [`SlotCount`].
+/// - every generated prologue rejects `stack_left < frame_cost(slots)` *before*
+///   it pushes anything. A context starts with at most [`STACK_BUDGET_BYTES`] —
+///   [`StackBudget`] refuses to make a larger one — and a frame spends at least
+///   [`FRAME_BYTES_BASE`], so there are at most [`MAX_RECURSION_DEPTH`] live
+///   frames; and it spends [`FRAME_BYTES_PER_SLOT`] on every slot past
+///   [`REFERENCE_FRAME_SLOTS`], so those slots number at most
+///   `STACK_BUDGET_BYTES / FRAME_BYTES_PER_SLOT`. Adding the two: live slots are
+///   bounded by `budget / FRAME_BYTES_PER_SLOT + MAX_RECURSION_DEPTH ×
+///   REFERENCE_FRAME_SLOTS`.
 ///
-/// So `top - base <= MAX_RECURSION_DEPTH * MAX_SHADOW_SLOTS` at all times.
-/// Reserving that product — plus one frame of headroom for the Rust-side
-/// [`push_frame`] callers, which do not go through the depth guard — means
-/// there is no inline bounds check in the prologue, because there is nothing
-/// left to check. That is one branch removed from the hottest path in the
-/// language.
+/// Reserving that — plus one frame of headroom for the Rust-side [`push_frame`]
+/// callers, which spend no budget and so are not covered by the argument —
+/// means there is no inline bounds check in the prologue, because there is
+/// nothing left to check. That is one branch removed from the hottest path in
+/// the language.
 ///
-/// The cost is 12.29 MiB of *virtual address space* per
-/// [`Runtime`](crate::Runtime). [`SlotStack::new`] allocates it zeroed, which
-/// is an `mmap` of fresh zero pages: resident memory tracks how deep the
-/// program actually recurses, not how deep it is allowed to.
-pub const SHADOW_STACK_SLOTS: usize = (MAX_RECURSION_DEPTH as usize + 1) * MAX_SHADOW_SLOTS;
+/// The old bound was `MAX_RECURSION_DEPTH * MAX_SHADOW_SLOTS`, which multiplied
+/// "the deepest recursion" by "the widest frame" as if a program could have both
+/// at once. It cannot, and now the guard is what says so: a maximum-width frame
+/// spends `FRAME_BYTES_BASE + 2 × (MAX_SHADOW_SLOTS − REFERENCE_FRAME_SLOTS)`
+/// bytes, so a stack of them runs out of budget at 2161 frames, not 8000. The
+/// reservation falls from 12.29 MiB to 4.77 MiB of *virtual address space* per
+/// [`Runtime`](crate::Runtime). [`SlotStack::new`] allocates it zeroed, which is
+/// an `mmap` of fresh zero pages: resident memory tracks how deep the program
+/// actually recurses, not how deep it is allowed to.
+pub const SHADOW_STACK_SLOTS: usize = (STACK_BUDGET_BYTES / FRAME_BYTES_PER_SLOT) as usize
+    + (MAX_RECURSION_DEPTH * REFERENCE_FRAME_SLOTS) as usize
+    + MAX_SHADOW_SLOTS;
+
+/// The bound the reservation above covers, spelled once so the `const` block and
+/// the test can both read it rather than restating the arithmetic.
+const MAX_LIVE_SLOTS: usize = (STACK_BUDGET_BYTES / FRAME_BYTES_PER_SLOT) as usize
+    + (MAX_RECURSION_DEPTH * REFERENCE_FRAME_SLOTS) as usize;
 
 // The capacity identity, restated so a build cannot disagree with it. It is
 // deliberately spelled without reference to how `SHADOW_STACK_SLOTS` is
-// computed: the hazard is not someone raising `MAX_RECURSION_DEPTH` (the
-// reservation follows it), it is someone deciding 12 MiB of address space is
-// too much and writing a smaller number. That edit makes shadow-stack overflow
-// reachable from generated code — silently, because generated code does not
-// check the limit — and this fails the *build* instead. Same discipline as
-// ADR-040's P0-08c: a sizing error is a compile error, not a test run.
+// computed: the hazard is not someone raising the budget (the reservation
+// follows it, and `StackBudget` refuses anyway), it is someone deciding the
+// address space is too much and writing a smaller number. That edit makes
+// shadow-stack overflow reachable from generated code — silently, because
+// generated code does not check the limit — and this fails the *build* instead.
+// Same discipline as ADR-040's P0-08c: a sizing error is a compile error, not a
+// test run.
 const _: () = assert!(
-    SHADOW_STACK_SLOTS / MAX_SHADOW_SLOTS > MAX_RECURSION_DEPTH as usize,
-    "the shadow stack must cover the deepest legal recursion at the widest \
-     legal frame: MAX_RECURSION_DEPTH frames of MAX_SHADOW_SLOTS slots, plus \
-     one frame of headroom for Rust-side pushes"
+    SHADOW_STACK_SLOTS > MAX_LIVE_SLOTS,
+    "the shadow stack must cover every slot the budget can buy, plus one frame \
+     of headroom for Rust-side pushes"
+);
+
+// The two premises that argument rests on, stated where the reservation is
+// sized rather than left to the reader of `frame_cost`: a frame must spend
+// something (or there is no bound on how many are live), and a slot past the
+// reference width must spend something (or there is no bound on how many are
+// claimed).
+const _: () = assert!(
+    FRAME_BYTES_BASE > 0 && FRAME_BYTES_PER_SLOT > 0,
+    "a frame and a slot must each spend budget, or the reservation argument in \
+     SHADOW_STACK_SLOTS does not close"
 );
 
 /// The three-word header generated code bump-allocates against.
@@ -596,11 +628,13 @@ mod tests {
 
     #[test]
     fn a_zero_slot_frame_moves_nothing() {
-        // The counterexample that keeps the depth guard alive: a function with
-        // no `Gc` locals consumes no slots, so it can recurse without limit
+        // The counterexample that keeps the prologue guard alive: a function
+        // with no `Gc` locals consumes no slots, so it can recurse without limit
         // while `top` never moves. A full shadow stack is therefore *not* a
-        // cleaner encoding of stack overflow — `MAX_RECURSION_DEPTH` bounds the
-        // native stack, which the shadow stack knows nothing about.
+        // cleaner encoding of stack overflow — the guard's budget bounds the
+        // native stack, which the shadow stack knows nothing about. It is also
+        // why `frame_cost` has a base at all: a frame charged only for its slots
+        // would charge this one nothing.
         let mut f = Fixture::new();
         let ctx = f.ctx_ptr();
         // SAFETY: `ctx` is wired to `f.stack`, which outlives the guards.
@@ -624,12 +658,59 @@ mod tests {
     }
 
     #[test]
-    fn the_reservation_covers_the_deepest_legal_recursion() {
-        // The readable form of the `const` block above. Both premises are
-        // enforced elsewhere: the prologue guards `depth >= MAX_RECURSION_DEPTH`
-        // before pushing, and every frame width is a `SlotCount`.
-        assert!(SHADOW_STACK_SLOTS >= MAX_RECURSION_DEPTH as usize * MAX_SHADOW_SLOTS);
+    fn the_reservation_covers_every_slot_the_budget_can_buy() {
+        // The readable form of the `const` block above, and the arithmetic that
+        // makes it exact rather than a product of two worst cases. Whatever mix
+        // of widths a program recurses through, every slot it claims was paid
+        // for out of one budget, so the slots alone can never outrun it.
+        for width in [0u32, 1, 7, 64, MAX_SHADOW_SLOTS as u32] {
+            let per_frame = crate::frame_cost(width);
+            let frames = STACK_BUDGET_BYTES / per_frame;
+            let slots = frames as usize * width as usize;
+            assert!(
+                slots <= MAX_LIVE_SLOTS,
+                "a stack of {frames} frames {width} slots wide claims {slots} \
+                 slots, past the {MAX_LIVE_SLOTS}-slot bound"
+            );
+        }
         let stack = ShadowStack::new(SHADOW_STACK_SLOTS, std::ptr::null_mut());
         assert_eq!(stack.capacity(), SHADOW_STACK_SLOTS);
+    }
+
+    #[test]
+    fn a_wide_frame_spends_more_budget_than_a_narrow_one() {
+        // The whole content of ADR-105, as arithmetic: the guard's addend now
+        // varies with the frame, so the deepest recursion a program reaches
+        // falls as its frames widen. A call count could not express this — and
+        // the factor it could not express is the factor by which the measured
+        // native frames actually differ.
+        let reference = STACK_BUDGET_BYTES / crate::frame_cost(REFERENCE_FRAME_SLOTS);
+        let widest = STACK_BUDGET_BYTES / crate::frame_cost(MAX_SHADOW_SLOTS as u32);
+        assert_eq!(
+            STACK_BUDGET_BYTES / crate::frame_cost(0),
+            MAX_RECURSION_DEPTH,
+            "the cheapest frame there is must not buy more calls than the debug \
+             frame stack has entries — that stack is sized MAX_RECURSION_DEPTH + 1"
+        );
+        assert_eq!(
+            reference, MAX_RECURSION_DEPTH,
+            "a reference-width frame reaches exactly the depth the old call \
+             count allowed, so an ordinary recursive program is unaffected"
+        );
+        assert!(
+            widest * 3 < reference,
+            "the widest legal frame must be several times dearer than the \
+             reference one: {widest} vs {reference}"
+        );
+    }
+
+    #[test]
+    fn a_budget_larger_than_the_reservation_cannot_be_built() {
+        // The seal. `SHADOW_STACK_SLOTS` is sized from `STACK_BUDGET_BYTES`, so
+        // a host that could install a bigger budget would make shadow-stack
+        // overflow reachable from generated code, which does not check.
+        assert!(crate::StackBudget::new(STACK_BUDGET_BYTES).is_some());
+        assert!(crate::StackBudget::new(STACK_BUDGET_BYTES + 1).is_none());
+        assert_eq!(crate::StackBudget::DEFAULT.get(), STACK_BUDGET_BYTES);
     }
 }

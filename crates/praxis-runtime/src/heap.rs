@@ -15,15 +15,22 @@
 //!   2. **Sweep** — walk every page a word at a time; each block in `allocated &
 //!      !mark` gets its descriptor `drop_value` called (§12.5), is poisoned, and
 //!      has its `allocated` bit cleared so the block can be reissued (RT-01).
+//!   3. **Clear the weak set** — scan the one set that names objects without
+//!      keeping them alive (the crash debugger's value slots) and turn every
+//!      entry naming a block step 2 just reclaimed into an absence (ADR-106).
+//!      This runs inside the collection because a reclaimed block is only
+//!      *recognisable* as one between the sweep and the next allocation.
 
 use std::cell::Cell;
 use std::marker::PhantomData;
+use std::num::NonZeroUsize;
 use std::ptr::NonNull;
+use std::sync::OnceLock;
 
 use crate::descriptor::{Payload, TypeDescriptor};
 use crate::gc::{GcHeader, GcRef, HeapId};
 use crate::page::{self, PageHeader, SizeClass, NUM_CLASSES};
-use crate::roots::{RootSet, RuntimeRoots};
+use crate::roots::{RootSet, RuntimeRoots, WeakSet};
 use crate::Tracer;
 
 /// Proof that the collector was given a chance to run at this point.
@@ -39,8 +46,174 @@ use crate::Tracer;
 ///
 /// Deliberately neither `Copy` nor `Clone`: one token, one allocation. A
 /// wrapper that allocates twice paces twice.
+///
+/// # Generated code holds no token, and does not need one (ADR-113)
+///
+/// Since ADR-113 the Cranelift backend reproduces [`Heap::collection_is_due`]
+/// inline and, when it answers `false`, reads an interned small `Int` out of
+/// [`crate::small_int`]'s table without entering this module at all. That is not
+/// a forged token, and the reason is what this type means: **the token is
+/// permission to *collect*, not permission to allocate.** The inline path
+/// allocates nothing — it hands back an immortal the runtime minted before
+/// `main` ran — and it takes that branch only where `maybe_collect` would have
+/// returned `false`, which is the branch on which `pace` mints a token having
+/// done nothing at all. Where the predicate answers `true` the inline path
+/// branches to `praxis_alloc_int`, which paces through `pace` exactly as before.
+///
+/// The obligation that leaves is one sentence, and [`InlineInternSite`] is the
+/// mechanism that keeps it checkable rather than documented: the inline path is
+/// taken **only** when [`Heap::collection_is_due`] is false.
 #[must_use = "a Safepoint is the permission to allocate; dropping it wasted a pacing check"]
 pub struct Safepoint<'a>(PhantomData<&'a Heap>);
+
+/// Everything generated code may bake in to answer an interned scalar inline,
+/// and nothing else (ADR-113).
+///
+/// # What this makes unrepresentable
+///
+/// The Cranelift backend's inline sequence for `Inst::Materialize { Int }` is
+/// four displacements and three immediates: where `Heap` hangs off the context,
+/// where the two pacing words sit inside it, where the intern table's base
+/// pointer sits in the context, and the range and stride of the table itself.
+/// Six of those seven numbers name a **private** field of a `#[repr(C)]` struct
+/// in this crate. Handed to the backend as loose constants they would be six
+/// independent chances to pair the `Int` table's base with the `Char` table's
+/// bounds — a read past the end of a table whose length is the only thing
+/// keeping the probe in bounds.
+///
+/// So they are one value with private fields, and there is exactly one of it:
+/// [`crate::small_int::INLINE_INTERN_SITE`]. `InlineInternSite::new` is
+/// `pub(crate)`, so a site can only be minted inside this crate — and the one
+/// place it is minted is beside the range constants it describes, in the module
+/// whose doc already calls itself "the one statement of the range". "Inline-probe
+/// a table the backend has no right to probe" has no spelling, because there is
+/// no second value to name; a future `Char` arm (P-4a) mints its own in
+/// `small_char.rs`, next to *its* bounds, and cannot get `Int`'s by accident.
+///
+/// # And the half it cannot make unrepresentable
+///
+/// The pacing offsets are **not** arguments to `new`: it fills them from
+/// `Heap`'s own [`Heap::BYTES_SINCE_COLLECT_OFFSET`] and
+/// [`Heap::COLLECT_THRESHOLD_OFFSET`], so a site cannot exist that describes an
+/// intern table without also carrying the pacing predicate's operands. That is
+/// as far as a type can go. A type cannot force the backend to *emit* the
+/// compare — that claim is about an instruction stream, and it is carried by
+/// `an_inline_int_box_tests_the_pacing_counter_before_it_reads_the_table` in the
+/// backend, which reads the emitted IR. ADR-113 says so plainly rather than
+/// implying the type proved more than it did.
+#[derive(Clone, Copy, Debug)]
+pub struct InlineInternSite {
+    heap_offset: usize,
+    bytes_since_collect_offset: usize,
+    collect_threshold_offset: usize,
+    table_offset: usize,
+    min: i64,
+    span: u64,
+    stride_shift: u8,
+}
+
+impl InlineInternSite {
+    /// The site for an intern table whose base pointer sits at `table_offset`
+    /// within a [`RuntimeContext`](crate::RuntimeContext) and which holds one
+    /// object per value in `min..=max`, `stride` bytes apart.
+    ///
+    /// `pub(crate)`, for [`crate::immortal::ImmortalWitness`]'s reason: minting
+    /// is confined to the modules that own the ranges, so the set of tables
+    /// generated code may probe is a list this crate wrote rather than anything
+    /// a caller can assemble.
+    ///
+    /// # Panics
+    /// Panics at compile time (in a `const` context) if `max < min`, if the
+    /// range does not fit a `u64`, or if `stride` is not a power of two — the
+    /// three assumptions the emitted sequence's arithmetic rests on. Every call
+    /// is a `const` initializer, so "panics" here means "fails the build".
+    pub(crate) const fn new(
+        table_offset: usize,
+        min: i64,
+        max: i64,
+        stride: usize,
+    ) -> InlineInternSite {
+        assert!(min <= max, "an intern table's range runs upwards");
+        assert!(stride.is_power_of_two(), "the index scale must be a shift");
+        InlineInternSite {
+            heap_offset: core::mem::offset_of!(crate::RuntimeContext, heap),
+            // Not parameters: a site that described a table but not the pacing
+            // predicate would be permission to skip the predicate, which is the
+            // one thing this type exists to withhold.
+            bytes_since_collect_offset: Heap::BYTES_SINCE_COLLECT_OFFSET,
+            collect_threshold_offset: Heap::COLLECT_THRESHOLD_OFFSET,
+            table_offset,
+            min,
+            // `max - min` as an unsigned width, which is the immediate the
+            // one-compare range test uses. See [`Self::span`].
+            span: max.wrapping_sub(min) as u64,
+            stride_shift: stride.trailing_zeros() as u8,
+        }
+    }
+
+    /// Where the `Heap` pointer sits in a `RuntimeContext`. The first load of
+    /// the sequence, and the base the two pacing loads are relative to.
+    #[must_use]
+    pub const fn heap_offset(self) -> usize {
+        self.heap_offset
+    }
+
+    /// Where [`Heap::bytes_since_collect`] sits within a `Heap`.
+    #[must_use]
+    pub const fn bytes_since_collect_offset(self) -> usize {
+        self.bytes_since_collect_offset
+    }
+
+    /// Where [`Heap::collect_threshold`] sits within a `Heap`.
+    ///
+    /// Generated code loads this word and the one above and takes the branch
+    /// `since >= threshold` to its cold path. That is
+    /// [`Heap::collection_is_due`] transcribed, and that function's doc is where
+    /// the obligation is written down.
+    #[must_use]
+    pub const fn collect_threshold_offset(self) -> usize {
+        self.collect_threshold_offset
+    }
+
+    /// Where the table's base pointer sits in a `RuntimeContext`.
+    #[must_use]
+    pub const fn table_offset(self) -> usize {
+        self.table_offset
+    }
+
+    /// The lowest interned value — the addend that turns a value into an index.
+    #[must_use]
+    pub const fn min(self) -> i64 {
+        self.min
+    }
+
+    /// `max - min`, as the unsigned bound of the **one** compare that decides
+    /// membership.
+    ///
+    /// Generated code tests `(value - min) as u64 <= span` rather than comparing
+    /// against `min` and `max` separately: in two's complement that single
+    /// unsigned compare is exactly `min <= value <= max` for every `i64`
+    /// including the wrapping ones, it reuses the subtract the index needs
+    /// anyway, and it costs one branch where the two-compare form costs two.
+    /// `crate::small_int`'s
+    /// `the_unsigned_range_test_generated_code_emits_answers_index_of` is the
+    /// proof, over the boundary values and both extremes of the type.
+    #[must_use]
+    pub const fn span(self) -> u64 {
+        self.span
+    }
+
+    /// `log2(stride)` — the shift that scales an index to a byte offset.
+    ///
+    /// A shift rather than a multiply because the stride is a pointer width and
+    /// the sequence is emitted at `opt_level = "none"`, where nothing would
+    /// strength-reduce an `imul` for us. `new` asserts the stride is a power of
+    /// two, so this is exact rather than approximate.
+    #[must_use]
+    pub const fn stride_shift(self) -> u8 {
+        self.stride_shift
+    }
+}
 
 /// A precise, non-moving GC heap (§12.1, ADR-011).
 ///
@@ -74,8 +247,10 @@ pub struct Heap {
     /// the runtime buys only a double-borrow panic that a scalar cannot need.
     bytes_since_collect: Cell<usize>,
     /// The threshold at/above which [`Heap::maybe_collect`] runs a collection.
-    /// Doubled after each collection so the heap grows geometrically (amortized
-    /// O(1) allocations per collection), a standard GC pacing heuristic.
+    /// Recomputed after each *paced* collection by [`Heap::pacer`]'s
+    /// [`Pacer::next_threshold`] from this value and [`Heap::live_bytes`]: the
+    /// ratchet doubles it up to a ceiling, and the live set can push it past
+    /// that ceiling when a program legitimately holds more (ADR-112).
     ///
     /// A `Cell` for [`Heap::bytes_since_collect`]'s reason.
     collect_threshold: Cell<usize>,
@@ -110,6 +285,26 @@ pub struct Heap {
     /// one size class: `Unit` is a bare header and the interned small-`Int`
     /// table ([`crate::small_int`]) is a thousand blocks of the next rung up.
     immortal_pages: Cell<*mut PageHeader>,
+    /// Block bytes the last sweep found still live — the input the pacer's
+    /// mandatory term is computed from (ADR-112).
+    ///
+    /// **Block bytes only.** The `Box<str>` behind a `Text` and the `HashMap`
+    /// table behind a `Map` are charged to [`Heap::bytes_since_collect`] at
+    /// allocation, but they are not recoverable at sweep without an
+    /// `owned_bytes_of` call per *survivor* — which is precisely the O(live)
+    /// walk ADR-103 deleted. So this number under-counts, and it under-counts
+    /// in the safe direction: a smaller `live` makes the next threshold
+    /// smaller, so the collector runs **more** often, never less. It cannot
+    /// produce an unbounded heap; it can only cost time, and only on a program
+    /// whose live set is mostly owned bytes — where mark cost is O(live
+    /// *objects*), which is small by construction for exactly that shape.
+    ///
+    /// Immortals are excluded, for [`Heap::live_count`]'s reason and RT-04's:
+    /// an object no collection can reclaim exerts no pressure, so it must not
+    /// buy the program a larger budget either.
+    live_bytes: Cell<usize>,
+    /// How the next paced threshold is chosen. Not a `Cell` — see [`Pacer`].
+    pacer: Pacer,
 }
 
 /// What ran a collection. Only allocation pressure grows the pacing threshold:
@@ -164,8 +359,219 @@ impl BlockLayout {
 
 /// The initial collection threshold (bytes). Small enough that the first
 /// collection runs early in a program's life (catching rooting bugs fast in
-/// tests), then grows via the doubling rule.
+/// tests), then grows under whichever [`Pacer`] the heap was built with.
 pub const INITIAL_COLLECT_THRESHOLD: usize = 1 << 16; // 64 KiB
+
+/// The ceiling on the *speculative* half of the pacing rule: ten doublings of
+/// [`INITIAL_COLLECT_THRESHOLD`] and then no more (ADR-112).
+///
+/// Chosen by measurement, not by derivation — 8/16/64/256 MiB were swept and
+/// 64 MiB is the knee: the time cost falls into the machine's own noise there
+/// and the memory saving is still ~16×, where 256 MiB gives back only 4× and
+/// 8 MiB costs 4% (ADR-112's Measurements). A figure derived from physical RAM
+/// would be more principled, but this workspace has no platform code for
+/// `sysctl hw.memsize` / `sysconf(_SC_PHYS_PAGES)`, and a constant is honest
+/// and testable where a derivation would make every Praxis program's schedule
+/// depend on the machine that ran it.
+pub const MAX_COLLECT_THRESHOLD: usize = INITIAL_COLLECT_THRESHOLD << 10; // 64 MiB
+
+/// How many times the measured live set the threshold must leave room for.
+///
+/// `k = 2` means a program whose live set is *L* bytes may allocate another *L*
+/// bytes before the next collection, so the collector's marginal mark cost is
+/// capped at one mark of the live set per equal quantity of fresh allocation —
+/// and the resident set is bounded at `(1 + k) × live`, which is the whole
+/// deliverable of ADR-112 and is why this is 2 and not 4. Raising it to 4
+/// measurably buys back time on a mark-bound program and costs every program
+/// in the language a `5 × live` bound instead of a `3 × live` one; ADR-112's
+/// Measurements price both.
+pub const LIVE_HEADROOM: usize = 2;
+
+/// How [`Heap::collect_inner`] chooses the next paced collection threshold.
+///
+/// Fixed at construction (there is no `Cell`): a collector that could change
+/// its own schedule mid-run would make "when does this program collect" a
+/// function of history rather than of the heap it was built with, and every
+/// pacing test would become order-dependent.
+///
+/// Both arms exist in one binary so the A/B behind [`Pacer::from_env`] is a
+/// single build rather than two, and the branch is taken once per *collection*
+/// — never on the allocation path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pacer {
+    /// ADR-011's original heuristic: `max(previous × 2, INITIAL)`, unbounded.
+    /// Retained as the measured-against arm; see ADR-112.
+    Doubling,
+    /// `max(min(previous × 2, ceiling), live × live_factor, INITIAL)`.
+    ///
+    /// Constructible only through [`Pacer::bounded`], which clamps both fields,
+    /// so "a ceiling below the first threshold" and "zero headroom" have no
+    /// spelling.
+    Bounded {
+        /// The largest the *ratchet* term may reach. It does **not** bound the
+        /// whole expression; see [`Pacer::next_threshold`].
+        ceiling: NonZeroUsize,
+        /// The multiple of the measured live set the threshold must leave room
+        /// for, whatever the ceiling says.
+        live_factor: NonZeroUsize,
+    },
+}
+
+impl Pacer {
+    /// What a [`Heap`] paces with when nothing says otherwise.
+    ///
+    /// One named constant rather than a literal at the sites that need it, so
+    /// "what does this workspace's collector actually do" has exactly one
+    /// answer to read.
+    pub const DEFAULT: Pacer = Pacer::bounded(MAX_COLLECT_THRESHOLD, LIVE_HEADROOM);
+
+    /// The bounded rule, with both parameters clamped into the range in which
+    /// they mean something.
+    ///
+    /// A ceiling below [`INITIAL_COLLECT_THRESHOLD`] is raised to it: the first
+    /// threshold is already `INITIAL`, so a lower ceiling would describe a
+    /// heap that had exceeded its own bound before its first allocation. A
+    /// `live_factor` of zero is raised to one: it would delete the mandatory
+    /// term, which is the whole anti-thrash half of the rule. Neither clamp is
+    /// a convenience — they are why the two illegal states have no spelling
+    /// (`a_bounded_pacer_cannot_be_built_with_a_ceiling_below_the_first_threshold`).
+    pub const fn bounded(ceiling: usize, live_factor: usize) -> Pacer {
+        // Written out rather than `usize::max`, which is not a `const fn`. This
+        // has to be `const` so `Pacer::DEFAULT` can be one, which is what keeps
+        // the shipped ceiling and factor readable as two named constants
+        // instead of as whatever `Heap::new` happens to pass.
+        let ceiling = if ceiling < INITIAL_COLLECT_THRESHOLD {
+            INITIAL_COLLECT_THRESHOLD
+        } else {
+            ceiling
+        };
+        let live_factor = if live_factor < 1 { 1 } else { live_factor };
+        Pacer::Bounded {
+            ceiling: match NonZeroUsize::new(ceiling) {
+                Some(ceiling) => ceiling,
+                None => panic!("clamped to at least INITIAL_COLLECT_THRESHOLD, which is non-zero"),
+            },
+            live_factor: match NonZeroUsize::new(live_factor) {
+                Some(factor) => factor,
+                None => panic!("clamped to at least 1, which is non-zero"),
+            },
+        }
+    }
+
+    /// The threshold the collection that just finished sets for the next one.
+    ///
+    /// `previous` is the threshold that was in force; `live` is the block bytes
+    /// [`Heap::sweep`] just measured.
+    ///
+    /// **The ceiling clamps the ratchet term only, and never the whole
+    /// expression.** `min(ceiling)` applied to the result would make a program
+    /// whose live set legitimately exceeds the ceiling collect on essentially
+    /// every allocation, which is a thrash bug and not a memory bound. The
+    /// ceiling bounds *speculative* growth — the part of the threshold that is
+    /// a guess about the future; `live × live_factor` is *mandatory* headroom,
+    /// a statement about the present, and it must be allowed to exceed the
+    /// ceiling. ADR-112 decision 2 is the argument, and
+    /// `a_bounded_pacer_gives_a_large_live_set_its_headroom` is the test that
+    /// fails if someone folds the ceiling over the max.
+    ///
+    /// The rule is monotonically non-decreasing up to the ceiling — once
+    /// `previous >= ceiling`, `min(previous × 2, ceiling) == ceiling` — so no
+    /// separate growth floor is needed: the ratchet-to-ceiling *is* the floor,
+    /// and it is what keeps a shrinking live set from dragging the threshold
+    /// back down toward it
+    /// (`a_shrinking_live_set_does_not_lower_the_threshold_below_the_ceiling`).
+    pub fn next_threshold(self, previous: usize, live: usize) -> usize {
+        match self {
+            Pacer::Doubling => previous.saturating_mul(2).max(INITIAL_COLLECT_THRESHOLD),
+            Pacer::Bounded {
+                ceiling,
+                live_factor,
+            } => previous
+                .saturating_mul(2)
+                .min(ceiling.get())
+                .max(live.saturating_mul(live_factor.get()))
+                .max(INITIAL_COLLECT_THRESHOLD),
+        }
+    }
+
+    /// The pacer every [`Heap::new`] is built with, read once per process from
+    /// `PRAXIS_GC_PACER`.
+    ///
+    /// **This is the only `std::env` read in any `src` file in this
+    /// workspace**, and ADR-112 decision 4 is why it earns that. Read through a
+    /// [`OnceLock`] so a process that mints several heaps — the debugger mints
+    /// a second one (ADR-032) — cannot have two of them disagree about the
+    /// collector's schedule, and so repeated `Heap::new` does not re-parse.
+    fn from_env() -> Pacer {
+        static PACER: OnceLock<Pacer> = OnceLock::new();
+        *PACER.get_or_init(|| Pacer::from_spec(std::env::var("PRAXIS_GC_PACER").ok().as_deref()))
+    }
+
+    /// [`Pacer::from_env`]'s parse, split out so it is testable without an
+    /// ambient environment.
+    ///
+    /// An unparseable value prints one line to stderr and falls back. A
+    /// *silent* fallback would let a typo in one arm of an A/B measure the
+    /// wrong build and report the result as if it were the right one, which is
+    /// the exact failure mode this knob exists to serve.
+    fn from_spec(spec: Option<&str>) -> Pacer {
+        let Some(spec) = spec else {
+            return Pacer::DEFAULT;
+        };
+        match Pacer::parse(spec) {
+            Ok(pacer) => pacer,
+            Err(reason) => {
+                eprintln!(
+                    "praxis: ignoring PRAXIS_GC_PACER={spec:?} ({reason}); \
+                     using the default pacer {:?}",
+                    Pacer::DEFAULT
+                );
+                Pacer::DEFAULT
+            }
+        }
+    }
+
+    /// The grammar: `doubling` | `bounded` | `bounded:<ceiling>` |
+    /// `bounded:<ceiling>:<k>`, where `<ceiling>` accepts a `K`/`M`/`G` suffix.
+    fn parse(spec: &str) -> Result<Pacer, String> {
+        let mut parts = spec.trim().split(':');
+        let head = parts.next().unwrap_or_default();
+        let pacer = match head {
+            "doubling" => Pacer::Doubling,
+            "bounded" => {
+                let ceiling = match parts.next() {
+                    Some(text) => {
+                        parse_bytes(text).ok_or_else(|| format!("{text:?} is not a byte count"))?
+                    }
+                    None => MAX_COLLECT_THRESHOLD,
+                };
+                let factor = match parts.next() {
+                    Some(text) => text
+                        .parse::<usize>()
+                        .map_err(|_| format!("{text:?} is not a live-set factor"))?,
+                    None => LIVE_HEADROOM,
+                };
+                Pacer::bounded(ceiling, factor)
+            }
+            other => return Err(format!("{other:?} is not a pacer")),
+        };
+        match parts.next() {
+            Some(extra) => Err(format!("trailing {extra:?}")),
+            None => Ok(pacer),
+        }
+    }
+}
+
+/// A byte count with an optional binary suffix: `65536`, `64K`, `8M`, `1G`.
+fn parse_bytes(text: &str) -> Option<usize> {
+    let (digits, scale) = match text.as_bytes().last()? {
+        b'k' | b'K' => (&text[..text.len() - 1], 1_usize << 10),
+        b'm' | b'M' => (&text[..text.len() - 1], 1_usize << 20),
+        b'g' | b'G' => (&text[..text.len() - 1], 1_usize << 30),
+        _ => (text, 1),
+    };
+    digits.parse::<usize>().ok()?.checked_mul(scale)
+}
 
 // SAFETY: the heap owns raw allocations that are only accessed through `GcRef`s
 // the caller keeps rooted. It is `Send` because the collector is
@@ -179,15 +585,56 @@ unsafe impl Send for Heap {}
 pub struct HeapStats {
     /// Number of currently-registered live allocations.
     pub live_count: usize,
+    /// Block bytes the last sweep found still live. Zero on a heap that has
+    /// never collected, and block bytes only — see [`Heap::live_bytes`].
+    ///
+    /// On [`HeapStats`] rather than behind a `#[cfg(test)]` accessor because
+    /// the property it makes checkable — a long-running program's heap stops
+    /// growing — is an *end-to-end* property, and the test that says so belongs
+    /// where generated code runs (`praxis-codegen-cranelift`'s `jit.rs`), not
+    /// in this crate.
+    pub live_bytes: usize,
 }
 
 impl Heap {
-    /// A fresh, empty heap.
+    /// Where [`Heap::bytes_since_collect`] and [`Heap::collect_threshold`] sit
+    /// within a `Heap`, for the one caller outside this crate that needs
+    /// them: the Cranelift backend, which loads both and compares them inline
+    /// (ADR-113).
+    ///
+    /// Exported from here, with `offset_of!`, for
+    /// [`GcHeader::DESCRIPTOR_OFFSET`](crate::GcHeader::DESCRIPTOR_OFFSET)'s
+    /// reason — the fields are **private** and this struct is their one layout
+    /// authority, so the alternative is a number written out in the backend that
+    /// nothing keeps true. `the_pacing_predicate_is_one_unsigned_compare_of_the_two_exported_words`
+    /// reads a live `Heap` through exactly these two displacements and asserts
+    /// the words it finds are the ones [`Heap::collection_is_due`] compares, so
+    /// the offsets and the predicate cannot drift apart.
+    ///
+    /// **This pair is the whole export surface, and its narrowness is
+    /// deliberate.** A pacer whose predicate needed a third term would have
+    /// nothing to hand the backend, which is the point at which whoever writes
+    /// it has to read [`Heap::collection_is_due`]'s doc.
+    pub const BYTES_SINCE_COLLECT_OFFSET: usize = core::mem::offset_of!(Heap, bytes_since_collect);
+    /// See [`Heap::BYTES_SINCE_COLLECT_OFFSET`].
+    pub const COLLECT_THRESHOLD_OFFSET: usize = core::mem::offset_of!(Heap, collect_threshold);
+
+    /// A fresh, empty heap, paced by [`Pacer::from_env`].
     ///
     /// No page is created here: the first allocation of a class creates that
     /// class's first page. A heap that never allocates costs nothing, which
     /// matters because the debugger mints a second one (ADR-032).
     pub fn new() -> Self {
+        Heap::with_pacer(Pacer::from_env())
+    }
+
+    /// A fresh, empty heap paced by an explicit [`Pacer`].
+    ///
+    /// The door every pacing test goes through, so no test's result depends on
+    /// the ambient environment — including the debug-profile pass ADR-112's
+    /// Consequences requires, which runs the whole suite with
+    /// `PRAXIS_GC_PACER` set.
+    pub fn with_pacer(pacer: Pacer) -> Self {
         Heap {
             id: HeapId::mint(),
             live_count: Cell::new(0),
@@ -198,6 +645,8 @@ impl Heap {
             empty: Cell::new(std::ptr::null_mut()),
             empty_large: Cell::new(std::ptr::null_mut()),
             immortal_pages: Cell::new(std::ptr::null_mut()),
+            live_bytes: Cell::new(0),
+            pacer,
         }
     }
 
@@ -428,10 +877,11 @@ impl Heap {
         value.header().heap_id() == Some(self.id)
     }
 
-    /// Current allocation count.
+    /// Current allocation count, and what the last sweep measured.
     pub fn stats(&self) -> HeapStats {
         HeapStats {
             live_count: self.live_count.get(),
+            live_bytes: self.live_bytes.get(),
         }
     }
 
@@ -740,12 +1190,7 @@ impl Heap {
         unsafe {
             std::ptr::write(
                 header_ptr,
-                GcHeader::new(
-                    descriptor,
-                    descriptor.size() as u32,
-                    recorded_offset,
-                    self.id,
-                ),
+                GcHeader::new(descriptor, recorded_offset, self.id),
             );
         }
         // Initialize the payload.
@@ -757,9 +1202,9 @@ impl Heap {
         // is what a block costs — a class rounds up to it, and that rounding is
         // real memory the program spent.
         //
-        // The block is only part of what the object costs. A `Text` is 56 bytes
+        // The block is only part of what the object costs. A `Text` is 48 bytes
         // of block and a `Box<str>` of whatever length the program read; a
-        // freshly built `Vec` is 56 bytes and a buffer of `capacity` refs. The
+        // freshly built `Vec` is 48 bytes and a buffer of `capacity` refs. The
         // descriptor measures the rest, so a text-heavy program no longer
         // under-reports its pressure by essentially its whole footprint
         // (RT-04). Growth *after* this point — a `push` that reallocates — is
@@ -779,8 +1224,14 @@ impl Heap {
     /// Every `GcRef` reachable from `roots` (plus everything transitively
     /// reachable through descriptor `trace` callbacks) is marked black and
     /// survives; everything else is finalized via `drop_value` and reclaimed.
+    ///
+    /// `roots` is passed twice, as both the strong and the weak set, because a
+    /// [`RuntimeRoots`] is both: five arms say what must survive and a sixth
+    /// says what must be told when something did not (ADR-106). The sealed set
+    /// being the source of both is what keeps them from disagreeing about which
+    /// collection they belong to.
     pub fn collect(&self, roots: &RuntimeRoots<'_>) {
-        self.collect_inner(roots, Trigger::Explicit);
+        self.collect_inner(roots, roots, Trigger::Explicit);
     }
 
     /// [`Heap::collect`] against an arbitrary root set.
@@ -790,9 +1241,23 @@ impl Heap {
     /// only from a live `RuntimeContext` and is exhaustive over the runtime's
     /// owners. Accepting a `&dyn RootSet` on the production path is what let
     /// the automatic collector root from the shadow chain alone (P0-06).
+    ///
+    /// The weak set is `()`: a bare `RootScope` has no debug frames behind it,
+    /// so there is nothing to clear. [`Heap::collect_with_weak`] is for the
+    /// tests that do have one.
     #[cfg(test)]
     pub fn collect_with(&self, roots: &dyn RootSet) {
-        self.collect_inner(roots, Trigger::Explicit);
+        self.collect_inner(roots, &(), Trigger::Explicit);
+    }
+
+    /// [`Heap::collect_with`] against an explicit weak set as well.
+    ///
+    /// Test-only. Production collection takes both from one `RuntimeRoots`, so
+    /// the two cannot describe different runtimes; this is how an in-crate test
+    /// drives the weak path without building a whole context.
+    #[cfg(test)]
+    pub fn collect_with_weak(&self, roots: &dyn RootSet, weak: &dyn WeakSet) {
+        self.collect_inner(roots, weak, Trigger::Explicit);
     }
 
     /// [`Heap::maybe_collect`] against an arbitrary root set. Test-only, and
@@ -801,31 +1266,42 @@ impl Heap {
     /// the threshold.
     #[cfg(test)]
     pub fn maybe_collect_with(&self, roots: &dyn RootSet) -> bool {
-        let should = self.bytes_since_collect.get() >= self.collect_threshold.get();
+        let should = self.collection_is_due();
         if should {
-            self.collect_inner(roots, Trigger::Paced);
+            self.collect_inner(roots, &(), Trigger::Paced);
         }
         should
     }
 
-    fn collect_inner(&self, roots: &dyn RootSet, trigger: Trigger) {
+    fn collect_inner(&self, roots: &dyn RootSet, weak: &dyn WeakSet, trigger: Trigger) {
         self.mark(roots);
         self.sweep();
+        // Step 3, and its position is the decision (ADR-106 decision 2). After
+        // the sweep, so every block this collection reclaimed is poisoned and
+        // therefore recognisable; before anything else can allocate, because the
+        // first `claim_free_block` to reissue one of those blocks writes a live
+        // header over the poison and the weak set's entry silently becomes a
+        // reference to an object of another type. Between those two points is
+        // the only place the question "did this die?" has an answer, and this is
+        // that place.
+        weak.clear_reclaimed();
         self.bytes_since_collect.set(0);
-        // Grow the threshold geometrically, so allocations per collection are
-        // amortized O(1) — but only when *pacing* was what ran this collection.
+        // Re-pace — but only when *pacing* was what ran this collection.
         //
-        // Doubling on an explicit collection too meant a host that collected on
-        // a schedule (the debugger between REPL commands, a test between
-        // phases) pushed the automatic threshold up without any allocation
-        // pressure having caused it, and after a few such calls the program was
-        // effectively running without a collector (RT-04).
+        // Growing the threshold on an explicit collection too meant a host that
+        // collected on a schedule (the debugger between REPL commands, a test
+        // between phases) pushed the automatic threshold up without any
+        // allocation pressure having caused it, and after a few such calls the
+        // program was effectively running without a collector (RT-04).
+        //
+        // `self.sweep()` ran two lines up, so `live_bytes` is the live set
+        // *this* collection measured rather than the previous one's — which is
+        // the whole reason the pacer can be a pure function of two numbers
+        // (ADR-112 decision 1).
         if trigger == Trigger::Paced {
             self.collect_threshold.set(
-                self.collect_threshold
-                    .get()
-                    .saturating_mul(2)
-                    .max(INITIAL_COLLECT_THRESHOLD),
+                self.pacer
+                    .next_threshold(self.collect_threshold.get(), self.live_bytes.get()),
             );
         }
     }
@@ -838,11 +1314,58 @@ impl Heap {
     ///
     /// Returns `true` if a collection ran.
     pub fn maybe_collect(&self, roots: &RuntimeRoots<'_>) -> bool {
-        let should = self.bytes_since_collect.get() >= self.collect_threshold.get();
+        let should = self.collection_is_due();
         if should {
-            self.collect_inner(roots, Trigger::Paced);
+            self.collect_inner(roots, roots, Trigger::Paced);
         }
         should
+    }
+
+    /// Has allocation pressure reached the threshold? — **the one statement of
+    /// the pacing predicate**, and the second-most-copied line in the runtime
+    /// (ADR-113).
+    ///
+    /// [`Heap::maybe_collect`] and [`Heap::maybe_collect_with`] are its two
+    /// callers here. Its third reader is not in this crate and cannot call it:
+    /// since ADR-113 the Cranelift backend **reproduces this expression inline**
+    /// in every `Inst::Materialize { Int }` it emits — two loads at
+    /// [`Heap::BYTES_SINCE_COLLECT_OFFSET`] and
+    /// [`Heap::COLLECT_THRESHOLD_OFFSET`], an unsigned compare, and a branch to
+    /// a cold block that calls `praxis_alloc_int` — so that the overwhelmingly
+    /// common case (a loop counter inside [`crate::small_int`]'s range, on a
+    /// heap that is nowhere near its threshold) is a table read rather than a
+    /// guarded call into this module.
+    ///
+    /// # The obligation, and what a third term would cost
+    ///
+    /// ADR-040's [`Safepoint`] exists so that "allocate on the paced path
+    /// without pacing" has no spelling. Generated code does not breach it,
+    /// because it never allocates on the fast path and never collects: it takes
+    /// that path **only** where this function answers `false`, which is exactly
+    /// the branch on which `maybe_collect` returns without doing anything. That
+    /// is the entire argument, and it holds only while this expression is what
+    /// the backend emits.
+    ///
+    /// So: **a term added here must be added to `emit_inline_intern` in
+    /// `crates/praxis-codegen-cranelift/src/lower.rs`, or generated code
+    /// allocates on a branch where the collector was due.** The failure mode is
+    /// not a wrong answer — it is a collection that silently does not happen,
+    /// which looks like a memory leak in a program the reader will not connect
+    /// to a pacer change. Two things fire when it is forgotten:
+    /// `the_pacing_predicate_is_one_unsigned_compare_of_the_two_exported_words`
+    /// below, which compares this function's answer against the two words the
+    /// backend loads, and the deliberately narrow export surface — a third term
+    /// has no offset constant to be baked from, so writing one is a decision
+    /// rather than an oversight.
+    ///
+    /// It is `pub` because it is part of that contract, not an implementation
+    /// detail: what the backend inlines should be nameable, and a host that
+    /// wants to know whether the next allocation will collect should ask this
+    /// rather than reconstruct it.
+    #[inline]
+    #[must_use]
+    pub fn collection_is_due(&self) -> bool {
+        self.bytes_since_collect.get() >= self.collect_threshold.get()
     }
 
     /// Mark phase: set the page bit of every reachable object.
@@ -914,8 +1437,16 @@ impl Heap {
     /// most of this finding's win is: the registry walk touched every live
     /// object on every collection, twice over, once to test its colour and once
     /// to reset it.
+    ///
+    /// It also measures the live set in bytes, for the pacer (ADR-112). That
+    /// costs **one multiply per page** — `live_count × block_size`, both of
+    /// which the page already knows and neither of which is on a survivor — so
+    /// ADR-103's "sweep does not touch survivors" property is preserved
+    /// exactly. Reconstructing the same number from the objects would be the
+    /// O(live) walk this design exists to have deleted.
     fn sweep(&self) {
         let mut reclaimed = 0usize;
+        let mut live_bytes = 0usize;
         for page in self.walk_pages() {
             let words = page.words();
             if page.is_immortal() {
@@ -973,8 +1504,20 @@ impl Heap {
                 page.release_blocks(freed);
                 reclaimed += freed as usize;
             }
+            // The page's liveness is final here, so this is the one point in the
+            // cycle at which the live set is knowable without touching an
+            // object. A large page reports its one block's stride rather than
+            // its padded `page_bytes`, which under-counts by the padding — safe
+            // in the direction `Heap::live_bytes` documents, and no production
+            // descriptor takes the large path at all. Immortal pages `continue`
+            // above and are excluded on purpose (RT-04).
+            live_bytes += page.live_count() as usize * page.block_size();
         }
+        // Accumulated into a local and stored once, so this line stays beside
+        // an unchecked subtraction without making that subtraction's ordering
+        // subtle.
         self.live_count.set(self.live_count.get() - reclaimed);
+        self.live_bytes.set(live_bytes);
         self.relink_pages();
     }
 
@@ -1020,6 +1563,11 @@ impl Heap {
             page.clear_bitmaps();
         }
         self.live_count.set(0);
+        // The other place liveness is repudiated wholesale, and the one both
+        // `Heap::reset` and `Drop` go through. A stale `live_bytes` here would
+        // let a reset heap's first paced collection inherit the *previous*
+        // program's live set as headroom.
+        self.live_bytes.set(0);
         self.relink_pages();
     }
 
@@ -1482,6 +2030,100 @@ mod tests {
         false
     }
 
+    /// **The ADR-113 obligation, as an assertion rather than a comment.**
+    ///
+    /// Generated code does not call [`Heap::collection_is_due`]; it loads two
+    /// words at [`Heap::BYTES_SINCE_COLLECT_OFFSET`] and
+    /// [`Heap::COLLECT_THRESHOLD_OFFSET`] and compares them. This test *is* that
+    /// sequence, in Rust, run against a live `Heap` whose two fields are driven
+    /// across the boundary — so it fails in three separate ways, each of which
+    /// is a real defect:
+    ///
+    /// 1. an offset that names the wrong field (the reads disagree with the
+    ///    fields);
+    /// 2. a `Cell` that stops being `#[repr(transparent)]` over its contents, or
+    ///    a `Heap` that stops being `#[repr(C)]` (same symptom);
+    /// 3. **a third term in the predicate** — the one this is really for. The
+    ///    moment `collection_is_due` is anything other than these two words
+    ///    compared, some state below makes the two answers differ, and whoever
+    ///    added the term arrives at that function's doc, which tells them the
+    ///    backend has to change too.
+    ///
+    /// It deliberately does not go through `maybe_collect`: that would collect,
+    /// which resets the counter, and the states worth checking are the ones on
+    /// either side of the boundary.
+    #[test]
+    fn the_pacing_predicate_is_one_unsigned_compare_of_the_two_exported_words() {
+        let heap = Heap::new();
+        // Straddle the boundary in both directions, and include the degenerate
+        // pair (0, 0) — a zero threshold means *always* due, and `>=` is what
+        // makes that true where `>` would not.
+        for (since, threshold) in [
+            (0_usize, 0_usize),
+            (0, 1),
+            (0, INITIAL_COLLECT_THRESHOLD),
+            (INITIAL_COLLECT_THRESHOLD - 1, INITIAL_COLLECT_THRESHOLD),
+            (INITIAL_COLLECT_THRESHOLD, INITIAL_COLLECT_THRESHOLD),
+            (INITIAL_COLLECT_THRESHOLD + 1, INITIAL_COLLECT_THRESHOLD),
+            (usize::MAX, INITIAL_COLLECT_THRESHOLD),
+            (INITIAL_COLLECT_THRESHOLD, usize::MAX),
+        ] {
+            heap.bytes_since_collect.set(since);
+            heap.collect_threshold.set(threshold);
+
+            let base = std::ptr::from_ref(&heap).cast::<u8>();
+            // SAFETY: `Heap` is `#[repr(C)]` and both constants are
+            // `offset_of!` of a `Cell<usize>` field of it, and `Cell<T>` is
+            // `#[repr(transparent)]` over `T`. This is byte-for-byte the load
+            // `emit_inline_intern` emits.
+            let (read_since, read_threshold) = unsafe {
+                (
+                    *base.add(Heap::BYTES_SINCE_COLLECT_OFFSET).cast::<usize>(),
+                    *base.add(Heap::COLLECT_THRESHOLD_OFFSET).cast::<usize>(),
+                )
+            };
+            assert_eq!(read_since, since, "BYTES_SINCE_COLLECT_OFFSET names it");
+            assert_eq!(read_threshold, threshold, "COLLECT_THRESHOLD_OFFSET does");
+            assert_eq!(
+                read_since >= read_threshold,
+                heap.collection_is_due(),
+                "the predicate generated code emits (since={since}, \
+                 threshold={threshold}) is no longer the predicate \
+                 `collection_is_due` applies — see its doc: the backend's \
+                 `emit_inline_intern` owes the same change, or generated code \
+                 answers from the intern table on a branch where the collector \
+                 was due"
+            );
+        }
+    }
+
+    /// The site the backend is handed carries the *same* two offsets, so
+    /// permission to probe the table and the obligation to pace cannot come
+    /// apart. `InlineInternSite::new` fills them itself rather than taking them,
+    /// and this is the assertion that it filled them from here.
+    #[test]
+    fn an_inline_intern_site_carries_the_heaps_own_pacing_offsets() {
+        let site = crate::small_int::INLINE_INTERN_SITE;
+        assert_eq!(
+            site.bytes_since_collect_offset(),
+            Heap::BYTES_SINCE_COLLECT_OFFSET
+        );
+        assert_eq!(
+            site.collect_threshold_offset(),
+            Heap::COLLECT_THRESHOLD_OFFSET
+        );
+        assert_ne!(
+            site.bytes_since_collect_offset(),
+            site.collect_threshold_offset(),
+            "two distinct fields, or the compare is `x >= x`"
+        );
+        assert_eq!(
+            site.heap_offset(),
+            core::mem::offset_of!(crate::RuntimeContext, heap),
+            "and the base those two are relative to is the context's `heap`"
+        );
+    }
+
     #[test]
     fn reset_restores_collection_pacing() {
         let mut heap = Heap::new();
@@ -1522,8 +2164,332 @@ mod tests {
         );
     }
 
+    /// The RT-04 property above is the pacer's, not the doubling rule's, and a
+    /// bounded pacer must not smuggle threshold growth in through an explicit
+    /// collection either. Written as a twin rather than by widening the test
+    /// above, so that one keeps pinning the *exact* doubling constant.
+    #[test]
+    fn an_explicit_collection_does_not_grow_a_bounded_pacers_threshold() {
+        let heap = Heap::with_pacer(Pacer::bounded(1 << 20, LIVE_HEADROOM));
+        for _ in 0..8 {
+            heap.collect_with(&RootScope::new());
+        }
+        assert_eq!(
+            heap.collect_threshold.get(),
+            INITIAL_COLLECT_THRESHOLD,
+            "an explicit collection must leave the automatic threshold alone"
+        );
+
+        assert!(allocate_until_paced(&heap, 100_000));
+        assert_eq!(
+            heap.collect_threshold.get(),
+            INITIAL_COLLECT_THRESHOLD * 2,
+            "with nothing rooted the ratchet term is what grows it, exactly as before"
+        );
+    }
+
+    /// The stride an `Int`'s block is taken at — derived through the same two
+    /// calls the allocator makes rather than written as a literal, so a change
+    /// to the ladder moves the expectation with it.
+    fn int_stride() -> usize {
+        let (_, block) = BlockLayout::of(&INT);
+        SizeClass::of(block)
+            .expect("an Int is on the ladder")
+            .block_size()
+    }
+
+    /// The input the bounded pacer's mandatory term is computed from. It is
+    /// measured from the pages' own counts in the walk sweep already performs,
+    /// so this is also the assertion that the multiply is reading the right two
+    /// numbers.
+    #[test]
+    fn sweep_measures_the_live_set_in_bytes() {
+        const ROOTED: usize = 100;
+        let heap = Heap::with_pacer(Pacer::Doubling);
+        let mut roots = RootScope::new();
+        for i in 0..1_000_i64 {
+            let r = heap.alloc_unpaced(INT_PAYLOAD, i);
+            if (i as usize) < ROOTED {
+                roots.root(r);
+            }
+        }
+
+        heap.collect_with(&roots);
+
+        assert_eq!(heap.stats().live_count, ROOTED);
+        assert_eq!(
+            heap.stats().live_bytes,
+            ROOTED * int_stride(),
+            "the live set is the survivors' blocks and nothing else"
+        );
+    }
+
+    /// The RT-04 twin of `an_immortal_is_invisible_to_sweep_and_to_finalize_all`
+    /// and of `minting_the_immortals_costs_the_collector_nothing`: an object no
+    /// collection can ever reclaim exerts no pressure, so it must not buy the
+    /// program a larger budget between collections either. Without this, every
+    /// program in the language would start with the ~40 KiB interned small-`Int`
+    /// table (ADR-100) counted as live and the first bounded threshold moved by
+    /// it.
+    #[test]
+    fn an_immortal_is_not_counted_in_the_live_set() {
+        let heap = Heap::with_pacer(Pacer::Doubling);
+        let immortals = crate::immortal::Immortals::new(&heap);
+        assert!(immortals.small_int(7).is_some(), "7 is interned");
+        let mut roots = RootScope::new();
+        roots.root(heap.alloc_unpaced(INT_PAYLOAD, 1_i64));
+
+        heap.collect_with(&roots);
+
+        assert_eq!(
+            heap.stats().live_bytes,
+            int_stride(),
+            "the immortal tables are on pages sweep never walks, so they are not live bytes"
+        );
+    }
+
+    /// The property this item exists for: the threshold's speculative half
+    /// ratchets to a bound and stops, where the doubling rule's grows without
+    /// limit for as long as the program runs.
+    #[test]
+    fn a_bounded_pacer_stops_doubling_at_the_ceiling() {
+        const CEILING: usize = 1 << 18; // 256 KiB — two rungs above INITIAL.
+        let heap = Heap::with_pacer(Pacer::bounded(CEILING, LIVE_HEADROOM));
+
+        for round in 0..40 {
+            assert!(
+                allocate_until_paced(&heap, 100_000),
+                "round {round} did not reach the threshold"
+            );
+            assert!(
+                heap.collect_threshold.get() <= CEILING,
+                "round {round} left the threshold at {} above the {CEILING}-byte ceiling",
+                heap.collect_threshold.get()
+            );
+        }
+        assert_eq!(
+            heap.collect_threshold.get(),
+            CEILING,
+            "and it ratchets all the way up to it rather than oscillating below"
+        );
+    }
+
+    /// The ceiling clamps the ratchet term and **not** the whole expression.
+    /// Folding `min(ceiling)` over the max is a one-character edit that turns a
+    /// memory bound into a thrash bug: a program whose live set exceeds the
+    /// ceiling would collect on essentially every allocation, having proved on
+    /// each one that it cannot reclaim anything. This test is what fails.
+    #[test]
+    fn a_bounded_pacer_gives_a_large_live_set_its_headroom() {
+        const CEILING: usize = 1 << 20; // 1 MiB
+        let heap = Heap::with_pacer(Pacer::bounded(CEILING, LIVE_HEADROOM));
+        let mut roots = RootScope::new();
+        // Two ceilings' worth of live blocks, held across the collection.
+        for i in 0..(2 * CEILING / int_stride()) as i64 {
+            roots.root(heap.alloc_unpaced(INT_PAYLOAD, i));
+        }
+
+        assert!(
+            drive_one_paced_collection(&heap, &roots, 200_000),
+            "the rooted fixture is already past the threshold"
+        );
+
+        let live = heap.stats().live_bytes;
+        assert!(
+            live > CEILING,
+            "the fixture must hold more than the ceiling, and holds {live}"
+        );
+        assert_eq!(
+            heap.collect_threshold.get(),
+            live * LIVE_HEADROOM,
+            "the mandatory term must be allowed to exceed the ceiling"
+        );
+    }
+
+    /// The exact difference from the naive `live × k` rule the pre-perf-fixes
+    /// experiment measured, and the reason no separate growth floor is needed:
+    /// the ratchet-to-ceiling *is* the floor. A program that briefly holds a
+    /// large live set and then drops it does not go back to collecting every
+    /// 64 KiB.
+    #[test]
+    fn a_shrinking_live_set_does_not_lower_the_threshold_below_the_ceiling() {
+        const CEILING: usize = 1 << 20; // 1 MiB
+        let heap = Heap::with_pacer(Pacer::bounded(CEILING, LIVE_HEADROOM));
+        {
+            let mut roots = RootScope::new();
+            for i in 0..(2 * CEILING / int_stride()) as i64 {
+                roots.root(heap.alloc_unpaced(INT_PAYLOAD, i));
+            }
+            assert!(drive_one_paced_collection(&heap, &roots, 200_000));
+            assert!(heap.collect_threshold.get() > CEILING);
+        }
+
+        // The roots are gone; the next collection finds nothing live.
+        assert!(drive_one_paced_collection(
+            &heap,
+            &RootScope::new(),
+            1_000_000
+        ));
+
+        assert_eq!(heap.stats().live_bytes, 0);
+        assert_eq!(
+            heap.collect_threshold.get(),
+            CEILING,
+            "an empty live set must leave the threshold at the ceiling, not at INITIAL"
+        );
+    }
+
+    /// RT-01 restated for the pacer, and the property the whole item is for: a
+    /// program that holds a bounded working set has a bounded heap, whatever
+    /// its total allocation. The doubling arm below is not decoration — it is
+    /// the measurement of what the bound is worth, and it fails the same
+    /// assertion by construction.
+    #[test]
+    fn a_bounded_heap_stops_growing() {
+        const CEILING: usize = 1 << 18; // 256 KiB
+        const RETAINED: usize = 1_024;
+        const CHURN: i64 = 512 * 1_024;
+
+        fn churn(pacer: Pacer) -> (usize, usize) {
+            let heap = Heap::with_pacer(pacer);
+            let mut roots = RootScope::new();
+            for i in 0..RETAINED as i64 {
+                roots.root(heap.alloc_unpaced(INT_PAYLOAD, i));
+            }
+            for i in 0..CHURN {
+                let _ = heap.alloc_unpaced(INT_PAYLOAD, i);
+                heap.maybe_collect_with(&roots);
+            }
+            (heap.committed_bytes(), heap.stats().live_bytes)
+        }
+
+        // One page of slack per rung is the worst case ADR-103 names for a
+        // heap that has touched every class; this fixture touches one.
+        let slack = 14 * page::PAGE_SIZE;
+        let (bounded_bytes, live) = churn(Pacer::bounded(CEILING, LIVE_HEADROOM));
+        assert_eq!(live, RETAINED * int_stride());
+        assert!(
+            bounded_bytes <= live + CEILING + slack,
+            "a bounded pacer left {bounded_bytes} bytes committed against a {live}-byte \
+             live set and a {CEILING}-byte ceiling"
+        );
+
+        let (doubling_bytes, _) = churn(Pacer::Doubling);
+        assert!(
+            doubling_bytes > live + CEILING + slack,
+            "the doubling rule is supposed to fail this bound, and committed only \
+             {doubling_bytes} bytes — the fixture is no longer measuring anything"
+        );
+    }
+
+    /// Allocate against `roots` until one paced collection runs, and report
+    /// whether it did within `limit` allocations. The rooted counterpart of
+    /// `allocate_until_paced`, for the tests whose whole subject is what a
+    /// *non-empty* live set does to the next threshold.
+    fn drive_one_paced_collection(heap: &Heap, roots: &dyn RootSet, limit: usize) -> bool {
+        for i in 0..limit {
+            let _ = heap.alloc_unpaced(INT_PAYLOAD, i as i64);
+            if heap.maybe_collect_with(roots) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `Heap::reset` re-seeds the pacer's *previous*, and `finalize_all` —
+    /// which reset goes through — repudiates its *live*. Both halves matter: a
+    /// reset heap that inherited the previous program's live set as headroom
+    /// would run for megabytes before its first collection (RT-04), which is
+    /// the same failure `reset_restores_collection_pacing` pins for the
+    /// threshold.
+    #[test]
+    fn reset_repudiates_the_measured_live_set() {
+        let mut heap = Heap::with_pacer(Pacer::bounded(1 << 20, LIVE_HEADROOM));
+        {
+            let mut roots = RootScope::new();
+            for i in 0..8_192_i64 {
+                roots.root(heap.alloc_unpaced(INT_PAYLOAD, i));
+            }
+            assert!(drive_one_paced_collection(&heap, &roots, 200_000));
+            assert_ne!(heap.stats().live_bytes, 0);
+        }
+
+        heap.reset();
+
+        assert_eq!(heap.stats().live_bytes, 0);
+        assert_eq!(heap.collect_threshold.get(), INITIAL_COLLECT_THRESHOLD);
+    }
+
+    /// The flip ADR-112's Measurements bought. The exact ceiling and factor are
+    /// pinned here rather than left implicit, so a future re-tuning is a visible
+    /// edit to a test that names the numbers, not a silent change to every
+    /// Praxis program's memory profile.
+    #[test]
+    fn the_default_pacer_is_bounded_at_the_measured_ceiling() {
+        assert_eq!(Pacer::from_spec(None), Pacer::DEFAULT);
+        assert_eq!(Pacer::DEFAULT, Pacer::bounded(64 << 20, 2));
+        assert_eq!(
+            Pacer::DEFAULT.next_threshold(1 << 30, 0),
+            MAX_COLLECT_THRESHOLD
+        );
+    }
+
+    /// The "make illegal states unrepresentable" gate on the constructor. A
+    /// ceiling below the first threshold would describe a heap that had
+    /// exceeded its own bound before its first allocation; a zero factor would
+    /// delete the mandatory term and with it the anti-thrash half of the rule.
+    #[test]
+    fn a_bounded_pacer_cannot_be_built_with_a_ceiling_below_the_first_threshold() {
+        assert_eq!(
+            Pacer::bounded(0, 0),
+            Pacer::bounded(INITIAL_COLLECT_THRESHOLD, 1)
+        );
+        assert_eq!(
+            Pacer::bounded(1, 0).next_threshold(INITIAL_COLLECT_THRESHOLD, 1_000_000),
+            1_000_000,
+            "a clamped factor of one still gives the live set its own bytes"
+        );
+    }
+
+    /// The knob's grammar, and — the part that matters for an A/B — that a
+    /// value it cannot read is a loud fallback rather than a silent one. A
+    /// silent fallback lets a typo in one arm measure the other build and
+    /// report the result as if it were the right one.
+    #[test]
+    fn a_pacer_spec_parses_its_grammar_and_rejects_everything_else() {
+        assert_eq!(Pacer::parse("doubling"), Ok(Pacer::Doubling));
+        assert_eq!(
+            Pacer::parse("bounded"),
+            Ok(Pacer::bounded(MAX_COLLECT_THRESHOLD, LIVE_HEADROOM))
+        );
+        assert_eq!(
+            Pacer::parse("bounded:8M"),
+            Ok(Pacer::bounded(8 << 20, LIVE_HEADROOM))
+        );
+        assert_eq!(Pacer::parse("bounded:1G:3"), Ok(Pacer::bounded(1 << 30, 3)));
+        assert_eq!(
+            Pacer::parse("bounded:65536"),
+            Ok(Pacer::bounded(INITIAL_COLLECT_THRESHOLD, LIVE_HEADROOM))
+        );
+
+        for bad in [
+            "",
+            "bounde",
+            "bounded:huge",
+            "bounded:8M:x",
+            "bounded:8M:2:2",
+        ] {
+            assert!(Pacer::parse(bad).is_err(), "{bad:?} must not parse");
+            assert_eq!(
+                Pacer::from_spec(Some(bad)),
+                Pacer::DEFAULT,
+                "{bad:?} must fall back to the default"
+            );
+        }
+    }
+
     /// Pacing counts what an object *costs*, not the size of its fixed block.
-    /// A `Text` is 40 bytes of block plus a `Box<str>` of whatever the program
+    /// A `Text` is 48 bytes of block plus a `Box<str>` of whatever the program
     /// read; charging only the block made a text-heavy program invisible to the
     /// collector — it under-reported its footprint by essentially all of it
     /// (RT-04).
@@ -1562,6 +2528,46 @@ mod tests {
         assert!(
             big.maybe_collect_with(&RootScope::new()),
             "a 64 KiB Text must reach the 64 KiB threshold on its own"
+        );
+    }
+
+    /// **The pacer is charged the narrower stride, which is the whole of
+    /// ADR-109's memory win.**
+    ///
+    /// Deleting `GcHeader::size` saves eight bytes per object in the heap, but
+    /// that saving only turns into a smaller resident set because
+    /// [`Heap::occupy`] charges the *stride* against `bytes_since_collect`. A
+    /// 24-byte `Int` is 25% fewer bytes charged than the 32-byte one it
+    /// replaces, so an `Int`-dominated program reaches `collect_threshold` after
+    /// a third more allocations and takes one fewer doubling to hold the same
+    /// live set. If pacing ever moved to counting *objects*, or to charging the
+    /// payload rather than the block, the header shrink would go on being true
+    /// and stop paying — and nothing else in the suite would notice.
+    ///
+    /// So this asserts the product, not the factors: N `Int`s cost N × 24, and
+    /// the 24 is written out rather than re-derived from `SizeClass`, for the
+    /// reason `page::tests::an_int_block_is_the_header_plus_eight` gives.
+    #[test]
+    fn the_pacer_is_charged_the_narrower_stride() {
+        const N: usize = 100;
+        let heap = Heap::new();
+        assert_eq!(
+            heap.bytes_since_collect.get(),
+            0,
+            "a fresh heap owes nothing"
+        );
+
+        for i in 0..N {
+            // Above the interned range is irrelevant here — `alloc_unpaced`
+            // goes to the heap whatever the value — but pacing must not trip a
+            // collection mid-count, which is exactly what `_unpaced` guarantees.
+            let _ = heap.alloc_unpaced(INT_PAYLOAD, i as i64);
+        }
+
+        assert_eq!(
+            heap.bytes_since_collect.get(),
+            N * 24,
+            "an Int must be charged its 24-byte block and nothing else"
         );
     }
 
@@ -1821,6 +2827,109 @@ mod tests {
         );
     }
 
+    /// A stand-in for the crash debugger's value slots (ADR-106): references
+    /// held somewhere the collector does not trace.
+    ///
+    /// It records what each slot's header looked like *at the moment the
+    /// collector called it*, which is the only way a test can observe where in
+    /// `collect_inner` the scan sits. The real arm reaches its slots through a
+    /// `DebugFrameEntry` and is tested against a live `Runtime` in
+    /// `crate::debug`; this one exists to pin the heap's half of the contract.
+    struct WeakSlots {
+        slots: std::cell::RefCell<Vec<Option<GcRef>>>,
+        poisoned_at_scan: std::cell::RefCell<Vec<bool>>,
+    }
+
+    impl WeakSlots {
+        fn holding(refs: &[GcRef]) -> WeakSlots {
+            WeakSlots {
+                slots: std::cell::RefCell::new(refs.iter().copied().map(Some).collect()),
+                poisoned_at_scan: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl crate::roots::WeakSet for WeakSlots {
+        fn clear_reclaimed(&self) -> usize {
+            let mut cleared = 0;
+            let mut seen = self.poisoned_at_scan.borrow_mut();
+            for slot in self.slots.borrow_mut().iter_mut() {
+                let Some(r) = *slot else {
+                    seen.push(false);
+                    continue;
+                };
+                let poisoned = r.header().is_poisoned();
+                seen.push(poisoned);
+                if poisoned {
+                    *slot = None;
+                    cleared += 1;
+                }
+            }
+            cleared
+        }
+    }
+
+    /// The weak set is a *clear*, not a second sweep: it nulls exactly the
+    /// entries whose objects this collection reclaimed and leaves every entry
+    /// naming a survivor alone.
+    ///
+    /// Nulling everything would satisfy "no dangling reference" and destroy the
+    /// debugger; retaining everything would satisfy the debugger and undo
+    /// MIR-01. This is the statement that it does neither.
+    #[test]
+    fn the_weak_scan_nulls_only_what_this_collection_reclaimed() {
+        let heap = Heap::new();
+        let doomed = heap.alloc_unpaced(INT_PAYLOAD, 1_i64);
+        let kept = heap.alloc_unpaced(INT_PAYLOAD, 2_i64);
+        let weak = WeakSlots::holding(&[doomed, kept]);
+        let mut scope = RootScope::new();
+        scope.root(kept);
+
+        heap.collect_with_weak(&scope, &weak);
+
+        assert_eq!(
+            *weak.poisoned_at_scan.borrow(),
+            vec![true, false],
+            "the scan ran before the sweep, or the sweep did not poison"
+        );
+        assert_eq!(
+            *weak.slots.borrow(),
+            vec![None, Some(kept)],
+            "exactly the reclaimed entry becomes an absence"
+        );
+        assert_eq!(heap.stats().live_count, 1);
+    }
+
+    /// The scan's position inside `collect_inner`, as an observation rather than
+    /// a comment (ADR-106 decision 2).
+    ///
+    /// Two facts pin it from both sides. The slot's header was already poisoned
+    /// when the scan looked at it, so the scan runs *after* the sweep. And the
+    /// very next allocation of that layout takes the same block back and reads
+    /// as a `Float`, so the scan ran *before* the reissue — which is the moment
+    /// after which no predicate could have told the two apart.
+    #[test]
+    fn the_weak_scan_runs_after_the_sweep_and_before_the_block_is_reissued() {
+        use crate::scalars::FLOAT_PAYLOAD;
+        let heap = Heap::new();
+        let doomed = heap.alloc_unpaced(INT_PAYLOAD, 1_i64);
+        let address = doomed.as_ptr();
+        let weak = WeakSlots::holding(&[doomed]);
+
+        heap.collect_with_weak(&RootScope::new(), &weak);
+
+        assert_eq!(*weak.poisoned_at_scan.borrow(), vec![true]);
+        assert_eq!(*weak.slots.borrow(), vec![None]);
+
+        let reused = heap.alloc_unpaced(FLOAT_PAYLOAD, 2.5_f64);
+        assert_eq!(
+            reused.as_ptr(),
+            address,
+            "this test only says anything if the block really came back"
+        );
+        assert_eq!(reused.descriptor().name, "Float");
+    }
+
     /// A page is not keyed by the type that happened to occupy it first, so a
     /// reclaimed `Int` block houses the next `Float`. The reused object must be
     /// indistinguishable from a fresh one: re-headed with this heap's id,
@@ -1932,11 +3041,32 @@ mod tests {
         );
     }
 
+    /// One half of the pair `a_swept_block_is_never_handed_to_a_request_of_another_alignment`
+    /// needs: a payload that agrees with [`Aligned16`]'s in width and differs
+    /// from it in alignment. **The two widths are deliberately identical, and
+    /// they did not used to be.**
+    ///
+    /// The test asserts equal block sizes as its own precondition, and whether
+    /// that holds is a fact about the *header*, not about these structs. While
+    /// `GcHeader` was 24 bytes, `payload_offset_for(16)` padded an over-aligned
+    /// payload forward to 32, so the pair reached 48 bytes only by cancellation
+    /// — 24 + 24 against 32 + 16, two different payload widths landing on one
+    /// block size. ADR-109 took the header to 16, which is itself a multiple of
+    /// 16, so the padding disappeared and the cancellation with it: the fixtures
+    /// fell to 40 and 32 and the test died on its precondition rather than on
+    /// the property it exists to check.
+    ///
+    /// Giving both the same 32-byte payload makes the parity structural instead
+    /// of coincidental — it now holds for any header whose size is a multiple of
+    /// 16, rather than for one particular header size — and leaves the block at
+    /// the 48 bytes this test has always talked about.
     #[repr(C)]
-    struct Aligned8([u64; 3]);
+    struct Aligned8([u64; 4]);
 
+    /// [`Aligned8`]'s payload at [`Aligned8`]'s width, aligned twice as
+    /// strictly. See [`Aligned8`] for why the widths must match.
     #[repr(C, align(16))]
-    struct Aligned16([u64; 2]);
+    struct Aligned16([u64; 4]);
 
     static ALIGNED_8: TypeDescriptor = TypeDescriptor::for_test::<Aligned8>(
         2,
@@ -1963,6 +3093,11 @@ mod tests {
     /// The adversarial test for the one way size-class indexing can go wrong.
     /// Both blocks are 48 bytes; only the alignment separates them, and a swept
     /// 8-aligned block must never satisfy a 16-aligned request.
+    ///
+    /// The first assertion is a precondition, not the property. If it is what
+    /// fails, the fixtures have stopped sharing a block size and nothing about
+    /// alignment reuse has regressed — read [`Aligned8`]'s doc, which explains
+    /// what the shared size depends on and what moved it last time.
     #[test]
     fn a_swept_block_is_never_handed_to_a_request_of_another_alignment() {
         let (_, eight) = BlockLayout::of(&ALIGNED_8);
@@ -1979,7 +3114,7 @@ mod tests {
                 &ALIGNED_8,
                 std::mem::size_of::<Aligned8>(),
                 std::mem::align_of::<Aligned8>(),
-                |payload| (payload as *mut Aligned8).write(Aligned8([1, 2, 3])),
+                |payload| (payload as *mut Aligned8).write(Aligned8([1, 2, 3, 4])),
             )
         };
         let address = doomed.as_ptr();
@@ -1990,7 +3125,7 @@ mod tests {
                 &ALIGNED_16,
                 std::mem::size_of::<Aligned16>(),
                 std::mem::align_of::<Aligned16>(),
-                |payload| (payload as *mut Aligned16).write(Aligned16([4, 5])),
+                |payload| (payload as *mut Aligned16).write(Aligned16([5, 6, 7, 8])),
             )
         };
         assert_ne!(

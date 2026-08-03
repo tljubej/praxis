@@ -24,23 +24,163 @@ use crate::roots::RootSet;
 use crate::shadow_stack::{ShadowStack, ShadowStackHeader, SHADOW_STACK_SLOTS};
 use crate::{collections::VecPayload, descriptor::TypeDescriptor};
 
-/// The maximum Praxis call depth before the prologue guard raises
-/// [`FaultKind::StackOverflow`]. Chosen with headroom under the native stack's
-/// abort threshold: high enough that legitimate recursion passes, low enough
-/// that runaway recursion faults cleanly instead of killing the host with
-/// SIGABRT. The guard is emitted in every generated function's prologue (§9.2,
-/// §17.4).
+/// What *any* call spends, however narrow: the floor of [`frame_cost`], in
+/// bytes (ADR-105).
 ///
-/// Since ADR-101 the guard is inline Cranelift — a load, a compare and a
-/// branch, with no call — and it runs *before* the shadow-stack push rather
-/// than after it. That ordering is what makes this constant the bound on the
-/// shadow stack as well as on the native one: at most `MAX_RECURSION_DEPTH`
-/// frames are ever live at once, so
-/// [`SHADOW_STACK_SLOTS`](crate::SHADOW_STACK_SLOTS) can be sized to make
-/// shadow-stack exhaustion unrepresentable. It does not work the other way
-/// round: a function with no `Gc` locals claims no slots, so a full shadow
-/// stack is not an encoding of deep recursion.
+/// Measured, not assumed. Bisecting the abort depth of recursive Praxis
+/// programs under `ulimit -s`, on this backend (arm64, release), gives a native
+/// frame of `99 + 1.06 × gc_locals` bytes: 86 B for a minimal frame, 294 B for
+/// one carrying twenty-two live collections. This is that fit at
+/// [`REFERENCE_FRAME_SLOTS`], rounded up — so the model over-charges every real
+/// frame and the budget below is a ceiling rather than an estimate.
+///
+/// **It is a floor and not merely a base, and that is load-bearing.** A frame
+/// narrower than the reference is charged the same, so no call can ever cost
+/// less than this — which is what makes
+/// [`DEBUG_FRAME_STACK_SLOTS`](crate::debug::DEBUG_FRAME_STACK_SLOTS) sound at
+/// `MAX_RECURSION_DEPTH + 1`. Charging a genuinely proportional cost from zero
+/// was the first implementation, and it let the budget buy 9571 minimum-width
+/// frames against a stack sized for 8001; the debug frame stack overflowed its
+/// reservation in `adr100_a_stack_overflow_restores_the_shadow_stack`, which is
+/// how this was found.
+///
+/// The backend checks the model rather than trusting it: after Cranelift has
+/// compiled a function it knows the real frame size, and a `debug_assert`
+/// there fails the build's test run if any function's actual frame outgrows
+/// what [`frame_cost`] charged for it.
+pub const FRAME_BYTES_BASE: u32 = 134;
+
+/// What each `Gc` local *past* [`REFERENCE_FRAME_SLOTS`] adds to a frame's cost,
+/// in bytes (ADR-105). Rounds up the measured 1.06 B per local.
+pub const FRAME_BYTES_PER_SLOT: u32 = 2;
+
+/// The deepest recursion a *reference-width* function reaches, and the figure
+/// [`STACK_BUDGET_BYTES`] is derived from.
+///
+/// This used to be the whole guard: the prologue counted calls and faulted at
+/// 8000 of them. What runs out is bytes, not calls, and a frame's byte cost
+/// varies by a factor of three with its width — so a count calibrated for a
+/// narrow frame let a wide one abort the host, which is precisely the failure
+/// the guard exists to prevent (ADR-105). It survives as the *anchor*: a
+/// reference frame still recurses exactly this deep.
 pub const MAX_RECURSION_DEPTH: u32 = 8000;
+
+/// The frame width [`MAX_RECURSION_DEPTH`] is calibrated against: the `Gc`
+/// local count of
+///
+/// ```praxis
+/// fn count(n: Int) -> Int { if n == 0 { 0 } else { 1 + count(n - 1) } }
+/// ```
+///
+/// — the program that constant was chosen for, and the one
+/// `adv_deep_recursion_over_limit_faults_cleanly` still uses.
+///
+/// **Anchoring the budget here rather than at zero is what keeps ADR-105 from
+/// being a regression.** A zero-slot function is a hypothetical: every real
+/// Praxis function boxes something, and the simplest recursive one there is
+/// takes eleven `Gc` locals. Deriving the budget from `frame_cost(0)` would
+/// have let *that* function recurse only 6686 deep where it used to reach 8000
+/// — a 16% cut to every ordinary program, paid to fix a defect that only ever
+/// affected wide frames. Deriving it from the reference frame leaves the
+/// ordinary case exactly where it was and takes the depth only from the frames
+/// that were over-reaching.
+///
+/// `a_reference_frame_still_recurses_as_deep_as_the_call_count_allowed` is the
+/// end-to-end gate; if a codegen change makes `count` wider, that test fails and
+/// this constant is what to re-measure.
+pub const REFERENCE_FRAME_SLOTS: u32 = 11;
+
+/// The native stack, in bytes, that Praxis frames may occupy — and the largest
+/// budget a host may install (ADR-105).
+///
+/// **Why this number and not the real stack limit.** The two stacks Praxis
+/// actually runs on are 8 MiB (a macOS main thread, where `praxis run` calls the
+/// JIT entry) and 2 MiB (std's default for a spawned thread, which is what the
+/// whole `cargo test` suite runs on). `getrlimit` answers for the first and not
+/// the second, so asking the OS gives a number that is wrong exactly where the
+/// suite lives. Choosing one figure that fits under *both*, with room to spare,
+/// removes the question instead of answering it: it is what
+/// `MAX_RECURSION_DEPTH` reference frames already cost under the old guard —
+/// about 1.02 MiB charged, 768 KiB actually consumed — and no frame shape can
+/// exceed it now, because the guard charges by shape.
+///
+/// A host that knows better may lower it through
+/// [`Runtime::set_stack_budget`](crate::Runtime::set_stack_budget). It may not
+/// raise it: [`SHADOW_STACK_SLOTS`](crate::SHADOW_STACK_SLOTS) is sized from
+/// this constant, and a larger budget would make shadow-stack exhaustion
+/// reachable again. [`StackBudget`] is what makes that unrepresentable rather
+/// than documented.
+pub const STACK_BUDGET_BYTES: u32 = MAX_RECURSION_DEPTH * FRAME_BYTES_BASE;
+
+/// What one call spends of [`StackBudget`]: a floor, plus a per-slot term for
+/// every `Gc` local past the reference width (ADR-105).
+///
+/// The backend knows `slots` before it emits the prologue, so this folds to one
+/// immediate and the guard is the same four instructions it was when the addend
+/// was a literal 1.
+///
+/// The `saturating_sub` is the floor, and it does two jobs. It keeps an ordinary
+/// function at the depth the old call count gave it — see
+/// [`REFERENCE_FRAME_SLOTS`] — and it makes [`FRAME_BYTES_BASE`] the *minimum*
+/// any call can spend, which is the premise
+/// [`DEBUG_FRAME_STACK_SLOTS`](crate::debug::DEBUG_FRAME_STACK_SLOTS) is sized
+/// on.
+///
+/// `slots` is a [`SlotCount`](crate::SlotCount) at every real call site and so
+/// is at most [`MAX_SHADOW_SLOTS`](crate::MAX_SHADOW_SLOTS); the saturating
+/// arithmetic is belt-and-braces for a caller that has not proved it yet.
+#[must_use]
+pub const fn frame_cost(slots: u32) -> u32 {
+    let over = slots.saturating_sub(REFERENCE_FRAME_SLOTS);
+    FRAME_BYTES_BASE.saturating_add(FRAME_BYTES_PER_SLOT.saturating_mul(over))
+}
+
+/// A native-stack budget a [`RuntimeContext`] may be minted with: a `u32` proven
+/// no larger than [`STACK_BUDGET_BYTES`] at construction.
+///
+/// The proof is the point. `SHADOW_STACK_SLOTS` is sized from
+/// `STACK_BUDGET_BYTES`, on the strength of "a frame spends at least
+/// `FRAME_BYTES_PER_SLOT` per slot it claims, so the slots of every live frame
+/// sum to at most `budget / FRAME_BYTES_PER_SLOT`". A host that could install a
+/// larger budget would make shadow-stack overflow reachable from generated
+/// code — silently, because generated code does not check the reservation. It
+/// cannot: [`StackBudget::new`] is the only constructor and it refuses.
+///
+/// Same shape as [`SlotCount`](crate::SlotCount), and for the same reason: the
+/// bound is checked once, where the value is made, and every consumer downstream
+/// may assume it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StackBudget(u32);
+
+impl StackBudget {
+    /// The budget every [`Runtime`] starts with: the whole of
+    /// [`STACK_BUDGET_BYTES`].
+    pub const DEFAULT: StackBudget = StackBudget(STACK_BUDGET_BYTES);
+
+    /// `Some` iff `bytes` is a budget the shadow-stack reservation covers.
+    ///
+    /// `const` so a caller can prove a literal at compile time.
+    #[must_use]
+    pub const fn new(bytes: u32) -> Option<StackBudget> {
+        if bytes <= STACK_BUDGET_BYTES {
+            Some(StackBudget(bytes))
+        } else {
+            None
+        }
+    }
+
+    /// The budget in bytes, which is `<= STACK_BUDGET_BYTES` by construction.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for StackBudget {
+    fn default() -> Self {
+        StackBudget::DEFAULT
+    }
+}
 
 /// What kind of runtime fault occurred (§9.2, §10.4). Set by the runtime
 /// wrapper that detected it; read by the host after the generated code unwinds
@@ -66,11 +206,11 @@ pub enum FaultKind {
     /// (§9.2). Raised by `Deque.pop_front`/`pop_back`, heap `pop`/`peek`, and
     /// similar accessors on an empty collection.
     EmptyCollection = 5,
-    /// Recursion exceeded the depth limit (§9.2, §17.4). Raised by the
-    /// prologue guard in every generated function when `recursion_depth` would
-    /// exceed `MAX_RECURSION_DEPTH`, so the host survives deep recursion
-    /// (`count(100000)` and similar) instead of overflowing the native stack
-    /// and aborting (SIGABRT).
+    /// Recursion exhausted the native-stack budget (§9.2, §17.4). Raised by the
+    /// prologue guard in every generated function when `stack_left` is less than
+    /// this frame's [`frame_cost`], so the host survives deep recursion
+    /// (`count(100000)` and similar) instead of overflowing the native stack and
+    /// aborting (SIGABRT).
     StackOverflow = 6,
     /// A `Float` value could not be converted to `Int`: NaN, ±infinity, or a
     /// finite value outside the signed 64-bit range (§4.12). `Float` arithmetic
@@ -82,10 +222,22 @@ pub enum FaultKind {
     /// `praxis_alloc_char`, which previously had no kind of its own to report
     /// and raised `None` (RT-17/RT-18).
     InvalidChar = 8,
-    /// A byte buffer that had to be `Text` was not valid UTF-8 (§4.3). Raised
-    /// by `praxis_alloc_text`, which recovers with a lossy conversion rather
-    /// than panicking across the ABI — but the recovery is a fault, not a
-    /// silent success, and now says so.
+    /// Host input that had to be `Text` was not valid UTF-8 (§4.3). Raised by
+    /// `praxis_get_input`, which is its only producer (ADR-111).
+    ///
+    /// It used to be raised by `praxis_alloc_text`, on the argument that a lossy
+    /// recovery should be a fault rather than a silent success. That made every
+    /// `Text` *literal* a faulting instruction — its bytes came from a Rust
+    /// `String` and cannot fail — so ADR-111 moved the validation to the one
+    /// caller that holds bytes it did not author. A literal's `Alloc` is
+    /// non-faulting now, and a violated precondition in `praxis_alloc_text`
+    /// aborts rather than faulting, the way `praxis_int_load`'s does.
+    ///
+    /// The variant and its discriminant stay where they are regardless:
+    /// generated code reads `FaultKind` directly since ADR-102, so renumbering
+    /// one is an ABI change and not a tidy-up. It is also unreachable from
+    /// `praxis run`, whose `lazy_stdin::read` validates stdin and exits 2 — it
+    /// exists for an embedder that does not.
     InvalidText = 9,
     /// A size or extent the runtime cannot honour: a negative `Grid` width or
     /// height, a `width * height` that overflows or exceeds
@@ -448,14 +600,26 @@ pub struct RuntimeContext {
     /// buffer when present), so fault sentinels are stable regardless of input.
     pub unit_ref: GcRef,
     pub current_generation: u64,
-    /// The current Praxis call depth — incremented at every generated function's
-    /// prologue and decremented in its epilogue (§9.2, §17.4). A prologue guard
-    /// faults with [`FaultKind::StackOverflow`] when this would exceed
-    /// [`MAX_RECURSION_DEPTH`], so deep recursion faults cleanly instead of
-    /// overflowing the native stack and aborting the host (SIGABRT). Read by
-    /// generated Cranelift code at a fixed offset, like the other `#[repr(C)]`
-    /// fields above.
-    pub recursion_depth: u32,
+    /// How much of the native-stack budget the live Praxis frames have *not*
+    /// yet spent, in bytes (§9.2, §17.4, ADR-105). A prologue subtracts its own
+    /// [`frame_cost`]; its epilogue stores back the value it found. A prologue
+    /// guard faults with [`FaultKind::StackOverflow`] when what is left will not
+    /// cover this frame, so deep recursion faults cleanly instead of overflowing
+    /// the native stack and aborting the host (SIGABRT). Read by generated
+    /// Cranelift code at a fixed offset, like the other `#[repr(C)]` fields
+    /// above.
+    ///
+    /// **It counts down, and the direction is the design.** Counting up needs
+    /// the limit in generated code, which fixes it at compile time for every
+    /// host. Counting down puts the limit in this field, so [`Runtime::context`]
+    /// — the one producer every caller of generated code goes through — is the
+    /// single place a stack size enters the system, and the backend never learns
+    /// it. It also makes zero mean *exhausted*, which is the right thing for
+    /// [`RuntimeContext::placeholder`] to say.
+    ///
+    /// Through ABI v18 this was `recursion_depth`, a plain call count. Same
+    /// position, same width, a different quantity — which is why v19 exists.
+    pub stack_left: u32,
     /// Host-managed pointer to the runtime's [`crate::ParseDetail`] slot
     /// (§7.11, M10-WS1). The parser interpreter writes the richest parse
     /// mismatch into it on `ParseFailed`; the host (CLI / crash debugger) reads
@@ -517,15 +681,36 @@ pub struct RuntimeContext {
     /// restores the `top` in the epilogue. Each [`DebugFrameEntry`] in
     /// `debug_frames` names the base of its own call's run.
     ///
-    /// **The collector never reads this.** It is not an arm of
-    /// [`crate::roots::RuntimeRoots`], and the slot type is `Option<GcRef>`
-    /// rather than the shadow stack's `*mut GcHeader` precisely so that
-    /// `impl RootSet for SlotStackHeader<*mut GcHeader>` cannot reach it: the
-    /// debug set is over-approximate and never cleared (MIR-16), and rooting it
-    /// would undo MIR-01's clears.
+    /// **The collector never *traces* this** — it is the weak arm of
+    /// [`crate::roots::RuntimeRoots`] (ADR-106), not a strong one. The slot type
+    /// is `Option<GcRef>` rather than the shadow stack's `*mut GcHeader`
+    /// precisely so that `impl RootSet for SlotStackHeader<*mut GcHeader>`
+    /// cannot reach it: the debug set is over-approximate and never cleared
+    /// (MIR-16), and rooting it would undo MIR-01's clears.
+    ///
+    /// It *is* scanned, once per collection, immediately after the sweep: every
+    /// slot naming storage that sweep just reclaimed becomes `None`. That is
+    /// what makes a debug value always a live object or an absence, and never a
+    /// reference to a block the allocator has since reissued as something else.
+    /// Through ADR-104 there was no such scan, and the defect it closes is
+    /// sharper than a dangling read — a reissued block renders as a well-formed
+    /// value of another type under the dead local's own name.
     ///
     /// Appended after `small_ints`, so every offset above is unchanged.
     pub debug_values: *mut DebugValueStackHeader,
+    /// The base of the interned ASCII-`Char` table (`Immortals::small_chars`),
+    /// alongside `small_ints` (§4.3, [`crate::small_char`], ADR-107).
+    ///
+    /// **Generated code never reads this one**, which is what separates it from
+    /// `small_ints`: the language has no character literal, so there is no
+    /// `GcConst::Char` and nothing lowers to a load of this base. Its readers are
+    /// the runtime's own — `abi.rs`'s `char_ref` and the parser interpreter's
+    /// `Rt::alloc_char`, both of which reach the runtime only through a
+    /// `*mut RuntimeContext`. It is therefore the `native_roots`/`fault_message`
+    /// class of field, and it is appended at the end of the struct for their
+    /// reason: every generated-code-read offset above stays where it was
+    /// (§11.6 ABI stability).
+    pub small_chars: *const GcRef,
 }
 
 impl RuntimeContext {
@@ -554,7 +739,12 @@ impl RuntimeContext {
             // since this constructor is only for not-yet-wired test scaffolding.
             unit_ref: input_source,
             current_generation: 0,
-            recursion_depth: 0,
+            // Zero is *exhausted*, not "fresh" — so if generated code ever did
+            // reach a placeholder in spite of the paragraph above, its first
+            // prologue faults `StackOverflow` rather than running with a full
+            // budget over a stack nobody sized. Counting down is what makes the
+            // safe default and the zero value the same number (ADR-105).
+            stack_left: 0,
             parse_detail: std::ptr::null_mut(),
             crash_snapshot: std::ptr::null_mut(),
             native_roots: std::ptr::null_mut(),
@@ -568,6 +758,12 @@ impl RuntimeContext {
             // `input_source` trick would have aliased.
             small_ints: std::ptr::null(),
             debug_values: std::ptr::null_mut(),
+            // Null for `small_ints`' reason: a null faults loudly at the first
+            // read rather than aliasing whatever the `input_source` trick above
+            // would have pointed at. The exposure is the parser interpreter's
+            // `Rt::alloc_char`, which is the standing one `Rt::alloc_int`
+            // already has — a parse is never run against a placeholder.
+            small_chars: std::ptr::null(),
         }
     }
 
@@ -641,6 +837,14 @@ pub struct Runtime {
     /// separately boxed locals array that ADR-021's prologue allocated.
     debug_frames: DebugFrameStack,
     debug_values: DebugValueStack,
+    /// The native-stack budget every context this runtime mints starts with
+    /// (ADR-105).
+    ///
+    /// Owned here rather than baked into generated code because the budget is a
+    /// property of the *stack the program runs on*, which the backend cannot
+    /// know and the host sometimes can. [`Runtime::context`] is the only reader,
+    /// which makes it the one door a stack size enters through.
+    stack_budget: StackBudget,
 }
 
 impl Runtime {
@@ -656,14 +860,35 @@ impl Runtime {
             parse_detail: ParseDetail::new(),
             crash_snapshot: SnapshotSlot::new(),
             fault_message: FaultMessage::new(),
-            // 12.29 MiB of address space, allocated zeroed — one `mmap` of
+            // 3.42 MiB of address space, allocated zeroed — one `mmap` of
             // untouched pages, faulted in only as deep as the program actually
             // recurses. See `SHADOW_STACK_SLOTS` for why it can be sized once
-            // and never checked.
+            // and never checked, and why ADR-105's byte budget made the figure
+            // exact where it used to be the product of two worst cases that
+            // cannot occur together.
             shadow_stack: ShadowStack::new(SHADOW_STACK_SLOTS, std::ptr::null_mut()),
             debug_frames: DebugFrameStack::new(DEBUG_FRAME_STACK_SLOTS, DebugFrameEntry::empty()),
             debug_values: DebugValueStack::new(DEBUG_VALUE_STACK_SLOTS, None),
+            stack_budget: StackBudget::DEFAULT,
         }
+    }
+
+    /// Lower the native-stack budget every context this runtime mints will start
+    /// with (ADR-105).
+    ///
+    /// For a host that knows its stack is smaller than the one
+    /// [`STACK_BUDGET_BYTES`] assumes, and for tests that want to reach the
+    /// guard without recursing eight thousand times. It cannot be *raised* past
+    /// the default — [`StackBudget::new`] refuses, because the shadow-stack
+    /// reservation is sized from that figure.
+    pub fn set_stack_budget(&mut self, budget: StackBudget) {
+        self.stack_budget = budget;
+    }
+
+    /// The native-stack budget this runtime hands to a new context.
+    #[must_use]
+    pub fn stack_budget(&self) -> StackBudget {
+        self.stack_budget
     }
 
     /// Borrow the heap.
@@ -722,11 +947,14 @@ impl Runtime {
     /// could not see the shadow chain at all; `debug_top` had the same defect.
     ///
     /// **Two contexts must never execute over these stacks concurrently.** That
-    /// is not a new property — `shadow` and `recursion_depth` have always had it
+    /// is not a new property — `shadow` and `stack_left` have always had it
     /// — and it holds because a Praxis program is single-threaded and every host
     /// that mints a second context ([`crate::Runtime::collect_now`], the
     /// debugger's `p EXPR` and `restart`) does so only when the previous run has
-    /// fully unwound.
+    /// fully unwound. A second context therefore starts with the *full* stack
+    /// budget rather than the running one's remainder, which is correct for the
+    /// two callers that mint one while frames are live: both do so from the host,
+    /// on the host's own stack, not from underneath the frames.
     pub fn context(&mut self) -> RuntimeContext {
         RuntimeContext {
             heap: &mut self.heap as *mut Heap,
@@ -736,7 +964,10 @@ impl Runtime {
             input_source: self.immortals.unit(),
             unit_ref: self.immortals.unit(),
             current_generation: 0,
-            recursion_depth: 0,
+            // The one door a native-stack size enters the system through
+            // (ADR-105). Generated code never learns the budget; it only ever
+            // subtracts from what it finds here.
+            stack_left: self.stack_budget.get(),
             parse_detail: &mut self.parse_detail as *mut ParseDetail,
             crash_snapshot: &mut self.crash_snapshot as *mut SnapshotSlot,
             // No native frame is on the Rust stack when the context is minted.
@@ -746,6 +977,7 @@ impl Runtime {
             fault_message: &mut self.fault_message as *mut FaultMessage,
             small_ints: self.immortals.small_ints_ptr(),
             debug_values: self.debug_values.header_ptr(),
+            small_chars: self.immortals.small_chars_ptr(),
         }
     }
 
@@ -921,13 +1153,29 @@ impl Runtime {
         self.heap.alloc_unpaced(crate::scalars::BYTE_PAYLOAD, value)
     }
 
-    /// Allocate a `Char` (§4.3). Panics if `value` is not a valid scalar value.
+    /// Allocate a `Char` (§4.3), or answer the interned immortal when `value` is
+    /// ASCII ([`crate::small_char`]). Panics if `value` is not a valid scalar
+    /// value.
+    ///
+    /// The validity assert stays in front of the table lookup rather than being
+    /// absorbed into it: `index_of` answers "is it interned", which for a value
+    /// above the range is `None` and therefore says nothing at all about
+    /// validity. An out-of-range invalid code point must still panic here.
+    ///
+    /// The interning is here and not only in `praxis_alloc_char` for
+    /// [`Runtime::alloc_int`]'s reason — the host helper and the ABI wrapper must
+    /// answer the *same object* for the same small value. Nothing can observe the
+    /// sharing (that is `small_char`'s argument), so a split would buy nothing
+    /// but two behaviours to remember.
     pub fn alloc_char(&self, value: u32) -> GcRef {
         assert!(
             crate::scalars::is_valid_char(value),
             "{value:#x} is not a valid Unicode scalar"
         );
-        self.heap.alloc_unpaced(crate::scalars::CHAR_PAYLOAD, value)
+        match self.immortals.small_char(value) {
+            Some(interned) => interned,
+            None => self.heap.alloc_unpaced(crate::scalars::CHAR_PAYLOAD, value),
+        }
     }
 
     /// Allocate a `Float` (§4.3, §4.12). All finite values, ±infinity, and NaN

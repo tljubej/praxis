@@ -153,7 +153,78 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// runtime, and `DebugFrame` is gone with them. `DebugLocal`, `SnapshotFrame`
 /// and `CrashSnapshot` are unchanged: the snapshot walker rejoins the static and
 /// per-call halves, which is what keeps `praxis-debugger` untouched.
-pub const RUNTIME_ABI_VERSION: u32 = 18;
+///
+/// v19 gathers every change listed below, and they ship together. A version is
+/// a statement about a build, and these are one build, so they share one bump
+/// rather than taking one each. (How many there are is deliberately not written
+/// here: entries kept arriving while this window was open, and a count would
+/// have gone stale on the next one.)
+///
+/// v19 (ADR-105): `RuntimeContext.recursion_depth: u32` becomes
+/// `stack_left: u32` — the same position and the same width, a different
+/// quantity, and the opposite direction. It counted calls up to a limit
+/// generated code carried; it now holds what is *left* of a native-stack budget
+/// the context arrived with, and every prologue subtracts its own
+/// `frame_cost(slots)`. This is the same class of bump as v12 and v17: nothing
+/// about the layout moved, but a program compiled against v18 subtracts nothing
+/// and compares against a constant that is no longer the limit, so against a v19
+/// runtime it would recurse until the native stack ran out — which is the abort
+/// ADR-105 removes, restored by a mismatched build.
+///
+/// v19 (ADR-107): `RuntimeContext` gained `small_chars`, the base of the
+/// interned ASCII-`Char` table (`crates/praxis-runtime/src/small_char.rs`), so a
+/// `Char` in `0..=127` is one immortal object per code point rather than a fresh
+/// box per `t[i]`, per step of `for c in t`, and per grid cell a parse reads.
+/// Appended after `debug_values`, so every generated-code-read offset is
+/// unchanged. **Generated code does not read this one** — the language has no
+/// character literal, so there is no `GcConst::Char` and nothing lowers to a load
+/// of this base; its readers are `char_ref` and the parser interpreter, both
+/// inside the runtime. The bump is therefore the struct-size rule that v9
+/// (`native_roots`) and v13 (`fault_message`) were bumped for, not v15's
+/// read-by-generated-code case: a host that built a `RuntimeContext` of the
+/// previous size and handed it to this runtime would have the parser read past
+/// the end of it.
+///
+/// v19 (ADR-109): `GcHeader` loses `size`, a field with no readers, going from
+/// 24 bytes to 16. No source moves — `payload_offset_for` is the single `const`
+/// authority and `Inst::EnumTag` and `emit_scalar_load` still call it — but the
+/// immediates they fold change from 24 to 16, so a runtime and a compiler from
+/// either side of this disagree about where every payload begins.
+///
+/// v19 (ADR-111): `praxis_alloc_text`'s manifest row moves from
+/// `AllocatesAndFaults` to `Allocates`, and with it the contract an embedder
+/// calling that wrapper is held to. No layout, no signature and no
+/// generated-code-read offset changes — this is the v12/v17 class of bump, a
+/// meaning change with no layout change — and it is owed in both directions.
+/// Code compiled against v19 emits **no** `CheckFault` after a text literal's
+/// `Inst::Alloc`, so run against a v18 runtime, which still validates and raises
+/// `InvalidText`, a fault would be set into a slot nothing at that site reads
+/// and observed later at some unrelated check. In the other direction, a host
+/// that calls `praxis_alloc_text` with untrusted bytes now gets a process abort
+/// where v18 gave it a recoverable fault: the UTF-8 requirement the wrapper's
+/// `# Safety` block always stated is enforced as a precondition instead of being
+/// laundered into a lossy conversion. The fault did not disappear —
+/// `praxis_get_input` validates the host's bytes and raises `InvalidText` there,
+/// which is where `lower_read` already emits the check.
+///
+/// v19 (ADR-113): generated code reads **`Heap`'s field layout**, which it never
+/// did before — through `RuntimeContext.heap`, at
+/// [`Heap::BYTES_SINCE_COLLECT_OFFSET`](crate::Heap::BYTES_SINCE_COLLECT_OFFSET)
+/// and [`Heap::COLLECT_THRESHOLD_OFFSET`](crate::Heap::COLLECT_THRESHOLD_OFFSET).
+/// `Inst::Materialize { Int }` and `Inst::Alloc { AllocKind::Int }` now load
+/// those two words, compare them (which is `Heap::collection_is_due` inline),
+/// and on the branch where no collection is due answer an in-range value from
+/// `RuntimeContext.small_ints` directly, instead of calling `praxis_alloc_int`.
+/// **No layout, calling convention or wrapper signature changed** — the wrapper
+/// still exists, still has its `Effect::Allocates` row and its address arm, and
+/// is still what both cold branches call. This is the v12/v17 class of bump, a
+/// meaning change with no layout change, and it is the reason ADR-112 could
+/// truthfully say "nothing in generated code reads a `Heap` field offset" and
+/// this record cannot: repacking `Heap` is now a generated-code change, and a
+/// program compiled against this version run against a runtime whose `Heap` put
+/// `pages` or `live_count` at those displacements would compare two pointers and
+/// decide from them whether the collector had been offered a turn.
+pub const RUNTIME_ABI_VERSION: u32 = 19;
 
 /// Assert that the compiler's expected ABI version matches this build's.
 ///
@@ -175,7 +246,7 @@ pub fn assert_abi_version() {
 
 /// The ABI version the compiler front end assumes when generating code. Kept in
 /// lockstep with [`RUNTIME_ABI_VERSION`] within a single build.
-const COMPILER_EXPECTED_ABI_VERSION: u32 = 18;
+const COMPILER_EXPECTED_ABI_VERSION: u32 = 19;
 
 // ---------------------------------------------------------------------------
 // The runtime symbol table (F4).
@@ -714,6 +785,58 @@ unsafe fn int_ref(ctx: *mut RuntimeContext, value: i64) -> GcRef {
     }
 }
 
+/// The `Char` for `code`: the interned immortal when it is ASCII
+/// ([`crate::small_char`]), a fresh allocation otherwise.
+///
+/// [`int_ref`]'s shape and its argument (ADR-107). Every wrapper that answers a
+/// `Char` reaches the heap through here — [`checked_alloc_char`], which is both
+/// `praxis_alloc_char` and `praxis_int_to_char`; [`praxis_text_get`], which is
+/// both `t[i]` and every step of `for c in t`; and [`default_cell`], which is a
+/// `Grid[Char]`'s fill. `praxis_text_get` is the one that matters for real code:
+/// an AoC-shaped program that walks a line of text used to box a fresh 32-byte
+/// object per character read, and every character of such a line is ASCII.
+///
+/// # It paces even when it does not allocate
+///
+/// The manifest declares `TextGet`, `AllocChar` and `IntToChar`
+/// `Effect::AllocatesAndFaults`, which is generated code's contract that the call
+/// site is a GC safepoint. If this returned before [`safepoint`], `for c in text`
+/// over an ASCII line would never offer the collector a turn — the collector's
+/// *only* trigger is the pacing counter, and a loop that reads characters and
+/// compares them touches nothing else that would bump it. So the token is minted
+/// and then dropped: [`Safepoint`] is `#[must_use]`, so `drop(sp)` is the honest
+/// spelling of "the collector got its turn and we allocated nothing", and it is a
+/// compile error to forget which of the two happened. Pinned by
+/// `char_ref_paces_the_collector_even_when_it_answers_from_the_table`.
+///
+/// Unlike `int_ref` there is no `Inst::ConstGc` that removes even the pacing
+/// check: that instruction exists for a *literal*, and the language has no
+/// character literal (ADR-107 Decision 2).
+///
+/// # Safety
+/// `ctx` must point at a live, wired `RuntimeContext`, and `code` must be a valid
+/// Unicode scalar value — every caller has already established this, either by
+/// [`checked_alloc_char`]'s range check or by starting from a Rust `char`.
+#[inline]
+unsafe fn char_ref(ctx: *mut RuntimeContext, code: u32) -> GcRef {
+    debug_assert!(
+        crate::scalars::is_valid_char(code),
+        "char_ref's callers validate first"
+    );
+    // SAFETY: caller upholds ctx validity.
+    let (h, sp) = unsafe { safepoint(ctx) };
+    match crate::small_char::index_of(code) {
+        Some(i) => {
+            drop(sp);
+            // SAFETY: `index_of` bounds `i` by `SMALL_CHAR_COUNT`, and
+            // `Runtime::context` points `small_chars` at a table of exactly that
+            // length whose slot `i` holds code point `i`.
+            unsafe { *(*ctx).small_chars.add(i) }
+        }
+        None => h.alloc(sp, scalars::CHAR_PAYLOAD, code),
+    }
+}
+
 /// Read `r`'s payload through a [`Payload`] handle, first checking that `r`
 /// really is that handle's type.
 ///
@@ -809,6 +932,56 @@ unsafe fn int_payload(r: GcRef) -> i64 {
 #[inline(never)]
 fn scalar_type_mismatch(what: &'static str, want: &'static str, found: &'static str) -> ! {
     panic!("{what} wants a `{want}` payload; this value is a `{found}` (REP-56)");
+}
+
+/// [`praxis_alloc_text`]'s refusal when its buffer is not UTF-8 — a violated
+/// precondition, not a runtime condition (ADR-111).
+///
+/// **Why this is a panic and not a fault.** `praxis_alloc_text`'s `# Safety`
+/// block has always said the bytes must be valid UTF-8, and the body used to
+/// treat a violation as `FaultKind::InvalidText` plus a lossy conversion — a
+/// contract and an implementation that contradicted each other, with the
+/// implementation's half costing a `CheckFault` after all 41 text literals in
+/// the corpus for a fault no generated call site could raise. One of the two had
+/// to go. The precondition is the one that is actually true: the compiler's
+/// bytes are a Rust `&str` unbroken from `Lit::Text(String)` through
+/// `AllocKind::Text { value: String }` to `Generation::alloc_str`, and the one
+/// caller in this crate that holds raw *host* bytes — [`praxis_get_input`] —
+/// validates them itself and raises `InvalidText` there, where the `read` can
+/// observe it.
+///
+/// **Why the `from_utf8` call above stays, in every profile.** This is
+/// [`scalar_type_mismatch`]'s argument verbatim and it is why that function is
+/// the neighbour: a `debug_assert` is not a bound, because it compiles out of a
+/// release build. What would be left in release is a `Box<str>` built from bytes
+/// that are not UTF-8, which [`crate::text::text_str`] later hands out as a
+/// `&str` — so the two profiles would answer differently and the wrong one is
+/// the one users get (REP-56's shape exactly). `from_utf8_unchecked` is the same
+/// hole with the check deleted rather than compiled out. The unconditional
+/// branch costs a never-taken jump to this cold callee, which is the price
+/// ADR-102 §1 already established for the inline scalar loads.
+///
+/// **It must not reach `set_fault`, and that is enforced.** REP-45's
+/// `a_wrapper_that_can_raise_a_fault_declares_that_it_faults` computes a textual
+/// fixed point over this file: a body that can reach `set_fault`, directly or
+/// through a helper defined here, must belong to a symbol whose manifest row
+/// says it faults. `AllocText`'s row is now `Effect::Allocates`, so a refusal
+/// spelled as a fault would fail that test — which is the sweep proving the
+/// fault relocated to `praxis_get_input` rather than merely disappearing.
+///
+/// The end-to-end path on a violation is ADR-080's: panic → `abi_guard!`
+/// catches → `panic_fault_is_observable("praxis_alloc_text")` reads the
+/// `Allocates` row and answers `false` → the message is printed and the process
+/// aborts. That is the same outcome `praxis_int_load` gives a wrong descriptor,
+/// and it falls out of the row change with no code of its own.
+#[cold]
+#[inline(never)]
+fn text_bytes_are_not_utf8(len: usize) -> ! {
+    panic!(
+        "praxis_alloc_text was handed {len} bytes that are not valid UTF-8; its \
+         `# Safety` contract requires them to be (ADR-111). A host with untrusted \
+         bytes must validate them first, as `praxis_get_input` does."
+    );
 }
 
 /// The Unit sentinel GcRef from the context's input source slot. (Unit is an
@@ -924,10 +1097,23 @@ unsafe fn checked_alloc_char(ctx: *mut RuntimeContext, value: i64) -> GcRef {
         return unsafe { unit_sentinel(ctx) };
     }
     // SAFETY: caller upholds ctx/heap validity; code is a validated scalar.
-    unsafe { gc_alloc(ctx, scalars::CHAR_PAYLOAD, code) }
+    unsafe { char_ref(ctx, code) }
 }
 
 /// Allocate an owned `Text` from a UTF-8 byte buffer (§4.3, ADR-013).
+///
+/// **UTF-8 is the caller's precondition, and this wrapper cannot fault**
+/// (ADR-111). Its row is `Effect::Allocates`, so `Inst::Alloc { AllocKind::Text }`
+/// is followed by no `CheckFault` — `praxis_mir::verify` rejects one — and a
+/// `Text` literal in a loop is hoisted into the preheader like a `Float` one
+/// (ADR-108 §3). Handing this bytes that are not UTF-8 is a violated contract,
+/// not a runtime condition, and it aborts through `text_bytes_are_not_utf8`
+/// (whose doc carries the argument) rather than raising `InvalidText`.
+///
+/// A host that holds *untrusted* bytes validates them before calling. There is
+/// exactly one such caller in this crate — [`praxis_get_input`], whose row is
+/// `AllocatesAndFaults` — and it raises `InvalidText` itself, so the fault a
+/// `read` can observe still lands at the `read` (§4.3, §7.10).
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`; `bytes` must point at
@@ -945,17 +1131,15 @@ pub unsafe extern "C" fn praxis_alloc_text(
             // SAFETY: caller guarantees `bytes..bytes+len` is a valid, UTF-8 buffer.
             unsafe { std::slice::from_raw_parts(bytes, len) }
         };
-        // The buffer must be valid UTF-8 (the compiler emits Text from string
-        // literals). Fall back to a replacement on malformed input rather than
-        // panicking across the ABI.
+        // The check is unconditional and stays so in every profile: it is the
+        // backstop on a raw read, the same standing `read_scalar` has, and its
+        // argument is written out at `text_bytes_are_not_utf8`. What a violation
+        // *does* is the part that changed — it refuses instead of recovering
+        // lossily behind a fault nobody at a generated call site could observe
+        // (ADR-111, REP-67).
         let owned: Box<str> = match std::str::from_utf8(slice) {
             Ok(s) => s.into(),
-            Err(_) => {
-                unsafe { set_fault(ctx, RaisedFault::INVALID_TEXT) };
-                std::string::String::from_utf8_lossy(slice)
-                    .into_owned()
-                    .into_boxed_str()
-            }
+            Err(_) => text_bytes_are_not_utf8(len),
         };
         // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
         unsafe {
@@ -4405,9 +4589,16 @@ unsafe fn default_cell(
             B::Byte => Some(gc_alloc(ctx, scalars::BYTE_PAYLOAD, 0_u8)),
             // `0_u32`, not `'\0'`: a `Char`'s payload is the scalar *value*, and
             // a Rust `char` only happened to fit because it shares `u32`'s
-            // layout. REP-02's signature is what said so.
-            B::Char => Some(gc_alloc(ctx, scalars::CHAR_PAYLOAD, 0_u32)),
+            // layout. REP-02's signature is what said so. NUL is inside the
+            // interned range, so this is the immortal, like the `Int` arm above.
+            B::Char => Some(char_ref(ctx, 0_u32)),
             B::Float => Some(gc_alloc(ctx, scalars::FLOAT_PAYLOAD, 0.0_f64)),
+            // `(null, 0)` meets `praxis_alloc_text`'s UTF-8 precondition
+            // trivially: the wrapper's own `bytes.is_null() || len == 0` branch
+            // turns it into the empty slice, and the empty slice is UTF-8.
+            // Worth saying since ADR-111 made that precondition load-bearing —
+            // a violation here would abort, not fault. `alloc_text_empty_string_round_trips`
+            // pins the branch this depends on.
             B::Text => Some(praxis_alloc_text(ctx, std::ptr::null(), 0)),
             // A composite has no zero value the runtime can invent: a
             // `Grid[Vec[Int]]` must be filled by the program that knows what its
@@ -4993,8 +5184,10 @@ pub unsafe extern "C" fn praxis_text_is_empty(ctx: *mut RuntimeContext, text: Gc
 /// Declared `Allocates` rather than `AllocatesAndFaults`, which is
 /// `praxis_float_to_text`'s row and for the same reason: both payloads are
 /// UTF-8 by construction, so their concatenation is too, and there is nothing
-/// for the `InvalidText` fault to check. `praxis_alloc_text` validates because
-/// it is handed a raw byte buffer; this wrapper is handed two `Text`s.
+/// for the `InvalidText` fault to check. Since ADR-111 `praxis_alloc_text` is
+/// `Allocates` on the same footing — every wrapper here trusts its caller about
+/// encoding, and the one place that cannot (`praxis_get_input`, which holds the
+/// host's raw bytes) validates and faults there.
 ///
 /// The result is `Owned` and never a `Slice`: a concatenation has no single
 /// owner to point into, and a slice of one would be a lie about its extent.
@@ -5053,8 +5246,14 @@ pub unsafe extern "C" fn praxis_text_get(
                 // No validity check, and none belongs here: `ch` is a Rust `char`,
                 // so `ch as u32` is a valid Unicode scalar by construction. The
                 // check `praxis_int_to_char` needs is for the values that did not
-                // come from one.
-                unsafe { gc_alloc(ctx, scalars::CHAR_PAYLOAD, ch as u32) }
+                // come from one — which is why this goes to `char_ref` directly
+                // rather than through `checked_alloc_char`.
+                //
+                // This is the interning's largest site (ADR-107): the same call
+                // is `t[i]` and every step of `for c in t` (the `iter_plan`
+                // lowering), so a program that walks a line of ASCII text used to
+                // box one 32-byte object per character.
+                unsafe { char_ref(ctx, ch as u32) }
             }
             None => {
                 unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
@@ -5315,6 +5514,19 @@ pub unsafe extern "C" fn praxis_range_get(
 /// descriptor guard (§6.3) is what keeps that state survivable; no `praxis run`
 /// reaches it.
 ///
+/// **This wrapper owns the UTF-8 judgement, and it is the only producer of
+/// [`FaultKind::InvalidText`](crate::FaultKind::InvalidText)** (ADR-111). A
+/// reader's bytes are the host's, not the compiler's, so they are checked here
+/// and `INVALID_TEXT` is raised here — where `lower_read`'s `CheckFault` makes
+/// it divert at the `read`. It used to be raised inside `praxis_alloc_text`,
+/// which cost a check after every text *literal* for a fault a literal cannot
+/// produce; that wrapper now trusts its caller, and this is the caller that has
+/// to earn the trust.
+///
+/// `praxis run` cannot reach the fault: `lazy_stdin::read` goes through
+/// `std::io::read_to_string` and exits 2 on non-UTF-8 stdin before the runtime
+/// sees a byte. An embedder installing its own reader can.
+///
 /// # Safety
 /// `ctx` must be live and wired.
 #[no_mangle]
@@ -5322,13 +5534,34 @@ pub unsafe extern "C" fn praxis_get_input(ctx: *mut RuntimeContext) -> GcRef {
     abi_guard!("praxis_get_input", ctx, {
         if let Some(read) = crate::input::take_input_reader() {
             let bytes = read();
-            // SAFETY: `bytes` is a live, initialized slice for this call, and
-            // `ctx` is the caller's live context. The result is stored into
-            // `input_source` — a root (`RuntimeRoots`) — with no allocation in
-            // between, so the collection this allocation paces cannot reclaim
-            // it. `praxis_alloc_text` takes `&[]` for `len == 0`, so the empty
-            // answer needs no special case here and must not get one.
-            let text = unsafe { praxis_alloc_text(ctx, bytes.as_ptr(), bytes.len()) };
+            // **This is the one place in the runtime that holds raw host bytes,
+            // so it is the one place the UTF-8 judgement §4.3 assigns belongs**
+            // (ADR-111). It used to live inside `praxis_alloc_text`, which made
+            // that wrapper's row `AllocatesAndFaults` and put a `CheckFault`
+            // after every text *literal* for a fault the compiler's own bytes
+            // could never raise. Here the fault is real: a host's `InputReader`
+            // is infallible about I/O by design (`crate::input`) and says
+            // nothing about encoding, so these bytes are exactly as trustworthy
+            // as the host. `GetInput`'s row already said `AllocatesAndFaults`
+            // and `lower_read` already emits the check, so `InvalidText` still
+            // diverts *at the `read`* with no MIR or manifest change.
+            //
+            // The Unit sentinel is the defined dummy (§10.4); `input_source`
+            // holds it until a buffer is installed, so answering it below is
+            // the same value by a shorter route.
+            let Ok(text) = std::str::from_utf8(&bytes) else {
+                unsafe { set_fault(ctx, RaisedFault::INVALID_TEXT) };
+                return unsafe { (*ctx).input_source };
+            };
+            // **The validation is strictly before the allocation, and must
+            // stay there.** SAFETY: `text` borrows a live, initialized buffer
+            // for this call, and `ctx` is the caller's live context. The result
+            // is stored into `input_source` — a root (`RuntimeRoots`) — with no
+            // allocation in between, so the collection this allocation paces
+            // cannot reclaim it. `praxis_alloc_text` takes `&[]` for
+            // `len == 0`, so the empty answer needs no special case here and
+            // must not get one.
+            let text = unsafe { praxis_alloc_text(ctx, text.as_ptr(), text.len()) };
             unsafe { (*ctx).input_source = text };
         }
         unsafe { (*ctx).input_source }
@@ -5866,9 +6099,22 @@ mod tests {
         panic!("automatic collection did not run after 10,000 allocations");
     }
 
+    /// The version number this build declares.
+    ///
+    /// Named for the version rather than for a change, because v19 gathers
+    /// several of them — ADR-105's `stack_left`, ADR-107's interned-`Char`
+    /// table, ADR-109's 16-byte `GcHeader`, ADR-111's `praxis_alloc_text`
+    /// contract — and naming one would make the other three look like they
+    /// arrived unversioned. The changelog on [`RUNTIME_ABI_VERSION`] is where
+    /// the list lives; this only asserts that the constant and the changelog
+    /// were updated together.
+    ///
+    /// `gc::tests::the_header_shrink_moved_the_folded_payload_offset_at_abi_v19`
+    /// asserts the other direction, pinning the payload offset *to* this number,
+    /// so the layout change and the version that declares it cannot drift apart.
     #[test]
-    fn version_is_eighteen_after_the_debug_frame_became_two_stacks() {
-        assert_eq!(RUNTIME_ABI_VERSION, 18);
+    fn version_is_nineteen_for_the_batch_this_build_ships() {
+        assert_eq!(RUNTIME_ABI_VERSION, 19);
     }
 
     #[test]
@@ -5984,6 +6230,66 @@ mod tests {
         );
     }
 
+    /// **ADR-111.** `praxis_alloc_text`'s UTF-8 backstop is unconditional in
+    /// every profile, and it never becomes an unchecked read.
+    ///
+    /// The same source-gate technique as
+    /// [`every_scalar_payload_read_goes_through_the_bounded_reader`], for the
+    /// same reason and against a sharper temptation. Making the row `Allocates`
+    /// says the caller promises UTF-8; the next tidy-up reads that as licence to
+    /// delete the check — either into a `debug_assert` (which compiles out of a
+    /// release build, so debug aborts and release builds a `Box<str>` of
+    /// non-UTF-8 bytes that `text_str` later hands out as a `&str`) or into
+    /// `from_utf8_unchecked` (the same hole, with the check deleted rather than
+    /// compiled out). Both are REP-56's shape: two profiles, two answers, and
+    /// `just ci` never builds the one users get.
+    ///
+    /// A behavioural test cannot see this. Under `cfg(debug_assertions)` a
+    /// `debug_assert` version passes every test the branch version passes, which
+    /// is precisely how REP-56 survived twenty-one stages of a green suite.
+    #[test]
+    fn the_text_precondition_backstop_is_unconditional_in_every_profile() {
+        let source = include_str!("abi.rs");
+        const SIGNATURE: &str = "pub unsafe extern \"C\" fn praxis_alloc_text(";
+        let at = source
+            .find(SIGNATURE)
+            .expect("`praxis_alloc_text`'s definition moved; this gate names it by signature");
+        let body_len = source[at..]
+            .find("\n}")
+            .expect("`praxis_alloc_text` has no closing brace in the first column");
+        let body = &source[at..at + body_len];
+
+        assert!(
+            body.contains("std::str::from_utf8(slice)"),
+            "`praxis_alloc_text` no longer validates its buffer. The check is the \
+             backstop on a raw read, not an optimization the `Allocates` row traded \
+             away (ADR-111).\nbody was:{body}"
+        );
+        assert!(
+            !body.contains("debug_assert"),
+            "`praxis_alloc_text`'s UTF-8 check is a `debug_assert`, which is compiled \
+             out of a release build — leaving a `Box<str>` built from bytes that are \
+             not UTF-8 (REP-56's shape). Make it an ordinary branch.\nbody was:{body}"
+        );
+        assert!(
+            !body.contains("from_utf8_unchecked"),
+            "`praxis_alloc_text` skips the check outright. A precondition is not a \
+             licence to read unvalidated bytes as a `str` — the refusal is \
+             `text_bytes_are_not_utf8`, which costs a never-taken branch \
+             (ADR-111).\nbody was:{body}"
+        );
+        // And the refusal is not a fault. If it were, REP-45's sweep would
+        // classify the wrapper as faulting and correctly refuse the
+        // `Allocates` row — this says so at the site rather than leaving the
+        // failure to be diagnosed three tests away.
+        assert!(
+            !body.contains("set_fault"),
+            "`praxis_alloc_text` sets a fault. Its row is `Effect::Allocates`, so no \
+             `CheckFault` follows the call and nothing would ever observe it \
+             (ADR-088, ADR-111).\nbody was:{body}"
+        );
+    }
+
     /// The companion to the source gate above: the branch it insists on is real,
     /// and it refuses rather than reading.
     ///
@@ -6096,6 +6402,344 @@ mod tests {
             // The host helper and the ABI wrapper answer the same object, as
             // `Runtime::alloc_bool` and `praxis_alloc_bool` already do.
             assert_eq!(rt.alloc_int(7).as_ptr(), a.as_ptr());
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// The `Char` counterpart of
+    /// [`small_ints_are_one_object_per_value_and_large_ones_are_not`] (ADR-107).
+    ///
+    /// Both halves matter. The first is the optimization; the second is the
+    /// branch a regression would silently delete, leaving every non-ASCII `Char`
+    /// in the language reading slot `code` of a table that ends at 128.
+    #[test]
+    fn alloc_char_answers_one_object_per_ascii_code_point_and_a_large_one_still_allocates() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx is wired to rt throughout.
+        unsafe {
+            // In range: two calls, one object — and it is the runtime's own
+            // table entry, not some other cache.
+            let a = praxis_alloc_char(ctx, i64::from('a' as u32));
+            let b = praxis_alloc_char(ctx, i64::from('a' as u32));
+            assert_eq!(a.as_ptr(), b.as_ptr());
+            assert_eq!(
+                a.as_ptr(),
+                rt.immortals().small_char('a' as u32).unwrap().as_ptr()
+            );
+            assert_eq!(a.as_char(), 'a');
+
+            // The ceiling is interned; one above it is not. There is no floor
+            // case — the payload is unsigned and NUL is interned.
+            let max = i64::from(crate::small_char::SMALL_CHAR_MAX);
+            assert_eq!(
+                praxis_alloc_char(ctx, max).as_ptr(),
+                praxis_alloc_char(ctx, max).as_ptr(),
+                "the last ASCII scalar is the edge of the range and must be interned"
+            );
+            assert_eq!(
+                praxis_alloc_char(ctx, 0).as_ptr(),
+                praxis_alloc_char(ctx, 0).as_ptr(),
+                "NUL is the floor and must be interned"
+            );
+            for code in [max + 1, i64::from('é' as u32), 0x10_FFFF] {
+                let x = praxis_alloc_char(ctx, code);
+                let y = praxis_alloc_char(ctx, code);
+                assert_ne!(
+                    x.as_ptr(),
+                    y.as_ptr(),
+                    "{code:#x} is outside the range and must still allocate"
+                );
+                assert_eq!(
+                    u32::from(x.as_char()),
+                    code as u32,
+                    "and still hold its code point"
+                );
+            }
+
+            // Distinct in-range code points are distinct objects: interning
+            // shares an object across *calls*, never across values.
+            assert_ne!(
+                praxis_alloc_char(ctx, i64::from('a' as u32)).as_ptr(),
+                praxis_alloc_char(ctx, i64::from('b' as u32)).as_ptr()
+            );
+
+            // The validity rule is untouched by the table: an interned slot is
+            // reached only after `checked_alloc_char` has approved the value, so
+            // a code point that is not a scalar still faults (RT-18).
+            for bad in [-1_i64, 0xD800, 0x11_0000, 0x1_0000_0041] {
+                let _ = praxis_alloc_char(ctx, bad);
+                assert_eq!(
+                    rt.take_fault(),
+                    Some(FaultKind::InvalidChar),
+                    "{bad:#x} is not a scalar value"
+                );
+            }
+
+            // The host helper and the ABI wrapper answer the same object, as
+            // `Runtime::alloc_int`/`praxis_alloc_int` already do. This is what
+            // makes "a `Char` is interned" one fact rather than two.
+            assert_eq!(rt.alloc_char('a' as u32).as_ptr(), a.as_ptr());
+            // …and the out-of-range halves still disagree as objects, which is
+            // the same statement from the other side.
+            assert_ne!(
+                rt.alloc_char('é' as u32).as_ptr(),
+                rt.alloc_char('é' as u32).as_ptr()
+            );
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// `praxis_text_get` is the interning's largest site: it is `t[i]` *and*
+    /// every step of `for c in t`. It reaches [`char_ref`] directly rather than
+    /// through [`checked_alloc_char`] — a Rust `char` needs no validity check —
+    /// so it is its own door and must be pinned as one.
+    ///
+    /// `text_get_answers_a_char_object` covers the uninterned half (`é`) and the
+    /// descriptor; this covers the identity.
+    #[test]
+    fn text_get_answers_the_interned_char() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let s = "abca";
+            let text = praxis_alloc_text(ctx, s.as_ptr(), s.len());
+            let zero = praxis_alloc_int(ctx, 0);
+            let three = praxis_alloc_int(ctx, 3);
+            let first = praxis_text_get(ctx, text, zero);
+            let last = praxis_text_get(ctx, text, three);
+            assert!(!rt.has_pending_fault());
+
+            // Two reads of the same character are one object, and it is the same
+            // object every other door answers.
+            assert_eq!(first.as_ptr(), last.as_ptr());
+            assert_eq!(
+                first.as_ptr(),
+                praxis_alloc_char(ctx, i64::from('a' as u32)).as_ptr()
+            );
+            assert_eq!(
+                first.as_ptr(),
+                rt.immortals().small_char('a' as u32).unwrap().as_ptr()
+            );
+            assert_eq!(first.as_char(), 'a');
+
+            // The non-ASCII half still allocates, and still answers the right
+            // scalar — the branch a regression would delete.
+            let u = "éé";
+            let utext = praxis_alloc_text(ctx, u.as_ptr(), u.len());
+            let one = praxis_alloc_int(ctx, 1);
+            let x = praxis_text_get(ctx, utext, zero);
+            let y = praxis_text_get(ctx, utext, one);
+            assert_ne!(x.as_ptr(), y.as_ptr(), "`é` is outside the interned range");
+            assert_eq!(x.as_char(), 'é');
+            assert_eq!(y.as_char(), 'é');
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// The two doors into [`checked_alloc_char`] answer the same object, which
+    /// is that helper's whole reason for existing — a rule stated at both goes
+    /// stale at one, and now the rule includes which object.
+    #[test]
+    fn int_to_char_answers_the_same_object_as_alloc_char() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let code = praxis_alloc_int(ctx, i64::from('Z' as u32));
+            let via_to_char = praxis_int_to_char(ctx, code);
+            let via_alloc = praxis_alloc_char(ctx, i64::from('Z' as u32));
+            assert!(!rt.has_pending_fault());
+            assert_eq!(via_to_char.as_ptr(), via_alloc.as_ptr());
+            assert_eq!(via_to_char.as_char(), 'Z');
+
+            // Outside the range both still allocate, and still not each other.
+            let big = praxis_alloc_int(ctx, i64::from('é' as u32));
+            assert_ne!(
+                praxis_int_to_char(ctx, big).as_ptr(),
+                praxis_alloc_char(ctx, i64::from('é' as u32)).as_ptr()
+            );
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-107's pacing half, and ADR-100 §3's analogue.** [`char_ref`] must
+    /// give the collector its turn on the path where it allocates *nothing*.
+    ///
+    /// `TextGet` is `AllocatesAndFaults` in the manifest, which is generated
+    /// code's contract that the call site is a GC safepoint. A `for c in line`
+    /// loop over ASCII touches nothing else that bumps the pacing counter, and
+    /// the counter is the collector's only trigger — so an early return here
+    /// would make such a loop run arbitrarily long with no collection at all.
+    ///
+    /// **The interleaved allocation is load-bearing and must stay unpaced.** The
+    /// observable is the live registry *shrinking*, and an interned `Char` never
+    /// enters it, so a loop of nothing but `praxis_text_get` could not shrink
+    /// anything however well it paced — a guaranteed false pass (see
+    /// `UNINTERNED`). `Runtime::alloc_int` is the one helper that grows the heap
+    /// **without** pacing, so it supplies the pressure and the population while
+    /// leaving `praxis_text_get` as the only safepoint in the loop. Swapping it
+    /// for `praxis_alloc_int` would make the test pass with this function's
+    /// safepoint deleted.
+    #[test]
+    fn char_ref_paces_the_collector_even_when_it_answers_from_the_table() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired throughout; `text` and `index` are rooted below.
+        unsafe {
+            let s = "abcdefgh";
+            let text = praxis_alloc_text(ctx, s.as_ptr(), s.len());
+            let index = praxis_alloc_int(ctx, 3);
+            let mut frame = push_frame(ctx, SlotCount::new(2).unwrap());
+            frame.set(0, text);
+            frame.set(1, index);
+
+            let mut before = rt.heap().stats().live_count;
+            let mut paced = false;
+            for i in 0..100_000_i64 {
+                // Registered, unrooted, and *unpaced*: pressure the collector can
+                // see and reclaim, contributed by something that never offers a
+                // turn itself.
+                let _ = rt.alloc_int(UNINTERNED + i);
+                // The wrapper under test. Every character of `s` is ASCII, so
+                // this answers from the table and allocates nothing.
+                let c = praxis_text_get(ctx, text, index);
+                assert_eq!(c.as_char(), 'd');
+                let after = rt.heap().stats().live_count;
+                if after < before.saturating_add(1) {
+                    paced = true;
+                    break;
+                }
+                before = after;
+            }
+            drop(frame);
+            assert!(
+                paced,
+                "praxis_text_get never gave the collector a turn on the interned path"
+            );
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// `default_cell`'s `Char` arm, the fourth boxing site. A `Grid[Char]`'s
+    /// fill is NUL, which is inside the range.
+    #[test]
+    fn a_grid_of_char_fills_with_the_interned_nul() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let grid = praxis_grid_new(ctx, &crate::scalars::CHAR, 3, 2);
+            assert!(!rt.has_pending_fault());
+            let nul = rt.immortals().small_char(0).expect("NUL is interned");
+            for y in 0..2 {
+                for x in 0..3 {
+                    let xi = praxis_alloc_int(ctx, x);
+                    let yi = praxis_alloc_int(ctx, y);
+                    let cell = praxis_grid_get(ctx, grid, xi, yi);
+                    assert_eq!(
+                        cell.as_ptr(),
+                        nul.as_ptr(),
+                        "every cell of a fresh Grid[Char] is the one interned NUL"
+                    );
+                }
+            }
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// The executable form of "nothing in the language can observe `Char`
+    /// identity", and the [`crate::dynamic_key::DynamicKey`] leg of ADR-107's
+    /// argument.
+    ///
+    /// `DynamicKey::eq` opens with a pointer comparison, and that is the line
+    /// interning could in principle have moved — but it is a fast path *for*
+    /// structural equality and `char_equals` is a reflexive `u32 ==`, so sharing
+    /// can only make it fire more often. This asserts the consequence rather than
+    /// the argument: the same shape is run twice, once with interned keys and
+    /// once with keys the runtime does not intern, and the two must agree.
+    #[test]
+    fn interning_a_char_does_not_change_keyed_collection_behaviour() {
+        // (key, a different key, label): once inside the ASCII range and once
+        // outside it. `é` and `ü` are two scalars the table does not hold.
+        for (a_ch, b_ch, label) in [('a', 'b', "interned"), ('é', 'ü', "allocated")] {
+            let mut rt = Runtime::new();
+            let ctx = wired_ctx(&mut rt);
+            // SAFETY: ctx wired; every ref below comes from the ABI.
+            unsafe {
+                let a = praxis_alloc_char(ctx, i64::from(a_ch as u32));
+                // A *second* reference to the same value, built separately.
+                // Interned it is `a`; uninterned it is a different object with
+                // the same payload. Both must key the same slot.
+                let a_again = praxis_alloc_char(ctx, i64::from(a_ch as u32));
+                let b = praxis_alloc_char(ctx, i64::from(b_ch as u32));
+                assert_eq!(
+                    std::ptr::eq(a.as_ptr(), a_again.as_ptr()),
+                    label == "interned",
+                    "the fixture must actually be {label}"
+                );
+
+                let set = praxis_set_new(ctx, &crate::scalars::CHAR);
+                let _ = praxis_set_insert(ctx, set, a);
+                assert_eq!(
+                    praxis_bool_load(ctx, praxis_set_contains(ctx, set, a_again)),
+                    1,
+                    "{label}: an equal Char is the same set member"
+                );
+                assert_eq!(
+                    praxis_bool_load(ctx, praxis_set_contains(ctx, set, b)),
+                    0,
+                    "{label}: a different Char is not"
+                );
+                // Inserting the equal-but-possibly-distinct object must not add
+                // a second member — the property that would break if the pointer
+                // fast path and `char_equals` ever disagreed.
+                let _ = praxis_set_insert(ctx, set, a_again);
+                assert_eq!(praxis_int_load(ctx, praxis_set_len(ctx, set)), 1, "{label}");
+
+                let counter = praxis_counter_new(ctx, &crate::scalars::CHAR);
+                let _ = praxis_counter_inc(ctx, counter, a);
+                let _ = praxis_counter_inc(ctx, counter, a_again);
+                assert_eq!(
+                    praxis_int_load(ctx, praxis_counter_get(ctx, counter, a)),
+                    2,
+                    "{label}: two bumps of an equal key are one key"
+                );
+                assert_eq!(
+                    praxis_int_load(ctx, praxis_counter_len(ctx, counter)),
+                    1,
+                    "{label}"
+                );
+            }
+            unsafe { drop_ctx(ctx) };
+        }
+    }
+
+    /// An interned `Char` is never registered, so a collection cannot reclaim it
+    /// however unrooted it is — the `Char` half of
+    /// [`an_interned_int_survives_collection_unrooted`].
+    #[test]
+    fn an_interned_char_survives_collection_unrooted() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx is wired to rt throughout.
+        unsafe {
+            let _ = praxis_alloc_char(ctx, i64::from('q' as u32));
+        }
+        assert_eq!(
+            rt.heap().stats().live_count,
+            0,
+            "an interned Char must not enter the live registry"
+        );
+        // Nothing roots `'q'`: no shadow frame, no native scope, no Rust local
+        // the collector can see. A registered object here would be swept.
+        rt.collect_now();
+        // SAFETY: ctx is still wired; the reference must still be readable.
+        unsafe {
+            let q = praxis_alloc_char(ctx, i64::from('q' as u32));
+            assert!(!q.header().is_poisoned(), "an immortal is never swept");
+            assert_eq!(q.as_char(), 'q');
         }
         unsafe { drop_ctx(ctx) };
     }
@@ -7165,20 +7809,68 @@ mod tests {
         assert_eq!(rt.fault(), FaultKind::InvalidChar);
     }
 
-    /// Malformed UTF-8 recovers lossily rather than panicking across the ABI —
-    /// but the recovery is a fault, and it used to raise `FaultKind::None`
-    /// (RT-17).
+    /// **ADR-111.** Input that is not UTF-8 faults at the `read`, because that
+    /// is where the bytes stop being the compiler's and start being the host's.
+    ///
+    /// This is the rewrite of `alloc_text_reports_invalid_utf8_as_its_own_fault_kind`,
+    /// which fed `praxis_alloc_text` the same four bytes directly. That test
+    /// would now *abort the test process* rather than fail, because a violated
+    /// precondition is a panic through `abi_guard!` and `praxis_alloc_text`'s
+    /// row no longer makes the resulting `Panic` fault observable — a harness
+    /// crash that reads like a toolchain problem. The property worth keeping is
+    /// not "the wrapper tolerates bad bytes"; it is that a program reading
+    /// non-UTF-8 input gets `InvalidText` at its `read`, and that is what this
+    /// asserts.
+    ///
+    /// `praxis run` cannot reach this: `lazy_stdin::read` goes through
+    /// `std::io::read_to_string` and exits 2 on non-UTF-8 stdin before the
+    /// runtime sees a byte (`praxis-cli/src/run.rs`). The reachable caller is an
+    /// embedder that installs its own `InputReader`, which is exactly what this
+    /// test is.
     #[test]
-    fn alloc_text_reports_invalid_utf8_as_its_own_fault_kind() {
+    fn input_that_is_not_utf8_faults_at_the_read() {
+        fn not_utf8() -> Vec<u8> {
+            vec![0xF0, 0x28, 0x8C, 0x28]
+        }
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
-        let bad = [0xF0_u8, 0x28, 0x8C, 0x28];
-        let result = unsafe { praxis_alloc_text(ctx, bad.as_ptr(), bad.len()) };
+        crate::input::install_input_reader(not_utf8);
+        let result = unsafe { praxis_get_input(ctx) };
+        let unit = rt.immortals().unit();
+        crate::input::clear_input_reader();
         unsafe { drop_ctx(ctx) };
 
-        assert_eq!(result.descriptor().name, "Text");
         assert_eq!(rt.fault(), FaultKind::InvalidText);
         assert!(rt.has_pending_fault());
+        assert_eq!(
+            result.as_ptr(),
+            unit.as_ptr(),
+            "the fault path answers §10.4's defined dummy, not a half-built Text"
+        );
+    }
+
+    /// The mutation companion, and it is required: a `praxis_get_input` that
+    /// faulted on *every* input would pass the gate above.
+    ///
+    /// Multi-byte on purpose — a validation that accepted only ASCII would also
+    /// pass a test written with `"hi"`.
+    #[test]
+    fn input_that_is_utf8_still_becomes_the_buffer() {
+        fn multibyte() -> Vec<u8> {
+            "héllo wörld".as_bytes().to_vec()
+        }
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        crate::input::install_input_reader(multibyte);
+        let result = unsafe { praxis_get_input(ctx) };
+        let contents = result.as_text().to_string();
+        let descriptor = result.descriptor().name;
+        crate::input::clear_input_reader();
+        unsafe { drop_ctx(ctx) };
+
+        assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+        assert_eq!(descriptor, "Text");
+        assert_eq!(contents, "héllo wörld");
     }
 
     #[test]
@@ -7586,7 +8278,6 @@ mod tests {
                 let object = Box::leak(Box::new(DirtyPaddedBool {
                     header: crate::gc::GcHeader::new(
                         &scalars::BOOL,
-                        scalars::BOOL.size() as u32,
                         crate::gc::GcHeader::payload_offset_for(scalars::BOOL.align()) as u16,
                         crate::gc::HeapId::mint(),
                     ),
@@ -8400,6 +9091,25 @@ mod tests {
                  that cannot see that cannot hold the invariant"
             );
         }
+        // **ADR-111 relocated a fault, and this is how the sweep proves it
+        // moved rather than vanished.** `praxis_alloc_text` used to raise
+        // `InvalidText` for bytes it was handed; it now trusts its caller, and
+        // the one caller holding raw host bytes raises it instead. Asserting
+        // the *destination* is visible to the scan is what makes the
+        // disappearance of the source meaningful — without it, deleting the
+        // validation outright would leave this test just as green.
+        assert!(
+            faulting.contains("praxis_get_input"),
+            "`praxis_get_input` validates the host's input and raises \
+             `InvalidText` itself (ADR-111); a scan that cannot see that cannot \
+             tell a relocated fault from a deleted one"
+        );
+        assert!(
+            !faulting.contains("praxis_alloc_text"),
+            "`praxis_alloc_text` reaches `set_fault` again. Its row is \
+             `Effect::Allocates`, so nothing observes the fault — a violated \
+             UTF-8 precondition aborts through `abi_guard!` instead (ADR-111)"
+        );
     }
     /// **The sweep above reads code, not prose.** Its classification is a
     /// substring match, so before [`code_only`] a *comment* inside a wrapper

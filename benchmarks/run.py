@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
 import shutil
@@ -86,8 +87,6 @@ def memory_gib() -> int | None:
                 ["sysctl", "-n", "hw.memsize"], capture_output=True, text=True
             ).stdout
             return round(int(out) / 2**30)
-        import os
-
         return round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30)
     except (ValueError, OSError, AttributeError):
         return None
@@ -191,6 +190,18 @@ def main() -> None:
         die(f"{PRAXIS_BIN} not found — run `cargo build --release` first")
     if shutil.which("rustc") is None:
         die("rustc not on PATH")
+    # `PRAXIS_GC_PACER` (ADR-112) changes the collector's schedule and nothing
+    # else, so a stale export would move every Praxis number in results.json
+    # without moving one character of its output — and REPORT.md would then
+    # describe a collector this workspace does not ship. Refusing is the same
+    # guard `gcfix-pre-perf-fixes.json`'s deliberate filename is: a measurement
+    # that cannot say which build it came from must not be recorded. Use
+    # `pacer_ab.py`, which sets the variable per run and writes both arms.
+    if (pacer := os.environ.get("PRAXIS_GC_PACER")) is not None:
+        die(
+            f"PRAXIS_GC_PACER={pacer!r} is set — results.json must measure the "
+            "collector this workspace ships. Unset it, or use pacer_ab.py."
+        )
 
     names = [n.strip() for n in args.only.split(",") if n.strip()] or list(BENCHMARKS)
     unknown = [n for n in names if n not in BENCHMARKS]
@@ -281,4 +292,8 @@ def main() -> None:
     print(f"\nwrote {out_path}", file=sys.stderr)
 
 
-main()
+# Guarded so `pacer_ab.py` can import `peak_rss_bytes` rather than copy it: the
+# macOS-reports-bytes / Linux-reports-kbytes convention must be one function, or
+# the A/B's memory column and this file's would silently differ by 1024×.
+if __name__ == "__main__":
+    main()

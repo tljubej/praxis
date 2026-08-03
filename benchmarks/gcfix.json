@@ -1,0 +1,138 @@
+{
+  "primes": {
+    "min": 1.4421361660006369,
+    "peak_rss": 75464704.0,
+    "checksum_ok": true,
+    "size": 1600000,
+    "reps": 5,
+    "arm_a": {
+      "pacer": "doubling",
+      "min": 1.5123337909990369,
+      "peak_rss": 1013628928.0
+    },
+    "arm_b": {
+      "pacer": "bounded:64M:2",
+      "min": 1.4421361660006369,
+      "peak_rss": 75464704.0
+    }
+  },
+  "mandelbrot": {
+    "min": 2.7364918750008655,
+    "peak_rss": 76038144.0,
+    "checksum_ok": true,
+    "size": 430,
+    "reps": 5,
+    "arm_a": {
+      "pacer": "doubling",
+      "min": 2.9409104590013158,
+      "peak_rss": 2193506304.0
+    },
+    "arm_b": {
+      "pacer": "bounded:64M:2",
+      "min": 2.7364918750008655,
+      "peak_rss": 76038144.0
+    }
+  },
+  "collatz": {
+    "min": 1.2195936249991064,
+    "peak_rss": 75153408.0,
+    "checksum_ok": true,
+    "size": 340000,
+    "reps": 5,
+    "arm_a": {
+      "pacer": "doubling",
+      "min": 1.2769112499991024,
+      "peak_rss": 531578880.0
+    },
+    "arm_b": {
+      "pacer": "bounded:64M:2",
+      "min": 1.2195936249991064,
+      "peak_rss": 75153408.0
+    }
+  },
+  "vm": {
+    "min": 7.10836370799916,
+    "peak_rss": 76726272.0,
+    "checksum_ok": true,
+    "size": 2800000,
+    "reps": 5,
+    "arm_a": {
+      "pacer": "doubling",
+      "min": 7.292092499999853,
+      "peak_rss": 1101332480.0
+    },
+    "arm_b": {
+      "pacer": "bounded:64M:2",
+      "min": 7.10836370799916,
+      "peak_rss": 76726272.0
+    }
+  },
+  "hashwork": {
+    "min": 4.475424832999124,
+    "peak_rss": 86130688.0,
+    "checksum_ok": true,
+    "size": 9400000,
+    "reps": 5,
+    "arm_a": {
+      "pacer": "doubling",
+      "min": 4.747130625000864,
+      "peak_rss": 1682800640.0
+    },
+    "arm_b": {
+      "pacer": "bounded:64M:2",
+      "min": 4.475424832999124,
+      "peak_rss": 86130688.0
+    }
+  },
+  "tree": {
+    "min": 3.33587554100086,
+    "peak_rss": 101498880.0,
+    "checksum_ok": true,
+    "size": 330,
+    "reps": 5,
+    "arm_a": {
+      "pacer": "doubling",
+      "min": 3.4266543749999983,
+      "peak_rss": 2216443904.0
+    },
+    "arm_b": {
+      "pacer": "bounded:64M:2",
+      "min": 3.33587554100086,
+      "peak_rss": 101498880.0
+    }
+  },
+  "pipeline": {
+    "min": 4.595133875000101,
+    "peak_rss": 140689408.0,
+    "checksum_ok": true,
+    "size": 1000000,
+    "reps": 5,
+    "arm_a": {
+      "pacer": "doubling",
+      "min": 3.6537115840001206,
+      "peak_rss": 3294576640.0
+    },
+    "arm_b": {
+      "pacer": "bounded:64M:2",
+      "min": 4.595133875000101,
+      "peak_rss": 140689408.0
+    }
+  },
+  "bfs": {
+    "min": 9.452112124999985,
+    "peak_rss": 110460928.0,
+    "checksum_ok": true,
+    "size": 200,
+    "reps": 5,
+    "arm_a": {
+      "pacer": "doubling",
+      "min": 9.470939625000028,
+      "peak_rss": 969244672.0
+    },
+    "arm_b": {
+      "pacer": "bounded:64M:2",
+      "min": 9.452112124999985,
+      "peak_rss": 110460928.0
+    }
+  }
+}

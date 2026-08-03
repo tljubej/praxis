@@ -7,7 +7,10 @@
 type); ADR-019 (a safepoint also *clears*); ADR-021 and ADR-035 (the debug
 frame is driven by its own set); ADR-033 (`DebugLocal.value` is an
 `Option<GcRef>`)
-**Amended by:** ADR-104 (decision 1's *emission*, not its contract)
+**Amended by:** ADR-104 (decision 1's *emission*, not its contract); ADR-106
+(the two sets stay two — the collector now *writes* the second one after every
+sweep, so a debug slot is a live object or an absence, and decision 2's
+`RootSlots::dead` is what makes that necessary)
 
 ## Context
 
@@ -73,6 +76,13 @@ It would be easy to read "exact" as better here too. It is not. `locals` after
 asking what the program's state *is*, not what the optimizer still needs. The
 two sets answer different questions, and the only reason they were ever one set
 is that nobody had asked the second question separately.
+
+Over-approximate does not mean unbounded, and ADR-106 says where the bound is:
+the debug set may name a value the root set dropped, but not one the collector
+has since reclaimed. The collector clears such a slot after every sweep, so the
+debug set over-approximates *liveness* and never *validity*. That is the one
+narrowing this decision's "never cleared" has taken, and it is a narrowing to
+`<uninit>`, which is what the debugger already renders for a slot nothing wrote.
 
 ### `DebugSlots` is a contract, not a store list (ADR-104)
 

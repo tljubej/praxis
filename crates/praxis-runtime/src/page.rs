@@ -805,6 +805,37 @@ mod tests {
         }
     }
 
+    /// **An `Int` costs 24 bytes, and the ladder holds a 24-byte rung to put it
+    /// on.** Both halves have to be true for ADR-109 to have paid for itself,
+    /// and they are separate facts: shrinking `GcHeader` makes the *block* 24,
+    /// and `MIN_BLOCK` following the header is what puts a *rung* exactly there
+    /// rather than rounding 24 up to the old floor of 24-plus-a-granule.
+    ///
+    /// `Int` is the descriptor to pin because it is the one the benchmarks
+    /// allocate in a loop — `collatz`, `primes` and `mandelbrot` are essentially
+    /// `Int` allocation with arithmetic in between — so it is where the density
+    /// win either shows up or does not. Without this test, a change that grew
+    /// the header back or coarsened `BLOCK_GRANULE` would move `Int` to the next
+    /// rung and the only symptom would be a benchmark number nobody attributed.
+    ///
+    /// This is deliberately a literal 24 rather than a re-derivation. Every
+    /// other assertion in this module derives, because derivations are what this
+    /// codebase pins; this one is the *claim* ADR-109 makes, and a claim checked
+    /// against its own derivation is checked against nothing.
+    #[test]
+    fn an_int_block_is_the_header_plus_eight() {
+        let (payload_offset, block) = BlockLayout::of(&crate::scalars::INT);
+        assert_eq!(payload_offset, 16, "the header, and no padding");
+        assert_eq!(block.size, 24, "16 bytes of header and 8 of payload");
+        assert_eq!(block.align, BLOCK_GRANULE);
+        let class = SizeClass::of(block).expect("an Int is on the ladder");
+        assert_eq!(
+            class.block_size(),
+            24,
+            "an Int must land on a rung that is exactly its block, not above it"
+        );
+    }
+
     /// The reciprocal is a derivation, and this is the derivation's proof.
     /// Exhaustive over every stride the ladder can hold and every offset a page
     /// can address — if `PAGE_SIZE` or `MAX_BLOCK` ever move past the bound the

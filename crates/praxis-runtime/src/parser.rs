@@ -233,10 +233,31 @@ impl Rt {
         }
     }
 
-    /// Allocate a boxed `Char` from a Unicode scalar.
+    /// The boxed `Char` for `value` — the interned immortal when it is ASCII
+    /// ([`crate::small_char`]), a fresh allocation otherwise.
+    ///
+    /// [`Rt::alloc_int`]'s shape, and the site ADR-107 was written for: the
+    /// `char` atomic runs once per **grid cell**, so `read grid(char)` over a
+    /// 140×140 AoC map used to box 19,600 objects of which at most 128 had
+    /// distinct values. Now it boxes none of them.
+    ///
+    /// The safepoint is taken either way, for [`Rt::alloc_int`]'s reason: a grid
+    /// parse is one of the few things that allocates on every step, so it is
+    /// exactly where the collector must keep being offered a turn even once every
+    /// cell answers from the table. The `Grid`'s own item vector is what still
+    /// grows, and it is what a collection here would have to find rooted — which
+    /// is `walk_grid`'s `NativeScope`'s job, unchanged.
     fn alloc_char(&self, value: u32) -> GcRef {
         let (heap, safepoint) = self.safepoint();
-        heap.alloc(safepoint, scalars::CHAR_PAYLOAD, value)
+        match crate::small_char::index_of(value) {
+            // SAFETY: `ctx` is valid (the `Interp`'s invariant) and `index_of`
+            // bounds `i` by the table's length.
+            Some(i) => {
+                drop(safepoint);
+                unsafe { *(*self.ctx).small_chars.add(i) }
+            }
+            None => heap.alloc(safepoint, scalars::CHAR_PAYLOAD, value),
+        }
     }
 
     /// Allocate a boxed `Float` (§7.4's `float` atomic).
@@ -2955,6 +2976,136 @@ mod tests {
 
         assert_eq!(payload.width, 1);
         assert_eq!(payload.items.len(), 1);
+    }
+
+    /// **ADR-107, the parser half.** `read grid(char)` is the shape the interning
+    /// was written for: the `char` atomic runs once per cell, so a 140×140 AoC
+    /// map used to box 19,600 `Char`s of which at most 128 had distinct values.
+    ///
+    /// The assertion is a *count*, not a spot check, because the property is
+    /// "the parse allocates nothing per cell" and only a count can say that. One
+    /// object is allocated by the whole parse — the `Grid` itself, whose cells
+    /// live in a Rust `Vec<GcRef>` rather than in the heap — and that number is
+    /// independent of how many cells there are, which the second grid below is
+    /// what proves. A per-cell allocation makes the first delta 10 and the
+    /// second 26.
+    #[test]
+    fn a_grid_of_chars_interns_its_ascii_cells() {
+        let mut rt = crate::Runtime::new();
+        let input = rt.alloc_text("#.#\n.#.\n#.#");
+        let mut ctx = rt.context();
+        ctx.input_source = input;
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Char,
+                },
+                PlanNode::Grid { child: 0 },
+            ],
+            1,
+        );
+
+        let before = rt.heap().stats().live_count;
+        let grid = unsafe { run_root(&mut ctx, &plan, input) }.expect("a 3×3 ASCII grid parses");
+        let after = rt.heap().stats().live_count;
+        assert_eq!(
+            after - before,
+            1,
+            "nine cells, one allocation: the Grid object and no Chars at all"
+        );
+
+        let payload = unsafe { &*grid.payload::<crate::collections::GridPayload>() };
+        assert_eq!(payload.items.len(), 9);
+        let hash = rt.immortals().small_char('#' as u32).expect("ASCII");
+        let dot = rt.immortals().small_char('.' as u32).expect("ASCII");
+        for (n, cell) in payload.items.iter().enumerate() {
+            // Every cell is one of exactly two objects, and they are the
+            // runtime's own table entries rather than a cache of the parser's.
+            let expected = if n % 2 == 0 { hash } else { dot };
+            assert_eq!(cell.as_ptr(), expected.as_ptr(), "cell {n}");
+        }
+
+        // The same shape at a different size costs the same: the delta is the
+        // Grid, not the cells.
+        let bigger = rt.alloc_text("#.#.#\n.#.#.\n#.#.#\n.#.#.\n#.#.#");
+        let mut ctx = rt.context();
+        ctx.input_source = bigger;
+        let before = rt.heap().stats().live_count;
+        let _ = unsafe { run_root(&mut ctx, &plan, bigger) }.expect("a 5×5 ASCII grid parses");
+        assert_eq!(
+            rt.heap().stats().live_count - before,
+            1,
+            "twenty-five cells cost exactly what nine did"
+        );
+    }
+
+    /// The branch a regression would delete. A cell outside the interned range
+    /// is still a fresh object per cell, and still holds its own scalar.
+    #[test]
+    fn a_non_ascii_grid_cell_is_still_a_fresh_object() {
+        let mut rt = crate::Runtime::new();
+        let input = rt.alloc_text("éé");
+        let mut ctx = rt.context();
+        ctx.input_source = input;
+        let plan = test_plan(
+            vec![
+                PlanNode::Atomic {
+                    kind: AtomicKind::Char,
+                },
+                PlanNode::Grid { child: 0 },
+            ],
+            1,
+        );
+
+        let before = rt.heap().stats().live_count;
+        let grid = unsafe { run_root(&mut ctx, &plan, input) }.expect("two scalars, one row");
+        assert_eq!(
+            rt.heap().stats().live_count - before,
+            3,
+            "the Grid and one Char per cell — `é` is outside the interned range"
+        );
+
+        let payload = unsafe { &*grid.payload::<crate::collections::GridPayload>() };
+        assert_eq!(payload.items.len(), 2);
+        assert_ne!(payload.items[0].as_ptr(), payload.items[1].as_ptr());
+        assert_eq!(payload.items[0].as_char(), 'é');
+        assert_eq!(payload.items[1].as_char(), 'é');
+    }
+
+    /// `one_of` is the parser's *other* door to `Rt::alloc_char`, and the grid
+    /// test does not reach it — `walk_one_of` builds its `Char` itself rather
+    /// than through the `char` atomic.
+    #[test]
+    fn one_of_answers_the_interned_char() {
+        let mut rt = crate::Runtime::new();
+        let input = rt.alloc_text("<");
+        let mut ctx = rt.context();
+        ctx.input_source = input;
+        let literals: &'static [&'static str] = Box::leak(vec!["<>^v"].into_boxed_slice());
+        let nodes: &'static [PlanNode] =
+            Box::leak(vec![PlanNode::OneOf { chars_index: 0 }].into_boxed_slice());
+        let plan = ParserPlan {
+            nodes,
+            template_parts: &[],
+            literals,
+            root: 0,
+        };
+
+        let before = rt.heap().stats().live_count;
+        let value = unsafe { run_root(&mut ctx, &plan, input) }.expect("`<` is one of \"<>^v\"");
+        assert_eq!(
+            rt.heap().stats().live_count,
+            before,
+            "an interned Char never enters the live registry"
+        );
+        assert_eq!(
+            value.as_ptr(),
+            rt.immortals()
+                .small_char('<' as u32)
+                .expect("ASCII")
+                .as_ptr()
+        );
+        assert_eq!(value.as_char(), '<');
     }
 
     #[test]

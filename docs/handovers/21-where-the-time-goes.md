@@ -199,7 +199,7 @@ bitmap claim is a little dearer than popping a `Vec`). Net collector time on
 the profile before believing a percentage from an earlier section of the same
 document.**
 
-### 3.7 Negative result: `opt_level` is `none`, and raising it does nothing
+### 3.7 `opt_level` is `none` — negative twice, then not (see the third measurement at the end)
 
 `JITBuilder::new` is used with no flags set anywhere in the workspace, so
 Cranelift runs at its default `opt_level = "none"`. Setting `opt_level =
@@ -239,6 +239,29 @@ as memory clobbers — every allocation is still `praxis_alloc_*`, and `collatz`
 loop still allocates — so the mid-end still cannot move much across a loop body.
 That predicts this stays negative until §3.6 changes what allocation costs, and
 it should not be tried again before then.
+
+**Third measurement, 2026-08-03, and the prediction above was right.** ADR-113
+turns the commonest allocation in the language into a table read behind a pacing
+branch — `praxis_alloc_int` is no longer a call on the path a loop counter
+takes — and that is precisely the clobber this section named. Measured on that
+tree, interleaved, alternating order:
+
+| | delta |
+|---|---:|
+| `collatz` | **−6.3%** (reproduced at −5.4% and −6.3% in two passes) |
+| `primes` | −1.6% |
+| the other five | within ±0.5% |
+
+Compile-time floor: **+0.2 to +0.9 ms** per program, against the 4.7 ms this
+section measured for `bfs`. So the cost is now a tenth of what it was and the
+benefit is real on one row.
+
+**The flag is still not set**, and the reason is stated at `Jit::in_generation`
+rather than here: one benchmark is not a result, and `collatz` is the most
+allocation-dense program in the suite — its number is the best case, not the
+average. What has changed is that "do not try it a third time" is retired.
+Try it again after P-1b (the inline bitmap claim), on a suite where more than one
+row should move.
 
 ## 4. What to do first
 

@@ -66,8 +66,11 @@ have to answer why `a.concat(b)` and `a + b` both exist. A `Text.repeat(n)`, a
 - One new runtime wrapper, `praxis_text_concat`, declared `Allocates` — it
   allocates a `Text` and cannot fault, which is `praxis_float_to_text`'s row
   exactly. Concatenating two valid UTF-8 payloads yields valid UTF-8, so there is
-  nothing for the `InvalidText` fault `praxis_alloc_text` carries to check; that
-  wrapper validates because it is handed raw bytes and this one is not. No
+  nothing for an `InvalidText` fault to check. (The contrast drawn here was with
+  `praxis_alloc_text`, which validated because it was handed raw bytes.
+  ADR-111 removed it: that wrapper's bytes are its caller's promise too, and the
+  one caller holding raw *host* bytes — `praxis_get_input` — validates them
+  itself. Both rows are `Allocates` now, for one reason instead of two.) No
   `#[repr(C)]` type changed, so no ABI version bump (H17).
 - `+=` on a `var` of type `Text` follows without a second decision: the compound
   assignment path types its right-hand side against the binding, so

@@ -105,6 +105,18 @@ reconciled with REP-45's `a_wrapper_that_can_raise_a_fault_declares_that_it_faul
 sweep. **Registered as REP-67**, not ridden in here — and it can supersede this
 decision later without touching the rule, which is the property to want.
 
+> **Superseded by [ADR-111](./111-a-text-literals-bytes-are-the-compilers-promise.md)
+> (2026-08-03), and the property held.** REP-67 is closed: `praxis_alloc_text`'s
+> row is `Effect::Allocates`, the 41 sites emit no check, and the cure needed no
+> second ABI symbol — the validation moved to `praxis_get_input`, the one caller
+> holding bytes the compiler did not write, whose row already said
+> `AllocatesAndFaults`. **The rule above is untouched.** What changed is an input
+> to `Inst::fault_reason`, not the rule that reads it: no verifier code, no
+> `check_fault_observed`, no carve-out. The forward rule stopped requiring a
+> check after `Alloc { Text }` and the converse arm began rejecting one, both on
+> their own. That is the same property from the other side — a rule with no hole
+> in it is a rule a later decision can change the *facts* under.
+
 ### 4. The `sum`/`product` accumulator gets a per-element check
 
 §10.4 is unambiguous, and it is what makes the overflow divert *at the addition*,

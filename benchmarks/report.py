@@ -61,19 +61,29 @@ def main() -> None:
     faster = [n for n in names if px_py[n] < 1]
     slower = [n for n in names if px_py[n] >= 1]
 
-    # The pacer experiment, if it has been run. Computed up front so the prose
-    # that refers to it cannot drift from the table that reports it.
+    # The pacer A/B, if it has been run. Computed up front so the prose that
+    # refers to it cannot drift from the table that reports it.
+    #
+    # `gcfix.json` carries **both** arms, measured against each other in one
+    # interleaved session of one binary (ADR-112). That is what closed the trap
+    # the old one-arm schema had: an arm-B-only file has to be compared against
+    # whatever `results.json` happens to hold, which may be a different build
+    # entirely — the mistake `gcfix-pre-perf-fixes.json`'s deliberate filename
+    # exists to prevent. A file without `arm_a` is that old schema, and the
+    # appendix is skipped rather than rendered against the wrong control.
     gcfix_path = HERE / "gcfix.json"
     gcfix = json.loads(gcfix_path.read_text()) if gcfix_path.exists() else {}
-    gc_names = [n for n in names if n in gcfix]
+    gc_names = [n for n in names if n in gcfix and "arm_a" in gcfix[n]]
     gc_time = gc_mem = None
     if gc_names:
-        gc_speedups = {n: t(n, "praxis") / gcfix[n]["min"] for n in gc_names}
+        arm_a = {n: gcfix[n]["arm_a"] for n in gc_names}
+        arm_b = {n: gcfix[n]["arm_b"] for n in gc_names}
+        gc_speedups = {n: arm_a[n]["min"] / arm_b[n]["min"] for n in gc_names}
         gc_time = statistics.geometric_mean(gc_speedups.values())
         gc_mem = statistics.geometric_mean(
-            benches[n]["peak_rss"]["praxis"] / gcfix[n]["peak_rss"]
+            arm_a[n]["peak_rss"] / arm_b[n]["peak_rss"]
             for n in gc_names
-            if benches[n]["peak_rss"].get("praxis") and gcfix[n]["peak_rss"]
+            if arm_a[n]["peak_rss"] and arm_b[n]["peak_rss"]
         )
 
     out: list[str] = []
@@ -104,18 +114,35 @@ def main() -> None:
     )
     w("")
     w(
-        "**This report was regenerated after the six findings in "
-        "[`docs/handovers/21-where-the-time-goes.md`](../docs/handovers/21-where-the-time-goes.md) "
-        "were fixed.** The previous run of this suite measured 4.6× CPython and 185× "
-        "Rust, and attributed the gap to boxing. That attribution did not survive a "
-        "profile: only 19% of `collatz` was inside JIT-generated code, and most of the "
-        "rest was runtime bookkeeping a uniform boxed representation does not require "
-        "— a SipHash-keyed free list probed twice per object, a 1552-byte frame "
-        "malloc\'d and memset per call, a crash-debugger view maintained continuously "
-        "ahead of a fault that almost never comes, a literal re-boxed on every "
-        "evaluation, and a side registry pushed per allocation and walked in full per "
-        "sweep. Fixing those, without changing one language semantic or touching §4.3, "
-        "is what moved the numbers below."
+        "**Two rounds of work stand behind these numbers, and neither changed one "
+        "language semantic or touched §4.3.** The first is the six findings in "
+        "[`docs/handovers/21-where-the-time-goes.md`](../docs/handovers/21-where-the-time-goes.md). "
+        "Before it this suite measured 4.6× CPython and 185× Rust and attributed the "
+        "gap to boxing — an attribution that did not survive a profile: only 19% of "
+        "`collatz` was inside JIT-generated code, and most of the rest was runtime "
+        "bookkeeping a uniform boxed representation does not require — a SipHash-keyed "
+        "free list probed twice per object, a 1552-byte frame malloc\'d and memset per "
+        "call, a crash-debugger view maintained continuously ahead of a fault that "
+        "almost never comes, a literal re-boxed on every evaluation, and a side "
+        "registry pushed per allocation and walked in full per sweep."
+    )
+    w("")
+    w(
+        "The second is "
+        "[`docs/handovers/24-every-item-in-23-closed.md`](../docs/handovers/24-every-item-in-23-closed.md), "
+        "which closed what that round left open. Measured against the build the first "
+        "round ended at — the same two binaries run interleaved in palindromic order, "
+        "best of five, every checksum identical — it is **1.13× faster and peaks 17.8× "
+        "lower** across these eight. Three changes account for nearly all of the time: "
+        "a loop-invariant literal is now allocated once in the loop\'s preheader rather "
+        "than once per iteration "
+        "([ADR-108](../docs/decisions/108-the-builder-holds-the-preheader-so-the-pass-is-not-needed.md)), "
+        "an in-range `Int` box is a table read behind a pacing branch rather than a "
+        "call "
+        "([ADR-113](../docs/decisions/113-an-int-box-is-a-table-read-behind-a-pacing-branch.md)), "
+        "and every heap block lost eight bytes "
+        "([ADR-109](../docs/decisions/109-pages-stay-segregated-by-size-class.md)). "
+        "The memory column is a separate story and it is the pacer\'s; see below."
     )
     w("")
     w("Two things are worth reading the tables for.")
@@ -134,20 +161,20 @@ def main() -> None:
     )
     w("")
     w(
-        "**The pacer is unchanged, and the memory ceiling moved anyway.** "
-        "`collect_threshold` still doubles after every paced collection and nothing "
-        "bounds it, so peak resident set is still a function of how long a program has "
-        "run rather than of how much it is holding. But storage is now "
-        "size-class-segregated pages with mark bitmaps "
-        "([ADR-103](../docs/decisions/103-a-page-owns-the-storage-and-the-liveness.md)) "
-        "rather than a bump arena plus an 8-byte-per-object side registry, and an "
-        "emptied page is re-classed rather than being dead capital for its old layout "
-        "— so the same workloads now peak between 0.5 and 3.2 GiB where they used to "
-        "peak near 6. The sizes in `sizes.json` were chosen for the old ceiling and "
-        "have not been re-tuned; they could now be raised substantially. What fixing "
-        "the pacer *itself* would cost was measured once, against the pre-fix build, "
-        "and the answer was not what it looks like — see `benchmarks/README.md` for "
-        "why that measurement is no longer rendered here."
+        "**The collector's pacer is bounded, and the memory column is a different "
+        "kind of number now.** `collect_threshold` used to double after every paced "
+        "collection with nothing to stop it, so peak resident set was a function of "
+        "how long a program had run rather than of how much it was holding — this "
+        "suite peaked between 0.5 and 3.2 GiB while six of its eight benchmarks held "
+        "essentially nothing. It is now `max(min(previous × 2, 64 MiB), live × 2)`, "
+        "where `live` is the block bytes the sweep just measured "
+        "([ADR-112](../docs/decisions/112-the-pacer-has-a-ceiling-and-the-live-set-may-exceed-it.md)), "
+        "so resident set is bounded by what the program holds plus a constant. The "
+        "suite got **faster** in the process — see the appendix, which is the "
+        "measurement rather than a hypothesis, and which replaces an earlier "
+        "experiment that said the opposite for a reason that no longer exists. The "
+        "sizes in `sizes.json` were chosen when these workloads peaked near 6 GiB and "
+        "have deliberately not been re-tuned."
     )
     w("")
 
@@ -185,8 +212,11 @@ def main() -> None:
     w(
         "Peak resident set for the same runs. The live data in every one of these "
         "programs is small and bounded — `hashwork` holds at most 65536 map entries, "
-        "`primes` and `collatz` hold nothing at all — so the Praxis column is almost "
-        "entirely heap that was garbage long before the program ended."
+        "`primes` and `collatz` hold nothing at all — and since the collector's "
+        "threshold gained a ceiling the Praxis column reflects that: it is the live "
+        "set plus a bounded amount of not-yet-collected garbage, rather than half of "
+        "everything the program ever allocated. See *The collector's pacer has a "
+        "ceiling* below for what it was."
     )
     w("")
     w("| Benchmark | Rust | Python | Praxis | Praxis retained per second |")
@@ -233,8 +263,9 @@ def main() -> None:
         f"The worst case is {max_floor_pct * 100:.2f}%, and most of even that is the "
         "size-independent setup rather than compilation: compiling and starting the "
         "largest program in the suite costs single-digit milliseconds. Making the "
-        "workloads bigger would not change any ratio in this report — it would only "
-        "run the machine out of memory."
+        "workloads bigger would not change any ratio in this report; it would only "
+        "make the floor percentages smaller, and since the pacer gained a ceiling it "
+        "would no longer run the machine out of memory either."
     )
     w("")
 
@@ -275,44 +306,48 @@ def main() -> None:
         f"values are the elements themselves and interning cannot help."
     )
     w("")
-    w("### The collector's pacer never comes back down")
+    w("### The collector's pacer has a ceiling")
     w("")
     w(
-        "`Heap::collect_inner` doubles `collect_threshold` after every paced "
-        "collection (`crates/praxis-runtime/src/heap.rs`), and nothing lowers it again "
-        "— the only assignment back to `INITIAL_COLLECT_THRESHOLD` is in `reset`, "
-        "which is teardown. Starting at 64 KiB, the *n*-th collection therefore runs "
-        "after 64 KiB · 2ⁿ of fresh allocation, and the heap high-water mark before it "
-        "is that same figure. Peak resident set comes out at **about half of "
-        "everything the program ever allocated**, independent of how much of it was "
-        "live: `primes` peaks at "
-        f"{fmt_rss(benches['primes']['peak_rss'].get('praxis'))} holding nothing at "
-        "all. A program that allocates at a steady rate — which is every program in "
-        "this suite, and every Praxis program, because arithmetic allocates — spends "
-        "its later life not collecting."
+        "`Heap::collect_inner` used to double `collect_threshold` after every paced "
+        "collection and nothing lowered it again — the only assignment back to "
+        "`INITIAL_COLLECT_THRESHOLD` was in `reset`, which is teardown. Starting at "
+        "64 KiB, the *n*-th collection ran after 64 KiB · 2ⁿ of fresh allocation, and "
+        "the heap high-water mark before it was that same figure. Peak resident set "
+        "came out at **about half of everything the program ever allocated**, "
+        "independent of how much of it was live: `primes` peaked at 967 MiB holding "
+        "nothing at all."
     )
     w("")
-    measured = (
-        "That was tried — see the appendix — and the result is worth stating "
-        "carefully, because it is not the one the paragraph above invites: it cuts "
-        f"peak memory by {gc_mem:.0f}× and costs {(1 / gc_time - 1) * 100:.0f}% "
-        "**more** time, not less. The doubling is not an accident that happens to be "
-        "slow; it is a trade that buys speed with memory, and it buys it at an "
-        "unbounded price."
-        if gc_time and gc_mem
-        else "It would bound resident memory to a multiple of live data. What it costs "
-        "in time is not obvious in either direction and is not measured here."
+    w(
+        "The rule is now "
+        "`max(min(previous × 2, 64 MiB), live × 2, 64 KiB)`, where `live` is the block "
+        "bytes the sweep that just ran measured "
+        "([ADR-112](../docs/decisions/112-the-pacer-has-a-ceiling-and-the-live-set-may-exceed-it.md)). "
+        "The ceiling clamps only the doubling term. That is the whole design: the "
+        "doubling is a *guess about the future* and may be capped, while `live × 2` is "
+        "a *statement about the present* and must be allowed to exceed the cap — "
+        "clamping the whole expression would make a program whose live set is larger "
+        "than the ceiling collect on essentially every allocation."
+    )
+    w("")
+    holds_nothing = [
+        n for n in ("primes", "mandelbrot", "collatz", "vm") if n in benches
+    ]
+    nothing_rss = [benches[n]["peak_rss"].get("praxis") for n in holds_nothing]
+    shape = (
+        f"The four benchmarks that hold nothing — {', '.join(f'`{n}`' for n in holds_nothing)} "
+        f"— now all peak between {fmt_rss(min(nothing_rss))} and "
+        f"{fmt_rss(max(nothing_rss))}, which is the ceiling plus the process. "
+        if all(nothing_rss)
+        else ""
     )
     w(
-        "The conventional fix is to set the next threshold from the *live* set "
-        "measured by the collection that just finished (`live × k`, clamped to a "
-        f"floor), rather than from the previous threshold. {measured} What is wrong "
-        "with the rule is not its rate but that nothing bounds it — a program's "
-        "resident set is a function of how long it has run rather than of how much it "
-        "is holding. What moved since the pre-fix report is the constant, not the "
-        "shape: an object costs less and an emptied page is re-classed rather than "
-        "held for its old layout, so the same workloads peak between 0.5 and 3.2 GiB "
-        "where they used to peak near 6 — but the curve is still unbounded in time."
+        "The memory table above is what that buys, and its *shape* says more than its "
+        f"magnitude. {shape}The rest come out ordered by how much they hold. Resident "
+        "set is a function of what a program is holding plus a constant, rather than "
+        "of how long it has run — which is the property that decides how large a "
+        "Praxis program can be."
     )
     w("")
     w("### What the sequence pipelines are worth")
@@ -356,94 +391,99 @@ def main() -> None:
         f"hash probe both languages pay identically, is {px_rs['hashwork']:.0f}×. The "
         "difference between those two figures is the boxing."
     )
-    cost = (
-        f"pacing off the live set costs {(1 / gc_time - 1) * 100:.0f}% more time and "
-        f"cuts peak memory by {gc_mem:.0f}×"
-        if gc_time and gc_mem
-        else "pacing off the live set bounds peak memory to a multiple of live data"
-    )
     w(
-        f"2. **Bound the collector's threshold.** A *scalability* fix rather than a "
-        f"speed one: {cost}. "
-        "That trade is worth taking anyway, because today the thing that decides how "
-        "large a Praxis program can be is how much RAM it has, not how long you are "
-        "willing to wait — and a puzzle input that runs for a minute is not an exotic "
-        "case for the language this one is aimed at. A middle setting (`max(live × k, "
-        "previous × k)` with a hard ceiling) would keep most of the speed and still "
-        "bound the growth."
-    )
-    w(
-        "3. **Escape analysis on MIR.** The same §4.3 sentence. A loop-local "
+        "2. **Escape analysis on MIR.** The same §4.3 sentence. A loop-local "
         "accumulator that never escapes its function needs no heap object at all, and "
         "the fused pipelines of §6.3 are exactly the shape where the intermediate "
         "values are provably local."
+    )
+    done = (
+        f"it costs {abs(gc_time - 1) * 100:.1f}% "
+        f"{'less' if gc_time > 1 else 'more'} time and cuts peak memory by "
+        f"{gc_mem:.0f}×"
+        if gc_time and gc_mem
+        else "peak memory is now bounded by a multiple of live data"
+    )
+    w(
+        f"3. ~~**Bound the collector's threshold.**~~ **Done**, and the appendix is "
+        f"the measurement rather than the estimate this entry used to carry: "
+        f"{done}. It was listed here as a *scalability* fix that would probably cost "
+        "time, on the strength of one experiment against a build whose free list has "
+        "since been deleted. It cost nothing, and what decides how large a Praxis "
+        "program can be is no longer how much RAM the machine has."
     )
     w("")
 
     # --- gc experiment ------------------------------------------------------
     if gc_names:
-        shared, speedups = gc_names, gc_speedups
-        mem_ratio, time_gm = gc_mem, gc_time
-        w("## Appendix — what the pacer is actually buying")
+        speedups, mem_ratio, time_gm = gc_speedups, gc_mem, gc_time
+        worst = min(speedups, key=speedups.get)
+        w("## Appendix — what bounding the pacer cost")
         w("")
         w(
-            "To put a number on the section above rather than leave it as a "
-            "hypothesis, the pacer was changed to set the next threshold from the "
-            "live bytes the sweep just measured (`live × 2`, floored at 8 MiB) "
-            "instead of from the previous threshold, and the suite re-run against "
-            "that build. Every checksum still matched. **The patch was a scratch "
-            "experiment built into a separate target directory and reverted; it is "
-            "not in the tree.**"
+            "Both pacing rules ship in the same binary behind `PRAXIS_GC_PACER` "
+            "([ADR-112](../docs/decisions/112-the-pacer-has-a-ceiling-and-the-live-set-may-exceed-it.md)), "
+            "so this A/B is one executable run twice rather than two builds compared "
+            "— no difference in optimization, layout or link order can be read as a "
+            "difference in pacing. The two arms ran back to back within each "
+            f"repetition, best of {gcfix[gc_names[0]].get('reps', '?')}, with **which "
+            "arm went first alternating** on successive repetitions so that the "
+            "laptop's several-percent drift is shared rather than charged to whichever "
+            "always ran second. Every run's output was checked against this suite's "
+            "checksums. `benchmarks/pacer_ab.py` is the harness and "
+            "`benchmarks/gcfix.json` holds both arms."
         )
         w("")
-        w("| Benchmark | Praxis as-is | Pacer patched | Time | Peak RSS as-is | Patched | Memory |")
+        w("| Benchmark | Unbounded doubling | Bounded | Time | Peak RSS unbounded | Bounded | Memory |")
         w("|---|---:|---:|---:|---:|---:|---:|")
-        for n in shared:
-            base_rss = benches[n]["peak_rss"].get("praxis")
-            mem = (
-                f"{base_rss / gcfix[n]['peak_rss']:.0f}× less"
-                if base_rss and gcfix[n]["peak_rss"]
-                else ""
-            )
+        for n in gc_names:
+            a, b = gcfix[n]["arm_a"], gcfix[n]["arm_b"]
+            mem = f"{a['peak_rss'] / b['peak_rss']:.0f}× less" if a["peak_rss"] and b["peak_rss"] else ""
             w(
-                f"| `{n}` | {fmt_time(t(n, 'praxis'))} | {fmt_time(gcfix[n]['min'])} | "
-                f"{speedups[n]:.2f}× | {fmt_rss(base_rss)} | "
-                f"{fmt_rss(gcfix[n]['peak_rss'])} | {mem} |"
+                f"| `{n}` | {fmt_time(a['min'])} | {fmt_time(b['min'])} | "
+                f"{speedups[n]:.2f}× | {fmt_rss(a['peak_rss'])} | "
+                f"{fmt_rss(b['peak_rss'])} | {mem} |"
             )
         w(
             f"| **geometric mean** | | | **{time_gm:.2f}×** | | | "
             f"**{mem_ratio:.0f}× less** |"
         )
         w("")
+        faster = [n for n in gc_names if speedups[n] >= 1]
         w(
-            f"The time column is below 1.00×, which means the patched build is "
-            f"**slower** — by {(1 / time_gm - 1) * 100:.0f}% on the geometric mean. "
-            "That is the opposite of what the doubling rule looks like it is doing "
-            "wrong, and it is the useful result: the unbounded threshold is not a "
-            "bug that happens to cost memory, it is a deliberate-looking trade of "
-            "memory for collection frequency, and the trade is a good one right up "
-            "until the memory runs out. Collecting against a live set this small "
-            "means collecting constantly, and mark-and-sweep costs more than the "
-            f"page faults it avoids. Meanwhile memory falls {mem_ratio:.0f}× and — "
-            "the part that matters — stops being a function of how long the "
-            "program has run."
+            f"Above 1.00× the bounded arm is faster. It is faster or unchanged on "
+            f"{len(faster)} of the {len(gc_names)} and "
+            f"{abs(time_gm - 1) * 100:.1f}% "
+            f"{'faster' if time_gm >= 1 else 'slower'} on the geometric mean, while "
+            f"peaking {mem_ratio:.0f}× lower. **A bounded collector is not a trade "
+            "here.** Some of that is the mark-and-sweep the doubling rule was "
+            "deferring being cheap; most of it is that a multi-gigabyte peak is "
+            "multi-gigabytes of pages the kernel has to zero on first touch, and a "
+            "bounded heap touches its working set once and recycles it."
         )
         w("")
         w(
-            "So the gap in the main table is not the collector's to give back. "
-            "It is the boxing, and only item 1 above reaches it."
+            f"The exception is `{worst}`, at {speedups[worst]:.2f}×. It is the one "
+            "benchmark that holds a large live set for its whole run, so every "
+            "collection marks all of it — which is the cost a bounded pacer genuinely "
+            "does pay, and the reason the rule keeps a `live × k` term rather than "
+            "collecting at a fixed interval. Raising `k` halves that cost and raises "
+            "the memory bound in the same proportion; ADR-112's Measurements price "
+            "both, and the tighter bound is what ships."
         )
         w("")
         w(
-            "**That last sentence was wrong, and this report is the correction.** "
-            "It was written from a pacer experiment, not from a profile. A profile of "
-            "`collatz` — the row it names — put only 19% of runtime inside "
-            "JIT-generated code; the rest was runtime bookkeeping that a uniform boxed "
-            "representation does not require. Six such items were found and fixed "
-            "(see [`docs/handovers/21-where-the-time-goes.md`](../docs/handovers/21-where-the-time-goes.md)), "
-            "and between them they moved the suite from 4.6× CPython to parity without "
-            "touching §4.3 or any language semantic. Boxing is what is left, which is "
-            "what the pre-fix report claimed it already was."
+            "**An earlier version of this appendix reported the opposite result**, "
+            "from an experiment against the build at `fd70374` "
+            "(`benchmarks/gcfix-pre-perf-fixes.json`): pacing off the live set cut "
+            "memory and cost 14% *more* time. That measurement was correct and its "
+            "conclusion was not. Block reuse there went through a SipHash-keyed "
+            "`HashMap` free list over an arena that never reused anything, so pacing "
+            "more often did not measure the cost of collecting — it measured the cost "
+            "of the free list. "
+            "[ADR-103](../docs/decisions/103-a-page-owns-the-storage-and-the-liveness.md) "
+            "deleted the free list; reuse is now a bitmap claim, the same six "
+            "instructions whether the block is fresh or recycled."
         )
         w("")
 
@@ -466,11 +506,15 @@ def main() -> None:
         f"{meta['reps']} on an otherwise-idle laptop; no CPU pinning, no "
         "frequency locking."
     )
+    max_px_rss = max((benches[n]["peak_rss"].get("praxis") or 0) for n in names)
     w(
-        "- **The sizes are memory-bound, not time-bound**, and less so than they "
-        "were. They were chosen when these workloads peaked near 6 GiB; they now peak "
-        "between 0.5 and 3.2 GiB and have not been re-tuned, so every Rust column here "
-        "is smaller than it needs to be."
+        "- **The sizes were memory-bound and are no longer bounded by memory at "
+        f"all.** They were chosen when these workloads peaked near 6 GiB; the largest "
+        f"now peaks at {fmt_rss(max_px_rss)}. They have deliberately not been "
+        "re-tuned, because changing a size moves a benchmark to a different rung of "
+        "the pacer's ladder and the pacer is what the appendix measures. Every Rust "
+        "column here is therefore smaller than it needs to be, and raising the sizes "
+        "is now free."
     )
     w(
         "- **`vm` and `bfs` give Python its two idiom advantages.** A Python `list` of "

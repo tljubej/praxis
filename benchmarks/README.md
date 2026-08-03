@@ -26,24 +26,44 @@ end to end), `--only primes,vm` selects a subset, and `--reps N` sets the
 repetition count of the timing pass. Rust binaries are compiled on demand into
 `benchmarks/.build/` and rebuilt when their source is newer.
 
-The workload sizes in `sizes.json` are chosen so Praxis peaks near 6 GiB of
-resident set, not so any language reaches a round number of seconds. That is
-not a stylistic choice — see the report's appendix for why memory, rather than
-time, is what bounds how large these can be.
+The workload sizes in `sizes.json` were chosen so Praxis peaked near 6 GiB of
+resident set, back when memory rather than time was what bounded how large they
+could be. Since the collector's threshold gained a ceiling
+([ADR-112](../docs/decisions/112-the-pacer-has-a-ceiling-and-the-live-set-may-exceed-it.md))
+that is no longer true and the sizes could be raised substantially. They have
+deliberately **not** been re-tuned: changing a size moves a benchmark to a
+different rung of the pacer's power-of-two ladder, which is exactly what the
+appendix measures, so the two changes must not be made in one step.
 
-`gcfix.json`, when present, holds the appendix's experiment: the same suite run
-against a build whose collector paces off the live set. It is produced by hand,
-not by `run.py`, and `report.py` renders the appendix only if the file exists.
+### The pacer A/B
 
-The file currently in the directory is `gcfix-pre-perf-fixes.json`, deliberately
-named so `report.py` does *not* find it. It was measured against the build at
-`fd70374`, before the six findings in
+`pacer_ab.py` runs the appendix's experiment. Both pacing rules ship in the same
+binary behind `PRAXIS_GC_PACER`, so the two arms are one executable run twice —
+no second target directory and no second link. It writes `gcfix.json`, which
+`report.py` renders the appendix from if the file is there.
+
+```bash
+cargo build --release && python3 benchmarks/pacer_ab.py --arm-b bounded:64M:2
+```
+
+**`gcfix.json` carries both arms**, measured against each other in one
+interleaved session. That is what makes it self-contained: the old one-arm
+schema had to be compared against whatever `results.json` happened to hold,
+which might be a completely different build. `report.py` skips the appendix for
+a file without an `arm_a` key rather than render it against the wrong control.
+
+The other file in the directory, `gcfix-pre-perf-fixes.json`, is that old
+one-arm schema and is deliberately named so `report.py` does not find it. It was
+measured against the build at `fd70374`, before the six findings in
 [`../docs/handovers/21-where-the-time-goes.md`](../docs/handovers/21-where-the-time-goes.md)
-were fixed, and `report.py` renders the appendix by comparing it row-for-row
-against whatever is in `results.json` — so leaving it named `gcfix.json` would
-have the report silently attribute this suite's changes to a pacer experiment
-that never ran against this build. Rename it back only alongside a fresh run of
-the experiment.
+were fixed. It is kept because it is the measurement ADR-112 overturns, and it
+should not be renamed: there is nothing left in the tree it could be a control
+for.
+
+`run.py` **refuses to run** with `PRAXIS_GC_PACER` set. The variable changes the
+collector's schedule and nothing else, so a stale export would move every Praxis
+number in `results.json` without moving one character of its output — and
+`REPORT.md` would then describe a collector this workspace does not ship.
 
 Neither `.build/` nor `results.json` is part of `just ci`: this directory is
 outside the cargo workspace and nothing in it is compiled by `cargo build

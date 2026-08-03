@@ -19,7 +19,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
 use praxis_mir::{
     AllocKind, CallTarget, CmpOp, FloatBinOp, Function as MirFunction, GcConst, Inst, IntBinOp,
-    LocalId, LocalKind, MirType, Overflow, RootSlots, Terminator,
+    LocalId, LocalKind, MirType, Overflow, RootSlots, ScalarKind, Terminator,
 };
 use praxis_runtime::{
     DebugFrameEntry, DebugLocalMeta, FunctionDebugMeta, RuntimeContext, ShadowStackHeader,
@@ -83,11 +83,12 @@ const SHADOW_SLOT_BYTES: i64 = core::mem::size_of::<*mut praxis_runtime::GcHeade
 /// prologue makes no calls at all.
 const SLOT_ZERO_UNROLL_MAX: u32 = 32;
 
-/// The byte offset of `recursion_depth` within a `RuntimeContext`. The prologue
-/// guard reads it — *before* it pushes anything — to decide whether to branch to
-/// the stack-overflow fault epilogue (§9.2, §17.4). Computed from the
+/// The byte offset of `stack_left` within a `RuntimeContext`. The prologue guard
+/// reads it — *before* it pushes anything — to decide whether what is left of the
+/// native-stack budget covers this frame, and branches to the stack-overflow
+/// fault epilogue when it does not (§9.2, §17.4, ADR-105). Computed from the
 /// `#[repr(C)]` layout, like `SHADOW_OFFSET`.
-const RECURSION_DEPTH_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, recursion_depth) as i64;
+const STACK_LEFT_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, stack_left) as i64;
 
 /// The byte offset of `unit_ref` within a `RuntimeContext`. A fault epilogue
 /// loads the immortal Unit from here and returns it, because the ABI says a
@@ -101,6 +102,21 @@ const UNIT_REF_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, unit_ref) as 
 /// preceded by a shadow-frame spill (docs/handovers/21-where-the-time-goes.md
 /// §3.5). Computed from the `#[repr(C)]` layout, like `SLOTS_OFFSET`.
 const SMALL_INTS_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, small_ints) as i64;
+
+/// The literal's table and the *runtime* value's table are the same table.
+///
+/// `Inst::ConstGc` reaches it through the offset above, computed here from the
+/// public `#[repr(C)]` struct; `Inst::Materialize { Int }` reaches it through
+/// [`praxis_runtime::small_int::INLINE_INTERN_SITE`], which the runtime mints
+/// beside the range constants (ADR-113). Two spellings of one field is exactly
+/// what `small_int`'s module doc forbids for the *bounds*, so it is asserted
+/// rather than assumed for the *base*: a reorder of `RuntimeContext` that moved
+/// one and not the other would put a literal `0` and a computed `0` in different
+/// places, and nothing else in the tree would notice.
+const _: () = assert!(
+    SMALL_INTS_OFFSET as usize == praxis_runtime::small_int::INLINE_INTERN_SITE.table_offset(),
+    "the interned-Int table has one base, and both readers must name it"
+);
 
 /// The byte offsets of the two cached `Bool` immortals within a
 /// `RuntimeContext`. A `Bool` literal is one load of one of these — the same
@@ -217,18 +233,30 @@ pub(crate) fn lower_function<M: Module>(
     let mut import_cache: HashMap<RuntimeSymbol, FuncRef> = HashMap::new();
     let mut user_func_cache: HashMap<String, FuncRef> = HashMap::new();
 
-    // Recursion-depth guard (§9.2, §17.4), and it comes *first*.
+    // Native-stack budget guard (§9.2, §17.4, ADR-105), and it comes *first*.
     //
     // It used to sit after the shadow-frame push, because the push helper was
-    // what bumped `ctx.recursion_depth` and the guard read the result back.
-    // With the bump inline there is no reason to push before deciding, and two
-    // reasons not to: the over-limit path then pushes nothing, so it pops
-    // nothing (the third `emit_pop_shadow_frame` call site is gone rather than
-    // rewritten), and "every prologue guards before it pushes" is the premise
-    // that lets `SHADOW_STACK_SLOTS` be sized so shadow-stack exhaustion is
-    // unrepresentable. Observable behaviour is unchanged — bodies still run at
-    // nesting levels 1..MAX_RECURSION_DEPTH and the call past it still faults
-    // `StackOverflow` — with one fewer frame ever pushed.
+    // what bumped the counter and the guard read the result back. With the bump
+    // inline there is no reason to push before deciding, and two reasons not to:
+    // the over-limit path then pushes nothing, so it pops nothing (the third
+    // `emit_pop_shadow_frame` call site is gone rather than rewritten), and
+    // "every prologue guards before it pushes" is the premise that lets
+    // `SHADOW_STACK_SLOTS` be sized so shadow-stack exhaustion is
+    // unrepresentable.
+    //
+    // Two things about it are new (ADR-105).
+    //
+    // It spends this frame's *cost* — `FRAME_BYTES_BASE + 2 * slots` — and not a
+    // flat 1. A call count is calibrated for one frame width, and the native
+    // frames of real functions differ by a factor of three; counted as calls,
+    // the widest legal frame aborted the host at a depth the narrowest one
+    // survived, which is exactly the failure this guard exists to prevent.
+    // `slot_count` is known here, so the cost folds to one immediate.
+    //
+    // And it counts *down*, against a budget the context arrived carrying. The
+    // limit is therefore not in generated code at all — `Runtime::context` is
+    // the one place a stack size enters the system, and this function does not
+    // need to know which stack it will run on.
     //
     // Without the guard, deep recursion (e.g. `count(100000)`) overflows the
     // native stack and the host aborts (SIGABRT); with it, the call faults
@@ -238,31 +266,35 @@ pub(crate) fn lower_function<M: Module>(
     // `entry` block ends with this conditional branch.
     let body_entry = builder.create_block();
     let over_limit = builder.create_block();
-    // The depth this call found, saved so the epilogue can restore it rather
-    // than decrement. `entry` dominates every block, so this is defined
-    // everywhere the epilogues can run.
-    let saved_depth_var = builder.declare_var(types::I32);
+    // The budget this call found, saved so the epilogue can restore it rather
+    // than add this frame's cost back. `entry` dominates every block, so this is
+    // defined everywhere the epilogues can run.
+    let saved_left_var = builder.declare_var(types::I32);
+    // What this frame spends. One immediate, folded at compile time; also what
+    // the frame-size audit after `define_function` checks Cranelift against.
+    let this_frame_cost = praxis_runtime::frame_cost(slot_count.get());
     {
-        // Load `(*ctx).recursion_depth` (u32) at its fixed `#[repr(C)]` offset.
+        // Load `(*ctx).stack_left` (u32) at its fixed `#[repr(C)]` offset.
         // `MemFlags::trusted()` is aligned + notrap: the context is live for the
         // whole call and the offset is in-bounds by construction.
-        let depth = builder.ins().load(
+        let left = builder.ins().load(
             types::I32,
             MemFlags::trusted(),
             ctx_val,
-            RECURSION_DEPTH_OFFSET as i32,
+            STACK_LEFT_OFFSET as i32,
         );
-        builder.def_var(saved_depth_var, depth);
-        // Unsigned, and `>=` rather than `>`: the saturating add that used to
-        // keep the counter non-negative lives in a helper that no longer
-        // exists, and guarding before the bump means this frame is the
-        // (depth+1)-th, so `depth == MAX` is already one too many.
-        let over = builder.ins().icmp_imm_u(
-            IntCC::UnsignedGreaterThanOrEqual,
-            depth,
-            i64::from(praxis_runtime::MAX_RECURSION_DEPTH),
-        );
-        builder.ins().brif(over, over_limit, &[], body_entry, &[]);
+        builder.def_var(saved_left_var, left);
+        // Unsigned, and `<` rather than `<=`: a budget that exactly covers this
+        // frame buys it. Comparing before subtracting is also what keeps the
+        // arithmetic in range — the subtraction below only happens on the branch
+        // that has just proved it cannot underflow.
+        let exhausted =
+            builder
+                .ins()
+                .icmp_imm_u(IntCC::UnsignedLessThan, left, i64::from(this_frame_cost));
+        builder
+            .ins()
+            .brif(exhausted, over_limit, &[], body_entry, &[]);
     }
 
     // The stack-overflow fault epilogue: raise the fault, snapshot, and return
@@ -271,8 +303,8 @@ pub(crate) fn lower_function<M: Module>(
     // frame, so this is the one `return_` in the function that is not preceded
     // by an epilogue, and it is exactly the one path that skipped the prologue.
     //
-    // The snapshot taken here now reflects the caller's chain (at depth
-    // MAX_RECURSION_DEPTH) rather than the overflowing frame's — one frame
+    // The snapshot taken here reflects the caller's chain — at whatever depth
+    // exhausted the budget — rather than the overflowing frame's: one frame
     // shallower than before, same fault, same kind.
     {
         builder.switch_to_block(over_limit);
@@ -294,17 +326,18 @@ pub(crate) fn lower_function<M: Module>(
     // guard let through. Block 0's body follows it in the same block.
     builder.switch_to_block(body_entry);
 
-    // Prologue: claim this call's depth. Storing `depth + 1` rather than
-    // incrementing in place is the same load the guard already did, reused.
+    // Prologue: spend this call's share of the budget. Reached only from the
+    // branch that proved `left >= cost`, so the subtraction cannot wrap.
     {
-        let depth = builder.use_var(saved_depth_var);
-        #[allow(deprecated)] // iadd_imm_s vs iadd_imm: the immediate is 1.
-        let deeper = builder.ins().iadd_imm_s(depth, 1);
+        let left = builder.use_var(saved_left_var);
+        #[allow(deprecated)] // iadd_imm_s vs iadd_imm: a negative immediate is
+        // what this actually means, and the signed form says so.
+        let remaining = builder.ins().iadd_imm_s(left, -i64::from(this_frame_cost));
         builder.ins().store(
             MemFlags::trusted(),
-            deeper,
+            remaining,
             ctx_val,
-            RECURSION_DEPTH_OFFSET as i32,
+            STACK_LEFT_OFFSET as i32,
         );
     }
 
@@ -386,7 +419,7 @@ pub(crate) fn lower_function<M: Module>(
 
     let spill = SpillCtx {
         frame_var,
-        saved_depth_var,
+        saved_left_var,
         debug_values_var,
         debug_frame_var,
         slot_of: &gc_slot,
@@ -452,8 +485,60 @@ pub(crate) fn lower_function<M: Module>(
     // Resolve our FuncId (declared in the first pass) and define the function.
     let id = func_id_for(module, &mir.name)?;
     module.define_function(id, &mut ctx)?;
+    audit_frame_cost(&ctx, &mir.name, this_frame_cost);
     module.clear_context(&mut ctx);
     Ok(())
+}
+
+/// Check the prologue's byte model against the frame Cranelift actually laid
+/// out (ADR-105).
+///
+/// `frame_cost` is a *measurement* — `112 + 2 × slots` bytes, fitted by
+/// bisecting the abort depth of recursive programs under `ulimit -s` and rounded
+/// up. Measurements go stale: a Cranelift upgrade, a new target, or a lowering
+/// that spills more can widen the real frame past what the guard charged for it,
+/// and the symptom would be the SIGABRT this whole change exists to remove —
+/// appearing years later, in a build nobody connected to a codegen bump.
+///
+/// So the model is not trusted, it is audited. Cranelift knows the exact frame
+/// size once it has compiled the function, and this compares the two on every
+/// function of every program a debug build compiles — which is the entire test
+/// suite. A `debug_assert` rather than a hard error because the release compiler
+/// should not pay for it and because the charge is deliberately generous: being
+/// *over* is the safe direction and the assert only fires when it is under.
+///
+/// `MachBufferFrameLayout::frame_to_fp_offset` is Cranelift's own words for
+/// "offset from bottom of frame to FP (near top of frame)" — so it covers the
+/// clobber saves, the spill slots and the outgoing arguments, which is
+/// everything that varies with the function. What sits *above* FP is the setup
+/// area: the return address and the caller's saved frame pointer, one word each
+/// on both targets this backend supports.
+fn audit_frame_cost(ctx: &codegen::Context, name: &str, charged: u32) {
+    // Cheap in release (the whole body compiles away), so no `cfg` needed.
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    /// The return address and the saved frame pointer, which `frame_to_fp_offset`
+    /// measures *up to* rather than including.
+    const SETUP_AREA_BYTES: u32 = 16;
+    let Some(layout) = ctx
+        .compiled_code()
+        .and_then(|cc| cc.buffer.frame_layout().cloned())
+    else {
+        // No layout means no claim to check. Not an error: a target or a
+        // Cranelift version that does not publish one leaves the model
+        // unaudited, which is where it started.
+        return;
+    };
+    let actual = layout.frame_to_fp_offset.saturating_add(SETUP_AREA_BYTES);
+    debug_assert!(
+        actual <= charged,
+        "`{name}`'s native frame is {actual} bytes but its prologue only spends \
+         {charged} of the stack budget, so deep recursion through it would \
+         exhaust the native stack before the guard fires — which is the abort \
+         ADR-105 removed. Raise FRAME_BYTES_BASE / FRAME_BYTES_PER_SLOT to fit \
+         the frames this backend now emits."
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -634,9 +719,9 @@ struct SpillCtx<'a> {
     /// stack (ADR-101) — not a frame object. The spill indexes it directly, and
     /// the epilogue stores it back as the stack's `top`.
     frame_var: Variable,
-    /// `ctx.recursion_depth` as this call found it. The epilogue stores it back
-    /// rather than decrementing.
-    saved_depth_var: Variable,
+    /// `ctx.stack_left` as this call found it. The epilogue stores it back
+    /// rather than adding this frame's cost back on (ADR-105).
+    saved_left_var: Variable,
     /// The base of this call's run of slots inside the contiguous debug value
     /// stack (ADR-104). Written only by [`SpillCtx::store_debug_local`], and
     /// stored back as that stack's `top` by the epilogue.
@@ -866,21 +951,60 @@ fn lower_inst<M: Module>(
                     .expect("a composite allocation names its slot-filler")
             };
             match alloc {
-                AllocKind::Int { value }
-                | AllocKind::Bool { value }
-                | AllocKind::Char { value }
-                | AllocKind::Float { value } => {
-                    // The four scalar boxes are one shape: pass the payload
+                AllocKind::Bool { value } => {
+                    // Two loads and a `select`, not a call (ADR-110). See
+                    // `emit_inline_bool`: `praxis_alloc_bool` has not allocated
+                    // since ADR-040 Decision 4 and its row is `Effect::Pure`.
+                    let arg = builder.use_var(vars[value.0 as usize]);
+                    let result = emit_inline_bool(builder, ctx_val, arg);
+                    builder.def_var(vars[dst.0 as usize], result);
+                }
+                AllocKind::Int { value } => {
+                    // An intern-table probe behind an inline pacing test, with
+                    // `praxis_alloc_int` on the cold path (ADR-113). This arm is
+                    // rare — `lower_lit_gc` routes every *in-range* `Int`
+                    // literal to `Inst::ConstGc`, so what reaches here is the
+                    // out-of-range literal, which takes the cold path by
+                    // construction. It shares the helper with
+                    // `Inst::Materialize` anyway, because two spellings of one
+                    // sequence is how the pacing test goes missing from one of
+                    // them.
+                    let arg = builder.use_var(vars[value.0 as usize]);
+                    emit_inline_intern(
+                        builder,
+                        ctx_val,
+                        arg,
+                        vars[dst.0 as usize],
+                        praxis_runtime::small_int::INLINE_INTERN_SITE,
+                        ctor_sym,
+                        module,
+                        imports,
+                    )?;
+                }
+                AllocKind::Char { value } | AllocKind::Float { value } => {
+                    // The remaining scalar boxes are one shape: pass the payload
                     // word, take back the `GcRef`. `Float`'s scalar local
                     // holds the f64 bit pattern as an i64 and
                     // `praxis_alloc_float` reassembles the f64; `Char`'s is a
                     // u32 Unicode scalar the wrapper validates.
+                    //
+                    // `Char` has an intern table too (`small_char`, ADR-107) and
+                    // could take the arm above — but `AllocChar`'s manifest row
+                    // is `AllocatesAndFaults`, so an inline path must also let
+                    // an invalid code point reach the wrapper that raises
+                    // `InvalidChar`, and handover 23's P-4a may move the
+                    // validation into the table's bounds anyway. It is its own
+                    // item, not a rider on this one.
                     let arg = builder.use_var(vars[value.0 as usize]);
                     let result = call_symbol(builder, ctx_val, &[arg], ctor_sym, module, imports)?;
                     builder.def_var(vars[dst.0 as usize], result);
                 }
                 AllocKind::Unit => {
-                    let result = call_symbol(builder, ctx_val, &[], ctor_sym, module, imports)?;
+                    // One load, not a call (ADR-110). `praxis_alloc_unit` reads
+                    // `ctx.unit_ref` and returns it; its row is `Effect::Pure`
+                    // and `load_unit_sentinel` is the same load every fault
+                    // epilogue in the backend already emits.
+                    let result = load_unit_sentinel(builder, ctx_val);
                     builder.def_var(vars[dst.0 as usize], result);
                 }
                 AllocKind::Text { value } => {
@@ -1101,20 +1225,59 @@ fn lower_inst<M: Module>(
             debug: _,
         } => {
             // Materialize re-boxes a scalar → it allocates → safepoint.
+            //
+            // The spill stays ahead of every arm below, including the two that
+            // no longer call anything. `Inst::Materialize` is an unconditional
+            // safepoint in MIR, which is a MIR-level property about which
+            // instructions the collector may run at — not a backend arm's to
+            // narrow from what it happens to emit (ADR-110). It is also what
+            // makes the cold arms correct without further thought: the roots are
+            // in the shadow frame before the branch, so the wrapper may collect.
             spill.spill_roots(builder, roots, vars);
-            // A scalar payload re-boxed: Int → praxis_alloc_int, Bool →
-            // alloc_bool, Char → praxis_alloc_char. The mapping is
-            // `ScalarKind::alloc_symbol`, for `ExtractScalar`'s reason above.
             let src_val = builder.use_var(vars[src.0 as usize]);
-            let result = call_symbol(
-                builder,
-                ctx_val,
-                &[src_val],
-                scalar.alloc_symbol(),
-                module,
-                imports,
-            )?;
-            builder.def_var(vars[dst.0 as usize], result);
+            match scalar {
+                ScalarKind::Bool => {
+                    // Two loads and a `select`, no branch (ADR-110).
+                    // `praxis_alloc_bool`'s row is `Effect::Pure` and it has not
+                    // allocated since ADR-040 decision 4.
+                    let result = emit_inline_bool(builder, ctx_val, src_val);
+                    builder.def_var(vars[dst.0 as usize], result);
+                }
+                ScalarKind::Int => {
+                    // **The hot allocating instruction in the language.** Every
+                    // loop counter, every accumulator, every fused-pipeline sink
+                    // arrives here, and for a value in `small_int`'s range the
+                    // answer is an object the runtime minted before `main` ran.
+                    // An inline pacing test and an inline table probe, with
+                    // `praxis_alloc_int` cold behind both (ADR-113).
+                    emit_inline_intern(
+                        builder,
+                        ctx_val,
+                        src_val,
+                        vars[dst.0 as usize],
+                        praxis_runtime::small_int::INLINE_INTERN_SITE,
+                        scalar.alloc_symbol(),
+                        module,
+                        imports,
+                    )?;
+                }
+                ScalarKind::Char | ScalarKind::Float | ScalarKind::Byte => {
+                    // A scalar payload re-boxed: Char → praxis_alloc_char, Float
+                    // → praxis_alloc_float. The mapping is
+                    // `ScalarKind::alloc_symbol`, for `ExtractScalar`'s reason
+                    // above — and it is what refuses `Byte`, which is reserved
+                    // and unwired, rather than this match deciding it.
+                    let result = call_symbol(
+                        builder,
+                        ctx_val,
+                        &[src_val],
+                        scalar.alloc_symbol(),
+                        module,
+                        imports,
+                    )?;
+                    builder.def_var(vars[dst.0 as usize], result);
+                }
+            }
         }
         Inst::StoreScalar { .. } => {
             // M4 scalars are immutable objects; StoreScalar is a no-op placeholder
@@ -1713,21 +1876,23 @@ fn lower_terminator<M: Module>(
 }
 
 /// Emit the shadow-stack epilogue (ADR-019, ADR-101): give this frame's slots
-/// back and restore the call depth. Two stores, no call.
+/// back and restore the stack budget. Two stores, no call.
 ///
 /// Both restore an absolute the prologue saved rather than undoing an
-/// increment. The extern helper this replaced decremented `recursion_depth`
-/// with a `saturating_sub` precisely because a fault path could otherwise
-/// underflow it; there is nothing to saturate when the value being written is
-/// the one this call found on entry, and an imbalance introduced below this
-/// frame cannot leak upward past it.
+/// increment. The extern helper this replaced decremented the counter with a
+/// `saturating_sub` precisely because a fault path could otherwise underflow
+/// it; there is nothing to saturate when the value being written is the one
+/// this call found on entry, and an imbalance introduced below this frame
+/// cannot leak upward past it. That is also why ADR-105's variable-width charge
+/// costs the epilogue nothing: restoring an absolute does not need to know what
+/// was added.
 fn emit_pop_shadow_frame(builder: &mut FunctionBuilder, ctx_val: Value, spill: &SpillCtx<'_>) {
-    let saved_depth = builder.use_var(spill.saved_depth_var);
+    let saved_left = builder.use_var(spill.saved_left_var);
     builder.ins().store(
         MemFlags::trusted(),
-        saved_depth,
+        saved_left,
         ctx_val,
-        RECURSION_DEPTH_OFFSET as i32,
+        STACK_LEFT_OFFSET as i32,
     );
     let base = builder.use_var(spill.frame_var);
     emit_slot_stack_pop(builder, ctx_val, SHADOW_OFFSET, base);
@@ -1839,6 +2004,202 @@ fn load_unit_sentinel(builder: &mut FunctionBuilder, ctx: Value) -> Value {
         .load(GC, MemFlags::trusted(), ctx, UNIT_REF_OFFSET as i32)
 }
 
+/// Materialize a `Bool` from a scalar payload word, inline (ADR-110).
+///
+/// `praxis_alloc_bool`'s whole body is `ctx.true_ref` / `ctx.false_ref` — it has
+/// not allocated since ADR-040 Decision 4 stopped twenty-four wrappers minting a
+/// fresh immortal per call, and its manifest row has said `Effect::Pure` ever
+/// since. So the call around it was buying a `bl`, a `catch_unwind` landing pad
+/// and a return, in front of two loads and a `select`.
+///
+/// No branch and no cold block: unlike the interned-`Int` probe there is no
+/// range to test, because there are exactly two `Bool`s and both are always in
+/// the context. Both loads are unconditional and the `select` picks one, which
+/// is branchless and cheaper than the `brif` a two-block form would emit.
+///
+/// `value` is the payload word MIR carries a `Bool` scalar in, so "true" is
+/// `!= 0` rather than `== 1` — the same test `praxis_alloc_bool` applies, and
+/// deliberately not `== 1`: a byte that is neither is an invalid `bool`, and
+/// `ScalarLoad::BoolByte` documents why the runtime never materializes one.
+fn emit_inline_bool(builder: &mut FunctionBuilder, ctx: Value, value: Value) -> Value {
+    let t = builder
+        .ins()
+        .load(GC, MemFlags::trusted(), ctx, TRUE_REF_OFFSET as i32);
+    let f = builder
+        .ins()
+        .load(GC, MemFlags::trusted(), ctx, FALSE_REF_OFFSET as i32);
+    // `_u` vs `_s` is immaterial for a zero immediate; the unsigned form is the
+    // one the rest of this file reaches for.
+    let is_true = builder.ins().icmp_imm_u(IntCC::NotEqual, value, 0);
+    builder.ins().select(is_true, t, f)
+}
+
+/// Box a scalar by probing the runtime's intern table inline, with the
+/// allocating wrapper on a cold path (ADR-113).
+///
+/// ```text
+/// hot:   heap  = load.i64  [ctx  + site.heap_offset()]
+///        since = load.i64  [heap + site.bytes_since_collect_offset()]
+///        thr   = load.i64  [heap + site.collect_threshold_offset()]
+///        due   = icmp uge  since, thr
+///                brif due, slow, probe                 ; ADR-040's obligation
+/// probe: index = iadd_imm  value, -site.min()
+///        ok    = icmp_imm  ule index, site.span()      ; one compare, not two
+///                brif ok, fast, slow
+/// fast:  off   = ishl_imm  index, site.stride_shift()
+///        base  = load.i64  [ctx + site.table_offset()]
+///        r     = load.i64  [base + off]
+/// slow:  (cold) r = call praxis_alloc_int(ctx, value)  ; unchanged
+/// ```
+///
+/// # What this replaces, and why it was the largest site left
+///
+/// `Inst::Materialize` is the hot allocating instruction in the language: every
+/// loop counter, every accumulator, every fused-pipeline sink. For `Int` it was
+/// a `bl` to `praxis_alloc_int`, an `abi_guard!` `catch_unwind` landing pad, a
+/// `RuntimeRoots::from_context` (five raw pointers read out of the context and
+/// four branches), a `Heap::pace` and a `Heap::maybe_collect` — and then, for the
+/// overwhelmingly common case, `int_ref` answered from a two-load table read
+/// having allocated nothing at all. Everything in front of that read is what
+/// this deletes; the read itself is the same read.
+///
+/// # The pacing test is first, and it is the whole ADR-040 argument
+///
+/// ADR-040 made `Heap::alloc` take a `#[must_use] Safepoint` whose only producer
+/// is `Heap::pace`, so that "allocate on the paced path without pacing" has no
+/// spelling. This sequence forges no token, because **the token is permission to
+/// *collect*, not permission to allocate** — and this path never collects and
+/// never allocates. It reads an immortal the runtime minted before `main` ran.
+///
+/// What it must not do is take that branch when a collection *was* due, because
+/// then a program whose pressure came from elsewhere would have its collection
+/// silently deferred at every one of these sites. Hence the first branch: when
+/// `Heap::collection_is_due` holds, this goes to the wrapper, which paces
+/// through `Heap::pace` exactly as it always did. On the branch it keeps,
+/// `maybe_collect` would have returned `false` — `collect_inner` would not have
+/// run, `RuntimeRoots::from_context` has no effects, and `int_ref`'s interned
+/// arm charges nothing against `bytes_since_collect`. So the two paths are
+/// equal, instruction for instruction of *observable effect*, and ADR-100
+/// decision 3 ("`int_ref` still paces, even when it answers from the table") is
+/// preserved rather than traded: the collector is still offered its turn at
+/// every site where it would have taken one.
+///
+/// The `site` is [`praxis_runtime::InlineInternSite`], and it carries the pacing
+/// offsets as well as the table's — deliberately not as two arguments, so that a
+/// caller cannot hold the permission without the obligation. Its doc, and
+/// `Heap::collection_is_due`'s, are where a pacer with a third term is told that
+/// this function owes the same change.
+///
+/// # The range test is one unsigned compare
+///
+/// `small_int::index_of` is `v >= MIN && v <= MAX`, two signed compares and two
+/// branches. The emitted form is the two's-complement identity for the same
+/// predicate — `(v - MIN) as u64 <= (MAX - MIN) as u64` — which is one compare,
+/// one branch, and it reuses the subtract the index needs anyway. Both immediates
+/// come off the site rather than from `SMALL_INT_MIN`/`SMALL_INT_MAX` read here,
+/// and `the_unsigned_range_test_generated_code_emits_answers_index_of` in
+/// `small_int.rs` proves the two agree over the boundary values and both extremes
+/// of the type.
+///
+/// # Flags
+///
+/// `MemFlags::trusted()` — `notrap + aligned`, and deliberately **not**
+/// `readonly`, for `emit_scalar_load`'s reason: `bytes_since_collect` is written
+/// by every allocating wrapper, so Cranelift's alias analysis must go on treating
+/// a call as clobbering it. Hoisting the pacing load out of a loop would turn a
+/// collection into one that never happens. (Two of these sites with no call
+/// between them may share the load, and that is sound in the other direction —
+/// neither of them wrote it.)
+#[allow(clippy::too_many_arguments)] // The lowering context, as `lower_inst` carries it.
+fn emit_inline_intern<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx_val: Value,
+    value: Value,
+    dst: Variable,
+    site: praxis_runtime::InlineInternSite,
+    sym: RuntimeSymbol,
+    module: &mut M,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
+) -> Result<()> {
+    let flags = MemFlags::trusted();
+
+    let probe = builder.create_block();
+    let fast = builder.create_block();
+    let slow = builder.create_block();
+    let merge = builder.create_block();
+    // Cold-block placement runs in the machine-independent lowering
+    // (`BlockLoweringOrder` reads `Layout::is_cold`), so it applies at
+    // `opt_level = "none"` too — the level this was measured at. Both edges
+    // into it are "unlikely", and neither is on the path a loop counter takes.
+    builder.set_cold_block(slow);
+
+    // (1) The pacing predicate, ahead of everything. `Heap::collection_is_due`
+    // is the one statement of it; this is its second reader and the only one
+    // that cannot call it.
+    let heap = builder
+        .ins()
+        .load(GC, flags, ctx_val, site.heap_offset() as i32);
+    let since = builder
+        .ins()
+        .load(GC, flags, heap, site.bytes_since_collect_offset() as i32);
+    let threshold = builder
+        .ins()
+        .load(GC, flags, heap, site.collect_threshold_offset() as i32);
+    let due = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, since, threshold);
+    builder.ins().brif(due, slow, &[], probe, &[]);
+
+    // (2) Membership: one subtract, one unsigned compare.
+    builder.switch_to_block(probe);
+    // `_s`: the addend is `-min`, which is negative whenever the table's floor
+    // is positive. Sign-extending it is what keeps this the same subtraction
+    // `index_of` performs for a range that does not straddle zero.
+    let index = builder.ins().iadd_imm_s(value, site.min().wrapping_neg());
+    let in_range =
+        builder
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, index, site.span() as i64);
+    builder.ins().brif(in_range, fast, &[], slow, &[]);
+
+    // (3) The table read `Inst::ConstGc` already emits for a literal, with the
+    // index computed at run time instead of folded — `load_gc_const`'s
+    // `GcConst::SmallInt` arm is the same two loads with a constant
+    // displacement.
+    builder.switch_to_block(fast);
+    {
+        let offset = builder
+            .ins()
+            .ishl_imm_u(index, i64::from(site.stride_shift()));
+        let base = builder
+            .ins()
+            .load(GC, flags, ctx_val, site.table_offset() as i32);
+        let slot = builder.ins().iadd(base, offset);
+        let interned = builder.ins().load(GC, flags, slot, 0);
+        builder.def_var(dst, interned);
+        builder.ins().jump(merge, &[]);
+    }
+
+    // (4) The wrapper, unchanged: same `#[no_mangle]`, same `abi_guard!`, same
+    // manifest row, same address arm. It is what paces when a collection is due
+    // and what allocates when the value is out of range, and keeping it as the
+    // callee is what makes "the answer is what it always was" a property of the
+    // code rather than of this comment.
+    builder.switch_to_block(slow);
+    {
+        let result = call_symbol(builder, ctx_val, &[value], sym, module, imports)?;
+        builder.def_var(dst, result);
+        builder.ins().jump(merge, &[]);
+    }
+
+    // `def_var` in both arms rather than a block parameter, as `emit_scalar_load`
+    // does — and the builder is left switched to `merge`, which `lower_inst`'s
+    // caller relies on: `spill.store_debug_defs` runs immediately afterwards and
+    // must land where both arms are visible.
+    builder.switch_to_block(merge);
+    Ok(())
+}
+
 /// Load a [`GcConst`] — a reference the runtime minted at startup — out of the
 /// live context. [`load_unit_sentinel`]'s shape, one indirection deeper.
 ///
@@ -1936,12 +2297,15 @@ fn inline_scalar_load_of(
             core::mem::align_of::<scalars::FloatPayload>(),
             ScalarLoad::Word,
         ),
-        // `Byte` is reserved and unwired, and its `load_symbol()` is `IntLoad`
-        // — an eight-byte read of a one-byte payload, chosen "defensively" when
-        // nothing emitted it. Giving that an inline form would be REP-37 by
-        // construction: the descriptor check would prove `INT` of a value that
-        // is not one, or prove nothing at all. Keep the call, which at least
-        // refuses inside `int_payload`'s bounded reader.
+        // `Byte` is reserved and unwired, and it has no wrapper to inline: since
+        // ADR-108's companion change its `load_symbol()` and `alloc_symbol()`
+        // both refuse rather than answering `IntLoad`/`AllocInt`. They used to
+        // answer the `Int` ones "defensively" while nothing emitted them, which
+        // was an eight-byte read of a one-byte payload waiting for the day
+        // `Byte` was wired. Returning `None` here is the same refusal one layer
+        // up, and it is what keeps this arm from ever reaching the panic: an
+        // inline form would be REP-37 by construction anyway, because the
+        // descriptor check would prove `INT` of a value that is not one.
         ScalarKind::Byte => return None,
     })
 }
@@ -2943,8 +3307,11 @@ mod tests {
     /// out by displacement rather than by opcode: the descriptor check reads a
     /// pointer, so "the IR contains a `load.i64`" is true of every kind and
     /// says nothing. The payload sits at `payload_offset_for(align)`, which is
-    /// 24 for all four scalars — the same number `Inst::EnumTag` folds — and
-    /// Cranelift prints the displacement as `+24`.
+    /// 16 for all four scalars — the same number `Inst::EnumTag` folds — and
+    /// Cranelift prints the displacement as `+16`. (It was 24 until ADR-109
+    /// deleted `GcHeader::size`; this helper derives the number from
+    /// `payload_offset_for` rather than spelling it, so only this sentence
+    /// needed the edit, which is ADR-039 Decision 1 doing its job.)
     fn payload_load(ir: &str, align: usize) -> String {
         let displacement = format!("+{}", praxis_runtime::GcHeader::payload_offset_for(align));
         let mut hits = ir
@@ -3065,9 +3432,11 @@ mod tests {
     fn a_reserved_byte_scalar_keeps_its_call() {
         assert!(
             inline_scalar_load_of(praxis_mir::ScalarKind::Byte).is_none(),
-            "`Byte`'s load_symbol() is `IntLoad` — an eight-byte read of a \
-             one-byte payload, chosen defensively while nothing emitted it. \
-             Inlining that would be REP-37 by construction."
+            "`Byte` has no wrapper to inline — `load_symbol()` refuses rather \
+             than answering `IntLoad`, which would be an eight-byte read of a \
+             one-byte payload. This arm must return `None` before that refusal \
+             is reached, and inlining anything here would be REP-37 by \
+             construction."
         );
         for wired in [
             praxis_mir::ScalarKind::Int,
@@ -3123,6 +3492,210 @@ mod tests {
                  is not the descriptor's"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-113: the shape `Inst::Materialize { Int }` emits.
+    //
+    // Same reason as the block above, with one addition that makes these the
+    // *only* gate on half of the change. The pacing test is invisible to every
+    // behavioural test that could be written: a program cannot tell "the
+    // collector was offered a turn and declined" from "the collector was not
+    // offered a turn", because in the state the fast path runs in those two are
+    // the same thing. What separates them is whether the compare is in the
+    // instruction stream at all, and that is what these read.
+    // -----------------------------------------------------------------------
+
+    /// The emitted `Materialize { Int }`, as text plus its entry block.
+    fn inline_intern_ir() -> (String, String) {
+        emitted_ir(|b, ctx, dst, m| {
+            let value = b.ins().iconst(GC, 7);
+            emit_inline_intern(
+                b,
+                ctx,
+                value,
+                dst,
+                praxis_runtime::small_int::INLINE_INTERN_SITE,
+                RuntimeSymbol::AllocInt,
+                m,
+                &mut HashMap::new(),
+            )
+        })
+    }
+
+    /// **The ADR-040 obligation, as an assertion about the instruction
+    /// stream.**
+    ///
+    /// The inline path forges no `Safepoint` because it never collects and never
+    /// allocates — but that argument holds only on the branch where
+    /// `Heap::collection_is_due` is false, so the compare has to be there and it
+    /// has to come first. Both pacing words are loaded in the entry block, they
+    /// are compared, and the branch on the result is the entry block's
+    /// terminator: nothing about the value being boxed has been looked at yet.
+    ///
+    /// This is the test that fails if someone "simplifies" the sequence by
+    /// probing the table first and testing the counter only on the miss. That
+    /// version is faster and it is the defect ADR-113 exists to forbid: a
+    /// program whose pressure came from `Text` or `Vec` would have every
+    /// collection deferred at every loop counter in between.
+    #[test]
+    fn an_inline_int_box_tests_the_pacing_counter_before_it_reads_the_table() {
+        let (all, entry) = inline_intern_ir();
+        let site = praxis_runtime::small_int::INLINE_INTERN_SITE;
+
+        for (what, offset) in [
+            ("the heap pointer", site.heap_offset()),
+            ("bytes_since_collect", site.bytes_since_collect_offset()),
+            ("collect_threshold", site.collect_threshold_offset()),
+        ] {
+            assert!(
+                entry.contains(&format!("+{offset}")) || offset == 0,
+                "{what} must be loaded in the entry block, at +{offset}:\n{all}"
+            );
+        }
+        assert!(
+            entry.contains("icmp uge"),
+            "the pacing predicate is `since >= threshold`, unsigned — the same \
+             compare `Heap::collection_is_due` applies:\n{all}"
+        );
+        let last = entry
+            .lines()
+            .rfind(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        assert!(
+            last.starts_with("brif "),
+            "and the branch on it is the entry block's terminator, so the \
+             counter is tested before anything else; found `{last}`:\n{entry}"
+        );
+        assert!(
+            !entry.contains(&format!("+{}", site.table_offset())),
+            "the table base must NOT be read before the pacing branch: a load \
+             there would be harmless, but it is the shape a reordering of this \
+             sequence takes, and the reordering is the defect:\n{all}"
+        );
+    }
+
+    /// The probe itself: one subtract, one unsigned compare against the span,
+    /// and a scaled load out of the table — the immediates all off the site.
+    #[test]
+    fn an_inline_int_box_probes_the_intern_table_before_it_allocates() {
+        let (all, entry) = inline_intern_ir();
+        let site = praxis_runtime::small_int::INLINE_INTERN_SITE;
+
+        // The `_imm` builders materialize their operand as an `iconst`, so each
+        // immediate is asserted as the constant it becomes. Taking every one of
+        // them off `site` is the point: not one of the three numbers below is
+        // written in this file, and a range change in `small_int.rs` moves them
+        // all without touching the backend.
+        assert!(
+            all.contains(&format!("iconst.i64 {}", site.min().wrapping_neg())),
+            "the index is `value - min`, and `min` is the table's:\n{all}"
+        );
+        assert!(
+            all.contains("icmp ule"),
+            "membership is **one** unsigned compare, not two signed ones — \
+             `(value - min) as u64 <= span` is `index_of` for every i64, and it \
+             costs one branch where the two-compare form costs two:\n{all}"
+        );
+        assert!(
+            all.contains(&format!("iconst.i64 {}", site.span())),
+            "and the bound it compares against is the site's span ({}), the \
+             table's own width rather than one this file wrote:\n{all}",
+            site.span()
+        );
+        assert!(
+            all.contains("ishl"),
+            "the index is scaled by a shift, not a multiply — nothing \
+             strength-reduces an `imul` at `opt_level = \"none\"`:\n{all}"
+        );
+        assert!(
+            all.contains(&format!("iconst.i64 {}", site.stride_shift())),
+            "by log2 of the table's stride:\n{all}"
+        );
+        assert!(
+            all.contains(&format!("+{}", site.table_offset())),
+            "the table base comes out of the context at the site's offset:\n{all}"
+        );
+        assert!(
+            !entry.contains("call "),
+            "and the hot path calls nothing at all — which is the whole change: \
+             `praxis_alloc_int`'s `bl`, its `catch_unwind` landing pad, its \
+             `RuntimeRoots::from_context` and its `maybe_collect` all stood in \
+             front of a two-load table read:\n{all}"
+        );
+    }
+
+    /// Exactly one block is cold, it is the one that calls `praxis_alloc_int`,
+    /// and no hot block calls anything.
+    ///
+    /// `an_overflow_report_is_a_branch_to_a_cold_block` for the allocation path,
+    /// with one difference worth pinning: this cold block has **two**
+    /// predecessors — the pacing branch and the range branch — so "one cold
+    /// block" also says the two bail-outs share a callee rather than each
+    /// growing their own.
+    #[test]
+    fn the_only_block_that_calls_praxis_alloc_int_is_the_cold_one() {
+        let mut module = test_module();
+        let mut ctx = module.make_context();
+        let mut sig = Signature::new(module.isa().default_call_conv());
+        sig.params.push(AbiParam::new(GC));
+        sig.returns.push(AbiParam::new(GC));
+        ctx.func.signature = sig;
+
+        let mut fn_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fn_ctx);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let ctx_val = builder.block_params(entry)[0];
+        let dst = builder.declare_var(GC);
+        let value = builder.ins().iconst(GC, 7);
+        emit_inline_intern(
+            &mut builder,
+            ctx_val,
+            value,
+            dst,
+            praxis_runtime::small_int::INLINE_INTERN_SITE,
+            RuntimeSymbol::AllocInt,
+            &mut module,
+            &mut HashMap::new(),
+        )
+        .expect("emission");
+        let out = builder.use_var(dst);
+        builder.ins().return_(&[out]);
+        builder.seal_all_blocks();
+        builder.finalize(module.isa().frontend_config());
+
+        let all = ctx.func.display().to_string();
+        let cold: Vec<_> = ctx
+            .func
+            .layout
+            .blocks()
+            .filter(|&b| ctx.func.layout.is_cold(b))
+            .collect();
+        assert_eq!(cold.len(), 1, "exactly the wrapper block is cold:\n{all}");
+        assert!(
+            block_text(&all, cold[0]).contains("call "),
+            "and it is the one that calls the wrapper:\n{all}"
+        );
+        for block in ctx.func.layout.blocks() {
+            if ctx.func.layout.is_cold(block) {
+                continue;
+            }
+            assert!(
+                !block_text(&all, block).contains("call "),
+                "no hot block may call: {block} does:\n{all}"
+            );
+        }
+        // Two edges into the one cold block, which is what says the pacing
+        // bail-out and the out-of-range bail-out share the wrapper.
+        let edges = all.matches(&format!("{}", cold[0])).count();
+        assert!(
+            edges >= 3,
+            "the cold block should be named by its label and by both branches \
+             into it; found {edges} mentions:\n{all}"
+        );
     }
 
     /// The overflow report is a branch to a cold block, not a call per op.

@@ -217,7 +217,7 @@ runtime_symbols! {
     AllocFloat = "praxis_alloc_float": (Ctx, RawI64) -> Gc, Allocates;
     AllocInt = "praxis_alloc_int": (Ctx, RawI64) -> Gc, Allocates;
     AllocRecord = "praxis_alloc_record": (Ctx, Ptr) -> Gc, Allocates;
-    AllocText = "praxis_alloc_text": (Ctx, Ptr, Ptr) -> Gc, AllocatesAndFaults;
+    AllocText = "praxis_alloc_text": (Ctx, Ptr, Ptr) -> Gc, Allocates;
     AllocTuple = "praxis_alloc_tuple": (Ctx, Ptr) -> Gc, Allocates;
     AllocUnit = "praxis_alloc_unit": (Ctx) -> GcUnit, Pure;
     AllocVarCell = "praxis_alloc_var_cell": (Ctx, Gc) -> Gc, Allocates;
@@ -536,6 +536,41 @@ mod tests {
                 sym.name()
             );
         }
+    }
+
+    /// **ADR-111.** `praxis_alloc_text` trusts its bytes, and the row is where
+    /// that is said.
+    ///
+    /// The UTF-8 requirement is the caller's precondition, not a runtime
+    /// judgement: the compiler's bytes come from a Rust `String` unbroken from
+    /// `Lit::Text` through `Generation::alloc_str`, and the one runtime caller
+    /// that holds raw host bytes (`praxis_get_input`) validates them itself. A
+    /// violation panics into `abi_guard!` and aborts; it never sets a fault.
+    ///
+    /// Written as an assertion rather than left to the manifest because the row
+    /// is read by three things at once and only this one is visible: it decides
+    /// whether `Inst::Alloc { AllocKind::Text }` is followed by a `CheckFault`
+    /// (ADR-088), whether a `Text` literal in a loop is hoisted into the
+    /// preheader (ADR-108 §3), and whether `panic_fault_is_observable` lets the
+    /// wrapper's panic path abort. A later edit marking it faulting again would
+    /// silently restore 41 corpus checks, un-hoist every `Text` literal, and
+    /// make the abort a fault — this makes it a failing test instead.
+    #[test]
+    fn alloc_text_trusts_its_bytes_and_the_row_says_so() {
+        assert_eq!(
+            RuntimeSymbol::AllocText.sig().effect,
+            Effect::Allocates,
+            "`praxis_alloc_text`'s UTF-8 requirement is its caller's precondition \
+             (ADR-111); declaring it faulting puts a check back after every text \
+             literal and takes `Text` back out of the ADR-108 hoist"
+        );
+        // And the wrapper the fault moved *to* still declares it, or the
+        // relocation would read as a deletion.
+        assert!(
+            RuntimeSymbol::GetInput.faults(),
+            "`praxis_get_input` holds raw host bytes and raises `InvalidText` \
+             itself, so the fault still lands at the `read`"
+        );
     }
 
     /// Spot-check the rows the compiler is most sensitive to: the two that take
