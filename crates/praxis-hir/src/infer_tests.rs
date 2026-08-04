@@ -6674,7 +6674,7 @@ fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
 fn a_closure_parameter_is_a_pattern_and_must_match_every_argument() {
     // Each name binds at its own component's type, which a parameter that named
     // the whole argument could not do.
-    let src = "var v = Vec()\nv.push((1, \"a\"))\nvar s = v.map(|(n, t)| t).collect()\nout(s)\n";
+    let src = "var v = Vec()\nv.push((1, \"a\"))\nvar s = v.map(|(n, t)| t)\nout(s)\n";
     assert_eq!(scheme_of(src, "n").as_deref(), Some("Int"));
     assert_eq!(scheme_of(src, "t").as_deref(), Some("Text"));
 
@@ -6686,7 +6686,7 @@ fn a_closure_parameter_is_a_pattern_and_must_match_every_argument() {
 
     // A bare name still binds the whole argument — the shape every existing
     // program is written with, and the one `Param::name` still answers for.
-    let src = "var v = Vec()\nv.push((1, 2))\nvar s = v.map(|kv| kv.0).collect()\nout(s)\n";
+    let src = "var v = Vec()\nv.push((1, 2))\nvar s = v.map(|kv| kv.0)\nout(s)\n";
     assert_eq!(scheme_of(src, "kv").as_deref(), Some("(Int, Int)"));
 
     // The annotation belongs to the whole argument, and it pins the components.

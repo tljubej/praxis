@@ -18,6 +18,14 @@ concerns.
 > reassigns is neither. `Y009` is retired. See
 > [ADR-125](./docs/decisions/125-a-binding-is-a-binding-and-the-compiler-decides-its-storage.md).
 >
+> **`.collect()` is gone too**, and for the opposite reason — not because it did
+> too much but because it did nothing. A pipeline is eagerly materialized, so a
+> chain that ends on a stage already answers a `Vec`: `v.map(f).collect()` and
+> `v.map(f)` compiled to the same loop. It was the lazy-`Seq[T]` design's bridge
+> in a pipeline that has no laziness to end, and no program in the corpus ever
+> wrote it. See
+> [ADR-126](./docs/decisions/126-a-pipeline-materializes-and-collect-named-a-step-it-takes-anyway.md).
+>
 > `praxis lsp` is a real JSON-RPC process over stdio (ADR-095: one synchronous
 > loop, no async runtime). It serves document synchronization with incremental
 > revisions, diagnostics, hover, completion including receiver methods,

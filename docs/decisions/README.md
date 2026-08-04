@@ -158,3 +158,4 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-123: *reserved* — W12, two code variants selected by `--debug never`; handover 26 defers it](./123-slug.md)
 - [ADR-124: A field and a sequence element are places, and a store replaces what is already there](./124-a-field-and-a-sequence-element-are-places.md)
 - [ADR-125: A binding is a binding, and the compiler decides its storage](./125-a-binding-is-a-binding-and-the-compiler-decides-its-storage.md)
+- [ADR-126: A pipeline materializes on its own, and `collect` named a step it takes anyway](./126-a-pipeline-materializes-and-collect-named-a-step-it-takes-anyway.md)

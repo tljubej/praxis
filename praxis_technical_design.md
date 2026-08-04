@@ -693,11 +693,15 @@ Example entries:
 ```text
 Vec[T].push(T) -> Unit
 Vec[T].len() -> Int
-Vec[T].map((T) -> U) -> Seq[U]
+Vec[T].map((T) -> U) -> Vec[U]
 Text.ints() -> Vec[Int]
 Map[K,V].get(K) -> Option[V]
-Grid[T].neighbors4(Point) -> Seq[Point]
+Grid[T].neighbors4(Point) -> Vec[Point]
 ```
+
+The two sequence rows answer `Vec`, not the `Seq[U]` they once wrote: §6.3's
+pipeline is eagerly materialized, so `Seq[T]` is a name for a fused chain's
+*intermediate* and never a row's result type (ADR-028 decision 2, ADR-126).
 
 Every row is a method, including the ones that take no arguments, and every call
 site writes the parentheses: `v.len()`, `grid.width()`. There is no property form
@@ -826,7 +830,8 @@ Initial operations:
 - `max`
 - `min_by`
 - `max_by`
-- `collect`
+
+**There is no `collect`, and this is the one place the list is shorter than a Rust programmer expects.** A chain that ends on a streaming combinator materializes on its own — `v.map(f)` *is* a `Vec[U]`, and the compiler appends the materializing step whether or not anything is written to ask for it. So the spelling named a stage the compiler takes anyway, and `v.map(f).collect()` and `v.map(f)` compiled to the same loop (ADR-126). The method a lazy `Seq[T]` would need is the method to add if `Seq[T]` ever becomes a value; until then the pipeline has no laziness for it to end.
 
 The compiler lowers pipelines into concrete internal adapters, then fuses common chains into loops. Every non-barrier combinator fuses into a single loop over the source — `v.map(f).filter(p).sum()` compiles to one loop with zero intermediate Vecs (ADR-029). A **barrier** needs the whole sequence before it can answer anything, so it is a runtime call rather than a fused stage: a chain ends at one and begins again from its result. `sorted`, `unique` and `frequencies` are implemented as barriers (REP-33). `chunks` and `windows` remain deferred — they answer `Vec[Vec[T]]`, which needs a rule for what the outer vector's element type is labelled with, and nothing in this document forces one.
 

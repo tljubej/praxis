@@ -1856,13 +1856,22 @@ fn pipeline_filter_keeps_matching() {
     assert_eq!(result.as_int(), 6);
 }
 
+/// **ADR-126.** A chain that ends on a stage materializes with nothing written
+/// to say so — the `Collect` sink the recognizer appends is the whole of it.
+///
+/// This was `pipeline_collect_materializes`, and it read `var copy = v.collect()`
+/// on a bare `Vec`: zero stages, so the sink's loop copied `v` element by element
+/// and the method's one observable effect was a shallow copy nobody asked it for.
+/// The sink is unchanged; what is gone is the spelling. A stage is what puts the
+/// binding on the sink's path, so a stage is what this binds through.
 #[test]
-fn pipeline_collect_materializes() {
-    // collect into a Vec, then len.
-    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var copy = v.collect()\n  copy.len()\n}\n";
+fn pipeline_materializes_without_a_written_sink() {
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var doubled = v.map(|x| x * 2)\n  doubled.len() * 1000 + doubled.sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), 3);
+    // 3 elements, and `[2, 4, 6]` rather than three of anything else — a `len`
+    // alone passes on a Vec that materialized the wrong values.
+    assert_eq!(result.as_int(), 3012);
 }
 
 #[test]
@@ -1970,7 +1979,7 @@ fn pipeline_fused_chain_survives_gc_stress() {
     // the loop, exactly like the source cursor, so a root set that did not cover
     // them would hand the collector a stale word — and after MIR-01/MIR-02, a
     // slot the liveness pass misses is nulled rather than merely stale.
-    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  var t = 0\n  for p in v.filter(|x| x > 100).enumerate().take(3).collect() { t = t + p.0 * 1000 + p.1 }\n  t\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  var t = 0\n  for p in v.filter(|x| x > 100).enumerate().take(3) { t = t + p.0 * 1000 + p.1 }\n  t\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // Filtered is 101..=299; enumerate numbers it densely from zero; take(3)
@@ -2260,14 +2269,14 @@ fn enumerate_after_filter_numbers_the_filtered_sequence() {
     // Weighted 100*index + value: 2 + 104 = 106. Reading source indices would
     // give (1,2), (3,4) → 406, and a swap of the halves gives something else
     // again.
-    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var t = 0\n  for p in v.filter(|x| x % 2 == 0).enumerate().collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var t = 0\n  for p in v.filter(|x| x % 2 == 0).enumerate() { t = t + p.0 * 100 + p.1 }\n  t\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 106);
 
     // And after a `skip`, which drops from the front: [1,2,3,4].skip(2) is
     // [3,4], numbered (0,3), (1,4) → 3 + 104 = 107.
-    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var t = 0\n  for p in v.skip(2).enumerate().collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var t = 0\n  for p in v.skip(2).enumerate() { t = t + p.0 * 100 + p.1 }\n  t\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 107);
@@ -2452,7 +2461,7 @@ fn filter_map_drops_the_nones_rather_than_carrying_them() {
 /// without any type error to hide behind.
 #[test]
 fn a_filter_map_that_matches_nothing_yields_nothing() {
-    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.filter_map(|x| if x > 100 { Some(x) } else { None }).collect().len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.filter_map(|x| if x > 100 { Some(x) } else { None }).len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -7619,7 +7628,7 @@ fn a_fused_pair_carries_both_of_its_halves() {
     // different weights fails on a swap as well as on a drop.
     let (rt, result) = run_main(
         "fn main() -> Int {\n  var v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  \
-         var t = 0\n  for p in v.enumerate().collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n",
+         var t = 0\n  for p in v.enumerate() { t = t + p.0 * 100 + p.1 }\n  t\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 360, "(0,10) + (1,20) + (2,30), weighted");
@@ -7628,7 +7637,7 @@ fn a_fused_pair_carries_both_of_its_halves() {
     let (rt, result) = run_main(
         "fn main() -> Int {\n  var a = Vec()\n  a.push(1)\n  a.push(2)\n  \
          var b = Vec()\n  b.push(30)\n  b.push(40)\n  \
-         var t = 0\n  for p in a.zip(b).collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n",
+         var t = 0\n  for p in a.zip(b) { t = t + p.0 * 100 + p.1 }\n  t\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 370, "(1,30) + (2,40), weighted");
@@ -7639,8 +7648,8 @@ fn a_fused_pair_carries_both_of_its_halves() {
     let (rt, result) = run_main(
         "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  \
          var w = Vec()\n  w.push(1)\n  w.push(9)\n  \
-         var same = v.enumerate().collect() == v.enumerate().collect()\n  \
-         var diff = v.enumerate().collect() == w.enumerate().collect()\n  \
+         var same = v.enumerate() == v.enumerate()\n  \
+         var diff = v.enumerate() == w.enumerate()\n  \
          if same { 10 } else { 0 } + if diff { 1 } else { 0 }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());

@@ -106,8 +106,6 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(seq_count_on_seq())
         .entry(seq_count_if_on_vec())
         .entry(seq_count_if_on_seq())
-        .entry(seq_collect_on_vec())
-        .entry(seq_collect_on_seq())
         // The barrier combinators (§6.3). Runtime symbols rather than
         // intrinsics, and on `Vec[T]` only — see the block comment above their
         // definitions, including why `chunks`/`windows` are still absent.
@@ -1812,7 +1810,8 @@ fn grid_rotate_right() -> MethodEntry {
 // (no runtime representation); the combinators are intrinsics the compiler
 // fuses into a single loop over the source. Streaming combinators (map/filter)
 // are defined on BOTH Vec[T] and Seq[T] so a chain can start on a concrete
-// collection and continue on Seq. Sinks (sum/count/collect/fold) terminate.
+// collection and continue on Seq. Sinks (sum/count/fold) terminate, and a chain
+// that ends without one materializes anyway (ADR-126).
 
 /// The `Seq[T]` receiver pattern (compiler-internal, §6.3).
 fn seq_of_t() -> TypePattern {
@@ -2032,31 +2031,12 @@ fn seq_count_on_seq() -> MethodEntry {
     }
 }
 
-fn seq_collect_on_vec() -> MethodEntry {
-    MethodEntry {
-        receiver: vec_of_t(),
-        name: "collect",
-        params: vec![],
-        result: vec_of_t(),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_collect"),
-        doc: "Materialize the elements into a Vec.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_collect_on_seq() -> MethodEntry {
-    MethodEntry {
-        receiver: seq_of_t(),
-        name: "collect",
-        params: vec![],
-        result: vec_of_t(),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_collect"),
-        doc: "Materialize the elements into a Vec.",
-        stability: Stability::Stable,
-    }
-}
+// **There is no `collect` row, and ADR-126 is why.** A chain that ends on a
+// streaming stage already materializes: `recognize_pipeline` appends the
+// `Collect` sink itself, so `v.map(f)` *is* a `Vec[U]` and `v.map(f).collect()`
+// built the identical plan. The row was the lazy `Seq[T]` design's bridge, and
+// this pipeline is eager (ADR-028 decision 2) — it named a step the compiler
+// takes whether or not it is written.
 
 // --- the barrier combinators (§6.3) ---------------------------------------
 //

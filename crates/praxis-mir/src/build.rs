@@ -2917,6 +2917,11 @@ fn pair_ty_of(db: &praxis_types::TypeDb, ty: Type) -> MirType {
 
 /// Classify a single `MethodCall` node as a terminal sink, or `None` if it's a
 /// streaming stage / unrecognized method.
+///
+/// **`Sink::Collect` has no arm here, and ADR-126 is why.** It is the sink the
+/// caller *appends* when a chain ends on a stage, never one a name selects: the
+/// `collect` method is gone from the catalog, so a call carrying that name no
+/// longer reaches MIR at all (inference reports `Y110` first).
 fn classify_sink(name: &str, args: &[TypedExpr]) -> Option<Sink> {
     Some(match (name, args) {
         ("sum", []) => Sink::Sum,
@@ -2935,15 +2940,15 @@ fn classify_sink(name: &str, args: &[TypedExpr]) -> Option<Sink> {
             f: Box::new(f.clone()),
         },
         ("reduce", [f]) => Sink::Reduce(Box::new(f.clone())),
-        ("collect", []) => Sink::Collect,
         _ => return None,
     })
 }
 
 /// Recognize a pipeline chain rooted at `expr`. Returns `Some(plan)` if `expr`
-/// is a `MethodCall` whose outermost call is a recognized sink, a recognized
-/// streaming stage (in which case an implicit `Collect` is appended so the chain
-/// yields a Vec — mirroring the eager `v.map(f)` behavior), or `collect`; and
+/// is a `MethodCall` whose outermost call is a recognized sink, or a recognized
+/// streaming stage (in which case a `Collect` is appended so the chain yields a
+/// Vec — the eager `v.map(f)` behavior, and since ADR-126 the *only* way that
+/// sink is selected); and
 /// whose receiver chain is a sequence of recognized streaming stages. Any
 /// non-pipeline `MethodCall` receiver (e.g. `.len()`, `.push(x)`) terminates the
 /// walk — that inner call lowers eagerly via the existing path, and *its* result
