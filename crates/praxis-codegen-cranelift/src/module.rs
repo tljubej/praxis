@@ -63,35 +63,51 @@ pub struct Jit {
 /// than left to `JITBuilder::new`'s empty list, so the decision is visible at
 /// the point it takes effect.
 ///
-/// **`opt_level` is `"none"`, and the question is closed.** It was measured four
-/// times. Handover 21 §3.7 and 22 §4 were both negative and explained it with
-/// "the mid-end has nothing to work with when the loop body is a chain of opaque
-/// calls"; ADR-113 removed exactly that, and the third measurement was the first
-/// non-null one — `collatz` −6.3%, `primes` −1.6%, the other five inside ±0.5% —
-/// which is why the note that stood here ended "try it again after P-1b".
+/// **`opt_level` is `"speed"`, on the fifth measurement, and the four before it
+/// were all looking in the wrong place.**
 ///
-/// Handover 25 §3 settled it without waiting, by comparing the *code* instead of
-/// the clock. Same program, same binary, the flag toggled:
+/// Handover 21 §3.7 and 22 §4 were negative and explained it with "the mid-end
+/// has nothing to work with when the loop body is a chain of opaque calls".
+/// ADR-113 removed one such call and the third measurement was the first
+/// non-null one (`collatz` −6.3%). Handover 25 §3 then closed the question
+/// *permanently* by comparing the code instead of the clock — same program, flag
+/// toggled, **216 instructions in the hot loop either way**, the same
+/// instructions — and concluded that what the lowering emits is simply not
+/// redundant to Cranelift, so redundancy in the loop is the lowering's to
+/// remove. That sentence ended "this is the last measurement the flag gets".
 ///
-/// | | hot loop | whole function |
+/// It was not. Re-run after handover 26's round, two independent passes,
+/// `benchmarks/ab.py`, arms differing in this constant alone:
+///
+/// | | pass 1 | pass 2 |
 /// |---|---:|---:|
-/// | `"none"` | 216 instrs | 473 |
-/// | `"speed"` | 216 instrs | 471 |
+/// | `collatz` | +16.7% ± 0.7% | **+16.5% ± 0.8%** |
+/// | `tree` | +4.0% ± 0.6% | **+4.2% ± 0.3%** |
+/// | `primes` | −1.1% | −1.0% |
+/// | `bfs` | −1.2% | −1.1% |
 ///
-/// **Zero difference in the loop** — not "within noise", the same instructions.
-/// That retires the explanation carried since 21 and replaces it with a sharper
-/// one: what the lowering emits is not redundant *to Cranelift*. The register
-/// allocator rematerializes descriptor addresses on purpose rather than keeping
-/// them live, the loads are through memory it cannot prove non-aliasing, and the
-/// type proofs compare against addresses it cannot fold. Redundancy in the loop
-/// is the **lowering's** to remove, and every item in handover 26's plan removes
-/// it there. This is the last measurement the flag gets.
+/// Suite geometric mean **1.025×**; the other four rows are inside the 2% floor.
+/// `primes` and `bfs` are a real if unresolved *cost* and are recorded rather
+/// than netted away.
+///
+/// **Every previous measurement, including the one that closed it, looked at the
+/// loop body — and the win is not there.** With `"speed"` the hot cycle is *two
+/// instructions longer*, on handover 25 §3's own sample loop (115→117) and on
+/// `collatz` (123→125). What moves is the whole function: `collatz` goes 805→761
+/// instructions, **3460→3208 bytes (−7%)**, and 38→34 cold blocks. The mid-end
+/// is cleaning up the out-of-line paths ADR-117's fold and ADR-119's three
+/// bail-outs put there, which is an I-cache and layout effect that a
+/// per-iteration instruction count structurally cannot see. Handover 25 §3's
+/// reasoning was sound and its instrument was wrong — it proved the loop body
+/// unchanged, which was true, and inferred that nothing changed, which was not.
+///
+/// Compile time is +0.1 ms on a 6.9 ms floor, measured the same day.
 ///
 /// Cranelift's settings builder is stringly typed, so a name or a value it does
 /// not know is an error from `JITBuilder::with_flags` at run time and not a build
 /// failure. `the_opt_level_flag_is_accepted_and_takes_effect` is the build
 /// failure.
-pub(crate) const CRANELIFT_FLAGS: &[(&str, &str)] = &[("opt_level", "none")];
+pub(crate) const CRANELIFT_FLAGS: &[(&str, &str)] = &[("opt_level", "speed")];
 
 impl Jit {
     /// Create a fresh JIT with the `praxis_*` symbols registered, in its own
@@ -318,9 +334,10 @@ mod tests {
         let jit = Jit::new().expect("the explicit flags must be accepted");
         assert_eq!(
             jit.module.isa().flags().opt_level(),
-            cranelift::codegen::settings::OptLevel::None,
-            "handover 25 §3 closed this: `\"speed\"` emitted the same 216 \
-             instructions in the hot loop and 2 fewer in the whole function"
+            cranelift::codegen::settings::OptLevel::Speed,
+            "the fifth measurement reopened this: `collatz` +16.5%, `tree` \
+             +4.2%, both reproduced, and the mechanism is code size rather \
+             than the loop body"
         );
     }
 

@@ -394,22 +394,31 @@ paragraph exists to prevent.
    W10 and will absorb credit from it** — W10 made each box cheaper, W8-S1
    removes the box — so whichever is measured second reports less, and the ADR
    must say which it is.
-2. **`opt_level = "speed"` — one sweep, and re-opening it needs the reason
-   stated, which is here.** Handover 25 §3 closed it and `CRANELIFT_FLAGS`'s doc
-   says "this is the last measurement the flag gets", on the grounds that what
-   the lowering emits is not redundant *to Cranelift*: the register allocator
-   rematerializes descriptor addresses on purpose, the loads are through memory
-   it cannot prove non-aliasing, and the proofs compare against addresses it
-   cannot fold. **The first of those three no longer describes the loop.** W6
-   deleted 27 `movz`/`movk` from the sample loop's 215 and there are no
-   descriptor immediates left at a proof site; W8-S0 deleted the box/unbox
-   pairs; W4b and W10 deleted the last opaque calls, and W10 replaced one with
-   46 instructions of straight-line address arithmetic with folded immediates —
-   which is exactly the material an egraph mid-end works on and which, at
-   `"none"`, never runs. ADR-113 already recorded the first non-null result the
-   flag ever produced (`collatz` −6.3%) immediately after removing *one* opaque
-   call from that loop. This is one `ab.py` sweep and zero lines of code, and it
-   is the cheapest thing on the list per unit of information.
+2. ~~**`opt_level = "speed"` — one sweep**~~ — **run, and landed.** It is
+   `"speed"` now; `CRANELIFT_FLAGS`'s doc carries the measurement. `collatz`
+   **+16.5%** and `tree` **+4.2%**, each reproduced across two independent
+   passes; `primes` −1.0% and `bfs` −1.1% are a real if unresolved cost and are
+   recorded rather than netted; suite geometric mean **1.025×**. One test moved
+   (the one that pins the flag's value) and compile time went +0.1 ms on a
+   6.9 ms floor.
+
+   **And the reason given for re-opening it was wrong, which is why this belongs
+   in §3 as much as here.** The argument above — that W6, W8-S0, W4b and W10
+   left the mid-end foldable material *in the loop* — predicted a shorter loop
+   body. The loop body is **two instructions longer** at `"speed"`, on handover
+   25 §3's own sample loop and on `collatz`. What moves is whole-function size:
+   `collatz` 805→761 instructions, **3460→3208 bytes**, 38→34 cold blocks. The
+   mid-end is cleaning up the out-of-line paths ADR-117's fold and ADR-119's
+   three bail-outs created — an I-cache and layout effect that a per-iteration
+   count structurally cannot see.
+
+   So handover 25 §3 was not wrong about what it measured. It measured the loop
+   body, correctly, found it unchanged, and inferred that nothing changed. **The
+   fourth time this round that a real effect turned out to be invisible to
+   instruction counting** — after W4b, whose every static count rose while `bfs`
+   gained 12%; W10, whose 46-instruction claim beat the call it replaced; and
+   W6/W7, whose "the clock cannot resolve this" the clock resolved in both
+   directions. A count is evidence about a shape, never about a cost.
 3. **W12 / two code variants selected at `Jit::new`.** Moved up, because a piece
    of its ledger is now measured rather than estimated: W8-S0b alone is **2.4% of
    the suite, resolved on five of eight rows**, against handover 25's 3.4%
