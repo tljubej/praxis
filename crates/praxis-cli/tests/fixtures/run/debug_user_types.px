@@ -1,0 +1,21 @@
+// A faulting program whose frame holds locals of *user-declared* types, which
+// is the case DBG-06 was reported for: `p`, `type` and `heap` all answered
+// ``type error: unknown type `Foo` `` — to `p foo`, and equally to `p 1 + 2`,
+// because the synthetic module annotated every local in the frame and declared
+// none of them.
+struct Poo { z: Text }
+
+struct Foo { x: Poo, y: Int }
+
+enum Move {
+    Step(Int, Int)
+    Stay
+}
+
+var foo = Foo{x: Poo{z: "asdasd"}, y: 2}
+foo.x.z = "qweqwe"
+foo.y = 100
+var move = Step(3, 4)
+var vec1 = [[[1,2],[3,4],[1]]]
+
+vec1[2][0] = [100]

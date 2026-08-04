@@ -1,0 +1,13 @@
+// Eight top-level bindings, then a fault. The `p` evaluator used to count the
+// *frame's* locals against its ABI arity ceiling, so this program could not
+// evaluate `p 1 + 2` — a refusal about the program, issued before the
+// expression was read (DBG-06).
+var a = 1
+var b = 2
+var c = 3
+var d = 4
+var e = 5
+var f = 6
+var g = 7
+var xs = [1]
+out(xs[5])

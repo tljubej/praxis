@@ -1,0 +1,9 @@
+// A parser template's *anonymous* structural record (§5.6) in the faulting
+// frame. `{ x: Int, y: Int }` is how it renders and there is no such syntax in
+// type position, so the synthetic module's parameter list did not parse and
+// every command answered "parse error: expected a type" (DBG-06). It gets a
+// minted declaration now, and `type` still reports the structural form.
+var points = parse("1,2\n3,4", lines(`{x:int},{y:int}`))
+var empty = Vec()
+var xs = [1]
+out(xs[5])

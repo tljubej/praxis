@@ -1084,6 +1084,167 @@ fn m10b_ws5_heap_literal() {
 }
 
 // ===========================================================================
+// DBG-06 — a frame's locals must not decide whether `p` works at all.
+//
+// The synthetic `fn __p_expr(<typed params>) { EXPR }` annotated *every* local
+// in the frame with `TypeDb::render`, which prints for a human rather than for
+// the parser. Three kinds of local therefore broke the whole module — and with
+// it every command, `p 1 + 2` included, which names no local at all:
+//
+//   - a user `struct`/`enum`, rendered as a bare name the synthetic module
+//     never declares (``unknown type `Foo` ``);
+//   - a parser template's anonymous record, rendered `{ x: Int, y: Int }`, for
+//     which type position has no syntax ("parse error: expected a type");
+//   - a seventh local of any kind, against an ABI arity ceiling that counted
+//     the frame instead of the expression.
+//
+// An expression now binds only the locals it names, and those are spelled by
+// `praxis_debugger::synth`, which emits the declarations it needs and declines
+// the types it cannot write.
+// ===========================================================================
+
+#[test]
+fn dbg06_p_evaluates_a_struct_local_and_its_fields() {
+    let (_code, out) =
+        run_repl_with_cmds("debug_user_types.px", "p foo\np foo.y\np foo.x.z\nquit\n");
+    assert!(
+        !out.contains("unknown type"),
+        "the struct's declaration reaches the synthetic module: {out}"
+    );
+    assert!(
+        out.contains("{ x: { z: qweqwe }, y: 100 }"),
+        "`p foo` prints the record: {out}"
+    );
+    // A field read lowers to an indexed load, so these also prove the emitted
+    // declaration put the fields in the order the value has them.
+    assert!(
+        out.contains("100"),
+        "`p foo.y` reads the second field: {out}"
+    );
+    assert!(
+        out.contains("qweqwe"),
+        "`p foo.x.z` reads through the nested record: {out}"
+    );
+}
+
+#[test]
+fn dbg06_type_and_heap_report_user_declared_types() {
+    let (_code, out) = run_repl_with_cmds(
+        "debug_user_types.px",
+        "type foo\nheap foo\ntype move\np move\nquit\n",
+    );
+    assert!(out.contains("Foo"), "`type foo` is `Foo`: {out}");
+    assert!(
+        out.contains("Foo: { x: { z: qweqwe }, y: 100 }"),
+        "`heap foo` prefixes the value with its type: {out}"
+    );
+    assert!(out.contains("Move"), "`type move` is `Move`: {out}");
+    assert!(
+        out.contains("Step(3, 4)"),
+        "an enum local evaluates to its variant: {out}"
+    );
+}
+
+#[test]
+fn dbg06_a_literal_expression_ignores_the_frames_locals() {
+    // The headline symptom: `p 1 + 2` failed in a program that merely *had* a
+    // struct local, because the frame was annotated before the expression was
+    // read.
+    for fixture in [
+        "debug_user_types.px",
+        "debug_many_locals.px",
+        "debug_template_record.px",
+    ] {
+        let (_code, out) = run_repl_with_cmds(fixture, "p 1 + 2\nquit\n");
+        // The banner's own "error: program faulted" is the fault that opened
+        // the REPL; what must not appear is a reply to the command.
+        assert!(
+            out.contains("Praxis crash> 3"),
+            "`p 1 + 2` is 3 on {fixture}: {out}"
+        );
+    }
+}
+
+#[test]
+fn dbg06_arity_ceiling_counts_the_expressions_names() {
+    // Eight locals in the frame, three named by the expression.
+    let (_code, out) = run_repl_with_cmds("debug_many_locals.px", "p a + b + c\nquit\n");
+    assert!(
+        !out.contains("supports up to"),
+        "eight locals in the frame do not refuse a three-name expression: {out}"
+    );
+    assert!(out.contains('6'), "a + b + c is 6: {out}");
+}
+
+#[test]
+fn dbg06_p_evaluates_a_parser_templates_anonymous_record() {
+    let (_code, out) = run_repl_with_cmds(
+        "debug_template_record.px",
+        "p points\ntype points\np points[0].x\nheap points[0]\nquit\n",
+    );
+    assert!(
+        !out.contains("expected a type"),
+        "the anonymous record is declared under a minted name: {out}"
+    );
+    assert!(
+        out.contains("[{ x: 1, y: 2 }, { x: 3, y: 4 }]"),
+        "`p points` prints the parsed records: {out}"
+    );
+    // The minted name is an implementation detail and must not surface.
+    assert!(
+        out.contains("Vec[{ x: Int, y: Int }]"),
+        "`type points` reports the structural type: {out}"
+    );
+    assert!(
+        !out.contains("__p_rec"),
+        "no minted name reaches the user: {out}"
+    );
+    assert!(
+        out.contains("{ x: Int, y: Int }: { x: 1, y: 2 }"),
+        "`heap points[0]` reports the element's type and value: {out}"
+    );
+}
+
+#[test]
+fn dbg06_an_expression_can_write_a_type_the_program_declares() {
+    // Spelling a local's type reaches only the types some local *has*. A
+    // `struct` written in the expression, and an `enum` written through its
+    // variants, are declarations the module needs just as much.
+    let (_code, out) = run_repl_with_cmds(
+        "debug_user_types.px",
+        "p Foo{x: Poo{z: \"hi\"}, y: 1}\np Stay\np match Step(6, 7) { Step(a, b) => a + b, Stay => 0 }\nquit\n",
+    );
+    assert!(
+        out.contains("{ x: { z: hi }, y: 1 }"),
+        "a record literal builds a value of the program's type: {out}"
+    );
+    assert!(
+        out.contains("Praxis crash> Stay"),
+        "a payload-less variant evaluates: {out}"
+    );
+    assert!(
+        out.contains("13"),
+        "a match over a constructed variant evaluates: {out}"
+    );
+}
+
+#[test]
+fn dbg06_an_unspellable_local_says_why_it_is_missing() {
+    // `var empty = Vec()` types as `Vec[?T]`, which has no source spelling, so
+    // the local is dropped — and the failure says which local and why, rather
+    // than reporting a name the `locals` listing plainly shows as undefined.
+    let (_code, out) = run_repl_with_cmds("debug_template_record.px", "p empty\nquit\n");
+    assert!(
+        out.contains("local `empty` was not bound"),
+        "the drop is explained: {out}"
+    );
+    assert!(
+        out.contains("Vec[?T]"),
+        "…with the type that stopped it: {out}"
+    );
+}
+
+// ===========================================================================
 // M10b WS6 — `restart` / `reload` (§9.7).
 //
 // `restart` reruns the same compiled code+input (re-faulting deterministically).

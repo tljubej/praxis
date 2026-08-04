@@ -560,6 +560,28 @@ impl TypeDb {
         &self.enum_defs[def.to_u32() as usize]
     }
 
+    /// Every registered record definition with its id, in registration order.
+    ///
+    /// The arena is otherwise navigated *from a type inward*, which is enough
+    /// for the compiler: a def is only interesting when something has that type.
+    /// The crash debugger asks the other direction — "does this program declare
+    /// a `Pt`?", for an expression that names one without any local having that
+    /// type — and answering it by hand meant reaching into `record_defs`.
+    pub fn record_defs(&self) -> impl Iterator<Item = (RecordDefId, &RecordDef)> {
+        self.record_defs
+            .iter()
+            .enumerate()
+            .map(|(i, def)| (RecordDefId(i as u32), def))
+    }
+
+    /// Every registered enum definition with its id, in registration order.
+    pub fn enum_defs(&self) -> impl Iterator<Item = (EnumDefId, &EnumDef)> {
+        self.enum_defs
+            .iter()
+            .enumerate()
+            .map(|(i, def)| (EnumDefId(i as u32), def))
+    }
+
     /// Register a record definition (§4.5 nominal, §5.6 anonymous structural).
     ///
     /// `name` is `Some` for a source-declared record and `None` for an anonymous

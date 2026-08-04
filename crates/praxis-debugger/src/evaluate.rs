@@ -24,6 +24,28 @@
 //! arguments, rooted for the call (§12.3 "active debugger-expression
 //! arguments") so a GC inside the evaluator cannot collect them. Step 6 formats
 //! the returned `GcRef` via its descriptor (ADR-032: allocate on the main heap).
+//!
+//! # What the frame contributes (DBG-06)
+//!
+//! Only the locals the expression **names**. The frame used to contribute all
+//! of them, and since the synthetic function has to be *whole* to compile, one
+//! unusable local was a total failure — every command, `p 1 + 2` included, died
+//! on the frame rather than on the expression. Three ways a local was unusable,
+//! all reported by the user in one sitting:
+//!
+//! - its type named a `struct` or `enum` the synthetic module never declared
+//!   (``unknown type `Foo` ``);
+//! - its type had no source syntax at all — an anonymous `read lines(…)` record,
+//!   an unfilled `Vec()`'s `Vec[?T]` ("expected a type");
+//! - there were more than [`MAX_SUPPORTED_ARITY`] of them, so the arity check
+//!   refused the call before looking at what was asked.
+//!
+//! Binding by mention fixes the third outright and narrows the other two to the
+//! expression that actually asks for the local; [`crate::synth`] then declares
+//! what it can and refuses what it cannot, so an unusable local costs its own
+//! name and nothing else. The mention set is over-approximated from the
+//! expression's *tokens* — binding a local named `y` because `foo.y` was
+//! written is harmless, missing one is not.
 
 use std::io::Write;
 use std::rc::Rc;
@@ -61,10 +83,46 @@ struct LocalBinding {
     value: GcRef,
 }
 
-/// The maximum number of locals a frame may have for `p EXPR` to evaluate
-/// against it. The arity-dispatched call site supports up to this many ABI
-/// args (extend `call_multi` to raise it).
+/// The maximum number of locals **one expression may name**. The arity-dispatched
+/// call site supports up to this many ABI args (extend [`call_with_arity`] to
+/// raise it).
+///
+/// It used to bound the whole *frame*, which is a different and much smaller
+/// number to run out of: a program with seven top-level `var`s could not
+/// evaluate `p 1 + 2`, because the frame was counted before the expression was
+/// read. Six names in one debugger expression is a real ceiling; six bindings in
+/// a function is not.
 const MAX_SUPPORTED_ARITY: usize = 6;
+
+/// The synthetic module one command compiles, and what building it cost.
+struct Synthetic {
+    /// The full source: type declarations, then `fn __p_expr(…) { EXPR }`.
+    source: String,
+    /// The locals that became parameters, in ABI order.
+    bindings: Vec<LocalBinding>,
+    /// Locals the expression named that could not be bound, each with the type
+    /// that has no spelling. Attached to a failure as a note — on its own,
+    /// "unknown name `points`" about a name the `locals` listing plainly shows
+    /// is a worse answer than the truth.
+    unbound: Vec<(String, String)>,
+    /// Minted-name → structural-rendering pairs, so `type`/`heap` report the
+    /// type the user's program has and not the one this module invented.
+    minted: Vec<(String, String)>,
+}
+
+impl Synthetic {
+    /// Add what could not be bound to a pipeline failure, so a diagnostic about
+    /// a missing name says which local went missing and why.
+    fn explain(&self, err: String) -> String {
+        let mut out = err;
+        for (name, ty) in &self.unbound {
+            out.push_str(&format!(
+                "\nnote: local `{name}` was not bound — its type `{ty}` has no source spelling"
+            ));
+        }
+        out
+    }
+}
 
 /// The outcome of evaluating `p EXPR` / `type EXPR`. `Ok(string)` on success
 /// (the formatted value, or the rendered type); `Err(message)` for any
@@ -86,13 +144,13 @@ pub fn evaluate(
     expr_text: &str,
     generation: &Rc<Generation>,
 ) -> EvalResult {
-    let bindings = collect_bindings(frame, db);
-    let source = synthesize(db, &bindings, expr_text);
-    let (typed_fn, _expr_ty, _fresh_db) = build_pipeline(&source)?;
+    let synthetic = synthesize(db, frame, expr_text);
+    let (typed_fn, _expr_ty, _fresh_db) =
+        build_pipeline(&synthetic.source).map_err(|e| synthetic.explain(e))?;
     // Purity gate (§9.5, §19.10): reject mutating/diverging expressions. Runs
     // on the HIR tail expression, before JIT.
     assert_read_only(&typed_fn.body.tail)?;
-    let result = exec(runtime, snapshot, &bindings, &source, generation)?;
+    let result = exec(runtime, snapshot, &synthetic, generation)?;
     let mut out = String::new();
     result.format(&mut out);
     Ok(if out.is_empty() {
@@ -106,11 +164,13 @@ pub fn evaluate(
 /// (§9.4 `type EXPR`). Same synthesis + pipeline as `evaluate`, but stops
 /// before JIT/purity and renders the expression's type instead.
 pub fn type_of(db: &mut TypeDb, frame: &SnapshotFrame, expr_text: &str) -> EvalResult {
-    let bindings = collect_bindings(frame, db);
-    let source = synthesize(db, &bindings, expr_text);
-    match build_pipeline(&source) {
-        Ok((_typed_fn, expr_ty, fresh_db)) => Ok(fresh_db.render(expr_ty)),
-        Err(e) => Err(e),
+    let synthetic = synthesize(db, frame, expr_text);
+    match build_pipeline(&synthetic.source) {
+        Ok((_typed_fn, expr_ty, fresh_db)) => Ok(crate::synth::humanize(
+            &synthetic.minted,
+            &fresh_db.render(expr_ty),
+        )),
+        Err(e) => Err(synthetic.explain(e)),
     }
 }
 
@@ -128,12 +188,12 @@ pub fn heap(
     expr_text: &str,
     generation: &Rc<Generation>,
 ) -> EvalResult {
-    let bindings = collect_bindings(frame, db);
-    let source = synthesize(db, &bindings, expr_text);
-    let (typed_fn, expr_ty, fresh_db) = build_pipeline(&source)?;
+    let synthetic = synthesize(db, frame, expr_text);
+    let (typed_fn, expr_ty, fresh_db) =
+        build_pipeline(&synthetic.source).map_err(|e| synthetic.explain(e))?;
     assert_read_only(&typed_fn.body.tail)?;
-    let result = exec(runtime, snapshot, &bindings, &source, generation)?;
-    let type_str = fresh_db.render(expr_ty);
+    let result = exec(runtime, snapshot, &synthetic, generation)?;
+    let type_str = crate::synth::humanize(&synthetic.minted, &fresh_db.render(expr_ty));
     let mut value_str = String::new();
     result.format(&mut value_str);
     Ok(if value_str.is_empty() {
@@ -161,11 +221,21 @@ pub fn heap(
 /// The bridge reads the payload rather than guessing from the top-level
 /// descriptor, so a `Vec[Text]` is now a `Vec[Text]` here and not the `Vec[Int]`
 /// the hand-written map answered for every vector (DBG-02, bounded by P0-11).
-fn collect_bindings(frame: &SnapshotFrame, db: &mut TypeDb) -> Vec<LocalBinding> {
+///
+/// Only the locals `expr_text` **mentions** are candidates (DBG-06). Every local
+/// used to be one, which made the synthetic function's health a property of the
+/// frame rather than of the expression: one local the module could not declare,
+/// or a seventh local of any kind, and `p 1 + 2` failed too.
+fn collect_bindings(
+    frame: &SnapshotFrame,
+    db: &mut TypeDb,
+    mentioned: &std::collections::HashSet<String>,
+) -> Vec<LocalBinding> {
     let candidates: Vec<(u32, String, praxis_runtime::GcRef)> = frame
         .locals
         .iter()
         .filter(|l| l.is_user() && is_bindable_name(&l.name()))
+        .filter(|l| mentioned.contains(&l.name()))
         .filter_map(|l| {
             // `reference()` rather than the value: a local whose box ADR-120
             // elided holds a raw payload, and `p EXPR` binds *objects* — it
@@ -179,7 +249,7 @@ fn collect_bindings(frame: &SnapshotFrame, db: &mut TypeDb) -> Vec<LocalBinding>
                 .map(|value| (l.type_id, l.name().to_string(), value))
         })
         .collect();
-    candidates
+    let bindings: Vec<LocalBinding> = candidates
         .into_iter()
         .filter_map(|(type_id, name, value)| {
             // SAFETY: a `Some` value was spilled by generated code, and a
@@ -192,19 +262,105 @@ fn collect_bindings(frame: &SnapshotFrame, db: &mut TypeDb) -> Vec<LocalBinding>
             let ty = recovered.or_else(|| db.type_from_raw(type_id))?;
             Some(LocalBinding { name, ty, value })
         })
+        .collect();
+    keep_innermost(bindings)
+}
+
+/// The identifiers `expr_text` mentions, over-approximated from its tokens.
+///
+/// Over-approximation is the safe direction and the reason this is a lexer and
+/// not a resolver: `foo.y` yields `y` as well as `foo`, so a local named `y` is
+/// bound needlessly — costing one ABI argument — while *missing* a mention would
+/// silently drop a name the expression needs. Malformed input needs no special
+/// case either: `lex` is total, and the parse step reports the syntax error.
+fn mentioned_idents(expr_text: &str) -> std::collections::HashSet<String> {
+    praxis_parser::lex(praxis_source::FileId::SYNTHETIC, expr_text)
+        .tokens
+        .iter()
+        .filter(|t| t.kind == praxis_syntax::SyntaxKind::Ident)
+        .map(|t| expr_text[t.span.start().to_usize()..t.span.end().to_usize()].to_string())
         .collect()
 }
 
-/// Build the synthetic source `fn __p_expr(<typed params>) { EXPR }`.
-fn synthesize(db: &TypeDb, bindings: &[LocalBinding], expr_text: &str) -> String {
-    if bindings.is_empty() {
-        return format!("fn {P_EXPR_FN}() {{ {expr_text} }}");
-    }
-    let params: Vec<String> = bindings
-        .iter()
-        .map(|b| format!("{}: {}", b.name, db.render(b.ty)))
+/// Keep the last local of each name, preserving order.
+///
+/// A snapshot frame flattens every scope of its function, so a shadowed name
+/// appears once per binding — `var x = 1` and a block's `var x = "s"` are two
+/// locals both called `x`. Two parameters of one name compile (the later wins,
+/// which is the innermost one and the answer the user means), but a synthetic
+/// function whose signature *cannot* be malformed is worth more than relying on
+/// that: the duplicate is dropped here, and with it the ABI argument it would
+/// have consumed against [`MAX_SUPPORTED_ARITY`].
+fn keep_innermost(bindings: Vec<LocalBinding>) -> Vec<LocalBinding> {
+    let mut seen = std::collections::HashSet::new();
+    let mut kept: Vec<LocalBinding> = bindings
+        .into_iter()
+        .rev()
+        .filter(|b| seen.insert(b.name.clone()))
         .collect();
-    format!("fn {P_EXPR_FN}({}) {{ {expr_text} }}", params.join(", "))
+    kept.reverse();
+    kept
+}
+
+/// Build the synthetic module for `expr_text` against `frame`: the `struct`/
+/// `enum` declarations the parameter types need (see [`crate::synth`]), then
+/// `fn __p_expr(<typed params>) { EXPR }`.
+///
+/// A local whose type has no source spelling is left out rather than written
+/// down wrong — the module has to compile as a whole, so an unwritable
+/// annotation would take the expression with it.
+fn synthesize(db: &mut TypeDb, frame: &SnapshotFrame, expr_text: &str) -> Synthetic {
+    let mentioned = mentioned_idents(expr_text);
+    let candidates = collect_bindings(frame, db, &mentioned);
+    synthesize_from(db, candidates, &mentioned, expr_text)
+}
+
+/// The half of [`synthesize`] that turns already-collected bindings into a
+/// module. Split out because "which locals does this frame offer" and "what
+/// module do these bindings make" fail in different ways and are worth testing
+/// apart: the second one is where a type's spelling is decided.
+fn synthesize_from(
+    db: &mut TypeDb,
+    candidates: Vec<LocalBinding>,
+    mentioned: &std::collections::HashSet<String>,
+    expr_text: &str,
+) -> Synthetic {
+    let mut params = Vec::with_capacity(candidates.len());
+    let mut bindings = Vec::with_capacity(candidates.len());
+    let mut unspellable = Vec::new();
+    let mut speller = crate::synth::Speller::new(db);
+    for candidate in candidates {
+        match speller.spell(candidate.ty) {
+            Some(ty) => {
+                params.push(format!("{}: {ty}", candidate.name));
+                bindings.push(candidate);
+            }
+            None => unspellable.push((candidate.name, candidate.ty)),
+        }
+    }
+    // The types the *expression* names, which need not be any local's type:
+    // `p Pt{x: 1, y: 2}` and `type Move` name a declaration and no value.
+    speller.declare_named(mentioned);
+    let decls = speller.declarations();
+    let minted = speller.into_minted();
+    let unbound = unspellable
+        .into_iter()
+        .map(|(name, ty)| (name, db.render(ty)))
+        .collect();
+    // The declarations are their own statements, so the function starts on the
+    // next line; a module that declared nothing is exactly the one-line source
+    // this synthesis has always produced.
+    let source = format!(
+        "{decls}{}fn {P_EXPR_FN}({}) {{ {expr_text} }}",
+        if decls.is_empty() { "" } else { "\n" },
+        params.join(", ")
+    );
+    Synthetic {
+        source,
+        bindings,
+        unbound,
+        minted,
+    }
 }
 
 /// Run parse → analyze → lower on the synthetic source, returning the
@@ -248,13 +404,15 @@ fn build_pipeline(source: &str) -> Result<(praxis_hir::TypedFn, Type, TypeDb), S
 fn exec(
     runtime: &mut Runtime,
     snapshot: &CrashSnapshot,
-    bindings: &[LocalBinding],
-    source: &str,
+    synthetic: &Synthetic,
     generation: &Rc<Generation>,
 ) -> Result<GcRef, String> {
+    let Synthetic {
+        source, bindings, ..
+    } = synthetic;
     if bindings.len() > MAX_SUPPORTED_ARITY {
         return Err(format!(
-            "frame has {} named locals; `p` supports up to {MAX_SUPPORTED_ARITY}",
+            "the expression names {} locals; `p` supports up to {MAX_SUPPORTED_ARITY}",
             bindings.len()
         ));
     }
@@ -432,28 +590,251 @@ pub fn write_eval_result<W: Write>(out: &mut W, result: &EvalResult) -> std::io:
 mod tests {
     use super::*;
 
+    /// A frame with no bindable local synthesizes the zero-parameter function.
+    /// The leading newline is the (empty) declaration block; nothing depends on
+    /// it being absent, and the parser treats it as it treats any blank line.
     #[test]
     fn synthesize_no_locals_is_zero_arg() {
-        let db = TypeDb::new();
-        let src = synthesize(&db, &[], "1 + 2");
-        assert_eq!(src, "fn __p_expr() { 1 + 2 }");
+        let mut db = TypeDb::new();
+        let frame = frame_with(Vec::new());
+        let synthetic = synthesize(&mut db, &frame, "1 + 2");
+        assert_eq!(synthetic.source, "fn __p_expr() { 1 + 2 }");
+        assert!(synthetic.bindings.is_empty());
     }
 
     #[test]
     fn synthesize_with_typed_params() {
+        let runtime = Runtime::new();
         let mut db = TypeDb::new();
         let int = db.int();
-        // A real heap value: a `LocalBinding` carries a live `GcRef`, and
-        // `synthesize` reading only the name and type is not a licence to put
-        // an invalid one there.
-        let runtime = praxis_runtime::Runtime::new();
+        let frame = frame_with(vec![snapshot_local(
+            "n",
+            runtime.alloc_int(7),
+            int,
+            praxis_runtime::LOCAL_KIND_USER,
+        )]);
+        let synthetic = synthesize(&mut db, &frame, "n + 1");
+        assert_eq!(synthetic.source, "fn __p_expr(n: Int) { n + 1 }");
+    }
+
+    /// DBG-06, the reported defect, at the level `p` builds its module: a
+    /// `struct` local made the module name a type it never declared, so the
+    /// pipeline answered ``unknown type `Foo` `` — to `p foo`, and equally to
+    /// `p 1 + 2`, which names nothing.
+    #[test]
+    fn a_struct_local_brings_its_declaration_into_the_module() {
+        let runtime = Runtime::new();
+        let mut db = TypeDb::new();
+        let text = db.text();
+        let inner = db.record(
+            Some("Poo".to_string()),
+            praxis_types::FieldSet::from_pairs(vec![("z".to_string(), text)]).expect("one field"),
+        );
+        let int = db.int();
+        let foo = db.record(
+            Some("Foo".to_string()),
+            praxis_types::FieldSet::from_pairs(vec![
+                ("x".to_string(), inner),
+                ("y".to_string(), int),
+            ])
+            .expect("two fields"),
+        );
         let bindings = vec![LocalBinding {
-            name: "n".to_string(),
-            ty: int,
-            value: runtime.alloc_int(7),
+            name: "foo".to_string(),
+            ty: foo,
+            // A `LocalBinding` carries a live `GcRef`; that synthesis reads only
+            // the name and type is not a licence to put an invalid one there.
+            value: runtime.alloc_int(0),
         }];
-        let src = synthesize(&db, &bindings, "n + 1");
-        assert_eq!(src, "fn __p_expr(n: Int) { n + 1 }");
+
+        let synthetic = synthesize_from(&mut db, bindings, &mentioned_idents("foo.y"), "foo.y");
+        assert!(
+            synthetic.source.contains("struct Foo { x: Poo, y: Int }"),
+            "{}",
+            synthetic.source
+        );
+        assert!(
+            synthetic.source.contains("struct Poo { z: Text }"),
+            "the field's own type is declared too: {}",
+            synthetic.source
+        );
+        assert!(
+            synthetic.source.contains("fn __p_expr(foo: Foo) { foo.y }"),
+            "{}",
+            synthetic.source
+        );
+        build_pipeline(&synthetic.source).expect("the synthesized module type-checks");
+    }
+
+    /// …and the same struct local costs an expression that never mentions it
+    /// nothing at all. This is the half of DBG-06 that made the report "`p`
+    /// doesn't work" rather than "`p foo` doesn't work".
+    #[test]
+    fn an_expression_binds_only_the_locals_it_names() {
+        let runtime = Runtime::new();
+        let mut db = TypeDb::new();
+        let int = db.int();
+        let var = db.fresh_var();
+        let unwritable = db.record(
+            Some("Foo".to_string()),
+            praxis_types::FieldSet::from_pairs(vec![("v".to_string(), var)]).expect("one field"),
+        );
+        let locals = || {
+            vec![
+                LocalBinding {
+                    name: "foo".to_string(),
+                    ty: unwritable,
+                    value: runtime.alloc_int(1),
+                },
+                LocalBinding {
+                    name: "n".to_string(),
+                    ty: int,
+                    value: runtime.alloc_int(2),
+                },
+            ]
+        };
+
+        // What `collect_bindings` offers an expression that names nothing: no
+        // local at all, so the unusable one is not in the way.
+        let synthetic = synthesize_from(&mut db, Vec::new(), &mentioned_idents("1 + 2"), "1 + 2");
+        assert_eq!(synthetic.source, "fn __p_expr() { 1 + 2 }");
+        assert!(synthetic.unbound.is_empty(), "nothing was asked for");
+        build_pipeline(&synthetic.source).expect("`p 1 + 2` compiles beside a `struct` local");
+
+        // And with both offered, the unwritable one is dropped rather than
+        // taking the expression with it.
+        let synthetic = synthesize_from(&mut db, locals(), &mentioned_idents("n * 2"), "n * 2");
+        assert_eq!(synthetic.source, "fn __p_expr(n: Int) { n * 2 }");
+        assert_eq!(synthetic.unbound.len(), 1, "`foo` was dropped, not written");
+        build_pipeline(&synthetic.source).expect("the surviving binding compiles");
+    }
+
+    /// A local the expression *does* name but whose type has no spelling is
+    /// dropped — and the failure says so. "unknown name `foo`" about a name the
+    /// `locals` listing shows is the answer this note exists to replace.
+    #[test]
+    fn an_unspellable_local_is_dropped_with_an_explanation() {
+        let runtime = Runtime::new();
+        let mut db = TypeDb::new();
+        let var = db.fresh_var();
+        let vec_of_var = db
+            .collection(
+                praxis_types::CollectionCtor::Vec,
+                praxis_types::CollectionArgs::new(praxis_types::CollectionCtor::Vec, vec![var])
+                    .expect("Vec takes one arg"),
+            )
+            .expect("Vec[?T]");
+        let bindings = vec![LocalBinding {
+            name: "ys".to_string(),
+            ty: vec_of_var,
+            value: runtime.alloc_int(1),
+        }];
+
+        let synthetic =
+            synthesize_from(&mut db, bindings, &mentioned_idents("ys.len()"), "ys.len()");
+        assert_eq!(synthetic.source, "fn __p_expr() { ys.len() }");
+        let err = build_pipeline(&synthetic.source).expect_err("`ys` is not in scope");
+        let explained = synthetic.explain(err);
+        assert!(
+            explained.contains("local `ys` was not bound"),
+            "{explained}"
+        );
+        assert!(explained.contains("Vec[?T]"), "{explained}");
+    }
+
+    /// A shadowed name is two locals in one flattened frame. Both used to become
+    /// parameters — legal, since the later wins, but it spent an ABI slot on a
+    /// binding nothing could refer to. The innermost is the one kept.
+    #[test]
+    fn a_shadowed_local_binds_once_innermost() {
+        let runtime = Runtime::new();
+        let mut db = TypeDb::new();
+        let int = db.int();
+        let text = db.text();
+        let frame = frame_with(vec![
+            snapshot_local(
+                "x",
+                runtime.alloc_int(1),
+                int,
+                praxis_runtime::LOCAL_KIND_USER,
+            ),
+            snapshot_local(
+                "x",
+                runtime.alloc_text("inner"),
+                text,
+                praxis_runtime::LOCAL_KIND_USER,
+            ),
+        ]);
+        let synthetic = synthesize(&mut db, &frame, "x");
+        assert_eq!(synthetic.source, "fn __p_expr(x: Text) { x }");
+        assert_eq!(synthetic.bindings.len(), 1);
+    }
+
+    /// The arity ceiling counts what the *expression* names, not what the frame
+    /// holds. Eight top-level `var`s used to mean `p 1 + 2` reported "frame has
+    /// 8 named locals" — a refusal about the program, before the expression was
+    /// even parsed.
+    #[test]
+    fn the_arity_ceiling_counts_the_expressions_names_not_the_frames() {
+        let runtime = Runtime::new();
+        let mut db = TypeDb::new();
+        let int = db.int();
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        let frame = frame_with(
+            names
+                .iter()
+                .map(|n| {
+                    snapshot_local(
+                        n,
+                        runtime.alloc_int(1),
+                        int,
+                        praxis_runtime::LOCAL_KIND_USER,
+                    )
+                })
+                .collect(),
+        );
+        let snapshot = CrashSnapshot {
+            frames: vec![frame],
+            fault_kind: praxis_runtime::FaultKind::IndexOutOfBounds,
+        };
+        let mut runtime = Runtime::new();
+        let generation = Rc::new(Generation::new());
+
+        assert_eq!(
+            evaluate(
+                &mut db,
+                &mut runtime,
+                &snapshot,
+                &snapshot.frames[0],
+                "1 + 2",
+                &generation,
+            ),
+            Ok("3".to_string()),
+            "a frame of eight locals does not refuse an expression that names none"
+        );
+        // Seven *named* in one expression is still past the ABI dispatch, and
+        // the message now says which count it is talking about.
+        let err = evaluate(
+            &mut db,
+            &mut runtime,
+            &snapshot,
+            &snapshot.frames[0],
+            "a + b + c + d + e + f + g + h",
+            &generation,
+        )
+        .expect_err("eight names exceed the arity");
+        assert!(err.contains("the expression names 8 locals"), "{err}");
+    }
+
+    #[test]
+    fn mentioned_idents_over_approximates_from_tokens() {
+        let idents = mentioned_idents("foo.y + xs.len()");
+        for name in ["foo", "y", "xs", "len"] {
+            assert!(idents.contains(name), "`{name}` is a mention: {idents:?}");
+        }
+        // A literal is not a name, and a malformed expression still lexes.
+        assert!(!mentioned_idents("1 + 2").contains("1"));
+        assert!(mentioned_idents("foo +").contains("foo"));
     }
 
     /// DBG-03. This test **asserted the defect** it now rules out (plan §8.2):
@@ -498,17 +879,15 @@ mod tests {
             source_span: (0, 0),
         };
 
-        let bindings = collect_bindings(&frame, &mut db);
+        let bindings = collect_bindings(&frame, &mut db, &mentioned_idents("1abc + a-b + δx"));
         let names: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
         assert_eq!(
             names,
             vec!["δx"],
             "only the name the language can spell is bound, and it is bound as written"
         );
-        assert_eq!(
-            synthesize(&db, &bindings, "δx"),
-            "fn __p_expr(δx: Int) { δx }"
-        );
+        let synthetic = synthesize(&mut db, &frame, "δx");
+        assert_eq!(synthetic.source, "fn __p_expr(δx: Int) { δx }");
     }
 
     /// DBG-04: the values the `p` evaluator holds must be in the collector's
@@ -660,6 +1039,17 @@ mod tests {
             primed,
             "twenty more evaluations of one expression must allocate nothing new"
         );
+    }
+
+    /// A one-frame `main` snapshot holding `locals`.
+    fn frame_with(locals: Vec<praxis_runtime::context::DebugLocal>) -> SnapshotFrame {
+        SnapshotFrame {
+            parent: 0,
+            func_name: "main".as_ptr(),
+            func_name_len: 4,
+            locals,
+            source_span: (0, 0),
+        }
     }
 
     /// A `DebugLocal` holding a real value, as `praxis_snapshot_debug_chain`
