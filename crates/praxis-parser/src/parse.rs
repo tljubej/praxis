@@ -874,11 +874,11 @@ impl<'t> Parser<'t> {
         //
         // A bare `name` target never reaches here — `parse_stmt` sends
         // `name = …` to `parse_assign_stmt` on the token after the name — so the
-        // targets this sees are the compound ones. Whether the target is a place
-        // at all is inference's answer (`Y021`) rather than the parser's: `x.y =
-        // 1` and `f() = 1` are well-formed *shapes* whose mistake is that they
-        // name no storage, and a parse error there says only "expected a
-        // statement separator".
+        // targets this sees are the compound ones. Which of them is a place is
+        // inference's answer rather than the parser's: `p.x = 1` is a field store
+        // (§4.5) and `f() = 1` is a well-formed *shape* whose mistake is that it
+        // names no storage (`Y021`), and a parse error there says only "expected
+        // a statement separator" about either.
         self.eat_trivia();
         let cp = self.checkpoint_lhs();
         self.parse_expr();
@@ -3138,10 +3138,11 @@ mod tests {
         assert!(kinds.contains(&SyntaxKind::ASSIGN_STMT), "{kinds:?}");
         assert!(!kinds.contains(&SyntaxKind::PLACE_ASSIGN_STMT), "{kinds:?}");
 
-        // A target that names no storage **parses**: the mistake is inference's
-        // (`Y021`), because "expected a statement separator" says nothing about
-        // it. This is the assertion that would fail if the wrap were made
-        // conditional on the target's shape.
+        // Whether a target is a place is inference's answer and not the
+        // parser's, so both kinds parse the same way: `p.x = 3` is a field store
+        // (§4.5) and `f() = 3` names no storage at all (`Y021`), and the parser
+        // wraps each of them without asking. This is the assertion that would
+        // fail if the wrap were made conditional on the target's shape.
         for src in ["f() = 3", "p.x = 3", "v.len() += 1"] {
             let out = parse_text(src);
             assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);

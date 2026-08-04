@@ -774,10 +774,10 @@ pub fn defines(inst: &Inst) -> Option<LocalId> {
         | Inst::LoadTupleElem { dst, .. }
         | Inst::EnumTag { dst, .. }
         | Inst::EnumPayloadGet { dst, .. } => Some(*dst),
-        // `StoreScalar` writes *into* an existing object through `dst_gc`; the
-        // local itself is unchanged, which is why it is a use and not a def.
-        // `CheckFault` writes nothing at all.
-        Inst::StoreScalar { .. } | Inst::CheckFault { .. } => None,
+        // `StoreScalar` and `StoreField` write *into* an existing object,
+        // through `dst_gc` and `record`; the local itself is unchanged, which is
+        // why it is a use and not a def. `CheckFault` writes nothing at all.
+        Inst::StoreScalar { .. } | Inst::StoreField { .. } | Inst::CheckFault { .. } => None,
     }
 }
 
@@ -812,6 +812,7 @@ fn operands(inst: &Inst) -> Vec<LocalId> {
         | Inst::MoveGc { dst, src }
         | Inst::FloatNeg { dst, src } => v.extend([*dst, *src]),
         Inst::StoreScalar { dst_gc, src, .. } => v.extend([*dst_gc, *src]),
+        Inst::StoreField { record, value, .. } => v.extend([*record, *value]),
         Inst::IntBinOp { dst, lhs, rhs, .. }
         | Inst::FloatBinOp { dst, lhs, rhs, .. }
         | Inst::IntCmp { dst, lhs, rhs, .. }

@@ -254,8 +254,8 @@ pub enum DiagCode {
     /// asymmetry). This one is emitted in inference.
     NoTupleElement,
     /// `Y020` — a subscript on a type that has none (REP-16), in either
-    /// direction: `s[0]` on a `Set`, `v[0] = x` on a `Vec` (which can be read
-    /// through a subscript but has no element store in the language at all), or
+    /// direction: `s[0]` on a `Set`, `t[0] = c` on a `Text` (which can be read
+    /// through a subscript and is immutable, so it has no element store), or
     /// `grid[x]` — the wrong *arity* for a receiver that does index, since
     /// `grid[x, y]` is the spelling §6.4 gives.
     ///
@@ -265,7 +265,8 @@ pub enum DiagCode {
     /// sees it (REP-12's asymmetry).
     NotIndexable,
     /// `Y021` — an assignment whose left side names no storage (REP-16):
-    /// `f() = 1`, `x.y = 1`, `a + b[0] = 1`.
+    /// `f() = 1`, `a + b[0] = 1`. A **field** is a place and no longer among
+    /// them: `p.x = 5` stores (§4.5).
     ///
     /// Distinct from `Y009` ("assignment to something that is not a `var`"),
     /// which is about a *binding* that exists and may not be written. This one is

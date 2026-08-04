@@ -898,6 +898,49 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
             args.push(stored);
             b.call_runtime(dst, *set, args);
         }
+        // `p.x = 5`, `p.x += 1` — a store into a record field (§4.5). The
+        // receiver is lowered **once**, into the local both the read and the
+        // write name, for the reason the subscript store above does it: a
+        // compound operator must evaluate its place exactly once, so
+        // `nodes(i).count += 1` calls `nodes` once.
+        //
+        // The slot index is an immediate on both instructions, so neither half
+        // is a `Call` with a boxed integer in a rootable argument (P0-03).
+        TypedStmt::FieldAssign {
+            receiver,
+            field_idx,
+            op,
+            value,
+            span,
+        } => {
+            let record = lower_expr_gc(b, receiver);
+            let stored = if *op == AssignOp::Assign {
+                lower_expr_gc(b, value)
+            } else {
+                // No fault check follows either half: `praxis_record_field` and
+                // `praxis_record_set_field` are both `Effect::Pure`, and the
+                // verifier rejects a check after an instruction that cannot
+                // fault as redundant (ADR-088).
+                let cur = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, Some(*span));
+                b.push(Inst::LoadField {
+                    dst: cur,
+                    src: record,
+                    field_idx: *field_idx,
+                });
+                let rhs = lower_expr_gc(b, value);
+                let operand_ty = expr_static_type(value);
+                let Some(stored) = lower_compound_arith(b, *op, cur, rhs, operand_ty, Some(*span))
+                else {
+                    return;
+                };
+                stored
+            };
+            b.push(Inst::StoreField {
+                record,
+                field_idx: *field_idx,
+                value: stored,
+            });
+        }
         TypedStmt::Expr(e) => {
             let _ = lower_expr_gc(b, e);
         }
@@ -6121,6 +6164,81 @@ mod tests {
         assert_eq!(map_index, 0, "`m[k] = v` performs no read");
     }
 
+    /// **The field store's MIR shape.** `p.x = 5` is one `StoreField` at the
+    /// slot the record definition names, and `p.x += 1` adds exactly one
+    /// `LoadField` at the *same* slot.
+    ///
+    /// Three assertions a behavioural test cannot make. The **slot** is one: a
+    /// store that derived its own index would still write a field, and this
+    /// program would still answer something. The **count** is another: the
+    /// desugaring into `p.x = p.x + 1` produces the same answer for a
+    /// side-effect-free receiver and lowers it twice. And the read must be a
+    /// `LoadField` rather than a `Call` — the index rides as an immediate on
+    /// both, because boxing it to ride an argument list would put an integer in
+    /// a slot the collector may dereference (P0-03).
+    #[test]
+    fn a_field_store_writes_one_slot_and_a_compound_one_reads_it_first() {
+        let field_ops = |src: &str| -> (Vec<u32>, Vec<u32>) {
+            let (funcs, _) = lower_src_to_mir(src);
+            let main = funcs.iter().find(|f| f.name == "main").expect("main");
+            let all = || main.blocks.iter().flat_map(|b| b.insts.iter());
+            (
+                all()
+                    .filter_map(|i| match i {
+                        Inst::LoadField { field_idx, .. } => Some(*field_idx),
+                        _ => None,
+                    })
+                    .collect(),
+                all()
+                    .filter_map(|i| match i {
+                        Inst::StoreField { field_idx, .. } => Some(*field_idx),
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        };
+        let decl = "struct P { x: Int, y: Int }\n";
+
+        // A plain store into the *second* field: one write, at slot 1, and no
+        // read at all. Slot 1 rather than 0 is the point — a store that always
+        // wrote the first field would pass with `x`.
+        let (reads, writes) = field_ops(&format!(
+            "{decl}fn main() -> Int {{\n  let p = P {{ x: 1, y: 2 }}\n  p.y = 5\n  0\n}}"
+        ));
+        assert_eq!(writes, vec![1], "`p.y = 5` is one store, at `y`'s slot");
+        assert!(reads.is_empty(), "`p.y = 5` reads nothing: {reads:?}");
+
+        // The compound form reads the slot it writes, once each.
+        let (reads, writes) = field_ops(&format!(
+            "{decl}fn main() -> Int {{\n  let p = P {{ x: 1, y: 2 }}\n  p.y += 5\n  0\n}}"
+        ));
+        assert_eq!(reads, vec![1], "one read, at the slot being written");
+        assert_eq!(writes, vec![1], "one write");
+
+        // The receiver is lowered once, so an allocation in it happens once —
+        // the counterpart of the subscript store's evaluation rule.
+        let (funcs, _) = lower_src_to_mir(&format!(
+            "{decl}fn pick(v: Vec[P]) -> P {{ v[0] }}\n\
+             fn main() -> Int {{\n  let v = [P {{ x: 1, y: 2 }}]\n  pick(v).x += 1\n  0\n}}"
+        ));
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let picks = main
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .filter(|i| {
+                matches!(
+                    i,
+                    Inst::Call {
+                        callee: CallTarget::User(name),
+                        ..
+                    } if name == "pick"
+                )
+            })
+            .count();
+        assert_eq!(picks, 1, "the receiver of a compound field store runs once");
+    }
+
     /// **REP-64's MIR shape.** A compound assignment whose operands are
     /// `Float`s emits `FloatBinOp`, never `IntBinOp` — at every operator and
     /// through every target shape the language has.
@@ -6144,6 +6262,10 @@ mod tests {
             (
                 "var m = Map()\nm[\"k\"] = 1.0\nm[\"k\"] {}= 2.0\nout(m[\"k\"])",
                 "a subscript store",
+            ),
+            (
+                "struct F { v: Float }\nlet f = F { v: 1.0 }\nf.v {}= 2.0\nout(f.v)",
+                "a field store",
             ),
         ];
         for op in ['+', '-', '*', '/'] {
@@ -6194,7 +6316,11 @@ mod tests {
             let src = template
                 .replace("{}", "+")
                 .replace("1.0", "1")
-                .replace("2.0", "2");
+                .replace("2.0", "2")
+                // The field shape is the one template that writes its type down,
+                // and the control has to change it with the literals or it is a
+                // `Float` field taking an `Int`.
+                .replace("Float", "Int");
             let (funcs, _) = lower_src_to_mir(&src);
             let has_int = funcs
                 .iter()

@@ -148,6 +148,26 @@ pub enum TypedStmt {
         value: TypedExpr,
         span: (u32, u32),
     },
+    /// `p.x = 5` / `p.x += 1` — a store into a record field (§4.5).
+    ///
+    /// Its own statement beside [`IndexAssign`](Self::IndexAssign) rather than a
+    /// third catalog row, for the reason a field read is not a method call
+    /// (ADR-077): the field is chosen by *name against one record definition* and
+    /// lowers to a slot index, where a subscript is dispatched on the receiver's
+    /// shape and arity. `field_idx` is that slot, read from the record's
+    /// `RecordDef` exactly as [`TypedExpr::FieldGet`] reads it.
+    ///
+    /// The receiver is carried **once**, and a compound operator reads and writes
+    /// through the one local MIR lowers it into — so `nodes(i).count += 1`
+    /// evaluates `nodes(i)` once, which is the whole reason `IndexAssign` is not
+    /// a desugaring either.
+    FieldAssign {
+        receiver: TypedExpr,
+        field_idx: u32,
+        op: AssignOp,
+        value: TypedExpr,
+        span: (u32, u32),
+    },
     /// A bare expression evaluated for effect.
     Expr(TypedExpr),
 }
@@ -1296,17 +1316,16 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// `m[key] = v`, `counts[key] += 1` — a store through a subscript (REP-16).
+    /// `m[key] = v`, `counts[key] += 1`, `p.x = 5` — a store through a place
+    /// (REP-16, §4.5/§6.2).
     ///
-    /// Inference resolved the store row and recorded it at the target's node range
-    /// (as it records a method at its name token), so this reads the entry rather
-    /// than re-deriving one. A target that is not a subscript, or a receiver with
-    /// no store row, was already reported there (`Y021`/`Y020`); lowering drops the
-    /// statement, which is what every unresolvable statement here does.
+    /// For a subscript, inference resolved the store row and recorded it at the
+    /// target's node range (as it records a method at its name token), so this
+    /// reads the entry rather than re-deriving one. A target that is not a place,
+    /// or a receiver with no store row, was already reported there (`Y021`/`Y020`);
+    /// lowering drops the statement, which is what every unresolvable statement
+    /// here does.
     fn lower_place_assign(&mut self, stmt: &praxis_ast::PlaceAssignStmt) -> Option<TypedStmt> {
-        let Some(Expr::Index(idx)) = stmt.target() else {
-            return None;
-        };
         // `min=`/`max=` write **without reading** — that is what §6.2's "an
         // absent entry accepts the first value" means, and the comparison is the
         // wrapper's. So they lower as a plain store whose row is a different one,
@@ -1321,6 +1340,23 @@ impl<'a> Lowerer<'a> {
             praxis_ast::PlaceAssignOp::Mul => AssignOp::MulAssign,
             praxis_ast::PlaceAssignOp::Div => AssignOp::DivAssign,
             praxis_ast::PlaceAssignOp::Rem => AssignOp::RemAssign,
+        };
+        let idx = match stmt.target()? {
+            Expr::Index(idx) => idx,
+            // A field store needs no catalog row at all: the slot comes from the
+            // record definition, and both halves of a compound operator go
+            // through the one `LoadField`/`StoreField` pair MIR emits.
+            Expr::FieldGet(f) => {
+                let (receiver, field_idx) = self.lower_field_place(&f)?;
+                return Some(TypedStmt::FieldAssign {
+                    receiver,
+                    field_idx,
+                    op,
+                    value: self.lower_expr(&stmt.value()?),
+                    span: self.node_span(stmt.syntax()),
+                });
+            }
+            _ => return None,
         };
         let resolved = self.method_refs.get(&idx.syntax().text_range()).copied()?;
         let set = match &resolved.entry.lowering {
@@ -2548,10 +2584,31 @@ impl<'a> Lowerer<'a> {
     /// instantiation to generate code for.
     fn lower_field_get(&mut self, f: &FieldExpr) -> TypedExpr {
         let span = self.node_span(f.syntax());
-        let receiver = match f.receiver() {
-            Some(r) => self.lower_expr(&r),
-            None => return self.error_expr(),
+        let Some((receiver, field_idx)) = self.lower_field_place(f) else {
+            return self.error_expr();
         };
+        // The *index* comes from the record definition; the *type* from
+        // inference, which already substituted the instance's arguments.
+        let ty = self.node_ty(f.syntax());
+        TypedExpr::FieldGet {
+            receiver: Box::new(receiver),
+            field_idx,
+            ty,
+            span,
+        }
+    }
+
+    /// The receiver and the slot index a `receiver.field` names — the half a
+    /// read and a store have in common (§4.5).
+    ///
+    /// One function rather than two derivations of "which slot is this", because
+    /// a store that computed its own index could disagree with the read beside it
+    /// in `p.x += 1` — and the record definition is the only thing that knows.
+    /// `None` means there is nothing to lower; every reason for it is described
+    /// in [`lower_field_get`](Self::lower_field_get)'s doc comment, and reported
+    /// there or in inference.
+    fn lower_field_place(&mut self, f: &FieldExpr) -> Option<(TypedExpr, u32)> {
+        let receiver = self.lower_expr(&f.receiver()?);
         let receiver_ty = expr_ty(&receiver);
         let resolved = self.db.follow(receiver_ty);
         let record = match self.db.data(resolved) {
@@ -2562,10 +2619,11 @@ impl<'a> Lowerer<'a> {
             let name = f.field_name()?;
             self.db.record_field_of(def, &args, name.text())
         }) else {
-            // A receiver nothing ever pinned: see this function's doc comment.
-            // Inference has already reported every receiver it could decide.
+            // A receiver nothing ever pinned: see `lower_field_get`'s doc
+            // comment. Inference has already reported every receiver it could
+            // decide.
             if self.db.var_id_of(resolved).is_some() {
-                return self.error_expr();
+                return None;
             }
             // A concrete type with no such field. Inference reports this too, and
             // `praxis run` stops before lowering when it does, so this is the
@@ -2577,17 +2635,9 @@ impl<'a> Lowerer<'a> {
                     format!("no field `{}` on this type", tok.text()),
                 );
             }
-            return self.error_expr();
+            return None;
         };
-        // The *index* comes from the record definition; the *type* from
-        // inference, which already substituted the instance's arguments.
-        let ty = self.node_ty(f.syntax());
-        TypedExpr::FieldGet {
-            receiver: Box::new(receiver),
-            field_idx: field_idx as u32,
-            ty,
-            span,
-        }
+        Some((receiver, field_idx as u32))
     }
 
     /// Lower a `match scrutinee { pattern => body, … }` expression (M7, §4.6).
@@ -2999,6 +3049,12 @@ pub fn stmt_exprs(s: &TypedStmt) -> impl Iterator<Item = &TypedExpr> {
             out.extend(indices);
             out.push(value);
         }
+        TypedStmt::FieldAssign {
+            receiver, value, ..
+        } => {
+            out.push(receiver);
+            out.push(value);
+        }
         TypedStmt::Expr(e) => out.push(e),
     }
     out.into_iter()
@@ -3011,7 +3067,8 @@ pub fn stmt_span(s: &TypedStmt) -> (u32, u32) {
         TypedStmt::Let { span, .. }
         | TypedStmt::Var { span, .. }
         | TypedStmt::Assign { span, .. }
-        | TypedStmt::IndexAssign { span, .. } => *span,
+        | TypedStmt::IndexAssign { span, .. }
+        | TypedStmt::FieldAssign { span, .. } => *span,
         TypedStmt::Expr(e) => expr_span(e),
     }
 }

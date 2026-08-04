@@ -296,6 +296,25 @@ Field punning is supported:
 let p = Point { x, y }
 ```
 
+**A field is an assignable place**, in every spelling an assignment has:
+
+```praxis
+struct Point { x: Int, y: Int }
+let p = Point { x: 3, y: 4 }
+p.x = 5
+p.y += 1
+```
+
+The binding is not what is written — the *object* is — so a `let` receiver is
+fine, exactly as `let values = Vec[Int]()` followed by `values.push(42)` is
+(§4.2), and every reference to that record observes the write. A compound
+operator reads and writes one place: `nodes(i).count += 1` evaluates `nodes(i)`
+once.
+
+`min=` and `max=` are not among the spellings. They are §6.2's map updates, and
+what they mean — "an absent entry accepts the first value" — is about an entry
+that may not be there; a field always is.
+
 Parser templates can generate anonymous structural records without requiring a declaration.
 
 ### 4.6 Enums
@@ -730,6 +749,27 @@ best[key] max= score
 ```
 
 For `min=` and `max=`, an absent entry accepts the first value.
+
+#### Which receivers a subscript reads and writes
+
+Six types read through a subscript: `Vec`, `Deque`, `Text`, `Map`, `Counter` and
+`Grid`. **Five of them write**, and the one that does not is `Text`, because a
+`Text` is immutable (§4.3):
+
+```praxis
+var v = [1, 2, 3]
+v[0] = 100
+v[2] += 10
+
+let counts = Map[Text, Int]()
+counts["a"] = 1
+counts["a"] += 2
+```
+
+A `Vec` and a `Deque` store **replaces** the element at that index and never
+appends: `v[v.len()] = x` is an out-of-range fault, and `push` is the spelling
+that grows a sequence. A store is checked against the collection's element type,
+and a compound operator evaluates its receiver and every index once.
 
 ### 6.3 Functional sequences
 

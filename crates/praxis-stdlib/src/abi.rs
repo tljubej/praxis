@@ -260,6 +260,7 @@ runtime_symbols! {
     DequePopFront = "praxis_deque_pop_front": (Ctx, Gc) -> Gc, Faults;
     DequePushBack = "praxis_deque_push_back": (Ctx, Gc, Gc) -> GcUnit, AllocatesAndFaults;
     DequePushFront = "praxis_deque_push_front": (Ctx, Gc, Gc) -> GcUnit, AllocatesAndFaults;
+    DequeSet = "praxis_deque_set": (Ctx, Gc, Gc, Gc) -> GcUnit, Faults;
     Dbg = "praxis_dbg": (Ctx, Gc) -> Gc, Pure;
     Dfs = "praxis_dfs": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     Dijkstra = "praxis_dijkstra": (Ctx, Gc, Gc, Gc) -> Gc, AllocatesAndFaults;
@@ -393,6 +394,7 @@ runtime_symbols! {
     VecLen = "praxis_vec_len": (Ctx, Gc) -> Gc, Allocates;
     VecNew = "praxis_vec_new": (Ctx, Ptr) -> Gc, Allocates;
     VecPush = "praxis_vec_push": (Ctx, Gc, Gc) -> GcUnit, AllocatesAndFaults;
+    VecSet = "praxis_vec_set": (Ctx, Gc, Gc, Gc) -> GcUnit, Faults;
     // `sorted` faults and `unique` does not, and the difference is derived from
     // the wrappers rather than guessed: `praxis_vec_sorted` raises
     // `TypeMismatch` when the element type has no `compare`, while

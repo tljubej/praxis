@@ -2015,6 +2015,27 @@ fn lower_inst<M: Module>(
             )?;
             builder.def_var(vars[dst.0 as usize], field);
         }
+        Inst::StoreField {
+            record,
+            field_idx,
+            value,
+        } => {
+            // praxis_record_set_field(ctx, record, idx, value) -> GcRef. The
+            // answer is the receiver, which the caller already holds, so it is
+            // dropped rather than given a local: this instruction defines none
+            // (`verify::defines`), the way `StoreScalar` defines none.
+            let record_val = builder.use_var(vars[record.0 as usize]);
+            let idx_val = builder.ins().iconst(GC, *field_idx as i64);
+            let value_val = builder.use_var(vars[value.0 as usize]);
+            let _ = call_symbol(
+                builder,
+                ctx_val,
+                &[record_val, idx_val, value_val],
+                RuntimeSymbol::RecordSetField,
+                module,
+                imports,
+            )?;
+        }
         Inst::LoadTupleElem { dst, src, index } => {
             // praxis_tuple_get(ctx, tuple, idx) -> GcRef. `Pure`, so not a
             // safepoint — the element is already allocated inside the tuple.

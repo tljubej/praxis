@@ -555,6 +555,47 @@ fn run_pass_float_compound_assign() {
     assert_passes("float_compound_assign.px", &expected);
 }
 
+/// **Every place the language can assign to**, through the compiled binary.
+///
+/// Two of them are new: a `Vec`/`Deque` element (ADR-064 gave those receivers a
+/// subscript read and no store, and said so) and a record field (`p.x = 5` was
+/// `Y021` — "the left side of an assignment must be a name or an index").
+///
+/// The expected lines are chosen so the two mistakes a store like this makes
+/// are *visible* rather than merely possible: a store that appended instead of
+/// replacing moves a length, and a store that derived its own field index
+/// instead of reading the record definition moves the neighbouring field. Each
+/// is read back on its own line, next to a value that must not have changed.
+#[test]
+fn run_pass_place_assignment() {
+    let expected = [
+        // A record field: plain, the neighbour it must not touch, the five
+        // compounds, `Text` concatenation, and the write seen through an alias.
+        "5",
+        "2",
+        "1",
+        "abcd",
+        "8",
+        "9",
+        // A `Vec` element, then its length — which an appending store moves.
+        "[100, 2, 13]",
+        "3", // A `Deque` element, from the front, and its length.
+        "1",
+        "42",
+        "2", // Nested places: a field of a field, and a field of an element.
+        "{ inner: { v: 7 }, xs: [10, 30] }",
+        "[{ v: 100 }, { v: 2 }]",
+        // A deferred receiver, through a generic `fn` (REP-28).
+        "8",
+        "55", // The receiver of a compound store runs once, and lands once.
+        "1",
+        "9", // …and the collections that already stored still do.
+        "3",
+    ]
+    .join("\n");
+    assert_passes("place_assignment.px", &expected);
+}
+
 #[test]
 fn run_fault_float_to_int_nan() {
     // NaN → to_int faults with FloatToInt (§4.12), exit 1, no abort.

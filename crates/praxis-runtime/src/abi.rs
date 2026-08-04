@@ -417,6 +417,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::CounterSet => praxis_counter_set as *const (),
         RuntimeSymbol::CounterValues => praxis_counter_values as *const (),
         RuntimeSymbol::DequeGet => praxis_deque_get as *const (),
+        RuntimeSymbol::DequeSet => praxis_deque_set as *const (),
         RuntimeSymbol::DequeIsEmpty => praxis_deque_is_empty as *const (),
         RuntimeSymbol::DequeLen => praxis_deque_len as *const (),
         RuntimeSymbol::DequeNew => praxis_deque_new as *const (),
@@ -555,6 +556,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::VarCellSet => praxis_var_cell_set as *const (),
         RuntimeSymbol::VecFrequencies => praxis_vec_frequencies as *const (),
         RuntimeSymbol::VecGet => praxis_vec_get as *const (),
+        RuntimeSymbol::VecSet => praxis_vec_set as *const (),
         RuntimeSymbol::VecIsEmpty => praxis_vec_is_empty as *const (),
         RuntimeSymbol::VecLen => praxis_vec_len as *const (),
         RuntimeSymbol::VecNew => praxis_vec_new as *const (),
@@ -3147,6 +3149,47 @@ pub unsafe extern "C" fn praxis_vec_get(
     })
 }
 
+/// Replace the element at `index`; faults `IndexOutOfBounds` if out of range
+/// (§9.2, §11.1). Returns the Unit sentinel.
+///
+/// **Replaces, and never appends.** `v[v.len()] = x` is out of range rather than
+/// a push, which is `praxis_vec_push`'s job: a store whose index decides between
+/// the two operations makes an off-by-one grow the vector instead of reporting.
+///
+/// The element descriptor goes through the same [`adopt_or_reject`] every push
+/// does, so a store into a vector that was never told its element type adopts
+/// the first value's, and one into a `Vec[Int]` raises `TypeMismatch` rather
+/// than retagging the collection (P0-11's rule, at the second door).
+///
+/// # Safety
+/// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`; `index`
+/// must be a valid `Int` `GcRef`; `value` must be a valid `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_set(
+    ctx: *mut RuntimeContext,
+    vec: GcRef,
+    index: GcRef,
+    value: GcRef,
+) -> GcRef {
+    abi_guard!("praxis_vec_set", ctx, {
+        // SAFETY: caller guarantees `vec` is a valid Vec.
+        let scope = unsafe { NativeScope::new(ctx) };
+        let p = unsafe { vec_payload_mut(scope.root(vec)) };
+        // SAFETY: caller guarantees `index` is a valid Int.
+        let idx = unsafe { int_payload(index) };
+        if idx < 0 || idx as usize >= p.items.len() {
+            unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
+            return unsafe { unit_sentinel(ctx) };
+        }
+        if !unsafe { adopt_or_reject(ctx, &mut p.element_descriptor, value) } {
+            return unsafe { unit_sentinel(ctx) };
+        }
+        // No allocation: the slot takes a `GcRef` the caller already holds.
+        p.items[idx as usize] = value;
+        unsafe { unit_sentinel(ctx) }
+    })
+}
+
 /// True iff `vec` has no elements, as a boxed `Bool` (§11.1).
 ///
 /// # Safety
@@ -3503,6 +3546,38 @@ pub unsafe extern "C" fn praxis_deque_get(
             return unsafe { unit_sentinel(ctx) };
         }
         p.items[idx as usize]
+    })
+}
+
+/// Replace the element at `index` (0-based from the front); faults
+/// `IndexOutOfBounds` if out of range. Returns the Unit sentinel.
+///
+/// A replacement and never an insertion, and the element descriptor is
+/// reconciled the same way, for [`praxis_vec_set`]'s reasons.
+///
+/// # Safety
+/// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`;
+/// `index` must be a valid `Int` `GcRef`; `value` must be a valid `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_deque_set(
+    ctx: *mut RuntimeContext,
+    deque: GcRef,
+    index: GcRef,
+    value: GcRef,
+) -> GcRef {
+    abi_guard!("praxis_deque_set", ctx, {
+        let scope = unsafe { NativeScope::new(ctx) };
+        let p = unsafe { deque_payload_mut(scope.root(deque)) };
+        let idx = unsafe { int_payload(index) };
+        if idx < 0 || idx as usize >= p.items.len() {
+            unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
+            return unsafe { unit_sentinel(ctx) };
+        }
+        if !unsafe { adopt_or_reject(ctx, &mut p.element_descriptor, value) } {
+            return unsafe { unit_sentinel(ctx) };
+        }
+        p.items[idx as usize] = value;
+        unsafe { unit_sentinel(ctx) }
     })
 }
 
@@ -7717,6 +7792,79 @@ mod tests {
             assert_eq!(rt.fault(), FaultKind::IndexOutOfBounds);
         }
         let _ = rt.take_fault();
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// `praxis_vec_set` and `praxis_deque_set` **replace** — the property that
+    /// separates them from the push beside them, and the one a store row pointed
+    /// at the wrong wrapper would break silently.
+    ///
+    /// So each assertion is about what appending would get wrong: the length is
+    /// unchanged, the neighbours are unchanged, an index one past the end faults
+    /// instead of growing the collection, and a value of the wrong type is
+    /// refused rather than retagging an explicitly typed collection (P0-11).
+    #[test]
+    fn a_sequence_store_replaces_and_never_appends() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; the stores mutate in place, so the same `GcRef`s
+        // stay valid throughout.
+        unsafe {
+            let v = praxis_vec_new(ctx, &crate::scalars::INT as *const _);
+            for n in [10, 20, 30] {
+                let _ = praxis_vec_push(ctx, v, praxis_alloc_int(ctx, n));
+            }
+            let d = praxis_deque_new(ctx, &crate::scalars::INT as *const _);
+            for n in [10, 20] {
+                let _ = praxis_deque_push_back(ctx, d, praxis_alloc_int(ctx, n));
+            }
+
+            let one = praxis_alloc_int(ctx, 1);
+            let ninety_nine = praxis_alloc_int(ctx, 99);
+            let _ = praxis_vec_set(ctx, v, one, ninety_nine);
+            let _ = praxis_deque_set(ctx, d, one, ninety_nine);
+            assert!(!rt.has_pending_fault());
+
+            assert_eq!(praxis_int_load(ctx, praxis_vec_len(ctx, v)), 3);
+            assert_eq!(praxis_int_load(ctx, praxis_deque_len(ctx, d)), 2);
+            let zero = praxis_alloc_int(ctx, 0);
+            let two = praxis_alloc_int(ctx, 2);
+            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, zero)), 10);
+            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, one)), 99);
+            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, two)), 30);
+            assert_eq!(praxis_int_load(ctx, praxis_deque_get(ctx, d, zero)), 10);
+            assert_eq!(praxis_int_load(ctx, praxis_deque_get(ctx, d, one)), 99);
+
+            // One past the end, and a negative index, are both out of range —
+            // and neither grows the collection, which is what a store that fell
+            // through to the appending wrapper would do.
+            let three = praxis_alloc_int(ctx, 3);
+            let neg = praxis_alloc_int(ctx, -1);
+            type Store = unsafe extern "C" fn(*mut RuntimeContext, GcRef, GcRef, GcRef) -> GcRef;
+            type Len = unsafe extern "C" fn(*mut RuntimeContext, GcRef) -> GcRef;
+            for (recv, idx, store, len_of) in [
+                (v, three, praxis_vec_set as Store, praxis_vec_len as Len),
+                (v, neg, praxis_vec_set as Store, praxis_vec_len as Len),
+                (d, two, praxis_deque_set as Store, praxis_deque_len as Len),
+                (d, neg, praxis_deque_set as Store, praxis_deque_len as Len),
+            ] {
+                let before = praxis_int_load(ctx, len_of(ctx, recv));
+                let _ = store(ctx, recv, idx, ninety_nine);
+                assert!(rt.has_pending_fault(), "an out-of-range store must fault");
+                assert_eq!(rt.take_fault(), Some(FaultKind::IndexOutOfBounds));
+                assert_eq!(
+                    praxis_int_load(ctx, len_of(ctx, recv)),
+                    before,
+                    "a faulting store must not have grown the collection"
+                );
+            }
+
+            // A `Vec[Int]` refuses a `Float` rather than retagging itself.
+            let float = praxis_alloc_float(ctx, 1.5_f64.to_bits() as i64);
+            let _ = praxis_vec_set(ctx, v, zero, float);
+            assert_eq!(rt.take_fault(), Some(FaultKind::TypeMismatch));
+            assert_eq!(praxis_int_load(ctx, praxis_vec_get(ctx, v, zero)), 10);
+        }
         unsafe { drop_ctx(ctx) };
     }
 

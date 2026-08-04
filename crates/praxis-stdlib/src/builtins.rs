@@ -183,11 +183,13 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(int_wrapping_mul())
         .entry(int_saturating_mul())
         .entry(int_checked_mul())
-        // Subscripts (REP-16, §4.7/§6.2/§6.4). Six collections read; the three
-        // that have a store at all also store. See the block comment above
-        // `vec_index` for why these are catalog rows.
+        // Subscripts (REP-16, §4.7/§6.2/§6.4). Six collections read; five of
+        // those six also store — every one but the immutable `Text`. See the
+        // block comment above `vec_index` for why these are catalog rows.
         .entry(vec_index())
+        .entry(vec_index_set())
         .entry(deque_index())
+        .entry(deque_index_set())
         .entry(text_index())
         .entry(map_index())
         .entry(map_index_set())
@@ -296,11 +298,15 @@ fn map_values() -> MethodEntry {
 // them; the subscript grammar is their only caller.
 //
 // Which collections index is a language decision and this table is where it is
-// recorded. Six read: `Vec`, `Deque`, `Text`, `Map`, `Counter`, `Grid`. Three
-// store: `Map`, `Counter`, `Grid` — the three that have a store *at all* today
-// (`Map.insert`, `Grid.set`, and `praxis_counter_set`). A `Vec` element cannot be
-// assigned through any spelling in the language, subscript or method, so
-// `v[0] = x` is reported rather than silently given one here.
+// recorded. Six read: `Vec`, `Deque`, `Text`, `Map`, `Counter`, `Grid`. **Five
+// store** — every reader but `Text`, which is immutable (§4.3), so `t[0] = c` is
+// still the report `not_index_assignable` gives.
+//
+// `Vec` and `Deque` were the two readers with no store, which ADR-064 recorded
+// as a feature owed rather than a gap it would smuggle in; they have one now,
+// through `praxis_vec_set`/`praxis_deque_set`. Their stores **replace** and never
+// append: `v[v.len()] = x` is `IndexOutOfBounds` rather than a push, so an
+// off-by-one is reported instead of growing the vector.
 //
 // The read rows repeat their `get` sibling's symbol on purpose — except `Map`,
 // whose two answers differ by design: `.get` returns Unit for an absent key and
@@ -319,6 +325,20 @@ fn vec_index() -> MethodEntry {
     }
 }
 
+fn vec_index_set() -> MethodEntry {
+    MethodEntry {
+        receiver: vec_of_t(),
+        name: crate::catalog::INDEX_STORE,
+        params: vec![TypePattern::Scalar(ScalarType::Int), TypePattern::var("T")],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecSet),
+        doc: "`v[i] = value` — replace the element at `i`; faults if out of range \
+              (it never appends — `push` is the spelling that grows a vector).",
+        stability: Stability::Stable,
+    }
+}
+
 fn deque_index() -> MethodEntry {
     MethodEntry {
         receiver: deque_of_t(),
@@ -328,6 +348,20 @@ fn deque_index() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequeGet),
         doc: "`d[i]` — the element at `i` (0-based from the front); faults if out of range.",
+        stability: Stability::Stable,
+    }
+}
+
+fn deque_index_set() -> MethodEntry {
+    MethodEntry {
+        receiver: deque_of_t(),
+        name: crate::catalog::INDEX_STORE,
+        params: vec![TypePattern::Scalar(ScalarType::Int), TypePattern::var("T")],
+        result: TypePattern::Unit,
+        purity: Purity::Impure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequeSet),
+        doc: "`d[i] = value` — replace the element at `i` (0-based from the front); \
+              faults if out of range (it never inserts).",
         stability: Stability::Stable,
     }
 }
@@ -2812,9 +2846,12 @@ mod tests {
             assert_eq!(hits[0].arity(), indices, "{what} indexes at {indices}");
         }
 
-        // Three store — the three with a store at all. A `Vec` reads and does not
-        // store, which is the asymmetry the `Y020` message has to describe.
+        // Five store — every reader but `Text`. The asymmetry the `Y020` message
+        // has to describe is now `Text`'s alone: it reads a `Char` out and is
+        // immutable (§4.3), so there is nothing to write back through.
         for (pat, args, what) in [
+            (of(CollectionCtor::Vec, 1), 2, "Vec"),
+            (of(CollectionCtor::Deque, 1), 2, "Deque"),
             (map_pat.clone(), 2, "Map"),
             (of(CollectionCtor::Counter, 1), 2, "Counter"),
             (of(CollectionCtor::Grid, 1), 3, "Grid"),
@@ -2845,16 +2882,37 @@ mod tests {
                 );
             }
         }
-        for (pat, what) in [
-            (of(CollectionCtor::Vec, 1), "Vec"),
-            (of(CollectionCtor::Deque, 1), "Deque"),
-            (text_receiver(), "Text"),
+        assert_eq!(
+            cat.by_receiver_and_name(&text_receiver(), crate::catalog::INDEX_STORE)
+                .count(),
+            0,
+            "a `Text` is immutable (§4.3): it reads through a subscript and has \
+             no element store"
+        );
+
+        // A `Vec`/`Deque` store is a **replacement**, and the wrapper it names is
+        // the assertion of that: `praxis_vec_set` faults on an index the vector
+        // does not hold, where `praxis_vec_push` would have grown it. A row that
+        // pointed at the push would spell `v[i] = x` and mean `v.push(x)`.
+        for (pat, push, what) in [
+            (of(CollectionCtor::Vec, 1), "push", "Vec"),
+            (of(CollectionCtor::Deque, 1), "push_back", "Deque"),
         ] {
-            assert_eq!(
-                cat.by_receiver_and_name(&pat, crate::catalog::INDEX_STORE)
-                    .count(),
-                0,
-                "{what} reads through a subscript and has no element store"
+            let store = cat
+                .by_receiver_and_name(&pat, crate::catalog::INDEX_STORE)
+                .next()
+                .unwrap_or_else(|| panic!("{what}'s store"));
+            let appender = cat
+                .by_receiver_and_name(&pat, push)
+                .next()
+                .unwrap_or_else(|| panic!("{what}.{push}"));
+            assert_ne!(
+                store.lowering, appender.lowering,
+                "{what}'s store replaces; `{push}` appends"
+            );
+            assert!(
+                store.can_fault(),
+                "{what}'s store reports an index it does not hold"
             );
         }
 

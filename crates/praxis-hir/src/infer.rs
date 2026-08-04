@@ -1978,8 +1978,8 @@ impl Inferer {
     ///
     /// The store is a second catalog row ([`INDEX_STORE`]) rather than the read
     /// row written backwards, because the two surfaces are not the same set: a
-    /// `Vec` reads through a subscript and has no element store anywhere in the
-    /// language, and a `Counter`'s read is zero-defaulting where its store is not.
+    /// `Text` reads through a subscript and is immutable, so it has no element
+    /// store, and a `Counter`'s read is zero-defaulting where its store is not.
     ///
     /// A compound operator needs the value the read yields *and* the value the
     /// store takes to agree, which they do by construction — both are the entry's
@@ -1993,17 +1993,29 @@ impl Inferer {
             .value()
             .map(|e| self.infer_expr(&e))
             .unwrap_or_else(|| self.db.fresh_var());
-        let Expr::Index(idx) = &target else {
-            // `f() = 1`, `x.y = 1`: a shape the grammar admits and that names no
-            // storage. The target is still inferred — it is a well-formed
-            // expression whose own mistakes are worth reporting.
-            let at = target.syntax().text_range();
-            self.infer_expr(&target);
-            self.diagnostics
-                .push(crate::diagnostics::not_an_assignment_target(
-                    self.file_span(at),
-                ));
-            return;
+        let idx = match &target {
+            Expr::Index(idx) => idx,
+            // `p.x = 5` — a store into a record field (§4.5). Its own arm rather
+            // than a catalog row: a field is selected by *name against one
+            // record definition*, not dispatched on a receiver shape, which is
+            // the same distinction that keeps `p.x` a field read and `p.len()` a
+            // method call (ADR-077).
+            Expr::FieldGet(f) => {
+                self.infer_field_assign(stmt, f, value_ty);
+                return;
+            }
+            _ => {
+                // `f() = 1`: a shape the grammar admits and that names no
+                // storage. The target is still inferred — it is a well-formed
+                // expression whose own mistakes are worth reporting.
+                let at = target.syntax().text_range();
+                self.infer_expr(&target);
+                self.diagnostics
+                    .push(crate::diagnostics::not_an_assignment_target(
+                        self.file_span(at),
+                    ));
+                return;
+            }
         };
         let receiver_ty = match idx.receiver() {
             Some(r) => self.infer_expr(&r),
@@ -2059,6 +2071,70 @@ impl Inferer {
             stmt.syntax().text_range(),
             "%=",
         );
+    }
+
+    /// `p.x = 5`, `p.x += 1` — a store into a record field (§4.5).
+    ///
+    /// **A field is a place**, which §4.2 already implies and nothing in the
+    /// language could spell: a `let` binding "may still point to a mutable
+    /// object", and every record was one you could only rebuild. `p.x = 5` was
+    /// `Y021` and `Point { x: 5, y: p.y }` was the whole workaround.
+    ///
+    /// The field's type comes from the **same** [`infer_field_get`] a read takes,
+    /// which is what keeps a store from being a second answer to "what does this
+    /// receiver hold": a receiver still under inference defers on the constraint
+    /// channel (REP-28's `HasField`) and is answered by whatever a call site puts
+    /// in its place, and a concrete receiver with no such field is reported once,
+    /// there, rather than again here in different words.
+    ///
+    /// The numeric requirement is the target's rather than the value's, for
+    /// [`infer_assign`](Self::infer_assign)'s reason and with its one exception:
+    /// `+=` on a `Text` field is concatenation and needs no number (ADR-085).
+    ///
+    /// [`infer_field_get`]: Self::infer_field_get
+    fn infer_field_assign(
+        &mut self,
+        stmt: &praxis_ast::PlaceAssignStmt,
+        f: &FieldExpr,
+        value_ty: Type,
+    ) {
+        let field_ty = self.infer_field_get(f);
+        let at = stmt.syntax().text_range();
+        let op = stmt.op();
+        // `min=`/`max=` are §6.2's **map** updates, and their whole semantics is
+        // about an entry that may be absent: "an absent entry accepts the first
+        // value". A field is always present, so there is no operation here to
+        // name — which is `Y016`'s shape (an operator a type does not have),
+        // not `Y020`'s (a subscript a receiver does not have).
+        let update = match op {
+            praxis_ast::PlaceAssignOp::Min => Some("min="),
+            praxis_ast::PlaceAssignOp::Max => Some("max="),
+            _ => None,
+        };
+        if let Some(spelling) = update {
+            let rendered = self.db.render(self.db.follow(field_ty));
+            self.diagnostics
+                .push(crate::diagnostics::operator_not_defined(
+                    self.file_span(at),
+                    spelling,
+                    &rendered,
+                ));
+            return;
+        }
+        if let Err(e) = self.db.unify(field_ty, value_ty) {
+            self.diag_unify(self.file_span(at), e);
+        }
+        let text_concat_assign =
+            op == praxis_ast::PlaceAssignOp::Add && is_text_scalar(&self.db, field_ty);
+        if op.reads_before_writing() && !text_concat_assign {
+            self.require_cap_as(
+                field_ty,
+                Capability::Kind(CapKind::Numeric),
+                at,
+                Some(crate::diagnostics::compound_assign_non_numeric),
+            );
+        }
+        self.reject_float_remainder(op == praxis_ast::PlaceAssignOp::Rem, field_ty, at, "%=");
     }
 
     /// Infer the type of a `match scrutinee { pattern => body, … }` expression

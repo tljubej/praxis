@@ -1,0 +1,98 @@
+// Every place the language can assign to, end to end.
+//
+// Two of them are new. ADR-064 gave `Vec`/`Deque` a subscript **read** and no
+// element store, and left that as a feature owed rather than one it smuggled
+// in; a record field had no store in any spelling at all, so `p.x = 5` was
+// `Y021` and rebuilding the whole record was the workaround.
+//
+// The values are chosen so a plausible-but-wrong implementation prints a
+// *different* number rather than crashing: a store that appended instead of
+// replacing would change a length, and a store that derived its own field index
+// instead of reading the record definition would write the neighbouring slot.
+// Every line therefore reads back something the wrong answer would move.
+
+struct Point { x: Int, y: Int }
+struct Named { name: Text, n: Int }
+struct Inner { v: Int }
+struct Outer { inner: Inner, xs: Vec[Int] }
+
+// ---- a record field: plain, then all five compounds ----
+var p = Point { x: 1, y: 2 }
+p.x = 5
+out(p.x)                // 5
+out(p.y)                // 2 — the neighbour a wrong slot index would have moved
+
+p.y += 10
+p.y -= 2
+p.y *= 3
+p.y /= 2
+p.y %= 7
+out(p.y)                // 1
+
+// `+=` on a `Text` field is concatenation and not arithmetic (ADR-085), the
+// same excuse a `Text` binding gets.
+var n = Named { name: "ab", n: 4 }
+n.name += "cd"
+n.n *= 2
+out(n.name)             // abcd
+out(n.n)                // 8
+
+// The write is on the **object**: every reference to it sees it (§4.2). A store
+// that rebuilt the record would leave `q` at 5.
+let q = p
+q.x = 9
+out(p.x)                // 9
+
+// ---- a Vec element ----
+var v = [1, 2, 3]
+v[0] = 100
+v[2] += 10
+out(v)                  // [100, 2, 13]
+out(v.len())            // 3 — a store that appended would print 4 or 5
+
+// ---- a Deque element, indexed from the front ----
+let d = Deque[Int]()
+d.push_back(1)
+d.push_back(2)
+d[1] = 42
+out(d[0])               // 1
+out(d[1])               // 42
+out(d.len())            // 2
+
+// ---- nested places: the receiver of either store is any expression ----
+let o = Outer { inner: Inner { v: 1 }, xs: [10, 20] }
+o.inner.v = 7
+o.xs[1] = 30
+out(o)                  // { inner: { v: 7 }, xs: [10, 30] }
+
+// A record *inside* a Vec: the element is a reference, so the store reaches it.
+let rs = [Inner { v: 1 }, Inner { v: 2 }]
+rs[0].v = 100
+out(rs)                 // [{ v: 100 }, { v: 2 }]
+
+// ---- a deferred receiver: the store is as generic as the read (REP-28) ----
+fn bump(r) { r.v += 1 }
+fn put(c, i, x) { c[i] = x }
+
+bump(o.inner)
+put(v, 1, 55)
+out(o.inner.v)          // 8
+out(v[1])               // 55
+
+// ---- the compound forms evaluate their place exactly once ----
+// `pick` appends to a log and answers the record, so the log's length is the
+// number of times the receiver expression ran. A desugaring into
+// `pick(log).v = pick(log).v + 1` would print 2.
+fn pick(log, r) { log.push(1)
+    r }
+
+let log = Vec[Int]()
+pick(log, o.inner).v += 1
+out(log.len())          // 1
+out(o.inner.v)          // 9
+
+// ---- the collections that already stored are unchanged ----
+var m = Map[Text, Int]()
+m["k"] = 1
+m["k"] += 2
+out(m["k"])             // 3

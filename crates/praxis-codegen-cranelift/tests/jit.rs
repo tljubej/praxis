@@ -6866,6 +6866,135 @@ fn a_compound_assignment_through_a_subscript_evaluates_its_place_once() {
     assert_eq!(result.as_int(), 12, "one call to `pick`, one increment");
 }
 
+/// **A `Vec`/`Deque` element store.** `v[0] = 100` writes the slot `v[0]` reads,
+/// where ADR-064 left the two readers with no store at all.
+///
+/// The assertions are the ones a plausible-but-wrong wrapper would fail. A store
+/// that reached for `praxis_vec_push` would *append*, so the length is checked
+/// alongside the element; an index the vector does not hold must fault rather
+/// than grow it, which is the same wrong answer from the other side; and the
+/// element descriptor has to be reconciled, or a `Vec[Int]` retagged by one bad
+/// store would read every remaining payload through the new type (P0-11).
+#[test]
+fn a_sequence_stores_the_element_its_subscript_reads() {
+    // Replace, not append: the length is unchanged and the neighbours are not.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var v = [1, 2, 3]\n  v[0] = 100\n  \
+         v[0] * 1000 + v[1] * 100 + v[2] * 10 + v.len()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 100_000 + 200 + 30 + 3);
+
+    // The compound form reads through the same subscript and writes back once.
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  var v = [1, 2, 3]\n  v[2] += 10\n  v[2]\n}\n");
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 13);
+
+    // A `Deque`, indexed from the front.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  let d = Deque[Int]()\n  d.push_back(1)\n  \
+         d.push_back(2)\n  d[1] = 7\n  d[0] * 10 + d[1]\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 17);
+
+    // One past the end is out of range and **not** a push: this is the assertion
+    // that fails if the store is ever pointed at the appending wrapper.
+    for src in [
+        "var v = [1, 2, 3]\n  v[3] = 9\n  v.len()",
+        "let d = Deque[Int]()\n  d.push_back(1)\n  d[1] = 9\n  d.len()",
+    ] {
+        let (rt, _) = run_main(&format!("fn main() -> Int {{\n  {src}\n}}\n"));
+        assert!(
+            rt.has_pending_fault(),
+            "{src}: a store past the end must fault rather than append"
+        );
+    }
+    // …and so is a negative index, which `as usize` alone would wrap.
+    let (rt, _) = run_main("fn main() -> Int {\n  var v = [1]\n  v[0 - 1] = 9\n  v.len()\n}\n");
+    assert!(rt.has_pending_fault(), "a negative index faults");
+}
+
+/// **A record field store.** `p.x = 5` writes the slot `p.x` reads (§4.5).
+///
+/// What a type test cannot see: the slot **index**. A store that derived its own
+/// index instead of reading the record definition would type-check and then
+/// write the wrong field, so every assertion here reads a *different* field back
+/// than the one it wrote.
+#[test]
+fn a_field_store_writes_the_slot_the_field_read_reads() {
+    // The written field changes and its neighbour does not — which is the half a
+    // wrong index gets backwards.
+    let (rt, result) = run_main(
+        "struct P { x: Int, y: Int }\n\
+         fn main() -> Int {\n  let p = P { x: 1, y: 2 }\n  p.x = 5\n  \
+         p.x * 10 + p.y\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 52);
+
+    // The compound forms read the same slot they write.
+    let (rt, result) = run_main(
+        "struct P { x: Int, y: Int }\n\
+         fn main() -> Int {\n  let p = P { x: 1, y: 2 }\n  p.y += 10\n  p.y *= 2\n  \
+         p.x * 100 + p.y\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 124);
+
+    // The write is on the **object**, so it is visible through every reference to
+    // it — §4.2's "passing an argument copies its `GcRef`". A store that rebuilt
+    // the record instead would leave the caller's copy at 1.
+    let (rt, result) = run_main(
+        "struct P { x: Int }\n\
+         fn bump(q) { q.x += 1 }\n\
+         fn main() -> Int {\n  let p = P { x: 1 }\n  bump(p)\n  bump(p)\n  p.x\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 3);
+
+    // A nested place: the receiver of a field store is any expression, so
+    // `o.inner.v` and `rs[0].v` reach the record the outer one holds.
+    let (rt, result) = run_main(
+        "struct I { v: Int }\nstruct O { inner: I }\n\
+         fn main() -> Int {\n  let o = O { inner: I { v: 1 } }\n  o.inner.v = 4\n  \
+         let rs = [I { v: 1 }, I { v: 2 }]\n  rs[0].v = 9\n  \
+         o.inner.v * 100 + rs[0].v * 10 + rs[1].v\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 492);
+
+    // A `Text` field, whose `+=` is concatenation (ADR-085) rather than the
+    // arithmetic the other four compounds take.
+    let (rt, result) = run_main(
+        "struct N { name: Text }\n\
+         fn main() -> Int {\n  let n = N { name: \"ab\" }\n  n.name += \"cd\"\n  \
+         n.name.len()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4);
+}
+
+/// **The field store's evaluation rule**, which is `IndexAssign`'s: a compound
+/// assignment through a field evaluates its receiver **once**.
+///
+/// `p.x += 1` desugared to `p.x = p.x + 1` names the receiver twice, and MIR
+/// lowers each `TypedExpr` where it stands — so `pick(log).x += 1` would call
+/// `pick` twice. `TypedStmt::FieldAssign` carries the receiver once, and this is
+/// the test that fails if it is ever desugared.
+#[test]
+fn a_compound_assignment_through_a_field_evaluates_its_receiver_once() {
+    let (rt, result) = run_main(
+        "struct C { n: Int }\n\
+         fn pick(log, c) { log.push(1)\n c }\n\
+         fn main() -> Int {\n  let log = Vec()\n  let c = C { n: 0 }\n  \
+         pick(log, c).n += 5\n  log.len() * 10 + c.n\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 15, "one call to `pick`, one increment");
+}
+
 /// **REP-09 end to end.** A constructor with written type arguments runs, and it
 /// builds the collection the annotation names.
 ///

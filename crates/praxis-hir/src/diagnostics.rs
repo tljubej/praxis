@@ -244,9 +244,10 @@ pub(crate) fn not_indexable(at: FileSpan, ty: &str, indices: usize) -> Diagnosti
 /// `Y020` — a subscript **store** on a type that has none (REP-16).
 ///
 /// The same code as [`not_indexable`] and a different message, because the two
-/// halves of the surface are not the same set: a `Vec` reads through `v[0]` and
-/// has no element store in the language at all, so "cannot be indexed" would be
-/// wrong about it while "cannot be assigned through" is exact.
+/// halves of the surface are not the same set: a `Text` reads through `t[0]` and
+/// is immutable (§4.3), so "cannot be indexed" would be wrong about it while
+/// "cannot be assigned through" is exact. `Vec` and `Deque` were in that
+/// sentence too until ADR-124 gave them element stores; `Text` is what is left.
 pub(crate) fn not_index_assignable(at: FileSpan, ty: &str, indices: usize) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
@@ -298,7 +299,7 @@ pub(crate) fn not_an_assignment_target(at: FileSpan) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
         DiagCode::NotAnAssignmentTarget,
-        "the left side of an assignment must be a name or an index".to_string(),
+        "the left side of an assignment must be a name, a field, or an index".to_string(),
         at,
     )
 }

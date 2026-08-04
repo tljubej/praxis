@@ -254,6 +254,13 @@ fn rewrite_stmt(stmt: &mut TypedStmt, pass: &mut MonoPass<'_>) {
             }
             rewrite_expr(value, pass);
         }
+        // …and both of a field store's, for the same reason.
+        TypedStmt::FieldAssign {
+            receiver, value, ..
+        } => {
+            rewrite_expr(receiver, pass);
+            rewrite_expr(value, pass);
+        }
         TypedStmt::Expr(e) => rewrite_expr(e, pass),
     }
 }
@@ -365,6 +372,12 @@ fn resolve_stmt(db: &mut TypeDb, binders: &[VarId], args: &[Type], stmt: &mut Ty
             for i in indices {
                 resolve_expr(db, binders, args, i);
             }
+            resolve_expr(db, binders, args, value);
+        }
+        TypedStmt::FieldAssign {
+            receiver, value, ..
+        } => {
+            resolve_expr(db, binders, args, receiver);
             resolve_expr(db, binders, args, value);
         }
         TypedStmt::Expr(e) => resolve_expr(db, binders, args, e),

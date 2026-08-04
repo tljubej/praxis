@@ -204,6 +204,16 @@ pattern whose head is not a record are both `Y123`, whose meaning — "this shap
 cannot match" — is exactly what is wrong with them. The next free codes are
 `Y022`, `Y116`, `Y126` and `N009`.
 
+**ADR-124 spent no code either**, and it narrows two of them. `Vec` and `Deque`
+have element stores now, so the receiver `Y020`'s store message describes is
+`Text` alone — it reads a `Char` out and is immutable (§4.3), which is the same
+"reads but does not write" asymmetry the paragraph above gives as `Vec`'s. And a
+**field** left `Y021`: `p.x = 1` is a store into a place, so what is left under
+that code is `f() = 1` and `a + b[0] = 1`, and the message says "a name, a field,
+or an index". Both features reuse reports that already existed — a field a record
+does not have is the read's `Y112`, and `p.x min= 3` is `Y016`, an operator the
+type does not have, rather than `Y020`, a subscript nobody wrote.
+
 ### Input — `I0xx`
 
 | Code | Finding | Stage | Meaning |

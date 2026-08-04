@@ -60,6 +60,12 @@ range always ends in `]` and so can never collide with an identifier's.
 Six collections read: `Vec`, `Deque`, `Text`, `Map`, `Counter`, `Grid`. **Three
 store:** `Map`, `Counter`, `Grid`.
 
+> **Superseded in part (ADR-124, 2026-08-04).** The feature this decision names
+> below was built: `Vec` and `Deque` have `INDEX_STORE` rows now, so **five**
+> store and the one reader left without one is `Text`, which is immutable. The
+> decision here — that a store is its own row, not the read written backwards —
+> is what made adding them two rows rather than a second dispatch.
+
 The store rows are not the read rows written backwards, because the sets differ and
 the semantics differ:
 

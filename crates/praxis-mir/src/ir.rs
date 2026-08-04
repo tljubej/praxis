@@ -521,6 +521,20 @@ pub enum Inst {
         src: LocalId,
         field_idx: u32,
     },
+    /// Write a `Gc` local into field `field_idx` of a record `GcRef` (§4.5).
+    /// Not a safepoint (no allocation).
+    ///
+    /// Writes *into* an existing object, so it defines no local —
+    /// [`StoreScalar`](Self::StoreScalar)'s shape, and the reason it is a use of
+    /// `record` rather than a def of it. The index is an **immediate**, for
+    /// [`LoadField`](Self::LoadField)'s reason: it is a raw ABI word, and boxing
+    /// it to ride a call's argument list would put an integer in a slot the
+    /// collector may dereference (P0-03).
+    StoreField {
+        record: LocalId,
+        field_idx: u32,
+        value: LocalId,
+    },
     /// Read an element out of a tuple `GcRef` into a `Gc` local (REP-08, §4.4).
     /// `index` is the element's position. Not a safepoint (no allocation).
     ///
@@ -611,6 +625,7 @@ impl Inst {
             Inst::BitsetContains { .. } => faulting(RuntimeSymbol::BitsetContains),
             Inst::LoadCapture { .. } => faulting(RuntimeSymbol::ClosureCapture),
             Inst::LoadField { .. } => faulting(RuntimeSymbol::RecordField),
+            Inst::StoreField { .. } => faulting(RuntimeSymbol::RecordSetField),
             Inst::LoadTupleElem { .. } => faulting(RuntimeSymbol::TupleGet),
             Inst::EnumPayloadGet { .. } => faulting(RuntimeSymbol::EnumPayload),
             // The backend reads the tag inline out of the payload — no call, so

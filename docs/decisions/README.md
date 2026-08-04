@@ -156,3 +156,4 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-121: *reserved* — W8-S1, `Gc`→`Scalar` demotion for loop-carried locals; behind the wave-5 gate](./121-slug.md)
 - [ADR-122: A descriptor the compiler wrote is provable, and a parameter is not](./122-a-descriptor-the-compiler-wrote-is-provable-and-a-parameter-is-not.md)
 - [ADR-123: *reserved* — W12, two code variants selected by `--debug never`; handover 26 defers it](./123-slug.md)
+- [ADR-124: A field and a sequence element are places, and a store replaces what is already there](./124-a-field-and-a-sequence-element-are-places.md)

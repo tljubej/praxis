@@ -307,6 +307,7 @@ pub(crate) fn uses(inst: &Inst) -> Vec<LocalId> {
         } => vec![],
         Inst::ExtractScalar { src, .. } => vec![*src],
         Inst::StoreScalar { dst_gc, src, .. } => vec![*dst_gc, *src],
+        Inst::StoreField { record, value, .. } => vec![*record, *value],
         Inst::Materialize { src, .. } => vec![*src],
         Inst::IntBinOp { lhs, rhs, .. } => vec![*lhs, *rhs],
         Inst::FloatBinOp { lhs, rhs, .. } => vec![*lhs, *rhs],

@@ -5600,7 +5600,7 @@ fn a_subscript_on_an_unannotated_parameter_is_answered_by_the_call_site() {
 }
 
 /// **REP-16, the store form.** `m[key] = v` and `counts[key] += 1` reach the
-/// three collections that have a store, and an assignment whose left side names
+/// five collections that have a store, and an assignment whose left side names
 /// no storage is `Y021` rather than a parse error.
 #[test]
 fn a_store_through_a_subscript_needs_a_receiver_that_has_one() {
@@ -5617,13 +5617,19 @@ fn a_store_through_a_subscript_needs_a_receiver_that_has_one() {
             .any(|d| d.kind() == praxis_source::DiagCode::NotAnAssignmentTarget)
     };
 
-    // The three that store, plain and compound.
+    // The five that store, plain and compound.
     assert!(!has_type_error("fn f(m: Map[Text, Int]) { m[\"a\"] = 1 }"));
     assert!(!has_type_error(
         "fn f(m: Map[Text, Int]) { m[\"a\"] = 1\n m[\"a\"] += 2 }"
     ));
     assert!(!has_type_error("fn f(c: Counter[Text]) { c[\"a\"] += 1 }"));
     assert!(!has_type_error("fn f(g: Grid[Int]) { g[0, 1] = 7 }"));
+    assert!(!has_type_error(
+        "fn f(v: Vec[Int]) { v[0] = 1\n v[0] += 2 }"
+    ));
+    assert!(!has_type_error(
+        "fn f(d: Deque[Int]) { d[0] = 1\n d[0] += 2 }"
+    ));
 
     // The stored type is checked against the collection's, in both positions.
     assert!(has_type_error(
@@ -5631,21 +5637,23 @@ fn a_store_through_a_subscript_needs_a_receiver_that_has_one() {
     ));
     assert!(has_type_error("fn f(m: Map[Text, Int]) { m[0] = 1 }"));
     assert!(has_type_error("fn f(g: Grid[Int]) { g[0, 1] = \"x\" }"));
+    assert!(has_type_error("fn f(v: Vec[Int]) { v[0] = \"x\" }"));
+    assert!(has_type_error("fn f(v: Vec[Int]) { v[\"a\"] = 1 }"));
+    assert!(has_type_error("fn f(d: Deque[Int]) { d[0] = \"x\" }"));
 
-    // A `Vec` reads through a subscript and has **no element store anywhere in
-    // the language** — no `v[0] = x`, and no `.set` either — so this is reported
-    // rather than given one silently.
-    assert!(y020("fn f(v: Vec[Int]) { v[0] = 1 }"));
-    assert!(!y020("fn f(v: Vec[Int]) -> Int { v[0] }"));
-    // Nor a `Text`, which is immutable.
+    // A `Text` reads through a subscript and has **no element store**, because it
+    // is immutable (§4.3) — so this is reported rather than given one silently.
+    // It is the one reader left with that asymmetry: `Vec` and `Deque` store now.
     assert!(y020("fn f(t: Text) { t[0] = 1 }"));
+    assert!(!y020("fn f(t: Text) -> Char { t[0] }"));
     // And a receiver with no subscript at all is the same code from either side.
     assert!(y020("fn f(s: Set[Int]) { s[0] = 1 }"));
 
     // A left side that names no storage. Each of these used to be a parse error
     // about a missing statement separator, which said nothing about the mistake.
+    // A **field** is not among them — it is a place (§4.5); see
+    // `a_store_through_a_field_writes_the_slot_the_read_would_have_read`.
     assert!(y021("fn g() -> Int { 1 }\nfn f() { g() = 3 }"));
-    assert!(y021("struct P { x: Int }\nfn f(p: P) { p.x = 3 }"));
     assert!(y021("fn f(v: Vec[Int]) { v.len() += 1 }"));
     // …and the target's own mistakes are still reported, so the statement is not
     // simply discarded.
@@ -5661,6 +5669,101 @@ fn a_store_through_a_subscript_needs_a_receiver_that_has_one() {
     assert!(has_type_error(
         "fn f(m: Map[Text, Bool]) { m[\"a\"] = true\n m[\"a\"] += true }"
     ));
+}
+
+/// **A field is a place.** `p.x = 5` stores into the slot `p.x` reads (§4.5),
+/// where it used to be `Y021` — "the left side of an assignment must be a name
+/// or an index" — and rebuilding the whole record was the only spelling.
+///
+/// The assertions are about what a *plausible-but-wrong* implementation would
+/// get wrong: that the store checks the field's type rather than accepting any
+/// value, that it goes through the same `HasField` requirement the read does (so
+/// an unannotated receiver defers rather than being refused, and a missing field
+/// is `Y112` and not `Y021`), and that the compound forms carry the numeric rule
+/// a `var` target has — including its one `Text` exception.
+#[test]
+fn a_store_through_a_field_writes_the_slot_the_read_would_have_read() {
+    let struct_p = "struct P { x: Int, y: Text }\n";
+    let y021 = |src: &str| -> bool {
+        analyze(src)
+            .diagnostics
+            .iter()
+            .any(|d| d.kind() == praxis_source::DiagCode::NotAnAssignmentTarget)
+    };
+    let no_field = |src: &str| -> bool {
+        analyze(src)
+            .diagnostics
+            .iter()
+            .any(|d| d.kind() == praxis_source::DiagCode::NoFieldOnType)
+    };
+
+    // Plain and compound, on a nominal record.
+    assert!(!has_type_error(&format!(
+        "{struct_p}fn f(p: P) {{ p.x = 5 }}"
+    )));
+    assert!(!has_type_error(&format!(
+        "{struct_p}fn f(p: P) {{ p.x += 1\n p.x -= 2\n p.x *= 3\n p.x /= 4\n p.x %= 5 }}"
+    )));
+    // `+=` on a `Text` field is concatenation and needs no number, exactly as it
+    // does on a `var` (ADR-085). The other four still need one.
+    assert!(!has_type_error(&format!(
+        "{struct_p}fn f(p: P) {{ p.y += \"z\" }}"
+    )));
+    assert!(has_type_error(&format!(
+        "{struct_p}fn f(p: P) {{ p.y *= \"z\" }}"
+    )));
+
+    // …and none of these is `Y021` any more, which is the row this test is for.
+    assert!(!y021(&format!("{struct_p}fn f(p: P) {{ p.x = 5 }}")));
+    assert!(!y021(&format!("{struct_p}fn f(p: P) {{ p.x += 1 }}")));
+
+    // The stored type is the *field's*, not whatever the value happens to be.
+    assert!(has_type_error(&format!(
+        "{struct_p}fn f(p: P) {{ p.x = \"five\" }}"
+    )));
+    assert!(has_type_error(&format!(
+        "{struct_p}fn f(p: P) {{ p.y = 5 }}"
+    )));
+
+    // A field the record does not have is `Y112` — the read's report, from the
+    // read's requirement — and not `Y021`, which would say the target names no
+    // storage when the mistake is which storage it names.
+    assert!(no_field(&format!("{struct_p}fn f(p: P) {{ p.z = 5 }}")));
+    assert!(!y021(&format!("{struct_p}fn f(p: P) {{ p.z = 5 }}")));
+
+    // An **unannotated** receiver defers on the constraint channel and is
+    // answered by the call site (REP-28), so a store is exactly as generic as a
+    // read: this is the assertion that fails if the store resolves the field
+    // itself instead of going through `infer_field_get`.
+    assert!(!has_type_error(&format!(
+        "{struct_p}fn bump(q) {{ q.x += 1 }}\nfn f(p: P) {{ bump(p) }}"
+    )));
+    // …and a call site whose argument has no such field is still reported.
+    assert!(has_type_error(
+        "struct P { x: Int }\nstruct Q { y: Int }\n\
+         fn bump(q) { q.x += 1 }\nfn f(q: Q) { bump(q) }"
+    ));
+
+    // A `let` binding may point at a mutable object (§4.2), so the store is
+    // legal through one — the same standing `let v = Vec[Int]()` / `v.push(1)`
+    // has. `Y009` is about rebinding the *name*, which this is not.
+    assert!(!has_type_error(&format!(
+        "{struct_p}fn f() {{ let p = P {{ x: 1, y: \"a\" }}\n p.x = 2 }}"
+    )));
+
+    // `min=`/`max=` are §6.2's map updates, and their semantics is about an entry
+    // that may be absent. A field is always present, so it is `Y016` (an operator
+    // this type does not have) rather than a silent accept.
+    assert!(has_type_error(&format!(
+        "{struct_p}fn f(p: P) {{ p.x min= 3 }}"
+    )));
+    assert!(has_type_error(&format!(
+        "{struct_p}fn f(p: P) {{ p.x max= 3 }}"
+    )));
+
+    // A **tuple element** is not a place: `p.0 = 1` has no store form, and the
+    // report is the one that says so.
+    assert!(y021("fn f(p: (Int, Int)) { p.0 = 1 }"));
 }
 
 /// **REP-09.** `Counter[(Int, Int)]()` parses, and it means what the annotation
