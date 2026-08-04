@@ -62,6 +62,25 @@ unfolded-check-fault = []
 # The tests that pin the inline shapes are arm-B-only for ADR-116's reason:
 # under the feature the emitted code holds the call they assert is absent.
 adr118-arm-a = []
+# ADR-119 arm A: no generated code claims a block. `emit_inline_intern`'s
+# out-of-range edge goes straight to `praxis_alloc_int` (the tree exactly as
+# ADR-113 left it) and `Float` goes back to an unconditional `call_symbol` with
+# no pacing test in front of it. The whole toggle is the `INLINE_SCALAR_CLAIM`
+# pair in `lower.rs`; three arms read it and nothing else in the workspace does.
+#
+#     cargo build --release -p praxis-cli \
+#         --features praxis-codegen-cranelift/adr119-arm-a                # arm A
+#
+# **`praxis-runtime` is byte-for-byte identical in both arms.** The `PageHeader`
+# and `GcHeader` displacements, `InlineClaimSite` and the two `*_CLAIM_SITE`
+# constants are compiled in either way and simply have no reader under the
+# feature — which is what makes this an A/B of the *emitted code* and of nothing
+# else, including the export surface ADR-119 argues the cost of.
+#
+# The tests that pin the claim's shape, its dominance and its heap state are
+# arm-B-only for ADR-116's reason: under the feature the emitted code holds the
+# call they assert is absent.
+adr119-arm-a = []
 
 [dependencies]
 praxis-mir.workspace = true

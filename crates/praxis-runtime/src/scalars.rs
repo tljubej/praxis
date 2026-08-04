@@ -22,6 +22,7 @@ use std::fmt;
 use crate::descriptor::{
     hash_value, BuiltinTypeId, DynamicHasher, Payload, Tracer, TypeDescriptor,
 };
+use crate::heap::InlineClaimSite;
 
 // ---- payload types ---------------------------------------------------------
 //
@@ -154,6 +155,21 @@ pub static INT: TypeDescriptor = TypeDescriptor::builtin::<IntPayload>(
 /// literal defaults to `i32` — the mismatch that used to abort the process, and
 /// that this handle makes the compiler resolve.
 pub static INT_PAYLOAD: Payload<IntPayload> = Payload::new(&INT);
+
+/// The inline bitmap claim for an `Int` that [`crate::small_int`]'s table does
+/// not hold (ADR-119).
+///
+/// **Minted here, beside the descriptor**, for [`crate::small_int`]'s reason one
+/// level up: the site's whole content is a function of `INT`, and a site minted
+/// anywhere else would be a second place that has to agree about which
+/// descriptor generated code is about to write into a header. `unwrap` in a
+/// `const` initializer means "fails the build": `INT` carries no `owned_bytes`
+/// callback and its 24-byte block is on the ladder, and if either stops being
+/// true this stops compiling rather than starting to under-charge the pacer.
+pub const INT_CLAIM_SITE: InlineClaimSite = match InlineClaimSite::of(&INT) {
+    Some(site) => site,
+    None => panic!("Int has no owned_bytes charge and its block is on the ladder"),
+};
 
 // ---- Byte ------------------------------------------------------------------
 
@@ -348,6 +364,16 @@ pub static FLOAT: TypeDescriptor = TypeDescriptor::builtin::<FloatPayload>(
 
 /// `Float`'s payload handle (REP-02).
 pub static FLOAT_PAYLOAD: Payload<FloatPayload> = Payload::new(&FLOAT);
+
+/// The inline bitmap claim for a `Float` (ADR-119). See [`INT_CLAIM_SITE`].
+///
+/// A `Float` has no intern table, so unlike `Int` this is the *whole* inline
+/// form of the box: there is no probe in front of it and the wrapper behind it
+/// is reached only when the claim itself bails.
+pub const FLOAT_CLAIM_SITE: InlineClaimSite = match InlineClaimSite::of(&FLOAT) {
+    Some(site) => site,
+    None => panic!("Float has no owned_bytes charge and its block is on the ladder"),
+};
 
 // ---- validation helper -----------------------------------------------------
 

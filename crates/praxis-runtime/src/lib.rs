@@ -72,8 +72,8 @@ pub use descriptor::{
 };
 pub use gc::{GcHeader, GcRef, HeapId};
 pub use heap::{
-    Heap, HeapStats, InlineInternSite, Pacer, INITIAL_COLLECT_THRESHOLD, LIVE_HEADROOM,
-    MAX_COLLECT_THRESHOLD,
+    Heap, HeapStats, InlineClaimSite, InlineInternSite, Pacer, INITIAL_COLLECT_THRESHOLD,
+    LIVE_HEADROOM, MAX_COLLECT_THRESHOLD,
 };
 pub use immortal::Immortals;
 pub use input::{clear_input_reader, install_input_reader, InputReader};

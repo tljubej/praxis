@@ -302,8 +302,28 @@ pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 /// The numeral is not touched by either line: ADR-116 owns v20's digit for the
 /// round.
 ///
-/// v20 (ADR-119, W10): *owed* — the inline bitmap claim, if it clears its
-/// wave-3 gate. Same reason as the line above.
+/// v20 (ADR-119, W10): generated code **claims and initializes a block itself**,
+/// so it now reads *and writes* `PageHeader` and `GcHeader` field layouts, which
+/// it had never done at all.
+///
+/// It reads `cursor`, `last_word`, `allocated` and `live_count` off a page taken
+/// from `Heap.partial[c]`; it writes a whole `GcHeader` — the descriptor
+/// pointer, the recorded `payload_offset` and the owning `heap_id`; it reads and
+/// writes `Heap.live_count` and `Heap.bytes_since_collect`; and it folds a size
+/// class's stride, its `first_block` and its payload displacement as immediates,
+/// so those three are compile-time facts about a class rather than loads.
+///
+/// This is the v12/v17 class and v15's at the same time: the meaning of what
+/// generated code may assume about a page changed, *and* it reads fields it
+/// never read. A v20-compiled program run against a v19 runtime whose
+/// `PageHeader` was packed differently would take bits out of the wrong bitmap
+/// words and lay headers at wrong addresses **inside a live page**. That is
+/// silent and it is a wild write, which is the worst entry in this list and the
+/// reason ADR-119 argues the widened export surface rather than filing it here —
+/// ADR-113 decision 2 called its two offsets "the whole export surface, and its
+/// narrowness is deliberate", and that sentence is now false.
+///
+/// The numeral is not touched: ADR-116 owns v20's digit for the round.
 ///
 /// v20 (ADR-120 part 2, W8-S0b): the scalar debug slot. `DebugLocalMeta` gains
 /// `slot_kind: DebugSlotKind`, and with it **a debug value slot's word stops

@@ -134,8 +134,12 @@ pub(crate) struct SizeClass(u8);
 impl SizeClass {
     /// `block`'s rung, or `None` if it is over-aligned or larger than the
     /// ladder — in which case it belongs on a large page.
+    ///
+    /// `const` since ADR-119: [`InlineClaimSite`](crate::InlineClaimSite) is a
+    /// `const` initializer, so a descriptor whose block the ladder rejects fails
+    /// the build rather than falling back to a wrapper call nobody noticed.
     #[inline]
-    pub(crate) fn of(block: BlockLayout) -> Option<SizeClass> {
+    pub(crate) const fn of(block: BlockLayout) -> Option<SizeClass> {
         if block.align == BLOCK_GRANULE && block.size <= MAX_BLOCK {
             let size = if block.size < MIN_BLOCK {
                 MIN_BLOCK
@@ -265,6 +269,45 @@ pub(crate) fn page_of(p: *const u8) -> *mut PageHeader {
 }
 
 impl PageHeader {
+    /// Where each field the inline claim sequence touches sits within a
+    /// `PageHeader` (ADR-119).
+    ///
+    /// Every one of these is `offset_of!` against a **private** field of this
+    /// `#[repr(C)]` struct, for [`GcHeader::DESCRIPTOR_OFFSET`]'s reason: the
+    /// alternative is a number written out in `lower.rs` that nothing keeps
+    /// true. They are `pub(crate)` and reach the backend only inside an
+    /// [`InlineClaimSite`](crate::InlineClaimSite), which is what stops them
+    /// being six independent chances to pair one page's cursor with another's
+    /// bitmap.
+    ///
+    /// **This is the surface ADR-113 decision 2 said it wanted to keep at two
+    /// offsets, and ADR-119 argues the case for widening it.** Repacking
+    /// `PageHeader` is a generated-code change from here on, and the assertion
+    /// that says so is
+    /// `the_claim_site_displacements_name_the_fields_they_claim_to` in
+    /// `heap.rs`, which reads a live page through every one of them.
+    /// The word the next claim starts scanning from.
+    pub(crate) const CURSOR_OFFSET: usize = core::mem::offset_of!(PageHeader, cursor);
+    /// See [`PageHeader::CURSOR_OFFSET`].
+    pub(crate) const LAST_WORD_OFFSET: usize = core::mem::offset_of!(PageHeader, last_word);
+    /// See [`PageHeader::CURSOR_OFFSET`].
+    pub(crate) const ALLOCATED_OFFSET: usize = core::mem::offset_of!(PageHeader, allocated);
+    /// See [`PageHeader::CURSOR_OFFSET`].
+    pub(crate) const LIVE_COUNT_OFFSET: usize = core::mem::offset_of!(PageHeader, live_count);
+
+    /// Where block 0 of a **small** page of stride `block_size` begins.
+    ///
+    /// A function of the stride alone, which is why the inline claim sequence
+    /// folds it to an immediate rather than loading `first_block`: both
+    /// [`PageHeader::new_small`] and [`PageHeader::reclass`] compute exactly
+    /// this, so every page on `Heap::partial[c]` has this value and no other.
+    /// Stated here, once, so the fold is this module's derivation and not the
+    /// backend's — `the_folded_first_block_is_the_one_every_page_of_the_class_has`
+    /// checks it against a live page of every rung.
+    pub(crate) const fn first_block_of(block_size: usize) -> usize {
+        round_up_to_multiple(std::mem::size_of::<PageHeader>(), block_size)
+    }
+
     /// A fresh page of `class`, owned by `heap_id`.
     ///
     /// Returns a raw pointer because a page outlives every borrow of it: the
@@ -272,7 +315,7 @@ impl PageHeader {
     /// masked object address.
     pub(crate) fn new_small(class: SizeClass, heap_id: u32) -> *mut PageHeader {
         let block_size = class.block_size();
-        let first_block = round_up_to_multiple(std::mem::size_of::<PageHeader>(), block_size);
+        let first_block = Self::first_block_of(block_size);
         let block_count = (PAGE_SIZE - first_block) / block_size;
         // Every small block is a `GcHeader` followed by a payload aligned no
         // more strictly than the header — `SizeClass::of` admits nothing else —
@@ -420,7 +463,7 @@ impl PageHeader {
         assert_eq!(self.live_count.get(), 0, "reclassing a non-empty page");
         assert_ne!(self.class.get(), CLASS_LARGE, "reclassing a large page");
         let block_size = class.block_size();
-        let first_block = round_up_to_multiple(std::mem::size_of::<PageHeader>(), block_size);
+        let first_block = Self::first_block_of(block_size);
         let block_count = (PAGE_SIZE - first_block) / block_size;
         self.class.set(class.index() as u8);
         self.block_size.set(block_size as u32);
@@ -619,6 +662,20 @@ impl PageHeader {
     #[inline]
     pub(crate) fn payload_offset(&self) -> usize {
         self.payload_offset.get() as usize
+    }
+
+    /// Where block 0 starts, relative to this page's base.
+    ///
+    /// Test-only, and that is the point: nothing on the allocation path reads
+    /// this field through an accessor, and generated code folds
+    /// [`PageHeader::first_block_of`] instead of loading it (ADR-119). The two
+    /// tests that use this — `the_folded_first_block_is_the_one_every_page_of_the_class_has`
+    /// here and `the_claim_site_displacements_name_the_fields_they_claim_to` in
+    /// `heap.rs` — are pinning the fold against the field it stands in for.
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn first_block(&self) -> usize {
+        self.first_block.get() as usize
     }
 
     /// How many blocks this page has.
@@ -949,6 +1006,42 @@ mod tests {
                 p.valid_mask(p.words() - 1),
                 "class {index}"
             );
+        }
+    }
+
+    /// Where block 0 starts is a function of the stride and nothing else, on
+    /// every rung and after a re-class.
+    ///
+    /// **This is what licenses ADR-119's fold.** The inline claim sequence does
+    /// not load `first_block`; it adds an immediate, because every page on a
+    /// class's availability list has the same one. That is true because
+    /// [`PageHeader::new_small`] and [`PageHeader::reclass`] both compute it
+    /// through [`PageHeader::first_block_of`] — and a page that reached the list
+    /// with a different value would have generated code writing headers one
+    /// stride out of place, silently, on someone else's block.
+    #[test]
+    fn the_folded_first_block_is_the_one_every_page_of_the_class_has() {
+        for index in 0..NUM_CLASSES {
+            let class = SizeClass::from_index(index);
+            let page = OwnedPage::small(class);
+            let p = page.get();
+            assert_eq!(
+                p.first_block(),
+                PageHeader::first_block_of(class.block_size()),
+                "a fresh page of class {index}"
+            );
+            // …and after the page has been emptied and handed to another rung,
+            // which is the path `Heap::grow_class` takes from the empty pool.
+            for other in (0..NUM_CLASSES).rev() {
+                let other_class = SizeClass::from_index(other);
+                p.reclass(other_class);
+                assert_eq!(
+                    p.first_block(),
+                    PageHeader::first_block_of(other_class.block_size()),
+                    "class {index} re-classed to {other}"
+                );
+                assert_eq!(p.block_size(), other_class.block_size());
+            }
         }
     }
 

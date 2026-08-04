@@ -47,22 +47,50 @@ use crate::Tracer;
 /// Deliberately neither `Copy` nor `Clone`: one token, one allocation. A
 /// wrapper that allocates twice paces twice.
 ///
-/// # Generated code holds no token, and does not need one (ADR-113)
+/// # Generated code holds no token, and does not need one (ADR-113, ADR-119)
 ///
 /// Since ADR-113 the Cranelift backend reproduces [`Heap::collection_is_due`]
 /// inline and, when it answers `false`, reads an interned small `Int` out of
 /// [`crate::small_int`]'s table without entering this module at all. That is not
 /// a forged token, and the reason is what this type means: **the token is
-/// permission to *collect*, not permission to allocate.** The inline path
-/// allocates nothing — it hands back an immortal the runtime minted before
-/// `main` ran — and it takes that branch only where `maybe_collect` would have
-/// returned `false`, which is the branch on which `pace` mints a token having
-/// done nothing at all. Where the predicate answers `true` the inline path
-/// branches to `praxis_alloc_int`, which paces through `pace` exactly as before.
+/// permission to *collect*, not permission to allocate.** It takes that branch
+/// only where `maybe_collect` would have returned `false`, which is the branch
+/// on which `pace` mints a token having done nothing at all. Where the predicate
+/// answers `true` the inline path branches to `praxis_alloc_int`, which paces
+/// through `pace` exactly as before.
 ///
-/// The obligation that leaves is one sentence, and [`InlineInternSite`] is the
-/// mechanism that keeps it checkable rather than documented: the inline path is
-/// taken **only** when [`Heap::collection_is_due`] is false.
+/// **ADR-113 also said "the inline path allocates nothing — it hands back an
+/// immortal the runtime minted before `main` ran". Since ADR-119 that sentence
+/// is false**: on the branch the predicate leaves open, generated code claims a
+/// block out of a page's `allocated` bitmap, writes the header and the payload
+/// itself, and bumps both live counters and the pacing charge — everything
+/// `alloc_raw` → `claim_block` → `occupy` does, in that order, without entering
+/// this module. What replaced the sentence is not weaker, and it is three parts:
+///
+/// 1. **Entry.** Every store the sequence performs is dominated, in the emitted
+///    Cranelift CFG, by the branch on [`Heap::collection_is_due`]. Asserted with
+///    a dominator tree over a function with two claim sites, so it is a
+///    dominance claim and not a claim about one lowering's shape.
+/// 2. **Duration**, which is the part that carries the weight. Between that
+///    branch and the last store there is **no call**, and a collection begins
+///    only inside `Heap::collect_inner`, which generated code reaches only
+///    through a `praxis_*` wrapper. So *not due on entry* implies *not due
+///    throughout*: no sweep can observe the block half-written, and a re-entrant
+///    claim cannot be handed the same free bit because there is nothing to
+///    re-enter through.
+/// 3. **State.** The heap is left field-for-field as the paced path would have
+///    left it, both live counters included — each is only ever *decremented*
+///    elsewhere and never recomputed, so a skipped increment underflows rather
+///    than decays.
+///
+/// The store order (header, payload, `allocated` bit, counters) is a severity
+/// ranking against a collection part 2 says cannot occur — **not** the safety
+/// argument. All three parts are claims about an instruction stream, so all
+/// three are carried by tests in `crates/praxis-codegen-cranelift/src/lower.rs`
+/// that read the emitted Cranelift, and the displacements they name are checked
+/// against live objects by `the_claim_site_displacements_name_the_fields_they_claim_to`
+/// below. [`InlineInternSite`] and [`InlineClaimSite`] carry the half a type can:
+/// which table may be probed, and which descriptors have a claim sequence at all.
 #[must_use = "a Safepoint is the permission to allocate; dropping it wasted a pacing check"]
 pub struct Safepoint<'a>(PhantomData<&'a Heap>);
 
@@ -215,6 +243,241 @@ impl InlineInternSite {
     }
 }
 
+/// Everything generated code may bake in to **claim and initialize a block**
+/// inline, and nothing else (ADR-119).
+///
+/// This is the value ADR-113 decision 3 declined to write and left the name
+/// `InlineAllocSite` free for. It was declined because P-1a allocated nothing at
+/// all, and "four fields nothing reads are four fields that go stale before
+/// their first reader arrives". This is that reader.
+///
+/// # What it makes unrepresentable
+///
+/// [`InlineInternSite`] confines *which table* the backend may probe. This
+/// confines something stronger: **which descriptors have a claim sequence at
+/// all.** [`InlineClaimSite::of`] is a `const fn` returning `Option`, and it
+/// answers `None` for a descriptor the sequence cannot reproduce the runtime's
+/// bookkeeping for —
+///
+/// - one that carries an [`owned_bytes`](TypeDescriptor::owned_bytes) callback,
+///   because `Heap::occupy` charges `stride + owned_bytes_of(payload)` against
+///   the pacing counter and the second term is a call the sequence has no way to
+///   make. Every scalar descriptor answers `None` to it; every `Text` and `Vec`
+///   answers `Some`, and those are exactly the descriptors this refuses;
+/// - one whose block [`SizeClass::of`] rejects, because a large page is claimed
+///   by a linear scan of `empty_large` keyed on the whole layout, which is not a
+///   bitmap claim in any sense.
+///
+/// Both refusals are `const`, so a `praxis-codegen-cranelift` arm that named a
+/// descriptor with an `owned_bytes` charge would fail to build rather than
+/// silently under-charge the collector — the failure mode ADR-113's "What was
+/// deliberately not done" identified as this path's whole risk. The one place a
+/// site is minted is [`crate::scalars`], beside the descriptors it describes.
+///
+/// # And the half it cannot make unrepresentable
+///
+/// The same half as [`InlineInternSite`]'s, and one more. It cannot force the
+/// backend to emit the pacing compare, to emit the stores in an order, or to
+/// emit all of them — those are claims about an instruction stream, and ADR-119
+/// decision 4 carries all three with tests that read the emitted Cranelift. What
+/// this type does is make the *numbers* one authority's, so that the tests are
+/// checking a shape rather than checking arithmetic.
+#[derive(Clone, Copy, Debug)]
+pub struct InlineClaimSite {
+    heap_offset: usize,
+    bytes_since_collect_offset: usize,
+    collect_threshold_offset: usize,
+    heap_id_offset: usize,
+    heap_live_count_offset: usize,
+    partial_head_offset: usize,
+    page_cursor_offset: usize,
+    page_last_word_offset: usize,
+    page_allocated_offset: usize,
+    page_live_count_offset: usize,
+    header_descriptor_offset: usize,
+    header_payload_offset_offset: usize,
+    header_heap_id_offset: usize,
+    first_block: usize,
+    stride: usize,
+    payload_offset: usize,
+}
+
+impl InlineClaimSite {
+    /// The claim site for `descriptor`, or `None` if the inline sequence cannot
+    /// reproduce what [`Heap::alloc_raw`] would have done for it.
+    ///
+    /// See the type's doc for the two refusals and why each is total rather than
+    /// conservative.
+    pub(crate) const fn of(descriptor: &'static TypeDescriptor) -> Option<InlineClaimSite> {
+        // The charge `Heap::occupy` makes is `stride + owned_bytes_of(payload)`.
+        // The sequence can reproduce the first term (it is `class.block_size()`,
+        // a compile-time fact) and not the second (it is an indirect call
+        // through the descriptor, on a payload that does not exist yet). A
+        // descriptor with the callback therefore has no inline form, and this is
+        // the only place that is decided.
+        if descriptor.owned_bytes.is_some() {
+            return None;
+        }
+        let (payload_offset, block) = BlockLayout::of(descriptor);
+        let Some(class) = SizeClass::of(block) else {
+            return None;
+        };
+        let stride = class.block_size();
+        Some(InlineClaimSite {
+            heap_offset: core::mem::offset_of!(crate::RuntimeContext, heap),
+            // Not parameters, for `InlineInternSite::new`'s reason: a site that
+            // described a block to claim but not the pacing predicate would be
+            // permission to skip the predicate, and skipping it is the one thing
+            // ADR-040's token exists to make unwritable.
+            bytes_since_collect_offset: Heap::BYTES_SINCE_COLLECT_OFFSET,
+            collect_threshold_offset: Heap::COLLECT_THRESHOLD_OFFSET,
+            heap_id_offset: core::mem::offset_of!(Heap, id),
+            heap_live_count_offset: core::mem::offset_of!(Heap, live_count),
+            // The class's availability-list head, folded: `partial` is an array
+            // and the index is a compile-time fact, so the backend names one
+            // displacement rather than an array base and a scale it could pair
+            // with the wrong class.
+            partial_head_offset: core::mem::offset_of!(Heap, partial)
+                + class.index() * core::mem::size_of::<Cell<*mut PageHeader>>(),
+            page_cursor_offset: PageHeader::CURSOR_OFFSET,
+            page_last_word_offset: PageHeader::LAST_WORD_OFFSET,
+            page_allocated_offset: PageHeader::ALLOCATED_OFFSET,
+            page_live_count_offset: PageHeader::LIVE_COUNT_OFFSET,
+            header_descriptor_offset: GcHeader::DESCRIPTOR_OFFSET,
+            header_payload_offset_offset: GcHeader::PAYLOAD_OFFSET_FIELD_OFFSET,
+            header_heap_id_offset: GcHeader::HEAP_ID_OFFSET,
+            first_block: PageHeader::first_block_of(stride),
+            stride,
+            payload_offset,
+        })
+    }
+
+    /// Where the `Heap` pointer sits in a `RuntimeContext`.
+    #[must_use]
+    pub const fn heap_offset(self) -> usize {
+        self.heap_offset
+    }
+
+    /// Where [`Heap::bytes_since_collect`] sits within a `Heap`. The sequence
+    /// loads it for the pacing compare and stores it back, once, at the end.
+    #[must_use]
+    pub const fn bytes_since_collect_offset(self) -> usize {
+        self.bytes_since_collect_offset
+    }
+
+    /// Where [`Heap::collect_threshold`] sits within a `Heap`. See
+    /// [`Heap::collection_is_due`], which is the one statement of the predicate
+    /// these two words are the operands of.
+    #[must_use]
+    pub const fn collect_threshold_offset(self) -> usize {
+        self.collect_threshold_offset
+    }
+
+    /// Where the owning [`HeapId`] sits within a `Heap` — the `u32` the sequence
+    /// copies into every header it writes.
+    #[must_use]
+    pub const fn heap_id_offset(self) -> usize {
+        self.heap_id_offset
+    }
+
+    /// Where `Heap::live_count` sits. One of the two counters ADR-119 decision 1
+    /// part 3 is about: sweep *decrements* it and never recomputes it, so a
+    /// claim that skips this bump underflows it on the first collection.
+    #[must_use]
+    pub const fn heap_live_count_offset(self) -> usize {
+        self.heap_live_count_offset
+    }
+
+    /// Where this descriptor's size class's availability-list head sits within a
+    /// `Heap`. A null here is the sequence's first bail-out: growing a class is
+    /// `Heap::grow_class`, which allocates a page.
+    #[must_use]
+    pub const fn partial_head_offset(self) -> usize {
+        self.partial_head_offset
+    }
+
+    /// Where `PageHeader::cursor` sits. The word the scan starts at, and — since
+    /// the inline sequence scans exactly one word — the word it claims from.
+    #[must_use]
+    pub const fn page_cursor_offset(self) -> usize {
+        self.page_cursor_offset
+    }
+
+    /// Where `PageHeader::last_word` sits. The sequence bails when
+    /// `cursor >= last_word`, which is both the "past the end" test
+    /// `claim_free_block`'s loop condition performs and the tail-word refusal
+    /// ADR-119 decision 3 measures — one compare doing both.
+    #[must_use]
+    pub const fn page_last_word_offset(self) -> usize {
+        self.page_last_word_offset
+    }
+
+    /// Where the `allocated` bitmap begins. Indexed by the cursor word, scaled
+    /// by eight.
+    #[must_use]
+    pub const fn page_allocated_offset(self) -> usize {
+        self.page_allocated_offset
+    }
+
+    /// Where `PageHeader::live_count` sits. The *other* counter of decision 1
+    /// part 3: `relink_pages` reads it to decide which availability list a page
+    /// joins, so a skipped bump puts a page holding live blocks on the empty
+    /// pool, where `reclass` hands its storage to another layout.
+    #[must_use]
+    pub const fn page_live_count_offset(self) -> usize {
+        self.page_live_count_offset
+    }
+
+    /// Where a [`GcHeader`]'s descriptor pointer sits. The first store, and the
+    /// one whose absence is unrecoverable — see ADR-119 decision 1's severity
+    /// ranking.
+    #[must_use]
+    pub const fn header_descriptor_offset(self) -> usize {
+        self.header_descriptor_offset
+    }
+
+    /// Where a [`GcHeader`]'s recorded payload displacement sits. A `u16`.
+    #[must_use]
+    pub const fn header_payload_offset_offset(self) -> usize {
+        self.header_payload_offset_offset
+    }
+
+    /// Where a [`GcHeader`]'s owning-heap id sits. A `u32`.
+    #[must_use]
+    pub const fn header_heap_id_offset(self) -> usize {
+        self.header_heap_id_offset
+    }
+
+    /// Byte offset of block 0 from a page's base, for this descriptor's class.
+    ///
+    /// Folded rather than loaded from `PageHeader::first_block`, because it is a
+    /// function of the stride alone and every page on this class's list has the
+    /// same one — [`PageHeader::first_block_of`] is the derivation, stated in
+    /// the module that owns the geometry.
+    #[must_use]
+    pub const fn first_block(self) -> usize {
+        self.first_block
+    }
+
+    /// The byte stride between blocks of this descriptor's class, which is also
+    /// exactly what `Heap::occupy` charges against the pacing counter for one of
+    /// them — the `owned_bytes` term being `None` is what
+    /// [`InlineClaimSite::of`] refused a descriptor for.
+    #[must_use]
+    pub const fn stride(self) -> usize {
+        self.stride
+    }
+
+    /// Where this descriptor's payload begins within its block, which is also
+    /// the value the header records. [`GcHeader::payload_offset_for`]'s answer,
+    /// carried beside the offset it is stored at so the two cannot be paired
+    /// wrongly.
+    #[must_use]
+    pub const fn payload_offset(self) -> usize {
+        self.payload_offset
+    }
+}
+
 /// A precise, non-moving GC heap (§12.1, ADR-011).
 ///
 /// `#[repr(C)]` so the `RuntimeContext.heap` pointer offset is stable
@@ -346,13 +609,24 @@ impl BlockLayout {
     /// # Panics
     /// Panics if the payload alignment exceeds what a `GcHeader` can record, or
     /// if the total size overflows.
-    pub(crate) fn of(descriptor: &TypeDescriptor) -> (usize, BlockLayout) {
+    ///
+    /// `const` since ADR-119, for [`SizeClass::of`]'s reason: the inline claim
+    /// sequence's stride and payload displacement come off this calculation in a
+    /// `const` initializer, so they are this function's answer at build time and
+    /// not a second derivation in the backend.
+    pub(crate) const fn of(descriptor: &TypeDescriptor) -> (usize, BlockLayout) {
         let payload_align = descriptor.align();
         let payload_offset = GcHeader::payload_offset_for(payload_align);
-        let size = payload_offset
-            .checked_add(descriptor.size())
-            .expect("allocation size overflow");
-        let align = std::mem::align_of::<GcHeader>().max(payload_align);
+        let size = match payload_offset.checked_add(descriptor.size()) {
+            Some(size) => size,
+            None => panic!("allocation size overflow"),
+        };
+        let header_align = std::mem::align_of::<GcHeader>();
+        let align = if payload_align > header_align {
+            payload_align
+        } else {
+            header_align
+        };
         (payload_offset, BlockLayout { size, align })
     }
 }
@@ -1127,6 +1401,15 @@ impl Heap {
     /// store, the payload `init` and two counter bumps. No hash, no registry
     /// push, no reallocation, no `RefCell` borrow.
     ///
+    /// **Generated code reproduces that sequence inline (ADR-119)**, for the two
+    /// descriptors [`InlineClaimSite::of`] admits, behind the same pacing branch
+    /// [`Heap::collection_is_due`] states. A change to what this function writes
+    /// — a third counter, a header field, a different charge — is a change the
+    /// Cranelift backend's `emit_inline_claim` owes too, and the test that
+    /// notices is `the_inline_claim_writes_every_word_the_wrapper_would`, which
+    /// asserts the emitted store list against the displacements the site
+    /// carries.
+    ///
     /// # Safety
     /// `init` must fully initialize `descriptor.size` bytes of the payload and
     /// the bytes must be valid as the descriptor's payload type thereafter.
@@ -1340,13 +1623,19 @@ impl Heap {
     ///
     /// ADR-040's [`Safepoint`] exists so that "allocate on the paced path
     /// without pacing" has no spelling. Generated code does not breach it,
-    /// because it never allocates on the fast path and never collects: it takes
-    /// that path **only** where this function answers `false`, which is exactly
-    /// the branch on which `maybe_collect` returns without doing anything. That
-    /// is the entire argument, and it holds only while this expression is what
-    /// the backend emits.
+    /// because it takes that path **only** where this function answers `false`,
+    /// which is exactly the branch on which `maybe_collect` returns without
+    /// doing anything. That is the entire argument, and it holds only while this
+    /// expression is what the backend emits.
     ///
-    /// So: **a term added here must be added to `emit_inline_intern` in
+    /// **Since ADR-119 the branch this guards does allocate**, so the argument
+    /// carries more weight than it did: generated code claims a block and writes
+    /// its header on the far side of it. What makes that sound is that between
+    /// this branch and the last store there is no call, so *not due here* is
+    /// *not due throughout*. See [`Safepoint`], which states all three parts.
+    ///
+    /// So: **a term added here must be added to `emit_inline_intern` and
+    /// `emit_inline_claim_box` in
     /// `crates/praxis-codegen-cranelift/src/lower.rs`, or generated code
     /// allocates on a branch where the collector was due.** The failure mode is
     /// not a wrong answer — it is a collection that silently does not happen,
@@ -2121,6 +2410,181 @@ mod tests {
             site.heap_offset(),
             core::mem::offset_of!(crate::RuntimeContext, heap),
             "and the base those two are relative to is the context's `heap`"
+        );
+    }
+
+    /// **The other half of ADR-119 decision 1 part 3, as an assertion.**
+    ///
+    /// The IR test in the backend says *which displacements* the claim sequence
+    /// stores to and in what order. Nothing there can say those displacements
+    /// name the fields they are supposed to — that is this test, and it is the
+    /// `the_pacing_predicate_is_one_unsigned_compare_of_the_two_exported_words`
+    /// shape widened from two words to a heap, a page and a header.
+    ///
+    /// Every read below is byte-for-byte a load the emitted sequence performs,
+    /// against a live heap that has just allocated one `Int` through the
+    /// wrapper — so a `#[repr(C)]` that stopped being one, a reordered
+    /// `PageHeader`, or an `offset_of!` naming a neighbouring field fails here
+    /// rather than in a program that silently writes a `heap_id` over a
+    /// `payload_offset`.
+    #[test]
+    fn the_claim_site_displacements_name_the_fields_they_claim_to() {
+        let site = crate::scalars::INT_CLAIM_SITE;
+        let heap = Heap::new();
+        let value = heap.alloc_unpaced(INT_PAYLOAD, 7_i64);
+
+        let heap_base = std::ptr::from_ref(&heap).cast::<u8>();
+        // SAFETY: `Heap` is `#[repr(C)]`, every constant below is an
+        // `offset_of!` of one of its fields, and `Cell<T>` is
+        // `#[repr(transparent)]` over `T`.
+        let (read_id, read_live, read_head) = unsafe {
+            (
+                *heap_base.add(site.heap_id_offset()).cast::<u32>(),
+                *heap_base.add(site.heap_live_count_offset()).cast::<usize>(),
+                *heap_base
+                    .add(site.partial_head_offset())
+                    .cast::<*mut PageHeader>(),
+            )
+        };
+        assert_eq!(read_id, heap.id.get(), "heap_id_offset names `Heap::id`");
+        assert_eq!(
+            read_live,
+            heap.live_count.get(),
+            "heap_live_count_offset names `Heap::live_count`"
+        );
+        assert!(
+            !read_head.is_null(),
+            "partial_head_offset names the `Int` class's list head, and the \
+             allocation above put a page on it"
+        );
+
+        // SAFETY: the head of an availability list is one of this heap's pages.
+        let page = unsafe { &*read_head };
+        let page_base = std::ptr::from_ref(page).cast::<u8>();
+        // SAFETY: `PageHeader` is `#[repr(C)]` and each constant is an
+        // `offset_of!` of one of its `Cell` fields.
+        let (read_cursor, read_last, read_page_live, read_word) = unsafe {
+            (
+                *page_base.add(site.page_cursor_offset()).cast::<u32>(),
+                *page_base.add(site.page_last_word_offset()).cast::<u32>(),
+                *page_base.add(site.page_live_count_offset()).cast::<u32>(),
+                *page_base.add(site.page_allocated_offset()).cast::<u64>(),
+            )
+        };
+        assert_eq!(
+            read_cursor, 0,
+            "the first claim leaves the cursor at word 0"
+        );
+        assert_eq!(
+            read_last,
+            page.words() as u32 - 1,
+            "page_last_word_offset names `PageHeader::last_word`"
+        );
+        // The inline sequence bails at `cursor >= last_word`, ceding the tail
+        // word to the wrapper (ADR-119 decision 3). On a page with **one**
+        // bitmap word that bail would fire on every claim and the inline arm
+        // would be dead code — a claim about reach rather than correctness,
+        // asserted here because nothing else would notice it going false.
+        assert!(
+            read_last >= 1,
+            "a claimable class must have more than one bitmap word, or the \
+             tail-word bail-out cedes the whole page to the wrapper"
+        );
+        assert_eq!(
+            read_page_live,
+            page.live_count(),
+            "page_live_count_offset names `PageHeader::live_count`"
+        );
+        assert_eq!(
+            read_word,
+            page.allocated_word(0),
+            "page_allocated_offset names the base of the `allocated` bitmap"
+        );
+
+        // The geometry the sequence folds rather than loads.
+        assert_eq!(
+            site.stride(),
+            page.block_size(),
+            "the stride the pacer is charged is the page's own"
+        );
+        assert_eq!(
+            site.first_block(),
+            page.first_block(),
+            "the folded `first_block` is the page's own — see \
+             `PageHeader::first_block_of`"
+        );
+        assert_eq!(
+            site.payload_offset(),
+            page.payload_offset(),
+            "and the payload displacement the header will record is the one \
+             the page was laid out with (ADR-039 decision 1)"
+        );
+
+        // And the header the sequence writes, read back through *its* three
+        // displacements against the one the wrapper just wrote.
+        let header_base = value.as_ptr().cast::<u8>();
+        // SAFETY: `value` is a live object this heap allocated, and `GcHeader`
+        // is `#[repr(C)]` with these three fields.
+        let (read_desc, read_payload_offset, read_header_id) = unsafe {
+            (
+                *header_base
+                    .add(site.header_descriptor_offset())
+                    .cast::<*const TypeDescriptor>(),
+                *header_base
+                    .add(site.header_payload_offset_offset())
+                    .cast::<u16>(),
+                *header_base.add(site.header_heap_id_offset()).cast::<u32>(),
+            )
+        };
+        assert!(
+            std::ptr::eq(read_desc, &crate::scalars::INT),
+            "header_descriptor_offset names the descriptor pointer"
+        );
+        assert_eq!(
+            read_payload_offset as usize,
+            site.payload_offset(),
+            "header_payload_offset_offset names the recorded displacement, and \
+             it is the one the site carries"
+        );
+        assert_eq!(
+            read_header_id,
+            heap.id.get(),
+            "header_heap_id_offset names the provenance word"
+        );
+    }
+
+    /// A descriptor whose payload owns bytes outside its block has **no** claim
+    /// site, and that refusal is the whole of why the inline sequence may charge
+    /// `stride` and nothing else.
+    ///
+    /// `Heap::occupy` charges `stride + owned_bytes_of(payload)`. Generated code
+    /// can reproduce the first term and cannot make the indirect call the second
+    /// needs, so a `Text` or a `Vec` claimed inline would under-charge the pacer
+    /// by its entire buffer — RT-04, re-introduced. This walks every built-in
+    /// descriptor and asserts the refusal is exactly the `owned_bytes` set,
+    /// rather than a list someone kept in step by hand.
+    #[test]
+    fn only_a_descriptor_with_no_owned_bytes_charge_has_a_claim_site() {
+        for descriptor in crate::descriptor::BUILTINS {
+            let claimable = InlineClaimSite::of(descriptor).is_some();
+            let charges_outside = descriptor.owned_bytes.is_some();
+            let on_the_ladder = SizeClass::of(BlockLayout::of(descriptor).1).is_some();
+            assert_eq!(
+                claimable,
+                !charges_outside && on_the_ladder,
+                "{}: a claim site exists exactly when the pacing charge is the \
+                 stride alone and the block is on the ladder",
+                descriptor.name
+            );
+        }
+        assert!(
+            InlineClaimSite::of(&crate::scalars::INT).is_some(),
+            "and `Int` is on the claimable side, which is the whole package"
+        );
+        assert!(
+            InlineClaimSite::of(&crate::text::TEXT).is_none(),
+            "…and `Text` is not: its `owned_bytes` is the `Box<str>` the \
+             sequence has no way to measure"
         );
     }
 

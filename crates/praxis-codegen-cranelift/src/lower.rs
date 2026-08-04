@@ -1283,25 +1283,48 @@ fn lower_inst<M: Module>(
                         arg,
                         vars[dst.0 as usize],
                         praxis_runtime::small_int::INLINE_INTERN_SITE,
+                        praxis_runtime::scalars::INT_CLAIM_SITE,
                         ctor_sym,
                         module,
                         imports,
                     )?;
                 }
-                AllocKind::Char { value } | AllocKind::Float { value } => {
-                    // The remaining scalar boxes are one shape: pass the payload
-                    // word, take back the `GcRef`. `Float`'s scalar local
-                    // holds the f64 bit pattern as an i64 and
-                    // `praxis_alloc_float` reassembles the f64; `Char`'s is a
-                    // u32 Unicode scalar the wrapper validates.
+                AllocKind::Float { value } => {
+                    // A pacing test and an inline bitmap claim, with
+                    // `praxis_alloc_float` cold behind both (ADR-119). There is
+                    // no intern table in front of it: `Float` has none, so the
+                    // claim is the whole inline form.
+                    let arg = builder.use_var(vars[value.0 as usize]);
+                    if INLINE_SCALAR_CLAIM {
+                        emit_inline_claim_box(
+                            builder,
+                            ctx_val,
+                            arg,
+                            vars[dst.0 as usize],
+                            praxis_runtime::scalars::FLOAT_CLAIM_SITE,
+                            BuiltinTypeId::Float,
+                            ctor_sym,
+                            module,
+                            imports,
+                        )?;
+                    } else {
+                        let result =
+                            call_symbol(builder, ctx_val, &[arg], ctor_sym, module, imports)?;
+                        builder.def_var(vars[dst.0 as usize], result);
+                    }
+                }
+                AllocKind::Char { value } => {
+                    // Pass the u32 Unicode scalar, take back the `GcRef`.
                     //
                     // `Char` has an intern table too (`small_char`, ADR-107) and
-                    // could take the arm above — but `AllocChar`'s manifest row
-                    // is `AllocatesAndFaults`, so an inline path must also let
-                    // an invalid code point reach the wrapper that raises
+                    // could take the `Int` arm above, and a claim sequence its
+                    // block layout admits — but `AllocChar`'s manifest row is
+                    // `AllocatesAndFaults`, so an inline path must also let an
+                    // invalid code point reach the wrapper that raises
                     // `InvalidChar`, and handover 23's P-4a may move the
                     // validation into the table's bounds anyway. It is its own
-                    // item, not a rider on this one.
+                    // item, not a rider on this one — ADR-113 said so and
+                    // ADR-119 does not change it.
                     let arg = builder.use_var(vars[value.0 as usize]);
                     let result = call_symbol(builder, ctx_val, &[arg], ctor_sym, module, imports)?;
                     builder.def_var(vars[dst.0 as usize], result);
@@ -1563,6 +1586,24 @@ fn lower_inst<M: Module>(
                         src_val,
                         vars[dst.0 as usize],
                         praxis_runtime::small_int::INLINE_INTERN_SITE,
+                        praxis_runtime::scalars::INT_CLAIM_SITE,
+                        scalar.alloc_symbol(),
+                        module,
+                        imports,
+                    )?;
+                }
+                ScalarKind::Float if INLINE_SCALAR_CLAIM => {
+                    // The pacing test and the inline claim (ADR-119).
+                    // `mandelbrot` is the only benchmark that reaches here, and
+                    // W8-S0 already took eight of its ten float boxes — which is
+                    // exactly why ADR-119's headline is not measured on it.
+                    emit_inline_claim_box(
+                        builder,
+                        ctx_val,
+                        src_val,
+                        vars[dst.0 as usize],
+                        praxis_runtime::scalars::FLOAT_CLAIM_SITE,
+                        BuiltinTypeId::Float,
                         scalar.alloc_symbol(),
                         module,
                         imports,
@@ -2527,6 +2568,7 @@ fn emit_inline_collection_read<M: Module>(
                     len,
                     dst,
                     praxis_runtime::small_int::INLINE_INTERN_SITE,
+                    praxis_runtime::scalars::INT_CLAIM_SITE,
                     RuntimeSymbol::AllocInt,
                     module,
                     imports,
@@ -2614,8 +2656,242 @@ fn emit_inline_collection_read<M: Module>(
     }
 }
 
+/// Whether an out-of-range scalar box claims its block inline.
+///
+/// **This pair of lines is ADR-119's whole toggle**; see the `adr119-arm-a`
+/// feature's comment in this crate's `Cargo.toml`. With the feature on,
+/// [`emit_inline_intern`]'s out-of-range edge goes straight to the wrapper (the
+/// tree exactly as ADR-113 left it) and `Float` goes back to an unconditional
+/// `call_symbol` with no pacing test at all. Nothing else in the crate reads it,
+/// and `praxis-runtime` is byte-for-byte identical in both arms — the offsets
+/// and [`praxis_runtime::InlineClaimSite`] exist in both, unread in arm A.
+#[cfg(not(feature = "adr119-arm-a"))]
+const INLINE_SCALAR_CLAIM: bool = true;
+#[cfg(feature = "adr119-arm-a")]
+const INLINE_SCALAR_CLAIM: bool = false;
+
+/// Claim a block from the heap's page bitmap and lay an object out in it —
+/// inline, in generated code, with no call at all (ADR-119).
+///
+/// Emitted into the block the builder is already in, which the caller must have
+/// reached **only** on the `collection_is_due == false` edge. On success `dst`
+/// holds the new reference and control is at `merge`; every bail-out branches to
+/// `slow`, which is the caller's cold block and calls the allocating wrapper.
+///
+/// ```text
+/// claim:  page  = load.i64   [heap + site.partial_head_offset()]
+///                 brif page == 0, slow, scan     ; the class has no page
+/// scan:   w     = uload32    [page + site.page_cursor_offset()]
+///         last  = uload32    [page + site.page_last_word_offset()]
+///                 brif w >= last, slow, word     ; full, *and* the tail word
+/// word:   wp    = iadd page, (w << 3)
+///         taken = load.i64   [wp + site.page_allocated_offset()]
+///         free  = bnot taken
+///                 brif free == 0, slow, store    ; this word is full
+/// store:  bit   = ctz free
+///         obj   = page + site.first_block() + ((w << 6) + bit) * site.stride()
+///         ; (1) header — descriptor first, and see below for why the order
+///         store.i64 [obj + site.header_descriptor_offset()]      = descriptor
+///         istore16  [obj + site.header_payload_offset_offset()]  = payload_offset
+///         istore32  [obj + site.header_heap_id_offset()]         = heap.id
+///         ; (2) payload
+///         store.i64 [obj + site.payload_offset()]                = value
+///         ; (3) the allocated bit — the block becomes sweep-visible here
+///         store.i64 [wp  + site.page_allocated_offset()] = taken | (1 << bit)
+///         ; (4) both live counters and the pacing charge
+///         istore32  [page + site.page_live_count_offset()] += 1
+///         store.i64 [heap + site.heap_live_count_offset()] += 1
+///         store.i64 [heap + site.bytes_since_collect_offset()] += site.stride()
+/// slow:   (cold) r = call praxis_alloc_int / praxis_alloc_float
+/// ```
+///
+/// # `PageHeader::cursor` is not stored, and that is not an omission
+///
+/// `claim_free_block` sets `cursor = w` on success. `w` is *read* from `cursor`
+/// here and never advanced — the inline form scans one word, where the wrapper
+/// loops — so the store would write back the value it just read.
+/// `the_inline_claim_leaves_the_heap_as_the_wrapper_would` compares a claimed
+/// page field-for-field against the wrapper's, `cursor` included, so this is a
+/// checked equality rather than a remark.
+///
+/// # The store order is a severity ranking, not the safety argument
+///
+/// The safety argument is ADR-119 decision 1 part 2: between the pacing branch
+/// and the last store there is no call and no other point at which a collection
+/// can begin, so *not due on entry* implies *not due throughout* and no sweep
+/// can observe any intermediate state of this sequence. **Nothing below weakens
+/// if the order changes**; the order exists because if the argument were ever
+/// wrong, the failures it admits should be recoverable ones. Writing the
+/// descriptor first removes the single unrecoverable one — a sweep reaching an
+/// allocated bit whose header holds uninitialized bytes would read them as a
+/// `*const TypeDescriptor` and make an indirect call through `drop_value`.
+/// Setting the bit after the payload leaves only bookkeeping errors. Claiming
+/// more for the order than that is what ADR-113's Consequences forbid.
+#[allow(clippy::too_many_arguments)] // The lowering context, as `lower_inst` carries it.
+fn emit_inline_claim(
+    builder: &mut FunctionBuilder,
+    ctx_val: Value,
+    heap: Value,
+    value: Value,
+    dst: Variable,
+    site: praxis_runtime::InlineClaimSite,
+    builtin: BuiltinTypeId,
+    slow: Block,
+    merge: Block,
+) {
+    // `MemFlags::trusted()` — `notrap + aligned`, and deliberately not
+    // `readonly`, for `emit_inline_intern`'s reason one step further: every word
+    // this sequence touches is written by the sweep as well, so a call must go
+    // on clobbering all of it.
+    let flags = MemFlags::trusted();
+
+    let scan = builder.create_block();
+    let word = builder.create_block();
+    let store = builder.create_block();
+
+    // (1) The class's availability list. A null head means `Heap::grow_class`,
+    // which allocates a page from the system allocator — not something an inline
+    // sequence attempts.
+    let page = builder
+        .ins()
+        .load(GC, flags, heap, site.partial_head_offset() as i32);
+    let no_page = builder.ins().icmp_imm_u(IntCC::Equal, page, 0);
+    builder.ins().brif(no_page, slow, &[], scan, &[]);
+
+    // (2) One bitmap word: the one the cursor names. `w >= last` is two refusals
+    // in one compare — `w > last` is `claim_free_block`'s loop falling off the
+    // end (the page is full), and `w == last` is the tail word, whose free bits
+    // must be masked with `tail_mask` because the top of it names blocks the page
+    // does not have. ADR-119 decision 3 measured reproducing the mask against
+    // ceding the word, and ceding it is free: the bound was already a compare.
+    builder.switch_to_block(scan);
+    let w = builder
+        .ins()
+        .uload32(flags, page, site.page_cursor_offset() as i32);
+    let last = builder
+        .ins()
+        .uload32(flags, page, site.page_last_word_offset() as i32);
+    let exhausted = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, w, last);
+    builder.ins().brif(exhausted, slow, &[], word, &[]);
+
+    builder.switch_to_block(word);
+    let word_byte = builder.ins().ishl_imm_u(w, 3);
+    let word_ptr = builder.ins().iadd(page, word_byte);
+    let taken = builder
+        .ins()
+        .load(GC, flags, word_ptr, site.page_allocated_offset() as i32);
+    let free = builder.ins().bnot(taken);
+    let none_free = builder.ins().icmp_imm_u(IntCC::Equal, free, 0);
+    builder.ins().brif(none_free, slow, &[], store, &[]);
+
+    builder.switch_to_block(store);
+    // `claim_free_block` takes the *lowest* free block, which is what makes
+    // reuse deterministic (`a_reclaimed_block_is_reused_for_the_next_object_of_its_layout`).
+    // `ctz` is that choice, not a convenience.
+    let bit = builder.ins().ctz(free);
+    let index_hi = builder.ins().ishl_imm_u(w, 6);
+    let index = builder.ins().iadd(index_hi, bit);
+    let block_off = builder.ins().imul_imm_u(index, site.stride() as i64);
+    let block = builder.ins().iadd(page, block_off);
+    let obj = builder.ins().iadd_imm_u(block, site.first_block() as i64);
+
+    // (3) The header, descriptor first. The descriptor address is ADR-116's
+    // load from the context's table, not an `iconst`: there is no heap at
+    // compile time and a debugger session replaces its `Jit` while keeping its
+    // `Runtime`, which is `load_gc_const`'s argument for the same shape.
+    let descriptor = descriptor_address(builder, ctx_val, builtin);
+    builder.ins().store(
+        flags,
+        descriptor,
+        obj,
+        site.header_descriptor_offset() as i32,
+    );
+    let payload_offset = builder.ins().iconst(GC, site.payload_offset() as i64);
+    builder.ins().istore16(
+        flags,
+        payload_offset,
+        obj,
+        site.header_payload_offset_offset() as i32,
+    );
+    // The owning id comes out of the live `Heap` this block was claimed from —
+    // the same word `Heap::occupy` writes. `Heap::reset` mints a fresh one and
+    // re-stamps every page, so a baked constant would stamp headers with a
+    // repudiated identity and the mark phase would refuse to trace them.
+    let heap_id = builder
+        .ins()
+        .uload32(flags, heap, site.heap_id_offset() as i32);
+    builder
+        .ins()
+        .istore32(flags, heap_id, obj, site.header_heap_id_offset() as i32);
+
+    // (4) The payload. For `Float` this is the IEEE-754 bit pattern the scalar
+    // channel already carries, which is byte-for-byte what `praxis_alloc_float`
+    // writes after `f64::from_bits`.
+    builder
+        .ins()
+        .store(flags, value, obj, site.payload_offset() as i32);
+
+    // (5) The allocated bit. **The block becomes sweep-visible on this store**
+    // and not before, which is what the order above is ranked around.
+    let one = builder.ins().iconst(GC, 1);
+    let mask = builder.ins().ishl(one, bit);
+    let claimed = builder.ins().bor(taken, mask);
+    builder.ins().store(
+        flags,
+        claimed,
+        word_ptr,
+        site.page_allocated_offset() as i32,
+    );
+
+    // (6) Both live counters and the pacing charge. Every one of these is
+    // *decremented* elsewhere and never recomputed — `sweep` takes the heap's
+    // by what it reclaimed and `release_blocks` takes the page's — so a skipped
+    // increment does not decay, it underflows, and `relink_pages` then reads a
+    // page holding live blocks as empty and hands its storage to another layout.
+    let page_live = builder
+        .ins()
+        .uload32(flags, page, site.page_live_count_offset() as i32);
+    let page_live_next = builder.ins().iadd_imm_u(page_live, 1);
+    builder.ins().istore32(
+        flags,
+        page_live_next,
+        page,
+        site.page_live_count_offset() as i32,
+    );
+    let heap_live = builder
+        .ins()
+        .load(GC, flags, heap, site.heap_live_count_offset() as i32);
+    let heap_live_next = builder.ins().iadd_imm_u(heap_live, 1);
+    builder.ins().store(
+        flags,
+        heap_live_next,
+        heap,
+        site.heap_live_count_offset() as i32,
+    );
+    // `Heap::occupy` charges `stride + descriptor.owned_bytes_of(payload)`.
+    // `InlineClaimSite::of` refuses every descriptor whose `owned_bytes` is
+    // `Some`, so the second term is zero here by construction rather than by
+    // this arm's choice — which is why the refusal is in the runtime and const.
+    let since = builder
+        .ins()
+        .load(GC, flags, heap, site.bytes_since_collect_offset() as i32);
+    let since_next = builder.ins().iadd_imm_u(since, site.stride() as i64);
+    builder.ins().store(
+        flags,
+        since_next,
+        heap,
+        site.bytes_since_collect_offset() as i32,
+    );
+
+    builder.def_var(dst, obj);
+    builder.ins().jump(merge, &[]);
+}
+
 /// Box a scalar by probing the runtime's intern table inline, with the
-/// allocating wrapper on a cold path (ADR-113).
+/// allocating wrapper on a cold path (ADR-113), and — since ADR-119 — an inline
+/// bitmap claim on the out-of-range edge.
 ///
 /// ```text
 /// hot:   heap  = load.i64  [ctx  + site.heap_offset()]
@@ -2625,10 +2901,11 @@ fn emit_inline_collection_read<M: Module>(
 ///                brif due, slow, probe                 ; ADR-040's obligation
 /// probe: index = iadd_imm  value, -site.min()
 ///        ok    = icmp_imm  ule index, site.span()      ; one compare, not two
-///                brif ok, fast, slow
+///                brif ok, fast, claim
 /// fast:  off   = ishl_imm  index, site.stride_shift()
 ///        base  = load.i64  [ctx + site.table_offset()]
 ///        r     = load.i64  [base + off]
+/// claim: (ADR-119) the bitmap claim, bailing to slow
 /// slow:  (cold) r = call praxis_alloc_int(ctx, value)  ; unchanged
 /// ```
 ///
@@ -2697,6 +2974,7 @@ fn emit_inline_intern<M: Module>(
     value: Value,
     dst: Variable,
     site: praxis_runtime::InlineInternSite,
+    claim: praxis_runtime::InlineClaimSite,
     sym: RuntimeSymbol,
     module: &mut M,
     imports: &mut HashMap<RuntimeSymbol, FuncRef>,
@@ -2740,7 +3018,17 @@ fn emit_inline_intern<M: Module>(
         builder
             .ins()
             .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, index, site.span() as i64);
-    builder.ins().brif(in_range, fast, &[], slow, &[]);
+    // The out-of-range edge. Before ADR-119 it went straight to `slow`; it now
+    // goes to a claim sequence that bails to `slow`, so the wrapper is reached
+    // on three conditions instead of two and on none of them has anything been
+    // written. `tree` and `pipeline` are the two benchmarks whose `Materialize`s
+    // mostly land here, and this edge is the +2.0%/+1.4% ADR-113 recorded owing.
+    let out_of_range = if INLINE_SCALAR_CLAIM {
+        builder.create_block()
+    } else {
+        slow
+    };
+    builder.ins().brif(in_range, fast, &[], out_of_range, &[]);
 
     // (3) The table read `Inst::ConstGc` already emits for a literal, with the
     // index computed at run time instead of folded — `load_gc_const`'s
@@ -2760,6 +3048,26 @@ fn emit_inline_intern<M: Module>(
         builder.ins().jump(merge, &[]);
     }
 
+    // (3b) The claim, for a value the table does not hold (ADR-119). It is
+    // reached only through `probe`, which is reached only on the
+    // `collection_is_due == false` edge above — which is decision 1 part 1, and
+    // `the_inline_claim_is_dominated_by_the_pacing_branch` asserts it against the
+    // emitted CFG's dominator tree rather than against this comment.
+    if INLINE_SCALAR_CLAIM {
+        builder.switch_to_block(out_of_range);
+        emit_inline_claim(
+            builder,
+            ctx_val,
+            heap,
+            value,
+            dst,
+            claim,
+            BuiltinTypeId::Int,
+            slow,
+            merge,
+        );
+    }
+
     // (4) The wrapper, unchanged: same `#[no_mangle]`, same `abi_guard!`, same
     // manifest row, same address arm. It is what paces when a collection is due
     // and what allocates when the value is out of range, and keeping it as the
@@ -2776,6 +3084,81 @@ fn emit_inline_intern<M: Module>(
     // does — and the builder is left switched to `merge`, which `lower_inst`'s
     // caller relies on: `spill.store_debug_defs` runs immediately afterwards and
     // must land where both arms are visible.
+    builder.switch_to_block(merge);
+    Ok(())
+}
+
+/// Box a scalar that has no intern table: the pacing test, then the inline
+/// claim, with the allocating wrapper cold behind both (ADR-119).
+///
+/// ```text
+/// hot:   heap  = load.i64 [ctx  + site.heap_offset()]
+///        since = load.i64 [heap + site.bytes_since_collect_offset()]
+///        thr   = load.i64 [heap + site.collect_threshold_offset()]
+///                brif icmp uge since, thr, slow, claim
+/// claim: (the sequence in `emit_inline_claim`, bailing to slow)
+/// slow:  (cold) r = call praxis_alloc_float(ctx, value)
+/// ```
+///
+/// **`Float` had no pacing test at all before this** — the arm was an
+/// unconditional `call_symbol`, and the wrapper paced. So unlike
+/// [`emit_inline_intern`], where the compare was already emitted and this only
+/// re-points one edge, here the compare is new; it is the whole of ADR-040's
+/// obligation and it is emitted first for the same reason.
+///
+/// `Char` deliberately does not come here. Its manifest row is
+/// `AllocatesAndFaults`: an invalid code point must reach the wrapper that
+/// raises `InvalidChar` with `CheckFault`'s diversion (RT-18), so an inline arm
+/// would have to reproduce a *fault*, not just a claim. ADR-113 left it out for
+/// the same reason and the reason has not changed.
+#[allow(clippy::too_many_arguments)] // The lowering context, as `lower_inst` carries it.
+fn emit_inline_claim_box<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx_val: Value,
+    value: Value,
+    dst: Variable,
+    claim: praxis_runtime::InlineClaimSite,
+    builtin: BuiltinTypeId,
+    sym: RuntimeSymbol,
+    module: &mut M,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
+) -> Result<()> {
+    let flags = MemFlags::trusted();
+
+    let start = builder.create_block();
+    let slow = builder.create_block();
+    let merge = builder.create_block();
+    builder.set_cold_block(slow);
+
+    let heap = builder
+        .ins()
+        .load(GC, flags, ctx_val, claim.heap_offset() as i32);
+    let since = builder
+        .ins()
+        .load(GC, flags, heap, claim.bytes_since_collect_offset() as i32);
+    let threshold = builder
+        .ins()
+        .load(GC, flags, heap, claim.collect_threshold_offset() as i32);
+    let due = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, since, threshold);
+    builder.ins().brif(due, slow, &[], start, &[]);
+
+    builder.switch_to_block(start);
+    emit_inline_claim(
+        builder, ctx_val, heap, value, dst, claim, builtin, slow, merge,
+    );
+
+    builder.switch_to_block(slow);
+    {
+        let result = call_symbol(builder, ctx_val, &[value], sym, module, imports)?;
+        builder.def_var(dst, result);
+        builder.ins().jump(merge, &[]);
+    }
+
+    // Left switched to `merge`, for `emit_inline_intern`'s reason:
+    // `spill.store_debug_defs` runs immediately after `lower_inst` and must land
+    // where both arms are visible.
     builder.switch_to_block(merge);
     Ok(())
 }
@@ -4503,6 +4886,7 @@ mod tests {
                 value,
                 dst,
                 praxis_runtime::small_int::INLINE_INTERN_SITE,
+                praxis_runtime::scalars::INT_CLAIM_SITE,
                 RuntimeSymbol::AllocInt,
                 m,
                 &mut HashMap::new(),
@@ -4644,6 +5028,7 @@ mod tests {
             value,
             dst,
             praxis_runtime::small_int::INLINE_INTERN_SITE,
+            praxis_runtime::scalars::INT_CLAIM_SITE,
             RuntimeSymbol::AllocInt,
             &mut module,
             &mut HashMap::new(),
@@ -4683,6 +5068,316 @@ mod tests {
             "the cold block should be named by its label and by both branches \
              into it; found {edges} mentions:\n{all}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-119: the inline bitmap claim.
+    //
+    // These are the *whole* gate on decision 1, and for a stronger reason than
+    // ADR-113's. There, a behavioural test could not see the pacing compare
+    // because the two states are the same observable program. Here a
+    // behavioural test cannot see any of the three parts: an object allocated
+    // inline and an object allocated by the wrapper are the same object, a
+    // collection that could not have run is indistinguishable from one that did
+    // not, and a counter that is bumped in the wrong order is bumped. What the
+    // three parts are claims about is the *emitted instruction stream* — its
+    // dominator tree, its call sites and its stores — so that is what these
+    // read.
+    // -----------------------------------------------------------------------
+
+    /// Two `Float` boxes in one function, so the second claim's guard is not the
+    /// entry block's terminator, plus the emitted function.
+    ///
+    /// **The second site is the test.** ADR-113's pacing assertion asks "is the
+    /// branch the entry block's terminator", which is true of a lowering with
+    /// one guarded site in it and says nothing about a real function, where the
+    /// hundredth `Materialize` is nowhere near the entry. Decision 1 part 1 is a
+    /// dominance claim and this is the shape that can tell the two apart.
+    #[cfg(not(feature = "adr119-arm-a"))]
+    fn two_claim_sites() -> codegen::ir::Function {
+        let (func, _entry) = emitted_function(|builder, ctx_val, dst, module| {
+            let bits = builder.ins().iconst(GC, 0x3ff0_0000_0000_0000);
+            for _ in 0..2 {
+                emit_inline_claim_box(
+                    builder,
+                    ctx_val,
+                    bits,
+                    dst,
+                    praxis_runtime::scalars::FLOAT_CLAIM_SITE,
+                    BuiltinTypeId::Float,
+                    RuntimeSymbol::AllocFloat,
+                    module,
+                    &mut HashMap::new(),
+                )?;
+            }
+            Ok(())
+        });
+        func
+    }
+
+    /// The blocks of `func` that contain `needle`, in layout order.
+    #[cfg(not(feature = "adr119-arm-a"))]
+    fn blocks_containing(func: &codegen::ir::Function, needle: &str) -> Vec<Block> {
+        let all = func.display().to_string();
+        func.layout
+            .blocks()
+            .filter(|&b| block_text(&all, b).contains(needle))
+            .collect()
+    }
+
+    /// The blocks that hold a claim site's **pacing** compare, in layout order.
+    ///
+    /// `icmp uge` alone is not enough and the reason is worth stating: the claim
+    /// emits a second unsigned `>=`, the `cursor >= last_word` bail-out. The two
+    /// are told apart by the *width of what they compare* — the pacing words are
+    /// `usize` and are loaded whole, where `cursor` and `last_word` are `u32` and
+    /// arrive through `uload32`. A guard block therefore has no `uload32` in it,
+    /// and a test that matched the scan block instead would assert a dominance
+    /// that holds for a reason other than the one decision 1 part 1 claims.
+    #[cfg(not(feature = "adr119-arm-a"))]
+    fn pacing_blocks(func: &codegen::ir::Function) -> Vec<Block> {
+        let all = func.display().to_string();
+        func.layout
+            .blocks()
+            .filter(|&b| {
+                let text = block_text(&all, b);
+                text.contains("icmp uge") && !text.contains("uload32")
+            })
+            .collect()
+    }
+
+    /// Every store in `block`, in order, as `(opcode, displacement)`.
+    ///
+    /// The displacement is what Cranelift prints after the base operand, so a
+    /// bare `store … , v27` is displacement 0. Two of the eight displacements
+    /// the claim writes to collide numerically — a `GcHeader`'s payload and a
+    /// `Heap`'s `bytes_since_collect` are both `+16` — so nothing here reads a
+    /// displacement on its own; the assertion is on the whole ordered list,
+    /// which is also what makes it an assertion about the *order*.
+    #[cfg(not(feature = "adr119-arm-a"))]
+    fn stores_in_order(text: &str) -> Vec<(String, usize)> {
+        text.lines()
+            .filter_map(|line| {
+                let line = line.trim_start();
+                let opcode = line.split([' ', '.']).next()?;
+                if !matches!(opcode, "store" | "istore16" | "istore32") {
+                    return None;
+                }
+                // `<opcode> <flags> <value>, <base>[+<disp>]  ; <comment>`
+                let operands = line.split(", ").nth(1)?;
+                let base = operands.split([' ', ';']).next()?;
+                let displacement = match base.split_once('+') {
+                    Some((_, disp)) => disp.parse().ok()?,
+                    None => 0,
+                };
+                Some((opcode.to_string(), displacement))
+            })
+            .collect()
+    }
+
+    /// **Decision 1 part 1 — entry.** Every store the claim performs is
+    /// dominated, in the emitted CFG, by the branch on `collection_is_due`.
+    ///
+    /// The pacing block is identified by the compare itself (`icmp uge` of the
+    /// two exported words) and the claim's store block by `ctz`, which is the
+    /// free-bit selection and appears nowhere else in the backend. Both are
+    /// found by *searching*, not by position, so a re-ordering of the emitter
+    /// that moved the guard would fail here rather than silently re-point the
+    /// assertion.
+    #[cfg(not(feature = "adr119-arm-a"))]
+    #[test]
+    fn the_inline_claim_is_dominated_by_the_pacing_branch() {
+        let func = two_claim_sites();
+        let all = func.display().to_string();
+        let paced = pacing_blocks(&func);
+        let claimed = blocks_containing(&func, "ctz");
+        assert_eq!(paced.len(), 2, "one pacing compare per site:\n{all}");
+        assert_eq!(claimed.len(), 2, "one claim per site:\n{all}");
+        // The second site's guard is not the entry block, which is what makes
+        // this a dominance claim rather than ADR-113's shape claim.
+        let entry = func.layout.entry_block().expect("a lowered function");
+        assert_ne!(
+            paced[1], entry,
+            "the second site's pacing test must not be in the entry block, or \
+             this test is not asking the question it means to:\n{all}"
+        );
+        for (guard, store) in paced.iter().zip(claimed.iter()) {
+            assert_dominates(&func, *guard, *store);
+        }
+        // And it is genuinely the *pacing* compare that dominates: both
+        // exported displacements are loaded in the guard block.
+        let site = praxis_runtime::scalars::FLOAT_CLAIM_SITE;
+        for guard in &paced {
+            let text = block_text(&all, *guard);
+            for offset in [
+                site.bytes_since_collect_offset(),
+                site.collect_threshold_offset(),
+            ] {
+                assert!(
+                    text.contains(&format!("+{offset}")),
+                    "{guard} compares two words it did not load at +{offset}:\n{all}"
+                );
+            }
+        }
+    }
+
+    /// **Decision 1 part 2 — duration.** Between the pacing branch and the last
+    /// store there is no call, so *not due on entry* implies *not due
+    /// throughout*.
+    ///
+    /// This is the clause that replaces ADR-113's "the inline path allocates
+    /// nothing", and it is the one that makes the claimed block unsweepable
+    /// before its reference reaches a root slot. A collection can only begin
+    /// inside `Heap::maybe_collect`, which generated code reaches only through a
+    /// wrapper call — so "no call on the path" *is* "no collection on the path",
+    /// and there is nothing weaker to check.
+    #[cfg(not(feature = "adr119-arm-a"))]
+    #[test]
+    fn nothing_between_the_pacing_branch_and_the_last_store_can_collect() {
+        let func = two_claim_sites();
+        let all = func.display().to_string();
+        for (block, text) in hot_blocks(&func) {
+            assert!(
+                !text.contains("call "),
+                "no hot block may call, and {block} does — a call is a point at \
+                 which a collection can begin, and this sequence has a \
+                 half-written heap in front of it:\n{all}"
+            );
+        }
+        let cold: Vec<_> = func
+            .layout
+            .blocks()
+            .filter(|&b| func.layout.is_cold(b))
+            .collect();
+        assert_eq!(cold.len(), 2, "one wrapper block per site:\n{all}");
+        for block in cold {
+            assert!(
+                block_text(&all, block).contains("call "),
+                "{block} is cold because it calls the wrapper:\n{all}"
+            );
+        }
+        // The claim's own chain is straight-line into the store block: every
+        // block that `ctz`'s block is reachable from, inside the sequence,
+        // branches only to the next link or to a cold bail-out. Stated as: the
+        // store block has exactly one instruction that leaves it, and it is a
+        // `jump`.
+        for store in blocks_containing(&func, "ctz") {
+            let text = block_text(&all, store);
+            assert!(
+                !text.contains("brif"),
+                "the store block must not branch — a bail-out after the first \
+                 store would leave a header written and no allocated bit:\n{all}"
+            );
+            assert_eq!(
+                text.matches("jump ").count(),
+                1,
+                "…and it falls through to the merge exactly once:\n{all}"
+            );
+        }
+    }
+
+    /// **Decision 1 part 3 — state.** The claim writes exactly the words
+    /// `alloc_raw → claim_block → occupy` writes, at the displacements the site
+    /// carries, in the order header → payload → `allocated` → counters.
+    ///
+    /// The order is not what makes the sequence safe — part 2 is — and this test
+    /// does not claim otherwise. What it pins is *completeness*: both live
+    /// counters and the pacing charge. Both counters are decremented elsewhere
+    /// and never recomputed (`sweep` by what it reclaimed, `release_blocks` by
+    /// what a page freed), so a skipped increment does not decay into a wrong
+    /// statistic — it underflows, and `relink_pages` then reads a page holding
+    /// live blocks as empty and lets `reclass` hand its storage to another
+    /// layout.
+    ///
+    /// The displacements come off the site rather than being written here, so
+    /// this is checking the *shape*; that they name the right fields is
+    /// `the_claim_site_displacements_name_the_fields_they_claim_to` in
+    /// `praxis-runtime`, which reads a live heap through every one of them.
+    #[cfg(not(feature = "adr119-arm-a"))]
+    #[test]
+    fn the_inline_claim_writes_every_word_the_wrapper_would() {
+        let func = two_claim_sites();
+        let all = func.display().to_string();
+        let site = praxis_runtime::scalars::FLOAT_CLAIM_SITE;
+        let store = blocks_containing(&func, "ctz")[0];
+        let text = block_text(&all, store);
+
+        // **The whole of decision 1 part 3, as one list.** Eight stores, in this
+        // order, at these displacements, with these widths. Asserting the list
+        // rather than eight separate `contains` is what makes it simultaneously
+        // a completeness claim (a missing counter shortens the list), an order
+        // claim (the severity ranking) and a displacement claim — and it is the
+        // only form that survives two of the displacements colliding: a
+        // `GcHeader`'s payload and a `Heap`'s `bytes_since_collect` are both
+        // `+16`, so no single line identifies itself.
+        let expected: Vec<(&str, usize)> = vec![
+            // (1) The header. The descriptor first: this is the store whose
+            // absence is unrecoverable, because a sweep reaching an allocated
+            // bit over an unwritten header would read those bytes as a
+            // `*const TypeDescriptor` and call through `drop_value`.
+            ("store", site.header_descriptor_offset()),
+            ("istore16", site.header_payload_offset_offset()),
+            ("istore32", site.header_heap_id_offset()),
+            // (2) The payload.
+            ("store", site.payload_offset()),
+            // (3) The `allocated` bit. The block becomes sweep-visible here and
+            // not before.
+            ("store", site.page_allocated_offset()),
+            // (4) Both live counters and the pacing charge. Every one of these
+            // is decremented elsewhere and never recomputed, so a skipped bump
+            // underflows rather than decays — and `relink_pages` then puts a
+            // page holding live blocks on the empty pool.
+            ("istore32", site.page_live_count_offset()),
+            ("store", site.heap_live_count_offset()),
+            ("store", site.bytes_since_collect_offset()),
+        ];
+        let found = stores_in_order(&text);
+        assert_eq!(
+            found
+                .iter()
+                .map(|(op, disp)| (op.as_str(), *disp))
+                .collect::<Vec<_>>(),
+            expected,
+            "the claim must write exactly what `alloc_raw` -> `claim_block` -> \
+             `occupy` writes, in the order ADR-119 decision 1 ranks them:\n{all}"
+        );
+
+        // And the charge is the stride and nothing else. The `owned_bytes` term
+        // `Heap::occupy` also adds is zero here by construction rather than by
+        // this arm's choice — `InlineClaimSite::of` refuses every descriptor
+        // that carries the callback.
+        assert!(
+            text.contains(&format!("iconst.i64 {}", site.stride())),
+            "the pacing charge is the block stride, folded:\n{all}"
+        );
+    }
+
+    /// The stride and the block geometry reach the backend as immediates, not as
+    /// loads off the page header.
+    ///
+    /// Handover 27 §9 registered this as unverified: `BlockLayout::of` and
+    /// `SizeClass::of` are const-shaped, but nobody had checked that
+    /// const-evaluation reaches the emitted CLIF as a usable constant rather
+    /// than needing a new accessor. It does — both are `iconst` — and the reason
+    /// is that they are const-evaluated in `praxis-runtime`, in
+    /// `InlineClaimSite::of`, and arrive here as numbers.
+    #[cfg(not(feature = "adr119-arm-a"))]
+    #[test]
+    fn the_block_geometry_is_folded_rather_than_read_off_the_page() {
+        let func = two_claim_sites();
+        let all = func.display().to_string();
+        let site = praxis_runtime::scalars::FLOAT_CLAIM_SITE;
+        for (what, value) in [
+            ("the stride", site.stride()),
+            ("the first block's displacement", site.first_block()),
+            ("the payload displacement", site.payload_offset()),
+        ] {
+            assert!(
+                all.contains(&format!("iconst.i64 {value}")),
+                "{what} must be an immediate; a load would be a word off the \
+                 page header on the hottest path in the language:\n{all}"
+            );
+        }
     }
 
     /// One `raise_on_cold_path` at the given exit, as IR text, plus the entry

@@ -8810,6 +8810,125 @@ fn a_loop_that_boxes_only_large_ints_still_collects() {
     );
 }
 
+// ===========================================================================
+// ADR-119 — generated code claims the block itself.
+//
+// The IR tests in `lower.rs` are the gate on the three parts of decision 1,
+// because all three are claims about the instruction stream. What a running
+// program *can* see is the arithmetic: whether the object the sequence built is
+// the object the wrapper would have built, whether the heap counted it, and
+// whether the collector can still reclaim it. These are those.
+// ===========================================================================
+
+/// Every block the inline claim takes is counted by the heap exactly once.
+///
+/// **This is the half of decision 1 part 3 a program can see, and the failure it
+/// prevents is not a wrong number.** `Heap::live_count` is only ever
+/// *decremented* — `sweep` takes it down by the blocks it reclaimed and never
+/// recomputes it — so a claim that skipped the bump does not leave the statistic
+/// low, it underflows a `usize` on the first collection. The same holds one
+/// level down for `PageHeader::live_count`, where the consequence is worse:
+/// `relink_pages` reads it to decide which availability list a page joins, so an
+/// understated page joins the *empty* pool and `reclass` hands its storage —
+/// blocks with live objects in them — to another layout.
+///
+/// The count is taken as a difference between two runs of the same program with
+/// different bounds, so the input `Text`, the frame metadata and every other
+/// fixed cost cancels and the assertion can be an exact equality rather than an
+/// inequality that would pass with the bump missing.
+#[test]
+fn the_inline_claim_counts_every_block_it_takes() {
+    const BOXES: i64 = 200;
+
+    // Each iteration boxes one value the intern table does not hold, and the
+    // `Vec` retains all of them, so nothing here is reclaimable and the count is
+    // the number of claims. `i` itself stays inside `small_int`'s range and
+    // costs nothing, which is what makes the difference exactly `BOXES`.
+    let live_after = |iterations: i64| {
+        let src = format!(
+            "fn main() -> Int {{\n  var v = Vec[Int]()\n  var i = 0\n  \
+             while i < {iterations} {{ v.push(i * 100000 + 100000)\n i = i + 1 }}\n  \
+             v.len()\n}}\n"
+        );
+        let (rt, result) = run_main(&src);
+        assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+        assert_eq!(result.as_int(), iterations);
+        rt.heap().stats().live_count
+    };
+
+    assert_eq!(
+        live_after(BOXES) as i64 - live_after(0) as i64,
+        BOXES,
+        "an inline claim must bump `Heap::live_count` exactly as \
+         `Heap::alloc_raw` does — see ADR-119 decision 1 part 3"
+    );
+}
+
+/// The object the inline claim builds is the object the wrapper would have
+/// built: same value, same type, and it survives a collection.
+///
+/// The header is three words generated code now writes itself, and each has a
+/// distinct failure. A wrong descriptor makes `ExtractScalar`'s inline proof
+/// fail and route to `praxis_int_load`, which aborts. A wrong recorded payload
+/// displacement reads the wrong eight bytes. A wrong `heap_id` is the quiet one:
+/// the mark phase compares it against the heap's own *before* it masks the
+/// address to find the page (ADR-039 decision 2), so an object stamped with the
+/// wrong id is not traced — it is simply reclaimed underneath a live reference.
+/// That is why this retains its values across a collection rather than reading
+/// them back immediately.
+#[test]
+fn an_inline_claimed_object_is_what_the_wrapper_would_have_answered() {
+    // 40,000 boxes against a 64 KiB initial threshold at 24 bytes a block: the
+    // collector runs many times over, and every one of these is rooted through
+    // the `Vec` the whole time.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var v = Vec[Int]()\n  var i = 0\n  \
+         while i < 40000 { v.push(i * 7 + 100000)\n i = i + 1 }\n  \
+         var sum = 0\n  var j = 0\n  \
+         while j < 40000 { sum = sum + v[j] - (j * 7 + 100000)\n j = j + 1 }\n  \
+         sum\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        0,
+        "every value read back must be the value stored — a claim that wrote \
+         the payload at the wrong displacement, or that handed out a block the \
+         collector had not really freed, shows up here and nowhere else"
+    );
+}
+
+/// A loop that boxes only `Float`s still collects.
+///
+/// `a_loop_that_boxes_only_large_ints_still_collects` is ADR-113's version of
+/// this, and it covers a path that already had a pacing test. **`Float` did
+/// not.** Before ADR-119 the arm was an unconditional `call_symbol` and the
+/// wrapper paced; now the pacing compare is emitted here, and if it were
+/// dropped this loop would allocate 40,000 blocks and never offer the collector
+/// a turn — which is exactly what ADR-040's token exists to make unwritable and
+/// what a `Safepoint` no longer stands in the way of.
+#[test]
+fn a_loop_that_boxes_only_floats_still_collects() {
+    const ITERATIONS: i64 = 20_000;
+
+    let src = format!(
+        "fn main() -> Int {{\n  var x = 0.0\n  var i = 0\n  \
+         while i < {ITERATIONS} {{ x = x + 1.5\n i = i + 1 }}\n  i\n}}\n"
+    );
+    let (rt, result) = run_main(&src);
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), ITERATIONS);
+
+    let live = rt.heap().stats().live_count;
+    assert!(
+        (live as i64) < ITERATIONS,
+        "the loop boxed {ITERATIONS} `Float`s and retains one, so a heap \
+         holding {live} of them means no collection ran — the inline claim \
+         skipped the pacing test it is the first `Float` path ever to have \
+         (ADR-119, ADR-040)"
+    );
+}
+
 /// A `Bool` or `Unit` literal answers the runtime's own singleton, and does so
 /// without a call or an allocation.
 ///

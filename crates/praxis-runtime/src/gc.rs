@@ -126,6 +126,29 @@ impl GcHeader {
     /// step further along.
     pub const DESCRIPTOR_OFFSET: usize = core::mem::offset_of!(GcHeader, descriptor);
 
+    /// Where the recorded payload displacement sits, relative to the header's
+    /// address (ADR-119).
+    ///
+    /// Read by nothing in generated code and **written** by one thing: the
+    /// inline claim sequence, which lays out a header itself. It is a `u16`, and
+    /// what it must be handed is what [`GcHeader::payload_offset_for`] answered
+    /// for the descriptor being stored beside it — the same value
+    /// `Heap::occupy` writes, from the same call. ADR-039 decision 1's authority
+    /// is unchanged; what is new is a second transcription of its answer, which
+    /// is why [`InlineClaimSite`](crate::InlineClaimSite) carries the offset and
+    /// the value together rather than letting a caller pair them.
+    pub const PAYLOAD_OFFSET_FIELD_OFFSET: usize = core::mem::offset_of!(GcHeader, payload_offset);
+
+    /// Where the owning [`HeapId`] sits, relative to the header's address
+    /// (ADR-119).
+    ///
+    /// The provenance word ADR-039 decision 2 made the mark phase's first read.
+    /// Generated code writes it — with the id it loaded out of the live `Heap`
+    /// it claimed the block from, never a compile-time constant: there is no
+    /// heap at compile time, and a debugger session replaces its `Jit` while
+    /// keeping its `Runtime` ([`crate::GcConst`]'s reason, one field along).
+    pub const HEAP_ID_OFFSET: usize = core::mem::offset_of!(GcHeader, heap_id);
+
     /// Where the payload begins, relative to the header's address, for a
     /// payload with the given alignment.
     ///
