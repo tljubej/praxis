@@ -345,9 +345,45 @@ than in a commit message.
 
 ## Measurements
 
-**No timing.** This package was built during a phase in which the machine is
-shared and timing was forbidden, so **the two arms are staged and the wall-clock
-sweep is owed.** Everything below is deterministic: instruction counts out of the
+> **The owed sweep was run after this record was drafted, and it is the largest
+> per-package result of the round after W8-S0.** Seven A,B,B,A reps, leading arm
+> alternating, no controls declared — see below for why the suite has none for
+> this package — median of the per-pair ratios against a bar of their scaled MAD:
+>
+> | | paired | bar | | | paired | bar |
+> |---|---:|---:|---|---|---:|---:|
+> | `pipeline` | **1.246×** | ±0.9% | | `tree` | **1.138×** | ±0.4% |
+> | `collatz` | **1.215×** | ±0.7% | | `hashwork` | **1.124×** | ±0.4% |
+> | `mandelbrot` | **1.209×** | ±0.3% | | `bfs` | **1.059×** | ±1.2% |
+> | `vm` | **1.190×** | ±0.4% | | `primes` | **1.046×** | ±0.7% |
+> | | | | | **geometric mean** | **1.151×** | |
+>
+> **All eight rows resolved** — every delta clears both the 2% floor and its own
+> paired dispersion. A first sweep was voided by its own control gate (see
+> below) and its numbers agree with these to within 0.7 points on every row it
+> reached, which is two independent passes by another name.
+>
+> **The acceptance test passes, and by two orders of the quantity asked for.**
+> ADR-113 left `tree` owing −1.6%, reproduced twice; this returns **+13.8% ±
+> 0.4%**. The regression is retired and then some.
+>
+> **The suite has no control for this package, and the first sweep proved it.**
+> That sweep named `collatz` and `primes` as controls on handover 26 §6's
+> guidance that they are the controls "for the allocator packages" — which means
+> packages measured *against* allocator noise. This *is* the allocator package,
+> and the gate profile puts `collatz` at 24.5% and `primes` at 10.0% scalar
+> allocation. They moved, `ab.py` voided the sweep, and it was right to: a
+> control that is a target is not a control. Every benchmark in the suite is at
+> least 8.0% scalar allocation, so there is nothing here this package must not
+> move. W8-S0's measurement reached the same conclusion about itself and said so
+> rather than inventing one.
+>
+> Taken with the 1-minute load at 3.2–3.9 and no competing build; §6's 0.5
+> ceiling is unreachable on this machine and was explicitly waived. Not
+> comparable to a number taken at 0.5.
+
+Everything below was written before that sweep and is deterministic: instruction
+counts out of the
 real compile path via `PRAXIS_DUMP_CLIF`/`PRAXIS_DUMP_VCODE`, walked with
 `benchmarks/periter.py` — the in-tree walker, because two hand-written walkers of
 that rule were wrong this round in two different ways and one reached a published
@@ -439,11 +475,14 @@ acceptance test: `tree` +2.0% and `pipeline` +1.4%. Re-measured on the current
 tree with an ADR-113 toggle, two independent passes:
 
 - **`tree` −1.6% ± 1.3% and −1.6% ± 0.9%** — still there, reproducing to the
-  tenth of a percent, about four fifths of its original size. **This is the
-  acceptance test and it is not yet run.** `tree`'s `Materialize`s box values
-  that mostly leave `small_int`'s range, so they pay ADR-113's pacing test in
-  front of a call they were making anyway — and it is exactly that call this
-  record deletes. If the sweep does not retire it, this did not land.
+  tenth of a percent, about four fifths of its original size. `tree`'s
+  `Materialize`s box values that mostly leave `small_int`'s range, so they pay
+  ADR-113's pacing test in front of a call they were making anyway — and it is
+  exactly that call this record deletes.
+  **The sweep has since been run and it returns `tree` +13.8% ± 0.4%.** The
+  regression is retired with roughly eight times the margin it asked for, which
+  says the pacing test in front of the call was never the expensive part — the
+  call was.
 - **`pipeline` −0.3% and −0.6%, inside its own spread both times** — **gone.**
   W8-S0 is 1.645× on `pipeline` and took the `Materialize` sites that were paying
   it. Its row **expired**; it is not carried forward as half of a pair, and this
@@ -570,18 +609,20 @@ stdout on all eight benchmarks is the evidence for.
   `InlineInternSite` confines probing, `InlineClaimSite` confines claiming. It is
   the first of the four whose refusal is a `const fn` returning `Option`, so the
   refusal is a build failure rather than a runtime absence.
-- **The wall-clock result is owed and the arms are staged for it.** Anyone
-  running `benchmarks/ab.py` against the two paths above is running this record's
-  acceptance test, and `tree` is the row it turns on.
+- **The wall-clock result came in at +15.1% on the suite geometric mean, every
+  row resolved**, and is recorded at the top of *Measurements*. It is the largest
+  per-package figure of the round after W8-S0's 1.850×.
 
 ## Open questions
 
-- **Does `tree`'s remaining 1.6% actually go?** ADR-113 left it, this is its
-  repair, and the sweep has not been run. If it does not, the second candidate is
-  the one ADR-113's own open question named — the extra basic blocks per site at
-  `opt_level = "none"` rather than the call — and this package adds four more of
-  them per site, so a *worse* `tree` would be an informative result rather than a
-  puzzling one.
+- ~~**Does `tree`'s remaining 1.6% actually go?**~~ **Answered: +13.8% ± 0.4%.**
+  It goes, with about eight times the margin the question asked for. The
+  interesting part is what that says about ADR-113's own open question, which
+  asked whether `tree`'s cost was the pacing loads or the three extra basic
+  blocks per site at `opt_level = "none"`. This package adds **four more blocks
+  per site** and `tree` got substantially *faster*, so the answer is neither: it
+  was the call. Codegen quality at four extra blocks is not what was hurting
+  `tree`, which retires a worry ADR-113 carried and this record inherited.
 - **Should the claim sequence scan more than one word?** It bails when the cursor
   word is full, which on a page filling front-to-back happens once per 64 blocks
   and hands the wrapper a call it makes for one allocation and then not again. A
